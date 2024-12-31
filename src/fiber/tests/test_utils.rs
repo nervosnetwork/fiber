@@ -480,6 +480,8 @@ pub(crate) async fn create_n_nodes_with_index_and_amounts_with_established_chann
             assert_eq!(res, Status::Committed);
         }
     }
+    // sleep for a while to make sure network graph is updated
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
     (nodes, channels)
 }
 

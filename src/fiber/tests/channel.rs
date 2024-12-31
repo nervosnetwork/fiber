@@ -1136,8 +1136,6 @@ async fn test_send_payment_with_rev_3_nodes() {
     let node_b_local_left = node_b.get_local_balance_from_channel(channel_2);
     let node_a_local = node_a.get_local_balance_from_channel(channel_2);
 
-    // sleep for 2 seconds to make sure the channel is established
-    tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
     let sent_amount = 1000000 + 5;
     let node_a_pubkey = node_a.pubkey.clone();
     let message = |rpc_reply| -> NetworkActorMessage {
@@ -4475,9 +4473,6 @@ async fn test_send_payment_with_multiple_edges_in_middle_hops() {
     let source_node = &node_0;
     let target_pubkey = node_3.pubkey.clone();
 
-    // sleep for a while
-    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
             SendPaymentCommand {
@@ -4542,9 +4537,6 @@ async fn test_send_payment_with_all_failed_middle_hops() {
     let [node_0, _node_1, _node_2, node_3] = nodes.try_into().expect("4 nodes");
     let source_node = &node_0;
     let target_pubkey = node_3.pubkey.clone();
-
-    // sleep for a while
-    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
@@ -4611,9 +4603,6 @@ async fn test_send_payment_with_multiple_edges_can_succeed_in_retry() {
     let source_node = &node_0;
     let target_pubkey = node_3.pubkey.clone();
 
-    // sleep for a while
-    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
             SendPaymentCommand {
@@ -4678,9 +4667,6 @@ async fn test_send_payment_with_final_hop_multiple_edges_in_middle_hops() {
     let [node_0, _node_1, _node_2, node_3] = nodes.try_into().expect("4 nodes");
     let source_node = &node_0;
     let target_pubkey = node_3.pubkey.clone();
-
-    // sleep for a while
-    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
@@ -4747,9 +4733,6 @@ async fn test_send_payment_with_final_all_failed_middle_hops() {
     let source_node = &node_0;
     let target_pubkey = node_3.pubkey.clone();
 
-    // sleep for a while
-    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
             SendPaymentCommand {
@@ -4806,9 +4789,6 @@ async fn test_send_payment_with_final_multiple_edges_can_succeed_in_retry() {
     let source_node = &node_0;
     let target_pubkey = node_3.pubkey.clone();
 
-    // sleep for a while
-    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
             SendPaymentCommand {
@@ -4863,9 +4843,6 @@ async fn test_send_payment_with_first_hop_failed_with_fee() {
     let source_node = &node_0;
     let target_pubkey = node_3.pubkey.clone();
 
-    // sleep for a while
-    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
             SendPaymentCommand {
@@ -4915,9 +4892,6 @@ async fn test_send_payment_succeed_with_multiple_edges_in_first_hop() {
     let [node_0, _node_1, _node_2, node_3] = nodes.try_into().expect("4 nodes");
     let source_node = &node_0;
     let target_pubkey = node_3.pubkey.clone();
-
-    // sleep for a while
-    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
@@ -4974,9 +4948,6 @@ async fn test_send_payment_with_first_hop_all_failed() {
     let source_node = &node_0;
     let target_pubkey = node_3.pubkey.clone();
 
-    // sleep for a while
-    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
             SendPaymentCommand {
@@ -5028,9 +4999,6 @@ async fn test_send_payment_will_succeed_with_direct_channel_info_first_hop() {
     let [mut node_0, _node_1, _node_2, node_3] = nodes.try_into().expect("4 nodes");
     let source_node = &mut node_0;
     let target_pubkey = node_3.pubkey.clone();
-
-    // sleep for a while
-    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
     // manually update the channel's to_local_amount
     source_node
@@ -5096,9 +5064,6 @@ async fn test_send_payment_will_succeed_with_retry_in_middle_hops() {
     let source_node = &mut node_0;
     let target_pubkey = node_3.pubkey.clone();
 
-    // sleep for a while
-    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-
     // manually update the channel's to_local_amount
     node_2.update_channel_local_balance(channels[2], 100).await;
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
@@ -5160,9 +5125,6 @@ async fn test_send_payment_will_fail_with_last_hop_info_in_add_tlc_peer() {
     let [mut node_0, _node_1, _node_2, mut node_3] = nodes.try_into().expect("4 nodes");
     let source_node = &mut node_0;
     let target_pubkey = node_3.pubkey.clone();
-
-    // sleep for a while
-    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
     // manually update the channel's to_remote_amount
     node_3
@@ -5230,9 +5192,6 @@ async fn test_send_payment_will_fail_with_invoice_not_generated_by_target() {
     let source_node = &mut node_0;
     let target_pubkey = node_3.pubkey.clone();
 
-    // sleep for a while
-    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-
     let invoice = InvoiceBuilder::new(Currency::Fibd)
         .amount(Some(100))
         .payment_preimage(gen_rand_sha256_hash())
@@ -5292,9 +5251,6 @@ async fn test_send_payment_will_succeed_with_valid_invoice() {
     let source_node = &mut node_0;
     let target_pubkey = node_3.pubkey.clone();
     let old_amount = node_3.get_local_balance_from_channel(channels[2]);
-
-    // sleep for a while
-    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
     let preimage = gen_rand_sha256_hash();
     let ckb_invoice = InvoiceBuilder::new(Currency::Fibd)
@@ -5363,9 +5319,6 @@ async fn test_send_payment_will_fail_with_no_invoice_preimage() {
     let source_node = &mut node_0;
     let target_pubkey = node_3.pubkey.clone();
     let old_amount = node_3.get_local_balance_from_channel(channels[2]);
-
-    // sleep for a while
-    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
     let preimage = gen_rand_sha256_hash();
     let ckb_invoice = InvoiceBuilder::new(Currency::Fibd)
@@ -5439,9 +5392,6 @@ async fn test_send_payment_will_fail_with_cancelled_invoice() {
     let target_pubkey = node_3.pubkey.clone();
     let old_amount = node_3.get_local_balance_from_channel(channels[2]);
 
-    // sleep for a while
-    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-
     let preimage = gen_rand_sha256_hash();
     let ckb_invoice = InvoiceBuilder::new(Currency::Fibd)
         .amount(Some(100))
@@ -5510,9 +5460,6 @@ async fn test_send_payment_will_succeed_with_large_tlc_expiry_limit() {
     let [mut node_0, _node_1, _node_2, node_3] = nodes.try_into().expect("4 nodes");
     let source_node = &mut node_0;
     let target_pubkey = node_3.pubkey.clone();
-
-    // sleep for a while
-    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
     let expected_minimal_tlc_expiry_limit = (24 * 60 * 60 * 1000) * 3;
 

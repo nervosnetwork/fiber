@@ -851,6 +851,7 @@ where
             last_edge = edge;
             current_expiry += expiry;
         }
+        assert_ne!(source, target);
         // initialize the target node
         nodes_heap.push(NodeHeapElement {
             node_id: target,
@@ -869,7 +870,6 @@ where
             for (from, to, channel_info, channel_update) in self.get_node_inbounds(cur_hop.node_id)
             {
                 assert_eq!(to, cur_hop.node_id);
-
                 if &udt_type_script != channel_info.udt_type_script() {
                     continue;
                 }
