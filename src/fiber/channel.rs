@@ -6255,10 +6255,10 @@ impl ChannelActorState {
             .filter(move |tlc| match tlc.outbound_status() {
                 OutboundTlcStatus::LocalAnnounced => for_remote,
                 OutboundTlcStatus::Committed => true,
-                OutboundTlcStatus::RemoteRemoved => for_remote,
-                OutboundTlcStatus::RemoveWaitPrevAck => for_remote,
-                OutboundTlcStatus::RemoveWaitAck => false,
-                OutboundTlcStatus::RemoveAckConfirmed => false,
+                OutboundTlcStatus::RemoteRemoved => true,
+                OutboundTlcStatus::RemoveWaitPrevAck => true,
+                OutboundTlcStatus::RemoveWaitAck => true,
+                OutboundTlcStatus::RemoveAckConfirmed => true,
             })
             .chain(self.tlc_state.received_tlcs.tlcs.iter().filter(move |tlc| {
                 match tlc.inbound_status() {
@@ -6266,23 +6266,43 @@ impl ChannelActorState {
                     InboundTlcStatus::AnnounceWaitPrevAck => !for_remote,
                     InboundTlcStatus::AnnounceWaitAck => true,
                     InboundTlcStatus::Committed => true,
-                    InboundTlcStatus::LocalRemoved => !for_remote,
-                    InboundTlcStatus::RemoveAckConfirmed => false,
+                    InboundTlcStatus::LocalRemoved => true,
+                    InboundTlcStatus::RemoveAckConfirmed => true,
                 }
             }));
 
         let mut offered_pending = 0;
+        let mut offered_fullfilled = 0;
         let mut received_pending = 0;
+        let mut received_fullfilled = 0;
         for info in pending_tlcs {
             if info.is_offered() {
                 offered_pending += info.amount;
+                if (info.outbound_status() == OutboundTlcStatus::RemoveWaitAck
+                    || info.outbound_status() == OutboundTlcStatus::RemoveAckConfirmed)
+                    && info
+                        .removed_reason
+                        .as_ref()
+                        .map(|r| matches!(r, RemoveTlcReason::RemoveTlcFulfill(_)))
+                        .unwrap_or_default()
+                {
+                    offered_fullfilled += info.amount;
+                }
             } else {
                 received_pending += info.amount;
+                if info.inbound_status() == InboundTlcStatus::RemoveAckConfirmed
+                    && info
+                        .removed_reason
+                        .as_ref()
+                        .map(|r| matches!(r, RemoveTlcReason::RemoveTlcFulfill(_)))
+                        .unwrap_or_default()
+                {
+                    received_fullfilled += info.amount;
+                }
             }
         }
-        info!("build_settlement_transaction_outputs for_remote: {} \n self.tlc_state: {:?} \n self.to_local_amount: {}, self.to_remote_amount: {}, offered_pending: {}, received_pending: {}", for_remote, self.tlc_state, self.to_local_amount, self.to_remote_amount, offered_pending, received_pending);
-        let to_local_value = self.to_local_amount - offered_pending;
-        let to_remote_value = self.to_remote_amount - received_pending;
+        let to_local_value = self.to_local_amount + received_fullfilled - offered_pending;
+        let to_remote_value = self.to_remote_amount + offered_fullfilled - received_pending;
 
         let commitment_tx_fee =
             calculate_commitment_tx_fee(self.commitment_fee_rate, &self.funding_udt_type_script);
