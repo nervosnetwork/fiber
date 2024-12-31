@@ -2610,12 +2610,10 @@ impl TlcState {
     }
 
     pub fn update_for_commitment_signed(&mut self) -> bool {
-        let mut need_another_commitment_signed = false;
         for tlc in self.offered_tlcs.tlcs.iter_mut() {
             match tlc.outbound_status() {
                 OutboundTlcStatus::RemoteRemoved => {
                     let status = if self.waiting_ack {
-                        need_another_commitment_signed = true;
                         OutboundTlcStatus::RemoveWaitPrevAck
                     } else {
                         OutboundTlcStatus::RemoveWaitAck
@@ -2629,7 +2627,6 @@ impl TlcState {
             match tlc.inbound_status() {
                 InboundTlcStatus::RemoteAnnounced => {
                     let status = if self.waiting_ack {
-                        need_another_commitment_signed = true;
                         InboundTlcStatus::AnnounceWaitPrevAck
                     } else {
                         InboundTlcStatus::AnnounceWaitAck
@@ -2639,20 +2636,17 @@ impl TlcState {
                 _ => {}
             }
         }
-        let res = need_another_commitment_signed || self.need_another_commitment_signed();
-        res
+        self.need_another_commitment_signed()
     }
 
     pub fn update_for_revoke_and_ack(&mut self) -> bool {
         self.set_waiting_ack(false);
-        let mut need_another_commitment_signed = false;
         for tlc in self.offered_tlcs.tlcs.iter_mut() {
             match tlc.outbound_status() {
                 OutboundTlcStatus::LocalAnnounced => {
                     tlc.status = TlcStatus::Outbound(OutboundTlcStatus::Committed);
                 }
                 OutboundTlcStatus::RemoveWaitPrevAck => {
-                    need_another_commitment_signed = true;
                     tlc.status = TlcStatus::Outbound(OutboundTlcStatus::RemoveWaitAck);
                 }
                 OutboundTlcStatus::RemoveWaitAck => {
@@ -2665,7 +2659,6 @@ impl TlcState {
         for tlc in self.received_tlcs.tlcs.iter_mut() {
             match tlc.inbound_status() {
                 InboundTlcStatus::AnnounceWaitPrevAck => {
-                    need_another_commitment_signed = true;
                     tlc.status = TlcStatus::Inbound(InboundTlcStatus::AnnounceWaitAck);
                 }
                 InboundTlcStatus::AnnounceWaitAck => {
@@ -2677,7 +2670,7 @@ impl TlcState {
                 _ => {}
             }
         }
-        need_another_commitment_signed || self.need_another_commitment_signed()
+        self.need_another_commitment_signed()
     }
 
     pub fn need_another_commitment_signed(&self) -> bool {
