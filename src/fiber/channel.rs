@@ -2323,7 +2323,10 @@ impl Debug for TlcInfo {
 
 impl TlcInfo {
     pub fn log(&self) -> String {
-        format!("id: {:?} status: {:?}", &self.tlc_id, self.status)
+        format!(
+            "id: {:?} status: {:?} amount: {:?}",
+            &self.tlc_id, self.status, self.amount
+        )
     }
 
     pub fn is_offered(&self) -> bool {
@@ -2439,6 +2442,7 @@ pub struct TlcState {
 }
 
 impl TlcState {
+    #[cfg(debug_assertions)]
     pub fn debug(&self) {
         for tlc in self.offered_tlcs.tlcs.iter() {
             eprintln!("offered_tlc: {:?}", tlc.log());
@@ -5487,7 +5491,6 @@ impl ChannelActorState {
         network: &ActorRef<NetworkActorMessage>,
         revoke_and_ack: RevokeAndAck,
     ) -> Result<bool, ProcessingChannelError> {
-        self.tlc_state.debug();
         let RevokeAndAck {
             channel_id: _,
             revocation_partial_signature,
