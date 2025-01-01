@@ -1,7 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
     marker::PhantomData,
-    mem::take,
     sync::Arc,
     time::Duration,
 };
@@ -1002,11 +1001,19 @@ impl<S: GossipMessageStore> ExtendedGossipMessageStoreState<S> {
     // We will also change the relevant state (e.g. update the latest cursor).
     // The returned list may be sent to the subscribers.
     async fn prune_messages_to_be_saved(&mut self) -> Vec<BroadcastMessageWithTimestamp> {
-        let messages_to_be_saved = take(&mut self.messages_to_be_saved);
-        let (complete_messages, uncomplete_messages) = messages_to_be_saved
-            .into_iter()
-            .partition(|m| self.has_dependencies_available(m));
-        self.messages_to_be_saved = uncomplete_messages;
+        // Note that we have to call has_dependencies_available before changing messages_to_be_saved,
+        // as the function will check the dependencies of the message in the current messages_to_be_saved.
+        let complete_messages = self
+            .messages_to_be_saved
+            .iter()
+            .filter(|m| self.has_dependencies_available(m))
+            .cloned()
+            .collect::<HashSet<_>>();
+        self.messages_to_be_saved = self
+            .messages_to_be_saved
+            .difference(&complete_messages)
+            .cloned()
+            .collect();
 
         let mut sorted_messages = complete_messages.into_iter().collect::<Vec<_>>();
         sorted_messages.sort_unstable();
