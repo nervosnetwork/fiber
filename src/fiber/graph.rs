@@ -845,9 +845,9 @@ where
         if route_to_self {
             // if there is no hint, we will randomly select a channel from the source node for route to self
             // so that the following part of algorithm will always trying to find a path without cycle
-            let (new_taget, expiry, edge) =
+            let (new_target, expiry, edge) =
                 self.adjust_target_for_route_self(&hop_hint_map, amount, source, target)?;
-            target = new_taget;
+            target = new_target;
             last_edge = edge;
             current_expiry += expiry;
         }
