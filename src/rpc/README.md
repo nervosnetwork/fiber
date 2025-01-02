@@ -497,10 +497,16 @@ Sends a payment to a peer.
 * `keysend` - `Option<bool>`, keysend payment
 * `udt_type_script` - `Option<Script>`, udt type script for the payment
 * `allow_self_payment` - `Option<bool>`, allow self payment, default is false
+* `hop_hints` - `Option<Vec>`, Optional route hints to reach the destination through private channels.
+ A hop hint is a hint for a node to use a specific channel, for example
+ (pubkey, funding_txid, inbound) where pubkey is the public key of the node,
+ funding_txid is the funding transaction hash of the channel outpoint, and
+ inbound is a boolean indicating whether to use the channel to send or receive.
+ Note: an inproper hint may cause the payment to fail, and hop_hints maybe helpful for self payment scenario
+ for helping the routing algorithm to find the correct path
 * `dry_run` - `Option<bool>`, dry_run for payment, used for check whether we can build valid router and the fee for this payment,
  it's useful for the sender to double check the payment before sending it to the network,
  default is false
-* `hop_hints` - `Option<Vec>`, Optional route hints to reach the destination through private channels.
 
 ##### Returns
 
