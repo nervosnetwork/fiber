@@ -17,7 +17,8 @@ use crate::fiber::types::PaymentHopData;
 use crate::invoice::CkbInvoice;
 use crate::now_timestamp_as_millis_u64;
 use ckb_types::packed::{OutPoint, Script};
-use rand::Rng;
+use rand::seq::SliceRandom;
+use rand::thread_rng;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use std::collections::{HashMap, HashSet};
@@ -1077,21 +1078,23 @@ where
                 return channel_info.capacity() >= amount;
             })
             .collect();
-        if direct_channels.is_empty() {
+
+        // a proper hop hint for route self will limit the direct_channels to only one
+        // if there are multiple channels, we will randomly select a channel from the source node for route to self
+        // so that the following part of algorithm will always trying to find a path without cycle
+        if let Some(&(from, _, channel_info, channel_update)) =
+            direct_channels.choose(&mut thread_rng())
+        {
+            let last_edge = Some((source, channel_info.out_point().clone()));
+            let current_expiry = channel_update.tlc_expiry_delta;
+            assert_ne!(target, from);
+            let target = from;
+            Ok((target, current_expiry, last_edge))
+        } else {
             return Err(PathFindError::PathFind(
                 "no direct channel found for source node".to_string(),
             ));
         }
-        // a proper hop hint for route self will limit the direct_channels to only one
-        // if there are multiple channels, we will randomly select a channel from the source node for route to self
-        // so that the following part of algorithm will always trying to find a path without cycle
-        let rand_index = rand::thread_rng().gen_range(0..direct_channels.len());
-        let (from, _, channel_info, channel_update) = direct_channels[rand_index];
-        let last_edge = Some((source, channel_info.out_point().clone()));
-        let current_expiry = channel_update.tlc_expiry_delta;
-        assert_ne!(target, from);
-        let target = from;
-        Ok((target, current_expiry, last_edge))
     }
 
     fn edge_weight(&self, amount: u128, fee: u128, htlc_expiry_delta: u64) -> u128 {
