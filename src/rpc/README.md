@@ -670,7 +670,7 @@ The Node information.
 
 #### Fields
 
-* `alias` - String, The alias of the node.
+* `node_name` - String, The name of the node.
 * `addresses` - `Vec<MultiAddr>`, The addresses of the node.
 * `node_id` - Pubkey, The node ID.
 * `timestamp` - u64, The timestamp of the node.
@@ -698,4 +698,3 @@ The Channel information.
 * `capacity` - u128, The capacity of the channel.
 * `chain_hash` - Hash256, The chain hash of the channel.
 * `udt_type_script` - `Option<Script>`, The UDT type script of the channel.
-

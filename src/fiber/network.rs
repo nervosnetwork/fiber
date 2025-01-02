@@ -1905,10 +1905,10 @@ where
                 debug!("Returning old node announcement message as it is still valid");
             }
             _ => {
-                let alias = self.node_name.unwrap_or_default();
+                let node_name = self.node_name.unwrap_or_default();
                 let addresses = self.announced_addrs.clone();
                 let announcement = NodeAnnouncement::new(
-                    alias,
+                    node_name,
                     addresses,
                     &self.private_key,
                     now,

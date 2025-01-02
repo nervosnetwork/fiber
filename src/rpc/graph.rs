@@ -105,8 +105,8 @@ impl From<ConfigUdtCfgInfos> for UdtCfgInfos {
 #[serde_as]
 #[derive(Serialize, Deserialize, Clone)]
 struct NodeInfo {
-    /// The alias of the node.
-    alias: String,
+    /// The name of the node.
+    node_name: String,
     /// The addresses of the node.
     addresses: Vec<MultiAddr>,
     /// The node ID.
@@ -126,7 +126,7 @@ struct NodeInfo {
 impl From<super::super::fiber::graph::NodeInfo> for NodeInfo {
     fn from(value: super::super::fiber::graph::NodeInfo) -> Self {
         NodeInfo {
-            alias: value.alias.to_string(),
+            node_name: value.node_name.to_string(),
             addresses: value.addresses,
             node_id: value.node_id,
             timestamp: value.timestamp,

@@ -45,7 +45,7 @@ table NodeAnnouncement {
     timestamp: Uint64,
     node_id: Pubkey,
     // Must be a valid utf-8 string of length maximal length 32 bytes.
-    alias: Byte32,
+    node_name: Byte32,
     // All the reachable addresses.
     address: BytesVec,
     // Chain hash

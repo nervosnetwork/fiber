@@ -3083,7 +3083,7 @@ impl ::core::fmt::Display for NodeAnnouncement {
         write!(f, ", {}: {}", "features", self.features())?;
         write!(f, ", {}: {}", "timestamp", self.timestamp())?;
         write!(f, ", {}: {}", "node_id", self.node_id())?;
-        write!(f, ", {}: {}", "alias", self.alias())?;
+        write!(f, ", {}: {}", "node_name", self.node_name())?;
         write!(f, ", {}: {}", "address", self.address())?;
         write!(f, ", {}: {}", "chain_hash", self.chain_hash())?;
         write!(
@@ -3158,7 +3158,7 @@ impl NodeAnnouncement {
         let end = molecule::unpack_number(&slice[20..]) as usize;
         Pubkey::new_unchecked(self.0.slice(start..end))
     }
-    pub fn alias(&self) -> Byte32 {
+    pub fn node_name(&self) -> Byte32 {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[20..]) as usize;
         let end = molecule::unpack_number(&slice[24..]) as usize;
@@ -3223,7 +3223,7 @@ impl molecule::prelude::Entity for NodeAnnouncement {
             .features(self.features())
             .timestamp(self.timestamp())
             .node_id(self.node_id())
-            .alias(self.alias())
+            .node_name(self.node_name())
             .address(self.address())
             .chain_hash(self.chain_hash())
             .auto_accept_min_ckb_funding_amount(self.auto_accept_min_ckb_funding_amount())
@@ -3253,7 +3253,7 @@ impl<'r> ::core::fmt::Display for NodeAnnouncementReader<'r> {
         write!(f, ", {}: {}", "features", self.features())?;
         write!(f, ", {}: {}", "timestamp", self.timestamp())?;
         write!(f, ", {}: {}", "node_id", self.node_id())?;
-        write!(f, ", {}: {}", "alias", self.alias())?;
+        write!(f, ", {}: {}", "node_name", self.node_name())?;
         write!(f, ", {}: {}", "address", self.address())?;
         write!(f, ", {}: {}", "chain_hash", self.chain_hash())?;
         write!(
@@ -3312,7 +3312,7 @@ impl<'r> NodeAnnouncementReader<'r> {
         let end = molecule::unpack_number(&slice[20..]) as usize;
         PubkeyReader::new_unchecked(&self.as_slice()[start..end])
     }
-    pub fn alias(&self) -> Byte32Reader<'r> {
+    pub fn node_name(&self) -> Byte32Reader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[20..]) as usize;
         let end = molecule::unpack_number(&slice[24..]) as usize;
@@ -3411,7 +3411,7 @@ pub struct NodeAnnouncementBuilder {
     pub(crate) features: Uint64,
     pub(crate) timestamp: Uint64,
     pub(crate) node_id: Pubkey,
-    pub(crate) alias: Byte32,
+    pub(crate) node_name: Byte32,
     pub(crate) address: BytesVec,
     pub(crate) chain_hash: Byte32,
     pub(crate) auto_accept_min_ckb_funding_amount: Uint64,
@@ -3435,8 +3435,8 @@ impl NodeAnnouncementBuilder {
         self.node_id = v;
         self
     }
-    pub fn alias(mut self, v: Byte32) -> Self {
-        self.alias = v;
+    pub fn node_name(mut self, v: Byte32) -> Self {
+        self.node_name = v;
         self
     }
     pub fn address(mut self, v: BytesVec) -> Self {
@@ -3465,7 +3465,7 @@ impl molecule::prelude::Builder for NodeAnnouncementBuilder {
             + self.features.as_slice().len()
             + self.timestamp.as_slice().len()
             + self.node_id.as_slice().len()
-            + self.alias.as_slice().len()
+            + self.node_name.as_slice().len()
             + self.address.as_slice().len()
             + self.chain_hash.as_slice().len()
             + self.auto_accept_min_ckb_funding_amount.as_slice().len()
@@ -3483,7 +3483,7 @@ impl molecule::prelude::Builder for NodeAnnouncementBuilder {
         offsets.push(total_size);
         total_size += self.node_id.as_slice().len();
         offsets.push(total_size);
-        total_size += self.alias.as_slice().len();
+        total_size += self.node_name.as_slice().len();
         offsets.push(total_size);
         total_size += self.address.as_slice().len();
         offsets.push(total_size);
@@ -3500,7 +3500,7 @@ impl molecule::prelude::Builder for NodeAnnouncementBuilder {
         writer.write_all(self.features.as_slice())?;
         writer.write_all(self.timestamp.as_slice())?;
         writer.write_all(self.node_id.as_slice())?;
-        writer.write_all(self.alias.as_slice())?;
+        writer.write_all(self.node_name.as_slice())?;
         writer.write_all(self.address.as_slice())?;
         writer.write_all(self.chain_hash.as_slice())?;
         writer.write_all(self.auto_accept_min_ckb_funding_amount.as_slice())?;

@@ -39,8 +39,8 @@ pub struct NodeInfo {
     // Tentatively using 64 bits for features. May change the type later while developing.
     // rust-lightning uses a Vec<u8> here.
     pub features: u64,
-    // The alias of the node. This is a human-readable string that is meant to be used for labelling nodes in the UI.
-    pub alias: AnnouncedNodeName,
+    // The name of the node. This is a human-readable string that is meant to be used for labelling nodes in the UI.
+    pub node_name: AnnouncedNodeName,
     // All the reachable addresses.
     pub addresses: Vec<MultiAddr>,
     // If the other party funding more than this amount, we will automatically accept the channel.
@@ -64,7 +64,7 @@ impl From<NodeAnnouncement> for NodeInfo {
             node_id: value.node_id,
             timestamp: value.timestamp,
             features: value.features,
-            alias: value.alias,
+            node_name: value.node_name,
             addresses: value.addresses,
             auto_accept_min_ckb_funding_amount: value.auto_accept_min_ckb_funding_amount,
             udt_cfg_infos: value.udt_cfg_infos,
