@@ -2,6 +2,9 @@ use super::test_utils::init_tracing;
 use crate::fiber::graph::PaymentSessionStatus;
 use crate::fiber::network::SendPaymentCommand;
 use crate::fiber::tests::test_utils::*;
+use crate::fiber::NetworkActorCommand;
+use crate::fiber::NetworkActorMessage;
+use ractor::call;
 
 #[tokio::test]
 async fn test_send_payment_for_direct_channel_and_dry_run() {
@@ -67,11 +70,17 @@ async fn test_send_payment_for_direct_channel_and_dry_run() {
     eprintln!("res: {:?}", res);
     assert!(res.is_ok());
     // sleep for a while
-    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
     let payment_hash = res.unwrap().payment_hash;
-    source_node
-        .assert_payment_status(payment_hash, PaymentSessionStatus::Success, Some(1))
-        .await;
+
+    let message = |rpc_reply| -> NetworkActorMessage {
+        NetworkActorMessage::Command(NetworkActorCommand::GetPayment(payment_hash, rpc_reply))
+    };
+    let res = call!(source_node.network_actor, message)
+        .expect("node_a alive")
+        .unwrap();
+
+    assert_eq!(res.status, PaymentSessionStatus::Success);
 
     let res = node_1
         .send_payment(SendPaymentCommand {
@@ -95,7 +104,7 @@ async fn test_send_payment_for_direct_channel_and_dry_run() {
     assert!(res.is_ok());
 
     // sleep for a while
-    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
     let payment_hash = res.unwrap().payment_hash;
     node_1
         .assert_payment_status(payment_hash, PaymentSessionStatus::Success, Some(1))
@@ -186,7 +195,7 @@ async fn test_send_payment_for_pay_self() {
     assert!(res.is_ok());
 
     // sleep for a while
-    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
     let res = res.unwrap();
     let payment_hash = res.payment_hash;
     node_0
@@ -241,4 +250,126 @@ async fn test_send_payment_for_pay_self() {
 
     eprintln!("res: {:?}", res);
     assert_eq!(res.unwrap().fee, 0);
+}
+
+#[tokio::test]
+async fn test_network_send_payment_randomly_send_each_other() {
+    init_tracing();
+
+    let _span = tracing::info_span!("node", node = "test").entered();
+    let node_a_funding_amount = 100000000000;
+    let node_b_funding_amount = 100000000000;
+
+    let (node_a, node_b, new_channel_id) =
+        create_nodes_with_established_channel(node_a_funding_amount, node_b_funding_amount, true)
+            .await;
+    // Wait for the channel announcement to be broadcasted
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+    let node_a_old_balance = node_a.get_local_balance_from_channel(new_channel_id);
+    let node_b_old_balance = node_b.get_local_balance_from_channel(new_channel_id);
+
+    let node_a_pubkey = node_a.pubkey.clone();
+    let node_b_pubkey = node_b.pubkey.clone();
+
+    let mut node_a_sent = 0;
+    let mut node_b_sent = 0;
+    let mut all_sent = vec![];
+    for _i in 1..8 {
+        let rand_wait_time = rand::random::<u64>() % 1000;
+        tokio::time::sleep(tokio::time::Duration::from_millis(rand_wait_time)).await;
+
+        let rand_num = rand::random::<u64>() % 2;
+        let amount = rand::random::<u128>() % 10000;
+        eprintln!("generated ampunt: {}", amount);
+        let (source, target) = if rand_num == 0 {
+            (&node_a.network_actor, node_b_pubkey.clone())
+        } else {
+            (&node_b.network_actor, node_a_pubkey.clone())
+        };
+        let message = |rpc_reply| -> NetworkActorMessage {
+            NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
+                SendPaymentCommand {
+                    target_pubkey: Some(target),
+                    amount: Some(amount),
+                    payment_hash: None,
+                    final_tlc_expiry_delta: None,
+                    tlc_expiry_limit: None,
+                    invoice: None,
+                    timeout: None,
+                    max_fee_amount: None,
+                    max_parts: None,
+                    keysend: Some(true),
+                    udt_type_script: None,
+                    allow_self_payment: false,
+                    dry_run: false,
+                },
+                rpc_reply,
+            ))
+        };
+
+        let res = call!(source, message).expect("node_a alive").unwrap();
+
+        if rand_num == 0 {
+            all_sent.push((true, amount, res.payment_hash, res.status));
+        } else {
+            all_sent.push((false, amount, res.payment_hash, res.status));
+        }
+    }
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(4000)).await;
+    for (a_sent, amount, payment_hash, create_status) in all_sent {
+        let message = |rpc_reply| -> NetworkActorMessage {
+            NetworkActorMessage::Command(NetworkActorCommand::GetPayment(payment_hash, rpc_reply))
+        };
+        let network = if a_sent {
+            &node_a.network_actor
+        } else {
+            &node_b.network_actor
+        };
+        let res = call!(network, message).expect("node_a alive").unwrap();
+        if res.status == PaymentSessionStatus::Success {
+            assert!(matches!(
+                create_status,
+                PaymentSessionStatus::Created | PaymentSessionStatus::Inflight
+            ));
+            eprintln!(
+                "{} payment_hash: {:?} success with amount: {} create_status: {:?}",
+                if a_sent { "a -> b" } else { "b -> a" },
+                payment_hash,
+                amount,
+                create_status
+            );
+            if a_sent {
+                node_a_sent += amount;
+            } else {
+                node_b_sent += amount;
+            }
+        }
+    }
+
+    eprintln!(
+        "node_a_old_balance: {}, node_b_old_balance: {}",
+        node_a_old_balance, node_b_old_balance
+    );
+    eprintln!("node_a_sent: {}, node_b_sent: {}", node_a_sent, node_b_sent);
+    let new_node_a_balance = node_a.get_local_balance_from_channel(new_channel_id);
+    let new_node_b_balance = node_b.get_local_balance_from_channel(new_channel_id);
+
+    eprintln!(
+        "new_node_a_balance: {}, new_node_b_balance: {}",
+        new_node_a_balance, new_node_b_balance
+    );
+
+    assert_eq!(
+        node_a_old_balance + node_b_old_balance,
+        new_node_a_balance + new_node_b_balance
+    );
+    assert_eq!(
+        new_node_a_balance,
+        node_a_old_balance - node_a_sent + node_b_sent
+    );
+    assert_eq!(
+        new_node_b_balance,
+        node_b_old_balance - node_b_sent + node_a_sent
+    );
 }

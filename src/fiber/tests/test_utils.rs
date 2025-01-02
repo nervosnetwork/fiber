@@ -555,6 +555,16 @@ impl NetworkNode {
         expected_status: PaymentSessionStatus,
         expected_retried: Option<u32>,
     ) {
+        let status = self.get_payment_status(payment_hash).await;
+        assert_eq!(status, expected_status);
+
+        if let Some(expected_retried) = expected_retried {
+            let payment_session = self.get_payment_session(payment_hash).unwrap();
+            assert_eq!(payment_session.retried_times, expected_retried);
+        }
+    }
+
+    pub async fn get_payment_status(&self, payment_hash: Hash256) -> PaymentSessionStatus {
         let message = |rpc_reply| -> NetworkActorMessage {
             NetworkActorMessage::Command(NetworkActorCommand::GetPayment(payment_hash, rpc_reply))
         };
@@ -562,11 +572,7 @@ impl NetworkNode {
             .expect("node_a alive")
             .unwrap();
 
-        assert_eq!(res.status, expected_status);
-        if let Some(expected_retried) = expected_retried {
-            let payment_session = self.get_payment_session(payment_hash).unwrap();
-            assert_eq!(payment_session.retried_times, expected_retried);
-        }
+        res.status
     }
 
     pub async fn update_channel_actor_state(&mut self, state: ChannelActorState) {
@@ -654,6 +660,7 @@ impl NetworkNode {
         let network_graph = Arc::new(TokioRwLock::new(NetworkGraph::new(
             store.clone(),
             public_key.clone(),
+            true,
         )));
 
         let network_actor = Actor::spawn_linked(
