@@ -672,7 +672,7 @@ The Node information.
 
 * `node_name` - String, The name of the node.
 * `addresses` - `Vec<MultiAddr>`, The addresses of the node.
-* `node_id` - Pubkey, The node ID.
+* `node_id` - Pubkey, The identity public key of the node.
 * `timestamp` - u64, The timestamp of the node.
 * `chain_hash` - Hash256, The chain hash of the node.
 * `auto_accept_min_ckb_funding_amount` - u64, The minimum CKB funding amount for automatically accepting open channel requests.
@@ -687,8 +687,8 @@ The Channel information.
 #### Fields
 
 * `channel_outpoint` - OutPoint, The outpoint of the channel.
-* `node1` - Pubkey, The node ID of the first node.
-* `node2` - Pubkey, The node ID of the second node.
+* `node1` - Pubkey, The identity public key of the first node.
+* `node2` - Pubkey, The identity public key of the second node.
 * `created_timestamp` - u64, The created timestamp of the channel, which is the block header timestamp of the block
  that contains the channel funding transaction.
 * `last_updated_timestamp_of_node1` - `Option<u64>`, The timestamp of the last update to channel by node 1 (e.g. updating fee rate).
@@ -698,3 +698,4 @@ The Channel information.
 * `capacity` - u128, The capacity of the channel.
 * `chain_hash` - Hash256, The chain hash of the channel.
 * `udt_type_script` - `Option<Script>`, The UDT type script of the channel.
+

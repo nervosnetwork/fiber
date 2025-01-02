@@ -109,7 +109,7 @@ struct NodeInfo {
     node_name: String,
     /// The addresses of the node.
     addresses: Vec<MultiAddr>,
-    /// The node ID.
+    /// The identity public key of the node.
     node_id: Pubkey,
     #[serde_as(as = "U64Hex")]
     /// The timestamp of the node.
@@ -162,9 +162,9 @@ struct ChannelInfo {
     /// The outpoint of the channel.
     #[serde_as(as = "EntityHex")]
     channel_outpoint: OutPoint,
-    /// The node ID of the first node.
+    /// The identity public key of the first node.
     node1: Pubkey,
-    /// The node ID of the second node.
+    /// The identity public key of the second node.
     node2: Pubkey,
     /// The created timestamp of the channel, which is the block header timestamp of the block
     /// that contains the channel funding transaction.
