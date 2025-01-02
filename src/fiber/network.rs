@@ -164,7 +164,6 @@ pub enum LocalInfoKind {
 #[derive(Debug, Clone)]
 pub struct NodeInfoResponse {
     pub node_name: Option<AnnouncedNodeName>,
-    pub peer_id: PeerId,
     pub node_id: Pubkey,
     pub addresses: Vec<MultiAddr>,
     pub chain_hash: Hash256,
@@ -1318,7 +1317,6 @@ where
             NetworkActorCommand::NodeInfo(_, rpc) => {
                 let response = NodeInfoResponse {
                     node_name: state.node_name.clone(),
-                    peer_id: state.peer_id.clone(),
                     node_id: state.get_public_key().clone(),
                     addresses: state.announced_addrs.clone(),
                     chain_hash: get_chain_hash(),

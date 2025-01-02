@@ -14,8 +14,8 @@ use jsonrpsee::{
 };
 use ractor::{call, ActorRef};
 use serde::{Deserialize, Serialize};
-use serde_with::{serde_as, DisplayFromStr};
-use tentacle::{multiaddr::MultiAddr, secio::PeerId};
+use serde_with::serde_as;
+use tentacle::multiaddr::MultiAddr;
 
 #[serde_as]
 #[derive(Clone, Serialize, Deserialize)]
@@ -31,10 +31,6 @@ pub(crate) struct NodeInfoResult {
 
     /// The optional name of the node.
     node_name: Option<String>,
-
-    /// The peer ID of the node, serialized as a string.
-    #[serde_as(as = "DisplayFromStr")]
-    peer_id: PeerId,
 
     /// A list of multi-addresses associated with the node.
     addresses: Vec<MultiAddr>,
@@ -118,7 +114,6 @@ where
             commit_hash,
             node_id: response.node_id,
             node_name: response.node_name.map(|name| name.to_string()),
-            peer_id: response.peer_id,
             addresses: response.addresses,
             chain_hash: response.chain_hash,
             open_channel_auto_accept_min_ckb_funding_amount: response

@@ -149,7 +149,7 @@ Attempts to open a channel with a peer.
 
 ##### Params
 
-* `peer_id` - PeerId, The peer ID to open a channel with.
+* `peer_id` - PeerId, The peer ID to open a channel with, the peer must be connected through the [connect_peer](#peer-connect_peer) rpc first.
 * `funding_amount` - u128, The amount of CKB or UDT to fund the channel with.
 * `public` - `Option<bool>`, Whether this is a public channel (will be broadcasted to network, and can be used to forward TLCs), an optional parameter, default value is true.
 * `funding_udt_type_script` - `Option<Script>`, The type script of the UDT to fund the channel with, an optional parameter.
@@ -435,7 +435,6 @@ Get the node information.
 * `commit_hash` - String, The commit hash of the node software.
 * `node_id` - Pubkey, The identity public key of the node.
 * `node_name` - `Option<String>`, The optional name of the node.
-* `peer_id` - PeerId, The peer ID of the node, serialized as a string.
 * `addresses` - `Vec<MultiAddr>`, A list of multi-addresses associated with the node.
 * `chain_hash` - Hash256, The hash of the blockchain that the node is connected to.
 * `open_channel_auto_accept_min_ckb_funding_amount` - u64, The minimum CKB funding amount for automatically accepting open channel requests, serialized as a hexadecimal string.
