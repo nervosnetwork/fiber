@@ -510,7 +510,7 @@ async fn test_network_send_payment_send_each_other() {
     let payment_hash2 = res2.payment_hash;
 
     // sleep for 2 seconds to make sure the payment is processed
-    tokio::time::sleep(tokio::time::Duration::from_millis(3000)).await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(4000)).await;
 
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::GetPayment(payment_hash1, rpc_reply))
@@ -2543,10 +2543,10 @@ async fn do_test_add_tlc_waiting_ack() {
         })
         .expect("node_b alive");
         if i == 2 {
-            // we are sending AddTlc constantly, so we should get a TemporaryChannelFailure
+            // we are sending AddTlc constantly, so we should get a WaitingTlcAck
             assert!(add_tlc_result.is_err());
             let code = add_tlc_result.unwrap_err();
-            assert_eq!(code.error_code, TlcErrorCode::TemporaryChannelFailure);
+            assert_eq!(code.error_code, TlcErrorCode::WaitingTlcAck);
         } else {
             assert!(add_tlc_result.is_ok());
         }
@@ -2574,10 +2574,10 @@ async fn do_test_add_tlc_waiting_ack() {
         })
         .expect("node_b alive");
         if i == 2 {
-            // we are sending AddTlc constantly, so we should get a TemporaryChannelFailure
+            // we are sending AddTlc constantly, so we should get a WaitingTlcAck
             assert!(add_tlc_result.is_err());
             let code = add_tlc_result.unwrap_err();
-            assert_eq!(code.error_code, TlcErrorCode::TemporaryChannelFailure);
+            assert_eq!(code.error_code, TlcErrorCode::WaitingTlcAck);
         } else {
             eprintln!("add_tlc_result: {:?}", add_tlc_result);
             assert!(add_tlc_result.is_ok());
@@ -5277,7 +5277,7 @@ async fn test_send_payment_will_succeed_with_retry_in_middle_hops() {
     assert!(res.is_ok());
 
     let payment_hash = res.unwrap().payment_hash;
-    tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 
     source_node
         .assert_payment_status(payment_hash, PaymentSessionStatus::Success, Some(2))

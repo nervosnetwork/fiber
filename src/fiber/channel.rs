@@ -615,8 +615,10 @@ where
             ProcessingChannelError::TlcAmountIsTooLow => TlcErrorCode::AmountBelowMinimum,
             ProcessingChannelError::TlcNumberExceedLimit
             | ProcessingChannelError::TlcAmountExceedLimit
-            | ProcessingChannelError::TlcValueInflightExceedLimit
-            | ProcessingChannelError::WaitingTlcAck => TlcErrorCode::WaitingTlcAck,
+            | ProcessingChannelError::TlcValueInflightExceedLimit => {
+                TlcErrorCode::TemporaryChannelFailure
+            }
+            ProcessingChannelError::WaitingTlcAck => TlcErrorCode::WaitingTlcAck,
             ProcessingChannelError::InternalError(_) => TlcErrorCode::TemporaryNodeFailure,
             ProcessingChannelError::InvalidState(error) => match state.state {
                 // we can not revert back up `ChannelReady` after `ShuttingDown`
@@ -748,6 +750,10 @@ where
             tlc_err,
             // There's no shared secret stored in the received TLC, use the one found in the peeled onion packet.
             &error.shared_secret,
+        );
+        debug!(
+            "debug register remove payment: {:?} payment_hash: {:?}",
+            &tlc_id, payment_hash
         );
         self.register_retryable_tlc_remove(
             myself,
@@ -4417,7 +4423,6 @@ impl ChannelActorState {
             let sent_tlc_value = self.get_offered_tlc_balance();
             debug_assert!(self.to_local_amount >= sent_tlc_value);
             if sent_tlc_value + tlc.amount > self.to_local_amount {
-                debug!("here is error");
                 return Err(ProcessingChannelError::TlcAmountExceedLimit);
             }
         } else {

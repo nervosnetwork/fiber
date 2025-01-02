@@ -489,14 +489,16 @@ async fn test_network_three_nodes_two_channels_send_each_other() {
 
     assert_eq!(res.status, PaymentSessionStatus::Success);
 
-    // let sum_fee = ((node_b.get_local_balance_from_channel(channels[0])
-    //     - node_b_old_balance_channel_0)
-    //     - (node_b_old_balance_channel_1 - node_b.get_local_balance_from_channel(channels[1])))
-    //     + ((node_b.get_local_balance_from_channel(channels[2]) - node_b_old_balance_channel_2)
-    //         - (node_b_old_balance_channel_3 - node_b.get_local_balance_from_channel(channels[3])));
-    // eprintln!("sum_fee: {}", sum_fee);
+    let new_node_b_balance_channel_0 = node_b.get_local_balance_from_channel(channels[0]);
+    let new_node_b_balance_channel_1 = node_b.get_local_balance_from_channel(channels[1]);
+
+    let node_b_fee = new_node_b_balance_channel_0 + new_node_b_balance_channel_1
+        - node_b_old_balance_channel_0
+        - node_b_old_balance_channel_1;
+
+    eprintln!("node_b_fee: {}", node_b_fee);
     eprintln!("fee1: {}, fee2: {}", fee1, fee2);
-    //assert_eq!(sum_fee, fee1 + fee2);
+    assert_eq!(node_b_fee, fee1 + fee2);
 }
 
 #[tokio::test]
@@ -506,10 +508,34 @@ async fn test_network_three_nodes_send_each_other() {
     let _span = tracing::info_span!("node", node = "test").entered();
     let (nodes, channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
         &[
-            ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
-            ((1, 2), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
-            ((2, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
-            ((1, 0), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+            (
+                (0, 1),
+                (
+                    MIN_RESERVED_CKB + 10000000000,
+                    MIN_RESERVED_CKB + 10000000000,
+                ),
+            ),
+            (
+                (1, 2),
+                (
+                    MIN_RESERVED_CKB + 10000000000,
+                    MIN_RESERVED_CKB + 10000000000,
+                ),
+            ),
+            (
+                (2, 1),
+                (
+                    MIN_RESERVED_CKB + 10000000000,
+                    MIN_RESERVED_CKB + 10000000000,
+                ),
+            ),
+            (
+                (1, 0),
+                (
+                    MIN_RESERVED_CKB + 10000000000,
+                    MIN_RESERVED_CKB + 10000000000,
+                ),
+            ),
         ],
         3,
         true,
@@ -619,44 +645,15 @@ async fn test_network_three_nodes_send_each_other() {
     let new_node_b_balance_channel_2 = node_b.get_local_balance_from_channel(channels[2]);
     let new_node_b_balance_channel_3 = node_b.get_local_balance_from_channel(channels[3]);
 
-    eprintln!(
-        "node_b_old_balance_channel_0: {} -> {}, node_b_old_balance_channel_1: {} -> {}",
-        node_b_old_balance_channel_0,
-        new_node_b_balance_channel_0,
-        node_b_old_balance_channel_1,
-        new_node_b_balance_channel_1,
-    );
-    eprintln!(
-        "node_b_old_balance_channel_2: {} -> {}, node_b_old_balance_channel_3: {} -> {}",
-        node_b_old_balance_channel_2,
-        new_node_b_balance_channel_2,
-        node_b_old_balance_channel_3,
-        new_node_b_balance_channel_3
-    );
+    let node_b_fee = new_node_b_balance_channel_0
+        + new_node_b_balance_channel_1
+        + new_node_b_balance_channel_2
+        + new_node_b_balance_channel_3
+        - node_b_old_balance_channel_0
+        - node_b_old_balance_channel_1
+        - node_b_old_balance_channel_2
+        - node_b_old_balance_channel_3;
 
-    eprintln!(
-        "node_b_first: {:?}",
-        new_node_b_balance_channel_0 - node_b_old_balance_channel_0
-    );
-
-    eprintln!(
-        "node_b_second: {:?}",
-        node_b_old_balance_channel_1 - new_node_b_balance_channel_1
-    );
-
-    // let node_b_fee1 = new_node_b_balance_channel_0
-    //     - node_b_old_balance_channel_0
-    //     - (node_b_old_balance_channel_1 - node_b.get_local_balance_from_channel(channels[1]));
-
-    // eprintln!("node_b_fee1: {}", node_b_fee1);
-
-    // let node_b_fee2 = ((node_b.get_local_balance_from_channel(channels[2])
-    //     - node_b_old_balance_channel_2)
-    //     - (node_b_old_balance_channel_3 - node_b.get_local_balance_from_channel(channels[3])));
-    // eprintln!("node_b_fee2: {}", node_b_fee2);
-
-    // let sum_fee = node_b_fee1 + node_b_fee2;
-    // eprintln!("sum_fee: {}", sum_fee);
-    // eprintln!("fee1: {}, fee2: {}", fee1, fee2);
-    // assert_eq!(sum_fee, fee1 + fee2);
+    eprintln!("node_b_fee: {}", node_b_fee);
+    assert_eq!(node_b_fee, fee1 + fee2);
 }
