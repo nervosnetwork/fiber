@@ -834,19 +834,6 @@ where
             ));
         }
 
-        let Some(source_node) = self.nodes.get(&source) else {
-            return Err(PathFindError::PathFind(format!(
-                "source node not found: {:?}",
-                &source
-            )));
-        };
-        let Some(_target_node) = self.nodes.get(&target) else {
-            return Err(PathFindError::PathFind(format!(
-                "target node not found: {:?}",
-                &target
-            )));
-        };
-
         // initialize the target node
         nodes_heap.push(NodeHeapElement {
             node_id: target,
@@ -1001,7 +988,7 @@ where
             }
         }
 
-        let mut current = source_node.node_id;
+        let mut current = source;
         while let Some(elem) = distances.remove(&current) {
             let (next_pubkey, next_out_point) = elem.next_hop.expect("next_hop is none");
             result.push(PathEdge {
