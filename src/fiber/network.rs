@@ -2071,7 +2071,7 @@ where
         let seed = self.generate_channel_seed();
         let (tx, rx) = oneshot::channel::<Hash256>();
         let channel = Actor::spawn_linked(
-            None,
+            Some(generate_channel_actor_name(&self.peer_id, &peer_id)),
             ChannelActor::new(
                 self.get_public_key(),
                 remote_pubkey,
@@ -3139,8 +3139,8 @@ where
             SupervisionEvent::ActorTerminated(who, _, _) => {
                 debug!("Actor {:?} terminated", who);
             }
-            SupervisionEvent::ActorPanicked(who, _) => {
-                error!("Actor {:?} panicked", who);
+            SupervisionEvent::ActorPanicked(who, err) => {
+                panic!("Actor unexpectedly panicked (id: {:?}): {:?}", who, err);
             }
             _ => {}
         }

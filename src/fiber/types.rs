@@ -1,6 +1,9 @@
 use super::channel::{ChannelFlags, CHANNEL_DISABLED_FLAG, MESSAGE_OF_NODE2_FLAG};
 use super::config::AnnouncedNodeName;
-use super::gen::fiber::{self as molecule_fiber, PubNonce as Byte66, UdtCellDeps, Uint128Opt};
+use super::gen::fiber::{
+    self as molecule_fiber, ChannelUpdateOpt, PaymentPreimageOpt, PubNonce as Byte66, PubkeyOpt,
+    TlcErrDataOpt, UdtCellDeps, Uint128Opt,
+};
 use super::gen::gossip::{self as molecule_gossip};
 use super::hash_algorithm::{HashAlgorithm, UnknownHashAlgorithmError};
 use super::network::get_chain_hash;
@@ -8,6 +11,9 @@ use super::r#gen::fiber::PubNonceOpt;
 use super::serde_utils::{EntityHex, SliceHex};
 use crate::ckb::config::{UdtArgInfo, UdtCellDep, UdtCfgInfos, UdtScript};
 use crate::ckb::contracts::get_udt_whitelist;
+use num_enum::IntoPrimitive;
+use num_enum::TryFromPrimitive;
+use std::convert::TryFrom;
 
 use anyhow::anyhow;
 use ckb_types::{
@@ -1191,16 +1197,103 @@ impl TlcErr {
         error_code.as_ref().to_string()
     }
 
+    pub fn error_code_as_u16(&self) -> u16 {
+        self.error_code.into()
+    }
+
     pub fn set_extra_data(&mut self, extra_data: TlcErrData) {
         self.extra_data = Some(extra_data);
     }
 
     fn serialize(&self) -> Vec<u8> {
-        deterministically_serialize(self)
+        molecule_fiber::TlcErr::from(self.clone())
+            .as_slice()
+            .to_vec()
     }
 
     fn deserialize(data: &[u8]) -> Option<Self> {
-        serde_json::from_slice(data).ok()
+        molecule_fiber::TlcErr::from_slice(data)
+            .map(TlcErr::from)
+            .ok()
+    }
+}
+
+impl TryFrom<TlcErrData> for molecule_fiber::TlcErrData {
+    type Error = Error;
+
+    fn try_from(tlc_err_data: TlcErrData) -> Result<Self, Self::Error> {
+        match tlc_err_data {
+            TlcErrData::ChannelFailed {
+                channel_outpoint,
+                channel_update,
+                node_id,
+            } => Ok(molecule_fiber::ChannelFailed::new_builder()
+                .channel_outpoint(channel_outpoint.into())
+                .channel_update(
+                    ChannelUpdateOpt::new_builder()
+                        .set(channel_update.map(|x| x.into()))
+                        .build(),
+                )
+                .node_id(node_id.into())
+                .build()
+                .into()),
+            TlcErrData::NodeFailed { node_id } => Ok(molecule_fiber::NodeFailed::new_builder()
+                .node_id(node_id.into())
+                .build()
+                .into()),
+        }
+    }
+}
+
+impl TryFrom<molecule_fiber::TlcErrData> for TlcErrData {
+    type Error = Error;
+
+    fn try_from(tlc_err_data: molecule_fiber::TlcErrData) -> Result<Self, Self::Error> {
+        match tlc_err_data.to_enum() {
+            molecule_fiber::TlcErrDataUnion::ChannelFailed(channel_failed) => {
+                Ok(TlcErrData::ChannelFailed {
+                    channel_outpoint: channel_failed.channel_outpoint().into(),
+                    channel_update: channel_failed
+                        .channel_update()
+                        .to_opt()
+                        .map(|x| x.try_into().unwrap()),
+                    node_id: channel_failed.node_id().try_into()?,
+                })
+            }
+            molecule_fiber::TlcErrDataUnion::NodeFailed(node_failed) => {
+                Ok(TlcErrData::NodeFailed {
+                    node_id: node_failed.node_id().try_into()?,
+                })
+            }
+        }
+    }
+}
+
+impl From<TlcErr> for molecule_fiber::TlcErr {
+    fn from(tlc_err: TlcErr) -> Self {
+        molecule_fiber::TlcErr::new_builder()
+            .error_code(tlc_err.error_code_as_u16().into())
+            .extra_data(
+                TlcErrDataOpt::new_builder()
+                    .set(tlc_err.extra_data.map(|data| data.try_into().unwrap()))
+                    .build(),
+            )
+            .build()
+    }
+}
+
+impl From<molecule_fiber::TlcErr> for TlcErr {
+    fn from(tlc_err: molecule_fiber::TlcErr) -> Self {
+        TlcErr {
+            error_code: {
+                let code: u16 = tlc_err.error_code().into();
+                TlcErrorCode::try_from(code).expect("tlc_errror_code failed")
+            },
+            extra_data: tlc_err
+                .extra_data()
+                .to_opt()
+                .map(|data| data.try_into().unwrap()),
+        }
     }
 }
 
@@ -1314,7 +1407,19 @@ const NODE: u16 = 0x2000;
 const UPDATE: u16 = 0x1000;
 
 #[repr(u16)]
-#[derive(Debug, Copy, Clone, Serialize, Deserialize, PartialEq, Eq, AsRefStr, EnumString)]
+#[derive(
+    Debug,
+    Copy,
+    Clone,
+    Serialize,
+    Deserialize,
+    PartialEq,
+    Eq,
+    AsRefStr,
+    EnumString,
+    TryFromPrimitive,
+    IntoPrimitive,
+)]
 pub enum TlcErrorCode {
     TemporaryNodeFailure = NODE | 2,
     PermanentNodeFailure = PERM | NODE | 2,
@@ -1997,7 +2102,7 @@ impl ChannelUpdate {
             tlc_minimum_value: self.tlc_minimum_value,
             tlc_fee_proportional_millionths: self.tlc_fee_proportional_millionths,
         };
-        deterministically_hash(&molecule_gossip::ChannelUpdate::from(unsigned_update))
+        deterministically_hash(&molecule_fiber::ChannelUpdate::from(unsigned_update))
     }
 
     pub fn is_update_of_node_1(&self) -> bool {
@@ -2020,9 +2125,9 @@ impl ChannelUpdate {
     }
 }
 
-impl From<ChannelUpdate> for molecule_gossip::ChannelUpdate {
+impl From<ChannelUpdate> for molecule_fiber::ChannelUpdate {
     fn from(channel_update: ChannelUpdate) -> Self {
-        let builder = molecule_gossip::ChannelUpdate::new_builder()
+        let builder = molecule_fiber::ChannelUpdate::new_builder()
             .chain_hash(channel_update.chain_hash.into())
             .channel_outpoint(channel_update.channel_outpoint)
             .timestamp(channel_update.timestamp.pack())
@@ -2042,10 +2147,10 @@ impl From<ChannelUpdate> for molecule_gossip::ChannelUpdate {
     }
 }
 
-impl TryFrom<molecule_gossip::ChannelUpdate> for ChannelUpdate {
+impl TryFrom<molecule_fiber::ChannelUpdate> for ChannelUpdate {
     type Error = Error;
 
-    fn try_from(channel_update: molecule_gossip::ChannelUpdate) -> Result<Self, Self::Error> {
+    fn try_from(channel_update: molecule_fiber::ChannelUpdate) -> Result<Self, Self::Error> {
         Ok(ChannelUpdate {
             signature: Some(channel_update.signature().try_into()?),
             chain_hash: channel_update.chain_hash().into(),
@@ -2819,7 +2924,7 @@ impl TryFrom<molecule_gossip::Cursor> for Cursor {
     }
 }
 
-impl From<u16> for molecule_gossip::Uint16 {
+impl From<u16> for molecule_fiber::Uint16 {
     fn from(count: u16) -> Self {
         let le_bytes = count.to_le_bytes();
         Self::new_builder()
@@ -2835,8 +2940,8 @@ impl From<u16> for molecule_gossip::Uint16 {
     }
 }
 
-impl From<molecule_gossip::Uint16> for u16 {
-    fn from(count: molecule_gossip::Uint16) -> Self {
+impl From<molecule_fiber::Uint16> for u16 {
+    fn from(count: molecule_fiber::Uint16) -> Self {
         let le_bytes = count.as_slice().try_into().expect("Uint16 to u16");
         u16::from_le_bytes(le_bytes)
     }
@@ -3283,10 +3388,6 @@ macro_rules! impl_traits {
 
 impl_traits!(FiberMessage);
 
-pub(crate) fn deterministically_serialize<T: Serialize>(v: &T) -> Vec<u8> {
-    serde_json::to_vec_pretty(v).expect("serialize value")
-}
-
 pub(crate) fn deterministically_hash<T: Entity>(v: &T) -> [u8; 32] {
     ckb_hash::blake2b_256(v.as_slice()).into()
 }
@@ -3324,11 +3425,58 @@ impl HopData for PaymentHopData {
     }
 
     fn serialize(&self) -> Vec<u8> {
-        deterministically_serialize(self)
+        molecule_fiber::PaymentHopData::from(self.clone())
+            .as_bytes()
+            .to_vec()
     }
 
     fn deserialize(data: &[u8]) -> Option<Self> {
-        serde_json::from_slice(data).ok()
+        molecule_fiber::PaymentHopData::from_slice(data)
+            .ok()
+            .map(|x| x.into())
+    }
+}
+
+impl From<PaymentHopData> for molecule_fiber::PaymentHopData {
+    fn from(payment_hop_data: PaymentHopData) -> Self {
+        molecule_fiber::PaymentHopData::new_builder()
+            .amount(payment_hop_data.amount.pack())
+            .expiry(payment_hop_data.expiry.pack())
+            .payment_preimage(
+                PaymentPreimageOpt::new_builder()
+                    .set(payment_hop_data.payment_preimage.map(|x| x.into()))
+                    .build(),
+            )
+            .hash_algorithm(Byte::new(payment_hop_data.hash_algorithm as u8))
+            .funding_tx_hash(payment_hop_data.funding_tx_hash.into())
+            .next_hop(
+                PubkeyOpt::new_builder()
+                    .set(payment_hop_data.next_hop.map(|x| x.into()))
+                    .build(),
+            )
+            .build()
+    }
+}
+
+impl From<molecule_fiber::PaymentHopData> for PaymentHopData {
+    fn from(payment_hop_data: molecule_fiber::PaymentHopData) -> Self {
+        PaymentHopData {
+            amount: payment_hop_data.amount().unpack(),
+            expiry: payment_hop_data.expiry().unpack(),
+            payment_preimage: payment_hop_data
+                .payment_preimage()
+                .to_opt()
+                .map(|x| x.into()),
+            hash_algorithm: payment_hop_data
+                .hash_algorithm()
+                .try_into()
+                .expect("valid hash algorithm"),
+            funding_tx_hash: payment_hop_data.funding_tx_hash().into(),
+            next_hop: payment_hop_data
+                .next_hop()
+                .to_opt()
+                .map(|x| x.try_into().expect("invalid pubkey")),
+        }
     }
 }
 
