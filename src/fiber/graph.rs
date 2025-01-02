@@ -1082,7 +1082,8 @@ where
                 "no direct channel found for source node".to_string(),
             ));
         }
-        // if there is no hint, we will randomly select a channel from the source node for route to self
+        // a proper hop hint for route self will limit the direct_channels to only one
+        // if there are multiple channels, we will randomly select a channel from the source node for route to self
         // so that the following part of algorithm will always trying to find a path without cycle
         let rand_index = rand::thread_rng().gen_range(0..direct_channels.len());
         let (from, _, channel_info, channel_update) = direct_channels[rand_index];
