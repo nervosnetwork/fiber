@@ -997,23 +997,17 @@ impl<S: GossipMessageStore> ExtendedGossipMessageStoreState<S> {
         }
     }
 
-    // Saving all the messages whose transitive dependencies are already available.
-    // We will also change the relevant state (e.g. update the latest cursor).
-    // The returned list may be sent to the subscribers.
+    // Obtaining all the messages whose transitive dependencies are already available,
+    // check their validity and then save valid messages to a list that can be sent to the subscribers.
     async fn prune_messages_to_be_saved(&mut self) -> Vec<BroadcastMessageWithTimestamp> {
         // Note that we have to call has_dependencies_available before changing messages_to_be_saved,
         // as the function will check the dependencies of the message in the current messages_to_be_saved.
-        let complete_messages = self
+        let (complete_messages, uncomplete_messages) = self
             .messages_to_be_saved
-            .iter()
-            .filter(|m| self.has_dependencies_available(m))
-            .cloned()
-            .collect::<HashSet<_>>();
-        self.messages_to_be_saved = self
-            .messages_to_be_saved
-            .difference(&complete_messages)
-            .cloned()
-            .collect();
+            .clone()
+            .into_iter()
+            .partition(|m| self.has_dependencies_available(m));
+        self.messages_to_be_saved = uncomplete_messages;
 
         let mut sorted_messages = complete_messages.into_iter().collect::<Vec<_>>();
         sorted_messages.sort_unstable();
