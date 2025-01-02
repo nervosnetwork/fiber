@@ -1448,7 +1448,6 @@ pub enum TlcErrorCode {
     InvalidOnionPayload = PERM | 22,
     InvalidOnionError = BADONION | PERM | 25,
     WaitingTlcAck = 26,
-    RepeatedTlcOperation = 27,
 }
 
 impl TlcErrorCode {

@@ -67,6 +67,7 @@ use thiserror::Error;
 use tokio::sync::oneshot;
 
 use std::{
+    collections::HashMap,
     fmt::{self, Debug},
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
@@ -636,7 +637,7 @@ where
                 // otherwise, channel maybe not ready
                 _ => TlcErrorCode::TemporaryChannelFailure,
             },
-            ProcessingChannelError::RepeatedProcessing(_) => TlcErrorCode::RepeatedTlcOperation,
+            ProcessingChannelError::RepeatedProcessing(_) => TlcErrorCode::TemporaryChannelFailure,
             ProcessingChannelError::SpawnErr(_)
             | ProcessingChannelError::Musig2SigningError(_)
             | ProcessingChannelError::Musig2VerifyError(_)
@@ -767,6 +768,10 @@ where
             .get_committed_received_tlcs()
             .into_iter()
             .filter(|tlc| tlc.removed_reason.is_none())
+            .filter(|tlc| {
+                state.tlc_state.tlc_apply_status.get(&tlc.tlc_id)
+                    != Some(&TlcApplyStatus::AddTlcApplied)
+            })
             .collect();
 
         for add_tlc in apply_tlcs {
@@ -936,6 +941,10 @@ where
         let received_amount = add_tlc.amount;
         let forward_amount = peeled_onion_packet.current.amount;
 
+        state
+            .tlc_state
+            .tlc_apply_status
+            .insert(add_tlc.tlc_id, TlcApplyStatus::AddTlcApplied);
         if peeled_onion_packet.is_last() {
             if forward_amount != add_tlc.amount {
                 return Err(ProcessingChannelError::FinalIncorrectHTLCAmount);
@@ -1009,13 +1018,6 @@ where
                         return Err(ProcessingChannelError::TlcForwardFeeIsTooLow);
                     }
                     // if this is not the last hop, forward TLC to next hop
-                    // self.handle_forward_onion_packet(
-                    //     state,
-                    //     add_tlc.payment_hash,
-                    //     peeled_onion_packet.clone(),
-                    //     add_tlc.tlc_id.into(),
-                    // )
-                    // .await?;
                     self.register_retryable_forward_tlc(
                         myself,
                         state,
@@ -1279,7 +1281,7 @@ where
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
 
         self.handle_commitment_signed_command(state)?;
-        eprintln!("finished AddTlcCommand: {:?}", add_tlc);
+        debug!("finished AddTlcCommand: {:?}", add_tlc.payment_hash);
         Ok(tlc.tlc_id.into())
     }
 
@@ -1456,30 +1458,9 @@ where
         tlc_id: TLCId,
         reason: RemoveTlcReason,
     ) {
-        state.tlc_state.insert_pending_remove_tlc(tlc_id, reason);
-        myself
-            .send_message(ChannelActorMessage::Event(
-                ChannelEvent::CheckTlcRetryOperation,
-            ))
-            .expect("myself alive");
-    }
-
-    pub async fn register_retryable_forward_tlc(
-        &self,
-        myself: &ActorRef<ChannelActorMessage>,
-        state: &mut ChannelActorState,
-        tlc_id: TLCId,
-        payment_hash: Hash256,
-        peeled_onion_packet: PeeledPaymentOnionPacket,
-    ) {
-        state
-            .tlc_state
-            .insert_forward_tlc(tlc_id, payment_hash, peeled_onion_packet);
-        myself
-            .send_message(ChannelActorMessage::Event(
-                ChannelEvent::CheckTlcRetryOperation,
-            ))
-            .expect("myself alive");
+        let remove_tlc = RetryableTlcOperation::RemoveTlc(tlc_id, reason);
+        self.register_retryable_tlc_operation(myself, state, remove_tlc)
+            .await;
     }
 
     pub async fn register_retryable_relay_tlc_remove(
@@ -1490,22 +1471,48 @@ where
         channel_id: Hash256,
         reason: RemoveTlcReason,
     ) {
-        state
-            .tlc_state
-            .insert_relay_tlc_remove(channel_id, tlc_id, reason);
-        myself
-            .send_message(ChannelActorMessage::Event(
-                ChannelEvent::CheckTlcRetryOperation,
-            ))
-            .expect("myself alive");
+        let remove_tlc = RetryableTlcOperation::RelayRemoveTlc(channel_id, tlc_id, reason);
+        self.register_retryable_tlc_operation(myself, state, remove_tlc)
+            .await;
     }
 
-    pub async fn check_and_apply_retryable_remove_tlcs(
+    pub async fn register_retryable_forward_tlc(
+        &self,
+        myself: &ActorRef<ChannelActorMessage>,
+        state: &mut ChannelActorState,
+        tlc_id: TLCId,
+        payment_hash: Hash256,
+        peeled_onion_packet: PeeledPaymentOnionPacket,
+    ) {
+        debug!("hello add forward tlc: {:?}", &payment_hash);
+        let forward_tlc =
+            RetryableTlcOperation::ForwardTlc(payment_hash, tlc_id, peeled_onion_packet);
+        self.register_retryable_tlc_operation(myself, state, forward_tlc)
+            .await;
+    }
+
+    async fn register_retryable_tlc_operation(
+        &self,
+        myself: &ActorRef<ChannelActorMessage>,
+        state: &mut ChannelActorState,
+        operation: RetryableTlcOperation,
+    ) {
+        if state.tlc_state.insert_retryable_tlc_operation(operation) {
+            myself
+                .send_message(ChannelActorMessage::Event(
+                    ChannelEvent::CheckTlcRetryOperation,
+                ))
+                .expect("myself alive");
+        }
+    }
+
+    pub async fn check_and_apply_retryable_tlc_operations(
         &self,
         myself: &ActorRef<ChannelActorMessage>,
         state: &mut ChannelActorState,
     ) {
-        let pending_tlc_ops = state.tlc_state.get_pending_remove();
+        debug!("begin to check_and_apply_retryable_tlc_operations ++++++++++++++");
+        let pending_tlc_ops = state.tlc_state.get_pending_operations();
         for retryable_operation in pending_tlc_ops.into_iter() {
             match retryable_operation {
                 RetryableTlcOperation::RemoveTlc(tlc_id, ref reason) => {
@@ -1570,9 +1577,9 @@ where
                             }
                             Err(err) => {
                                 error!(
-                                "Failed to relay remove tlc: {:?} with reason: {:?}, will not retry",
-                                &retryable_operation, err
-                            );
+                                    "Failed to relay remove tlc: {:?} with reason: {:?}, will not retry",
+                                    &retryable_operation, err
+                                );
                                 state
                                     .tlc_state
                                     .remove_pending_tlc_operation(&retryable_operation);
@@ -1585,6 +1592,7 @@ where
                     tlc_id,
                     ref peeled_onion_packet,
                 ) => {
+                    debug!("begin to forward tlc: {:?}", &payment_hash);
                     let res = self
                         .handle_forward_onion_packet(
                             state,
@@ -1593,7 +1601,7 @@ where
                             tlc_id.into(),
                         )
                         .await;
-                    eprintln!("res: {:?}", res);
+                    debug!("forwarded payment: {:?} with res: {:?}", payment_hash, res);
                     match res {
                         Ok(_) => {
                             state
@@ -1601,10 +1609,9 @@ where
                                 .remove_pending_tlc_operation(&retryable_operation);
                             info!(
                                 "debug haha remove_pending_tlc_operation: {:?}",
-                                retryable_operation
+                                payment_hash
                             );
                         }
-
                         Err(err) => match err {
                             ProcessingChannelError::WaitingTlcAck
                             | ProcessingChannelError::TlcForwardingError(TlcErr {
@@ -1615,18 +1622,6 @@ where
                                         "Failed to forward tlc: {:?} because of WaitingTlcAck, retry it later",
                                         &payment_hash
                                     );
-                            }
-                            ProcessingChannelError::TlcForwardingError(TlcErr {
-                                error_code: TlcErrorCode::RepeatedTlcOperation,
-                                ..
-                            }) => {
-                                state
-                                    .tlc_state
-                                    .remove_pending_tlc_operation(&retryable_operation);
-                                info!(
-                                    "debug haha repeated add_tlc: {:?}, will not retry",
-                                    retryable_operation
-                                );
                             }
                             _ => {
                                 let shared_secret = peeled_onion_packet.shared_secret.clone();
@@ -1644,11 +1639,12 @@ where
             }
         }
         // If there are more pending removes, we will retry it later
-        if !state.tlc_state.get_pending_remove().is_empty() {
+        if !state.tlc_state.get_pending_operations().is_empty() {
             myself.send_after(AUTO_SETDOWN_TLC_INTERVAL, || {
                 ChannelActorMessage::Event(ChannelEvent::CheckTlcRetryOperation)
             });
         }
+        debug!("end to check_and_apply_retryable_tlc_operations ------------");
     }
 
     // This is the dual of `handle_tx_collaboration_msg`. Any logic error here is likely
@@ -1879,7 +1875,7 @@ where
                 debug!("Channel closed with uncooperative close");
             }
             ChannelEvent::CheckTlcRetryOperation => {
-                self.check_and_apply_retryable_remove_tlcs(myself, state)
+                self.check_and_apply_retryable_tlc_operations(myself, state)
                     .await;
             }
             ChannelEvent::PeerDisconnected => {
@@ -2561,6 +2557,13 @@ impl PendingTlcs {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+pub enum TlcApplyStatus {
+    AddTlcApplied,
+    TlcForwarded,
+    RemoveTlcApplied,
+}
+
 #[derive(Default, Clone, Debug, Serialize, Deserialize)]
 pub struct TlcState {
     pub offered_tlcs: PendingTlcs,
@@ -2568,6 +2571,7 @@ pub struct TlcState {
     // if the tlc is pending to be removed, the reason will be stored here
     // this will only used for retrying remove TLC
     pub retryable_tlc_operations: Vec<RetryableTlcOperation>,
+    pub tlc_apply_status: HashMap<TLCId, TlcApplyStatus>,
     pub waiting_ack: bool,
 }
 
@@ -2633,9 +2637,12 @@ impl TlcState {
         self.waiting_ack = waiting_ack;
     }
 
-    pub fn insert_pending_remove_tlc(&mut self, tlc_id: TLCId, reason: RemoveTlcReason) {
-        self.retryable_tlc_operations
-            .push(RetryableTlcOperation::RemoveTlc(tlc_id, reason));
+    pub fn insert_retryable_tlc_operation(&mut self, operation: RetryableTlcOperation) -> bool {
+        if self.retryable_tlc_operations.contains(&operation) {
+            return false;
+        }
+        self.retryable_tlc_operations.push(operation);
+        true
     }
 
     pub fn all_tlcs(&self) -> impl Iterator<Item = &TlcInfo> + '_ {
@@ -2667,33 +2674,7 @@ impl TlcState {
         }
     }
 
-    pub fn insert_relay_tlc_remove(
-        &mut self,
-        channel_id: Hash256,
-        tlc_id: u64,
-        reason: RemoveTlcReason,
-    ) {
-        self.retryable_tlc_operations
-            .push(RetryableTlcOperation::RelayRemoveTlc(
-                channel_id, tlc_id, reason,
-            ));
-    }
-
-    pub fn insert_forward_tlc(
-        &mut self,
-        tlc_id: TLCId,
-        payment_hash: Hash256,
-        peeled_onion_packet: PeeledPaymentOnionPacket,
-    ) {
-        self.retryable_tlc_operations
-            .push(RetryableTlcOperation::ForwardTlc(
-                payment_hash,
-                tlc_id,
-                peeled_onion_packet,
-            ))
-    }
-
-    pub fn get_pending_remove(&self) -> Vec<RetryableTlcOperation> {
+    pub fn get_pending_operations(&self) -> Vec<RetryableTlcOperation> {
         self.retryable_tlc_operations.clone()
     }
 
@@ -4436,6 +4417,7 @@ impl ChannelActorState {
             let sent_tlc_value = self.get_offered_tlc_balance();
             debug_assert!(self.to_local_amount >= sent_tlc_value);
             if sent_tlc_value + tlc.amount > self.to_local_amount {
+                debug!("here is error");
                 return Err(ProcessingChannelError::TlcAmountExceedLimit);
             }
         } else {

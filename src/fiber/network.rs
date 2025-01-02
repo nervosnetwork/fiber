@@ -1401,6 +1401,7 @@ where
                 return reply.send(Err(tlc_error)).expect("send add tlc response");
             }
         }
+        debug!("got add tlc response ......");
         let add_tlc_res = recv.await.expect("recv error").map(|res| res.tlc_id);
         reply.send(add_tlc_res).expect("send error");
     }
@@ -1605,6 +1606,7 @@ where
 
         self.handle_send_onion_packet_command(state, command, rpc_reply)
             .await;
+        debug!("got send onion packet response ......");
         match recv.await.expect("msg recv error") {
             Err(error_detail) => {
                 self.update_graph_with_tlc_fail(&state.network, &error_detail)
@@ -1623,6 +1625,7 @@ where
                     // otherwise the endpoint user may get confused in the internal state changes
                     self.set_payment_fail_with_error(payment_session, &err);
                 }
+                debug!("send payment error: {:?}", error_detail);
                 return Err(Error::SendPaymentFirstHopError(err, need_to_retry));
             }
             Ok(tlc_id) => {
