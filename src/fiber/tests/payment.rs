@@ -837,6 +837,96 @@ async fn test_send_payment_select_channel_with_hop_hints() {
 }
 
 #[tokio::test]
+async fn test_send_payment_two_nodes_with_hop_hints_and_multiple_channels() {
+    init_tracing();
+    let _span = tracing::info_span!("node", node = "test").entered();
+
+    let (nodes, channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+        &[
+            ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+            ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+            ((1, 0), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+            ((1, 0), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+        ],
+        2,
+        true,
+    )
+    .await;
+    let [mut node_0, node_1] = nodes.try_into().expect("2 nodes");
+    eprintln!("node_0: {:?}", node_0.pubkey);
+    eprintln!("node_1: {:?}", node_1.pubkey);
+
+    let channel_1_funding_tx = node_0.get_channel_funding_tx(&channels[1]).unwrap();
+    let channel_3_funding_tx = node_0.get_channel_funding_tx(&channels[3]).unwrap();
+    let old_balance = node_0.get_local_balance_from_channel(channels[1]);
+    let old_node1_balance = node_1.get_local_balance_from_channel(channels[3]);
+    eprintln!("channel_1_funding_tx: {:?}", channel_1_funding_tx);
+    let res = node_0
+        .send_payment(SendPaymentCommand {
+            target_pubkey: Some(node_0.pubkey.clone()),
+            amount: Some(60000000),
+            payment_hash: None,
+            final_tlc_expiry_delta: None,
+            tlc_expiry_limit: None,
+            invoice: None,
+            timeout: None,
+            max_fee_amount: None,
+            max_parts: None,
+            keysend: Some(true),
+            udt_type_script: None,
+            allow_self_payment: true,
+            hop_hints: Some(vec![
+                // node1 - channel_1 -> node2
+                HopHint {
+                    pubkey: node_0.pubkey.clone(),
+                    channel_funding_tx: channel_1_funding_tx,
+                    inbound: false,
+                },
+                // node2 - channel_3 -> node1
+                HopHint {
+                    pubkey: node_0.pubkey.clone(),
+                    channel_funding_tx: channel_3_funding_tx,
+                    inbound: true,
+                },
+            ]),
+            dry_run: false,
+        })
+        .await
+        .unwrap();
+
+    let payment_hash = res.payment_hash;
+    eprintln!("payment_hash: {:?}", payment_hash);
+    let payment_session = node_0
+        .get_payment_session(payment_hash)
+        .expect("get payment");
+    eprintln!("payment_session: {:?}", payment_session);
+    let used_channels: Vec<Hash256> = payment_session
+        .route
+        .nodes
+        .iter()
+        .map(|x| x.channel_outpoint.tx_hash().into())
+        .collect();
+    eprintln!("used_channels: {:?}", used_channels);
+    assert_eq!(used_channels.len(), 3);
+    assert_eq!(used_channels[0], channel_1_funding_tx);
+    assert_eq!(used_channels[1], channel_3_funding_tx);
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
+
+    let balance = node_0.get_local_balance_from_channel(channels[1]);
+    assert_eq!(balance, old_balance - 60000000 - res.fee);
+
+    let node_1_balance = node_1.get_local_balance_from_channel(channels[1]);
+    assert_eq!(node_1_balance, 60000000 + res.fee);
+
+    let balance = node_0.get_local_balance_from_channel(channels[3]);
+    assert_eq!(balance, 60000000);
+
+    let node_1_balance = node_1.get_local_balance_from_channel(channels[3]);
+    assert_eq!(node_1_balance, old_node1_balance - 60000000);
+}
+
+#[tokio::test]
 async fn test_network_send_payment_randomly_send_each_other() {
     init_tracing();
 

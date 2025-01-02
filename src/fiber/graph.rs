@@ -825,15 +825,12 @@ where
             ));
         }
 
-        let hop_hint_map: HashMap<Pubkey, (OutPoint, bool)> = hop_hints
+        let hop_hint_map: HashMap<(Pubkey, bool), OutPoint> = hop_hints
             .into_iter()
             .map(|hint| {
                 (
-                    hint.pubkey,
-                    (
-                        OutPoint::new(hint.channel_funding_tx.into(), 0),
-                        hint.inbound,
-                    ),
+                    (hint.pubkey, hint.inbound),
+                    OutPoint::new(hint.channel_funding_tx.into(), 0),
                 )
             })
             .collect::<HashMap<_, _>>();
@@ -874,13 +871,13 @@ where
                     continue;
                 }
 
-                if let Some((channel, inbound)) = hop_hint_map.get(&from) {
-                    if channel != channel_info.out_point() && !*inbound {
+                if let Some(channel) = hop_hint_map.get(&(from, false)) {
+                    if channel != channel_info.out_point() {
                         continue;
                     }
                 }
-                if let Some((channel, inbound)) = hop_hint_map.get(&to) {
-                    if channel != channel_info.out_point() && *inbound {
+                if let Some(channel) = hop_hint_map.get(&(to, true)) {
+                    if channel != channel_info.out_point() {
                         continue;
                     }
                 }
@@ -1047,29 +1044,27 @@ where
 
     fn adjust_target_for_route_self(
         &self,
-        hop_hint_map: &HashMap<Pubkey, (OutPoint, bool)>,
+        hop_hint_map: &HashMap<(Pubkey, bool), OutPoint>,
         amount: u128,
         source: Pubkey,
         target: Pubkey,
     ) -> Result<(Pubkey, u64, Option<(Pubkey, OutPoint)>), PathFindError> {
-        let hop_hint = hop_hint_map.get(&source);
         let direct_channels: Vec<(Pubkey, Pubkey, &ChannelInfo, &ChannelUpdateInfo)> = self
             .get_node_inbounds(source)
             .filter(|(_, _, channel_info, _)| {
-                if let Some((channel, inbound)) = hop_hint {
-                    if *inbound {
-                        // if there is a hop hint for node -> source,
-                        // try to use this channel as the last candidate hop for route self
-                        // and we event don't check the direct balance of channel,
-                        // hop hint's priority is higher than direct balance
-                        return channel == channel_info.out_point();
-                    } else {
-                        // if there is a hop hint for source -> node,
-                        // then we can not set this node as the last candidate hop for route self
-                        // so skip this channel
-                        if channel == channel_info.out_point() {
-                            return false;
-                        }
+                if let Some(channel) = hop_hint_map.get(&(source, true)) {
+                    // if there is a hop hint for node -> source,
+                    // try to use this channel as the last candidate hop for route self
+                    // and we event don't check the direct balance of channel,
+                    // hop hint's priority is higher than direct balance
+                    return channel == channel_info.out_point();
+                }
+                if let Some(channel) = hop_hint_map.get(&(source, false)) {
+                    // if there is a hop hint for source -> node,
+                    // then we can not set this node as the last candidate hop for route self
+                    // so skip this channel
+                    if channel == channel_info.out_point() {
+                        return false;
                     }
                 }
                 if let Some(state) = self
@@ -1079,6 +1074,8 @@ where
                     let balance = state.to_remote_amount;
                     return balance >= amount;
                 }
+                // normal code path will not reach here, we must can get balance for direct channels
+                // anyway, check the capacity here for safety
                 return channel_info.capacity() >= amount;
             })
             .collect();
