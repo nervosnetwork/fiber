@@ -1442,6 +1442,10 @@ where
         payment_hash: Hash256,
         reason: RemoveTlcReason,
     ) {
+        error!(
+            "Received RemoveTLC event: {:?}, reason: {:?}",
+            payment_hash, reason
+        );
         if let Some(mut payment_session) = self.store.get_payment_session(payment_hash) {
             if payment_session.status == PaymentSessionStatus::Inflight {
                 match reason {
