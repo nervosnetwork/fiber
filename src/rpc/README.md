@@ -433,7 +433,7 @@ Get the node information.
 
 * `version` - String, The version of the node software.
 * `commit_hash` - String, The commit hash of the node software.
-* `public_key` - Pubkey, The public key of the node.
+* `node_id` - Pubkey, The identity public key of the node.
 * `node_name` - `Option<String>`, The optional name of the node.
 * `peer_id` - PeerId, The peer ID of the node, serialized as a string.
 * `addresses` - `Vec<MultiAddr>`, A list of multi-addresses associated with the node.

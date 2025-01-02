@@ -165,7 +165,7 @@ pub enum LocalInfoKind {
 pub struct NodeInfoResponse {
     pub node_name: Option<AnnouncedNodeName>,
     pub peer_id: PeerId,
-    pub public_key: Pubkey,
+    pub node_id: Pubkey,
     pub addresses: Vec<MultiAddr>,
     pub chain_hash: Hash256,
     pub open_channel_auto_accept_min_ckb_funding_amount: u64,
@@ -1319,7 +1319,7 @@ where
                 let response = NodeInfoResponse {
                     node_name: state.node_name.clone(),
                     peer_id: state.peer_id.clone(),
-                    public_key: state.get_public_key().clone(),
+                    node_id: state.get_public_key().clone(),
                     addresses: state.announced_addrs.clone(),
                     chain_hash: get_chain_hash(),
                     open_channel_auto_accept_min_ckb_funding_amount: state

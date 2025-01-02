@@ -26,8 +26,8 @@ pub(crate) struct NodeInfoResult {
     /// The commit hash of the node software.
     commit_hash: String,
 
-    /// The public key of the node.
-    public_key: Pubkey,
+    /// The identity public key of the node.
+    node_id: Pubkey,
 
     /// The optional name of the node.
     node_name: Option<String>,
@@ -116,7 +116,7 @@ where
         handle_actor_call!(self.actor, message, ()).map(|response| NodeInfoResult {
             version,
             commit_hash,
-            public_key: response.public_key,
+            node_id: response.node_id,
             node_name: response.node_name.map(|name| name.to_string()),
             peer_id: response.peer_id,
             addresses: response.addresses,

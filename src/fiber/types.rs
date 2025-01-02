@@ -1893,7 +1893,7 @@ impl TryFrom<molecule_gossip::NodeAnnouncement> for NodeAnnouncement {
             auto_accept_min_ckb_funding_amount: node_announcement
                 .auto_accept_min_ckb_funding_amount()
                 .unpack(),
-                node_name: AnnouncedNodeName::from_slice(node_announcement.node_name().as_slice())
+            node_name: AnnouncedNodeName::from_slice(node_announcement.node_name().as_slice())
                 .map_err(|e| Error::AnyHow(anyhow!("Invalid node_name: {}", e)))?,
             udt_cfg_infos: node_announcement.udt_cfg_infos().into(),
             addresses: node_announcement
