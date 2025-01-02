@@ -8,4 +8,5 @@ mod path;
 mod payment;
 mod serde_utils;
 pub mod test_utils;
+mod tlc_op;
 mod types;

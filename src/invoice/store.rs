@@ -15,4 +15,9 @@ pub trait InvoiceStore {
         status: CkbInvoiceStatus,
     ) -> Result<(), InvoiceError>;
     fn get_invoice_status(&self, id: &Hash256) -> Option<CkbInvoiceStatus>;
+    fn insert_payment_preimage(
+        &self,
+        payment_hash: Hash256,
+        preimage: Hash256,
+    ) -> Result<(), InvoiceError>;
 }
