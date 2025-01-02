@@ -13,6 +13,7 @@ use ckb_types::{
     H256,
 };
 use lru::LruCache;
+use once_cell::sync::OnceCell;
 use ractor::{
     async_trait as rasync_trait, call, call_t,
     concurrency::{timeout, JoinHandle},
@@ -218,161 +219,6 @@ pub trait GossipMessageStore {
     fn save_node_announcement(&self, node_announcement: NodeAnnouncement);
 }
 
-#[derive(Clone)]
-pub struct ChainWithCache {
-    chain_actor: ActorRef<CkbChainMessage>,
-    channel_timestamp_cache: Arc<Mutex<LruCache<Byte32, u64>>>,
-    channel_transaction_cache: Arc<Mutex<LruCache<Byte32, (TransactionView, H256)>>>,
-}
-
-impl ChainWithCache {
-    fn new(chain_actor: ActorRef<CkbChainMessage>) -> Self {
-        Self {
-            chain_actor,
-            // The cache size of 200 is enough to process two batches of 100 broadcast messages.
-            // So it could be quite enough for the channel announcement messages. Yet it is not
-            // very memory intensive.
-            channel_timestamp_cache: Arc::new(Mutex::new(LruCache::new(
-                NonZero::new(200).unwrap(),
-            ))),
-            // Normally, we will first obtain the transaction timestamp
-            // (the timestamp of the block that contains the transaction) to sort messages by timestamp.
-            // And then we will verify the transaction is a valid funding transaction for the channel.
-            // There shouldn't be too many channel announcement transactions in the cache.
-            channel_transaction_cache: Arc::new(Mutex::new(LruCache::new(
-                NonZero::new(100).unwrap(),
-            ))),
-        }
-    }
-
-    async fn get_channel_tx(&self, outpoint: &OutPoint) -> Result<(TransactionView, H256), Error> {
-        let mut channel_transactions = self.channel_transaction_cache.lock().await;
-        match channel_transactions.get(&outpoint.tx_hash()) {
-            Some(tx) => {
-                return Ok(tx.clone());
-            }
-            None => {
-                // TODO: we should also cache invalid transactions to avoid querying the chain actor,
-                // but there is a possibility that the transaction is valid while calling the chain actor fails.
-                match call_t!(
-                    &self.chain_actor,
-                    CkbChainMessage::TraceTx,
-                    DEFAULT_CHAIN_ACTOR_TIMEOUT,
-                    TraceTxRequest {
-                        tx_hash: outpoint.tx_hash(),
-                        confirmations: 1,
-                    }
-                ) {
-                    Ok(TraceTxResponse {
-                        tx: Some(tx),
-                        status:
-                            TxStatus {
-                                status: Status::Committed,
-                                block_hash: Some(block_hash),
-                                ..
-                            },
-                    }) => {
-                        channel_transactions.put(outpoint.tx_hash(), (tx.clone(), block_hash.clone()));
-                        Ok((tx, block_hash))
-                    },
-                    err => Err(Error::InvalidParameter(format!(
-                        "Channel announcement transaction {:?} not found or not confirmed, result is: {:?}",
-                        &outpoint.tx_hash(),
-                        err
-                    ))),
-                }
-            }
-        }
-    }
-
-    async fn get_channel_timestamp<S: GossipMessageStore>(
-        &self,
-        outpoint: &OutPoint,
-        store: &S,
-    ) -> Result<u64, Error> {
-        let mut channel_timestamps = self.channel_timestamp_cache.lock().await;
-        let timestamp = match channel_timestamps.get(&outpoint.tx_hash()) {
-            Some(timestamp) => {
-                return Ok(*timestamp);
-            }
-            None => {
-                if let Some((timestamp, _)) = store.get_latest_channel_announcement(&outpoint) {
-                    timestamp
-                } else {
-                    debug!(
-                        "Getting channel announcement message timestamp by calling chain actor: {:?}",
-                        &outpoint
-                    );
-                    let (_, block_hash) = self.get_channel_tx(outpoint).await?;
-                    match call_t!(
-                        &self.chain_actor,
-                        CkbChainMessage::GetBlockTimestamp,
-                        DEFAULT_CHAIN_ACTOR_TIMEOUT,
-                        GetBlockTimestampRequest::from_block_hash(block_hash.clone())
-                    ) {
-                        Ok(Ok(Some(timestamp))) => timestamp,
-                        Ok(Ok(None)) => {
-                            return Err(Error::InternalError(anyhow::anyhow!(
-                                "Unable to find block {:?} for channel outpoint {:?}",
-                                &block_hash,
-                                &outpoint
-                            )));
-                        }
-                        Ok(Err(err)) => {
-                            return Err(Error::CkbRpcError(err));
-                        }
-                        Err(err) => {
-                            return Err(Error::InternalError(anyhow::Error::new(err).context(
-                                format!(
-                                    "Error while trying to obtain block {:?} for channel outpoint {:?}",
-                                    block_hash, &outpoint
-                                ),
-                            )));
-                        }
-                    }
-                }
-            }
-        };
-        channel_timestamps.put(outpoint.tx_hash(), timestamp);
-        Ok(timestamp)
-    }
-
-    async fn get_message_cursor<S: GossipMessageStore>(
-        &self,
-        message: BroadcastMessage,
-        store: &S,
-    ) -> Result<Cursor, Error> {
-        let m = self
-            .get_broadcast_message_with_timestamp(message, store)
-            .await?;
-        Ok(m.cursor())
-    }
-
-    async fn get_broadcast_message_with_timestamp<S: GossipMessageStore>(
-        &self,
-        message: BroadcastMessage,
-        store: &S,
-    ) -> Result<BroadcastMessageWithTimestamp, Error> {
-        match message {
-            BroadcastMessage::ChannelAnnouncement(channel_announcement) => {
-                let timestamp = self
-                    .get_channel_timestamp(&channel_announcement.channel_outpoint, store)
-                    .await?;
-                Ok(BroadcastMessageWithTimestamp::ChannelAnnouncement(
-                    timestamp,
-                    channel_announcement,
-                ))
-            }
-            BroadcastMessage::ChannelUpdate(channel_update) => {
-                Ok(BroadcastMessageWithTimestamp::ChannelUpdate(channel_update))
-            }
-            BroadcastMessage::NodeAnnouncement(node_announcement) => Ok(
-                BroadcastMessageWithTimestamp::NodeAnnouncement(node_announcement),
-            ),
-        }
-    }
-}
-
 // A batch of gossip messages has been added to the store since the last time
 // we pulled new messages/messages are pushed to us.
 #[derive(Clone, Debug)]
@@ -516,7 +362,7 @@ struct SyncingPeerState {
 pub struct GossipSyncingActorState<S> {
     peer_id: PeerId,
     gossip_actor: ActorRef<GossipActorMessage>,
-    chain: ChainWithCache,
+    chain_actor: ActorRef<CkbChainMessage>,
     store: ExtendedGossipMessageStore<S>,
     // The problem of using the cursor from the store is that a malicious peer may only
     // send large cursor to us, which may cause us to miss some messages.
@@ -534,14 +380,14 @@ impl<S> GossipSyncingActorState<S> {
     fn new(
         peer_id: PeerId,
         gossip_actor: ActorRef<GossipActorMessage>,
-        chain: ChainWithCache,
+        chain_actor: ActorRef<CkbChainMessage>,
         store: ExtendedGossipMessageStore<S>,
         cursor: Cursor,
     ) -> Self {
         Self {
             peer_id,
             gossip_actor,
-            chain,
+            chain_actor,
             store,
             cursor,
             peer_state: Default::default(),
@@ -593,7 +439,7 @@ where
     type Arguments = (
         PeerId,
         ActorRef<GossipActorMessage>,
-        ChainWithCache,
+        ActorRef<CkbChainMessage>,
         ExtendedGossipMessageStore<S>,
         Cursor,
     );
@@ -601,7 +447,7 @@ where
     async fn pre_start(
         &self,
         myself: ActorRef<Self::Msg>,
-        (peer_id, gossip_actor, chain, store, cursor): Self::Arguments,
+        (peer_id, gossip_actor, chain_actor, store, cursor): Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
         myself
             .send_message(GossipSyncingActorMessage::NewGetRequest())
@@ -609,7 +455,7 @@ where
         Ok(GossipSyncingActorState::new(
             peer_id,
             gossip_actor,
-            chain,
+            chain_actor,
             store,
             cursor,
         ))
@@ -644,10 +490,12 @@ where
                     match messages.last() {
                         Some(last_message) => {
                             // We need the message timestamp to construct a valid cursor.
-                            match state
-                                .chain
-                                .get_message_cursor(last_message.clone(), &state.store.store)
-                                .await
+                            match get_message_cursor(
+                                last_message.clone(),
+                                &state.store.store,
+                                &state.chain_actor,
+                            )
+                            .await
                             {
                                 Ok(cursor) => {
                                     state.cursor = cursor;
@@ -1009,7 +857,7 @@ where
         announce_private_addr: bool,
         store: S,
         gossip_actor: ActorRef<GossipActorMessage>,
-        chain: ChainWithCache,
+        chain_actor: ActorRef<CkbChainMessage>,
         supervisor: ActorCell,
     ) -> Self {
         let (actor, _) = Actor::spawn_linked(
@@ -1023,7 +871,7 @@ where
                 announce_private_addr,
                 store.clone(),
                 gossip_actor,
-                chain,
+                chain_actor,
             ),
             supervisor,
         )
@@ -1131,7 +979,7 @@ pub struct ExtendedGossipMessageStoreState<S> {
     announce_private_addr: bool,
     store: S,
     gossip_actor: ActorRef<GossipActorMessage>,
-    chain: ChainWithCache,
+    chain_actor: ActorRef<CkbChainMessage>,
     next_id: u64,
     output_ports: HashMap<u64, BroadcastMessageOutput>,
     messages_to_be_saved: HashSet<BroadcastMessageWithTimestamp>,
@@ -1142,13 +990,13 @@ impl<S: GossipMessageStore> ExtendedGossipMessageStoreState<S> {
         announce_private_addr: bool,
         store: S,
         gossip_actor: ActorRef<GossipActorMessage>,
-        chain: ChainWithCache,
+        chain_actor: ActorRef<CkbChainMessage>,
     ) -> Self {
         Self {
             announce_private_addr,
             store,
             gossip_actor,
-            chain,
+            chain_actor,
             next_id: Default::default(),
             output_ports: Default::default(),
             messages_to_be_saved: Default::default(),
@@ -1182,7 +1030,8 @@ impl<S: GossipMessageStore> ExtendedGossipMessageStoreState<S> {
 
         let mut verified_sorted_messages = Vec::with_capacity(sorted_messages.len());
         for message in sorted_messages {
-            match verify_and_save_broadcast_message(&message, &self.store, &self.chain).await {
+            match verify_and_save_broadcast_message(&message, &self.store, &self.chain_actor).await
+            {
                 Ok(_) => {
                     verified_sorted_messages.push(message);
                 }
@@ -1233,11 +1082,12 @@ impl<S: GossipMessageStore> ExtendedGossipMessageStoreState<S> {
             }
         }
 
-        let message = self
-            .chain
-            .get_broadcast_message_with_timestamp(message.clone(), &self.store)
-            .await
-            .map_err(|error| GossipMessageProcessingError::ProcessingError(error.to_string()))?;
+        let message =
+            get_broadcast_message_with_timestamp(message.clone(), &self.store, &self.chain_actor)
+                .await
+                .map_err(|error| {
+                    GossipMessageProcessingError::ProcessingError(error.to_string())
+                })?;
 
         let max_acceptable_gossip_message_timestamp = max_acceptable_gossip_message_timestamp();
         if message.timestamp() > max_acceptable_gossip_message_timestamp {
@@ -1305,7 +1155,7 @@ impl<S: GossipMessageStore + Send + Sync + 'static> Actor for ExtendedGossipMess
         bool,
         S,
         ActorRef<GossipActorMessage>,
-        ChainWithCache,
+        ActorRef<CkbChainMessage>,
     );
 
     async fn pre_start(
@@ -1316,7 +1166,7 @@ impl<S: GossipMessageStore + Send + Sync + 'static> Actor for ExtendedGossipMess
             announce_private_addr,
             store,
             gossip_actor,
-            chain,
+            chain_actor,
         ): Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
         myself.send_interval(gossip_store_maintenance_interval, || {
@@ -1326,7 +1176,7 @@ impl<S: GossipMessageStore + Send + Sync + 'static> Actor for ExtendedGossipMess
             announce_private_addr,
             store,
             gossip_actor,
-            chain,
+            chain_actor,
         ))
     }
 
@@ -1536,7 +1386,7 @@ pub(crate) struct GossipActorState<S> {
     num_targeted_outbound_passive_syncing_peers: usize,
     next_request_id: u64,
     myself: ActorRef<GossipActorMessage>,
-    chain: ChainWithCache,
+    chain_actor: ActorRef<CkbChainMessage>,
     // There are some messages missing from our store, and we need to query them from peers.
     // These messages include channel updates and node announcements related to channel announcements,
     // and channel announcements related to channel updates.
@@ -1664,7 +1514,7 @@ where
             (
                 peer_id.clone(),
                 self.myself.clone(),
-                self.chain.clone(),
+                self.chain_actor.clone(),
                 self.store.clone(),
                 safe_cursor,
             ),
@@ -1864,6 +1714,15 @@ fn get_dependent_message_queries<S: GossipMessageStore>(
     queries
 }
 
+async fn get_message_cursor<S: GossipMessageStore>(
+    message: BroadcastMessage,
+    store: &S,
+    chain: &ActorRef<CkbChainMessage>,
+) -> Result<Cursor, Error> {
+    let m = get_broadcast_message_with_timestamp(message, store, chain).await?;
+    Ok(m.cursor())
+}
+
 fn get_existing_broadcast_message<S: GossipMessageStore>(
     message: &BroadcastMessage,
     store: &S,
@@ -1902,6 +1761,29 @@ fn get_existing_newer_broadcast_message<S: GossipMessageStore>(
     })
 }
 
+async fn get_broadcast_message_with_timestamp<S: GossipMessageStore>(
+    message: BroadcastMessage,
+    store: &S,
+    chain: &ActorRef<CkbChainMessage>,
+) -> Result<BroadcastMessageWithTimestamp, Error> {
+    match message {
+        BroadcastMessage::ChannelAnnouncement(channel_announcement) => {
+            let timestamp =
+                get_channel_timestamp(&channel_announcement.channel_outpoint, store, chain).await?;
+            Ok(BroadcastMessageWithTimestamp::ChannelAnnouncement(
+                timestamp,
+                channel_announcement,
+            ))
+        }
+        BroadcastMessage::ChannelUpdate(channel_update) => {
+            Ok(BroadcastMessageWithTimestamp::ChannelUpdate(channel_update))
+        }
+        BroadcastMessage::NodeAnnouncement(node_announcement) => Ok(
+            BroadcastMessageWithTimestamp::NodeAnnouncement(node_announcement),
+        ),
+    }
+}
+
 // Channel updates depends on channel announcements to obtain the node public keys.
 // If a channel update is saved before the channel announcement, we can't reliably determine if
 // this channel update is valid. So we need to save the channel update to lagged_messages and
@@ -1913,7 +1795,7 @@ fn get_existing_newer_broadcast_message<S: GossipMessageStore>(
 async fn verify_and_save_broadcast_message<S: GossipMessageStore>(
     message: &BroadcastMessageWithTimestamp,
     store: &S,
-    chain: &ChainWithCache,
+    chain: &ActorRef<CkbChainMessage>,
 ) -> Result<(), Error> {
     match message {
         BroadcastMessageWithTimestamp::ChannelAnnouncement(timestamp, channel_announcement) => {
@@ -1935,6 +1817,119 @@ async fn verify_and_save_broadcast_message<S: GossipMessageStore>(
     Ok(())
 }
 
+async fn get_channel_tx(
+    outpoint: &OutPoint,
+    chain: &ActorRef<CkbChainMessage>,
+) -> Result<(TransactionView, H256), Error> {
+    static CHANNEL_TRANSACTIONS: OnceCell<Mutex<LruCache<Byte32, (TransactionView, H256)>>> =
+        OnceCell::new();
+    static CHANNEL_TRANSACTION_CACHE_SIZE: usize = 20;
+    CHANNEL_TRANSACTIONS.get_or_init(|| {
+        Mutex::new(LruCache::new(
+            NonZero::new(CHANNEL_TRANSACTION_CACHE_SIZE).unwrap(),
+        ))
+    });
+    let mut channel_transactions = CHANNEL_TRANSACTIONS.get().unwrap().lock().await;
+    match channel_transactions.get(&outpoint.tx_hash()) {
+        Some(tx) => {
+            return Ok(tx.clone());
+        }
+        None => {
+            // TODO: we should also cache invalid transactions to avoid querying the chain actor,
+            // but there is a possibility that the transaction is valid while calling the chain actor fails.
+            match call_t!(
+                chain,
+                CkbChainMessage::TraceTx,
+                DEFAULT_CHAIN_ACTOR_TIMEOUT,
+                TraceTxRequest {
+                    tx_hash: outpoint.tx_hash(),
+                    confirmations: 1,
+                }
+            ) {
+                Ok(TraceTxResponse {
+                    tx: Some(tx),
+                    status:
+                        TxStatus {
+                            status: Status::Committed,
+                            block_hash: Some(block_hash),
+                            ..
+                        },
+                }) => {
+                    channel_transactions.put(outpoint.tx_hash(), (tx.clone(), block_hash.clone()));
+                    Ok((tx, block_hash))
+                },
+                err => Err(Error::InvalidParameter(format!(
+                    "Channel announcement transaction {:?} not found or not confirmed, result is: {:?}",
+                    &outpoint.tx_hash(),
+                    err
+                ))),
+            }
+        }
+    }
+}
+
+async fn get_channel_timestamp<S: GossipMessageStore>(
+    outpoint: &OutPoint,
+    store: &S,
+    chain: &ActorRef<CkbChainMessage>,
+) -> Result<u64, Error> {
+    static CHANNEL_TIMESTAMPS: OnceCell<Mutex<LruCache<Byte32, u64>>> = OnceCell::new();
+    // The cache size of 200 is enough to process two batches of 100 broadcast messages.
+    // So it could be quite enough for the channel announcement messages. Yet it is not
+    // very memory intensive.
+    static CHANNEL_TIMESTAMP_CACHE_SIZE: usize = 200;
+    CHANNEL_TIMESTAMPS.get_or_init(|| {
+        Mutex::new(LruCache::new(
+            NonZero::new(CHANNEL_TIMESTAMP_CACHE_SIZE).unwrap(),
+        ))
+    });
+    let mut channel_timestamps = CHANNEL_TIMESTAMPS.get().unwrap().lock().await;
+    let timestamp = match channel_timestamps.get(&outpoint.tx_hash()) {
+        Some(timestamp) => {
+            return Ok(*timestamp);
+        }
+        None => {
+            if let Some((timestamp, _)) = store.get_latest_channel_announcement(&outpoint) {
+                timestamp
+            } else {
+                debug!(
+                    "Getting channel announcement message timestamp by calling chain actor: {:?}",
+                    &outpoint
+                );
+                let (_, block_hash) = get_channel_tx(outpoint, chain).await?;
+                match call_t!(
+                    chain,
+                    CkbChainMessage::GetBlockTimestamp,
+                    DEFAULT_CHAIN_ACTOR_TIMEOUT,
+                    GetBlockTimestampRequest::from_block_hash(block_hash.clone())
+                ) {
+                    Ok(Ok(Some(timestamp))) => timestamp,
+                    Ok(Ok(None)) => {
+                        return Err(Error::InternalError(anyhow::anyhow!(
+                            "Unable to find block {:?} for channel outpoint {:?}",
+                            &block_hash,
+                            &outpoint
+                        )));
+                    }
+                    Ok(Err(err)) => {
+                        return Err(Error::CkbRpcError(err));
+                    }
+                    Err(err) => {
+                        return Err(Error::InternalError(anyhow::Error::new(err).context(
+                            format!(
+                                "Error while trying to obtain block {:?} for channel outpoint {:?}",
+                                block_hash, &outpoint
+                            ),
+                        )));
+                    }
+                }
+            }
+        }
+    };
+    channel_timestamps.put(outpoint.tx_hash(), timestamp);
+    Ok(timestamp)
+}
+
 // Verify the channel announcement message. If any error occurs, return the error.
 // Otherwise, return the timestamp of the channel announcement and a bool value indicating if the
 // the channel announcement is already saved to the store. If it is already saved, the bool value
@@ -1942,7 +1937,7 @@ async fn verify_and_save_broadcast_message<S: GossipMessageStore>(
 async fn verify_channel_announcement<S: GossipMessageStore>(
     channel_announcement: &ChannelAnnouncement,
     store: &S,
-    chain: &ChainWithCache,
+    chain: &ActorRef<CkbChainMessage>,
 ) -> Result<bool, Error> {
     if let Some((_, announcement)) =
         store.get_latest_channel_announcement(&channel_announcement.channel_outpoint)
@@ -2155,7 +2150,6 @@ impl GossipProtocolHandle {
     {
         let (network_control_sender, network_control_receiver) = oneshot::channel();
         let (store_sender, store_receiver) = oneshot::channel();
-        let chain = ChainWithCache::new(chain_actor);
 
         let (actor, _handle) = ActorRuntime::spawn_linked_instant(
             name,
@@ -2167,7 +2161,7 @@ impl GossipProtocolHandle {
                 gossip_store_maintenance_interval,
                 announce_private_addr,
                 store,
-                chain,
+                chain_actor,
             ),
             supervisor,
         )
@@ -2211,7 +2205,7 @@ where
         Duration,
         bool,
         S,
-        ChainWithCache,
+        ActorRef<CkbChainMessage>,
     );
 
     async fn pre_start(
@@ -2224,7 +2218,7 @@ where
             store_maintenance_interval,
             announce_private_addr,
             store,
-            chain,
+            chain_actor,
         ): Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
         let store = ExtendedGossipMessageStore::new(
@@ -2232,7 +2226,7 @@ where
             announce_private_addr,
             store,
             myself.clone(),
-            chain.clone(),
+            chain_actor.clone(),
             myself.get_cell(),
         )
         .await;
@@ -2254,7 +2248,7 @@ where
             num_targeted_active_syncing_peers: MAX_NUM_OF_ACTIVE_SYNCING_PEERS,
             num_targeted_outbound_passive_syncing_peers: MIN_NUM_OF_PASSIVE_SYNCING_PEERS,
             myself,
-            chain,
+            chain_actor,
             next_request_id: Default::default(),
             pending_queries: Default::default(),
             num_finished_active_syncing_peers: Default::default(),
