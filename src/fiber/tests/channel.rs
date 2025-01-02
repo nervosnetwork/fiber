@@ -4295,6 +4295,8 @@ async fn test_shutdown_channel_with_different_size_shutdown_script() {
     let node_a_funding_amount = 100000000000;
     let node_b_funding_amount = 6200000000;
 
+    // create a private channel for testing shutdown,
+    // https://github.com/nervosnetwork/fiber/issues/431
     let (mut node_a, mut node_b, new_channel_id) =
         create_nodes_with_established_channel(node_a_funding_amount, node_b_funding_amount, false)
             .await;
@@ -4347,6 +4349,14 @@ async fn test_shutdown_channel_with_different_size_shutdown_script() {
             }
             _ => None,
         })
+        .await;
+
+    node_a
+        .expect_event(|event| matches!(event, NetworkServiceEvent::DebugEvent(DebugEvent::Common(message)) if message == "ChannelClosed"))
+        .await;
+
+    node_b
+        .expect_event(|event| matches!(event, NetworkServiceEvent::DebugEvent(DebugEvent::Common(message)) if message == "ChannelClosed"))
         .await;
 
     assert_eq!(node_a_shutdown_tx_hash, node_b_shutdown_tx_hash);

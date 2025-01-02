@@ -1760,16 +1760,18 @@ where
             }
             ChannelEvent::ClosingTransactionConfirmed => {
                 // Broadcast the channel update message which disables the channel.
-                let update = state.generate_disabled_channel_update(&self.network).await;
+                if state.is_public() {
+                    let update = state.generate_disabled_channel_update(&self.network).await;
 
-                self.network
-                    .send_message(NetworkActorMessage::new_command(
-                        NetworkActorCommand::BroadcastMessages(vec![
-                            BroadcastMessage::ChannelUpdate(update),
-                        ]),
-                    ))
-                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-
+                    self.network
+                        .send_message(NetworkActorMessage::new_command(
+                            NetworkActorCommand::BroadcastMessages(vec![
+                                BroadcastMessage::ChannelUpdate(update),
+                            ]),
+                        ))
+                        .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                }
+                debug_event!(self.network, "ChannelClosed");
                 myself.stop(Some("ChannelClosed".to_string()));
             }
         }
@@ -3407,6 +3409,7 @@ impl ChannelActorState {
         // The function that would change the channel update parameters.
         f: impl FnOnce(&mut ChannelUpdate),
     ) -> ChannelUpdate {
+        assert!(self.is_public());
         let mut channel_update = self
             .get_unsigned_channel_update_message()
             .expect("public channel can generate channel update message");
