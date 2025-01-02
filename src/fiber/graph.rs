@@ -840,8 +840,6 @@ where
         let mut last_edge = None;
 
         if route_to_self {
-            // if there is no hint, we will randomly select a channel from the source node for route to self
-            // so that the following part of algorithm will always trying to find a path without cycle
             let (new_target, expiry, edge) =
                 self.adjust_target_for_route_self(&hop_hint_map, amount, source, target)?;
             target = new_target;
@@ -1084,6 +1082,8 @@ where
                 "no direct channel found for source node".to_string(),
             ));
         }
+        // if there is no hint, we will randomly select a channel from the source node for route to self
+        // so that the following part of algorithm will always trying to find a path without cycle
         let rand_index = rand::thread_rng().gen_range(0..direct_channels.len());
         let (from, _, channel_info, channel_update) = direct_channels[rand_index];
         let last_edge = Some((source, channel_info.out_point().clone()));
