@@ -1496,11 +1496,18 @@ where
                 ..
             }) = &tcl_error_detail.extra_data
             {
-                let _ = network.send_message(NetworkActorMessage::new_command(
-                    NetworkActorCommand::ProcessBroadcastMessage(BroadcastMessage::ChannelUpdate(
-                        channel_update.clone(),
-                    )),
-                ));
+                network
+                    .send_message(NetworkActorMessage::new_command(
+                        NetworkActorCommand::ProcessBroadcastMessage(
+                            BroadcastMessage::ChannelUpdate(channel_update.clone()),
+                        ),
+                    ))
+                    .expect(ASSUME_NETWORK_MYSELF_ALIVE);
+                network
+                    .send_message(NetworkActorMessage::new_command(
+                        NetworkActorCommand::GossipActorMessage(GossipActorMessage::TickStore),
+                    ))
+                    .expect(ASSUME_NETWORK_MYSELF_ALIVE);
             }
         }
         match tcl_error_detail.error_code() {

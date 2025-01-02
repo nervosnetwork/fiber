@@ -309,6 +309,9 @@ pub enum GossipActorMessage {
     // 2. Check if there are any pending broadcast message queries. If so, broadcast them to the network.
     TickNetworkMaintenance,
 
+    // Send a store Tick to the store actor, to make sure a ChannelUpdate may be processed immediately.
+    TickStore,
+
     // The active syncing process is finished for a peer.
     ActiveSyncingFinished(PeerId, Cursor),
 
@@ -2443,6 +2446,14 @@ where
                             .await?;
                     }
                 }
+            }
+
+            GossipActorMessage::TickStore => {
+                let _ = state
+                    .store
+                    .actor
+                    .send_message(ExtendedGossipMessageStoreMessage::Tick)
+                    .expect("store actor alive");
             }
 
             GossipActorMessage::ActiveSyncingFinished(peer_id, cursor) => {
