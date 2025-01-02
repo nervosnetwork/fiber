@@ -1448,8 +1448,10 @@ async fn test_send_payment_with_max_nodes() {
     let res = res.unwrap();
     assert_eq!(res.status, PaymentSessionStatus::Inflight);
     assert!(res.fee > 0);
+
     // sleep for 2 seconds to make sure the payment is sent
     tokio::time::sleep(tokio::time::Duration::from_millis(8000)).await;
+
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::GetPayment(res.payment_hash, rpc_reply))
     };
@@ -4330,6 +4332,8 @@ async fn test_shutdown_channel_with_different_size_shutdown_script() {
     let node_a_funding_amount = 100000000000;
     let node_b_funding_amount = 6200000000;
 
+    // create a private channel for testing shutdown,
+    // https://github.com/nervosnetwork/fiber/issues/431
     let (mut node_a, mut node_b, new_channel_id) =
         create_nodes_with_established_channel(node_a_funding_amount, node_b_funding_amount, false)
             .await;
@@ -4382,6 +4386,14 @@ async fn test_shutdown_channel_with_different_size_shutdown_script() {
             }
             _ => None,
         })
+        .await;
+
+    node_a
+        .expect_event(|event| matches!(event, NetworkServiceEvent::DebugEvent(DebugEvent::Common(message)) if message == "ChannelClosed"))
+        .await;
+
+    node_b
+        .expect_event(|event| matches!(event, NetworkServiceEvent::DebugEvent(DebugEvent::Common(message)) if message == "ChannelClosed"))
         .await;
 
     assert_eq!(node_a_shutdown_tx_hash, node_b_shutdown_tx_hash);
