@@ -1569,6 +1569,7 @@ where
                                     "Failed to relay remove tlc: {:?} because of WaitingTlcAck, retry it later",
                                     &retryable_operation
                                 );
+                            state.tlc_state.debug();
                             true
                         }
                         Ok(Err(err)) => {

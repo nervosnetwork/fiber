@@ -1666,7 +1666,7 @@ pub struct NodeAnnouncement {
     // Must be a valid utf-8 string of length maximal length 32 bytes.
     // If the length is less than 32 bytes, it will be padded with 0.
     // If the length is more than 32 bytes, it should be truncated.
-    pub alias: AnnouncedNodeName,
+    pub node_name: AnnouncedNodeName,
     // All the reachable addresses.
     pub addresses: Vec<MultiAddr>,
     // chain_hash
@@ -1679,7 +1679,7 @@ pub struct NodeAnnouncement {
 
 impl NodeAnnouncement {
     pub fn new_unsigned(
-        alias: AnnouncedNodeName,
+        node_name: AnnouncedNodeName,
         addresses: Vec<MultiAddr>,
         node_id: Pubkey,
         timestamp: u64,
@@ -1690,7 +1690,7 @@ impl NodeAnnouncement {
             features: Default::default(),
             timestamp,
             node_id,
-            alias,
+            node_name,
             chain_hash: get_chain_hash(),
             addresses,
             auto_accept_min_ckb_funding_amount,
@@ -1699,14 +1699,14 @@ impl NodeAnnouncement {
     }
 
     pub fn new(
-        alias: AnnouncedNodeName,
+        node_name: AnnouncedNodeName,
         addresses: Vec<MultiAddr>,
         private_key: &Privkey,
         timestamp: u64,
         auto_accept_min_ckb_funding_amount: u64,
     ) -> NodeAnnouncement {
         let mut unsigned = NodeAnnouncement::new_unsigned(
-            alias,
+            node_name,
             addresses,
             private_key.pubkey(),
             timestamp,
@@ -1722,7 +1722,7 @@ impl NodeAnnouncement {
             features: self.features,
             timestamp: self.timestamp,
             node_id: self.node_id,
-            alias: self.alias,
+            node_name: self.node_name,
             chain_hash: self.chain_hash,
             addresses: self.addresses.clone(),
             auto_accept_min_ckb_funding_amount: self.auto_accept_min_ckb_funding_amount,
@@ -1865,7 +1865,7 @@ impl From<NodeAnnouncement> for molecule_gossip::NodeAnnouncement {
             .features(node_announcement.features.pack())
             .timestamp(node_announcement.timestamp.pack())
             .node_id(node_announcement.node_id.into())
-            .alias(u8_32_as_byte_32(&node_announcement.alias.0))
+            .node_name(u8_32_as_byte_32(&node_announcement.node_name.0))
             .chain_hash(node_announcement.chain_hash.into())
             .auto_accept_min_ckb_funding_amount(
                 node_announcement.auto_accept_min_ckb_funding_amount.pack(),
@@ -1906,8 +1906,8 @@ impl TryFrom<molecule_gossip::NodeAnnouncement> for NodeAnnouncement {
             auto_accept_min_ckb_funding_amount: node_announcement
                 .auto_accept_min_ckb_funding_amount()
                 .unpack(),
-            alias: AnnouncedNodeName::from_slice(node_announcement.alias().as_slice())
-                .map_err(|e| Error::AnyHow(anyhow!("Invalid alias: {}", e)))?,
+            node_name: AnnouncedNodeName::from_slice(node_announcement.node_name().as_slice())
+                .map_err(|e| Error::AnyHow(anyhow!("Invalid node_name: {}", e)))?,
             udt_cfg_infos: node_announcement.udt_cfg_infos().into(),
             addresses: node_announcement
                 .address()
