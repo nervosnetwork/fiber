@@ -1500,9 +1500,9 @@ where
                             }
                             Err(err) if err.contains("WaitingTlcAck") => {
                                 error!(
-                                "Failed to relay remove tlc: {:?} because of WaitingTlcAck, retry it later",
-                                &retryable_remove
-                            );
+                                    "Failed to relay remove tlc: {:?} because of WaitingTlcAck, retry it later",
+                                    &retryable_remove
+                                );
                             }
                             Err(err) => {
                                 error!(

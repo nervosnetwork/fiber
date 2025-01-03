@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use super::test_utils::init_tracing;
 use crate::fiber::graph::PaymentSessionStatus;
 use crate::fiber::network::SendPaymentCommand;
@@ -372,4 +374,153 @@ async fn test_network_send_payment_randomly_send_each_other() {
         new_node_b_balance,
         node_b_old_balance - node_b_sent + node_a_sent
     );
+}
+
+#[tokio::test]
+async fn test_send_payment_bench_test() {
+    init_tracing();
+    let _span = tracing::info_span!("node", node = "test").entered();
+    let (nodes, _channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+        &[
+            (
+                (0, 1),
+                (
+                    MIN_RESERVED_CKB + 10000000000,
+                    MIN_RESERVED_CKB + 10000000000,
+                ),
+            ),
+            (
+                (1, 2),
+                (
+                    MIN_RESERVED_CKB + 10000000000,
+                    MIN_RESERVED_CKB + 10000000000,
+                ),
+            ),
+        ],
+        3,
+        true,
+    )
+    .await;
+    let [mut node_0, _node_1, node_2] = nodes.try_into().expect("3 nodes");
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+    let mut all_sent = HashSet::new();
+
+    for i in 1..=10 {
+        let payment = node_0.send_payment_keysend(&node_2, 1000).await.unwrap();
+        all_sent.insert(payment.payment_hash);
+        eprintln!("send: {} payment_hash: {:?} sent", i, payment.payment_hash);
+        tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
+    }
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(5000)).await;
+
+    loop {
+        for payment_hash in all_sent.clone().iter() {
+            let status = node_0.get_payment_status(*payment_hash).await;
+            if status == PaymentSessionStatus::Success {
+                eprintln!("payment_hash: {:?} success", payment_hash);
+                all_sent.remove(payment_hash);
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        }
+        if all_sent.is_empty() {
+            break;
+        }
+    }
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+}
+
+#[tokio::test]
+async fn test_send_payment_three_nodes_wait_succ_bench_test() {
+    init_tracing();
+    let _span = tracing::info_span!("node", node = "test").entered();
+    let (nodes, _channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+        &[
+            (
+                (0, 1),
+                (
+                    MIN_RESERVED_CKB + 10000000000,
+                    MIN_RESERVED_CKB + 10000000000,
+                ),
+            ),
+            (
+                (1, 2),
+                (
+                    MIN_RESERVED_CKB + 10000000000,
+                    MIN_RESERVED_CKB + 10000000000,
+                ),
+            ),
+        ],
+        3,
+        true,
+    )
+    .await;
+    let [mut node_0, _node_1, node_2] = nodes.try_into().expect("3 nodes");
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+    let mut all_sent = vec![];
+
+    for i in 1..=10 {
+        let payment = node_0.send_payment_keysend(&node_2, 1000).await.unwrap();
+        all_sent.push(payment.payment_hash);
+        eprintln!(
+            "send: {} payment_hash: {:?} sentxx",
+            i, payment.payment_hash
+        );
+        tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
+
+        node_0.wait_until_success(payment.payment_hash).await;
+    }
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+}
+
+#[tokio::test]
+async fn test_send_payment_three_nodes_send_each_other_bench_test() {
+    init_tracing();
+    let _span = tracing::info_span!("node", node = "test").entered();
+    let (nodes, _channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+        &[
+            (
+                (0, 1),
+                (
+                    MIN_RESERVED_CKB + 10000000000,
+                    MIN_RESERVED_CKB + 10000000000,
+                ),
+            ),
+            (
+                (1, 2),
+                (
+                    MIN_RESERVED_CKB + 10000000000,
+                    MIN_RESERVED_CKB + 10000000000,
+                ),
+            ),
+        ],
+        3,
+        true,
+    )
+    .await;
+    let [mut node_0, _node_1, mut node_2] = nodes.try_into().expect("3 nodes");
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+    let mut all_sent = vec![];
+
+    for i in 1..=10 {
+        let payment1 = node_0.send_payment_keysend(&node_2, 1000).await.unwrap();
+        all_sent.push(payment1.payment_hash);
+        eprintln!("send: {} payment_hash: {:?} sent", i, payment1.payment_hash);
+
+        let payment2 = node_2.send_payment_keysend(&node_0, 1000).await.unwrap();
+        all_sent.push(payment2.payment_hash);
+        eprintln!("send: {} payment_hash: {:?} sent", i, payment2.payment_hash);
+        tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
+
+        node_0.wait_until_success(payment1.payment_hash).await;
+        node_2.wait_until_success(payment2.payment_hash).await;
+    }
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 }
