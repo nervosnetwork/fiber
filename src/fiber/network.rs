@@ -2031,7 +2031,8 @@ where
             }),
             network.clone().get_cell(),
         )
-        .await?
+        .await
+        .map_err(|e| ProcessingChannelError::SpawnErr(e.to_string()))?
         .0;
         let temp_channel_id = rx.await.expect("msg received");
         self.on_channel_created(temp_channel_id, &peer_id, channel.clone());
@@ -2113,7 +2114,8 @@ where
             }),
             network.clone().get_cell(),
         )
-        .await?
+        .await
+        .map_err(|e| ProcessingChannelError::SpawnErr(e.to_string()))?
         .0;
         let new_id = rx.await.expect("msg received");
         self.on_channel_created(new_id, &peer_id, channel.clone());
@@ -3108,12 +3110,12 @@ where
         match message {
             NetworkActorMessage::Event(event) => {
                 if let Err(err) = self.handle_event(myself, state, event).await {
-                    error!("Failed to handle ckb network event: {}", err);
+                    error!("Failed to handle fiber network event: {}", err);
                 }
             }
             NetworkActorMessage::Command(command) => {
                 if let Err(err) = self.handle_command(myself, state, command).await {
-                    error!("Failed to handle ckb network command: {}", err);
+                    error!("Failed to handle fiber network command: {}", err);
                 }
             }
             NetworkActorMessage::Notification(event) => {

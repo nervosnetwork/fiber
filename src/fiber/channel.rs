@@ -58,7 +58,7 @@ use musig2::{
 };
 use ractor::{
     async_trait as rasync_trait, call, concurrency::Duration, Actor, ActorProcessingErr, ActorRef,
-    OutputPort, RpcReplyPort, SpawnErr,
+    OutputPort, RpcReplyPort,
 };
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
@@ -67,7 +67,7 @@ use thiserror::Error;
 use tokio::sync::oneshot;
 
 use std::{
-    collections::HashMap,
+    collections::HashSet,
     fmt::{self, Debug},
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
@@ -138,11 +138,12 @@ pub struct TlcNotification {
 #[derive(Debug)]
 pub enum ChannelCommand {
     TxCollaborationCommand(TxCollaborationCommand),
-    // TODO: maybe we should automatically send commitment_signed message after receiving
-    // tx_complete event.
     CommitmentSigned(),
     AddTlc(AddTlcCommand, RpcReplyPort<Result<AddTlcResponse, TlcErr>>),
-    RemoveTlc(RemoveTlcCommand, RpcReplyPort<Result<(), String>>),
+    RemoveTlc(
+        RemoveTlcCommand,
+        RpcReplyPort<Result<(), ProcessingChannelError>>,
+    ),
     Shutdown(ShutdownCommand, RpcReplyPort<Result<(), String>>),
     Update(UpdateCommand, RpcReplyPort<Result<(), String>>),
     #[cfg(test)]
@@ -590,7 +591,6 @@ where
         state: &mut ChannelActorState,
         error: &ProcessingChannelError,
     ) -> TlcErr {
-        debug!("debug now get_tlc_error: {:?}", error);
         let error_code = match error {
             ProcessingChannelError::PeelingOnionPacketError(_) => TlcErrorCode::InvalidOnionPayload,
             ProcessingChannelError::TlcForwardFeeIsTooLow => TlcErrorCode::FeeInsufficient,
@@ -751,10 +751,6 @@ where
             // There's no shared secret stored in the received TLC, use the one found in the peeled onion packet.
             &error.shared_secret,
         );
-        debug!(
-            "debug register remove payment: {:?} payment_hash: {:?}",
-            &tlc_id, payment_hash
-        );
         self.register_retryable_tlc_remove(
             myself,
             state,
@@ -774,10 +770,7 @@ where
             .get_committed_received_tlcs()
             .into_iter()
             .filter(|tlc| tlc.removed_reason.is_none())
-            .filter(|tlc| {
-                state.tlc_state.tlc_apply_status.get(&tlc.tlc_id)
-                    != Some(&TlcApplyStatus::AddTlcApplied)
-            })
+            .filter(|tlc| !state.tlc_state.applied_add_tlcs.contains(&tlc.tlc_id))
             .collect();
 
         for add_tlc in apply_tlcs {
@@ -947,10 +940,7 @@ where
         let received_amount = add_tlc.amount;
         let forward_amount = peeled_onion_packet.current.amount;
 
-        state
-            .tlc_state
-            .tlc_apply_status
-            .insert(add_tlc.tlc_id, TlcApplyStatus::AddTlcApplied);
+        state.tlc_state.applied_add_tlcs.insert(add_tlc.tlc_id);
         if peeled_onion_packet.is_last() {
             if forward_amount != add_tlc.amount {
                 return Err(ProcessingChannelError::FinalIncorrectHTLCAmount);
@@ -1287,7 +1277,6 @@ where
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
 
         self.handle_commitment_signed_command(state)?;
-        debug!("finished AddTlcCommand: {:?}", add_tlc.payment_hash);
         Ok(tlc.tlc_id.into())
     }
 
@@ -1490,7 +1479,6 @@ where
         payment_hash: Hash256,
         peeled_onion_packet: PeeledPaymentOnionPacket,
     ) {
-        debug!("hello add forward tlc: {:?}", &payment_hash);
         let forward_tlc =
             RetryableTlcOperation::ForwardTlc(payment_hash, tlc_id, peeled_onion_packet);
         self.register_retryable_tlc_operation(myself, state, forward_tlc)
@@ -1512,7 +1500,7 @@ where
         }
     }
 
-    pub async fn check_and_apply_retryable_tlc_operations(
+    pub async fn apply_retryable_tlc_operations(
         &self,
         myself: &ActorRef<ChannelActorMessage>,
         state: &mut ChannelActorState,
@@ -1547,7 +1535,7 @@ where
                 }
                 RetryableTlcOperation::RelayRemoveTlc(channel_id, tlc_id, ref reason) => {
                     // send replay remove tlc with network actor to previous hop
-                    let (send, recv) = oneshot::channel::<Result<(), String>>();
+                    let (send, recv) = oneshot::channel::<Result<(), ProcessingChannelError>>();
                     let port = RpcReplyPort::from(send);
                     self.network
                         .send_message(NetworkActorMessage::new_command(
@@ -1565,7 +1553,7 @@ where
                         .expect(ASSUME_NETWORK_ACTOR_ALIVE);
                     match recv.await {
                         Ok(Ok(_)) => false,
-                        Ok(Err(err)) if err.contains("waiting TLC ACK") => {
+                        Ok(Err(ProcessingChannelError::WaitingTlcAck)) => {
                             error!(
                                     "Failed to relay remove tlc: {:?} because of WaitingTlcAck, retry it later",
                                     &retryable_operation
@@ -1595,7 +1583,6 @@ where
                             tlc_id.into(),
                         )
                         .await;
-                    debug!("forwarded payment: {:?} with res: {:?}", payment_hash, res);
                     match res {
                         Ok(_) => false,
                         Err(err) => match err {
@@ -1773,7 +1760,7 @@ where
                         Ok(())
                     }
                     Err(err) => {
-                        let _ = reply.send(Err(err.to_string()));
+                        let _ = reply.send(Err(err.clone()));
                         Err(err)
                     }
                 }
@@ -1867,8 +1854,7 @@ where
                 debug!("Channel closed with uncooperative close");
             }
             ChannelEvent::CheckTlcRetryOperation => {
-                self.check_and_apply_retryable_tlc_operations(myself, state)
-                    .await;
+                self.apply_retryable_tlc_operations(myself, state).await;
             }
             ChannelEvent::PeerDisconnected => {
                 myself.stop(Some("PeerDisconnected".to_string()));
@@ -2549,21 +2535,12 @@ impl PendingTlcs {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
-pub enum TlcApplyStatus {
-    AddTlcApplied,
-    TlcForwarded,
-    RemoveTlcApplied,
-}
-
 #[derive(Default, Clone, Debug, Serialize, Deserialize)]
 pub struct TlcState {
     pub offered_tlcs: PendingTlcs,
     pub received_tlcs: PendingTlcs,
-    // if the tlc is pending to be removed, the reason will be stored here
-    // this will only used for retrying remove TLC
     pub retryable_tlc_operations: Vec<RetryableTlcOperation>,
-    pub tlc_apply_status: HashMap<TLCId, TlcApplyStatus>,
+    pub applied_add_tlcs: HashSet<TLCId>,
     pub waiting_ack: bool,
 }
 
@@ -2659,6 +2636,7 @@ impl TlcState {
     }
 
     pub fn apply_remove_tlc(&mut self, tlc_id: TLCId) {
+        self.applied_add_tlcs.remove(&tlc_id);
         if tlc_id.is_offered() {
             self.offered_tlcs.tlcs.retain(|tlc| tlc.tlc_id != tlc_id);
         } else {
@@ -3055,7 +3033,7 @@ pub enum ChannelEvent {
 
 pub type ProcessingChannelResult = Result<(), ProcessingChannelError>;
 
-#[derive(Error, Debug)]
+#[derive(Error, Debug, Clone)]
 pub enum ProcessingChannelError {
     #[error("Invalid state: {0}")]
     InvalidState(String),
@@ -3068,7 +3046,7 @@ pub enum ProcessingChannelError {
     #[error("Capacity error: {0}")]
     CapacityError(#[from] CapacityError),
     #[error("Failed to spawn actor: {0}")]
-    SpawnErr(#[from] SpawnErr),
+    SpawnErr(String),
     #[error("Musig2 VerifyError: {0}")]
     Musig2VerifyError(#[from] VerifyError),
     #[error("Musig2 SigningError: {0}")]
