@@ -709,7 +709,7 @@ async fn test_send_payment_bench_test() {
                 eprintln!("payment_hash: {:?} success", payment_hash);
                 all_sent.remove(payment_hash);
             }
-            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
         }
         if all_sent.is_empty() {
             break;

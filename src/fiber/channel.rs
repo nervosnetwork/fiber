@@ -1247,6 +1247,10 @@ where
         state: &mut ChannelActorState,
         command: AddTlcCommand,
     ) -> Result<u64, ProcessingChannelError> {
+        eprintln!(
+            "begin to handle add tlc command: {:?}",
+            &command.payment_hash
+        );
         state.check_for_tlc_update(Some(command.amount), true, true)?;
         state.check_tlc_expiry(command.expiry)?;
         let tlc = state.create_outbounding_tlc(command.clone());
@@ -1277,6 +1281,10 @@ where
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
 
         self.handle_commitment_signed_command(state)?;
+        eprintln!(
+            "finished handle add tlc command: {:?}",
+            &command.payment_hash
+        );
         Ok(tlc.tlc_id.into())
     }
 
@@ -1622,6 +1630,9 @@ where
             }
         }
 
+        if state.tlc_state.get_pending_operations().is_empty() {
+            eprintln!("All retryable tlc operations are applied successfully !!!");
+        }
         for op in state.tlc_state.get_pending_operations().iter() {
             eprintln!("After apply there is retryable tlc operation: {:?}", &op);
         }
@@ -2234,6 +2245,7 @@ where
                         error, message
                     );
                     debug_event!(&self.network, &format!("{:?}", error));
+                    panic!("now");
                 }
             }
             ChannelActorMessage::Command(command) => {
@@ -2573,6 +2585,7 @@ pub struct TlcState {
     pub retryable_tlc_operations: Vec<RetryableTlcOperation>,
     pub applied_add_tlcs: HashSet<TLCId>,
     pub waiting_ack: bool,
+    pub begin_waiting_time: u64,
 }
 
 impl TlcState {
@@ -2635,6 +2648,11 @@ impl TlcState {
 
     pub fn set_waiting_ack(&mut self, waiting_ack: bool) {
         self.waiting_ack = waiting_ack;
+        self.begin_waiting_time = if waiting_ack {
+            now_timestamp_as_millis_u64()
+        } else {
+            0
+        };
     }
 
     pub fn insert_retryable_tlc_operation(&mut self, operation: RetryableTlcOperation) -> bool {
@@ -4846,6 +4864,17 @@ impl ChannelActorState {
         is_sent: bool,
     ) -> ProcessingChannelResult {
         if is_tlc_command_message && self.tlc_state.waiting_ack {
+            let now = now_timestamp_as_millis_u64();
+            let instance = now - self.tlc_state.begin_waiting_time;
+            eprintln!(
+                "Already waiting for TLC ack for {:?} ",
+                Duration::from_millis(instance)
+            );
+
+            if instance > 10 * 1000 {
+                self.tlc_state.debug();
+            }
+
             return Err(ProcessingChannelError::WaitingTlcAck);
         }
         match self.state {
