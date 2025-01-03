@@ -2502,6 +2502,26 @@ impl BroadcastMessageWithOnChainInfo {
     }
 }
 
+impl PartialEq<BroadcastMessageWithOnChainInfo> for BroadcastMessage {
+    fn eq(&self, other: &BroadcastMessageWithOnChainInfo) -> bool {
+        match (self, other) {
+            (
+                BroadcastMessage::NodeAnnouncement(node_announcement),
+                BroadcastMessageWithOnChainInfo::NodeAnnouncement(other_node_announcement),
+            ) => node_announcement == other_node_announcement,
+            (
+                BroadcastMessage::ChannelAnnouncement(channel_announcement),
+                BroadcastMessageWithOnChainInfo::ChannelAnnouncement(_, other_channel_announcement),
+            ) => channel_announcement == other_channel_announcement,
+            (
+                BroadcastMessage::ChannelUpdate(channel_update),
+                BroadcastMessageWithOnChainInfo::ChannelUpdate(other_channel_update),
+            ) => channel_update == other_channel_update,
+            _ => false,
+        }
+    }
+}
+
 // Augment the broadcast message with timestamp so that we can easily obtain the cursor of the message.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum BroadcastMessageWithTimestamp {

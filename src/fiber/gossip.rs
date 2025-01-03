@@ -976,7 +976,7 @@ pub struct ExtendedGossipMessageStoreState<S> {
     chain_actor: ActorRef<CkbChainMessage>,
     next_id: u64,
     output_ports: HashMap<u64, BroadcastMessageOutput>,
-    messages_to_be_saved: HashSet<BroadcastMessageWithOnChainInfo>,
+    messages_to_be_saved: Vec<BroadcastMessageWithOnChainInfo>,
 }
 
 impl<S: GossipMessageStore> ExtendedGossipMessageStoreState<S> {
@@ -1070,6 +1070,13 @@ impl<S: GossipMessageStore> ExtendedGossipMessageStoreState<S> {
             }
         }
 
+        match self.messages_to_be_saved.iter().find(|m| message == *m) {
+            Some(existing_message) => {
+                return Ok(existing_message.clone().into());
+            }
+            None => {}
+        }
+
         let message = get_broadcast_message_with_on_chain_info(message.clone(), &self.chain_actor)
             .await
             .map_err(|error| GossipMessageProcessingError::ProcessingError(error.to_string()))?;
@@ -1097,7 +1104,7 @@ impl<S: GossipMessageStore> ExtendedGossipMessageStoreState<S> {
         }
 
         trace!("New gossip message saved to memory: {:?}", message);
-        self.messages_to_be_saved.insert(message.clone());
+        self.messages_to_be_saved.push(message.clone());
         Ok(message.into())
     }
 
