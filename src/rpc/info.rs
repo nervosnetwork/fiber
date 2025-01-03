@@ -1,12 +1,13 @@
 use super::graph::UdtCfgInfos;
+use crate::ckb::CkbConfig;
 use crate::fiber::serde_utils::U32Hex;
 use crate::fiber::{
-    channel::ChannelActorStateStore,
     serde_utils::{U128Hex, U64Hex},
     types::{Hash256, Pubkey},
     NetworkActorCommand, NetworkActorMessage,
 };
 use crate::{handle_actor_call, log_and_error};
+use ckb_jsonrpc_types::Script;
 use jsonrpsee::{
     core::async_trait,
     proc_macros::rpc,
@@ -46,6 +47,9 @@ pub(crate) struct NodeInfoResult {
     #[serde_as(as = "U64Hex")]
     auto_accept_channel_ckb_funding_amount: u64,
 
+    /// The default funding lock script for the node.
+    default_funding_lock_script: Script,
+
     /// The locktime expiry delta for Time-Locked Contracts (TLC), serialized as a hexadecimal string.
     #[serde_as(as = "U64Hex")]
     tlc_expiry_delta: u64,
@@ -78,14 +82,21 @@ pub(crate) struct NodeInfoResult {
     udt_cfg_infos: UdtCfgInfos,
 }
 
-pub(crate) struct InfoRpcServerImpl<S> {
+pub(crate) struct InfoRpcServerImpl {
     actor: ActorRef<NetworkActorMessage>,
-    _store: S,
+    default_funding_lock_script: Script,
 }
 
-impl<S> InfoRpcServerImpl<S> {
-    pub(crate) fn new(actor: ActorRef<NetworkActorMessage>, _store: S) -> Self {
-        InfoRpcServerImpl { actor, _store }
+impl InfoRpcServerImpl {
+    pub(crate) fn new(actor: ActorRef<NetworkActorMessage>, config: CkbConfig) -> Self {
+        let default_funding_lock_script = config
+            .get_default_funding_lock_script()
+            .expect("get default funding lock script should be ok")
+            .into();
+        InfoRpcServerImpl {
+            actor,
+            default_funding_lock_script,
+        }
     }
 }
 
@@ -98,10 +109,7 @@ trait InfoRpc {
 }
 
 #[async_trait]
-impl<S> InfoRpcServer for InfoRpcServerImpl<S>
-where
-    S: ChannelActorStateStore + Send + Sync + 'static,
-{
+impl InfoRpcServer for InfoRpcServerImpl {
     async fn node_info(&self) -> Result<NodeInfoResult, ErrorObjectOwned> {
         let version = env!("CARGO_PKG_VERSION").to_string();
         let commit_hash = crate::get_git_version().to_string();
@@ -119,6 +127,7 @@ where
             open_channel_auto_accept_min_ckb_funding_amount: response
                 .open_channel_auto_accept_min_ckb_funding_amount,
             auto_accept_channel_ckb_funding_amount: response.auto_accept_channel_ckb_funding_amount,
+            default_funding_lock_script: self.default_funding_lock_script.clone(),
             tlc_expiry_delta: response.tlc_expiry_delta,
             tlc_min_value: response.tlc_min_value,
             tlc_max_value: response.tlc_max_value,
