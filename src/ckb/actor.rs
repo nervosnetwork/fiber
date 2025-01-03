@@ -4,6 +4,7 @@ use ractor::{
     concurrency::{sleep, Duration},
     Actor, ActorProcessingErr, ActorRef, RpcReplyPort,
 };
+use tracing::debug;
 
 use crate::ckb::contracts::{get_script_by_contract, Contract};
 
@@ -90,12 +91,6 @@ impl Actor for CkbChainActor {
         let pub_key_hash = ckb_hash::blake2b_256(pub_key.serialize());
         let funding_source_lock_script =
             get_script_by_contract(Contract::Secp256k1Lock, &pub_key_hash[0..20]);
-        tracing::info!(
-            "[{}] funding lock args: {}",
-            myself.get_name().unwrap_or_default(),
-            funding_source_lock_script.args()
-        );
-
         Ok(CkbChainState {
             config,
             secret_key,
@@ -180,7 +175,7 @@ impl Actor for CkbChainActor {
                 },
                 reply_port,
             ) => {
-                tracing::info!(
+                debug!(
                     "[{}] trace transaction {} with {} confs",
                     myself.get_name().unwrap_or_default(),
                     tx_hash,
