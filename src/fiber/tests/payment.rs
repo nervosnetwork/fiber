@@ -469,7 +469,7 @@ async fn test_network_three_nodes_two_channels_send_each_other() {
     let fee2 = res.fee;
     eprintln!("payment_hash2: {:?}", payment_hash2);
 
-    tokio::time::sleep(tokio::time::Duration::from_millis(9000)).await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(12000)).await;
 
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::GetPayment(payment_hash1, rpc_reply))

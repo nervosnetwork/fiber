@@ -1506,6 +1506,9 @@ where
         state: &mut ChannelActorState,
     ) {
         let pending_tlc_ops = state.tlc_state.get_pending_operations();
+        for op in pending_tlc_ops.iter() {
+            eprintln!("Begin to applying retryable tlc operation: {:?}", &op);
+        }
         for retryable_operation in pending_tlc_ops.into_iter() {
             let need_retry = match retryable_operation {
                 RetryableTlcOperation::RemoveTlc(tlc_id, ref reason) => {
@@ -1618,6 +1621,11 @@ where
                     .remove_pending_tlc_operation(&retryable_operation);
             }
         }
+
+        for op in state.tlc_state.get_pending_operations().iter() {
+            eprintln!("After apply there is retryable tlc operation: {:?}", &op);
+        }
+
         // If there are more pending removes, we will retry it later
         if !state.tlc_state.get_pending_operations().is_empty() {
             myself.send_after(AUTO_SETDOWN_TLC_INTERVAL, || {
@@ -2484,11 +2492,34 @@ impl From<TlcInfo> for TlcNotifyInfo {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Serialize, Deserialize, Eq, PartialEq)]
 pub enum RetryableTlcOperation {
     RemoveTlc(TLCId, RemoveTlcReason),
     RelayRemoveTlc(Hash256, u64, RemoveTlcReason),
     ForwardTlc(Hash256, TLCId, PeeledPaymentOnionPacket),
+}
+
+impl Debug for RetryableTlcOperation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            RetryableTlcOperation::RemoveTlc(tlc_id, reason) => f
+                .debug_tuple("RemoveTlc")
+                .field(tlc_id)
+                .field(reason)
+                .finish(),
+            RetryableTlcOperation::RelayRemoveTlc(payment_hash, tlc_id, reason) => f
+                .debug_tuple("RelayRemoveTlc")
+                .field(payment_hash)
+                .field(tlc_id)
+                .field(reason)
+                .finish(),
+            RetryableTlcOperation::ForwardTlc(payment_hash, tlc_id, _) => f
+                .debug_tuple("ForwardTlc")
+                .field(payment_hash)
+                .field(tlc_id)
+                .finish(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Default)]

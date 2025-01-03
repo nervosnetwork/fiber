@@ -14,6 +14,7 @@ use crate::ckb::contracts::get_udt_whitelist;
 use num_enum::IntoPrimitive;
 use num_enum::TryFromPrimitive;
 use std::convert::TryFrom;
+use std::fmt::Debug;
 
 use anyhow::anyhow;
 use ckb_types::{
@@ -1136,7 +1137,7 @@ pub struct TlcErr {
 
 impl Display for TlcErr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.error_code_as_str().fmt(f)
+        write!(f, "{}", self.error_code_as_str())
     }
 }
 
@@ -1481,10 +1482,21 @@ impl TlcErrorCode {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum RemoveTlcReason {
     RemoveTlcFulfill(RemoveTlcFulfill),
     RemoveTlcFail(TlcErrPacket),
+}
+
+impl Debug for RemoveTlcReason {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            RemoveTlcReason::RemoveTlcFulfill(_fulfill) => {
+                write!(f, "RemoveTlcFulfill")
+            }
+            RemoveTlcReason::RemoveTlcFail(_fail) => write!(f, "RemoveTlcFail"),
+        }
+    }
 }
 
 impl RemoveTlcReason {
