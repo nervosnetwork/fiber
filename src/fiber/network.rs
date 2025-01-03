@@ -1657,6 +1657,10 @@ where
         let payment_data = payment_session.request.clone();
         if payment_session.can_retry() {
             payment_session.retried_times += 1;
+            error!(
+                "begin to payment session: {:?} with retried times: {}",
+                payment_hash, payment_session.retried_times
+            );
             let hops_info = self
                 .build_payment_route(&mut payment_session, &payment_data)
                 .await?;

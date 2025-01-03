@@ -678,7 +678,7 @@ async fn test_network_send_payment_more_send_each_other() {
     let payment_hash4 = res4.payment_hash;
 
     // sleep for 3 seconds to make sure the payment is processed
-    tokio::time::sleep(tokio::time::Duration::from_millis(3000)).await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(4000)).await;
 
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::GetPayment(payment_hash1, rpc_reply))
@@ -5227,7 +5227,7 @@ async fn test_send_payment_will_succeed_with_retry_in_middle_hops() {
     // we have two chaneels between node_2 and node_3
     // the path finding will first try the channel with larger capacity,
     // but we manually set the to_local_amount to smaller value for testing
-    // path finding will get the direct channel info with actual balance of channel,
+    // path finding will get a temporary failure in the first try and retry the second channel
     // so it will try the channel with smaller capacity and the payment will succeed
     let (nodes, channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
         &[
@@ -5242,6 +5242,7 @@ async fn test_send_payment_will_succeed_with_retry_in_middle_hops() {
     .await;
     let [mut node_0, _node_1, mut node_2, node_3] = nodes.try_into().expect("4 nodes");
     let source_node = &mut node_0;
+    let node_0_amount = source_node.get_local_balance_from_channel(channels[0]);
     let target_pubkey = node_3.pubkey.clone();
 
     // sleep for a while
@@ -5251,11 +5252,12 @@ async fn test_send_payment_will_succeed_with_retry_in_middle_hops() {
     node_2.update_channel_local_balance(channels[2], 100).await;
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
+    let amount = 999;
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
             SendPaymentCommand {
                 target_pubkey: Some(target_pubkey.clone()),
-                amount: Some(999),
+                amount: Some(amount),
                 payment_hash: None,
                 final_tlc_expiry_delta: None,
                 tlc_expiry_limit: None,
@@ -5273,15 +5275,21 @@ async fn test_send_payment_will_succeed_with_retry_in_middle_hops() {
     };
 
     // expect send payment to succeed
-    let res = call!(source_node.network_actor, message).expect("source_node alive");
-    assert!(res.is_ok());
+    let res = call!(source_node.network_actor, message)
+        .expect("source_node alive")
+        .unwrap();
 
-    let payment_hash = res.unwrap().payment_hash;
-    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+    let payment_hash = res.payment_hash;
+    tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
 
+    let fee = res.fee;
+    eprintln!("fee: {:?}", fee);
     source_node
         .assert_payment_status(payment_hash, PaymentSessionStatus::Success, Some(2))
         .await;
+
+    let new_node0_amount = source_node.get_local_balance_from_channel(channels[0]);
+    assert_eq!(node_0_amount - amount - fee, new_node0_amount);
 }
 
 #[tokio::test]

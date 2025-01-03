@@ -1517,40 +1517,36 @@ where
         myself: &ActorRef<ChannelActorMessage>,
         state: &mut ChannelActorState,
     ) {
-        debug!("begin to check_and_apply_retryable_tlc_operations ++++++++++++++");
         let pending_tlc_ops = state.tlc_state.get_pending_operations();
         for retryable_operation in pending_tlc_ops.into_iter() {
-            match retryable_operation {
+            let need_retry = match retryable_operation {
                 RetryableTlcOperation::RemoveTlc(tlc_id, ref reason) => {
-                    let command = RemoveTlcCommand {
-                        id: tlc_id.into(),
-                        reason: reason.clone(),
-                    };
-
-                    match self.handle_remove_tlc_command(state, command) {
-                        Ok(_) | Err(ProcessingChannelError::RepeatedProcessing(_)) => {
-                            state
-                                .tlc_state
-                                .remove_pending_tlc_operation(&retryable_operation);
-                        }
+                    match self.handle_remove_tlc_command(
+                        state,
+                        RemoveTlcCommand {
+                            id: tlc_id.into(),
+                            reason: reason.clone(),
+                        },
+                    ) {
+                        Ok(_) | Err(ProcessingChannelError::RepeatedProcessing(_)) => false,
                         Err(ProcessingChannelError::WaitingTlcAck) => {
                             error!(
                                 "Failed to remove tlc: {:?} because of WaitingTlcAck, retry it later",
                                 &retryable_operation
                             );
+                            true
                         }
                         Err(err) => {
                             error!(
                                 "Failed to remove tlc: {:?} with reason: {:?}, will not retry",
                                 &retryable_operation, err
                             );
-                            state
-                                .tlc_state
-                                .remove_pending_tlc_operation(&retryable_operation);
+                            false
                         }
                     }
                 }
                 RetryableTlcOperation::RelayRemoveTlc(channel_id, tlc_id, ref reason) => {
+                    // send replay remove tlc with network actor to previous hop
                     let (send, recv) = oneshot::channel::<Result<(), String>>();
                     let port = RpcReplyPort::from(send);
                     self.network
@@ -1567,30 +1563,23 @@ where
                             }),
                         ))
                         .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-                    if let Ok(res) = recv.await {
-                        info!("debug error now: {:?}", res);
-                        match res {
-                            Ok(_) => {
-                                state
-                                    .tlc_state
-                                    .remove_pending_tlc_operation(&retryable_operation);
-                            }
-                            Err(err) if err.contains("waiting TLC ACK") => {
-                                error!(
+                    match recv.await {
+                        Ok(Ok(_)) => false,
+                        Ok(Err(err)) if err.contains("waiting TLC ACK") => {
+                            error!(
                                     "Failed to relay remove tlc: {:?} because of WaitingTlcAck, retry it later",
                                     &retryable_operation
                                 );
-                            }
-                            Err(err) => {
-                                error!(
+                            true
+                        }
+                        Ok(Err(err)) => {
+                            error!(
                                     "Failed to relay remove tlc: {:?} with reason: {:?}, will not retry",
                                     &retryable_operation, err
                                 );
-                                state
-                                    .tlc_state
-                                    .remove_pending_tlc_operation(&retryable_operation);
-                            }
+                            false
                         }
+                        Err(_) => true,
                     }
                 }
                 RetryableTlcOperation::ForwardTlc(
@@ -1598,7 +1587,6 @@ where
                     tlc_id,
                     ref peeled_onion_packet,
                 ) => {
-                    debug!("begin to forward tlc: {:?}", &payment_hash);
                     let res = self
                         .handle_forward_onion_packet(
                             state,
@@ -1609,15 +1597,7 @@ where
                         .await;
                     debug!("forwarded payment: {:?} with res: {:?}", payment_hash, res);
                     match res {
-                        Ok(_) => {
-                            state
-                                .tlc_state
-                                .remove_pending_tlc_operation(&retryable_operation);
-                            info!(
-                                "debug haha remove_pending_tlc_operation: {:?}",
-                                payment_hash
-                            );
-                        }
+                        Ok(_) => false,
                         Err(err) => match err {
                             ProcessingChannelError::WaitingTlcAck
                             | ProcessingChannelError::TlcForwardingError(TlcErr {
@@ -1628,6 +1608,7 @@ where
                                         "Failed to forward tlc: {:?} because of WaitingTlcAck, retry it later",
                                         &payment_hash
                                     );
+                                true
                             }
                             _ => {
                                 let shared_secret = peeled_onion_packet.shared_secret.clone();
@@ -1638,10 +1619,16 @@ where
                                     "Failed to forward tlc: {:?} because of TlcForwardingError, will not retry",
                                     &payment_hash
                                 );
+                                false
                             }
                         },
                     }
                 }
+            };
+            if !need_retry {
+                state
+                    .tlc_state
+                    .remove_pending_tlc_operation(&retryable_operation);
             }
         }
         // If there are more pending removes, we will retry it later
@@ -1650,7 +1637,6 @@ where
                 ChannelActorMessage::Event(ChannelEvent::CheckTlcRetryOperation)
             });
         }
-        debug!("end to check_and_apply_retryable_tlc_operations ------------");
     }
 
     // This is the dual of `handle_tx_collaboration_msg`. Any logic error here is likely
