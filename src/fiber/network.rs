@@ -164,8 +164,7 @@ pub enum LocalInfoKind {
 #[derive(Debug, Clone)]
 pub struct NodeInfoResponse {
     pub node_name: Option<AnnouncedNodeName>,
-    pub peer_id: PeerId,
-    pub public_key: Pubkey,
+    pub node_id: Pubkey,
     pub addresses: Vec<MultiAddr>,
     pub chain_hash: Hash256,
     pub open_channel_auto_accept_min_ckb_funding_amount: u64,
@@ -1318,8 +1317,7 @@ where
             NetworkActorCommand::NodeInfo(_, rpc) => {
                 let response = NodeInfoResponse {
                     node_name: state.node_name.clone(),
-                    peer_id: state.peer_id.clone(),
-                    public_key: state.get_public_key().clone(),
+                    node_id: state.get_public_key().clone(),
                     addresses: state.announced_addrs.clone(),
                     chain_hash: get_chain_hash(),
                     open_channel_auto_accept_min_ckb_funding_amount: state
@@ -1905,10 +1903,10 @@ where
                 debug!("Returning old node announcement message as it is still valid");
             }
             _ => {
-                let alias = self.node_name.unwrap_or_default();
+                let node_name = self.node_name.unwrap_or_default();
                 let addresses = self.announced_addrs.clone();
                 let announcement = NodeAnnouncement::new(
-                    alias,
+                    node_name,
                     addresses,
                     &self.private_key,
                     now,

@@ -149,7 +149,7 @@ Attempts to open a channel with a peer.
 
 ##### Params
 
-* `peer_id` - PeerId, The peer ID to open a channel with.
+* `peer_id` - PeerId, The peer ID to open a channel with, the peer must be connected through the [connect_peer](#peer-connect_peer) rpc first.
 * `funding_amount` - u128, The amount of CKB or UDT to fund the channel with.
 * `public` - `Option<bool>`, Whether this is a public channel (will be broadcasted to network, and can be used to forward TLCs), an optional parameter, default value is true.
 * `funding_udt_type_script` - `Option<Script>`, The type script of the UDT to fund the channel with, an optional parameter.
@@ -433,9 +433,8 @@ Get the node information.
 
 * `version` - String, The version of the node software.
 * `commit_hash` - String, The commit hash of the node software.
-* `public_key` - Pubkey, The public key of the node.
+* `node_id` - Pubkey, The identity public key of the node.
 * `node_name` - `Option<String>`, The optional name of the node.
-* `peer_id` - PeerId, The peer ID of the node, serialized as a string.
 * `addresses` - `Vec<MultiAddr>`, A list of multi-addresses associated with the node.
 * `chain_hash` - Hash256, The hash of the blockchain that the node is connected to.
 * `open_channel_auto_accept_min_ckb_funding_amount` - u64, The minimum CKB funding amount for automatically accepting open channel requests, serialized as a hexadecimal string.
@@ -670,9 +669,9 @@ The Node information.
 
 #### Fields
 
-* `alias` - String, The alias of the node.
+* `node_name` - String, The name of the node.
 * `addresses` - `Vec<MultiAddr>`, The addresses of the node.
-* `node_id` - Pubkey, The node ID.
+* `node_id` - Pubkey, The identity public key of the node.
 * `timestamp` - u64, The timestamp of the node.
 * `chain_hash` - Hash256, The chain hash of the node.
 * `auto_accept_min_ckb_funding_amount` - u64, The minimum CKB funding amount for automatically accepting open channel requests.
@@ -687,8 +686,8 @@ The Channel information.
 #### Fields
 
 * `channel_outpoint` - OutPoint, The outpoint of the channel.
-* `node1` - Pubkey, The node ID of the first node.
-* `node2` - Pubkey, The node ID of the second node.
+* `node1` - Pubkey, The identity public key of the first node.
+* `node2` - Pubkey, The identity public key of the second node.
 * `created_timestamp` - u64, The created timestamp of the channel, which is the block header timestamp of the block
  that contains the channel funding transaction.
 * `last_updated_timestamp_of_node1` - `Option<u64>`, The timestamp of the last update to channel by node 1 (e.g. updating fee rate).

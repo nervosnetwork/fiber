@@ -105,11 +105,11 @@ impl From<ConfigUdtCfgInfos> for UdtCfgInfos {
 #[serde_as]
 #[derive(Serialize, Deserialize, Clone)]
 struct NodeInfo {
-    /// The alias of the node.
-    alias: String,
+    /// The name of the node.
+    node_name: String,
     /// The addresses of the node.
     addresses: Vec<MultiAddr>,
-    /// The node ID.
+    /// The identity public key of the node.
     node_id: Pubkey,
     #[serde_as(as = "U64Hex")]
     /// The timestamp of the node.
@@ -126,7 +126,7 @@ struct NodeInfo {
 impl From<super::super::fiber::graph::NodeInfo> for NodeInfo {
     fn from(value: super::super::fiber::graph::NodeInfo) -> Self {
         NodeInfo {
-            alias: value.alias.to_string(),
+            node_name: value.node_name.to_string(),
             addresses: value.addresses,
             node_id: value.node_id,
             timestamp: value.timestamp,
@@ -162,9 +162,9 @@ struct ChannelInfo {
     /// The outpoint of the channel.
     #[serde_as(as = "EntityHex")]
     channel_outpoint: OutPoint,
-    /// The node ID of the first node.
+    /// The identity public key of the first node.
     node1: Pubkey,
-    /// The node ID of the second node.
+    /// The identity public key of the second node.
     node2: Pubkey,
     /// The created timestamp of the channel, which is the block header timestamp of the block
     /// that contains the channel funding transaction.

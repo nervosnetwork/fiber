@@ -38,7 +38,7 @@ use tentacle::secio::PeerId;
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug)]
 pub(crate) struct OpenChannelParams {
-    /// The peer ID to open a channel with.
+    /// The peer ID to open a channel with, the peer must be connected through the [connect_peer](#peer-connect_peer) rpc first.
     #[serde_as(as = "DisplayFromStr")]
     peer_id: PeerId,
 
