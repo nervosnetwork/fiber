@@ -9,6 +9,7 @@ mod invoice;
 mod peer;
 mod utils;
 
+use crate::ckb::CkbConfig;
 use crate::fiber::gossip::GossipMessageStore;
 use crate::rpc::info::InfoRpcServer;
 use crate::{
@@ -86,6 +87,7 @@ pub async fn start_rpc<
         + 'static,
 >(
     config: RpcConfig,
+    ckb_config: Option<CkbConfig>,
     fiber_config: Option<FiberConfig>,
     network_actor: Option<ActorRef<NetworkActorMessage>>,
     cch_actor: Option<ActorRef<CchMessage>>,
@@ -112,7 +114,13 @@ pub async fn start_rpc<
     if let Some(network_actor) = network_actor {
         if config.is_module_enabled("info") {
             modules
-                .merge(InfoRpcServerImpl::new(network_actor.clone(), store.clone()).into_rpc())
+                .merge(
+                    InfoRpcServerImpl::new(
+                        network_actor.clone(),
+                        ckb_config.expect("ckb config should be set"),
+                    )
+                    .into_rpc(),
+                )
                 .unwrap();
         }
 

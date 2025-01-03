@@ -440,6 +440,7 @@ Get the node information.
 * `chain_hash` - Hash256, The hash of the blockchain that the node is connected to.
 * `open_channel_auto_accept_min_ckb_funding_amount` - u64, The minimum CKB funding amount for automatically accepting open channel requests, serialized as a hexadecimal string.
 * `auto_accept_channel_ckb_funding_amount` - u64, The CKB funding amount for automatically accepting channel requests, serialized as a hexadecimal string.
+* `default_funding_lock_script` - Script, The default funding lock script for the node.
 * `tlc_expiry_delta` - u64, The locktime expiry delta for Time-Locked Contracts (TLC), serialized as a hexadecimal string.
 * `tlc_min_value` - u128, The minimum value for Time-Locked Contracts (TLC), serialized as a hexadecimal string.
 * `tlc_max_value` - u128, The maximum value for Time-Locked Contracts (TLC), serialized as a hexadecimal string, `0` means no maximum value limit.
