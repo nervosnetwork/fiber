@@ -465,10 +465,6 @@ where
         match message {
             GossipSyncingActorMessage::RequestTimeout(request_id) => {
                 state.inflight_requests.remove(&request_id);
-                debug!(
-                    "Sending new GetBroadcastMessages request after timeout: id {}",
-                    request_id
-                );
                 // TODO: When the peer failed for too many times, we should consider disconnecting from the peer.
                 state.peer_state.failed_times += 1;
                 myself
@@ -538,7 +534,6 @@ where
                             .send_message(ExtendedGossipMessageStoreMessage::SaveMessage(message))
                             .expect("store actor alive");
                     }
-                    debug!("Sending new GetBroadcastMessages request after receiving response: peer_id {:?}", &state.peer_id);
                     myself
                         .send_message(GossipSyncingActorMessage::NewGetRequest())
                         .expect("gossip syncing actor alive");
@@ -565,7 +560,6 @@ where
                 // Send a new GetBroadcastMessages request to the newly-connected peer.
                 // If we have less than NUM_SIMULTANEOUS_GET_REQUESTS requests inflight.
                 if state.inflight_requests.len() > NUM_SIMULTANEOUS_GET_REQUESTS {
-                    debug!("Not sending new GetBroadcastMessages request because there are already {} requests inflight (max {})", state.inflight_requests.len(), NUM_SIMULTANEOUS_GET_REQUESTS);
                     return Ok(());
                 }
                 state
@@ -821,10 +815,6 @@ impl PeerState {
     }
 
     fn change_sync_status(&mut self, new_status: PeerSyncStatus) {
-        debug!(
-            "Peer {:?} sync status changed from {:?} to {:?}",
-            self.session_id, self.sync_status, new_status
-        );
         self.sync_status = new_status;
     }
 }
@@ -903,10 +893,6 @@ impl<S: GossipMessageStore + Sync> SubscribableGossipMessageStore
         receiver: ActorRef<TReceiverMsg>,
         converter: F,
     ) -> Result<Self::Subscription, Self::Error> {
-        debug!(
-            "Creating a new subscription from cursor {:?} with receiver {:?}",
-            &cursor, &receiver
-        );
         match call!(
             &self.actor,
             ExtendedGossipMessageStoreMessage::NewSubscription,
@@ -1042,9 +1028,10 @@ impl<S: GossipMessageStore> ExtendedGossipMessageStoreState<S> {
                     verified_sorted_messages.push(message);
                 }
                 Err(error) => {
-                    warn!(
+                    trace!(
                         "Failed to verify and save message {:?}: {:?}",
-                        message, error
+                        message,
+                        error
                     );
                 }
             }
@@ -1276,11 +1263,6 @@ impl<S: GossipMessageStore + Send + Sync + 'static> Actor for ExtendedGossipMess
                                 m.cursor(),
                             ))
                             .expect("actor alive");
-                        debug!(
-                            "Sending messages to subscription #{}: number of messages = {}",
-                            id,
-                            messages.len()
-                        );
                         subscription
                             .output_port
                             .send(GossipMessageUpdates::new(messages));
@@ -1293,17 +1275,14 @@ impl<S: GossipMessageStore + Send + Sync + 'static> Actor for ExtendedGossipMess
 
             ExtendedGossipMessageStoreMessage::SaveMessage(message) => {
                 if let Err(error) = state.insert_message_to_be_saved_list(&message).await {
-                    error!(
-                        "Failed to save message to the store: {:?}, error: {:?}",
-                        message, error
-                    );
+                    trace!("Failed to save message: {:?}, error: {:?}", message, error);
                 }
             }
 
             ExtendedGossipMessageStoreMessage::SaveAndBroadcastMessage(message) => {
                 match state.insert_message_to_be_saved_list(&message).await {
                     Err(error) => error!(
-                        "Failed to save message to the store: {:?}, error: {:?}",
+                        "Failed to save message and broadcast message: {:?}, error: {:?}",
                         message, error
                     ),
                     Ok(message) => {
@@ -1519,10 +1498,6 @@ where
 
     async fn start_new_active_syncer(&mut self, peer_id: &PeerId) {
         let safe_cursor = self.get_safe_cursor_to_start_syncing();
-        debug!(
-            "Starting active syncer to peer {:?} with cursor {:?}",
-            peer_id, safe_cursor
-        );
         let sync_actor = Actor::spawn_linked(
             Some(format!(
                 "gossip syncing actor to peer {:?} supervised by {:?}",
@@ -1550,10 +1525,6 @@ where
 
     async fn start_passive_syncer(&mut self, peer_id: &PeerId) {
         let cursor = self.get_safe_cursor_to_start_syncing();
-        debug!(
-            "Starting passive syncer to peer {:?} from cursor {:?}",
-            peer_id, cursor
-        );
         let filter = BroadcastMessagesFilter {
             chain_hash: get_chain_hash(),
             after_cursor: cursor.clone(),
@@ -1576,7 +1547,6 @@ where
     }
 
     async fn stop_passive_syncer(&mut self, peer_id: &PeerId) {
-        debug!("Stopping passive syncer to peer {:?}", peer_id);
         let filter = BroadcastMessagesFilter {
             chain_hash: get_chain_hash(),
             after_cursor: Cursor::max(),
@@ -1607,10 +1577,6 @@ where
         peer_id: &PeerId,
         filter: BroadcastMessagesFilter,
     ) -> crate::Result<()> {
-        debug!(
-            "Sending BroadcastMessagesFilter to peer {:?}: {:?}",
-            &peer_id, &filter
-        );
         let message = GossipMessage::BroadcastMessagesFilter(filter);
         self.send_message_to_peer(peer_id, message).await?;
         Ok(())
@@ -1924,10 +1890,6 @@ async fn verify_channel_announcement<S: GossipMessageStore>(
     store: &S,
     chain: &ActorRef<CkbChainMessage>,
 ) -> Result<bool, Error> {
-    debug!(
-        "Verifying channel announcement message: {:?}",
-        &channel_announcement
-    );
     if let Some((_, announcement)) =
         store.get_latest_channel_announcement(&channel_announcement.channel_outpoint)
     {
@@ -1983,15 +1945,7 @@ async fn verify_channel_announcement<S: GossipMessageStore>(
         )));
     }
 
-    debug!(
-        "Node signatures in channel announcement message verified: {:?}",
-        &channel_announcement
-    );
-
     let (tx, _) = get_channel_tx(&channel_announcement.channel_outpoint, chain).await?;
-
-    debug!("Channel announcement transaction found: {:?}", &tx);
-
     let pubkey = channel_announcement.ckb_key.serialize();
     let pubkey_hash = &blake2b_256(pubkey.as_slice())[0..20];
     match tx.inner.outputs.first() {
@@ -2038,11 +1992,6 @@ async fn verify_channel_announcement<S: GossipMessageStore>(
         )));
     }
 
-    debug!(
-        "All signatures in channel announcement message verified: {:?}",
-        &channel_announcement
-    );
-
     Ok(false)
 }
 
@@ -2084,10 +2033,6 @@ fn verify_channel_update<S: GossipMessageStore>(
             } else {
                 channel_announcement.node2_id
             };
-            debug!(
-                "Verifying channel update message signature: {:?}, pubkey: {:?}, message: {:?}",
-                &channel_update, &pubkey, &message
-            );
             if !signature.verify(&pubkey, &message) {
                 return Err(Error::InvalidParameter(format!(
                     "Channel update message signature verification failed (invalid signature): {:?}",
@@ -2130,20 +2075,12 @@ fn verify_node_announcement<S: GossipMessageStore>(
     }
     let message = node_announcement.message_to_sign();
     match node_announcement.signature {
-        Some(ref signature) if signature.verify(&node_announcement.node_id, &message) => {
-            debug!(
-                "Node announcement message verified: {:?}",
-                &node_announcement
-            );
-        }
-        _ => {
-            return Err(Error::InvalidParameter(format!(
-                "Node announcement message signature verification failed: {:?}",
-                &node_announcement
-            )));
-        }
+        Some(ref signature) if signature.verify(&node_announcement.node_id, &message) => Ok(false),
+        _ => Err(Error::InvalidParameter(format!(
+            "Node announcement message signature verification failed: {:?}",
+            &node_announcement
+        ))),
     }
-    Ok(false)
 }
 
 impl GossipProtocolHandle {
@@ -2293,28 +2230,16 @@ where
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
-            GossipActorMessage::PeerConnected(peer_id, pubkey, session) => {
+            GossipActorMessage::PeerConnected(peer_id, _pubkey, session) => {
                 if state.is_peer_connected(&peer_id) {
-                    warn!(
-                        "Repeated connection from {:?} for gossip protocol",
-                        &peer_id
-                    );
                     return Ok(());
                 }
-                debug!(
-                    "Gossip peer connected: peer {:?}, pubkey {:?}, session {:?}",
-                    &peer_id, &pubkey, &session.id
-                );
                 state
                     .peer_states
                     .insert(peer_id.clone(), PeerState::new(session.id, session.ty));
             }
-            GossipActorMessage::PeerDisconnected(peer_id, session) => {
-                debug!(
-                    "Peer disconnected: peer {:?}, session {:?}",
-                    &peer_id, &session.id
-                );
-                drop(state.peer_states.remove(&peer_id));
+            GossipActorMessage::PeerDisconnected(peer_id, _session) => {
+                state.peer_states.remove(&peer_id);
             }
             GossipActorMessage::ProcessBroadcastMessage(message) => {
                 state
@@ -2335,7 +2260,6 @@ where
                     .await?;
             }
             GossipActorMessage::TryBroadcastMessages(messages) => {
-                debug!("Trying to broadcast message: {:?}", &messages);
                 for message in messages {
                     state
                         .store
@@ -2375,7 +2299,6 @@ where
 
             GossipActorMessage::RotateOutboundPassiveSyncingPeers => {
                 if !state.is_ready_for_passive_syncing() {
-                    debug!("Not ready for passive syncing, skipping rotation");
                     return Ok(());
                 }
 
@@ -2446,10 +2369,6 @@ where
             }
 
             GossipActorMessage::ActiveSyncingFinished(peer_id, cursor) => {
-                debug!(
-                    "Active syncing finished for peer {:?}: {:?}",
-                    &peer_id, &cursor
-                );
                 state.num_finished_active_syncing_peers += 1;
                 if let Some(peer_state) = state.peer_states.get_mut(&peer_id) {
                     peer_state.change_sync_status(PeerSyncStatus::FinishedActiveSyncing(
@@ -2460,7 +2379,7 @@ where
             }
 
             GossipActorMessage::MaliciousPeerFound(peer_id) => {
-                debug!("Malicious peer found: {:?}", &peer_id);
+                warn!("Malicious peer found: {:?}", &peer_id);
             }
 
             GossipActorMessage::SendGossipMessage(GossipMessageWithPeerId { peer_id, message }) => {
@@ -2494,20 +2413,10 @@ where
                             Some(peer_state) => {
                                 match peer_state.filter_processor.as_mut() {
                                     Some(filter_processor) => {
-                                        debug!(
-                                        "Updating filter processor for peer {:?}: from {:?} {:?}",
-                                        &peer_id,
-                                        filter_processor.get_filter(),
-                                        &after_cursor
-                                    );
                                         filter_processor.update_filter(&after_cursor);
                                         return Ok(());
                                     }
                                     _ => {
-                                        debug!(
-                                            "Creating filter processor for peer {:?}: {:?}",
-                                            &peer_id, &after_cursor
-                                        );
                                         peer_state.filter_processor = Some(
                                             PeerFilterProcessor::new(
                                                 state.store.clone(),
