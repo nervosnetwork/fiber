@@ -364,6 +364,7 @@ async fn test_network_send_payment_normal_keysend_workflow() {
                 keysend: Some(true),
                 udt_type_script: None,
                 allow_self_payment: false,
+                hop_hints: None,
                 dry_run: false,
             },
             rpc_reply,
@@ -412,6 +413,7 @@ async fn test_network_send_payment_normal_keysend_workflow() {
                 keysend: Some(true),
                 udt_type_script: None,
                 allow_self_payment: false,
+                hop_hints: None,
                 dry_run: false,
             },
             rpc_reply,
@@ -469,6 +471,7 @@ async fn test_network_send_payment_send_each_other() {
                 keysend: Some(true),
                 udt_type_script: None,
                 allow_self_payment: false,
+                hop_hints: None,
                 dry_run: false,
             },
             rpc_reply,
@@ -497,6 +500,7 @@ async fn test_network_send_payment_send_each_other() {
                 keysend: Some(true),
                 udt_type_script: None,
                 allow_self_payment: false,
+                hop_hints: None,
                 dry_run: false,
             },
             rpc_reply,
@@ -582,6 +586,7 @@ async fn test_network_send_payment_more_send_each_other() {
                 keysend: Some(true),
                 udt_type_script: None,
                 allow_self_payment: false,
+                hop_hints: None,
                 dry_run: false,
             },
             rpc_reply,
@@ -610,6 +615,7 @@ async fn test_network_send_payment_more_send_each_other() {
                 keysend: Some(true),
                 udt_type_script: None,
                 allow_self_payment: false,
+                hop_hints: None,
                 dry_run: false,
             },
             rpc_reply,
@@ -637,6 +643,7 @@ async fn test_network_send_payment_more_send_each_other() {
                 keysend: Some(true),
                 udt_type_script: None,
                 allow_self_payment: false,
+                hop_hints: None,
                 dry_run: false,
             },
             rpc_reply,
@@ -665,6 +672,7 @@ async fn test_network_send_payment_more_send_each_other() {
                 keysend: Some(true),
                 udt_type_script: None,
                 allow_self_payment: false,
+                hop_hints: None,
                 dry_run: false,
             },
             rpc_reply,
@@ -755,6 +763,7 @@ async fn test_network_send_payment_send_with_ack() {
                 keysend: Some(true),
                 udt_type_script: None,
                 allow_self_payment: false,
+                hop_hints: None,
                 dry_run: false,
             },
             rpc_reply,
@@ -786,6 +795,7 @@ async fn test_network_send_payment_send_with_ack() {
                 keysend: Some(true),
                 udt_type_script: None,
                 allow_self_payment: false,
+                hop_hints: None,
                 dry_run: false,
             },
             rpc_reply,
@@ -925,6 +935,7 @@ async fn test_network_send_previous_tlc_error() {
                 keysend: Some(true),
                 udt_type_script: None,
                 allow_self_payment: false,
+                hop_hints: None,
                 dry_run: false,
                 tlc_expiry_limit: None,
             },
@@ -979,6 +990,7 @@ async fn test_network_send_payment_keysend_with_payment_hash() {
                 keysend: Some(true),
                 udt_type_script: None,
                 allow_self_payment: false,
+                hop_hints: None,
                 dry_run: false,
             },
             rpc_reply,
@@ -1027,6 +1039,7 @@ async fn test_network_send_payment_final_incorrect_hash() {
                 keysend: None,
                 udt_type_script: None,
                 allow_self_payment: false,
+                hop_hints: None,
                 dry_run: false,
             },
             rpc_reply,
@@ -1092,6 +1105,7 @@ async fn test_network_send_payment_target_not_found() {
                 keysend: None,
                 udt_type_script: None,
                 allow_self_payment: false,
+                hop_hints: None,
                 dry_run: false,
             },
             rpc_reply,
@@ -1132,6 +1146,7 @@ async fn test_network_send_payment_amount_is_too_large() {
                 keysend: None,
                 udt_type_script: None,
                 allow_self_payment: false,
+                hop_hints: None,
                 dry_run: false,
             },
             rpc_reply,
@@ -1176,6 +1191,7 @@ async fn test_network_send_payment_with_dry_run() {
                 keysend: None,
                 udt_type_script: None,
                 allow_self_payment: false,
+                hop_hints: None,
                 dry_run: true,
             },
             rpc_reply,
@@ -1203,6 +1219,7 @@ async fn test_network_send_payment_with_dry_run() {
                 keysend: None,
                 udt_type_script: None,
                 allow_self_payment: false,
+                hop_hints: None,
                 dry_run: true,
             },
             rpc_reply,
@@ -1247,6 +1264,7 @@ async fn test_send_payment_with_3_nodes() {
                 keysend: Some(true),
                 udt_type_script: None,
                 allow_self_payment: false,
+                hop_hints: None,
                 dry_run: false,
             },
             rpc_reply,
@@ -1306,8 +1324,6 @@ async fn test_send_payment_with_rev_3_nodes() {
     let node_b_local_left = node_b.get_local_balance_from_channel(channel_2);
     let node_a_local = node_a.get_local_balance_from_channel(channel_2);
 
-    // sleep for 2 seconds to make sure the channel is established
-    tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
     let sent_amount = 1000000 + 5;
     let node_a_pubkey = node_a.pubkey.clone();
     let message = |rpc_reply| -> NetworkActorMessage {
@@ -1325,6 +1341,7 @@ async fn test_send_payment_with_rev_3_nodes() {
                 keysend: Some(true),
                 udt_type_script: None,
                 allow_self_payment: false,
+                hop_hints: None,
                 dry_run: false,
             },
             rpc_reply,
@@ -1395,6 +1412,7 @@ async fn test_send_payment_with_max_nodes() {
                 keysend: Some(true),
                 udt_type_script: None,
                 allow_self_payment: false,
+                hop_hints: None,
                 dry_run: true,
             },
             rpc_reply,
@@ -1418,6 +1436,7 @@ async fn test_send_payment_with_max_nodes() {
                 keysend: Some(true),
                 udt_type_script: None,
                 allow_self_payment: false,
+                hop_hints: None,
                 dry_run: false,
             },
             rpc_reply,
@@ -1484,6 +1503,7 @@ async fn test_send_payment_with_3_nodes_overflow() {
                 keysend: Some(true),
                 udt_type_script: None,
                 allow_self_payment: false,
+                hop_hints: None,
                 dry_run: false,
             },
             rpc_reply,
@@ -1532,6 +1552,7 @@ async fn test_send_payment_fail_with_3_nodes_invalid_hash() {
                 keysend: None,
                 udt_type_script: None,
                 allow_self_payment: false,
+                hop_hints: None,
                 dry_run: false,
             },
             rpc_reply,
@@ -1603,6 +1624,7 @@ async fn test_send_payment_fail_with_3_nodes_final_tlc_expiry_delta() {
                 keysend: Some(true),
                 udt_type_script: None,
                 allow_self_payment: false,
+                hop_hints: None,
                 dry_run: false,
             },
             rpc_reply,
@@ -1629,6 +1651,7 @@ async fn test_send_payment_fail_with_3_nodes_final_tlc_expiry_delta() {
                 keysend: Some(true),
                 udt_type_script: None,
                 allow_self_payment: false,
+                hop_hints: None,
                 dry_run: false,
             },
             rpc_reply,
@@ -1654,6 +1677,7 @@ async fn test_send_payment_fail_with_3_nodes_final_tlc_expiry_delta() {
                 keysend: Some(true),
                 udt_type_script: None,
                 allow_self_payment: false,
+                hop_hints: None,
                 dry_run: false,
             },
             rpc_reply,
@@ -1696,6 +1720,7 @@ async fn test_send_payment_fail_with_3_nodes_dry_run_fee() {
                 keysend: Some(true),
                 udt_type_script: None,
                 allow_self_payment: false,
+                hop_hints: None,
                 dry_run: true,
             },
             rpc_reply,
@@ -1721,6 +1746,7 @@ async fn test_send_payment_fail_with_3_nodes_dry_run_fee() {
                 keysend: Some(true),
                 udt_type_script: None,
                 allow_self_payment: false,
+                hop_hints: None,
                 dry_run: true,
             },
             rpc_reply,
@@ -1748,6 +1774,7 @@ async fn test_send_payment_fail_with_3_nodes_dry_run_fee() {
                 keysend: Some(true),
                 udt_type_script: None,
                 allow_self_payment: false,
+                hop_hints: None,
                 dry_run: false,
             },
             rpc_reply,
@@ -1774,6 +1801,7 @@ async fn test_send_payment_fail_with_3_nodes_dry_run_fee() {
                 keysend: Some(true),
                 udt_type_script: None,
                 allow_self_payment: false,
+                hop_hints: None,
                 dry_run: false,
             },
             rpc_reply,
@@ -1814,6 +1842,7 @@ async fn test_network_send_payment_dry_run_can_still_query() {
                 keysend: None,
                 udt_type_script: None,
                 allow_self_payment: false,
+                hop_hints: None,
                 dry_run: false,
             },
             rpc_reply,
@@ -1839,6 +1868,7 @@ async fn test_network_send_payment_dry_run_can_still_query() {
                 keysend: None,
                 udt_type_script: None,
                 allow_self_payment: false,
+                hop_hints: None,
                 dry_run: true,
             },
             rpc_reply,
@@ -1879,6 +1909,7 @@ async fn test_network_send_payment_dry_run_will_not_create_payment_session() {
                 keysend: None,
                 udt_type_script: None,
                 allow_self_payment: false,
+                hop_hints: None,
                 dry_run: true,
             },
             rpc_reply,
@@ -1905,6 +1936,7 @@ async fn test_network_send_payment_dry_run_will_not_create_payment_session() {
                 keysend: None,
                 udt_type_script: None,
                 allow_self_payment: false,
+                hop_hints: None,
                 dry_run: false,
             },
             rpc_reply,
@@ -3058,6 +3090,7 @@ async fn test_channel_update_tlc_sync_up() {
                 keysend: Some(true),
                 udt_type_script: None,
                 allow_self_payment: false,
+                hop_hints: None,
                 dry_run: false,
             },
             rpc_reply,
@@ -3130,6 +3163,7 @@ async fn test_channel_update_tlc_sync_up() {
                 keysend: Some(true),
                 udt_type_script: None,
                 allow_self_payment: false,
+                hop_hints: None,
                 dry_run: false,
             },
             rpc_reply,
@@ -3184,6 +3218,7 @@ async fn test_channel_update_tlc_sync_up() {
                 keysend: Some(true),
                 udt_type_script: None,
                 allow_self_payment: false,
+                hop_hints: None,
                 dry_run: false,
             },
             rpc_reply,
@@ -3229,6 +3264,7 @@ async fn test_channel_update_tlc_sync_up() {
                 keysend: Some(true),
                 udt_type_script: None,
                 allow_self_payment: false,
+                hop_hints: None,
                 dry_run: false,
             },
             rpc_reply,
@@ -4005,6 +4041,7 @@ async fn test_send_payment_with_node_restart_then_resend_add_tlc() {
                 keysend: Some(true),
                 udt_type_script: None,
                 allow_self_payment: false,
+                hop_hints: None,
                 dry_run: false,
             },
             rpc_reply,
@@ -4485,6 +4522,7 @@ async fn test_send_payment_with_channel_balance_error() {
                 keysend: Some(true),
                 udt_type_script: None,
                 allow_self_payment: false,
+                hop_hints: None,
                 dry_run: false,
             },
             rpc_reply,
@@ -4522,6 +4560,7 @@ async fn test_send_payment_with_channel_balance_error() {
                 keysend: Some(true),
                 udt_type_script: None,
                 allow_self_payment: false,
+                hop_hints: None,
                 dry_run: false,
             },
             rpc_reply,
@@ -4584,6 +4623,7 @@ async fn test_send_payment_with_disable_channel() {
                 keysend: Some(true),
                 udt_type_script: None,
                 allow_self_payment: false,
+                hop_hints: None,
                 dry_run: false,
             },
             rpc_reply,
@@ -4633,9 +4673,6 @@ async fn test_send_payment_with_multiple_edges_in_middle_hops() {
     let source_node = &node_0;
     let target_pubkey = node_3.pubkey.clone();
 
-    // sleep for a while
-    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
             SendPaymentCommand {
@@ -4651,6 +4688,7 @@ async fn test_send_payment_with_multiple_edges_in_middle_hops() {
                 keysend: Some(true),
                 udt_type_script: None,
                 allow_self_payment: false,
+                hop_hints: None,
                 dry_run: false,
             },
             rpc_reply,
@@ -4700,9 +4738,6 @@ async fn test_send_payment_with_all_failed_middle_hops() {
     let source_node = &node_0;
     let target_pubkey = node_3.pubkey.clone();
 
-    // sleep for a while
-    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
             SendPaymentCommand {
@@ -4718,6 +4753,7 @@ async fn test_send_payment_with_all_failed_middle_hops() {
                 keysend: Some(true),
                 udt_type_script: None,
                 allow_self_payment: false,
+                hop_hints: None,
                 dry_run: false,
             },
             rpc_reply,
@@ -4767,9 +4803,6 @@ async fn test_send_payment_with_multiple_edges_can_succeed_in_retry() {
     let source_node = &node_0;
     let target_pubkey = node_3.pubkey.clone();
 
-    // sleep for a while
-    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
             SendPaymentCommand {
@@ -4785,6 +4818,7 @@ async fn test_send_payment_with_multiple_edges_can_succeed_in_retry() {
                 keysend: Some(true),
                 udt_type_script: None,
                 allow_self_payment: false,
+                hop_hints: None,
                 dry_run: false,
             },
             rpc_reply,
@@ -4834,9 +4868,6 @@ async fn test_send_payment_with_final_hop_multiple_edges_in_middle_hops() {
     let source_node = &node_0;
     let target_pubkey = node_3.pubkey.clone();
 
-    // sleep for a while
-    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
             SendPaymentCommand {
@@ -4852,6 +4883,7 @@ async fn test_send_payment_with_final_hop_multiple_edges_in_middle_hops() {
                 keysend: Some(true),
                 udt_type_script: None,
                 allow_self_payment: false,
+                hop_hints: None,
                 dry_run: false,
             },
             rpc_reply,
@@ -4901,9 +4933,6 @@ async fn test_send_payment_with_final_all_failed_middle_hops() {
     let source_node = &node_0;
     let target_pubkey = node_3.pubkey.clone();
 
-    // sleep for a while
-    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
             SendPaymentCommand {
@@ -4919,6 +4948,7 @@ async fn test_send_payment_with_final_all_failed_middle_hops() {
                 keysend: Some(true),
                 udt_type_script: None,
                 allow_self_payment: false,
+                hop_hints: None,
                 dry_run: false,
             },
             rpc_reply,
@@ -4959,9 +4989,6 @@ async fn test_send_payment_with_final_multiple_edges_can_succeed_in_retry() {
     let source_node = &node_0;
     let target_pubkey = node_3.pubkey.clone();
 
-    // sleep for a while
-    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
             SendPaymentCommand {
@@ -4977,6 +5004,7 @@ async fn test_send_payment_with_final_multiple_edges_can_succeed_in_retry() {
                 keysend: Some(true),
                 udt_type_script: None,
                 allow_self_payment: false,
+                hop_hints: None,
                 dry_run: false,
             },
             rpc_reply,
@@ -5015,9 +5043,6 @@ async fn test_send_payment_with_first_hop_failed_with_fee() {
     let source_node = &node_0;
     let target_pubkey = node_3.pubkey.clone();
 
-    // sleep for a while
-    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
             SendPaymentCommand {
@@ -5033,6 +5058,7 @@ async fn test_send_payment_with_first_hop_failed_with_fee() {
                 keysend: Some(true),
                 udt_type_script: None,
                 allow_self_payment: false,
+                hop_hints: None,
                 dry_run: false,
             },
             rpc_reply,
@@ -5067,9 +5093,6 @@ async fn test_send_payment_succeed_with_multiple_edges_in_first_hop() {
     let source_node = &node_0;
     let target_pubkey = node_3.pubkey.clone();
 
-    // sleep for a while
-    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
             SendPaymentCommand {
@@ -5085,6 +5108,7 @@ async fn test_send_payment_succeed_with_multiple_edges_in_first_hop() {
                 keysend: Some(true),
                 udt_type_script: None,
                 allow_self_payment: false,
+                hop_hints: None,
                 dry_run: false,
             },
             rpc_reply,
@@ -5124,9 +5148,6 @@ async fn test_send_payment_with_first_hop_all_failed() {
     let source_node = &node_0;
     let target_pubkey = node_3.pubkey.clone();
 
-    // sleep for a while
-    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
             SendPaymentCommand {
@@ -5142,6 +5163,7 @@ async fn test_send_payment_with_first_hop_all_failed() {
                 keysend: Some(true),
                 udt_type_script: None,
                 allow_self_payment: false,
+                hop_hints: None,
                 dry_run: false,
             },
             rpc_reply,
@@ -5178,9 +5200,6 @@ async fn test_send_payment_will_succeed_with_direct_channel_info_first_hop() {
     let source_node = &mut node_0;
     let target_pubkey = node_3.pubkey.clone();
 
-    // sleep for a while
-    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-
     // manually update the channel's to_local_amount
     source_node
         .update_channel_local_balance(channels[0], 100)
@@ -5202,6 +5221,7 @@ async fn test_send_payment_will_succeed_with_direct_channel_info_first_hop() {
                 keysend: Some(true),
                 udt_type_script: None,
                 allow_self_payment: false,
+                hop_hints: None,
                 dry_run: false,
             },
             rpc_reply,
@@ -5244,9 +5264,6 @@ async fn test_send_payment_will_succeed_with_retry_in_middle_hops() {
     let source_node = &mut node_0;
     let target_pubkey = node_3.pubkey.clone();
 
-    // sleep for a while
-    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-
     // manually update the channel's to_local_amount
     node_2.update_channel_local_balance(channels[2], 100).await;
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
@@ -5266,6 +5283,7 @@ async fn test_send_payment_will_succeed_with_retry_in_middle_hops() {
                 keysend: Some(true),
                 udt_type_script: None,
                 allow_self_payment: false,
+                hop_hints: None,
                 dry_run: false,
             },
             rpc_reply,
@@ -5308,9 +5326,6 @@ async fn test_send_payment_will_fail_with_last_hop_info_in_add_tlc_peer() {
     let source_node = &mut node_0;
     let target_pubkey = node_3.pubkey.clone();
 
-    // sleep for a while
-    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-
     // manually update the channel's to_remote_amount
     node_3
         .update_channel_remote_balance(channels[2], 100000000)
@@ -5331,6 +5346,7 @@ async fn test_send_payment_will_fail_with_last_hop_info_in_add_tlc_peer() {
             keysend: Some(true),
             udt_type_script: None,
             allow_self_payment: false,
+            hop_hints: None,
             dry_run: false,
         })
         .await;
@@ -5376,9 +5392,6 @@ async fn test_send_payment_will_fail_with_invoice_not_generated_by_target() {
     let source_node = &mut node_0;
     let target_pubkey = node_3.pubkey.clone();
 
-    // sleep for a while
-    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-
     let invoice = InvoiceBuilder::new(Currency::Fibd)
         .amount(Some(100))
         .payment_preimage(gen_rand_sha256_hash())
@@ -5402,6 +5415,7 @@ async fn test_send_payment_will_fail_with_invoice_not_generated_by_target() {
             keysend: None,
             udt_type_script: None,
             allow_self_payment: false,
+            hop_hints: None,
             dry_run: false,
         })
         .await;
@@ -5438,9 +5452,6 @@ async fn test_send_payment_will_succeed_with_valid_invoice() {
     let target_pubkey = node_3.pubkey.clone();
     let old_amount = node_3.get_local_balance_from_channel(channels[2]);
 
-    // sleep for a while
-    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-
     let preimage = gen_rand_sha256_hash();
     let ckb_invoice = InvoiceBuilder::new(Currency::Fibd)
         .amount(Some(100))
@@ -5466,6 +5477,7 @@ async fn test_send_payment_will_succeed_with_valid_invoice() {
             keysend: None,
             udt_type_script: None,
             allow_self_payment: false,
+            hop_hints: None,
             dry_run: false,
         })
         .await;
@@ -5508,9 +5520,6 @@ async fn test_send_payment_will_fail_with_no_invoice_preimage() {
     let target_pubkey = node_3.pubkey.clone();
     let old_amount = node_3.get_local_balance_from_channel(channels[2]);
 
-    // sleep for a while
-    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-
     let preimage = gen_rand_sha256_hash();
     let ckb_invoice = InvoiceBuilder::new(Currency::Fibd)
         .amount(Some(100))
@@ -5537,6 +5546,7 @@ async fn test_send_payment_will_fail_with_no_invoice_preimage() {
             keysend: None,
             udt_type_script: None,
             allow_self_payment: false,
+            hop_hints: None,
             dry_run: false,
         })
         .await;
@@ -5582,9 +5592,6 @@ async fn test_send_payment_will_fail_with_cancelled_invoice() {
     let target_pubkey = node_3.pubkey.clone();
     let old_amount = node_3.get_local_balance_from_channel(channels[2]);
 
-    // sleep for a while
-    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-
     let preimage = gen_rand_sha256_hash();
     let ckb_invoice = InvoiceBuilder::new(Currency::Fibd)
         .amount(Some(100))
@@ -5613,6 +5620,7 @@ async fn test_send_payment_will_fail_with_cancelled_invoice() {
             keysend: None,
             udt_type_script: None,
             allow_self_payment: false,
+            hop_hints: None,
             dry_run: false,
         })
         .await;
@@ -5653,9 +5661,6 @@ async fn test_send_payment_will_succeed_with_large_tlc_expiry_limit() {
     let source_node = &mut node_0;
     let target_pubkey = node_3.pubkey.clone();
 
-    // sleep for a while
-    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-
     let expected_minimal_tlc_expiry_limit = (24 * 60 * 60 * 1000) * 3;
 
     let res = source_node
@@ -5672,6 +5677,7 @@ async fn test_send_payment_will_succeed_with_large_tlc_expiry_limit() {
             keysend: Some(true),
             udt_type_script: None,
             allow_self_payment: false,
+            hop_hints: None,
             dry_run: false,
         })
         .await;
@@ -5692,6 +5698,7 @@ async fn test_send_payment_will_succeed_with_large_tlc_expiry_limit() {
             keysend: Some(true),
             udt_type_script: None,
             allow_self_payment: false,
+            hop_hints: None,
             dry_run: false,
         })
         .await;
