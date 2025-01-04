@@ -331,7 +331,7 @@ fn test_channel_actor_state_store() {
         local_pubkey: gen_rand_fiber_public_key(),
         remote_pubkey: gen_rand_fiber_public_key(),
         funding_tx: Some(Transaction::default()),
-        funding_tx_confirmed_at: Some((1.into(), 1)),
+        funding_tx_confirmed_at: Some((1.into(), 1, 1)),
         is_acceptor: true,
         funding_udt_type_script: Some(Script::default()),
         to_local_amount: 100,

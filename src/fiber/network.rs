@@ -59,15 +59,18 @@ use super::gossip::{GossipActorMessage, GossipMessageStore, GossipMessageUpdates
 use super::graph::{NetworkGraph, NetworkGraphStateStore, SessionRoute};
 use super::key::blake2b_hash_with_salt;
 use super::types::{
-    BroadcastMessage, BroadcastMessageQuery, EcdsaSignature, FiberMessage, GossipMessage, Hash256,
-    NodeAnnouncement, OpenChannel, PaymentHopData, Privkey, Pubkey, RemoveTlcReason, TlcErr,
-    TlcErrData, TlcErrorCode,
+    BroadcastMessage, BroadcastMessageQuery, BroadcastMessageWithTimestamp, EcdsaSignature,
+    FiberMessage, GossipMessage, Hash256, NodeAnnouncement, OpenChannel, PaymentHopData, Privkey,
+    Pubkey, RemoveTlcReason, TlcErr, TlcErrData, TlcErrorCode,
 };
 use super::{FiberConfig, ASSUME_NETWORK_ACTOR_ALIVE};
 
 use crate::ckb::config::UdtCfgInfos;
 use crate::ckb::contracts::{check_udt_script, get_udt_whitelist, is_udt_type_auto_accept};
-use crate::ckb::{CkbChainMessage, FundingRequest, FundingTx, TraceTxRequest, TraceTxResponse};
+use crate::ckb::{
+    CkbChainMessage, FundingRequest, FundingTx, GetBlockTimestampRequest, TraceTxRequest,
+    TraceTxResponse,
+};
 use crate::fiber::channel::{
     AddTlcCommand, AddTlcResponse, TxCollaborationCommand, TxUpdateCommand,
 };
@@ -227,7 +230,7 @@ pub enum NetworkActorCommand {
     // we use this to query them.
     QueryBroadcastMessages(PeerId, Vec<BroadcastMessageQuery>),
     // Broadcast our BroadcastMessage to the network.
-    BroadcastMessages(Vec<BroadcastMessage>),
+    BroadcastMessages(Vec<BroadcastMessageWithTimestamp>),
     // Broadcast local information to the network.
     BroadcastLocalInfo(LocalInfoKind),
     SignMessage([u8; 32], RpcReplyPort<EcdsaSignature>),
@@ -598,8 +601,8 @@ pub enum NetworkActorEvent {
     FundingTransactionPending(Transaction, OutPoint, Hash256),
 
     /// A funding transaction has been confirmed. The transaction was included in the
-    /// block with the given transaction index.
-    FundingTransactionConfirmed(OutPoint, BlockNumber, u32),
+    /// block with the given transaction index, and the timestamp in the block header.
+    FundingTransactionConfirmed(OutPoint, BlockNumber, u32, u64),
 
     /// A funding transaction has failed.
     FundingTransactionFailed(OutPoint),
@@ -857,9 +860,14 @@ where
                     .on_funding_transaction_pending(transaction, outpoint.clone(), channel_id)
                     .await;
             }
-            NetworkActorEvent::FundingTransactionConfirmed(outpoint, block_number, tx_index) => {
+            NetworkActorEvent::FundingTransactionConfirmed(
+                outpoint,
+                block_number,
+                tx_index,
+                timestamp,
+            ) => {
                 state
-                    .on_funding_transaction_confirmed(outpoint, block_number, tx_index)
+                    .on_funding_transaction_confirmed(outpoint, block_number, tx_index, timestamp)
                     .await;
             }
             NetworkActorEvent::CommitmentTransactionPending(transaction, channel_id) => {
@@ -1305,7 +1313,7 @@ where
                     myself
                         .send_message(NetworkActorMessage::new_command(
                             NetworkActorCommand::BroadcastMessages(vec![
-                                BroadcastMessage::NodeAnnouncement(message),
+                                BroadcastMessageWithTimestamp::NodeAnnouncement(message),
                             ]),
                         ))
                         .expect(ASSUME_NETWORK_MYSELF_ALIVE);
@@ -2441,9 +2449,9 @@ where
                 remote_peer_id, &message
             );
             let _ = self.network.send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::BroadcastMessages(vec![BroadcastMessage::NodeAnnouncement(
-                    message,
-                )]),
+                NetworkActorCommand::BroadcastMessages(vec![
+                    BroadcastMessageWithTimestamp::NodeAnnouncement(message),
+                ]),
             ));
         } else {
             debug!(
@@ -2662,6 +2670,7 @@ where
             &outpoint, &channel_id, &tx_hash
         );
         let network = self.network.clone();
+        let chain = self.chain_actor.clone();
         self.broadcast_tx_with_callback(transaction, move |result| {
             let message = match result {
                 Ok(TraceTxResponse {
@@ -2673,11 +2682,51 @@ where
                         },
                     ..
                 }) => {
+                    const MAX_GET_BLOCK_TIMESTAMP_RETRY: u8 = 5;
+                    use tokio::runtime::Runtime;
+                    let rt = Runtime::new().unwrap();
+
+
+    let timestamp=                        rt.block_on( async {
+                            for _ in 0..MAX_GET_BLOCK_TIMESTAMP_RETRY {
+                                match call!(
+                                    chain,
+                                    |reply| 
+                                CkbChainMessage::GetBlockTimestamp(
+                                    GetBlockTimestampRequest::from_block_number(block_number.into()), reply
+                                )
+                            ) {
+                                Ok(Ok(Some(timestamp))) => return timestamp,
+                                Ok(Ok(None)) => {
+                                    panic!(
+                                        "Failed to get block timestamp for block number {:?}: block not found",
+                                        &block_number
+                                    );
+                                }
+                                Ok(Err(err)) => {
+                                    error!(
+                                        "Failed to get block timestamp for block number {:?}: {:?}",
+                                        &block_number, &err
+                                    );
+                                }
+                                Err(err) => {
+                                    error!(
+                                        "Failed to get block timestamp for block number {:?}: {:?}",
+                                        &block_number, &err
+                                    );
+                                }
+
+                            } 
+                        }
+                            panic!("Failed to get block timestamp for block number {:?} after {} retries", &block_number, MAX_GET_BLOCK_TIMESTAMP_RETRY);
+                    });
+
                     info!("Funding transaction {:?} confirmed", &tx_hash);
                     NetworkActorEvent::FundingTransactionConfirmed(
                         outpoint,
                         block_number.into(),
                         DUMMY_FUNDING_TX_INDEX,
+                        timestamp,
                     )
                 }
                 Ok(status) => {
@@ -2754,6 +2803,7 @@ where
         outpoint: OutPoint,
         block_number: BlockNumber,
         tx_index: u32,
+        timestamp: u64,
     ) {
         debug!("Funding transaction is confirmed: {:?}", &outpoint);
         let channel_id = match self.pending_channels.remove(&outpoint) {
@@ -2772,6 +2822,7 @@ where
             ChannelActorMessage::Event(ChannelEvent::FundingTransactionConfirmed(
                 block_number,
                 tx_index,
+                timestamp,
             )),
         )
         .await;

@@ -1,6 +1,9 @@
 #[cfg(debug_assertions)]
 use crate::fiber::network::DebugEvent;
-use crate::{debug_event, fiber::serde_utils::U64Hex};
+use crate::{
+    debug_event,
+    fiber::{serde_utils::U64Hex, types::BroadcastMessageWithTimestamp},
+};
 use bitflags::bitflags;
 use ckb_jsonrpc_types::BlockNumber;
 use futures::future::OptionFuture;
@@ -25,7 +28,7 @@ use crate::{
         },
         serde_utils::{CompactSignatureAsBytes, EntityHex, PubNonceAsBytes},
         types::{
-            AcceptChannel, AddTlc, AnnouncementSignatures, BroadcastMessage, BroadcastMessageQuery,
+            AcceptChannel, AddTlc, AnnouncementSignatures, BroadcastMessageQuery,
             BroadcastMessageQueryFlags, ChannelAnnouncement, ChannelReady, ChannelUpdate,
             ClosingSigned, CommitmentSigned, EcdsaSignature, FiberChannelMessage, FiberMessage,
             Hash256, OpenChannel, PaymentOnionPacket, PeeledPaymentOnionPacket, Privkey, Pubkey,
@@ -1709,7 +1712,7 @@ where
         event: ChannelEvent,
     ) -> Result<(), ProcessingChannelError> {
         match event {
-            ChannelEvent::FundingTransactionConfirmed(block_number, tx_index) => {
+            ChannelEvent::FundingTransactionConfirmed(block_number, tx_index, timestamp) => {
                 debug!("Funding transaction confirmed");
                 let flags = match state.state {
                     ChannelState::AwaitingChannelReady(flags) => flags,
@@ -1723,7 +1726,7 @@ where
                             "Expecting funding transaction confirmed event in state AwaitingChannelReady or after TX_SIGNATURES_SENT, but got state {:?}", &state.state)));
                     }
                 };
-                state.funding_tx_confirmed_at = Some((block_number, tx_index));
+                state.funding_tx_confirmed_at = Some((block_number, tx_index, timestamp));
                 self.network
                     .send_message(NetworkActorMessage::new_command(
                         NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
@@ -1766,7 +1769,7 @@ where
                     self.network
                         .send_message(NetworkActorMessage::new_command(
                             NetworkActorCommand::BroadcastMessages(vec![
-                                BroadcastMessage::ChannelUpdate(update),
+                                BroadcastMessageWithTimestamp::ChannelUpdate(update),
                             ]),
                         ))
                         .expect(ASSUME_NETWORK_ACTOR_ALIVE);
@@ -2766,7 +2769,7 @@ pub struct ChannelActorState {
     #[serde_as(as = "Option<EntityHex>")]
     pub funding_tx: Option<Transaction>,
 
-    pub funding_tx_confirmed_at: Option<(BlockNumber, u32)>,
+    pub funding_tx_confirmed_at: Option<(BlockNumber, u32, u64)>,
 
     #[serde_as(as = "Option<EntityHex>")]
     pub funding_udt_type_script: Option<Script>,
@@ -2932,7 +2935,7 @@ pub struct ClosedChannel {}
 #[derive(Debug)]
 pub enum ChannelEvent {
     PeerDisconnected,
-    FundingTransactionConfirmed(BlockNumber, u32),
+    FundingTransactionConfirmed(BlockNumber, u32, u64),
     CommitmentTransactionConfirmed,
     ClosingTransactionConfirmed,
     CheckTlcSetdown,
@@ -3453,9 +3456,9 @@ impl ChannelActorState {
         let channel_update = self.generate_channel_update(network).await;
         network
             .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::BroadcastMessages(vec![BroadcastMessage::ChannelUpdate(
-                    channel_update,
-                )]),
+                NetworkActorCommand::BroadcastMessages(vec![
+                    BroadcastMessageWithTimestamp::ChannelUpdate(channel_update),
+                ]),
             ))
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
     }
@@ -5384,8 +5387,13 @@ impl ChannelActorState {
             network
                 .send_message(NetworkActorMessage::new_command(
                     NetworkActorCommand::BroadcastMessages(vec![
-                        BroadcastMessage::ChannelAnnouncement(channel_announcement),
-                        BroadcastMessage::ChannelUpdate(channel_update),
+                        BroadcastMessageWithTimestamp::ChannelAnnouncement(
+                            self.funding_tx_confirmed_at
+                                .expect("funding tx confirmed")
+                                .2,
+                            channel_announcement,
+                        ),
+                        BroadcastMessageWithTimestamp::ChannelUpdate(channel_update),
                     ]),
                 ))
                 .expect(ASSUME_NETWORK_ACTOR_ALIVE);

@@ -2441,85 +2441,38 @@ impl BroadcastMessage {
             }
         }
     }
+
+    pub(crate) fn message_id(&self) -> BroadcastMessageID {
+        match self {
+            BroadcastMessage::NodeAnnouncement(node_announcement) => {
+                BroadcastMessageID::NodeAnnouncement(node_announcement.node_id)
+            }
+            BroadcastMessage::ChannelAnnouncement(channel_announcement) => {
+                BroadcastMessageID::ChannelAnnouncement(
+                    channel_announcement.channel_outpoint.clone(),
+                )
+            }
+            BroadcastMessage::ChannelUpdate(channel_update) => {
+                BroadcastMessageID::ChannelUpdate(channel_update.channel_outpoint.clone())
+            }
+        }
+    }
+
+    pub(crate) fn timestamp(&self) -> Option<u64> {
+        match self {
+            BroadcastMessage::NodeAnnouncement(node_announcement) => {
+                Some(node_announcement.timestamp)
+            }
+            BroadcastMessage::ChannelAnnouncement(_) => None,
+            BroadcastMessage::ChannelUpdate(channel_update) => Some(channel_update.timestamp),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ChannelOnchainInfo {
     pub timestamp: u64,
     pub first_output: CellOutput,
-}
-
-// Augment the broadcast message with on-chain information so that we can verify the validity of the message.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum BroadcastMessageWithOnChainInfo {
-    NodeAnnouncement(NodeAnnouncement),
-    ChannelAnnouncement(ChannelOnchainInfo, ChannelAnnouncement),
-    ChannelUpdate(ChannelUpdate),
-}
-
-impl BroadcastMessageWithOnChainInfo {
-    pub fn cursor(&self) -> Cursor {
-        match self {
-            Self::NodeAnnouncement(node_announcement) => Cursor::new(
-                node_announcement.timestamp,
-                BroadcastMessageID::NodeAnnouncement(node_announcement.node_id),
-            ),
-            Self::ChannelAnnouncement(on_chain_info, channel_announcement) => Cursor::new(
-                on_chain_info.timestamp,
-                BroadcastMessageID::ChannelAnnouncement(
-                    channel_announcement.channel_outpoint.clone(),
-                ),
-            ),
-            Self::ChannelUpdate(channel_update) => Cursor::new(
-                channel_update.timestamp,
-                BroadcastMessageID::ChannelUpdate(channel_update.channel_outpoint.clone()),
-            ),
-        }
-    }
-
-    pub fn timestamp(&self) -> u64 {
-        match self {
-            Self::NodeAnnouncement(node_announcement) => node_announcement.timestamp,
-            Self::ChannelAnnouncement(on_chain_info, _) => on_chain_info.timestamp,
-            Self::ChannelUpdate(channel_update) => channel_update.timestamp,
-        }
-    }
-
-    pub fn message_id(&self) -> BroadcastMessageID {
-        match self {
-            Self::NodeAnnouncement(node_announcement) => {
-                BroadcastMessageID::NodeAnnouncement(node_announcement.node_id)
-            }
-            Self::ChannelAnnouncement(_, channel_announcement) => {
-                BroadcastMessageID::ChannelAnnouncement(
-                    channel_announcement.channel_outpoint.clone(),
-                )
-            }
-            Self::ChannelUpdate(channel_update) => {
-                BroadcastMessageID::ChannelUpdate(channel_update.channel_outpoint.clone())
-            }
-        }
-    }
-}
-
-impl PartialEq<BroadcastMessageWithOnChainInfo> for BroadcastMessage {
-    fn eq(&self, other: &BroadcastMessageWithOnChainInfo) -> bool {
-        match (self, other) {
-            (
-                BroadcastMessage::NodeAnnouncement(node_announcement),
-                BroadcastMessageWithOnChainInfo::NodeAnnouncement(other_node_announcement),
-            ) => node_announcement == other_node_announcement,
-            (
-                BroadcastMessage::ChannelAnnouncement(channel_announcement),
-                BroadcastMessageWithOnChainInfo::ChannelAnnouncement(_, other_channel_announcement),
-            ) => channel_announcement == other_channel_announcement,
-            (
-                BroadcastMessage::ChannelUpdate(channel_update),
-                BroadcastMessageWithOnChainInfo::ChannelUpdate(other_channel_update),
-            ) => channel_update == other_channel_update,
-            _ => false,
-        }
-    }
 }
 
 // Augment the broadcast message with timestamp so that we can easily obtain the cursor of the message.
@@ -2601,7 +2554,7 @@ impl BroadcastMessageWithTimestamp {
     }
 }
 
-impl Ord for BroadcastMessageWithOnChainInfo {
+impl Ord for BroadcastMessage {
     fn cmp(&self, other: &Self) -> Ordering {
         self.message_id()
             .cmp(&other.message_id())
@@ -2609,9 +2562,30 @@ impl Ord for BroadcastMessageWithOnChainInfo {
     }
 }
 
-impl PartialOrd for BroadcastMessageWithOnChainInfo {
+impl PartialOrd for BroadcastMessage {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
+    }
+}
+
+impl From<(BroadcastMessage, Option<ChannelOnchainInfo>)> for BroadcastMessageWithTimestamp {
+    fn from(
+        (broadcast_message, channel_onchain_info): (BroadcastMessage, Option<ChannelOnchainInfo>),
+    ) -> Self {
+        match broadcast_message {
+            BroadcastMessage::NodeAnnouncement(node_announcement) => {
+                BroadcastMessageWithTimestamp::NodeAnnouncement(node_announcement)
+            }
+            BroadcastMessage::ChannelAnnouncement(channel_announcement) => {
+                let timestamp = channel_onchain_info
+                    .expect("Channel onchain info is required for channel announcement")
+                    .timestamp;
+                BroadcastMessageWithTimestamp::ChannelAnnouncement(timestamp, channel_announcement)
+            }
+            BroadcastMessage::ChannelUpdate(channel_update) => {
+                BroadcastMessageWithTimestamp::ChannelUpdate(channel_update)
+            }
+        }
     }
 }
 
@@ -2643,26 +2617,6 @@ impl From<(BroadcastMessage, u64)> for BroadcastMessageWithTimestamp {
             }
             BroadcastMessage::ChannelUpdate(channel_update) => {
                 debug_assert_eq!(timestamp, channel_update.timestamp);
-                BroadcastMessageWithTimestamp::ChannelUpdate(channel_update)
-            }
-        }
-    }
-}
-
-impl From<BroadcastMessageWithOnChainInfo> for BroadcastMessageWithTimestamp {
-    fn from(broadcast_message_with_onchain_info: BroadcastMessageWithOnChainInfo) -> Self {
-        match broadcast_message_with_onchain_info {
-            BroadcastMessageWithOnChainInfo::NodeAnnouncement(node_announcement) => {
-                BroadcastMessageWithTimestamp::NodeAnnouncement(node_announcement)
-            }
-            BroadcastMessageWithOnChainInfo::ChannelAnnouncement(
-                channel_onchain_info,
-                channel_announcement,
-            ) => BroadcastMessageWithTimestamp::ChannelAnnouncement(
-                channel_onchain_info.timestamp,
-                channel_announcement,
-            ),
-            BroadcastMessageWithOnChainInfo::ChannelUpdate(channel_update) => {
                 BroadcastMessageWithTimestamp::ChannelUpdate(channel_update)
             }
         }
