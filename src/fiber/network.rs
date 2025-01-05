@@ -1406,7 +1406,10 @@ where
 
         // we have already checked the channel_id is valid,
         match state.send_command_to_channel(*channel_id, command).await {
-            Ok(()) => {}
+            Ok(()) => {
+                let add_tlc_res = recv.await.expect("recv error").map(|res| res.tlc_id);
+                reply.send(add_tlc_res).expect("send error");
+            }
             Err(err) => {
                 error!(
                     "Failed to send onion packet to channel: {:?} with err: {:?}",
@@ -1416,8 +1419,6 @@ where
                 return reply.send(Err(tlc_error)).expect("send add tlc response");
             }
         }
-        let add_tlc_res = recv.await.expect("recv error").map(|res| res.tlc_id);
-        reply.send(add_tlc_res).expect("send error");
     }
 
     fn get_tlc_error(

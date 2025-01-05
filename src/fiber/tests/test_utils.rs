@@ -575,6 +575,7 @@ impl NetworkNode {
             udt_type_script: None,
             allow_self_payment: false,
             dry_run: false,
+            hop_hints: None,
         })
         .await
     }
