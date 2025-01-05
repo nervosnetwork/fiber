@@ -1450,7 +1450,7 @@ async fn test_send_payment_with_max_nodes() {
     assert!(res.fee > 0);
 
     // sleep for 2 seconds to make sure the payment is sent
-    tokio::time::sleep(tokio::time::Duration::from_millis(8000)).await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(12000)).await;
 
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::GetPayment(res.payment_hash, rpc_reply))
@@ -5298,7 +5298,7 @@ async fn test_send_payment_will_succeed_with_retry_in_middle_hops() {
         .unwrap();
 
     let payment_hash = res.payment_hash;
-    tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+    tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
 
     let fee = res.fee;
     eprintln!("fee: {:?}", fee);

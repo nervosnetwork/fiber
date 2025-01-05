@@ -1,4 +1,6 @@
-use super::channel::{ChannelFlags, CHANNEL_DISABLED_FLAG, MESSAGE_OF_NODE2_FLAG};
+use super::channel::{
+    ChannelFlags, ProcessingChannelError, CHANNEL_DISABLED_FLAG, MESSAGE_OF_NODE2_FLAG,
+};
 use super::config::AnnouncedNodeName;
 use super::gen::fiber::{
     self as molecule_fiber, ChannelUpdateOpt, PaymentPreimageOpt, PubNonce as Byte66, PubkeyOpt,
@@ -1651,6 +1653,15 @@ impl TryFrom<molecule_fiber::AnnouncementSignatures> for AnnouncementSignatures 
             .map_err(|e| anyhow!(e))?,
         })
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct ForwardTlcResult {
+    pub channel_id: Hash256,
+    pub payment_hash: Hash256,
+    pub tlc_id: u64,
+    pub channel_error: ProcessingChannelError,
+    pub tlc_err: Option<TlcErr>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Hash)]

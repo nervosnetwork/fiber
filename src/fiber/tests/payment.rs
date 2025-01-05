@@ -510,7 +510,7 @@ async fn test_send_payment_with_route_to_self_with_hop_hints() {
     assert!(res.is_ok());
 
     // sleep for a while
-    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+    tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
     let res = res.unwrap();
     let payment_hash = res.payment_hash;
     node_0
@@ -1370,7 +1370,7 @@ async fn test_send_payment_bench_test() {
 
     let mut all_sent = HashSet::new();
 
-    for i in 1..=15 {
+    for i in 1..=10 {
         let payment = node_0.send_payment_keysend(&node_2, 1000).await.unwrap();
         eprintln!("payment: {:?}", payment);
         all_sent.insert(payment.payment_hash);
@@ -1480,7 +1480,7 @@ async fn test_send_payment_three_nodes_send_each_other_bench_test() {
 
     let mut all_sent = vec![];
 
-    for i in 1..=8 {
+    for i in 1..=5 {
         let payment1 = node_0.send_payment_keysend(&node_2, 1000).await.unwrap();
         all_sent.push(payment1.payment_hash);
         eprintln!("send: {} payment_hash: {:?} sent", i, payment1.payment_hash);

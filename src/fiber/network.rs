@@ -502,6 +502,7 @@ pub struct SendOnionPacketCommand {
     pub peeled_onion_packet: PeeledPaymentOnionPacket,
     pub previous_tlc: Option<(Hash256, u64)>,
     pub payment_hash: Hash256,
+    pub wait_for_add_tlc_reply: bool,
 }
 
 impl NetworkActorMessage {
@@ -1366,6 +1367,7 @@ where
             peeled_onion_packet,
             previous_tlc,
             payment_hash,
+            wait_for_add_tlc_reply,
         } = command;
 
         let info = peeled_onion_packet.current.clone();
@@ -1407,8 +1409,12 @@ where
         // we have already checked the channel_id is valid,
         match state.send_command_to_channel(*channel_id, command).await {
             Ok(()) => {
-                let add_tlc_res = recv.await.expect("recv error").map(|res| res.tlc_id);
-                reply.send(add_tlc_res).expect("send error");
+                if wait_for_add_tlc_reply {
+                    let add_tlc_res = recv.await.expect("recv error").map(|res| res.tlc_id);
+                    reply.send(add_tlc_res).expect("send error");
+                } else {
+                    reply.send(Ok(u64::MAX)).expect("send error");
+                }
             }
             Err(err) => {
                 error!(
@@ -1613,6 +1619,7 @@ where
             peeled_onion_packet,
             previous_tlc: None,
             payment_hash: payment_data.payment_hash,
+            wait_for_add_tlc_reply: true,
         };
 
         self.handle_send_onion_packet_command(state, command, rpc_reply)
@@ -1679,7 +1686,6 @@ where
                         // If this is the first hop error, like the WaitingTlcAck error,
                         // we will just retry later, return Ok here for letting endpoint user
                         // know payment session is created successfully
-                        // self.store.insert_payment_session(payment_session.clone());
                         myself.send_after(Duration::from_millis(500), move || {
                             NetworkActorMessage::new_event(NetworkActorEvent::RetrySendPayment(
                                 payment_hash,
