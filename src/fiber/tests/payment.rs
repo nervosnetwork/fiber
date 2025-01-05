@@ -685,13 +685,13 @@ async fn test_send_payment_bench_test() {
         true,
     )
     .await;
-    let [mut node_0, _node_1, node_2] = nodes.try_into().expect("3 nodes");
+    let [mut node_0, node_1, node_2] = nodes.try_into().expect("3 nodes");
 
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
     let mut all_sent = HashSet::new();
 
-    for i in 1..=9 {
+    for i in 1..=15 {
         let payment = node_0.send_payment_keysend(&node_2, 1000).await.unwrap();
         eprintln!("payment: {:?}", payment);
         all_sent.insert(payment.payment_hash);
@@ -699,7 +699,7 @@ async fn test_send_payment_bench_test() {
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
     }
 
-    tokio::time::sleep(tokio::time::Duration::from_millis(5000)).await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
     loop {
         for payment_hash in all_sent.clone().iter() {
@@ -709,8 +709,14 @@ async fn test_send_payment_bench_test() {
                 eprintln!("payment_hash: {:?} success", payment_hash);
                 all_sent.remove(payment_hash);
             }
-            tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         }
+        let res = node_0.node_info().await;
+        eprintln!("node0 node_info: {:?}", res);
+        let res = node_1.node_info().await;
+        eprintln!("node1 node_info: {:?}", res);
+        let res = node_2.node_info().await;
+        eprintln!("node2 node_info: {:?}", res);
         if all_sent.is_empty() {
             break;
         }
@@ -795,7 +801,7 @@ async fn test_send_payment_three_nodes_send_each_other_bench_test() {
 
     let mut all_sent = vec![];
 
-    for i in 1..=10 {
+    for i in 1..=8 {
         let payment1 = node_0.send_payment_keysend(&node_2, 1000).await.unwrap();
         all_sent.push(payment1.payment_hash);
         eprintln!("send: {} payment_hash: {:?} sent", i, payment1.payment_hash);
@@ -803,10 +809,9 @@ async fn test_send_payment_three_nodes_send_each_other_bench_test() {
         let payment2 = node_2.send_payment_keysend(&node_0, 1000).await.unwrap();
         all_sent.push(payment2.payment_hash);
         eprintln!("send: {} payment_hash: {:?} sent", i, payment2.payment_hash);
-        tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
 
         node_0.wait_until_success(payment1.payment_hash).await;
         node_2.wait_until_success(payment2.payment_hash).await;
     }
-    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 }

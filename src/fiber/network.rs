@@ -1399,10 +1399,8 @@ where
                 return reply.send(Err(tlc_error)).expect("send add tlc response");
             }
         }
-        debug!("got add tlc response ......");
         let add_tlc_res = recv.await.expect("recv error").map(|res| res.tlc_id);
-        reply.send(add_tlc_res.clone()).expect("send error");
-        debug!("send add tlc response ......: {:?}", add_tlc_res);
+        reply.send(add_tlc_res).expect("send error");
     }
 
     fn get_tlc_error(
@@ -1442,10 +1440,6 @@ where
         payment_hash: Hash256,
         reason: RemoveTlcReason,
     ) {
-        error!(
-            "Received RemoveTLC event: {:?}, reason: {:?}",
-            payment_hash, reason
-        );
         if let Some(mut payment_session) = self.store.get_payment_session(payment_hash) {
             if payment_session.status == PaymentSessionStatus::Inflight {
                 match reason {
@@ -1605,7 +1599,7 @@ where
 
         self.handle_send_onion_packet_command(state, command, rpc_reply)
             .await;
-        debug!("got send onion packet response ......");
+
         match recv.await.expect("msg recv error") {
             Err(error_detail) => {
                 self.update_graph_with_tlc_fail(&state.network, &error_detail)
@@ -1624,7 +1618,6 @@ where
                     // otherwise the endpoint user may get confused in the internal state changes
                     self.set_payment_fail_with_error(payment_session, &err);
                 }
-                debug!("send payment error: {:?}", error_detail);
                 return Err(Error::SendPaymentFirstHopError(err, need_to_retry));
             }
             Ok(tlc_id) => {
@@ -1655,10 +1648,6 @@ where
         let payment_data = payment_session.request.clone();
         if payment_session.can_retry() {
             payment_session.retried_times += 1;
-            error!(
-                "begin to payment session: {:?} with retried times: {}",
-                payment_hash, payment_session.retried_times
-            );
             let hops_info = self
                 .build_payment_route(&mut payment_session, &payment_data)
                 .await?;
@@ -1672,6 +1661,7 @@ where
                         // If this is the first hop error, like the WaitingTlcAck error,
                         // we will just retry later, return Ok here for letting endpoint user
                         // know payment session is created successfully
+                        // self.store.insert_payment_session(payment_session.clone());
                         myself.send_after(Duration::from_millis(500), move || {
                             NetworkActorMessage::new_event(NetworkActorEvent::RetrySendPayment(
                                 payment_hash,

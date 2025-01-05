@@ -102,7 +102,7 @@ pub const MESSAGE_OF_NODE2_FLAG: u32 = 1;
 // The channel is disabled, and no more tlcs can be added to the channel.
 pub const CHANNEL_DISABLED_FLAG: u32 = 1;
 
-const AUTO_SETDOWN_TLC_INTERVAL: Duration = Duration::from_secs(2);
+const RETRYABLE_TLC_OPS_INTERVAL: Duration = Duration::from_millis(500);
 
 #[derive(Debug)]
 pub enum ChannelActorMessage {
@@ -172,7 +172,7 @@ pub struct AddTlcCommand {
     pub previous_tlc: Option<(Hash256, u64)>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RemoveTlcCommand {
     pub id: u64,
     pub reason: RemoveTlcReason,
@@ -672,13 +672,15 @@ where
         commitment_signed: CommitmentSigned,
     ) -> Result<(), ProcessingChannelError> {
         // build commitment tx and verify signature from remote, if passed send ACK for partner
-        state.verify_commitment_signed_and_send_ack(commitment_signed, &self.network)?;
+        state.verify_commitment_signed_and_send_ack(commitment_signed.clone(), &self.network)?;
+        debug!(
+            "handled commitment_signed peer message: {:?}",
+            commitment_signed
+        );
 
         let need_commitment_signed = state.tlc_state.update_for_commitment_signed();
-        if need_commitment_signed {
-            if !state.tlc_state.waiting_ack {
-                self.handle_commitment_signed_command(state)?;
-            }
+        if need_commitment_signed && !state.tlc_state.waiting_ack {
+            self.handle_commitment_signed_command(state)?;
         }
 
         // flush remove tlc for received tlcs after replying ack for peer
@@ -726,10 +728,7 @@ where
     ) {
         let tlc_err = match error.source {
             // If we already have TlcErr, we can directly use it to send back to the peer.
-            ProcessingChannelError::TlcForwardingError(tlc_err) => {
-                eprintln!("Tlc forwarding error: {:?}", tlc_err);
-                tlc_err
-            }
+            ProcessingChannelError::TlcForwardingError(tlc_err) => tlc_err,
             _ => {
                 let error_detail = self.get_tlc_error(state, &error.source).await;
                 #[cfg(debug_assertions)]
@@ -1220,7 +1219,7 @@ where
             .send_message(NetworkActorMessage::new_command(
                 NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
                     state.get_remote_peer_id(),
-                    FiberMessage::commitment_signed(commitment_signed),
+                    FiberMessage::commitment_signed(commitment_signed.clone()),
                 )),
             ))
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
@@ -1247,10 +1246,6 @@ where
         state: &mut ChannelActorState,
         command: AddTlcCommand,
     ) -> Result<u64, ProcessingChannelError> {
-        eprintln!(
-            "begin to handle add tlc command: {:?}",
-            &command.payment_hash
-        );
         state.check_for_tlc_update(Some(command.amount), true, true)?;
         state.check_tlc_expiry(command.expiry)?;
         let tlc = state.create_outbounding_tlc(command.clone());
@@ -1280,11 +1275,7 @@ where
             ))
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
 
-        self.handle_commitment_signed_command(state)?;
-        eprintln!(
-            "finished handle add tlc command: {:?}",
-            &command.payment_hash
-        );
+        self.handle_commitment_signed_command(state).unwrap();
         Ok(tlc.tlc_id.into())
     }
 
@@ -1514,9 +1505,6 @@ where
         state: &mut ChannelActorState,
     ) {
         let pending_tlc_ops = state.tlc_state.get_pending_operations();
-        for op in pending_tlc_ops.iter() {
-            eprintln!("Begin to applying retryable tlc operation: {:?}", &op);
-        }
         for retryable_operation in pending_tlc_ops.into_iter() {
             let need_retry = match retryable_operation {
                 RetryableTlcOperation::RemoveTlc(tlc_id, ref reason) => {
@@ -1546,7 +1534,7 @@ where
                 }
                 RetryableTlcOperation::RelayRemoveTlc(channel_id, tlc_id, ref reason) => {
                     // send replay remove tlc with network actor to previous hop
-                    let (send, recv) = oneshot::channel::<Result<(), ProcessingChannelError>>();
+                    let (send, _recv) = oneshot::channel::<Result<(), ProcessingChannelError>>();
                     let port = RpcReplyPort::from(send);
                     self.network
                         .send_message(NetworkActorMessage::new_command(
@@ -1562,25 +1550,8 @@ where
                             }),
                         ))
                         .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-                    match recv.await {
-                        Ok(Ok(_)) => false,
-                        Ok(Err(ProcessingChannelError::WaitingTlcAck)) => {
-                            error!(
-                                    "Failed to relay remove tlc: {:?} because of WaitingTlcAck, retry it later",
-                                    &retryable_operation
-                                );
-                            state.tlc_state.debug();
-                            true
-                        }
-                        Ok(Err(err)) => {
-                            error!(
-                                    "Failed to relay remove tlc: {:?} with reason: {:?}, will not retry",
-                                    &retryable_operation, err
-                                );
-                            false
-                        }
-                        Err(_) => true,
-                    }
+                    // the previous hop will automatically retry if there is Waiting_Ack error
+                    false
                 }
                 RetryableTlcOperation::ForwardTlc(
                     payment_hash,
@@ -1631,16 +1602,9 @@ where
             }
         }
 
-        if state.tlc_state.get_pending_operations().is_empty() {
-            eprintln!("All retryable tlc operations are applied successfully !!!");
-        }
-        for op in state.tlc_state.get_pending_operations().iter() {
-            eprintln!("After apply there is retryable tlc operation: {:?}", &op);
-        }
-
         // If there are more pending removes, we will retry it later
         if !state.tlc_state.get_pending_operations().is_empty() {
-            myself.send_after(AUTO_SETDOWN_TLC_INTERVAL, || {
+            myself.send_after(RETRYABLE_TLC_OPS_INTERVAL, || {
                 ChannelActorMessage::Event(ChannelEvent::CheckTlcRetryOperation)
             });
         }
@@ -1751,6 +1715,7 @@ where
 
     pub async fn handle_command(
         &self,
+        myself: &ActorRef<ChannelActorMessage>,
         state: &mut ChannelActorState,
         command: ChannelCommand,
     ) -> Result<(), ProcessingChannelError> {
@@ -1774,14 +1739,25 @@ where
                 }
             }
             ChannelCommand::RemoveTlc(command, reply) => {
-                match self.handle_remove_tlc_command(state, command) {
+                match self.handle_remove_tlc_command(state, command.clone()) {
                     Ok(_) => {
                         let _ = reply.send(Ok(()));
                         Ok(())
                     }
                     Err(err) => {
-                        let _ = reply.send(Err(err.clone()));
-                        Err(err)
+                        if matches!(err, ProcessingChannelError::WaitingTlcAck) {
+                            self.register_retryable_tlc_remove(
+                                myself,
+                                state,
+                                TLCId::Received(command.id),
+                                command.reason,
+                            )
+                            .await;
+                            Ok(())
+                        } else {
+                            let _ = reply.send(Err(err.clone()));
+                            Err(err)
+                        }
                     }
                 }
             }
@@ -2246,11 +2222,10 @@ where
                         error, message
                     );
                     debug_event!(&self.network, &format!("{:?}", error));
-                    panic!("now");
                 }
             }
             ChannelActorMessage::Command(command) => {
-                if let Err(err) = self.handle_command(state, command).await {
+                if let Err(err) = self.handle_command(&myself, state, command).await {
                     error!("Error while processing channel command: {:?}", err);
                 }
             }
@@ -2586,17 +2561,16 @@ pub struct TlcState {
     pub retryable_tlc_operations: Vec<RetryableTlcOperation>,
     pub applied_add_tlcs: HashSet<TLCId>,
     pub waiting_ack: bool,
-    pub begin_waiting_time: u64,
 }
 
 impl TlcState {
     #[cfg(debug_assertions)]
     pub fn debug(&self) {
         for tlc in self.offered_tlcs.tlcs.iter() {
-            eprintln!("offered_tlc: {:?}", tlc.log());
+            debug!("offered_tlc: {:?}", tlc.log());
         }
         for tlc in self.received_tlcs.tlcs.iter() {
-            eprintln!("received_tlc: {:?}", tlc.log());
+            debug!("received_tlc: {:?}", tlc.log());
         }
     }
 
@@ -2649,11 +2623,6 @@ impl TlcState {
 
     pub fn set_waiting_ack(&mut self, waiting_ack: bool) {
         self.waiting_ack = waiting_ack;
-        self.begin_waiting_time = if waiting_ack {
-            now_timestamp_as_millis_u64()
-        } else {
-            0
-        };
     }
 
     pub fn insert_retryable_tlc_operation(&mut self, operation: RetryableTlcOperation) -> bool {
@@ -4865,17 +4834,6 @@ impl ChannelActorState {
         is_sent: bool,
     ) -> ProcessingChannelResult {
         if is_tlc_command_message && self.tlc_state.waiting_ack {
-            let now = now_timestamp_as_millis_u64();
-            let instance = now - self.tlc_state.begin_waiting_time;
-            eprintln!(
-                "Already waiting for TLC ack for {:?} ",
-                Duration::from_millis(instance)
-            );
-
-            if instance > 10 * 1000 {
-                self.tlc_state.debug();
-            }
-
             return Err(ProcessingChannelError::WaitingTlcAck);
         }
         match self.state {
