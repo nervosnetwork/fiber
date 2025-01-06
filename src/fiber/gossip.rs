@@ -324,12 +324,6 @@ pub enum GossipActorMessage {
     // We will save and broadcast the messages. Note that we don't check the dependencies of
     // these messages because we assume that the messages created by us are always valid.
     TryBroadcastMessages(Vec<BroadcastMessageWithTimestamp>),
-    // Broadcast a message to the network. The message here must have all its dependencies met.
-    // This is normally the case when we saved a message to the store.
-    // This is an internal command used by both TryBroadcastMessages and ProcessBroadcastMessage,
-    // in which we will normally enrich the BroadcastMessage and check their dependencies,
-    // and then broadcast them to the network.
-    BroadcastMessageImmediately(BroadcastMessageWithTimestamp),
     // Send gossip message to a peer.
     SendGossipMessage(GossipMessageWithPeerId),
     // Received GossipMessage from a peer
@@ -621,10 +615,6 @@ impl PeerFilterProcessor {
         Self { filter, actor }
     }
 
-    fn get_filter(&self) -> &Cursor {
-        &self.filter
-    }
-
     fn update_filter(&mut self, filter: &Cursor) {
         self.filter = filter.clone();
         self.actor
@@ -848,7 +838,6 @@ where
         maintenance_interval: Duration,
         announce_private_addr: bool,
         store: S,
-        gossip_actor: ActorRef<GossipActorMessage>,
         chain_actor: ActorRef<CkbChainMessage>,
         supervisor: ActorCell,
     ) -> Self {
@@ -862,7 +851,6 @@ where
                 maintenance_interval,
                 announce_private_addr,
                 store.clone(),
-                gossip_actor,
                 chain_actor,
             ),
             supervisor,
@@ -970,7 +958,6 @@ pub enum GossipMessageProcessingError {
 pub struct ExtendedGossipMessageStoreState<S> {
     announce_private_addr: bool,
     store: S,
-    gossip_actor: ActorRef<GossipActorMessage>,
     chain_actor: ActorRef<CkbChainMessage>,
     next_id: u64,
     output_ports: HashMap<u64, BroadcastMessageOutput>,
@@ -978,16 +965,10 @@ pub struct ExtendedGossipMessageStoreState<S> {
 }
 
 impl<S: GossipMessageStore> ExtendedGossipMessageStoreState<S> {
-    fn new(
-        announce_private_addr: bool,
-        store: S,
-        gossip_actor: ActorRef<GossipActorMessage>,
-        chain_actor: ActorRef<CkbChainMessage>,
-    ) -> Self {
+    fn new(announce_private_addr: bool, store: S, chain_actor: ActorRef<CkbChainMessage>) -> Self {
         Self {
             announce_private_addr,
             store,
-            gossip_actor,
             chain_actor,
             next_id: Default::default(),
             output_ports: Default::default(),
@@ -996,7 +977,8 @@ impl<S: GossipMessageStore> ExtendedGossipMessageStoreState<S> {
     }
 
     // Obtaining all the messages whose transitive dependencies are already available,
-    // check their validity and then save valid messages to a list that can be sent to the subscribers.
+    // check their validity and then save valid messages to store and
+    // return the list of saved messages that can be sent to the subscribers.
     async fn prune_messages_to_be_saved(&mut self) -> Vec<BroadcastMessageWithTimestamp> {
         // Note that we have to call has_dependencies_available before changing messages_to_be_saved,
         // as the function will check the dependencies of the message in the current messages_to_be_saved.
@@ -1185,13 +1167,7 @@ impl<S: GossipMessageStore> ExtendedGossipMessageStoreActor<S> {
 impl<S: GossipMessageStore + Send + Sync + 'static> Actor for ExtendedGossipMessageStoreActor<S> {
     type Msg = ExtendedGossipMessageStoreMessage;
     type State = ExtendedGossipMessageStoreState<S>;
-    type Arguments = (
-        Duration,
-        bool,
-        S,
-        ActorRef<GossipActorMessage>,
-        ActorRef<CkbChainMessage>,
-    );
+    type Arguments = (Duration, bool, S, ActorRef<CkbChainMessage>);
 
     async fn pre_start(
         &self,
@@ -1200,7 +1176,6 @@ impl<S: GossipMessageStore + Send + Sync + 'static> Actor for ExtendedGossipMess
             gossip_store_maintenance_interval,
             announce_private_addr,
             store,
-            gossip_actor,
             chain_actor,
         ): Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
@@ -1210,7 +1185,6 @@ impl<S: GossipMessageStore + Send + Sync + 'static> Actor for ExtendedGossipMess
         Ok(ExtendedGossipMessageStoreState::new(
             announce_private_addr,
             store,
-            gossip_actor,
             chain_actor,
         ))
     }
@@ -2201,7 +2175,6 @@ where
             store_maintenance_interval,
             announce_private_addr,
             store,
-            myself.clone(),
             chain_actor.clone(),
             myself.get_cell(),
         )
@@ -2296,33 +2269,6 @@ where
                     ))
                     .expect("store actor alive");
             }
-            GossipActorMessage::BroadcastMessageImmediately(message) => {
-                for (peer, peer_state) in &state.peer_states {
-                    let session = peer_state.session_id;
-                    match &peer_state.filter_processor {
-                        Some(filter_processor)
-                            if filter_processor.get_filter() < &message.cursor() =>
-                        {
-                            trace!("Broadcasting message to peer {:?}: {:?}", &peer, &message);
-                            state
-                                .send_message_to_session(
-                                    session,
-                                    GossipMessage::BroadcastMessagesFilterResult(
-                                        message.create_broadcast_messages_filter_result(),
-                                    ),
-                                )
-                                .await?;
-                        }
-                        _ => {
-                            debug!(
-                                "Ignoring broadcast message for peer {:?}: {:?} as its filter processor is {:?}",
-                                peer, &message, &peer_state.filter_processor
-                            );
-                        }
-                    }
-                }
-            }
-
             GossipActorMessage::RotateOutboundPassiveSyncingPeers => {
                 if !state.is_ready_for_passive_syncing() {
                     return Ok(());
