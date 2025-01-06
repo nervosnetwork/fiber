@@ -1013,6 +1013,73 @@ impl TryFrom<molecule_fiber::ClosingSigned> for ClosingSigned {
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct UpdateTlcInfo {
+    pub channel_id: Hash256,
+    pub tlc_expiry_delta: Option<u64>,
+    pub tlc_minimum_value: Option<u128>,
+    pub tlc_maximum_value: Option<u128>,
+    pub tlc_fee_proportional_millionths: Option<u128>,
+}
+
+impl From<UpdateTlcInfo> for molecule_fiber::UpdateTlcInfo {
+    fn from(update_tlc_info: UpdateTlcInfo) -> Self {
+        molecule_fiber::UpdateTlcInfo::new_builder()
+            .channel_id(update_tlc_info.channel_id.into())
+            .tlc_expiry_delta(
+                molecule_fiber::Uint64Opt::new_builder()
+                    .set(update_tlc_info.tlc_expiry_delta.map(|x| x.pack()))
+                    .build(),
+            )
+            .tlc_minimum_value(
+                molecule_fiber::Uint128Opt::new_builder()
+                    .set(update_tlc_info.tlc_minimum_value.map(|x| x.pack()))
+                    .build(),
+            )
+            .tlc_maximum_value(
+                molecule_fiber::Uint128Opt::new_builder()
+                    .set(update_tlc_info.tlc_maximum_value.map(|x| x.pack()))
+                    .build(),
+            )
+            .tlc_fee_proportional_millionths(
+                molecule_fiber::Uint128Opt::new_builder()
+                    .set(
+                        update_tlc_info
+                            .tlc_fee_proportional_millionths
+                            .map(|x| x.pack()),
+                    )
+                    .build(),
+            )
+            .build()
+    }
+}
+
+impl TryFrom<molecule_fiber::UpdateTlcInfo> for UpdateTlcInfo {
+    type Error = Error;
+
+    fn try_from(update_tlc_info: molecule_fiber::UpdateTlcInfo) -> Result<Self, Self::Error> {
+        Ok(UpdateTlcInfo {
+            channel_id: update_tlc_info.channel_id().into(),
+            tlc_expiry_delta: update_tlc_info
+                .tlc_expiry_delta()
+                .to_opt()
+                .map(|x| x.unpack()),
+            tlc_minimum_value: update_tlc_info
+                .tlc_minimum_value()
+                .to_opt()
+                .map(|x| x.unpack()),
+            tlc_maximum_value: update_tlc_info
+                .tlc_maximum_value()
+                .to_opt()
+                .map(|x| x.unpack()),
+            tlc_fee_proportional_millionths: update_tlc_info
+                .tlc_fee_proportional_millionths()
+                .to_opt()
+                .map(|x| x.unpack()),
+        })
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AddTlc {
     pub channel_id: Hash256,
     pub tlc_id: u64,
@@ -2179,6 +2246,7 @@ pub enum FiberChannelMessage {
     TxAckRBF(TxAckRBF),
     Shutdown(Shutdown),
     ClosingSigned(ClosingSigned),
+    UpdateTlcInfo(UpdateTlcInfo),
     AddTlc(AddTlc),
     RevokeAndAck(RevokeAndAck),
     RemoveTlc(RemoveTlc),
@@ -2202,6 +2270,7 @@ impl FiberChannelMessage {
             FiberChannelMessage::TxAckRBF(tx_ack_rbf) => tx_ack_rbf.channel_id,
             FiberChannelMessage::Shutdown(shutdown) => shutdown.channel_id,
             FiberChannelMessage::ClosingSigned(closing_signed) => closing_signed.channel_id,
+            FiberChannelMessage::UpdateTlcInfo(update_tlc_info) => update_tlc_info.channel_id,
             FiberChannelMessage::AddTlc(add_tlc) => add_tlc.channel_id,
             FiberChannelMessage::RevokeAndAck(revoke_and_ack) => revoke_and_ack.channel_id,
             FiberChannelMessage::RemoveTlc(remove_tlc) => remove_tlc.channel_id,
@@ -3113,6 +3182,9 @@ impl From<FiberMessage> for molecule_fiber::FiberMessageUnion {
                 FiberChannelMessage::ClosingSigned(closing_signed) => {
                     molecule_fiber::FiberMessageUnion::ClosingSigned(closing_signed.into())
                 }
+                FiberChannelMessage::UpdateTlcInfo(update_tlc_info) => {
+                    molecule_fiber::FiberMessageUnion::UpdateTlcInfo(update_tlc_info.into())
+                }
                 FiberChannelMessage::AddTlc(add_tlc) => {
                     molecule_fiber::FiberMessageUnion::AddTlc(add_tlc.into())
                 }
@@ -3198,6 +3270,11 @@ impl TryFrom<molecule_fiber::FiberMessageUnion> for FiberMessage {
             molecule_fiber::FiberMessageUnion::ClosingSigned(closing_signed) => {
                 FiberMessage::ChannelNormalOperation(FiberChannelMessage::ClosingSigned(
                     closing_signed.try_into()?,
+                ))
+            }
+            molecule_fiber::FiberMessageUnion::UpdateTlcInfo(update_tlc_info) => {
+                FiberMessage::ChannelNormalOperation(FiberChannelMessage::UpdateTlcInfo(
+                    update_tlc_info.try_into()?,
                 ))
             }
             molecule_fiber::FiberMessageUnion::AddTlc(add_tlc) => {

@@ -94,7 +94,7 @@ struct ClosingSigned {
     partial_signature:  Byte32,
 }
 
-struct UpdateTlcInfo {
+table UpdateTlcInfo {
     channel_id:     Byte32,
     tlc_expiry_delta: Uint64Opt,
     tlc_minimum_value: Uint128Opt,

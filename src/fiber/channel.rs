@@ -468,6 +468,9 @@ where
                 state.maybe_channel_is_ready(&self.network).await;
                 Ok(())
             }
+            FiberChannelMessage::UpdateTlcInfo(update_tlc_info) => {
+                todo!("handle UpdateTlcInfo message: {:?}", update_tlc_info)
+            }
             FiberChannelMessage::AddTlc(add_tlc) => {
                 self.handle_add_tlc_peer_message(state, add_tlc)
             }
