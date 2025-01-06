@@ -3522,6 +3522,13 @@ impl ChannelActorState {
         Some(self.generate_channel_update(network).await)
     }
 
+    fn get_channel_update_channel_flags(&self) -> u32 {
+        self.public_channel_info
+            .as_ref()
+            .and_then(|info: &PublicChannelInfo| (!info.enabled).then_some(CHANNEL_DISABLED_FLAG))
+            .unwrap_or(0)
+    }
+
     pub fn get_unsigned_channel_update_message(&self) -> Option<ChannelUpdate> {
         let local_is_node1 = self.local_is_node1();
         let message_flags = if local_is_node1 { 0 } else { 1 };
@@ -3530,7 +3537,7 @@ impl ChannelActorState {
             self.must_get_funding_transaction_outpoint(),
             now_timestamp_as_millis_u64(),
             message_flags,
-            0,
+            self.get_channel_update_channel_flags(),
             self.local_tlc_info.tlc_expiry_delta,
             self.local_tlc_info.tlc_min_value,
             self.local_tlc_info.tlc_fee_proportional_millionths,
