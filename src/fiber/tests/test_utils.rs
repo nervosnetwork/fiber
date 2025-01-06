@@ -94,9 +94,9 @@ impl Drop for TempDir {
                 "Deleting temp directory {:?}. To keep this directory, set environment variable {RETAIN_VAR} to anything",
                 self.as_ref()
             );
-            // unsafe {
-            //     ManuallyDrop::drop(&mut self.0);
-            // }
+            unsafe {
+                ManuallyDrop::drop(&mut self.0);
+            }
         }
     }
 }

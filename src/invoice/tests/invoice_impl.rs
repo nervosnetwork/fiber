@@ -390,6 +390,9 @@ fn test_invoice_timestamp() {
         .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))
         .unwrap();
 
+    // sleep 1 milisecond to make sure the timestamp is different
+    std::thread::sleep(Duration::from_millis(1));
+
     let invoice2 = InvoiceBuilder::new(Currency::Fibb)
         .amount(Some(1280))
         .payment_hash(payment_hash)
