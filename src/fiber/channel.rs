@@ -135,7 +135,6 @@ pub enum ChannelCommand {
     // TODO: maybe we should automatically send commitment_signed message after receiving
     // tx_complete event.
     CommitmentSigned(),
-    UpdateTlcInfo(),
     AddTlc(AddTlcCommand, RpcReplyPort<Result<AddTlcResponse, TlcErr>>),
     RemoveTlc(RemoveTlcCommand, RpcReplyPort<Result<(), String>>),
     Shutdown(ShutdownCommand, RpcReplyPort<Result<(), String>>),
@@ -1595,10 +1594,6 @@ where
                 self.handle_tx_collaboration_command(state, tx_collaboration_command)
             }
             ChannelCommand::CommitmentSigned() => self.handle_commitment_signed_command(state),
-            ChannelCommand::UpdateTlcInfo() => {
-                state.send_update_tlc_info_message(&self.network);
-                Ok(())
-            }
             ChannelCommand::AddTlc(command, reply) => {
                 match self.handle_add_tlc_command(state, command) {
                     Ok(tlc_id) => {
