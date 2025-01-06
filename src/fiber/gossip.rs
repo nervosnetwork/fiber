@@ -526,13 +526,11 @@ where
                         }
                     }
 
-                    for message in messages {
-                        let _ = state
-                            .store
-                            .actor
-                            .send_message(ExtendedGossipMessageStoreMessage::SaveMessage(message))
-                            .expect("store actor alive");
-                    }
+                    let _ = state
+                        .store
+                        .actor
+                        .send_message(ExtendedGossipMessageStoreMessage::SaveMessages(messages))
+                        .expect("store actor alive");
                     myself
                         .send_message(GossipSyncingActorMessage::NewGetRequest())
                         .expect("gossip syncing actor alive");
@@ -1318,9 +1316,11 @@ impl<S: GossipMessageStore + Send + Sync + 'static> Actor for ExtendedGossipMess
                 }
             }
 
-            ExtendedGossipMessageStoreMessage::SaveMessage(message) => {
-                if let Err(error) = state.insert_message_to_be_saved_list(&message).await {
-                    trace!("Failed to save message: {:?}, error: {:?}", message, error);
+            ExtendedGossipMessageStoreMessage::SaveMessages(messages) => {
+                for message in messages {
+                    if let Err(error) = state.insert_message_to_be_saved_list(&message).await {
+                        trace!("Failed to save message: {:?}, error: {:?}", message, error);
+                    }
                 }
             }
 
@@ -1358,14 +1358,12 @@ pub enum ExtendedGossipMessageStoreMessage {
     // Update the subscription. If this Option is None, the subscription will be cancelled.
     // Otherwise the new cursor will be used to filter the messages that are sent to the subscriber.
     UpdateSubscription(u64, Option<Cursor>, RpcReplyPort<()>),
-    // Save a new broadcast message to the store. We will check if the message has any dependencies that are not
-    // saved yet. If it has, we will save it to messages_to_be_saved, otherwise we will save it to the store.
-    // We may also save the message to lagged_messages if the message is lagged.
-    // We may pass a bool parameter to indicate if a output port to wait for the message to be saved should be
-    // returned. If there is any error while saving the message, we will send an error message to the output port.
-    SaveMessage(BroadcastMessage),
-    // Save a new message to the store. If the message's dependencies are all met, then we will
-    // broadcast the message to the network. Otherwise, we will ignore the broadcasting.
+    // Save new broadcast messages to the store. The messages will be first saved to the memory,
+    // then if all the dependencies are met, they are periodically saved to the store and sent to the subscribers.
+    SaveMessages(Vec<BroadcastMessage>),
+    // Save new messages to the store, and broadcast them to the subscribers immediately.
+    // These messages will not be saved to the memory and wait for the dependencies to be met.
+    // We normally use this variant to send our own messages to the subscribers.
     SaveAndBroadcastMessages(Vec<BroadcastMessageWithTimestamp>),
     // Send broadcast messages after the cursor to the subscriber specified in the u64 id.
     // This is normally called immediately after a new subscription is created. This is the time when
@@ -1627,7 +1625,9 @@ where
         let _ = self
             .store
             .actor
-            .send_message(ExtendedGossipMessageStoreMessage::SaveMessage(message))
+            .send_message(ExtendedGossipMessageStoreMessage::SaveMessages(vec![
+                message,
+            ]))
             .expect("store actor alive");
     }
 
