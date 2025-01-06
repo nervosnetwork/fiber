@@ -1135,36 +1135,6 @@ where
         Ok(())
     }
 
-    async fn handle_forward_onion_packet(
-        &self,
-        state: &mut ChannelActorState,
-        payment_hash: Hash256,
-        peeled_onion_packet: PeeledPaymentOnionPacket,
-        added_tlc_id: u64,
-    ) -> Result<(), ProcessingChannelError> {
-        let (send, _recv) = oneshot::channel::<Result<u64, TlcErr>>();
-        let rpc_reply = RpcReplyPort::from(send);
-        self.network
-            .send_message(NetworkActorMessage::Command(
-                NetworkActorCommand::SendPaymentOnionPacket(
-                    SendOnionPacketCommand {
-                        peeled_onion_packet,
-                        previous_tlc: Some((state.get_id(), added_tlc_id)),
-                        payment_hash,
-                        wait_for_add_tlc_reply: false,
-                    },
-                    rpc_reply,
-                ),
-            ))
-            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-
-        // If we failed to forward the onion packet, we should remove the tlc.
-        // if let Err(res) = recv.await.expect("expect command replied") {
-        //     return Err(ProcessingChannelError::TlcForwardingError(res));
-        // }
-        Ok(())
-    }
-
     pub fn handle_commitment_signed_command(
         &self,
         state: &mut ChannelActorState,
@@ -1582,31 +1552,25 @@ where
                     //
                     // but we need the result for better error handling
                     // so we introduce the ForwardTlcResult to get the result based on actor message
-
                     if !try_one_time {
                         // we need to decide whether to retry it until we get ForwardTlcResult
                         continue;
                     }
-                    match self
-                        .handle_forward_onion_packet(
-                            state,
+                    match self.network.send_message(NetworkActorMessage::Command(
+                        NetworkActorCommand::SendPaymentOnionPacket(SendOnionPacketCommand {
+                            peeled_onion_packet: peeled_onion_packet.clone(),
+                            previous_tlc: Some((state.get_id(), tlc_id.into())),
                             payment_hash,
-                            peeled_onion_packet.clone(),
-                            tlc_id.into(),
-                        )
-                        .await
-                    {
+                        }),
+                    )) {
                         Ok(_) => {
                             // here we just make sure the forward tlc is sent, we don't need to wait for the result
                             // retry it if necessary until we get ForwardTlcResult
                             self.set_forward_tlc_status(state, payment_hash, false);
                             true
                         }
-                        Err(err) => {
-                            let shared_secret = peeled_onion_packet.shared_secret.clone();
-                            let err = err.with_shared_secret(shared_secret);
-                            self.process_add_tlc_error(myself, state, payment_hash, tlc_id, err)
-                                .await;
+                        Err(_err) => {
+                            // network actor is dead? we will retry it later
                             false
                         }
                     }
@@ -1619,7 +1583,7 @@ where
             }
         }
 
-        // If there are more pending removes, we will retry it later
+        // Add some randomness to the interval to avoid all channels retrying at the same time
         let rand_interval = rand::thread_rng()
             .gen_range(RETRYABLE_TLC_OPS_INTERVAL..RETRYABLE_TLC_OPS_INTERVAL * 2);
         if state.tlc_state.has_pending_operations() {
@@ -2312,7 +2276,7 @@ where
             }
             ChannelActorMessage::Command(command) => {
                 if let Err(err) = self.handle_command(&myself, state, command).await {
-                    //error!("Error while processing channel command: {:?}", err);
+                    error!("Error while processing channel command: {:?}", err);
                 }
             }
             ChannelActorMessage::Event(e) => {

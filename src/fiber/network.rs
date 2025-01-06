@@ -213,7 +213,7 @@ pub enum NetworkActorCommand {
     ControlFiberChannel(ChannelCommandWithId),
     // The first parameter is the peeled onion in binary via `PeeledOnionPacket::serialize`. `PeeledOnionPacket::current`
     // is for the current node.
-    SendPaymentOnionPacket(SendOnionPacketCommand, RpcReplyPort<Result<u64, TlcErr>>),
+    SendPaymentOnionPacket(SendOnionPacketCommand),
     PeelPaymentOnionPacket(
         PaymentOnionPacket, // onion_packet
         Hash256,            // payment_hash
@@ -502,7 +502,6 @@ pub struct SendOnionPacketCommand {
     pub peeled_onion_packet: PeeledPaymentOnionPacket,
     pub previous_tlc: Option<(Hash256, u64)>,
     pub payment_hash: Hash256,
-    pub wait_for_add_tlc_reply: bool,
 }
 
 impl NetworkActorMessage {
@@ -1128,9 +1127,8 @@ where
                     .await?
             }
 
-            NetworkActorCommand::SendPaymentOnionPacket(command, reply) => {
-                self.handle_send_onion_packet_command(state, command, reply)
-                    .await;
+            NetworkActorCommand::SendPaymentOnionPacket(command) => {
+                let _ = self.handle_send_onion_packet_command(state, command).await;
             }
             NetworkActorCommand::PeelPaymentOnionPacket(onion_packet, payment_hash, reply) => {
                 let response = onion_packet
@@ -1372,13 +1370,11 @@ where
         &self,
         state: &mut NetworkActorState<S>,
         command: SendOnionPacketCommand,
-        reply: RpcReplyPort<Result<u64, TlcErr>>,
-    ) {
+    ) -> Result<(), TlcErr> {
         let SendOnionPacketCommand {
             peeled_onion_packet,
             previous_tlc,
             payment_hash,
-            wait_for_add_tlc_reply,
         } = command;
 
         let info = peeled_onion_packet.current.clone();
@@ -1399,10 +1395,10 @@ where
                     channel_outpoint.clone(),
                     None,
                 );
-                return reply.send(Err(tlc_err)).expect("send add tlc response");
+                return Err(tlc_err);
             }
         };
-        let (send, recv) = oneshot::channel::<Result<AddTlcResponse, TlcErr>>();
+        let (send, _recv) = oneshot::channel::<Result<AddTlcResponse, TlcErr>>();
         let rpc_reply = RpcReplyPort::from(send);
         let command = ChannelCommand::AddTlc(
             AddTlcCommand {
@@ -1420,10 +1416,7 @@ where
         // we have already checked the channel_id is valid,
         match state.send_command_to_channel(*channel_id, command).await {
             Ok(()) => {
-                if wait_for_add_tlc_reply {
-                    //let add_tlc_res = recv.await.expect("recv error").map(|res| res.tlc_id);
-                    reply.send(Ok(0)).expect("send error");
-                }
+                return Ok(());
             }
             Err(err) => {
                 error!(
@@ -1431,7 +1424,7 @@ where
                     channel_id, err
                 );
                 let tlc_error = self.get_tlc_error(state, &err, &channel_outpoint);
-                return reply.send(Err(tlc_error)).expect("send add tlc response");
+                return Err(tlc_error);
             }
         }
     }
@@ -1605,8 +1598,6 @@ where
         payment_session.route =
             SessionRoute::new(state.get_public_key(), payment_data.target_pubkey, &hops);
 
-        let (send, recv) = oneshot::channel::<Result<u64, TlcErr>>();
-        let rpc_reply = RpcReplyPort::from(send);
         let peeled_onion_packet = match PeeledPaymentOnionPacket::create(
             session_key,
             hops,
@@ -1623,17 +1614,18 @@ where
                 return Err(Error::SendPaymentError(err));
             }
         };
-        let command = SendOnionPacketCommand {
-            peeled_onion_packet,
-            previous_tlc: None,
-            payment_hash: payment_data.payment_hash,
-            wait_for_add_tlc_reply: true,
-        };
 
-        self.handle_send_onion_packet_command(state, command, rpc_reply)
-            .await;
-
-        match recv.await.expect("msg recv error") {
+        match self
+            .handle_send_onion_packet_command(
+                state,
+                SendOnionPacketCommand {
+                    peeled_onion_packet,
+                    previous_tlc: None,
+                    payment_hash: payment_data.payment_hash,
+                },
+            )
+            .await
+        {
             Err(error_detail) => {
                 self.update_graph_with_tlc_fail(&state.network, &error_detail)
                     .await;
@@ -1653,7 +1645,7 @@ where
                 }
                 return Err(Error::SendPaymentFirstHopError(err, need_to_retry));
             }
-            Ok(_tlc_id) => {
+            Ok(_) => {
                 payment_session.set_inflight_status();
                 self.store.insert_payment_session(payment_session.clone());
                 return Ok(payment_session.clone());
