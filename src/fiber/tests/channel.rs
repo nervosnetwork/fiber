@@ -398,6 +398,36 @@ async fn test_create_private_channel() {
 }
 
 #[tokio::test]
+async fn test_create_channel_with_remote_tlc_info() {
+    async fn test(public: bool) {
+        let node_a_funding_amount = 100000000000;
+        let node_b_funding_amount = 6200000000;
+
+        let (node_a, node_b, channel_id, _) = NetworkNode::new_2_nodes_with_established_channel(
+            node_a_funding_amount,
+            node_b_funding_amount,
+            public,
+        )
+        .await;
+
+        let node_a_channel_state = node_a.store.get_channel_actor_state(&channel_id).unwrap();
+        let node_b_channel_state = node_b.store.get_channel_actor_state(&channel_id).unwrap();
+
+        assert_eq!(
+            Some(node_a_channel_state.local_tlc_info),
+            node_b_channel_state.remote_tlc_info
+        );
+        assert_eq!(
+            Some(node_b_channel_state.local_tlc_info),
+            node_a_channel_state.remote_tlc_info
+        );
+    }
+
+    test(true).await;
+    test(false).await;
+}
+
+#[tokio::test]
 async fn test_create_public_channel() {
     init_tracing();
 

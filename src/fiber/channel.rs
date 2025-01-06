@@ -2875,7 +2875,7 @@ pub struct ShutdownInfo {
 // This struct holds the TLC information for the channel participants.
 // We can update this information through the channel update message.
 #[serde_as]
-#[derive(Default, Clone, Debug, Serialize, Deserialize)]
+#[derive(Default, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ChannelTlcInfo {
     // The fee rate for tlc transfers. We only have these values set when
     // this is a public channel. Both sides may set this value differently.
