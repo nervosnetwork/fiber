@@ -1660,7 +1660,7 @@ pub struct ForwardTlcResult {
     pub channel_id: Hash256,
     pub payment_hash: Hash256,
     pub tlc_id: u64,
-    pub channel_error: ProcessingChannelError,
+    pub channel_error: Option<ProcessingChannelError>,
     pub tlc_err: Option<TlcErr>,
 }
 

@@ -1524,32 +1524,50 @@ async fn test_send_payment_three_nodes_bench_test() {
 
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
-    let mut all_sent = vec![];
+    let mut all_sent = HashSet::new();
 
-    for i in 1..=4 {
+    for i in 1..=7 {
         let payment1 = node_1.send_payment_keysend(&node_3, 1000).await.unwrap();
-        all_sent.push((1, payment1.payment_hash));
+        all_sent.insert((1, payment1.payment_hash));
         eprintln!("send: {} payment_hash: {:?} sent", i, payment1.payment_hash);
 
         let payment2 = node_2.send_payment_keysend(&node_3, 1000).await.unwrap();
-        all_sent.push((2, payment2.payment_hash));
+        all_sent.insert((2, payment2.payment_hash));
         eprintln!("send: {} payment_hash: {:?} sent", i, payment2.payment_hash);
 
         let payment3 = node_2.send_payment_keysend(&node_1, 1000).await.unwrap();
-        all_sent.push((2, payment3.payment_hash));
+        all_sent.insert((2, payment3.payment_hash));
         eprintln!("send: {} payment_hash: {:?} sent", i, payment3.payment_hash);
 
         let payment4 = node_3.send_payment_keysend(&node_1, 1000).await.unwrap();
-        all_sent.push((3, payment4.payment_hash));
+        all_sent.insert((3, payment4.payment_hash));
         eprintln!("send: {} payment_hash: {:?} sent", i, payment4.payment_hash);
     }
-    for (node_index, payment_hash) in all_sent {
-        let node = match node_index {
-            1 => &mut node_1,
-            2 => &mut node_2,
-            3 => &mut node_3,
-            _ => unreachable!(),
-        };
-        node.wait_until_success(payment_hash).await;
+
+    loop {
+        for (node_index, payment_hash) in all_sent.clone().iter() {
+            let node = match node_index {
+                1 => &mut node_1,
+                2 => &mut node_2,
+                3 => &mut node_3,
+                _ => unreachable!(),
+            };
+            let status = node.get_payment_status(*payment_hash).await;
+            eprintln!("got payment: {:?} status: {:?}", payment_hash, status);
+            if status == PaymentSessionStatus::Success {
+                eprintln!("payment_hash: {:?} success", payment_hash);
+                all_sent.remove(&(*node_index, *payment_hash));
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(3000)).await;
+        }
+        let res = node_1.node_info().await;
+        eprintln!("node1 node_info: {:?}", res);
+        let res = node_2.node_info().await;
+        eprintln!("node2 node_info: {:?}", res);
+        let res = node_3.node_info().await;
+        eprintln!("node3 node_info: {:?}", res);
+        if all_sent.is_empty() {
+            break;
+        }
     }
 }

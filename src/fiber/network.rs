@@ -59,9 +59,9 @@ use super::gossip::{GossipActorMessage, GossipMessageStore, GossipMessageUpdates
 use super::graph::{NetworkGraph, NetworkGraphStateStore, SessionRoute};
 use super::key::blake2b_hash_with_salt;
 use super::types::{
-    BroadcastMessage, BroadcastMessageQuery, EcdsaSignature, FiberMessage, GossipMessage, Hash256,
-    NodeAnnouncement, OpenChannel, PaymentHopData, Privkey, Pubkey, RemoveTlcReason, TlcErr,
-    TlcErrData, TlcErrorCode,
+    BroadcastMessage, BroadcastMessageQuery, EcdsaSignature, FiberMessage, ForwardTlcResult,
+    GossipMessage, Hash256, NodeAnnouncement, OpenChannel, PaymentHopData, Privkey, Pubkey,
+    RemoveTlcReason, TlcErr, TlcErrData, TlcErrorCode,
 };
 use super::{FiberConfig, ASSUME_NETWORK_ACTOR_ALIVE};
 
@@ -642,6 +642,14 @@ pub enum NetworkActorEvent {
 
     // A payment need to retry
     RetrySendPayment(Hash256),
+
+    // AddTlc result from peer (payment_hash, process_channel_error, tlc_err)
+    AddTlcFailed(
+        Hash256,
+        ProcessingChannelError,
+        TlcErr,
+        Option<(Hash256, u64)>,
+    ),
 }
 
 #[derive(Debug)]
@@ -922,6 +930,17 @@ where
             }
             NetworkActorEvent::RetrySendPayment(payment_hash) => {
                 let _ = self.try_payment_session(myself, state, payment_hash).await;
+            }
+            NetworkActorEvent::AddTlcFailed(payment_hash, channel_error, tlc_err, previous_tlc) => {
+                self.on_add_tlc_failed_event(
+                    myself,
+                    state,
+                    payment_hash,
+                    channel_error,
+                    tlc_err,
+                    previous_tlc,
+                )
+                .await;
             }
             #[cfg(test)]
             NetworkActorEvent::GossipMessage(peer_id, message) => {
@@ -1372,7 +1391,7 @@ where
 
         let info = peeled_onion_packet.current.clone();
         let shared_secret = peeled_onion_packet.shared_secret;
-        debug!("Processing onion packet info: {:?}", info);
+        //debug!("Processing onion packet info: {:?}", info);
 
         let channel_outpoint = OutPoint::new(info.funding_tx_hash.into(), 0);
         let channel_id = match state.outpoint_channel_map.get(&channel_outpoint) {
@@ -1410,8 +1429,8 @@ where
         match state.send_command_to_channel(*channel_id, command).await {
             Ok(()) => {
                 if wait_for_add_tlc_reply {
-                    let add_tlc_res = recv.await.expect("recv error").map(|res| res.tlc_id);
-                    reply.send(add_tlc_res).expect("send error");
+                    //let add_tlc_res = recv.await.expect("recv error").map(|res| res.tlc_id);
+                    reply.send(Ok(0)).expect("send error");
                 }
             }
             Err(err) => {
@@ -1587,7 +1606,6 @@ where
     ) -> Result<PaymentSession, Error> {
         let session_key = Privkey::from_slice(KeyPair::generate_random_key().as_ref());
         assert_ne!(hops[0].funding_tx_hash, Hash256::default());
-        let first_channel_outpoint = OutPoint::new(hops[0].funding_tx_hash.into(), 0);
 
         payment_session
             .session_key
@@ -1643,15 +1661,86 @@ where
                 }
                 return Err(Error::SendPaymentFirstHopError(err, need_to_retry));
             }
-            Ok(tlc_id) => {
-                payment_session.set_inflight_status(first_channel_outpoint, tlc_id);
+            Ok(_tlc_id) => {
+                payment_session.set_inflight_status();
                 self.store.insert_payment_session(payment_session.clone());
                 return Ok(payment_session.clone());
             }
         }
     }
 
+    async fn on_add_tlc_failed_event(
+        &self,
+        myself: ActorRef<NetworkActorMessage>,
+        state: &mut NetworkActorState<S>,
+        payment_hash: Hash256,
+        channel_error: ProcessingChannelError,
+        tlc_err: TlcErr,
+        previous_tlc: Option<(Hash256, u64)>,
+    ) {
+        if matches!(channel_error, ProcessingChannelError::RepeatedProcessing(_)) {
+            return;
+        }
+        if let Some((channel_id, tlc_id)) = previous_tlc {
+            myself
+                .send_message(NetworkActorMessage::new_command(
+                    NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
+                        channel_id: channel_id,
+                        command: ChannelCommand::ForwardTlcResult(ForwardTlcResult {
+                            channel_id,
+                            payment_hash,
+                            tlc_id,
+                            channel_error: Some(channel_error.clone()),
+                            tlc_err: Some(tlc_err.clone()),
+                        }),
+                    }),
+                ))
+                .expect("network actor alive");
+            unreachable!("we should not reach here");
+        } else {
+            if let Some(mut payment_session) = self.store.get_payment_session(payment_hash) {
+                // error!(
+                //     "onfail payment {:?} session status: {:?}, error: {:?}",
+                //     payment_session.status, payment_hash, channel_error
+                // );
+                if payment_session.status == PaymentSessionStatus::Inflight {
+                    // debug!(
+                    //     "Failed to send payment session: {:?}, error: {:?}",
+                    //     payment_hash, channel_error
+                    // );
+                    let need_to_retry = self
+                        .network_graph
+                        .write()
+                        .await
+                        .record_payment_fail(&payment_session, tlc_err.clone());
+                    if matches!(channel_error, ProcessingChannelError::WaitingTlcAck) {
+                        payment_session.last_error = Some("WaitingTlcAck".to_string());
+                        self.store.insert_payment_session(payment_session.clone());
+                    }
+                    if need_to_retry {
+                        let res = self.try_payment_session(myself, state, payment_hash).await;
+                        if res.is_err() {
+                            debug!("Failed to retry payment session: {:?}", res);
+                        }
+                    } else {
+                        let error = format!(
+                            "Failed to send payment session: {:?}, retried times: {}",
+                            payment_session.payment_hash(),
+                            payment_session.retried_times
+                        );
+                        self.set_payment_fail_with_error(&mut payment_session, &error);
+                    }
+                }
+            }
+        }
+    }
+
     fn set_payment_fail_with_error(&self, payment_session: &mut PaymentSession, error: &str) {
+        // debug!(
+        //     "set payment session failed: {:?}, error: {:?}",
+        //     payment_session.payment_hash(),
+        //     error
+        // );
         payment_session.set_failed_status(error);
         self.store.insert_payment_session(payment_session.clone());
     }
@@ -1670,7 +1759,14 @@ where
 
         let payment_data = payment_session.request.clone();
         if payment_session.can_retry() {
-            payment_session.retried_times += 1;
+            if payment_session.last_error != Some("WaitingTlcAck".to_string()) {
+                payment_session.retried_times += 1;
+            }
+            // warn!(
+            //     "now retrying payment session: {:?}, retried times: {}",
+            //     payment_hash, payment_session.retried_times
+            // );
+
             let hops_info = self
                 .build_payment_route(&mut payment_session, &payment_data)
                 .await?;

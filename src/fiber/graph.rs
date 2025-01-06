@@ -1205,10 +1205,6 @@ pub struct PaymentSession {
     pub status: PaymentSessionStatus,
     pub created_at: u64,
     pub last_updated_at: u64,
-    // The channel_outpoint and the tlc_id of the first hop
-    #[serde_as(as = "Option<EntityHex>")]
-    pub first_hop_channel_outpoint: Option<OutPoint>,
-    pub first_hop_tlc_id: Option<u64>,
     pub route: SessionRoute,
     // Session key for onion packet. Save it for decoding the error packet.
     pub session_key: [u8; 32],
@@ -1225,8 +1221,6 @@ impl PaymentSession {
             status: PaymentSessionStatus::Created,
             created_at: now,
             last_updated_at: now,
-            first_hop_channel_outpoint: None,
-            first_hop_tlc_id: None,
             route: SessionRoute::default(),
             session_key: Default::default(),
         }
@@ -1241,10 +1235,8 @@ impl PaymentSession {
         self.last_updated_at = now_timestamp_as_millis_u64();
     }
 
-    pub fn set_inflight_status(&mut self, channel_outpoint: OutPoint, tlc_id: u64) {
+    pub fn set_inflight_status(&mut self) {
         self.set_status(PaymentSessionStatus::Inflight);
-        self.first_hop_channel_outpoint = Some(channel_outpoint);
-        self.first_hop_tlc_id = Some(tlc_id);
     }
 
     pub fn set_success_status(&mut self) {

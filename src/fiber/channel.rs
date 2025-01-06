@@ -4,6 +4,7 @@ use crate::{debug_event, fiber::serde_utils::U64Hex};
 use bitflags::bitflags;
 use ckb_jsonrpc_types::BlockNumber;
 use futures::future::OptionFuture;
+use rand::Rng;
 use secp256k1::XOnlyPublicKey;
 use tracing::{debug, error, info, trace, warn};
 
@@ -103,7 +104,7 @@ pub const MESSAGE_OF_NODE2_FLAG: u32 = 1;
 // The channel is disabled, and no more tlcs can be added to the channel.
 pub const CHANNEL_DISABLED_FLAG: u32 = 1;
 
-const RETRYABLE_TLC_OPS_INTERVAL: Duration = Duration::from_millis(500);
+const RETRYABLE_TLC_OPS_INTERVAL: Duration = Duration::from_millis(1000);
 
 #[derive(Debug)]
 pub enum ChannelActorMessage {
@@ -1524,6 +1525,13 @@ where
         state: &mut ChannelActorState,
     ) {
         let pending_tlc_ops = state.tlc_state.get_pending_operations();
+        // error!(
+        //     "now apply_retryable_tlc_operations: {:?}",
+        //     pending_tlc_ops.len()
+        // );
+        // for i in pending_tlc_ops.iter() {
+        //     error!("pending_tlc_ops: {:?}", i);
+        // }
         for retryable_operation in pending_tlc_ops.into_iter() {
             let keep = match retryable_operation {
                 RetryableTlcOperation::RemoveTlc(tlc_id, ref reason) => {
@@ -1612,8 +1620,10 @@ where
         }
 
         // If there are more pending removes, we will retry it later
+        let rand_interval = rand::thread_rng()
+            .gen_range(RETRYABLE_TLC_OPS_INTERVAL..RETRYABLE_TLC_OPS_INTERVAL * 2);
         if state.tlc_state.has_pending_operations() {
-            myself.send_after(RETRYABLE_TLC_OPS_INTERVAL, || {
+            myself.send_after(rand_interval, || {
                 ChannelActorMessage::Event(ChannelEvent::CheckTlcRetryOperation)
             });
         }
@@ -1635,7 +1645,7 @@ where
             _ => None,
         }) {
             if let Some(tlc_err) = result.tlc_err {
-                match result.channel_error {
+                match result.channel_error.unwrap() {
                     ProcessingChannelError::WaitingTlcAck => {
                         // if we get WaitingTlcAck error, we will retry it later
                         self.set_forward_tlc_status(state, result.payment_hash, true);
@@ -1661,6 +1671,9 @@ where
                         state.tlc_state.remove_pending_tlc_operation(op);
                     }
                 }
+            } else {
+                //error!("remove forward tlc operation: {:?}", &op);
+                state.tlc_state.remove_pending_tlc_operation(op);
             }
         }
     }
@@ -1782,6 +1795,26 @@ where
             ChannelCommand::AddTlc(command, reply) => {
                 match self.handle_add_tlc_command(state, command.clone()) {
                     Ok(tlc_id) => {
+                        if let Some((channel_id, tlc_id)) = command.previous_tlc {
+                            self.network
+                                .send_message(NetworkActorMessage::new_command(
+                                    NetworkActorCommand::ControlFiberChannel(
+                                        ChannelCommandWithId {
+                                            channel_id: channel_id,
+                                            command: ChannelCommand::ForwardTlcResult(
+                                                ForwardTlcResult {
+                                                    channel_id,
+                                                    payment_hash: command.payment_hash,
+                                                    tlc_id,
+                                                    channel_error: None,
+                                                    tlc_err: None,
+                                                },
+                                            ),
+                                        },
+                                    ),
+                                ))
+                                .expect("network actor alive");
+                        }
                         let _ = reply.send(Ok(AddTlcResponse { tlc_id }));
                         Ok(())
                     }
@@ -1798,11 +1831,22 @@ where
                                                     channel_id,
                                                     payment_hash: command.payment_hash,
                                                     tlc_id,
-                                                    channel_error: err.clone(),
+                                                    channel_error: Some(err.clone()),
                                                     tlc_err: Some(tlc_err.clone()),
                                                 },
                                             ),
                                         },
+                                    ),
+                                ))
+                                .expect("network actor alive");
+                        } else {
+                            self.network
+                                .send_message(NetworkActorMessage::new_event(
+                                    NetworkActorEvent::AddTlcFailed(
+                                        command.payment_hash,
+                                        err.clone(),
+                                        tlc_err.clone(),
+                                        command.previous_tlc,
                                     ),
                                 ))
                                 .expect("network actor alive");
@@ -2305,7 +2349,7 @@ where
             }
             ChannelActorMessage::Command(command) => {
                 if let Err(err) = self.handle_command(&myself, state, command).await {
-                    error!("Error while processing channel command: {:?}", err);
+                    //error!("Error while processing channel command: {:?}", err);
                 }
             }
             ChannelActorMessage::Event(e) => {
@@ -2595,10 +2639,11 @@ impl Debug for RetryableTlcOperation {
                 .field(tlc_id)
                 .field(reason)
                 .finish(),
-            RetryableTlcOperation::ForwardTlc(payment_hash, tlc_id, ..) => f
+            RetryableTlcOperation::ForwardTlc(payment_hash, tlc_id, _, run_once) => f
                 .debug_tuple("ForwardTlc")
                 .field(payment_hash)
                 .field(tlc_id)
+                .field(run_once)
                 .finish(),
         }
     }
