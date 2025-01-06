@@ -1531,12 +1531,12 @@ where
         payment_session: &mut PaymentSession,
         payment_data: &SendPaymentData,
     ) -> Result<Vec<PaymentHopData>, Error> {
-        match self
-            .network_graph
-            .read()
-            .await
-            .build_route(payment_data.clone())
-        {
+        // Load owned channel info before building route, so that we use private channels and also the
+        // exact balance of the channels.
+        let mut rwgraph = self.network_graph.write().await;
+        rwgraph.load_owned_channel_info();
+        let graph = tokio::sync::RwLockWriteGuard::downgrade(rwgraph);
+        match graph.build_route(payment_data.clone()) {
             Err(e) => {
                 let error = format!("Failed to build route, {}", e);
                 self.set_payment_fail_with_error(payment_session, &error);
