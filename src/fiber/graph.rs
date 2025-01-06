@@ -584,7 +584,7 @@ where
                                     .clone(),
                                 from: node_id,
                                 to: channel_actor_state.remote_pubkey,
-                                capacity: channel_actor_state.get_total_capacity(),
+                                capacity: channel_actor_state.get_liquid_capacity(),
                                 tlc_expiry_delta: remote_tlc_info.tlc_expiry_delta,
                                 tlc_minimum_value: remote_tlc_info.tlc_min_value,
                                 fee_rate: remote_tlc_info.tlc_fee_proportional_millionths,
