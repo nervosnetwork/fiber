@@ -1649,9 +1649,6 @@ where
                     ProcessingChannelError::WaitingTlcAck => {
                         // if we get WaitingTlcAck error, we will retry it later
                         self.set_forward_tlc_status(state, result.payment_hash, true);
-                        myself.send_after(RETRYABLE_TLC_OPS_INTERVAL, || {
-                            ChannelActorMessage::Event(ChannelEvent::CheckTlcRetryOperation)
-                        });
                     }
                     ProcessingChannelError::RepeatedProcessing(_) => {
                         // ignore repeated processing error, we have already handled it
@@ -2375,6 +2372,7 @@ where
                 ))
                 .expect("myself alive");
         }
+
         Ok(())
     }
 }

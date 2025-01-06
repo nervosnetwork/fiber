@@ -76,6 +76,10 @@ overflow-checks = true
 [profile.dev]
 panic = "abort"
 
+[profile.test]
+opt-level = 3
+
+
 [dev-dependencies]
 tempfile = "3.10.1"
 ckb-testtool = "0.13.2"
