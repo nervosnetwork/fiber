@@ -933,44 +933,47 @@ where
                 return Err(ProcessingChannelError::FinalIncorrectPaymentHash);
             }
         } else {
-            if !state.is_public() {
-                // if we don't have public channel info, we can not forward the TLC
-                // this may happended some malicious sender build a invalid onion router
-                return Err(ProcessingChannelError::InvalidState(
-                    "Received AddTlc message, but the channel is not public or disabled"
-                        .to_string(),
-                ));
-            } else {
-                if state.local_tlc_info.tlc_min_value > received_amount {
-                    return Err(ProcessingChannelError::TlcAmountIsTooLow);
-                }
+            match state.public_channel_info.as_ref() {
+                Some(public_channel_info) if public_channel_info.enabled => {
+                    if state.local_tlc_info.tlc_min_value > received_amount {
+                        return Err(ProcessingChannelError::TlcAmountIsTooLow);
+                    }
 
-                if add_tlc.expiry
-                    < peeled_onion_packet.current.expiry + state.local_tlc_info.tlc_expiry_delta
-                {
-                    return Err(ProcessingChannelError::IncorrectTlcExpiry);
-                }
+                    if add_tlc.expiry
+                        < peeled_onion_packet.current.expiry + state.local_tlc_info.tlc_expiry_delta
+                    {
+                        return Err(ProcessingChannelError::IncorrectTlcExpiry);
+                    }
 
-                assert!(received_amount >= forward_amount);
-                let forward_fee = received_amount.saturating_sub(forward_amount);
-                let fee_rate: u128 = state.local_tlc_info.tlc_fee_proportional_millionths;
+                    assert!(received_amount >= forward_amount);
+                    let forward_fee = received_amount.saturating_sub(forward_amount);
+                    let fee_rate: u128 = state.local_tlc_info.tlc_fee_proportional_millionths;
 
-                let expected_fee = calculate_tlc_forward_fee(forward_amount, fee_rate);
-                if expected_fee.is_err() || forward_fee < expected_fee.clone().unwrap() {
-                    error!(
-                        "too low forward_fee: {}, expected_fee: {:?}",
-                        forward_fee, expected_fee
-                    );
-                    return Err(ProcessingChannelError::TlcForwardFeeIsTooLow);
+                    let expected_fee = calculate_tlc_forward_fee(forward_amount, fee_rate);
+                    if expected_fee.is_err() || forward_fee < expected_fee.clone().unwrap() {
+                        error!(
+                            "too low forward_fee: {}, expected_fee: {:?}",
+                            forward_fee, expected_fee
+                        );
+                        return Err(ProcessingChannelError::TlcForwardFeeIsTooLow);
+                    }
+                    // if this is not the last hop, forward TLC to next hop
+                    self.handle_forward_onion_packet(
+                        state,
+                        add_tlc.payment_hash,
+                        peeled_onion_packet.clone(),
+                        add_tlc.tlc_id.into(),
+                    )
+                    .await?;
                 }
-                // if this is not the last hop, forward TLC to next hop
-                self.handle_forward_onion_packet(
-                    state,
-                    add_tlc.payment_hash,
-                    peeled_onion_packet.clone(),
-                    add_tlc.tlc_id.into(),
-                )
-                .await?;
+                _ => {
+                    // if we don't have public channel info, we can not forward the TLC
+                    // this may happended some malicious sender build a invalid onion router
+                    return Err(ProcessingChannelError::InvalidState(
+                        "Received AddTlc message, but the channel is not public or disabled"
+                            .to_string(),
+                    ));
+                }
             }
         }
         Ok(())
