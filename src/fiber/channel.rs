@@ -1644,8 +1644,8 @@ where
             }
             _ => None,
         }) {
-            if let Some(tlc_err) = result.tlc_err {
-                match result.channel_error.unwrap() {
+            if let Some((channel_err, tlc_err)) = result.error_info {
+                match channel_err {
                     ProcessingChannelError::WaitingTlcAck => {
                         // if we get WaitingTlcAck error, we will retry it later
                         self.set_forward_tlc_status(state, result.payment_hash, true);
@@ -1790,64 +1790,30 @@ where
             }
             ChannelCommand::CommitmentSigned() => self.handle_commitment_signed_command(state),
             ChannelCommand::AddTlc(command, reply) => {
-                match self.handle_add_tlc_command(state, command.clone()) {
+                let res = self.handle_add_tlc_command(state, command.clone());
+                let error_info = if let Err(ref err) = res {
+                    Some((err.clone(), self.get_tlc_error(state, &err).await))
+                } else {
+                    None
+                };
+
+                self.network
+                    .send_message(NetworkActorMessage::new_event(
+                        NetworkActorEvent::AddTlcResult(
+                            command.payment_hash,
+                            error_info,
+                            command.previous_tlc,
+                        ),
+                    ))
+                    .expect("network actor alive");
+
+                match res {
                     Ok(tlc_id) => {
-                        if let Some((channel_id, tlc_id)) = command.previous_tlc {
-                            self.network
-                                .send_message(NetworkActorMessage::new_command(
-                                    NetworkActorCommand::ControlFiberChannel(
-                                        ChannelCommandWithId {
-                                            channel_id: channel_id,
-                                            command: ChannelCommand::ForwardTlcResult(
-                                                ForwardTlcResult {
-                                                    channel_id,
-                                                    payment_hash: command.payment_hash,
-                                                    tlc_id,
-                                                    channel_error: None,
-                                                    tlc_err: None,
-                                                },
-                                            ),
-                                        },
-                                    ),
-                                ))
-                                .expect("network actor alive");
-                        }
                         let _ = reply.send(Ok(AddTlcResponse { tlc_id }));
                         Ok(())
                     }
                     Err(err) => {
                         let tlc_err = self.get_tlc_error(state, &err).await;
-                        if let Some((channel_id, tlc_id)) = command.previous_tlc {
-                            self.network
-                                .send_message(NetworkActorMessage::new_command(
-                                    NetworkActorCommand::ControlFiberChannel(
-                                        ChannelCommandWithId {
-                                            channel_id: channel_id,
-                                            command: ChannelCommand::ForwardTlcResult(
-                                                ForwardTlcResult {
-                                                    channel_id,
-                                                    payment_hash: command.payment_hash,
-                                                    tlc_id,
-                                                    channel_error: Some(err.clone()),
-                                                    tlc_err: Some(tlc_err.clone()),
-                                                },
-                                            ),
-                                        },
-                                    ),
-                                ))
-                                .expect("network actor alive");
-                        } else {
-                            self.network
-                                .send_message(NetworkActorMessage::new_event(
-                                    NetworkActorEvent::AddTlcFailed(
-                                        command.payment_hash,
-                                        err.clone(),
-                                        tlc_err.clone(),
-                                        command.previous_tlc,
-                                    ),
-                                ))
-                                .expect("network actor alive");
-                        }
                         let _ = reply.send(Err(tlc_err));
                         Err(err)
                     }
