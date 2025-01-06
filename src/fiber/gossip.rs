@@ -1085,21 +1085,22 @@ impl<S: GossipMessageStore> ExtendedGossipMessageStoreState<S> {
         self.broadcast_messages(messages);
     }
 
-    fn get_channel_annnouncement(&self, outpoint: &OutPoint) -> Option<(u64, ChannelAnnouncement)> {
+    fn get_channel_annnouncement(&self, outpoint: &OutPoint) -> Option<ChannelAnnouncement> {
         self.store
             .get_latest_channel_announcement(outpoint)
+            .map(|(_, m)| m)
             .or_else(|| self.get_channel_annnouncement_in_memory(outpoint))
     }
 
     fn get_channel_annnouncement_in_memory(
         &self,
         outpoint: &OutPoint,
-    ) -> Option<(u64, ChannelAnnouncement)> {
+    ) -> Option<ChannelAnnouncement> {
         self.messages_to_be_saved.iter().find_map(|m| match m {
             BroadcastMessage::ChannelAnnouncement(channel_announcement)
                 if &channel_announcement.channel_outpoint == outpoint =>
             {
-                Some((0, channel_announcement.clone()))
+                Some(channel_announcement.clone())
             }
             _ => None,
         })
@@ -1119,7 +1120,7 @@ impl<S: GossipMessageStore> ExtendedGossipMessageStoreState<S> {
             }
         }
 
-        if let Some(_) = self.messages_to_be_saved.get(&message) {
+        if self.messages_to_be_saved.contains(&message) {
             return Ok(());
         }
 
@@ -1783,14 +1784,11 @@ fn get_existing_newer_broadcast_message<S: GossipMessageStore>(
     })
 }
 
-// Channel updates depends on channel announcements to obtain the node public keys.
-// If a channel update is saved before the channel announcement, we can't reliably determine if
-// this channel update is valid. So we need to save the channel update to lagged_messages and
-// wait for the channel announcement to be saved. The bool value returned indicates if the
-// message is fully verified and can be saved to the store.
-// In the same vein, channel announcement contains references to node announcements. If a node
-// announcement is saved before the channel announcement, we need to temporarily save the channel
-// announcement to lagged_messages and wait for the node announcement to be saved.
+// Verify and save broadcast messages to the store.
+// Note that we can't relialy verify a message until we have all the messages that it depends on.
+// So this function should be called by the dependency order of the messages.
+// E.g. channel updates depends on channel announcements to obtain the node public keys,
+// so we should call this method to save and verify channel announcements before channel updates.
 async fn verify_and_save_broadcast_message<S: GossipMessageStore>(
     message: &BroadcastMessage,
     store: &S,

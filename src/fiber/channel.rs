@@ -4390,6 +4390,12 @@ impl ChannelActorState {
             .expect("Funding transaction outpoint is present")
     }
 
+    pub fn must_get_funding_transaction_timestamp(&self) -> u64 {
+        self.funding_tx_confirmed_at
+            .expect("Funding transaction confirmed at present")
+            .2
+    }
+
     pub fn get_local_shutdown_script(&self) -> Script {
         self.local_shutdown_script.clone()
     }
@@ -5388,9 +5394,7 @@ impl ChannelActorState {
                 .send_message(NetworkActorMessage::new_command(
                     NetworkActorCommand::BroadcastMessages(vec![
                         BroadcastMessageWithTimestamp::ChannelAnnouncement(
-                            self.funding_tx_confirmed_at
-                                .expect("funding tx confirmed")
-                                .2,
+                            self.must_get_funding_transaction_timestamp(),
                             channel_announcement,
                         ),
                         BroadcastMessageWithTimestamp::ChannelUpdate(channel_update),
