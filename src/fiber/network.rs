@@ -2672,7 +2672,7 @@ where
         let network = self.network.clone();
         let chain = self.chain_actor.clone();
         self.broadcast_tx_with_callback(transaction, move |result| {
-            let message = match result {
+            match result {
                 Ok(TraceTxResponse {
                     status:
                         TxStatus {
@@ -2682,21 +2682,29 @@ where
                         },
                     ..
                 }) => {
-                    const MAX_GET_BLOCK_TIMESTAMP_RETRY: u8 = 5;
-                    use tokio::runtime::Runtime;
-                    let rt = Runtime::new().unwrap();
-
-
-    let timestamp=                        rt.block_on( async {
-                            for _ in 0..MAX_GET_BLOCK_TIMESTAMP_RETRY {
-                                match call!(
-                                    chain,
-                                    |reply| 
-                                CkbChainMessage::GetBlockTimestamp(
+                    tokio::spawn( async move  {
+                        const MAX_GET_BLOCK_TIMESTAMP_RETRY: u8 = 5;
+                        for _ in 0..MAX_GET_BLOCK_TIMESTAMP_RETRY {
+                            match call!(
+                                chain,
+                                |reply| CkbChainMessage::GetBlockTimestamp(
                                     GetBlockTimestampRequest::from_block_number(block_number.into()), reply
                                 )
                             ) {
-                                Ok(Ok(Some(timestamp))) => return timestamp,
+                                Ok(Ok(Some(timestamp))) => {
+                                    info!("Funding transaction {:?} confirmed", &tx_hash);
+                                    // Notify outside observers.
+                                    network.send_message(NetworkActorMessage::new_event(
+                                        NetworkActorEvent::FundingTransactionConfirmed(
+                                            outpoint.clone(),
+                                            block_number.into(),
+                                            DUMMY_FUNDING_TX_INDEX,
+                                            timestamp,
+                                        )
+                                    ))
+                                    .expect(ASSUME_NETWORK_MYSELF_ALIVE);
+                                    return;
+                                },
                                 Ok(Ok(None)) => {
                                     panic!(
                                         "Failed to get block timestamp for block number {:?}: block not found",
@@ -2715,37 +2723,31 @@ where
                                         &block_number, &err
                                     );
                                 }
-
-                            } 
+                            }
                         }
-                            panic!("Failed to get block timestamp for block number {:?} after {} retries", &block_number, MAX_GET_BLOCK_TIMESTAMP_RETRY);
+                        panic!("Failed to get block timestamp for block number {:?} after {} retries", &block_number, MAX_GET_BLOCK_TIMESTAMP_RETRY);
                     });
-
-                    info!("Funding transaction {:?} confirmed", &tx_hash);
-                    NetworkActorEvent::FundingTransactionConfirmed(
-                        outpoint,
-                        block_number.into(),
-                        DUMMY_FUNDING_TX_INDEX,
-                        timestamp,
-                    )
                 }
                 Ok(status) => {
                     error!(
                         "Funding transaction {:?} failed to be confirmed with final status {:?}",
                         &tx_hash, &status
                     );
-                    NetworkActorEvent::FundingTransactionFailed(outpoint)
+                    // Notify outside observers.
+                    network
+                        .send_message(NetworkActorMessage::new_event(                    NetworkActorEvent::FundingTransactionFailed(outpoint)
+                    ))
+                        .expect(ASSUME_NETWORK_MYSELF_ALIVE);
                 }
                 Err(err) => {
                     error!("Failed to trace transaction {:?}: {:?}", &tx_hash, &err);
-                    NetworkActorEvent::FundingTransactionFailed(outpoint)
+                    // Notify outside observers.
+                    network
+                        .send_message(NetworkActorMessage::new_event(                    NetworkActorEvent::FundingTransactionFailed(outpoint)
+                    ))
+                        .expect(ASSUME_NETWORK_MYSELF_ALIVE);
                 }
             };
-
-            // Notify outside observers.
-            network
-                .send_message(NetworkActorMessage::new_event(message))
-                .expect(ASSUME_NETWORK_MYSELF_ALIVE);
         })
         .await;
     }
