@@ -74,6 +74,8 @@ use std::{
     u128,
 };
 
+use super::types::UpdateTlcInfo;
+
 // - `empty_witness_args`: 16 bytes, fixed to 0x10000000100000001000000010000000, for compatibility with the xudt
 // - `pubkey`: 32 bytes, x only aggregated public key
 // - `signature`: 64 bytes, aggregated signature
@@ -133,6 +135,7 @@ pub enum ChannelCommand {
     // TODO: maybe we should automatically send commitment_signed message after receiving
     // tx_complete event.
     CommitmentSigned(),
+    UpdateTlcInfo(),
     AddTlc(AddTlcCommand, RpcReplyPort<Result<AddTlcResponse, TlcErr>>),
     RemoveTlc(RemoveTlcCommand, RpcReplyPort<Result<(), String>>),
     Shutdown(ShutdownCommand, RpcReplyPort<Result<(), String>>),
@@ -469,7 +472,26 @@ where
                 Ok(())
             }
             FiberChannelMessage::UpdateTlcInfo(update_tlc_info) => {
-                todo!("handle UpdateTlcInfo message: {:?}", update_tlc_info)
+                let old = state
+                    .remote_tlc_info
+                    .get_or_insert_with(|| ChannelTlcInfo::default());
+
+                if let Some(tlc_expiry_delta) = update_tlc_info.tlc_expiry_delta {
+                    old.tlc_expiry_delta = tlc_expiry_delta;
+                }
+                if let Some(tlc_minimum_value) = update_tlc_info.tlc_minimum_value {
+                    old.tlc_min_value = tlc_minimum_value;
+                }
+                if let Some(tlc_maximum_value) = update_tlc_info.tlc_maximum_value {
+                    old.tlc_max_value = tlc_maximum_value;
+                }
+                if let Some(tlc_fee_proportional_millionths) =
+                    update_tlc_info.tlc_fee_proportional_millionths
+                {
+                    old.tlc_fee_proportional_millionths = tlc_fee_proportional_millionths;
+                }
+
+                Ok(())
             }
             FiberChannelMessage::AddTlc(add_tlc) => {
                 self.handle_add_tlc_peer_message(state, add_tlc)
@@ -1570,6 +1592,10 @@ where
                 self.handle_tx_collaboration_command(state, tx_collaboration_command)
             }
             ChannelCommand::CommitmentSigned() => self.handle_commitment_signed_command(state),
+            ChannelCommand::UpdateTlcInfo() => {
+                state.send_update_tlc_info_message(&self.network);
+                Ok(())
+            }
             ChannelCommand::AddTlc(command, reply) => {
                 match self.handle_add_tlc_command(state, command) {
                     Ok(tlc_id) => {
@@ -3422,6 +3448,18 @@ impl ChannelActorState {
         self.do_generate_channel_update(network, |_update| {}).await
     }
 
+    fn create_update_tlc_info_message(&self) -> UpdateTlcInfo {
+        UpdateTlcInfo {
+            channel_id: self.get_id(),
+            tlc_minimum_value: Some(self.local_tlc_info.tlc_min_value),
+            tlc_maximum_value: Some(self.local_tlc_info.tlc_max_value),
+            tlc_fee_proportional_millionths: Some(
+                self.local_tlc_info.tlc_fee_proportional_millionths,
+            ),
+            tlc_expiry_delta: Some(self.local_tlc_info.tlc_expiry_delta),
+        }
+    }
+
     async fn generate_disabled_channel_update(
         &mut self,
         network: &ActorRef<NetworkActorMessage>,
@@ -3436,12 +3474,29 @@ impl ChannelActorState {
         &mut self,
         network: &ActorRef<NetworkActorMessage>,
     ) {
-        let channel_update = self.generate_channel_update(network).await;
+        if self.is_public() {
+            let channel_update = self.generate_channel_update(network).await;
+            network
+                .send_message(NetworkActorMessage::new_command(
+                    NetworkActorCommand::BroadcastMessages(vec![BroadcastMessage::ChannelUpdate(
+                        channel_update,
+                    )]),
+                ))
+                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+        }
+        self.send_update_tlc_info_message(network);
+    }
+
+    fn send_update_tlc_info_message(&self, network: &ActorRef<NetworkActorMessage>) {
+        let update_tlc_info = self.create_update_tlc_info_message();
         network
             .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::BroadcastMessages(vec![BroadcastMessage::ChannelUpdate(
-                    channel_update,
-                )]),
+                NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId {
+                    peer_id: self.get_remote_peer_id(),
+                    message: FiberMessage::ChannelNormalOperation(
+                        FiberChannelMessage::UpdateTlcInfo(update_tlc_info),
+                    ),
+                }),
             ))
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
     }
@@ -5484,6 +5539,7 @@ impl ChannelActorState {
         self.increment_local_commitment_number();
         self.increment_remote_commitment_number();
         let peer_id = self.get_remote_peer_id();
+        self.send_update_tlc_info_message(network);
         network
             .send_message(NetworkActorMessage::new_event(
                 NetworkActorEvent::ChannelReady(
