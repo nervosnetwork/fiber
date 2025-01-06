@@ -1249,7 +1249,7 @@ where
             ))
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
 
-        self.handle_commitment_signed_command(state).unwrap();
+        self.handle_commitment_signed_command(state)?;
         Ok(tlc.tlc_id.into())
     }
 
@@ -4724,10 +4724,10 @@ impl ChannelActorState {
             local: local_commitment_number,
             remote: remote_commitment_number,
         } = tlc.get_commitment_numbers();
-        // debug!(
-        //     "Local commitment number: {}, remote commitment number: {}",
-        //     local_commitment_number, remote_commitment_number
-        // );
+        debug!(
+            "Local commitment number: {}, remote commitment number: {}",
+            local_commitment_number, remote_commitment_number
+        );
         let local_pubkey = derive_tlc_pubkey(
             &self.get_local_channel_public_keys().tlc_base_key,
             &self.get_local_commitment_point(remote_commitment_number),

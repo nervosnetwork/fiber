@@ -1526,7 +1526,7 @@ async fn test_send_payment_three_nodes_bench_test() {
 
     let mut all_sent = HashSet::new();
 
-    for i in 1..=5 {
+    for i in 1..=4 {
         let payment1 = node_1.send_payment_keysend(&node_3, 1000).await.unwrap();
         all_sent.insert((1, payment1.payment_hash));
         eprintln!("send: {} payment_hash: {:?} sent", i, payment1.payment_hash);

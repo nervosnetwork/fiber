@@ -1130,7 +1130,7 @@ pub trait NetworkGraphStateStore {
 pub enum PaymentSessionStatus {
     // initial status, payment session is created, no HTLC is sent
     Created,
-    // related HTLC is send and waiting for the response
+    // related HTLC is send and waiting for the response, first hop AddTlc is sent
     Inflight,
     // related HTLC is successfully settled
     Success,

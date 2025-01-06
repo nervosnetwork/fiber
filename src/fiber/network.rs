@@ -930,7 +930,7 @@ where
                 let _ = self.try_payment_session(myself, state, payment_hash).await;
             }
             NetworkActorEvent::AddTlcResult(payment_hash, error_info, previous_tlc) => {
-                self.on_add_tlc_failed_event(myself, state, payment_hash, error_info, previous_tlc)
+                self.on_add_tlc_result_event(myself, state, payment_hash, error_info, previous_tlc)
                     .await;
             }
             #[cfg(test)]
@@ -1379,8 +1379,6 @@ where
 
         let info = peeled_onion_packet.current.clone();
         let shared_secret = peeled_onion_packet.shared_secret;
-        //debug!("Processing onion packet info: {:?}", info);
-
         let channel_outpoint = OutPoint::new(info.funding_tx_hash.into(), 0);
         let channel_id = match state.outpoint_channel_map.get(&channel_outpoint) {
             Some(channel_id) => channel_id,
@@ -1399,6 +1397,7 @@ where
             }
         };
         let (send, _recv) = oneshot::channel::<Result<AddTlcResponse, TlcErr>>();
+        // explicitly don't wait for the response, we will handle the result in AddTlcResult
         let rpc_reply = RpcReplyPort::from(send);
         let command = ChannelCommand::AddTlc(
             AddTlcCommand {
@@ -1646,14 +1645,13 @@ where
                 return Err(Error::SendPaymentFirstHopError(err, need_to_retry));
             }
             Ok(_) => {
-                payment_session.set_inflight_status();
                 self.store.insert_payment_session(payment_session.clone());
                 return Ok(payment_session.clone());
             }
         }
     }
 
-    async fn on_add_tlc_failed_event(
+    async fn on_add_tlc_result_event(
         &self,
         myself: ActorRef<NetworkActorMessage>,
         state: &mut NetworkActorState<S>,
@@ -1683,7 +1681,9 @@ where
         };
 
         if error_info.is_none() {
+            // Change the status from Created into Inflight
             payment_session.set_inflight_status();
+            self.store.insert_payment_session(payment_session.clone());
             return;
         }
 
@@ -1692,29 +1692,27 @@ where
             return;
         }
 
-        if payment_session.status == PaymentSessionStatus::Inflight {
-            let need_to_retry = self
-                .network_graph
-                .write()
-                .await
-                .record_payment_fail(&payment_session, tlc_err.clone());
-            if matches!(channel_error, ProcessingChannelError::WaitingTlcAck) {
-                payment_session.last_error = Some("WaitingTlcAck".to_string());
-                self.store.insert_payment_session(payment_session.clone());
+        let need_to_retry = self
+            .network_graph
+            .write()
+            .await
+            .record_payment_fail(&payment_session, tlc_err.clone());
+        if matches!(channel_error, ProcessingChannelError::WaitingTlcAck) {
+            payment_session.last_error = Some("WaitingTlcAck".to_string());
+            self.store.insert_payment_session(payment_session.clone());
+        }
+        if need_to_retry {
+            let res = self.try_payment_session(myself, state, payment_hash).await;
+            if res.is_err() {
+                debug!("Failed to retry payment session: {:?}", res);
             }
-            if need_to_retry {
-                let res = self.try_payment_session(myself, state, payment_hash).await;
-                if res.is_err() {
-                    debug!("Failed to retry payment session: {:?}", res);
-                }
-            } else {
-                let error = format!(
-                    "Failed to send payment session: {:?}, retried times: {}",
-                    payment_session.payment_hash(),
-                    payment_session.retried_times
-                );
-                self.set_payment_fail_with_error(&mut payment_session, &error);
-            }
+        } else {
+            let error = format!(
+                "Failed to send payment session: {:?}, retried times: {}",
+                payment_session.payment_hash(),
+                payment_session.retried_times
+            );
+            self.set_payment_fail_with_error(&mut payment_session, &error);
         }
     }
 
