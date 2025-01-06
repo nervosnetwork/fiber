@@ -212,6 +212,7 @@ pub struct TxUpdateCommand {
 pub struct OpenChannelParameter {
     pub funding_amount: u128,
     pub seed: [u8; 32],
+    pub tlc_info: ChannelTlcInfo,
     pub public_channel_info: Option<PublicChannelInfo>,
     pub funding_udt_type_script: Option<Script>,
     pub shutdown_script: Script,
@@ -226,6 +227,7 @@ pub struct OpenChannelParameter {
 pub struct AcceptChannelParameter {
     pub funding_amount: u128,
     pub reserved_ckb_amount: u64,
+    pub tlc_info: ChannelTlcInfo,
     pub public_channel_info: Option<PublicChannelInfo>,
     pub seed: [u8; 32],
     pub open_channel: OpenChannel,
@@ -906,48 +908,44 @@ where
                 return Err(ProcessingChannelError::FinalIncorrectPaymentHash);
             }
         } else {
-            match state.public_channel_info.as_ref() {
-                Some(public_channel_info) if public_channel_info.enabled => {
-                    let min_tlc_value = public_channel_info.tlc_min_value;
-                    if min_tlc_value > received_amount {
-                        return Err(ProcessingChannelError::TlcAmountIsTooLow);
-                    }
-
-                    if add_tlc.expiry
-                        < peeled_onion_packet.current.expiry + public_channel_info.tlc_expiry_delta
-                    {
-                        return Err(ProcessingChannelError::IncorrectTlcExpiry);
-                    }
-
-                    assert!(received_amount >= forward_amount);
-                    let forward_fee = received_amount.saturating_sub(forward_amount);
-                    let fee_rate: u128 = public_channel_info.tlc_fee_proportional_millionths;
-
-                    let expected_fee = calculate_tlc_forward_fee(forward_amount, fee_rate);
-                    if expected_fee.is_err() || forward_fee < expected_fee.clone().unwrap() {
-                        error!(
-                            "too low forward_fee: {}, expected_fee: {:?}",
-                            forward_fee, expected_fee
-                        );
-                        return Err(ProcessingChannelError::TlcForwardFeeIsTooLow);
-                    }
-                    // if this is not the last hop, forward TLC to next hop
-                    self.handle_forward_onion_packet(
-                        state,
-                        add_tlc.payment_hash,
-                        peeled_onion_packet.clone(),
-                        add_tlc.tlc_id.into(),
-                    )
-                    .await?;
+            if !state.is_public() {
+                // if we don't have public channel info, we can not forward the TLC
+                // this may happended some malicious sender build a invalid onion router
+                return Err(ProcessingChannelError::InvalidState(
+                    "Received AddTlc message, but the channel is not public or disabled"
+                        .to_string(),
+                ));
+            } else {
+                if state.local_tlc_info.tlc_min_value > received_amount {
+                    return Err(ProcessingChannelError::TlcAmountIsTooLow);
                 }
-                _ => {
-                    // if we don't have public channel info, we can not forward the TLC
-                    // this may happended some malicious sender build a invalid onion router
-                    return Err(ProcessingChannelError::InvalidState(
-                        "Received AddTlc message, but the channel is not public or disabled"
-                            .to_string(),
-                    ));
+
+                if add_tlc.expiry
+                    < peeled_onion_packet.current.expiry + state.local_tlc_info.tlc_expiry_delta
+                {
+                    return Err(ProcessingChannelError::IncorrectTlcExpiry);
                 }
+
+                assert!(received_amount >= forward_amount);
+                let forward_fee = received_amount.saturating_sub(forward_amount);
+                let fee_rate: u128 = state.local_tlc_info.tlc_fee_proportional_millionths;
+
+                let expected_fee = calculate_tlc_forward_fee(forward_amount, fee_rate);
+                if expected_fee.is_err() || forward_fee < expected_fee.clone().unwrap() {
+                    error!(
+                        "too low forward_fee: {}, expected_fee: {:?}",
+                        forward_fee, expected_fee
+                    );
+                    return Err(ProcessingChannelError::TlcForwardFeeIsTooLow);
+                }
+                // if this is not the last hop, forward TLC to next hop
+                self.handle_forward_onion_packet(
+                    state,
+                    add_tlc.payment_hash,
+                    peeled_onion_packet.clone(),
+                    add_tlc.tlc_id.into(),
+                )
+                .await?;
             }
         }
         Ok(())
@@ -1752,6 +1750,7 @@ where
                 funding_amount: local_funding_amount,
                 reserved_ckb_amount: local_reserved_ckb_amount,
                 shutdown_script: local_shutdown_script,
+                tlc_info,
                 public_channel_info,
                 seed,
                 open_channel,
@@ -1828,6 +1827,7 @@ where
                     *remote_max_tlc_number_in_flight,
                     max_tlc_number_in_flight,
                     max_tlc_value_in_flight,
+                    tlc_info,
                 );
                 state.check_accept_channel_parameters()?;
 
@@ -1879,6 +1879,7 @@ where
             ChannelInitializationParameter::OpenChannel(OpenChannelParameter {
                 funding_amount,
                 seed,
+                tlc_info,
                 public_channel_info,
                 funding_udt_type_script,
                 shutdown_script,
@@ -1923,6 +1924,7 @@ where
                     shutdown_script.clone(),
                     max_tlc_value_in_flight,
                     max_tlc_number_in_flight,
+                    tlc_info,
                 );
 
                 channel.check_open_channel_parameters()?;
@@ -2721,6 +2723,9 @@ pub struct ChannelActorState {
     // The data below are only relevant if the channel is public.
     pub public_channel_info: Option<PublicChannelInfo>,
 
+    pub local_tlc_info: ChannelTlcInfo,
+    pub remote_tlc_info: Option<ChannelTlcInfo>,
+
     // The local public key used to establish p2p network connection.
     pub local_pubkey: Pubkey,
     // The remote public key used to establish p2p network connection.
@@ -2840,16 +2845,11 @@ pub struct ShutdownInfo {
     pub signature: Option<PartialSignature>,
 }
 
-// This struct holds the channel information that are only relevant when the channel
-// is public. The information includes signatures to the channel announcement message,
-// our config for the channel that will be published to the network (via ChannelUpdate).
-// For ChannelUpdate config, only information on our side are saved here because we have no
-// control to the config on the counterparty side. And they will publish
-// the config to the network via another ChannelUpdate message.
+// This struct holds the TLC information for the channel participants.
+// We can update this information through the channel update message.
 #[serde_as]
 #[derive(Default, Clone, Debug, Serialize, Deserialize)]
-pub struct PublicChannelInfo {
-    pub enabled: bool,
+pub struct ChannelTlcInfo {
     // The fee rate for tlc transfers. We only have these values set when
     // this is a public channel. Both sides may set this value differently.
     // This is a fee that is paid by the sender of the tlc.
@@ -2863,6 +2863,35 @@ pub struct PublicChannelInfo {
     /// The minimal tcl value we can receive in relay tlc
     pub tlc_min_value: u128,
 
+    /// The maximal tcl value we can receive in relay tlc
+    pub tlc_max_value: u128,
+}
+
+impl ChannelTlcInfo {
+    pub fn new(
+        tlc_min_value: u128,
+        tlc_expiry_delta: u64,
+        tlc_fee_proportional_millionths: u128,
+    ) -> Self {
+        Self {
+            tlc_min_value,
+            tlc_expiry_delta,
+            tlc_fee_proportional_millionths,
+            ..Default::default()
+        }
+    }
+}
+
+// This struct holds the channel information that are only relevant when the channel
+// is public. The information includes signatures to the channel announcement message,
+// our config for the channel that will be published to the network (via ChannelUpdate).
+// For ChannelUpdate config, only information on our side are saved here because we have no
+// control to the config on the counterparty side. And they will publish
+// the config to the network via another ChannelUpdate message.
+#[serde_as]
+#[derive(Default, Clone, Debug, Serialize, Deserialize)]
+pub struct PublicChannelInfo {
+    pub enabled: bool,
     // Channel announcement signatures, may be empty for private channel.
     pub local_channel_announcement_signature: Option<(EcdsaSignature, PartialSignature)>,
     pub remote_channel_announcement_signature: Option<(EcdsaSignature, PartialSignature)>,
@@ -2875,15 +2904,8 @@ pub struct PublicChannelInfo {
 }
 
 impl PublicChannelInfo {
-    pub fn new(
-        tlc_min_value: u128,
-        tlc_expiry_delta: u64,
-        tlc_fee_proportional_millionths: u128,
-    ) -> Self {
+    pub fn new() -> Self {
         Self {
-            tlc_min_value,
-            tlc_expiry_delta,
-            tlc_fee_proportional_millionths,
             enabled: true,
             ..Default::default()
         }
@@ -3446,17 +3468,15 @@ impl ChannelActorState {
         let local_is_node1 = self.local_is_node1();
         let message_flags = if local_is_node1 { 0 } else { 1 };
 
-        self.public_channel_info.as_ref().and_then(|info| {
-            Some(ChannelUpdate::new_unsigned(
-                self.must_get_funding_transaction_outpoint(),
-                now_timestamp_as_millis_u64(),
-                message_flags,
-                0,
-                info.tlc_expiry_delta,
-                info.tlc_min_value,
-                info.tlc_fee_proportional_millionths,
-            ))
-        })
+        self.is_public().then_some(ChannelUpdate::new_unsigned(
+            self.must_get_funding_transaction_outpoint(),
+            now_timestamp_as_millis_u64(),
+            message_flags,
+            0,
+            self.local_tlc_info.tlc_expiry_delta,
+            self.local_tlc_info.tlc_min_value,
+            self.local_tlc_info.tlc_fee_proportional_millionths,
+        ))
     }
 
     pub fn new_inbound_channel<'a>(
@@ -3484,6 +3504,7 @@ impl ChannelActorState {
         remote_max_tlc_number_in_flight: u64,
         local_max_tlc_number_in_flight: u64,
         local_max_tlc_value_in_flight: u128,
+        local_tlc_info: ChannelTlcInfo,
     ) -> Self {
         let signer = InMemorySigner::generate_from_seed(seed);
         let local_base_pubkeys = signer.get_base_public_keys();
@@ -3501,6 +3522,8 @@ impl ChannelActorState {
         let mut state = Self {
             state: ChannelState::NegotiatingFunding(NegotiatingFundingFlags::THEIR_INIT_SENT),
             public_channel_info,
+            local_tlc_info,
+            remote_tlc_info: None,
             local_pubkey,
             remote_pubkey,
             funding_tx: None,
@@ -3563,6 +3586,7 @@ impl ChannelActorState {
         shutdown_script: Script,
         local_max_tlc_value_in_flight: u128,
         local_max_tlc_number_in_flight: u64,
+        local_tlc_info: ChannelTlcInfo,
     ) -> Self {
         let signer = InMemorySigner::generate_from_seed(seed);
         let local_pubkeys = signer.get_base_public_keys();
@@ -3570,6 +3594,8 @@ impl ChannelActorState {
         Self {
             state: ChannelState::NegotiatingFunding(NegotiatingFundingFlags::empty()),
             public_channel_info,
+            local_tlc_info,
+            remote_tlc_info: None,
             local_pubkey,
             remote_pubkey,
             funding_tx: None,
@@ -3886,38 +3912,29 @@ impl ChannelActorState {
             .remote_channel_announcement_signature = Some((ecdsa_signature, partial_signatures));
     }
 
-    fn get_our_tlc_fee_proportional_millionths(&self) -> Option<u128> {
-        self.public_channel_info
-            .as_ref()
-            .map(|state| state.tlc_fee_proportional_millionths)
+    fn get_our_tlc_fee_proportional_millionths(&self) -> u128 {
+        self.local_tlc_info.tlc_fee_proportional_millionths
     }
 
     fn update_our_tlc_fee_proportional_millionths(&mut self, fee: u128) -> bool {
-        let old_fee = self.get_our_tlc_fee_proportional_millionths();
-        match old_fee {
-            Some(old_fee) if old_fee == fee => false,
-            _ => {
-                self.public_channel_state_mut()
-                    .tlc_fee_proportional_millionths = fee;
-                true
-            }
+        if self.get_our_tlc_fee_proportional_millionths() != fee {
+            self.local_tlc_info.tlc_fee_proportional_millionths = fee;
+            true
+        } else {
+            false
         }
     }
 
-    fn get_our_tlc_min_value(&self) -> Option<u128> {
-        self.public_channel_info
-            .as_ref()
-            .map(|state| state.tlc_min_value)
+    fn get_our_tlc_min_value(&self) -> u128 {
+        self.local_tlc_info.tlc_min_value
     }
 
     fn update_our_tlc_min_value(&mut self, value: u128) -> bool {
-        let old_value = self.get_our_tlc_min_value();
-        match old_value {
-            Some(old_value) if old_value == value => false,
-            _ => {
-                self.public_channel_state_mut().tlc_min_value = value;
-                true
-            }
+        if self.get_our_tlc_min_value() != value {
+            self.local_tlc_info.tlc_min_value = value;
+            true
+        } else {
+            false
         }
     }
 
@@ -3936,20 +3953,16 @@ impl ChannelActorState {
         }
     }
 
-    fn get_our_tlc_expiry_delta(&self) -> Option<u64> {
-        self.public_channel_info
-            .as_ref()
-            .map(|info| info.tlc_expiry_delta)
+    fn get_our_tlc_expiry_delta(&self) -> u64 {
+        self.local_tlc_info.tlc_expiry_delta
     }
 
     fn update_our_tlc_expiry_delta(&mut self, value: u64) -> bool {
-        let old_value = self.get_our_tlc_expiry_delta();
-        match old_value {
-            Some(old_value) if old_value == value => false,
-            _ => {
-                self.public_channel_state_mut().tlc_expiry_delta = value;
-                true
-            }
+        if self.get_our_tlc_expiry_delta() != value {
+            self.local_tlc_info.tlc_expiry_delta = value;
+            true
+        } else {
+            false
         }
     }
 

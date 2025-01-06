@@ -313,9 +313,6 @@ fn test_channel_actor_state_store() {
         state: ChannelState::NegotiatingFunding(NegotiatingFundingFlags::THEIR_INIT_SENT),
         public_channel_info: Some(PublicChannelInfo {
             enabled: false,
-            tlc_fee_proportional_millionths: 123,
-            tlc_expiry_delta: 3,
-            tlc_min_value: 10,
             local_channel_announcement_signature: Some((
                 mock_ecdsa_signature(),
                 MaybeScalar::two(),
@@ -328,6 +325,13 @@ fn test_channel_actor_state_store() {
             channel_announcement: None,
             channel_update: None,
         }),
+        local_tlc_info: ChannelTlcInfo {
+            tlc_fee_proportional_millionths: 123,
+            tlc_expiry_delta: 3,
+            tlc_min_value: 10,
+            tlc_max_value: 0,
+        },
+        remote_tlc_info: None,
         local_pubkey: gen_rand_fiber_public_key(),
         remote_pubkey: gen_rand_fiber_public_key(),
         funding_tx: Some(Transaction::default()),
