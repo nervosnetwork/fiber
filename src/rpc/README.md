@@ -49,6 +49,7 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
     * [Type `ChannelInfo`](#type-channelinfo)
     * [Type `ChannelState`](#type-channelstate)
     * [Type `NodeInfo`](#type-nodeinfo)
+    * [Type `PaymentSessionStatus`](#type-paymentsessionstatus)
     * [Type `RemoveTlcReason`](#type-removetlcreason)
     * [Type `UdtArgInfo`](#type-udtarginfo)
     * [Type `UdtCellDep`](#type-udtcelldep)
@@ -711,4 +712,17 @@ The Channel information.
 * `capacity` - u128, The capacity of the channel.
 * `chain_hash` - Hash256, The chain hash of the channel.
 * `udt_type_script` - `Option<Script>`, The UDT type script of the channel.
+
+<a id="#type-paymentsessionstatus"></a>
+### Type `PaymentSessionStatus`
+
+The status of a payment, will update as the payment progresses.
+
+
+#### Enum with values of
+
+* `Created` - , initial status, payment session is created, no HTLC is sent
+* `Inflight` - , the first hop AddTlc is sent successfully and waiting for the response
+* `Success` - , related HTLC is successfully settled
+* `Failed` - , related HTLC is failed
 

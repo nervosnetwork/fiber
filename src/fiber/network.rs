@@ -1414,7 +1414,7 @@ where
 
         // we have already checked the channel_id is valid,
         match state.send_command_to_channel(*channel_id, command).await {
-            Ok(()) => {
+            Ok(_) => {
                 return Ok(());
             }
             Err(err) => {
