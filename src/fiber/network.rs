@@ -1,8 +1,9 @@
 use ckb_hash::blake2b_256;
-use ckb_jsonrpc_types::{BlockNumber, Status, TxStatus};
+use ckb_jsonrpc_types::{Status, TxStatus};
 use ckb_types::core::{EpochNumberWithFraction, TransactionView};
 use ckb_types::packed::{Byte32, OutPoint, Script, Transaction};
 use ckb_types::prelude::{IntoTransactionView, Pack, Unpack};
+use ckb_types::H256;
 use once_cell::sync::OnceCell;
 use ractor::concurrency::Duration;
 use ractor::{
@@ -602,7 +603,7 @@ pub enum NetworkActorEvent {
 
     /// A funding transaction has been confirmed. The transaction was included in the
     /// block with the given transaction index, and the timestamp in the block header.
-    FundingTransactionConfirmed(OutPoint, BlockNumber, u32, u64),
+    FundingTransactionConfirmed(OutPoint, H256, u32, u64),
 
     /// A funding transaction has failed.
     FundingTransactionFailed(OutPoint),
@@ -862,12 +863,12 @@ where
             }
             NetworkActorEvent::FundingTransactionConfirmed(
                 outpoint,
-                block_number,
+                block_hash,
                 tx_index,
                 timestamp,
             ) => {
                 state
-                    .on_funding_transaction_confirmed(outpoint, block_number, tx_index, timestamp)
+                    .on_funding_transaction_confirmed(outpoint, block_hash, tx_index, timestamp)
                     .await;
             }
             NetworkActorEvent::CommitmentTransactionPending(transaction, channel_id) => {
@@ -2677,7 +2678,7 @@ where
                     status:
                         TxStatus {
                             status: Status::Committed,
-                            block_number: Some(block_number),
+                            block_hash: Some(block_hash),
                             ..
                         },
                     ..
@@ -2688,7 +2689,7 @@ where
                             match call!(
                                 chain,
                                 |reply| CkbChainMessage::GetBlockTimestamp(
-                                    GetBlockTimestampRequest::from_block_number(block_number.into()), reply
+                                    GetBlockTimestampRequest::from_block_hash(block_hash.clone()), reply
                                 )
                             ) {
                                 Ok(Ok(Some(timestamp))) => {
@@ -2697,7 +2698,7 @@ where
                                     network.send_message(NetworkActorMessage::new_event(
                                         NetworkActorEvent::FundingTransactionConfirmed(
                                             outpoint.clone(),
-                                            block_number.into(),
+                                            block_hash.clone(),
                                             DUMMY_FUNDING_TX_INDEX,
                                             timestamp,
                                         )
@@ -2707,25 +2708,25 @@ where
                                 },
                                 Ok(Ok(None)) => {
                                     panic!(
-                                        "Failed to get block timestamp for block number {:?}: block not found",
-                                        &block_number
+                                        "Failed to get block timestamp for block hash {:?}: block not found",
+                                        &block_hash
                                     );
                                 }
                                 Ok(Err(err)) => {
                                     error!(
-                                        "Failed to get block timestamp for block number {:?}: {:?}",
-                                        &block_number, &err
+                                        "Failed to get block timestamp for block hash {:?}: {:?}",
+                                        &block_hash, &err
                                     );
                                 }
                                 Err(err) => {
                                     error!(
-                                        "Failed to get block timestamp for block number {:?}: {:?}",
-                                        &block_number, &err
+                                        "Failed to get block timestamp for block hash {:?}: {:?}",
+                                        &block_hash, &err
                                     );
                                 }
                             }
                         }
-                        panic!("Failed to get block timestamp for block number {:?} after {} retries", &block_number, MAX_GET_BLOCK_TIMESTAMP_RETRY);
+                        panic!("Failed to get block timestamp for block hash {:?} after {} retries", &block_hash, MAX_GET_BLOCK_TIMESTAMP_RETRY);
                     });
                 }
                 Ok(status) => {
@@ -2803,7 +2804,7 @@ where
     async fn on_funding_transaction_confirmed(
         &mut self,
         outpoint: OutPoint,
-        block_number: BlockNumber,
+        block_hash: H256,
         tx_index: u32,
         timestamp: u64,
     ) {
@@ -2822,9 +2823,7 @@ where
             channel_id,
             None,
             ChannelActorMessage::Event(ChannelEvent::FundingTransactionConfirmed(
-                block_number,
-                tx_index,
-                timestamp,
+                block_hash, tx_index, timestamp,
             )),
         )
         .await;

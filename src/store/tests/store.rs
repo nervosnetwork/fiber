@@ -18,6 +18,7 @@ use crate::watchtower::*;
 use ckb_hash::new_blake2b;
 use ckb_types::packed::*;
 use ckb_types::prelude::*;
+use ckb_types::H256;
 use core::cmp::Ordering;
 use musig2::secp::MaybeScalar;
 use musig2::CompactSignature;
@@ -331,7 +332,7 @@ fn test_channel_actor_state_store() {
         local_pubkey: gen_rand_fiber_public_key(),
         remote_pubkey: gen_rand_fiber_public_key(),
         funding_tx: Some(Transaction::default()),
-        funding_tx_confirmed_at: Some((1.into(), 1, 1)),
+        funding_tx_confirmed_at: Some((H256::default(), 1, 1)),
         is_acceptor: true,
         funding_udt_type_script: Some(Script::default()),
         to_local_amount: 100,

@@ -5,7 +5,6 @@ use crate::{
     fiber::{serde_utils::U64Hex, types::BroadcastMessageWithTimestamp},
 };
 use bitflags::bitflags;
-use ckb_jsonrpc_types::BlockNumber;
 use futures::future::OptionFuture;
 use secp256k1::XOnlyPublicKey;
 use tracing::{debug, error, info, trace, warn};
@@ -50,6 +49,7 @@ use ckb_types::{
     },
     packed::{Bytes, CellInput, CellOutput, OutPoint, Script, Transaction},
     prelude::{AsTransactionBuilder, IntoTransactionView, Pack, Unpack},
+    H256,
 };
 use molecule::prelude::{Builder, Entity};
 use musig2::{
@@ -1712,7 +1712,7 @@ where
         event: ChannelEvent,
     ) -> Result<(), ProcessingChannelError> {
         match event {
-            ChannelEvent::FundingTransactionConfirmed(block_number, tx_index, timestamp) => {
+            ChannelEvent::FundingTransactionConfirmed(block_hash, tx_index, timestamp) => {
                 debug!("Funding transaction confirmed");
                 let flags = match state.state {
                     ChannelState::AwaitingChannelReady(flags) => flags,
@@ -1726,7 +1726,7 @@ where
                             "Expecting funding transaction confirmed event in state AwaitingChannelReady or after TX_SIGNATURES_SENT, but got state {:?}", &state.state)));
                     }
                 };
-                state.funding_tx_confirmed_at = Some((block_number, tx_index, timestamp));
+                state.funding_tx_confirmed_at = Some((block_hash, tx_index, timestamp));
                 self.network
                     .send_message(NetworkActorMessage::new_command(
                         NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
@@ -2769,7 +2769,7 @@ pub struct ChannelActorState {
     #[serde_as(as = "Option<EntityHex>")]
     pub funding_tx: Option<Transaction>,
 
-    pub funding_tx_confirmed_at: Option<(BlockNumber, u32, u64)>,
+    pub funding_tx_confirmed_at: Option<(H256, u32, u64)>,
 
     #[serde_as(as = "Option<EntityHex>")]
     pub funding_udt_type_script: Option<Script>,
@@ -2935,7 +2935,7 @@ pub struct ClosedChannel {}
 #[derive(Debug)]
 pub enum ChannelEvent {
     PeerDisconnected,
-    FundingTransactionConfirmed(BlockNumber, u32, u64),
+    FundingTransactionConfirmed(H256, u32, u64),
     CommitmentTransactionConfirmed,
     ClosingTransactionConfirmed,
     CheckTlcSetdown,
@@ -4392,6 +4392,7 @@ impl ChannelActorState {
 
     pub fn must_get_funding_transaction_timestamp(&self) -> u64 {
         self.funding_tx_confirmed_at
+            .as_ref()
             .expect("Funding transaction confirmed at present")
             .2
     }
