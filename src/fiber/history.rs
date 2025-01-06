@@ -225,11 +225,6 @@ impl InternalResult {
                 TlcErrorCode::ExpiryTooSoon | TlcErrorCode::ExpiryTooFar => {
                     need_to_retry = false;
                 }
-                TlcErrorCode::WaitingTlcAck => {
-                    unimplemented!(
-                        "WaitingTlcAck in middle hop should be handled in the retry logic"
-                    );
-                }
                 _ => {
                     self.fail_node(nodes, len - 1);
                     if len > 1 {
@@ -285,11 +280,6 @@ impl InternalResult {
                 | TlcErrorCode::FinalIncorrectTlcAmount => {
                     error!("middle hop does not expect to report this error");
                     need_to_retry = false;
-                }
-                TlcErrorCode::WaitingTlcAck => {
-                    unimplemented!(
-                        "WaitingTlcAck in middle hop should be handled in the retry logic"
-                    );
                 }
                 _ => {
                     self.fail_node(nodes, index);

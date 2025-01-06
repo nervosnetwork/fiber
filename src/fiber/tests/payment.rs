@@ -72,18 +72,9 @@ async fn test_send_payment_for_direct_channel_and_dry_run() {
 
     eprintln!("res: {:?}", res);
     assert!(res.is_ok());
-    // sleep for a while
-    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
     let payment_hash = res.unwrap().payment_hash;
 
-    let message = |rpc_reply| -> NetworkActorMessage {
-        NetworkActorMessage::Command(NetworkActorCommand::GetPayment(payment_hash, rpc_reply))
-    };
-    let res = call!(source_node.network_actor, message)
-        .expect("node_a alive")
-        .unwrap();
-
-    assert_eq!(res.status, PaymentSessionStatus::Success);
+    source_node.wait_until_success(payment_hash).await;
 
     let res = node_1
         .send_payment(SendPaymentCommand {
@@ -108,8 +99,8 @@ async fn test_send_payment_for_direct_channel_and_dry_run() {
     assert!(res.is_ok());
 
     // sleep for a while
-    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
     let payment_hash = res.unwrap().payment_hash;
+    node_1.wait_until_success(payment_hash).await;
     node_1
         .assert_payment_status(payment_hash, PaymentSessionStatus::Success, Some(1))
         .await;
@@ -197,10 +188,9 @@ async fn test_send_payment_for_pay_self() {
     eprintln!("res: {:?}", res);
     assert!(res.is_ok());
 
-    // sleep for a while
-    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
     let res = res.unwrap();
     let payment_hash = res.payment_hash;
+    node_0.wait_until_success(payment_hash).await;
     node_0
         .assert_payment_status(payment_hash, PaymentSessionStatus::Success, Some(1))
         .await;
@@ -299,10 +289,9 @@ async fn test_send_payment_for_pay_self_with_two_nodes() {
     eprintln!("res: {:?}", res);
     assert!(res.is_ok());
 
-    // sleep for a while
-    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
     let res = res.unwrap();
     let payment_hash = res.payment_hash;
+    node_0.wait_until_success(payment_hash).await;
     node_0
         .assert_payment_status(payment_hash, PaymentSessionStatus::Success, Some(1))
         .await;
@@ -387,9 +376,9 @@ async fn test_send_payment_with_more_capacity_for_payself() {
     assert!(res.is_ok());
 
     // sleep for a while
-    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
     let res = res.unwrap();
     let payment_hash = res.payment_hash;
+    node_0.wait_until_success(payment_hash).await;
     node_0
         .assert_payment_status(payment_hash, PaymentSessionStatus::Success, Some(1))
         .await;
@@ -509,10 +498,9 @@ async fn test_send_payment_with_route_to_self_with_hop_hints() {
     eprintln!("res: {:?}", res);
     assert!(res.is_ok());
 
-    // sleep for a while
-    tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
     let res = res.unwrap();
     let payment_hash = res.payment_hash;
+    node_0.wait_until_success(payment_hash).await;
     node_0
         .assert_payment_status(payment_hash, PaymentSessionStatus::Success, Some(1))
         .await;
@@ -622,10 +610,9 @@ async fn test_send_payment_with_route_to_self_with_outbound_hop_hints() {
     eprintln!("res: {:?}", res);
     assert!(res.is_ok());
 
-    // sleep for a while
-    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
     let res = res.unwrap();
     let payment_hash = res.payment_hash;
+    node_0.wait_until_success(payment_hash).await;
     node_0
         .assert_payment_status(payment_hash, PaymentSessionStatus::Success, Some(1))
         .await;
@@ -1148,25 +1135,8 @@ async fn test_network_three_nodes_two_channels_send_each_other() {
     let fee2 = res.fee;
     eprintln!("payment_hash2: {:?}", payment_hash2);
 
-    tokio::time::sleep(tokio::time::Duration::from_millis(12000)).await;
-
-    let message = |rpc_reply| -> NetworkActorMessage {
-        NetworkActorMessage::Command(NetworkActorCommand::GetPayment(payment_hash1, rpc_reply))
-    };
-    let res = call!(node_a.network_actor, message)
-        .expect("node_a alive")
-        .unwrap();
-
-    assert_eq!(res.status, PaymentSessionStatus::Success);
-
-    let message = |rpc_reply| -> NetworkActorMessage {
-        NetworkActorMessage::Command(NetworkActorCommand::GetPayment(payment_hash2, rpc_reply))
-    };
-    let res = call!(node_c.network_actor, message)
-        .expect("node_a alive")
-        .unwrap();
-
-    assert_eq!(res.status, PaymentSessionStatus::Success);
+    node_a.wait_until_success(payment_hash1).await;
+    node_c.wait_until_success(payment_hash2).await;
 
     let new_node_b_balance_channel_0 = node_b.get_local_balance_from_channel(channels[0]);
     let new_node_b_balance_channel_1 = node_b.get_local_balance_from_channel(channels[1]);
@@ -1301,25 +1271,8 @@ async fn test_network_three_nodes_send_each_other() {
     let fee2 = res.fee;
     eprintln!("payment_hash2: {:?}", payment_hash2);
 
-    tokio::time::sleep(tokio::time::Duration::from_millis(7000)).await;
-
-    let message = |rpc_reply| -> NetworkActorMessage {
-        NetworkActorMessage::Command(NetworkActorCommand::GetPayment(payment_hash1, rpc_reply))
-    };
-    let res = call!(node_a.network_actor, message)
-        .expect("node_a alive")
-        .unwrap();
-
-    assert_eq!(res.status, PaymentSessionStatus::Success);
-
-    let message = |rpc_reply| -> NetworkActorMessage {
-        NetworkActorMessage::Command(NetworkActorCommand::GetPayment(payment_hash2, rpc_reply))
-    };
-    let res = call!(node_c.network_actor, message)
-        .expect("node_a alive")
-        .unwrap();
-
-    assert_eq!(res.status, PaymentSessionStatus::Success);
+    node_a.wait_until_success(payment_hash1).await;
+    node_c.wait_until_success(payment_hash2).await;
 
     let new_node_b_balance_channel_0 = node_b.get_local_balance_from_channel(channels[0]);
     let new_node_b_balance_channel_1 = node_b.get_local_balance_from_channel(channels[1]);
@@ -1400,8 +1353,6 @@ async fn test_send_payment_bench_test() {
             break;
         }
     }
-
-    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 }
 
 #[tokio::test]

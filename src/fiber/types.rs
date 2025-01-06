@@ -1450,7 +1450,6 @@ pub enum TlcErrorCode {
     ExpiryTooFar = PERM | 21,
     InvalidOnionPayload = PERM | 22,
     InvalidOnionError = BADONION | PERM | 25,
-    WaitingTlcAck = 26,
 }
 
 impl TlcErrorCode {

@@ -621,7 +621,7 @@ where
             | ProcessingChannelError::TlcValueInflightExceedLimit => {
                 TlcErrorCode::TemporaryChannelFailure
             }
-            ProcessingChannelError::WaitingTlcAck => TlcErrorCode::WaitingTlcAck,
+            ProcessingChannelError::WaitingTlcAck => TlcErrorCode::TemporaryChannelFailure,
             ProcessingChannelError::InternalError(_) => TlcErrorCode::TemporaryNodeFailure,
             ProcessingChannelError::InvalidState(error) => match state.state {
                 // we can not revert back up `ChannelReady` after `ShuttingDown`

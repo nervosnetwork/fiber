@@ -596,14 +596,16 @@ impl NetworkNode {
     }
 
     pub async fn get_payment_status(&self, payment_hash: Hash256) -> PaymentSessionStatus {
+        self.get_payment_result(payment_hash).await.status
+    }
+
+    pub async fn get_payment_result(&self, payment_hash: Hash256) -> SendPaymentResponse {
         let message = |rpc_reply| -> NetworkActorMessage {
             NetworkActorMessage::Command(NetworkActorCommand::GetPayment(payment_hash, rpc_reply))
         };
-        let res = call!(self.network_actor, message)
+        call!(self.network_actor, message)
             .expect("node_a alive")
-            .unwrap();
-
-        res.status
+            .unwrap()
     }
 
     pub async fn wait_until_success(&self, payment_hash: Hash256) {
@@ -612,8 +614,25 @@ impl NetworkNode {
             if status == PaymentSessionStatus::Success {
                 eprintln!("Payment success: {:?}\n\n", payment_hash);
                 break;
-            } else {
-                eprintln!("status for {:?} is : {:?}", payment_hash, status);
+            } else if status == PaymentSessionStatus::Failed {
+                eprintln!("Payment failed: {:?}\n\n", payment_hash);
+                // report error
+                assert_eq!(status, PaymentSessionStatus::Success);
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    }
+
+    pub async fn wait_until_failed(&self, payment_hash: Hash256) {
+        loop {
+            let status = self.get_payment_status(payment_hash).await;
+            if status == PaymentSessionStatus::Failed {
+                eprintln!("Payment failed: {:?}\n\n", payment_hash);
+                break;
+            } else if status == PaymentSessionStatus::Success {
+                eprintln!("Payment success: {:?}\n\n", payment_hash);
+                // report error
+                assert_eq!(status, PaymentSessionStatus::Failed);
             }
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
