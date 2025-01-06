@@ -6,6 +6,7 @@ use ckb_types::{
     core::{DepType, TransactionView},
     packed::{CellDep, CellOutput, OutPoint, Script, Transaction},
     prelude::{Builder, Entity, IntoTransactionView, Pack, PackVec, Unpack},
+    H256,
 };
 use once_cell::sync::{Lazy, OnceCell};
 use std::{collections::HashMap, sync::Arc, sync::RwLock};
@@ -15,7 +16,7 @@ use crate::{
     ckb::{
         config::UdtCfgInfos,
         contracts::{Contract, ContractsContext, ContractsInfo},
-        GetBlockTimestampRequest, TraceTxRequest, TraceTxResponse,
+        TraceTxRequest, TraceTxResponse,
     },
     now_timestamp_as_millis_u64,
 };
@@ -500,16 +501,14 @@ impl Actor for MockChainActor {
                 // cause an infinite loop.
                 // So here we create an static lock which is shared across all nodes, and we use this lock to
                 // guarantee that the block timestamp is the same across all nodes.
-                static BLOCK_TIMESTAMP: OnceCell<
-                    TokioRwLock<HashMap<GetBlockTimestampRequest, u64>>,
-                > = OnceCell::new();
+                static BLOCK_TIMESTAMP: OnceCell<TokioRwLock<HashMap<H256, u64>>> = OnceCell::new();
                 BLOCK_TIMESTAMP.get_or_init(|| TokioRwLock::new(HashMap::new()));
                 let timestamp = *BLOCK_TIMESTAMP
                     .get()
                     .unwrap()
                     .write()
                     .await
-                    .entry(request.clone())
+                    .entry(request.block_hash())
                     .or_insert(now_timestamp_as_millis_u64());
 
                 let _ = rpc_reply_port.send(Ok(Some(timestamp)));

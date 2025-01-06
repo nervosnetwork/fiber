@@ -41,19 +41,18 @@ impl TraceTxResponse {
     }
 }
 
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
-pub enum GetBlockTimestampRequest {
-    BlockNumber(u64),
-    BlockHash(H256),
+#[derive(Debug, Clone)]
+pub struct GetBlockTimestampRequest {
+    block_hash: H256,
 }
 
 impl GetBlockTimestampRequest {
     pub fn from_block_hash(block_hash: H256) -> Self {
-        Self::BlockHash(block_hash)
+        Self { block_hash }
     }
 
-    pub fn from_block_number(block_number: u64) -> Self {
-        Self::BlockNumber(block_number)
+    pub fn block_hash(&self) -> H256 {
+        self.block_hash.clone()
     }
 }
 
@@ -258,20 +257,18 @@ impl Actor for CkbChainActor {
                     }
                 }
             }
-            CkbChainMessage::GetBlockTimestamp(request, reply_port) => {
+            CkbChainMessage::GetBlockTimestamp(
+                GetBlockTimestampRequest { block_hash },
+                reply_port,
+            ) => {
                 let rpc_url = state.config.rpc_url.clone();
-
                 tokio::task::block_in_place(move || {
                     let ckb_client = CkbRpcClient::new(&rpc_url);
-                    let timestamp = match request {
-                        GetBlockTimestampRequest::BlockNumber(block_number) => ckb_client
-                            .get_header_by_number(block_number.into())
-                            .map(|x| x.map(|x| x.inner.timestamp.into())),
-                        GetBlockTimestampRequest::BlockHash(block_hash) => ckb_client
+                    let _ = reply_port.send(
+                        ckb_client
                             .get_header(block_hash)
                             .map(|x| x.map(|x| x.inner.timestamp.into())),
-                    };
-                    let _ = reply_port.send(timestamp);
+                    );
                 });
             }
         }
