@@ -1141,7 +1141,7 @@ where
         peeled_onion_packet: PeeledPaymentOnionPacket,
         added_tlc_id: u64,
     ) -> Result<(), ProcessingChannelError> {
-        let (send, recv) = oneshot::channel::<Result<u64, TlcErr>>();
+        let (send, _recv) = oneshot::channel::<Result<u64, TlcErr>>();
         let rpc_reply = RpcReplyPort::from(send);
         self.network
             .send_message(NetworkActorMessage::Command(
@@ -1158,9 +1158,9 @@ where
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
 
         // If we failed to forward the onion packet, we should remove the tlc.
-        if let Err(res) = recv.await.expect("expect command replied") {
-            return Err(ProcessingChannelError::TlcForwardingError(res));
-        }
+        // if let Err(res) = recv.await.expect("expect command replied") {
+        //     return Err(ProcessingChannelError::TlcForwardingError(res));
+        // }
         Ok(())
     }
 

@@ -1412,8 +1412,6 @@ where
                 if wait_for_add_tlc_reply {
                     let add_tlc_res = recv.await.expect("recv error").map(|res| res.tlc_id);
                     reply.send(add_tlc_res).expect("send error");
-                } else {
-                    reply.send(Ok(u64::MAX)).expect("send error");
                 }
             }
             Err(err) => {

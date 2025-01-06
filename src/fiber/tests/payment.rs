@@ -1494,3 +1494,62 @@ async fn test_send_payment_three_nodes_send_each_other_bench_test() {
         node_2.wait_until_success(payment2.payment_hash).await;
     }
 }
+
+#[tokio::test]
+async fn test_send_payment_three_nodes_bench_test() {
+    init_tracing();
+    let _span = tracing::info_span!("node", node = "test").entered();
+    let (nodes, _channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+        &[
+            (
+                (0, 1),
+                (
+                    MIN_RESERVED_CKB + 10000000000,
+                    MIN_RESERVED_CKB + 10000000000,
+                ),
+            ),
+            (
+                (1, 2),
+                (
+                    MIN_RESERVED_CKB + 10000000000,
+                    MIN_RESERVED_CKB + 10000000000,
+                ),
+            ),
+        ],
+        3,
+        true,
+    )
+    .await;
+    let [mut node_1, mut node_2, mut node_3] = nodes.try_into().expect("3 nodes");
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+    let mut all_sent = vec![];
+
+    for i in 1..=4 {
+        let payment1 = node_1.send_payment_keysend(&node_3, 1000).await.unwrap();
+        all_sent.push((1, payment1.payment_hash));
+        eprintln!("send: {} payment_hash: {:?} sent", i, payment1.payment_hash);
+
+        let payment2 = node_2.send_payment_keysend(&node_3, 1000).await.unwrap();
+        all_sent.push((2, payment2.payment_hash));
+        eprintln!("send: {} payment_hash: {:?} sent", i, payment2.payment_hash);
+
+        let payment3 = node_2.send_payment_keysend(&node_1, 1000).await.unwrap();
+        all_sent.push((2, payment3.payment_hash));
+        eprintln!("send: {} payment_hash: {:?} sent", i, payment3.payment_hash);
+
+        let payment4 = node_3.send_payment_keysend(&node_1, 1000).await.unwrap();
+        all_sent.push((3, payment4.payment_hash));
+        eprintln!("send: {} payment_hash: {:?} sent", i, payment4.payment_hash);
+    }
+    for (node_index, payment_hash) in all_sent {
+        let node = match node_index {
+            1 => &mut node_1,
+            2 => &mut node_2,
+            3 => &mut node_3,
+            _ => unreachable!(),
+        };
+        node.wait_until_success(payment_hash).await;
+    }
+}
