@@ -179,6 +179,9 @@ pub struct DirectedGraphEdge {
 
     // The total capacity of the channel.
     pub capacity: u128,
+    // The balance of the channel from the perspective of the `from` node.
+    // May be None if the balance is not known.
+    pub balance: Option<u128>,
 
     /// The difference in htlc expiry values that you must have when routing through this channel (in milliseconds).
     pub tlc_expiry_delta: u64,
@@ -585,6 +588,7 @@ where
                                 from: node_id,
                                 to: channel_actor_state.remote_pubkey,
                                 capacity: channel_actor_state.get_liquid_capacity(),
+                                balance: Some(channel_actor_state.to_local_amount),
                                 tlc_expiry_delta: remote_tlc_info.tlc_expiry_delta,
                                 tlc_minimum_value: remote_tlc_info.tlc_min_value,
                                 fee_rate: remote_tlc_info.tlc_fee_proportional_millionths,
@@ -612,6 +616,7 @@ where
                         from: channel.node1,
                         to: channel.node2,
                         capacity: channel.capacity,
+                        balance: None,
                         tlc_expiry_delta: info.tlc_expiry_delta,
                         tlc_minimum_value: info.tlc_minimum_value,
                         fee_rate: info.fee_rate as u128,
@@ -627,6 +632,7 @@ where
                         from: channel.node2,
                         to: channel.node1,
                         capacity: channel.capacity,
+                        balance: None,
                         tlc_expiry_delta: info.tlc_expiry_delta,
                         tlc_minimum_value: info.tlc_minimum_value,
                         fee_rate: info.fee_rate as u128,
@@ -641,9 +647,11 @@ where
         // so the channel with larger capacity maybe have the same weight with the channel with smaller capacity
         // so we sort by capacity reverse order to make sure we try channel with larger capacity firstly
         channels.sort_by(|a, b| {
-            b.capacity
-                .cmp(&a.capacity)
-                .then(b.channel_outpoint.cmp(&a.channel_outpoint))
+            b.balance.cmp(&a.balance).then(
+                b.capacity
+                    .cmp(&a.capacity)
+                    .then(b.channel_outpoint.cmp(&a.channel_outpoint)),
+            )
         });
         channels.into_iter()
     }
@@ -905,6 +913,7 @@ where
                     from,
                     to,
                     capacity,
+                    balance,
                     udt_type_script: edge_udt_type_script,
                     tlc_expiry_delta,
                     tlc_minimum_value,
@@ -967,13 +976,10 @@ where
                     continue;
                 }
 
-                // if this is a direct channel, try to load the channel actor state for balance
-                if from == self.source {
-                    if let Some(state) = self.store.get_channel_state_by_outpoint(&channel_outpoint)
-                    {
-                        if amount_to_send > state.to_local_amount {
-                            continue;
-                        }
+                // If we know the exact balance and it is less than the amount to send, skip this edge
+                if let Some(balance) = balance {
+                    if amount_to_send > balance {
+                        continue;
                     }
                 }
 
