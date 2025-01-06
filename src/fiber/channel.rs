@@ -1494,21 +1494,14 @@ where
         myself: &ActorRef<ChannelActorMessage>,
         state: &mut ChannelActorState,
     ) {
-        let pending_tlc_ops = state.tlc_state.get_pending_operations();
-        // error!(
-        //     "now apply_retryable_tlc_operations: {:?}",
-        //     pending_tlc_ops.len()
-        // );
-        // for i in pending_tlc_ops.iter() {
-        //     error!("pending_tlc_ops: {:?}", i);
-        // }
-        for retryable_operation in pending_tlc_ops.into_iter() {
-            let keep = match retryable_operation {
+        let mut pending_tlc_ops = state.tlc_state.get_pending_operations();
+        pending_tlc_ops.retain_mut(|retryable_operation| {
+            match retryable_operation {
                 RetryableTlcOperation::RemoveTlc(tlc_id, ref reason) => {
                     match self.handle_remove_tlc_command(
                         state,
                         RemoveTlcCommand {
-                            id: tlc_id.into(),
+                            id: u64::from(*tlc_id),
                             reason: reason.clone(),
                         },
                     ) {
@@ -1524,10 +1517,10 @@ where
                     self.network
                         .send_message(NetworkActorMessage::new_command(
                             NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
-                                channel_id: channel_id,
+                                channel_id: *channel_id,
                                 command: ChannelCommand::RemoveTlc(
                                     RemoveTlcCommand {
-                                        id: tlc_id,
+                                        id: u64::from(*tlc_id),
                                         reason: reason.clone(),
                                     },
                                     port,
@@ -1552,36 +1545,35 @@ where
                     //
                     // but we need the result for better error handling
                     // so we introduce the ForwardTlcResult to get the result based on actor message
-                    if !try_one_time {
+                    if !*try_one_time {
                         // we need to decide whether to retry it until we get ForwardTlcResult
-                        continue;
-                    }
-                    match self.network.send_message(NetworkActorMessage::Command(
-                        NetworkActorCommand::SendPaymentOnionPacket(SendOnionPacketCommand {
-                            peeled_onion_packet: peeled_onion_packet.clone(),
-                            previous_tlc: Some((state.get_id(), tlc_id.into())),
-                            payment_hash,
-                        }),
-                    )) {
-                        Ok(_) => {
-                            // here we just make sure the forward tlc is sent, we don't need to wait for the result
-                            // retry it if necessary until we get ForwardTlcResult
-                            self.set_forward_tlc_status(state, payment_hash, false);
-                            true
-                        }
-                        Err(_err) => {
-                            // network actor is dead? we will retry it later
-                            false
+                        true
+                    } else {
+                        match self.network.send_message(NetworkActorMessage::Command(
+                            NetworkActorCommand::SendPaymentOnionPacket(SendOnionPacketCommand {
+                                peeled_onion_packet: peeled_onion_packet.clone(),
+                                previous_tlc: Some((state.get_id(), u64::from(*tlc_id))),
+                                payment_hash: *payment_hash,
+                            }),
+                        )) {
+                            Ok(_) => {
+                                // here we just make sure the forward tlc is sent, we don't need to wait for the result
+                                // retry it if necessary until we get ForwardTlcResult
+                                // self.set_forward_tlc_status(state, *payment_hash, false);
+                                *try_one_time = false;
+                                true
+                            }
+                            Err(_err) => {
+                                // network actor is dead? we will retry it later
+                                false
+                            }
                         }
                     }
                 }
-            };
-            if !keep {
-                state
-                    .tlc_state
-                    .remove_pending_tlc_operation(&retryable_operation);
             }
-        }
+        });
+
+        state.tlc_state.retryable_tlc_operations = pending_tlc_ops;
 
         // Add some randomness to the interval to avoid all channels retrying at the same time
         let rand_interval = rand::thread_rng()
@@ -1600,7 +1592,7 @@ where
         result: ForwardTlcResult,
     ) {
         let pending_ops = state.tlc_state.get_pending_operations();
-        if let Some((op, peeled_onion)) = pending_ops.iter().find_map(|op| match op {
+        if let Some((tlc_op, peeled_onion)) = pending_ops.iter().find_map(|op| match op {
             RetryableTlcOperation::ForwardTlc(payment_hash, _, peel_onion_packet, _)
                 if *payment_hash == result.payment_hash =>
             {
@@ -1616,25 +1608,25 @@ where
                     }
                     ProcessingChannelError::RepeatedProcessing(_) => {
                         // ignore repeated processing error, we have already handled it
-                        state.tlc_state.remove_pending_tlc_operation(op);
+                        state.tlc_state.remove_pending_tlc_operation(tlc_op);
                     }
                     _ => {
-                        let error = ProcessingChannelError::TlcForwardingError(tlc_err);
-                        let err = error.with_shared_secret(peeled_onion.shared_secret.clone());
+                        let error = ProcessingChannelError::TlcForwardingError(tlc_err)
+                            .with_shared_secret(peeled_onion.shared_secret.clone());
                         self.process_add_tlc_error(
                             myself,
                             state,
                             result.payment_hash,
                             TLCId::Received(result.tlc_id),
-                            err,
+                            error,
                         )
                         .await;
-                        state.tlc_state.remove_pending_tlc_operation(op);
+                        state.tlc_state.remove_pending_tlc_operation(tlc_op);
                     }
                 }
             } else {
-                //error!("remove forward tlc operation: {:?}", &op);
-                state.tlc_state.remove_pending_tlc_operation(op);
+                // if we get success result from AddTlc, we will remove the pending operation
+                state.tlc_state.remove_pending_tlc_operation(tlc_op);
             }
         }
     }
