@@ -5678,6 +5678,11 @@ impl ChannelActorState {
         network: &ActorRef<NetworkActorMessage>,
         revoke_and_ack: RevokeAndAck,
     ) -> Result<bool, ProcessingChannelError> {
+        if !self.tlc_state.waiting_ack {
+            return Err(ProcessingChannelError::InvalidState(
+                "unexpected RevokeAndAck message".to_string(),
+            ));
+        }
         let RevokeAndAck {
             channel_id: _,
             revocation_partial_signature,
