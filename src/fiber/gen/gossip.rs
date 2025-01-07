@@ -4,231 +4,6 @@ use super::blockchain::*;
 use super::fiber::*;
 use molecule::prelude::*;
 #[derive(Clone)]
-pub struct Uint16(molecule::bytes::Bytes);
-impl ::core::fmt::LowerHex for Uint16 {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        use molecule::hex_string;
-        if f.alternate() {
-            write!(f, "0x")?;
-        }
-        write!(f, "{}", hex_string(self.as_slice()))
-    }
-}
-impl ::core::fmt::Debug for Uint16 {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        write!(f, "{}({:#x})", Self::NAME, self)
-    }
-}
-impl ::core::fmt::Display for Uint16 {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        use molecule::hex_string;
-        let raw_data = hex_string(&self.raw_data());
-        write!(f, "{}(0x{})", Self::NAME, raw_data)
-    }
-}
-impl ::core::default::Default for Uint16 {
-    fn default() -> Self {
-        let v = molecule::bytes::Bytes::from_static(&Self::DEFAULT_VALUE);
-        Uint16::new_unchecked(v)
-    }
-}
-impl Uint16 {
-    const DEFAULT_VALUE: [u8; 2] = [0, 0];
-    pub const TOTAL_SIZE: usize = 2;
-    pub const ITEM_SIZE: usize = 1;
-    pub const ITEM_COUNT: usize = 2;
-    pub fn nth0(&self) -> Byte {
-        Byte::new_unchecked(self.0.slice(0..1))
-    }
-    pub fn nth1(&self) -> Byte {
-        Byte::new_unchecked(self.0.slice(1..2))
-    }
-    pub fn raw_data(&self) -> molecule::bytes::Bytes {
-        self.as_bytes()
-    }
-    pub fn as_reader<'r>(&'r self) -> Uint16Reader<'r> {
-        Uint16Reader::new_unchecked(self.as_slice())
-    }
-}
-impl molecule::prelude::Entity for Uint16 {
-    type Builder = Uint16Builder;
-    const NAME: &'static str = "Uint16";
-    fn new_unchecked(data: molecule::bytes::Bytes) -> Self {
-        Uint16(data)
-    }
-    fn as_bytes(&self) -> molecule::bytes::Bytes {
-        self.0.clone()
-    }
-    fn as_slice(&self) -> &[u8] {
-        &self.0[..]
-    }
-    fn from_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
-        Uint16Reader::from_slice(slice).map(|reader| reader.to_entity())
-    }
-    fn from_compatible_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
-        Uint16Reader::from_compatible_slice(slice).map(|reader| reader.to_entity())
-    }
-    fn new_builder() -> Self::Builder {
-        ::core::default::Default::default()
-    }
-    fn as_builder(self) -> Self::Builder {
-        Self::new_builder().set([self.nth0(), self.nth1()])
-    }
-}
-#[derive(Clone, Copy)]
-pub struct Uint16Reader<'r>(&'r [u8]);
-impl<'r> ::core::fmt::LowerHex for Uint16Reader<'r> {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        use molecule::hex_string;
-        if f.alternate() {
-            write!(f, "0x")?;
-        }
-        write!(f, "{}", hex_string(self.as_slice()))
-    }
-}
-impl<'r> ::core::fmt::Debug for Uint16Reader<'r> {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        write!(f, "{}({:#x})", Self::NAME, self)
-    }
-}
-impl<'r> ::core::fmt::Display for Uint16Reader<'r> {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        use molecule::hex_string;
-        let raw_data = hex_string(&self.raw_data());
-        write!(f, "{}(0x{})", Self::NAME, raw_data)
-    }
-}
-impl<'r> Uint16Reader<'r> {
-    pub const TOTAL_SIZE: usize = 2;
-    pub const ITEM_SIZE: usize = 1;
-    pub const ITEM_COUNT: usize = 2;
-    pub fn nth0(&self) -> ByteReader<'r> {
-        ByteReader::new_unchecked(&self.as_slice()[0..1])
-    }
-    pub fn nth1(&self) -> ByteReader<'r> {
-        ByteReader::new_unchecked(&self.as_slice()[1..2])
-    }
-    pub fn raw_data(&self) -> &'r [u8] {
-        self.as_slice()
-    }
-}
-impl<'r> molecule::prelude::Reader<'r> for Uint16Reader<'r> {
-    type Entity = Uint16;
-    const NAME: &'static str = "Uint16Reader";
-    fn to_entity(&self) -> Self::Entity {
-        Self::Entity::new_unchecked(self.as_slice().to_owned().into())
-    }
-    fn new_unchecked(slice: &'r [u8]) -> Self {
-        Uint16Reader(slice)
-    }
-    fn as_slice(&self) -> &'r [u8] {
-        self.0
-    }
-    fn verify(slice: &[u8], _compatible: bool) -> molecule::error::VerificationResult<()> {
-        use molecule::verification_error as ve;
-        let slice_len = slice.len();
-        if slice_len != Self::TOTAL_SIZE {
-            return ve!(Self, TotalSizeNotMatch, Self::TOTAL_SIZE, slice_len);
-        }
-        Ok(())
-    }
-}
-#[derive(Clone)]
-pub struct Uint16Builder(pub(crate) [Byte; 2]);
-impl ::core::fmt::Debug for Uint16Builder {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        write!(f, "{}({:?})", Self::NAME, &self.0[..])
-    }
-}
-impl ::core::default::Default for Uint16Builder {
-    fn default() -> Self {
-        Uint16Builder([Byte::default(), Byte::default()])
-    }
-}
-impl Uint16Builder {
-    pub const TOTAL_SIZE: usize = 2;
-    pub const ITEM_SIZE: usize = 1;
-    pub const ITEM_COUNT: usize = 2;
-    pub fn set(mut self, v: [Byte; 2]) -> Self {
-        self.0 = v;
-        self
-    }
-    pub fn nth0(mut self, v: Byte) -> Self {
-        self.0[0] = v;
-        self
-    }
-    pub fn nth1(mut self, v: Byte) -> Self {
-        self.0[1] = v;
-        self
-    }
-}
-impl molecule::prelude::Builder for Uint16Builder {
-    type Entity = Uint16;
-    const NAME: &'static str = "Uint16Builder";
-    fn expected_length(&self) -> usize {
-        Self::TOTAL_SIZE
-    }
-    fn write<W: molecule::io::Write>(&self, writer: &mut W) -> molecule::io::Result<()> {
-        writer.write_all(self.0[0].as_slice())?;
-        writer.write_all(self.0[1].as_slice())?;
-        Ok(())
-    }
-    fn build(&self) -> Self::Entity {
-        let mut inner = Vec::with_capacity(self.expected_length());
-        self.write(&mut inner)
-            .unwrap_or_else(|_| panic!("{} build should be ok", Self::NAME));
-        Uint16::new_unchecked(inner.into())
-    }
-}
-impl From<[Byte; 2usize]> for Uint16 {
-    fn from(value: [Byte; 2usize]) -> Self {
-        Self::new_builder().set(value).build()
-    }
-}
-impl ::core::convert::TryFrom<&[Byte]> for Uint16 {
-    type Error = ::core::array::TryFromSliceError;
-    fn try_from(value: &[Byte]) -> Result<Self, ::core::array::TryFromSliceError> {
-        Ok(Self::new_builder()
-            .set(<&[Byte; 2usize]>::try_from(value)?.clone())
-            .build())
-    }
-}
-impl From<Uint16> for [Byte; 2usize] {
-    #[track_caller]
-    fn from(value: Uint16) -> Self {
-        [value.nth0(), value.nth1()]
-    }
-}
-impl From<[u8; 2usize]> for Uint16 {
-    fn from(value: [u8; 2usize]) -> Self {
-        Uint16Reader::new_unchecked(&value).to_entity()
-    }
-}
-impl ::core::convert::TryFrom<&[u8]> for Uint16 {
-    type Error = ::core::array::TryFromSliceError;
-    fn try_from(value: &[u8]) -> Result<Self, ::core::array::TryFromSliceError> {
-        Ok(<[u8; 2usize]>::try_from(value)?.into())
-    }
-}
-impl From<Uint16> for [u8; 2usize] {
-    #[track_caller]
-    fn from(value: Uint16) -> Self {
-        ::core::convert::TryFrom::try_from(value.as_slice()).unwrap()
-    }
-}
-impl<'a> From<Uint16Reader<'a>> for &'a [u8; 2usize] {
-    #[track_caller]
-    fn from(value: Uint16Reader<'a>) -> Self {
-        ::core::convert::TryFrom::try_from(value.as_slice()).unwrap()
-    }
-}
-impl<'a> From<&'a Uint16Reader<'a>> for &'a [u8; 2usize] {
-    #[track_caller]
-    fn from(value: &'a Uint16Reader<'a>) -> Self {
-        ::core::convert::TryFrom::try_from(value.as_slice()).unwrap()
-    }
-}
-#[derive(Clone)]
 pub struct SchnorrSignature(molecule::bytes::Bytes);
 impl ::core::fmt::LowerHex for SchnorrSignature {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
@@ -3308,7 +3083,7 @@ impl ::core::fmt::Display for NodeAnnouncement {
         write!(f, ", {}: {}", "features", self.features())?;
         write!(f, ", {}: {}", "timestamp", self.timestamp())?;
         write!(f, ", {}: {}", "node_id", self.node_id())?;
-        write!(f, ", {}: {}", "alias", self.alias())?;
+        write!(f, ", {}: {}", "node_name", self.node_name())?;
         write!(f, ", {}: {}", "address", self.address())?;
         write!(f, ", {}: {}", "chain_hash", self.chain_hash())?;
         write!(
@@ -3383,7 +3158,7 @@ impl NodeAnnouncement {
         let end = molecule::unpack_number(&slice[20..]) as usize;
         Pubkey::new_unchecked(self.0.slice(start..end))
     }
-    pub fn alias(&self) -> Byte32 {
+    pub fn node_name(&self) -> Byte32 {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[20..]) as usize;
         let end = molecule::unpack_number(&slice[24..]) as usize;
@@ -3448,7 +3223,7 @@ impl molecule::prelude::Entity for NodeAnnouncement {
             .features(self.features())
             .timestamp(self.timestamp())
             .node_id(self.node_id())
-            .alias(self.alias())
+            .node_name(self.node_name())
             .address(self.address())
             .chain_hash(self.chain_hash())
             .auto_accept_min_ckb_funding_amount(self.auto_accept_min_ckb_funding_amount())
@@ -3478,7 +3253,7 @@ impl<'r> ::core::fmt::Display for NodeAnnouncementReader<'r> {
         write!(f, ", {}: {}", "features", self.features())?;
         write!(f, ", {}: {}", "timestamp", self.timestamp())?;
         write!(f, ", {}: {}", "node_id", self.node_id())?;
-        write!(f, ", {}: {}", "alias", self.alias())?;
+        write!(f, ", {}: {}", "node_name", self.node_name())?;
         write!(f, ", {}: {}", "address", self.address())?;
         write!(f, ", {}: {}", "chain_hash", self.chain_hash())?;
         write!(
@@ -3537,7 +3312,7 @@ impl<'r> NodeAnnouncementReader<'r> {
         let end = molecule::unpack_number(&slice[20..]) as usize;
         PubkeyReader::new_unchecked(&self.as_slice()[start..end])
     }
-    pub fn alias(&self) -> Byte32Reader<'r> {
+    pub fn node_name(&self) -> Byte32Reader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[20..]) as usize;
         let end = molecule::unpack_number(&slice[24..]) as usize;
@@ -3636,7 +3411,7 @@ pub struct NodeAnnouncementBuilder {
     pub(crate) features: Uint64,
     pub(crate) timestamp: Uint64,
     pub(crate) node_id: Pubkey,
-    pub(crate) alias: Byte32,
+    pub(crate) node_name: Byte32,
     pub(crate) address: BytesVec,
     pub(crate) chain_hash: Byte32,
     pub(crate) auto_accept_min_ckb_funding_amount: Uint64,
@@ -3660,8 +3435,8 @@ impl NodeAnnouncementBuilder {
         self.node_id = v;
         self
     }
-    pub fn alias(mut self, v: Byte32) -> Self {
-        self.alias = v;
+    pub fn node_name(mut self, v: Byte32) -> Self {
+        self.node_name = v;
         self
     }
     pub fn address(mut self, v: BytesVec) -> Self {
@@ -3690,7 +3465,7 @@ impl molecule::prelude::Builder for NodeAnnouncementBuilder {
             + self.features.as_slice().len()
             + self.timestamp.as_slice().len()
             + self.node_id.as_slice().len()
-            + self.alias.as_slice().len()
+            + self.node_name.as_slice().len()
             + self.address.as_slice().len()
             + self.chain_hash.as_slice().len()
             + self.auto_accept_min_ckb_funding_amount.as_slice().len()
@@ -3708,7 +3483,7 @@ impl molecule::prelude::Builder for NodeAnnouncementBuilder {
         offsets.push(total_size);
         total_size += self.node_id.as_slice().len();
         offsets.push(total_size);
-        total_size += self.alias.as_slice().len();
+        total_size += self.node_name.as_slice().len();
         offsets.push(total_size);
         total_size += self.address.as_slice().len();
         offsets.push(total_size);
@@ -3725,7 +3500,7 @@ impl molecule::prelude::Builder for NodeAnnouncementBuilder {
         writer.write_all(self.features.as_slice())?;
         writer.write_all(self.timestamp.as_slice())?;
         writer.write_all(self.node_id.as_slice())?;
-        writer.write_all(self.alias.as_slice())?;
+        writer.write_all(self.node_name.as_slice())?;
         writer.write_all(self.address.as_slice())?;
         writer.write_all(self.chain_hash.as_slice())?;
         writer.write_all(self.auto_accept_min_ckb_funding_amount.as_slice())?;
@@ -4238,308 +4013,6 @@ impl molecule::prelude::Builder for ChannelAnnouncementBuilder {
         self.write(&mut inner)
             .unwrap_or_else(|_| panic!("{} build should be ok", Self::NAME));
         ChannelAnnouncement::new_unchecked(inner.into())
-    }
-}
-#[derive(Clone)]
-pub struct ChannelUpdate(molecule::bytes::Bytes);
-impl ::core::fmt::LowerHex for ChannelUpdate {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        use molecule::hex_string;
-        if f.alternate() {
-            write!(f, "0x")?;
-        }
-        write!(f, "{}", hex_string(self.as_slice()))
-    }
-}
-impl ::core::fmt::Debug for ChannelUpdate {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        write!(f, "{}({:#x})", Self::NAME, self)
-    }
-}
-impl ::core::fmt::Display for ChannelUpdate {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        write!(f, "{} {{ ", Self::NAME)?;
-        write!(f, "{}: {}", "signature", self.signature())?;
-        write!(f, ", {}: {}", "chain_hash", self.chain_hash())?;
-        write!(f, ", {}: {}", "channel_outpoint", self.channel_outpoint())?;
-        write!(f, ", {}: {}", "timestamp", self.timestamp())?;
-        write!(f, ", {}: {}", "message_flags", self.message_flags())?;
-        write!(f, ", {}: {}", "channel_flags", self.channel_flags())?;
-        write!(f, ", {}: {}", "tlc_expiry_delta", self.tlc_expiry_delta())?;
-        write!(f, ", {}: {}", "tlc_minimum_value", self.tlc_minimum_value())?;
-        write!(f, ", {}: {}", "tlc_maximum_value", self.tlc_maximum_value())?;
-        write!(
-            f,
-            ", {}: {}",
-            "tlc_fee_proportional_millionths",
-            self.tlc_fee_proportional_millionths()
-        )?;
-        write!(f, " }}")
-    }
-}
-impl ::core::default::Default for ChannelUpdate {
-    fn default() -> Self {
-        let v = molecule::bytes::Bytes::from_static(&Self::DEFAULT_VALUE);
-        ChannelUpdate::new_unchecked(v)
-    }
-}
-impl ChannelUpdate {
-    const DEFAULT_VALUE: [u8; 204] = [
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    ];
-    pub const TOTAL_SIZE: usize = 204;
-    pub const FIELD_SIZES: [usize; 10] = [64, 32, 36, 8, 4, 4, 8, 16, 16, 16];
-    pub const FIELD_COUNT: usize = 10;
-    pub fn signature(&self) -> EcdsaSignature {
-        EcdsaSignature::new_unchecked(self.0.slice(0..64))
-    }
-    pub fn chain_hash(&self) -> Byte32 {
-        Byte32::new_unchecked(self.0.slice(64..96))
-    }
-    pub fn channel_outpoint(&self) -> OutPoint {
-        OutPoint::new_unchecked(self.0.slice(96..132))
-    }
-    pub fn timestamp(&self) -> Uint64 {
-        Uint64::new_unchecked(self.0.slice(132..140))
-    }
-    pub fn message_flags(&self) -> Uint32 {
-        Uint32::new_unchecked(self.0.slice(140..144))
-    }
-    pub fn channel_flags(&self) -> Uint32 {
-        Uint32::new_unchecked(self.0.slice(144..148))
-    }
-    pub fn tlc_expiry_delta(&self) -> Uint64 {
-        Uint64::new_unchecked(self.0.slice(148..156))
-    }
-    pub fn tlc_minimum_value(&self) -> Uint128 {
-        Uint128::new_unchecked(self.0.slice(156..172))
-    }
-    pub fn tlc_maximum_value(&self) -> Uint128 {
-        Uint128::new_unchecked(self.0.slice(172..188))
-    }
-    pub fn tlc_fee_proportional_millionths(&self) -> Uint128 {
-        Uint128::new_unchecked(self.0.slice(188..204))
-    }
-    pub fn as_reader<'r>(&'r self) -> ChannelUpdateReader<'r> {
-        ChannelUpdateReader::new_unchecked(self.as_slice())
-    }
-}
-impl molecule::prelude::Entity for ChannelUpdate {
-    type Builder = ChannelUpdateBuilder;
-    const NAME: &'static str = "ChannelUpdate";
-    fn new_unchecked(data: molecule::bytes::Bytes) -> Self {
-        ChannelUpdate(data)
-    }
-    fn as_bytes(&self) -> molecule::bytes::Bytes {
-        self.0.clone()
-    }
-    fn as_slice(&self) -> &[u8] {
-        &self.0[..]
-    }
-    fn from_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
-        ChannelUpdateReader::from_slice(slice).map(|reader| reader.to_entity())
-    }
-    fn from_compatible_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
-        ChannelUpdateReader::from_compatible_slice(slice).map(|reader| reader.to_entity())
-    }
-    fn new_builder() -> Self::Builder {
-        ::core::default::Default::default()
-    }
-    fn as_builder(self) -> Self::Builder {
-        Self::new_builder()
-            .signature(self.signature())
-            .chain_hash(self.chain_hash())
-            .channel_outpoint(self.channel_outpoint())
-            .timestamp(self.timestamp())
-            .message_flags(self.message_flags())
-            .channel_flags(self.channel_flags())
-            .tlc_expiry_delta(self.tlc_expiry_delta())
-            .tlc_minimum_value(self.tlc_minimum_value())
-            .tlc_maximum_value(self.tlc_maximum_value())
-            .tlc_fee_proportional_millionths(self.tlc_fee_proportional_millionths())
-    }
-}
-#[derive(Clone, Copy)]
-pub struct ChannelUpdateReader<'r>(&'r [u8]);
-impl<'r> ::core::fmt::LowerHex for ChannelUpdateReader<'r> {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        use molecule::hex_string;
-        if f.alternate() {
-            write!(f, "0x")?;
-        }
-        write!(f, "{}", hex_string(self.as_slice()))
-    }
-}
-impl<'r> ::core::fmt::Debug for ChannelUpdateReader<'r> {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        write!(f, "{}({:#x})", Self::NAME, self)
-    }
-}
-impl<'r> ::core::fmt::Display for ChannelUpdateReader<'r> {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        write!(f, "{} {{ ", Self::NAME)?;
-        write!(f, "{}: {}", "signature", self.signature())?;
-        write!(f, ", {}: {}", "chain_hash", self.chain_hash())?;
-        write!(f, ", {}: {}", "channel_outpoint", self.channel_outpoint())?;
-        write!(f, ", {}: {}", "timestamp", self.timestamp())?;
-        write!(f, ", {}: {}", "message_flags", self.message_flags())?;
-        write!(f, ", {}: {}", "channel_flags", self.channel_flags())?;
-        write!(f, ", {}: {}", "tlc_expiry_delta", self.tlc_expiry_delta())?;
-        write!(f, ", {}: {}", "tlc_minimum_value", self.tlc_minimum_value())?;
-        write!(f, ", {}: {}", "tlc_maximum_value", self.tlc_maximum_value())?;
-        write!(
-            f,
-            ", {}: {}",
-            "tlc_fee_proportional_millionths",
-            self.tlc_fee_proportional_millionths()
-        )?;
-        write!(f, " }}")
-    }
-}
-impl<'r> ChannelUpdateReader<'r> {
-    pub const TOTAL_SIZE: usize = 204;
-    pub const FIELD_SIZES: [usize; 10] = [64, 32, 36, 8, 4, 4, 8, 16, 16, 16];
-    pub const FIELD_COUNT: usize = 10;
-    pub fn signature(&self) -> EcdsaSignatureReader<'r> {
-        EcdsaSignatureReader::new_unchecked(&self.as_slice()[0..64])
-    }
-    pub fn chain_hash(&self) -> Byte32Reader<'r> {
-        Byte32Reader::new_unchecked(&self.as_slice()[64..96])
-    }
-    pub fn channel_outpoint(&self) -> OutPointReader<'r> {
-        OutPointReader::new_unchecked(&self.as_slice()[96..132])
-    }
-    pub fn timestamp(&self) -> Uint64Reader<'r> {
-        Uint64Reader::new_unchecked(&self.as_slice()[132..140])
-    }
-    pub fn message_flags(&self) -> Uint32Reader<'r> {
-        Uint32Reader::new_unchecked(&self.as_slice()[140..144])
-    }
-    pub fn channel_flags(&self) -> Uint32Reader<'r> {
-        Uint32Reader::new_unchecked(&self.as_slice()[144..148])
-    }
-    pub fn tlc_expiry_delta(&self) -> Uint64Reader<'r> {
-        Uint64Reader::new_unchecked(&self.as_slice()[148..156])
-    }
-    pub fn tlc_minimum_value(&self) -> Uint128Reader<'r> {
-        Uint128Reader::new_unchecked(&self.as_slice()[156..172])
-    }
-    pub fn tlc_maximum_value(&self) -> Uint128Reader<'r> {
-        Uint128Reader::new_unchecked(&self.as_slice()[172..188])
-    }
-    pub fn tlc_fee_proportional_millionths(&self) -> Uint128Reader<'r> {
-        Uint128Reader::new_unchecked(&self.as_slice()[188..204])
-    }
-}
-impl<'r> molecule::prelude::Reader<'r> for ChannelUpdateReader<'r> {
-    type Entity = ChannelUpdate;
-    const NAME: &'static str = "ChannelUpdateReader";
-    fn to_entity(&self) -> Self::Entity {
-        Self::Entity::new_unchecked(self.as_slice().to_owned().into())
-    }
-    fn new_unchecked(slice: &'r [u8]) -> Self {
-        ChannelUpdateReader(slice)
-    }
-    fn as_slice(&self) -> &'r [u8] {
-        self.0
-    }
-    fn verify(slice: &[u8], _compatible: bool) -> molecule::error::VerificationResult<()> {
-        use molecule::verification_error as ve;
-        let slice_len = slice.len();
-        if slice_len != Self::TOTAL_SIZE {
-            return ve!(Self, TotalSizeNotMatch, Self::TOTAL_SIZE, slice_len);
-        }
-        Ok(())
-    }
-}
-#[derive(Clone, Debug, Default)]
-pub struct ChannelUpdateBuilder {
-    pub(crate) signature: EcdsaSignature,
-    pub(crate) chain_hash: Byte32,
-    pub(crate) channel_outpoint: OutPoint,
-    pub(crate) timestamp: Uint64,
-    pub(crate) message_flags: Uint32,
-    pub(crate) channel_flags: Uint32,
-    pub(crate) tlc_expiry_delta: Uint64,
-    pub(crate) tlc_minimum_value: Uint128,
-    pub(crate) tlc_maximum_value: Uint128,
-    pub(crate) tlc_fee_proportional_millionths: Uint128,
-}
-impl ChannelUpdateBuilder {
-    pub const TOTAL_SIZE: usize = 204;
-    pub const FIELD_SIZES: [usize; 10] = [64, 32, 36, 8, 4, 4, 8, 16, 16, 16];
-    pub const FIELD_COUNT: usize = 10;
-    pub fn signature(mut self, v: EcdsaSignature) -> Self {
-        self.signature = v;
-        self
-    }
-    pub fn chain_hash(mut self, v: Byte32) -> Self {
-        self.chain_hash = v;
-        self
-    }
-    pub fn channel_outpoint(mut self, v: OutPoint) -> Self {
-        self.channel_outpoint = v;
-        self
-    }
-    pub fn timestamp(mut self, v: Uint64) -> Self {
-        self.timestamp = v;
-        self
-    }
-    pub fn message_flags(mut self, v: Uint32) -> Self {
-        self.message_flags = v;
-        self
-    }
-    pub fn channel_flags(mut self, v: Uint32) -> Self {
-        self.channel_flags = v;
-        self
-    }
-    pub fn tlc_expiry_delta(mut self, v: Uint64) -> Self {
-        self.tlc_expiry_delta = v;
-        self
-    }
-    pub fn tlc_minimum_value(mut self, v: Uint128) -> Self {
-        self.tlc_minimum_value = v;
-        self
-    }
-    pub fn tlc_maximum_value(mut self, v: Uint128) -> Self {
-        self.tlc_maximum_value = v;
-        self
-    }
-    pub fn tlc_fee_proportional_millionths(mut self, v: Uint128) -> Self {
-        self.tlc_fee_proportional_millionths = v;
-        self
-    }
-}
-impl molecule::prelude::Builder for ChannelUpdateBuilder {
-    type Entity = ChannelUpdate;
-    const NAME: &'static str = "ChannelUpdateBuilder";
-    fn expected_length(&self) -> usize {
-        Self::TOTAL_SIZE
-    }
-    fn write<W: molecule::io::Write>(&self, writer: &mut W) -> molecule::io::Result<()> {
-        writer.write_all(self.signature.as_slice())?;
-        writer.write_all(self.chain_hash.as_slice())?;
-        writer.write_all(self.channel_outpoint.as_slice())?;
-        writer.write_all(self.timestamp.as_slice())?;
-        writer.write_all(self.message_flags.as_slice())?;
-        writer.write_all(self.channel_flags.as_slice())?;
-        writer.write_all(self.tlc_expiry_delta.as_slice())?;
-        writer.write_all(self.tlc_minimum_value.as_slice())?;
-        writer.write_all(self.tlc_maximum_value.as_slice())?;
-        writer.write_all(self.tlc_fee_proportional_millionths.as_slice())?;
-        Ok(())
-    }
-    fn build(&self) -> Self::Entity {
-        let mut inner = Vec::with_capacity(self.expected_length());
-        self.write(&mut inner)
-            .unwrap_or_else(|_| panic!("{} build should be ok", Self::NAME));
-        ChannelUpdate::new_unchecked(inner.into())
     }
 }
 #[derive(Clone)]

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 export SHELLOPTS
-export RUST_BACKTRACE=full RUST_LOG=info,fnn=debug,fnn::cch::actor::tracker=off
+export RUST_BACKTRACE=full RUST_LOG=info,fnn=debug,fnn::cch::actor::tracker=off,fnn::fiber::gossip=off,fnn::fiber::graph=off
 
 should_remove_old_state="${REMOVE_OLD_STATE:-}"
 should_clean_fiber_state="${REMOVE_OLD_FIBER:-}"
@@ -32,16 +32,13 @@ echo "Initializing finished, begin to start services ...."
 sleep 1
 
 ckb run -C "$deploy_dir/node-data" --indexer &
+cargo build
 
 # Start the dev node in the background.
 cd "$nodes_dir" || exit 1
 
 start() {
-    if [ -n "$FNN" ]; then
-        "$FNN" "$@"
-    else
-        cargo run -- "$@"
-    fi
+    ../../target/debug/fnn "$@"
 }
 
 if [ "$#" -ne 1 ]; then
