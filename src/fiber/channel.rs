@@ -6,7 +6,6 @@ use crate::{
 };
 use bitflags::bitflags;
 use futures::future::OptionFuture;
-use rand::Rng;
 use secp256k1::XOnlyPublicKey;
 use tracing::{debug, error, info, trace, warn};
 
@@ -1576,12 +1575,8 @@ where
         });
 
         state.tlc_state.retryable_tlc_operations = pending_tlc_ops;
-
-        // Add some randomness to the interval to avoid all channels retrying at the same time
-        let rand_interval = rand::thread_rng()
-            .gen_range(RETRYABLE_TLC_OPS_INTERVAL..RETRYABLE_TLC_OPS_INTERVAL * 2);
         if state.tlc_state.has_pending_operations() {
-            myself.send_after(rand_interval, || {
+            myself.send_after(RETRYABLE_TLC_OPS_INTERVAL, || {
                 ChannelActorMessage::Event(ChannelEvent::CheckTlcRetryOperation)
             });
         }
@@ -1792,11 +1787,9 @@ where
                                 command.reason,
                             )
                             .await;
-                            Ok(())
-                        } else {
-                            let _ = reply.send(Err(err.clone()));
-                            Err(err)
                         }
+                        let _ = reply.send(Err(err.clone()));
+                        Err(err)
                     }
                 }
             }
