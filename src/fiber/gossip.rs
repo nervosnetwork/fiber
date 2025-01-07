@@ -1368,10 +1368,12 @@ pub enum ExtendedGossipMessageStoreMessage {
 pub(crate) struct GossipActorState<S> {
     store: ExtendedGossipMessageStore<S>,
     control: ServiceAsyncControl,
-    num_finished_active_syncing_peers: usize,
     // The number of active syncing peers that we have finished syncing with.
-    // Together with the number of currect active syncing peers, this is
+    // Together with the number of current active syncing peers, this is
     // used to determine if we should start a new active syncing peer.
+    num_finished_active_syncing_peers: usize,
+    // The number of targeted active syncing peers that we want to have.
+    // Currently we will only start this many active syncing peers.
     num_targeted_active_syncing_peers: usize,
     // The number of outbound passive syncing peers that we want to have.
     // We only count outbound peers because the purpose of this number is to avoid eclipse attacks.
