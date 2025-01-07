@@ -214,7 +214,6 @@ pub const MIN_COMMITMENT_DELAY_EPOCHS: u64 = 1;
 // The max commitment delay is 84 epochs = 14 days.
 pub const MAX_COMMITMENT_DELAY_EPOCHS: u64 = 84;
 pub const DEFAULT_MAX_TLC_VALUE_IN_FLIGHT: u128 = u128::MAX;
-pub const DEFAULT_MAX_TLC_NUMBER_IN_FLIGHT: u64 = 30;
 pub const DEFAULT_MIN_TLC_VALUE: u128 = 0;
 pub const SYS_MAX_TLC_NUMBER_IN_FLIGHT: u64 = 253;
 pub const MAX_TLC_NUMBER_IN_FLIGHT: u64 = 125;
@@ -2901,13 +2900,6 @@ impl ChannelConstraints {
             max_tlc_value_in_flight,
             max_tlc_number_in_flight,
         }
-    }
-
-    pub fn default() -> Self {
-        Self::new(
-            DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
-            DEFAULT_MAX_TLC_NUMBER_IN_FLIGHT,
-        )
     }
 }
 
@@ -5673,12 +5665,14 @@ impl ChannelActorState {
         self.remote_commitment_points
             .push((self.get_local_commitment_number(), commitment_point));
 
+        // shrink the remote commitment points list
+        // TODO: use all_tlcs as filter instead of select the minimal commitment number
         let len = self.remote_commitment_points.len();
         if len > (self.local_constraints.max_tlc_number_in_flight + 1) as usize {
             let min_remote_commitment = self
                 .tlc_state
                 .all_tlcs()
-                .map(|x| x.created_at.remote)
+                .map(|x| x.created_at.remote.min(x.created_at.local))
                 .min()
                 .unwrap_or_default();
             self.remote_commitment_points

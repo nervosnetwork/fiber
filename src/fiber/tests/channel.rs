@@ -1,3 +1,4 @@
+use super::test_utils::{init_tracing, NetworkNode};
 use crate::fiber::channel::UpdateCommand;
 use crate::fiber::config::MAX_PAYMENT_TLC_EXPIRY_LIMIT;
 use crate::fiber::graph::PaymentSessionStatus;
@@ -35,8 +36,6 @@ use ractor::call;
 use secp256k1::Secp256k1;
 use std::collections::HashSet;
 use std::time::Duration;
-
-use super::test_utils::{init_tracing, NetworkNode};
 
 const DEFAULT_EXPIRY_DELTA: u64 = 24 * 60 * 60 * 1000; // 24 hours
 
@@ -2211,6 +2210,105 @@ async fn do_test_remove_tlc_with_wrong_hash_algorithm(
 
     dbg!(&remove_tlc_result);
     assert!(remove_tlc_result.is_err());
+}
+
+#[tokio::test]
+async fn do_test_channel_remote_commitment_error() {
+    // https://github.com/nervosnetwork/fiber/issues/447
+    let node_a_funding_amount = 100000000000;
+    let node_b_funding_amount = 100000000000;
+
+    let tlc_number_in_flight_limit = 5;
+    let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
+
+    let (new_channel_id, _funding_tx) = establish_channel_between_nodes(
+        &mut node_a,
+        &mut node_b,
+        false,
+        node_a_funding_amount,
+        node_b_funding_amount,
+        Some(tlc_number_in_flight_limit as u64),
+        None,
+        None,
+        None,
+        None,
+        Some(tlc_number_in_flight_limit as u64),
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
+
+    let mut all_sent = vec![];
+    let mut batch_remove_count = 0;
+    while batch_remove_count <= 3 {
+        let preimage: [u8; 32] = gen_rand_sha256_hash().as_ref().try_into().unwrap();
+
+        // create a new payment hash
+        let hash_algorithm = HashAlgorithm::Sha256;
+        let digest = hash_algorithm.hash(&preimage);
+        if let Ok(add_tlc_result) = call!(node_a.network_actor, |rpc_reply| {
+            NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+                ChannelCommandWithId {
+                    channel_id: new_channel_id,
+                    command: ChannelCommand::AddTlc(
+                        AddTlcCommand {
+                            amount: 1000,
+                            hash_algorithm,
+                            payment_hash: digest.into(),
+                            expiry: now_timestamp_as_millis_u64() + DEFAULT_EXPIRY_DELTA,
+                            onion_packet: None,
+                            shared_secret: NO_SHARED_SECRET.clone(),
+                            previous_tlc: None,
+                        },
+                        rpc_reply,
+                    ),
+                },
+            ))
+        })
+        .expect("node_b alive")
+        {
+            dbg!(&add_tlc_result);
+            all_sent.push((preimage, add_tlc_result.tlc_id));
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        if all_sent.len() >= tlc_number_in_flight_limit {
+            while all_sent.len() > tlc_number_in_flight_limit - 2 {
+                if let Some((preimage, tlc_id)) = all_sent.iter().next().cloned() {
+                    let remove_tlc_result = call!(node_b.network_actor, |rpc_reply| {
+                        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+                            ChannelCommandWithId {
+                                channel_id: new_channel_id,
+                                command: ChannelCommand::RemoveTlc(
+                                    RemoveTlcCommand {
+                                        id: tlc_id,
+                                        reason: RemoveTlcReason::RemoveTlcFulfill(
+                                            RemoveTlcFulfill {
+                                                payment_preimage: Hash256::from(preimage),
+                                            },
+                                        ),
+                                    },
+                                    rpc_reply,
+                                ),
+                            },
+                        ))
+                    })
+                    .expect("node_b alive");
+                    dbg!(&remove_tlc_result);
+                    if remove_tlc_result.is_ok()
+                        || remove_tlc_result
+                            .unwrap_err()
+                            .to_string()
+                            .contains("Trying to remove non-existing tlc")
+                    {
+                        all_sent.remove(0);
+                    }
+                }
+            }
+            batch_remove_count += 1;
+        }
+    }
 }
 
 #[tokio::test]
