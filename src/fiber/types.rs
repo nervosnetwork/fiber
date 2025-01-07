@@ -11,6 +11,7 @@ use super::r#gen::fiber::PubNonceOpt;
 use super::serde_utils::{EntityHex, SliceHex};
 use crate::ckb::config::{UdtArgInfo, UdtCellDep, UdtCfgInfos, UdtScript};
 use crate::ckb::contracts::get_udt_whitelist;
+use ckb_jsonrpc_types::CellOutput;
 use num_enum::IntoPrimitive;
 use num_enum::TryFromPrimitive;
 use std::convert::TryFrom;
@@ -2440,8 +2441,41 @@ impl BroadcastMessage {
             }
         }
     }
+
+    pub(crate) fn message_id(&self) -> BroadcastMessageID {
+        match self {
+            BroadcastMessage::NodeAnnouncement(node_announcement) => {
+                BroadcastMessageID::NodeAnnouncement(node_announcement.node_id)
+            }
+            BroadcastMessage::ChannelAnnouncement(channel_announcement) => {
+                BroadcastMessageID::ChannelAnnouncement(
+                    channel_announcement.channel_outpoint.clone(),
+                )
+            }
+            BroadcastMessage::ChannelUpdate(channel_update) => {
+                BroadcastMessageID::ChannelUpdate(channel_update.channel_outpoint.clone())
+            }
+        }
+    }
+
+    pub(crate) fn timestamp(&self) -> Option<u64> {
+        match self {
+            BroadcastMessage::NodeAnnouncement(node_announcement) => {
+                Some(node_announcement.timestamp)
+            }
+            BroadcastMessage::ChannelAnnouncement(_) => None,
+            BroadcastMessage::ChannelUpdate(channel_update) => Some(channel_update.timestamp),
+        }
+    }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ChannelOnchainInfo {
+    pub timestamp: u64,
+    pub first_output: CellOutput,
+}
+
+// Augment the broadcast message with timestamp so that we can easily obtain the cursor of the message.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum BroadcastMessageWithTimestamp {
     NodeAnnouncement(NodeAnnouncement),
@@ -2520,7 +2554,7 @@ impl BroadcastMessageWithTimestamp {
     }
 }
 
-impl Ord for BroadcastMessageWithTimestamp {
+impl Ord for BroadcastMessage {
     fn cmp(&self, other: &Self) -> Ordering {
         self.message_id()
             .cmp(&other.message_id())
@@ -2528,9 +2562,30 @@ impl Ord for BroadcastMessageWithTimestamp {
     }
 }
 
-impl PartialOrd for BroadcastMessageWithTimestamp {
+impl PartialOrd for BroadcastMessage {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
+    }
+}
+
+impl From<(BroadcastMessage, Option<ChannelOnchainInfo>)> for BroadcastMessageWithTimestamp {
+    fn from(
+        (broadcast_message, channel_onchain_info): (BroadcastMessage, Option<ChannelOnchainInfo>),
+    ) -> Self {
+        match broadcast_message {
+            BroadcastMessage::NodeAnnouncement(node_announcement) => {
+                BroadcastMessageWithTimestamp::NodeAnnouncement(node_announcement)
+            }
+            BroadcastMessage::ChannelAnnouncement(channel_announcement) => {
+                let timestamp = channel_onchain_info
+                    .expect("Channel onchain info is required for channel announcement")
+                    .timestamp;
+                BroadcastMessageWithTimestamp::ChannelAnnouncement(timestamp, channel_announcement)
+            }
+            BroadcastMessage::ChannelUpdate(channel_update) => {
+                BroadcastMessageWithTimestamp::ChannelUpdate(channel_update)
+            }
+        }
     }
 }
 
@@ -2720,14 +2775,14 @@ impl Ord for BroadcastMessageID {
                 BroadcastMessageID::NodeAnnouncement(pubkey1),
                 BroadcastMessageID::NodeAnnouncement(pubkey2),
             ) => pubkey1.cmp(pubkey2),
-            (BroadcastMessageID::ChannelUpdate(_), _) => Ordering::Less,
-            (BroadcastMessageID::NodeAnnouncement(_), _) => Ordering::Greater,
+            (BroadcastMessageID::NodeAnnouncement(_), _) => Ordering::Less,
+            (BroadcastMessageID::ChannelUpdate(_), _) => Ordering::Greater,
             (
                 BroadcastMessageID::ChannelAnnouncement(_),
                 BroadcastMessageID::NodeAnnouncement(_),
-            ) => Ordering::Less,
+            ) => Ordering::Greater,
             (BroadcastMessageID::ChannelAnnouncement(_), BroadcastMessageID::ChannelUpdate(_)) => {
-                Ordering::Greater
+                Ordering::Less
             }
         }
     }

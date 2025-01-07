@@ -1,8 +1,9 @@
 use ckb_hash::blake2b_256;
-use ckb_jsonrpc_types::{BlockNumber, Status, TxStatus};
+use ckb_jsonrpc_types::{Status, TxStatus};
 use ckb_types::core::{EpochNumberWithFraction, TransactionView};
 use ckb_types::packed::{Byte32, OutPoint, Script, Transaction};
 use ckb_types::prelude::{IntoTransactionView, Pack, Unpack};
+use ckb_types::H256;
 use once_cell::sync::OnceCell;
 use ractor::concurrency::Duration;
 use ractor::{
@@ -59,15 +60,18 @@ use super::gossip::{GossipActorMessage, GossipMessageStore, GossipMessageUpdates
 use super::graph::{NetworkGraph, NetworkGraphStateStore, SessionRoute};
 use super::key::blake2b_hash_with_salt;
 use super::types::{
-    BroadcastMessage, BroadcastMessageQuery, EcdsaSignature, FiberMessage, GossipMessage, Hash256,
-    NodeAnnouncement, OpenChannel, PaymentHopData, Privkey, Pubkey, RemoveTlcReason, TlcErr,
-    TlcErrData, TlcErrorCode,
+    BroadcastMessage, BroadcastMessageQuery, BroadcastMessageWithTimestamp, EcdsaSignature,
+    FiberMessage, GossipMessage, Hash256, NodeAnnouncement, OpenChannel, PaymentHopData, Privkey,
+    Pubkey, RemoveTlcReason, TlcErr, TlcErrData, TlcErrorCode,
 };
 use super::{FiberConfig, ASSUME_NETWORK_ACTOR_ALIVE};
 
 use crate::ckb::config::UdtCfgInfos;
 use crate::ckb::contracts::{check_udt_script, get_udt_whitelist, is_udt_type_auto_accept};
-use crate::ckb::{CkbChainMessage, FundingRequest, FundingTx, TraceTxRequest, TraceTxResponse};
+use crate::ckb::{
+    CkbChainMessage, FundingRequest, FundingTx, GetBlockTimestampRequest, TraceTxRequest,
+    TraceTxResponse,
+};
 use crate::fiber::channel::{
     AddTlcCommand, AddTlcResponse, TxCollaborationCommand, TxUpdateCommand,
 };
@@ -227,7 +231,7 @@ pub enum NetworkActorCommand {
     // we use this to query them.
     QueryBroadcastMessages(PeerId, Vec<BroadcastMessageQuery>),
     // Broadcast our BroadcastMessage to the network.
-    BroadcastMessages(Vec<BroadcastMessage>),
+    BroadcastMessages(Vec<BroadcastMessageWithTimestamp>),
     // Broadcast local information to the network.
     BroadcastLocalInfo(LocalInfoKind),
     SignMessage([u8; 32], RpcReplyPort<EcdsaSignature>),
@@ -615,8 +619,8 @@ pub enum NetworkActorEvent {
     FundingTransactionPending(Transaction, OutPoint, Hash256),
 
     /// A funding transaction has been confirmed. The transaction was included in the
-    /// block with the given transaction index.
-    FundingTransactionConfirmed(OutPoint, BlockNumber, u32),
+    /// block with the given transaction index, and the timestamp in the block header.
+    FundingTransactionConfirmed(OutPoint, H256, u32, u64),
 
     /// A funding transaction has failed.
     FundingTransactionFailed(OutPoint),
@@ -874,9 +878,14 @@ where
                     .on_funding_transaction_pending(transaction, outpoint.clone(), channel_id)
                     .await;
             }
-            NetworkActorEvent::FundingTransactionConfirmed(outpoint, block_number, tx_index) => {
+            NetworkActorEvent::FundingTransactionConfirmed(
+                outpoint,
+                block_hash,
+                tx_index,
+                timestamp,
+            ) => {
                 state
-                    .on_funding_transaction_confirmed(outpoint, block_number, tx_index)
+                    .on_funding_transaction_confirmed(outpoint, block_hash, tx_index, timestamp)
                     .await;
             }
             NetworkActorEvent::CommitmentTransactionPending(transaction, channel_id) => {
@@ -1322,7 +1331,7 @@ where
                     myself
                         .send_message(NetworkActorMessage::new_command(
                             NetworkActorCommand::BroadcastMessages(vec![
-                                BroadcastMessage::NodeAnnouncement(message),
+                                BroadcastMessageWithTimestamp::NodeAnnouncement(message),
                             ]),
                         ))
                         .expect(ASSUME_NETWORK_MYSELF_ALIVE);
@@ -2458,9 +2467,9 @@ where
                 remote_peer_id, &message
             );
             let _ = self.network.send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::BroadcastMessages(vec![BroadcastMessage::NodeAnnouncement(
-                    message,
-                )]),
+                NetworkActorCommand::BroadcastMessages(vec![
+                    BroadcastMessageWithTimestamp::NodeAnnouncement(message),
+                ]),
             ));
         } else {
             debug!(
@@ -2679,41 +2688,80 @@ where
             &outpoint, &channel_id, &tx_hash
         );
         let network = self.network.clone();
+        let chain = self.chain_actor.clone();
         self.broadcast_tx_with_callback(transaction, move |result| {
-            let message = match result {
+            match result {
                 Ok(TraceTxResponse {
                     status:
                         TxStatus {
                             status: Status::Committed,
-                            block_number: Some(block_number),
+                            block_hash: Some(block_hash),
                             ..
                         },
                     ..
                 }) => {
-                    info!("Funding transaction {:?} confirmed", &tx_hash);
-                    NetworkActorEvent::FundingTransactionConfirmed(
-                        outpoint,
-                        block_number.into(),
-                        DUMMY_FUNDING_TX_INDEX,
-                    )
+                    tokio::spawn( async move  {
+                        match call!(
+                            chain,
+                            |reply| CkbChainMessage::GetBlockTimestamp(
+                                GetBlockTimestampRequest::from_block_hash(block_hash.clone()), reply
+                            )
+                        ) {
+                            Ok(Ok(Some(timestamp))) => {
+                                info!("Funding transaction {:?} confirmed", &tx_hash);
+                                // Notify outside observers.
+                                network.send_message(NetworkActorMessage::new_event(
+                                    NetworkActorEvent::FundingTransactionConfirmed(
+                                        outpoint.clone(),
+                                        block_hash.clone(),
+                                        DUMMY_FUNDING_TX_INDEX,
+                                        timestamp,
+                                    )
+                                ))
+                                .expect(ASSUME_NETWORK_MYSELF_ALIVE);
+                                return;
+                            },
+                            Ok(Ok(None)) => {
+                                error!(
+                                    "Failed to get block timestamp for block hash {:?}: block not found",
+                                    &block_hash
+                                );
+                            }
+                            Ok(Err(err)) => {
+                                error!(
+                                    "Failed to get block timestamp for block hash {:?}: {:?}",
+                                    &block_hash, &err
+                                );
+                            }
+                            Err(err) => {
+                                error!(
+                                    "Failed to get block timestamp for block hash {:?}: {:?}",
+                                    &block_hash, &err
+                                );
+                            }
+                        }
+                    });
                 }
                 Ok(status) => {
                     error!(
                         "Funding transaction {:?} failed to be confirmed with final status {:?}",
                         &tx_hash, &status
                     );
-                    NetworkActorEvent::FundingTransactionFailed(outpoint)
+                    // Notify outside observers.
+                    network
+                        .send_message(NetworkActorMessage::new_event(                    NetworkActorEvent::FundingTransactionFailed(outpoint)
+                    ))
+                        .expect(ASSUME_NETWORK_MYSELF_ALIVE);
                 }
                 Err(err) => {
                     error!("Failed to trace transaction {:?}: {:?}", &tx_hash, &err);
-                    NetworkActorEvent::FundingTransactionFailed(outpoint)
+                    // Notify outside observers.
+                    network
+                        .send_message(NetworkActorMessage::new_event(                    NetworkActorEvent::FundingTransactionFailed(outpoint)
+                    ))
+                        .expect(ASSUME_NETWORK_MYSELF_ALIVE);
                 }
             };
-
-            // Notify outside observers.
-            network
-                .send_message(NetworkActorMessage::new_event(message))
-                .expect(ASSUME_NETWORK_MYSELF_ALIVE);
         })
         .await;
     }
@@ -2769,8 +2817,9 @@ where
     async fn on_funding_transaction_confirmed(
         &mut self,
         outpoint: OutPoint,
-        block_number: BlockNumber,
+        block_hash: H256,
         tx_index: u32,
+        timestamp: u64,
     ) {
         debug!("Funding transaction is confirmed: {:?}", &outpoint);
         let channel_id = match self.pending_channels.remove(&outpoint) {
@@ -2787,8 +2836,7 @@ where
             channel_id,
             None,
             ChannelActorMessage::Event(ChannelEvent::FundingTransactionConfirmed(
-                block_number,
-                tx_index,
+                block_hash, tx_index, timestamp,
             )),
         )
         .await;
