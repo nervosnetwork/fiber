@@ -1610,7 +1610,7 @@ where
                     payment_data.payment_hash, e
                 );
                 self.set_payment_fail_with_error(payment_session, &err);
-                return Err(Error::SendPaymentError(err));
+                return Err(Error::SendPaymentFirstHopError(err, false));
             }
         };
 
@@ -1702,10 +1702,7 @@ where
             self.store.insert_payment_session(payment_session.clone());
         }
         if need_to_retry {
-            let res = self.try_payment_session(myself, state, payment_hash).await;
-            if res.is_err() {
-                debug!("Failed to retry payment session: {:?}", res);
-            }
+            let _ = self.try_payment_session(myself, state, payment_hash).await;
         } else {
             let error = format!(
                 "Failed to send payment session: {:?}, retried times: {}",
@@ -1747,7 +1744,8 @@ where
                 .await
             {
                 Ok(payment_session) => return Ok(payment_session),
-                Err(Error::SendPaymentFirstHopError(err, need_retry)) => {
+                Err(err) => {
+                    let need_retry = matches!(err, Error::SendPaymentFirstHopError(_, true));
                     if need_retry {
                         // If this is the first hop error, like the WaitingTlcAck error,
                         // we will just retry later, return Ok here for letting endpoint user
@@ -1759,21 +1757,8 @@ where
                         });
                         return Ok(payment_session);
                     } else {
-                        return Err(Error::SendPaymentError(err));
+                        return Err(err);
                     }
-                }
-                Err(e) => {
-                    // we will retry the payment session,
-                    // but we need to retry later to let the actor to process failure,
-                    // so that we can make different choice for later try
-                    let payment_hash = payment_data.payment_hash;
-                    myself.send_after(Duration::from_millis(500), move || {
-                        NetworkActorMessage::new_event(NetworkActorEvent::RetrySendPayment(
-                            payment_hash,
-                        ))
-                    });
-                    debug!("send payment error: {:?}", e);
-                    return Err(e);
                 }
             }
         } else {
