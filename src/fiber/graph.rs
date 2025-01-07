@@ -166,21 +166,33 @@ impl TryFrom<&ChannelActorState> for ChannelInfo {
         let capacity = state.get_liquid_capacity();
         let udt_type_script = state.funding_udt_type_script.clone();
 
-        let (node1, node2, update_of_node1, update_of_node2) = if state.local_is_node1() {
-            (
-                state.local_pubkey,
-                state.remote_pubkey,
-                Some(state.local_tlc_info.clone().into()),
-                state.remote_tlc_info.clone().map(Into::into),
-            )
-        } else {
-            (
-                state.remote_pubkey,
-                state.local_pubkey,
-                state.remote_tlc_info.clone().map(Into::into),
-                Some(state.local_tlc_info.clone().into()),
-            )
-        };
+        let (node1, node2, mut update_of_node1, mut update_of_node2, node1_balance, node2_balance) =
+            if state.local_is_node1() {
+                (
+                    state.local_pubkey,
+                    state.remote_pubkey,
+                    Some(state.local_tlc_info.clone().into()),
+                    state.remote_tlc_info.clone().map(ChannelUpdateInfo::from),
+                    state.to_local_amount,
+                    state.to_remote_amount,
+                )
+            } else {
+                (
+                    state.remote_pubkey,
+                    state.local_pubkey,
+                    state.remote_tlc_info.clone().map(ChannelUpdateInfo::from),
+                    Some(state.local_tlc_info.clone().into()),
+                    state.to_remote_amount,
+                    state.to_local_amount,
+                )
+            };
+
+        if let Some(update_of_node1) = update_of_node1.as_mut() {
+            update_of_node1.balance = Some(node1_balance);
+        }
+        if let Some(update_of_node2) = update_of_node2.as_mut() {
+            update_of_node2.balance = Some(node2_balance);
+        }
 
         Ok(Self {
             channel_outpoint,
@@ -218,6 +230,8 @@ pub struct ChannelUpdateInfo {
     pub timestamp: u64,
     /// Whether the channel can be currently used for payments (in this one direction).
     pub enabled: bool,
+    /// The exact balance of the owner in this direction of the channel, if known.
+    pub balance: Option<u128>,
     /// The difference in htlc expiry values that you must have when routing through this channel (in milliseconds).
     pub tlc_expiry_delta: u64,
     /// The minimum value, which must be relayed to the next hop via the channel
@@ -230,6 +244,7 @@ impl From<&ChannelTlcInfo> for ChannelUpdateInfo {
         Self {
             timestamp: info.timestamp,
             enabled: info.enabled,
+            balance: None,
             tlc_expiry_delta: info.tlc_expiry_delta,
             tlc_minimum_value: info.tlc_minimum_value,
             fee_rate: info.tlc_fee_proportional_millionths as u64,
@@ -254,6 +269,7 @@ impl From<&ChannelUpdate> for ChannelUpdateInfo {
         Self {
             timestamp: update.timestamp,
             enabled: !update.is_disabled(),
+            balance: None,
             tlc_expiry_delta: update.tlc_expiry_delta,
             tlc_minimum_value: update.tlc_minimum_value,
             fee_rate: update.tlc_fee_proportional_millionths as u64,
@@ -981,15 +997,10 @@ where
                     continue;
                 }
 
-                // if this is a direct channel, try to load the channel actor state for balance
-                if from == self.source {
-                    if let Some(state) = self
-                        .store
-                        .get_channel_state_by_outpoint(&channel_info.out_point())
-                    {
-                        if amount_to_send > state.to_local_amount {
-                            continue;
-                        }
+                // If we already know the balance of the channel, check if we can send the amount.
+                if let Some(balance) = channel_update.balance {
+                    if amount_to_send > balance {
+                        continue;
                     }
                 }
 
