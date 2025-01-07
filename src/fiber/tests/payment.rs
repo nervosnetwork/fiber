@@ -127,7 +127,7 @@ async fn test_send_payment_over_private_channel() {
         true,
     )
     .await;
-    let [mut node1, mut node2, mut node3] = nodes.try_into().expect("3 nodes");
+    let [mut node1, mut node2, node3] = nodes.try_into().expect("3 nodes");
 
     let (_new_channel_id, _funding_tx) = establish_channel_between_nodes(
         &mut node1,

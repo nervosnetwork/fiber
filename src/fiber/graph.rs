@@ -636,8 +636,6 @@ where
         &self,
         node_id: Pubkey,
     ) -> impl Iterator<Item = (Pubkey, Pubkey, &ChannelInfo, &ChannelUpdateInfo)> {
-        debug!("get_node_inbounds for node {:?}", node_id);
-        debug!("all channels {:?}", self.channels);
         let mut channels: Vec<(Pubkey, Pubkey, &ChannelInfo, &ChannelUpdateInfo)> = self
             .channels
             .values()
