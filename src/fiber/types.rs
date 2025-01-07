@@ -1,4 +1,4 @@
-use super::channel::{ChannelFlags, CHANNEL_DISABLED_FLAG, MESSAGE_OF_NODE2_FLAG};
+use super::channel::{ChannelFlags, ChannelTlcInfo, CHANNEL_DISABLED_FLAG, MESSAGE_OF_NODE2_FLAG};
 use super::config::AnnouncedNodeName;
 use super::gen::fiber::{self as molecule_fiber, PubNonce as Byte66, UdtCellDeps, Uint128Opt};
 use super::gen::gossip::{self as molecule_gossip};
@@ -1015,67 +1015,60 @@ impl TryFrom<molecule_fiber::ClosingSigned> for ClosingSigned {
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct UpdateTlcInfo {
     pub channel_id: Hash256,
-    pub tlc_expiry_delta: Option<u64>,
-    pub tlc_minimum_value: Option<u128>,
-    pub tlc_maximum_value: Option<u128>,
-    pub tlc_fee_proportional_millionths: Option<u128>,
+    pub timestamp: u64,
+    pub channel_flags: u32,
+    pub tlc_expiry_delta: u64,
+    pub tlc_minimum_value: u128,
+    pub tlc_maximum_value: u128,
+    pub tlc_fee_proportional_millionths: u128,
+}
+
+impl UpdateTlcInfo {
+    pub fn is_disabled(&self) -> bool {
+        self.channel_flags & CHANNEL_DISABLED_FLAG == CHANNEL_DISABLED_FLAG
+    }
 }
 
 impl From<UpdateTlcInfo> for molecule_fiber::UpdateTlcInfo {
     fn from(update_tlc_info: UpdateTlcInfo) -> Self {
         molecule_fiber::UpdateTlcInfo::new_builder()
             .channel_id(update_tlc_info.channel_id.into())
-            .tlc_expiry_delta(
-                molecule_fiber::Uint64Opt::new_builder()
-                    .set(update_tlc_info.tlc_expiry_delta.map(|x| x.pack()))
-                    .build(),
-            )
-            .tlc_minimum_value(
-                molecule_fiber::Uint128Opt::new_builder()
-                    .set(update_tlc_info.tlc_minimum_value.map(|x| x.pack()))
-                    .build(),
-            )
-            .tlc_maximum_value(
-                molecule_fiber::Uint128Opt::new_builder()
-                    .set(update_tlc_info.tlc_maximum_value.map(|x| x.pack()))
-                    .build(),
-            )
-            .tlc_fee_proportional_millionths(
-                molecule_fiber::Uint128Opt::new_builder()
-                    .set(
-                        update_tlc_info
-                            .tlc_fee_proportional_millionths
-                            .map(|x| x.pack()),
-                    )
-                    .build(),
-            )
+            .timestamp(update_tlc_info.timestamp.pack())
+            .channel_flags(update_tlc_info.channel_flags.pack())
+            .tlc_expiry_delta(update_tlc_info.tlc_expiry_delta.pack())
+            .tlc_minimum_value(update_tlc_info.tlc_minimum_value.pack())
+            .tlc_maximum_value(update_tlc_info.tlc_maximum_value.pack())
+            .tlc_fee_proportional_millionths(update_tlc_info.tlc_fee_proportional_millionths.pack())
             .build()
     }
 }
 
-impl TryFrom<molecule_fiber::UpdateTlcInfo> for UpdateTlcInfo {
-    type Error = Error;
-
-    fn try_from(update_tlc_info: molecule_fiber::UpdateTlcInfo) -> Result<Self, Self::Error> {
-        Ok(UpdateTlcInfo {
+impl From<molecule_fiber::UpdateTlcInfo> for UpdateTlcInfo {
+    fn from(update_tlc_info: molecule_fiber::UpdateTlcInfo) -> Self {
+        UpdateTlcInfo {
             channel_id: update_tlc_info.channel_id().into(),
-            tlc_expiry_delta: update_tlc_info
-                .tlc_expiry_delta()
-                .to_opt()
-                .map(|x| x.unpack()),
-            tlc_minimum_value: update_tlc_info
-                .tlc_minimum_value()
-                .to_opt()
-                .map(|x| x.unpack()),
-            tlc_maximum_value: update_tlc_info
-                .tlc_maximum_value()
-                .to_opt()
-                .map(|x| x.unpack()),
+            timestamp: update_tlc_info.timestamp().unpack(),
+            channel_flags: update_tlc_info.channel_flags().unpack(),
+            tlc_expiry_delta: update_tlc_info.tlc_expiry_delta().unpack(),
+            tlc_minimum_value: update_tlc_info.tlc_minimum_value().unpack(),
+            tlc_maximum_value: update_tlc_info.tlc_maximum_value().unpack(),
             tlc_fee_proportional_millionths: update_tlc_info
                 .tlc_fee_proportional_millionths()
-                .to_opt()
-                .map(|x| x.unpack()),
-        })
+                .unpack(),
+        }
+    }
+}
+
+impl From<UpdateTlcInfo> for ChannelTlcInfo {
+    fn from(update_tlc_info: UpdateTlcInfo) -> Self {
+        ChannelTlcInfo {
+            timestamp: update_tlc_info.timestamp,
+            enabled: !update_tlc_info.is_disabled(),
+            tlc_expiry_delta: update_tlc_info.tlc_expiry_delta,
+            tlc_minimum_value: update_tlc_info.tlc_minimum_value,
+            tlc_maximum_value: update_tlc_info.tlc_maximum_value,
+            tlc_fee_proportional_millionths: update_tlc_info.tlc_fee_proportional_millionths,
+        }
     }
 }
 
@@ -3274,7 +3267,7 @@ impl TryFrom<molecule_fiber::FiberMessageUnion> for FiberMessage {
             }
             molecule_fiber::FiberMessageUnion::UpdateTlcInfo(update_tlc_info) => {
                 FiberMessage::ChannelNormalOperation(FiberChannelMessage::UpdateTlcInfo(
-                    update_tlc_info.try_into()?,
+                    update_tlc_info.into(),
                 ))
             }
             molecule_fiber::FiberMessageUnion::AddTlc(add_tlc) => {

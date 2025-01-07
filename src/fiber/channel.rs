@@ -471,25 +471,7 @@ where
                 Ok(())
             }
             FiberChannelMessage::UpdateTlcInfo(update_tlc_info) => {
-                let old = state.remote_tlc_info.get_or_insert_with(|| ChannelTlcInfo {
-                    enabled: true,
-                    ..Default::default()
-                });
-
-                if let Some(tlc_expiry_delta) = update_tlc_info.tlc_expiry_delta {
-                    old.tlc_expiry_delta = tlc_expiry_delta;
-                }
-                if let Some(tlc_minimum_value) = update_tlc_info.tlc_minimum_value {
-                    old.tlc_min_value = tlc_minimum_value;
-                }
-                if let Some(tlc_maximum_value) = update_tlc_info.tlc_maximum_value {
-                    old.tlc_max_value = tlc_maximum_value;
-                }
-                if let Some(tlc_fee_proportional_millionths) =
-                    update_tlc_info.tlc_fee_proportional_millionths
-                {
-                    old.tlc_fee_proportional_millionths = tlc_fee_proportional_millionths;
-                }
+                state.remote_tlc_info = Some(update_tlc_info.into());
 
                 Ok(())
             }
@@ -934,7 +916,7 @@ where
             }
         } else {
             if state.is_public() && state.is_tlc_forwarding_enabled() {
-                if state.local_tlc_info.tlc_min_value > received_amount {
+                if state.local_tlc_info.tlc_minimum_value > received_amount {
                     return Err(ProcessingChannelError::TlcAmountIsTooLow);
                 }
 
@@ -2890,10 +2872,10 @@ pub struct ChannelTlcInfo {
     pub tlc_expiry_delta: u64,
 
     /// The minimal tcl value we can receive in relay tlc
-    pub tlc_min_value: u128,
+    pub tlc_minimum_value: u128,
 
     /// The maximal tcl value we can receive in relay tlc
-    pub tlc_max_value: u128,
+    pub tlc_maximum_value: u128,
 }
 
 impl ChannelTlcInfo {
@@ -2903,10 +2885,11 @@ impl ChannelTlcInfo {
         tlc_fee_proportional_millionths: u128,
     ) -> Self {
         Self {
-            tlc_min_value,
+            tlc_minimum_value: tlc_min_value,
             tlc_expiry_delta,
             tlc_fee_proportional_millionths,
             enabled: true,
+            timestamp: now_timestamp_as_millis_u64(),
             ..Default::default()
         }
     }
@@ -3453,15 +3436,16 @@ impl ChannelActorState {
         self.do_generate_channel_update(network, |_update| {}).await
     }
 
-    fn create_update_tlc_info_message(&self) -> UpdateTlcInfo {
+    fn create_update_tlc_info_message(&mut self) -> UpdateTlcInfo {
+        self.local_tlc_info.timestamp = now_timestamp_as_millis_u64();
         UpdateTlcInfo {
             channel_id: self.get_id(),
-            tlc_minimum_value: Some(self.local_tlc_info.tlc_min_value),
-            tlc_maximum_value: Some(self.local_tlc_info.tlc_max_value),
-            tlc_fee_proportional_millionths: Some(
-                self.local_tlc_info.tlc_fee_proportional_millionths,
-            ),
-            tlc_expiry_delta: Some(self.local_tlc_info.tlc_expiry_delta),
+            timestamp: self.local_tlc_info.timestamp,
+            channel_flags: self.get_channel_update_channel_flags(),
+            tlc_minimum_value: self.local_tlc_info.tlc_minimum_value,
+            tlc_maximum_value: self.local_tlc_info.tlc_maximum_value,
+            tlc_fee_proportional_millionths: self.local_tlc_info.tlc_fee_proportional_millionths,
+            tlc_expiry_delta: self.local_tlc_info.tlc_expiry_delta,
         }
     }
 
@@ -3489,7 +3473,7 @@ impl ChannelActorState {
         self.send_update_tlc_info_message(network);
     }
 
-    fn send_update_tlc_info_message(&self, network: &ActorRef<NetworkActorMessage>) {
+    fn send_update_tlc_info_message(&mut self, network: &ActorRef<NetworkActorMessage>) {
         let update_tlc_info = self.create_update_tlc_info_message();
         network
             .send_message(NetworkActorMessage::new_command(
@@ -3542,7 +3526,7 @@ impl ChannelActorState {
             message_flags,
             self.get_channel_update_channel_flags(),
             self.local_tlc_info.tlc_expiry_delta,
-            self.local_tlc_info.tlc_min_value,
+            self.local_tlc_info.tlc_minimum_value,
             self.local_tlc_info.tlc_fee_proportional_millionths,
         ))
     }
@@ -3989,10 +3973,10 @@ impl ChannelActorState {
     }
 
     fn update_our_tlc_min_value(&mut self, value: u128) -> bool {
-        if self.local_tlc_info.tlc_min_value == value {
+        if self.local_tlc_info.tlc_minimum_value == value {
             return false;
         }
-        self.local_tlc_info.tlc_min_value = value;
+        self.local_tlc_info.tlc_minimum_value = value;
         true
     }
 

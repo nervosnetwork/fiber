@@ -231,7 +231,7 @@ impl From<&ChannelTlcInfo> for ChannelUpdateInfo {
             timestamp: info.timestamp,
             enabled: info.enabled,
             tlc_expiry_delta: info.tlc_expiry_delta,
-            tlc_minimum_value: info.tlc_min_value,
+            tlc_minimum_value: info.tlc_minimum_value,
             fee_rate: info.tlc_fee_proportional_millionths as u64,
         }
     }
