@@ -1530,14 +1530,9 @@ where
             {
                 network
                     .send_message(NetworkActorMessage::new_command(
-                        NetworkActorCommand::ProcessBroadcastMessage(
-                            BroadcastMessage::ChannelUpdate(channel_update.clone()),
-                        ),
-                    ))
-                    .expect(ASSUME_NETWORK_MYSELF_ALIVE);
-                network
-                    .send_message(NetworkActorMessage::new_command(
-                        NetworkActorCommand::GossipActorMessage(GossipActorMessage::TickStore),
+                        NetworkActorCommand::BroadcastMessages(vec![
+                            BroadcastMessageWithTimestamp::ChannelUpdate(channel_update.clone()),
+                        ]),
                     ))
                     .expect(ASSUME_NETWORK_MYSELF_ALIVE);
             }
@@ -2818,7 +2813,7 @@ where
                     );
                     // Notify outside observers.
                     network
-                        .send_message(NetworkActorMessage::new_event(                    NetworkActorEvent::FundingTransactionFailed(outpoint)
+                        .send_message(NetworkActorMessage::new_event(NetworkActorEvent::FundingTransactionFailed(outpoint)
                     ))
                         .expect(ASSUME_NETWORK_MYSELF_ALIVE);
                 }
@@ -2826,7 +2821,7 @@ where
                     error!("Failed to trace transaction {:?}: {:?}", &tx_hash, &err);
                     // Notify outside observers.
                     network
-                        .send_message(NetworkActorMessage::new_event(                    NetworkActorEvent::FundingTransactionFailed(outpoint)
+                        .send_message(NetworkActorMessage::new_event(NetworkActorEvent::FundingTransactionFailed(outpoint)
                     ))
                         .expect(ASSUME_NETWORK_MYSELF_ALIVE);
                 }
