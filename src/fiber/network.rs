@@ -2684,49 +2684,45 @@ where
                     ..
                 }) => {
                     tokio::spawn( async move  {
-                        const MAX_GET_BLOCK_TIMESTAMP_RETRY: u8 = 5;
-                        for _ in 0..MAX_GET_BLOCK_TIMESTAMP_RETRY {
-                            match call!(
-                                chain,
-                                |reply| CkbChainMessage::GetBlockTimestamp(
-                                    GetBlockTimestampRequest::from_block_hash(block_hash.clone()), reply
-                                )
-                            ) {
-                                Ok(Ok(Some(timestamp))) => {
-                                    info!("Funding transaction {:?} confirmed", &tx_hash);
-                                    // Notify outside observers.
-                                    network.send_message(NetworkActorMessage::new_event(
-                                        NetworkActorEvent::FundingTransactionConfirmed(
-                                            outpoint.clone(),
-                                            block_hash.clone(),
-                                            DUMMY_FUNDING_TX_INDEX,
-                                            timestamp,
-                                        )
-                                    ))
-                                    .expect(ASSUME_NETWORK_MYSELF_ALIVE);
-                                    return;
-                                },
-                                Ok(Ok(None)) => {
-                                    panic!(
-                                        "Failed to get block timestamp for block hash {:?}: block not found",
-                                        &block_hash
-                                    );
-                                }
-                                Ok(Err(err)) => {
-                                    error!(
-                                        "Failed to get block timestamp for block hash {:?}: {:?}",
-                                        &block_hash, &err
-                                    );
-                                }
-                                Err(err) => {
-                                    error!(
-                                        "Failed to get block timestamp for block hash {:?}: {:?}",
-                                        &block_hash, &err
-                                    );
-                                }
+                        match call!(
+                            chain,
+                            |reply| CkbChainMessage::GetBlockTimestamp(
+                                GetBlockTimestampRequest::from_block_hash(block_hash.clone()), reply
+                            )
+                        ) {
+                            Ok(Ok(Some(timestamp))) => {
+                                info!("Funding transaction {:?} confirmed", &tx_hash);
+                                // Notify outside observers.
+                                network.send_message(NetworkActorMessage::new_event(
+                                    NetworkActorEvent::FundingTransactionConfirmed(
+                                        outpoint.clone(),
+                                        block_hash.clone(),
+                                        DUMMY_FUNDING_TX_INDEX,
+                                        timestamp,
+                                    )
+                                ))
+                                .expect(ASSUME_NETWORK_MYSELF_ALIVE);
+                                return;
+                            },
+                            Ok(Ok(None)) => {
+                                error!(
+                                    "Failed to get block timestamp for block hash {:?}: block not found",
+                                    &block_hash
+                                );
+                            }
+                            Ok(Err(err)) => {
+                                error!(
+                                    "Failed to get block timestamp for block hash {:?}: {:?}",
+                                    &block_hash, &err
+                                );
+                            }
+                            Err(err) => {
+                                error!(
+                                    "Failed to get block timestamp for block hash {:?}: {:?}",
+                                    &block_hash, &err
+                                );
                             }
                         }
-                        panic!("Failed to get block timestamp for block hash {:?} after {} retries", &block_hash, MAX_GET_BLOCK_TIMESTAMP_RETRY);
                     });
                 }
                 Ok(status) => {
