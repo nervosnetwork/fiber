@@ -5,6 +5,7 @@ use crate::fiber::channel::ChannelCommandWithId;
 use crate::fiber::graph::NetworkGraphStateStore;
 use crate::fiber::graph::PaymentSession;
 use crate::fiber::graph::PaymentSessionStatus;
+use crate::fiber::network::NodeInfoResponse;
 use crate::fiber::network::SendPaymentCommand;
 use crate::fiber::network::SendPaymentResponse;
 use crate::fiber::types::EcdsaSignature;
@@ -551,7 +552,32 @@ impl NetworkNode {
         };
 
         let res = call!(self.network_actor, message).expect("source_node alive");
+        eprintln!("result: {:?}", res);
         res
+    }
+
+    pub async fn send_payment_keysend(
+        &mut self,
+        recipient: &NetworkNode,
+        amount: u128,
+    ) -> std::result::Result<SendPaymentResponse, String> {
+        self.send_payment(SendPaymentCommand {
+            target_pubkey: Some(recipient.pubkey.clone()),
+            amount: Some(amount),
+            payment_hash: None,
+            final_tlc_expiry_delta: None,
+            tlc_expiry_limit: None,
+            invoice: None,
+            timeout: None,
+            max_fee_amount: None,
+            max_parts: None,
+            keysend: Some(true),
+            udt_type_script: None,
+            allow_self_payment: false,
+            dry_run: false,
+            hop_hints: None,
+        })
+        .await
     }
 
     pub async fn assert_payment_status(
@@ -570,14 +596,56 @@ impl NetworkNode {
     }
 
     pub async fn get_payment_status(&self, payment_hash: Hash256) -> PaymentSessionStatus {
+        self.get_payment_result(payment_hash).await.status
+    }
+
+    pub async fn get_payment_result(&self, payment_hash: Hash256) -> SendPaymentResponse {
         let message = |rpc_reply| -> NetworkActorMessage {
             NetworkActorMessage::Command(NetworkActorCommand::GetPayment(payment_hash, rpc_reply))
         };
+        call!(self.network_actor, message)
+            .expect("node_a alive")
+            .unwrap()
+    }
+
+    pub async fn wait_until_success(&self, payment_hash: Hash256) {
+        loop {
+            let status = self.get_payment_status(payment_hash).await;
+            if status == PaymentSessionStatus::Success {
+                eprintln!("Payment success: {:?}\n\n", payment_hash);
+                break;
+            } else if status == PaymentSessionStatus::Failed {
+                eprintln!("Payment failed: {:?}\n\n", payment_hash);
+                // report error
+                assert_eq!(status, PaymentSessionStatus::Success);
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    }
+
+    pub async fn wait_until_failed(&self, payment_hash: Hash256) {
+        loop {
+            let status = self.get_payment_status(payment_hash).await;
+            if status == PaymentSessionStatus::Failed {
+                eprintln!("Payment failed: {:?}\n\n", payment_hash);
+                break;
+            } else if status == PaymentSessionStatus::Success {
+                eprintln!("Payment success: {:?}\n\n", payment_hash);
+                // report error
+                assert_eq!(status, PaymentSessionStatus::Failed);
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    }
+
+    pub async fn node_info(&self) -> NodeInfoResponse {
+        let message =
+            |rpc_reply| NetworkActorMessage::Command(NetworkActorCommand::NodeInfo((), rpc_reply));
+        eprintln!("query node_info ...");
         let res = call!(self.network_actor, message)
             .expect("node_a alive")
             .unwrap();
-
-        res.status
+        res
     }
 
     pub async fn update_channel_actor_state(&mut self, state: ChannelActorState) {

@@ -1,4 +1,6 @@
-use super::channel::{ChannelFlags, CHANNEL_DISABLED_FLAG, MESSAGE_OF_NODE2_FLAG};
+use super::channel::{
+    ChannelFlags, ProcessingChannelError, CHANNEL_DISABLED_FLAG, MESSAGE_OF_NODE2_FLAG,
+};
 use super::config::AnnouncedNodeName;
 use super::gen::fiber::{
     self as molecule_fiber, ChannelUpdateOpt, PaymentPreimageOpt, PubNonce as Byte66, PubkeyOpt,
@@ -15,6 +17,7 @@ use ckb_jsonrpc_types::CellOutput;
 use num_enum::IntoPrimitive;
 use num_enum::TryFromPrimitive;
 use std::convert::TryFrom;
+use std::fmt::Debug;
 
 use anyhow::anyhow;
 use ckb_types::{
@@ -1137,7 +1140,7 @@ pub struct TlcErr {
 
 impl Display for TlcErr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.error_code_as_str().fmt(f)
+        write!(f, "{}", self.error_code_as_str())
     }
 }
 
@@ -1481,10 +1484,21 @@ impl TlcErrorCode {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum RemoveTlcReason {
     RemoveTlcFulfill(RemoveTlcFulfill),
     RemoveTlcFail(TlcErrPacket),
+}
+
+impl Debug for RemoveTlcReason {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            RemoveTlcReason::RemoveTlcFulfill(_fulfill) => {
+                write!(f, "RemoveTlcFulfill")
+            }
+            RemoveTlcReason::RemoveTlcFail(_fail) => write!(f, "RemoveTlcFail"),
+        }
+    }
 }
 
 impl RemoveTlcReason {
@@ -1639,6 +1653,14 @@ impl TryFrom<molecule_fiber::AnnouncementSignatures> for AnnouncementSignatures 
             .map_err(|e| anyhow!(e))?,
         })
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct ForwardTlcResult {
+    pub channel_id: Hash256,
+    pub payment_hash: Hash256,
+    pub tlc_id: u64,
+    pub error_info: Option<(ProcessingChannelError, TlcErr)>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Hash)]

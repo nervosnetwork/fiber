@@ -61,8 +61,8 @@ use super::graph::{NetworkGraph, NetworkGraphStateStore, SessionRoute};
 use super::key::blake2b_hash_with_salt;
 use super::types::{
     BroadcastMessage, BroadcastMessageQuery, BroadcastMessageWithTimestamp, EcdsaSignature,
-    FiberMessage, GossipMessage, Hash256, NodeAnnouncement, OpenChannel, PaymentHopData, Privkey,
-    Pubkey, RemoveTlcReason, TlcErr, TlcErrData, TlcErrorCode,
+    FiberMessage, ForwardTlcResult, GossipMessage, Hash256, NodeAnnouncement, OpenChannel,
+    PaymentHopData, Privkey, Pubkey, RemoveTlcReason, TlcErr, TlcErrData, TlcErrorCode,
 };
 use super::{FiberConfig, ASSUME_NETWORK_ACTOR_ALIVE};
 
@@ -217,7 +217,7 @@ pub enum NetworkActorCommand {
     ControlFiberChannel(ChannelCommandWithId),
     // The first parameter is the peeled onion in binary via `PeeledOnionPacket::serialize`. `PeeledOnionPacket::current`
     // is for the current node.
-    SendPaymentOnionPacket(SendOnionPacketCommand, RpcReplyPort<Result<u64, TlcErr>>),
+    SendPaymentOnionPacket(SendOnionPacketCommand),
     PeelPaymentOnionPacket(
         PaymentOnionPacket, // onion_packet
         Hash256,            // payment_hash
@@ -645,6 +645,13 @@ pub enum NetworkActorEvent {
 
     // A payment need to retry
     RetrySendPayment(Hash256),
+
+    // AddTlc result from peer (payment_hash, (process_channel_error, tlc_err), (previous_channel_id, previous_tlc_id))
+    AddTlcResult(
+        Hash256,
+        Option<(ProcessingChannelError, TlcErr)>,
+        Option<(Hash256, u64)>,
+    ),
 }
 
 #[derive(Debug)]
@@ -931,6 +938,10 @@ where
             NetworkActorEvent::RetrySendPayment(payment_hash) => {
                 let _ = self.try_payment_session(myself, state, payment_hash).await;
             }
+            NetworkActorEvent::AddTlcResult(payment_hash, error_info, previous_tlc) => {
+                self.on_add_tlc_result_event(myself, state, payment_hash, error_info, previous_tlc)
+                    .await;
+            }
             #[cfg(test)]
             NetworkActorEvent::GossipMessage(peer_id, message) => {
                 let _ = state
@@ -1125,9 +1136,8 @@ where
                     .await?
             }
 
-            NetworkActorCommand::SendPaymentOnionPacket(command, reply) => {
-                self.handle_send_onion_packet_command(state, command, reply)
-                    .await;
+            NetworkActorCommand::SendPaymentOnionPacket(command) => {
+                let _ = self.handle_send_onion_packet_command(state, command).await;
             }
             NetworkActorCommand::PeelPaymentOnionPacket(onion_packet, payment_hash, reply) => {
                 let response = onion_packet
@@ -1369,8 +1379,7 @@ where
         &self,
         state: &mut NetworkActorState<S>,
         command: SendOnionPacketCommand,
-        reply: RpcReplyPort<Result<u64, TlcErr>>,
-    ) {
+    ) -> Result<(), TlcErr> {
         let SendOnionPacketCommand {
             peeled_onion_packet,
             previous_tlc,
@@ -1379,8 +1388,6 @@ where
 
         let info = peeled_onion_packet.current.clone();
         let shared_secret = peeled_onion_packet.shared_secret;
-        debug!("Processing onion packet info: {:?}", info);
-
         let channel_outpoint = OutPoint::new(info.funding_tx_hash.into(), 0);
         let channel_id = match state.outpoint_channel_map.get(&channel_outpoint) {
             Some(channel_id) => channel_id,
@@ -1395,10 +1402,11 @@ where
                     channel_outpoint.clone(),
                     None,
                 );
-                return reply.send(Err(tlc_err)).expect("send add tlc response");
+                return Err(tlc_err);
             }
         };
-        let (send, recv) = oneshot::channel::<Result<AddTlcResponse, TlcErr>>();
+        let (send, _recv) = oneshot::channel::<Result<AddTlcResponse, TlcErr>>();
+        // explicitly don't wait for the response, we will handle the result in AddTlcResult
         let rpc_reply = RpcReplyPort::from(send);
         let command = ChannelCommand::AddTlc(
             AddTlcCommand {
@@ -1415,18 +1423,18 @@ where
 
         // we have already checked the channel_id is valid,
         match state.send_command_to_channel(*channel_id, command).await {
-            Ok(()) => {}
+            Ok(_) => {
+                return Ok(());
+            }
             Err(err) => {
                 error!(
                     "Failed to send onion packet to channel: {:?} with err: {:?}",
                     channel_id, err
                 );
                 let tlc_error = self.get_tlc_error(state, &err, &channel_outpoint);
-                return reply.send(Err(tlc_error)).expect("send add tlc response");
+                return Err(tlc_error);
             }
         }
-        let add_tlc_res = recv.await.expect("recv error").map(|res| res.tlc_id);
-        reply.send(add_tlc_res).expect("send error");
     }
 
     fn get_tlc_error(
@@ -1591,7 +1599,6 @@ where
     ) -> Result<PaymentSession, Error> {
         let session_key = Privkey::from_slice(KeyPair::generate_random_key().as_ref());
         assert_ne!(hops[0].funding_tx_hash, Hash256::default());
-        let first_channel_outpoint = OutPoint::new(hops[0].funding_tx_hash.into(), 0);
 
         payment_session
             .session_key
@@ -1599,8 +1606,6 @@ where
         payment_session.route =
             SessionRoute::new(state.get_public_key(), payment_data.target_pubkey, &hops);
 
-        let (send, recv) = oneshot::channel::<Result<u64, TlcErr>>();
-        let rpc_reply = RpcReplyPort::from(send);
         let peeled_onion_packet = match PeeledPaymentOnionPacket::create(
             session_key,
             hops,
@@ -1614,18 +1619,21 @@ where
                     payment_data.payment_hash, e
                 );
                 self.set_payment_fail_with_error(payment_session, &err);
-                return Err(Error::SendPaymentError(err));
+                return Err(Error::SendPaymentFirstHopError(err, false));
             }
         };
-        let command = SendOnionPacketCommand {
-            peeled_onion_packet,
-            previous_tlc: None,
-            payment_hash: payment_data.payment_hash,
-        };
 
-        self.handle_send_onion_packet_command(state, command, rpc_reply)
-            .await;
-        match recv.await.expect("msg recv error") {
+        match self
+            .handle_send_onion_packet_command(
+                state,
+                SendOnionPacketCommand {
+                    peeled_onion_packet,
+                    previous_tlc: None,
+                    payment_hash: payment_data.payment_hash,
+                },
+            )
+            .await
+        {
             Err(error_detail) => {
                 self.update_graph_with_tlc_fail(&state.network, &error_detail)
                     .await;
@@ -1645,11 +1653,72 @@ where
                 }
                 return Err(Error::SendPaymentFirstHopError(err, need_to_retry));
             }
-            Ok(tlc_id) => {
-                payment_session.set_inflight_status(first_channel_outpoint, tlc_id);
+            Ok(_) => {
                 self.store.insert_payment_session(payment_session.clone());
                 return Ok(payment_session.clone());
             }
+        }
+    }
+
+    async fn on_add_tlc_result_event(
+        &self,
+        myself: ActorRef<NetworkActorMessage>,
+        state: &mut NetworkActorState<S>,
+        payment_hash: Hash256,
+        error_info: Option<(ProcessingChannelError, TlcErr)>,
+        previous_tlc: Option<(Hash256, u64)>,
+    ) {
+        if let Some((channel_id, tlc_id)) = previous_tlc {
+            myself
+                .send_message(NetworkActorMessage::new_command(
+                    NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
+                        channel_id: channel_id,
+                        command: ChannelCommand::ForwardTlcResult(ForwardTlcResult {
+                            payment_hash,
+                            channel_id,
+                            tlc_id,
+                            error_info: error_info.clone(),
+                        }),
+                    }),
+                ))
+                .expect("network actor alive");
+            return;
+        }
+
+        let Some(mut payment_session) = self.store.get_payment_session(payment_hash) else {
+            return;
+        };
+
+        if error_info.is_none() {
+            // Change the status from Created into Inflight
+            payment_session.set_inflight_status();
+            self.store.insert_payment_session(payment_session.clone());
+            return;
+        }
+
+        let (channel_error, tlc_err) = error_info.unwrap();
+        if matches!(channel_error, ProcessingChannelError::RepeatedProcessing(_)) {
+            return;
+        }
+
+        let need_to_retry = self
+            .network_graph
+            .write()
+            .await
+            .record_payment_fail(&payment_session, tlc_err.clone());
+        if matches!(channel_error, ProcessingChannelError::WaitingTlcAck) {
+            payment_session.last_error = Some("WaitingTlcAck".to_string());
+            self.store.insert_payment_session(payment_session.clone());
+        }
+        if need_to_retry {
+            let _ = self.try_payment_session(myself, state, payment_hash).await;
+        } else {
+            let error = format!(
+                "Failed to send payment session: {:?}, retried times: {}",
+                payment_session.payment_hash(),
+                payment_session.retried_times
+            );
+            self.set_payment_fail_with_error(&mut payment_session, &error);
         }
     }
 
@@ -1672,7 +1741,10 @@ where
 
         let payment_data = payment_session.request.clone();
         if payment_session.can_retry() {
-            payment_session.retried_times += 1;
+            if payment_session.last_error != Some("WaitingTlcAck".to_string()) {
+                payment_session.retried_times += 1;
+            }
+
             let hops_info = self
                 .build_payment_route(&mut payment_session, &payment_data)
                 .await?;
@@ -1681,7 +1753,8 @@ where
                 .await
             {
                 Ok(payment_session) => return Ok(payment_session),
-                Err(Error::SendPaymentFirstHopError(err, need_retry)) => {
+                Err(err) => {
+                    let need_retry = matches!(err, Error::SendPaymentFirstHopError(_, true));
                     if need_retry {
                         // If this is the first hop error, like the WaitingTlcAck error,
                         // we will just retry later, return Ok here for letting endpoint user
@@ -1693,21 +1766,8 @@ where
                         });
                         return Ok(payment_session);
                     } else {
-                        return Err(Error::SendPaymentError(err));
+                        return Err(err);
                     }
-                }
-                Err(e) => {
-                    // we will retry the payment session,
-                    // but we need to retry later to let the actor to process failure,
-                    // so that we can make different choice for later try
-                    let payment_hash = payment_data.payment_hash;
-                    myself.send_after(Duration::from_millis(500), move || {
-                        NetworkActorMessage::new_event(NetworkActorEvent::RetrySendPayment(
-                            payment_hash,
-                        ))
-                    });
-                    debug!("send payment error: {:?}", e);
-                    return Err(e);
                 }
             }
         } else {
@@ -2043,7 +2103,8 @@ where
             }),
             network.clone().get_cell(),
         )
-        .await?
+        .await
+        .map_err(|e| ProcessingChannelError::SpawnErr(e.to_string()))?
         .0;
         let temp_channel_id = rx.await.expect("msg received");
         self.on_channel_created(temp_channel_id, &peer_id, channel.clone());
@@ -2125,7 +2186,8 @@ where
             }),
             network.clone().get_cell(),
         )
-        .await?
+        .await
+        .map_err(|e| ProcessingChannelError::SpawnErr(e.to_string()))?
         .0;
         let new_id = rx.await.expect("msg received");
         self.on_channel_created(new_id, &peer_id, channel.clone());
@@ -3159,12 +3221,12 @@ where
         match message {
             NetworkActorMessage::Event(event) => {
                 if let Err(err) = self.handle_event(myself, state, event).await {
-                    error!("Failed to handle ckb network event: {}", err);
+                    error!("Failed to handle fiber network event: {}", err);
                 }
             }
             NetworkActorMessage::Command(command) => {
                 if let Err(err) = self.handle_command(myself, state, command).await {
-                    error!("Failed to handle ckb network command: {}", err);
+                    error!("Failed to handle fiber network command: {}", err);
                 }
             }
             NetworkActorMessage::Notification(event) => {
