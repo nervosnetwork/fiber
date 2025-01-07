@@ -74,7 +74,7 @@ use std::{
     u128,
 };
 
-use super::types::UpdateTlcInfo;
+use super::types::{ChannelUpdateChannelFlags, ChannelUpdateMessageFlags, UpdateTlcInfo};
 
 // - `empty_witness_args`: 16 bytes, fixed to 0x10000000100000001000000010000000, for compatibility with the xudt
 // - `pubkey`: 32 bytes, x only aggregated public key
@@ -92,17 +92,6 @@ pub const COMMITMENT_CELL_WITNESS_LEN: usize = 16 + 1 + 32 + 64;
 // so that we can get previous commitment point/number without checking if the channel
 // is funded or not.
 pub const INITIAL_COMMITMENT_NUMBER: u64 = 0;
-
-// Whether we are receiving a channel update from node1 or node2.
-// If the flag is set, it means the channel update is from node1, otherwise it is from node2.
-pub const MESSAGE_OF_NODE1_FLAG: u32 = 0;
-
-// Whether we are receiving a channel update from node1 or node2.
-// If the flag is set, it means the channel update is from node2, otherwise it is from node1.
-pub const MESSAGE_OF_NODE2_FLAG: u32 = 1;
-
-// The channel is disabled, and no more tlcs can be added to the channel.
-pub const CHANNEL_DISABLED_FLAG: u32 = 1;
 
 const AUTO_SETDOWN_TLC_INTERVAL: Duration = Duration::from_secs(2);
 
@@ -3454,7 +3443,7 @@ impl ChannelActorState {
         network: &ActorRef<NetworkActorMessage>,
     ) -> ChannelUpdate {
         self.do_generate_channel_update(network, |update| {
-            update.channel_flags = CHANNEL_DISABLED_FLAG
+            update.channel_flags |= ChannelUpdateChannelFlags::DISABLED;
         })
         .await
     }
@@ -3508,17 +3497,20 @@ impl ChannelActorState {
         Some(self.generate_channel_update(network).await)
     }
 
-    fn get_channel_update_channel_flags(&self) -> u32 {
+    fn get_channel_update_channel_flags(&self) -> ChannelUpdateChannelFlags {
         if self.is_tlc_forwarding_enabled() {
-            0
+            ChannelUpdateChannelFlags::empty()
         } else {
-            CHANNEL_DISABLED_FLAG
+            ChannelUpdateChannelFlags::DISABLED
         }
     }
 
     pub fn get_unsigned_channel_update_message(&self) -> Option<ChannelUpdate> {
-        let local_is_node1 = self.local_is_node1();
-        let message_flags = if local_is_node1 { 0 } else { 1 };
+        let message_flags = if self.local_is_node1() {
+            ChannelUpdateMessageFlags::UPDATE_OF_NODE1
+        } else {
+            ChannelUpdateMessageFlags::UPDATE_OF_NODE2
+        };
 
         self.is_public().then_some(ChannelUpdate::new_unsigned(
             self.must_get_funding_transaction_outpoint(),

@@ -1,14 +1,15 @@
 use super::test_utils::{init_tracing, NetworkNode};
 use crate::{
     fiber::{
-        channel::{ShutdownInfo, MESSAGE_OF_NODE1_FLAG, MESSAGE_OF_NODE2_FLAG},
+        channel::ShutdownInfo,
         config::DEFAULT_TLC_EXPIRY_DELTA,
         gossip::GossipMessageStore,
         graph::ChannelUpdateInfo,
         network::{NetworkActorStateStore, SendPaymentCommand, SendPaymentData},
         tests::test_utils::NetworkNodeConfigBuilder,
         types::{
-            BroadcastMessage, ChannelAnnouncement, ChannelUpdate, NodeAnnouncement, Privkey, Pubkey,
+            BroadcastMessage, ChannelAnnouncement, ChannelUpdate, ChannelUpdateChannelFlags,
+            ChannelUpdateMessageFlags, NodeAnnouncement, Privkey, Pubkey,
         },
         NetworkActorCommand, NetworkActorEvent, NetworkActorMessage,
     },
@@ -289,32 +290,36 @@ async fn create_a_channel() -> (NetworkNode, ChannelAnnouncement, Privkey, Privk
 async fn test_node1_node2_channel_update() {
     let (node, channel_announcement, sk1, sk2) = create_a_channel().await;
 
-    let create_channel_update = |timestamp: u64, message_flags: u32, key: Privkey| {
-        let mut channel_update = ChannelUpdate::new_unsigned(
-            channel_announcement.out_point().clone(),
-            timestamp,
-            message_flags,
-            0,
-            42,
-            0,
-            10,
-        );
+    let create_channel_update =
+        |timestamp: u64, message_flags: ChannelUpdateMessageFlags, key: Privkey| {
+            let mut channel_update = ChannelUpdate::new_unsigned(
+                channel_announcement.out_point().clone(),
+                timestamp,
+                message_flags,
+                ChannelUpdateChannelFlags::empty(),
+                42,
+                0,
+                10,
+            );
 
-        channel_update.signature = Some(key.sign(channel_update.message_to_sign()));
-        node.network_actor
-            .send_message(NetworkActorMessage::Event(
-                NetworkActorEvent::GossipMessage(
-                    get_test_peer_id(),
-                    BroadcastMessage::ChannelUpdate(channel_update.clone())
-                        .create_broadcast_messages_filter_result(),
-                ),
-            ))
-            .expect("send message to network actor");
-        channel_update
-    };
+            channel_update.signature = Some(key.sign(channel_update.message_to_sign()));
+            node.network_actor
+                .send_message(NetworkActorMessage::Event(
+                    NetworkActorEvent::GossipMessage(
+                        get_test_peer_id(),
+                        BroadcastMessage::ChannelUpdate(channel_update.clone())
+                            .create_broadcast_messages_filter_result(),
+                    ),
+                ))
+                .expect("send message to network actor");
+            channel_update
+        };
 
-    let channel_update_of_node1 =
-        create_channel_update(now_timestamp_as_millis_u64(), MESSAGE_OF_NODE1_FLAG, sk1);
+    let channel_update_of_node1 = create_channel_update(
+        now_timestamp_as_millis_u64(),
+        ChannelUpdateMessageFlags::UPDATE_OF_NODE1,
+        sk1,
+    );
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
     let new_channel_info = node
@@ -326,8 +331,11 @@ async fn test_node1_node2_channel_update() {
         Some(ChannelUpdateInfo::from(&channel_update_of_node1))
     );
 
-    let channel_update_of_node2 =
-        create_channel_update(now_timestamp_as_millis_u64(), MESSAGE_OF_NODE2_FLAG, sk2);
+    let channel_update_of_node2 = create_channel_update(
+        now_timestamp_as_millis_u64(),
+        ChannelUpdateMessageFlags::UPDATE_OF_NODE2,
+        sk2,
+    );
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
     let new_channel_info = node
@@ -350,15 +358,15 @@ async fn test_channel_update_version() {
 
     let create_channel_update = |key: &Privkey| {
         let message_flag = if key == &sk1 {
-            MESSAGE_OF_NODE1_FLAG
+            ChannelUpdateMessageFlags::UPDATE_OF_NODE1
         } else {
-            MESSAGE_OF_NODE2_FLAG
+            ChannelUpdateMessageFlags::UPDATE_OF_NODE2
         };
         let mut channel_update = ChannelUpdate::new_unsigned(
             channel_info.out_point().clone(),
             now_timestamp_as_millis_u64(),
             message_flag,
-            0,
+            ChannelUpdateChannelFlags::empty(),
             42,
             0,
             10,

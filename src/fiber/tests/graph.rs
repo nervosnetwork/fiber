@@ -1,8 +1,7 @@
-use crate::fiber::channel::{MESSAGE_OF_NODE1_FLAG, MESSAGE_OF_NODE2_FLAG};
 use crate::fiber::config::{DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT};
 use crate::fiber::gossip::GossipMessageStore;
 use crate::fiber::graph::{PathFindError, SessionRoute};
-use crate::fiber::types::Pubkey;
+use crate::fiber::types::{ChannelUpdateChannelFlags, ChannelUpdateMessageFlags, Pubkey};
 use crate::now_timestamp_as_millis_u64;
 use crate::{
     fiber::{
@@ -129,11 +128,11 @@ impl MockNetworkGraph {
             channel_outpoint.clone(),
             now_timestamp_as_millis_u64(),
             if node_a_is_node1 {
-                MESSAGE_OF_NODE2_FLAG
+                ChannelUpdateMessageFlags::UPDATE_OF_NODE2
             } else {
-                MESSAGE_OF_NODE1_FLAG
+                ChannelUpdateMessageFlags::UPDATE_OF_NODE1
             },
-            0,
+            ChannelUpdateChannelFlags::empty(),
             11,
             min_tlc_value.unwrap_or(0),
             fee_rate.unwrap_or(0),
@@ -143,11 +142,11 @@ impl MockNetworkGraph {
                 channel_outpoint.clone(),
                 now_timestamp_as_millis_u64(),
                 if node_a_is_node1 {
-                    MESSAGE_OF_NODE1_FLAG
+                    ChannelUpdateMessageFlags::UPDATE_OF_NODE1
                 } else {
-                    MESSAGE_OF_NODE2_FLAG
+                    ChannelUpdateMessageFlags::UPDATE_OF_NODE2
                 },
-                0,
+                ChannelUpdateChannelFlags::empty(),
                 22,
                 min_tlc_value.unwrap_or(0),
                 fee_rate,

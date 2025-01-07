@@ -1,4 +1,4 @@
-use super::channel::{ChannelFlags, ChannelTlcInfo, CHANNEL_DISABLED_FLAG, MESSAGE_OF_NODE2_FLAG};
+use super::channel::{ChannelFlags, ChannelTlcInfo};
 use super::config::AnnouncedNodeName;
 use super::gen::fiber::{self as molecule_fiber, PubNonce as Byte66, UdtCellDeps, Uint128Opt};
 use super::gen::gossip::{self as molecule_gossip};
@@ -42,6 +42,20 @@ use tracing::{error, trace};
 pub fn secp256k1_instance() -> &'static Secp256k1<All> {
     static INSTANCE: OnceCell<Secp256k1<All>> = OnceCell::new();
     INSTANCE.get_or_init(Secp256k1::new)
+}
+
+bitflags::bitflags! {
+    #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct ChannelUpdateChannelFlags: u32 {
+        const DISABLED = 1;
+    }
+    #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct ChannelUpdateMessageFlags: u32 {
+        const UPDATE_OF_NODE1 = 0;
+        const UPDATE_OF_NODE2 = 1;
+    }
 }
 
 impl From<&Byte66> for PubNonce {
@@ -1016,17 +1030,11 @@ impl TryFrom<molecule_fiber::ClosingSigned> for ClosingSigned {
 pub struct UpdateTlcInfo {
     pub channel_id: Hash256,
     pub timestamp: u64,
-    pub channel_flags: u32,
+    pub channel_flags: ChannelUpdateChannelFlags,
     pub tlc_expiry_delta: u64,
     pub tlc_minimum_value: u128,
     pub tlc_maximum_value: u128,
     pub tlc_fee_proportional_millionths: u128,
-}
-
-impl UpdateTlcInfo {
-    pub fn is_disabled(&self) -> bool {
-        self.channel_flags & CHANNEL_DISABLED_FLAG == CHANNEL_DISABLED_FLAG
-    }
 }
 
 impl From<UpdateTlcInfo> for molecule_fiber::UpdateTlcInfo {
@@ -1034,7 +1042,7 @@ impl From<UpdateTlcInfo> for molecule_fiber::UpdateTlcInfo {
         molecule_fiber::UpdateTlcInfo::new_builder()
             .channel_id(update_tlc_info.channel_id.into())
             .timestamp(update_tlc_info.timestamp.pack())
-            .channel_flags(update_tlc_info.channel_flags.pack())
+            .channel_flags(update_tlc_info.channel_flags.bits().pack())
             .tlc_expiry_delta(update_tlc_info.tlc_expiry_delta.pack())
             .tlc_minimum_value(update_tlc_info.tlc_minimum_value.pack())
             .tlc_maximum_value(update_tlc_info.tlc_maximum_value.pack())
@@ -1048,7 +1056,9 @@ impl From<molecule_fiber::UpdateTlcInfo> for UpdateTlcInfo {
         UpdateTlcInfo {
             channel_id: update_tlc_info.channel_id().into(),
             timestamp: update_tlc_info.timestamp().unpack(),
-            channel_flags: update_tlc_info.channel_flags().unpack(),
+            channel_flags: ChannelUpdateChannelFlags::from_bits_truncate(
+                update_tlc_info.channel_flags().unpack(),
+            ),
             tlc_expiry_delta: update_tlc_info.tlc_expiry_delta().unpack(),
             tlc_minimum_value: update_tlc_info.tlc_minimum_value().unpack(),
             tlc_maximum_value: update_tlc_info.tlc_maximum_value().unpack(),
@@ -1063,7 +1073,9 @@ impl From<UpdateTlcInfo> for ChannelTlcInfo {
     fn from(update_tlc_info: UpdateTlcInfo) -> Self {
         ChannelTlcInfo {
             timestamp: update_tlc_info.timestamp,
-            enabled: !update_tlc_info.is_disabled(),
+            enabled: !update_tlc_info
+                .channel_flags
+                .contains(ChannelUpdateChannelFlags::DISABLED),
             tlc_expiry_delta: update_tlc_info.tlc_expiry_delta,
             tlc_minimum_value: update_tlc_info.tlc_minimum_value,
             tlc_maximum_value: update_tlc_info.tlc_maximum_value,
@@ -2023,10 +2035,10 @@ pub struct ChannelUpdate {
     // Currently only the first bit is used to indicate the direction of the channel.
     // If it is 0, it means this channel message is from node 1 (thus applies to tlcs
     // sent from node 2 to node 1). Otherwise, it is from node 2.
-    pub message_flags: u32,
+    pub message_flags: ChannelUpdateMessageFlags,
     // Currently only the first bit is used to indicate if the channel is disabled.
     // If the first bit is set, the channel is disabled.
-    pub channel_flags: u32,
+    pub channel_flags: ChannelUpdateChannelFlags,
     pub tlc_expiry_delta: u64,
     pub tlc_minimum_value: u128,
     pub tlc_fee_proportional_millionths: u128,
@@ -2036,15 +2048,15 @@ impl ChannelUpdate {
     pub fn new_unsigned(
         channel_outpoint: OutPoint,
         timestamp: u64,
-        message_flags: u32,
-        channel_flags: u32,
+        message_flags: ChannelUpdateMessageFlags,
+        channel_flags: ChannelUpdateChannelFlags,
         tlc_expiry_delta: u64,
         tlc_minimum_value: u128,
         tlc_fee_proportional_millionths: u128,
     ) -> Self {
         // To avoid having the same timestamp for both channel updates, we will use an even
         // timestamp number for node1 and an odd timestamp number for node2.
-        let timestamp = if message_flags & MESSAGE_OF_NODE2_FLAG == MESSAGE_OF_NODE2_FLAG {
+        let timestamp = if message_flags.contains(ChannelUpdateMessageFlags::UPDATE_OF_NODE2) {
             timestamp | 1u64
         } else {
             timestamp & !1u64
@@ -2082,11 +2094,13 @@ impl ChannelUpdate {
     }
 
     pub fn is_update_of_node_2(&self) -> bool {
-        self.message_flags & MESSAGE_OF_NODE2_FLAG == MESSAGE_OF_NODE2_FLAG
+        self.message_flags
+            .contains(ChannelUpdateMessageFlags::UPDATE_OF_NODE2)
     }
 
     pub fn is_disabled(&self) -> bool {
-        self.channel_flags & CHANNEL_DISABLED_FLAG == CHANNEL_DISABLED_FLAG
+        self.channel_flags
+            .contains(ChannelUpdateChannelFlags::DISABLED)
     }
 
     pub fn cursor(&self) -> Cursor {
@@ -2109,8 +2123,8 @@ impl From<ChannelUpdate> for molecule_gossip::ChannelUpdate {
             .chain_hash(channel_update.chain_hash.into())
             .channel_outpoint(channel_update.channel_outpoint)
             .timestamp(channel_update.timestamp.pack())
-            .message_flags(channel_update.message_flags.pack())
-            .channel_flags(channel_update.channel_flags.pack())
+            .message_flags(channel_update.message_flags.bits().pack())
+            .channel_flags(channel_update.channel_flags.bits().pack())
             .tlc_expiry_delta(channel_update.tlc_expiry_delta.pack())
             .tlc_minimum_value(channel_update.tlc_minimum_value.pack())
             .tlc_fee_proportional_millionths(channel_update.tlc_fee_proportional_millionths.pack())
@@ -2127,8 +2141,12 @@ impl TryFrom<molecule_gossip::ChannelUpdate> for ChannelUpdate {
             chain_hash: channel_update.chain_hash().into(),
             channel_outpoint: channel_update.channel_outpoint(),
             timestamp: channel_update.timestamp().unpack(),
-            message_flags: channel_update.message_flags().unpack(),
-            channel_flags: channel_update.channel_flags().unpack(),
+            message_flags: ChannelUpdateMessageFlags::from_bits_truncate(
+                channel_update.message_flags().unpack(),
+            ),
+            channel_flags: ChannelUpdateChannelFlags::from_bits_truncate(
+                channel_update.channel_flags().unpack(),
+            ),
             tlc_expiry_delta: channel_update.tlc_expiry_delta().unpack(),
             tlc_minimum_value: channel_update.tlc_minimum_value().unpack(),
             tlc_fee_proportional_millionths: channel_update
