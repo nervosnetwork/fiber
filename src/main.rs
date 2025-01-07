@@ -1,13 +1,9 @@
 use ckb_chain_spec::ChainSpec;
-use ckb_hash::blake2b_256;
 use ckb_resource::Resource;
 use core::default::Default;
 use fnn::actors::RootActor;
 use fnn::cch::CchMessage;
-use fnn::ckb::{
-    contracts::{get_script_by_contract, try_init_contracts_context, Contract},
-    CkbChainActor,
-};
+use fnn::ckb::{contracts::try_init_contracts_context, CkbChainActor};
 use fnn::fiber::{channel::ChannelSubscribers, graph::NetworkGraph, network::init_chain_hash};
 use fnn::store::Store;
 use fnn::tasks::{
@@ -20,7 +16,6 @@ use fnn::watchtower::{
 use fnn::NetworkServiceEvent;
 use fnn::{start_cch, start_network, start_rpc, Config};
 use ractor::Actor;
-use secp256k1::Secp256k1;
 #[cfg(debug_assertions)]
 use std::collections::HashMap;
 use std::fmt::Debug;
@@ -95,7 +90,7 @@ pub async fn main() -> Result<(), ExitMessage> {
         Some(fiber_config) => {
             // TODO: this is not a super user friendly error message which has actionable information
             // for the user to fix the error and start the node.
-            let ckb_config = config.ckb.ok_or_else(|| {
+            let ckb_config = config.ckb.clone().ok_or_else(|| {
                 ExitMessage(
                     "service fiber requires service ckb which is not enabled in the config file"
                         .to_string(),
@@ -141,16 +136,10 @@ pub async fn main() -> Result<(), ExitMessage> {
                 fiber_config.announce_private_addr(),
             )));
 
-            let secret_key = ckb_config.read_secret_key().map_err(|err| {
-                ExitMessage(format!(
-                    "failed to read the secret key for the ckb signer: {}",
-                    err
-                ))
-            })?;
-            let secp = Secp256k1::new();
-            let pubkey_hash = blake2b_256(secret_key.public_key(&secp).serialize());
-            let default_shutdown_script =
-                get_script_by_contract(Contract::Secp256k1Lock, &pubkey_hash[0..20]);
+            // we use the default funding lock script as the shutdown script for the network actor
+            let default_shutdown_script = ckb_config
+                .get_default_funding_lock_script()
+                .expect("get default funding lock script should be ok");
 
             info!("Starting fiber");
             let network_actor = start_network(
@@ -281,6 +270,7 @@ pub async fn main() -> Result<(), ExitMessage> {
         (Some(rpc_config), Some(network_graph)) => {
             let handle = start_rpc(
                 rpc_config,
+                config.ckb,
                 config.fiber,
                 network_actor,
                 cch_actor,

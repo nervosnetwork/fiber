@@ -2,7 +2,7 @@ use super::channel::ChannelActorStateStore;
 use super::config::AnnouncedNodeName;
 use super::gossip::GossipMessageStore;
 use super::history::{Direction, InternalResult, PaymentHistory, TimedResult};
-use super::network::{get_chain_hash, SendPaymentData, SendPaymentResponse};
+use super::network::{get_chain_hash, HopHint, SendPaymentData, SendPaymentResponse};
 use super::path::NodeHeap;
 use super::types::{
     BroadcastMessageID, BroadcastMessageWithTimestamp, ChannelAnnouncement, ChannelUpdate, Hash256,
@@ -17,6 +17,8 @@ use crate::fiber::types::PaymentHopData;
 use crate::invoice::CkbInvoice;
 use crate::now_timestamp_as_millis_u64;
 use ckb_types::packed::{OutPoint, Script};
+use rand::seq::SliceRandom;
+use rand::thread_rng;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use std::collections::{HashMap, HashSet};
@@ -39,8 +41,8 @@ pub struct NodeInfo {
     // Tentatively using 64 bits for features. May change the type later while developing.
     // rust-lightning uses a Vec<u8> here.
     pub features: u64,
-    // The alias of the node. This is a human-readable string that is meant to be used for labelling nodes in the UI.
-    pub alias: AnnouncedNodeName,
+    // The name of the node. This is a human-readable string that is meant to be used for labelling nodes in the UI.
+    pub node_name: AnnouncedNodeName,
     // All the reachable addresses.
     pub addresses: Vec<MultiAddr>,
     // If the other party funding more than this amount, we will automatically accept the channel.
@@ -64,7 +66,7 @@ impl From<NodeAnnouncement> for NodeInfo {
             node_id: value.node_id,
             timestamp: value.timestamp,
             features: value.features,
-            alias: value.alias,
+            node_name: value.node_name,
             addresses: value.addresses,
             auto_accept_min_ckb_funding_amount: value.auto_accept_min_ckb_funding_amount,
             udt_cfg_infos: value.udt_cfg_infos,
@@ -710,6 +712,7 @@ where
             final_tlc_expiry_delta,
             payment_data.tlc_expiry_limit,
             allow_self_payment,
+            payment_data.hop_hints,
         )?;
         assert!(!route.is_empty());
 
@@ -805,6 +808,7 @@ where
         final_tlc_expiry_delta: u64,
         tlc_expiry_limit: u64,
         allow_self: bool,
+        hop_hints: Vec<HopHint>,
     ) -> Result<Vec<PathEdge>, PathFindError> {
         let started_time = std::time::Instant::now();
         let nodes_len = self.nodes.len();
@@ -815,12 +819,6 @@ where
         let mut edges_expanded = 0;
         let mut nodes_heap = NodeHeap::new(nodes_len);
         let mut distances = HashMap::<Pubkey, NodeHeapElement>::new();
-        // a map from node_id to the selected channel outpoint
-        // suppose the scenario of A <-- channel_1 --> B <-- channel_2 --> A
-        // when we starting iterate channels from A, we may considerting channel_1 and channel_2,
-        // and we selected channel_1 according to weight
-        // in this case, `last_hop_channels` stores (B -> channel_1) so that we can skip channel_1 when we iterate channels from B
-        let mut last_hop_channels = HashMap::new();
 
         if amount == 0 {
             return Err(PathFindError::Amount(
@@ -834,6 +832,28 @@ where
             ));
         }
 
+        let hop_hint_map: HashMap<(Pubkey, bool), OutPoint> = hop_hints
+            .into_iter()
+            .map(|hint| {
+                (
+                    (hint.pubkey, hint.inbound),
+                    OutPoint::new(hint.channel_funding_tx.into(), 0),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+
+        let mut target = target;
+        let mut current_expiry = final_tlc_expiry_delta;
+        let mut last_edge = None;
+
+        if route_to_self {
+            let (new_target, expiry, edge) =
+                self.adjust_target_for_route_self(&hop_hint_map, amount, source, target)?;
+            target = new_target;
+            last_edge = edge;
+            current_expiry += expiry;
+        }
+        assert_ne!(source, target);
         // initialize the target node
         nodes_heap.push(NodeHeapElement {
             node_id: target,
@@ -843,7 +863,7 @@ where
             fee_charged: 0,
             probability: 1.0,
             next_hop: None,
-            incoming_tlc_expiry: final_tlc_expiry_delta,
+            incoming_tlc_expiry: current_expiry,
         });
 
         while let Some(cur_hop) = nodes_heap.pop() {
@@ -851,19 +871,26 @@ where
 
             for (from, to, channel_info, channel_update) in self.get_node_inbounds(cur_hop.node_id)
             {
-                if from == target && !route_to_self {
-                    continue;
-                }
+                assert_eq!(to, cur_hop.node_id);
                 if &udt_type_script != channel_info.udt_type_script() {
                     continue;
                 }
 
-                // if the channel is already visited in the last hop, skip it
-                if last_hop_channels
-                    .values()
-                    .any(|x| x == &channel_info.out_point())
-                {
-                    continue;
+                if let Some(channel) = hop_hint_map.get(&(from, false)) {
+                    if channel != channel_info.out_point() {
+                        continue;
+                    }
+                }
+                if let Some(channel) = hop_hint_map.get(&(to, true)) {
+                    if channel != channel_info.out_point() {
+                        continue;
+                    }
+                }
+
+                if let Some((_node, channel)) = &last_edge {
+                    if channel == channel_info.out_point() {
+                        continue;
+                    }
                 }
 
                 edges_expanded += 1;
@@ -982,7 +1009,6 @@ where
                     probability,
                     next_hop: Some((cur_hop.node_id, channel_info.out_point().clone())),
                 };
-                last_hop_channels.insert(node.node_id, channel_info.out_point());
                 distances.insert(node.node_id, node.clone());
                 nodes_heap.push_or_fix(node);
             }
@@ -1011,8 +1037,70 @@ where
         if result.is_empty() || current != target {
             return Err(PathFindError::PathFind("no path found".to_string()));
         }
+        if let Some((node, channel)) = last_edge {
+            result.push(PathEdge {
+                target: node,
+                channel_outpoint: channel.clone(),
+            })
+        }
 
         Ok(result)
+    }
+
+    fn adjust_target_for_route_self(
+        &self,
+        hop_hint_map: &HashMap<(Pubkey, bool), OutPoint>,
+        amount: u128,
+        source: Pubkey,
+        target: Pubkey,
+    ) -> Result<(Pubkey, u64, Option<(Pubkey, OutPoint)>), PathFindError> {
+        let direct_channels: Vec<(Pubkey, Pubkey, &ChannelInfo, &ChannelUpdateInfo)> = self
+            .get_node_inbounds(source)
+            .filter(|(_, _, channel_info, _)| {
+                if let Some(channel) = hop_hint_map.get(&(source, true)) {
+                    // if there is a hop hint for node -> source,
+                    // try to use this channel as the last candidate hop for route self
+                    // and we event don't check the direct balance of channel,
+                    // hop hint's priority is higher than direct balance
+                    return channel == channel_info.out_point();
+                }
+                if let Some(channel) = hop_hint_map.get(&(source, false)) {
+                    // if there is a hop hint for source -> node,
+                    // then we can not set this node as the last candidate hop for route self
+                    // so skip this channel
+                    if channel == channel_info.out_point() {
+                        return false;
+                    }
+                }
+                if let Some(state) = self
+                    .store
+                    .get_channel_state_by_outpoint(&channel_info.out_point())
+                {
+                    let balance = state.to_remote_amount;
+                    return balance >= amount;
+                }
+                // normal code path will not reach here, we must can get balance for direct channels
+                // anyway, check the capacity here for safety
+                return channel_info.capacity() >= amount;
+            })
+            .collect();
+
+        // a proper hop hint for route self will limit the direct_channels to only one
+        // if there are multiple channels, we will randomly select a channel from the source node for route to self
+        // so that the following part of algorithm will always trying to find a path without cycle
+        if let Some(&(from, _, channel_info, channel_update)) =
+            direct_channels.choose(&mut thread_rng())
+        {
+            let last_edge = Some((source, channel_info.out_point().clone()));
+            let current_expiry = channel_update.tlc_expiry_delta;
+            assert_ne!(target, from);
+            let target = from;
+            Ok((target, current_expiry, last_edge))
+        } else {
+            return Err(PathFindError::PathFind(
+                "no direct channel found for source node".to_string(),
+            ));
+        }
     }
 
     fn edge_weight(&self, amount: u128, fee: u128, htlc_expiry_delta: u64) -> u128 {
@@ -1048,7 +1136,7 @@ pub trait NetworkGraphStateStore {
 pub enum PaymentSessionStatus {
     // initial status, payment session is created, no HTLC is sent
     Created,
-    // related HTLC is send and waiting for the response
+    // the first hop AddTlc is sent successfully and waiting for the response
     Inflight,
     // related HTLC is successfully settled
     Success,
@@ -1123,10 +1211,6 @@ pub struct PaymentSession {
     pub status: PaymentSessionStatus,
     pub created_at: u64,
     pub last_updated_at: u64,
-    // The channel_outpoint and the tlc_id of the first hop
-    #[serde_as(as = "Option<EntityHex>")]
-    pub first_hop_channel_outpoint: Option<OutPoint>,
-    pub first_hop_tlc_id: Option<u64>,
     pub route: SessionRoute,
     // Session key for onion packet. Save it for decoding the error packet.
     pub session_key: [u8; 32],
@@ -1143,8 +1227,6 @@ impl PaymentSession {
             status: PaymentSessionStatus::Created,
             created_at: now,
             last_updated_at: now,
-            first_hop_channel_outpoint: None,
-            first_hop_tlc_id: None,
             route: SessionRoute::default(),
             session_key: Default::default(),
         }
@@ -1159,10 +1241,8 @@ impl PaymentSession {
         self.last_updated_at = now_timestamp_as_millis_u64();
     }
 
-    pub fn set_inflight_status(&mut self, channel_outpoint: OutPoint, tlc_id: u64) {
+    pub fn set_inflight_status(&mut self) {
         self.set_status(PaymentSessionStatus::Inflight);
-        self.first_hop_channel_outpoint = Some(channel_outpoint);
-        self.first_hop_tlc_id = Some(tlc_id);
     }
 
     pub fn set_success_status(&mut self) {

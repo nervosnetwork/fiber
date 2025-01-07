@@ -751,6 +751,7 @@ fn test_send_payment_validate_payment_hash() {
         keysend: None,
         udt_type_script: None,
         allow_self_payment: false,
+        hop_hints: None,
         dry_run: false,
         custom_records: None,
     };
@@ -776,6 +777,7 @@ fn test_send_payment_validate_amount() {
         keysend: None,
         udt_type_script: None,
         allow_self_payment: false,
+        hop_hints: None,
         dry_run: false,
         custom_records: None,
     };
@@ -822,6 +824,7 @@ fn test_send_payment_validate_invoice() {
         keysend: None,
         udt_type_script: None,
         allow_self_payment: false,
+        hop_hints: None,
         dry_run: false,
         custom_records: None,
     };
@@ -845,6 +848,7 @@ fn test_send_payment_validate_invoice() {
         keysend: None,
         udt_type_script: None,
         allow_self_payment: false,
+        hop_hints: None,
         dry_run: false,
         custom_records: None,
     };
@@ -869,6 +873,7 @@ fn test_send_payment_validate_invoice() {
         keysend: Some(true),
         udt_type_script: None,
         allow_self_payment: false,
+        hop_hints: None,
         dry_run: false,
         custom_records: None,
     };
@@ -890,6 +895,7 @@ fn test_send_payment_validate_invoice() {
         keysend: None,
         udt_type_script: None,
         allow_self_payment: false,
+        hop_hints: None,
         dry_run: false,
         custom_records: None,
     };
@@ -911,6 +917,7 @@ fn test_send_payment_validate_invoice() {
         keysend: Some(true),
         udt_type_script: None,
         allow_self_payment: false,
+        hop_hints: None,
         dry_run: false,
         custom_records: None,
     };
@@ -932,6 +939,7 @@ fn test_send_payment_validate_invoice() {
         keysend: None,
         udt_type_script: None,
         allow_self_payment: false,
+        hop_hints: None,
         dry_run: false,
         custom_records: None,
     };
@@ -968,6 +976,7 @@ fn test_send_payment_validate_invoice() {
         keysend: None,
         udt_type_script: None,
         allow_self_payment: false,
+        hop_hints: None,
         dry_run: false,
         custom_records: None,
     };
@@ -994,6 +1003,7 @@ fn test_send_payment_validate_htlc_expiry_delta() {
         keysend: None,
         udt_type_script: None,
         allow_self_payment: false,
+        hop_hints: None,
         dry_run: false,
         custom_records: None,
     };

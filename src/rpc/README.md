@@ -20,14 +20,12 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
         * [Method `open_channel`](#channel-open_channel)
         * [Method `accept_channel`](#channel-accept_channel)
         * [Method `list_channels`](#channel-list_channels)
-        * [Method `commitment_signed`](#channel-commitment_signed)
-        * [Method `add_tlc`](#channel-add_tlc)
-        * [Method `remove_tlc`](#channel-remove_tlc)
         * [Method `shutdown_channel`](#channel-shutdown_channel)
         * [Method `update_channel`](#channel-update_channel)
-        * [Method `send_payment`](#channel-send_payment)
-        * [Method `get_payment`](#channel-get_payment)
     * [Module Dev](#module-dev)
+        * [Method `commitment_signed`](#dev-commitment_signed)
+        * [Method `add_tlc`](#dev-add_tlc)
+        * [Method `remove_tlc`](#dev-remove_tlc)
         * [Method `submit_commitment_transaction`](#dev-submit_commitment_transaction)
     * [Module Graph](#module-graph)
         * [Method `graph_nodes`](#graph-graph_nodes)
@@ -39,6 +37,9 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
         * [Method `parse_invoice`](#invoice-parse_invoice)
         * [Method `get_invoice`](#invoice-get_invoice)
         * [Method `cancel_invoice`](#invoice-cancel_invoice)
+    * [Module Payment](#module-payment)
+        * [Method `send_payment`](#payment-send_payment)
+        * [Method `get_payment`](#payment-get_payment)
     * [Module Peer](#module-peer)
         * [Method `connect_peer`](#peer-connect_peer)
         * [Method `disconnect_peer`](#peer-disconnect_peer)
@@ -48,6 +49,7 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
     * [Type `ChannelInfo`](#type-channelinfo)
     * [Type `ChannelState`](#type-channelstate)
     * [Type `NodeInfo`](#type-nodeinfo)
+    * [Type `PaymentSessionStatus`](#type-paymentsessionstatus)
     * [Type `RemoveTlcReason`](#type-removetlcreason)
     * [Type `UdtArgInfo`](#type-udtarginfo)
     * [Type `UdtCellDep`](#type-udtcelldep)
@@ -149,7 +151,7 @@ Attempts to open a channel with a peer.
 
 ##### Params
 
-* `peer_id` - PeerId, The peer ID to open a channel with.
+* `peer_id` - PeerId, The peer ID to open a channel with, the peer must be connected through the [connect_peer](#peer-connect_peer) rpc first.
 * `funding_amount` - u128, The amount of CKB or UDT to fund the channel with.
 * `public` - `Option<bool>`, Whether this is a public channel (will be broadcasted to network, and can be used to forward TLCs), an optional parameter, default value is true.
 * `funding_udt_type_script` - `Option<Script>`, The type script of the UDT to fund the channel with, an optional parameter.
@@ -219,54 +221,6 @@ Lists all channels.
 * `channels` - `Vec<Channel>`, The list of channels
 
 
-<a id="channel-commitment_signed"></a>
-#### Method `commitment_signed`
-
-Sends a commitment_signed message to the peer.
-
-##### Params
-
-* `channel_id` - Hash256, The channel ID of the channel to send the commitment_signed message to
-
-##### Returns
-
-* None
-
-
-<a id="channel-add_tlc"></a>
-#### Method `add_tlc`
-
-Adds a TLC to a channel.
-
-##### Params
-
-* `channel_id` - Hash256, The channel ID of the channel to add the TLC to
-* `amount` - u128, The amount of the TLC
-* `payment_hash` - Hash256, The payment hash of the TLC
-* `expiry` - u64, The expiry of the TLC
-* `hash_algorithm` - `Option<HashAlgorithm>`, The hash algorithm of the TLC
-
-##### Returns
-
-* `tlc_id` - u64, The ID of the TLC
-
-
-<a id="channel-remove_tlc"></a>
-#### Method `remove_tlc`
-
-Removes a TLC from a channel.
-
-##### Params
-
-* `channel_id` - Hash256, The channel ID of the channel to remove the TLC from
-* `tlc_id` - u64, The ID of the TLC to remove
-* `reason` - RemoveTlcReason, The reason for removing the TLC, either a 32-byte hash for preimage fulfillment or an u32 error code for removal
-
-##### Returns
-
-* None
-
-
 <a id="channel-shutdown_channel"></a>
 #### Method `shutdown_channel`
 
@@ -304,6 +258,7 @@ Updates a channel.
 * None
 
 
+<<<<<<< HEAD
 <a id="channel-send_payment"></a>
 #### Method `send_payment`
 
@@ -364,10 +319,60 @@ Retrieves a payment.
 * `fee` - u128, fee paid for the payment
 
 
+=======
+>>>>>>> develop
 <a id="dev"></a>
 ### Module `Dev`
 RPC module for development purposes, this module is not intended to be used in production.
  This module will be disabled in release build.
+
+
+<a id="dev-commitment_signed"></a>
+#### Method `commitment_signed`
+
+Sends a commitment_signed message to the peer.
+
+##### Params
+
+* `channel_id` - Hash256, The channel ID of the channel to send the commitment_signed message to
+
+##### Returns
+
+* None
+
+
+<a id="dev-add_tlc"></a>
+#### Method `add_tlc`
+
+Adds a TLC to a channel.
+
+##### Params
+
+* `channel_id` - Hash256, The channel ID of the channel to add the TLC to
+* `amount` - u128, The amount of the TLC
+* `payment_hash` - Hash256, The payment hash of the TLC
+* `expiry` - u64, The expiry of the TLC
+* `hash_algorithm` - `Option<HashAlgorithm>`, The hash algorithm of the TLC
+
+##### Returns
+
+* `tlc_id` - u64, The ID of the TLC
+
+
+<a id="dev-remove_tlc"></a>
+#### Method `remove_tlc`
+
+Removes a TLC from a channel.
+
+##### Params
+
+* `channel_id` - Hash256, The channel ID of the channel to remove the TLC from
+* `tlc_id` - u64, The ID of the TLC to remove
+* `reason` - RemoveTlcReason, The reason for removing the TLC, either a 32-byte hash for preimage fulfillment or an u32 error code for removal
+
+##### Returns
+
+* None
 
 
 <a id="dev-submit_commitment_transaction"></a>
@@ -439,13 +444,13 @@ Get the node information.
 
 * `version` - String, The version of the node software.
 * `commit_hash` - String, The commit hash of the node software.
-* `public_key` - Pubkey, The public key of the node.
+* `node_id` - Pubkey, The identity public key of the node.
 * `node_name` - `Option<String>`, The optional name of the node.
-* `peer_id` - PeerId, The peer ID of the node, serialized as a string.
 * `addresses` - `Vec<MultiAddr>`, A list of multi-addresses associated with the node.
 * `chain_hash` - Hash256, The hash of the blockchain that the node is connected to.
 * `open_channel_auto_accept_min_ckb_funding_amount` - u64, The minimum CKB funding amount for automatically accepting open channel requests, serialized as a hexadecimal string.
 * `auto_accept_channel_ckb_funding_amount` - u64, The CKB funding amount for automatically accepting channel requests, serialized as a hexadecimal string.
+* `default_funding_lock_script` - Script, The default funding lock script for the node.
 * `tlc_expiry_delta` - u64, The locktime expiry delta for Time-Locked Contracts (TLC), serialized as a hexadecimal string.
 * `tlc_min_value` - u128, The minimum value for Time-Locked Contracts (TLC), serialized as a hexadecimal string.
 * `tlc_max_value` - u128, The maximum value for Time-Locked Contracts (TLC), serialized as a hexadecimal string, `0` means no maximum value limit.
@@ -528,6 +533,72 @@ Cancels an invoice, only when invoice is in status `Open` can be canceled.
 * `invoice_address` - String, The encoded invoice address.
 * `invoice` - CkbInvoice, The invoice.
 * `status` - CkbInvoiceStatus, The invoice status
+
+
+<a id="payment"></a>
+### Module `Payment`
+RPC module for channel management.
+
+
+<a id="payment-send_payment"></a>
+#### Method `send_payment`
+
+Sends a payment to a peer.
+
+##### Params
+
+* `target_pubkey` - `Option<Pubkey>`, the identifier of the payment target
+* `amount` - `Option<u128>`, the amount of the payment
+* `payment_hash` - `Option<Hash256>`, the hash to use within the payment's HTLC
+* `final_tlc_expiry_delta` - `Option<u64>`, the TLC expiry delta should be used to set the timelock for the final hop, in milliseconds
+* `tlc_expiry_limit` - `Option<u64>`, the TLC expiry limit for the whole payment, in milliseconds, each hop is with a default tlc delta of 1 day
+ suppose the payment router is with N hops, the total tlc expiry limit is at least (N-1) days
+ this is also the default value for the payment if this parameter is not provided
+* `invoice` - `Option<String>`, the encoded invoice to send to the recipient
+* `timeout` - `Option<u64>`, the payment timeout in seconds, if the payment is not completed within this time, it will be cancelled
+* `max_fee_amount` - `Option<u128>`, the maximum fee amounts in shannons that the sender is willing to pay
+* `max_parts` - `Option<u64>`, max parts for the payment, only used for multi-part payments
+* `keysend` - `Option<bool>`, keysend payment
+* `udt_type_script` - `Option<Script>`, udt type script for the payment
+* `allow_self_payment` - `Option<bool>`, allow self payment, default is false
+* `hop_hints` - `Option<Vec>`, Optional route hints to reach the destination through private channels.
+ A hop hint is a hint for a node to use a specific channel, for example
+ (pubkey, funding_txid, inbound) where pubkey is the public key of the node,
+ funding_txid is the funding transaction hash of the channel outpoint, and
+ inbound is a boolean indicating whether to use the channel to send or receive.
+ Note: an inproper hint may cause the payment to fail, and hop_hints maybe helpful for self payment scenario
+ for helping the routing algorithm to find the correct path
+* `dry_run` - `Option<bool>`, dry_run for payment, used for check whether we can build valid router and the fee for this payment,
+ it's useful for the sender to double check the payment before sending it to the network,
+ default is false
+
+##### Returns
+
+* `payment_hash` - Hash256, The payment hash of the payment
+* `status` - PaymentSessionStatus, The status of the payment
+* `created_at` - u64, The time the payment was created at, in milliseconds from UNIX epoch
+* `last_updated_at` - u64, The time the payment was last updated at, in milliseconds from UNIX epoch
+* `failed_error` - `Option<String>`, The error message if the payment failed
+* `fee` - u128, fee paid for the payment
+
+
+<a id="payment-get_payment"></a>
+#### Method `get_payment`
+
+Retrieves a payment.
+
+##### Params
+
+* `payment_hash` - Hash256, The payment hash of the payment to retrieve
+
+##### Returns
+
+* `payment_hash` - Hash256, The payment hash of the payment
+* `status` - PaymentSessionStatus, The status of the payment
+* `created_at` - u64, The time the payment was created at, in milliseconds from UNIX epoch
+* `last_updated_at` - u64, The time the payment was last updated at, in milliseconds from UNIX epoch
+* `failed_error` - `Option<String>`, The error message if the payment failed
+* `fee` - u128, fee paid for the payment
 
 
 <a id="peer"></a>
@@ -676,9 +747,9 @@ The Node information.
 
 #### Fields
 
-* `alias` - String, The alias of the node.
+* `node_name` - String, The name of the node.
 * `addresses` - `Vec<MultiAddr>`, The addresses of the node.
-* `node_id` - Pubkey, The node ID.
+* `node_id` - Pubkey, The identity public key of the node.
 * `timestamp` - u64, The timestamp of the node.
 * `chain_hash` - Hash256, The chain hash of the node.
 * `auto_accept_min_ckb_funding_amount` - u64, The minimum CKB funding amount for automatically accepting open channel requests.
@@ -693,8 +764,8 @@ The Channel information.
 #### Fields
 
 * `channel_outpoint` - OutPoint, The outpoint of the channel.
-* `node1` - Pubkey, The node ID of the first node.
-* `node2` - Pubkey, The node ID of the second node.
+* `node1` - Pubkey, The identity public key of the first node.
+* `node2` - Pubkey, The identity public key of the second node.
 * `created_timestamp` - u64, The created timestamp of the channel, which is the block header timestamp of the block
  that contains the channel funding transaction.
 * `last_updated_timestamp_of_node1` - `Option<u64>`, The timestamp of the last update to channel by node 1 (e.g. updating fee rate).
@@ -704,4 +775,17 @@ The Channel information.
 * `capacity` - u128, The capacity of the channel.
 * `chain_hash` - Hash256, The chain hash of the channel.
 * `udt_type_script` - `Option<Script>`, The UDT type script of the channel.
+
+<a id="#type-paymentsessionstatus"></a>
+### Type `PaymentSessionStatus`
+
+The status of a payment, will update as the payment progresses.
+
+
+#### Enum with values of
+
+* `Created` - , initial status, payment session is created, no HTLC is sent
+* `Inflight` - , the first hop AddTlc is sent successfully and waiting for the response
+* `Success` - , related HTLC is successfully settled
+* `Failed` - , related HTLC is failed
 

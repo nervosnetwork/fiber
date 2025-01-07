@@ -472,6 +472,7 @@ impl Actor for MockChainActor {
                 }
             }
             TraceTx(tx, reply_port) => {
+                debug!("Tracing transaction: {:?}", &tx);
                 match state.tx_status.get(&tx.tx_hash).cloned() {
                     Some((tx_view, status)) => {
                         reply_trace_tx(Some(tx_view), status, reply_port);
