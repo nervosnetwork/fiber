@@ -258,69 +258,6 @@ Updates a channel.
 * None
 
 
-<<<<<<< HEAD
-<a id="channel-send_payment"></a>
-#### Method `send_payment`
-
-Sends a payment to a peer.
-
-##### Params
-
-* `target_pubkey` - `Option<Pubkey>`, the identifier of the payment target
-* `amount` - `Option<u128>`, the amount of the payment
-* `payment_hash` - `Option<Hash256>`, the hash to use within the payment's HTLC
-* `final_tlc_expiry_delta` - `Option<u64>`, the TLC expiry delta should be used to set the timelock for the final hop, in milliseconds
-* `tlc_expiry_limit` - `Option<u64>`, the TLC expiry limit for the whole payment, in milliseconds, each hop is with a default tlc delta of 1 day
- suppose the payment router is with N hops, the total tlc expiry limit is at least (N-1) days
- this is also the default value for the payment if this parameter is not provided
-* `invoice` - `Option<String>`, the encoded invoice to send to the recipient
-* `timeout` - `Option<u64>`, the payment timeout in seconds, if the payment is not completed within this time, it will be cancelled
-* `max_fee_amount` - `Option<u128>`, the maximum fee amounts in shannons that the sender is willing to pay
-* `max_parts` - `Option<u64>`, max parts for the payment, only used for multi-part payments
-* `keysend` - `Option<bool>`, keysend payment
-* `udt_type_script` - `Option<Script>`, udt type script for the payment
-* `custom_records` - `Option<HashMap>`, Some custom records for the payment which contains a map of u32 to Vec<u8>
- The key is the record type, and the value is the serialized data
-* `allow_self_payment` - `Option<bool>`, allow self payment, default is false
-* `dry_run` - `Option<bool>`, dry_run for payment, used for check whether we can build valid router and the fee for this payment,
- it's useful for the sender to double check the payment before sending it to the network,
- default is false
-
-##### Returns
-
-* `payment_hash` - Hash256, The payment hash of the payment
-* `status` - PaymentSessionStatus, The status of the payment
-* `created_at` - u64, The time the payment was created at, in milliseconds from UNIX epoch
-* `last_updated_at` - u64, The time the payment was last updated at, in milliseconds from UNIX epoch
-* `failed_error` - `Option<String>`, The error message if the payment failed
-* `custom_records` - `Option<PaymentCustomRecord>`, Some custom records for the payment which contains a map of u32 to Vec<u8>
- The key is the record type, and the value is the serialized data
-* `fee` - u128, fee paid for the payment
-
-
-<a id="channel-get_payment"></a>
-#### Method `get_payment`
-
-Retrieves a payment.
-
-##### Params
-
-* `payment_hash` - Hash256, The payment hash of the payment to retrieve
-
-##### Returns
-
-* `payment_hash` - Hash256, The payment hash of the payment
-* `status` - PaymentSessionStatus, The status of the payment
-* `created_at` - u64, The time the payment was created at, in milliseconds from UNIX epoch
-* `last_updated_at` - u64, The time the payment was last updated at, in milliseconds from UNIX epoch
-* `failed_error` - `Option<String>`, The error message if the payment failed
-* `custom_records` - `Option<PaymentCustomRecord>`, Some custom records for the payment which contains a map of u32 to Vec<u8>
- The key is the record type, and the value is the serialized data
-* `fee` - u128, fee paid for the payment
-
-
-=======
->>>>>>> develop
 <a id="dev"></a>
 ### Module `Dev`
 RPC module for development purposes, this module is not intended to be used in production.
@@ -561,6 +498,8 @@ Sends a payment to a peer.
 * `keysend` - `Option<bool>`, keysend payment
 * `udt_type_script` - `Option<Script>`, udt type script for the payment
 * `allow_self_payment` - `Option<bool>`, allow self payment, default is false
+* `custom_records` - `Option<HashMap>`, Some custom records for the payment which contains a map of u32 to Vec<u8>
+ The key is the record type, and the value is the serialized data
 * `hop_hints` - `Option<Vec>`, Optional route hints to reach the destination through private channels.
  A hop hint is a hint for a node to use a specific channel, for example
  (pubkey, funding_txid, inbound) where pubkey is the public key of the node,
