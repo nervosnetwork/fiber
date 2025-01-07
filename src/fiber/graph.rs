@@ -169,28 +169,6 @@ impl From<(u64, ChannelAnnouncement)> for ChannelInfo {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct DirectedGraphEdge {
-    pub channel_outpoint: OutPoint,
-    // UDT script
-    pub udt_type_script: Option<Script>,
-
-    pub from: Pubkey,
-    pub to: Pubkey,
-
-    // The total capacity of the channel.
-    pub capacity: u128,
-    // The balance of the channel from the perspective of the `from` node.
-    // May be None if the balance is not known.
-    pub balance: Option<u128>,
-
-    /// The difference in htlc expiry values that you must have when routing through this channel (in milliseconds).
-    pub tlc_expiry_delta: u64,
-    /// The minimum value, which must be relayed to the next hop via the channel
-    pub tlc_minimum_value: u128,
-    pub fee_rate: u128,
-}
-
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ChannelUpdateInfo {
     // The timestamp is the time when the channel update was received by the node.
@@ -226,9 +204,6 @@ impl From<&ChannelUpdate> for ChannelUpdateInfo {
 pub struct NetworkGraph<S> {
     // The pubkey of the node that is running this instance of the network graph.
     source: Pubkey,
-    // Some graph edges that are known locally, but not in the network graph.
-    // Those edges are normally the channels that are owned by the node.
-    addtional_known_edges: HashMap<Pubkey, HashMap<OutPoint, DirectedGraphEdge>>,
     // All the channels in the network.
     channels: HashMap<OutPoint, ChannelInfo>,
     // All the nodes in the network.
@@ -274,7 +249,6 @@ where
     pub fn new(store: S, source: Pubkey) -> Self {
         let mut network_graph = Self {
             source,
-            addtional_known_edges: Default::default(),
             channels: HashMap::new(),
             nodes: HashMap::new(),
             latest_cursor: Cursor::default(),
@@ -572,64 +546,38 @@ where
             .filter(move |channel| channel.node1() == node_id || channel.node2() == node_id)
     }
 
-    pub fn get_node_inbounds(&self, node_id: Pubkey) -> impl Iterator<Item = DirectedGraphEdge> {
-        let tmp_known_edges = HashMap::new();
-        let known_edges = self
-            .addtional_known_edges
-            .get(&node_id)
-            .unwrap_or(&tmp_known_edges);
-        let mut channels = known_edges.values().cloned().collect::<Vec<_>>();
-
-        for channel in self.channels.values() {
-            // We always assume that the information obtained from store is the latest.
-            // So we would not bother to check channel info from the graph.
-            if known_edges.contains_key(&channel.channel_outpoint) {
-                continue;
-            }
-
-            if let Some(info) = channel.update_of_node2.as_ref() {
-                if info.enabled && channel.node2() == node_id {
-                    channels.push(DirectedGraphEdge {
-                        channel_outpoint: channel.channel_outpoint.clone(),
-                        udt_type_script: channel.udt_type_script.clone(),
-                        from: channel.node1,
-                        to: channel.node2,
-                        capacity: channel.capacity,
-                        balance: None,
-                        tlc_expiry_delta: info.tlc_expiry_delta,
-                        tlc_minimum_value: info.tlc_minimum_value,
-                        fee_rate: info.fee_rate as u128,
-                    });
+    pub fn get_node_inbounds(
+        &self,
+        node_id: Pubkey,
+    ) -> impl Iterator<Item = (Pubkey, Pubkey, &ChannelInfo, &ChannelUpdateInfo)> {
+        let mut channels: Vec<(Pubkey, Pubkey, &ChannelInfo, &ChannelUpdateInfo)> = self
+            .channels
+            .values()
+            .filter_map(move |channel| {
+                if let Some(info) = channel.update_of_node2.as_ref() {
+                    if info.enabled && channel.node2() == node_id {
+                        return Some((channel.node1(), channel.node2(), channel, info));
+                    }
                 }
-            }
 
-            if let Some(info) = channel.update_of_node1.as_ref() {
-                if info.enabled && channel.node1() == node_id {
-                    channels.push(DirectedGraphEdge {
-                        channel_outpoint: channel.channel_outpoint.clone(),
-                        udt_type_script: channel.udt_type_script.clone(),
-                        from: channel.node2,
-                        to: channel.node1,
-                        capacity: channel.capacity,
-                        balance: None,
-                        tlc_expiry_delta: info.tlc_expiry_delta,
-                        tlc_minimum_value: info.tlc_minimum_value,
-                        fee_rate: info.fee_rate as u128,
-                    });
+                if let Some(info) = channel.update_of_node1.as_ref() {
+                    if info.enabled && channel.node1() == node_id {
+                        return Some((channel.node2(), channel.node1(), channel, info));
+                    }
                 }
-            }
-        }
+                None
+            })
+            .collect();
 
         // Iterating over HashMap's values is not guaranteed to be in order,
         // which may introduce randomness in the path finding.
         // the weight algorithm in find_path does not considering capacity,
         // so the channel with larger capacity maybe have the same weight with the channel with smaller capacity
         // so we sort by capacity reverse order to make sure we try channel with larger capacity firstly
-        channels.sort_by(|a, b| {
-            b.balance.cmp(&a.balance).then(
-                b.capacity
-                    .cmp(&a.capacity)
-                    .then(b.channel_outpoint.cmp(&a.channel_outpoint)),
+        channels.sort_by(|(_, _, a, _), (_, _, b, _)| {
+            b.capacity().cmp(&a.capacity()).then(
+                b.channel_last_update_time()
+                    .cmp(&a.channel_last_update_time()),
             )
         });
         channels.into_iter()
@@ -706,27 +654,7 @@ where
                     let channel_outpoint =
                         channel_actor_state.must_get_funding_transaction_outpoint();
 
-                    if let Some(ref remote_tlc_info) = channel_actor_state.remote_tlc_info {
-                        self.addtional_known_edges
-                            .entry(channel_actor_state.remote_pubkey)
-                            .or_default()
-                            .insert(
-                                channel_outpoint.clone(),
-                                DirectedGraphEdge {
-                                    channel_outpoint,
-                                    udt_type_script: channel_actor_state
-                                        .funding_udt_type_script
-                                        .clone(),
-                                    from: self.source,
-                                    to: channel_actor_state.remote_pubkey,
-                                    capacity: channel_actor_state.get_liquid_capacity(),
-                                    balance: Some(channel_actor_state.to_local_amount),
-                                    tlc_expiry_delta: remote_tlc_info.tlc_expiry_delta,
-                                    tlc_minimum_value: remote_tlc_info.tlc_min_value,
-                                    fee_rate: remote_tlc_info.tlc_fee_proportional_millionths,
-                                },
-                            );
-                    }
+                    if let Some(ref remote_tlc_info) = channel_actor_state.remote_tlc_info {}
                 }
                 // It is possible that after we obtained the list of channels, the channel is deleted.
                 None => {}
@@ -922,37 +850,31 @@ where
         while let Some(cur_hop) = nodes_heap.pop() {
             nodes_visited += 1;
 
-            for edge in self.get_node_inbounds(cur_hop.node_id) {
-                let DirectedGraphEdge {
-                    channel_outpoint,
-                    from,
-                    to,
-                    capacity,
-                    balance,
-                    udt_type_script: edge_udt_type_script,
-                    tlc_expiry_delta,
-                    tlc_minimum_value,
-                    fee_rate,
-                } = edge;
+            for (from, to, channel_info, channel_update) in self.get_node_inbounds(cur_hop.node_id)
+            {
                 if from == target && !route_to_self {
                     continue;
                 }
-                if &udt_type_script != &edge_udt_type_script {
+                if &udt_type_script != channel_info.udt_type_script() {
                     continue;
                 }
 
                 // if the channel is already visited in the last hop, skip it
-                if last_hop_channels.values().any(|x| x == &channel_outpoint) {
+                if last_hop_channels
+                    .values()
+                    .any(|x| x == &channel_info.out_point())
+                {
                     continue;
                 }
 
                 edges_expanded += 1;
 
                 let next_hop_received_amount = cur_hop.amount_received;
-                if next_hop_received_amount > capacity {
+                if next_hop_received_amount > channel_info.capacity() {
                     debug!(
-                        "next_hop_received_amount: {} > channel capacity {}",
-                        next_hop_received_amount, capacity
+                        "next_hop_received_amount: {} > channel_info.capacity {}",
+                        next_hop_received_amount,
+                        channel_info.capacity()
                     );
                     continue;
                 }
@@ -960,14 +882,16 @@ where
                 let fee = if from == source {
                     0
                 } else {
-                    calculate_tlc_forward_fee(next_hop_received_amount, fee_rate).map_err(
-                        |err| {
-                            PathFindError::PathFind(format!(
-                                "calculate_tlc_forward_fee error: {:?}",
-                                err
-                            ))
-                        },
-                    )?
+                    calculate_tlc_forward_fee(
+                        next_hop_received_amount,
+                        channel_update.fee_rate as u128,
+                    )
+                    .map_err(|err| {
+                        PathFindError::PathFind(format!(
+                            "calculate_tlc_forward_fee error: {:?}",
+                            err
+                        ))
+                    })?
                 };
                 let amount_to_send = next_hop_received_amount + fee;
 
@@ -984,21 +908,30 @@ where
                 }
                 // check to make sure the current hop can send the amount
                 // if `tlc_maximum_value` equals 0, it means there is no limit
-                if amount_to_send > capacity {
+                if amount_to_send > channel_info.capacity() {
                     continue;
                 }
-                if amount_to_send < tlc_minimum_value {
+                if amount_to_send < channel_update.tlc_minimum_value {
                     continue;
                 }
 
-                // If we know the exact balance and it is less than the amount to send, skip this edge
-                if let Some(balance) = balance {
-                    if amount_to_send > balance {
-                        continue;
+                // if this is a direct channel, try to load the channel actor state for balance
+                if from == self.source {
+                    if let Some(state) = self
+                        .store
+                        .get_channel_state_by_outpoint(&channel_info.out_point())
+                    {
+                        if amount_to_send > state.to_local_amount {
+                            continue;
+                        }
                     }
                 }
 
-                let expiry_delta = if from == source { 0 } else { tlc_expiry_delta };
+                let expiry_delta = if from == source {
+                    0
+                } else {
+                    channel_update.tlc_expiry_delta
+                };
 
                 let incoming_htlc_expiry = cur_hop.incoming_tlc_expiry + expiry_delta;
                 if incoming_htlc_expiry > tlc_expiry_limit {
@@ -1009,20 +942,24 @@ where
                     * self.history.eval_probability(
                         from,
                         to,
-                        &channel_outpoint,
+                        &channel_info.out_point(),
                         amount_to_send,
-                        capacity,
+                        channel_info.capacity(),
                     );
 
                 debug!(
                     "probability: {} for channel_outpoint: {:?} from: {:?} => to: {:?}",
-                    probability, &channel_outpoint, from, to
+                    probability,
+                    channel_info.out_point(),
+                    from,
+                    to
                 );
                 if probability < DEFAULT_MIN_PROBABILITY {
                     debug!("probability is too low: {:?}", probability);
                     continue;
                 }
-                let agg_weight = self.edge_weight(amount_to_send, fee, tlc_expiry_delta);
+                let agg_weight =
+                    self.edge_weight(amount_to_send, fee, channel_update.tlc_expiry_delta);
                 let weight = cur_hop.weight + agg_weight;
                 let distance = self.calculate_distance_based_probability(probability, weight);
 
@@ -1039,9 +976,9 @@ where
                     incoming_tlc_expiry: incoming_htlc_expiry,
                     fee_charged: fee,
                     probability,
-                    next_hop: Some((cur_hop.node_id, channel_outpoint.clone())),
+                    next_hop: Some((cur_hop.node_id, channel_info.out_point().clone())),
                 };
-                last_hop_channels.insert(node.node_id, channel_outpoint.clone());
+                last_hop_channels.insert(node.node_id, channel_info.out_point());
                 distances.insert(node.node_id, node.clone());
                 nodes_heap.push_or_fix(node);
             }
