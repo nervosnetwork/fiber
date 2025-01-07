@@ -1,4 +1,4 @@
-use super::channel::ChannelActorStateStore;
+use super::channel::{ChannelActorState, ChannelActorStateStore, ChannelTlcInfo};
 use super::config::AnnouncedNodeName;
 use super::gossip::GossipMessageStore;
 use super::history::{Direction, InternalResult, PaymentHistory, TimedResult};
@@ -153,6 +153,49 @@ impl ChannelInfo {
     }
 }
 
+impl TryFrom<&ChannelActorState> for ChannelInfo {
+    type Error = String;
+
+    fn try_from(state: &ChannelActorState) -> Result<Self, Self::Error> {
+        if !state.is_ready() {
+            return Err("Channel is not ready".to_string());
+        }
+
+        let timestamp = 0;
+        let channel_outpoint = state.must_get_funding_transaction_outpoint();
+        let capacity = state.get_liquid_capacity();
+        let udt_type_script = state.funding_udt_type_script.clone();
+
+        let (node1, node2, update_of_node1, update_of_node2) = if state.local_is_node1() {
+            (
+                state.local_pubkey,
+                state.remote_pubkey,
+                Some(state.local_tlc_info.clone().into()),
+                state.remote_tlc_info.clone().map(Into::into),
+            )
+        } else {
+            (
+                state.remote_pubkey,
+                state.local_pubkey,
+                state.remote_tlc_info.clone().map(Into::into),
+                Some(state.local_tlc_info.clone().into()),
+            )
+        };
+
+        Ok(Self {
+            channel_outpoint,
+            timestamp,
+            features: 0,
+            node1,
+            node2,
+            capacity,
+            udt_type_script,
+            update_of_node1,
+            update_of_node2,
+        })
+    }
+}
+
 impl From<(u64, ChannelAnnouncement)> for ChannelInfo {
     fn from((timestamp, channel_announcement): (u64, ChannelAnnouncement)) -> Self {
         Self {
@@ -180,6 +223,24 @@ pub struct ChannelUpdateInfo {
     /// The minimum value, which must be relayed to the next hop via the channel
     pub tlc_minimum_value: u128,
     pub fee_rate: u64,
+}
+
+impl From<&ChannelTlcInfo> for ChannelUpdateInfo {
+    fn from(info: &ChannelTlcInfo) -> Self {
+        Self {
+            timestamp: 0,
+            enabled: true,
+            tlc_expiry_delta: info.tlc_expiry_delta,
+            tlc_minimum_value: info.tlc_min_value,
+            fee_rate: info.tlc_fee_proportional_millionths as u64,
+        }
+    }
+}
+
+impl From<ChannelTlcInfo> for ChannelUpdateInfo {
+    fn from(info: ChannelTlcInfo) -> Self {
+        Self::from(&info)
+    }
 }
 
 impl From<ChannelUpdate> for ChannelUpdateInfo {
@@ -651,10 +712,13 @@ where
             match self.store.get_channel_actor_state(&channel_id) {
                 Some(channel_actor_state) => {
                     assert_eq!(channel_actor_state.local_pubkey, self.source);
-                    let channel_outpoint =
-                        channel_actor_state.must_get_funding_transaction_outpoint();
-
-                    if let Some(ref remote_tlc_info) = channel_actor_state.remote_tlc_info {}
+                    match ChannelInfo::try_from(&channel_actor_state) {
+                        Ok(channel_info) => {
+                            self.channels
+                                .insert(channel_info.channel_outpoint.clone(), channel_info);
+                        }
+                        Err(_) => {}
+                    };
                 }
                 // It is possible that after we obtained the list of channels, the channel is deleted.
                 None => {}

@@ -3319,6 +3319,10 @@ impl ChannelActorState {
         self.public_channel_info.is_some()
     }
 
+    pub fn is_ready(&self) -> bool {
+        matches!(self.state, ChannelState::ChannelReady())
+    }
+
     pub async fn try_create_channel_messages(
         &mut self,
         network: &ActorRef<NetworkActorMessage>,
@@ -3880,7 +3884,7 @@ impl ChannelActorState {
         self.state = new_state;
     }
 
-    fn local_is_node1(&self) -> bool {
+    pub(crate) fn local_is_node1(&self) -> bool {
         self.local_pubkey < self.remote_pubkey
     }
 
