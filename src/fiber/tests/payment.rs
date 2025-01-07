@@ -115,3 +115,63 @@ async fn test_send_payment_for_direct_channel_and_dry_run() {
     assert_eq!(node_0_balance, 10000000000);
     assert_eq!(node_1_balance, 0);
 }
+
+#[tokio::test]
+async fn test_send_payment_over_private_channel() {
+    init_tracing();
+    let _span = tracing::info_span!("node", node = "test").entered();
+
+    let (nodes, _channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+        &[((1, 2), (4200000000 + 20000000000, 4200000000))],
+        3,
+        true,
+    )
+    .await;
+    let [mut node1, mut node2, mut node3] = nodes.try_into().expect("3 nodes");
+
+    let (_new_channel_id, _funding_tx) = establish_channel_between_nodes(
+        &mut node1,
+        &mut node2,
+        false,
+        4200000000 + 20000000000,
+        4200000000,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
+
+    // sleep for a while
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
+    let source_node = &mut node1;
+    let target_pubkey = node3.pubkey.clone();
+
+    let res = source_node
+        .send_payment(SendPaymentCommand {
+            target_pubkey: Some(target_pubkey.clone()),
+            amount: Some(10000000000),
+            payment_hash: None,
+            final_tlc_expiry_delta: None,
+            tlc_expiry_limit: None,
+            invoice: None,
+            timeout: None,
+            max_fee_amount: None,
+            max_parts: None,
+            keysend: Some(true),
+            udt_type_script: None,
+            allow_self_payment: false,
+            dry_run: false,
+        })
+        .await;
+
+    eprintln!("res: {:?}", res);
+    assert!(res.is_ok());
+}
