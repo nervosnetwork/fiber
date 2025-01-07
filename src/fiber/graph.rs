@@ -166,32 +166,38 @@ impl TryFrom<&ChannelActorState> for ChannelInfo {
         let capacity = state.get_liquid_capacity();
         let udt_type_script = state.funding_udt_type_script.clone();
 
-        let (node1, node2, mut update_of_node1, mut update_of_node2, node1_balance, node2_balance) =
-            if state.local_is_node1() {
-                (
-                    state.local_pubkey,
-                    state.remote_pubkey,
-                    Some(state.local_tlc_info.clone().into()),
-                    state.remote_tlc_info.clone().map(ChannelUpdateInfo::from),
-                    state.to_local_amount,
-                    state.to_remote_amount,
-                )
-            } else {
-                (
-                    state.remote_pubkey,
-                    state.local_pubkey,
-                    state.remote_tlc_info.clone().map(ChannelUpdateInfo::from),
-                    Some(state.local_tlc_info.clone().into()),
-                    state.to_remote_amount,
-                    state.to_local_amount,
-                )
-            };
+        let (
+            node1,
+            node2,
+            mut update_of_node1,
+            mut update_of_node2,
+            node1_receivable_balance,
+            node2_receivable_balance,
+        ) = if state.local_is_node1() {
+            (
+                state.local_pubkey,
+                state.remote_pubkey,
+                Some(state.local_tlc_info.clone().into()),
+                state.remote_tlc_info.clone().map(ChannelUpdateInfo::from),
+                state.to_remote_amount,
+                state.to_local_amount,
+            )
+        } else {
+            (
+                state.remote_pubkey,
+                state.local_pubkey,
+                state.remote_tlc_info.clone().map(ChannelUpdateInfo::from),
+                Some(state.local_tlc_info.clone().into()),
+                state.to_local_amount,
+                state.to_remote_amount,
+            )
+        };
 
         if let Some(update_of_node1) = update_of_node1.as_mut() {
-            update_of_node1.balance = Some(node1_balance);
+            update_of_node1.receivable_balance = Some(node1_receivable_balance);
         }
         if let Some(update_of_node2) = update_of_node2.as_mut() {
-            update_of_node2.balance = Some(node2_balance);
+            update_of_node2.receivable_balance = Some(node2_receivable_balance);
         }
 
         Ok(Self {
@@ -230,8 +236,11 @@ pub struct ChannelUpdateInfo {
     pub timestamp: u64,
     /// Whether the channel can be currently used for payments (in this one direction).
     pub enabled: bool,
-    /// The exact balance of the owner in this direction of the channel, if known.
-    pub balance: Option<u128>,
+    /// The exact amount of balance that we can receive from the other party via the channel.
+    /// Note that this is not our balance, but the balance of the other party.
+    /// This node is forwarding the balance for the other party, so we need to use the receivable balance
+    /// instead of our balance.
+    pub receivable_balance: Option<u128>,
     /// The difference in htlc expiry values that you must have when routing through this channel (in milliseconds).
     pub tlc_expiry_delta: u64,
     /// The minimum value, which must be relayed to the next hop via the channel
@@ -244,7 +253,7 @@ impl From<&ChannelTlcInfo> for ChannelUpdateInfo {
         Self {
             timestamp: info.timestamp,
             enabled: info.enabled,
-            balance: None,
+            receivable_balance: None,
             tlc_expiry_delta: info.tlc_expiry_delta,
             tlc_minimum_value: info.tlc_minimum_value,
             fee_rate: info.tlc_fee_proportional_millionths as u64,
@@ -269,7 +278,7 @@ impl From<&ChannelUpdate> for ChannelUpdateInfo {
         Self {
             timestamp: update.timestamp,
             enabled: !update.is_disabled(),
-            balance: None,
+            receivable_balance: None,
             tlc_expiry_delta: update.tlc_expiry_delta,
             tlc_minimum_value: update.tlc_minimum_value,
             fee_rate: update.tlc_fee_proportional_millionths as u64,
@@ -998,7 +1007,7 @@ where
                 }
 
                 // If we already know the balance of the channel, check if we can send the amount.
-                if let Some(balance) = channel_update.balance {
+                if let Some(balance) = channel_update.receivable_balance {
                     if amount_to_send > balance {
                         continue;
                     }
