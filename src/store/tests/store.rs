@@ -312,7 +312,6 @@ fn test_channel_actor_state_store() {
     let state = ChannelActorState {
         state: ChannelState::NegotiatingFunding(NegotiatingFundingFlags::THEIR_INIT_SENT),
         public_channel_info: Some(PublicChannelInfo {
-            enabled: false,
             local_channel_announcement_signature: Some((
                 mock_ecdsa_signature(),
                 MaybeScalar::two(),
@@ -326,6 +325,8 @@ fn test_channel_actor_state_store() {
             channel_update: None,
         }),
         local_tlc_info: ChannelTlcInfo {
+            enabled: false,
+            timestamp: 0,
             tlc_fee_proportional_millionths: 123,
             tlc_expiry_delta: 3,
             tlc_min_value: 10,
@@ -385,15 +386,7 @@ fn test_channel_actor_state_store() {
 
     let get_state = store.get_channel_actor_state(&state.id);
     assert!(get_state.is_some());
-    assert_eq!(
-        get_state
-            .unwrap()
-            .public_channel_info
-            .as_ref()
-            .unwrap()
-            .enabled,
-        false
-    );
+    assert_eq!(get_state.unwrap().is_tlc_forwarding_enabled(), false);
 
     let remote_peer_id = state.get_remote_peer_id();
     assert_eq!(

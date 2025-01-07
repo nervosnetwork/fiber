@@ -604,9 +604,7 @@ impl NetworkNode {
 
     pub async fn disable_channel(&mut self, channel_id: Hash256) {
         let mut channel_actor_state = self.get_channel_actor_state(channel_id);
-        let mut public_info = channel_actor_state.public_channel_info.unwrap();
-        public_info.enabled = false;
-        channel_actor_state.public_channel_info = Some(public_info);
+        channel_actor_state.local_tlc_info.enabled = false;
         self.update_channel_actor_state(channel_actor_state).await;
     }
 
