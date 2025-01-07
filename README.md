@@ -7,16 +7,13 @@ Fiber Network Node (FNN) is a reference implementation of Fiber Network Protocol
 * Payments over fiber channel (via [fiber-scripts])
 * Cross-chain asset transfer
 
-Please note that the implementation is still under development, there are two major features not implemented yet:
-
-* Watchtower service to monitor and revoke on-chain transactions
-* Multihop payments
+Please note that the implementation is still under development, there are many limitations and known issues, you may find or report them in the issue tracker.
 
 But as a prototype, it's a good starting point for developers to understand the FNP and try out the integration with their applications.
 
 ## Build and run a testnet node
 
-1. Build the project:
+1. Build the project, if you are using the released binary, you can skip this step:
 
 ```
 cargo build --release
@@ -26,6 +23,7 @@ cargo build --release
 
 ```
 mkdir /folder-to/my-fnn
+// if you are using the released binary, replace target/release/fnn with the path of released binary
 cp target/release/fnn /folder-to/my-fnn
 cp config/testnet/config.yml /folder-to/my-fnn
 cd /folder-to/my-fnn
@@ -45,6 +43,20 @@ head -n 1 ./ckb/exported-key > ./ckb/key
 ```
 RUST_LOG=info ./fnn -c config.yml -d .
 ```
+
+## Testnet compatibility issues
+
+The current state of the FNN is not stable, the protocol and storage format may changed between versions. We strongly recommend you to close the channel before upgrading the node, otherwise, you may lose the channel state:
+
+1. [list all channels](./src/rpc/README.md#channel-list_channels) and [close](./src/rpc/README.md#channel-shutdown_channel) them via RPC.
+
+2. Stop the node and remove the storage of the node:
+
+```
+rm -rf /folder-to/my-fnn/fiber/store
+```
+
+3. Repalce the binary with the new version and start the node again.
 
 ## Documentation
 

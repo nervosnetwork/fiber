@@ -1,4 +1,6 @@
-use super::channel::{ChannelFlags, CHANNEL_DISABLED_FLAG, MESSAGE_OF_NODE2_FLAG};
+use super::channel::{
+    ChannelFlags, ProcessingChannelError, CHANNEL_DISABLED_FLAG, MESSAGE_OF_NODE2_FLAG,
+};
 use super::config::AnnouncedNodeName;
 use super::gen::fiber::{
     self as molecule_fiber, ChannelUpdateOpt, PaymentPreimageOpt, PubNonce as Byte66, PubkeyOpt,
@@ -11,9 +13,11 @@ use super::r#gen::fiber::PubNonceOpt;
 use super::serde_utils::{EntityHex, SliceHex};
 use crate::ckb::config::{UdtArgInfo, UdtCellDep, UdtCfgInfos, UdtScript};
 use crate::ckb::contracts::get_udt_whitelist;
+use ckb_jsonrpc_types::CellOutput;
 use num_enum::IntoPrimitive;
 use num_enum::TryFromPrimitive;
 use std::convert::TryFrom;
+use std::fmt::Debug;
 
 use anyhow::anyhow;
 use ckb_types::{
@@ -1136,7 +1140,7 @@ pub struct TlcErr {
 
 impl Display for TlcErr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.error_code_as_str().fmt(f)
+        write!(f, "{}", self.error_code_as_str())
     }
 }
 
@@ -1480,10 +1484,21 @@ impl TlcErrorCode {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum RemoveTlcReason {
     RemoveTlcFulfill(RemoveTlcFulfill),
     RemoveTlcFail(TlcErrPacket),
+}
+
+impl Debug for RemoveTlcReason {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            RemoveTlcReason::RemoveTlcFulfill(_fulfill) => {
+                write!(f, "RemoveTlcFulfill")
+            }
+            RemoveTlcReason::RemoveTlcFail(_fail) => write!(f, "RemoveTlcFail"),
+        }
+    }
 }
 
 impl RemoveTlcReason {
@@ -1640,6 +1655,14 @@ impl TryFrom<molecule_fiber::AnnouncementSignatures> for AnnouncementSignatures 
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct ForwardTlcResult {
+    pub channel_id: Hash256,
+    pub payment_hash: Hash256,
+    pub tlc_id: u64,
+    pub error_info: Option<(ProcessingChannelError, TlcErr)>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Hash)]
 pub struct NodeAnnouncement {
     // Signature to this message, may be empty the message is not signed yet.
@@ -1653,7 +1676,7 @@ pub struct NodeAnnouncement {
     // Must be a valid utf-8 string of length maximal length 32 bytes.
     // If the length is less than 32 bytes, it will be padded with 0.
     // If the length is more than 32 bytes, it should be truncated.
-    pub alias: AnnouncedNodeName,
+    pub node_name: AnnouncedNodeName,
     // All the reachable addresses.
     pub addresses: Vec<MultiAddr>,
     // chain_hash
@@ -1666,7 +1689,7 @@ pub struct NodeAnnouncement {
 
 impl NodeAnnouncement {
     pub fn new_unsigned(
-        alias: AnnouncedNodeName,
+        node_name: AnnouncedNodeName,
         addresses: Vec<MultiAddr>,
         node_id: Pubkey,
         timestamp: u64,
@@ -1677,7 +1700,7 @@ impl NodeAnnouncement {
             features: Default::default(),
             timestamp,
             node_id,
-            alias,
+            node_name,
             chain_hash: get_chain_hash(),
             addresses,
             auto_accept_min_ckb_funding_amount,
@@ -1686,14 +1709,14 @@ impl NodeAnnouncement {
     }
 
     pub fn new(
-        alias: AnnouncedNodeName,
+        node_name: AnnouncedNodeName,
         addresses: Vec<MultiAddr>,
         private_key: &Privkey,
         timestamp: u64,
         auto_accept_min_ckb_funding_amount: u64,
     ) -> NodeAnnouncement {
         let mut unsigned = NodeAnnouncement::new_unsigned(
-            alias,
+            node_name,
             addresses,
             private_key.pubkey(),
             timestamp,
@@ -1709,7 +1732,7 @@ impl NodeAnnouncement {
             features: self.features,
             timestamp: self.timestamp,
             node_id: self.node_id,
-            alias: self.alias,
+            node_name: self.node_name,
             chain_hash: self.chain_hash,
             addresses: self.addresses.clone(),
             auto_accept_min_ckb_funding_amount: self.auto_accept_min_ckb_funding_amount,
@@ -1852,7 +1875,7 @@ impl From<NodeAnnouncement> for molecule_gossip::NodeAnnouncement {
             .features(node_announcement.features.pack())
             .timestamp(node_announcement.timestamp.pack())
             .node_id(node_announcement.node_id.into())
-            .alias(u8_32_as_byte_32(&node_announcement.alias.0))
+            .node_name(u8_32_as_byte_32(&node_announcement.node_name.0))
             .chain_hash(node_announcement.chain_hash.into())
             .auto_accept_min_ckb_funding_amount(
                 node_announcement.auto_accept_min_ckb_funding_amount.pack(),
@@ -1893,8 +1916,8 @@ impl TryFrom<molecule_gossip::NodeAnnouncement> for NodeAnnouncement {
             auto_accept_min_ckb_funding_amount: node_announcement
                 .auto_accept_min_ckb_funding_amount()
                 .unpack(),
-            alias: AnnouncedNodeName::from_slice(node_announcement.alias().as_slice())
-                .map_err(|e| Error::AnyHow(anyhow!("Invalid alias: {}", e)))?,
+            node_name: AnnouncedNodeName::from_slice(node_announcement.node_name().as_slice())
+                .map_err(|e| Error::AnyHow(anyhow!("Invalid node_name: {}", e)))?,
             udt_cfg_infos: node_announcement.udt_cfg_infos().into(),
             addresses: node_announcement
                 .address()
@@ -2440,8 +2463,41 @@ impl BroadcastMessage {
             }
         }
     }
+
+    pub(crate) fn message_id(&self) -> BroadcastMessageID {
+        match self {
+            BroadcastMessage::NodeAnnouncement(node_announcement) => {
+                BroadcastMessageID::NodeAnnouncement(node_announcement.node_id)
+            }
+            BroadcastMessage::ChannelAnnouncement(channel_announcement) => {
+                BroadcastMessageID::ChannelAnnouncement(
+                    channel_announcement.channel_outpoint.clone(),
+                )
+            }
+            BroadcastMessage::ChannelUpdate(channel_update) => {
+                BroadcastMessageID::ChannelUpdate(channel_update.channel_outpoint.clone())
+            }
+        }
+    }
+
+    pub(crate) fn timestamp(&self) -> Option<u64> {
+        match self {
+            BroadcastMessage::NodeAnnouncement(node_announcement) => {
+                Some(node_announcement.timestamp)
+            }
+            BroadcastMessage::ChannelAnnouncement(_) => None,
+            BroadcastMessage::ChannelUpdate(channel_update) => Some(channel_update.timestamp),
+        }
+    }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ChannelOnchainInfo {
+    pub timestamp: u64,
+    pub first_output: CellOutput,
+}
+
+// Augment the broadcast message with timestamp so that we can easily obtain the cursor of the message.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum BroadcastMessageWithTimestamp {
     NodeAnnouncement(NodeAnnouncement),
@@ -2520,7 +2576,7 @@ impl BroadcastMessageWithTimestamp {
     }
 }
 
-impl Ord for BroadcastMessageWithTimestamp {
+impl Ord for BroadcastMessage {
     fn cmp(&self, other: &Self) -> Ordering {
         self.message_id()
             .cmp(&other.message_id())
@@ -2528,9 +2584,30 @@ impl Ord for BroadcastMessageWithTimestamp {
     }
 }
 
-impl PartialOrd for BroadcastMessageWithTimestamp {
+impl PartialOrd for BroadcastMessage {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
+    }
+}
+
+impl From<(BroadcastMessage, Option<ChannelOnchainInfo>)> for BroadcastMessageWithTimestamp {
+    fn from(
+        (broadcast_message, channel_onchain_info): (BroadcastMessage, Option<ChannelOnchainInfo>),
+    ) -> Self {
+        match broadcast_message {
+            BroadcastMessage::NodeAnnouncement(node_announcement) => {
+                BroadcastMessageWithTimestamp::NodeAnnouncement(node_announcement)
+            }
+            BroadcastMessage::ChannelAnnouncement(channel_announcement) => {
+                let timestamp = channel_onchain_info
+                    .expect("Channel onchain info is required for channel announcement")
+                    .timestamp;
+                BroadcastMessageWithTimestamp::ChannelAnnouncement(timestamp, channel_announcement)
+            }
+            BroadcastMessage::ChannelUpdate(channel_update) => {
+                BroadcastMessageWithTimestamp::ChannelUpdate(channel_update)
+            }
+        }
     }
 }
 
@@ -2720,14 +2797,14 @@ impl Ord for BroadcastMessageID {
                 BroadcastMessageID::NodeAnnouncement(pubkey1),
                 BroadcastMessageID::NodeAnnouncement(pubkey2),
             ) => pubkey1.cmp(pubkey2),
-            (BroadcastMessageID::ChannelUpdate(_), _) => Ordering::Less,
-            (BroadcastMessageID::NodeAnnouncement(_), _) => Ordering::Greater,
+            (BroadcastMessageID::NodeAnnouncement(_), _) => Ordering::Less,
+            (BroadcastMessageID::ChannelUpdate(_), _) => Ordering::Greater,
             (
                 BroadcastMessageID::ChannelAnnouncement(_),
                 BroadcastMessageID::NodeAnnouncement(_),
-            ) => Ordering::Less,
+            ) => Ordering::Greater,
             (BroadcastMessageID::ChannelAnnouncement(_), BroadcastMessageID::ChannelUpdate(_)) => {
-                Ordering::Greater
+                Ordering::Less
             }
         }
     }
