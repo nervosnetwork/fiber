@@ -2203,7 +2203,7 @@ where
     {
         let chain = self.chain_actor.clone();
         // Spawn a new task to avoid blocking current actor message processing.
-        ractor::concurrency::tokio_primatives::spawn(async move {
+        ractor::concurrency::tokio_primitives::spawn(async move {
             debug!("Trying to broadcast transaction {:?}", &transaction);
             let result = match call_t!(
                 &chain,
@@ -3268,7 +3268,7 @@ where
             SupervisionEvent::ActorTerminated(who, _, _) => {
                 debug!("Actor {:?} terminated", who);
             }
-            SupervisionEvent::ActorPanicked(who, err) => {
+            SupervisionEvent::ActorFailed(who, err) => {
                 panic!("Actor unexpectedly panicked (id: {:?}): {:?}", who, err);
             }
             _ => {}

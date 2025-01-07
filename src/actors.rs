@@ -68,7 +68,7 @@ impl Actor for RootActor {
                     debug!("Actor terminated for unknown reason (id: {:?})", who);
                 }
             },
-            SupervisionEvent::ActorPanicked(who, err) => {
+            SupervisionEvent::ActorFailed(who, err) => {
                 panic!("Actor unexpectedly panicked (id: {:?}): {:?}", who, err);
             }
             _ => {}
