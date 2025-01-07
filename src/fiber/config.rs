@@ -89,7 +89,7 @@ pub struct FiberConfig {
     )]
     pub(crate) announce_listening_addr: Option<bool>,
 
-    /// whether to announce private address, this should be set to false unless you are running a private network or testing [default: false]
+    /// whether to announce or process private address, this should be set to false unless you are running a private network or testing [default: false]
     #[arg(
         name = "FIBER_ANNOUNCE_PRIVATE_ADDR",
         long = "fiber-announce-private-addr",
@@ -375,6 +375,10 @@ impl FiberConfig {
 
     pub fn announce_listening_addr(&self) -> bool {
         self.announce_listening_addr.unwrap_or(false)
+    }
+
+    pub fn announce_private_addr(&self) -> bool {
+        self.announce_private_addr.unwrap_or(false)
     }
 
     pub fn open_channel_auto_accept_min_ckb_funding_amount(&self) -> u64 {
