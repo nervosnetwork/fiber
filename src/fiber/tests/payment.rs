@@ -140,6 +140,65 @@ async fn test_send_payment_prefer_newer_channels() {
 }
 
 #[tokio::test]
+async fn test_send_payment_prefer_channels_with_larger_balance() {
+    init_tracing();
+    let _span = tracing::info_span!("node", node = "test").entered();
+
+    let (nodes, channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+        &[
+            // These two channnels have the same overall capacity, but the second channel has more balance for node_0.
+            (
+                (0, 1),
+                (MIN_RESERVED_CKB + 5000000000, MIN_RESERVED_CKB + 5000000000),
+            ),
+            ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+        ],
+        2,
+        true,
+    )
+    .await;
+    let [mut node_0, node_1] = nodes.try_into().expect("2 nodes");
+    let source_node = &mut node_0;
+    let target_pubkey = node_1.pubkey.clone();
+
+    let res = source_node
+        .send_payment(SendPaymentCommand {
+            target_pubkey: Some(target_pubkey.clone()),
+            amount: Some(5000000000),
+            payment_hash: None,
+            final_tlc_expiry_delta: None,
+            tlc_expiry_limit: None,
+            invoice: None,
+            timeout: None,
+            max_fee_amount: None,
+            max_parts: None,
+            keysend: Some(true),
+            udt_type_script: None,
+            allow_self_payment: false,
+            hop_hints: None,
+            dry_run: false,
+        })
+        .await;
+
+    eprintln!("res: {:?}", res);
+    assert!(res.is_ok());
+    let payment_hash = res.unwrap().payment_hash;
+    source_node.wait_until_success(payment_hash).await;
+
+    // We are using the second channel (with larger balance), so the first channel's balances are unchanged.
+    let node_0_balance = source_node.get_local_balance_from_channel(channels[0]);
+    let node_1_balance = node_1.get_local_balance_from_channel(channels[0]);
+    assert_eq!(node_0_balance, 5000000000);
+    assert_eq!(node_1_balance, 5000000000);
+
+    // We are using the second channel (with larger balance), so the second channel's balances are changed.
+    let node_0_balance = source_node.get_local_balance_from_channel(channels[1]);
+    let node_1_balance = node_1.get_local_balance_from_channel(channels[1]);
+    assert_eq!(node_0_balance, 5000000000);
+    assert_eq!(node_1_balance, 5000000000);
+}
+
+#[tokio::test]
 async fn test_send_payment_over_private_channel() {
     async fn test(amount_to_send: u128, is_payment_ok: bool) {
         let (nodes, _channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
