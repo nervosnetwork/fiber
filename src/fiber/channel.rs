@@ -1211,7 +1211,7 @@ where
                 state.maybe_transition_to_shutdown(&self.network)?;
             }
         }
-        state.update_last_used_remote_nonce();
+        state.update_last_commitment_signed_remote_nonce();
         Ok(())
     }
 
@@ -3016,6 +3016,18 @@ pub struct ChannelActorState {
     #[serde_as(as = "Option<PubNonceAsBytes>")]
     pub last_committed_remote_nonce: Option<PubNonce>,
 
+    // While handling peer's CommitmentSigned message, we will build a RevokeAndAck message,
+    // and reply this message to the peer. The nonce used to build the RevokeAndAck message is
+    // an older one sent by the peer. We will read this nonce from the field `last_committed_remote_nonce`
+    // The new nonce contained in the CommitmentSigned message
+    // will be saved to `last_committed_remote_nonce` field when this process finishes successfully.
+    // The problem is in some abnormal cases, the may not be able to successfully send the RevokeAndAck.
+    // But we have overwritten the `last_committed_remote_nonce` field with the new nonce.
+    // While reestablishing the channel, we need to use the old nonce to build the RevokeAndAck message.
+    // This is why we need to save the old nonce in this field.
+    #[serde_as(as = "Option<PubNonceAsBytes>")]
+    pub last_commitment_signed_remote_nonce: Option<PubNonce>,
+
     // While building a CommitmentSigned message, we use the latest remote nonce (the `last_committed_remote_nonce` above)
     // to partially sign the commitment transaction. This nonce is also needed for the RevokeAndAck message
     // returned from the peer. We need to save this nonce because the counterparty may send other nonces during
@@ -3023,7 +3035,7 @@ pub struct ChannelActorState {
     // This field is used to keep the nonce used by the unconfirmed CommitmentSigned. When we receive a
     // RevokeAndAck from the peer, we will use this nonce to validate the RevokeAndAck message.
     #[serde_as(as = "Option<PubNonceAsBytes>")]
-    pub last_used_remote_nonce: Option<PubNonce>,
+    pub last_revoke_and_ack_remote_nonce: Option<PubNonce>,
 
     // The latest commitment transaction we're holding,
     // it can be broadcasted to blockchain by us to force close the channel.
@@ -3658,7 +3670,8 @@ impl ChannelActorState {
             remote_channel_public_keys: Some(remote_pubkeys),
             commitment_numbers: Default::default(),
             remote_shutdown_script: Some(remote_shutdown_script),
-            last_used_remote_nonce: None,
+            last_commitment_signed_remote_nonce: None,
+            last_revoke_and_ack_remote_nonce: None,
             last_committed_remote_nonce: Some(remote_nonce),
             remote_commitment_points: vec![
                 (0, first_commitment_point),
@@ -3730,7 +3743,8 @@ impl ChannelActorState {
             // these values will update after accept channel peer message handled
             remote_constraints: ChannelConstraints::default(),
             remote_channel_public_keys: None,
-            last_used_remote_nonce: None,
+            last_commitment_signed_remote_nonce: None,
+            last_revoke_and_ack_remote_nonce: None,
             last_committed_remote_nonce: None,
             commitment_numbers: Default::default(),
             remote_commitment_points: vec![],
@@ -4215,6 +4229,7 @@ impl ChannelActorState {
                 )),
             ))
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+        self.update_last_revoke_and_ack_remote_nonce();
         Ok(())
     }
 
@@ -4246,17 +4261,22 @@ impl ChannelActorState {
             .clone()
     }
 
-    fn get_last_used_remote_nonce(&self) -> Option<PubNonce> {
-        self.last_used_remote_nonce.clone()
+    fn get_last_commitment_signed_remote_nonce(&self) -> Option<PubNonce> {
+        self.last_commitment_signed_remote_nonce.clone()
     }
 
     fn commit_remote_nonce(&mut self, nonce: PubNonce) {
         self.last_committed_remote_nonce = Some(nonce);
     }
 
-    fn update_last_used_remote_nonce(&mut self) {
+    fn update_last_commitment_signed_remote_nonce(&mut self) {
         let nonce = self.get_last_committed_remote_nonce();
-        self.last_used_remote_nonce = Some(nonce);
+        self.last_commitment_signed_remote_nonce = Some(nonce);
+    }
+
+    fn update_last_revoke_and_ack_remote_nonce(&mut self) {
+        let nonce = self.get_last_committed_remote_nonce();
+        self.last_revoke_and_ack_remote_nonce = Some(nonce);
     }
 
     pub fn get_current_commitment_numbers(&self) -> CommitmentNumbers {
@@ -5785,7 +5805,17 @@ impl ChannelActorState {
                     // Resetting our remote commitment number to the actual remote commitment number
                     // and resend the RevokeAndAck message.
                     self.set_remote_commitment_number(acutal_remote_commitment_number);
+                    // Resetting the remote nonce to build the RevokeAndAck message
+                    let last_commited_nonce = self.get_last_committed_remote_nonce();
+                    let used_nonce = self
+                        .last_revoke_and_ack_remote_nonce
+                        .as_ref()
+                        .expect("must have set last_revoke_and_ack_remote_nonce")
+                        .clone();
+                    self.commit_remote_nonce(used_nonce);
                     self.send_revoke_and_ack_message(network)?;
+                    // Now we can reset the remote nonce to the "real" last committed nonce
+                    self.commit_remote_nonce(last_commited_nonce);
                     let need_commitment_signed = self.tlc_state.update_for_commitment_signed();
                     if need_commitment_signed {
                         network
@@ -6120,7 +6150,7 @@ impl ChannelActorState {
             let pubkeys = [local_pubkey, remote_pubkey];
             let key_agg_ctx = KeyAggContext::new(pubkeys).expect("Valid pubkeys");
             let remote_nonce =
-                self.get_last_used_remote_nonce()
+                self.get_last_commitment_signed_remote_nonce()
                     .ok_or(ProcessingChannelError::InvalidState(
                         "No last used remote nonce found, has the peer sent a RevokeAndAck without us sending CommitmentSigned"
                             .to_string(),
