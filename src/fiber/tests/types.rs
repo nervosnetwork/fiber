@@ -127,6 +127,7 @@ fn test_peeled_onion_packet() {
             funding_tx_hash: Hash256::default(),
             hash_algorithm: HashAlgorithm::Sha256,
             payment_preimage: None,
+            custom_records: None,
         },
         PaymentHopData {
             amount: 5,
@@ -135,6 +136,7 @@ fn test_peeled_onion_packet() {
             funding_tx_hash: Hash256::default(),
             hash_algorithm: HashAlgorithm::Sha256,
             payment_preimage: None,
+            custom_records: None,
         },
         PaymentHopData {
             amount: 8,
@@ -143,6 +145,7 @@ fn test_peeled_onion_packet() {
             funding_tx_hash: Hash256::default(),
             hash_algorithm: HashAlgorithm::Sha256,
             payment_preimage: None,
+            custom_records: None,
         },
     ];
     let packet = PeeledOnionPacket::create(

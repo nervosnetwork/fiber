@@ -156,6 +156,7 @@ pub struct SendPaymentResponse {
     pub created_at: u64,
     pub last_updated_at: u64,
     pub failed_error: Option<String>,
+    pub custom_records: Option<PaymentCustomRecord>,
     pub fee: u128,
 }
 
@@ -305,10 +306,18 @@ pub struct SendPaymentCommand {
     pub udt_type_script: Option<Script>,
     // allow self payment, default is false
     pub allow_self_payment: bool,
+    // custom records
+    pub custom_records: Option<PaymentCustomRecord>,
     // the hop hint which may help the find path algorithm to find the path
     pub hop_hints: Option<Vec<HopHint>>,
     // dry_run only used for checking, default is false
     pub dry_run: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Default)]
+pub struct PaymentCustomRecord {
+    /// The custom records to be included in the payment.
+    pub data: HashMap<u32, Vec<u8>>,
 }
 
 #[serde_as]
@@ -338,6 +347,7 @@ pub struct SendPaymentData {
     #[serde_as(as = "Option<EntityHex>")]
     pub udt_type_script: Option<Script>,
     pub preimage: Option<Hash256>,
+    pub custom_records: Option<PaymentCustomRecord>,
     pub allow_self_payment: bool,
     pub hop_hints: Vec<HopHint>,
     pub dry_run: bool,
@@ -482,6 +492,7 @@ impl SendPaymentData {
             keysend,
             udt_type_script,
             preimage,
+            custom_records: command.custom_records,
             allow_self_payment: command.allow_self_payment,
             hop_hints,
             dry_run: command.dry_run,

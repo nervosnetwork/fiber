@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use crate::fiber::{
     channel::ChannelActorStateStore,
     graph::PaymentSessionStatus as InnerPaymentSessionStatus,
@@ -115,6 +117,10 @@ pub(crate) struct SendPaymentCommandParams {
     /// allow self payment, default is false
     allow_self_payment: Option<bool>,
 
+    /// Some custom records for the payment which contains a map of u32 to Vec<u8>
+    /// The key is the record type, and the value is the serialized data
+    custom_records: Option<HashMap<u32, Vec<u8>>>,
+
     /// Optional route hints to reach the destination through private channels.
     /// A hop hint is a hint for a node to use a specific channel, for example
     /// (pubkey, funding_txid, inbound) where pubkey is the public key of the node,
@@ -204,6 +210,7 @@ where
                     keysend: params.keysend,
                     udt_type_script: params.udt_type_script.clone().map(|s| s.into()),
                     allow_self_payment: params.allow_self_payment.unwrap_or(false),
+                    custom_records: None,
                     hop_hints: params
                         .hop_hints
                         .clone()

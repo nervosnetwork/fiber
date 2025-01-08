@@ -1,3 +1,4 @@
+use crate::fiber::serde_utils::EntityHex;
 use crate::fiber::{
     channel::{
         AwaitingChannelReadyFlags, AwaitingTxSignaturesFlags, ChannelActorStateStore,
@@ -6,7 +7,7 @@ use crate::fiber::{
         SigningCommitmentFlags, UpdateCommand,
     },
     network::{AcceptChannelCommand, OpenChannelCommand},
-    serde_utils::{EntityHex, U128Hex, U64Hex},
+    serde_utils::{U128Hex, U64Hex},
     types::Hash256,
     NetworkActorCommand, NetworkActorMessage,
 };

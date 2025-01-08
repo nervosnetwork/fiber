@@ -8,7 +8,7 @@ use super::gen::fiber::{
 };
 use super::gen::gossip::{self as molecule_gossip};
 use super::hash_algorithm::{HashAlgorithm, UnknownHashAlgorithmError};
-use super::network::get_chain_hash;
+use super::network::{get_chain_hash, PaymentCustomRecord};
 use super::r#gen::fiber::PubNonceOpt;
 use super::serde_utils::{EntityHex, SliceHex};
 use crate::ckb::config::{UdtArgInfo, UdtCellDep, UdtCfgInfos, UdtScript};
@@ -3470,7 +3470,7 @@ pub(crate) fn deterministically_hash<T: Entity>(v: &T) -> [u8; 32] {
 }
 
 #[serde_as]
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaymentHopData {
     pub amount: u128,
     pub expiry: u64,
@@ -3479,6 +3479,7 @@ pub struct PaymentHopData {
     pub hash_algorithm: HashAlgorithm,
     pub funding_tx_hash: Hash256,
     pub next_hop: Option<Pubkey>,
+    pub custom_records: Option<PaymentCustomRecord>,
 }
 
 /// Trait for hop data
@@ -3553,6 +3554,7 @@ impl From<molecule_fiber::PaymentHopData> for PaymentHopData {
                 .next_hop()
                 .to_opt()
                 .map(|x| x.try_into().expect("invalid pubkey")),
+            custom_records: None,
         }
     }
 }

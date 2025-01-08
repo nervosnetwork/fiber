@@ -760,8 +760,13 @@ where
                 next_hop,
                 hash_algorithm: hash_algorithm,
                 expiry: current_expiry,
-                funding_tx_hash,
                 payment_preimage: if is_last { preimage } else { None },
+                custom_records: if is_last {
+                    payment_data.custom_records.clone()
+                } else {
+                    None
+                },
+                funding_tx_hash,
             });
             current_expiry += expiry_delta;
             current_amount += fee;
@@ -772,8 +777,9 @@ where
             next_hop: Some(route[0].target),
             hash_algorithm: hash_algorithm,
             expiry: current_expiry,
-            funding_tx_hash: route[0].channel_outpoint.tx_hash().into(),
             payment_preimage: None,
+            custom_records: None,
+            funding_tx_hash: route[0].channel_outpoint.tx_hash().into(),
         });
         hops_data.reverse();
         assert_eq!(hops_data.len(), route.len() + 1);
@@ -1272,6 +1278,7 @@ impl From<PaymentSession> for SendPaymentResponse {
             failed_error: session.last_error,
             created_at: session.created_at,
             last_updated_at: session.last_updated_at,
+            custom_records: session.request.custom_records,
             fee,
         }
     }

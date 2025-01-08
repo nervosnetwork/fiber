@@ -365,6 +365,7 @@ async fn test_network_send_payment_normal_keysend_workflow() {
                 allow_self_payment: false,
                 hop_hints: None,
                 dry_run: false,
+                custom_records: None,
             },
             rpc_reply,
         ))
@@ -414,6 +415,7 @@ async fn test_network_send_payment_normal_keysend_workflow() {
                 allow_self_payment: false,
                 hop_hints: None,
                 dry_run: false,
+                custom_records: None,
             },
             rpc_reply,
         ))
@@ -472,6 +474,7 @@ async fn test_network_send_payment_send_each_other() {
                 allow_self_payment: false,
                 hop_hints: None,
                 dry_run: false,
+                custom_records: None,
             },
             rpc_reply,
         ))
@@ -501,6 +504,7 @@ async fn test_network_send_payment_send_each_other() {
                 allow_self_payment: false,
                 hop_hints: None,
                 dry_run: false,
+                custom_records: None,
             },
             rpc_reply,
         ))
@@ -585,6 +589,7 @@ async fn test_network_send_payment_more_send_each_other() {
                 keysend: Some(true),
                 udt_type_script: None,
                 allow_self_payment: false,
+                custom_records: None,
                 hop_hints: None,
                 dry_run: false,
             },
@@ -614,6 +619,7 @@ async fn test_network_send_payment_more_send_each_other() {
                 keysend: Some(true),
                 udt_type_script: None,
                 allow_self_payment: false,
+                custom_records: None,
                 hop_hints: None,
                 dry_run: false,
             },
@@ -642,6 +648,7 @@ async fn test_network_send_payment_more_send_each_other() {
                 keysend: Some(true),
                 udt_type_script: None,
                 allow_self_payment: false,
+                custom_records: None,
                 hop_hints: None,
                 dry_run: false,
             },
@@ -671,6 +678,7 @@ async fn test_network_send_payment_more_send_each_other() {
                 keysend: Some(true),
                 udt_type_script: None,
                 allow_self_payment: false,
+                custom_records: None,
                 hop_hints: None,
                 dry_run: false,
             },
@@ -730,6 +738,7 @@ async fn test_network_send_payment_send_with_ack() {
                 allow_self_payment: false,
                 hop_hints: None,
                 dry_run: false,
+                custom_records: None,
             },
             rpc_reply,
         ))
@@ -762,6 +771,7 @@ async fn test_network_send_payment_send_with_ack() {
                 allow_self_payment: false,
                 hop_hints: None,
                 dry_run: false,
+                custom_records: None,
             },
             rpc_reply,
         ))
@@ -801,6 +811,7 @@ async fn test_network_send_previous_tlc_error() {
             funding_tx_hash: Hash256::default(),
             hash_algorithm: HashAlgorithm::Sha256,
             payment_preimage: None,
+            custom_records: None,
         },
         PaymentHopData {
             amount: 8,
@@ -809,6 +820,7 @@ async fn test_network_send_previous_tlc_error() {
             funding_tx_hash: Hash256::default(),
             hash_algorithm: HashAlgorithm::Sha256,
             payment_preimage: None,
+            custom_records: None,
         },
     ];
     let generated_payment_hash = gen_rand_sha256_hash();
@@ -884,6 +896,7 @@ async fn test_network_send_previous_tlc_error() {
                 allow_self_payment: false,
                 hop_hints: None,
                 dry_run: false,
+                custom_records: None,
                 tlc_expiry_limit: None,
             },
             rpc_reply,
@@ -933,6 +946,7 @@ async fn test_network_send_payment_keysend_with_payment_hash() {
                 allow_self_payment: false,
                 hop_hints: None,
                 dry_run: false,
+                custom_records: None,
             },
             rpc_reply,
         ))
@@ -982,6 +996,7 @@ async fn test_network_send_payment_final_incorrect_hash() {
                 allow_self_payment: false,
                 hop_hints: None,
                 dry_run: false,
+                custom_records: None,
             },
             rpc_reply,
         ))
@@ -1048,6 +1063,7 @@ async fn test_network_send_payment_target_not_found() {
                 allow_self_payment: false,
                 hop_hints: None,
                 dry_run: false,
+                custom_records: None,
             },
             rpc_reply,
         ))
@@ -1089,6 +1105,7 @@ async fn test_network_send_payment_amount_is_too_large() {
                 allow_self_payment: false,
                 hop_hints: None,
                 dry_run: false,
+                custom_records: None,
             },
             rpc_reply,
         ))
@@ -1134,6 +1151,7 @@ async fn test_network_send_payment_with_dry_run() {
                 allow_self_payment: false,
                 hop_hints: None,
                 dry_run: true,
+                custom_records: None,
             },
             rpc_reply,
         ))
@@ -1162,6 +1180,7 @@ async fn test_network_send_payment_with_dry_run() {
                 allow_self_payment: false,
                 hop_hints: None,
                 dry_run: true,
+                custom_records: None,
             },
             rpc_reply,
         ))
@@ -1207,6 +1226,7 @@ async fn test_send_payment_with_3_nodes() {
                 allow_self_payment: false,
                 hop_hints: None,
                 dry_run: false,
+                custom_records: None,
             },
             rpc_reply,
         ))
@@ -1284,6 +1304,7 @@ async fn test_send_payment_with_rev_3_nodes() {
                 allow_self_payment: false,
                 hop_hints: None,
                 dry_run: false,
+                custom_records: None,
             },
             rpc_reply,
         ))
@@ -1355,6 +1376,7 @@ async fn test_send_payment_with_max_nodes() {
                 allow_self_payment: false,
                 hop_hints: None,
                 dry_run: true,
+                custom_records: None,
             },
             rpc_reply,
         ))
@@ -1379,6 +1401,7 @@ async fn test_send_payment_with_max_nodes() {
                 allow_self_payment: false,
                 hop_hints: None,
                 dry_run: false,
+                custom_records: None,
             },
             rpc_reply,
         ))
@@ -1390,6 +1413,17 @@ async fn test_send_payment_with_max_nodes() {
     assert_eq!(res.status, PaymentSessionStatus::Created);
     assert!(res.fee > 0);
 
+    // sleep for 8 seconds to make sure the payment is sent
+    tokio::time::sleep(tokio::time::Duration::from_millis(8000)).await;
+
+    let message = |rpc_reply| -> NetworkActorMessage {
+        NetworkActorMessage::Command(NetworkActorCommand::GetPayment(res.payment_hash, rpc_reply))
+    };
+    let res = call!(nodes[0].network_actor, message)
+        .expect("node_a alive")
+        .unwrap();
+    assert_eq!(res.status, PaymentSessionStatus::Success);
+    assert_eq!(res.failed_error, None);
     nodes[0].wait_until_success(res.payment_hash).await;
 
     let sender_local_new = nodes[0].get_local_balance_from_channel(channels[0]);
@@ -1436,6 +1470,7 @@ async fn test_send_payment_with_3_nodes_overflow() {
                 allow_self_payment: false,
                 hop_hints: None,
                 dry_run: false,
+                custom_records: None,
             },
             rpc_reply,
         ))
@@ -1485,6 +1520,7 @@ async fn test_send_payment_fail_with_3_nodes_invalid_hash() {
                 allow_self_payment: false,
                 hop_hints: None,
                 dry_run: false,
+                custom_records: None,
             },
             rpc_reply,
         ))
@@ -1557,6 +1593,7 @@ async fn test_send_payment_fail_with_3_nodes_final_tlc_expiry_delta() {
                 allow_self_payment: false,
                 hop_hints: None,
                 dry_run: false,
+                custom_records: None,
             },
             rpc_reply,
         ))
@@ -1584,6 +1621,7 @@ async fn test_send_payment_fail_with_3_nodes_final_tlc_expiry_delta() {
                 allow_self_payment: false,
                 hop_hints: None,
                 dry_run: false,
+                custom_records: None,
             },
             rpc_reply,
         ))
@@ -1610,6 +1648,7 @@ async fn test_send_payment_fail_with_3_nodes_final_tlc_expiry_delta() {
                 allow_self_payment: false,
                 hop_hints: None,
                 dry_run: false,
+                custom_records: None,
             },
             rpc_reply,
         ))
@@ -1653,6 +1692,7 @@ async fn test_send_payment_fail_with_3_nodes_dry_run_fee() {
                 allow_self_payment: false,
                 hop_hints: None,
                 dry_run: true,
+                custom_records: None,
             },
             rpc_reply,
         ))
@@ -1679,6 +1719,7 @@ async fn test_send_payment_fail_with_3_nodes_dry_run_fee() {
                 allow_self_payment: false,
                 hop_hints: None,
                 dry_run: true,
+                custom_records: None,
             },
             rpc_reply,
         ))
@@ -1707,6 +1748,7 @@ async fn test_send_payment_fail_with_3_nodes_dry_run_fee() {
                 allow_self_payment: false,
                 hop_hints: None,
                 dry_run: false,
+                custom_records: None,
             },
             rpc_reply,
         ))
@@ -1734,6 +1776,7 @@ async fn test_send_payment_fail_with_3_nodes_dry_run_fee() {
                 allow_self_payment: false,
                 hop_hints: None,
                 dry_run: false,
+                custom_records: None,
             },
             rpc_reply,
         ))
@@ -1775,6 +1818,7 @@ async fn test_network_send_payment_dry_run_can_still_query() {
                 allow_self_payment: false,
                 hop_hints: None,
                 dry_run: false,
+                custom_records: None,
             },
             rpc_reply,
         ))
@@ -1801,6 +1845,7 @@ async fn test_network_send_payment_dry_run_can_still_query() {
                 allow_self_payment: false,
                 hop_hints: None,
                 dry_run: true,
+                custom_records: None,
             },
             rpc_reply,
         ))
@@ -1842,6 +1887,7 @@ async fn test_network_send_payment_dry_run_will_not_create_payment_session() {
                 allow_self_payment: false,
                 hop_hints: None,
                 dry_run: true,
+                custom_records: None,
             },
             rpc_reply,
         ))
@@ -1869,6 +1915,7 @@ async fn test_network_send_payment_dry_run_will_not_create_payment_session() {
                 allow_self_payment: false,
                 hop_hints: None,
                 dry_run: false,
+                custom_records: None,
             },
             rpc_reply,
         ))
@@ -3122,6 +3169,7 @@ async fn test_channel_update_tlc_sync_up() {
                 allow_self_payment: false,
                 hop_hints: None,
                 dry_run: false,
+                custom_records: None,
             },
             rpc_reply,
         ))
@@ -3195,6 +3243,7 @@ async fn test_channel_update_tlc_sync_up() {
                 allow_self_payment: false,
                 hop_hints: None,
                 dry_run: false,
+                custom_records: None,
             },
             rpc_reply,
         ))
@@ -3250,6 +3299,7 @@ async fn test_channel_update_tlc_sync_up() {
                 allow_self_payment: false,
                 hop_hints: None,
                 dry_run: false,
+                custom_records: None,
             },
             rpc_reply,
         ))
@@ -3296,6 +3346,7 @@ async fn test_channel_update_tlc_sync_up() {
                 allow_self_payment: false,
                 hop_hints: None,
                 dry_run: false,
+                custom_records: None,
             },
             rpc_reply,
         ))
@@ -4071,6 +4122,7 @@ async fn test_send_payment_with_node_restart_then_resend_add_tlc() {
                 keysend: Some(true),
                 udt_type_script: None,
                 allow_self_payment: false,
+                custom_records: None,
                 hop_hints: None,
                 dry_run: false,
             },
@@ -4554,6 +4606,7 @@ async fn test_send_payment_with_channel_balance_error() {
                 allow_self_payment: false,
                 hop_hints: None,
                 dry_run: false,
+                custom_records: None,
             },
             rpc_reply,
         ))
@@ -4584,6 +4637,7 @@ async fn test_send_payment_with_channel_balance_error() {
                 allow_self_payment: false,
                 hop_hints: None,
                 dry_run: false,
+                custom_records: None,
             },
             rpc_reply,
         ))
@@ -4642,6 +4696,7 @@ async fn test_send_payment_with_disable_channel() {
                 allow_self_payment: false,
                 hop_hints: None,
                 dry_run: false,
+                custom_records: None,
             },
             rpc_reply,
         ))
@@ -4698,6 +4753,7 @@ async fn test_send_payment_with_multiple_edges_in_middle_hops() {
                 allow_self_payment: false,
                 hop_hints: None,
                 dry_run: false,
+                custom_records: None,
             },
             rpc_reply,
         ))
@@ -4754,6 +4810,7 @@ async fn test_send_payment_with_all_failed_middle_hops() {
                 allow_self_payment: false,
                 hop_hints: None,
                 dry_run: false,
+                custom_records: None,
             },
             rpc_reply,
         ))
@@ -4811,6 +4868,7 @@ async fn test_send_payment_with_multiple_edges_can_succeed_in_retry() {
                 allow_self_payment: false,
                 hop_hints: None,
                 dry_run: false,
+                custom_records: None,
             },
             rpc_reply,
         ))
@@ -4867,6 +4925,7 @@ async fn test_send_payment_with_final_hop_multiple_edges_in_middle_hops() {
                 allow_self_payment: false,
                 hop_hints: None,
                 dry_run: false,
+                custom_records: None,
             },
             rpc_reply,
         ))
@@ -4923,6 +4982,7 @@ async fn test_send_payment_with_final_all_failed_middle_hops() {
                 allow_self_payment: false,
                 hop_hints: None,
                 dry_run: false,
+                custom_records: None,
             },
             rpc_reply,
         ))
@@ -4979,6 +5039,7 @@ async fn test_send_payment_with_final_multiple_edges_can_succeed_in_retry() {
                 allow_self_payment: false,
                 hop_hints: None,
                 dry_run: false,
+                custom_records: None,
             },
             rpc_reply,
         ))
@@ -5033,6 +5094,7 @@ async fn test_send_payment_with_first_hop_failed_with_fee() {
                 allow_self_payment: false,
                 hop_hints: None,
                 dry_run: false,
+                custom_records: None,
             },
             rpc_reply,
         ))
@@ -5083,6 +5145,7 @@ async fn test_send_payment_succeed_with_multiple_edges_in_first_hop() {
                 allow_self_payment: false,
                 hop_hints: None,
                 dry_run: false,
+                custom_records: None,
             },
             rpc_reply,
         ))
@@ -5138,6 +5201,7 @@ async fn test_send_payment_with_first_hop_all_failed() {
                 allow_self_payment: false,
                 hop_hints: None,
                 dry_run: false,
+                custom_records: None,
             },
             rpc_reply,
         ))
@@ -5196,6 +5260,7 @@ async fn test_send_payment_will_succeed_with_direct_channel_info_first_hop() {
                 allow_self_payment: false,
                 hop_hints: None,
                 dry_run: false,
+                custom_records: None,
             },
             rpc_reply,
         ))
@@ -5259,6 +5324,7 @@ async fn test_send_payment_will_succeed_with_retry_in_middle_hops() {
                 allow_self_payment: false,
                 hop_hints: None,
                 dry_run: false,
+                custom_records: None,
             },
             rpc_reply,
         ))
@@ -5328,6 +5394,7 @@ async fn test_send_payment_will_fail_with_last_hop_info_in_add_tlc_peer() {
             allow_self_payment: false,
             hop_hints: None,
             dry_run: false,
+            custom_records: None,
         })
         .await;
 
@@ -5397,6 +5464,7 @@ async fn test_send_payment_will_fail_with_invoice_not_generated_by_target() {
             allow_self_payment: false,
             hop_hints: None,
             dry_run: false,
+            custom_records: None,
         })
         .await;
 
@@ -5458,6 +5526,7 @@ async fn test_send_payment_will_succeed_with_valid_invoice() {
             allow_self_payment: false,
             hop_hints: None,
             dry_run: false,
+            custom_records: None,
         })
         .await;
 
@@ -5527,6 +5596,7 @@ async fn test_send_payment_will_fail_with_no_invoice_preimage() {
             allow_self_payment: false,
             hop_hints: None,
             dry_run: false,
+            custom_records: None,
         })
         .await;
 
@@ -5601,6 +5671,7 @@ async fn test_send_payment_will_fail_with_cancelled_invoice() {
             allow_self_payment: false,
             hop_hints: None,
             dry_run: false,
+            custom_records: None,
         })
         .await;
 
@@ -5658,6 +5729,7 @@ async fn test_send_payment_will_succeed_with_large_tlc_expiry_limit() {
             allow_self_payment: false,
             hop_hints: None,
             dry_run: false,
+            custom_records: None,
         })
         .await;
 
@@ -5679,6 +5751,7 @@ async fn test_send_payment_will_succeed_with_large_tlc_expiry_limit() {
             allow_self_payment: false,
             hop_hints: None,
             dry_run: false,
+            custom_records: None,
         })
         .await;
 

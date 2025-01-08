@@ -6,6 +6,7 @@ use crate::fiber::graph::NetworkGraphStateStore;
 use crate::fiber::graph::PaymentSession;
 use crate::fiber::graph::PaymentSessionStatus;
 use crate::fiber::network::NodeInfoResponse;
+use crate::fiber::network::PaymentCustomRecord;
 use crate::fiber::network::SendPaymentCommand;
 use crate::fiber::network::SendPaymentResponse;
 use crate::fiber::types::EcdsaSignature;
@@ -575,6 +576,7 @@ impl NetworkNode {
             udt_type_script: None,
             allow_self_payment: false,
             dry_run: false,
+            custom_records: None,
             hop_hints: None,
         })
         .await
@@ -692,6 +694,13 @@ impl NetworkNode {
 
     pub fn get_payment_session(&self, payment_hash: Hash256) -> Option<PaymentSession> {
         self.store.get_payment_session(payment_hash)
+    }
+
+    pub fn get_payment_custom_records(
+        &self,
+        payment_hash: &Hash256,
+    ) -> Option<PaymentCustomRecord> {
+        self.store.get_payment_custom_records(payment_hash)
     }
 
     pub async fn new_with_node_name(node_name: &str) -> Self {

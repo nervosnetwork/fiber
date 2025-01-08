@@ -13,6 +13,7 @@
 /// | 97           | BroadcastMessageID   | u64                         |
 /// | 192          | Hash256              | PaymentSession              |
 /// | 193          | OutPoint | Direction | TimedResult                 |
+/// | 194          | Hash256              | PaymentCustomRecord         |
 /// | 224          | Hash256              | ChannelData                 |
 /// +--------------+----------------------+-----------------------------+
 ///
@@ -28,4 +29,5 @@ pub(crate) const BROADCAST_MESSAGE_PREFIX: u8 = 96;
 pub(crate) const BROADCAST_MESSAGE_TIMESTAMP_PREFIX: u8 = 97;
 pub(crate) const PAYMENT_SESSION_PREFIX: u8 = 192;
 pub(crate) const PAYMENT_HISTORY_TIMED_RESULT_PREFIX: u8 = 193;
+pub(crate) const PAYMENT_CUSTOM_RECORD_PREFIX: u8 = 194;
 pub(crate) const WATCHTOWER_CHANNEL_PREFIX: u8 = 224;

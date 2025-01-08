@@ -498,6 +498,8 @@ Sends a payment to a peer.
 * `keysend` - `Option<bool>`, keysend payment
 * `udt_type_script` - `Option<Script>`, udt type script for the payment
 * `allow_self_payment` - `Option<bool>`, allow self payment, default is false
+* `custom_records` - `Option<HashMap>`, Some custom records for the payment which contains a map of u32 to Vec<u8>
+ The key is the record type, and the value is the serialized data
 * `hop_hints` - `Option<Vec>`, Optional route hints to reach the destination through private channels.
  A hop hint is a hint for a node to use a specific channel, for example
  (pubkey, funding_txid, inbound) where pubkey is the public key of the node,
