@@ -1498,12 +1498,10 @@ where
                             .await
                             .record_payment_fail(&payment_session, error_detail.clone());
                         if need_to_retry {
-                            let res = self
-                                .try_payment_session(myself, state, payment_session.payment_hash())
-                                .await;
-                            if res.is_err() {
-                                debug!("Failed to retry payment session: {:?}", res);
-                            }
+                            // If this is the first hop error, like the WaitingTlcAck error,
+                            // we will just retry later, return Ok here for letting endpoint user
+                            // know payment session is created successfully
+                            self.register_payment_retry(myself, payment_hash);
                         } else {
                             self.set_payment_fail_with_error(
                                 &mut payment_session,
@@ -1530,11 +1528,13 @@ where
                 ..
             }) = &tcl_error_detail.extra_data
             {
-                let _ = network.send_message(NetworkActorMessage::new_command(
-                    NetworkActorCommand::ProcessBroadcastMessage(BroadcastMessage::ChannelUpdate(
-                        channel_update.clone(),
-                    )),
-                ));
+                network
+                    .send_message(NetworkActorMessage::new_command(
+                        NetworkActorCommand::BroadcastMessages(vec![
+                            BroadcastMessageWithTimestamp::ChannelUpdate(channel_update.clone()),
+                        ]),
+                    ))
+                    .expect(ASSUME_NETWORK_MYSELF_ALIVE);
             }
         }
         match tcl_error_detail.error_code() {
@@ -1756,14 +1756,10 @@ where
                 Err(err) => {
                     let need_retry = matches!(err, Error::SendPaymentFirstHopError(_, true));
                     if need_retry {
-                        // If this is the first hop error, like the WaitingTlcAck error,
+                        // If this is the first hop error, such as the WaitingTlcAck error,
                         // we will just retry later, return Ok here for letting endpoint user
                         // know payment session is created successfully
-                        myself.send_after(Duration::from_millis(500), move || {
-                            NetworkActorMessage::new_event(NetworkActorEvent::RetrySendPayment(
-                                payment_hash,
-                            ))
-                        });
+                        self.register_payment_retry(myself, payment_hash);
                         return Ok(payment_session);
                     } else {
                         return Err(err);
@@ -1779,6 +1775,12 @@ where
             });
             return Err(Error::SendPaymentError(error));
         }
+    }
+
+    fn register_payment_retry(&self, myself: ActorRef<NetworkActorMessage>, payment_hash: Hash256) {
+        myself.send_after(Duration::from_millis(500), move || {
+            NetworkActorMessage::new_event(NetworkActorEvent::RetrySendPayment(payment_hash))
+        });
     }
 
     async fn on_send_payment(
@@ -2811,7 +2813,7 @@ where
                     );
                     // Notify outside observers.
                     network
-                        .send_message(NetworkActorMessage::new_event(                    NetworkActorEvent::FundingTransactionFailed(outpoint)
+                        .send_message(NetworkActorMessage::new_event(NetworkActorEvent::FundingTransactionFailed(outpoint)
                     ))
                         .expect(ASSUME_NETWORK_MYSELF_ALIVE);
                 }
@@ -2819,7 +2821,7 @@ where
                     error!("Failed to trace transaction {:?}: {:?}", &tx_hash, &err);
                     // Notify outside observers.
                     network
-                        .send_message(NetworkActorMessage::new_event(                    NetworkActorEvent::FundingTransactionFailed(outpoint)
+                        .send_message(NetworkActorMessage::new_event(NetworkActorEvent::FundingTransactionFailed(outpoint)
                     ))
                         .expect(ASSUME_NETWORK_MYSELF_ALIVE);
                 }
