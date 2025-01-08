@@ -3633,7 +3633,7 @@ async fn test_revoke_old_commitment_transaction() {
     let witness = [
         empty_witness_args.to_vec(),
         vec![0xFF],
-        0u64.to_be_bytes().to_vec(),
+        revocation_data.commitment_number.to_be_bytes().to_vec(),
         revocation_data.x_only_aggregated_pubkey.to_vec(),
         revocation_data.aggregated_signature.serialize().to_vec(),
     ]
@@ -3656,6 +3656,7 @@ async fn test_channel_with_simple_update_operation() {
 
 #[tokio::test]
 async fn test_create_channel() {
+    init_tracing();
     let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
 
     let message = |rpc_reply| {
