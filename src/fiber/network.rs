@@ -3378,13 +3378,13 @@ impl From<&MyServiceHandle> for FiberProtocolHandle {
 #[async_trait]
 impl ServiceHandle for MyServiceHandle {
     async fn handle_error(&mut self, _context: &mut ServiceContext, error: ServiceError) {
-        trace!("Service error: {:?}", error);
+        error!("Tentacle service error: {:?}", error);
         // TODO
         // ServiceError::DialerError => remove address from peer store
         // ServiceError::ProtocolError => ban peer
     }
     async fn handle_event(&mut self, _context: &mut ServiceContext, event: ServiceEvent) {
-        trace!("Service event: {:?}", event);
+        trace!("Tentacle service event: {:?}", event);
     }
 }
 
