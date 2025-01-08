@@ -684,12 +684,24 @@ where
         // the weight algorithm in find_path does not considering capacity,
         // so the channel with larger capacity maybe have the same weight with the channel with smaller capacity
         // so we sort by capacity reverse order to make sure we try channel with larger capacity firstly
-        channels.sort_by(|(_, _, a, _), (_, _, b, _)| {
-            b.capacity().cmp(&a.capacity()).then(
-                b.channel_last_update_time()
-                    .cmp(&a.channel_last_update_time()),
-            )
-        });
+        channels.sort_by(
+            |(_, _, a_channel_info, a_channel_update_info),
+             (_, _, b_channel_info, b_channel_update_info)| {
+                b_channel_update_info
+                    .receivable_balance
+                    .cmp(&a_channel_update_info.receivable_balance)
+                    .then(
+                        b_channel_info
+                            .capacity()
+                            .cmp(&a_channel_info.capacity())
+                            .then(
+                                b_channel_info
+                                    .channel_last_update_time()
+                                    .cmp(&a_channel_info.channel_last_update_time()),
+                            ),
+                    )
+            },
+        );
         channels.into_iter()
     }
 
