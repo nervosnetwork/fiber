@@ -3020,6 +3020,8 @@ where
             Duration::from_millis(config.gossip_network_maintenance_interval_ms()).into(),
             Duration::from_millis(config.gossip_store_maintenance_interval_ms()).into(),
             config.announce_private_addr(),
+            config.gossip_network_num_targeted_active_syncing_peers,
+            config.gossip_network_num_targeted_outbound_passive_syncing_peers,
             self.store.clone(),
             self.chain_actor.clone(),
             myself.get_cell(),
