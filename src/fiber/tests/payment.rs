@@ -1580,3 +1580,231 @@ async fn test_send_payment_three_nodes_bench_test() {
     assert_eq!(node_3_amount_diff, node3_got_amount - node_3_sent_fee);
     // got 3996
 }
+
+#[tokio::test]
+async fn test_send_payment_middle_hop_stopped() {
+    init_tracing();
+    let _span = tracing::info_span!("node", node = "test").entered();
+    let (nodes, _channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+        &[
+            ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((2, 3), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((0, 4), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((4, 3), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+        ],
+        5,
+        true,
+    )
+    .await;
+    let [mut node_0, _node_1, mut node_2, node_3, mut node_4] = nodes.try_into().expect("5 nodes");
+
+    // dry run node_0 -> node_3 will select  0 -> 4 -> 3
+    let res = node_0
+        .send_payment(SendPaymentCommand {
+            target_pubkey: Some(node_3.pubkey.clone()),
+            amount: Some(1000),
+            payment_hash: None,
+            final_tlc_expiry_delta: None,
+            tlc_expiry_limit: None,
+            invoice: None,
+            timeout: None,
+            max_fee_amount: None,
+            max_parts: None,
+            keysend: Some(true),
+            udt_type_script: None,
+            allow_self_payment: false,
+            hop_hints: None,
+            dry_run: true,
+        })
+        .await
+        .unwrap();
+    eprintln!("res: {:?}", res);
+    assert_eq!(res.fee, 1);
+
+    // node_4 stopped
+    node_4.stop().await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+    let res = node_0
+        .send_payment(SendPaymentCommand {
+            target_pubkey: Some(node_3.pubkey.clone()),
+            amount: Some(1000),
+            payment_hash: None,
+            final_tlc_expiry_delta: None,
+            tlc_expiry_limit: None,
+            invoice: None,
+            timeout: None,
+            max_fee_amount: None,
+            max_parts: None,
+            keysend: Some(true),
+            udt_type_script: None,
+            allow_self_payment: false,
+            hop_hints: None,
+            dry_run: true,
+        })
+        .await
+        .unwrap();
+    eprintln!("res: {:?}", res);
+    // when node_4 stopped, the first try path is still 0 -> 4 -> 3
+    // so the fee is 1
+    assert_eq!(res.fee, 1);
+
+    let res = node_0
+        .send_payment(SendPaymentCommand {
+            target_pubkey: Some(node_3.pubkey.clone()),
+            amount: Some(1000),
+            payment_hash: None,
+            final_tlc_expiry_delta: None,
+            tlc_expiry_limit: None,
+            invoice: None,
+            timeout: None,
+            max_fee_amount: None,
+            max_parts: None,
+            keysend: Some(true),
+            udt_type_script: None,
+            allow_self_payment: false,
+            hop_hints: None,
+            dry_run: false,
+        })
+        .await
+        .unwrap();
+    eprintln!("res: {:?}", res);
+    assert_eq!(res.fee, 1);
+
+    node_0.wait_until_success(res.payment_hash).await;
+
+    // after the first payment try failed, the payment session will find another path
+    // 0 -> 1 -> 2 -> 3, so it will succeed, but the fee change from 1 to 3
+    let payment = node_0.get_payment_result(res.payment_hash).await;
+    assert_eq!(payment.fee, 3);
+    eprintln!("payment: {:?}", payment);
+
+    // node_2 stopped, payment will fail
+    node_2.stop().await;
+    let res = node_0
+        .send_payment(SendPaymentCommand {
+            target_pubkey: Some(node_3.pubkey.clone()),
+            amount: Some(1000),
+            payment_hash: None,
+            final_tlc_expiry_delta: None,
+            tlc_expiry_limit: None,
+            invoice: None,
+            timeout: None,
+            max_fee_amount: None,
+            max_parts: None,
+            keysend: Some(true),
+            udt_type_script: None,
+            allow_self_payment: false,
+            hop_hints: None,
+            dry_run: false,
+        })
+        .await
+        .unwrap();
+    eprintln!("res: {:?}", res);
+    assert_eq!(res.fee, 3);
+
+    node_0.wait_until_failed(res.payment_hash).await;
+}
+
+#[tokio::test]
+async fn test_send_payment_middle_hop_stopped_retry_longer_path() {
+    init_tracing();
+    let _span = tracing::info_span!("node", node = "test").entered();
+    let (nodes, _channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+        &[
+            ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((2, 3), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((0, 4), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((4, 5), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((5, 6), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((6, 3), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+        ],
+        7,
+        true,
+    )
+    .await;
+    let [mut node_0, _node_1, mut node_2, node_3, _node_4, _node_5, _node_6] =
+        nodes.try_into().expect("7 nodes");
+
+    // dry run node_0 -> node_3 will select  0 -> 1 -> 2 -> 3
+    let res = node_0
+        .send_payment(SendPaymentCommand {
+            target_pubkey: Some(node_3.pubkey.clone()),
+            amount: Some(1000),
+            payment_hash: None,
+            final_tlc_expiry_delta: None,
+            tlc_expiry_limit: None,
+            invoice: None,
+            timeout: None,
+            max_fee_amount: None,
+            max_parts: None,
+            keysend: Some(true),
+            udt_type_script: None,
+            allow_self_payment: false,
+            hop_hints: None,
+            dry_run: true,
+        })
+        .await
+        .unwrap();
+    eprintln!("res: {:?}", res);
+    assert_eq!(res.fee, 3);
+
+    // node_2 stopped
+    node_2.stop().await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+    let res = node_0
+        .send_payment(SendPaymentCommand {
+            target_pubkey: Some(node_3.pubkey.clone()),
+            amount: Some(1000),
+            payment_hash: None,
+            final_tlc_expiry_delta: None,
+            tlc_expiry_limit: None,
+            invoice: None,
+            timeout: None,
+            max_fee_amount: None,
+            max_parts: None,
+            keysend: Some(true),
+            udt_type_script: None,
+            allow_self_payment: false,
+            hop_hints: None,
+            dry_run: true,
+        })
+        .await
+        .unwrap();
+    eprintln!("res: {:?}", res);
+    // when node_2 stopped, the first try path is still 0 -> 1 -> 2 -> 3
+    // so the fee is 3
+    assert_eq!(res.fee, 3);
+
+    let res = node_0
+        .send_payment(SendPaymentCommand {
+            target_pubkey: Some(node_3.pubkey.clone()),
+            amount: Some(1000),
+            payment_hash: None,
+            final_tlc_expiry_delta: None,
+            tlc_expiry_limit: None,
+            invoice: None,
+            timeout: None,
+            max_fee_amount: None,
+            max_parts: None,
+            keysend: Some(true),
+            udt_type_script: None,
+            allow_self_payment: false,
+            hop_hints: None,
+            dry_run: false,
+        })
+        .await
+        .unwrap();
+    eprintln!("res: {:?}", res);
+    assert_eq!(res.fee, 3);
+
+    node_0.wait_until_success(res.payment_hash).await;
+    let payment = node_0.get_payment_result(res.payment_hash).await;
+    eprintln!("payment: {:?}", payment);
+
+    // payment success with a longer path 0 -> 4 -> 5 -> 6 -> 3
+    assert_eq!(payment.fee, 5);
+}

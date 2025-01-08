@@ -59,6 +59,7 @@ use crate::{
 
 static RETAIN_VAR: &str = "TEST_TEMP_RETAIN";
 pub(crate) const MIN_RESERVED_CKB: u128 = 4200000000;
+pub(crate) const HUGE_CKB_AMOUNT: u128 = MIN_RESERVED_CKB + 1000000000000 as u128;
 
 #[derive(Debug)]
 pub struct TempDir(ManuallyDrop<OldTempDir>);
