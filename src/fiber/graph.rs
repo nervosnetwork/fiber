@@ -681,9 +681,10 @@ where
 
         // Iterating over HashMap's values is not guaranteed to be in order,
         // which may introduce randomness in the path finding.
-        // the weight algorithm in find_path does not considering capacity,
-        // so the channel with larger capacity maybe have the same weight with the channel with smaller capacity
-        // so we sort by capacity reverse order to make sure we try channel with larger capacity firstly
+        // We will first sort the channels by receivable_balance, then capacity, and at last update time.
+        // This is because the weight algorithm in find_path does not considering receivable_balance and capacity,
+        // so the channel with larger receivable_balance/capacity maybe have the same weight with the channel
+        // with smaller receivable_balance/capacity, even though the former have better chance to success.
         channels.sort_by(
             |(_, _, a_channel_info, a_channel_update_info),
              (_, _, b_channel_info, b_channel_update_info)| {
