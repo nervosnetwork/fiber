@@ -1725,7 +1725,7 @@ async fn test_send_payment_middle_hop_stopped_retry_longer_path() {
         true,
     )
     .await;
-    let [mut node_0, _node_1, mut node_2, node_3, _node_4, _node_5, _node_6] =
+    let [mut node_0, _node_1, mut node_2, mut node_3, _node_4, _node_5, _node_6] =
         nodes.try_into().expect("7 nodes");
 
     // dry run node_0 -> node_3 will select  0 -> 1 -> 2 -> 3
@@ -1807,4 +1807,30 @@ async fn test_send_payment_middle_hop_stopped_retry_longer_path() {
 
     // payment success with a longer path 0 -> 4 -> 5 -> 6 -> 3
     assert_eq!(payment.fee, 5);
+
+    // node_3 stopped, payment will fail
+    node_3.stop().await;
+    let res = node_0
+        .send_payment(SendPaymentCommand {
+            target_pubkey: Some(node_3.pubkey.clone()),
+            amount: Some(1000),
+            payment_hash: None,
+            final_tlc_expiry_delta: None,
+            tlc_expiry_limit: None,
+            invoice: None,
+            timeout: None,
+            max_fee_amount: None,
+            max_parts: None,
+            keysend: Some(true),
+            udt_type_script: None,
+            allow_self_payment: false,
+            hop_hints: None,
+            dry_run: false,
+        })
+        .await
+        .unwrap();
+    eprintln!("res: {:?}", res);
+    assert_eq!(res.fee, 5);
+
+    node_0.wait_until_failed(res.payment_hash).await;
 }
