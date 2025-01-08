@@ -1450,7 +1450,7 @@ async fn test_send_payment_three_nodes_send_each_other_bench_test() {
 async fn test_send_payment_three_nodes_bench_test() {
     init_tracing();
     let _span = tracing::info_span!("node", node = "test").entered();
-    let (nodes, _channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+    let (nodes, channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
         &[
             (
                 (0, 1),
@@ -1476,29 +1476,49 @@ async fn test_send_payment_three_nodes_bench_test() {
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
     let mut all_sent = HashSet::new();
+    let mut node_2_got_fee = 0;
+    let mut node1_got_amount = 0;
+    let mut node_1_sent_fee = 0;
+    let mut node3_got_amount = 0;
+    let mut node_3_sent_fee = 0;
+    let mut node_2_ch1_sent_amount = 0;
+    let mut node_2_ch2_sent_amount = 0;
+
+    let old_node_1_amount = node_1.get_local_balance_from_channel(channels[0]);
+    let old_node_2_chnnale1_amount = node_2.get_local_balance_from_channel(channels[0]);
+    let old_node_2_chnnale2_amount = node_2.get_local_balance_from_channel(channels[1]);
+    let old_node_3_amount = node_3.get_local_balance_from_channel(channels[1]);
 
     for i in 1..=4 {
         let payment1 = node_1.send_payment_keysend(&node_3, 1000).await.unwrap();
-        all_sent.insert((1, payment1.payment_hash));
+        all_sent.insert((1, payment1.payment_hash, payment1.fee));
         eprintln!("send: {} payment_hash: {:?} sent", i, payment1.payment_hash);
+        node_1_sent_fee += payment1.fee;
+        node_2_got_fee += payment1.fee;
 
         let payment2 = node_2.send_payment_keysend(&node_3, 1000).await.unwrap();
-        all_sent.insert((2, payment2.payment_hash));
+        all_sent.insert((2, payment2.payment_hash, payment2.fee));
         eprintln!("send: {} payment_hash: {:?} sent", i, payment2.payment_hash);
+        node_2_ch1_sent_amount += 1000;
+        node1_got_amount += 1000;
 
         let payment3 = node_2.send_payment_keysend(&node_1, 1000).await.unwrap();
-        all_sent.insert((2, payment3.payment_hash));
+        all_sent.insert((2, payment3.payment_hash, payment3.fee));
         eprintln!("send: {} payment_hash: {:?} sent", i, payment3.payment_hash);
+        node_2_ch2_sent_amount += 1000;
+        node3_got_amount += 1000;
 
         let payment4 = node_3.send_payment_keysend(&node_1, 1000).await.unwrap();
-        all_sent.insert((3, payment4.payment_hash));
+        all_sent.insert((3, payment4.payment_hash, payment4.fee));
         eprintln!("send: {} payment_hash: {:?} sent", i, payment4.payment_hash);
+        node_3_sent_fee += payment4.fee;
+        node_2_got_fee += payment4.fee;
     }
 
     loop {
         tokio::time::sleep(tokio::time::Duration::from_millis(3000)).await;
 
-        for (node_index, payment_hash) in all_sent.clone().iter() {
+        for (node_index, payment_hash, fee) in all_sent.clone().iter() {
             let node = match node_index {
                 1 => &mut node_1,
                 2 => &mut node_2,
@@ -1510,7 +1530,7 @@ async fn test_send_payment_three_nodes_bench_test() {
             eprintln!("got payment: {:?} status: {:?}", payment_hash, status);
             if status == PaymentSessionStatus::Success {
                 eprintln!("payment_hash: {:?} success", payment_hash);
-                all_sent.remove(&(*node_index, *payment_hash));
+                all_sent.remove(&(*node_index, *payment_hash, *fee));
             }
         }
         let res = node_1.node_info().await;
@@ -1523,4 +1543,40 @@ async fn test_send_payment_three_nodes_bench_test() {
             break;
         }
     }
+
+    eprintln!("node_2_got_fee: {}", node_2_got_fee);
+    eprintln!("node1_got_amount: {}", node1_got_amount);
+    eprintln!("node3_got_amount: {}", node3_got_amount);
+
+    // node1: sent 4 fee to node2, got 4000 from node2
+    // node3: sent 4 fee to node2, got 4000 from node2
+    // node2: got 8 from node1 and node3, sent 8000 to node1 and node3
+
+    let node_1_amount = node_1.get_local_balance_from_channel(channels[0]);
+    let node_2_chnnale1_amount = node_2.get_local_balance_from_channel(channels[0]);
+    let node_2_chnnale2_amount = node_2.get_local_balance_from_channel(channels[1]);
+    let node_3_amount = node_3.get_local_balance_from_channel(channels[1]);
+
+    let node_1_amount_diff = node_1_amount - old_node_1_amount;
+    let node_2_chnnale1_amount_diff = old_node_2_chnnale1_amount - node_2_chnnale1_amount;
+    let node_2_chnnale2_amount_diff = old_node_2_chnnale2_amount - node_2_chnnale2_amount;
+    let node_3_amount_diff = node_3_amount - old_node_3_amount;
+
+    assert_eq!(node_1_amount_diff, node1_got_amount - node_1_sent_fee);
+    // got 3996
+
+    assert_eq!(
+        node_2_chnnale1_amount_diff,
+        node_2_ch1_sent_amount - node_1_sent_fee
+    );
+    // sent 3996
+
+    assert_eq!(
+        node_2_chnnale2_amount_diff,
+        node_2_ch2_sent_amount - node_3_sent_fee
+    );
+    // sent 3996
+
+    assert_eq!(node_3_amount_diff, node3_got_amount - node_3_sent_fee);
+    // got 3996
 }
