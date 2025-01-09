@@ -1449,3 +1449,88 @@ async fn test_send_payment_middle_hop_stopped_retry_longer_path() {
 
     node_0.wait_until_failed(res.payment_hash).await;
 }
+
+#[tokio::test]
+async fn test_send_payment_max_value_in_flight_in_first_hop() {
+    // https://github.com/nervosnetwork/fiber/issues/450
+
+    init_tracing();
+    let _span = tracing::info_span!("node", node = "test").entered();
+    let nodes = NetworkNode::new_interconnected_nodes(2).await;
+    let [mut node_0, mut node_1] = nodes.try_into().expect("2 nodes");
+    let (_channel_id, _funding_tx) = {
+        establish_channel_between_nodes(
+            &mut node_0,
+            &mut node_1,
+            true,
+            HUGE_CKB_AMOUNT,
+            HUGE_CKB_AMOUNT,
+            None,
+            Some(100000000),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+    };
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+    let res = node_0
+        .send_payment_keysend(&node_1, 100000000 + 1, false)
+        .await
+        .unwrap();
+    eprintln!("res: {:?}", res);
+    assert_eq!(res.fee, 0);
+
+    let payment_hash = res.payment_hash;
+    node_0.wait_until_failed(payment_hash).await;
+
+    // now we can not send payment with amount 100000000 + 1 with dry_run
+    // since there is already payment history data
+    let res = node_0
+        .send_payment_keysend(&node_1, 100000000 + 1, true)
+        .await;
+    eprintln!("res: {:?}", res);
+    assert!(res.unwrap_err().to_string().contains("no path found"));
+
+    // if we build a nother channel with higher max_value_in_flight
+    // we can send payment with amount 100000000 + 1 with this new channel
+    let (_channel_id, _funding_tx) = {
+        establish_channel_between_nodes(
+            &mut node_0,
+            &mut node_1,
+            true,
+            HUGE_CKB_AMOUNT,
+            HUGE_CKB_AMOUNT,
+            None,
+            Some(100000000 + 2),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+    };
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+    let res = node_0
+        .send_payment_keysend(&node_1, 100000000 + 1, false)
+        .await
+        .unwrap();
+    eprintln!("res: {:?}", res);
+    assert_eq!(res.fee, 0);
+
+    let payment_hash = res.payment_hash;
+    node_0.wait_until_success(payment_hash).await;
+}

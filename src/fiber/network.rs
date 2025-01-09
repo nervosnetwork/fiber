@@ -1713,15 +1713,16 @@ where
             return;
         }
 
-        let need_to_retry = self
-            .network_graph
-            .write()
-            .await
-            .record_payment_fail(&payment_session, tlc_err.clone());
-        if matches!(channel_error, ProcessingChannelError::WaitingTlcAck) {
+        let need_to_retry = if matches!(channel_error, ProcessingChannelError::WaitingTlcAck) {
             payment_session.last_error = Some("WaitingTlcAck".to_string());
             self.store.insert_payment_session(payment_session.clone());
-        }
+            true
+        } else {
+            self.network_graph
+                .write()
+                .await
+                .record_payment_fail(&payment_session, tlc_err.clone())
+        };
         if need_to_retry {
             let _ = self.try_payment_session(myself, state, payment_hash).await;
         } else {
