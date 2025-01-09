@@ -27,47 +27,16 @@ async fn test_send_payment_for_direct_channel_and_dry_run() {
     .await;
     let [mut node_0, mut node_1] = nodes.try_into().expect("2 nodes");
     let source_node = &mut node_0;
-    let target_pubkey = node_1.pubkey.clone();
 
     let res = source_node
-        .send_payment(SendPaymentCommand {
-            target_pubkey: Some(target_pubkey.clone()),
-            amount: Some(10000000000),
-            payment_hash: None,
-            final_tlc_expiry_delta: None,
-            tlc_expiry_limit: None,
-            invoice: None,
-            timeout: None,
-            max_fee_amount: None,
-            max_parts: None,
-            keysend: Some(true),
-            udt_type_script: None,
-            allow_self_payment: false,
-            hop_hints: None,
-            dry_run: true,
-        })
+        .send_payment_keysend(&node_1, 10000000000, true)
         .await;
 
     eprintln!("res: {:?}", res);
     assert!(res.is_ok());
 
     let res = source_node
-        .send_payment(SendPaymentCommand {
-            target_pubkey: Some(target_pubkey.clone()),
-            amount: Some(10000000000),
-            payment_hash: None,
-            final_tlc_expiry_delta: None,
-            tlc_expiry_limit: None,
-            invoice: None,
-            timeout: None,
-            max_fee_amount: None,
-            max_parts: None,
-            keysend: Some(true),
-            udt_type_script: None,
-            allow_self_payment: false,
-            hop_hints: None,
-            dry_run: false,
-        })
+        .send_payment_keysend(&node_1, 10000000000, false)
         .await;
 
     eprintln!("res: {:?}", res);
@@ -77,22 +46,7 @@ async fn test_send_payment_for_direct_channel_and_dry_run() {
     source_node.wait_until_success(payment_hash).await;
 
     let res = node_1
-        .send_payment(SendPaymentCommand {
-            target_pubkey: Some(source_node.pubkey.clone()),
-            amount: Some(10000000000),
-            payment_hash: None,
-            final_tlc_expiry_delta: None,
-            tlc_expiry_limit: None,
-            invoice: None,
-            timeout: None,
-            max_fee_amount: None,
-            max_parts: None,
-            keysend: Some(true),
-            udt_type_script: None,
-            allow_self_payment: false,
-            hop_hints: None,
-            dry_run: false,
-        })
+        .send_payment_keysend(&source_node, 10000000000, false)
         .await;
 
     eprintln!("res: {:?}", res);
@@ -144,46 +98,12 @@ async fn test_send_payment_for_pay_self() {
     let node_2_channel2_balance = node_2.get_local_balance_from_channel(channels[2]);
 
     // now node_0 -> node_2 will be ok only with node_1, so the fee is larger than 0
-    let res = node_0
-        .send_payment(SendPaymentCommand {
-            target_pubkey: Some(node_2.pubkey.clone()),
-            amount: Some(60000000),
-            payment_hash: None,
-            final_tlc_expiry_delta: None,
-            tlc_expiry_limit: None,
-            invoice: None,
-            timeout: None,
-            max_fee_amount: None,
-            max_parts: None,
-            keysend: Some(true),
-            udt_type_script: None,
-            allow_self_payment: false,
-            hop_hints: None,
-            dry_run: true,
-        })
-        .await;
+    let res = node_0.send_payment_keysend(&node_2, 60000000, true).await;
 
     assert!(res.unwrap().fee > 0);
 
     // node_0 -> node_0 will be ok for dry_run if `allow_self_payment` is true
-    let res = node_0
-        .send_payment(SendPaymentCommand {
-            target_pubkey: Some(node_0.pubkey.clone()),
-            amount: Some(60000000),
-            payment_hash: None,
-            final_tlc_expiry_delta: None,
-            tlc_expiry_limit: None,
-            invoice: None,
-            timeout: None,
-            max_fee_amount: None,
-            max_parts: None,
-            keysend: Some(true),
-            udt_type_script: None,
-            allow_self_payment: true,
-            hop_hints: None,
-            dry_run: false,
-        })
-        .await;
+    let res = node_0.send_payment_keysend_to_self(60000000, false).await;
 
     eprintln!("res: {:?}", res);
     assert!(res.is_ok());
@@ -223,24 +143,7 @@ async fn test_send_payment_for_pay_self() {
 
     // node_0 -> node_2 will be ok with direct channel2,
     // since after payself this channel now have enough balance, so the fee is 0
-    let res = node_0
-        .send_payment(SendPaymentCommand {
-            target_pubkey: Some(node_2.pubkey.clone()),
-            amount: Some(60000000),
-            payment_hash: None,
-            final_tlc_expiry_delta: None,
-            tlc_expiry_limit: None,
-            invoice: None,
-            timeout: None,
-            max_fee_amount: None,
-            max_parts: None,
-            keysend: Some(true),
-            udt_type_script: None,
-            allow_self_payment: false,
-            hop_hints: None,
-            dry_run: true,
-        })
-        .await;
+    let res = node_0.send_payment_keysend(&node_2, 60000000, true).await;
 
     eprintln!("res: {:?}", res);
     assert_eq!(res.unwrap().fee, 0);
@@ -267,24 +170,7 @@ async fn test_send_payment_for_pay_self_with_two_nodes() {
     let node_1_channel1_balance = node_1.get_local_balance_from_channel(channels[1]);
 
     // node_0 -> node_0 will be ok for dry_run if `allow_self_payment` is true
-    let res = node_0
-        .send_payment(SendPaymentCommand {
-            target_pubkey: Some(node_0.pubkey.clone()),
-            amount: Some(60000000),
-            payment_hash: None,
-            final_tlc_expiry_delta: None,
-            tlc_expiry_limit: None,
-            invoice: None,
-            timeout: None,
-            max_fee_amount: None,
-            max_parts: None,
-            keysend: Some(true),
-            udt_type_script: None,
-            allow_self_payment: true,
-            hop_hints: None,
-            dry_run: false,
-        })
-        .await;
+    let res = node_0.send_payment_keysend_to_self(60000000, false).await;
 
     eprintln!("res: {:?}", res);
     assert!(res.is_ok());
@@ -353,24 +239,7 @@ async fn test_send_payment_with_more_capacity_for_payself() {
     let node_2_channel2_balance = node_2.get_local_balance_from_channel(channels[2]);
 
     // node_0 -> node_0 will be ok if `allow_self_payment` is true
-    let res = node_0
-        .send_payment(SendPaymentCommand {
-            target_pubkey: Some(node_0.pubkey.clone()),
-            amount: Some(60000000),
-            payment_hash: None,
-            final_tlc_expiry_delta: None,
-            tlc_expiry_limit: None,
-            invoice: None,
-            timeout: None,
-            max_fee_amount: None,
-            max_parts: None,
-            keysend: Some(true),
-            udt_type_script: None,
-            allow_self_payment: true,
-            hop_hints: None,
-            dry_run: false,
-        })
-        .await;
+    let res = node_0.send_payment_keysend_to_self(60000000, false).await;
 
     eprintln!("res: {:?}", res);
     assert!(res.is_ok());
@@ -655,42 +524,12 @@ async fn test_send_payment_select_channel_with_hop_hints() {
 
     let (nodes, channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
         &[
-            (
-                (0, 1),
-                (
-                    MIN_RESERVED_CKB + 10000000000,
-                    MIN_RESERVED_CKB + 10000000000,
-                ),
-            ),
+            ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
             // there are 3 channels from node1 -> node2
-            (
-                (1, 2),
-                (
-                    MIN_RESERVED_CKB + 10000000000,
-                    MIN_RESERVED_CKB + 10000000000,
-                ),
-            ),
-            (
-                (1, 2),
-                (
-                    MIN_RESERVED_CKB + 10000000000,
-                    MIN_RESERVED_CKB + 10000000000,
-                ),
-            ),
-            (
-                (1, 2),
-                (
-                    MIN_RESERVED_CKB + 10000000000,
-                    MIN_RESERVED_CKB + 10000000000,
-                ),
-            ),
-            (
-                (2, 3),
-                (
-                    MIN_RESERVED_CKB + 10000000000,
-                    MIN_RESERVED_CKB + 10000000000,
-                ),
-            ),
+            ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((2, 3), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
         ],
         4,
         true,
@@ -832,10 +671,10 @@ async fn test_send_payment_two_nodes_with_hop_hints_and_multiple_channels() {
 
     let (nodes, channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
         &[
-            ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
-            ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
-            ((1, 0), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
-            ((1, 0), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+            ((0, 1), (HUGE_CKB_AMOUNT, MIN_RESERVED_CKB)),
+            ((0, 1), (HUGE_CKB_AMOUNT, MIN_RESERVED_CKB)),
+            ((1, 0), (HUGE_CKB_AMOUNT, MIN_RESERVED_CKB)),
+            ((1, 0), (HUGE_CKB_AMOUNT, MIN_RESERVED_CKB)),
         ],
         2,
         true,
@@ -1045,90 +884,33 @@ async fn test_network_three_nodes_two_channels_send_each_other() {
     let _span = tracing::info_span!("node", node = "test").entered();
     let (nodes, channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
         &[
-            (
-                (0, 1),
-                (
-                    MIN_RESERVED_CKB + 10000000000,
-                    MIN_RESERVED_CKB + 10000000000,
-                ),
-            ),
-            (
-                (1, 2),
-                (
-                    MIN_RESERVED_CKB + 10000000000,
-                    MIN_RESERVED_CKB + 10000000000,
-                ),
-            ),
+            ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
         ],
         3,
         true,
     )
     .await;
-    let [node_a, node_b, node_c] = nodes.try_into().expect("3 nodes");
+    let [mut node_a, node_b, mut node_c] = nodes.try_into().expect("3 nodes");
 
     // Wait for the channel announcement to be broadcasted
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
     let node_b_old_balance_channel_0 = node_b.get_local_balance_from_channel(channels[0]);
     let node_b_old_balance_channel_1 = node_b.get_local_balance_from_channel(channels[1]);
 
-    let node_a_pubkey = node_a.pubkey.clone();
-    let node_c_pubkey = node_c.pubkey.clone();
-
     let amount_a_to_c = 60000;
-    let message = |rpc_reply| -> NetworkActorMessage {
-        NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
-            SendPaymentCommand {
-                target_pubkey: Some(node_c_pubkey.clone()),
-                amount: Some(amount_a_to_c),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                tlc_expiry_limit: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                max_parts: None,
-                keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-            },
-            rpc_reply,
-        ))
-    };
-
-    let res = call!(node_a.network_actor, message)
-        .expect("node_a alive")
+    let res = node_a
+        .send_payment_keysend(&node_c, amount_a_to_c, false)
+        .await
         .unwrap();
     let payment_hash1 = res.payment_hash;
     let fee1 = res.fee;
     eprintln!("payment_hash1: {:?}", payment_hash1);
 
     let amount_c_to_a = 50000;
-    let message = |rpc_reply| -> NetworkActorMessage {
-        NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
-            SendPaymentCommand {
-                target_pubkey: Some(node_a_pubkey.clone()),
-                amount: Some(amount_c_to_a),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                tlc_expiry_limit: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                max_parts: None,
-                keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-            },
-            rpc_reply,
-        ))
-    };
-
-    let res = call!(node_c.network_actor, message)
-        .expect("node_a alive")
+    let res = node_c
+        .send_payment_keysend(&node_a, amount_c_to_a, false)
+        .await
         .unwrap();
 
     let payment_hash2 = res.payment_hash;
@@ -1157,34 +939,10 @@ async fn test_network_three_nodes_send_each_other() {
     let _span = tracing::info_span!("node", node = "test").entered();
     let (nodes, channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
         &[
-            (
-                (0, 1),
-                (
-                    MIN_RESERVED_CKB + 10000000000,
-                    MIN_RESERVED_CKB + 10000000000,
-                ),
-            ),
-            (
-                (1, 2),
-                (
-                    MIN_RESERVED_CKB + 10000000000,
-                    MIN_RESERVED_CKB + 10000000000,
-                ),
-            ),
-            (
-                (2, 1),
-                (
-                    MIN_RESERVED_CKB + 10000000000,
-                    MIN_RESERVED_CKB + 10000000000,
-                ),
-            ),
-            (
-                (1, 0),
-                (
-                    MIN_RESERVED_CKB + 10000000000,
-                    MIN_RESERVED_CKB + 10000000000,
-                ),
-            ),
+            ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((2, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((1, 0), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
         ],
         3,
         true,
@@ -1298,20 +1056,8 @@ async fn test_send_payment_bench_test() {
     let _span = tracing::info_span!("node", node = "test").entered();
     let (nodes, _channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
         &[
-            (
-                (0, 1),
-                (
-                    MIN_RESERVED_CKB + 10000000000,
-                    MIN_RESERVED_CKB + 10000000000,
-                ),
-            ),
-            (
-                (1, 2),
-                (
-                    MIN_RESERVED_CKB + 10000000000,
-                    MIN_RESERVED_CKB + 10000000000,
-                ),
-            ),
+            ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
         ],
         3,
         true,
@@ -1324,7 +1070,10 @@ async fn test_send_payment_bench_test() {
     let mut all_sent = HashSet::new();
 
     for i in 1..=10 {
-        let payment = node_0.send_payment_keysend(&node_2, 1000).await.unwrap();
+        let payment = node_0
+            .send_payment_keysend(&node_2, 1000, false)
+            .await
+            .unwrap();
         eprintln!("payment: {:?}", payment);
         all_sent.insert(payment.payment_hash);
         eprintln!("send: {} payment_hash: {:?} sent", i, payment.payment_hash);
@@ -1361,20 +1110,8 @@ async fn test_send_payment_three_nodes_wait_succ_bench_test() {
     let _span = tracing::info_span!("node", node = "test").entered();
     let (nodes, _channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
         &[
-            (
-                (0, 1),
-                (
-                    MIN_RESERVED_CKB + 10000000000,
-                    MIN_RESERVED_CKB + 10000000000,
-                ),
-            ),
-            (
-                (1, 2),
-                (
-                    MIN_RESERVED_CKB + 10000000000,
-                    MIN_RESERVED_CKB + 10000000000,
-                ),
-            ),
+            ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
         ],
         3,
         true,
@@ -1387,7 +1124,10 @@ async fn test_send_payment_three_nodes_wait_succ_bench_test() {
     let mut all_sent = vec![];
 
     for i in 1..=10 {
-        let payment = node_0.send_payment_keysend(&node_2, 1000).await.unwrap();
+        let payment = node_0
+            .send_payment_keysend(&node_2, 1000, false)
+            .await
+            .unwrap();
         all_sent.push(payment.payment_hash);
         eprintln!(
             "send: {} payment_hash: {:?} sentxx",
@@ -1406,20 +1146,8 @@ async fn test_send_payment_three_nodes_send_each_other_bench_test() {
     let _span = tracing::info_span!("node", node = "test").entered();
     let (nodes, _channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
         &[
-            (
-                (0, 1),
-                (
-                    MIN_RESERVED_CKB + 10000000000,
-                    MIN_RESERVED_CKB + 10000000000,
-                ),
-            ),
-            (
-                (1, 2),
-                (
-                    MIN_RESERVED_CKB + 10000000000,
-                    MIN_RESERVED_CKB + 10000000000,
-                ),
-            ),
+            ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
         ],
         3,
         true,
@@ -1432,11 +1160,17 @@ async fn test_send_payment_three_nodes_send_each_other_bench_test() {
     let mut all_sent = vec![];
 
     for i in 1..=5 {
-        let payment1 = node_0.send_payment_keysend(&node_2, 1000).await.unwrap();
+        let payment1 = node_0
+            .send_payment_keysend(&node_2, 1000, false)
+            .await
+            .unwrap();
         all_sent.push(payment1.payment_hash);
         eprintln!("send: {} payment_hash: {:?} sent", i, payment1.payment_hash);
 
-        let payment2 = node_2.send_payment_keysend(&node_0, 1000).await.unwrap();
+        let payment2 = node_2
+            .send_payment_keysend(&node_0, 1000, false)
+            .await
+            .unwrap();
         all_sent.push(payment2.payment_hash);
         eprintln!("send: {} payment_hash: {:?} sent", i, payment2.payment_hash);
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
@@ -1452,20 +1186,8 @@ async fn test_send_payment_three_nodes_bench_test() {
     let _span = tracing::info_span!("node", node = "test").entered();
     let (nodes, channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
         &[
-            (
-                (0, 1),
-                (
-                    MIN_RESERVED_CKB + 10000000000,
-                    MIN_RESERVED_CKB + 10000000000,
-                ),
-            ),
-            (
-                (1, 2),
-                (
-                    MIN_RESERVED_CKB + 10000000000,
-                    MIN_RESERVED_CKB + 10000000000,
-                ),
-            ),
+            ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
         ],
         3,
         true,
@@ -1490,25 +1212,37 @@ async fn test_send_payment_three_nodes_bench_test() {
     let old_node_3_amount = node_3.get_local_balance_from_channel(channels[1]);
 
     for i in 1..=4 {
-        let payment1 = node_1.send_payment_keysend(&node_3, 1000).await.unwrap();
+        let payment1 = node_1
+            .send_payment_keysend(&node_3, 1000, false)
+            .await
+            .unwrap();
         all_sent.insert((1, payment1.payment_hash, payment1.fee));
         eprintln!("send: {} payment_hash: {:?} sent", i, payment1.payment_hash);
         node_1_sent_fee += payment1.fee;
         node_2_got_fee += payment1.fee;
 
-        let payment2 = node_2.send_payment_keysend(&node_3, 1000).await.unwrap();
+        let payment2 = node_2
+            .send_payment_keysend(&node_3, 1000, false)
+            .await
+            .unwrap();
         all_sent.insert((2, payment2.payment_hash, payment2.fee));
         eprintln!("send: {} payment_hash: {:?} sent", i, payment2.payment_hash);
         node_2_ch1_sent_amount += 1000;
         node1_got_amount += 1000;
 
-        let payment3 = node_2.send_payment_keysend(&node_1, 1000).await.unwrap();
+        let payment3 = node_2
+            .send_payment_keysend(&node_1, 1000, false)
+            .await
+            .unwrap();
         all_sent.insert((2, payment3.payment_hash, payment3.fee));
         eprintln!("send: {} payment_hash: {:?} sent", i, payment3.payment_hash);
         node_2_ch2_sent_amount += 1000;
         node3_got_amount += 1000;
 
-        let payment4 = node_3.send_payment_keysend(&node_1, 1000).await.unwrap();
+        let payment4 = node_3
+            .send_payment_keysend(&node_1, 1000, false)
+            .await
+            .unwrap();
         all_sent.insert((3, payment4.payment_hash, payment4.fee));
         eprintln!("send: {} payment_hash: {:?} sent", i, payment4.payment_hash);
         node_3_sent_fee += payment4.fee;
@@ -1601,22 +1335,7 @@ async fn test_send_payment_middle_hop_stopped() {
 
     // dry run node_0 -> node_3 will select  0 -> 4 -> 3
     let res = node_0
-        .send_payment(SendPaymentCommand {
-            target_pubkey: Some(node_3.pubkey.clone()),
-            amount: Some(1000),
-            payment_hash: None,
-            final_tlc_expiry_delta: None,
-            tlc_expiry_limit: None,
-            invoice: None,
-            timeout: None,
-            max_fee_amount: None,
-            max_parts: None,
-            keysend: Some(true),
-            udt_type_script: None,
-            allow_self_payment: false,
-            hop_hints: None,
-            dry_run: true,
-        })
+        .send_payment_keysend(&node_3, 1000, true)
         .await
         .unwrap();
     eprintln!("res: {:?}", res);
@@ -1627,22 +1346,7 @@ async fn test_send_payment_middle_hop_stopped() {
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
     let res = node_0
-        .send_payment(SendPaymentCommand {
-            target_pubkey: Some(node_3.pubkey.clone()),
-            amount: Some(1000),
-            payment_hash: None,
-            final_tlc_expiry_delta: None,
-            tlc_expiry_limit: None,
-            invoice: None,
-            timeout: None,
-            max_fee_amount: None,
-            max_parts: None,
-            keysend: Some(true),
-            udt_type_script: None,
-            allow_self_payment: false,
-            hop_hints: None,
-            dry_run: true,
-        })
+        .send_payment_keysend(&node_3, 1000, true)
         .await
         .unwrap();
     eprintln!("res: {:?}", res);
@@ -1651,22 +1355,7 @@ async fn test_send_payment_middle_hop_stopped() {
     assert_eq!(res.fee, 1);
 
     let res = node_0
-        .send_payment(SendPaymentCommand {
-            target_pubkey: Some(node_3.pubkey.clone()),
-            amount: Some(1000),
-            payment_hash: None,
-            final_tlc_expiry_delta: None,
-            tlc_expiry_limit: None,
-            invoice: None,
-            timeout: None,
-            max_fee_amount: None,
-            max_parts: None,
-            keysend: Some(true),
-            udt_type_script: None,
-            allow_self_payment: false,
-            hop_hints: None,
-            dry_run: false,
-        })
+        .send_payment_keysend(&node_3, 1000, false)
         .await
         .unwrap();
     eprintln!("res: {:?}", res);
@@ -1683,22 +1372,7 @@ async fn test_send_payment_middle_hop_stopped() {
     // node_2 stopped, payment will fail
     node_2.stop().await;
     let res = node_0
-        .send_payment(SendPaymentCommand {
-            target_pubkey: Some(node_3.pubkey.clone()),
-            amount: Some(1000),
-            payment_hash: None,
-            final_tlc_expiry_delta: None,
-            tlc_expiry_limit: None,
-            invoice: None,
-            timeout: None,
-            max_fee_amount: None,
-            max_parts: None,
-            keysend: Some(true),
-            udt_type_script: None,
-            allow_self_payment: false,
-            hop_hints: None,
-            dry_run: false,
-        })
+        .send_payment_keysend(&node_3, 1000, false)
         .await
         .unwrap();
     eprintln!("res: {:?}", res);
@@ -1730,22 +1404,7 @@ async fn test_send_payment_middle_hop_stopped_retry_longer_path() {
 
     // dry run node_0 -> node_3 will select  0 -> 1 -> 2 -> 3
     let res = node_0
-        .send_payment(SendPaymentCommand {
-            target_pubkey: Some(node_3.pubkey.clone()),
-            amount: Some(1000),
-            payment_hash: None,
-            final_tlc_expiry_delta: None,
-            tlc_expiry_limit: None,
-            invoice: None,
-            timeout: None,
-            max_fee_amount: None,
-            max_parts: None,
-            keysend: Some(true),
-            udt_type_script: None,
-            allow_self_payment: false,
-            hop_hints: None,
-            dry_run: true,
-        })
+        .send_payment_keysend(&node_3, 1000, true)
         .await
         .unwrap();
     eprintln!("res: {:?}", res);
@@ -1756,22 +1415,7 @@ async fn test_send_payment_middle_hop_stopped_retry_longer_path() {
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
     let res = node_0
-        .send_payment(SendPaymentCommand {
-            target_pubkey: Some(node_3.pubkey.clone()),
-            amount: Some(1000),
-            payment_hash: None,
-            final_tlc_expiry_delta: None,
-            tlc_expiry_limit: None,
-            invoice: None,
-            timeout: None,
-            max_fee_amount: None,
-            max_parts: None,
-            keysend: Some(true),
-            udt_type_script: None,
-            allow_self_payment: false,
-            hop_hints: None,
-            dry_run: true,
-        })
+        .send_payment_keysend(&node_3, 1000, true)
         .await
         .unwrap();
     eprintln!("res: {:?}", res);
@@ -1780,22 +1424,7 @@ async fn test_send_payment_middle_hop_stopped_retry_longer_path() {
     assert_eq!(res.fee, 3);
 
     let res = node_0
-        .send_payment(SendPaymentCommand {
-            target_pubkey: Some(node_3.pubkey.clone()),
-            amount: Some(1000),
-            payment_hash: None,
-            final_tlc_expiry_delta: None,
-            tlc_expiry_limit: None,
-            invoice: None,
-            timeout: None,
-            max_fee_amount: None,
-            max_parts: None,
-            keysend: Some(true),
-            udt_type_script: None,
-            allow_self_payment: false,
-            hop_hints: None,
-            dry_run: false,
-        })
+        .send_payment_keysend(&node_3, 1000, false)
         .await
         .unwrap();
     eprintln!("res: {:?}", res);
@@ -1811,24 +1440,10 @@ async fn test_send_payment_middle_hop_stopped_retry_longer_path() {
     // node_3 stopped, payment will fail
     node_3.stop().await;
     let res = node_0
-        .send_payment(SendPaymentCommand {
-            target_pubkey: Some(node_3.pubkey.clone()),
-            amount: Some(1000),
-            payment_hash: None,
-            final_tlc_expiry_delta: None,
-            tlc_expiry_limit: None,
-            invoice: None,
-            timeout: None,
-            max_fee_amount: None,
-            max_parts: None,
-            keysend: Some(true),
-            udt_type_script: None,
-            allow_self_payment: false,
-            hop_hints: None,
-            dry_run: false,
-        })
+        .send_payment_keysend(&node_3, 1000, false)
         .await
         .unwrap();
+
     eprintln!("res: {:?}", res);
     assert_eq!(res.fee, 5);
 
