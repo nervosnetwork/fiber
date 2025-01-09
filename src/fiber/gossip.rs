@@ -2227,7 +2227,7 @@ where
             SupervisionEvent::ActorTerminated(who, _, _) => {
                 debug!("{:?} terminated", who);
             }
-            SupervisionEvent::ActorPanicked(who, err) => {
+            SupervisionEvent::ActorFailed(who, err) => {
                 panic!("Actor unexpectedly panicked (id: {:?}): {:?}", who, err);
             }
             _ => {}
