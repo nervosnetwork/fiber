@@ -1,5 +1,4 @@
-use ckb_types::packed::OutPoint;
-
+use super::graph::PathEdge;
 use super::types::Pubkey;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
@@ -28,8 +27,8 @@ pub(crate) struct NodeHeapElement {
     // The expected aboslute expiry timestamp (in milliseconds) for the incoming HTLC of this Node
     pub incoming_tlc_expiry: u64,
 
-    // next_hop is the edge this route comes from
-    pub next_hop: Option<(Pubkey, OutPoint)>,
+    // next_hop is the edge this route comes from, we also include the fee rate and tlc expiry delta.
+    pub next_hop: Option<PathEdge>,
 }
 
 impl Ord for NodeHeapElement {
