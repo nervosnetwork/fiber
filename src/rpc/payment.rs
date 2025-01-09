@@ -1,3 +1,5 @@
+use crate::fiber::graph::SessionRoute as InnerSessionRoute;
+use crate::fiber::serde_utils::EntityHex;
 use crate::fiber::{
     channel::ChannelActorStateStore,
     graph::PaymentSessionStatus as InnerPaymentSessionStatus,
@@ -8,6 +10,7 @@ use crate::fiber::{
 };
 use crate::{handle_actor_call, log_and_error};
 use ckb_jsonrpc_types::Script;
+use ckb_types::packed::OutPoint;
 use jsonrpsee::{
     core::async_trait,
     proc_macros::rpc,
@@ -48,6 +51,43 @@ impl From<InnerPaymentSessionStatus> for PaymentSessionStatus {
     }
 }
 
+/// The node and channel information in a payment route hop
+#[cfg(debug_assertions)]
+#[serde_as]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SessionRouteNode {
+    /// the public key of the node
+    pub pubkey: Pubkey,
+    /// the amount for this hop
+    pub amount: u128,
+    /// the channel outpoint for this hop
+    #[serde_as(as = "EntityHex")]
+    pub channel_outpoint: OutPoint,
+}
+
+/// The router information for a payment route, used for debugging
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct SessionRoute {
+    /// the nodes in the route
+    pub nodes: Vec<SessionRouteNode>,
+}
+
+impl From<InnerSessionRoute> for SessionRoute {
+    fn from(route: InnerSessionRoute) -> Self {
+        SessionRoute {
+            nodes: route
+                .nodes
+                .into_iter()
+                .map(|node| SessionRouteNode {
+                    pubkey: node.pubkey,
+                    amount: node.amount,
+                    channel_outpoint: node.channel_outpoint,
+                })
+                .collect(),
+        }
+    }
+}
+
 #[serde_as]
 #[derive(Serialize, Deserialize, Clone)]
 pub struct GetPaymentCommandResult {
@@ -66,6 +106,10 @@ pub struct GetPaymentCommandResult {
     /// fee paid for the payment
     #[serde_as(as = "U128Hex")]
     pub fee: u128,
+
+    #[cfg(debug_assertions)]
+    /// The route information for the payment
+    router: SessionRoute,
 }
 
 #[serde_as]
@@ -220,6 +264,8 @@ where
             last_updated_at: response.last_updated_at,
             failed_error: response.failed_error,
             fee: response.fee,
+            #[cfg(debug_assertions)]
+            router: response.router.into(),
         })
     }
 
@@ -240,6 +286,8 @@ where
             created_at: response.created_at,
             failed_error: response.failed_error,
             fee: response.fee,
+            #[cfg(debug_assertions)]
+            router: response.router.into(),
         })
     }
 }

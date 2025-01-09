@@ -1273,6 +1273,8 @@ impl From<PaymentSession> for SendPaymentResponse {
             created_at: session.created_at,
             last_updated_at: session.last_updated_at,
             fee,
+            #[cfg(debug_assertions)]
+            router: session.route,
         }
     }
 }

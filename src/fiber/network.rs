@@ -157,6 +157,8 @@ pub struct SendPaymentResponse {
     pub last_updated_at: u64,
     pub failed_error: Option<String>,
     pub fee: u128,
+    #[cfg(debug_assertions)]
+    pub router: SessionRoute,
 }
 
 /// What kind of local information should be broadcasted to the network.

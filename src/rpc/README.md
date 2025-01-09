@@ -51,6 +51,8 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
     * [Type `NodeInfo`](#type-nodeinfo)
     * [Type `PaymentSessionStatus`](#type-paymentsessionstatus)
     * [Type `RemoveTlcReason`](#type-removetlcreason)
+    * [Type `SessionRoute`](#type-sessionroute)
+    * [Type `SessionRouteNode`](#type-sessionroutenode)
     * [Type `UdtArgInfo`](#type-udtarginfo)
     * [Type `UdtCellDep`](#type-udtcelldep)
     * [Type `UdtCfgInfos`](#type-udtcfginfos)
@@ -517,6 +519,7 @@ Sends a payment to a peer.
 * `last_updated_at` - u64, The time the payment was last updated at, in milliseconds from UNIX epoch
 * `failed_error` - `Option<String>`, The error message if the payment failed
 * `fee` - u128, fee paid for the payment
+* `router` - SessionRoute, The route information for the payment
 
 
 <a id="payment-get_payment"></a>
@@ -536,6 +539,7 @@ Retrieves a payment.
 * `last_updated_at` - u64, The time the payment was last updated at, in milliseconds from UNIX epoch
 * `failed_error` - `Option<String>`, The error message if the payment failed
 * `fee` - u128, fee paid for the payment
+* `router` - SessionRoute, The route information for the payment
 
 
 <a id="peer"></a>
@@ -725,4 +729,26 @@ The status of a payment, will update as the payment progresses.
 * `Inflight` - , the first hop AddTlc is sent successfully and waiting for the response
 * `Success` - , related HTLC is successfully settled
 * `Failed` - , related HTLC is failed
+
+<a id="#type-sessionroutenode"></a>
+### Type `SessionRouteNode`
+
+The node and channel information in a payment route hop
+
+
+#### Fields
+
+* `pubkey` - Pubkey, the public key of the node
+* `amount` - u128, the amount for this hop
+* `channel_outpoint` - OutPoint, the channel outpoint for this hop
+
+<a id="#type-sessionroute"></a>
+### Type `SessionRoute`
+
+The router information for a payment route, used for debugging
+
+
+#### Fields
+
+* `nodes` - `Vec<SessionRouteNode>`, the nodes in the route
 

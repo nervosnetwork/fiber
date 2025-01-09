@@ -635,6 +635,22 @@ impl NetworkNode {
             .unwrap()
     }
 
+    pub async fn expect_payment_used_channel(
+        &self,
+        payment_hash: &Hash256,
+        funding_tx: &TransactionView,
+    ) {
+        let payment_result = self.get_payment_result(*payment_hash).await;
+        let used_channes = payment_result
+            .router
+            .nodes
+            .iter()
+            .map(|r| r.channel_outpoint.clone())
+            .collect::<Vec<_>>();
+        let funding_channel_outpoint = OutPoint::new(funding_tx.hash(), 0);
+        assert!(used_channes.contains(&funding_channel_outpoint));
+    }
+
     pub async fn wait_until_success(&self, payment_hash: Hash256) {
         loop {
             let status = self.get_payment_status(payment_hash).await;

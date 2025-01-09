@@ -1501,7 +1501,7 @@ async fn test_send_payment_max_value_in_flight_in_first_hop() {
 
     // if we build a nother channel with higher max_value_in_flight
     // we can send payment with amount 100000000 + 1 with this new channel
-    let (_channel_id, _funding_tx) = {
+    let (_channel_id, funding_tx) = {
         establish_channel_between_nodes(
             &mut node_0,
             &mut node_1,
@@ -1528,9 +1528,10 @@ async fn test_send_payment_max_value_in_flight_in_first_hop() {
         .send_payment_keysend(&node_1, 100000000 + 1, false)
         .await
         .unwrap();
-    eprintln!("res: {:?}", res);
-    assert_eq!(res.fee, 0);
 
     let payment_hash = res.payment_hash;
     node_0.wait_until_success(payment_hash).await;
+    node_0
+        .expect_payment_used_channel(&payment_hash, &funding_tx)
+        .await;
 }
