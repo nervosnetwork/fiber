@@ -501,7 +501,7 @@ pub struct AcceptChannelCommand {
     pub tlc_expiry_delta: Option<u64>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SendOnionPacketCommand {
     pub peeled_onion_packet: PeeledPaymentOnionPacket,
     pub previous_tlc: Option<(Hash256, u64)>,
@@ -1137,7 +1137,19 @@ where
             }
 
             NetworkActorCommand::SendPaymentOnionPacket(command) => {
-                let _ = self.handle_send_onion_packet_command(state, command).await;
+                let res = self
+                    .handle_send_onion_packet_command(state, command.clone())
+                    .await;
+                if let Err(err) = res {
+                    self.on_add_tlc_result_event(
+                        myself,
+                        state,
+                        command.payment_hash,
+                        Some((ProcessingChannelError::TlcForwardingError(err.clone()), err)),
+                        command.previous_tlc,
+                    )
+                    .await;
+                }
             }
             NetworkActorCommand::PeelPaymentOnionPacket(onion_packet, payment_hash, reply) => {
                 let response = onion_packet
