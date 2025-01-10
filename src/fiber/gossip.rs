@@ -1224,10 +1224,12 @@ impl<S: GossipMessageStore + Send + Sync + 'static> Actor for ExtendedGossipMess
                 // Tick and later we will send the corresponding ChannelAnnouncement.
                 // So the downstream consumer need to either cache some of the messages and wait for the
                 // dependent messages to arrive or read the messages from the store directly.
-                myself.send_message(ExtendedGossipMessageStoreMessage::LoadMessagesFromStore(
-                    id,
-                    cursor.clone(),
-                ))?;
+                myself
+                    .send_message(ExtendedGossipMessageStoreMessage::LoadMessagesFromStore(
+                        id,
+                        cursor.clone(),
+                    ))
+                    .expect("myself alive");
                 state.output_ports.insert(
                     id,
                     BroadcastMessageOutput::new(cursor, Arc::clone(&output_port)),
@@ -2260,7 +2262,7 @@ where
             }
             GossipActorMessage::QueryBroadcastMessages(peer, queries) => {
                 let id = state.get_and_increment_request_id();
-                state
+                if let Err(e) = state
                     .send_message_to_peer(
                         &peer,
                         GossipMessage::QueryBroadcastMessages(QueryBroadcastMessages {
@@ -2269,7 +2271,13 @@ where
                             queries,
                         }),
                     )
-                    .await?;
+                    .await
+                {
+                    error!(
+                        "Failed to send query broadcast messages to peer {:?}: {:?}",
+                        &peer, e
+                    );
+                }
             }
             GossipActorMessage::TryBroadcastMessages(messages) => {
                 state
@@ -2345,8 +2353,15 @@ where
                                 chain_hash: get_chain_hash(),
                                 queries: queries.clone(),
                             });
-                        send_message_to_session(&state.control, peer_state.session_id, message)
-                            .await?;
+                        if let Err(e) =
+                            send_message_to_session(&state.control, peer_state.session_id, message)
+                                .await
+                        {
+                            error!(
+                                "Failed to send query broadcast messages to peer {:?}: {:?}",
+                                &peer_state.session_id, e
+                            );
+                        }
                     }
                 }
             }
@@ -2383,7 +2398,10 @@ where
                         chain_hash,
                         after_cursor,
                     }) => {
-                        check_chain_hash(&chain_hash)?;
+                        if let Err(e) = check_chain_hash(&chain_hash) {
+                            error!("Failed to check chain hash: {:?}", e);
+                            return Ok(());
+                        }
                         if after_cursor.is_max() {
                             info!(
                                 "Received BroadcastMessagesFilter with max cursor from peer, stopping filter processor to {:?}",
@@ -2481,7 +2499,10 @@ where
                         chain_hash,
                         queries,
                     }) => {
-                        check_chain_hash(&chain_hash)?;
+                        if let Err(e) = check_chain_hash(&chain_hash) {
+                            error!("Failed to check chain hash: {:?}", e);
+                            return Ok(());
+                        }
                         if queries.len() > MAX_NUM_OF_BROADCAST_MESSAGES as usize {
                             warn!(
                                 "Received QueryBroadcastMessages with too many queries: {:?}",
