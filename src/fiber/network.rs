@@ -959,7 +959,16 @@ where
             }
             NetworkActorEvent::OwnedChannelUpdateEvent(owned_channel_update_event) => {
                 let mut graph = self.network_graph.write().await;
+                debug!(
+                    "Received owned channel update event: {:?}",
+                    owned_channel_update_event
+                );
+                let is_down =
+                    matches!(owned_channel_update_event, OwnedChannelUpdateEvent::Down(_));
                 graph.process_owned_channel_update_event(owned_channel_update_event);
+                if is_down {
+                    debug!("Owned channel is down");
+                }
             }
         }
         Ok(())
@@ -1591,11 +1600,7 @@ where
         payment_session: &mut PaymentSession,
         payment_data: &SendPaymentData,
     ) -> Result<Vec<PaymentHopData>, Error> {
-        // Load owned channel info before building route, so that we use private channels and also the
-        // exact balance of the channels.
-        let mut rwgraph = self.network_graph.write().await;
-        rwgraph.load_owned_channel_info();
-        let graph = tokio::sync::RwLockWriteGuard::downgrade(rwgraph);
+        let graph = self.network_graph.read().await;
         match graph.build_route(payment_data.clone()) {
             Err(e) => {
                 let error = format!("Failed to build route, {}", e);

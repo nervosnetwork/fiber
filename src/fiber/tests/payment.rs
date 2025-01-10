@@ -1491,7 +1491,7 @@ async fn test_send_payment_middle_hop_stopped() {
         true,
     )
     .await;
-    let [mut node_0, _node_1, mut node_2, node_3, mut node_4] = nodes.try_into().expect("5 nodes");
+    let [mut node_0, _node_1, _node_2, node_3, mut node_4] = nodes.try_into().expect("5 nodes");
 
     // dry run node_0 -> node_3 will select  0 -> 4 -> 3
     let res = node_0
@@ -1505,32 +1505,8 @@ async fn test_send_payment_middle_hop_stopped() {
     node_4.stop().await;
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
-    let res = node_0
-        .send_payment_keysend(&node_3, 1000, true)
-        .await
-        .unwrap();
-    eprintln!("res: {:?}", res);
-    // when node_4 stopped, the first try path is still 0 -> 4 -> 3
-    // so the fee is 1
-    assert_eq!(res.fee, 1);
-
-    let res = node_0
-        .send_payment_keysend(&node_3, 1000, false)
-        .await
-        .unwrap();
-    eprintln!("res: {:?}", res);
-    assert_eq!(res.fee, 1);
-
-    node_0.wait_until_success(res.payment_hash).await;
-
-    // after the first payment try failed, the payment session will find another path
-    // 0 -> 1 -> 2 -> 3, so it will succeed, but the fee change from 1 to 3
-    let payment = node_0.get_payment_result(res.payment_hash).await;
-    assert_eq!(payment.fee, 3);
-    eprintln!("payment: {:?}", payment);
-
-    // node_2 stopped, payment will fail
-    node_2.stop().await;
+    // when node_4 stopped, node 0 learned that channel 0 -> 4 was not available
+    // so it will try another path 0 -> 1 -> 2 -> 3
     let res = node_0
         .send_payment_keysend(&node_3, 1000, false)
         .await
@@ -1538,7 +1514,7 @@ async fn test_send_payment_middle_hop_stopped() {
     eprintln!("res: {:?}", res);
     assert_eq!(res.fee, 3);
 
-    node_0.wait_until_failed(res.payment_hash).await;
+    node_0.wait_until_success(res.payment_hash).await;
 }
 
 #[tokio::test]

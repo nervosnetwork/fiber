@@ -836,25 +836,6 @@ where
         self.source = source;
     }
 
-    pub fn load_owned_channel_info(&mut self) {
-        for (_peer_id, channel_id, _state) in self.store.get_active_channel_states(None) {
-            match self.store.get_channel_actor_state(&channel_id) {
-                Some(channel_actor_state) => {
-                    assert_eq!(channel_actor_state.local_pubkey, self.source);
-                    match ChannelInfo::try_from(&channel_actor_state) {
-                        Ok(channel_info) => {
-                            self.channels
-                                .insert(channel_info.channel_outpoint.clone(), channel_info);
-                        }
-                        Err(_) => {}
-                    };
-                }
-                // It is possible that after we obtained the list of channels, the channel is deleted.
-                None => {}
-            }
-        }
-    }
-
     /// Returns a list of `PaymentHopData` for all nodes in the route,
     /// including the origin and the target node.
     pub fn build_route(
