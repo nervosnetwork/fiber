@@ -5672,15 +5672,6 @@ impl ChannelActorState {
         self.increment_remote_commitment_number();
         let peer_id = self.get_remote_peer_id();
         self.notify_owned_channel_updated(network).await;
-        if let Ok(channel_info) = (&*self).try_into() {
-            network
-                .send_message(NetworkActorMessage::new_event(
-                    NetworkActorEvent::OwnedChannelUpdateEvent(
-                        super::graph::OwnedChannelUpdateEvent::Up(channel_info),
-                    ),
-                ))
-                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-        }
         network
             .send_message(NetworkActorMessage::new_event(
                 NetworkActorEvent::ChannelReady(
