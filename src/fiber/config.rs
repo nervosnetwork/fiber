@@ -234,6 +234,33 @@ pub struct FiberConfig {
     )]
     pub(crate) gossip_store_maintenance_interval_ms: Option<u64>,
 
+    /// Gossip network num targeted active syncing peers. [default: None]
+    /// This is the number of peers to target for active syncing. This is the number of peers that we will
+    /// send GetBroadcastMessages message to obtain the gossip messages that we missed during the time we
+    /// were offiline. A larger number means more peers to receive updates from, but also more bandwidth usage.
+    /// If None, it will use the default value.
+    #[arg(
+        name = "FIBER_GOSSIP_NETWORK_NUM_TARGETED_ACTIVE_SYNCING_PEERS",
+        long = "fiber-gossip-network-num-targeted-active-syncing-peers",
+        env,
+        help = "Gossip network num targeted active syncing peers. [default: None]"
+    )]
+    pub(crate) gossip_network_num_targeted_active_syncing_peers: Option<usize>,
+
+    /// Gossip network num targeted outbound passive syncing peers. [default: None]
+    /// This is the number of peers to target for outbound passive syncing. This is the number of outbound peers
+    /// that we will send BroadcastMessageFilter to receive updates from them. A larger number means more
+    /// peers to receive updates from, but also more bandwidth usage. We only count the outbound peers here,
+    /// because outbound peers are less likely to be malicious, and we want to receive updates from them.
+    /// If None, it will use the default value.
+    #[arg(
+        name = "FIBER_GOSSIP_NETWORK_NUM_TARGETED_OUTBOUND_PASSIVE_SYNCING_PEERS",
+        long = "fiber-gossip-network-num-targeted-outbound-passive-syncing-peers",
+        env,
+        help = "Gossip network num targeted outbound passive syncing peers. [default: None]"
+    )]
+    pub(crate) gossip_network_num_targeted_outbound_passive_syncing_peers: Option<usize>,
+
     /// Whether to sync the network graph from the network. [default: true]
     #[arg(
         name = "FIBER_SYNC_NETWORK_GRAPH",

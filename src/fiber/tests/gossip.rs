@@ -71,6 +71,8 @@ impl GossipTestingContext {
             Duration::from_millis(50).into(),
             Duration::from_millis(50).into(),
             true,
+            None,
+            None,
             store.clone(),
             chain_actor.clone(),
             root_actor.get_cell(),
