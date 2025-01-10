@@ -501,7 +501,7 @@ pub struct AcceptChannelCommand {
     pub tlc_expiry_delta: Option<u64>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SendOnionPacketCommand {
     pub peeled_onion_packet: PeeledPaymentOnionPacket,
     pub previous_tlc: Option<(Hash256, u64)>,
@@ -1144,7 +1144,19 @@ where
             }
 
             NetworkActorCommand::SendPaymentOnionPacket(command) => {
-                let _ = self.handle_send_onion_packet_command(state, command).await;
+                let res = self
+                    .handle_send_onion_packet_command(state, command.clone())
+                    .await;
+                if let Err(err) = res {
+                    self.on_add_tlc_result_event(
+                        myself,
+                        state,
+                        command.payment_hash,
+                        Some((ProcessingChannelError::TlcForwardingError(err.clone()), err)),
+                        command.previous_tlc,
+                    )
+                    .await;
+                }
             }
             NetworkActorCommand::PeelPaymentOnionPacket(onion_packet, payment_hash, reply) => {
                 let response = onion_packet
@@ -1505,12 +1517,10 @@ where
                             .await
                             .record_payment_fail(&payment_session, error_detail.clone());
                         if need_to_retry {
-                            let res = self
-                                .try_payment_session(myself, state, payment_session.payment_hash())
-                                .await;
-                            if res.is_err() {
-                                debug!("Failed to retry payment session: {:?}", res);
-                            }
+                            // If this is the first hop error, like the WaitingTlcAck error,
+                            // we will just retry later, return Ok here for letting endpoint user
+                            // know payment session is created successfully
+                            self.register_payment_retry(myself, payment_hash);
                         } else {
                             self.set_payment_fail_with_error(
                                 &mut payment_session,
@@ -1537,11 +1547,13 @@ where
                 ..
             }) = &tcl_error_detail.extra_data
             {
-                let _ = network.send_message(NetworkActorMessage::new_command(
-                    NetworkActorCommand::ProcessBroadcastMessage(BroadcastMessage::ChannelUpdate(
-                        channel_update.clone(),
-                    )),
-                ));
+                network
+                    .send_message(NetworkActorMessage::new_command(
+                        NetworkActorCommand::BroadcastMessages(vec![
+                            BroadcastMessageWithTimestamp::ChannelUpdate(channel_update.clone()),
+                        ]),
+                    ))
+                    .expect(ASSUME_NETWORK_MYSELF_ALIVE);
             }
         }
         match tcl_error_detail.error_code() {
@@ -1763,14 +1775,10 @@ where
                 Err(err) => {
                     let need_retry = matches!(err, Error::SendPaymentFirstHopError(_, true));
                     if need_retry {
-                        // If this is the first hop error, like the WaitingTlcAck error,
+                        // If this is the first hop error, such as the WaitingTlcAck error,
                         // we will just retry later, return Ok here for letting endpoint user
                         // know payment session is created successfully
-                        myself.send_after(Duration::from_millis(500), move || {
-                            NetworkActorMessage::new_event(NetworkActorEvent::RetrySendPayment(
-                                payment_hash,
-                            ))
-                        });
+                        self.register_payment_retry(myself, payment_hash);
                         return Ok(payment_session);
                     } else {
                         return Err(err);
@@ -1786,6 +1794,12 @@ where
             });
             return Err(Error::SendPaymentError(error));
         }
+    }
+
+    fn register_payment_retry(&self, myself: ActorRef<NetworkActorMessage>, payment_hash: Hash256) {
+        myself.send_after(Duration::from_millis(500), move || {
+            NetworkActorMessage::new_event(NetworkActorEvent::RetrySendPayment(payment_hash))
+        });
     }
 
     async fn on_send_payment(
@@ -2212,7 +2226,7 @@ where
     {
         let chain = self.chain_actor.clone();
         // Spawn a new task to avoid blocking current actor message processing.
-        ractor::concurrency::tokio_primatives::spawn(async move {
+        ractor::concurrency::tokio_primitives::spawn(async move {
             debug!("Trying to broadcast transaction {:?}", &transaction);
             let result = match call_t!(
                 &chain,
@@ -2820,7 +2834,7 @@ where
                     );
                     // Notify outside observers.
                     network
-                        .send_message(NetworkActorMessage::new_event(                    NetworkActorEvent::FundingTransactionFailed(outpoint)
+                        .send_message(NetworkActorMessage::new_event(NetworkActorEvent::FundingTransactionFailed(outpoint)
                     ))
                         .expect(ASSUME_NETWORK_MYSELF_ALIVE);
                 }
@@ -2828,7 +2842,7 @@ where
                     error!("Failed to trace transaction {:?}: {:?}", &tx_hash, &err);
                     // Notify outside observers.
                     network
-                        .send_message(NetworkActorMessage::new_event(                    NetworkActorEvent::FundingTransactionFailed(outpoint)
+                        .send_message(NetworkActorMessage::new_event(NetworkActorEvent::FundingTransactionFailed(outpoint)
                     ))
                         .expect(ASSUME_NETWORK_MYSELF_ALIVE);
                 }
@@ -3029,6 +3043,8 @@ where
             Duration::from_millis(config.gossip_network_maintenance_interval_ms()).into(),
             Duration::from_millis(config.gossip_store_maintenance_interval_ms()).into(),
             config.announce_private_addr(),
+            config.gossip_network_num_targeted_active_syncing_peers,
+            config.gossip_network_num_targeted_outbound_passive_syncing_peers,
             self.store.clone(),
             self.chain_actor.clone(),
             myself.get_cell(),
@@ -3277,7 +3293,7 @@ where
             SupervisionEvent::ActorTerminated(who, _, _) => {
                 debug!("Actor {:?} terminated", who);
             }
-            SupervisionEvent::ActorPanicked(who, err) => {
+            SupervisionEvent::ActorFailed(who, err) => {
                 panic!("Actor unexpectedly panicked (id: {:?}): {:?}", who, err);
             }
             _ => {}

@@ -1224,10 +1224,12 @@ impl<S: GossipMessageStore + Send + Sync + 'static> Actor for ExtendedGossipMess
                 // Tick and later we will send the corresponding ChannelAnnouncement.
                 // So the downstream consumer need to either cache some of the messages and wait for the
                 // dependent messages to arrive or read the messages from the store directly.
-                myself.send_message(ExtendedGossipMessageStoreMessage::LoadMessagesFromStore(
-                    id,
-                    cursor.clone(),
-                ))?;
+                myself
+                    .send_message(ExtendedGossipMessageStoreMessage::LoadMessagesFromStore(
+                        id,
+                        cursor.clone(),
+                    ))
+                    .expect("myself alive");
                 state.output_ports.insert(
                     id,
                     BroadcastMessageOutput::new(cursor, Arc::clone(&output_port)),
@@ -1351,11 +1353,13 @@ pub enum ExtendedGossipMessageStoreMessage {
 pub(crate) struct GossipActorState<S> {
     store: ExtendedGossipMessageStore<S>,
     control: ServiceAsyncControl,
-    num_targeted_active_syncing_peers: usize,
     // The number of active syncing peers that we have finished syncing with.
-    // Together with the number of currect active syncing peers, this is
+    // Together with the number of current active syncing peers, this is
     // used to determine if we should start a new active syncing peer.
     num_finished_active_syncing_peers: usize,
+    // The number of targeted active syncing peers that we want to have.
+    // Currently we will only start this many active syncing peers.
+    num_targeted_active_syncing_peers: usize,
     // The number of outbound passive syncing peers that we want to have.
     // We only count outbound peers because the purpose of this number is to avoid eclipse attacks.
     // By maintaining a certain number of outbound passive syncing peers, we can ensure that we are
@@ -2091,6 +2095,8 @@ impl GossipProtocolHandle {
         gossip_network_maintenance_interval: Duration,
         gossip_store_maintenance_interval: Duration,
         announce_private_addr: bool,
+        num_targeted_active_syncing_peers: Option<usize>,
+        num_targeted_outbound_passive_syncing_peers: Option<usize>,
         store: S,
         chain_actor: ActorRef<CkbChainMessage>,
         supervisor: ActorCell,
@@ -2110,6 +2116,9 @@ impl GossipProtocolHandle {
                 gossip_network_maintenance_interval,
                 gossip_store_maintenance_interval,
                 announce_private_addr,
+                num_targeted_active_syncing_peers.unwrap_or(MAX_NUM_OF_ACTIVE_SYNCING_PEERS),
+                num_targeted_outbound_passive_syncing_peers
+                    .unwrap_or(MIN_NUM_OF_PASSIVE_SYNCING_PEERS),
                 store,
                 chain_actor,
             ),
@@ -2154,6 +2163,8 @@ where
         Duration,
         Duration,
         bool,
+        usize,
+        usize,
         S,
         ActorRef<CkbChainMessage>,
     );
@@ -2167,6 +2178,8 @@ where
             network_maintenance_interval,
             store_maintenance_interval,
             announce_private_addr,
+            num_targeted_active_syncing_peers,
+            num_targeted_outbound_passive_syncing_peers,
             store,
             chain_actor,
         ): Self::Arguments,
@@ -2194,8 +2207,8 @@ where
         let state = Self::State {
             store,
             control,
-            num_targeted_active_syncing_peers: MAX_NUM_OF_ACTIVE_SYNCING_PEERS,
-            num_targeted_outbound_passive_syncing_peers: MIN_NUM_OF_PASSIVE_SYNCING_PEERS,
+            num_targeted_active_syncing_peers,
+            num_targeted_outbound_passive_syncing_peers,
             myself,
             chain_actor,
             next_request_id: Default::default(),
@@ -2216,7 +2229,7 @@ where
             SupervisionEvent::ActorTerminated(who, _, _) => {
                 debug!("{:?} terminated", who);
             }
-            SupervisionEvent::ActorPanicked(who, err) => {
+            SupervisionEvent::ActorFailed(who, err) => {
                 panic!("Actor unexpectedly panicked (id: {:?}): {:?}", who, err);
             }
             _ => {}
@@ -2249,7 +2262,7 @@ where
             }
             GossipActorMessage::QueryBroadcastMessages(peer, queries) => {
                 let id = state.get_and_increment_request_id();
-                state
+                if let Err(e) = state
                     .send_message_to_peer(
                         &peer,
                         GossipMessage::QueryBroadcastMessages(QueryBroadcastMessages {
@@ -2258,7 +2271,13 @@ where
                             queries,
                         }),
                     )
-                    .await?;
+                    .await
+                {
+                    error!(
+                        "Failed to send query broadcast messages to peer {:?}: {:?}",
+                        &peer, e
+                    );
+                }
             }
             GossipActorMessage::TryBroadcastMessages(messages) => {
                 state
@@ -2334,8 +2353,15 @@ where
                                 chain_hash: get_chain_hash(),
                                 queries: queries.clone(),
                             });
-                        send_message_to_session(&state.control, peer_state.session_id, message)
-                            .await?;
+                        if let Err(e) =
+                            send_message_to_session(&state.control, peer_state.session_id, message)
+                                .await
+                        {
+                            error!(
+                                "Failed to send query broadcast messages to peer {:?}: {:?}",
+                                &peer_state.session_id, e
+                            );
+                        }
                     }
                 }
             }
@@ -2372,7 +2398,10 @@ where
                         chain_hash,
                         after_cursor,
                     }) => {
-                        check_chain_hash(&chain_hash)?;
+                        if let Err(e) = check_chain_hash(&chain_hash) {
+                            error!("Failed to check chain hash: {:?}", e);
+                            return Ok(());
+                        }
                         if after_cursor.is_max() {
                             info!(
                                 "Received BroadcastMessagesFilter with max cursor from peer, stopping filter processor to {:?}",
@@ -2470,7 +2499,10 @@ where
                         chain_hash,
                         queries,
                     }) => {
-                        check_chain_hash(&chain_hash)?;
+                        if let Err(e) = check_chain_hash(&chain_hash) {
+                            error!("Failed to check chain hash: {:?}", e);
+                            return Ok(());
+                        }
                         if queries.len() > MAX_NUM_OF_BROADCAST_MESSAGES as usize {
                             warn!(
                                 "Received QueryBroadcastMessages with too many queries: {:?}",

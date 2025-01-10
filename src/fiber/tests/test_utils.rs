@@ -59,6 +59,7 @@ use crate::{
 
 static RETAIN_VAR: &str = "TEST_TEMP_RETAIN";
 pub(crate) const MIN_RESERVED_CKB: u128 = 4200000000;
+pub(crate) const HUGE_CKB_AMOUNT: u128 = MIN_RESERVED_CKB + 1000000000000 as u128;
 
 #[derive(Debug)]
 pub struct TempDir(ManuallyDrop<OldTempDir>);
@@ -560,6 +561,7 @@ impl NetworkNode {
         &mut self,
         recipient: &NetworkNode,
         amount: u128,
+        dry_run: bool,
     ) -> std::result::Result<SendPaymentResponse, String> {
         self.send_payment(SendPaymentCommand {
             target_pubkey: Some(recipient.pubkey.clone()),
@@ -574,7 +576,32 @@ impl NetworkNode {
             keysend: Some(true),
             udt_type_script: None,
             allow_self_payment: false,
-            dry_run: false,
+            dry_run,
+            hop_hints: None,
+        })
+        .await
+    }
+
+    pub async fn send_payment_keysend_to_self(
+        &mut self,
+        amount: u128,
+        dry_run: bool,
+    ) -> std::result::Result<SendPaymentResponse, String> {
+        let pubkey = self.pubkey.clone();
+        self.send_payment(SendPaymentCommand {
+            target_pubkey: Some(pubkey),
+            amount: Some(amount),
+            payment_hash: None,
+            final_tlc_expiry_delta: None,
+            tlc_expiry_limit: None,
+            invoice: None,
+            timeout: None,
+            max_fee_amount: None,
+            max_parts: None,
+            keysend: Some(true),
+            udt_type_script: None,
+            allow_self_payment: true,
+            dry_run,
             hop_hints: None,
         })
         .await
