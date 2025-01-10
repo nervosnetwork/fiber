@@ -130,6 +130,7 @@ pub(crate) struct SendPaymentCommandParams {
     dry_run: Option<bool>,
 }
 
+/// A hop hint is a hint for a node to use a specific channel.
 #[serde_as]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HopHint {

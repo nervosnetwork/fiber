@@ -48,6 +48,8 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
     * [Type `Channel`](#type-channel)
     * [Type `ChannelInfo`](#type-channelinfo)
     * [Type `ChannelState`](#type-channelstate)
+    * [Type `HopHint`](#type-hophint)
+    * [Type `NewInvoiceParams`](#type-newinvoiceparams)
     * [Type `NodeInfo`](#type-nodeinfo)
     * [Type `PaymentSessionStatus`](#type-paymentsessionstatus)
     * [Type `RemoveTlcReason`](#type-removetlcreason)
@@ -60,7 +62,6 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
 <a id="cch"></a>
 ### Module `Cch`
 RPC module for cross chain hub demonstration.
- This is the seccond line
 
 
 <a id="cch-send_btc"></a>
@@ -713,6 +714,24 @@ The Channel information.
 * `chain_hash` - Hash256, The chain hash of the channel.
 * `udt_type_script` - `Option<Script>`, The UDT type script of the channel.
 
+<a id="#type-newinvoiceparams"></a>
+### Type `NewInvoiceParams`
+
+The parameter struct for generating a new invoice.
+
+
+#### Fields
+
+* `amount` - u128, The amount of the invoice.
+* `description` - `Option<String>`, The description of the invoice.
+* `currency` - Currency, The currency of the invoice.
+* `payment_preimage` - Hash256, The payment preimage of the invoice.
+* `expiry` - `Option<u64>`, The expiry time of the invoice.
+* `fallback_address` - `Option<String>`, The fallback address of the invoice.
+* `final_expiry_delta` - `Option<u64>`, The final HTLC timeout of the invoice.
+* `udt_type_script` - `Option<Script>`, The UDT type script of the invoice.
+* `hash_algorithm` - `Option<HashAlgorithm>`, The hash algorithm of the invoice.
+
 <a id="#type-paymentsessionstatus"></a>
 ### Type `PaymentSessionStatus`
 
@@ -725,4 +744,16 @@ The status of a payment, will update as the payment progresses.
 * `Inflight` - , the first hop AddTlc is sent successfully and waiting for the response
 * `Success` - , related HTLC is successfully settled
 * `Failed` - , related HTLC is failed
+
+<a id="#type-hophint"></a>
+### Type `HopHint`
+
+A hop hint is a hint for a node to use a specific channel.
+
+
+#### Fields
+
+* `pubkey` - Pubkey, The public key of the node
+* `channel_funding_tx` - Hash256, The funding transaction hash of the channel outpoint
+* `inbound` - bool, inbound or outbound to use this channel
 
