@@ -246,6 +246,8 @@ async fn do_test_owned_channel_saved_to_the_owner_graph(public: bool) {
         HashSet::from([node1_channel.node1_peerid(), node1_channel.node2_peerid()]),
         HashSet::from([node1_id.clone(), node2_id.clone()])
     );
+    assert_ne!(node1_channel.update_of_node1, None);
+    assert_ne!(node1_channel.update_of_node2, None);
     let node1_nodes = node1.get_network_graph_nodes().await;
     assert_eq!(node1_nodes.len(), 2);
     for node in node1_nodes {
@@ -255,6 +257,8 @@ async fn do_test_owned_channel_saved_to_the_owner_graph(public: bool) {
     let node2_channels = node2.get_network_graph_channels().await;
     assert_eq!(node2_channels.len(), 1);
     let node2_channel = &node2_channels[0];
+    assert_ne!(node2_channel.update_of_node1, None);
+    assert_ne!(node2_channel.update_of_node2, None);
     assert_eq!(
         HashSet::from([node2_channel.node1_peerid(), node2_channel.node2_peerid()]),
         HashSet::from([node1_id, node2_id])

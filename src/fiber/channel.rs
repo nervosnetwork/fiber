@@ -69,7 +69,7 @@ use tentacle::secio::PeerId;
 use thiserror::Error;
 use tokio::sync::oneshot;
 
-use super::types::ForwardTlcResult;
+use super::{graph::ChannelUpdateInfo, types::ForwardTlcResult};
 use std::{
     collections::HashSet,
     fmt::{self, Debug},
@@ -479,7 +479,22 @@ where
             }
             FiberChannelMessage::UpdateTlcInfo(update_tlc_info) => {
                 state.remote_tlc_info = Some(update_tlc_info.into());
-
+                let channel_outpoint = state.must_get_funding_transaction_outpoint();
+                let peer_id = state.get_remote_pubkey();
+                let channel_update_info = state
+                    .get_remote_channel_update_info()
+                    .expect("remote tlc info set above; qed");
+                self.network
+                    .send_message(NetworkActorMessage::new_event(
+                        NetworkActorEvent::OwnedChannelUpdateEvent(
+                            super::graph::OwnedChannelUpdateEvent::Updated(
+                                channel_outpoint,
+                                peer_id,
+                                channel_update_info,
+                            ),
+                        ),
+                    ))
+                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
                 Ok(())
             }
             FiberChannelMessage::AddTlc(add_tlc) => {
@@ -3673,7 +3688,26 @@ impl ChannelActorState {
                 ))
                 .expect(ASSUME_NETWORK_ACTOR_ALIVE);
         }
+        self.update_graph_for_channel_change(network);
         self.send_update_tlc_info_message(network);
+    }
+
+    fn update_graph_for_channel_change(&mut self, network: &ActorRef<NetworkActorMessage>) {
+        // Also update network graph with latest local channel update info.
+        let channel_outpoint = self.must_get_funding_transaction_outpoint();
+        let peer_id = self.get_local_pubkey();
+        let channel_update_info = self.get_local_channel_update_info();
+        network
+            .send_message(NetworkActorMessage::new_event(
+                NetworkActorEvent::OwnedChannelUpdateEvent(
+                    super::graph::OwnedChannelUpdateEvent::Updated(
+                        channel_outpoint,
+                        peer_id,
+                        channel_update_info,
+                    ),
+                ),
+            ))
+            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
     }
 
     fn send_update_tlc_info_message(&mut self, network: &ActorRef<NetworkActorMessage>) {
@@ -4352,12 +4386,36 @@ impl ChannelActorState {
         self.id
     }
 
+    pub fn get_local_pubkey(&self) -> Pubkey {
+        self.local_pubkey
+    }
+
     pub fn get_local_peer_id(&self) -> PeerId {
         self.local_pubkey.tentacle_peer_id()
     }
 
+    pub fn get_local_channel_update_info(&self) -> ChannelUpdateInfo {
+        let balance = self.get_remote_balance();
+        let mut info = ChannelUpdateInfo::from(&self.local_tlc_info);
+        info.receivable_balance = Some(balance);
+        info
+    }
+
+    pub fn get_remote_pubkey(&self) -> Pubkey {
+        self.remote_pubkey
+    }
+
     pub fn get_remote_peer_id(&self) -> PeerId {
         self.remote_pubkey.tentacle_peer_id()
+    }
+
+    pub fn get_remote_channel_update_info(&self) -> Option<ChannelUpdateInfo> {
+        let balance = self.get_local_balance();
+        self.remote_tlc_info.as_ref().map(|tlc_info| {
+            let mut info = ChannelUpdateInfo::from(tlc_info);
+            info.receivable_balance = Some(balance);
+            info
+        })
     }
 
     pub fn get_local_secnonce(&self) -> SecNonce {
@@ -5679,15 +5737,6 @@ impl ChannelActorState {
         self.increment_remote_commitment_number();
         let peer_id = self.get_remote_peer_id();
         self.send_update_tlc_info_message(network);
-        network
-            .send_message(NetworkActorMessage::new_event(
-                NetworkActorEvent::ChannelReady(
-                    self.get_id(),
-                    peer_id.clone(),
-                    self.must_get_funding_transaction_outpoint(),
-                ),
-            ))
-            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
         if let Ok(channel_info) = (&*self).try_into() {
             network
                 .send_message(NetworkActorMessage::new_event(
@@ -5697,6 +5746,15 @@ impl ChannelActorState {
                 ))
                 .expect(ASSUME_NETWORK_ACTOR_ALIVE);
         }
+        network
+            .send_message(NetworkActorMessage::new_event(
+                NetworkActorEvent::ChannelReady(
+                    self.get_id(),
+                    peer_id.clone(),
+                    self.must_get_funding_transaction_outpoint(),
+                ),
+            ))
+            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
     }
 
     fn append_remote_commitment_point(&mut self, commitment_point: Pubkey) {

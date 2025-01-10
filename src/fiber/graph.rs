@@ -300,12 +300,8 @@ pub enum OwnedChannelUpdateEvent {
     /// The channel is down and should not be used for routing payments.
     /// This normally means the peer is not reachable.
     Down(OutPoint),
-    /// One direction of the channel is disabled for forwarding payments.
-    Disabled(OutPoint, Pubkey),
-    /// One direction of the channel is enabled for forwarding payments.
-    Enabled(OutPoint, Pubkey),
-    /// The balance of one direction has been updated (we can forward this amount to the other party).
-    BalanceUpdate(OutPoint, Pubkey, u128),
+    /// One direction of the channel is updated (e.g. new balance, new fee rate).
+    Updated(OutPoint, Pubkey, ChannelUpdateInfo),
 }
 
 #[derive(Clone, Debug)]
@@ -431,45 +427,13 @@ where
             OwnedChannelUpdateEvent::Down(channel_outpoint) => {
                 self.channels.remove(&channel_outpoint);
             }
-            OwnedChannelUpdateEvent::Disabled(channel_outpoint, node) => {
+            OwnedChannelUpdateEvent::Updated(channel_outpoint, node, channel_update) => {
                 if let Some(channel) = self.channels.get_mut(&channel_outpoint) {
                     if node == channel.node2() {
-                        if let Some(info) = channel.update_of_node2.as_mut() {
-                            info.enabled = false;
-                        }
+                        channel.update_of_node2 = Some(channel_update);
                     }
                     if node == channel.node1() {
-                        if let Some(info) = channel.update_of_node1.as_mut() {
-                            info.enabled = false;
-                        }
-                    }
-                }
-            }
-            OwnedChannelUpdateEvent::Enabled(channel_outpoint, node) => {
-                if let Some(channel) = self.channels.get_mut(&channel_outpoint) {
-                    if node == channel.node2() {
-                        if let Some(info) = channel.update_of_node2.as_mut() {
-                            info.enabled = true;
-                        }
-                    }
-                    if node == channel.node1() {
-                        if let Some(info) = channel.update_of_node1.as_mut() {
-                            info.enabled = true;
-                        }
-                    }
-                }
-            }
-            OwnedChannelUpdateEvent::BalanceUpdate(channel_outpoint, node, balance) => {
-                if let Some(channel) = self.channels.get_mut(&channel_outpoint) {
-                    if node == channel.node2() {
-                        if let Some(info) = channel.update_of_node2.as_mut() {
-                            info.receivable_balance = Some(balance);
-                        }
-                    }
-                    if node == channel.node1() {
-                        if let Some(info) = channel.update_of_node1.as_mut() {
-                            info.receivable_balance = Some(balance);
-                        }
+                        channel.update_of_node1 = Some(channel_update);
                     }
                 }
             }
