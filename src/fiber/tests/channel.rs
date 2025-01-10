@@ -280,8 +280,7 @@ async fn test_owned_private_channel_saved_to_the_owner_graph() {
     do_test_owned_channel_saved_to_the_owner_graph(false).await;
 }
 
-#[tokio::test]
-async fn test_update_graph_balance_after_payment() {
+async fn do_test_update_graph_balance_after_payment(public: bool) {
     init_tracing();
 
     let _span = tracing::info_span!("node", node = "test").entered();
@@ -289,7 +288,7 @@ async fn test_update_graph_balance_after_payment() {
     let node_b_funding_amount = 6200000000;
 
     let (node_a, node_b, new_channel_id) =
-        create_nodes_with_established_channel(node_a_funding_amount, node_b_funding_amount, true)
+        create_nodes_with_established_channel(node_a_funding_amount, node_b_funding_amount, public)
             .await;
     let node_a_pubkey = node_a.pubkey;
     let node_b_pubkey = node_b.pubkey;
@@ -447,6 +446,16 @@ async fn test_update_graph_balance_after_payment() {
         node_a_new_balance,
         node_b_new_balance,
     );
+}
+
+#[tokio::test]
+async fn test_update_graph_balance_after_payment_public_channel() {
+    do_test_update_graph_balance_after_payment(true).await;
+}
+
+#[tokio::test]
+async fn test_update_graph_balance_after_payment_private_channel() {
+    do_test_update_graph_balance_after_payment(false).await;
 }
 
 #[tokio::test]
