@@ -2293,6 +2293,23 @@ where
 
         Ok(())
     }
+
+    async fn post_stop(
+        &self,
+        _myself: ActorRef<Self::Msg>,
+        state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        if let Some(outpoint) = state.get_funding_transaction_outpoint() {
+            self.network
+                .send_message(NetworkActorMessage::new_event(
+                    NetworkActorEvent::OwnedChannelUpdateEvent(
+                        super::graph::OwnedChannelUpdateEvent::Down(outpoint),
+                    ),
+                ))
+                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+        }
+        Ok(())
+    }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

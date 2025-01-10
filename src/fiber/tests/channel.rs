@@ -280,6 +280,167 @@ async fn test_owned_private_channel_saved_to_the_owner_graph() {
     do_test_owned_channel_saved_to_the_owner_graph(false).await;
 }
 
+async fn do_test_owned_channel_removed_from_graph_on_disconnected(public: bool) {
+    let node1_funding_amount = 100000000000;
+    let node2_funding_amount = 6200000000;
+
+    let (mut node1, mut node2, _new_channel_id, _) =
+        NetworkNode::new_2_nodes_with_established_channel(
+            node1_funding_amount,
+            node2_funding_amount,
+            public,
+        )
+        .await;
+
+    let node1_id = node1.peer_id.clone();
+    let node2_id = node2.peer_id.clone();
+
+    let node1_channels = node1.get_network_graph_channels().await;
+    assert_ne!(node1_channels, vec![]);
+    let node2_channels = node2.get_network_graph_channels().await;
+    assert_ne!(node2_channels, vec![]);
+
+    node1
+        .network_actor
+        .send_message(NetworkActorMessage::new_command(
+            NetworkActorCommand::DisconnectPeer(node2_id.clone()),
+        ))
+        .expect("node_a alive");
+
+    node1
+        .expect_event(|event| match event {
+            NetworkServiceEvent::PeerDisConnected(peer_id, _) => {
+                assert_eq!(peer_id, &node2_id);
+                true
+            }
+            _ => false,
+        })
+        .await;
+
+    node2
+        .expect_event(|event| match event {
+            NetworkServiceEvent::PeerDisConnected(peer_id, _) => {
+                assert_eq!(peer_id, &node1_id);
+                true
+            }
+            _ => false,
+        })
+        .await;
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    let node1_channels = node1.get_network_graph_channels().await;
+    assert_eq!(node1_channels, vec![]);
+    let node2_channels = node2.get_network_graph_channels().await;
+    assert_eq!(node2_channels, vec![]);
+}
+
+#[tokio::test]
+async fn test_owned_channel_removed_from_graph_on_disconnected_public_channel() {
+    do_test_owned_channel_removed_from_graph_on_disconnected(true).await;
+}
+
+#[tokio::test]
+async fn test_owned_channel_removed_from_graph_on_disconnected_private_channel() {
+    do_test_owned_channel_removed_from_graph_on_disconnected(false).await;
+}
+
+async fn do_test_owned_channel_saved_to_graph_on_reconnected(public: bool) {
+    let node1_funding_amount = 100000000000;
+    let node2_funding_amount = 6200000000;
+
+    let (mut node1, mut node2, _new_channel_id, _) =
+        NetworkNode::new_2_nodes_with_established_channel(
+            node1_funding_amount,
+            node2_funding_amount,
+            public,
+        )
+        .await;
+
+    let node1_id = node1.peer_id.clone();
+    let node2_id = node2.peer_id.clone();
+
+    let node1_channels = node1.get_network_graph_channels().await;
+    assert_ne!(node1_channels, vec![]);
+    let node2_channels = node2.get_network_graph_channels().await;
+    assert_ne!(node2_channels, vec![]);
+
+    node1
+        .network_actor
+        .send_message(NetworkActorMessage::new_command(
+            NetworkActorCommand::DisconnectPeer(node2_id.clone()),
+        ))
+        .expect("node_a alive");
+
+    node1
+        .expect_event(|event| match event {
+            NetworkServiceEvent::PeerDisConnected(peer_id, _) => {
+                assert_eq!(peer_id, &node2_id);
+                true
+            }
+            _ => false,
+        })
+        .await;
+
+    node2
+        .expect_event(|event| match event {
+            NetworkServiceEvent::PeerDisConnected(peer_id, _) => {
+                assert_eq!(peer_id, &node1_id);
+                true
+            }
+            _ => false,
+        })
+        .await;
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    let node1_channels = node1.get_network_graph_channels().await;
+    assert_eq!(node1_channels, vec![]);
+    let node2_channels = node2.get_network_graph_channels().await;
+    assert_eq!(node2_channels, vec![]);
+
+    // Don't use `connect_to` here as that may consume the `ChannelCreated` event.
+    // This is due to tentacle connection is async. We may actually send
+    // the `ChannelCreated` event before the `PeerConnected` event.
+    node1.connect_to_nonblocking(&node2).await;
+
+    node1
+        .expect_event(|event| match event {
+            NetworkServiceEvent::ChannelCreated(peer_id, channel_id) => {
+                println!("A channel ({:?}) to {:?} create", channel_id, peer_id);
+                assert_eq!(peer_id, &node2_id);
+                true
+            }
+            _ => false,
+        })
+        .await;
+
+    node2
+        .expect_event(|event| match event {
+            NetworkServiceEvent::ChannelCreated(peer_id, channel_id) => {
+                println!("A channel ({:?}) to {:?} create", channel_id, peer_id);
+                assert_eq!(peer_id, &node1_id);
+                true
+            }
+            _ => false,
+        })
+        .await;
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    let node1_channels = node1.get_network_graph_channels().await;
+    assert_ne!(node1_channels, vec![]);
+    let node2_channels = node2.get_network_graph_channels().await;
+    assert_ne!(node2_channels, vec![]);
+}
+
+#[tokio::test]
+async fn test_owned_channel_saved_to_graph_on_reconnected_public_channel() {
+    do_test_owned_channel_saved_to_graph_on_reconnected(true).await;
+}
+
+#[tokio::test]
+async fn test_owned_channel_saved_to_graph_on_reconnected_private_channel() {
+    do_test_owned_channel_saved_to_graph_on_reconnected(false).await;
+}
+
 async fn do_test_update_graph_balance_after_payment(public: bool) {
     init_tracing();
 
