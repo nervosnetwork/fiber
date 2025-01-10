@@ -487,6 +487,16 @@ where
         timestamp: u64,
         channel_announcement: ChannelAnnouncement,
     ) -> Option<Cursor> {
+        if self.source == channel_announcement.node1_id
+            || self.source == channel_announcement.node2_id
+        {
+            // We don't need to process our own channel announcement with gossip messages.
+            // They are processed by passing OwnedChannelUpdateEvents to the graph.
+            // These are real-time events with more detailed information (e.g. balance).
+            // We don't want to overwrite their detailed information here.
+            return None;
+        }
+
         match self.channels.get(&channel_announcement.channel_outpoint) {
             Some(_channel) => {
                 trace!(
@@ -527,11 +537,16 @@ where
     }
 
     fn process_channel_update(&mut self, channel_update: ChannelUpdate) -> Option<Cursor> {
+        let source = self.source;
         let channel_outpoint = &channel_update.channel_outpoint;
-        // The channel update message may have smaller timestamp than channel announcement.
-        // So it is possible that the channel announcement is not loaded into the graph yet,
-        // when we receive the channel update message.
         let channel = self.load_channel_info_mut(channel_outpoint)?;
+        if channel.node1() == source || channel.node2() == source {
+            // We don't need to process our own channel update with gossip messages.
+            // They are processed by passing OwnedChannelUpdateEvents to the graph.
+            // These are real-time events with more detailed information (e.g. balance).
+            // We don't want to overwrite their detailed information here.
+            return None;
+        }
         let update_info = if channel_update.is_update_of_node_1() {
             &mut channel.update_of_node1
         } else {
