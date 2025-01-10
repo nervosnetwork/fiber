@@ -219,10 +219,7 @@ async fn test_create_public_channel() {
     .await;
 }
 
-#[tokio::test]
-async fn test_public_channel_saved_to_the_owner_graph() {
-    init_tracing();
-
+async fn do_test_owned_channel_saved_to_the_owner_graph(public: bool) {
     let node1_funding_amount = 100000000000;
     let node2_funding_amount = 6200000000;
 
@@ -230,12 +227,12 @@ async fn test_public_channel_saved_to_the_owner_graph() {
         NetworkNode::new_2_nodes_with_established_channel(
             node1_funding_amount,
             node2_funding_amount,
-            true,
+            public,
         )
         .await;
 
     // Wait for the channel announcement to be broadcasted
-    tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
     let node1_id = node1.peer_id.clone();
     node1.stop().await;
@@ -267,6 +264,16 @@ async fn test_public_channel_saved_to_the_owner_graph() {
     for node in node2_nodes {
         assert!(node.node_id == node2_channel.node1() || node.node_id == node2_channel.node2());
     }
+}
+
+#[tokio::test]
+async fn test_owned_public_channel_saved_to_the_owner_graph() {
+    do_test_owned_channel_saved_to_the_owner_graph(true).await;
+}
+
+#[tokio::test]
+async fn test_owned_private_channel_saved_to_the_owner_graph() {
+    do_test_owned_channel_saved_to_the_owner_graph(false).await;
 }
 
 #[tokio::test]
