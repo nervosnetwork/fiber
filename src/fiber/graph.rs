@@ -298,6 +298,12 @@ pub enum OwnedChannelUpdateEvent {
 
 #[derive(Clone, Debug)]
 pub struct NetworkGraph<S> {
+    // Whether to always process gossip messages for our own channels.
+    // See comments in should_process_gossip_message_for_channel for why we need this.
+    // TLDR: Most of the tests do not need this. Only tests in src/fiber/tests/graph.rs need this.
+    // We will only set this to true for tests in src/fiber/tests/graph.rs.
+    #[cfg(test)]
+    pub always_process_gossip_message: bool,
     // The pubkey of the node that is running this instance of the network graph.
     source: Pubkey,
     // All the channels in the network.
@@ -346,6 +352,8 @@ where
 {
     pub fn new(store: S, source: Pubkey, announce_private_addr: bool) -> Self {
         let mut network_graph = Self {
+            #[cfg(test)]
+            always_process_gossip_message: false,
             source,
             channels: HashMap::new(),
             nodes: HashMap::new(),
@@ -482,18 +490,31 @@ where
         self.channels.get_mut(channel_outpoint)
     }
 
+    // We don't need to process our own channel announcement with gossip messages.
+    // They are processed by passing OwnedChannelUpdateEvents to the graph.
+    // These are real-time events with more detailed information (e.g. balance).
+    // We don't want to overwrite their detailed information here.
+    // But tests in src/fiber/tests/graph.rs need to process gossip messages
+    // to update the network graph. Many of the tests are messages from the graph.source.
+    // If we ignore these messages, the graph won't be updated. And many tests will fail.
+    fn should_process_gossip_message_for_channel(&self, channel_outpoint: &OutPoint) -> bool {
+        #[cfg(test)]
+        if self.always_process_gossip_message {
+            return true;
+        }
+        match self.channels.get(channel_outpoint) {
+            Some(channel) => !(self.source == channel.node1() || self.source == channel.node2()),
+            // Channel does not exist yet, process the message.
+            None => true,
+        }
+    }
+
     fn process_channel_announcement(
         &mut self,
         timestamp: u64,
         channel_announcement: ChannelAnnouncement,
     ) -> Option<Cursor> {
-        if self.source == channel_announcement.node1_id
-            || self.source == channel_announcement.node2_id
-        {
-            // We don't need to process our own channel announcement with gossip messages.
-            // They are processed by passing OwnedChannelUpdateEvents to the graph.
-            // These are real-time events with more detailed information (e.g. balance).
-            // We don't want to overwrite their detailed information here.
+        if !self.should_process_gossip_message_for_channel(&channel_announcement.channel_outpoint) {
             return None;
         }
 
@@ -537,16 +558,10 @@ where
     }
 
     fn process_channel_update(&mut self, channel_update: ChannelUpdate) -> Option<Cursor> {
-        let source = self.source;
-        let channel_outpoint = &channel_update.channel_outpoint;
-        let channel = self.load_channel_info_mut(channel_outpoint)?;
-        if channel.node1() == source || channel.node2() == source {
-            // We don't need to process our own channel update with gossip messages.
-            // They are processed by passing OwnedChannelUpdateEvents to the graph.
-            // These are real-time events with more detailed information (e.g. balance).
-            // We don't want to overwrite their detailed information here.
+        if !self.should_process_gossip_message_for_channel(&channel_update.channel_outpoint) {
             return None;
         }
+        let channel = self.load_channel_info_mut(&channel_update.channel_outpoint)?;
         let update_info = if channel_update.is_update_of_node_1() {
             &mut channel.update_of_node1
         } else {

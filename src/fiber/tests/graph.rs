@@ -59,7 +59,8 @@ impl MockNetworkGraph {
                 0,
             ));
         }
-        let graph = NetworkGraph::new(store.clone(), public_key1.into(), true);
+        let mut graph = NetworkGraph::new(store.clone(), public_key1.into(), true);
+        graph.always_process_gossip_message = true;
 
         Self {
             keys: keypairs.into_iter().map(|x| x.1).collect(),
