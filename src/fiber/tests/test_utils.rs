@@ -2,6 +2,7 @@ use crate::fiber::channel::ChannelActorState;
 use crate::fiber::channel::ChannelActorStateStore;
 use crate::fiber::channel::ChannelCommand;
 use crate::fiber::channel::ChannelCommandWithId;
+use crate::fiber::channel::ReloadParams;
 use crate::fiber::graph::NetworkGraphStateStore;
 use crate::fiber::graph::PaymentSession;
 use crate::fiber::graph::PaymentSessionStatus;
@@ -675,14 +676,18 @@ impl NetworkNode {
         res
     }
 
-    pub async fn update_channel_actor_state(&mut self, state: ChannelActorState) {
+    pub async fn update_channel_actor_state(
+        &mut self,
+        state: ChannelActorState,
+        reload_params: Option<ReloadParams>,
+    ) {
         let channel_id = state.id.clone();
         self.store.insert_channel_actor_state(state);
         self.network_actor
             .send_message(NetworkActorMessage::Command(
                 NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
                     channel_id,
-                    command: ChannelCommand::ReloadState(),
+                    command: ChannelCommand::ReloadState(reload_params.unwrap_or_default()),
                 }),
             ))
             .expect("network actor is live");
@@ -696,7 +701,8 @@ impl NetworkNode {
     ) {
         let mut channel_actor_state = self.get_channel_actor_state(channel_id);
         channel_actor_state.to_local_amount = new_to_local_amount;
-        self.update_channel_actor_state(channel_actor_state).await;
+        self.update_channel_actor_state(channel_actor_state, None)
+            .await;
     }
 
     pub async fn update_channel_remote_balance(
@@ -706,13 +712,27 @@ impl NetworkNode {
     ) {
         let mut channel_actor_state = self.get_channel_actor_state(channel_id);
         channel_actor_state.to_remote_amount = new_to_remote_amount;
-        self.update_channel_actor_state(channel_actor_state).await;
+        self.update_channel_actor_state(channel_actor_state, None)
+            .await;
     }
 
     pub async fn disable_channel(&mut self, channel_id: Hash256) {
         let mut channel_actor_state = self.get_channel_actor_state(channel_id);
         channel_actor_state.local_tlc_info.enabled = false;
-        self.update_channel_actor_state(channel_actor_state).await;
+        self.update_channel_actor_state(channel_actor_state, None)
+            .await;
+    }
+
+    pub async fn disable_channel_stealthy(&mut self, channel_id: Hash256) {
+        let mut channel_actor_state = self.get_channel_actor_state(channel_id);
+        channel_actor_state.local_tlc_info.enabled = false;
+        self.update_channel_actor_state(
+            channel_actor_state,
+            Some(ReloadParams {
+                notify_changes: false,
+            }),
+        )
+        .await;
     }
 
     pub fn get_payment_session(&self, payment_hash: Hash256) -> Option<PaymentSession> {

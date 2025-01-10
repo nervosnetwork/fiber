@@ -141,7 +141,22 @@ pub enum ChannelCommand {
     Update(UpdateCommand, RpcReplyPort<Result<(), String>>),
     ForwardTlcResult(ForwardTlcResult),
     #[cfg(test)]
-    ReloadState(),
+    ReloadState(ReloadParams),
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+pub struct ReloadParams {
+    pub notify_changes: bool,
+}
+
+#[cfg(test)]
+impl Default for ReloadParams {
+    fn default() -> Self {
+        Self {
+            notify_changes: true,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -1827,11 +1842,15 @@ where
                 Ok(())
             }
             #[cfg(test)]
-            ChannelCommand::ReloadState() => {
+            ChannelCommand::ReloadState(reload_params) => {
                 *state = self
                     .store
                     .get_channel_actor_state(&state.get_id())
                     .expect("load channel state failed");
+                let ReloadParams { notify_changes } = reload_params;
+                if notify_changes {
+                    state.notify_owned_channel_updated(&self.network).await;
+                }
                 Ok(())
             }
         }

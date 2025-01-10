@@ -5002,8 +5002,8 @@ async fn test_send_payment_with_disable_channel() {
     // sleep for a while
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
-    // begin to set channel disable
-    node_2.disable_channel(channels[1]).await;
+    // begin to set channel disable, but do not notify the network
+    node_2.disable_channel_stealthy(channels[1]).await;
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
     let message = |rpc_reply| -> NetworkActorMessage {
