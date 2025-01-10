@@ -479,22 +479,7 @@ where
             }
             FiberChannelMessage::UpdateTlcInfo(update_tlc_info) => {
                 state.remote_tlc_info = Some(update_tlc_info.into());
-                let channel_outpoint = state.must_get_funding_transaction_outpoint();
-                let peer_id = state.get_remote_pubkey();
-                let channel_update_info = state
-                    .get_remote_channel_update_info()
-                    .expect("remote tlc info set above; qed");
-                self.network
-                    .send_message(NetworkActorMessage::new_event(
-                        NetworkActorEvent::OwnedChannelUpdateEvent(
-                            super::graph::OwnedChannelUpdateEvent::Updated(
-                                channel_outpoint,
-                                peer_id,
-                                channel_update_info,
-                            ),
-                        ),
-                    ))
-                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                state.update_graph_for_remote_channel_change(&self.network);
                 Ok(())
             }
             FiberChannelMessage::AddTlc(add_tlc) => {
@@ -711,6 +696,7 @@ where
         state: &mut ChannelActorState,
         inbound: bool,
     ) {
+        let previous_balance = state.get_local_balance();
         let pending_tlcs = if inbound {
             state.tlc_state.received_tlcs.tlcs.iter_mut()
         } else {
@@ -732,6 +718,10 @@ where
             self.apply_remove_tlc_operation(myself, state, tlc_id)
                 .await
                 .expect("expect remove tlc success");
+        }
+        if state.get_local_balance() != previous_balance {
+            state.update_graph_for_local_channel_change(&self.network);
+            state.update_graph_for_remote_channel_change(&self.network);
         }
     }
 
@@ -3688,12 +3678,29 @@ impl ChannelActorState {
                 ))
                 .expect(ASSUME_NETWORK_ACTOR_ALIVE);
         }
-        self.update_graph_for_channel_change(network);
+        self.update_graph_for_local_channel_change(network);
         self.send_update_tlc_info_message(network);
     }
 
-    fn update_graph_for_channel_change(&mut self, network: &ActorRef<NetworkActorMessage>) {
-        // Also update network graph with latest local channel update info.
+    fn update_graph_for_remote_channel_change(&mut self, network: &ActorRef<NetworkActorMessage>) {
+        if let Some(channel_update_info) = self.get_remote_channel_update_info() {
+            let channel_outpoint = self.must_get_funding_transaction_outpoint();
+            let peer_id = self.get_remote_pubkey();
+            network
+                .send_message(NetworkActorMessage::new_event(
+                    NetworkActorEvent::OwnedChannelUpdateEvent(
+                        super::graph::OwnedChannelUpdateEvent::Updated(
+                            channel_outpoint,
+                            peer_id,
+                            channel_update_info,
+                        ),
+                    ),
+                ))
+                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+        }
+    }
+
+    fn update_graph_for_local_channel_change(&mut self, network: &ActorRef<NetworkActorMessage>) {
         let channel_outpoint = self.must_get_funding_transaction_outpoint();
         let peer_id = self.get_local_pubkey();
         let channel_update_info = self.get_local_channel_update_info();

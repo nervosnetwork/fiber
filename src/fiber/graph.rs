@@ -154,6 +154,17 @@ impl ChannelInfo {
             .map(|n| n.timestamp)
             .max(self.update_of_node1.as_ref().map(|n| n.timestamp))
     }
+
+    #[cfg(test)]
+    pub fn get_channel_update_of(&self, node: Pubkey) -> Option<&ChannelUpdateInfo> {
+        if self.node1() == node {
+            self.update_of_node1.as_ref()
+        } else if self.node2() == node {
+            self.update_of_node2.as_ref()
+        } else {
+            None
+        }
+    }
 }
 
 impl TryFrom<&ChannelActorState> for ChannelInfo {
