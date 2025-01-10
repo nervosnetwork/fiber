@@ -175,45 +175,26 @@ impl TryFrom<&ChannelActorState> for ChannelInfo {
             return Err("Channel is not ready".to_string());
         }
 
-        let timestamp = 0;
+        let timestamp = state.must_get_funding_transaction_timestamp();
         let channel_outpoint = state.must_get_funding_transaction_outpoint();
         let capacity = state.get_liquid_capacity();
         let udt_type_script = state.funding_udt_type_script.clone();
 
-        let (
-            node1,
-            node2,
-            mut update_of_node1,
-            mut update_of_node2,
-            node1_receivable_balance,
-            node2_receivable_balance,
-        ) = if state.local_is_node1() {
+        let (node1, node2, update_of_node1, update_of_node2) = if state.local_is_node1() {
             (
                 state.local_pubkey,
                 state.remote_pubkey,
-                Some(state.local_tlc_info.clone().into()),
-                state.remote_tlc_info.clone().map(ChannelUpdateInfo::from),
-                state.to_remote_amount,
-                state.to_local_amount,
+                Some(state.get_local_channel_update_info()),
+                state.get_remote_channel_update_info(),
             )
         } else {
             (
                 state.remote_pubkey,
                 state.local_pubkey,
-                state.remote_tlc_info.clone().map(ChannelUpdateInfo::from),
-                Some(state.local_tlc_info.clone().into()),
-                state.to_local_amount,
-                state.to_remote_amount,
+                state.get_remote_channel_update_info(),
+                Some(state.get_local_channel_update_info()),
             )
         };
-
-        if let Some(update_of_node1) = update_of_node1.as_mut() {
-            update_of_node1.receivable_balance = Some(node1_receivable_balance);
-        }
-        if let Some(update_of_node2) = update_of_node2.as_mut() {
-            update_of_node2.receivable_balance = Some(node2_receivable_balance);
-        }
-
         Ok(Self {
             channel_outpoint,
             timestamp,
