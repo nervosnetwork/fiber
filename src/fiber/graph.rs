@@ -497,16 +497,12 @@ where
     // But tests in src/fiber/tests/graph.rs need to process gossip messages
     // to update the network graph. Many of the tests are messages from the graph.source.
     // If we ignore these messages, the graph won't be updated. And many tests will fail.
-    fn should_process_gossip_message_for_channel(&self, channel_outpoint: &OutPoint) -> bool {
+    fn should_process_gossip_message_for_nodes(&self, node1: &Pubkey, node2: &Pubkey) -> bool {
         #[cfg(test)]
         if self.always_process_gossip_message {
             return true;
         }
-        match self.channels.get(channel_outpoint) {
-            Some(channel) => !(self.source == channel.node1() || self.source == channel.node2()),
-            // Channel does not exist yet, process the message.
-            None => true,
-        }
+        !(&self.source == node1 || &self.source == node2)
     }
 
     fn process_channel_announcement(
@@ -514,7 +510,10 @@ where
         timestamp: u64,
         channel_announcement: ChannelAnnouncement,
     ) -> Option<Cursor> {
-        if !self.should_process_gossip_message_for_channel(&channel_announcement.channel_outpoint) {
+        if !self.should_process_gossip_message_for_nodes(
+            &channel_announcement.node1_id,
+            &channel_announcement.node2_id,
+        ) {
             return None;
         }
 
@@ -558,8 +557,14 @@ where
     }
 
     fn process_channel_update(&mut self, channel_update: ChannelUpdate) -> Option<Cursor> {
-        if !self.should_process_gossip_message_for_channel(&channel_update.channel_outpoint) {
-            return None;
+        match self.get_channel(&channel_update.channel_outpoint) {
+            Some(channel)
+                if !self
+                    .should_process_gossip_message_for_nodes(&channel.node1, &channel.node2) =>
+            {
+                return None;
+            }
+            _ => {}
         }
         let channel = self.load_channel_info_mut(&channel_update.channel_outpoint)?;
         let update_info = if channel_update.is_update_of_node_1() {

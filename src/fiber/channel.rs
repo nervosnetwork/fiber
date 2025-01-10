@@ -319,7 +319,9 @@ where
         if state.reestablishing {
             match message {
                 FiberChannelMessage::ReestablishChannel(ref reestablish_channel) => {
-                    state.handle_reestablish_channel_message(reestablish_channel, &self.network)?;
+                    state
+                        .handle_reestablish_channel_message(reestablish_channel, &self.network)
+                        .await?;
                 }
                 _ => {
                     debug!("Ignoring message while reestablishing: {:?}", message);
@@ -576,7 +578,9 @@ where
                 Ok(())
             }
             FiberChannelMessage::ReestablishChannel(ref reestablish_channel) => {
-                state.handle_reestablish_channel_message(reestablish_channel, &self.network)?;
+                state
+                    .handle_reestablish_channel_message(reestablish_channel, &self.network)
+                    .await?;
                 Ok(())
             }
             FiberChannelMessage::TxAbort(_)
@@ -1411,7 +1415,7 @@ where
         }
 
         if updated {
-            state.on_channel_tlc_info_updated(&self.network).await;
+            state.notify_owned_channel_updated(&self.network).await;
         }
 
         Ok(())
@@ -3684,7 +3688,9 @@ impl ChannelActorState {
         .await
     }
 
-    async fn on_channel_tlc_info_updated(&mut self, network: &ActorRef<NetworkActorMessage>) {
+    // Notify the network, network graph and channel counterparty about the channel update.
+    // We do this on channel ready, channel reestablishment, user channel parameters update.
+    async fn notify_owned_channel_updated(&mut self, network: &ActorRef<NetworkActorMessage>) {
         if self.is_public() {
             let channel_update = self.generate_channel_update(network).await;
             network
@@ -3695,7 +3701,15 @@ impl ChannelActorState {
                 ))
                 .expect(ASSUME_NETWORK_ACTOR_ALIVE);
         }
-        self.update_graph_for_local_channel_change(network);
+        if let Ok(channel_info) = (&*self).try_into() {
+            network
+                .send_message(NetworkActorMessage::new_event(
+                    NetworkActorEvent::OwnedChannelUpdateEvent(
+                        super::graph::OwnedChannelUpdateEvent::Up(channel_info),
+                    ),
+                ))
+                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+        }
         self.send_update_tlc_info_message(network);
     }
 
@@ -5760,7 +5774,7 @@ impl ChannelActorState {
         self.increment_local_commitment_number();
         self.increment_remote_commitment_number();
         let peer_id = self.get_remote_peer_id();
-        self.send_update_tlc_info_message(network);
+        self.notify_owned_channel_updated(network).await;
         if let Ok(channel_info) = (&*self).try_into() {
             network
                 .send_message(NetworkActorMessage::new_event(
@@ -5960,7 +5974,7 @@ impl ChannelActorState {
         Ok(need_commitment_signed)
     }
 
-    fn handle_reestablish_channel_message(
+    async fn handle_reestablish_channel_message(
         &mut self,
         reestablish_channel: &ReestablishChannel,
         network: &ActorRef<NetworkActorMessage>,
@@ -6089,6 +6103,8 @@ impl ChannelActorState {
                         expected_remote_commitment_number, acutal_remote_commitment_number
                     );
                 }
+
+                self.notify_owned_channel_updated(network).await;
 
                 debug_event!(network, "Reestablished channel in ChannelReady");
             }
