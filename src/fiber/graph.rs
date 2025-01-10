@@ -289,6 +289,25 @@ impl From<&ChannelUpdate> for ChannelUpdateInfo {
     }
 }
 
+/// Update for our own channel has been made. We can use those events to update our graph.
+/// The events only contain the information that is relevant for our own channels.
+/// Other channel update events should be processed by gossip messages.
+#[derive(Debug)]
+pub enum OwnedChannelUpdateEvent {
+    /// The channel is back online and can be used for routing payments.
+    /// This normally means the peer is now reachable.
+    Up(ChannelInfo),
+    /// The channel is down and should not be used for routing payments.
+    /// This normally means the peer is not reachable.
+    Down(OutPoint),
+    /// One direction of the channel is disabled for forwarding payments.
+    Disabled(OutPoint, Pubkey),
+    /// One direction of the channel is enabled for forwarding payments.
+    Enabled(OutPoint, Pubkey),
+    /// The balance of one direction has been updated (we can forward this amount to the other party).
+    BalanceUpdate(OutPoint, Pubkey, u128),
+}
+
 #[derive(Clone, Debug)]
 pub struct NetworkGraph<S> {
     // The pubkey of the node that is running this instance of the network graph.
@@ -398,6 +417,63 @@ where
             }
         }
         return true;
+    }
+
+    // Process the events that are relevant for our own channels, and update the graph accordingly.
+    pub(crate) fn process_owned_channel_update_event(&mut self, event: OwnedChannelUpdateEvent) {
+        match event {
+            OwnedChannelUpdateEvent::Up(channel_info) => {
+                // Normally the channel_info passed here is the latest channel info,
+                // so we can just overwrite the old channel info.
+                self.channels
+                    .insert(channel_info.channel_outpoint.clone(), channel_info);
+            }
+            OwnedChannelUpdateEvent::Down(channel_outpoint) => {
+                self.channels.remove(&channel_outpoint);
+            }
+            OwnedChannelUpdateEvent::Disabled(channel_outpoint, node) => {
+                if let Some(channel) = self.channels.get_mut(&channel_outpoint) {
+                    if node == channel.node2() {
+                        if let Some(info) = channel.update_of_node2.as_mut() {
+                            info.enabled = false;
+                        }
+                    }
+                    if node == channel.node1() {
+                        if let Some(info) = channel.update_of_node1.as_mut() {
+                            info.enabled = false;
+                        }
+                    }
+                }
+            }
+            OwnedChannelUpdateEvent::Enabled(channel_outpoint, node) => {
+                if let Some(channel) = self.channels.get_mut(&channel_outpoint) {
+                    if node == channel.node2() {
+                        if let Some(info) = channel.update_of_node2.as_mut() {
+                            info.enabled = true;
+                        }
+                    }
+                    if node == channel.node1() {
+                        if let Some(info) = channel.update_of_node1.as_mut() {
+                            info.enabled = true;
+                        }
+                    }
+                }
+            }
+            OwnedChannelUpdateEvent::BalanceUpdate(channel_outpoint, node, balance) => {
+                if let Some(channel) = self.channels.get_mut(&channel_outpoint) {
+                    if node == channel.node2() {
+                        if let Some(info) = channel.update_of_node2.as_mut() {
+                            info.receivable_balance = Some(balance);
+                        }
+                    }
+                    if node == channel.node1() {
+                        if let Some(info) = channel.update_of_node1.as_mut() {
+                            info.receivable_balance = Some(balance);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // Load all the broadcast messages starting from latest_cursor from the store.

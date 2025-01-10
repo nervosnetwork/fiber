@@ -57,7 +57,7 @@ use super::channel::{
 use super::config::{AnnouncedNodeName, MIN_TLC_EXPIRY_DELTA};
 use super::fee::calculate_commitment_tx_fee;
 use super::gossip::{GossipActorMessage, GossipMessageStore, GossipMessageUpdates};
-use super::graph::{NetworkGraph, NetworkGraphStateStore, SessionRoute};
+use super::graph::{NetworkGraph, NetworkGraphStateStore, OwnedChannelUpdateEvent, SessionRoute};
 use super::key::blake2b_hash_with_salt;
 use super::types::{
     BroadcastMessage, BroadcastMessageQuery, BroadcastMessageWithTimestamp, EcdsaSignature,
@@ -652,6 +652,9 @@ pub enum NetworkActorEvent {
         Option<(ProcessingChannelError, TlcErr)>,
         Option<(Hash256, u64)>,
     ),
+
+    // An owned channel is updated.
+    OwnedChannelUpdateEvent(OwnedChannelUpdateEvent),
 }
 
 #[derive(Debug)]
@@ -953,6 +956,10 @@ where
             NetworkActorEvent::GossipMessageUpdates(gossip_message_updates) => {
                 let mut graph = self.network_graph.write().await;
                 graph.update_for_messages(gossip_message_updates.messages);
+            }
+            NetworkActorEvent::OwnedChannelUpdateEvent(owned_channel_update_event) => {
+                let mut graph = self.network_graph.write().await;
+                graph.process_owned_channel_update_event(owned_channel_update_event);
             }
         }
         Ok(())
