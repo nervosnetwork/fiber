@@ -1126,15 +1126,16 @@ pub trait NetworkGraphStateStore {
     fn get_payment_history_results(&self) -> Vec<(OutPoint, Direction, TimedResult)>;
 }
 
+/// The status of a payment, will update as the payment progresses.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum PaymentSessionStatus {
-    // initial status, payment session is created, no HTLC is sent
+    /// initial status, payment session is created, no HTLC is sent
     Created,
-    // the first hop AddTlc is sent successfully and waiting for the response
+    /// the first hop AddTlc is sent successfully and waiting for the response
     Inflight,
-    // related HTLC is successfully settled
+    /// related HTLC is successfully settled
     Success,
-    // related HTLC is failed
+    /// related HTLC is failed
     Failed,
 }
 
