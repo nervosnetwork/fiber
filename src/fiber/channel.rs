@@ -3016,6 +3016,15 @@ pub struct ChannelActorState {
     #[serde_as(as = "Option<PubNonceAsBytes>")]
     pub last_committed_remote_nonce: Option<PubNonce>,
 
+    // While building a CommitmentSigned message, we use the latest remote nonce (the `last_committed_remote_nonce` above)
+    // to partially sign the commitment transaction. This nonce is also needed for the RevokeAndAck message
+    // returned from the peer. We need to save this nonce because the counterparty may send other nonces during
+    // the period when our CommitmentSigned is sent and the counterparty's RevokeAndAck is received.
+    // This field is used to keep the nonce used by the unconfirmed CommitmentSigned. When we receive a
+    // RevokeAndAck from the peer, we will use this nonce to validate the RevokeAndAck message.
+    #[serde_as(as = "Option<PubNonceAsBytes>")]
+    pub last_commitment_signed_remote_nonce: Option<PubNonce>,
+
     // While handling peer's CommitmentSigned message, we will build a RevokeAndAck message,
     // and reply this message to the peer. The nonce used to build the RevokeAndAck message is
     // an older one sent by the peer. We will read this nonce from the field `last_committed_remote_nonce`
@@ -3025,15 +3034,6 @@ pub struct ChannelActorState {
     // But we have overwritten the `last_committed_remote_nonce` field with the new nonce.
     // While reestablishing the channel, we need to use the old nonce to build the RevokeAndAck message.
     // This is why we need to save the old nonce in this field.
-    #[serde_as(as = "Option<PubNonceAsBytes>")]
-    pub last_commitment_signed_remote_nonce: Option<PubNonce>,
-
-    // While building a CommitmentSigned message, we use the latest remote nonce (the `last_committed_remote_nonce` above)
-    // to partially sign the commitment transaction. This nonce is also needed for the RevokeAndAck message
-    // returned from the peer. We need to save this nonce because the counterparty may send other nonces during
-    // the period when our CommitmentSigned is sent and the counterparty's RevokeAndAck is received.
-    // This field is used to keep the nonce used by the unconfirmed CommitmentSigned. When we receive a
-    // RevokeAndAck from the peer, we will use this nonce to validate the RevokeAndAck message.
     #[serde_as(as = "Option<PubNonceAsBytes>")]
     pub last_revoke_and_ack_remote_nonce: Option<PubNonce>,
 
