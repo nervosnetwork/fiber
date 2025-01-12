@@ -14,6 +14,9 @@ impl DbMigrate {
     pub fn new(db: Arc<DB>) -> Self {
         let mut migrations = Migrations::default();
         migrations.add_migration(Arc::new(DefaultMigration::new()));
+        migrations.add_migration(Arc::new(
+            super::migrations::v20250112205923::MyMigration::new(),
+        ));
         DbMigrate { migrations, db }
     }
 
