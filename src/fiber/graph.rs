@@ -977,6 +977,10 @@ where
                         // because the fee here is for the receiving node to forward the amount to the next node.
                         // So the total amount in AddTlc packet should include the fee.
                         accumulated_transfer_amount: amount_to_send,
+                        // We need to use cur_hop.incoming_tlc_expiry instead of incoming_tlc_expiry here
+                        // because we need the expiry for the AddTlc packet sent from source to target.
+                        // cur_hop.incoming_tlc_expiry is the expiry time for the TLC that is going to be received by the target,
+                        // while incoming_tlc_expiry is the expiry time for the TLC that is going to be received by the source.
                         accumulated_tlc_expiry: cur_hop.incoming_tlc_expiry,
                     }),
                 };
