@@ -32,6 +32,10 @@ body:json {
   }
 }
 
+script:pre-request {
+  await new Promise(r => setTimeout(r, 2000));
+}
+
 assert {
   res.body.error: isUndefined
   res.body.result: isNull
