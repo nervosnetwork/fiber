@@ -95,6 +95,12 @@ impl MockNetworkGraph {
         }
     }
 
+    // Add an directed edge from node_a to node_b with the given configuration.
+    // The capacity is the capacity of the channel, the fee_rate is the fee rate
+    // that node_b will charge when forwarding tlc for node_a. The min_tlc_value
+    // is the minimum tlc value that node_b will accept when forwarding tlc for node_a.
+    // The udt_type_script is the udt type script of the channel. The other_fee_rate
+    // is the fee rate that node_a will charge when forwarding tlc for node_b.
     pub fn add_edge_with_config(
         &mut self,
         node_a: usize,
@@ -163,6 +169,8 @@ impl MockNetworkGraph {
         self.graph.reload_from_store();
     }
 
+    // Add an directed edge from node_a to node_b with the given capacity and fee rate.
+    // The fee rate is the fee rate that node_b will charge when forwarding tlc for node_a.
     pub fn add_edge(
         &mut self,
         node_a: usize,
