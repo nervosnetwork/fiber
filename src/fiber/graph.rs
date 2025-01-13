@@ -229,16 +229,15 @@ pub enum PathFindError {
 // This represents a TLC transfer from one node to another.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PathEdge {
-    pub source: Pubkey,
-    pub target: Pubkey,
-    pub channel_outpoint: OutPoint,
+    pub(crate) target: Pubkey,
+    pub(crate) channel_outpoint: OutPoint,
     // The amount that the source node will transfer to the target node.
     // "accumulated" implies that this amount accumulates all the fees along the path.
-    pub accumulated_transfer_amount: u128,
+    pub(crate) accumulated_transfer_amount: u128,
     // The expiry for the TLC that the source node sends to the target node.
     // "accumulated" implies that this expiry accumulates all the expiry deltas along the path.
-    pub accumulated_tlc_expiry: u64,
-    pub is_final: bool,
+    pub(crate) accumulated_tlc_expiry: u64,
+    pub(crate) is_final: bool,
 }
 
 impl<S> NetworkGraph<S>
@@ -803,14 +802,15 @@ where
         let mut last_edge = None;
 
         if route_to_self {
-            let (edge, expiry) = self.adjust_target_for_route_self(
+            let (t, edge, expiry) = self.adjust_target_for_route_self(
                 &hop_hint_map,
                 amount,
                 final_tlc_expiry_delta,
                 source,
                 target,
             )?;
-            target = edge.source;
+            assert_ne!(target, t);
+            target = t;
             accumulated_expiry = accumulated_expiry + expiry;
             last_edge = Some(edge);
         }
@@ -972,7 +972,6 @@ where
                     fee_charged: fee,
                     probability,
                     next_hop: Some(PathEdge {
-                        source: from,
                         target: to,
                         channel_outpoint: channel_info.out_point().clone(),
                         // Here we need to use the amount accumulated so far (i.e. with the fees in current hop)
@@ -1022,7 +1021,7 @@ where
         expiry: u64,
         source: Pubkey,
         target: Pubkey,
-    ) -> Result<(PathEdge, u64), PathFindError> {
+    ) -> Result<(Pubkey, PathEdge, u64), PathFindError> {
         let direct_channels: Vec<(Pubkey, Pubkey, &ChannelInfo, &ChannelUpdateInfo)> = self
             .get_node_inbounds(source)
             .filter(|(_, _, channel_info, _)| {
@@ -1062,14 +1061,13 @@ where
         {
             assert_ne!(target, from);
             let last_edge = PathEdge {
-                source: from,
                 target: to,
                 channel_outpoint: channel_info.out_point().clone(),
                 accumulated_transfer_amount: amount,
                 accumulated_tlc_expiry: expiry,
                 is_final: true,
             };
-            Ok((last_edge, channel_update.tlc_expiry_delta))
+            Ok((from, last_edge, channel_update.tlc_expiry_delta))
         } else {
             return Err(PathFindError::PathFind(
                 "no direct channel found for source node".to_string(),
