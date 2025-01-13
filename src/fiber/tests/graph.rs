@@ -1,5 +1,5 @@
 use crate::fiber::channel::{MESSAGE_OF_NODE1_FLAG, MESSAGE_OF_NODE2_FLAG};
-use crate::fiber::config::{DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT};
+use crate::fiber::config::MAX_PAYMENT_TLC_EXPIRY_LIMIT;
 use crate::fiber::gossip::GossipMessageStore;
 use crate::fiber::graph::{PathFindError, SessionRoute};
 use crate::fiber::types::Pubkey;
@@ -21,6 +21,13 @@ use secp256k1::{PublicKey, SecretKey, XOnlyPublicKey};
 use crate::gen_rand_secp256k1_keypair_tuple;
 
 use super::test_utils::TempDir;
+
+// Default tlc expiry delta used in this test environment.
+// Should be a value larger than the running duration of the unit tests.
+// The value below is 42 minutes.
+const TLC_EXPIRY_DELTA_IN_TESTS: u64 = 42 * 60 * 1000;
+// Default final tlc expiry delta used in this test environment.
+const FINAL_TLC_EXPIRY_DELTA_IN_TESTS: u64 = 43 * 60 * 1000;
 
 fn generate_key_pairs(num: usize) -> Vec<(SecretKey, PublicKey)> {
     let mut keys = vec![];
@@ -134,7 +141,7 @@ impl MockNetworkGraph {
                 MESSAGE_OF_NODE1_FLAG
             },
             0,
-            11,
+            TLC_EXPIRY_DELTA_IN_TESTS,
             min_tlc_value.unwrap_or(0),
             fee_rate.unwrap_or(0),
         ));
@@ -200,7 +207,7 @@ impl MockNetworkGraph {
             amount,
             Some(max_fee),
             None,
-            DEFAULT_TLC_EXPIRY_DELTA,
+            FINAL_TLC_EXPIRY_DELTA_IN_TESTS,
             MAX_PAYMENT_TLC_EXPIRY_LIMIT,
             false,
             vec![],
@@ -223,7 +230,7 @@ impl MockNetworkGraph {
             amount,
             Some(max_fee),
             Some(udt_type_script),
-            DEFAULT_TLC_EXPIRY_DELTA,
+            FINAL_TLC_EXPIRY_DELTA_IN_TESTS,
             MAX_PAYMENT_TLC_EXPIRY_LIMIT,
             false,
             vec![],
@@ -404,9 +411,12 @@ fn test_graph_find_path_expiry() {
     // assert we choose the second path
     assert_eq!(
         route[0].accumulated_tlc_expiry - route[1].accumulated_tlc_expiry,
-        11
+        TLC_EXPIRY_DELTA_IN_TESTS
     );
-    assert_eq!(route[1].accumulated_tlc_expiry, DEFAULT_TLC_EXPIRY_DELTA);
+    assert_eq!(
+        route[1].accumulated_tlc_expiry,
+        FINAL_TLC_EXPIRY_DELTA_IN_TESTS
+    );
 }
 
 #[test]
@@ -550,7 +560,7 @@ fn test_graph_build_router_is_ok_with_fee_rate() {
         amount: 1000,
         payment_hash: Hash256::default(),
         invoice: None,
-        final_tlc_expiry_delta: DEFAULT_TLC_EXPIRY_DELTA,
+        final_tlc_expiry_delta: FINAL_TLC_EXPIRY_DELTA_IN_TESTS,
         tlc_expiry_limit: MAX_PAYMENT_TLC_EXPIRY_LIMIT,
         timeout: None,
         max_fee_amount: Some(1000),
@@ -591,7 +601,7 @@ fn test_graph_build_router_fee_rate_optimize() {
         amount: 1000,
         payment_hash: Hash256::default(),
         invoice: None,
-        final_tlc_expiry_delta: DEFAULT_TLC_EXPIRY_DELTA,
+        final_tlc_expiry_delta: FINAL_TLC_EXPIRY_DELTA_IN_TESTS,
         tlc_expiry_limit: MAX_PAYMENT_TLC_EXPIRY_LIMIT,
         timeout: None,
         max_fee_amount: Some(1000),
@@ -624,7 +634,7 @@ fn test_graph_build_router_no_fee_with_direct_pay() {
         amount: 1000,
         payment_hash: Hash256::default(),
         invoice: None,
-        final_tlc_expiry_delta: DEFAULT_TLC_EXPIRY_DELTA,
+        final_tlc_expiry_delta: FINAL_TLC_EXPIRY_DELTA_IN_TESTS,
         tlc_expiry_limit: MAX_PAYMENT_TLC_EXPIRY_LIMIT,
         timeout: None,
         max_fee_amount: Some(1000),
@@ -658,7 +668,7 @@ fn test_graph_find_path_err() {
         100,
         Some(1000),
         None,
-        DEFAULT_TLC_EXPIRY_DELTA,
+        FINAL_TLC_EXPIRY_DELTA_IN_TESTS,
         MAX_PAYMENT_TLC_EXPIRY_LIMIT,
         false,
         vec![],
@@ -671,7 +681,7 @@ fn test_graph_find_path_err() {
         100,
         Some(1000),
         None,
-        DEFAULT_TLC_EXPIRY_DELTA,
+        FINAL_TLC_EXPIRY_DELTA_IN_TESTS,
         MAX_PAYMENT_TLC_EXPIRY_LIMIT,
         false,
         vec![],
@@ -695,7 +705,7 @@ fn test_graph_find_path_node_order() {
         100,
         Some(1000),
         None,
-        DEFAULT_TLC_EXPIRY_DELTA,
+        FINAL_TLC_EXPIRY_DELTA_IN_TESTS,
         MAX_PAYMENT_TLC_EXPIRY_LIMIT,
         false,
         vec![],
@@ -721,7 +731,7 @@ fn test_graph_build_route_with_expiry_limit() {
         100,
         Some(1000),
         None,
-        DEFAULT_TLC_EXPIRY_DELTA,
+        FINAL_TLC_EXPIRY_DELTA_IN_TESTS,
         MAX_PAYMENT_TLC_EXPIRY_LIMIT,
         false,
         vec![],
@@ -734,7 +744,7 @@ fn test_graph_build_route_with_expiry_limit() {
         100,
         Some(1000),
         None,
-        DEFAULT_TLC_EXPIRY_DELTA,
+        FINAL_TLC_EXPIRY_DELTA_IN_TESTS,
         100,
         false,
         vec![],
@@ -743,7 +753,7 @@ fn test_graph_build_route_with_expiry_limit() {
 }
 
 #[test]
-fn test_graph_build_route_three_nodes() {
+fn test_graph_build_route_three_nodes_amount() {
     let mut network = MockNetworkGraph::new(3);
     network.add_edge(0, 2, Some(500), Some(200000));
     network.add_edge(2, 3, Some(500), Some(2));
@@ -755,7 +765,7 @@ fn test_graph_build_route_three_nodes() {
         amount: 100,
         payment_hash: Hash256::default(),
         invoice: None,
-        final_tlc_expiry_delta: DEFAULT_TLC_EXPIRY_DELTA,
+        final_tlc_expiry_delta: FINAL_TLC_EXPIRY_DELTA_IN_TESTS,
         tlc_expiry_limit: MAX_PAYMENT_TLC_EXPIRY_LIMIT,
         timeout: Some(10),
         max_fee_amount: Some(1000),
@@ -789,6 +799,66 @@ fn test_graph_build_route_three_nodes() {
 }
 
 #[test]
+fn test_graph_build_route_three_nodes_expiry() {
+    let mut network = MockNetworkGraph::new(3);
+    network.add_edge(0, 2, Some(500), Some(200000));
+    network.add_edge(2, 3, Some(500), Some(2));
+    let node2 = network.keys[2];
+    let node3 = network.keys[3];
+    // Test build route from node1 to node3
+    let timestamp_before_building_route = now_timestamp_as_millis_u64();
+    let route = network.graph.build_route(SendPaymentData {
+        target_pubkey: node3.into(),
+        amount: 100,
+        payment_hash: Hash256::default(),
+        invoice: None,
+        final_tlc_expiry_delta: FINAL_TLC_EXPIRY_DELTA_IN_TESTS,
+        tlc_expiry_limit: MAX_PAYMENT_TLC_EXPIRY_LIMIT,
+        timeout: Some(10),
+        max_fee_amount: Some(1000),
+        max_parts: None,
+        keysend: false,
+        udt_type_script: None,
+        preimage: None,
+        allow_self_payment: false,
+        hop_hints: vec![],
+        dry_run: false,
+    });
+    let timestamp_after_building_route = now_timestamp_as_millis_u64();
+    assert!(route.is_ok());
+    let route = route.unwrap();
+    assert_eq!(route.len(), 3);
+    assert_eq!(
+        route[0].funding_tx_hash,
+        network.edges[0].2.tx_hash().into()
+    );
+    assert_eq!(
+        route[1].funding_tx_hash,
+        network.edges[1].2.tx_hash().into()
+    );
+
+    assert_eq!(route[0].next_hop, Some(node2.into()));
+    assert_eq!(route[1].next_hop, Some(node3.into()));
+    assert_eq!(route[2].next_hop, None);
+
+    assert!(
+        route[0].expiry
+            <= timestamp_after_building_route
+                + TLC_EXPIRY_DELTA_IN_TESTS
+                + FINAL_TLC_EXPIRY_DELTA_IN_TESTS
+    );
+    assert!(
+        route[0].expiry
+            >= timestamp_before_building_route
+                + TLC_EXPIRY_DELTA_IN_TESTS
+                + FINAL_TLC_EXPIRY_DELTA_IN_TESTS
+    );
+    assert_eq!(route[1].expiry, route[2].expiry);
+    assert!(route[1].expiry <= timestamp_after_building_route + FINAL_TLC_EXPIRY_DELTA_IN_TESTS);
+    assert!(route[1].expiry >= timestamp_before_building_route + FINAL_TLC_EXPIRY_DELTA_IN_TESTS);
+}
+
+#[test]
 fn test_graph_build_route_below_min_tlc_value() {
     let mut network = MockNetworkGraph::new(3);
     // Add edges with min_tlc_value set to 50
@@ -802,7 +872,7 @@ fn test_graph_build_route_below_min_tlc_value() {
         amount: 10, // Below min_tlc_value of 50
         payment_hash: Hash256::default(),
         invoice: None,
-        final_tlc_expiry_delta: DEFAULT_TLC_EXPIRY_DELTA,
+        final_tlc_expiry_delta: FINAL_TLC_EXPIRY_DELTA_IN_TESTS,
         tlc_expiry_limit: MAX_PAYMENT_TLC_EXPIRY_LIMIT,
         timeout: Some(10),
         max_fee_amount: Some(1000),
@@ -832,7 +902,7 @@ fn test_graph_build_route_select_edge_with_latest_timestamp() {
         amount: 100,
         payment_hash: Hash256::default(),
         invoice: None,
-        final_tlc_expiry_delta: DEFAULT_TLC_EXPIRY_DELTA,
+        final_tlc_expiry_delta: FINAL_TLC_EXPIRY_DELTA_IN_TESTS,
         tlc_expiry_limit: MAX_PAYMENT_TLC_EXPIRY_LIMIT,
         timeout: Some(10),
         max_fee_amount: Some(1000),
@@ -870,7 +940,7 @@ fn test_graph_build_route_select_edge_with_large_capacity() {
         amount: 100,
         payment_hash: Hash256::default(),
         invoice: None,
-        final_tlc_expiry_delta: DEFAULT_TLC_EXPIRY_DELTA,
+        final_tlc_expiry_delta: FINAL_TLC_EXPIRY_DELTA_IN_TESTS,
         tlc_expiry_limit: MAX_PAYMENT_TLC_EXPIRY_LIMIT,
         timeout: Some(10),
         max_fee_amount: Some(1000),
@@ -925,7 +995,7 @@ fn test_graph_mark_failed_channel() {
         amount: 100,
         payment_hash: Hash256::default(),
         invoice: None,
-        final_tlc_expiry_delta: DEFAULT_TLC_EXPIRY_DELTA,
+        final_tlc_expiry_delta: FINAL_TLC_EXPIRY_DELTA_IN_TESTS,
         tlc_expiry_limit: MAX_PAYMENT_TLC_EXPIRY_LIMIT,
         timeout: Some(10),
         max_fee_amount: Some(1000),
@@ -948,7 +1018,7 @@ fn test_graph_mark_failed_channel() {
         amount: 100,
         payment_hash: Hash256::default(),
         invoice: None,
-        final_tlc_expiry_delta: DEFAULT_TLC_EXPIRY_DELTA,
+        final_tlc_expiry_delta: FINAL_TLC_EXPIRY_DELTA_IN_TESTS,
         tlc_expiry_limit: MAX_PAYMENT_TLC_EXPIRY_LIMIT,
         timeout: Some(10),
         max_fee_amount: Some(1000),
@@ -981,7 +1051,7 @@ fn test_graph_session_router() {
         amount: 100,
         payment_hash: Hash256::default(),
         invoice: None,
-        final_tlc_expiry_delta: DEFAULT_TLC_EXPIRY_DELTA,
+        final_tlc_expiry_delta: FINAL_TLC_EXPIRY_DELTA_IN_TESTS,
         tlc_expiry_limit: MAX_PAYMENT_TLC_EXPIRY_LIMIT,
         timeout: Some(10),
         max_fee_amount: Some(1000),
@@ -1022,7 +1092,7 @@ fn test_graph_mark_failed_node() {
         amount: 100,
         payment_hash: Hash256::default(),
         invoice: None,
-        final_tlc_expiry_delta: DEFAULT_TLC_EXPIRY_DELTA,
+        final_tlc_expiry_delta: FINAL_TLC_EXPIRY_DELTA_IN_TESTS,
         tlc_expiry_limit: MAX_PAYMENT_TLC_EXPIRY_LIMIT,
         timeout: Some(10),
         max_fee_amount: Some(1000),
@@ -1042,7 +1112,7 @@ fn test_graph_mark_failed_node() {
         amount: 100,
         payment_hash: Hash256::default(),
         invoice: None,
-        final_tlc_expiry_delta: DEFAULT_TLC_EXPIRY_DELTA,
+        final_tlc_expiry_delta: FINAL_TLC_EXPIRY_DELTA_IN_TESTS,
         tlc_expiry_limit: MAX_PAYMENT_TLC_EXPIRY_LIMIT,
 
         timeout: Some(10),
@@ -1065,7 +1135,7 @@ fn test_graph_mark_failed_node() {
         amount: 100,
         payment_hash: Hash256::default(),
         invoice: None,
-        final_tlc_expiry_delta: DEFAULT_TLC_EXPIRY_DELTA,
+        final_tlc_expiry_delta: FINAL_TLC_EXPIRY_DELTA_IN_TESTS,
         tlc_expiry_limit: MAX_PAYMENT_TLC_EXPIRY_LIMIT,
 
         timeout: Some(10),
@@ -1086,7 +1156,7 @@ fn test_graph_mark_failed_node() {
         amount: 100,
         payment_hash: Hash256::default(),
         invoice: None,
-        final_tlc_expiry_delta: DEFAULT_TLC_EXPIRY_DELTA,
+        final_tlc_expiry_delta: FINAL_TLC_EXPIRY_DELTA_IN_TESTS,
         tlc_expiry_limit: MAX_PAYMENT_TLC_EXPIRY_LIMIT,
         timeout: Some(10),
         max_fee_amount: Some(1000),
@@ -1451,12 +1521,11 @@ fn test_graph_payment_expiry_is_in_right_order() {
     assert!(route.is_ok());
     let route = route.unwrap();
     let expiries = route.iter().map(|e| e.expiry).collect::<Vec<_>>();
-    // we set 11 as tlc expiry delta in the test
     assert_eq!(expiries.len(), 4);
-    assert_eq!(expiries[0] - expiries[1], 11);
-    assert_eq!(expiries[1] - expiries[2], 11);
+    assert_eq!(expiries[0] - expiries[1], TLC_EXPIRY_DELTA_IN_TESTS);
+    assert_eq!(expiries[1] - expiries[2], TLC_EXPIRY_DELTA_IN_TESTS);
     assert_eq!(expiries[2], expiries[3]);
-    assert!(expiries[3] >= current_time + DEFAULT_TLC_EXPIRY_DELTA);
+    assert!(expiries[3] >= current_time + FINAL_TLC_EXPIRY_DELTA_IN_TESTS);
 
     let final_tlc_expiry_delta = 987654;
     let command = SendPaymentCommand {
@@ -1483,7 +1552,6 @@ fn test_graph_payment_expiry_is_in_right_order() {
     assert!(route.is_ok());
     let route = route.unwrap();
     let expiries = route.iter().map(|e| e.expiry).collect::<Vec<_>>();
-    // we set 11 as tlc expiry delta in the test
     assert_eq!(expiries.len(), 4);
     assert!(expiries[3] >= current_time + final_tlc_expiry_delta);
 }
