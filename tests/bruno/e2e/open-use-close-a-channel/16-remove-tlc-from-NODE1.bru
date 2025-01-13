@@ -1,11 +1,11 @@
 meta {
-  name: remove tlc from NODE3
+  name: remove tlc from NODE1
   type: http
-  seq: 18
+  seq: 16
 }
 
 post {
-  url: {{NODE3_RPC_URL}}
+  url: {{NODE1_RPC_URL}}
   body: json
   auth: none
 }
@@ -37,13 +37,11 @@ script:pre-request {
 }
 
 assert {
-  res.body.error: isDefined
-  res.body.result: isUndefined
+  res.body.error: isUndefined
+  res.body.result: isNull
 }
 
 script:post-response {
-    console.log("step 18: ", res.body);
-  // This request is remove a TLC which already removed in previous step.
   // Sleep for sometime to make sure current operation finishes before next request starts.
   await new Promise(r => setTimeout(r, 100));
 }

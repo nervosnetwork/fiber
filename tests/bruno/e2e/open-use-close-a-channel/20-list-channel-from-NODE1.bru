@@ -1,7 +1,7 @@
 meta {
   name: get channels from node1
   type: http
-  seq: 21
+  seq: 20
 }
 
 post {
@@ -29,7 +29,7 @@ body:json {
 }
 
 script:pre-request {
-  await new Promise(r => setTimeout(r, 3000));
+  await new Promise(r => setTimeout(r, 2000));
 }
 
 assert {
