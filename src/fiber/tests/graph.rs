@@ -798,17 +798,20 @@ fn test_graph_build_route_three_nodes_amount() {
     assert_eq!(route[2].amount, 100);
 }
 
-#[test]
-fn test_graph_build_route_three_nodes_expiry() {
-    let mut network = MockNetworkGraph::new(3);
-    network.add_edge(0, 2, Some(500), Some(200000));
-    network.add_edge(2, 3, Some(500), Some(2));
-    let node2 = network.keys[2];
-    let node3 = network.keys[3];
-    // Test build route from node1 to node3
+// TODO: pass randomized input to this function.
+fn do_test_graph_build_route_expiry(n_nodes: usize) {
+    let mut network = MockNetworkGraph::new(n_nodes);
+    let ns = (0..n_nodes).into_iter().collect::<Vec<_>>();
+    for window in ns.windows(2) {
+        let source = window[0];
+        let target = window[1];
+        network.add_edge(source, target, Some(500000), Some(0));
+    }
+    let last_node = network.keys[n_nodes - 1];
     let timestamp_before_building_route = now_timestamp_as_millis_u64();
+    // Send a payment from the first node to the last node
     let route = network.graph.build_route(SendPaymentData {
-        target_pubkey: node3.into(),
+        target_pubkey: last_node.into(),
         amount: 100,
         payment_hash: Hash256::default(),
         invoice: None,
@@ -827,35 +830,53 @@ fn test_graph_build_route_three_nodes_expiry() {
     let timestamp_after_building_route = now_timestamp_as_millis_u64();
     assert!(route.is_ok());
     let route = route.unwrap();
-    assert_eq!(route.len(), 3);
-    assert_eq!(
-        route[0].funding_tx_hash,
-        network.edges[0].2.tx_hash().into()
-    );
-    assert_eq!(
-        route[1].funding_tx_hash,
-        network.edges[1].2.tx_hash().into()
-    );
+    assert_eq!(route.len(), n_nodes);
+    for i in 0..(n_nodes - 1) {
+        assert_eq!(
+            route[i].funding_tx_hash,
+            network.edges[i].2.tx_hash().into()
+        );
+        assert_eq!(route[i].next_hop, Some(network.keys[i + 1].into()));
+    }
 
-    assert_eq!(route[0].next_hop, Some(node2.into()));
-    assert_eq!(route[1].next_hop, Some(node3.into()));
-    assert_eq!(route[2].next_hop, None);
+    assert_eq!(route[n_nodes - 1].next_hop, None);
+    assert_eq!(route[n_nodes - 1].funding_tx_hash, Default::default());
 
-    assert!(
-        route[0].expiry
-            <= timestamp_after_building_route
-                + TLC_EXPIRY_DELTA_IN_TESTS
-                + FINAL_TLC_EXPIRY_DELTA_IN_TESTS
-    );
-    assert!(
-        route[0].expiry
-            >= timestamp_before_building_route
-                + TLC_EXPIRY_DELTA_IN_TESTS
-                + FINAL_TLC_EXPIRY_DELTA_IN_TESTS
-    );
-    assert_eq!(route[1].expiry, route[2].expiry);
-    assert!(route[1].expiry <= timestamp_after_building_route + FINAL_TLC_EXPIRY_DELTA_IN_TESTS);
-    assert!(route[1].expiry >= timestamp_before_building_route + FINAL_TLC_EXPIRY_DELTA_IN_TESTS);
+    for i in 0..n_nodes - 1 {
+        assert!(
+            route[i].expiry
+                <= timestamp_after_building_route
+                    + TLC_EXPIRY_DELTA_IN_TESTS * ((n_nodes - i - 2) as u64)
+                    + FINAL_TLC_EXPIRY_DELTA_IN_TESTS
+        );
+        assert!(
+            route[i].expiry
+                >= timestamp_before_building_route
+                    + TLC_EXPIRY_DELTA_IN_TESTS * ((n_nodes - i - 2) as u64)
+                    + FINAL_TLC_EXPIRY_DELTA_IN_TESTS
+        );
+    }
+    assert_eq!(route[n_nodes - 1].expiry, route[n_nodes - 2].expiry);
+}
+
+#[test]
+fn test_graph_build_route_2_nodes_expiry() {
+    do_test_graph_build_route_expiry(2);
+}
+
+#[test]
+fn test_graph_build_route_3_nodes_expiry() {
+    do_test_graph_build_route_expiry(3);
+}
+
+#[test]
+fn test_graph_build_route_4_nodes_expiry() {
+    do_test_graph_build_route_expiry(4);
+}
+
+#[test]
+fn test_graph_build_route_99_nodes_expiry() {
+    do_test_graph_build_route_expiry(99);
 }
 
 #[test]
