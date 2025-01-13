@@ -237,7 +237,6 @@ pub struct PathEdge {
     // The expiry for the TLC that the source node sends to the target node.
     // "accumulated" implies that this expiry accumulates all the expiry deltas along the path.
     pub(crate) accumulated_tlc_expiry: u64,
-    pub(crate) is_final: bool,
 }
 
 impl<S> NetworkGraph<S>
@@ -979,7 +978,6 @@ where
                         // So the total amount in AddTlc packet should include the fee.
                         accumulated_transfer_amount: amount_to_send,
                         accumulated_tlc_expiry: cur_hop.incoming_tlc_expiry,
-                        is_final,
                     }),
                 };
                 distances.insert(node.node_id, node.clone());
@@ -1065,7 +1063,6 @@ where
                 channel_outpoint: channel_info.out_point().clone(),
                 accumulated_transfer_amount: amount,
                 accumulated_tlc_expiry: expiry,
-                is_final: true,
             };
             Ok((from, last_edge, channel_update.tlc_expiry_delta))
         } else {
