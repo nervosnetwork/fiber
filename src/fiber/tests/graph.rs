@@ -386,6 +386,30 @@ fn test_graph_find_path_fee() {
 }
 
 #[test]
+fn test_graph_find_path_expiry() {
+    let mut network = MockNetworkGraph::new(5);
+
+    network.add_edge(1, 2, Some(1000), Some(10000));
+    // means node 2 will charge fee_rate 10000 when forwarding tlc
+    network.add_edge(2, 3, Some(1000), Some(30000));
+
+    let route = network.find_path(1, 3, 100, 1000);
+
+    assert!(route.is_ok());
+    let route = route.unwrap();
+    eprintln!("route: {:?}", route);
+
+    // make sure we choose the path with lower fees
+    assert_eq!(route.len(), 2);
+    // assert we choose the second path
+    assert_eq!(
+        route[0].accumulated_tlc_expiry - route[1].accumulated_tlc_expiry,
+        11
+    );
+    assert_eq!(route[1].accumulated_tlc_expiry, DEFAULT_TLC_EXPIRY_DELTA);
+}
+
+#[test]
 fn test_graph_find_path_direct_linear() {
     let mut network = MockNetworkGraph::new(6);
 
