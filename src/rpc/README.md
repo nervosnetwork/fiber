@@ -58,6 +58,7 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
     * [Type `PaymentSessionStatus`](#type-paymentsessionstatus)
     * [Type `Pubkey`](#type-pubkey)
     * [Type `RemoveTlcReason`](#type-removetlcreason)
+    * [Type `SessionRoute`](#type-sessionroute)
     * [Type `UdtCfgInfos`](#type-udtcfginfos)
 
 ## RPC Modules
@@ -578,6 +579,7 @@ Sends a payment to a peer.
 * `last_updated_at` - <em>`u64`</em>, The time the payment was last updated at, in milliseconds from UNIX epoch
 * `failed_error` - <em>`Option<String>`</em>, The error message if the payment failed
 * `fee` - <em>`u128`</em>, fee paid for the payment
+* `router` - <em>[SessionRoute](#type-sessionroute)</em>, The route information for the payment
 
 ---
 
@@ -600,6 +602,7 @@ Retrieves a payment.
 * `last_updated_at` - <em>`u64`</em>, The time the payment was last updated at, in milliseconds from UNIX epoch
 * `failed_error` - <em>`Option<String>`</em>, The error message if the payment failed
 * `fee` - <em>`u128`</em>, fee paid for the payment
+* `router` - <em>[SessionRoute](#type-sessionroute)</em>, The route information for the payment
 
 ---
 
@@ -838,6 +841,21 @@ The reason for removing a TLC
 
 * `RemoveTlcFulfill` - The reason for removing the TLC is that it was fulfilled
 * `RemoveTlcFail` - The reason for removing the TLC is that it failed
+---
+
+<a id="#type-sessionroute"></a>
+### Type `SessionRoute`
+
+The router is a list of nodes that the payment will go through.
+ We store in the payment session and then will use it to track the payment history.
+ The router is a list of nodes that the payment will go through.
+ For example:
+    A(amount, channel) -> B -> C -> D means A will send `amount` with `channel` to B.
+
+
+#### Fields
+
+* `nodes` - <em>`Vec<SessionRouteNode>`</em>, the nodes in the route
 ---
 
 <a id="#type-udtcfginfos"></a>

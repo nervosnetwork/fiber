@@ -200,6 +200,9 @@ impl InternalResult {
                 | TlcErrorCode::ExpiryTooFar => {
                     need_to_retry = false;
                 }
+                TlcErrorCode::TemporaryChannelFailure => {
+                    self.fail_pair_balanced(nodes, index + 1);
+                }
                 _ => {
                     // we can not penalize our own node, the whole payment session need to retry
                 }

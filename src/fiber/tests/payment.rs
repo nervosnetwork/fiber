@@ -1521,7 +1521,7 @@ async fn test_send_payment_middle_hop_stopped() {
 async fn test_send_payment_middle_hop_stopped_retry_longer_path() {
     init_tracing();
     let _span = tracing::info_span!("node", node = "test").entered();
-    let (nodes, _channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+    let (nodes, channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
         &[
             ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
             ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
@@ -1545,6 +1545,7 @@ async fn test_send_payment_middle_hop_stopped_retry_longer_path() {
         .unwrap();
     eprintln!("res: {:?}", res);
     assert_eq!(res.fee, 3);
+    node_0.expect_router_used_channel(&res, channels[1]).await;
 
     // node_2 stopped
     node_2.stop().await;
@@ -1558,6 +1559,7 @@ async fn test_send_payment_middle_hop_stopped_retry_longer_path() {
     // when node_2 stopped, the first try path is still 0 -> 1 -> 2 -> 3
     // so the fee is 3
     assert_eq!(res.fee, 3);
+    node_0.expect_router_used_channel(&res, channels[1]).await;
 
     let res = node_0
         .send_payment_keysend(&node_3, 1000, false)
@@ -1572,6 +1574,9 @@ async fn test_send_payment_middle_hop_stopped_retry_longer_path() {
 
     // payment success with a longer path 0 -> 4 -> 5 -> 6 -> 3
     assert_eq!(payment.fee, 5);
+    node_0
+        .expect_payment_used_channel(res.payment_hash, channels[5])
+        .await;
 
     // node_3 stopped, payment will fail
     node_3.stop().await;
@@ -1584,6 +1589,92 @@ async fn test_send_payment_middle_hop_stopped_retry_longer_path() {
     assert_eq!(res.fee, 5);
 
     node_0.wait_until_failed(res.payment_hash).await;
+}
+
+#[tokio::test]
+async fn test_send_payment_max_value_in_flight_in_first_hop() {
+    // https://github.com/nervosnetwork/fiber/issues/450
+
+    init_tracing();
+    let _span = tracing::info_span!("node", node = "test").entered();
+    let nodes = NetworkNode::new_interconnected_nodes(2).await;
+    let [mut node_0, mut node_1] = nodes.try_into().expect("2 nodes");
+    let (_channel_id, _funding_tx) = {
+        establish_channel_between_nodes(
+            &mut node_0,
+            &mut node_1,
+            true,
+            HUGE_CKB_AMOUNT,
+            HUGE_CKB_AMOUNT,
+            None,
+            Some(100000000),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+    };
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+    let res = node_0
+        .send_payment_keysend(&node_1, 100000000 + 1, false)
+        .await
+        .unwrap();
+    eprintln!("res: {:?}", res);
+    assert_eq!(res.fee, 0);
+
+    let payment_hash = res.payment_hash;
+    node_0.wait_until_failed(payment_hash).await;
+
+    // now we can not send payment with amount 100000000 + 1 with dry_run
+    // since there is already payment history data
+    let res = node_0
+        .send_payment_keysend(&node_1, 100000000 + 1, true)
+        .await;
+    eprintln!("res: {:?}", res);
+    assert!(res.unwrap_err().to_string().contains("no path found"));
+
+    // if we build a nother channel with higher max_value_in_flight
+    // we can send payment with amount 100000000 + 1 with this new channel
+    let (channel_id, _funding_tx) = {
+        establish_channel_between_nodes(
+            &mut node_0,
+            &mut node_1,
+            true,
+            HUGE_CKB_AMOUNT,
+            HUGE_CKB_AMOUNT,
+            None,
+            Some(100000000 + 2),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+    };
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+    let res = node_0
+        .send_payment_keysend(&node_1, 100000000 + 1, false)
+        .await
+        .unwrap();
+
+    let payment_hash = res.payment_hash;
+    node_0.wait_until_success(payment_hash).await;
+    node_0
+        .expect_payment_used_channel(payment_hash, channel_id)
+        .await;
 }
 
 #[tokio::test]

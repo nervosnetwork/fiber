@@ -1,6 +1,6 @@
 use crate::fiber::{
     channel::ChannelActorStateStore,
-    graph::PaymentSessionStatus,
+    graph::{PaymentSessionStatus, SessionRoute},
     network::{HopHint as NetworkHopHint, SendPaymentCommand},
     serde_utils::{U128Hex, U64Hex},
     types::{Hash256, Pubkey},
@@ -42,6 +42,10 @@ pub struct GetPaymentCommandResult {
     /// fee paid for the payment
     #[serde_as(as = "U128Hex")]
     pub fee: u128,
+
+    #[cfg(debug_assertions)]
+    /// The route information for the payment
+    router: SessionRoute,
 }
 
 #[serde_as]
@@ -197,6 +201,8 @@ where
             last_updated_at: response.last_updated_at,
             failed_error: response.failed_error,
             fee: response.fee,
+            #[cfg(debug_assertions)]
+            router: response.router.into(),
         })
     }
 
@@ -217,6 +223,8 @@ where
             created_at: response.created_at,
             failed_error: response.failed_error,
             fee: response.fee,
+            #[cfg(debug_assertions)]
+            router: response.router.into(),
         })
     }
 }

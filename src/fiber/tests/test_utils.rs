@@ -367,6 +367,9 @@ pub(crate) async fn establish_channel_between_nodes(
         .await
         .expect("tx found");
 
+    node_a.add_channel_tx(new_channel_id, funding_tx.clone());
+    node_b.add_channel_tx(new_channel_id, funding_tx.clone());
+
     (new_channel_id, funding_tx)
 }
 
@@ -634,6 +637,30 @@ impl NetworkNode {
         call!(self.network_actor, message)
             .expect("node_a alive")
             .unwrap()
+    }
+
+    pub async fn expect_payment_used_channel(&self, payment_hash: Hash256, channel_id: Hash256) {
+        let payment_result = self.get_payment_result(payment_hash).await;
+        self.expect_router_used_channel(&payment_result, channel_id)
+            .await;
+    }
+
+    pub async fn expect_router_used_channel(
+        &self,
+        payment_result: &SendPaymentResponse,
+        channel_id: Hash256,
+    ) {
+        let used_channes = payment_result
+            .router
+            .nodes
+            .iter()
+            .map(|r| r.channel_outpoint.clone())
+            .collect::<Vec<_>>();
+        let funding_tx = self
+            .get_channel_funding_tx(&channel_id)
+            .expect("funding tx");
+        let channel_outpoint = OutPoint::new(funding_tx.into(), 0);
+        assert!(used_channes.contains(&channel_outpoint));
     }
 
     pub async fn wait_until_success(&self, payment_hash: Hash256) {

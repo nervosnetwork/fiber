@@ -1274,22 +1274,27 @@ pub enum PaymentSessionStatus {
     Failed,
 }
 
+/// The node and channel information in a payment route hop
 #[serde_as]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SessionRouteNode {
+    /// the public key of the node
     pub pubkey: Pubkey,
+    /// the amount for this hop
     pub amount: u128,
+    /// the channel outpoint for this hop
     #[serde_as(as = "EntityHex")]
     pub channel_outpoint: OutPoint,
 }
 
-// The router is a list of nodes that the payment will go through.
-// We store in the payment session and then will use it to track the payment history.
-// The router is a list of nodes that the payment will go through.
-// For example:
-//    A(amount, channel) -> B -> C -> D means A will send `amount` with `channel` to B.
+/// The router is a list of nodes that the payment will go through.
+/// We store in the payment session and then will use it to track the payment history.
+/// The router is a list of nodes that the payment will go through.
+/// For example:
+///    A(amount, channel) -> B -> C -> D means A will send `amount` with `channel` to B.
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct SessionRoute {
+    /// the nodes in the route
     pub nodes: Vec<SessionRouteNode>,
 }
 
@@ -1409,6 +1414,8 @@ impl From<PaymentSession> for SendPaymentResponse {
             created_at: session.created_at,
             last_updated_at: session.last_updated_at,
             fee,
+            #[cfg(debug_assertions)]
+            router: session.route,
         }
     }
 }

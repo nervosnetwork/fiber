@@ -187,6 +187,8 @@ async fn test_create_channel_with_remote_tlc_info() {
         )
         .await;
 
+        tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
         let node_a_channel_state = node_a.store.get_channel_actor_state(&channel_id).unwrap();
         let node_b_channel_state = node_b.store.get_channel_actor_state(&channel_id).unwrap();
 
