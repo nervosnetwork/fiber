@@ -102,7 +102,7 @@ pub struct FiberConfig {
     pub(crate) announced_addrs: Vec<String>,
 
     /// bootstrap node addresses to be connected at startup (separated by `,`)
-    #[arg(name = "FIBER_BOOTNODES_ADDRS", long = "fiber-bootnodes-addrs", env, value_parser, num_args = 0.., value_delimiter = ',')]
+    #[arg(name = "FIBER_BOOTNODE_ADDRS", long = "fiber-bootnode-addrs", env, value_parser, num_args = 0.., value_delimiter = ',')]
     pub bootnode_addrs: Vec<String>,
 
     /// node name to be announced to fiber network
