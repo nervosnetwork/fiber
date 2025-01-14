@@ -1,6 +1,6 @@
 use crate::fiber::{
     channel::ChannelActorStateStore,
-    graph::PaymentSessionStatus as InnerPaymentSessionStatus,
+    graph::PaymentSessionStatus,
     network::{HopHint as NetworkHopHint, SendPaymentCommand},
     serde_utils::{U128Hex, U64Hex},
     types::{Hash256, Pubkey},
@@ -22,30 +22,6 @@ use serde_with::serde_as;
 pub struct GetPaymentCommandParams {
     /// The payment hash of the payment to retrieve
     pub payment_hash: Hash256,
-}
-
-/// The status of a payment, will update as the payment progresses.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub enum PaymentSessionStatus {
-    /// initial status, payment session is created, no HTLC is sent
-    Created,
-    /// the first hop AddTlc is sent successfully and waiting for the response
-    Inflight,
-    /// related HTLC is successfully settled
-    Success,
-    /// related HTLC is failed
-    Failed,
-}
-
-impl From<InnerPaymentSessionStatus> for PaymentSessionStatus {
-    fn from(status: InnerPaymentSessionStatus) -> Self {
-        match status {
-            InnerPaymentSessionStatus::Created => PaymentSessionStatus::Created,
-            InnerPaymentSessionStatus::Inflight => PaymentSessionStatus::Inflight,
-            InnerPaymentSessionStatus::Success => PaymentSessionStatus::Success,
-            InnerPaymentSessionStatus::Failed => PaymentSessionStatus::Failed,
-        }
-    }
 }
 
 #[serde_as]
@@ -130,6 +106,7 @@ pub(crate) struct SendPaymentCommandParams {
     dry_run: Option<bool>,
 }
 
+/// A hop hint is a hint for a node to use a specific channel.
 #[serde_as]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HopHint {

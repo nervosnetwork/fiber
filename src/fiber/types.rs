@@ -135,6 +135,7 @@ impl AsRef<[u8; 32]> for Privkey {
     }
 }
 
+/// A 256-bit hash digest, used as identifier of channnel, payment, transaction hash etc.
 #[serde_as]
 #[derive(Copy, Clone, Serialize, Deserialize, Hash, Eq, PartialEq, Default)]
 pub struct Hash256(#[serde_as(as = "SliceHex")] [u8; 32]);
@@ -267,6 +268,7 @@ impl Privkey {
     }
 }
 
+/// The public key for a Node
 #[derive(Copy, Clone, Debug, PartialOrd, Ord, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Pubkey(pub PublicKey);
 
