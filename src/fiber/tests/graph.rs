@@ -418,11 +418,11 @@ fn test_graph_find_path_expiry() {
     assert_eq!(route.len(), 2);
     // assert we choose the second path
     assert_eq!(
-        route[0].accumulated_tlc_expiry - route[1].accumulated_tlc_expiry,
+        route[0].incoming_tlc_expiry - route[1].incoming_tlc_expiry,
         TLC_EXPIRY_DELTA_IN_TESTS
     );
     assert_eq!(
-        route[1].accumulated_tlc_expiry,
+        route[1].incoming_tlc_expiry,
         FINAL_TLC_EXPIRY_DELTA_IN_TESTS
     );
 }

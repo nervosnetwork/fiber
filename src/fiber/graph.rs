@@ -232,11 +232,12 @@ pub struct PathEdge {
     pub(crate) target: Pubkey,
     pub(crate) channel_outpoint: OutPoint,
     // The amount that the source node will transfer to the target node.
-    // "accumulated" implies that this amount accumulates all the fees along the path.
-    pub(crate) accumulated_transfer_amount: u128,
+    // We have already added up all the fees along the path, so this amount can be used directly for the TLC.
+    pub(crate) amount_received: u128,
     // The expiry for the TLC that the source node sends to the target node.
-    // "accumulated" implies that this expiry accumulates all the expiry deltas along the path.
-    pub(crate) accumulated_tlc_expiry: u64,
+    // We have already added up all the expiry deltas along the path,
+    // the only thing missing is current time. So the expiry is the current time plus the expiry delta.
+    pub(crate) incoming_tlc_expiry: u64,
 }
 
 impl<S> NetworkGraph<S>
@@ -720,10 +721,10 @@ where
 
         for r in route {
             hops_data.push(PaymentHopData {
-                amount: r.accumulated_transfer_amount,
+                amount: r.amount_received,
                 next_hop: Some(r.target),
                 hash_algorithm: hash_algorithm,
-                expiry: now + r.accumulated_tlc_expiry,
+                expiry: now + r.incoming_tlc_expiry,
                 funding_tx_hash: r.channel_outpoint.tx_hash().into(),
                 payment_preimage: None,
             });
@@ -796,12 +797,11 @@ where
             .collect::<HashMap<_, _>>();
 
         let mut target = target;
-        let mut accumulated_expiry = final_tlc_expiry_delta;
-        let accumulated_amount = amount;
+        let mut expiry = final_tlc_expiry_delta;
         let mut last_edge = None;
 
         if route_to_self {
-            let (t, edge, expiry) = self.adjust_target_for_route_self(
+            let (t, edge, e) = self.adjust_target_for_route_self(
                 &hop_hint_map,
                 amount,
                 final_tlc_expiry_delta,
@@ -810,7 +810,7 @@ where
             )?;
             assert_ne!(target, t);
             target = t;
-            accumulated_expiry = accumulated_expiry + expiry;
+            expiry = expiry + e;
             last_edge = Some(edge);
         }
         assert_ne!(source, target);
@@ -819,11 +819,11 @@ where
             node_id: target,
             weight: 0,
             distance: 0,
-            amount_received: accumulated_amount,
+            amount_received: amount,
             fee_charged: 0,
             probability: 1.0,
             next_hop: None,
-            incoming_tlc_expiry: accumulated_expiry,
+            incoming_tlc_expiry: expiry,
         });
 
         while let Some(cur_hop) = nodes_heap.pop() {
@@ -976,12 +976,12 @@ where
                         // Here we need to use the amount accumulated so far (i.e. with the fees in current hop)
                         // because the fee here is for the receiving node to forward the amount to the next node.
                         // So the total amount in AddTlc packet should include the fee.
-                        accumulated_transfer_amount: amount_to_send,
+                        amount_received: amount_to_send,
                         // We need to use cur_hop.incoming_tlc_expiry instead of incoming_tlc_expiry here
                         // because we need the expiry for the AddTlc packet sent from source to target.
                         // cur_hop.incoming_tlc_expiry is the expiry time for the TLC that is going to be received by the target,
                         // while incoming_tlc_expiry is the expiry time for the TLC that is going to be received by the source.
-                        accumulated_tlc_expiry: cur_hop.incoming_tlc_expiry,
+                        incoming_tlc_expiry: cur_hop.incoming_tlc_expiry,
                     }),
                 };
                 distances.insert(node.node_id, node.clone());
@@ -1065,8 +1065,8 @@ where
             let last_edge = PathEdge {
                 target: to,
                 channel_outpoint: channel_info.out_point().clone(),
-                accumulated_transfer_amount: amount,
-                accumulated_tlc_expiry: expiry,
+                amount_received: amount,
+                incoming_tlc_expiry: expiry,
             };
             Ok((from, last_edge, channel_update.tlc_expiry_delta))
         } else {
