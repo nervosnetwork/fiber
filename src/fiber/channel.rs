@@ -1226,6 +1226,7 @@ where
                 state.tlc_state.set_waiting_ack(true);
             }
             CommitmentSignedFlags::PendingShutdown() => {
+                state.tlc_state.set_waiting_ack(true);
                 state.maybe_transition_to_shutdown(&self.network)?;
             }
         }
