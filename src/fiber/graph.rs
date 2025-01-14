@@ -235,7 +235,7 @@ pub struct ChannelUpdateInfo {
     /// Note that this is not our balance, but the balance of the other party.
     /// This node is forwarding the balance for the other party, so we need to use the receivable balance
     /// instead of our balance.
-    pub receivable_balance: Option<u128>,
+    pub inbound_liquidity: Option<u128>,
     /// The difference in htlc expiry values that you must have when routing through this channel (in milliseconds).
     pub tlc_expiry_delta: u64,
     /// The minimum value, which must be relayed to the next hop via the channel
@@ -248,7 +248,7 @@ impl From<&ChannelTlcInfo> for ChannelUpdateInfo {
         Self {
             timestamp: info.timestamp,
             enabled: info.enabled,
-            receivable_balance: None,
+            inbound_liquidity: None,
             tlc_expiry_delta: info.tlc_expiry_delta,
             tlc_minimum_value: info.tlc_minimum_value,
             fee_rate: info.tlc_fee_proportional_millionths as u64,
@@ -273,7 +273,7 @@ impl From<&ChannelUpdate> for ChannelUpdateInfo {
         Self {
             timestamp: update.timestamp,
             enabled: !update.is_disabled(),
-            receivable_balance: None,
+            inbound_liquidity: None,
             tlc_expiry_delta: update.tlc_expiry_delta,
             tlc_minimum_value: update.tlc_minimum_value,
             fee_rate: update.tlc_fee_proportional_millionths as u64,
@@ -748,16 +748,16 @@ where
 
         // Iterating over HashMap's values is not guaranteed to be in order,
         // which may introduce randomness in the path finding.
-        // We will first sort the channels by receivable_balance, then capacity, and at last update time.
-        // This is because the weight algorithm in find_path does not considering receivable_balance and capacity,
-        // so the channel with larger receivable_balance/capacity maybe have the same weight with the channel
-        // with smaller receivable_balance/capacity, even though the former have better chance to success.
+        // We will first sort the channels by inbound_liquidity, then capacity, and at last update time.
+        // This is because the weight algorithm in find_path does not considering inbound_liquidity and capacity,
+        // so the channel with larger inbound_liquidity/capacity maybe have the same weight with the channel
+        // with smaller inbound_liquidity/capacity, even though the former have better chance to success.
         channels.sort_by(
             |(_, _, a_channel_info, a_channel_update_info),
              (_, _, b_channel_info, b_channel_update_info)| {
                 b_channel_update_info
-                    .receivable_balance
-                    .cmp(&a_channel_update_info.receivable_balance)
+                    .inbound_liquidity
+                    .cmp(&a_channel_update_info.inbound_liquidity)
                     .then(
                         b_channel_info
                             .capacity()
@@ -1102,7 +1102,7 @@ where
                 }
 
                 // If we already know the balance of the channel, check if we can send the amount.
-                if let Some(balance) = channel_update.receivable_balance {
+                if let Some(balance) = channel_update.inbound_liquidity {
                     if amount_to_send > balance {
                         continue;
                     }
