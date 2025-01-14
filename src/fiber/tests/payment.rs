@@ -1449,3 +1449,78 @@ async fn test_send_payment_middle_hop_stopped_retry_longer_path() {
 
     node_0.wait_until_failed(res.payment_hash).await;
 }
+
+#[tokio::test]
+async fn test_send_payment_target_hop_stopped() {
+    init_tracing();
+    let _span = tracing::info_span!("node", node = "test").entered();
+    let (nodes, _channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+        &[
+            ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((2, 3), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((3, 4), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+        ],
+        5,
+        true,
+    )
+    .await;
+    let [mut node_0, _node_1, _node_2, _node_3, mut node_4] = nodes.try_into().expect("5 nodes");
+
+    // dry run node_0 -> node_4 will select  0 -> 1 -> 2 -> 3 -> 4
+    let res = node_0
+        .send_payment_keysend(&node_4, 1000, true)
+        .await
+        .unwrap();
+    eprintln!("res: {:?}", res);
+    assert_eq!(res.fee, 5);
+
+    // node_4 stopped
+    node_4.stop().await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+    let res = node_0
+        .send_payment_keysend(&node_4, 1000, false)
+        .await
+        .unwrap();
+    eprintln!("res: {:?}", res);
+    // when node_4 stopped, the first try path is still 0 -> 1 -> 2 -> 3 -> 4
+    // so the fee is 5
+    assert_eq!(res.fee, 5);
+
+    node_0.wait_until_failed(res.payment_hash).await;
+}
+
+#[tokio::test]
+async fn test_send_payment_middle_hop_balance_is_not_enough() {
+    // https://github.com/nervosnetwork/fiber/issues/286
+    init_tracing();
+    let _span = tracing::info_span!("node", node = "test").entered();
+    let (nodes, _channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+        &[
+            ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((2, 3), (MIN_RESERVED_CKB, HUGE_CKB_AMOUNT)),
+        ],
+        4,
+        true,
+    )
+    .await;
+    let [mut node_0, _node_1, _node_2, node_3] = nodes.try_into().expect("3 nodes");
+
+    let res = node_0
+        .send_payment_keysend(&node_3, 1000, false)
+        .await
+        .unwrap();
+    eprintln!("res: {:?}", res);
+
+    // path is still 0 -> 1 -> 2 -> 3,
+    // 2 -> 3 don't have enough balance
+    node_0.wait_until_failed(res.payment_hash).await;
+    let result = node_0.get_payment_result(res.payment_hash).await;
+    eprintln!("debug result: {:?}", result);
+    assert!(result
+        .failed_error
+        .expect("got error")
+        .contains("Failed to build route"));
+}
