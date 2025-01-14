@@ -1429,7 +1429,9 @@ where
         }
 
         if updated {
-            state.notify_owned_channel_updated(&self.network).await;
+            state
+                .notify_owned_channel_updated(&self.network, true)
+                .await;
         }
 
         Ok(())
@@ -1849,7 +1851,9 @@ where
                     .expect("load channel state failed");
                 let ReloadParams { notify_changes } = reload_params;
                 if notify_changes {
-                    state.notify_owned_channel_updated(&self.network).await;
+                    state
+                        .notify_owned_channel_updated(&self.network, false)
+                        .await;
                 }
                 Ok(())
             }
@@ -3645,7 +3649,20 @@ impl ChannelActorState {
 
     // Notify the network, network graph and channel counterparty about the channel update.
     // We do this on channel ready, channel reestablishment, user channel parameters update.
-    async fn notify_owned_channel_updated(&mut self, network: &ActorRef<NetworkActorMessage>) {
+    // Some of the events require us to send an OwnedChannelUpdateEvent::Up to the network actor,
+    // (e.g. channel ready and channel reestablishment) and some require us to send a
+    // OwnedChannelUpdateEvent::Updated (e.g. user channel parameters update) to the network actor.
+    // update_only is used to distinguish between the two cases.
+    async fn notify_owned_channel_updated(
+        &mut self,
+        network: &ActorRef<NetworkActorMessage>,
+        update_only: bool,
+    ) {
+        if update_only {
+            self.update_graph_for_local_channel_change(network);
+        } else {
+            self.update_graph_for_local_channel_ready(network);
+        }
         if self.is_public() {
             let channel_update = self.generate_channel_update(network).await;
             network
@@ -3653,15 +3670,6 @@ impl ChannelActorState {
                     NetworkActorCommand::BroadcastMessages(vec![
                         BroadcastMessageWithTimestamp::ChannelUpdate(channel_update),
                     ]),
-                ))
-                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-        }
-        if let Ok(channel_info) = (&*self).try_into() {
-            network
-                .send_message(NetworkActorMessage::new_event(
-                    NetworkActorEvent::OwnedChannelUpdateEvent(
-                        super::graph::OwnedChannelUpdateEvent::Up(channel_info),
-                    ),
                 ))
                 .expect(ASSUME_NETWORK_ACTOR_ALIVE);
         }
@@ -3680,6 +3688,18 @@ impl ChannelActorState {
                             peer_id,
                             channel_update_info,
                         ),
+                    ),
+                ))
+                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+        }
+    }
+
+    fn update_graph_for_local_channel_ready(&mut self, network: &ActorRef<NetworkActorMessage>) {
+        if let Ok(channel_info) = (&*self).try_into() {
+            network
+                .send_message(NetworkActorMessage::new_event(
+                    NetworkActorEvent::OwnedChannelUpdateEvent(
+                        super::graph::OwnedChannelUpdateEvent::Up(channel_info),
                     ),
                 ))
                 .expect(ASSUME_NETWORK_ACTOR_ALIVE);
@@ -5690,7 +5710,7 @@ impl ChannelActorState {
         self.increment_local_commitment_number();
         self.increment_remote_commitment_number();
         let peer_id = self.get_remote_peer_id();
-        self.notify_owned_channel_updated(network).await;
+        self.notify_owned_channel_updated(network, false).await;
         network
             .send_message(NetworkActorMessage::new_event(
                 NetworkActorEvent::ChannelReady(
@@ -5986,7 +6006,7 @@ impl ChannelActorState {
                     );
                 }
 
-                self.notify_owned_channel_updated(network).await;
+                self.notify_owned_channel_updated(network, false).await;
 
                 debug_event!(network, "Reestablished channel in ChannelReady");
             }
