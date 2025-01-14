@@ -321,10 +321,10 @@ fn genrate_nodes_config() {
         .skip(2) // bootnode node was not always started
         .map(|(_, port)| port.to_string())
         .collect::<Vec<_>>()
-        .join("\n");
+        .join("\n")
+        + "\n";
 
     let port_file_path = nodes_dir.join(".ports");
-
     std::fs::write(port_file_path, content).expect("write ports list");
 }
 

@@ -2,9 +2,11 @@ use crate::fiber::channel::ChannelActorState;
 use crate::fiber::channel::ChannelActorStateStore;
 use crate::fiber::channel::ChannelCommand;
 use crate::fiber::channel::ChannelCommandWithId;
+use crate::fiber::channel::ReloadParams;
 use crate::fiber::graph::NetworkGraphStateStore;
 use crate::fiber::graph::PaymentSession;
 use crate::fiber::graph::PaymentSessionStatus;
+use crate::fiber::network::NodeInfoResponse;
 use crate::fiber::network::SendPaymentCommand;
 use crate::fiber::network::SendPaymentResponse;
 use crate::fiber::types::EcdsaSignature;
@@ -18,6 +20,7 @@ use ckb_types::{core::TransactionView, packed::Byte32};
 use ractor::{call, Actor, ActorRef};
 use rand::rngs::OsRng;
 use secp256k1::{Message, Secp256k1};
+use std::collections::HashMap;
 use std::{
     env,
     ffi::OsStr,
@@ -57,6 +60,7 @@ use crate::{
 
 static RETAIN_VAR: &str = "TEST_TEMP_RETAIN";
 pub(crate) const MIN_RESERVED_CKB: u128 = 4200000000;
+pub(crate) const HUGE_CKB_AMOUNT: u128 = MIN_RESERVED_CKB + 1000000000000 as u128;
 
 #[derive(Debug)]
 pub struct TempDir(ManuallyDrop<OldTempDir>);
@@ -172,6 +176,7 @@ pub struct NetworkNode {
     pub base_dir: Arc<TempDir>,
     pub node_name: Option<String>,
     pub store: Store,
+    pub channels_tx_map: HashMap<Hash256, Hash256>,
     pub fiber_config: FiberConfig,
     pub listening_addrs: Vec<MultiAddr>,
     pub network_actor: ActorRef<NetworkActorMessage>,
@@ -474,9 +479,12 @@ pub(crate) async fn create_n_nodes_with_index_and_amounts_with_established_chann
         // all the other nodes submit_tx
         for k in 0..n {
             let res = nodes[k].submit_tx(funding_tx.clone()).await;
+            nodes[k].add_channel_tx(channel_id, funding_tx.clone());
             assert_eq!(res, Status::Committed);
         }
     }
+    // sleep for a while to make sure network graph is updated
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
     (nodes, channels)
 }
 
@@ -546,7 +554,58 @@ impl NetworkNode {
         };
 
         let res = call!(self.network_actor, message).expect("source_node alive");
+        eprintln!("result: {:?}", res);
         res
+    }
+
+    pub async fn send_payment_keysend(
+        &mut self,
+        recipient: &NetworkNode,
+        amount: u128,
+        dry_run: bool,
+    ) -> std::result::Result<SendPaymentResponse, String> {
+        self.send_payment(SendPaymentCommand {
+            target_pubkey: Some(recipient.pubkey.clone()),
+            amount: Some(amount),
+            payment_hash: None,
+            final_tlc_expiry_delta: None,
+            tlc_expiry_limit: None,
+            invoice: None,
+            timeout: None,
+            max_fee_amount: None,
+            max_parts: None,
+            keysend: Some(true),
+            udt_type_script: None,
+            allow_self_payment: false,
+            dry_run,
+            hop_hints: None,
+        })
+        .await
+    }
+
+    pub async fn send_payment_keysend_to_self(
+        &mut self,
+        amount: u128,
+        dry_run: bool,
+    ) -> std::result::Result<SendPaymentResponse, String> {
+        let pubkey = self.pubkey.clone();
+        self.send_payment(SendPaymentCommand {
+            target_pubkey: Some(pubkey),
+            amount: Some(amount),
+            payment_hash: None,
+            final_tlc_expiry_delta: None,
+            tlc_expiry_limit: None,
+            invoice: None,
+            timeout: None,
+            max_fee_amount: None,
+            max_parts: None,
+            keysend: Some(true),
+            udt_type_script: None,
+            allow_self_payment: true,
+            dry_run,
+            hop_hints: None,
+        })
+        .await
     }
 
     pub async fn assert_payment_status(
@@ -555,28 +614,80 @@ impl NetworkNode {
         expected_status: PaymentSessionStatus,
         expected_retried: Option<u32>,
     ) {
-        let message = |rpc_reply| -> NetworkActorMessage {
-            NetworkActorMessage::Command(NetworkActorCommand::GetPayment(payment_hash, rpc_reply))
-        };
-        let res = call!(self.network_actor, message)
-            .expect("node_a alive")
-            .unwrap();
+        let status = self.get_payment_status(payment_hash).await;
+        assert_eq!(status, expected_status);
 
-        assert_eq!(res.status, expected_status);
         if let Some(expected_retried) = expected_retried {
             let payment_session = self.get_payment_session(payment_hash).unwrap();
             assert_eq!(payment_session.retried_times, expected_retried);
         }
     }
 
-    pub async fn update_channel_actor_state(&mut self, state: ChannelActorState) {
+    pub async fn get_payment_status(&self, payment_hash: Hash256) -> PaymentSessionStatus {
+        self.get_payment_result(payment_hash).await.status
+    }
+
+    pub async fn get_payment_result(&self, payment_hash: Hash256) -> SendPaymentResponse {
+        let message = |rpc_reply| -> NetworkActorMessage {
+            NetworkActorMessage::Command(NetworkActorCommand::GetPayment(payment_hash, rpc_reply))
+        };
+        call!(self.network_actor, message)
+            .expect("node_a alive")
+            .unwrap()
+    }
+
+    pub async fn wait_until_success(&self, payment_hash: Hash256) {
+        loop {
+            let status = self.get_payment_status(payment_hash).await;
+            if status == PaymentSessionStatus::Success {
+                eprintln!("Payment success: {:?}\n\n", payment_hash);
+                break;
+            } else if status == PaymentSessionStatus::Failed {
+                eprintln!("Payment failed: {:?}\n\n", payment_hash);
+                // report error
+                assert_eq!(status, PaymentSessionStatus::Success);
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    }
+
+    pub async fn wait_until_failed(&self, payment_hash: Hash256) {
+        loop {
+            let status = self.get_payment_status(payment_hash).await;
+            if status == PaymentSessionStatus::Failed {
+                eprintln!("Payment failed: {:?}\n\n", payment_hash);
+                break;
+            } else if status == PaymentSessionStatus::Success {
+                eprintln!("Payment success: {:?}\n\n", payment_hash);
+                // report error
+                assert_eq!(status, PaymentSessionStatus::Failed);
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    }
+
+    pub async fn node_info(&self) -> NodeInfoResponse {
+        let message =
+            |rpc_reply| NetworkActorMessage::Command(NetworkActorCommand::NodeInfo((), rpc_reply));
+        eprintln!("query node_info ...");
+        let res = call!(self.network_actor, message)
+            .expect("node_a alive")
+            .unwrap();
+        res
+    }
+
+    pub async fn update_channel_actor_state(
+        &mut self,
+        state: ChannelActorState,
+        reload_params: Option<ReloadParams>,
+    ) {
         let channel_id = state.id.clone();
         self.store.insert_channel_actor_state(state);
         self.network_actor
             .send_message(NetworkActorMessage::Command(
                 NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
                     channel_id,
-                    command: ChannelCommand::ReloadState(),
+                    command: ChannelCommand::ReloadState(reload_params.unwrap_or_default()),
                 }),
             ))
             .expect("network actor is live");
@@ -590,7 +701,8 @@ impl NetworkNode {
     ) {
         let mut channel_actor_state = self.get_channel_actor_state(channel_id);
         channel_actor_state.to_local_amount = new_to_local_amount;
-        self.update_channel_actor_state(channel_actor_state).await;
+        self.update_channel_actor_state(channel_actor_state, None)
+            .await;
     }
 
     pub async fn update_channel_remote_balance(
@@ -600,15 +712,27 @@ impl NetworkNode {
     ) {
         let mut channel_actor_state = self.get_channel_actor_state(channel_id);
         channel_actor_state.to_remote_amount = new_to_remote_amount;
-        self.update_channel_actor_state(channel_actor_state).await;
+        self.update_channel_actor_state(channel_actor_state, None)
+            .await;
     }
 
     pub async fn disable_channel(&mut self, channel_id: Hash256) {
         let mut channel_actor_state = self.get_channel_actor_state(channel_id);
-        let mut public_info = channel_actor_state.public_channel_info.unwrap();
-        public_info.enabled = false;
-        channel_actor_state.public_channel_info = Some(public_info);
-        self.update_channel_actor_state(channel_actor_state).await;
+        channel_actor_state.local_tlc_info.enabled = false;
+        self.update_channel_actor_state(channel_actor_state, None)
+            .await;
+    }
+
+    pub async fn disable_channel_stealthy(&mut self, channel_id: Hash256) {
+        let mut channel_actor_state = self.get_channel_actor_state(channel_id);
+        channel_actor_state.local_tlc_info.enabled = false;
+        self.update_channel_actor_state(
+            channel_actor_state,
+            Some(ReloadParams {
+                notify_changes: false,
+            }),
+        )
+        .await;
     }
 
     pub fn get_payment_session(&self, payment_hash: Hash256) -> Option<PaymentSession> {
@@ -700,6 +824,7 @@ impl NetworkNode {
             node_name,
             store,
             fiber_config,
+            channels_tx_map: Default::default(),
             listening_addrs: announced_addrs,
             network_actor,
             network_graph,
@@ -895,6 +1020,14 @@ impl NetworkNode {
 
     pub async fn submit_tx(&mut self, tx: TransactionView) -> ckb_jsonrpc_types::Status {
         submit_tx(self.chain_actor.clone(), tx).await
+    }
+
+    pub fn add_channel_tx(&mut self, channel_id: Hash256, tx: TransactionView) {
+        self.channels_tx_map.insert(channel_id, tx.hash().into());
+    }
+
+    pub fn get_channel_funding_tx(&self, channel_id: &Hash256) -> Option<Hash256> {
+        self.channels_tx_map.get(channel_id).cloned()
     }
 
     pub async fn trace_tx(&mut self, tx: TransactionView) -> ckb_jsonrpc_types::Status {

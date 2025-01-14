@@ -1,8 +1,8 @@
+use crate::fiber::gossip::GossipError;
 #[cfg(debug_assertions)]
 use crate::fiber::network::DebugEvent;
-use crate::fiber::{gossip::GossipError, serde_utils::U64Hex};
+use crate::{debug_event, fiber::types::BroadcastMessageWithTimestamp};
 use bitflags::bitflags;
-use ckb_jsonrpc_types::BlockNumber;
 use futures::future::OptionFuture;
 use secp256k1::XOnlyPublicKey;
 use tracing::{debug, error, info, trace, warn};
@@ -25,7 +25,7 @@ use crate::{
         },
         serde_utils::{CompactSignatureAsBytes, EntityHex, PubNonceAsBytes},
         types::{
-            AcceptChannel, AddTlc, AnnouncementSignatures, BroadcastMessage, BroadcastMessageQuery,
+            AcceptChannel, AddTlc, AnnouncementSignatures, BroadcastMessageQuery,
             BroadcastMessageQueryFlags, ChannelAnnouncement, ChannelReady, ChannelUpdate,
             ClosingSigned, CommitmentSigned, EcdsaSignature, FiberChannelMessage, FiberMessage,
             Hash256, OpenChannel, PaymentOnionPacket, PeeledPaymentOnionPacket, Privkey, Pubkey,
@@ -47,11 +47,12 @@ use ckb_types::{
     },
     packed::{Bytes, CellInput, CellOutput, OutPoint, Script, Transaction},
     prelude::{AsTransactionBuilder, IntoTransactionView, Pack, Unpack},
+    H256,
 };
 use molecule::prelude::{Builder, Entity};
 use musig2::{
     aggregate_partial_signatures,
-    errors::{SigningError, VerifyError},
+    errors::{RoundFinalizeError, SigningError, VerifyError},
     secp::Point,
     sign_partial, verify_partial, AggNonce, CompactSignature, KeyAggContext, PartialSignature,
     PubNonce, SecNonce,
@@ -59,7 +60,7 @@ use musig2::{
 use ractor::{
     async_trait as rasync_trait, call,
     concurrency::{sleep, Duration},
-    Actor, ActorProcessingErr, ActorRef, OutputPort, RpcReplyPort, SpawnErr,
+    Actor, ActorProcessingErr, ActorRef, OutputPort, RpcReplyPort,
 };
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
@@ -67,13 +68,16 @@ use tentacle::secio::PeerId;
 use thiserror::Error;
 use tokio::sync::oneshot;
 
+use super::{graph::ChannelUpdateInfo, types::ForwardTlcResult};
 use std::{
-    collections::{BTreeMap, HashMap},
-    fmt::Debug,
+    collections::HashSet,
+    fmt::{self, Debug},
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
     u128,
 };
+
+use super::types::{ChannelUpdateChannelFlags, ChannelUpdateMessageFlags, UpdateTlcInfo};
 
 // - `empty_witness_args`: 16 bytes, fixed to 0x10000000100000001000000010000000, for compatibility with the xudt
 // - `pubkey`: 32 bytes, x only aggregated public key
@@ -92,18 +96,7 @@ pub const COMMITMENT_CELL_WITNESS_LEN: usize = 16 + 1 + 32 + 64;
 // is funded or not.
 pub const INITIAL_COMMITMENT_NUMBER: u64 = 0;
 
-// Whether we are receiving a channel update from node1 or node2.
-// If the flag is set, it means the channel update is from node1, otherwise it is from node2.
-pub const MESSAGE_OF_NODE1_FLAG: u32 = 0;
-
-// Whether we are receiving a channel update from node1 or node2.
-// If the flag is set, it means the channel update is from node2, otherwise it is from node1.
-pub const MESSAGE_OF_NODE2_FLAG: u32 = 1;
-
-// The channel is disabled, and no more tlcs can be added to the channel.
-pub const CHANNEL_DISABLED_FLAG: u32 = 1;
-
-const AUTO_SETDOWN_TLC_INTERVAL: Duration = Duration::from_secs(2);
+const RETRYABLE_TLC_OPS_INTERVAL: Duration = Duration::from_millis(1000);
 
 #[derive(Debug)]
 pub enum ChannelActorMessage {
@@ -122,24 +115,49 @@ pub struct AddTlcResponse {
 }
 
 #[derive(Clone)]
+pub struct TlcNotifyInfo {
+    pub payment_hash: Hash256,
+    pub tlc_id: TLCId,
+    pub amount: u128,
+    pub payment_preimage: Option<Hash256>,
+}
+
+#[derive(Clone)]
 pub struct TlcNotification {
     pub channel_id: Hash256,
-    pub tlc: AddTlcInfo,
+    pub tlc: TlcNotifyInfo,
     pub script: Script,
 }
 
 #[derive(Debug)]
 pub enum ChannelCommand {
     TxCollaborationCommand(TxCollaborationCommand),
-    // TODO: maybe we should automatically send commitment_signed message after receiving
-    // tx_complete event.
     CommitmentSigned(),
     AddTlc(AddTlcCommand, RpcReplyPort<Result<AddTlcResponse, TlcErr>>),
-    RemoveTlc(RemoveTlcCommand, RpcReplyPort<Result<(), String>>),
+    RemoveTlc(
+        RemoveTlcCommand,
+        RpcReplyPort<Result<(), ProcessingChannelError>>,
+    ),
     Shutdown(ShutdownCommand, RpcReplyPort<Result<(), String>>),
     Update(UpdateCommand, RpcReplyPort<Result<(), String>>),
+    ForwardTlcResult(ForwardTlcResult),
     #[cfg(test)]
-    ReloadState(),
+    ReloadState(ReloadParams),
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+pub struct ReloadParams {
+    pub notify_changes: bool,
+}
+
+#[cfg(test)]
+impl Default for ReloadParams {
+    fn default() -> Self {
+        Self {
+            notify_changes: true,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -164,7 +182,7 @@ pub struct AddTlcCommand {
     pub previous_tlc: Option<(Hash256, u64)>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RemoveTlcCommand {
     pub id: u64,
     pub reason: RemoveTlcReason,
@@ -200,7 +218,6 @@ pub const MIN_COMMITMENT_DELAY_EPOCHS: u64 = 1;
 // The max commitment delay is 84 epochs = 14 days.
 pub const MAX_COMMITMENT_DELAY_EPOCHS: u64 = 84;
 pub const DEFAULT_MAX_TLC_VALUE_IN_FLIGHT: u128 = u128::MAX;
-pub const DEFAULT_MAX_TLC_NUMBER_IN_FLIGHT: u64 = 30;
 pub const DEFAULT_MIN_TLC_VALUE: u128 = 0;
 pub const SYS_MAX_TLC_NUMBER_IN_FLIGHT: u64 = 253;
 pub const MAX_TLC_NUMBER_IN_FLIGHT: u64 = 125;
@@ -213,6 +230,7 @@ pub struct TxUpdateCommand {
 pub struct OpenChannelParameter {
     pub funding_amount: u128,
     pub seed: [u8; 32],
+    pub tlc_info: ChannelTlcInfo,
     pub public_channel_info: Option<PublicChannelInfo>,
     pub funding_udt_type_script: Option<Script>,
     pub shutdown_script: Script,
@@ -227,6 +245,7 @@ pub struct OpenChannelParameter {
 pub struct AcceptChannelParameter {
     pub funding_amount: u128,
     pub reserved_ckb_amount: u64,
+    pub tlc_info: ChannelTlcInfo,
     pub public_channel_info: Option<PublicChannelInfo>,
     pub seed: [u8; 32],
     pub open_channel: OpenChannel,
@@ -314,7 +333,9 @@ where
         if state.reestablishing {
             match message {
                 FiberChannelMessage::ReestablishChannel(ref reestablish_channel) => {
-                    state.handle_reestablish_channel_message(reestablish_channel, &self.network)?;
+                    state
+                        .handle_reestablish_channel_message(reestablish_channel, &self.network)
+                        .await?;
                 }
                 _ => {
                     debug!("Ignoring message while reestablishing: {:?}", message);
@@ -440,7 +461,12 @@ where
                 Ok(())
             }
             FiberChannelMessage::RevokeAndAck(revoke_and_ack) => {
-                state.handle_revoke_and_ack_peer_message(&self.network, revoke_and_ack)?;
+                let need_commitment_signed =
+                    state.handle_revoke_and_ack_peer_message(&self.network, revoke_and_ack)?;
+                if need_commitment_signed {
+                    self.handle_commitment_signed_command(state)?;
+                }
+                self.update_tlc_status_on_ack(myself, state).await;
                 Ok(())
             }
             FiberChannelMessage::ChannelReady(_channel_ready) => {
@@ -465,6 +491,11 @@ where
                 let flags = flags | AwaitingChannelReadyFlags::THEIR_CHANNEL_READY;
                 state.update_state(ChannelState::AwaitingChannelReady(flags));
                 state.maybe_channel_is_ready(&self.network).await;
+                Ok(())
+            }
+            FiberChannelMessage::UpdateTlcInfo(update_tlc_info) => {
+                state.remote_tlc_info = Some(update_tlc_info.into());
+                state.update_graph_for_remote_channel_change(&self.network);
                 Ok(())
             }
             FiberChannelMessage::AddTlc(add_tlc) => {
@@ -561,7 +592,9 @@ where
                 Ok(())
             }
             FiberChannelMessage::ReestablishChannel(ref reestablish_channel) => {
-                state.handle_reestablish_channel_message(reestablish_channel, &self.network)?;
+                state
+                    .handle_reestablish_channel_message(reestablish_channel, &self.network)
+                    .await?;
                 Ok(())
             }
             FiberChannelMessage::TxAbort(_)
@@ -602,8 +635,11 @@ where
             ProcessingChannelError::TlcAmountIsTooLow => TlcErrorCode::AmountBelowMinimum,
             ProcessingChannelError::TlcNumberExceedLimit
             | ProcessingChannelError::TlcAmountExceedLimit
-            | ProcessingChannelError::TlcValueInflightExceedLimit
-            | ProcessingChannelError::WaitingTlcAck => TlcErrorCode::TemporaryChannelFailure,
+            | ProcessingChannelError::TlcValueInflightExceedLimit => {
+                TlcErrorCode::TemporaryChannelFailure
+            }
+            ProcessingChannelError::WaitingTlcAck => TlcErrorCode::TemporaryChannelFailure,
+            ProcessingChannelError::InternalError(_) => TlcErrorCode::TemporaryNodeFailure,
             ProcessingChannelError::InvalidState(error) => match state.state {
                 // we can not revert back up `ChannelReady` after `ShuttingDown`
                 ChannelState::Closed(_) | ChannelState::ShuttingDown(_) => {
@@ -625,6 +661,7 @@ where
             },
             ProcessingChannelError::RepeatedProcessing(_) => TlcErrorCode::TemporaryChannelFailure,
             ProcessingChannelError::SpawnErr(_)
+            | ProcessingChannelError::Musig2RoundFinalizeError(_)
             | ProcessingChannelError::Musig2SigningError(_)
             | ProcessingChannelError::Musig2VerifyError(_)
             | ProcessingChannelError::CapacityError(_) => TlcErrorCode::TemporaryNodeFailure,
@@ -656,72 +693,134 @@ where
         commitment_signed: CommitmentSigned,
     ) -> Result<(), ProcessingChannelError> {
         // build commitment tx and verify signature from remote, if passed send ACK for partner
-        state.verify_commitment_signed_and_send_ack(commitment_signed, &self.network)?;
-        self.flush_staging_tlc_operations(myself, state).await;
+        state.verify_commitment_signed_and_send_ack(commitment_signed.clone(), &self.network)?;
+        debug!(
+            "handled commitment_signed peer message: {:?}",
+            commitment_signed
+        );
+
+        let need_commitment_signed = state.tlc_state.update_for_commitment_signed();
+        if need_commitment_signed && !state.tlc_state.waiting_ack {
+            self.handle_commitment_signed_command(state)?;
+        }
+
+        // flush remove tlc for received tlcs after replying ack for peer
+        self.apply_settled_remove_tlcs(myself, state, true).await;
         Ok(())
     }
 
-    async fn flush_staging_tlc_operations(
+    async fn apply_settled_remove_tlcs(
+        &self,
+        myself: &ActorRef<ChannelActorMessage>,
+        state: &mut ChannelActorState,
+        inbound: bool,
+    ) {
+        let previous_balance = state.get_local_balance();
+        let pending_tlcs = if inbound {
+            state.tlc_state.received_tlcs.tlcs.iter_mut()
+        } else {
+            state.tlc_state.offered_tlcs.tlcs.iter_mut()
+        };
+        let settled_tlcs: Vec<_> = pending_tlcs
+            .filter(|tlc| {
+                tlc.removed_reason.is_some()
+                    && matches!(
+                        tlc.status,
+                        TlcStatus::Inbound(InboundTlcStatus::RemoveAckConfirmed)
+                            | TlcStatus::Outbound(OutboundTlcStatus::RemoveAckConfirmed)
+                    )
+            })
+            .map(|tlc| tlc.tlc_id)
+            .collect();
+
+        for tlc_id in settled_tlcs {
+            self.apply_remove_tlc_operation(myself, state, tlc_id)
+                .await
+                .expect("expect remove tlc success");
+        }
+        if state.get_local_balance() != previous_balance {
+            state.update_graph_for_local_channel_change(&self.network);
+            state.update_graph_for_remote_channel_change(&self.network);
+        }
+    }
+
+    async fn process_add_tlc_error(
+        &self,
+        myself: &ActorRef<ChannelActorMessage>,
+        state: &mut ChannelActorState,
+        payment_hash: Hash256,
+        tlc_id: TLCId,
+        error: ProcessingChannelErrorWithSharedSecret,
+    ) {
+        let tlc_err = match error.source {
+            // If we already have TlcErr, we can directly use it to send back to the peer.
+            ProcessingChannelError::TlcForwardingError(tlc_err) => tlc_err,
+            _ => {
+                let error_detail = self.get_tlc_error(state, &error.source).await;
+                #[cfg(debug_assertions)]
+                self.network
+                    .clone()
+                    .send_message(NetworkActorMessage::new_notification(
+                        NetworkServiceEvent::DebugEvent(DebugEvent::AddTlcFailed(
+                            state.get_local_peer_id(),
+                            payment_hash,
+                            error_detail.clone(),
+                        )),
+                    ))
+                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                error_detail
+            }
+        };
+        let error_packet = TlcErrPacket::new(
+            tlc_err,
+            // There's no shared secret stored in the received TLC, use the one found in the peeled onion packet.
+            &error.shared_secret,
+        );
+        self.register_retryable_tlc_remove(
+            myself,
+            state,
+            tlc_id,
+            RemoveTlcReason::RemoveTlcFail(error_packet),
+        )
+        .await;
+    }
+
+    async fn update_tlc_status_on_ack(
         &self,
         myself: &ActorRef<ChannelActorMessage>,
         state: &mut ChannelActorState,
     ) {
-        let pending_apply_tlcs = state.tlc_state.commit_remote_tlcs();
-        for tlc_info in pending_apply_tlcs {
-            match tlc_info {
-                TlcKind::AddTlc(add_tlc) => {
-                    assert!(add_tlc.is_received());
-                    if let Err(e) = self.apply_add_tlc_operation(myself, state, &add_tlc).await {
-                        let tlc_err = match e.source {
-                            // If we already have TlcErr, we can directly use it to send back to the peer.
-                            ProcessingChannelError::TlcForwardingError(tlc_err) => tlc_err,
-                            _ => {
-                                let error_detail = self.get_tlc_error(state, &e.source).await;
-                                #[cfg(debug_assertions)]
-                                self.network
-                                    .clone()
-                                    .send_message(NetworkActorMessage::new_notification(
-                                        NetworkServiceEvent::DebugEvent(DebugEvent::AddTlcFailed(
-                                            state.get_local_peer_id(),
-                                            add_tlc.payment_hash,
-                                            error_detail.clone(),
-                                        )),
-                                    ))
-                                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-                                error_detail
-                            }
-                        };
-                        let error_packet = TlcErrPacket::new(
-                            tlc_err,
-                            // There's no shared secret stored in the received TLC, use the one found in the peeled onion packet.
-                            &e.shared_secret,
-                        );
-                        self.register_retryable_tlc_remove(
-                            myself,
-                            state,
-                            add_tlc.tlc_id,
-                            RemoveTlcReason::RemoveTlcFail(error_packet),
-                        )
-                        .await;
-                    }
-                }
-                TlcKind::RemoveTlc(remove_tlc) => {
-                    let _ = self
-                        .apply_remove_tlc_operation(myself, state, remove_tlc)
-                        .await
-                        .map_err(|e| {
-                            error!("Error handling apply_remove_tlc_operation: {:?}", e);
-                        });
-                }
+        let apply_tlcs: Vec<TlcInfo> = state
+            .tlc_state
+            .get_committed_received_tlcs()
+            .into_iter()
+            .filter(|tlc| tlc.removed_reason.is_none())
+            .filter(|tlc| !state.tlc_state.applied_add_tlcs.contains(&tlc.tlc_id))
+            .collect();
+
+        for add_tlc in apply_tlcs {
+            assert!(add_tlc.is_received());
+            if let Err(error) = self.apply_add_tlc_operation(myself, state, &add_tlc).await {
+                self.process_add_tlc_error(
+                    myself,
+                    state,
+                    add_tlc.payment_hash,
+                    add_tlc.tlc_id,
+                    error,
+                )
+                .await;
             }
         }
+
+        // flush outbound tlcs
+        self.apply_settled_remove_tlcs(myself, state, false).await;
     }
 
     async fn try_to_relay_remove_tlc(
         &self,
         myself: &ActorRef<ChannelActorMessage>,
         state: &mut ChannelActorState,
-        tlc_info: &AddTlcInfo,
+        tlc_info: &TlcInfo,
         remove_reason: RemoveTlcReason,
     ) {
         assert!(tlc_info.is_offered());
@@ -746,12 +845,10 @@ where
         &self,
         myself: &ActorRef<ChannelActorMessage>,
         state: &mut ChannelActorState,
-        tlc_id: u64,
+        tlc_id: TLCId,
     ) {
         let tlc_info = state.get_received_tlc(tlc_id).expect("expect tlc");
-        let preimage = tlc_info
-            .payment_preimage
-            .or_else(|| self.store.get_invoice_preimage(&tlc_info.payment_hash));
+        let preimage = self.store.get_invoice_preimage(&tlc_info.payment_hash);
 
         let preimage = if let Some(preimage) = preimage {
             preimage
@@ -784,9 +881,8 @@ where
                     error!("invoice already paid, ignore");
                 }
                 _ => {
-                    self.store
-                        .update_invoice_status(&tlc.payment_hash, CkbInvoiceStatus::Paid)
-                        .expect("update invoice status error");
+                    // do nothing
+                    // invoice status will be updated to paid after apply remove tlc operation
                 }
             }
         }
@@ -799,7 +895,7 @@ where
         &self,
         myself: &ActorRef<ChannelActorMessage>,
         state: &mut ChannelActorState,
-        add_tlc: &AddTlcInfo,
+        add_tlc: &TlcInfo,
     ) -> Result<(), ProcessingChannelErrorWithSharedSecret> {
         // If needed, shared secret also get be extracted from the encrypted onion packet:
         // - Extract public key from onion_packet[1..34]
@@ -811,6 +907,7 @@ where
         {
             let shared_secret = peeled_onion_packet.shared_secret.clone();
             self.apply_add_tlc_operation_with_peeled_onion_packet(
+                myself,
                 state,
                 add_tlc,
                 peeled_onion_packet,
@@ -823,7 +920,7 @@ where
             self.subscribers
                 .pending_received_tlcs_subscribers
                 .send(TlcNotification {
-                    tlc: add_tlc.clone(),
+                    tlc: add_tlc.clone().into(),
                     channel_id: state.get_id(),
                     script: udt_type_script.clone(),
                 });
@@ -832,7 +929,7 @@ where
         // we don't need to settle down the tlc if it is not the last hop here,
         // some e2e tests are calling AddTlc manually, so we can not use onion packet to
         // check whether it's the last hop here, maybe need to revisit in future.
-        self.try_to_settle_down_tlc(myself, state, add_tlc.tlc_id.into())
+        self.try_to_settle_down_tlc(myself, state, add_tlc.tlc_id)
             .await;
 
         warn!("finished check tlc for peer message: {:?}", &add_tlc.tlc_id);
@@ -842,7 +939,7 @@ where
     async fn try_add_tlc_peel_onion_packet(
         &self,
         state: &mut ChannelActorState,
-        add_tlc: &AddTlcInfo,
+        add_tlc: &TlcInfo,
     ) -> Result<Option<PeeledPaymentOnionPacket>, ProcessingChannelError> {
         state.check_tlc_expiry(add_tlc.expiry)?;
 
@@ -859,14 +956,16 @@ where
 
     async fn apply_add_tlc_operation_with_peeled_onion_packet(
         &self,
+        myself: &ActorRef<ChannelActorMessage>,
         state: &mut ChannelActorState,
-        add_tlc: &AddTlcInfo,
+        add_tlc: &TlcInfo,
         peeled_onion_packet: PeeledPaymentOnionPacket,
     ) -> Result<(), ProcessingChannelError> {
         let payment_hash = add_tlc.payment_hash;
         let received_amount = add_tlc.amount;
         let forward_amount = peeled_onion_packet.current.amount;
 
+        state.tlc_state.applied_add_tlcs.insert(add_tlc.tlc_id);
         if peeled_onion_packet.is_last() {
             if forward_amount != add_tlc.amount {
                 return Err(ProcessingChannelError::FinalIncorrectHTLCAmount);
@@ -884,9 +983,6 @@ where
                 if invoice_status != CkbInvoiceStatus::Open {
                     return Err(ProcessingChannelError::FinalInvoiceInvalid(invoice_status));
                 }
-                self.store
-                    .update_invoice_status(&payment_hash, CkbInvoiceStatus::Received)
-                    .expect("update invoice status failed");
             }
 
             // if this is the last hop, store the preimage.
@@ -902,53 +998,60 @@ where
                 if add_tlc.payment_hash != filled_payment_hash {
                     return Err(ProcessingChannelError::FinalIncorrectPreimage);
                 }
-                state.set_received_tlc_preimage(add_tlc.tlc_id.into(), Some(preimage));
+                // update invoice status to received only all the error checking passed
+                if let Some(_invoice) = self.store.get_invoice(&payment_hash) {
+                    self.store
+                        .update_invoice_status(&payment_hash, CkbInvoiceStatus::Received)
+                        .expect("update invoice status failed");
+                }
+                self.store
+                    .insert_payment_preimage(payment_hash, preimage)
+                    .map_err(|_| {
+                        ProcessingChannelError::InternalError("insert preimage failed".to_string())
+                    })?;
             } else {
                 return Err(ProcessingChannelError::FinalIncorrectPaymentHash);
             }
         } else {
-            match state.public_channel_info.as_ref() {
-                Some(public_channel_info) if public_channel_info.enabled => {
-                    let min_tlc_value = public_channel_info.tlc_min_value;
-                    if min_tlc_value > received_amount {
-                        return Err(ProcessingChannelError::TlcAmountIsTooLow);
-                    }
-
-                    if add_tlc.expiry
-                        < peeled_onion_packet.current.expiry + public_channel_info.tlc_expiry_delta
-                    {
-                        return Err(ProcessingChannelError::IncorrectTlcExpiry);
-                    }
-
-                    assert!(received_amount >= forward_amount);
-                    let forward_fee = received_amount.saturating_sub(forward_amount);
-                    let fee_rate: u128 = public_channel_info.tlc_fee_proportional_millionths;
-
-                    let expected_fee = calculate_tlc_forward_fee(forward_amount, fee_rate);
-                    if expected_fee.is_err() || forward_fee < expected_fee.clone().unwrap() {
-                        error!(
-                            "too low forward_fee: {}, expected_fee: {:?}",
-                            forward_fee, expected_fee
-                        );
-                        return Err(ProcessingChannelError::TlcForwardFeeIsTooLow);
-                    }
-                    // if this is not the last hop, forward TLC to next hop
-                    self.handle_forward_onion_packet(
-                        state,
-                        add_tlc.payment_hash,
-                        peeled_onion_packet.clone(),
-                        add_tlc.tlc_id.into(),
-                    )
-                    .await?;
+            if state.is_public() && state.is_tlc_forwarding_enabled() {
+                if state.local_tlc_info.tlc_minimum_value > received_amount {
+                    return Err(ProcessingChannelError::TlcAmountIsTooLow);
                 }
-                _ => {
-                    // if we don't have public channel info, we can not forward the TLC
-                    // this may happended some malicious sender build a invalid onion router
-                    return Err(ProcessingChannelError::InvalidState(
-                        "Received AddTlc message, but the channel is not public or disabled"
-                            .to_string(),
-                    ));
+
+                if add_tlc.expiry
+                    < peeled_onion_packet.current.expiry + state.local_tlc_info.tlc_expiry_delta
+                {
+                    return Err(ProcessingChannelError::IncorrectTlcExpiry);
                 }
+
+                assert!(received_amount >= forward_amount);
+                let forward_fee = received_amount.saturating_sub(forward_amount);
+                let fee_rate: u128 = state.local_tlc_info.tlc_fee_proportional_millionths;
+
+                let expected_fee = calculate_tlc_forward_fee(forward_amount, fee_rate);
+                if expected_fee.is_err() || forward_fee < expected_fee.clone().unwrap() {
+                    error!(
+                        "too low forward_fee: {}, expected_fee: {:?}",
+                        forward_fee, expected_fee
+                    );
+                    return Err(ProcessingChannelError::TlcForwardFeeIsTooLow);
+                }
+                // if this is not the last hop, forward TLC to next hop
+                self.register_retryable_forward_tlc(
+                    myself,
+                    state,
+                    add_tlc.tlc_id,
+                    add_tlc.payment_hash,
+                    peeled_onion_packet.clone(),
+                )
+                .await;
+            } else {
+                // if we don't have public channel info, we can not forward the TLC
+                // this may happended some malicious sender build a invalid onion router
+                return Err(ProcessingChannelError::InvalidState(
+                    "Received AddTlc message, but the channel is not public or disabled"
+                        .to_string(),
+                ));
             }
         }
         Ok(())
@@ -965,9 +1068,7 @@ where
         state.check_for_tlc_update(Some(add_tlc.amount), false, false)?;
         let tlc_info = state.create_inbounding_tlc(add_tlc.clone())?;
         state.check_insert_tlc(&tlc_info)?;
-        state
-            .tlc_state
-            .add_remote_tlc(TlcKind::AddTlc(tlc_info.clone()));
+        state.tlc_state.add_received_tlc(tlc_info);
         state.increment_next_received_tlc_id();
         Ok(())
     }
@@ -982,12 +1083,22 @@ where
         // maybe we need to go through shutdown process for this error
         state
             .check_remove_tlc_with_reason(TLCId::Offered(remove_tlc.tlc_id), &remove_tlc.reason)?;
-        let tlc_kind = TlcKind::RemoveTlc(RemoveTlcInfo {
-            tlc_id: TLCId::Offered(remove_tlc.tlc_id),
-            channel_id: remove_tlc.channel_id,
-            reason: remove_tlc.reason.clone(),
-        });
-        state.tlc_state.add_remote_tlc(tlc_kind.clone());
+        let payment_hash = state
+            .tlc_state
+            .set_offered_tlc_removed(remove_tlc.tlc_id, remove_tlc.reason.clone());
+        if let RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill { payment_preimage }) =
+            remove_tlc.reason
+        {
+            // we need to store the preimage if the TLC is fulfilled
+            // incase the peer has already shutdown the channel,
+            // so we can send setttlement transaction to get money when necessary
+            // the preimage must be valid since we have checked it in check_remove_tlc_with_reason
+            self.store
+                .insert_payment_preimage(payment_hash, payment_preimage)
+                .map_err(|_| {
+                    ProcessingChannelError::InternalError("insert preimage failed".to_string())
+                })?;
+        }
         Ok(())
     }
 
@@ -995,24 +1106,29 @@ where
         &self,
         myself: &ActorRef<ChannelActorMessage>,
         state: &mut ChannelActorState,
-        remove_tlc: RemoveTlcInfo,
+        tlc_id: TLCId,
     ) -> Result<(), ProcessingChannelError> {
         let channel_id = state.get_id();
-        let remove_reason = remove_tlc.reason.clone();
-        let tlc_info = state
-            .remove_tlc_with_reason(remove_tlc.tlc_id, &remove_reason)
-            .expect("expect remove tlc successfully");
+        let (tlc_info, remove_reason) = state.remove_tlc_with_reason(tlc_id)?;
+        if matches!(remove_reason, RemoveTlcReason::RemoveTlcFulfill(_))
+            && self.store.get_invoice(&tlc_info.payment_hash).is_some()
+        {
+            self.store
+                .update_invoice_status(&tlc_info.payment_hash, CkbInvoiceStatus::Paid)
+                .expect("update invoice status failed");
+        }
+
         if let (
             Some(ref udt_type_script),
             RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill { payment_preimage }),
         ) = (state.funding_udt_type_script.clone(), &remove_reason)
         {
-            let mut tlc = tlc_info.clone();
-            tlc.payment_preimage = Some(*payment_preimage);
+            let mut tlc_notify_info: TlcNotifyInfo = tlc_info.clone().into();
+            tlc_notify_info.payment_preimage = Some(*payment_preimage);
             self.subscribers
                 .settled_tlcs_subscribers
                 .send(TlcNotification {
-                    tlc,
+                    tlc: tlc_notify_info,
                     channel_id,
                     script: udt_type_script.clone(),
                 });
@@ -1020,47 +1136,20 @@ where
         if tlc_info.previous_tlc.is_none() {
             // only the original sender of the TLC should send `TlcRemoveReceived` event
             // because only the original sender cares about the TLC event to settle the payment
-            self.network
-                .send_message(NetworkActorMessage::new_event(
-                    NetworkActorEvent::TlcRemoveReceived(
-                        tlc_info.payment_hash,
-                        remove_reason.clone(),
-                    ),
-                ))
-                .expect("myself alive");
+            if tlc_info.is_offered() {
+                self.network
+                    .send_message(NetworkActorMessage::new_event(
+                        NetworkActorEvent::TlcRemoveReceived(
+                            tlc_info.payment_hash,
+                            remove_reason.clone(),
+                        ),
+                    ))
+                    .expect("myself alive");
+            }
         } else {
             // relay RemoveTlc to previous channel if needed
             self.try_to_relay_remove_tlc(myself, state, &tlc_info, remove_reason)
                 .await;
-        }
-        Ok(())
-    }
-
-    async fn handle_forward_onion_packet(
-        &self,
-        state: &mut ChannelActorState,
-        payment_hash: Hash256,
-        peeled_onion_packet: PeeledPaymentOnionPacket,
-        added_tlc_id: u64,
-    ) -> Result<(), ProcessingChannelError> {
-        let (send, recv) = oneshot::channel::<Result<u64, TlcErr>>();
-        let rpc_reply = RpcReplyPort::from(send);
-        self.network
-            .send_message(NetworkActorMessage::Command(
-                NetworkActorCommand::SendPaymentOnionPacket(
-                    SendOnionPacketCommand {
-                        peeled_onion_packet,
-                        previous_tlc: Some((state.get_id(), added_tlc_id)),
-                        payment_hash,
-                    },
-                    rpc_reply,
-                ),
-            ))
-            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-
-        // If we failed to forward the onion packet, we should remove the tlc.
-        if let Err(res) = recv.await.expect("expect command replied") {
-            return Err(ProcessingChannelError::TlcForwardingError(res));
         }
         Ok(())
     }
@@ -1118,15 +1207,15 @@ where
             commitment_tx_partial_signature,
             next_local_nonce: state.get_next_local_nonce(),
         };
+
         self.network
             .send_message(NetworkActorMessage::new_command(
                 NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
                     state.get_remote_peer_id(),
-                    FiberMessage::commitment_signed(commitment_signed),
+                    FiberMessage::commitment_signed(commitment_signed.clone()),
                 )),
             ))
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-        state.save_remote_nonce_for_raa();
 
         match flags {
             CommitmentSignedFlags::SigningCommitment(flags) => {
@@ -1134,11 +1223,15 @@ where
                 state.update_state(ChannelState::SigningCommitment(flags));
                 state.maybe_transition_to_tx_signatures(flags, &self.network)?;
             }
-            CommitmentSignedFlags::ChannelReady() => {}
+            CommitmentSignedFlags::ChannelReady() => {
+                state.tlc_state.set_waiting_ack(true);
+            }
             CommitmentSignedFlags::PendingShutdown() => {
+                state.tlc_state.set_waiting_ack(true);
                 state.maybe_transition_to_shutdown(&self.network)?;
             }
         }
+        state.update_last_commitment_signed_remote_nonce();
         Ok(())
     }
 
@@ -1151,7 +1244,7 @@ where
         state.check_tlc_expiry(command.expiry)?;
         let tlc = state.create_outbounding_tlc(command.clone());
         state.check_insert_tlc(&tlc)?;
-        state.tlc_state.add_local_tlc(TlcKind::AddTlc(tlc.clone()));
+        state.tlc_state.add_offered_tlc(tlc.clone());
         state.increment_next_offered_tlc_id();
 
         let add_tlc = AddTlc {
@@ -1165,8 +1258,10 @@ where
         };
 
         // Send tlc update message to peer.
-        let msg =
-            FiberMessageWithPeerId::new(state.get_remote_peer_id(), FiberMessage::add_tlc(add_tlc));
+        let msg = FiberMessageWithPeerId::new(
+            state.get_remote_peer_id(),
+            FiberMessage::add_tlc(add_tlc.clone()),
+        );
 
         self.network
             .send_message(NetworkActorMessage::new_command(
@@ -1175,7 +1270,6 @@ where
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
 
         self.handle_commitment_signed_command(state)?;
-        state.tlc_state.set_waiting_ack(true);
         Ok(tlc.tlc_id.into())
     }
 
@@ -1186,12 +1280,9 @@ where
     ) -> ProcessingChannelResult {
         state.check_for_tlc_update(None, true, false)?;
         state.check_remove_tlc_with_reason(TLCId::Received(command.id), &command.reason)?;
-        let tlc_kind = TlcKind::RemoveTlc(RemoveTlcInfo {
-            channel_id: state.get_id(),
-            tlc_id: TLCId::Received(command.id),
-            reason: command.reason.clone(),
-        });
-        state.tlc_state.add_local_tlc(tlc_kind.clone());
+        state
+            .tlc_state
+            .set_received_tlc_removed(command.id, command.reason.clone());
         let msg = FiberMessageWithPeerId::new(
             state.get_remote_peer_id(),
             FiberMessage::remove_tlc(RemoveTlc {
@@ -1208,7 +1299,6 @@ where
 
         state.maybe_transition_to_shutdown(&self.network)?;
         self.handle_commitment_signed_command(state)?;
-        state.tlc_state.set_waiting_ack(true);
         Ok(())
     }
 
@@ -1342,7 +1432,7 @@ where
 
         if updated {
             state
-                .generate_and_broadcast_channel_update(&self.network)
+                .notify_owned_channel_updated(&self.network, true)
                 .await;
         }
 
@@ -1356,8 +1446,8 @@ where
         tlc_id: TLCId,
         reason: RemoveTlcReason,
     ) {
-        state.tlc_state.set_tlc_pending_remove(tlc_id, reason);
-        self.check_and_apply_retryable_remove_tlcs(myself, state)
+        let remove_tlc = RetryableTlcOperation::RemoveTlc(tlc_id, reason);
+        self.register_retryable_tlc_operation(myself, state, remove_tlc)
             .await;
     }
 
@@ -1369,56 +1459,88 @@ where
         channel_id: Hash256,
         reason: RemoveTlcReason,
     ) {
-        state
-            .tlc_state
-            .insert_relay_tlc_remove(channel_id, tlc_id, reason);
-        self.check_and_apply_retryable_remove_tlcs(myself, state)
+        let remove_tlc = RetryableTlcOperation::RelayRemoveTlc(channel_id, tlc_id, reason);
+        self.register_retryable_tlc_operation(myself, state, remove_tlc)
             .await;
     }
 
-    pub async fn check_and_apply_retryable_remove_tlcs(
+    pub async fn register_retryable_forward_tlc(
+        &self,
+        myself: &ActorRef<ChannelActorMessage>,
+        state: &mut ChannelActorState,
+        tlc_id: TLCId,
+        payment_hash: Hash256,
+        peeled_onion_packet: PeeledPaymentOnionPacket,
+    ) {
+        let forward_tlc =
+            RetryableTlcOperation::ForwardTlc(payment_hash, tlc_id, peeled_onion_packet, true);
+        self.register_retryable_tlc_operation(myself, state, forward_tlc)
+            .await;
+    }
+
+    async fn register_retryable_tlc_operation(
+        &self,
+        myself: &ActorRef<ChannelActorMessage>,
+        state: &mut ChannelActorState,
+        operation: RetryableTlcOperation,
+    ) {
+        if state.tlc_state.insert_retryable_tlc_operation(operation) {
+            myself
+                .send_message(ChannelActorMessage::Event(
+                    ChannelEvent::CheckTlcRetryOperation,
+                ))
+                .expect("myself alive");
+        }
+    }
+
+    fn set_forward_tlc_status(
+        &self,
+        state: &mut ChannelActorState,
+        payment_hash: Hash256,
+        try_one_time: bool,
+    ) {
+        if let Some(RetryableTlcOperation::ForwardTlc(_, _, _, ref mut sent)) = state
+            .tlc_state
+            .retryable_tlc_operations
+            .iter_mut()
+            .find(|op| matches!(op, RetryableTlcOperation::ForwardTlc(ph, _, _, _) if *ph == payment_hash))
+        {
+            *sent = try_one_time;
+        }
+    }
+
+    pub async fn apply_retryable_tlc_operations(
         &self,
         myself: &ActorRef<ChannelActorMessage>,
         state: &mut ChannelActorState,
     ) {
-        let pending_removes = state.tlc_state.get_pending_remove();
-        for retryable_remove in pending_removes.into_iter() {
-            match retryable_remove {
-                RetryableRemoveTlc::RemoveTlc(tlc_id, ref reason) => {
-                    let command = RemoveTlcCommand {
-                        id: tlc_id.into(),
-                        reason: reason.clone(),
-                    };
-
-                    match self.handle_remove_tlc_command(state, command) {
-                        Ok(_) | Err(ProcessingChannelError::RepeatedProcessing(_)) => {
-                            state.tlc_state.remove_pending_remove_tlc(&retryable_remove);
-                        }
-                        Err(ProcessingChannelError::WaitingTlcAck) => {
-                            error!(
-                                "Failed to remove tlc: {:?} because of WaitingTlcAck, retry it later",
-                                &retryable_remove
-                            );
-                        }
-                        Err(err) => {
-                            error!(
-                                "Failed to remove tlc: {:?} with reason: {:?}, will not retry",
-                                &retryable_remove, err
-                            );
-                            state.tlc_state.remove_pending_remove_tlc(&retryable_remove);
-                        }
+        let mut pending_tlc_ops = state.tlc_state.get_pending_operations();
+        pending_tlc_ops.retain_mut(|retryable_operation| {
+            match retryable_operation {
+                RetryableTlcOperation::RemoveTlc(tlc_id, ref reason) => {
+                    match self.handle_remove_tlc_command(
+                        state,
+                        RemoveTlcCommand {
+                            id: u64::from(*tlc_id),
+                            reason: reason.clone(),
+                        },
+                    ) {
+                        Ok(_) | Err(ProcessingChannelError::RepeatedProcessing(_)) => false,
+                        Err(ProcessingChannelError::WaitingTlcAck) => true,
+                        Err(_err) => false,
                     }
                 }
-                RetryableRemoveTlc::RelayRemoveTlc(channel_id, tlc_id, ref reason) => {
-                    let (send, recv) = oneshot::channel::<Result<(), String>>();
+                RetryableTlcOperation::RelayRemoveTlc(channel_id, tlc_id, ref reason) => {
+                    // send relay remove tlc with network actor to previous hop
+                    let (send, _recv) = oneshot::channel::<Result<(), ProcessingChannelError>>();
                     let port = RpcReplyPort::from(send);
                     self.network
                         .send_message(NetworkActorMessage::new_command(
                             NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
-                                channel_id: channel_id,
+                                channel_id: *channel_id,
                                 command: ChannelCommand::RemoveTlc(
                                     RemoveTlcCommand {
-                                        id: tlc_id,
+                                        id: u64::from(*tlc_id),
                                         reason: reason.clone(),
                                     },
                                     port,
@@ -1426,34 +1548,102 @@ where
                             }),
                         ))
                         .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-                    if let Ok(res) = recv.await {
-                        match res {
+                    // the previous hop will automatically retry if there is Waiting_Ack error
+                    false
+                }
+                RetryableTlcOperation::ForwardTlc(
+                    payment_hash,
+                    tlc_id,
+                    ref peeled_onion_packet,
+                    try_one_time,
+                ) => {
+                    // there is a potential deadlock for waiting the result from another channel actor
+                    // for the scenario these two things happen at the same time:
+                    //  1. channel A send forward tlc to channel B
+                    //  2. channel B send forward tlc to channel A
+                    // we may end up waiting for each other forever
+                    //
+                    // but we need the result for better error handling
+                    // so we introduce the ForwardTlcResult to get the result based on actor message
+                    if !*try_one_time {
+                        // we need to decide whether to retry it until we get ForwardTlcResult
+                        true
+                    } else {
+                        match self.network.send_message(NetworkActorMessage::Command(
+                            NetworkActorCommand::SendPaymentOnionPacket(SendOnionPacketCommand {
+                                peeled_onion_packet: peeled_onion_packet.clone(),
+                                previous_tlc: Some((state.get_id(), u64::from(*tlc_id))),
+                                payment_hash: *payment_hash,
+                            }),
+                        )) {
                             Ok(_) => {
-                                state.tlc_state.remove_pending_remove_tlc(&retryable_remove);
+                                // here we just make sure the forward tlc is sent, we don't need to wait for the result
+                                // retry it if necessary until we get ForwardTlcResult
+                                // self.set_forward_tlc_status(state, *payment_hash, false);
+                                *try_one_time = false;
+                                true
                             }
-                            Err(err) if err.contains("WaitingTlcAck") => {
-                                error!(
-                                "Failed to relay remove tlc: {:?} because of WaitingTlcAck, retry it later",
-                                &retryable_remove
-                            );
-                            }
-                            Err(err) => {
-                                error!(
-                                "Failed to relay remove tlc: {:?} with reason: {:?}, will not retry",
-                                &retryable_remove, err
-                            );
-                                state.tlc_state.remove_pending_remove_tlc(&retryable_remove);
+                            Err(_err) => {
+                                // network actor is dead? we will retry it later
+                                false
                             }
                         }
                     }
                 }
             }
-        }
-        // If there are more pending removes, we will retry it later
-        if !state.tlc_state.get_pending_remove().is_empty() {
-            myself.send_after(AUTO_SETDOWN_TLC_INTERVAL, || {
-                ChannelActorMessage::Event(ChannelEvent::CheckTlcSetdown)
+        });
+
+        state.tlc_state.retryable_tlc_operations = pending_tlc_ops;
+        if state.tlc_state.has_pending_operations() {
+            myself.send_after(RETRYABLE_TLC_OPS_INTERVAL, || {
+                ChannelActorMessage::Event(ChannelEvent::CheckTlcRetryOperation)
             });
+        }
+    }
+
+    async fn handle_forward_tlc_result(
+        &self,
+        myself: &ActorRef<ChannelActorMessage>,
+        state: &mut ChannelActorState,
+        result: ForwardTlcResult,
+    ) {
+        let pending_ops = state.tlc_state.get_pending_operations();
+        if let Some((tlc_op, peeled_onion)) = pending_ops.iter().find_map(|op| match op {
+            RetryableTlcOperation::ForwardTlc(payment_hash, _, peel_onion_packet, _)
+                if *payment_hash == result.payment_hash =>
+            {
+                Some((op, peel_onion_packet))
+            }
+            _ => None,
+        }) {
+            if let Some((channel_err, tlc_err)) = result.error_info {
+                match channel_err {
+                    ProcessingChannelError::WaitingTlcAck => {
+                        // if we get WaitingTlcAck error, we will retry it later
+                        self.set_forward_tlc_status(state, result.payment_hash, true);
+                    }
+                    ProcessingChannelError::RepeatedProcessing(_) => {
+                        // ignore repeated processing error, we have already handled it
+                        state.tlc_state.remove_pending_tlc_operation(tlc_op);
+                    }
+                    _ => {
+                        let error = ProcessingChannelError::TlcForwardingError(tlc_err)
+                            .with_shared_secret(peeled_onion.shared_secret.clone());
+                        self.process_add_tlc_error(
+                            myself,
+                            state,
+                            result.payment_hash,
+                            TLCId::Received(result.tlc_id),
+                            error,
+                        )
+                        .await;
+                        state.tlc_state.remove_pending_tlc_operation(tlc_op);
+                    }
+                }
+            } else {
+                // if we get success result from AddTlc, we will remove the pending operation
+                state.tlc_state.remove_pending_tlc_operation(tlc_op);
+            }
         }
     }
 
@@ -1562,6 +1752,7 @@ where
 
     pub async fn handle_command(
         &self,
+        myself: &ActorRef<ChannelActorMessage>,
         state: &mut ChannelActorState,
         command: ChannelCommand,
     ) -> Result<(), ProcessingChannelError> {
@@ -1571,13 +1762,29 @@ where
             }
             ChannelCommand::CommitmentSigned() => self.handle_commitment_signed_command(state),
             ChannelCommand::AddTlc(command, reply) => {
-                match self.handle_add_tlc_command(state, command) {
+                let res = self.handle_add_tlc_command(state, command.clone());
+                let error_info = if let Err(ref err) = res {
+                    Some((err.clone(), self.get_tlc_error(state, &err).await))
+                } else {
+                    None
+                };
+
+                self.network
+                    .send_message(NetworkActorMessage::new_event(
+                        NetworkActorEvent::AddTlcResult(
+                            command.payment_hash,
+                            error_info,
+                            command.previous_tlc,
+                        ),
+                    ))
+                    .expect("network actor alive");
+
+                match res {
                     Ok(tlc_id) => {
                         let _ = reply.send(Ok(AddTlcResponse { tlc_id }));
                         Ok(())
                     }
                     Err(err) => {
-                        debug!("Error processing AddTlc command: {:?}", &err);
                         let tlc_err = self.get_tlc_error(state, &err).await;
                         let _ = reply.send(Err(tlc_err));
                         Err(err)
@@ -1585,13 +1792,22 @@ where
                 }
             }
             ChannelCommand::RemoveTlc(command, reply) => {
-                match self.handle_remove_tlc_command(state, command) {
+                match self.handle_remove_tlc_command(state, command.clone()) {
                     Ok(_) => {
                         let _ = reply.send(Ok(()));
                         Ok(())
                     }
                     Err(err) => {
-                        let _ = reply.send(Err(err.to_string()));
+                        if matches!(err, ProcessingChannelError::WaitingTlcAck) {
+                            self.register_retryable_tlc_remove(
+                                myself,
+                                state,
+                                TLCId::Received(command.id),
+                                command.reason,
+                            )
+                            .await;
+                        }
+                        let _ = reply.send(Err(err.clone()));
                         Err(err)
                     }
                 }
@@ -1624,12 +1840,23 @@ where
                     }
                 }
             }
+            ChannelCommand::ForwardTlcResult(forward_tlc_res) => {
+                self.handle_forward_tlc_result(myself, state, forward_tlc_res)
+                    .await;
+                Ok(())
+            }
             #[cfg(test)]
-            ChannelCommand::ReloadState() => {
+            ChannelCommand::ReloadState(reload_params) => {
                 *state = self
                     .store
                     .get_channel_actor_state(&state.get_id())
                     .expect("load channel state failed");
+                let ReloadParams { notify_changes } = reload_params;
+                if notify_changes {
+                    state
+                        .notify_owned_channel_updated(&self.network, false)
+                        .await;
+                }
                 Ok(())
             }
         }
@@ -1642,7 +1869,7 @@ where
         event: ChannelEvent,
     ) -> Result<(), ProcessingChannelError> {
         match event {
-            ChannelEvent::FundingTransactionConfirmed(block_number, tx_index) => {
+            ChannelEvent::FundingTransactionConfirmed(block_hash, tx_index, timestamp) => {
                 debug!("Funding transaction confirmed");
                 let flags = match state.state {
                     ChannelState::AwaitingChannelReady(flags) => flags,
@@ -1656,7 +1883,7 @@ where
                             "Expecting funding transaction confirmed event in state AwaitingChannelReady or after TX_SIGNATURES_SENT, but got state {:?}", &state.state)));
                     }
                 };
-                state.funding_tx_confirmed_at = Some((block_number, tx_index));
+                state.funding_tx_confirmed_at = Some((block_hash, tx_index, timestamp));
                 self.network
                     .send_message(NetworkActorMessage::new_command(
                         NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
@@ -1684,25 +1911,26 @@ where
                 state.update_state(ChannelState::Closed(CloseFlags::UNCOOPERATIVE));
                 debug!("Channel closed with uncooperative close");
             }
-            ChannelEvent::CheckTlcSetdown => {
-                self.check_and_apply_retryable_remove_tlcs(myself, state)
-                    .await;
+            ChannelEvent::CheckTlcRetryOperation => {
+                self.apply_retryable_tlc_operations(myself, state).await;
             }
             ChannelEvent::PeerDisconnected => {
                 myself.stop(Some("PeerDisconnected".to_string()));
             }
             ChannelEvent::ClosingTransactionConfirmed => {
                 // Broadcast the channel update message which disables the channel.
-                let update = state.generate_disabled_channel_update(&self.network).await;
+                if state.is_public() {
+                    let update = state.generate_disabled_channel_update(&self.network).await;
 
-                self.network
-                    .send_message(NetworkActorMessage::new_command(
-                        NetworkActorCommand::BroadcastMessages(vec![
-                            BroadcastMessage::ChannelUpdate(update),
-                        ]),
-                    ))
-                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-
+                    self.network
+                        .send_message(NetworkActorMessage::new_command(
+                            NetworkActorCommand::BroadcastMessages(vec![
+                                BroadcastMessageWithTimestamp::ChannelUpdate(update),
+                            ]),
+                        ))
+                        .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                }
+                debug_event!(self.network, "ChannelClosed");
                 myself.stop(Some("ChannelClosed".to_string()));
             }
         }
@@ -1753,6 +1981,7 @@ where
                 funding_amount: local_funding_amount,
                 reserved_ckb_amount: local_reserved_ckb_amount,
                 shutdown_script: local_shutdown_script,
+                tlc_info,
                 public_channel_info,
                 seed,
                 open_channel,
@@ -1828,6 +2057,7 @@ where
                     *remote_max_tlc_number_in_flight,
                     max_tlc_number_in_flight,
                     max_tlc_value_in_flight,
+                    tlc_info,
                 );
                 state.check_accept_channel_parameters()?;
 
@@ -1879,6 +2109,7 @@ where
             ChannelInitializationParameter::OpenChannel(OpenChannelParameter {
                 funding_amount,
                 seed,
+                tlc_info,
                 public_channel_info,
                 funding_udt_type_script,
                 shutdown_script,
@@ -1923,6 +2154,7 @@ where
                     shutdown_script.clone(),
                     max_tlc_value_in_flight,
                     max_tlc_number_in_flight,
+                    tlc_info,
                 );
 
                 channel.check_open_channel_parameters()?;
@@ -2005,14 +2237,12 @@ where
                     remote_commitment_number: channel.get_current_commitment_number(false),
                 };
 
-                let command = FiberMessageWithPeerId::new(
-                    self.get_remote_peer_id(),
-                    FiberMessage::reestablish_channel(reestablish_channel),
-                );
-
                 self.network
                     .send_message(NetworkActorMessage::new_command(
-                        NetworkActorCommand::SendFiberMessage(command),
+                        NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
+                            self.get_remote_peer_id(),
+                            FiberMessage::reestablish_channel(reestablish_channel),
+                        )),
                     ))
                     .expect(ASSUME_NETWORK_ACTOR_ALIVE);
 
@@ -2049,22 +2279,19 @@ where
 
         match message {
             ChannelActorMessage::PeerMessage(message) => {
-                if let Err(error) = self.handle_peer_message(&myself, state, message).await {
-                    error!("Error while processing channel message: {:?}", error);
-                    #[cfg(debug_assertions)]
-                    self.network
-                        .clone()
-                        .send_message(NetworkActorMessage::new_notification(
-                            NetworkServiceEvent::DebugEvent(DebugEvent::Common(format!(
-                                "{:?}",
-                                error
-                            ))),
-                        ))
-                        .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                if let Err(error) = self
+                    .handle_peer_message(&myself, state, message.clone())
+                    .await
+                {
+                    error!(
+                        "Error while processing channel message: {:?} with message: {:?}",
+                        error, message
+                    );
+                    debug_event!(&self.network, &format!("{:?}", error));
                 }
             }
             ChannelActorMessage::Command(command) => {
-                if let Err(err) = self.handle_command(state, command).await {
+                if let Err(err) = self.handle_command(&myself, state, command).await {
                     error!("Error while processing channel command: {:?}", err);
                 }
             }
@@ -2076,6 +2303,39 @@ where
         }
 
         self.store.insert_channel_actor_state(state.clone());
+        Ok(())
+    }
+
+    async fn post_start(
+        &self,
+        myself: ActorRef<Self::Msg>,
+        state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        if state.tlc_state.has_pending_operations() {
+            myself
+                .send_message(ChannelActorMessage::Event(
+                    ChannelEvent::CheckTlcRetryOperation,
+                ))
+                .expect("myself alive");
+        }
+
+        Ok(())
+    }
+
+    async fn post_stop(
+        &self,
+        _myself: ActorRef<Self::Msg>,
+        state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        if let Some(outpoint) = state.get_funding_transaction_outpoint() {
+            self.network
+                .send_message(NetworkActorMessage::new_event(
+                    NetworkActorEvent::OwnedChannelUpdateEvent(
+                        super::graph::OwnedChannelUpdateEvent::Down(outpoint),
+                    ),
+                ))
+                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+        }
         Ok(())
     }
 }
@@ -2161,27 +2421,69 @@ impl TLCId {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
-pub enum TlcKind {
-    AddTlc(AddTlcInfo),
-    RemoveTlc(RemoveTlcInfo),
+pub enum OutboundTlcStatus {
+    // Offered tlc created and sent to remote party
+    LocalAnnounced,
+    // Received ACK from remote party for this offered tlc
+    Committed,
+    // Remote party removed this tlc
+    RemoteRemoved,
+    // We received another RemoveTlc message from peer when we are waiting for the ack of the last one.
+    // So we need another ACK to confirm the removal.
+    RemoveWaitPrevAck,
+    // We have sent commitment signed to peer and waiting ACK for confirming this RemoveTlc
+    RemoveWaitAck,
+    // We have received the ACK for the RemoveTlc, it's safe to remove this tlc
+    RemoveAckConfirmed,
 }
 
-impl TlcKind {
-    pub fn log(&self) -> String {
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+pub enum InboundTlcStatus {
+    // Received tlc from remote party, but not committed yet
+    RemoteAnnounced,
+    // We received another AddTlc peer message when we are waiting for the ack of the last one.
+    // So we need another ACK to confirm the addition.
+    AnnounceWaitPrevAck,
+    // We have sent commitment signed to peer and waiting ACK for confirming this AddTlc
+    AnnounceWaitAck,
+    // We have received ACK from peer and Committed this tlc
+    Committed,
+    // We have removed this tlc, but haven't received ACK from peer
+    LocalRemoved,
+    // We have received the ACK for the RemoveTlc, it's safe to remove this tlc
+    RemoveAckConfirmed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+pub enum TlcStatus {
+    Outbound(OutboundTlcStatus),
+    Inbound(InboundTlcStatus),
+}
+
+impl TlcStatus {
+    pub fn as_outbound_status(&self) -> OutboundTlcStatus {
         match self {
-            TlcKind::AddTlc(add_tlc) => {
-                format!("{:?}", &add_tlc.tlc_id)
+            TlcStatus::Outbound(status) => status.clone(),
+            _ => {
+                unreachable!("unexpected status")
             }
-            TlcKind::RemoveTlc(remove_tlc) => {
-                format!("RemoveTlc({:?})", &remove_tlc.tlc_id)
+        }
+    }
+
+    pub fn as_inbound_status(&self) -> InboundTlcStatus {
+        match self {
+            TlcStatus::Inbound(status) => status.clone(),
+            _ => {
+                unreachable!("unexpected status ")
             }
         }
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
-pub struct AddTlcInfo {
+#[derive(Clone, Serialize, Deserialize, Eq, PartialEq)]
+pub struct TlcInfo {
     pub channel_id: Hash256,
+    pub status: TlcStatus,
     pub tlc_id: TLCId,
     pub amount: u128,
     pub payment_hash: Hash256,
@@ -2194,8 +2496,7 @@ pub struct AddTlcInfo {
     /// Save it to backward errors. Use all zeros when no shared secrets are available.
     pub shared_secret: [u8; 32],
     pub created_at: CommitmentNumbers,
-    pub removed_at: Option<(CommitmentNumbers, RemoveTlcReason)>,
-    pub payment_preimage: Option<Hash256>,
+    pub removed_reason: Option<RemoveTlcReason>,
 
     /// Note: `previous_tlc` is used to track the tlc chain for a multi-tlc payment,
     ///       we need to know previous when removing tlc backwardly.
@@ -2207,7 +2508,25 @@ pub struct AddTlcInfo {
     pub previous_tlc: Option<(Hash256, TLCId)>,
 }
 
-impl AddTlcInfo {
+impl Debug for TlcInfo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TlcInfo")
+            .field("tlc_id", &self.tlc_id)
+            .field("status", &self.status)
+            .field("amount", &self.amount)
+            .field("removed_reason", &self.removed_reason)
+            .finish()
+    }
+}
+
+impl TlcInfo {
+    pub fn log(&self) -> String {
+        format!(
+            "id: {:?} status: {:?} amount: {:?}",
+            &self.tlc_id, self.status, self.amount
+        )
+    }
+
     pub fn is_offered(&self) -> bool {
         self.tlc_id.is_offered()
     }
@@ -2224,6 +2543,20 @@ impl AddTlcInfo {
         self.tlc_id.flip_mut();
     }
 
+    pub fn outbound_status(&self) -> OutboundTlcStatus {
+        self.status.as_outbound_status()
+    }
+
+    pub fn inbound_status(&self) -> InboundTlcStatus {
+        self.status.as_inbound_status()
+    }
+
+    fn get_hash(&self) -> ShortHash {
+        self.payment_hash.as_ref()[..20]
+            .try_into()
+            .expect("short hash from payment hash")
+    }
+
     /// Get the value for the field `htlc_type` in commitment lock witness.
     /// - Lowest 1 bit: 0 if the tlc is offered by the remote party, 1 otherwise.
     /// - High 7 bits:
@@ -2233,431 +2566,362 @@ impl AddTlcInfo {
         let offered_flag = if self.is_offered() { 0u8 } else { 1u8 };
         ((self.hash_algorithm as u8) << 1) + offered_flag
     }
-
-    fn get_hash(&self) -> ShortHash {
-        self.payment_hash.as_ref()[..20]
-            .try_into()
-            .expect("short hash from payment hash")
-    }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
-pub struct RemoveTlcInfo {
-    pub channel_id: Hash256,
-    pub tlc_id: TLCId,
-    pub reason: RemoveTlcReason,
-}
-
-impl TlcKind {
-    pub fn tlc_id_u64(&self) -> u64 {
-        match self {
-            TlcKind::AddTlc(add_tlc) => add_tlc.tlc_id.into(),
-            TlcKind::RemoveTlc(remove_tlc) => remove_tlc.tlc_id.into(),
+impl From<TlcInfo> for TlcNotifyInfo {
+    fn from(tlc: TlcInfo) -> Self {
+        TlcNotifyInfo {
+            tlc_id: tlc.tlc_id,
+            amount: tlc.amount,
+            payment_hash: tlc.payment_hash,
+            payment_preimage: None,
         }
     }
+}
 
-    pub fn tlc_id(&self) -> TLCId {
+#[derive(Clone, Serialize, Deserialize, Eq, PartialEq)]
+pub enum RetryableTlcOperation {
+    RemoveTlc(TLCId, RemoveTlcReason),
+    RelayRemoveTlc(Hash256, u64, RemoveTlcReason),
+    ForwardTlc(Hash256, TLCId, PeeledPaymentOnionPacket, bool),
+}
+
+impl Debug for RetryableTlcOperation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            TlcKind::AddTlc(info) => info.tlc_id,
-            TlcKind::RemoveTlc(remove_tlc) => remove_tlc.tlc_id,
+            RetryableTlcOperation::RemoveTlc(tlc_id, reason) => f
+                .debug_tuple("RemoveTlc")
+                .field(tlc_id)
+                .field(reason)
+                .finish(),
+            RetryableTlcOperation::RelayRemoveTlc(payment_hash, tlc_id, reason) => f
+                .debug_tuple("RelayRemoveTlc")
+                .field(payment_hash)
+                .field(tlc_id)
+                .field(reason)
+                .finish(),
+            RetryableTlcOperation::ForwardTlc(payment_hash, tlc_id, _, run_once) => f
+                .debug_tuple("ForwardTlc")
+                .field(payment_hash)
+                .field(tlc_id)
+                .field(run_once)
+                .finish(),
         }
-    }
-
-    pub fn is_offered(&self) -> bool {
-        self.tlc_id().is_offered()
-    }
-
-    pub fn is_received(&self) -> bool {
-        !self.is_offered()
     }
 }
 
-#[derive(Default, Clone, Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Default)]
 pub struct PendingTlcs {
-    tlcs: Vec<TlcKind>,
-    committed_index: usize,
-    next_tlc_id: u64,
+    pub tlcs: Vec<TlcInfo>,
+    pub next_tlc_id: u64,
 }
 
 impl PendingTlcs {
-    pub fn new() -> Self {
-        Self {
-            tlcs: Vec::new(),
-            committed_index: 0,
-            next_tlc_id: 0,
-        }
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut TlcInfo> {
+        self.tlcs.iter_mut()
     }
 
-    pub fn next_tlc_id(&self) -> u64 {
+    pub fn get_next_id(&self) -> u64 {
         self.next_tlc_id
     }
 
-    pub fn increment_next_tlc_id(&mut self) {
+    pub fn increment_next_id(&mut self) {
         self.next_tlc_id += 1;
     }
 
-    pub fn add_tlc_operation(&mut self, tlc_op: TlcKind) {
-        self.tlcs.push(tlc_op);
-    }
-
-    pub fn get_staging_tlcs(&self) -> &[TlcKind] {
-        &self.tlcs[self.committed_index..]
-    }
-
-    pub fn get_committed_tlcs(&self) -> &[TlcKind] {
-        &self.tlcs[..self.committed_index]
-    }
-
-    pub fn get_committed_tlcs_mut(&mut self) -> &mut [TlcKind] {
-        &mut self.tlcs[..self.committed_index]
-    }
-
-    pub fn tlcs(&self) -> &[TlcKind] {
-        &self.tlcs
-    }
-
-    pub fn tlcs_mut(&mut self) -> &mut Vec<TlcKind> {
-        &mut self.tlcs
-    }
-
-    pub fn push(&mut self, tlc: TlcKind) {
-        assert!(!self.is_tlc_present(&tlc));
+    pub fn add_tlc(&mut self, tlc: TlcInfo) {
         self.tlcs.push(tlc);
     }
 
-    fn is_tlc_present(&self, tlc: &TlcKind) -> bool {
-        self.tlcs.iter().any(|t| match (t, tlc) {
-            (TlcKind::AddTlc(info1), TlcKind::AddTlc(info2)) => info1.tlc_id == info2.tlc_id,
-            (TlcKind::RemoveTlc(info1), TlcKind::RemoveTlc(info2)) => info1.tlc_id == info2.tlc_id,
-            _ => false,
-        })
-    }
-
-    pub fn commit_tlcs(&mut self, committed_tlcs: &[TlcKind]) -> Vec<TlcKind> {
-        let staging_tlcs = self.get_staging_tlcs().to_vec();
-        for tlc in committed_tlcs {
-            if !self.is_tlc_present(tlc) {
-                self.tlcs.push(tlc.clone());
-            }
-        }
-        self.committed_index = self.tlcs.len();
-        return staging_tlcs;
-    }
-
-    pub fn get_mut(&mut self, tlc_id: &TLCId) -> Option<&mut AddTlcInfo> {
-        self.tlcs.iter_mut().find_map(|tlc| match tlc {
-            TlcKind::AddTlc(info) if info.tlc_id == *tlc_id => Some(info),
-            _ => None,
-        })
-    }
-
-    pub fn drop_remove_tlc(&mut self, tlc_id: &TLCId) {
-        self.tlcs.retain(|tlc| match tlc {
-            TlcKind::RemoveTlc(info) => info.tlc_id != *tlc_id,
-            _ => true,
-        });
-        self.committed_index = self.tlcs.len();
-    }
-
-    pub fn shrink_removed_tlc(&mut self) {
-        assert_eq!(self.committed_index, self.tlcs.len());
-        let new_committed_index = self
-            .get_committed_tlcs()
+    pub fn get_committed_tlcs(&self) -> Vec<TlcInfo> {
+        self.tlcs
             .iter()
-            .filter(|tlc| match tlc {
-                TlcKind::AddTlc(info) => info.removed_at.is_none(),
-                _ => true,
+            .filter(|tlc| {
+                if tlc.is_offered() {
+                    match tlc.outbound_status() {
+                        OutboundTlcStatus::Committed => true,
+                        _ => false,
+                    }
+                } else {
+                    match tlc.inbound_status() {
+                        InboundTlcStatus::Committed => true,
+                        _ => false,
+                    }
+                }
             })
-            .count();
-        self.tlcs.retain(|tlc| match tlc {
-            TlcKind::AddTlc(info) => info.removed_at.is_none(),
-            _ => true,
-        });
-        self.committed_index = new_committed_index;
+            .cloned()
+            .collect()
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
-pub enum RetryableRemoveTlc {
-    RemoveTlc(TLCId, RemoveTlcReason),
-    RelayRemoveTlc(Hash256, u64, RemoveTlcReason),
 }
 
 #[derive(Default, Clone, Debug, Serialize, Deserialize)]
 pub struct TlcState {
-    local_pending_tlcs: PendingTlcs,
-    remote_pending_tlcs: PendingTlcs,
-    // if the tlc is pending to be removed, the reason will be stored here
-    // this will only used for retrying remove TLC
-    retryable_remove_tlcs: Vec<RetryableRemoveTlc>,
-    waiting_ack: bool,
+    pub offered_tlcs: PendingTlcs,
+    pub received_tlcs: PendingTlcs,
+    pub retryable_tlc_operations: Vec<RetryableTlcOperation>,
+    pub applied_add_tlcs: HashSet<TLCId>,
+    pub waiting_ack: bool,
 }
 
 impl TlcState {
+    #[cfg(debug_assertions)]
+    pub fn debug(&self) {
+        for tlc in self.offered_tlcs.tlcs.iter() {
+            debug!("offered_tlc: {:?}", tlc.log());
+        }
+        for tlc in self.received_tlcs.tlcs.iter() {
+            debug!("received_tlc: {:?}", tlc.log());
+        }
+    }
+
+    pub fn get_mut(&mut self, tlc_id: &TLCId) -> Option<&mut TlcInfo> {
+        self.offered_tlcs
+            .tlcs
+            .iter_mut()
+            .find(|tlc| tlc.tlc_id == *tlc_id)
+            .or_else(|| {
+                self.received_tlcs
+                    .tlcs
+                    .iter_mut()
+                    .find(|tlc| tlc.tlc_id == *tlc_id)
+            })
+    }
+
+    pub fn get(&self, tlc_id: &TLCId) -> Option<&TlcInfo> {
+        if tlc_id.is_offered() {
+            self.offered_tlcs
+                .tlcs
+                .iter()
+                .find(|tlc| tlc.tlc_id == *tlc_id)
+        } else {
+            self.received_tlcs
+                .tlcs
+                .iter()
+                .find(|tlc| tlc.tlc_id == *tlc_id)
+        }
+    }
+
+    pub fn get_committed_received_tlcs(&self) -> Vec<TlcInfo> {
+        self.received_tlcs.get_committed_tlcs()
+    }
+
     pub fn get_next_offering(&self) -> u64 {
-        self.local_pending_tlcs.next_tlc_id()
+        self.offered_tlcs.get_next_id()
     }
 
     pub fn get_next_received(&self) -> u64 {
-        self.remote_pending_tlcs.next_tlc_id()
+        self.received_tlcs.get_next_id()
     }
 
     pub fn increment_offering(&mut self) {
-        self.local_pending_tlcs.increment_next_tlc_id();
+        self.offered_tlcs.increment_next_id();
     }
 
     pub fn increment_received(&mut self) {
-        self.remote_pending_tlcs.increment_next_tlc_id();
+        self.received_tlcs.increment_next_id();
     }
 
     pub fn set_waiting_ack(&mut self, waiting_ack: bool) {
         self.waiting_ack = waiting_ack;
     }
 
-    pub fn set_tlc_pending_remove(&mut self, tlc_id: TLCId, reason: RemoveTlcReason) {
-        self.retryable_remove_tlcs
-            .push(RetryableRemoveTlc::RemoveTlc(tlc_id, reason));
-    }
-
-    pub fn insert_relay_tlc_remove(
-        &mut self,
-        channel_id: Hash256,
-        tlc_id: u64,
-        reason: RemoveTlcReason,
-    ) {
-        self.retryable_remove_tlcs
-            .push(RetryableRemoveTlc::RelayRemoveTlc(
-                channel_id, tlc_id, reason,
-            ));
-    }
-
-    pub fn get_pending_remove(&self) -> Vec<RetryableRemoveTlc> {
-        self.retryable_remove_tlcs.clone()
-    }
-
-    pub fn remove_pending_remove_tlc(&mut self, retryable_remove: &RetryableRemoveTlc) {
-        self.retryable_remove_tlcs
-            .retain(|remove| remove != retryable_remove);
-    }
-
-    pub fn get(&self, id: &TLCId) -> Option<&AddTlcInfo> {
-        match id {
-            TLCId::Offered(_id) => {
-                self.local_pending_tlcs
-                    .tlcs()
-                    .iter()
-                    .find_map(|tlc| match tlc {
-                        TlcKind::AddTlc(info) if info.tlc_id == *id => Some(info),
-                        _ => None,
-                    })
-            }
-            TLCId::Received(_id) => {
-                self.remote_pending_tlcs
-                    .tlcs()
-                    .iter()
-                    .find_map(|tlc| match tlc {
-                        TlcKind::AddTlc(info) if info.tlc_id == *id => Some(info),
-                        _ => None,
-                    })
-            }
+    pub fn insert_retryable_tlc_operation(&mut self, operation: RetryableTlcOperation) -> bool {
+        if self.retryable_tlc_operations.contains(&operation) {
+            return false;
         }
+        self.retryable_tlc_operations.push(operation);
+        true
     }
 
-    pub fn get_mut(&mut self, id: &TLCId) -> Option<&mut AddTlcInfo> {
-        match id {
-            TLCId::Offered(_id) => {
-                self.local_pending_tlcs
-                    .tlcs
-                    .iter_mut()
-                    .find_map(|tlc| match tlc {
-                        TlcKind::AddTlc(info) if info.tlc_id == *id => Some(info),
-                        _ => None,
-                    })
-            }
-            TLCId::Received(_id) => {
-                self.remote_pending_tlcs
-                    .tlcs
-                    .iter_mut()
-                    .find_map(|tlc| match tlc {
-                        TlcKind::AddTlc(info) if info.tlc_id == *id => Some(info),
-                        _ => None,
-                    })
-            }
-        }
+    pub fn all_tlcs(&self) -> impl Iterator<Item = &TlcInfo> + '_ {
+        self.offered_tlcs
+            .tlcs
+            .iter()
+            .chain(self.received_tlcs.tlcs.iter())
     }
 
-    pub fn add_local_tlc(&mut self, tlc_info: TlcKind) {
-        self.local_pending_tlcs.push(tlc_info);
-    }
-
-    pub fn add_remote_tlc(&mut self, tlc_info: TlcKind) {
-        self.remote_pending_tlcs.push(tlc_info);
-    }
-
-    pub fn next_local_tlc_id(&self) -> u64 {
-        self.local_pending_tlcs.next_tlc_id()
-    }
-
-    pub fn increment_local_tlc_id(&mut self) {
-        self.local_pending_tlcs.increment_next_tlc_id();
-    }
-
-    pub fn next_remote_tlc_id(&self) -> u64 {
-        self.remote_pending_tlcs.next_tlc_id()
-    }
-
-    pub fn increment_remote_tlc_id(&mut self) {
-        self.remote_pending_tlcs.increment_next_tlc_id();
-    }
-
-    fn unify_tlcs<'a>(
-        &self,
-        staging_tlcs: impl Iterator<Item = &'a TlcKind>,
-        committed_tlcs: impl Iterator<Item = &'a TlcKind>,
-    ) -> Vec<TlcKind> {
-        let mut add_tlcs: BTreeMap<TLCId, TlcKind> = Default::default();
-        let mut remove_tlcs = vec![];
-        for tlc in committed_tlcs {
-            match tlc {
-                TlcKind::AddTlc(info) => {
-                    if info.removed_at.is_none() {
-                        let _ = add_tlcs.insert(tlc.tlc_id(), tlc.clone());
-                    }
-                }
-                TlcKind::RemoveTlc(..) => {
-                    unreachable!("RemoveTlc should not be in committed tlcs")
-                }
-            }
-        }
-        for tlc in staging_tlcs {
-            match tlc {
-                TlcKind::AddTlc(_info) => {
-                    // If the tlc is already in the committed tlcs, we should not add it again.
-                    // committed tlcs always have the latest tlc information
-                    if add_tlcs.contains_key(&tlc.tlc_id()) {
-                        continue;
-                    }
-                    let _ = add_tlcs.insert(tlc.tlc_id(), tlc.clone());
-                }
-                TlcKind::RemoveTlc(..) => remove_tlcs.push(tlc.clone()),
-            }
-        }
-        for tlc in remove_tlcs {
-            let tlc_id = tlc.tlc_id();
-            let _ = add_tlcs.remove(&tlc_id);
-        }
-        add_tlcs.values().map(|tlc| tlc.clone()).collect()
-    }
-
-    pub fn get_tlcs_for_local(&self) -> Vec<TlcKind> {
-        self.unify_tlcs(
-            self.local_pending_tlcs.get_staging_tlcs().into_iter(),
-            self.local_pending_tlcs
-                .get_committed_tlcs()
-                .into_iter()
-                .chain(self.remote_pending_tlcs.get_committed_tlcs().into_iter()),
-        )
-    }
-
-    pub fn get_tlcs_for_remote(&self) -> Vec<TlcKind> {
-        self.unify_tlcs(
-            self.remote_pending_tlcs.get_staging_tlcs().into_iter(),
-            self.remote_pending_tlcs
-                .get_committed_tlcs()
-                .into_iter()
-                .chain(self.local_pending_tlcs.get_committed_tlcs().into_iter()),
-        )
-    }
-
-    pub fn get_tlcs_with(&self, local_commitment: bool) -> Vec<TlcKind> {
-        if local_commitment {
-            self.get_tlcs_for_local()
-        } else {
-            self.get_tlcs_for_remote()
-        }
-    }
-
-    pub fn commit_local_tlcs(&mut self) -> Vec<TlcKind> {
-        self.local_pending_tlcs
-            .commit_tlcs(self.remote_pending_tlcs.get_committed_tlcs())
-    }
-
-    pub fn commit_remote_tlcs(&mut self) -> Vec<TlcKind> {
-        self.remote_pending_tlcs
-            .commit_tlcs(self.local_pending_tlcs.get_committed_tlcs())
-    }
-
-    fn filter_add_tlcs<'a, I>(tlcs: I) -> impl Iterator<Item = &'a AddTlcInfo>
-    where
-        I: Iterator<Item = &'a TlcKind>,
-    {
-        tlcs.filter_map(|tlc| match tlc {
-            TlcKind::AddTlc(info) => {
-                if info.removed_at.is_some() {
-                    None
+    pub fn all_commited_tlcs(&self) -> impl Iterator<Item = &TlcInfo> + '_ {
+        self.offered_tlcs
+            .tlcs
+            .iter()
+            .chain(self.received_tlcs.tlcs.iter())
+            .filter(|tlc| {
+                if tlc.is_offered() {
+                    matches!(tlc.outbound_status(), OutboundTlcStatus::Committed)
                 } else {
-                    Some((info.tlc_id, info))
+                    matches!(tlc.inbound_status(), InboundTlcStatus::Committed)
                 }
-            }
-            TlcKind::RemoveTlc(..) => None,
-        })
-        .collect::<BTreeMap<_, _>>()
-        .into_iter()
-        .map(|(_, v)| v)
+            })
     }
 
-    pub fn all_commited_tlcs(&self) -> impl Iterator<Item = &AddTlcInfo> {
-        Self::filter_add_tlcs(
-            self.local_pending_tlcs
-                .get_committed_tlcs()
-                .into_iter()
-                .chain(self.remote_pending_tlcs.get_committed_tlcs().into_iter()),
-        )
-    }
-
-    pub fn all_tlcs(&self) -> impl Iterator<Item = &AddTlcInfo> {
-        Self::filter_add_tlcs(
-            self.local_pending_tlcs
-                .tlcs()
-                .into_iter()
-                .chain(self.remote_pending_tlcs.tlcs().into_iter()),
-        )
-    }
-
-    pub fn mark_tlc_remove(
-        &mut self,
-        tlc_id: TLCId,
-        removed_at: CommitmentNumbers,
-        reason: RemoveTlcReason,
-    ) {
-        // we don't consider RemoveTLC in the pending TLCS when build commitment signature
-        // so it's safe to remove them all from remote and local pending TLCS
-        self.local_pending_tlcs.drop_remove_tlc(&tlc_id);
-        self.remote_pending_tlcs.drop_remove_tlc(&tlc_id);
-        if let Some(tlc) = self.local_pending_tlcs.get_mut(&tlc_id) {
-            tlc.removed_at = Some((removed_at, reason.clone()));
-        }
-        if let Some(tlc) = self.remote_pending_tlcs.get_mut(&tlc_id) {
-            tlc.removed_at = Some((removed_at, reason));
-        }
-    }
-
-    pub fn apply_remove_tlc(
-        &mut self,
-        tlc_id: TLCId,
-        removed_at: CommitmentNumbers,
-        reason: RemoveTlcReason,
-    ) {
-        self.mark_tlc_remove(tlc_id, removed_at, reason);
-        // it's safe to remove multiple removed tlcs from pending TLCS,
-        // just make sure the two partners are operating on correct pending list,
-        // in other words, when one is remove from local TLCS,
-        // the peer should remove it from remote TLCS
+    pub fn apply_remove_tlc(&mut self, tlc_id: TLCId) {
+        self.applied_add_tlcs.remove(&tlc_id);
         if tlc_id.is_offered() {
-            self.local_pending_tlcs.shrink_removed_tlc();
+            self.offered_tlcs.tlcs.retain(|tlc| tlc.tlc_id != tlc_id);
         } else {
-            self.remote_pending_tlcs.shrink_removed_tlc();
+            self.received_tlcs.tlcs.retain(|tlc| tlc.tlc_id != tlc_id);
         }
+    }
+
+    pub fn get_pending_operations(&self) -> Vec<RetryableTlcOperation> {
+        self.retryable_tlc_operations.clone()
+    }
+
+    pub fn has_pending_operations(&self) -> bool {
+        !self.retryable_tlc_operations.is_empty()
+    }
+
+    pub fn remove_pending_tlc_operation(&mut self, retryable_tlc_op: &RetryableTlcOperation) {
+        self.retryable_tlc_operations
+            .retain(|op| op != retryable_tlc_op);
+
+        // if we already finished the RemoveTlc operation for the tlc,
+        // we should also remove the ForwardTlc to avoid any later retry.
+        match retryable_tlc_op {
+            RetryableTlcOperation::RemoveTlc(tlc_id, _) => {
+                self.retryable_tlc_operations.retain(|op| match op {
+                    RetryableTlcOperation::ForwardTlc(_, id, ..) => id != tlc_id,
+                    _ => true,
+                });
+            }
+            _ => {}
+        }
+    }
+
+    pub fn add_offered_tlc(&mut self, tlc: TlcInfo) {
+        self.offered_tlcs.add_tlc(tlc);
+    }
+
+    pub fn add_received_tlc(&mut self, tlc: TlcInfo) {
+        self.received_tlcs.add_tlc(tlc);
+    }
+
+    pub fn set_received_tlc_removed(&mut self, tlc_id: u64, reason: RemoveTlcReason) {
+        if let Some(tlc) = self.get_mut(&TLCId::Received(tlc_id)) {
+            assert_eq!(tlc.inbound_status(), InboundTlcStatus::Committed);
+            tlc.removed_reason = Some(reason);
+            tlc.status = TlcStatus::Inbound(InboundTlcStatus::LocalRemoved);
+        }
+    }
+
+    pub fn set_offered_tlc_removed(&mut self, tlc_id: u64, reason: RemoveTlcReason) -> Hash256 {
+        let tlc = self.get_mut(&TLCId::Offered(tlc_id)).expect("get tlc");
+        assert_eq!(tlc.outbound_status(), OutboundTlcStatus::Committed);
+        tlc.removed_reason = Some(reason);
+        tlc.status = TlcStatus::Outbound(OutboundTlcStatus::RemoteRemoved);
+        tlc.payment_hash
+    }
+
+    pub fn commitment_signed_tlcs(&self, for_remote: bool) -> impl Iterator<Item = &TlcInfo> + '_ {
+        self.offered_tlcs
+            .tlcs
+            .iter()
+            .filter(move |tlc| match tlc.outbound_status() {
+                OutboundTlcStatus::LocalAnnounced => for_remote,
+                OutboundTlcStatus::Committed => true,
+                OutboundTlcStatus::RemoteRemoved => for_remote,
+                OutboundTlcStatus::RemoveWaitPrevAck => for_remote,
+                OutboundTlcStatus::RemoveWaitAck => false,
+                OutboundTlcStatus::RemoveAckConfirmed => false,
+            })
+            .chain(
+                self.received_tlcs
+                    .tlcs
+                    .iter()
+                    .filter(move |tlc| match tlc.inbound_status() {
+                        InboundTlcStatus::RemoteAnnounced => !for_remote,
+                        InboundTlcStatus::AnnounceWaitPrevAck => !for_remote,
+                        InboundTlcStatus::AnnounceWaitAck => true,
+                        InboundTlcStatus::Committed => true,
+                        InboundTlcStatus::LocalRemoved => !for_remote,
+                        InboundTlcStatus::RemoveAckConfirmed => false,
+                    }),
+            )
+    }
+
+    pub fn update_for_commitment_signed(&mut self) -> bool {
+        for tlc in self.offered_tlcs.tlcs.iter_mut() {
+            match tlc.outbound_status() {
+                OutboundTlcStatus::RemoteRemoved => {
+                    let status = if self.waiting_ack {
+                        OutboundTlcStatus::RemoveWaitPrevAck
+                    } else {
+                        OutboundTlcStatus::RemoveWaitAck
+                    };
+                    tlc.status = TlcStatus::Outbound(status);
+                }
+                _ => {}
+            }
+        }
+        for tlc in self.received_tlcs.tlcs.iter_mut() {
+            match tlc.inbound_status() {
+                InboundTlcStatus::RemoteAnnounced => {
+                    let status = if self.waiting_ack {
+                        InboundTlcStatus::AnnounceWaitPrevAck
+                    } else {
+                        InboundTlcStatus::AnnounceWaitAck
+                    };
+                    tlc.status = TlcStatus::Inbound(status)
+                }
+                _ => {}
+            }
+        }
+        self.need_another_commitment_signed()
+    }
+
+    pub fn update_for_revoke_and_ack(&mut self) -> bool {
+        self.set_waiting_ack(false);
+        for tlc in self.offered_tlcs.tlcs.iter_mut() {
+            match tlc.outbound_status() {
+                OutboundTlcStatus::LocalAnnounced => {
+                    tlc.status = TlcStatus::Outbound(OutboundTlcStatus::Committed);
+                }
+                OutboundTlcStatus::RemoveWaitPrevAck => {
+                    tlc.status = TlcStatus::Outbound(OutboundTlcStatus::RemoveWaitAck);
+                }
+                OutboundTlcStatus::RemoveWaitAck => {
+                    tlc.status = TlcStatus::Outbound(OutboundTlcStatus::RemoveAckConfirmed);
+                }
+                _ => {}
+            }
+        }
+
+        for tlc in self.received_tlcs.tlcs.iter_mut() {
+            match tlc.inbound_status() {
+                InboundTlcStatus::AnnounceWaitPrevAck => {
+                    tlc.status = TlcStatus::Inbound(InboundTlcStatus::AnnounceWaitAck);
+                }
+                InboundTlcStatus::AnnounceWaitAck => {
+                    tlc.status = TlcStatus::Inbound(InboundTlcStatus::Committed);
+                }
+                InboundTlcStatus::LocalRemoved => {
+                    tlc.status = TlcStatus::Inbound(InboundTlcStatus::RemoveAckConfirmed);
+                }
+                _ => {}
+            }
+        }
+        self.need_another_commitment_signed()
+    }
+
+    pub fn need_another_commitment_signed(&self) -> bool {
+        self.offered_tlcs.tlcs.iter().any(|tlc| {
+            let status = tlc.outbound_status();
+            matches!(
+                status,
+                OutboundTlcStatus::LocalAnnounced
+                    | OutboundTlcStatus::RemoteRemoved
+                    | OutboundTlcStatus::RemoveWaitPrevAck
+                    | OutboundTlcStatus::RemoveWaitAck
+            )
+        }) || self.received_tlcs.tlcs.iter().any(|tlc| {
+            let status = tlc.inbound_status();
+            matches!(
+                status,
+                InboundTlcStatus::RemoteAnnounced
+                    | InboundTlcStatus::AnnounceWaitPrevAck
+                    | InboundTlcStatus::AnnounceWaitAck
+            )
+        })
     }
 }
 
@@ -2675,13 +2939,6 @@ impl ChannelConstraints {
             max_tlc_value_in_flight,
             max_tlc_number_in_flight,
         }
-    }
-
-    pub fn default() -> Self {
-        Self::new(
-            DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
-            DEFAULT_MAX_TLC_NUMBER_IN_FLIGHT,
-        )
     }
 }
 
@@ -2721,6 +2978,9 @@ pub struct ChannelActorState {
     // The data below are only relevant if the channel is public.
     pub public_channel_info: Option<PublicChannelInfo>,
 
+    pub local_tlc_info: ChannelTlcInfo,
+    pub remote_tlc_info: Option<ChannelTlcInfo>,
+
     // The local public key used to establish p2p network connection.
     pub local_pubkey: Pubkey,
     // The remote public key used to establish p2p network connection.
@@ -2730,7 +2990,7 @@ pub struct ChannelActorState {
     #[serde_as(as = "Option<EntityHex>")]
     pub funding_tx: Option<Transaction>,
 
-    pub funding_tx_confirmed_at: Option<(BlockNumber, u32)>,
+    pub funding_tx_confirmed_at: Option<(H256, u32, u64)>,
 
     #[serde_as(as = "Option<EntityHex>")]
     pub funding_udt_type_script: Option<Script>,
@@ -2799,16 +3059,33 @@ pub struct ChannelActorState {
     #[serde_as(as = "EntityHex")]
     pub local_shutdown_script: Script,
 
-    // While building a CommitmentSigned message, we use a nonce sent by the counterparty
-    // to partially sign the commitment transaction. This nonce is also used while handling the revoke_and_ack
-    // message from the peer. We need to save this nonce because the counterparty may send other nonces during
-    // the period when our CommitmentSigned is sent and the counterparty's RevokeAndAck is received.
+    // Basically the latest remote nonce sent by the peer with the CommitmentSigned message,
+    // but we will only update this field after we have sent a RevokeAndAck to the peer.
+    // With above guarantee, we can be sure the results of the sender obtaining its latest local nonce
+    // and the receiver obtaining its latest remote nonce are the same.
     #[serde_as(as = "Option<PubNonceAsBytes>")]
-    pub last_used_nonce_in_commitment_signed: Option<PubNonce>,
+    pub last_committed_remote_nonce: Option<PubNonce>,
 
-    // The nonces that are sent by the counterparty, the length is at most 2
-    #[serde_as(as = "Vec<(U64Hex, PubNonceAsBytes)>")]
-    pub remote_nonces: Vec<(u64, PubNonce)>,
+    // While handling peer's CommitmentSigned message, we will build a RevokeAndAck message,
+    // and reply this message to the peer. The nonce used to build the RevokeAndAck message is
+    // an older one sent by the peer. We will read this nonce from the field `last_committed_remote_nonce`
+    // The new nonce contained in the CommitmentSigned message
+    // will be saved to `last_committed_remote_nonce` field when this process finishes successfully.
+    // The problem is in some abnormal cases, the may not be able to successfully send the RevokeAndAck.
+    // But we have overwritten the `last_committed_remote_nonce` field with the new nonce.
+    // While reestablishing the channel, we need to use the old nonce to build the RevokeAndAck message.
+    // This is why we need to save the old nonce in this field.
+    #[serde_as(as = "Option<PubNonceAsBytes>")]
+    pub last_commitment_signed_remote_nonce: Option<PubNonce>,
+
+    // While building a CommitmentSigned message, we use the latest remote nonce (the `last_committed_remote_nonce` above)
+    // to partially sign the commitment transaction. This nonce is also needed for the RevokeAndAck message
+    // returned from the peer. We need to save this nonce because the counterparty may send other nonces during
+    // the period when our CommitmentSigned is sent and the counterparty's RevokeAndAck is received.
+    // This field is used to keep the nonce used by the unconfirmed CommitmentSigned. When we receive a
+    // RevokeAndAck from the peer, we will use this nonce to validate the RevokeAndAck message.
+    #[serde_as(as = "Option<PubNonceAsBytes>")]
+    pub last_revoke_and_ack_remote_nonce: Option<PubNonce>,
 
     // The latest commitment transaction we're holding,
     // it can be broadcasted to blockchain by us to force close the channel.
@@ -2840,16 +3117,17 @@ pub struct ShutdownInfo {
     pub signature: Option<PartialSignature>,
 }
 
-// This struct holds the channel information that are only relevant when the channel
-// is public. The information includes signatures to the channel announcement message,
-// our config for the channel that will be published to the network (via ChannelUpdate).
-// For ChannelUpdate config, only information on our side are saved here because we have no
-// control to the config on the counterparty side. And they will publish
-// the config to the network via another ChannelUpdate message.
+// This struct holds the TLC information for the channel participants.
+// We can update this information through the channel update message.
 #[serde_as]
-#[derive(Default, Clone, Debug, Serialize, Deserialize)]
-pub struct PublicChannelInfo {
+#[derive(Default, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ChannelTlcInfo {
+    // The timestamp when the following information is updated.
+    pub timestamp: u64,
+
+    // Whether this channel is enabled for TLC forwarding or not.
     pub enabled: bool,
+
     // The fee rate for tlc transfers. We only have these values set when
     // this is a public channel. Both sides may set this value differently.
     // This is a fee that is paid by the sender of the tlc.
@@ -2861,8 +3139,38 @@ pub struct PublicChannelInfo {
     pub tlc_expiry_delta: u64,
 
     /// The minimal tcl value we can receive in relay tlc
-    pub tlc_min_value: u128,
+    pub tlc_minimum_value: u128,
 
+    /// The maximal tcl value we can receive in relay tlc
+    pub tlc_maximum_value: u128,
+}
+
+impl ChannelTlcInfo {
+    pub fn new(
+        tlc_min_value: u128,
+        tlc_expiry_delta: u64,
+        tlc_fee_proportional_millionths: u128,
+    ) -> Self {
+        Self {
+            tlc_minimum_value: tlc_min_value,
+            tlc_expiry_delta,
+            tlc_fee_proportional_millionths,
+            enabled: true,
+            timestamp: now_timestamp_as_millis_u64(),
+            ..Default::default()
+        }
+    }
+}
+
+// This struct holds the channel information that are only relevant when the channel
+// is public. The information includes signatures to the channel announcement message,
+// our config for the channel that will be published to the network (via ChannelUpdate).
+// For ChannelUpdate config, only information on our side are saved here because we have no
+// control to the config on the counterparty side. And they will publish
+// the config to the network via another ChannelUpdate message.
+#[serde_as]
+#[derive(Default, Clone, Debug, Serialize, Deserialize)]
+pub struct PublicChannelInfo {
     // Channel announcement signatures, may be empty for private channel.
     pub local_channel_announcement_signature: Option<(EcdsaSignature, PartialSignature)>,
     pub remote_channel_announcement_signature: Option<(EcdsaSignature, PartialSignature)>,
@@ -2875,18 +3183,8 @@ pub struct PublicChannelInfo {
 }
 
 impl PublicChannelInfo {
-    pub fn new(
-        tlc_min_value: u128,
-        tlc_expiry_delta: u64,
-        tlc_fee_proportional_millionths: u128,
-    ) -> Self {
-        Self {
-            tlc_min_value,
-            tlc_expiry_delta,
-            tlc_fee_proportional_millionths,
-            enabled: true,
-            ..Default::default()
-        }
+    pub fn new() -> Self {
+        Default::default()
     }
 }
 
@@ -2896,15 +3194,15 @@ pub struct ClosedChannel {}
 #[derive(Debug)]
 pub enum ChannelEvent {
     PeerDisconnected,
-    FundingTransactionConfirmed(BlockNumber, u32),
+    FundingTransactionConfirmed(H256, u32, u64),
     CommitmentTransactionConfirmed,
     ClosingTransactionConfirmed,
-    CheckTlcSetdown,
+    CheckTlcRetryOperation,
 }
 
 pub type ProcessingChannelResult = Result<(), ProcessingChannelError>;
 
-#[derive(Error, Debug)]
+#[derive(Error, Debug, Clone)]
 pub enum ProcessingChannelError {
     #[error("Invalid state: {0}")]
     InvalidState(String),
@@ -2912,10 +3210,14 @@ pub enum ProcessingChannelError {
     RepeatedProcessing(String),
     #[error("Invalid parameter: {0}")]
     InvalidParameter(String),
+    #[error("Internal error: {0}")]
+    InternalError(String),
     #[error("Capacity error: {0}")]
     CapacityError(#[from] CapacityError),
     #[error("Failed to spawn actor: {0}")]
-    SpawnErr(#[from] SpawnErr),
+    SpawnErr(String),
+    #[error("Musig2 RoundFinalizeError: {0}")]
+    Musig2RoundFinalizeError(#[from] RoundFinalizeError),
     #[error("Musig2 VerifyError: {0}")]
     Musig2VerifyError(#[from] VerifyError),
     #[error("Musig2 SigningError: {0}")]
@@ -3181,93 +3483,19 @@ pub(crate) fn occupied_capacity(
     }
 }
 
-impl From<&ChannelActorState> for Musig2SignContext {
-    fn from(value: &ChannelActorState) -> Self {
-        Musig2SignContext {
-            key_agg_ctx: value.get_musig2_agg_context(),
-            agg_nonce: value.get_musig2_agg_pubnonce(),
-            seckey: value.signer.funding_key.clone(),
-            secnonce: value.get_local_musig2_secnonce(),
-        }
-    }
-}
-
-impl From<&ChannelActorState> for Musig2VerifyContext {
-    fn from(value: &ChannelActorState) -> Self {
-        Musig2VerifyContext {
-            key_agg_ctx: value.get_musig2_agg_context(),
-            agg_nonce: value.get_musig2_agg_pubnonce(),
-            pubkey: *value.get_remote_funding_pubkey(),
-            pubnonce: value.get_remote_nonce().clone(),
-        }
-    }
-}
-
-impl From<(&ChannelActorState, bool)> for Musig2SignContext {
-    fn from(value: (&ChannelActorState, bool)) -> Self {
-        let (channel, local) = value;
-        let local_pubkey = channel.get_local_channel_public_keys().funding_pubkey;
-        let remote_pubkey = channel.get_remote_channel_public_keys().funding_pubkey;
-        let pubkeys = if local {
-            [local_pubkey, remote_pubkey]
-        } else {
-            [remote_pubkey, local_pubkey]
-        };
-        let key_agg_ctx = KeyAggContext::new(pubkeys).expect("Valid pubkeys");
-
-        let local_nonce = channel.get_local_nonce();
-        let remote_nonce = channel.get_remote_nonce();
-        let nonces = if local {
-            [local_nonce, remote_nonce]
-        } else {
-            [remote_nonce, local_nonce]
-        };
-        let agg_nonce = AggNonce::sum(nonces);
-
-        Musig2SignContext {
-            key_agg_ctx,
-            agg_nonce,
-            seckey: channel.signer.funding_key.clone(),
-            secnonce: channel.get_local_musig2_secnonce(),
-        }
-    }
-}
-
-impl From<(&ChannelActorState, bool)> for Musig2VerifyContext {
-    fn from(value: (&ChannelActorState, bool)) -> Self {
-        let (channel, local) = value;
-        let local_pubkey = channel.get_local_channel_public_keys().funding_pubkey;
-        let remote_pubkey = channel.get_remote_channel_public_keys().funding_pubkey;
-        let pubkeys = if local {
-            [local_pubkey, remote_pubkey]
-        } else {
-            [remote_pubkey, local_pubkey]
-        };
-        let key_agg_ctx = KeyAggContext::new(pubkeys).expect("Valid pubkeys");
-
-        let local_nonce = channel.get_local_nonce();
-        let remote_nonce = channel.get_remote_nonce();
-        let nonces = if local {
-            [local_nonce, remote_nonce]
-        } else {
-            [remote_nonce, local_nonce]
-        };
-        let agg_nonce = AggNonce::sum(nonces);
-
-        Musig2VerifyContext {
-            key_agg_ctx,
-            agg_nonce,
-            pubkey: *channel.get_remote_funding_pubkey(),
-            pubnonce: channel.get_remote_nonce(),
-        }
-    }
-}
-
 // Constructors for the channel actor state.
 #[allow(clippy::too_many_arguments)]
 impl ChannelActorState {
     pub fn is_public(&self) -> bool {
         self.public_channel_info.is_some()
+    }
+
+    pub fn is_ready(&self) -> bool {
+        matches!(self.state, ChannelState::ChannelReady())
+    }
+
+    pub fn is_tlc_forwarding_enabled(&self) -> bool {
+        self.local_tlc_info.enabled
     }
 
     pub async fn try_create_channel_messages(
@@ -3328,7 +3556,7 @@ impl ChannelActorState {
         let agg_nonce =
             AggNonce::sum(self.order_things_for_musig2(local_nonce, remote_nonce.clone()));
 
-        let key_agg_ctx = self.get_musig2_agg_context();
+        let key_agg_ctx = self.get_deterministic_musig2_agg_context();
 
         let message = channel_announcement.message_to_sign();
 
@@ -3371,6 +3599,7 @@ impl ChannelActorState {
         // The function that would change the channel update parameters.
         f: impl FnOnce(&mut ChannelUpdate),
     ) -> ChannelUpdate {
+        assert!(self.is_public());
         let mut channel_update = self
             .get_unsigned_channel_update_message()
             .expect("public channel can generate channel update message");
@@ -3397,26 +3626,115 @@ impl ChannelActorState {
         self.do_generate_channel_update(network, |_update| {}).await
     }
 
+    fn create_update_tlc_info_message(&mut self) -> UpdateTlcInfo {
+        self.local_tlc_info.timestamp = now_timestamp_as_millis_u64();
+        UpdateTlcInfo {
+            channel_id: self.get_id(),
+            timestamp: self.local_tlc_info.timestamp,
+            channel_flags: self.get_channel_update_channel_flags(),
+            tlc_minimum_value: self.local_tlc_info.tlc_minimum_value,
+            tlc_maximum_value: self.local_tlc_info.tlc_maximum_value,
+            tlc_fee_proportional_millionths: self.local_tlc_info.tlc_fee_proportional_millionths,
+            tlc_expiry_delta: self.local_tlc_info.tlc_expiry_delta,
+        }
+    }
+
     async fn generate_disabled_channel_update(
         &mut self,
         network: &ActorRef<NetworkActorMessage>,
     ) -> ChannelUpdate {
         self.do_generate_channel_update(network, |update| {
-            update.channel_flags = CHANNEL_DISABLED_FLAG
+            update.channel_flags |= ChannelUpdateChannelFlags::DISABLED;
         })
         .await
     }
 
-    async fn generate_and_broadcast_channel_update(
+    // Notify the network, network graph and channel counterparty about the channel update.
+    // We do this on channel ready, channel reestablishment, user channel parameters update.
+    // Some of the events require us to send an OwnedChannelUpdateEvent::Up to the network actor,
+    // (e.g. channel ready and channel reestablishment) and some require us to send a
+    // OwnedChannelUpdateEvent::Updated (e.g. user channel parameters update) to the network actor.
+    // update_only is used to distinguish between the two cases.
+    async fn notify_owned_channel_updated(
         &mut self,
         network: &ActorRef<NetworkActorMessage>,
+        update_only: bool,
     ) {
-        let channel_update = self.generate_channel_update(network).await;
+        if update_only {
+            self.update_graph_for_local_channel_change(network);
+        } else {
+            self.update_graph_for_local_channel_ready(network);
+        }
+        if self.is_public() {
+            let channel_update = self.generate_channel_update(network).await;
+            network
+                .send_message(NetworkActorMessage::new_command(
+                    NetworkActorCommand::BroadcastMessages(vec![
+                        BroadcastMessageWithTimestamp::ChannelUpdate(channel_update),
+                    ]),
+                ))
+                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+        }
+        self.send_update_tlc_info_message(network);
+    }
+
+    fn update_graph_for_remote_channel_change(&mut self, network: &ActorRef<NetworkActorMessage>) {
+        if let Some(channel_update_info) = self.get_remote_channel_update_info() {
+            let channel_outpoint = self.must_get_funding_transaction_outpoint();
+            let peer_id = self.get_remote_pubkey();
+            network
+                .send_message(NetworkActorMessage::new_event(
+                    NetworkActorEvent::OwnedChannelUpdateEvent(
+                        super::graph::OwnedChannelUpdateEvent::Updated(
+                            channel_outpoint,
+                            peer_id,
+                            channel_update_info,
+                        ),
+                    ),
+                ))
+                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+        }
+    }
+
+    fn update_graph_for_local_channel_ready(&mut self, network: &ActorRef<NetworkActorMessage>) {
+        if let Ok(channel_info) = (&*self).try_into() {
+            network
+                .send_message(NetworkActorMessage::new_event(
+                    NetworkActorEvent::OwnedChannelUpdateEvent(
+                        super::graph::OwnedChannelUpdateEvent::Up(channel_info),
+                    ),
+                ))
+                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+        }
+    }
+
+    fn update_graph_for_local_channel_change(&mut self, network: &ActorRef<NetworkActorMessage>) {
+        let channel_outpoint = self.must_get_funding_transaction_outpoint();
+        let peer_id = self.get_local_pubkey();
+        let channel_update_info = self.get_local_channel_update_info();
+        network
+            .send_message(NetworkActorMessage::new_event(
+                NetworkActorEvent::OwnedChannelUpdateEvent(
+                    super::graph::OwnedChannelUpdateEvent::Updated(
+                        channel_outpoint,
+                        peer_id,
+                        channel_update_info,
+                    ),
+                ),
+            ))
+            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+    }
+
+    fn send_update_tlc_info_message(&mut self, network: &ActorRef<NetworkActorMessage>) {
+        let update_tlc_info = self.create_update_tlc_info_message();
         network
             .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::BroadcastMessages(vec![BroadcastMessage::ChannelUpdate(
-                    channel_update,
-                )]),
+                NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId {
+                    peer_id: self.get_remote_peer_id(),
+                    message: FiberMessage::ChannelNormalOperation(
+                        FiberChannelMessage::UpdateTlcInfo(update_tlc_info),
+                    ),
+                }),
             ))
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
     }
@@ -3442,21 +3760,30 @@ impl ChannelActorState {
         Some(self.generate_channel_update(network).await)
     }
 
-    pub fn get_unsigned_channel_update_message(&self) -> Option<ChannelUpdate> {
-        let local_is_node1 = self.local_is_node1();
-        let message_flags = if local_is_node1 { 0 } else { 1 };
+    fn get_channel_update_channel_flags(&self) -> ChannelUpdateChannelFlags {
+        if self.is_tlc_forwarding_enabled() {
+            ChannelUpdateChannelFlags::empty()
+        } else {
+            ChannelUpdateChannelFlags::DISABLED
+        }
+    }
 
-        self.public_channel_info.as_ref().and_then(|info| {
-            Some(ChannelUpdate::new_unsigned(
-                self.must_get_funding_transaction_outpoint(),
-                now_timestamp_as_millis_u64(),
-                message_flags,
-                0,
-                info.tlc_expiry_delta,
-                info.tlc_min_value,
-                info.tlc_fee_proportional_millionths,
-            ))
-        })
+    pub fn get_unsigned_channel_update_message(&self) -> Option<ChannelUpdate> {
+        let message_flags = if self.local_is_node1() {
+            ChannelUpdateMessageFlags::UPDATE_OF_NODE1
+        } else {
+            ChannelUpdateMessageFlags::UPDATE_OF_NODE2
+        };
+
+        self.is_public().then_some(ChannelUpdate::new_unsigned(
+            self.must_get_funding_transaction_outpoint(),
+            now_timestamp_as_millis_u64(),
+            message_flags,
+            self.get_channel_update_channel_flags(),
+            self.local_tlc_info.tlc_expiry_delta,
+            self.local_tlc_info.tlc_minimum_value,
+            self.local_tlc_info.tlc_fee_proportional_millionths,
+        ))
     }
 
     pub fn new_inbound_channel<'a>(
@@ -3484,6 +3811,7 @@ impl ChannelActorState {
         remote_max_tlc_number_in_flight: u64,
         local_max_tlc_number_in_flight: u64,
         local_max_tlc_value_in_flight: u128,
+        local_tlc_info: ChannelTlcInfo,
     ) -> Self {
         let signer = InMemorySigner::generate_from_seed(seed);
         let local_base_pubkeys = signer.get_base_public_keys();
@@ -3501,6 +3829,8 @@ impl ChannelActorState {
         let mut state = Self {
             state: ChannelState::NegotiatingFunding(NegotiatingFundingFlags::THEIR_INIT_SENT),
             public_channel_info,
+            local_tlc_info,
+            remote_tlc_info: None,
             local_pubkey,
             remote_pubkey,
             funding_tx: None,
@@ -3520,8 +3850,9 @@ impl ChannelActorState {
             remote_channel_public_keys: Some(remote_pubkeys),
             commitment_numbers: Default::default(),
             remote_shutdown_script: Some(remote_shutdown_script),
-            last_used_nonce_in_commitment_signed: None,
-            remote_nonces: vec![(0, remote_nonce)],
+            last_commitment_signed_remote_nonce: None,
+            last_revoke_and_ack_remote_nonce: None,
+            last_committed_remote_nonce: Some(remote_nonce),
             remote_commitment_points: vec![
                 (0, first_commitment_point),
                 (1, second_commitment_point),
@@ -3563,6 +3894,7 @@ impl ChannelActorState {
         shutdown_script: Script,
         local_max_tlc_value_in_flight: u128,
         local_max_tlc_number_in_flight: u64,
+        local_tlc_info: ChannelTlcInfo,
     ) -> Self {
         let signer = InMemorySigner::generate_from_seed(seed);
         let local_pubkeys = signer.get_base_public_keys();
@@ -3570,6 +3902,8 @@ impl ChannelActorState {
         Self {
             state: ChannelState::NegotiatingFunding(NegotiatingFundingFlags::empty()),
             public_channel_info,
+            local_tlc_info,
+            remote_tlc_info: None,
             local_pubkey,
             remote_pubkey,
             funding_tx: None,
@@ -3592,8 +3926,9 @@ impl ChannelActorState {
             // these values will update after accept channel peer message handled
             remote_constraints: ChannelConstraints::default(),
             remote_channel_public_keys: None,
-            last_used_nonce_in_commitment_signed: None,
-            remote_nonces: vec![],
+            last_commitment_signed_remote_nonce: None,
+            last_revoke_and_ack_remote_nonce: None,
+            last_committed_remote_nonce: None,
             commitment_numbers: Default::default(),
             remote_commitment_points: vec![],
             local_shutdown_script: shutdown_script,
@@ -3791,7 +4126,7 @@ impl ChannelActorState {
         self.state = new_state;
     }
 
-    fn local_is_node1(&self) -> bool {
+    pub(crate) fn local_is_node1(&self) -> bool {
         self.local_pubkey < self.remote_pubkey
     }
 
@@ -3812,7 +4147,7 @@ impl ChannelActorState {
         let local_secnonce = self.get_channel_announcement_musig2_secnonce();
         let local_nonce = local_secnonce.public_nonce();
         let agg_nonce = AggNonce::sum(self.order_things_for_musig2(local_nonce, remote_nonce));
-        let key_agg_ctx = self.get_musig2_agg_context();
+        let key_agg_ctx = self.get_deterministic_musig2_agg_context();
         let channel_id = self.get_id();
         let peer_id = self.get_remote_peer_id();
         let channel_outpoint = self.must_get_funding_transaction_outpoint();
@@ -3886,71 +4221,36 @@ impl ChannelActorState {
             .remote_channel_announcement_signature = Some((ecdsa_signature, partial_signatures));
     }
 
-    fn get_our_tlc_fee_proportional_millionths(&self) -> Option<u128> {
-        self.public_channel_info
-            .as_ref()
-            .map(|state| state.tlc_fee_proportional_millionths)
-    }
-
     fn update_our_tlc_fee_proportional_millionths(&mut self, fee: u128) -> bool {
-        let old_fee = self.get_our_tlc_fee_proportional_millionths();
-        match old_fee {
-            Some(old_fee) if old_fee == fee => false,
-            _ => {
-                self.public_channel_state_mut()
-                    .tlc_fee_proportional_millionths = fee;
-                true
-            }
+        if self.local_tlc_info.tlc_fee_proportional_millionths == fee {
+            return false;
         }
-    }
-
-    fn get_our_tlc_min_value(&self) -> Option<u128> {
-        self.public_channel_info
-            .as_ref()
-            .map(|state| state.tlc_min_value)
+        self.local_tlc_info.tlc_fee_proportional_millionths = fee;
+        true
     }
 
     fn update_our_tlc_min_value(&mut self, value: u128) -> bool {
-        let old_value = self.get_our_tlc_min_value();
-        match old_value {
-            Some(old_value) if old_value == value => false,
-            _ => {
-                self.public_channel_state_mut().tlc_min_value = value;
-                true
-            }
+        if self.local_tlc_info.tlc_minimum_value == value {
+            return false;
         }
-    }
-
-    fn get_our_enabled(&self) -> Option<bool> {
-        self.public_channel_info.as_ref().map(|state| state.enabled)
+        self.local_tlc_info.tlc_minimum_value = value;
+        true
     }
 
     fn update_our_enabled(&mut self, enabled: bool) -> bool {
-        let old_value = self.get_our_enabled();
-        match old_value {
-            Some(old_value) if old_value == enabled => false,
-            _ => {
-                self.public_channel_state_mut().enabled = enabled;
-                true
-            }
+        if self.local_tlc_info.enabled == enabled {
+            return false;
         }
-    }
-
-    fn get_our_tlc_expiry_delta(&self) -> Option<u64> {
-        self.public_channel_info
-            .as_ref()
-            .map(|info| info.tlc_expiry_delta)
+        self.local_tlc_info.enabled = enabled;
+        true
     }
 
     fn update_our_tlc_expiry_delta(&mut self, value: u64) -> bool {
-        let old_value = self.get_our_tlc_expiry_delta();
-        match old_value {
-            Some(old_value) if old_value == value => false,
-            _ => {
-                self.public_channel_state_mut().tlc_expiry_delta = value;
-                true
-            }
+        if self.local_tlc_info.tlc_expiry_delta == value {
+            return false;
         }
+        self.local_tlc_info.tlc_expiry_delta = value;
+        true
     }
 
     fn get_total_reserved_ckb_amount(&self) -> u64 {
@@ -3969,7 +4269,7 @@ impl ChannelActorState {
 
     // Get the total liquid capacity of the channel, which will exclude the reserved ckb amount.
     // This is the capacity used for gossiping channel information.
-    fn get_liquid_capacity(&self) -> u128 {
+    pub(crate) fn get_liquid_capacity(&self) -> u128 {
         let capacity = if self.funding_udt_type_script.is_some() {
             self.get_total_udt_amount()
         } else {
@@ -3984,24 +4284,8 @@ impl ChannelActorState {
         &mut self,
         network: &ActorRef<NetworkActorMessage>,
     ) -> ProcessingChannelResult {
-        let key_agg_ctx = {
-            let local_pubkey = self.get_local_channel_public_keys().funding_pubkey;
-            let remote_pubkey = self.get_remote_channel_public_keys().funding_pubkey;
-            KeyAggContext::new([remote_pubkey, local_pubkey]).expect("Valid pubkeys")
-        };
-        let x_only_aggregated_pubkey = key_agg_ctx.aggregated_pubkey::<Point>().serialize_xonly();
-        let sign_ctx = {
-            let local_nonce = self.get_local_nonce();
-            let remote_nonce = self.get_remote_nonce();
-            let nonces = [local_nonce, remote_nonce];
-            let agg_nonce = AggNonce::sum(nonces);
-            Musig2SignContext {
-                key_agg_ctx,
-                agg_nonce,
-                seckey: self.signer.funding_key.clone(),
-                secnonce: self.get_local_musig2_secnonce(),
-            }
-        };
+        let sign_ctx = self.get_sign_context(false);
+        let x_only_aggregated_pubkey = sign_ctx.common_ctx.x_only_aggregated_pubkey();
 
         let revocation_partial_signature = {
             let commitment_tx_fee = calculate_commitment_tx_fee(
@@ -4023,7 +4307,7 @@ impl ChannelActorState {
             } else {
                 let capacity = self.get_total_ckb_amount() - commitment_tx_fee;
                 let output = CellOutput::new_builder()
-                    .lock(lock_script)
+                    .lock(lock_script.clone())
                     .capacity(capacity.pack())
                     .build();
                 let output_data = Bytes::default();
@@ -4046,10 +4330,8 @@ impl ChannelActorState {
                 ]
                 .concat(),
             );
-            sign_ctx
-                .clone()
-                .sign(message.as_slice())
-                .expect("valid signature")
+            let our_signature = sign_ctx.sign(message.as_slice()).expect("valid signature");
+            our_signature
         };
 
         let commitment_tx_partial_signature = {
@@ -4095,6 +4377,7 @@ impl ChannelActorState {
                 )),
             ))
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+        self.update_last_revoke_and_ack_remote_nonce();
         Ok(())
     }
 
@@ -4102,21 +4385,36 @@ impl ChannelActorState {
         self.id
     }
 
+    pub fn get_local_pubkey(&self) -> Pubkey {
+        self.local_pubkey
+    }
+
     pub fn get_local_peer_id(&self) -> PeerId {
         self.local_pubkey.tentacle_peer_id()
+    }
+
+    pub fn get_local_channel_update_info(&self) -> ChannelUpdateInfo {
+        let balance = self.get_remote_balance();
+        let mut info = ChannelUpdateInfo::from(&self.local_tlc_info);
+        info.inbound_liquidity = Some(balance);
+        info
+    }
+
+    pub fn get_remote_pubkey(&self) -> Pubkey {
+        self.remote_pubkey
     }
 
     pub fn get_remote_peer_id(&self) -> PeerId {
         self.remote_pubkey.tentacle_peer_id()
     }
 
-    pub fn get_local_secnonce(&self) -> SecNonce {
-        self.signer
-            .derive_musig2_nonce(self.get_local_commitment_number())
-    }
-
-    pub fn get_local_nonce(&self) -> PubNonce {
-        self.get_local_secnonce().public_nonce()
+    pub fn get_remote_channel_update_info(&self) -> Option<ChannelUpdateInfo> {
+        let balance = self.get_local_balance();
+        self.remote_tlc_info.as_ref().map(|tlc_info| {
+            let mut info = ChannelUpdateInfo::from(tlc_info);
+            info.inbound_liquidity = Some(balance);
+            info
+        })
     }
 
     pub fn get_next_local_secnonce(&self) -> SecNonce {
@@ -4128,43 +4426,29 @@ impl ChannelActorState {
         self.get_next_local_secnonce().public_nonce()
     }
 
-    pub fn get_remote_nonce(&self) -> PubNonce {
-        let comitment_number = self.get_remote_commitment_number();
-        assert!(self.remote_nonces.len() <= 2);
-        self.remote_nonces
-            .iter()
-            .rev()
-            .find_map(|(number, nonce)| {
-                if *number == comitment_number {
-                    Some(nonce.clone())
-                } else {
-                    None
-                }
-            })
-            .expect("get_remote_nonce")
+    fn get_last_committed_remote_nonce(&self) -> PubNonce {
+        self.last_committed_remote_nonce
+            .as_ref()
+            .expect("always have peer's last committed nonce in normal channel operations")
+            .clone()
     }
 
-    fn save_remote_nonce(&mut self, nonce: PubNonce) {
-        let next_remote_number = if self.remote_nonces.is_empty() {
-            0
-        } else {
-            self.get_remote_commitment_number() + 1
-        };
-        self.remote_nonces.push((next_remote_number, nonce));
-        if self.remote_nonces.len() > 2 {
-            self.remote_nonces.remove(0);
-        }
+    fn get_last_commitment_signed_remote_nonce(&self) -> Option<PubNonce> {
+        self.last_commitment_signed_remote_nonce.clone()
     }
 
-    fn save_remote_nonce_for_raa(&mut self) {
-        let nonce = self.get_remote_nonce();
-        self.last_used_nonce_in_commitment_signed = Some(nonce);
+    fn commit_remote_nonce(&mut self, nonce: PubNonce) {
+        self.last_committed_remote_nonce = Some(nonce);
     }
 
-    fn take_remote_nonce_for_raa(&mut self) -> PubNonce {
-        self.last_used_nonce_in_commitment_signed
-            .take()
-            .expect("set last_used_nonce_in_commitment_signed in commitment signed")
+    fn update_last_commitment_signed_remote_nonce(&mut self) {
+        let nonce = self.get_last_committed_remote_nonce();
+        self.last_commitment_signed_remote_nonce = Some(nonce);
+    }
+
+    fn update_last_revoke_and_ack_remote_nonce(&mut self) {
+        let nonce = self.get_last_committed_remote_nonce();
+        self.last_revoke_and_ack_remote_nonce = Some(nonce);
     }
 
     pub fn get_current_commitment_numbers(&self) -> CommitmentNumbers {
@@ -4203,12 +4487,12 @@ impl ChannelActorState {
         self.get_current_commitment_number(for_remote) + 1
     }
 
-    pub fn get_next_offering_tlc_id(&self) -> u64 {
-        self.tlc_state.get_next_offering()
+    pub fn get_next_offering_tlc_id(&self) -> TLCId {
+        TLCId::Offered(self.tlc_state.get_next_offering())
     }
 
-    pub fn get_next_received_tlc_id(&self) -> u64 {
-        self.tlc_state.get_next_received()
+    pub fn get_next_received_tlc_id(&self) -> TLCId {
+        TLCId::Received(self.tlc_state.get_next_received())
     }
 
     pub fn increment_next_offered_tlc_id(&mut self) {
@@ -4219,21 +4503,26 @@ impl ChannelActorState {
         self.tlc_state.increment_received();
     }
 
-    pub fn get_offered_tlc(&self, tlc_id: u64) -> Option<&AddTlcInfo> {
-        self.tlc_state.get(&TLCId::Offered(tlc_id))
+    pub fn get_offered_tlc(&self, tlc_id: TLCId) -> Option<&TlcInfo> {
+        self.tlc_state.get(&tlc_id)
     }
 
-    pub fn get_received_tlc(&self, tlc_id: u64) -> Option<&AddTlcInfo> {
-        self.tlc_state.get(&TLCId::Received(tlc_id))
+    pub fn get_received_tlc(&self, tlc_id: TLCId) -> Option<&TlcInfo> {
+        self.tlc_state.get(&tlc_id)
     }
 
-    pub(crate) fn set_received_tlc_preimage(&mut self, tlc_id: u64, preimage: Option<Hash256>) {
-        if let Some(tlc) = self.tlc_state.get_mut(&TLCId::Received(tlc_id)) {
-            tlc.payment_preimage = preimage;
+    pub fn check_insert_tlc(&mut self, tlc: &TlcInfo) -> Result<(), ProcessingChannelError> {
+        let next_tlc_id = if tlc.is_offered() {
+            self.get_next_offering_tlc_id()
+        } else {
+            self.get_next_received_tlc_id()
+        };
+        if tlc.tlc_id != next_tlc_id {
+            return Err(ProcessingChannelError::InvalidParameter(format!(
+                "Received tlc id {:?} is not the expected next id {:?}",
+                tlc.tlc_id, next_tlc_id
+            )));
         }
-    }
-
-    pub fn check_insert_tlc(&mut self, tlc: &AddTlcInfo) -> Result<(), ProcessingChannelError> {
         let payment_hash = tlc.payment_hash;
         if let Some(tlc) = self
             .tlc_state
@@ -4273,55 +4562,49 @@ impl ChannelActorState {
     pub fn remove_tlc_with_reason(
         &mut self,
         tlc_id: TLCId,
-        reason: &RemoveTlcReason,
-    ) -> Result<AddTlcInfo, ProcessingChannelError> {
-        let removed_at = self.get_current_commitment_numbers();
-        let current = self.tlc_state.get(&tlc_id).expect("TLC exists").clone();
+    ) -> Result<(TlcInfo, RemoveTlcReason), ProcessingChannelError> {
+        let current = self.tlc_state.get_mut(&tlc_id).expect("TLC exists").clone();
+        let reason = current
+            .removed_reason
+            .clone()
+            .expect("expect removed_reason exist");
+        assert!(matches!(
+            current.status,
+            TlcStatus::Inbound(InboundTlcStatus::RemoveAckConfirmed)
+                | TlcStatus::Outbound(OutboundTlcStatus::RemoveAckConfirmed)
+        ));
 
-        match &current.removed_at {
-            Some((current_removed_at, current_remove_reason))
-                if current_remove_reason == reason && removed_at == *current_removed_at =>
-            {
-                debug!("Skipping removing of tlc {:?} as it is already removed at {:?} with the same reason {:?}", tlc_id, removed_at, reason);
-                return Err(ProcessingChannelError::RepeatedProcessing(
-                    "TLC is already removed".to_string(),
-                ));
+        if let RemoveTlcReason::RemoveTlcFulfill(fulfill) = &reason {
+            let filled_payment_hash: Hash256 =
+                current.hash_algorithm.hash(fulfill.payment_preimage).into();
+            if current.payment_hash != filled_payment_hash {
+                return Err(ProcessingChannelError::FinalIncorrectPreimage);
             }
-            Some((current_remove_reason, current_removed_at)) => {
-                return Err(ProcessingChannelError::InvalidParameter(
-                            format!("Illegally removing the same tlc: {:?} was previously removed at {:?} for {:?}, and trying to remove it again at {:?} for {:?}",
-                                tlc_id,  current_removed_at, reason, removed_at, current_remove_reason)));
+
+            // update balance according to the tlc
+            let (mut to_local_amount, mut to_remote_amount) =
+                (self.to_local_amount, self.to_remote_amount);
+            if current.is_offered() {
+                to_local_amount -= current.amount;
+                to_remote_amount += current.amount;
+            } else {
+                to_local_amount += current.amount;
+                to_remote_amount -= current.amount;
             }
-            None => {
-                if let RemoveTlcReason::RemoveTlcFulfill(fulfill) = reason {
-                    let filled_payment_hash: Hash256 =
-                        current.hash_algorithm.hash(fulfill.payment_preimage).into();
-                    if current.payment_hash != filled_payment_hash {
-                        return Err(ProcessingChannelError::FinalIncorrectPreimage);
-                    }
 
-                    // update balance according to the tlc
-                    let (mut to_local_amount, mut to_remote_amount) =
-                        (self.to_local_amount, self.to_remote_amount);
-                    if current.is_offered() {
-                        to_local_amount -= current.amount;
-                        to_remote_amount += current.amount;
-                    } else {
-                        to_local_amount += current.amount;
-                        to_remote_amount -= current.amount;
-                    }
-                    self.to_local_amount = to_local_amount;
-                    self.to_remote_amount = to_remote_amount;
+            self.to_local_amount = to_local_amount;
+            self.to_remote_amount = to_remote_amount;
 
-                    debug!("Updated local balance to {} and remote balance to {} by removing tlc {:?} with reason {:?}",
+            debug!("Updated local balance to {} and remote balance to {} by removing tlc {:?} with reason {:?}",
                             to_local_amount, to_remote_amount, tlc_id, reason);
-                }
-                self.tlc_state
-                    .apply_remove_tlc(tlc_id, removed_at, reason.clone());
-            }
         }
+        self.tlc_state.apply_remove_tlc(tlc_id);
+        debug!(
+            "Removed tlc payment_hash {:?} with reason {:?}",
+            current.payment_hash, reason
+        );
 
-        Ok(current.clone())
+        Ok((current.clone(), reason))
     }
 
     pub fn get_local_channel_public_keys(&self) -> &ChannelBasePublicKeys {
@@ -4352,16 +4635,11 @@ impl ChannelActorState {
             .expect("Funding transaction outpoint is present")
     }
 
-    pub fn get_funding_transaction_block_number(&self) -> BlockNumber {
+    pub fn must_get_funding_transaction_timestamp(&self) -> u64 {
         self.funding_tx_confirmed_at
-            .expect("funding tx confirmed_at is present")
-            .0
-    }
-
-    pub fn get_funding_transaction_index(&self) -> u32 {
-        self.funding_tx_confirmed_at
-            .expect("funding tx confirmed_at is present")
-            .1
+            .as_ref()
+            .expect("Funding transaction confirmed at present")
+            .2
     }
 
     pub fn get_local_shutdown_script(&self) -> Script {
@@ -4398,12 +4676,14 @@ impl ChannelActorState {
     }
 
     pub fn get_funding_lock_script_xonly_key(&self) -> XOnlyPublicKey {
-        let pubkey: secp256k1::PublicKey = self.get_musig2_agg_context().aggregated_pubkey();
+        let pubkey: secp256k1::PublicKey = self
+            .get_deterministic_musig2_agg_context()
+            .aggregated_pubkey();
         pubkey.into()
     }
 
     pub fn get_funding_lock_script_xonly(&self) -> [u8; 32] {
-        self.get_musig2_agg_context()
+        self.get_deterministic_musig2_agg_context()
             .aggregated_pubkey::<Point>()
             .serialize_xonly()
     }
@@ -4426,11 +4706,7 @@ impl ChannelActorState {
         }
     }
 
-    pub fn get_musig2_agg_pubkey(&self) -> Pubkey {
-        self.get_musig2_agg_context().aggregated_pubkey()
-    }
-
-    pub fn get_musig2_agg_context(&self) -> KeyAggContext {
+    pub fn get_deterministic_musig2_agg_context(&self) -> KeyAggContext {
         let local_pubkey = self.get_local_channel_public_keys().funding_pubkey;
         let remote_pubkey = self.get_remote_channel_public_keys().funding_pubkey;
         let keys = self.order_things_for_musig2(local_pubkey, remote_pubkey);
@@ -4459,84 +4735,36 @@ impl ChannelActorState {
         self.get_local_musig2_secnonce().public_nonce()
     }
 
-    pub fn get_musig2_agg_pubnonce(&self) -> AggNonce {
-        let local_nonce = self.get_local_nonce();
-        let remote_nonce = self.get_remote_nonce();
+    pub fn get_deterministic_musig2_agg_pubnonce(
+        &self,
+        local_nonce: PubNonce,
+        remote_nonce: PubNonce,
+    ) -> AggNonce {
         let nonces = self.order_things_for_musig2(local_nonce, remote_nonce);
         AggNonce::sum(nonces)
     }
 
-    fn get_active_received_tlcs(&self, local_commitment: bool) -> impl Iterator<Item = AddTlcInfo> {
+    fn get_active_received_tlcs(&self, for_remote: bool) -> Vec<TlcInfo> {
         self.tlc_state
-            .get_tlcs_with(local_commitment)
-            .into_iter()
-            .filter_map(|tlc| match tlc {
-                TlcKind::AddTlc(tlc) if tlc.is_received() => Some(tlc),
-                _ => None,
-            })
+            .commitment_signed_tlcs(for_remote)
+            .filter(|tlc| tlc.is_received())
+            .map(|tlc| tlc.clone())
+            .collect()
     }
 
-    fn get_active_offered_tlcs(&self, local_commitment: bool) -> impl Iterator<Item = AddTlcInfo> {
+    fn get_active_offered_tlcs(&self, for_remote: bool) -> Vec<TlcInfo> {
         self.tlc_state
-            .get_tlcs_with(local_commitment)
-            .into_iter()
-            .filter_map(|tlc| match tlc {
-                TlcKind::AddTlc(tlc) if tlc.is_offered() => Some(tlc),
-                _ => None,
-            })
+            .commitment_signed_tlcs(for_remote)
+            .filter(|tlc| tlc.is_offered())
+            .map(|tlc| tlc.clone())
+            .collect()
     }
 
-    // Get the total amount of pending tlcs that are fulfilled
-    fn get_pending_fulfilled_tlcs_amount(&self, for_remote: bool, offered: bool) -> u128 {
-        let (local_pending_tlcs, remote_pending_tlcs) = if for_remote {
-            (
-                &self.tlc_state.local_pending_tlcs,
-                &self.tlc_state.remote_pending_tlcs,
-            )
-        } else {
-            (
-                &self.tlc_state.remote_pending_tlcs,
-                &self.tlc_state.local_pending_tlcs,
-            )
-        };
-        let mut pending = local_pending_tlcs
-            .get_committed_tlcs()
-            .into_iter()
-            .chain(remote_pending_tlcs.get_committed_tlcs().into_iter())
-            .filter_map(|tlc| match tlc {
-                TlcKind::AddTlc(info)
-                    if info.removed_at.is_none() && info.is_offered() == offered =>
-                {
-                    Some((tlc.tlc_id(), info.amount))
-                }
-                _ => None,
-            })
-            .collect::<HashMap<TLCId, u128>>();
-        let mut fulfilled = 0;
-
-        for tlc in local_pending_tlcs.get_staging_tlcs() {
-            match tlc {
-                TlcKind::AddTlc(info) => {
-                    pending.insert(tlc.tlc_id(), info.amount);
-                }
-                TlcKind::RemoveTlc(remove_tlc) => {
-                    if let Some(amount) = pending.remove(&remove_tlc.tlc_id) {
-                        if matches!(remove_tlc.reason, RemoveTlcReason::RemoveTlcFulfill(_)) {
-                            fulfilled += amount;
-                        }
-                    }
-                }
-            }
-        }
-
-        fulfilled
-    }
-
-    pub fn get_all_received_tlcs(&self) -> impl Iterator<Item = &AddTlcInfo> {
+    pub fn get_all_received_tlcs(&self) -> impl Iterator<Item = &TlcInfo> {
         self.tlc_state.all_tlcs().filter(|tlc| tlc.is_received())
     }
 
-    pub fn get_all_offer_tlcs(&self) -> impl Iterator<Item = &AddTlcInfo> {
+    pub fn get_all_offer_tlcs(&self) -> impl Iterator<Item = &TlcInfo> {
         self.tlc_state.all_tlcs().filter(|tlc| tlc.is_offered())
     }
 
@@ -4546,7 +4774,7 @@ impl ChannelActorState {
     // The offerer who offered this tlc will have the first pubkey, and the receiver
     // will have the second pubkey.
     // This tlc must have valid local_committed_at and remote_committed_at fields.
-    pub fn get_tlc_pubkeys(&self, tlc: &AddTlcInfo) -> (Pubkey, Pubkey) {
+    pub fn get_tlc_pubkeys(&self, tlc: &TlcInfo) -> (Pubkey, Pubkey) {
         let is_offered = tlc.is_offered();
         let CommitmentNumbers {
             local: local_commitment_number,
@@ -4574,9 +4802,10 @@ impl ChannelActorState {
 
     fn get_active_received_tlc_with_pubkeys(
         &self,
-        local: bool,
-    ) -> Vec<(AddTlcInfo, Pubkey, Pubkey)> {
-        self.get_active_received_tlcs(local)
+        for_remote: bool,
+    ) -> Vec<(TlcInfo, Pubkey, Pubkey)> {
+        self.get_active_received_tlcs(for_remote)
+            .into_iter()
             .map(move |tlc| {
                 let (k1, k2) = self.get_tlc_pubkeys(&tlc);
                 (tlc, k1, k2)
@@ -4586,9 +4815,10 @@ impl ChannelActorState {
 
     fn get_active_offered_tlc_with_pubkeys(
         &self,
-        local: bool,
-    ) -> Vec<(AddTlcInfo, Pubkey, Pubkey)> {
-        self.get_active_offered_tlcs(local)
+        for_remote: bool,
+    ) -> Vec<(TlcInfo, Pubkey, Pubkey)> {
+        self.get_active_offered_tlcs(for_remote)
+            .into_iter()
             .map(move |tlc| {
                 let (k1, k2) = self.get_tlc_pubkeys(&tlc);
                 (tlc, k1, k2)
@@ -4596,14 +4826,14 @@ impl ChannelActorState {
             .collect()
     }
 
-    fn get_active_htlcs(&self, local: bool) -> Vec<u8> {
+    fn get_active_htlcs(&self, for_remote: bool) -> Vec<u8> {
         // Build a sorted array of TLC so that both party can generate the same commitment transaction.
         let tlcs = {
             let (mut received_tlcs, mut offered_tlcs) = (
-                self.get_active_received_tlc_with_pubkeys(local),
-                self.get_active_offered_tlc_with_pubkeys(local),
+                self.get_active_received_tlc_with_pubkeys(for_remote),
+                self.get_active_offered_tlc_with_pubkeys(for_remote),
             );
-            let (mut a, mut b) = if local {
+            let (mut a, mut b) = if for_remote {
                 (received_tlcs, offered_tlcs)
             } else {
                 for (tlc, _, _) in received_tlcs.iter_mut().chain(offered_tlcs.iter_mut()) {
@@ -4616,6 +4846,7 @@ impl ChannelActorState {
             b.sort_by(|x, y| u64::from(x.0.tlc_id).cmp(&u64::from(y.0.tlc_id)));
             [a, b].concat()
         };
+
         if tlcs.is_empty() {
             Vec::new()
         } else {
@@ -4639,7 +4870,7 @@ impl ChannelActorState {
     fn any_tlc_pending(&self) -> bool {
         self.tlc_state
             .all_tlcs()
-            .any(|tlc| tlc.removed_at.is_none())
+            .any(|tlc| tlc.removed_reason.is_none())
     }
 
     pub fn get_local_funding_pubkey(&self) -> &Pubkey {
@@ -4708,15 +4939,25 @@ impl ChannelActorState {
         reason: &RemoveTlcReason,
     ) -> ProcessingChannelResult {
         if let Some(tlc) = self.tlc_state.get(&tlc_id) {
-            if tlc.removed_at.is_some() {
+            if tlc.removed_reason.is_some() {
                 return Err(ProcessingChannelError::RepeatedProcessing(
                     "TLC is already removed".to_string(),
+                ));
+            }
+            if (tlc.is_offered() && tlc.outbound_status() != OutboundTlcStatus::Committed)
+                || (tlc.is_received() && tlc.inbound_status() != InboundTlcStatus::Committed)
+            {
+                return Err(ProcessingChannelError::InvalidState(
+                    "TLC is not in Committed status".to_string(),
                 ));
             }
             if let RemoveTlcReason::RemoveTlcFulfill(fulfill) = reason {
                 let filled_payment_hash: Hash256 =
                     tlc.hash_algorithm.hash(fulfill.payment_preimage).into();
                 if tlc.payment_hash != filled_payment_hash {
+                    // actually this branch should never be reached in normal case
+                    // `FinalIncorrectPreimage` will be returned in `apply_add_tlc_operation_with_peeled_onion_packet`
+                    // when the preimage is incorrect
                     return Err(ProcessingChannelError::FinalIncorrectPreimage);
                 }
             }
@@ -4799,23 +5040,23 @@ impl ChannelActorState {
         Ok(())
     }
 
-    fn create_outbounding_tlc(&self, command: AddTlcCommand) -> AddTlcInfo {
-        let id = self.get_next_offering_tlc_id();
+    fn create_outbounding_tlc(&self, command: AddTlcCommand) -> TlcInfo {
+        let tlc_id = self.get_next_offering_tlc_id();
         assert!(
-            self.get_offered_tlc(id).is_none(),
+            self.get_offered_tlc(tlc_id).is_none(),
             "Must not have the same id in pending offered tlcs"
         );
 
-        AddTlcInfo {
+        TlcInfo {
             channel_id: self.get_id(),
-            tlc_id: TLCId::Offered(id),
+            status: TlcStatus::Outbound(OutboundTlcStatus::LocalAnnounced),
+            tlc_id,
             amount: command.amount,
             payment_hash: command.payment_hash,
             expiry: command.expiry,
             hash_algorithm: command.hash_algorithm,
             created_at: self.get_current_commitment_numbers(),
-            payment_preimage: None,
-            removed_at: None,
+            removed_reason: None,
             onion_packet: command.onion_packet,
             shared_secret: command.shared_secret,
             previous_tlc: command
@@ -4824,9 +5065,10 @@ impl ChannelActorState {
         }
     }
 
-    fn create_inbounding_tlc(&self, message: AddTlc) -> Result<AddTlcInfo, ProcessingChannelError> {
-        let tlc_info = AddTlcInfo {
+    fn create_inbounding_tlc(&self, message: AddTlc) -> Result<TlcInfo, ProcessingChannelError> {
+        let tlc_info = TlcInfo {
             tlc_id: TLCId::Received(message.tlc_id),
+            status: TlcStatus::Inbound(InboundTlcStatus::RemoteAnnounced),
             channel_id: self.get_id(),
             amount: message.amount,
             payment_hash: message.payment_hash,
@@ -4837,8 +5079,7 @@ impl ChannelActorState {
             // No need to save shared secret for inbound TLC.
             shared_secret: NO_SHARED_SECRET.clone(),
             created_at: self.get_current_commitment_numbers(),
-            payment_preimage: None,
-            removed_at: None,
+            removed_reason: None,
             previous_tlc: None,
         };
         Ok(tlc_info)
@@ -4846,12 +5087,16 @@ impl ChannelActorState {
 
     fn aggregate_partial_signatures_to_consume_funding_cell(
         &self,
-        partial_signatures: [PartialSignature; 2],
+        common_ctx: &Musig2CommonContext,
+        our_partial_signature: PartialSignature,
+        their_partial_signature: PartialSignature,
         tx: &TransactionView,
     ) -> Result<TransactionView, ProcessingChannelError> {
-        let verify_ctx = Musig2VerifyContext::from(self);
-        let signature = verify_ctx
-            .aggregate_partial_signatures_for_msg(partial_signatures, tx.hash().as_slice())?;
+        let signature = common_ctx.aggregate_partial_signatures_for_msg(
+            our_partial_signature,
+            their_partial_signature,
+            tx.hash().as_slice(),
+        )?;
 
         let witness =
             create_witness_for_funding_cell(self.get_funding_lock_script_xonly(), signature);
@@ -4866,19 +5111,23 @@ impl ChannelActorState {
         psct: &PartiallySignedCommitmentTransaction,
     ) -> Result<(TransactionView, SettlementData), ProcessingChannelError> {
         let completed_commitment_tx = {
-            let sign_ctx = Musig2SignContext::from(self);
+            let deterministic_sign_ctx = self.get_deterministic_sign_context();
+
             let our_funding_tx_partial_signature =
-                sign_ctx.sign(psct.commitment_tx.hash().as_slice())?;
+                deterministic_sign_ctx.sign(psct.commitment_tx.hash().as_slice())?;
+
             self.aggregate_partial_signatures_to_consume_funding_cell(
-                [
-                    psct.funding_tx_partial_signature,
-                    our_funding_tx_partial_signature,
-                ],
+                &deterministic_sign_ctx.common_ctx,
+                our_funding_tx_partial_signature,
+                psct.funding_tx_partial_signature,
                 &psct.commitment_tx,
             )?
         };
 
         let settlement_data = {
+            let sign_ctx = self.get_sign_context(false);
+            let x_only_aggregated_pubkey = sign_ctx.common_ctx.x_only_aggregated_pubkey();
+
             let settlement_tx = &psct.settlement_tx;
             let commitment_tx = &psct.commitment_tx;
             let to_local_output = settlement_tx
@@ -4914,18 +5163,8 @@ impl ChannelActorState {
                 ]
                 .concat(),
             );
-            let sign_ctx = Musig2SignContext::from((self, false));
-            let our_commitment_tx_partial_signature = sign_ctx.sign(message.as_slice())?;
-
-            let verify_ctx = Musig2VerifyContext::from((self, false));
-            let aggregated_signature = verify_ctx.aggregate_partial_signatures_for_msg(
-                [
-                    our_commitment_tx_partial_signature,
-                    psct.commitment_tx_partial_signature,
-                ],
-                message.as_slice(),
-            )?;
-            let x_only_aggregated_pubkey = self.get_commitment_lock_script_xonly(false);
+            let aggregated_signature = sign_ctx
+                .sign_and_aggregate(message.as_slice(), psct.commitment_tx_partial_signature)?;
 
             SettlementData {
                 x_only_aggregated_pubkey,
@@ -4969,7 +5208,7 @@ impl ChannelActorState {
 
         if self.local_shutdown_info.is_some() && self.remote_shutdown_info.is_some() {
             let shutdown_tx = self.build_shutdown_tx()?;
-            let sign_ctx = Musig2SignContext::from(&*self);
+            let deterministic_sign_ctx = self.get_deterministic_sign_context();
 
             let local_shutdown_info = self
                 .local_shutdown_info
@@ -4986,7 +5225,7 @@ impl ChannelActorState {
             let local_shutdown_signature = match local_shutdown_info.signature {
                 Some(signature) => signature,
                 None => {
-                    let signature = sign_ctx.sign(shutdown_tx.hash().as_slice())?;
+                    let signature = deterministic_sign_ctx.sign(shutdown_tx.hash().as_slice())?;
                     local_shutdown_info.signature = Some(signature);
 
                     network
@@ -5007,7 +5246,9 @@ impl ChannelActorState {
             if let Some(remote_shutdown_signature) = remote_shutdown_info.signature {
                 let tx: TransactionView = self
                     .aggregate_partial_signatures_to_consume_funding_cell(
-                        [local_shutdown_signature, remote_shutdown_signature],
+                        &deterministic_sign_ctx.common_ctx,
+                        local_shutdown_signature,
+                        remote_shutdown_signature,
                         &shutdown_tx,
                     )?;
                 assert_eq!(
@@ -5054,7 +5295,7 @@ impl ChannelActorState {
         self.to_remote_amount = accept_channel.funding_amount;
         self.remote_reserved_ckb_amount = accept_channel.reserved_ckb_amount;
 
-        self.save_remote_nonce(accept_channel.next_local_nonce.clone());
+        self.commit_remote_nonce(accept_channel.next_local_nonce.clone());
         let remote_pubkeys = (&accept_channel).into();
         self.remote_channel_public_keys = Some(remote_pubkeys);
         self.remote_commitment_points = vec![
@@ -5259,8 +5500,6 @@ impl ChannelActorState {
             ))
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
 
-        self.save_remote_nonce(commitment_signed.next_local_nonce);
-        self.latest_commitment_transaction = Some(commitment_tx.data());
         match flags {
             CommitmentSignedFlags::SigningCommitment(flags) => {
                 let flags = flags | SigningCommitmentFlags::THEIR_COMMITMENT_SIGNED_SENT;
@@ -5285,6 +5524,8 @@ impl ChannelActorState {
                 }
             }
         }
+        self.commit_remote_nonce(commitment_signed.next_local_nonce);
+        self.latest_commitment_transaction = Some(commitment_tx.data());
         Ok(())
     }
 
@@ -5398,8 +5639,11 @@ impl ChannelActorState {
             network
                 .send_message(NetworkActorMessage::new_command(
                     NetworkActorCommand::BroadcastMessages(vec![
-                        BroadcastMessage::ChannelAnnouncement(channel_announcement),
-                        BroadcastMessage::ChannelUpdate(channel_update),
+                        BroadcastMessageWithTimestamp::ChannelAnnouncement(
+                            self.must_get_funding_transaction_timestamp(),
+                            channel_announcement,
+                        ),
+                        BroadcastMessageWithTimestamp::ChannelUpdate(channel_update),
                     ]),
                 ))
                 .expect(ASSUME_NETWORK_ACTOR_ALIVE);
@@ -5439,7 +5683,7 @@ impl ChannelActorState {
             let channel_outpoint = self.must_get_funding_transaction_outpoint();
             let peer = peer_id.clone();
             // We will spawn a new task to query peer's information about the channel.
-            ractor::concurrency::tokio_primatives::spawn(async move {
+            ractor::concurrency::tokio_primitives::spawn(async move {
                 // It is possible that while we are querying the peer for the channel update message,
                 // the peer has not yet generated the message (because it is still waiting for the
                 // funding transaction to be confirmed). In this case, we should retry the query.
@@ -5526,6 +5770,7 @@ impl ChannelActorState {
         self.increment_local_commitment_number();
         self.increment_remote_commitment_number();
         let peer_id = self.get_remote_peer_id();
+        self.notify_owned_channel_updated(network, false).await;
         network
             .send_message(NetworkActorMessage::new_event(
                 NetworkActorEvent::ChannelReady(
@@ -5541,28 +5786,31 @@ impl ChannelActorState {
         self.remote_commitment_points
             .push((self.get_local_commitment_number(), commitment_point));
 
+        // shrink the remote commitment points list
+        // TODO: use all_tlcs as filter instead of select the minimal commitment number
         let len = self.remote_commitment_points.len();
         if len > (self.local_constraints.max_tlc_number_in_flight + 1) as usize {
             let min_remote_commitment = self
                 .tlc_state
                 .all_tlcs()
-                .map(|x| x.created_at.remote)
+                .map(|x| x.created_at.remote.min(x.created_at.local))
                 .min()
                 .unwrap_or_default();
             self.remote_commitment_points
                 .retain(|(num, _)| *num >= min_remote_commitment);
         }
-        assert!(
-            self.remote_commitment_points.len()
-                <= (self.local_constraints.max_tlc_number_in_flight + 1) as usize
-        );
     }
 
     fn handle_revoke_and_ack_peer_message(
         &mut self,
         network: &ActorRef<NetworkActorMessage>,
         revoke_and_ack: RevokeAndAck,
-    ) -> ProcessingChannelResult {
+    ) -> Result<bool, ProcessingChannelError> {
+        if !self.tlc_state.waiting_ack {
+            return Err(ProcessingChannelError::InvalidState(
+                "unexpected RevokeAndAck message".to_string(),
+            ));
+        }
         let RevokeAndAck {
             channel_id: _,
             revocation_partial_signature,
@@ -5570,33 +5818,8 @@ impl ChannelActorState {
             next_per_commitment_point,
         } = revoke_and_ack;
 
-        let key_agg_ctx = {
-            let local_pubkey = self.get_local_channel_public_keys().funding_pubkey;
-            let remote_pubkey = self.get_remote_channel_public_keys().funding_pubkey;
-            KeyAggContext::new([local_pubkey, remote_pubkey]).expect("Valid pubkeys")
-        };
-        let x_only_aggregated_pubkey = key_agg_ctx.aggregated_pubkey::<Point>().serialize_xonly();
-        let (verify_ctx, sign_ctx) = {
-            let local_nonce = self.get_local_nonce();
-            let remote_nonce = self.take_remote_nonce_for_raa();
-            let nonces = [remote_nonce.clone(), local_nonce];
-            let agg_nonce = AggNonce::sum(nonces);
-
-            (
-                Musig2VerifyContext {
-                    key_agg_ctx: key_agg_ctx.clone(),
-                    agg_nonce: agg_nonce.clone(),
-                    pubkey: *self.get_remote_funding_pubkey(),
-                    pubnonce: remote_nonce,
-                },
-                Musig2SignContext {
-                    key_agg_ctx,
-                    agg_nonce,
-                    seckey: self.signer.funding_key.clone(),
-                    secnonce: self.get_local_musig2_secnonce(),
-                },
-            )
-        };
+        let sign_ctx = self.get_sign_context_for_revoke_and_ack_message()?;
+        let x_only_aggregated_pubkey = sign_ctx.common_ctx.x_only_aggregated_pubkey();
 
         let revocation_data = {
             let commitment_tx_fee = calculate_commitment_tx_fee(
@@ -5608,7 +5831,7 @@ impl ChannelActorState {
             {
                 let capacity = self.get_total_reserved_ckb_amount() - commitment_tx_fee;
                 let output = CellOutput::new_builder()
-                    .lock(lock_script)
+                    .lock(lock_script.clone())
                     .type_(Some(udt_type_script.clone()).pack())
                     .capacity(capacity.pack())
                     .build();
@@ -5618,7 +5841,7 @@ impl ChannelActorState {
             } else {
                 let capacity = self.get_total_ckb_amount() - commitment_tx_fee;
                 let output = CellOutput::new_builder()
-                    .lock(lock_script)
+                    .lock(lock_script.clone())
                     .capacity(capacity.pack())
                     .build();
                 let output_data = Bytes::default();
@@ -5626,7 +5849,6 @@ impl ChannelActorState {
             };
 
             let commitment_number = self.get_local_commitment_number() - 1;
-
             let commitment_lock_script_args = [
                 &blake2b_256(x_only_aggregated_pubkey)[0..20],
                 self.get_delay_epoch_as_lock_args_bytes().as_slice(),
@@ -5642,12 +5864,8 @@ impl ChannelActorState {
                 ]
                 .concat(),
             );
-            verify_ctx.verify(revocation_partial_signature, message.as_slice())?;
-            let our_signature = sign_ctx.clone().sign(message.as_slice())?;
-            let aggregated_signature = verify_ctx.aggregate_partial_signatures_for_msg(
-                [revocation_partial_signature, our_signature],
-                message.as_slice(),
-            )?;
+            let aggregated_signature =
+                sign_ctx.sign_and_aggregate(message.as_slice(), revocation_partial_signature)?;
             RevocationData {
                 commitment_number,
                 x_only_aggregated_pubkey,
@@ -5678,12 +5896,8 @@ impl ChannelActorState {
                 ]
                 .concat(),
             );
-            verify_ctx.verify(commitment_tx_partial_signature, message.as_slice())?;
-            let our_signature = sign_ctx.sign(message.as_slice())?;
-            let aggregated_signature = verify_ctx.aggregate_partial_signatures_for_msg(
-                [commitment_tx_partial_signature, our_signature],
-                message.as_slice(),
-            )?;
+            let aggregated_signature =
+                sign_ctx.sign_and_aggregate(message.as_slice(), commitment_tx_partial_signature)?;
 
             SettlementData {
                 x_only_aggregated_pubkey,
@@ -5698,15 +5912,7 @@ impl ChannelActorState {
         self.increment_local_commitment_number();
         self.append_remote_commitment_point(next_per_commitment_point);
 
-        let staging_tlcs = self.tlc_state.commit_local_tlcs();
-        for tlc in staging_tlcs {
-            if let TlcKind::RemoveTlc(remove_tlc) = tlc {
-                self.remove_tlc_with_reason(remove_tlc.tlc_id, &remove_tlc.reason)
-                    .expect("expect remove tlc successfully");
-            }
-        }
-        self.tlc_state.set_waiting_ack(false);
-
+        let need_commitment_signed = self.tlc_state.update_for_revoke_and_ack();
         network
             .send_message(NetworkActorMessage::new_notification(
                 NetworkServiceEvent::RevokeAndAckReceived(
@@ -5717,17 +5923,17 @@ impl ChannelActorState {
                 ),
             ))
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-        Ok(())
+        Ok(need_commitment_signed)
     }
 
-    fn handle_reestablish_channel_message(
+    async fn handle_reestablish_channel_message(
         &mut self,
         reestablish_channel: &ReestablishChannel,
         network: &ActorRef<NetworkActorMessage>,
     ) -> ProcessingChannelResult {
         debug!(
-            "Handling reestablish channel message: {:?}, our commitment_numbers {:?}",
-            reestablish_channel, self.commitment_numbers,
+            "Handling reestablish channel message: {:?}, our commitment_numbers {:?} in channel state {:?}",
+            reestablish_channel, self.commitment_numbers, self.state
         );
         self.reestablishing = false;
         match self.state {
@@ -5742,32 +5948,34 @@ impl ChannelActorState {
                     // resend AddTlc, RemoveTlc and CommitmentSigned messages if needed
                     let mut need_resend_commitment_signed = false;
                     for info in self.tlc_state.all_tlcs() {
-                        if info.is_offered() {
-                            if info.created_at.get_local() >= acutal_local_commitment_number {
-                                // resend AddTlc message
-                                network
-                                    .send_message(NetworkActorMessage::new_command(
-                                        NetworkActorCommand::SendFiberMessage(
-                                            FiberMessageWithPeerId::new(
-                                                self.get_remote_peer_id(),
-                                                FiberMessage::add_tlc(AddTlc {
-                                                    channel_id: self.get_id(),
-                                                    tlc_id: info.tlc_id.into(),
-                                                    amount: info.amount,
-                                                    payment_hash: info.payment_hash,
-                                                    expiry: info.expiry,
-                                                    hash_algorithm: info.hash_algorithm,
-                                                    onion_packet: info.onion_packet.clone(),
-                                                }),
-                                            ),
+                        if info.is_offered()
+                            && matches!(info.outbound_status(), OutboundTlcStatus::LocalAnnounced)
+                        {
+                            // resend AddTlc message
+                            network
+                                .send_message(NetworkActorMessage::new_command(
+                                    NetworkActorCommand::SendFiberMessage(
+                                        FiberMessageWithPeerId::new(
+                                            self.get_remote_peer_id(),
+                                            FiberMessage::add_tlc(AddTlc {
+                                                channel_id: self.get_id(),
+                                                tlc_id: info.tlc_id.into(),
+                                                amount: info.amount,
+                                                payment_hash: info.payment_hash,
+                                                expiry: info.expiry,
+                                                hash_algorithm: info.hash_algorithm,
+                                                onion_packet: info.onion_packet.clone(),
+                                            }),
                                         ),
-                                    ))
-                                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-
-                                need_resend_commitment_signed = true;
-                            }
-                        } else if let Some((commitment_number, remove_reason)) = &info.removed_at {
-                            if commitment_number.get_local() >= acutal_local_commitment_number {
+                                    ),
+                                ))
+                                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                            need_resend_commitment_signed = true;
+                            debug_event!(network, "resend add tlc");
+                        } else if let Some(remove_reason) = &info.removed_reason {
+                            if info.is_received()
+                                && matches!(info.inbound_status(), InboundTlcStatus::LocalRemoved)
+                            {
                                 // resend RemoveTlc message
                                 network
                                     .send_message(NetworkActorMessage::new_command(
@@ -5785,10 +5993,20 @@ impl ChannelActorState {
                                     .expect(ASSUME_NETWORK_ACTOR_ALIVE);
 
                                 need_resend_commitment_signed = true;
+                                debug_event!(network, "resend remove tlc");
                             }
                         }
                     }
-                    if need_resend_commitment_signed {
+                    // previous waiting_ack maybe true, reset it after reestablish the channel
+                    // if we need to resend CommitmentSigned message, it will be set to proper status again
+                    self.tlc_state.set_waiting_ack(false);
+                    debug!(
+                        "Resend AddTlc and RemoveTlc messages if needed: {}",
+                        need_resend_commitment_signed
+                    );
+                    if need_resend_commitment_signed
+                        || self.tlc_state.need_another_commitment_signed()
+                    {
                         debug!("Resend CommitmentSigned message");
                         network
                             .send_message(NetworkActorMessage::new_command(
@@ -5801,6 +6019,7 @@ impl ChannelActorState {
                     }
                 } else if acutal_local_commitment_number == expected_local_commitment_number + 1 {
                     // wait for remote to resend the RevokeAndAck message, do nothing here
+                    warn!("wait for remote to resend the RevokeAndAck message, do nothing here");
                 } else {
                     // unreachable state, just log an error for potential bugs
                     error!(
@@ -5817,7 +6036,28 @@ impl ChannelActorState {
                     // Resetting our remote commitment number to the actual remote commitment number
                     // and resend the RevokeAndAck message.
                     self.set_remote_commitment_number(acutal_remote_commitment_number);
+                    // Resetting the remote nonce to build the RevokeAndAck message
+                    let last_commited_nonce = self.get_last_committed_remote_nonce();
+                    let used_nonce = self
+                        .last_revoke_and_ack_remote_nonce
+                        .as_ref()
+                        .expect("must have set last_revoke_and_ack_remote_nonce")
+                        .clone();
+                    self.commit_remote_nonce(used_nonce);
                     self.send_revoke_and_ack_message(network)?;
+                    // Now we can reset the remote nonce to the "real" last committed nonce
+                    self.commit_remote_nonce(last_commited_nonce);
+                    let need_commitment_signed = self.tlc_state.update_for_commitment_signed();
+                    if need_commitment_signed {
+                        network
+                            .send_message(NetworkActorMessage::new_command(
+                                NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
+                                    channel_id: self.get_id(),
+                                    command: ChannelCommand::CommitmentSigned(),
+                                }),
+                            ))
+                            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                    }
                 } else {
                     // unreachable state, just log an error for potential bugs
                     error!(
@@ -5825,6 +6065,10 @@ impl ChannelActorState {
                         expected_remote_commitment_number, acutal_remote_commitment_number
                     );
                 }
+
+                self.notify_owned_channel_updated(network, false).await;
+
+                debug_event!(network, "Reestablished channel in ChannelReady");
             }
             _ => {
                 // TODO: @quake we need to handle other states.
@@ -5933,24 +6177,8 @@ impl ChannelActorState {
     }
 
     fn build_init_commitment_tx_signature(&self) -> Result<PartialSignature, SigningError> {
-        let key_agg_ctx = {
-            let local_pubkey = self.get_local_channel_public_keys().funding_pubkey;
-            let remote_pubkey = self.get_remote_channel_public_keys().funding_pubkey;
-            KeyAggContext::new([remote_pubkey, local_pubkey]).expect("Valid pubkeys")
-        };
-        let x_only_aggregated_pubkey = key_agg_ctx.aggregated_pubkey::<Point>().serialize_xonly();
-        let sign_ctx = {
-            let local_nonce = self.get_local_nonce();
-            let remote_nonce = self.get_remote_nonce();
-            let nonces = [local_nonce, remote_nonce];
-            let agg_nonce = AggNonce::sum(nonces);
-            Musig2SignContext {
-                key_agg_ctx,
-                agg_nonce,
-                seckey: self.signer.funding_key.clone(),
-                secnonce: self.get_local_musig2_secnonce(),
-            }
-        };
+        let sign_ctx = self.get_sign_context(true);
+        let x_only_aggregated_pubkey = sign_ctx.common_ctx.x_only_aggregated_pubkey();
         let ([to_local_output, to_remote_output], [to_local_output_data, to_remote_output_data]) =
             self.build_settlement_transaction_outputs(false);
         let version = 0u64;
@@ -5971,29 +6199,17 @@ impl ChannelActorState {
             .concat(),
         );
 
-        sign_ctx.sign(message.as_slice())
+        let signature = sign_ctx.sign(message.as_slice());
+        signature
     }
 
     fn check_init_commitment_tx_signature(
         &self,
         signature: PartialSignature,
     ) -> Result<SettlementData, ProcessingChannelError> {
-        let key_agg_ctx = {
-            let local_pubkey = self.get_local_channel_public_keys().funding_pubkey;
-            let remote_pubkey = self.get_remote_channel_public_keys().funding_pubkey;
-            KeyAggContext::new([local_pubkey, remote_pubkey]).expect("Valid pubkeys")
-        };
-        let x_only_aggregated_pubkey = key_agg_ctx.aggregated_pubkey::<Point>().serialize_xonly();
-        let local_nonce = self.get_local_nonce();
-        let remote_nonce = self.get_remote_nonce();
-        let nonces = [remote_nonce.clone(), local_nonce];
-        let agg_nonce = AggNonce::sum(nonces);
-        let verify_ctx = Musig2VerifyContext {
-            key_agg_ctx: key_agg_ctx.clone(),
-            agg_nonce: agg_nonce.clone(),
-            pubkey: *self.get_remote_funding_pubkey(),
-            pubnonce: remote_nonce,
-        };
+        let sign_ctx = self.get_sign_context(false);
+        let x_only_aggregated_pubkey = sign_ctx.common_ctx.x_only_aggregated_pubkey();
+
         let ([to_local_output, to_remote_output], [to_local_output_data, to_remote_output_data]) =
             self.build_settlement_transaction_outputs(true);
         let version = 0u64;
@@ -6014,21 +6230,9 @@ impl ChannelActorState {
             .concat(),
         );
 
-        verify_ctx.verify(signature, message.as_slice())?;
-
         let settlement_data = {
-            let sign_ctx = Musig2SignContext {
-                key_agg_ctx,
-                agg_nonce,
-                seckey: self.signer.funding_key.clone(),
-                secnonce: self.get_local_musig2_secnonce(),
-            };
-
-            let our_signature = sign_ctx.sign(message.as_slice())?;
-            let aggregated_signature = verify_ctx.aggregate_partial_signatures_for_msg(
-                [signature, our_signature],
-                message.as_slice(),
-            )?;
+            let aggregated_signature =
+                sign_ctx.sign_and_aggregate(message.as_slice(), signature)?;
 
             SettlementData {
                 x_only_aggregated_pubkey,
@@ -6083,13 +6287,121 @@ impl ChannelActorState {
         local_pubkey <= remote_pubkey
     }
 
-    // Order some items (like pubkey and nonce) from holders and counterparty in musig2.
-    fn order_things_for_musig2<T>(&self, holder: T, counterparty: T) -> [T; 2] {
+    // Order some items (like pubkey and nonce) from local and remote in musig2.
+    fn order_things_for_musig2<T>(&self, local: T, remote: T) -> [T; 2] {
         if self.should_local_go_first_in_musig2() {
-            [holder, counterparty]
+            [local, remote]
         } else {
-            [counterparty, holder]
+            [remote, local]
         }
+    }
+
+    fn get_deterministic_common_context(&self) -> Musig2CommonContext {
+        let local_first = self.should_local_go_first_in_musig2();
+        let key_agg_ctx = self.get_deterministic_musig2_agg_context();
+        let remote_nonce = self.get_last_committed_remote_nonce();
+        let local_nonce = self.get_local_musig2_pubnonce();
+        let agg_nonce = AggNonce::sum(if local_first {
+            [local_nonce, remote_nonce]
+        } else {
+            [remote_nonce, local_nonce]
+        });
+        Musig2CommonContext {
+            local_first,
+            key_agg_ctx,
+            agg_nonce,
+        }
+    }
+
+    // A deterministic `Musig2VerifyContext` is a verifying context that has the same basic configuration
+    // for both parties. This is mostly used by us to verify transactions to consume the funding cell,
+    // which uses a deterministic aggregated pubkey for both parties.
+    fn get_deterministic_verify_context(&self) -> Musig2VerifyContext {
+        let common_ctx = self.get_deterministic_common_context();
+        Musig2VerifyContext {
+            common_ctx,
+            pubkey: self.get_remote_funding_pubkey().clone(),
+            pubnonce: self.get_last_committed_remote_nonce(),
+        }
+    }
+
+    fn get_verify_context(&self) -> Musig2VerifyContext {
+        // We are always verifying a commitment transaction that is broadcast by us,
+        // so we can always pass false to get_musig2_common_ctx.
+        let common_ctx = self.get_musig2_common_ctx(false);
+
+        Musig2VerifyContext {
+            common_ctx,
+            pubkey: self.get_remote_funding_pubkey().clone(),
+            pubnonce: self.get_last_committed_remote_nonce(),
+        }
+    }
+
+    // A deterministic `Musig2SignContext` is a signing context that has the same basic configuration
+    // for both parties. This is mostly used by us to sign transactions to consume the funding cell,
+    // which uses a deterministic aggregated pubkey for both parties.
+    fn get_deterministic_sign_context(&self) -> Musig2SignContext {
+        let common_ctx = self.get_deterministic_common_context();
+        Musig2SignContext {
+            common_ctx,
+            seckey: self.signer.funding_key.clone(),
+            secnonce: self.get_local_musig2_secnonce(),
+        }
+    }
+
+    // This function is used to construct a `Musig2SignContext` with which we can easily sign
+    // and aggregate partial signatures. The parameter for_remote is used to indicate the direction
+    // of commitment transation (just like the same parameter used in building commitment transactions).
+    // This is also due to the fact commitment transactions are asymmetrical (A's broadcastable commitment
+    // transactions are different from B's broadcastable commitment transactions), sometimes we need to
+    // construct different `Musig2SignContext` depending on the direction of commitment transaction.
+    // For example, the `Musig2SignContext`s used by A to construct `CommitmentSigned` and `RevokeAndAck`
+    // messages to B are different. A needs to build a commitment transaction that is broadcast by B
+    // to construct a `CommitmentSigned` message, but when constructing `RevokeAndAck` A needs to
+    // build an old commitment transaction that is broadcast by himself. This is the reason why
+    // we need a `for_remote` parameter. It serves the same function as `for_remote` in functions
+    // like `build_commitment_and_settlement_tx`.
+    fn get_sign_context(&self, for_remote: bool) -> Musig2SignContext {
+        let common_ctx = self.get_musig2_common_ctx(for_remote);
+
+        Musig2SignContext {
+            common_ctx,
+            seckey: self.signer.funding_key.clone(),
+            secnonce: self.get_local_musig2_secnonce(),
+        }
+    }
+
+    // As explained in the documentation of `last_used_remote_nonce` field, we need to
+    // use a saved remote nonce because the latest remote nonce may be different from the
+    // one we used while sending CommitmentSigned message.
+    fn get_sign_context_for_revoke_and_ack_message(
+        &self,
+    ) -> Result<Musig2SignContext, ProcessingChannelError> {
+        let common_ctx = {
+            let local_pubkey = self.get_local_channel_public_keys().funding_pubkey;
+            let remote_pubkey = self.get_remote_channel_public_keys().funding_pubkey;
+            let pubkeys = [local_pubkey, remote_pubkey];
+            let key_agg_ctx = KeyAggContext::new(pubkeys).expect("Valid pubkeys");
+            let remote_nonce =
+                self.get_last_commitment_signed_remote_nonce()
+                    .ok_or(ProcessingChannelError::InvalidState(
+                        "No last used remote nonce found, has the peer sent a RevokeAndAck without us sending CommitmentSigned"
+                            .to_string(),
+                    ))?;
+            let local_nonce = self.get_local_musig2_pubnonce();
+            let agg_nonce = AggNonce::sum([local_nonce, remote_nonce]);
+            Musig2CommonContext {
+                local_first: true,
+                key_agg_ctx,
+                agg_nonce,
+            }
+        };
+
+        Ok(Musig2SignContext {
+            common_ctx,
+            seckey: self.signer.funding_key.clone(),
+            secnonce: self.get_local_musig2_secnonce(),
+        })
     }
 
     // Should the local send tx_signatures first?
@@ -6313,16 +6625,39 @@ impl ChannelActorState {
         }
     }
 
-    fn get_commitment_lock_script_xonly(&self, for_remote: bool) -> [u8; 32] {
+    // For different directions of commitment transactions, we put pubkeys and nonces
+    // in different order. It is a coincidency that in the current code when we are building
+    // a commitment transaction for the remote, we will put our pubkey/nonce first.
+    // That is to say, `for_remote` is equivalent to this function's parameter `local_first`.
+    // But, the name local_first is more descriptive in the context of ordering musig2-related
+    // stuff.
+    fn get_musig2_common_ctx(&self, local_first: bool) -> Musig2CommonContext {
         let local_pubkey = self.get_local_channel_public_keys().funding_pubkey;
         let remote_pubkey = self.get_remote_channel_public_keys().funding_pubkey;
-        let pubkeys = if for_remote {
+        let pubkeys = if local_first {
             [local_pubkey, remote_pubkey]
         } else {
             [remote_pubkey, local_pubkey]
         };
-        KeyAggContext::new(pubkeys)
-            .expect("Valid pubkeys")
+        let key_agg_ctx = KeyAggContext::new(pubkeys).expect("Valid pubkeys");
+        let remote_nonce = self.get_last_committed_remote_nonce();
+        let local_nonce = self.get_local_musig2_pubnonce();
+
+        let agg_nonce = AggNonce::sum(if local_first {
+            [local_nonce, remote_nonce]
+        } else {
+            [remote_nonce, local_nonce]
+        });
+        Musig2CommonContext {
+            local_first,
+            key_agg_ctx,
+            agg_nonce,
+        }
+    }
+
+    fn get_commitment_lock_script_xonly(&self, for_remote: bool) -> [u8; 32] {
+        self.get_musig2_common_ctx(for_remote)
+            .key_agg_ctx
             .aggregated_pubkey::<Point>()
             .serialize_xonly()
     }
@@ -6331,11 +6666,63 @@ impl ChannelActorState {
         &self,
         for_remote: bool,
     ) -> ([CellOutput; 2], [Bytes; 2]) {
-        let offered_fulfilled = self.get_pending_fulfilled_tlcs_amount(for_remote, true);
-        let received_fulfilled = self.get_pending_fulfilled_tlcs_amount(for_remote, false);
+        let pending_tlcs = self
+            .tlc_state
+            .offered_tlcs
+            .tlcs
+            .iter()
+            .filter(move |tlc| match tlc.outbound_status() {
+                OutboundTlcStatus::LocalAnnounced => for_remote,
+                OutboundTlcStatus::Committed => true,
+                OutboundTlcStatus::RemoteRemoved => true,
+                OutboundTlcStatus::RemoveWaitPrevAck => true,
+                OutboundTlcStatus::RemoveWaitAck => true,
+                OutboundTlcStatus::RemoveAckConfirmed => true,
+            })
+            .chain(self.tlc_state.received_tlcs.tlcs.iter().filter(move |tlc| {
+                match tlc.inbound_status() {
+                    InboundTlcStatus::RemoteAnnounced => !for_remote,
+                    InboundTlcStatus::AnnounceWaitPrevAck => !for_remote,
+                    InboundTlcStatus::AnnounceWaitAck => true,
+                    InboundTlcStatus::Committed => true,
+                    InboundTlcStatus::LocalRemoved => true,
+                    InboundTlcStatus::RemoveAckConfirmed => true,
+                }
+            }));
 
-        let to_local_value = self.to_local_amount - offered_fulfilled + received_fulfilled;
-        let to_remote_value = self.to_remote_amount - received_fulfilled + offered_fulfilled;
+        let mut offered_pending = 0;
+        let mut offered_fullfilled = 0;
+        let mut received_pending = 0;
+        let mut received_fullfilled = 0;
+        for info in pending_tlcs {
+            if info.is_offered() {
+                offered_pending += info.amount;
+                if (info.outbound_status() == OutboundTlcStatus::RemoveWaitAck
+                    || info.outbound_status() == OutboundTlcStatus::RemoveAckConfirmed)
+                    && info
+                        .removed_reason
+                        .as_ref()
+                        .map(|r| matches!(r, RemoveTlcReason::RemoveTlcFulfill(_)))
+                        .unwrap_or_default()
+                {
+                    offered_fullfilled += info.amount;
+                }
+            } else {
+                received_pending += info.amount;
+                if info.inbound_status() == InboundTlcStatus::RemoveAckConfirmed
+                    && info
+                        .removed_reason
+                        .as_ref()
+                        .map(|r| matches!(r, RemoveTlcReason::RemoveTlcFulfill(_)))
+                        .unwrap_or_default()
+                {
+                    received_fullfilled += info.amount;
+                }
+            }
+        }
+        let to_local_value = self.to_local_amount + received_fullfilled - offered_pending;
+        let to_remote_value = self.to_remote_amount + offered_fullfilled - received_pending;
+
         let commitment_tx_fee =
             calculate_commitment_tx_fee(self.commitment_fee_rate, &self.funding_udt_type_script);
 
@@ -6407,13 +6794,12 @@ impl ChannelActorState {
     ) -> Result<PartiallySignedCommitmentTransaction, ProcessingChannelError> {
         let (commitment_tx, settlement_tx) = self.build_commitment_and_settlement_tx(false);
 
-        let verify_ctx = Musig2VerifyContext::from(self);
-        verify_ctx.verify(
+        let deterministic_verify_ctx = self.get_deterministic_verify_context();
+        deterministic_verify_ctx.verify(
             funding_tx_partial_signature,
             commitment_tx.hash().as_slice(),
         )?;
 
-        let verify_ctx = Musig2VerifyContext::from((self, false));
         let to_local_output = settlement_tx
             .outputs()
             .get(0)
@@ -6447,6 +6833,7 @@ impl ChannelActorState {
             ]
             .concat(),
         );
+        let verify_ctx = self.get_verify_context();
         verify_ctx.verify(commitment_tx_partial_signature, message.as_slice())?;
 
         Ok(PartiallySignedCommitmentTransaction {
@@ -6463,10 +6850,10 @@ impl ChannelActorState {
     ) -> Result<(PartialSignature, PartialSignature), ProcessingChannelError> {
         let (commitment_tx, settlement_tx) = self.build_commitment_and_settlement_tx(true);
 
-        let sign_ctx = Musig2SignContext::from(self);
-        let funding_tx_partial_signature = sign_ctx.sign(commitment_tx.hash().as_slice())?;
+        let deterministic_sign_ctx = self.get_deterministic_sign_context();
+        let funding_tx_partial_signature =
+            deterministic_sign_ctx.sign(commitment_tx.hash().as_slice())?;
 
-        let sign_ctx = Musig2SignContext::from((self, true));
         let to_local_output = settlement_tx
             .outputs()
             .get(0)
@@ -6501,6 +6888,7 @@ impl ChannelActorState {
             .concat(),
         );
 
+        let sign_ctx = self.get_sign_context(true);
         let commitment_tx_partial_signature = sign_ctx.sign(message.as_slice())?;
 
         Ok((
@@ -6609,30 +6997,28 @@ pub fn create_witness_for_commitment_cell(
         .expect("Witness length should be correct")
 }
 
-pub struct Musig2VerifyContext {
-    pub key_agg_ctx: KeyAggContext,
-    pub agg_nonce: AggNonce,
-    pub pubkey: Pubkey,
-    pub pubnonce: PubNonce,
+// The common musig2 configuration that is used both by signing and verifying.
+#[derive(Debug)]
+struct Musig2CommonContext {
+    // This parameter is also saved to the context because it is useful for
+    // aggregating partial signatures.
+    local_first: bool,
+    key_agg_ctx: KeyAggContext,
+    agg_nonce: AggNonce,
 }
 
-impl Musig2VerifyContext {
-    pub fn verify(&self, signature: PartialSignature, message: &[u8]) -> Result<(), VerifyError> {
-        verify_partial(
-            &self.key_agg_ctx,
-            signature,
-            &self.agg_nonce,
-            self.pubkey,
-            &self.pubnonce,
-            message,
-        )
-    }
-
-    pub fn aggregate_partial_signatures_for_msg(
+impl Musig2CommonContext {
+    fn aggregate_partial_signatures_for_msg(
         &self,
-        partial_signatures: [PartialSignature; 2],
+        local_signature: PartialSignature,
+        remote_signature: PartialSignature,
         message: &[u8],
     ) -> Result<CompactSignature, VerifyError> {
+        let partial_signatures = if self.local_first {
+            [local_signature, remote_signature]
+        } else {
+            [remote_signature, local_signature]
+        };
         aggregate_partial_signatures(
             &self.key_agg_ctx,
             &self.agg_nonce,
@@ -6640,25 +7026,61 @@ impl Musig2VerifyContext {
             message,
         )
     }
+
+    pub fn x_only_aggregated_pubkey(&self) -> [u8; 32] {
+        self.key_agg_ctx
+            .aggregated_pubkey::<Point>()
+            .serialize_xonly()
+    }
 }
 
-#[derive(Clone)]
-pub struct Musig2SignContext {
-    key_agg_ctx: KeyAggContext,
-    agg_nonce: AggNonce,
+struct Musig2VerifyContext {
+    common_ctx: Musig2CommonContext,
+    pubkey: Pubkey,
+    pubnonce: PubNonce,
+}
+
+impl Musig2VerifyContext {
+    fn verify(&self, signature: PartialSignature, message: &[u8]) -> Result<(), VerifyError> {
+        verify_partial(
+            &self.common_ctx.key_agg_ctx,
+            signature,
+            &self.common_ctx.agg_nonce,
+            self.pubkey,
+            &self.pubnonce,
+            message,
+        )
+    }
+}
+
+struct Musig2SignContext {
+    common_ctx: Musig2CommonContext,
     seckey: Privkey,
     secnonce: SecNonce,
 }
 
 impl Musig2SignContext {
-    pub fn sign(self, message: &[u8]) -> Result<PartialSignature, SigningError> {
+    fn sign(&self, message: &[u8]) -> Result<PartialSignature, SigningError> {
         sign_partial(
-            &self.key_agg_ctx,
-            self.seckey,
+            &self.common_ctx.key_agg_ctx,
+            self.seckey.clone(),
             self.secnonce.clone(),
-            &self.agg_nonce,
+            &self.common_ctx.agg_nonce,
             message,
         )
+    }
+
+    fn sign_and_aggregate(
+        &self,
+        message: &[u8],
+        remote_signature: PartialSignature,
+    ) -> Result<CompactSignature, RoundFinalizeError> {
+        let local_signature = self.sign(message)?;
+        Ok(self.common_ctx.aggregate_partial_signatures_for_msg(
+            local_signature,
+            remote_signature,
+            message,
+        )?)
     }
 }
 

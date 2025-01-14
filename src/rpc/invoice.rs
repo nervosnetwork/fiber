@@ -13,6 +13,7 @@ use serde_with::serde_as;
 use std::time::Duration;
 use tentacle::secio::SecioKeyPair;
 
+/// The parameter struct for generating a new invoice.
 #[serde_as]
 #[derive(Serialize, Deserialize)]
 pub(crate) struct NewInvoiceParams {

@@ -37,6 +37,7 @@ assert {
 }
 
 script:pre-request {
+  await new Promise(r => setTimeout(r, 2000));
   let expiry = "0x" + (Date.now() + 1000 * 60 * 60 * 24).toString(16);
   bru.setVar("expiry", expiry);
 }
@@ -45,4 +46,8 @@ script:post-response {
   console.log("step 10 response: ", res.body);
   // Sleep for sometime to make sure current operation finishes before next request starts.
   await new Promise(r => setTimeout(r, 100));
+
+  if (res.body.error.message != "AmountBelowMinimum") {
+    throw new Error("Assertion failed: error message is not right");
+  }
 }

@@ -473,6 +473,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "bon"
+version = "2.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "97493a391b4b18ee918675fb8663e53646fd09321c58b46afa04e8ce2499c869"
+dependencies = [
+ "bon-macros",
+ "rustversion",
+]
+
+[[package]]
+name = "bon-macros"
+version = "2.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2a2af3eac944c12cdf4423eab70d310da0a8e5851a18ffb192c0a5e3f7ae1663"
+dependencies = [
+ "darling",
+ "ident_case",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.90",
+]
+
+[[package]]
 name = "bs58"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -948,7 +971,7 @@ dependencies = [
  "ckb-script",
  "ckb-traits",
  "ckb-types",
- "dashmap",
+ "dashmap 5.5.3",
  "derive-getters",
  "dyn-clone",
  "enum-repr-derive",
@@ -1394,6 +1417,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "dashmap"
+version = "6.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5041cc499144891f3790297212f32a74fb938e5136a14943f338ef9e0ae276cf"
+dependencies = [
+ "cfg-if 1.0.0",
+ "crossbeam-utils",
+ "hashbrown 0.14.5",
+ "lock_api",
+ "once_cell",
+ "parking_lot_core",
+]
+
+[[package]]
 name = "data-encoding"
 version = "2.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1589,7 +1626,7 @@ dependencies = [
 
 [[package]]
 name = "fnn"
-version = "0.1.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "arcode",
@@ -1621,6 +1658,7 @@ dependencies = [
  "molecule",
  "musig2",
  "nom",
+ "num_enum",
  "once_cell",
  "ractor",
  "rand 0.8.5",
@@ -2810,6 +2848,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "num_enum"
+version = "0.7.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4e613fc340b2220f734a8595782c551f1250e969d87d3be1ae0579e8d4065179"
+dependencies = [
+ "num_enum_derive",
+]
+
+[[package]]
+name = "num_enum_derive"
+version = "0.7.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "af1844ef2428cc3e1cb900be36181049ef3d3193c63e43026cfe202983b27a56"
+dependencies = [
+ "proc-macro-crate",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.90",
+]
+
+[[package]]
 name = "number_prefix"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3250,15 +3309,16 @@ dependencies = [
 
 [[package]]
 name = "ractor"
-version = "0.9.7"
+version = "0.14.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7dd876f0d609ba2ddc8a36136e9b81299312bd9fc9b71131381d16c9ce8e495a"
+checksum = "aeb2472c961aec135028ae83b64491243ef36402c4f93f04b4f29f9f5d8805a8"
 dependencies = [
  "async-trait",
- "dashmap",
+ "bon",
+ "dashmap 6.1.0",
  "futures",
  "once_cell",
- "rand 0.8.5",
+ "strum",
  "tokio",
  "tracing",
 ]

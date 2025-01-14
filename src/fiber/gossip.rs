@@ -39,7 +39,7 @@ use super::{
     types::{
         BroadcastMessage, BroadcastMessageID, BroadcastMessageQuery, BroadcastMessageQueryFlags,
         BroadcastMessageWithTimestamp, BroadcastMessagesFilter, BroadcastMessagesFilterResult,
-        ChannelAnnouncement, ChannelUpdate, Cursor, GetBroadcastMessages,
+        ChannelAnnouncement, ChannelOnchainInfo, ChannelUpdate, Cursor, GetBroadcastMessages,
         GetBroadcastMessagesResult, GossipMessage, NodeAnnouncement, Pubkey,
         QueryBroadcastMessages, QueryBroadcastMessagesResult,
     },
@@ -334,13 +334,7 @@ pub enum GossipActorMessage {
     // Try to broadcast BroadcastMessage created by us to the network.
     // We will save and broadcast the messages. Note that we don't check the dependencies of
     // these messages because we assume that the messages created by us are always valid.
-    TryBroadcastMessages(Vec<BroadcastMessage>),
-    // Broadcast a message to the network. The message here must have all its dependencies met.
-    // This is normally the case when we saved a message to the store.
-    // This is an internal command used by both TryBroadcastMessages and ProcessBroadcastMessage,
-    // in which we will normally enrich the BroadcastMessage and check their dependencies,
-    // and then broadcast them to the network.
-    BroadcastMessagesImmediately(Vec<BroadcastMessageWithTimestamp>),
+    TryBroadcastMessages(Vec<BroadcastMessageWithTimestamp>),
     // Send gossip message to a peer.
     SendGossipMessage(GossipMessageWithPeerId),
     // Received GossipMessage from a peer
@@ -362,6 +356,8 @@ where
         gossip_network_maintenance_interval: Duration,
         gossip_store_maintenance_interval: Duration,
         announce_private_addr: bool,
+        num_targeted_active_syncing_peers: Option<usize>,
+        num_targeted_outbound_passive_syncing_peers: Option<usize>,
         store: S,
         chain_actor: ActorRef<CkbChainMessage>,
         supervisor: ActorCell,
@@ -379,6 +375,9 @@ where
                 gossip_network_maintenance_interval,
                 gossip_store_maintenance_interval,
                 announce_private_addr,
+                num_targeted_active_syncing_peers.unwrap_or(MAX_NUM_OF_ACTIVE_SYNCING_PEERS),
+                num_targeted_outbound_passive_syncing_peers
+                    .unwrap_or(MIN_NUM_OF_PASSIVE_SYNCING_PEERS),
                 store,
                 chain_actor,
             ),
@@ -547,10 +546,6 @@ where
         match message {
             GossipSyncingActorMessage::RequestTimeout(request_id) => {
                 state.inflight_requests.remove(&request_id);
-                debug!(
-                    "Sending new GetBroadcastMessages request after timeout: id {}",
-                    request_id
-                );
                 // TODO: When the peer failed for too many times, we should consider disconnecting from the peer.
                 state.peer_state.failed_times += 1;
                 myself
@@ -572,7 +567,7 @@ where
                         Some(last_message) => {
                             // We need the message timestamp to construct a valid cursor.
                             match get_message_cursor(
-                                last_message.clone(),
+                                last_message,
                                 &state.store.store,
                                 &state.chain_actor,
                             )
@@ -648,7 +643,6 @@ where
                 // Send a new GetBroadcastMessages request to the newly-connected peer.
                 // If we have less than NUM_SIMULTANEOUS_GET_REQUESTS requests inflight.
                 if state.inflight_requests.len() > NUM_SIMULTANEOUS_GET_REQUESTS {
-                    debug!("Not sending new GetBroadcastMessages request because there are already {} requests inflight (max {})", state.inflight_requests.len(), NUM_SIMULTANEOUS_GET_REQUESTS);
                     return Ok(());
                 }
                 state
@@ -711,10 +705,6 @@ impl PeerFilterProcessor {
         .await
         .expect("start peer filter processor actor");
         Self { filter, actor }
-    }
-
-    fn get_filter(&self) -> &Cursor {
-        &self.filter
     }
 
     fn update_filter(&mut self, filter: &Cursor) {
@@ -904,10 +894,6 @@ impl PeerState {
     }
 
     fn change_sync_status(&mut self, new_status: PeerSyncStatus) {
-        debug!(
-            "Peer {:?} sync status changed from {:?} to {:?}",
-            self.session_id, self.sync_status, new_status
-        );
         self.sync_status = new_status;
     }
 }
@@ -986,10 +972,6 @@ impl<S: GossipMessageStore + Sync> SubscribableGossipMessageStore
         receiver: ActorRef<TReceiverMsg>,
         converter: F,
     ) -> Result<Self::Subscription, Self::Error> {
-        debug!(
-            "Creating a new subscription from cursor {:?} with receiver {:?}",
-            &cursor, &receiver
-        );
         match call!(
             &self.actor,
             ExtendedGossipMessageStoreMessage::NewSubscription,
@@ -1083,10 +1065,9 @@ pub struct ExtendedGossipMessageStoreState<S> {
     chain_actor: ActorRef<CkbChainMessage>,
     next_id: u64,
     output_ports: HashMap<u64, BroadcastMessageOutput>,
-    last_cursor: Cursor,
     // A map from peer_id to the messages that need to be saved. If the peer_id is None,
     // then the message is from the local node. Otherwise, the message is from a remote peer.
-    messages_to_be_saved: HashMap<Option<PeerId>, HashSet<BroadcastMessageWithTimestamp>>,
+    messages_to_be_saved: HashMap<Option<PeerId>, HashSet<BroadcastMessage>>,
 }
 
 impl<S: GossipMessageStore> ExtendedGossipMessageStoreState<S> {
@@ -1103,20 +1084,13 @@ impl<S: GossipMessageStore> ExtendedGossipMessageStoreState<S> {
             chain_actor,
             next_id: Default::default(),
             output_ports: Default::default(),
-            last_cursor: Default::default(),
             messages_to_be_saved: Default::default(),
         }
     }
 
-    fn update_last_cursor(&mut self, cursor: Cursor) {
-        if cursor > self.last_cursor {
-            self.last_cursor = cursor;
-        }
-    }
-
-    // Saving all the messages whose transitive dependencies are already available.
-    // We will also change the relevant state (e.g. update the latest cursor).
-    // The returned list may be sent to the subscribers.
+    // Obtaining all the messages whose transitive dependencies are already available,
+    // check their validity and then save valid messages to store and
+    // return the list of saved messages that can be sent to the subscribers.
     async fn prune_messages_to_be_saved(&mut self) -> Vec<BroadcastMessageWithTimestamp> {
         let mut complete_messages = HashSet::new();
         for (_, messages) in &self.messages_to_be_saved {
@@ -1144,14 +1118,14 @@ impl<S: GossipMessageStore> ExtendedGossipMessageStoreState<S> {
         for message in sorted_messages {
             match verify_and_save_broadcast_message(&message, &self.store, &self.chain_actor).await
             {
-                Ok(_) => {
-                    self.update_last_cursor(message.cursor());
+                Ok(message) => {
                     verified_sorted_messages.push(message);
                 }
                 Err(error) => {
-                    warn!(
+                    trace!(
                         "Failed to verify and save message {:?}: {:?}",
-                        message, error
+                        message,
+                        error
                     );
                 }
             }
@@ -1160,25 +1134,74 @@ impl<S: GossipMessageStore> ExtendedGossipMessageStoreState<S> {
         verified_sorted_messages
     }
 
-    fn get_channel_annnouncement(&self, outpoint: &OutPoint) -> Option<(u64, ChannelAnnouncement)> {
+    fn store_messages(&mut self, messages: &[BroadcastMessageWithTimestamp]) {
+        for message in messages {
+            match message {
+                BroadcastMessageWithTimestamp::ChannelAnnouncement(
+                    timestamp,
+                    channel_announcement,
+                ) => {
+                    self.store
+                        .save_channel_announcement(*timestamp, channel_announcement.clone());
+                }
+                BroadcastMessageWithTimestamp::ChannelUpdate(channel_update) => {
+                    self.store.save_channel_update(channel_update.clone());
+                }
+                BroadcastMessageWithTimestamp::NodeAnnouncement(node_announcement) => {
+                    self.store.save_node_announcement(node_announcement.clone());
+                }
+            }
+        }
+    }
+
+    fn broadcast_messages(&mut self, messages: &[BroadcastMessageWithTimestamp]) {
+        if messages.is_empty() {
+            return;
+        }
+
+        for (id, subscription) in self.output_ports.iter() {
+            let messages_to_send = messages
+                .iter()
+                .filter(|m| &m.cursor() > &subscription.filter)
+                .cloned()
+                .collect::<Vec<_>>();
+            trace!(
+                "Sending complete messages in memory to subscription #{}: number of messages = {}",
+                id,
+                messages_to_send.len()
+            );
+            for chunk in messages_to_send.chunks(MAX_NUM_OF_BROADCAST_MESSAGES as usize) {
+                subscription
+                    .output_port
+                    .send(GossipMessageUpdates::new(chunk.to_vec()));
+            }
+        }
+    }
+
+    fn store_and_broadcast_messages(&mut self, messages: &[BroadcastMessageWithTimestamp]) {
+        self.store_messages(messages);
+        self.broadcast_messages(messages);
+    }
+
+    fn get_channel_annnouncement(&self, outpoint: &OutPoint) -> Option<ChannelAnnouncement> {
         self.store
             .get_latest_channel_announcement(outpoint)
+            .map(|(_, m)| m)
             .or_else(|| self.get_channel_annnouncement_in_memory(outpoint))
     }
 
     fn get_channel_annnouncement_in_memory(
         &self,
         outpoint: &OutPoint,
-    ) -> Option<(u64, ChannelAnnouncement)> {
+    ) -> Option<ChannelAnnouncement> {
         self.messages_to_be_saved
             .values()
             .flatten()
             .find_map(|m| match m {
-                BroadcastMessageWithTimestamp::ChannelAnnouncement(
-                    timestamp,
-                    channel_announcement,
-                ) if &channel_announcement.channel_outpoint == outpoint => {
-                    Some((*timestamp, channel_announcement.clone()))
+                BroadcastMessage::ChannelAnnouncement(channel_announcement)
+                    if &channel_announcement.channel_outpoint == outpoint =>
+                {
+                    Some(channel_announcement.clone())
                 }
                 _ => None,
             })
@@ -1188,34 +1211,35 @@ impl<S: GossipMessageStore> ExtendedGossipMessageStoreState<S> {
         &mut self,
         peer_id: &Option<PeerId>,
         message: &BroadcastMessage,
-    ) -> Result<BroadcastMessageWithTimestamp, GossipMessageProcessingError> {
+    ) -> Result<(), GossipMessageProcessingError> {
         if let Some(existing_message) = get_existing_newer_broadcast_message(message, &self.store) {
             if &BroadcastMessage::from(existing_message.clone()) != message {
                 return Err(GossipMessageProcessingError::NewerMessageSaved(
                     existing_message,
                 ));
             } else {
-                return Ok(existing_message);
+                return Ok(());
             }
         }
 
-        let message =
-            get_broadcast_message_with_timestamp(message.clone(), &self.store, &self.chain_actor)
-                .await
-                .map_err(|error| {
-                    GossipMessageProcessingError::ProcessingError(error.to_string())
-                })?;
+        if let Some(l) = self.messages_to_be_saved.get(peer_id) {
+            if l.contains(&message) {
+                return Ok(());
+            }
+        }
 
-        let max_acceptable_gossip_message_timestamp = max_acceptable_gossip_message_timestamp();
-        if message.timestamp() > max_acceptable_gossip_message_timestamp {
-            return Err(GossipMessageProcessingError::MessageTooNew(
-                message.timestamp(),
-                max_acceptable_gossip_message_timestamp,
-            ));
+        if let Some(timestamp) = message.timestamp() {
+            let max_acceptable_gossip_message_timestamp = max_acceptable_gossip_message_timestamp();
+            if timestamp > max_acceptable_gossip_message_timestamp {
+                return Err(GossipMessageProcessingError::MessageTooNew(
+                    timestamp,
+                    max_acceptable_gossip_message_timestamp,
+                ));
+            }
         }
 
         if !self.announce_private_addr {
-            if let BroadcastMessageWithTimestamp::NodeAnnouncement(node_announcement) = &message {
+            if let BroadcastMessage::NodeAnnouncement(node_announcement) = &message {
                 if !node_announcement.addresses.iter().any(|addr| {
                     multiaddr_to_socketaddr(addr)
                         .map(|socket_addr| is_reachable(socket_addr.ip()))
@@ -1237,12 +1261,12 @@ impl<S: GossipMessageStore> ExtendedGossipMessageStoreState<S> {
             .entry(peer_id.clone())
             .or_default()
             .insert(message.clone());
-        Ok(message)
+        Ok(())
     }
 
-    fn has_dependencies_available(&self, message: &BroadcastMessageWithTimestamp) -> bool {
+    fn has_dependencies_available(&self, message: &BroadcastMessage) -> bool {
         match message {
-            BroadcastMessageWithTimestamp::ChannelUpdate(channel_update) => self
+            BroadcastMessage::ChannelUpdate(channel_update) => self
                 .get_channel_annnouncement(&channel_update.channel_outpoint)
                 .is_some(),
             _ => true,
@@ -1339,10 +1363,12 @@ impl<S: GossipMessageStore + Send + Sync + 'static> Actor for ExtendedGossipMess
                 // Tick and later we will send the corresponding ChannelAnnouncement.
                 // So the downstream consumer need to either cache some of the messages and wait for the
                 // dependent messages to arrive or read the messages from the store directly.
-                myself.send_message(ExtendedGossipMessageStoreMessage::LoadMessagesFromStore(
-                    id,
-                    cursor.clone(),
-                ))?;
+                myself
+                    .send_message(ExtendedGossipMessageStoreMessage::LoadMessagesFromStore(
+                        id,
+                        cursor.clone(),
+                    ))
+                    .expect("myself alive");
                 state.output_ports.insert(
                     id,
                     BroadcastMessageOutput::new(cursor, Arc::clone(&output_port)),
@@ -1395,11 +1421,6 @@ impl<S: GossipMessageStore + Send + Sync + 'static> Actor for ExtendedGossipMess
                                 m.cursor(),
                             ))
                             .expect("actor alive");
-                        debug!(
-                            "Sending messages to subscription #{}: number of messages = {}",
-                            id,
-                            messages.len()
-                        );
                         subscription
                             .output_port
                             .send(GossipMessageUpdates::new(messages));
@@ -1412,79 +1433,27 @@ impl<S: GossipMessageStore + Send + Sync + 'static> Actor for ExtendedGossipMess
 
             ExtendedGossipMessageStoreMessage::SaveMessages(peer, messages) => {
                 for message in messages {
-                    match state.insert_message_to_be_saved_list(&peer, &message).await {
-                        Err(error) => {
-                            error!(
-                            "Failed to save message to the store: {:?} (from peer {:?}), error: {:?}",
-                            message, &peer, error
-                        )
-                        }
-                        Ok(message) => {
-                            trace!(
-                                "Saved message to the memory: {:?} (from peer {:?})",
-                                message,
-                                &peer
-                            );
-                        }
-                    };
+                    if let Err(error) = state.insert_message_to_be_saved_list(&peer, &message).await
+                    {
+                        trace!("Failed to save message: {:?}, error: {:?}", message, error);
+                    }
                 }
             }
 
-            ExtendedGossipMessageStoreMessage::SaveAndBroadcastMessage(messages) => {
-                let mut good_messages = Vec::with_capacity(messages.len());
-                for message in messages {
-                    match state.insert_message_to_be_saved_list(&None, &message).await {
-                        Err(error) => error!(
-                            "Failed to save message to the store: {:?}, error: {:?}",
-                            message, error
-                        ),
-                        Ok(message) => {
-                            good_messages.push(message);
-                        }
-                    }
-                }
-                // Normally we will need to check if the message has any dependencies that are not saved yet.
-                // But this is not necessary for the messages that we are proactively broadcasting.
-                // These are our own channel announcements, channel updates and node announcements.
-                state
-                    .gossip_actor
-                    .send_message(GossipActorMessage::BroadcastMessagesImmediately(
-                        good_messages,
-                    ))
-                    .expect("gossip actor alive");
+            ExtendedGossipMessageStoreMessage::SaveAndBroadcastMessages(messages) => {
+                state.store_and_broadcast_messages(&messages);
             }
 
             ExtendedGossipMessageStoreMessage::Tick => {
                 trace!(
-                    "Gossip store maintenance ticked: last_cursor = {:?}, #subscriptions = {},  #messages_to_be_saved = {}",
-                    state.last_cursor,
+                    "Gossip store maintenance ticked: #subscriptions = {},  #messages_to_be_saved = {}",
                     state.output_ports.len(),
                     state.messages_to_be_saved.values().map(|s| s.len()).sum::<usize>(),
                 );
 
                 // These are the messages that have complete dependencies and can be sent to the subscribers.
                 let complete_messages = state.prune_messages_to_be_saved().await;
-                if !complete_messages.is_empty() {
-                    for (id, subscription) in state.output_ports.iter() {
-                        let messages_to_send = complete_messages
-                            .iter()
-                            .filter(|m| &m.cursor() > &subscription.filter)
-                            .cloned()
-                            .collect::<Vec<_>>();
-                        trace!(
-                        "Sending complete messages in memory to subscription #{}: number of messages = {}",
-                        id,
-                        messages_to_send.len()
-                    );
-                        for chunk in
-                            messages_to_send.chunks(DEFAULT_NUM_OF_BROADCAST_MESSAGE as usize)
-                        {
-                            subscription
-                                .output_port
-                                .send(GossipMessageUpdates::new(chunk.to_vec()));
-                        }
-                    }
-                }
+                state.broadcast_messages(&complete_messages);
 
                 // The assumption is that when a peer sends us a message, it should have all the dependencies.
                 // So here we will send queries to the peer for the missing messages.
@@ -1503,19 +1472,21 @@ impl<S: GossipMessageStore + Send + Sync + 'static> Actor for ExtendedGossipMess
                     let myself = myself.clone();
                     let incomplete_messages = incomplete_messages.into_iter().collect::<Vec<_>>();
 
-                    ractor::concurrency::tokio_primatives::spawn(async move {
+                    ractor::concurrency::tokio_primitives::spawn(async move {
                         for messages in
                             incomplete_messages.chunks(DEFAULT_NUM_OF_BROADCAST_MESSAGE as usize)
                         {
                             let queries = messages
                                 .iter()
                                 .filter_map(|m| match m {
-                                    BroadcastMessageWithTimestamp::ChannelUpdate(
-                                        channel_update,
-                                    ) => Some(BroadcastMessageQuery {
-                                        flags: BroadcastMessageQueryFlags::ChannelAnnouncement,
-                                        channel_outpoint: channel_update.channel_outpoint.clone(),
-                                    }),
+                                    BroadcastMessage::ChannelUpdate(channel_update) => {
+                                        Some(BroadcastMessageQuery {
+                                            flags: BroadcastMessageQueryFlags::ChannelAnnouncement,
+                                            channel_outpoint: channel_update
+                                                .channel_outpoint
+                                                .clone(),
+                                        })
+                                    }
                                     _ => None,
                                 })
                                 .collect::<Vec<_>>();
@@ -1575,32 +1546,32 @@ pub enum ExtendedGossipMessageStoreMessage {
     // Update the subscription. If this Option is None, the subscription will be cancelled.
     // Otherwise the new cursor will be used to filter the messages that are sent to the subscriber.
     UpdateSubscription(u64, Option<Cursor>, RpcReplyPort<()>),
-    // Save broadcast messages originated from the peer to the store.
-    // (If the optional peer is None, the messages are our own messages.)
-    // We will check if there are any dependencies to the messages that are unsaved yet.
-    // If there are, we will save the message temporarily and send a query to the peer.
+    // Save new broadcast messages to the store. The messages will be first saved to the memory,
+    // then if all the dependencies are met, they are periodically saved to the store and sent to the subscribers.
     SaveMessages(Option<PeerId>, Vec<BroadcastMessage>),
-    // Save a new message to the store. If the message's dependencies are all met, then we will
-    // broadcast the message to the network. Otherwise, we will ignore the broadcasting.
-    SaveAndBroadcastMessage(Vec<BroadcastMessage>),
+    // Save new messages to the store, and broadcast them to the subscribers immediately.
+    // These messages will not be saved to the memory and wait for the dependencies to be met.
+    // We normally use this variant to send our own messages to the subscribers.
+    SaveAndBroadcastMessages(Vec<BroadcastMessageWithTimestamp>),
     // Send broadcast messages after the cursor to the subscriber specified in the u64 id.
     // This is normally called immediately after a new subscription is created. This is the time when
     // we need to send existing messages to the subscriber.
     LoadMessagesFromStore(u64, Cursor),
     // A tick message that is sent periodically to check if there are any messages that are saved out of order.
     // If there are, we will send them to the subscribers.
-    // This tick will also advance the last_cursor upon finishing.
     Tick,
 }
 
 pub(crate) struct GossipActorState<S> {
     store: ExtendedGossipMessageStore<S>,
     control: Option<ServiceAsyncControl>,
-    num_targeted_active_syncing_peers: usize,
     // The number of active syncing peers that we have finished syncing with.
-    // Together with the number of currect active syncing peers, this is
+    // Together with the number of current active syncing peers, this is
     // used to determine if we should start a new active syncing peer.
     num_finished_active_syncing_peers: usize,
+    // The number of targeted active syncing peers that we want to have.
+    // Currently we will only start this many active syncing peers.
+    num_targeted_active_syncing_peers: usize,
     // The number of outbound passive syncing peers that we want to have.
     // We only count outbound peers because the purpose of this number is to avoid eclipse attacks.
     // By maintaining a certain number of outbound passive syncing peers, we can ensure that we are
@@ -1724,10 +1695,6 @@ where
 
     async fn start_new_active_syncer(&mut self, peer_id: &PeerId) {
         let safe_cursor = self.get_safe_cursor_to_start_syncing();
-        debug!(
-            "Starting active syncer to peer {:?} with cursor {:?}",
-            peer_id, safe_cursor
-        );
         let sync_actor = Actor::spawn_linked(
             Some(format!(
                 "gossip syncing actor to peer {:?} supervised by {:?}",
@@ -1755,10 +1722,6 @@ where
 
     async fn start_passive_syncer(&mut self, peer_id: &PeerId) {
         let cursor = self.get_safe_cursor_to_start_syncing();
-        debug!(
-            "Starting passive syncer to peer {:?} from cursor {:?}",
-            peer_id, cursor
-        );
         let filter = BroadcastMessagesFilter {
             chain_hash: get_chain_hash(),
             after_cursor: cursor.clone(),
@@ -1781,7 +1744,6 @@ where
     }
 
     async fn stop_passive_syncer(&mut self, peer_id: &PeerId) {
-        debug!("Stopping passive syncer to peer {:?}", peer_id);
         let filter = BroadcastMessagesFilter {
             chain_hash: get_chain_hash(),
             after_cursor: Cursor::max(),
@@ -1812,10 +1774,6 @@ where
         peer_id: &PeerId,
         filter: BroadcastMessagesFilter,
     ) -> crate::Result<()> {
-        debug!(
-            "Sending BroadcastMessagesFilter to peer {:?}: {:?}",
-            &peer_id, &filter
-        );
         let message = GossipMessage::BroadcastMessagesFilter(filter);
         self.send_message_to_peer(peer_id, message).await?;
         Ok(())
@@ -1905,12 +1863,30 @@ pub(crate) struct GossipProtocolHandle {
 }
 
 async fn get_message_cursor<S: GossipMessageStore>(
-    message: BroadcastMessage,
+    message: &BroadcastMessage,
     store: &S,
     chain: &ActorRef<CkbChainMessage>,
 ) -> Result<Cursor, Error> {
-    let m = get_broadcast_message_with_timestamp(message, store, chain).await?;
-    Ok(m.cursor())
+    match message {
+        BroadcastMessage::ChannelAnnouncement(channel_announcement) => {
+            let timestamp =
+                get_channel_timestamp(&channel_announcement.channel_outpoint, store, chain).await?;
+            Ok(Cursor::new(
+                timestamp,
+                BroadcastMessageID::ChannelAnnouncement(
+                    channel_announcement.channel_outpoint.clone(),
+                ),
+            ))
+        }
+        BroadcastMessage::ChannelUpdate(channel_update) => Ok(Cursor::new(
+            channel_update.timestamp,
+            BroadcastMessageID::ChannelUpdate(channel_update.channel_outpoint.clone()),
+        )),
+        BroadcastMessage::NodeAnnouncement(node_announcement) => Ok(Cursor::new(
+            node_announcement.timestamp,
+            BroadcastMessageID::NodeAnnouncement(node_announcement.node_id.clone()),
+        )),
+    }
 }
 
 fn get_existing_broadcast_message<S: GossipMessageStore>(
@@ -1951,60 +1927,42 @@ fn get_existing_newer_broadcast_message<S: GossipMessageStore>(
     })
 }
 
-async fn get_broadcast_message_with_timestamp<S: GossipMessageStore>(
-    message: BroadcastMessage,
+// Verify and save broadcast messages to the store.
+// Note that we can't relialy verify a message until we have all the messages that it depends on.
+// So this function should be called by the dependency order of the messages.
+// E.g. channel updates depends on channel announcements to obtain the node public keys,
+// so we should call this method to save and verify channel announcements before channel updates.
+async fn verify_and_save_broadcast_message<S: GossipMessageStore>(
+    message: &BroadcastMessage,
     store: &S,
     chain: &ActorRef<CkbChainMessage>,
 ) -> Result<BroadcastMessageWithTimestamp, Error> {
-    match message {
+    let timestamp = match message {
         BroadcastMessage::ChannelAnnouncement(channel_announcement) => {
-            let timestamp =
-                get_channel_timestamp(&channel_announcement.channel_outpoint, store, chain).await?;
-            Ok(BroadcastMessageWithTimestamp::ChannelAnnouncement(
-                timestamp,
-                channel_announcement,
-            ))
+            let on_chain_info =
+                get_channel_on_chain_info(channel_announcement.out_point(), chain).await?;
+            if !verify_channel_announcement(channel_announcement, &on_chain_info, store).await? {
+                store.save_channel_announcement(
+                    on_chain_info.timestamp,
+                    channel_announcement.clone(),
+                );
+            }
+            on_chain_info.timestamp
         }
         BroadcastMessage::ChannelUpdate(channel_update) => {
-            Ok(BroadcastMessageWithTimestamp::ChannelUpdate(channel_update))
-        }
-        BroadcastMessage::NodeAnnouncement(node_announcement) => Ok(
-            BroadcastMessageWithTimestamp::NodeAnnouncement(node_announcement),
-        ),
-    }
-}
-
-// Channel updates depends on channel announcements to obtain the node public keys.
-// If a channel update is saved before the channel announcement, we can't reliably determine if
-// this channel update is valid. So we need to save the channel update to lagged_messages and
-// wait for the channel announcement to be saved. The bool value returned indicates if the
-// message is fully verified and can be saved to the store.
-// In the same vein, channel announcement contains references to node announcements. If a node
-// announcement is saved before the channel announcement, we need to temporarily save the channel
-// announcement to lagged_messages and wait for the node announcement to be saved.
-async fn verify_and_save_broadcast_message<S: GossipMessageStore>(
-    message: &BroadcastMessageWithTimestamp,
-    store: &S,
-    chain: &ActorRef<CkbChainMessage>,
-) -> Result<(), Error> {
-    match message {
-        BroadcastMessageWithTimestamp::ChannelAnnouncement(timestamp, channel_announcement) => {
-            if !verify_channel_announcement(channel_announcement, store, chain).await? {
-                store.save_channel_announcement(*timestamp, channel_announcement.clone());
-            }
-        }
-        BroadcastMessageWithTimestamp::ChannelUpdate(channel_update) => {
             if !verify_channel_update(channel_update, store)? {
                 store.save_channel_update(channel_update.clone());
             }
+            channel_update.timestamp
         }
-        BroadcastMessageWithTimestamp::NodeAnnouncement(node_announcement) => {
+        BroadcastMessage::NodeAnnouncement(node_announcement) => {
             if !verify_node_announcement(node_announcement, store)? {
                 store.save_node_announcement(node_announcement.clone());
             }
+            node_announcement.timestamp
         }
-    }
-    Ok(())
+    };
+    Ok((message.clone(), timestamp).into())
 }
 
 async fn get_channel_tx(
@@ -2017,7 +1975,7 @@ async fn get_channel_tx(
         DEFAULT_CHAIN_ACTOR_TIMEOUT,
         TraceTxRequest {
             tx_hash: outpoint.tx_hash(),
-            confirmations: 1,
+            confirmations: 2,
         }
     ) {
         Ok(TraceTxResponse {
@@ -2046,7 +2004,26 @@ async fn get_channel_timestamp<S: GossipMessageStore>(
         return Ok(timestamp);
     }
 
-    let (_, block_hash) = get_channel_tx(outpoint, chain).await?;
+    let on_chain_info = get_channel_on_chain_info(outpoint, chain).await?;
+
+    Ok(on_chain_info.timestamp)
+}
+
+async fn get_channel_on_chain_info(
+    outpoint: &OutPoint,
+    chain: &ActorRef<CkbChainMessage>,
+) -> Result<ChannelOnchainInfo, Error> {
+    let (tx, block_hash) = get_channel_tx(outpoint, chain).await?;
+    let first_output = match tx.inner.outputs.first() {
+        None => {
+            return Err(Error::InvalidParameter(format!(
+                "On-chain transaction found but no output: {:?}",
+                &outpoint
+            )));
+        }
+        Some(output) => output.clone(),
+    };
+
     let timestamp: u64 = match call_t!(
         chain,
         CkbChainMessage::GetBlockTimestamp,
@@ -2074,7 +2051,10 @@ async fn get_channel_timestamp<S: GossipMessageStore>(
         }
     };
 
-    Ok(timestamp)
+    Ok(ChannelOnchainInfo {
+        timestamp,
+        first_output,
+    })
 }
 
 // Verify the channel announcement message. If any error occurs, return the error.
@@ -2083,13 +2063,9 @@ async fn get_channel_timestamp<S: GossipMessageStore>(
 // is true, otherwise it is false.
 async fn verify_channel_announcement<S: GossipMessageStore>(
     channel_announcement: &ChannelAnnouncement,
+    on_chain_info: &ChannelOnchainInfo,
     store: &S,
-    chain: &ActorRef<CkbChainMessage>,
 ) -> Result<bool, Error> {
-    debug!(
-        "Verifying channel announcement message: {:?}",
-        &channel_announcement
-    );
     if let Some((_, announcement)) =
         store.get_latest_channel_announcement(&channel_announcement.channel_outpoint)
     {
@@ -2145,45 +2121,32 @@ async fn verify_channel_announcement<S: GossipMessageStore>(
         )));
     }
 
-    debug!(
-        "Node signatures in channel announcement message verified: {:?}",
-        &channel_announcement
-    );
-
-    let (tx, _) = get_channel_tx(&channel_announcement.channel_outpoint, chain).await?;
-
-    debug!("Channel announcement transaction found: {:?}", &tx);
-
     let pubkey = channel_announcement.ckb_key.serialize();
     let pubkey_hash = &blake2b_256(pubkey.as_slice())[0..20];
-    match tx.inner.outputs.first() {
-        None => {
-            return Err(Error::InvalidParameter(format!(
-                "On-chain transaction found but no output: {:?}",
-                &channel_announcement
-            )));
-        }
-        Some(output) => {
-            if output.lock.args.as_bytes() != pubkey_hash {
-                return Err(Error::InvalidParameter(format!(
+
+    let output = &on_chain_info.first_output;
+    if output.lock.args.as_bytes() != pubkey_hash {
+        return Err(Error::InvalidParameter(format!(
                     "On-chain transaction found but pubkey hash mismatched: on chain hash {:?}, pub key ({:?}) hash {:?}",
                     &output.lock.args.as_bytes(),
                     hex::encode(pubkey),
                     &pubkey_hash
                 )));
-            }
-            let capacity: u128 = u64::from(output.capacity).into();
-            if channel_announcement.udt_type_script.is_none()
-                && channel_announcement.capacity > capacity
-            {
-                return Err(Error::InvalidParameter(format!(
-                    "On-chain transaction found but capacity mismatched: on chain capacity {:?} smaller than annoucned channel capacity {:?}",
-                    &output.capacity, &channel_announcement.capacity
-                )));
-            }
-            capacity
+    }
+    let capacity: u128 = u64::from(output.capacity).into();
+    match channel_announcement.udt_type_script {
+        Some(_) => {
+            // TODO: verify the capacity of the UDT
         }
-    };
+        None => {
+            if channel_announcement.capacity > capacity {
+                return Err(Error::InvalidParameter(format!(
+                            "On-chain transaction found but capacity mismatched: on chain capacity {:?} smaller than annoucned channel capacity {:?}",
+                            &output.capacity, &channel_announcement.capacity
+                        )));
+            }
+        }
+    }
 
     if let Err(err) = secp256k1_instance().verify_schnorr(
         ckb_signature,
@@ -2199,11 +2162,6 @@ async fn verify_channel_announcement<S: GossipMessageStore>(
             &err
         )));
     }
-
-    debug!(
-        "All signatures in channel announcement message verified: {:?}",
-        &channel_announcement
-    );
 
     Ok(false)
 }
@@ -2246,10 +2204,6 @@ fn verify_channel_update<S: GossipMessageStore>(
             } else {
                 channel_announcement.node2_id
             };
-            debug!(
-                "Verifying channel update message signature: {:?}, pubkey: {:?}, message: {:?}",
-                &channel_update, &pubkey, &message
-            );
             if !signature.verify(&pubkey, &message) {
                 return Err(Error::InvalidParameter(format!(
                     "Channel update message signature verification failed (invalid signature): {:?}",
@@ -2292,20 +2246,12 @@ fn verify_node_announcement<S: GossipMessageStore>(
     }
     let message = node_announcement.message_to_sign();
     match node_announcement.signature {
-        Some(ref signature) if signature.verify(&node_announcement.node_id, &message) => {
-            debug!(
-                "Node announcement message verified: {:?}",
-                &node_announcement
-            );
-        }
-        _ => {
-            return Err(Error::InvalidParameter(format!(
-                "Node announcement message signature verification failed: {:?}",
-                &node_announcement
-            )));
-        }
+        Some(ref signature) if signature.verify(&node_announcement.node_id, &message) => Ok(false),
+        _ => Err(Error::InvalidParameter(format!(
+            "Node announcement message signature verification failed: {:?}",
+            &node_announcement
+        ))),
     }
-    Ok(false)
 }
 
 impl GossipProtocolHandle {
@@ -2347,6 +2293,8 @@ where
         Duration,
         Duration,
         bool,
+        usize,
+        usize,
         S,
         ActorRef<CkbChainMessage>,
     );
@@ -2360,6 +2308,8 @@ where
             network_maintenance_interval,
             store_maintenance_interval,
             announce_private_addr,
+            num_targeted_active_syncing_peers,
+            num_targeted_outbound_passive_syncing_peers,
             store,
             chain_actor,
         ): Self::Arguments,
@@ -2402,8 +2352,8 @@ where
         let state = Self::State {
             store,
             control: Default::default(),
-            num_targeted_active_syncing_peers: MAX_NUM_OF_ACTIVE_SYNCING_PEERS,
-            num_targeted_outbound_passive_syncing_peers: MIN_NUM_OF_PASSIVE_SYNCING_PEERS,
+            num_targeted_active_syncing_peers,
+            num_targeted_outbound_passive_syncing_peers,
             myself,
             chain_actor,
             next_request_id: Default::default(),
@@ -2424,8 +2374,8 @@ where
             SupervisionEvent::ActorTerminated(who, _, _) => {
                 debug!("{:?} terminated", who);
             }
-            SupervisionEvent::ActorPanicked(who, _) => {
-                error!("{:?} panicked", who);
+            SupervisionEvent::ActorFailed(who, err) => {
+                panic!("Actor unexpectedly panicked (id: {:?}): {:?}", who, err);
             }
             _ => {}
         }
@@ -2443,28 +2393,16 @@ where
                 state.control = Some(control);
             }
 
-            GossipActorMessage::PeerConnected(peer_id, pubkey, session) => {
+            GossipActorMessage::PeerConnected(peer_id, _pubkey, session) => {
                 if state.is_peer_connected(&peer_id) {
-                    warn!(
-                        "Repeated connection from {:?} for gossip protocol",
-                        &peer_id
-                    );
                     return Ok(());
                 }
-                debug!(
-                    "Gossip peer connected: peer {:?}, pubkey {:?}, session {:?}",
-                    &peer_id, &pubkey, &session.id
-                );
                 state
                     .peer_states
                     .insert(peer_id.clone(), PeerState::new(session.id, session.ty));
             }
-            GossipActorMessage::PeerDisconnected(peer_id, session) => {
-                debug!(
-                    "Peer disconnected: peer {:?}, session {:?}",
-                    &peer_id, &session.id
-                );
-                drop(state.peer_states.remove(&peer_id));
+            GossipActorMessage::PeerDisconnected(peer_id, _session) => {
+                state.peer_states.remove(&peer_id);
             }
             GossipActorMessage::ProcessBroadcastMessage(message) => {
                 state
@@ -2510,54 +2448,13 @@ where
                 state
                     .store
                     .actor
-                    .send_message(ExtendedGossipMessageStoreMessage::SaveAndBroadcastMessage(
+                    .send_message(ExtendedGossipMessageStoreMessage::SaveAndBroadcastMessages(
                         messages,
                     ))
                     .expect("store actor alive");
             }
-            GossipActorMessage::BroadcastMessagesImmediately(messages) => {
-                for (peer, peer_state) in &state.peer_states {
-                    let session = peer_state.session_id;
-                    match &peer_state.filter_processor {
-                        Some(filter_processor) => {
-                            let messages = messages
-                                .iter()
-                                .filter_map(|message| {
-                                    (filter_processor.get_filter() < &message.cursor())
-                                        .then_some(message.clone().into())
-                                })
-                                .collect::<Vec<_>>();
-                            trace!("Broadcasting message to peer {:?}: {:?}", &peer, &messages);
-                            if !messages.is_empty() {
-                                if let Err(error) = state
-                                    .send_message_to_session(
-                                        session,
-                                        GossipMessage::BroadcastMessagesFilterResult(
-                                            BroadcastMessagesFilterResult { messages },
-                                        ),
-                                    )
-                                    .await
-                                {
-                                    error!(
-                                        "Failed to broadcast messages to session {}: error {:?}",
-                                        session, error
-                                    )
-                                }
-                            }
-                        }
-                        _ => {
-                            debug!(
-                                "Ignoring broadcast messages for peer {:?}: {:?} we don't have filter processor for it",
-                                peer, &messages
-                            );
-                        }
-                    }
-                }
-            }
-
             GossipActorMessage::RotateOutboundPassiveSyncingPeers => {
                 if !state.is_ready_for_passive_syncing() {
-                    debug!("Not ready for passive syncing, skipping rotation");
                     return Ok(());
                 }
 
@@ -2606,10 +2503,6 @@ where
             }
 
             GossipActorMessage::ActiveSyncingFinished(peer_id, cursor) => {
-                debug!(
-                    "Active syncing finished for peer {:?}: {:?}",
-                    &peer_id, &cursor
-                );
                 state.num_finished_active_syncing_peers += 1;
                 if let Some(peer_state) = state.peer_states.get_mut(&peer_id) {
                     peer_state.change_sync_status(PeerSyncStatus::FinishedActiveSyncing(
@@ -2620,7 +2513,7 @@ where
             }
 
             GossipActorMessage::MaliciousPeerFound(peer_id) => {
-                debug!("Malicious peer found: {:?}", &peer_id);
+                warn!("Malicious peer found: {:?}", &peer_id);
             }
 
             GossipActorMessage::SendGossipMessage(GossipMessageWithPeerId { peer_id, message }) => {
@@ -2641,7 +2534,10 @@ where
                         chain_hash,
                         after_cursor,
                     }) => {
-                        check_chain_hash(&chain_hash)?;
+                        if let Err(e) = check_chain_hash(&chain_hash) {
+                            error!("Failed to check chain hash: {:?}", e);
+                            return Ok(());
+                        }
                         if after_cursor.is_max() {
                             info!(
                                 "Received BroadcastMessagesFilter with max cursor from peer, stopping filter processor to {:?}",
@@ -2654,20 +2550,10 @@ where
                             Some(peer_state) => {
                                 match peer_state.filter_processor.as_mut() {
                                     Some(filter_processor) => {
-                                        debug!(
-                                        "Updating filter processor for peer {:?}: from {:?} {:?}",
-                                        &peer_id,
-                                        filter_processor.get_filter(),
-                                        &after_cursor
-                                    );
                                         filter_processor.update_filter(&after_cursor);
                                         return Ok(());
                                     }
                                     _ => {
-                                        debug!(
-                                            "Creating filter processor for peer {:?}: {:?}",
-                                            &peer_id, &after_cursor
-                                        );
                                         peer_state.filter_processor = Some(
                                             PeerFilterProcessor::new(
                                                 state.store.clone(),
@@ -2701,7 +2587,10 @@ where
                             .await;
                     }
                     GossipMessage::GetBroadcastMessages(get_broadcast_messages) => {
-                        check_chain_hash(&get_broadcast_messages.chain_hash)?;
+                        if let Err(e) = check_chain_hash(&get_broadcast_messages.chain_hash) {
+                            error!("Failed to check chain hash: {:?}", e);
+                            return Ok(());
+                        }
                         if get_broadcast_messages.count > MAX_NUM_OF_BROADCAST_MESSAGES {
                             warn!(
                                 "Received GetBroadcastMessages with too many messages: {:?}",
@@ -2747,7 +2636,10 @@ where
                         chain_hash,
                         queries,
                     }) => {
-                        check_chain_hash(&chain_hash)?;
+                        if let Err(e) = check_chain_hash(&chain_hash) {
+                            error!("Failed to check chain hash: {:?}", e);
+                            return Ok(());
+                        }
                         if queries.len() > MAX_NUM_OF_BROADCAST_MESSAGES as usize {
                             warn!(
                                 "Received QueryBroadcastMessages with too many queries: {:?}",

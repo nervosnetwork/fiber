@@ -1,8 +1,9 @@
 use ckb_hash::blake2b_256;
-use ckb_jsonrpc_types::{BlockNumber, Status, TxStatus};
+use ckb_jsonrpc_types::{Status, TxStatus};
 use ckb_types::core::{EpochNumberWithFraction, TransactionView};
 use ckb_types::packed::{Byte32, OutPoint, Script, Transaction};
 use ckb_types::prelude::{IntoTransactionView, Pack, Unpack};
+use ckb_types::H256;
 use once_cell::sync::OnceCell;
 use ractor::concurrency::Duration;
 use ractor::{
@@ -47,7 +48,7 @@ use tracing::{debug, error, info, trace, warn};
 use super::channel::{
     get_funding_and_reserved_amount, occupied_capacity, AcceptChannelParameter, ChannelActor,
     ChannelActorMessage, ChannelActorStateStore, ChannelCommand, ChannelCommandWithId,
-    ChannelEvent, ChannelInitializationParameter, ChannelState, ChannelSubscribers,
+    ChannelEvent, ChannelInitializationParameter, ChannelState, ChannelSubscribers, ChannelTlcInfo,
     OpenChannelParameter, ProcessingChannelError, ProcessingChannelResult, PublicChannelInfo,
     RevocationData, SettlementData, ShuttingDownFlags, DEFAULT_COMMITMENT_FEE_RATE,
     DEFAULT_FEE_RATE, DEFAULT_MAX_TLC_VALUE_IN_FLIGHT, MAX_COMMITMENT_DELAY_EPOCHS,
@@ -56,18 +57,22 @@ use super::channel::{
 use super::config::{AnnouncedNodeName, MIN_TLC_EXPIRY_DELTA};
 use super::fee::calculate_commitment_tx_fee;
 use super::gossip::{GossipActorMessage, GossipError, GossipMessageStore, GossipMessageUpdates};
-use super::graph::{NetworkGraph, NetworkGraphStateStore, SessionRoute};
+use super::graph::{NetworkGraph, NetworkGraphStateStore, OwnedChannelUpdateEvent, SessionRoute};
 use super::key::blake2b_hash_with_salt;
 use super::types::{
-    BroadcastMessage, BroadcastMessageQuery, EcdsaSignature, FiberMessage, GossipMessage, Hash256,
-    NodeAnnouncement, OpenChannel, PaymentHopData, Privkey, Pubkey, QueryBroadcastMessagesResult,
-    RemoveTlcReason, TlcErr, TlcErrData, TlcErrorCode,
+    BroadcastMessage, BroadcastMessageQuery, BroadcastMessageWithTimestamp, EcdsaSignature,
+    FiberMessage, ForwardTlcResult, GossipMessage, Hash256, NodeAnnouncement, OpenChannel,
+    PaymentHopData, Privkey, Pubkey, QueryBroadcastMessagesResult, RemoveTlcReason, TlcErr,
+    TlcErrData, TlcErrorCode,
 };
 use super::{FiberConfig, ASSUME_NETWORK_ACTOR_ALIVE};
 
 use crate::ckb::config::UdtCfgInfos;
 use crate::ckb::contracts::{check_udt_script, get_udt_whitelist, is_udt_type_auto_accept};
-use crate::ckb::{CkbChainMessage, FundingRequest, FundingTx, TraceTxRequest, TraceTxResponse};
+use crate::ckb::{
+    CkbChainMessage, FundingRequest, FundingTx, GetBlockTimestampRequest, TraceTxRequest,
+    TraceTxResponse,
+};
 use crate::fiber::channel::{
     AddTlcCommand, AddTlcResponse, TxCollaborationCommand, TxUpdateCommand,
 };
@@ -166,8 +171,7 @@ pub enum LocalInfoKind {
 #[derive(Debug, Clone)]
 pub struct NodeInfoResponse {
     pub node_name: Option<AnnouncedNodeName>,
-    pub peer_id: PeerId,
-    pub public_key: Pubkey,
+    pub node_id: Pubkey,
     pub addresses: Vec<MultiAddr>,
     pub chain_hash: Hash256,
     pub open_channel_auto_accept_min_ckb_funding_amount: u64,
@@ -216,7 +220,7 @@ pub enum NetworkActorCommand {
     ControlFiberChannel(ChannelCommandWithId),
     // The first parameter is the peeled onion in binary via `PeeledOnionPacket::serialize`. `PeeledOnionPacket::current`
     // is for the current node.
-    SendPaymentOnionPacket(SendOnionPacketCommand, RpcReplyPort<Result<u64, TlcErr>>),
+    SendPaymentOnionPacket(SendOnionPacketCommand),
     PeelPaymentOnionPacket(
         PaymentOnionPacket, // onion_packet
         Hash256,            // payment_hash
@@ -236,7 +240,7 @@ pub enum NetworkActorCommand {
         RpcReplyPort<Result<QueryBroadcastMessagesResult, GossipError>>,
     ),
     // Broadcast our BroadcastMessage to the network.
-    BroadcastMessages(Vec<BroadcastMessage>),
+    BroadcastMessages(Vec<BroadcastMessageWithTimestamp>),
     // Broadcast local information to the network.
     BroadcastLocalInfo(LocalInfoKind),
     SignMessage([u8; 32], RpcReplyPort<EcdsaSignature>),
@@ -307,8 +311,21 @@ pub struct SendPaymentCommand {
     pub udt_type_script: Option<Script>,
     // allow self payment, default is false
     pub allow_self_payment: bool,
+    // the hop hint which may help the find path algorithm to find the path
+    pub hop_hints: Option<Vec<HopHint>>,
     // dry_run only used for checking, default is false
     pub dry_run: bool,
+}
+
+#[serde_as]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct HopHint {
+    /// The public key of the node
+    pub pubkey: Pubkey,
+    /// The funding transaction hash of the channel outpoint
+    pub channel_funding_tx: Hash256,
+    /// inbound or outbound for the channel
+    pub inbound: bool,
 }
 
 #[serde_as]
@@ -328,6 +345,7 @@ pub struct SendPaymentData {
     pub udt_type_script: Option<Script>,
     pub preimage: Option<Hash256>,
     pub allow_self_payment: bool,
+    pub hop_hints: Vec<HopHint>,
     pub dry_run: bool,
 }
 
@@ -455,6 +473,8 @@ impl SendPaymentData {
             ));
         }
 
+        let hop_hints = command.hop_hints.unwrap_or_default();
+
         Ok(SendPaymentData {
             target_pubkey: target,
             amount,
@@ -469,6 +489,7 @@ impl SendPaymentData {
             udt_type_script,
             preimage,
             allow_self_payment: command.allow_self_payment,
+            hop_hints,
             dry_run: command.dry_run,
         })
     }
@@ -486,7 +507,7 @@ pub struct AcceptChannelCommand {
     pub tlc_expiry_delta: Option<u64>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SendOnionPacketCommand {
     pub peeled_onion_packet: PeeledPaymentOnionPacket,
     pub previous_tlc: Option<(Hash256, u64)>,
@@ -514,6 +535,18 @@ pub enum DebugEvent {
     AddTlcFailed(PeerId, Hash256, TlcErr),
     // Common event with string
     Common(String),
+}
+
+#[macro_export]
+macro_rules! debug_event {
+    ($network:expr, $debug_event:expr) => {
+        #[cfg(debug_assertions)]
+        $network
+            .send_message(NetworkActorMessage::new_notification(
+                NetworkServiceEvent::DebugEvent(DebugEvent::Common($debug_event.to_string())),
+            ))
+            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+    };
 }
 
 #[derive(Clone, Debug)]
@@ -592,8 +625,8 @@ pub enum NetworkActorEvent {
     FundingTransactionPending(Transaction, OutPoint, Hash256),
 
     /// A funding transaction has been confirmed. The transaction was included in the
-    /// block with the given transaction index.
-    FundingTransactionConfirmed(OutPoint, BlockNumber, u32),
+    /// block with the given transaction index, and the timestamp in the block header.
+    FundingTransactionConfirmed(OutPoint, H256, u32, u64),
 
     /// A funding transaction has failed.
     FundingTransactionFailed(OutPoint),
@@ -618,6 +651,16 @@ pub enum NetworkActorEvent {
 
     // A payment need to retry
     RetrySendPayment(Hash256),
+
+    // AddTlc result from peer (payment_hash, (process_channel_error, tlc_err), (previous_channel_id, previous_tlc_id))
+    AddTlcResult(
+        Hash256,
+        Option<(ProcessingChannelError, TlcErr)>,
+        Option<(Hash256, u64)>,
+    ),
+
+    // An owned channel is updated.
+    OwnedChannelUpdateEvent(OwnedChannelUpdateEvent),
 }
 
 #[derive(Debug)]
@@ -851,9 +894,14 @@ where
                     .on_funding_transaction_pending(transaction, outpoint.clone(), channel_id)
                     .await;
             }
-            NetworkActorEvent::FundingTransactionConfirmed(outpoint, block_number, tx_index) => {
+            NetworkActorEvent::FundingTransactionConfirmed(
+                outpoint,
+                block_hash,
+                tx_index,
+                timestamp,
+            ) => {
                 state
-                    .on_funding_transaction_confirmed(outpoint, block_number, tx_index)
+                    .on_funding_transaction_confirmed(outpoint, block_hash, tx_index, timestamp)
                     .await;
             }
             NetworkActorEvent::CommitmentTransactionPending(transaction, channel_id) => {
@@ -899,6 +947,10 @@ where
             NetworkActorEvent::RetrySendPayment(payment_hash) => {
                 let _ = self.try_payment_session(myself, state, payment_hash).await;
             }
+            NetworkActorEvent::AddTlcResult(payment_hash, error_info, previous_tlc) => {
+                self.on_add_tlc_result_event(myself, state, payment_hash, error_info, previous_tlc)
+                    .await;
+            }
             #[cfg(test)]
             NetworkActorEvent::GossipMessage(peer_id, message) => {
                 state
@@ -911,6 +963,19 @@ where
             NetworkActorEvent::GossipMessageUpdates(gossip_message_updates) => {
                 let mut graph = self.network_graph.write().await;
                 graph.update_for_messages(gossip_message_updates.messages);
+            }
+            NetworkActorEvent::OwnedChannelUpdateEvent(owned_channel_update_event) => {
+                let mut graph = self.network_graph.write().await;
+                debug!(
+                    "Received owned channel update event: {:?}",
+                    owned_channel_update_event
+                );
+                let is_down =
+                    matches!(owned_channel_update_event, OwnedChannelUpdateEvent::Down(_));
+                graph.process_owned_channel_update_event(owned_channel_update_event);
+                if is_down {
+                    debug!("Owned channel is down");
+                }
             }
         }
         Ok(())
@@ -1094,9 +1159,20 @@ where
                     .await?
             }
 
-            NetworkActorCommand::SendPaymentOnionPacket(command, reply) => {
-                self.handle_send_onion_packet_command(state, command, reply)
+            NetworkActorCommand::SendPaymentOnionPacket(command) => {
+                let res = self
+                    .handle_send_onion_packet_command(state, command.clone())
                     .await;
+                if let Err(err) = res {
+                    self.on_add_tlc_result_event(
+                        myself,
+                        state,
+                        command.payment_hash,
+                        Some((ProcessingChannelError::TlcForwardingError(err.clone()), err)),
+                        command.previous_tlc,
+                    )
+                    .await;
+                }
             }
             NetworkActorCommand::PeelPaymentOnionPacket(onion_packet, payment_hash, reply) => {
                 let response = onion_packet
@@ -1311,7 +1387,7 @@ where
                     myself
                         .send_message(NetworkActorMessage::new_command(
                             NetworkActorCommand::BroadcastMessages(vec![
-                                BroadcastMessage::NodeAnnouncement(message),
+                                BroadcastMessageWithTimestamp::NodeAnnouncement(message),
                             ]),
                         ))
                         .expect(ASSUME_NETWORK_MYSELF_ALIVE);
@@ -1320,8 +1396,7 @@ where
             NetworkActorCommand::NodeInfo(_, rpc) => {
                 let response = NodeInfoResponse {
                     node_name: state.node_name.clone(),
-                    peer_id: state.peer_id.clone(),
-                    public_key: state.get_public_key().clone(),
+                    node_id: state.get_public_key().clone(),
                     addresses: state.announced_addrs.clone(),
                     chain_hash: get_chain_hash(),
                     open_channel_auto_accept_min_ckb_funding_amount: state
@@ -1347,8 +1422,7 @@ where
         &self,
         state: &mut NetworkActorState<S>,
         command: SendOnionPacketCommand,
-        reply: RpcReplyPort<Result<u64, TlcErr>>,
-    ) {
+    ) -> Result<(), TlcErr> {
         let SendOnionPacketCommand {
             peeled_onion_packet,
             previous_tlc,
@@ -1357,8 +1431,6 @@ where
 
         let info = peeled_onion_packet.current.clone();
         let shared_secret = peeled_onion_packet.shared_secret;
-        debug!("Processing onion packet info: {:?}", info);
-
         let channel_outpoint = OutPoint::new(info.funding_tx_hash.into(), 0);
         let channel_id = match state.outpoint_channel_map.get(&channel_outpoint) {
             Some(channel_id) => channel_id,
@@ -1373,10 +1445,11 @@ where
                     channel_outpoint.clone(),
                     None,
                 );
-                return reply.send(Err(tlc_err)).expect("send add tlc response");
+                return Err(tlc_err);
             }
         };
-        let (send, recv) = oneshot::channel::<Result<AddTlcResponse, TlcErr>>();
+        let (send, _recv) = oneshot::channel::<Result<AddTlcResponse, TlcErr>>();
+        // explicitly don't wait for the response, we will handle the result in AddTlcResult
         let rpc_reply = RpcReplyPort::from(send);
         let command = ChannelCommand::AddTlc(
             AddTlcCommand {
@@ -1393,18 +1466,18 @@ where
 
         // we have already checked the channel_id is valid,
         match state.send_command_to_channel(*channel_id, command).await {
-            Ok(()) => {}
+            Ok(_) => {
+                return Ok(());
+            }
             Err(err) => {
                 error!(
                     "Failed to send onion packet to channel: {:?} with err: {:?}",
                     channel_id, err
                 );
                 let tlc_error = self.get_tlc_error(state, &err, &channel_outpoint);
-                return reply.send(Err(tlc_error)).expect("send add tlc response");
+                return Err(tlc_error);
             }
         }
-        let add_tlc_res = recv.await.expect("recv error").map(|res| res.tlc_id);
-        reply.send(add_tlc_res).expect("send error");
     }
 
     fn get_tlc_error(
@@ -1468,12 +1541,10 @@ where
                             .await
                             .record_payment_fail(&payment_session, error_detail.clone());
                         if need_to_retry {
-                            let res = self
-                                .try_payment_session(myself, state, payment_session.payment_hash())
-                                .await;
-                            if res.is_err() {
-                                debug!("Failed to retry payment session: {:?}", res);
-                            }
+                            // If this is the first hop error, like the WaitingTlcAck error,
+                            // we will just retry later, return Ok here for letting endpoint user
+                            // know payment session is created successfully
+                            self.register_payment_retry(myself, payment_hash);
                         } else {
                             self.set_payment_fail_with_error(
                                 &mut payment_session,
@@ -1500,11 +1571,13 @@ where
                 ..
             }) = &tcl_error_detail.extra_data
             {
-                let _ = network.send_message(NetworkActorMessage::new_command(
-                    NetworkActorCommand::ProcessBroadcastMessage(BroadcastMessage::ChannelUpdate(
-                        channel_update.clone(),
-                    )),
-                ));
+                network
+                    .send_message(NetworkActorMessage::new_command(
+                        NetworkActorCommand::BroadcastMessages(vec![
+                            BroadcastMessageWithTimestamp::ChannelUpdate(channel_update.clone()),
+                        ]),
+                    ))
+                    .expect(ASSUME_NETWORK_MYSELF_ALIVE);
             }
         }
         match tcl_error_detail.error_code() {
@@ -1542,12 +1615,8 @@ where
         payment_session: &mut PaymentSession,
         payment_data: &SendPaymentData,
     ) -> Result<Vec<PaymentHopData>, Error> {
-        match self
-            .network_graph
-            .read()
-            .await
-            .build_route(payment_data.clone())
-        {
+        let graph = self.network_graph.read().await;
+        match graph.build_route(payment_data.clone()) {
             Err(e) => {
                 let error = format!("Failed to build route, {}", e);
                 self.set_payment_fail_with_error(payment_session, &error);
@@ -1569,7 +1638,6 @@ where
     ) -> Result<PaymentSession, Error> {
         let session_key = Privkey::from_slice(KeyPair::generate_random_key().as_ref());
         assert_ne!(hops[0].funding_tx_hash, Hash256::default());
-        let first_channel_outpoint = OutPoint::new(hops[0].funding_tx_hash.into(), 0);
 
         payment_session
             .session_key
@@ -1577,8 +1645,6 @@ where
         payment_session.route =
             SessionRoute::new(state.get_public_key(), payment_data.target_pubkey, &hops);
 
-        let (send, recv) = oneshot::channel::<Result<u64, TlcErr>>();
-        let rpc_reply = RpcReplyPort::from(send);
         let peeled_onion_packet = match PeeledPaymentOnionPacket::create(
             session_key,
             hops,
@@ -1592,18 +1658,21 @@ where
                     payment_data.payment_hash, e
                 );
                 self.set_payment_fail_with_error(payment_session, &err);
-                return Err(Error::SendPaymentError(err));
+                return Err(Error::SendPaymentFirstHopError(err, false));
             }
         };
-        let command = SendOnionPacketCommand {
-            peeled_onion_packet,
-            previous_tlc: None,
-            payment_hash: payment_data.payment_hash,
-        };
 
-        self.handle_send_onion_packet_command(state, command, rpc_reply)
-            .await;
-        match recv.await.expect("msg recv error") {
+        match self
+            .handle_send_onion_packet_command(
+                state,
+                SendOnionPacketCommand {
+                    peeled_onion_packet,
+                    previous_tlc: None,
+                    payment_hash: payment_data.payment_hash,
+                },
+            )
+            .await
+        {
             Err(error_detail) => {
                 self.update_graph_with_tlc_fail(&state.network, &error_detail)
                     .await;
@@ -1616,14 +1685,79 @@ where
                     "Failed to send onion packet with error {}",
                     error_detail.error_code_as_str()
                 );
-                self.set_payment_fail_with_error(payment_session, &err);
+                if !need_to_retry {
+                    // only update the payment session status when we don't need to retry
+                    // otherwise the endpoint user may get confused in the internal state changes
+                    self.set_payment_fail_with_error(payment_session, &err);
+                }
                 return Err(Error::SendPaymentFirstHopError(err, need_to_retry));
             }
-            Ok(tlc_id) => {
-                payment_session.set_inflight_status(first_channel_outpoint, tlc_id);
+            Ok(_) => {
                 self.store.insert_payment_session(payment_session.clone());
                 return Ok(payment_session.clone());
             }
+        }
+    }
+
+    async fn on_add_tlc_result_event(
+        &self,
+        myself: ActorRef<NetworkActorMessage>,
+        state: &mut NetworkActorState<S>,
+        payment_hash: Hash256,
+        error_info: Option<(ProcessingChannelError, TlcErr)>,
+        previous_tlc: Option<(Hash256, u64)>,
+    ) {
+        if let Some((channel_id, tlc_id)) = previous_tlc {
+            myself
+                .send_message(NetworkActorMessage::new_command(
+                    NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
+                        channel_id: channel_id,
+                        command: ChannelCommand::ForwardTlcResult(ForwardTlcResult {
+                            payment_hash,
+                            channel_id,
+                            tlc_id,
+                            error_info: error_info.clone(),
+                        }),
+                    }),
+                ))
+                .expect("network actor alive");
+            return;
+        }
+
+        let Some(mut payment_session) = self.store.get_payment_session(payment_hash) else {
+            return;
+        };
+
+        if error_info.is_none() {
+            // Change the status from Created into Inflight
+            payment_session.set_inflight_status();
+            self.store.insert_payment_session(payment_session.clone());
+            return;
+        }
+
+        let (channel_error, tlc_err) = error_info.unwrap();
+        if matches!(channel_error, ProcessingChannelError::RepeatedProcessing(_)) {
+            return;
+        }
+
+        let need_to_retry = self
+            .network_graph
+            .write()
+            .await
+            .record_payment_fail(&payment_session, tlc_err.clone());
+        if matches!(channel_error, ProcessingChannelError::WaitingTlcAck) {
+            payment_session.last_error = Some("WaitingTlcAck".to_string());
+            self.store.insert_payment_session(payment_session.clone());
+        }
+        if need_to_retry {
+            let _ = self.try_payment_session(myself, state, payment_hash).await;
+        } else {
+            let error = format!(
+                "Failed to send payment session: {:?}, retried times: {}",
+                payment_session.payment_hash(),
+                payment_session.retried_times
+            );
+            self.set_payment_fail_with_error(&mut payment_session, &error);
         }
     }
 
@@ -1642,10 +1776,14 @@ where
         let Some(mut payment_session) = self.store.get_payment_session(payment_hash) else {
             return Err(Error::InvalidParameter(payment_hash.to_string()));
         };
+        assert!(payment_session.status != PaymentSessionStatus::Failed);
 
         let payment_data = payment_session.request.clone();
         if payment_session.can_retry() {
-            payment_session.retried_times += 1;
+            if payment_session.last_error != Some("WaitingTlcAck".to_string()) {
+                payment_session.retried_times += 1;
+            }
+
             let hops_info = self
                 .build_payment_route(&mut payment_session, &payment_data)
                 .await?;
@@ -1654,33 +1792,17 @@ where
                 .await
             {
                 Ok(payment_session) => return Ok(payment_session),
-                Err(Error::SendPaymentFirstHopError(err, need_retry)) => {
+                Err(err) => {
+                    let need_retry = matches!(err, Error::SendPaymentFirstHopError(_, true));
                     if need_retry {
-                        // If this is the first hop error, like the WaitingTlcAck error,
+                        // If this is the first hop error, such as the WaitingTlcAck error,
                         // we will just retry later, return Ok here for letting endpoint user
                         // know payment session is created successfully
-                        myself.send_after(Duration::from_millis(500), move || {
-                            NetworkActorMessage::new_event(NetworkActorEvent::RetrySendPayment(
-                                payment_hash,
-                            ))
-                        });
+                        self.register_payment_retry(myself, payment_hash);
                         return Ok(payment_session);
                     } else {
-                        return Err(Error::SendPaymentError(err));
+                        return Err(err);
                     }
-                }
-                Err(e) => {
-                    // we will retry the payment session,
-                    // but we need to retry later to let the actor to process failure,
-                    // so that we can make different choice for later try
-                    let payment_hash = payment_data.payment_hash;
-                    myself.send_after(Duration::from_millis(500), move || {
-                        NetworkActorMessage::new_event(NetworkActorEvent::RetrySendPayment(
-                            payment_hash,
-                        ))
-                    });
-                    debug!("send payment error: {:?}", e);
-                    return Err(e);
                 }
             }
         } else {
@@ -1692,6 +1814,12 @@ where
             });
             return Err(Error::SendPaymentError(error));
         }
+    }
+
+    fn register_payment_retry(&self, myself: ActorRef<NetworkActorMessage>, payment_hash: Hash256) {
+        myself.send_after(Duration::from_millis(500), move || {
+            NetworkActorMessage::new_event(NetworkActorEvent::RetrySendPayment(payment_hash))
+        });
     }
 
     async fn on_send_payment(
@@ -1902,10 +2030,10 @@ where
                 debug!("Returning old node announcement message as it is still valid");
             }
             _ => {
-                let alias = self.node_name.unwrap_or_default();
+                let node_name = self.node_name.unwrap_or_default();
                 let addresses = self.announced_addrs.clone();
                 let announcement = NodeAnnouncement::new(
-                    alias,
+                    node_name,
                     addresses,
                     &self.private_key,
                     now,
@@ -1998,11 +2126,12 @@ where
             ChannelInitializationParameter::OpenChannel(OpenChannelParameter {
                 funding_amount,
                 seed,
-                public_channel_info: public.then_some(PublicChannelInfo::new(
+                tlc_info: ChannelTlcInfo::new(
                     tlc_min_value.unwrap_or(self.tlc_min_value),
                     tlc_expiry_delta.unwrap_or(self.tlc_expiry_delta),
                     tlc_fee_proportional_millionths.unwrap_or(self.tlc_fee_proportional_millionths),
-                )),
+                ),
+                public_channel_info: public.then_some(PublicChannelInfo::new()),
                 funding_udt_type_script,
                 shutdown_script,
                 channel_id_sender: tx,
@@ -2016,7 +2145,8 @@ where
             }),
             network.clone().get_cell(),
         )
-        .await?
+        .await
+        .map_err(|e| ProcessingChannelError::SpawnErr(e.to_string()))?
         .0;
         let temp_channel_id = rx.await.expect("msg received");
         self.on_channel_created(temp_channel_id, &peer_id, channel.clone());
@@ -2072,7 +2202,7 @@ where
         let seed = self.generate_channel_seed();
         let (tx, rx) = oneshot::channel::<Hash256>();
         let channel = Actor::spawn_linked(
-            None,
+            Some(generate_channel_actor_name(&self.peer_id, &peer_id)),
             ChannelActor::new(
                 self.get_public_key(),
                 remote_pubkey,
@@ -2083,11 +2213,12 @@ where
             ChannelInitializationParameter::AcceptChannel(AcceptChannelParameter {
                 funding_amount,
                 reserved_ckb_amount,
-                public_channel_info: open_channel.is_public().then_some(PublicChannelInfo::new(
+                tlc_info: ChannelTlcInfo::new(
                     min_tlc_value.unwrap_or(self.tlc_min_value),
                     tlc_expiry_delta.unwrap_or(self.tlc_expiry_delta),
                     tlc_fee_proportional_millionths.unwrap_or(self.tlc_fee_proportional_millionths),
-                )),
+                ),
+                public_channel_info: open_channel.is_public().then_some(PublicChannelInfo::new()),
                 seed,
                 open_channel,
                 shutdown_script,
@@ -2098,7 +2229,8 @@ where
             }),
             network.clone().get_cell(),
         )
-        .await?
+        .await
+        .map_err(|e| ProcessingChannelError::SpawnErr(e.to_string()))?
         .0;
         let new_id = rx.await.expect("msg received");
         self.on_channel_created(new_id, &peer_id, channel.clone());
@@ -2114,7 +2246,7 @@ where
     {
         let chain = self.chain_actor.clone();
         // Spawn a new task to avoid blocking current actor message processing.
-        ractor::concurrency::tokio_primatives::spawn(async move {
+        ractor::concurrency::tokio_primitives::spawn(async move {
             debug!("Trying to broadcast transaction {:?}", &transaction);
             let result = match call_t!(
                 &chain,
@@ -2440,9 +2572,9 @@ where
                 remote_peer_id, &message
             );
             let _ = self.network.send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::BroadcastMessages(vec![BroadcastMessage::NodeAnnouncement(
-                    message,
-                )]),
+                NetworkActorCommand::BroadcastMessages(vec![
+                    BroadcastMessageWithTimestamp::NodeAnnouncement(message),
+                ]),
             ));
         } else {
             debug!(
@@ -2661,41 +2793,80 @@ where
             &outpoint, &channel_id, &tx_hash
         );
         let network = self.network.clone();
+        let chain = self.chain_actor.clone();
         self.broadcast_tx_with_callback(transaction, move |result| {
-            let message = match result {
+            match result {
                 Ok(TraceTxResponse {
                     status:
                         TxStatus {
                             status: Status::Committed,
-                            block_number: Some(block_number),
+                            block_hash: Some(block_hash),
                             ..
                         },
                     ..
                 }) => {
-                    info!("Funding transaction {:?} confirmed", &tx_hash);
-                    NetworkActorEvent::FundingTransactionConfirmed(
-                        outpoint,
-                        block_number.into(),
-                        DUMMY_FUNDING_TX_INDEX,
-                    )
+                    tokio::spawn( async move  {
+                        match call!(
+                            chain,
+                            |reply| CkbChainMessage::GetBlockTimestamp(
+                                GetBlockTimestampRequest::from_block_hash(block_hash.clone()), reply
+                            )
+                        ) {
+                            Ok(Ok(Some(timestamp))) => {
+                                info!("Funding transaction {:?} confirmed", &tx_hash);
+                                // Notify outside observers.
+                                network.send_message(NetworkActorMessage::new_event(
+                                    NetworkActorEvent::FundingTransactionConfirmed(
+                                        outpoint.clone(),
+                                        block_hash.clone(),
+                                        DUMMY_FUNDING_TX_INDEX,
+                                        timestamp,
+                                    )
+                                ))
+                                .expect(ASSUME_NETWORK_MYSELF_ALIVE);
+                                return;
+                            },
+                            Ok(Ok(None)) => {
+                                error!(
+                                    "Failed to get block timestamp for block hash {:?}: block not found",
+                                    &block_hash
+                                );
+                            }
+                            Ok(Err(err)) => {
+                                error!(
+                                    "Failed to get block timestamp for block hash {:?}: {:?}",
+                                    &block_hash, &err
+                                );
+                            }
+                            Err(err) => {
+                                error!(
+                                    "Failed to get block timestamp for block hash {:?}: {:?}",
+                                    &block_hash, &err
+                                );
+                            }
+                        }
+                    });
                 }
                 Ok(status) => {
                     error!(
                         "Funding transaction {:?} failed to be confirmed with final status {:?}",
                         &tx_hash, &status
                     );
-                    NetworkActorEvent::FundingTransactionFailed(outpoint)
+                    // Notify outside observers.
+                    network
+                        .send_message(NetworkActorMessage::new_event(NetworkActorEvent::FundingTransactionFailed(outpoint)
+                    ))
+                        .expect(ASSUME_NETWORK_MYSELF_ALIVE);
                 }
                 Err(err) => {
                     error!("Failed to trace transaction {:?}: {:?}", &tx_hash, &err);
-                    NetworkActorEvent::FundingTransactionFailed(outpoint)
+                    // Notify outside observers.
+                    network
+                        .send_message(NetworkActorMessage::new_event(NetworkActorEvent::FundingTransactionFailed(outpoint)
+                    ))
+                        .expect(ASSUME_NETWORK_MYSELF_ALIVE);
                 }
             };
-
-            // Notify outside observers.
-            network
-                .send_message(NetworkActorMessage::new_event(message))
-                .expect(ASSUME_NETWORK_MYSELF_ALIVE);
         })
         .await;
     }
@@ -2751,8 +2922,9 @@ where
     async fn on_funding_transaction_confirmed(
         &mut self,
         outpoint: OutPoint,
-        block_number: BlockNumber,
+        block_hash: H256,
         tx_index: u32,
+        timestamp: u64,
     ) {
         debug!("Funding transaction is confirmed: {:?}", &outpoint);
         let channel_id = match self.pending_channels.remove(&outpoint) {
@@ -2769,8 +2941,7 @@ where
             channel_id,
             None,
             ChannelActorMessage::Event(ChannelEvent::FundingTransactionConfirmed(
-                block_number,
-                tx_index,
+                block_hash, tx_index, timestamp,
             )),
         )
         .await;
@@ -2892,6 +3063,8 @@ where
             Duration::from_millis(config.gossip_network_maintenance_interval_ms()).into(),
             Duration::from_millis(config.gossip_store_maintenance_interval_ms()).into(),
             config.announce_private_addr(),
+            config.gossip_network_num_targeted_active_syncing_peers,
+            config.gossip_network_num_targeted_outbound_passive_syncing_peers,
             self.store.clone(),
             self.chain_actor.clone(),
             myself.get_cell(),
@@ -3095,12 +3268,12 @@ where
         match message {
             NetworkActorMessage::Event(event) => {
                 if let Err(err) = self.handle_event(myself, state, event).await {
-                    error!("Failed to handle ckb network event: {}", err);
+                    error!("Failed to handle fiber network event: {}", err);
                 }
             }
             NetworkActorMessage::Command(command) => {
                 if let Err(err) = self.handle_command(myself, state, command).await {
-                    error!("Failed to handle ckb network command: {}", err);
+                    error!("Failed to handle fiber network command: {}", err);
                 }
             }
             NetworkActorMessage::Notification(event) => {
@@ -3142,8 +3315,8 @@ where
             SupervisionEvent::ActorTerminated(who, _, _) => {
                 debug!("Actor {:?} terminated", who);
             }
-            SupervisionEvent::ActorPanicked(who, _) => {
-                error!("Actor {:?} panicked", who);
+            SupervisionEvent::ActorFailed(who, err) => {
+                panic!("Actor unexpectedly panicked (id: {:?}): {:?}", who, err);
             }
             _ => {}
         }

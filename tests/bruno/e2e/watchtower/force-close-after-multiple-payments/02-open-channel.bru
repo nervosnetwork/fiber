@@ -23,7 +23,12 @@ body:json {
     "params": [
       {
         "peer_id": "{{NODE2_PEERID}}",
-        "funding_amount": "0xba43b7400"
+        "funding_amount": "0xba43b7400",
+        "shutdown_script": {
+          "code_hash": "0x2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+          "hash_type": "data",
+          "args": "0x42"
+        }
       }
     ]
   }

@@ -45,4 +45,8 @@ script:post-response {
   console.log("step 10 response: ", res.body);
   // Sleep for sometime to make sure current operation finishes before next request starts.
   await new Promise(r => setTimeout(r, 100));
+
+  if (res.body.error.message != "TemporaryChannelFailure") {
+    throw new Error("Assertion failed: error message is not right");
+  }
 }

@@ -37,8 +37,18 @@ assert {
   res.body.result: isUndefined
 }
 
+script:pre-request {
+  await new Promise(r => setTimeout(r, 2000));
+}
+
 script:post-response {
   console.log("step 14: ", res.body);
+  // tlc_id2 is not added successfully, so it should not be removed successfully.
+   if (!(res.body.error.message.includes("Trying to remove non-existing tlc with id"))) {
+    throw new Error("Assertion failed: error message is not right");
+  }
+
   // Sleep for sometime to make sure current operation finishes before next request starts.
   await new Promise(r => setTimeout(r, 100));
+
 }

@@ -1,7 +1,7 @@
 meta {
   name: remove tlc from NODE1
   type: http
-  seq: 12
+  seq: 16
 }
 
 post {
@@ -23,7 +23,7 @@ body:json {
     "params": [
       {
         "channel_id": "{{CHANNEL_ID}}",
-        "tlc_id": "{{TLC_ID1}}",
+        "tlc_id": "{{TLC_ID3}}",
         "reason": {
           "error_code": "TemporaryNodeFailure"
         }
@@ -32,17 +32,16 @@ body:json {
   }
 }
 
+script:pre-request {
+  await new Promise(r => setTimeout(r, 2000));
+}
+
 assert {
   res.body.error: isUndefined
   res.body.result: isNull
 }
 
-script:pre-request {
-  await new Promise(r => setTimeout(r, 1000));
-}
-
 script:post-response {
   // Sleep for sometime to make sure current operation finishes before next request starts.
   await new Promise(r => setTimeout(r, 100));
-  console.log("remove tlc response: ", res.body);
 }
