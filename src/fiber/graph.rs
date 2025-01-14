@@ -819,7 +819,7 @@ where
             node_id: target,
             weight: 0,
             distance: 0,
-            amount_received: amount,
+            amount_to_send: amount,
             fee_charged: 0,
             probability: 1.0,
             next_hop: None,
@@ -858,7 +858,7 @@ where
 
                 edges_expanded += 1;
 
-                let next_hop_received_amount = cur_hop.amount_received;
+                let next_hop_received_amount = cur_hop.amount_to_send;
                 if next_hop_received_amount > channel_info.capacity() {
                     debug!(
                         "next_hop_received_amount: {} > channel_info.capacity {}",
@@ -966,7 +966,7 @@ where
                     node_id: from,
                     weight,
                     distance,
-                    amount_received: amount_to_send,
+                    amount_to_send,
                     incoming_tlc_expiry,
                     fee_charged: fee,
                     probability,
