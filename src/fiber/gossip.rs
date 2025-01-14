@@ -342,6 +342,324 @@ impl<S> GossipActor<S> {
     }
 }
 
+impl<S> GossipActor<S>
+where
+    S: GossipMessageStore + Clone + Send + Sync + 'static,
+{
+    async fn handle_actor_message(
+        &self,
+        myself: ActorRef<<Self as Actor>::Msg>,
+        message: <Self as Actor>::Msg,
+        state: &mut <Self as Actor>::State,
+    ) {
+        match message {
+            GossipActorMessage::PeerConnected(peer_id, _pubkey, session) => {
+                if state.is_peer_connected(&peer_id) {
+                    return;
+                }
+                state
+                    .peer_states
+                    .insert(peer_id.clone(), PeerState::new(session.id, session.ty));
+            }
+            GossipActorMessage::PeerDisconnected(peer_id, _session) => {
+                state.peer_states.remove(&peer_id);
+            }
+            GossipActorMessage::ProcessBroadcastMessage(message) => {
+                state
+                    .try_to_verify_and_save_broadcast_message(message.clone())
+                    .await;
+            }
+            GossipActorMessage::QueryBroadcastMessages(peer, queries) => {
+                let id = state.get_and_increment_request_id();
+                if let Err(e) = state
+                    .send_message_to_peer(
+                        &peer,
+                        GossipMessage::QueryBroadcastMessages(QueryBroadcastMessages {
+                            id,
+                            chain_hash: get_chain_hash(),
+                            queries,
+                        }),
+                    )
+                    .await
+                {
+                    error!(
+                        "Failed to send query broadcast messages to peer {:?}: {:?}",
+                        &peer, e
+                    );
+                }
+            }
+            GossipActorMessage::TryBroadcastMessages(messages) => {
+                state
+                    .store
+                    .actor
+                    .send_message(ExtendedGossipMessageStoreMessage::SaveAndBroadcastMessages(
+                        messages,
+                    ))
+                    .expect("store actor alive");
+            }
+            GossipActorMessage::RotateOutboundPassiveSyncingPeers => {
+                if !state.is_ready_for_passive_syncing() {
+                    return;
+                }
+
+                let current_peers = state
+                    .outbound_passive_syncing_peers()
+                    .into_iter()
+                    .collect::<HashSet<_>>();
+                let new_peers = state
+                    .peer_states
+                    .iter()
+                    .filter_map(|(peer, state)| {
+                        (state.session_type.is_outbound()
+                            && (state.sync_status.can_start_passive_syncing()
+                                || state.sync_status.is_passive_syncing()))
+                        .then_some(peer.clone())
+                    })
+                    .take(state.num_targeted_outbound_passive_syncing_peers)
+                    .collect::<HashSet<_>>();
+                debug!(
+                    "Rotating passive syncing peers: current {:?}, new {:?}",
+                    &current_peers, &new_peers
+                );
+                for peers in new_peers.difference(&current_peers) {
+                    state.start_passive_syncer(&peers).await;
+                }
+                for peers in current_peers.difference(&new_peers) {
+                    state.stop_passive_syncer(&peers).await;
+                }
+            }
+
+            GossipActorMessage::TickNetworkMaintenance => {
+                trace!(
+                    "Gossip network maintenance ticked, current state: num of peers: {}, num of finished syncing peers: {}, num of active syncing peers: {}, num of passive syncing peers: {}, num of pending queries: {}",
+                    state.peer_states.len(),
+                    state.num_finished_active_syncing_peers,
+                    state.num_of_active_syncing_peers(),
+                    state.num_of_passive_syncing_peers(),
+                    state.pending_queries.len(),
+                );
+                for peer in state.peers_to_start_active_syncing() {
+                    state.start_new_active_syncer(&peer).await;
+                }
+
+                for peer in state.peers_to_start_passive_syncing() {
+                    state.start_passive_syncer(&peer).await;
+                }
+
+                // Query missing messages from peers.
+                let pending_queries = std::mem::take(&mut state.pending_queries);
+                for chunk in pending_queries.chunks(MAX_NUM_OF_BROADCAST_MESSAGES as usize) {
+                    let queries = chunk.to_vec();
+                    let id = state.get_and_increment_request_id();
+                    for peer_state in state
+                        .peer_states
+                        .values()
+                        .take(NUM_SIMULTANEOUS_GET_REQUESTS)
+                    {
+                        let message =
+                            GossipMessage::QueryBroadcastMessages(QueryBroadcastMessages {
+                                id,
+                                chain_hash: get_chain_hash(),
+                                queries: queries.clone(),
+                            });
+                        if let Err(e) =
+                            send_message_to_session(&state.control, peer_state.session_id, message)
+                                .await
+                        {
+                            error!(
+                                "Failed to send query broadcast messages to peer {:?}: {:?}",
+                                &peer_state.session_id, e
+                            );
+                        }
+                    }
+                }
+            }
+
+            GossipActorMessage::ActiveSyncingFinished(peer_id, cursor) => {
+                state.num_finished_active_syncing_peers += 1;
+                if let Some(peer_state) = state.peer_states.get_mut(&peer_id) {
+                    peer_state.change_sync_status(PeerSyncStatus::FinishedActiveSyncing(
+                        now_timestamp_as_millis_u64(),
+                        cursor,
+                    ));
+                }
+            }
+
+            GossipActorMessage::MaliciousPeerFound(peer_id) => {
+                warn!("Malicious peer found: {:?}", &peer_id);
+            }
+
+            GossipActorMessage::SendGossipMessage(GossipMessageWithPeerId { peer_id, message }) => {
+                if let Err(error) = state.send_message_to_peer(&peer_id, message).await {
+                    error!(
+                        "Failed to send gossip message to peer {:?}: {:?}",
+                        &peer_id, error
+                    );
+                }
+            }
+
+            GossipActorMessage::GossipMessageReceived(GossipMessageWithPeerId {
+                peer_id,
+                message,
+            }) => {
+                match message {
+                    GossipMessage::BroadcastMessagesFilter(BroadcastMessagesFilter {
+                        chain_hash,
+                        after_cursor,
+                    }) => {
+                        if let Err(e) = check_chain_hash(&chain_hash) {
+                            error!("Failed to check chain hash: {:?}", e);
+                            return;
+                        }
+                        if after_cursor.is_max() {
+                            info!(
+                                "Received BroadcastMessagesFilter with max cursor from peer, stopping filter processor to {:?}",
+                                &peer_id
+                            );
+                            state.peer_states.remove(&peer_id);
+                            return;
+                        }
+                        match state.peer_states.get_mut(&peer_id) {
+                            Some(peer_state) => {
+                                match peer_state.filter_processor.as_mut() {
+                                    Some(filter_processor) => {
+                                        filter_processor.update_filter(&after_cursor);
+                                        return;
+                                    }
+                                    _ => {
+                                        peer_state.filter_processor = Some(
+                                            PeerFilterProcessor::new(
+                                                state.store.clone(),
+                                                peer_id.clone(),
+                                                after_cursor.clone(),
+                                                myself,
+                                            )
+                                            .await,
+                                        );
+                                    }
+                                };
+                                // Also start passive syncer to peer so that we have less silos.
+                                if peer_state.sync_status.can_start_passive_syncing() {
+                                    state.start_passive_syncer(&peer_id).await;
+                                }
+                            }
+                            None => {
+                                warn!(
+                                    "Received BroadcastMessagesFilter from unknown peer: {:?}",
+                                    &peer_id
+                                );
+                                return;
+                            }
+                        };
+                    }
+                    GossipMessage::BroadcastMessagesFilterResult(
+                        BroadcastMessagesFilterResult { messages },
+                    ) => {
+                        for message in messages {
+                            state
+                                .try_to_verify_and_save_broadcast_message(message)
+                                .await;
+                        }
+                    }
+                    GossipMessage::GetBroadcastMessages(get_broadcast_messages) => {
+                        if let Err(e) = check_chain_hash(&get_broadcast_messages.chain_hash) {
+                            error!("Failed to check chain hash: {:?}", e);
+                            return;
+                        }
+                        if get_broadcast_messages.count > MAX_NUM_OF_BROADCAST_MESSAGES {
+                            warn!(
+                                "Received GetBroadcastMessages with too many messages: {:?}",
+                                get_broadcast_messages.count
+                            );
+                            return;
+                        }
+                        let id = get_broadcast_messages.id;
+                        let messages = state.get_store().get_broadcast_messages(
+                            &get_broadcast_messages.after_cursor,
+                            Some(get_broadcast_messages.count as u16),
+                        );
+                        let result =
+                            GossipMessage::GetBroadcastMessagesResult(GetBroadcastMessagesResult {
+                                id,
+                                messages: messages.into_iter().map(|m| m.into()).collect(),
+                            });
+                        if let Err(error) = state.send_message_to_peer(&peer_id, result).await {
+                            error!(
+                                "Failed to send GetBroadcastMessagesResult to peer {:?}: {:?}",
+                                &peer_id, error
+                            );
+                        }
+                    }
+                    GossipMessage::GetBroadcastMessagesResult(result) => {
+                        let peer_state = state.peer_states.get(&peer_id);
+                        if let Some(PeerState {
+                            sync_status: PeerSyncStatus::ActiveGet(actor),
+                            ..
+                        }) = peer_state
+                        {
+                            let _ = actor
+                                .send_message(GossipSyncingActorMessage::ResponseReceived(result));
+                        } else {
+                            warn!(
+                                "Received GetBroadcastMessagesResult from peer {:?} in state {:?}",
+                                &peer_id, &peer_state
+                            );
+                        }
+                    }
+                    GossipMessage::QueryBroadcastMessages(QueryBroadcastMessages {
+                        id,
+                        chain_hash,
+                        queries,
+                    }) => {
+                        if let Err(e) = check_chain_hash(&chain_hash) {
+                            error!("Failed to check chain hash: {:?}", e);
+                            return;
+                        }
+                        if queries.len() > MAX_NUM_OF_BROADCAST_MESSAGES as usize {
+                            warn!(
+                                "Received QueryBroadcastMessages with too many queries: {:?}",
+                                queries.len()
+                            );
+                            return;
+                        }
+                        let (results, missing_queries) =
+                            state.get_store().query_broadcast_messages(queries);
+                        let result = GossipMessage::QueryBroadcastMessagesResult(
+                            QueryBroadcastMessagesResult {
+                                id,
+                                messages: results.into_iter().map(|m| m.into()).collect(),
+                                missing_queries: missing_queries,
+                            },
+                        );
+                        if let Err(error) = state.send_message_to_peer(&peer_id, result).await {
+                            error!(
+                                "Failed to send QueryBroadcastMessagesResult to peer {:?}: {:?}",
+                                &peer_id, error
+                            );
+                        }
+                    }
+                    GossipMessage::QueryBroadcastMessagesResult(QueryBroadcastMessagesResult {
+                        id: _id,
+                        messages,
+                        missing_queries,
+                    }) => {
+                        let _is_finished = missing_queries.is_empty();
+                        for message in messages {
+                            state
+                                .try_to_verify_and_save_broadcast_message(message)
+                                .await;
+                        }
+                        // TODO: mark requests corresponding to id as finished
+                        // TODO: if not finished, send another QueryBroadcastMessages to other peers.
+                        // Must be careful since some queries may be initiated by malformed messages
+                        // from malicious peers.
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 struct SyncingPeerState {
     failed_times: usize,
@@ -407,54 +725,16 @@ impl<S> GossipSyncingActor<S> {
     }
 }
 
-pub(crate) enum GossipSyncingActorMessage {
-    // A GetBroadcastMessages request to the syncing peer has timed out.
-    RequestTimeout(u64),
-    // A GetBroadcastMessagesResult response from the syncing peer.
-    ResponseReceived(GetBroadcastMessagesResult),
-    // Initiate a new GetBroadcastMessages request.
-    // Mostly triggered by a timeout or a response received.
-    NewGetRequest(),
-}
-
-#[rasync_trait]
-impl<S> Actor for GossipSyncingActor<S>
+impl<S> GossipSyncingActor<S>
 where
     S: GossipMessageStore + Clone + Send + Sync + 'static,
 {
-    type Msg = GossipSyncingActorMessage;
-    type State = GossipSyncingActorState<S>;
-    type Arguments = (
-        PeerId,
-        ActorRef<GossipActorMessage>,
-        ActorRef<CkbChainMessage>,
-        ExtendedGossipMessageStore<S>,
-        Cursor,
-    );
-
-    async fn pre_start(
+    async fn handle_actor_message(
         &self,
-        myself: ActorRef<Self::Msg>,
-        (peer_id, gossip_actor, chain_actor, store, cursor): Self::Arguments,
-    ) -> Result<Self::State, ActorProcessingErr> {
-        myself
-            .send_message(GossipSyncingActorMessage::NewGetRequest())
-            .expect("gossip syncing actor alive");
-        Ok(GossipSyncingActorState::new(
-            peer_id,
-            gossip_actor,
-            chain_actor,
-            store,
-            cursor,
-        ))
-    }
-
-    async fn handle(
-        &self,
-        myself: ActorRef<Self::Msg>,
-        message: Self::Msg,
-        state: &mut Self::State,
-    ) -> Result<(), ActorProcessingErr> {
+        myself: ActorRef<<Self as Actor>::Msg>,
+        message: <Self as Actor>::Msg,
+        state: &mut <Self as Actor>::State,
+    ) {
         match message {
             GossipSyncingActorMessage::RequestTimeout(request_id) => {
                 state.inflight_requests.remove(&request_id);
@@ -503,7 +783,7 @@ where
                                             state.peer_id.clone(),
                                         ))
                                         .expect("gossip actor alive");
-                                    return Ok(());
+                                    return;
                                 }
                             }
                         }
@@ -516,7 +796,7 @@ where
                                 ))
                                 .expect("gossip actor alive");
                             myself.stop(Some("Active syncing finished".to_string()));
-                            return Ok(());
+                            return;
                         }
                     }
 
@@ -551,7 +831,7 @@ where
                 // Send a new GetBroadcastMessages request to the newly-connected peer.
                 // If we have less than NUM_SIMULTANEOUS_GET_REQUESTS requests inflight.
                 if state.inflight_requests.len() > NUM_SIMULTANEOUS_GET_REQUESTS {
-                    return Ok(());
+                    return;
                 }
                 state
                     .gossip_actor
@@ -571,6 +851,58 @@ where
                 state.inflight_requests.insert(request_id, handle);
             }
         }
+    }
+}
+
+pub(crate) enum GossipSyncingActorMessage {
+    // A GetBroadcastMessages request to the syncing peer has timed out.
+    RequestTimeout(u64),
+    // A GetBroadcastMessagesResult response from the syncing peer.
+    ResponseReceived(GetBroadcastMessagesResult),
+    // Initiate a new GetBroadcastMessages request.
+    // Mostly triggered by a timeout or a response received.
+    NewGetRequest(),
+}
+
+#[rasync_trait]
+impl<S> Actor for GossipSyncingActor<S>
+where
+    S: GossipMessageStore + Clone + Send + Sync + 'static,
+{
+    type Msg = GossipSyncingActorMessage;
+    type State = GossipSyncingActorState<S>;
+    type Arguments = (
+        PeerId,
+        ActorRef<GossipActorMessage>,
+        ActorRef<CkbChainMessage>,
+        ExtendedGossipMessageStore<S>,
+        Cursor,
+    );
+
+    async fn pre_start(
+        &self,
+        myself: ActorRef<Self::Msg>,
+        (peer_id, gossip_actor, chain_actor, store, cursor): Self::Arguments,
+    ) -> Result<Self::State, ActorProcessingErr> {
+        myself
+            .send_message(GossipSyncingActorMessage::NewGetRequest())
+            .expect("gossip syncing actor alive");
+        Ok(GossipSyncingActorState::new(
+            peer_id,
+            gossip_actor,
+            chain_actor,
+            store,
+            cursor,
+        ))
+    }
+
+    async fn handle(
+        &self,
+        myself: ActorRef<Self::Msg>,
+        message: Self::Msg,
+        state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        self.handle_actor_message(myself, message, state).await;
         Ok(())
     }
 }
@@ -634,6 +966,40 @@ enum PeerFilterProcessorMessage {
     UpdateFilter(Cursor),
 }
 
+impl<S> PeerFilterActor<S>
+where
+    S: SubscribableGossipMessageStore + Clone + Send + Sync + 'static,
+    S::Subscription: Send,
+{
+    async fn handle_actor_message(
+        &self,
+        _myself: ActorRef<<Self as Actor>::Msg>,
+        message: <Self as Actor>::Msg,
+        state: &mut <Self as Actor>::State,
+    ) {
+        match message {
+            PeerFilterProcessorMessage::NewStoreUpdates(updates) => {
+                if let Some(result) = updates.create_broadcast_messages_filter_result() {
+                    self.gossip_actor
+                        .send_message(GossipActorMessage::SendGossipMessage(
+                            GossipMessageWithPeerId {
+                                peer_id: self.peer.clone(),
+                                message: GossipMessage::BroadcastMessagesFilterResult(result),
+                            },
+                        ))
+                        .expect("gossip actor alive");
+                }
+            }
+            PeerFilterProcessorMessage::UpdateFilter(cursor) => {
+                self.store
+                    .update_subscription(state, cursor)
+                    .await
+                    .expect("update subscription");
+            }
+        }
+    }
+}
+
 #[rasync_trait]
 impl<S> Actor for PeerFilterActor<S>
 where
@@ -661,30 +1027,11 @@ where
 
     async fn handle(
         &self,
-        _myself: ActorRef<Self::Msg>,
+        myself: ActorRef<Self::Msg>,
         message: Self::Msg,
-        subscription: &mut Self::State,
+        state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        match message {
-            PeerFilterProcessorMessage::NewStoreUpdates(updates) => {
-                if let Some(result) = updates.create_broadcast_messages_filter_result() {
-                    self.gossip_actor
-                        .send_message(GossipActorMessage::SendGossipMessage(
-                            GossipMessageWithPeerId {
-                                peer_id: self.peer.clone(),
-                                message: GossipMessage::BroadcastMessagesFilterResult(result),
-                            },
-                        ))
-                        .expect("gossip actor alive");
-                }
-            }
-            PeerFilterProcessorMessage::UpdateFilter(cursor) => {
-                self.store
-                    .update_subscription(subscription, cursor)
-                    .await
-                    .expect("update subscription");
-            }
-        }
+        self.handle_actor_message(myself, message, state).await;
         Ok(())
     }
 
@@ -1163,38 +1510,13 @@ impl<S: GossipMessageStore> ExtendedGossipMessageStoreActor<S> {
     }
 }
 
-#[rasync_trait]
-impl<S: GossipMessageStore + Send + Sync + 'static> Actor for ExtendedGossipMessageStoreActor<S> {
-    type Msg = ExtendedGossipMessageStoreMessage;
-    type State = ExtendedGossipMessageStoreState<S>;
-    type Arguments = (Duration, bool, S, ActorRef<CkbChainMessage>);
-
-    async fn pre_start(
+impl<S: GossipMessageStore + Send + Sync + 'static> ExtendedGossipMessageStoreActor<S> {
+    async fn handle_actor_message(
         &self,
-        myself: ActorRef<Self::Msg>,
-        (
-            gossip_store_maintenance_interval,
-            announce_private_addr,
-            store,
-            chain_actor,
-        ): Self::Arguments,
-    ) -> Result<Self::State, ActorProcessingErr> {
-        myself.send_interval(gossip_store_maintenance_interval, || {
-            ExtendedGossipMessageStoreMessage::Tick
-        });
-        Ok(ExtendedGossipMessageStoreState::new(
-            announce_private_addr,
-            store,
-            chain_actor,
-        ))
-    }
-
-    async fn handle(
-        &self,
-        myself: ActorRef<Self::Msg>,
-        message: Self::Msg,
-        state: &mut Self::State,
-    ) -> Result<(), ActorProcessingErr> {
+        myself: ActorRef<<Self as Actor>::Msg>,
+        message: <Self as Actor>::Msg,
+        state: &mut <Self as Actor>::State,
+    ) {
         match message {
             ExtendedGossipMessageStoreMessage::NewSubscription(cursor, reply) => {
                 trace!(
@@ -1210,7 +1532,7 @@ impl<S: GossipMessageStore + Send + Sync + 'static> Actor for ExtendedGossipMess
                         "Failed to send reply to new subscription (has the caller exited?): {:?}",
                         error
                     );
-                    return Ok(());
+                    return;
                 }
                 rx.await.expect("receive notification");
                 trace!(
@@ -1261,7 +1583,7 @@ impl<S: GossipMessageStore + Send + Sync + 'static> Actor for ExtendedGossipMess
                 let subscription = match state.output_ports.get_mut(&id) {
                     Some(output) => output,
                     // Subscriber has already unsubscribed, early return.
-                    None => return Ok(()),
+                    None => return,
                 };
                 let messages = state
                     .store
@@ -1316,6 +1638,42 @@ impl<S: GossipMessageStore + Send + Sync + 'static> Actor for ExtendedGossipMess
                 state.broadcast_messages(&complete_messages);
             }
         }
+    }
+}
+
+#[rasync_trait]
+impl<S: GossipMessageStore + Send + Sync + 'static> Actor for ExtendedGossipMessageStoreActor<S> {
+    type Msg = ExtendedGossipMessageStoreMessage;
+    type State = ExtendedGossipMessageStoreState<S>;
+    type Arguments = (Duration, bool, S, ActorRef<CkbChainMessage>);
+
+    async fn pre_start(
+        &self,
+        myself: ActorRef<Self::Msg>,
+        (
+            gossip_store_maintenance_interval,
+            announce_private_addr,
+            store,
+            chain_actor,
+        ): Self::Arguments,
+    ) -> Result<Self::State, ActorProcessingErr> {
+        myself.send_interval(gossip_store_maintenance_interval, || {
+            ExtendedGossipMessageStoreMessage::Tick
+        });
+        Ok(ExtendedGossipMessageStoreState::new(
+            announce_private_addr,
+            store,
+            chain_actor,
+        ))
+    }
+
+    async fn handle(
+        &self,
+        myself: ActorRef<Self::Msg>,
+        message: Self::Msg,
+        state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        self.handle_actor_message(myself, message, state).await;
         Ok(())
     }
 }
@@ -2219,6 +2577,16 @@ where
         Ok(state)
     }
 
+    async fn handle(
+        &self,
+        myself: ActorRef<Self::Msg>,
+        message: Self::Msg,
+        state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        self.handle_actor_message(myself, message, state).await;
+        Ok(())
+    }
+
     async fn handle_supervisor_evt(
         &self,
         _myself: ActorRef<Self::Msg>,
@@ -2234,321 +2602,6 @@ where
             }
             _ => {}
         }
-        Ok(())
-    }
-
-    async fn handle(
-        &self,
-        myself: ActorRef<Self::Msg>,
-        message: Self::Msg,
-        state: &mut Self::State,
-    ) -> Result<(), ActorProcessingErr> {
-        match message {
-            GossipActorMessage::PeerConnected(peer_id, _pubkey, session) => {
-                if state.is_peer_connected(&peer_id) {
-                    return Ok(());
-                }
-                state
-                    .peer_states
-                    .insert(peer_id.clone(), PeerState::new(session.id, session.ty));
-            }
-            GossipActorMessage::PeerDisconnected(peer_id, _session) => {
-                state.peer_states.remove(&peer_id);
-            }
-            GossipActorMessage::ProcessBroadcastMessage(message) => {
-                state
-                    .try_to_verify_and_save_broadcast_message(message.clone())
-                    .await;
-            }
-            GossipActorMessage::QueryBroadcastMessages(peer, queries) => {
-                let id = state.get_and_increment_request_id();
-                if let Err(e) = state
-                    .send_message_to_peer(
-                        &peer,
-                        GossipMessage::QueryBroadcastMessages(QueryBroadcastMessages {
-                            id,
-                            chain_hash: get_chain_hash(),
-                            queries,
-                        }),
-                    )
-                    .await
-                {
-                    error!(
-                        "Failed to send query broadcast messages to peer {:?}: {:?}",
-                        &peer, e
-                    );
-                }
-            }
-            GossipActorMessage::TryBroadcastMessages(messages) => {
-                state
-                    .store
-                    .actor
-                    .send_message(ExtendedGossipMessageStoreMessage::SaveAndBroadcastMessages(
-                        messages,
-                    ))
-                    .expect("store actor alive");
-            }
-            GossipActorMessage::RotateOutboundPassiveSyncingPeers => {
-                if !state.is_ready_for_passive_syncing() {
-                    return Ok(());
-                }
-
-                let current_peers = state
-                    .outbound_passive_syncing_peers()
-                    .into_iter()
-                    .collect::<HashSet<_>>();
-                let new_peers = state
-                    .peer_states
-                    .iter()
-                    .filter_map(|(peer, state)| {
-                        (state.session_type.is_outbound()
-                            && (state.sync_status.can_start_passive_syncing()
-                                || state.sync_status.is_passive_syncing()))
-                        .then_some(peer.clone())
-                    })
-                    .take(state.num_targeted_outbound_passive_syncing_peers)
-                    .collect::<HashSet<_>>();
-                debug!(
-                    "Rotating passive syncing peers: current {:?}, new {:?}",
-                    &current_peers, &new_peers
-                );
-                for peers in new_peers.difference(&current_peers) {
-                    state.start_passive_syncer(&peers).await;
-                }
-                for peers in current_peers.difference(&new_peers) {
-                    state.stop_passive_syncer(&peers).await;
-                }
-            }
-
-            GossipActorMessage::TickNetworkMaintenance => {
-                trace!(
-                    "Gossip network maintenance ticked, current state: num of peers: {}, num of finished syncing peers: {}, num of active syncing peers: {}, num of passive syncing peers: {}, num of pending queries: {}",
-                    state.peer_states.len(),
-                    state.num_finished_active_syncing_peers,
-                    state.num_of_active_syncing_peers(),
-                    state.num_of_passive_syncing_peers(),
-                    state.pending_queries.len(),
-                );
-                for peer in state.peers_to_start_active_syncing() {
-                    state.start_new_active_syncer(&peer).await;
-                }
-
-                for peer in state.peers_to_start_passive_syncing() {
-                    state.start_passive_syncer(&peer).await;
-                }
-
-                // Query missing messages from peers.
-                let pending_queries = std::mem::take(&mut state.pending_queries);
-                for chunk in pending_queries.chunks(MAX_NUM_OF_BROADCAST_MESSAGES as usize) {
-                    let queries = chunk.to_vec();
-                    let id = state.get_and_increment_request_id();
-                    for peer_state in state
-                        .peer_states
-                        .values()
-                        .take(NUM_SIMULTANEOUS_GET_REQUESTS)
-                    {
-                        let message =
-                            GossipMessage::QueryBroadcastMessages(QueryBroadcastMessages {
-                                id,
-                                chain_hash: get_chain_hash(),
-                                queries: queries.clone(),
-                            });
-                        if let Err(e) =
-                            send_message_to_session(&state.control, peer_state.session_id, message)
-                                .await
-                        {
-                            error!(
-                                "Failed to send query broadcast messages to peer {:?}: {:?}",
-                                &peer_state.session_id, e
-                            );
-                        }
-                    }
-                }
-            }
-
-            GossipActorMessage::ActiveSyncingFinished(peer_id, cursor) => {
-                state.num_finished_active_syncing_peers += 1;
-                if let Some(peer_state) = state.peer_states.get_mut(&peer_id) {
-                    peer_state.change_sync_status(PeerSyncStatus::FinishedActiveSyncing(
-                        now_timestamp_as_millis_u64(),
-                        cursor,
-                    ));
-                }
-            }
-
-            GossipActorMessage::MaliciousPeerFound(peer_id) => {
-                warn!("Malicious peer found: {:?}", &peer_id);
-            }
-
-            GossipActorMessage::SendGossipMessage(GossipMessageWithPeerId { peer_id, message }) => {
-                if let Err(error) = state.send_message_to_peer(&peer_id, message).await {
-                    error!(
-                        "Failed to send gossip message to peer {:?}: {:?}",
-                        &peer_id, error
-                    );
-                }
-            }
-
-            GossipActorMessage::GossipMessageReceived(GossipMessageWithPeerId {
-                peer_id,
-                message,
-            }) => {
-                match message {
-                    GossipMessage::BroadcastMessagesFilter(BroadcastMessagesFilter {
-                        chain_hash,
-                        after_cursor,
-                    }) => {
-                        if let Err(e) = check_chain_hash(&chain_hash) {
-                            error!("Failed to check chain hash: {:?}", e);
-                            return Ok(());
-                        }
-                        if after_cursor.is_max() {
-                            info!(
-                                "Received BroadcastMessagesFilter with max cursor from peer, stopping filter processor to {:?}",
-                                &peer_id
-                            );
-                            state.peer_states.remove(&peer_id);
-                            return Ok(());
-                        }
-                        match state.peer_states.get_mut(&peer_id) {
-                            Some(peer_state) => {
-                                match peer_state.filter_processor.as_mut() {
-                                    Some(filter_processor) => {
-                                        filter_processor.update_filter(&after_cursor);
-                                        return Ok(());
-                                    }
-                                    _ => {
-                                        peer_state.filter_processor = Some(
-                                            PeerFilterProcessor::new(
-                                                state.store.clone(),
-                                                peer_id.clone(),
-                                                after_cursor.clone(),
-                                                myself,
-                                            )
-                                            .await,
-                                        );
-                                    }
-                                };
-                                // Also start passive syncer to peer so that we have less silos.
-                                if peer_state.sync_status.can_start_passive_syncing() {
-                                    state.start_passive_syncer(&peer_id).await;
-                                }
-                            }
-                            None => {
-                                warn!(
-                                    "Received BroadcastMessagesFilter from unknown peer: {:?}",
-                                    &peer_id
-                                );
-                                return Ok(());
-                            }
-                        };
-                    }
-                    GossipMessage::BroadcastMessagesFilterResult(
-                        BroadcastMessagesFilterResult { messages },
-                    ) => {
-                        for message in messages {
-                            state
-                                .try_to_verify_and_save_broadcast_message(message)
-                                .await;
-                        }
-                    }
-                    GossipMessage::GetBroadcastMessages(get_broadcast_messages) => {
-                        if let Err(e) = check_chain_hash(&get_broadcast_messages.chain_hash) {
-                            error!("Failed to check chain hash: {:?}", e);
-                            return Ok(());
-                        }
-                        if get_broadcast_messages.count > MAX_NUM_OF_BROADCAST_MESSAGES {
-                            warn!(
-                                "Received GetBroadcastMessages with too many messages: {:?}",
-                                get_broadcast_messages.count
-                            );
-                            return Ok(());
-                        }
-                        let id = get_broadcast_messages.id;
-                        let messages = state.get_store().get_broadcast_messages(
-                            &get_broadcast_messages.after_cursor,
-                            Some(get_broadcast_messages.count as u16),
-                        );
-                        let result =
-                            GossipMessage::GetBroadcastMessagesResult(GetBroadcastMessagesResult {
-                                id,
-                                messages: messages.into_iter().map(|m| m.into()).collect(),
-                            });
-                        if let Err(error) = state.send_message_to_peer(&peer_id, result).await {
-                            error!(
-                                "Failed to send GetBroadcastMessagesResult to peer {:?}: {:?}",
-                                &peer_id, error
-                            );
-                        }
-                    }
-                    GossipMessage::GetBroadcastMessagesResult(result) => {
-                        let peer_state = state.peer_states.get(&peer_id);
-                        if let Some(PeerState {
-                            sync_status: PeerSyncStatus::ActiveGet(actor),
-                            ..
-                        }) = peer_state
-                        {
-                            let _ = actor
-                                .send_message(GossipSyncingActorMessage::ResponseReceived(result));
-                        } else {
-                            warn!(
-                                "Received GetBroadcastMessagesResult from peer {:?} in state {:?}",
-                                &peer_id, &peer_state
-                            );
-                        }
-                    }
-                    GossipMessage::QueryBroadcastMessages(QueryBroadcastMessages {
-                        id,
-                        chain_hash,
-                        queries,
-                    }) => {
-                        if let Err(e) = check_chain_hash(&chain_hash) {
-                            error!("Failed to check chain hash: {:?}", e);
-                            return Ok(());
-                        }
-                        if queries.len() > MAX_NUM_OF_BROADCAST_MESSAGES as usize {
-                            warn!(
-                                "Received QueryBroadcastMessages with too many queries: {:?}",
-                                queries.len()
-                            );
-                            return Ok(());
-                        }
-                        let (results, missing_queries) =
-                            state.get_store().query_broadcast_messages(queries);
-                        let result = GossipMessage::QueryBroadcastMessagesResult(
-                            QueryBroadcastMessagesResult {
-                                id,
-                                messages: results.into_iter().map(|m| m.into()).collect(),
-                                missing_queries: missing_queries,
-                            },
-                        );
-                        if let Err(error) = state.send_message_to_peer(&peer_id, result).await {
-                            error!(
-                                "Failed to send QueryBroadcastMessagesResult to peer {:?}: {:?}",
-                                &peer_id, error
-                            );
-                        }
-                    }
-                    GossipMessage::QueryBroadcastMessagesResult(QueryBroadcastMessagesResult {
-                        id: _id,
-                        messages,
-                        missing_queries,
-                    }) => {
-                        let _is_finished = missing_queries.is_empty();
-                        for message in messages {
-                            state
-                                .try_to_verify_and_save_broadcast_message(message)
-                                .await;
-                        }
-                        // TODO: mark requests corresponding to id as finished
-                        // TODO: if not finished, send another QueryBroadcastMessages to other peers.
-                        // Must be careful since some queries may be initiated by malformed messages
-                        // from malicious peers.
-                    }
-                }
-            }
-        }
-
         Ok(())
     }
 }

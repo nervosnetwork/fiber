@@ -138,6 +138,71 @@ pub struct CchState {
     orders_db: CchOrdersDb,
 }
 
+impl CchActor {
+    async fn handle_actor_message(
+        &self,
+        myself: ActorRef<<Self as Actor>::Msg>,
+        message: <Self as Actor>::Msg,
+        state: &mut <Self as Actor>::State,
+    ) {
+        match message {
+            CchMessage::SendBTC(send_btc, port) => {
+                let result = self.send_btc(state, send_btc).await;
+                if !port.is_closed() {
+                    // ignore error
+                    let _ = port.send(result);
+                }
+            }
+            CchMessage::ReceiveBTC(receive_btc, port) => {
+                let result = self.receive_btc(myself, state, receive_btc).await;
+                if !port.is_closed() {
+                    // ignore error
+                    let _ = port.send(result);
+                }
+            }
+            CchMessage::GetReceiveBTCOrder(payment_hash, port) => {
+                let result = state
+                    .orders_db
+                    .get_receive_btc_order(&payment_hash)
+                    .await
+                    .map_err(Into::into);
+                if !port.is_closed() {
+                    // ignore error
+                    let _ = port.send(result);
+                }
+            }
+            CchMessage::SettleSendBTCOrder(event) => {
+                tracing::debug!("settle_send_btc_order {:?}", event);
+                if let Err(err) = self.settle_send_btc_order(state, event).await {
+                    tracing::error!("settle_send_btc_order failed: {}", err);
+                }
+            }
+            CchMessage::SettleReceiveBTCOrder(event) => {
+                tracing::debug!("settle_receive_btc_order {:?}", event);
+                if let Err(err) = self.settle_receive_btc_order(state, event).await {
+                    tracing::error!("settle_receive_btc_order failed: {}", err);
+                }
+            }
+            CchMessage::PendingReceivedTlcNotification(tlc_notification) => {
+                if let Err(err) = self
+                    .handle_pending_received_tlc_notification(state, tlc_notification)
+                    .await
+                {
+                    tracing::error!("handle_pending_received_tlc_notification failed: {}", err);
+                }
+            }
+            CchMessage::SettledTlcNotification(tlc_notification) => {
+                if let Err(err) = self
+                    .handle_settled_tlc_notification(state, tlc_notification)
+                    .await
+                {
+                    tracing::error!("handle_settled_tlc_notification failed: {}", err);
+                }
+            }
+        }
+    }
+}
+
 #[ractor::async_trait]
 impl Actor for CchActor {
     type Msg = CchMessage;
@@ -189,68 +254,8 @@ impl Actor for CchActor {
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        match message {
-            CchMessage::SendBTC(send_btc, port) => {
-                let result = self.send_btc(state, send_btc).await;
-                if !port.is_closed() {
-                    // ignore error
-                    let _ = port.send(result);
-                }
-                Ok(())
-            }
-            CchMessage::ReceiveBTC(receive_btc, port) => {
-                let result = self.receive_btc(myself, state, receive_btc).await;
-                if !port.is_closed() {
-                    // ignore error
-                    let _ = port.send(result);
-                }
-                Ok(())
-            }
-            CchMessage::GetReceiveBTCOrder(payment_hash, port) => {
-                let result = state
-                    .orders_db
-                    .get_receive_btc_order(&payment_hash)
-                    .await
-                    .map_err(Into::into);
-                if !port.is_closed() {
-                    // ignore error
-                    let _ = port.send(result);
-                }
-                Ok(())
-            }
-            CchMessage::SettleSendBTCOrder(event) => {
-                tracing::debug!("settle_send_btc_order {:?}", event);
-                if let Err(err) = self.settle_send_btc_order(state, event).await {
-                    tracing::error!("settle_send_btc_order failed: {}", err);
-                }
-                Ok(())
-            }
-            CchMessage::SettleReceiveBTCOrder(event) => {
-                tracing::debug!("settle_receive_btc_order {:?}", event);
-                if let Err(err) = self.settle_receive_btc_order(state, event).await {
-                    tracing::error!("settle_receive_btc_order failed: {}", err);
-                }
-                Ok(())
-            }
-            CchMessage::PendingReceivedTlcNotification(tlc_notification) => {
-                if let Err(err) = self
-                    .handle_pending_received_tlc_notification(state, tlc_notification)
-                    .await
-                {
-                    tracing::error!("handle_pending_received_tlc_notification failed: {}", err);
-                }
-                Ok(())
-            }
-            CchMessage::SettledTlcNotification(tlc_notification) => {
-                if let Err(err) = self
-                    .handle_settled_tlc_notification(state, tlc_notification)
-                    .await
-                {
-                    tracing::error!("handle_settled_tlc_notification failed: {}", err);
-                }
-                Ok(())
-            }
-        }
+        self.handle_actor_message(myself, message, state).await;
+        Ok(())
     }
 }
 

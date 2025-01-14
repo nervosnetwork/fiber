@@ -74,36 +74,13 @@ pub enum CkbChainMessage {
     ),
 }
 
-#[ractor::async_trait]
-impl Actor for CkbChainActor {
-    type Msg = CkbChainMessage;
-    type State = CkbChainState;
-    type Arguments = CkbConfig;
-
-    async fn pre_start(
+impl CkbChainActor {
+    async fn handle_actor_message(
         &self,
-        _myself: ActorRef<Self::Msg>,
-        config: Self::Arguments,
-    ) -> Result<Self::State, ActorProcessingErr> {
-        let secret_key = config.read_secret_key()?;
-        let secp = secp256k1::Secp256k1::new();
-        let pub_key = secret_key.public_key(&secp);
-        let pub_key_hash = ckb_hash::blake2b_256(pub_key.serialize());
-        let funding_source_lock_script =
-            get_script_by_contract(Contract::Secp256k1Lock, &pub_key_hash[0..20]);
-        Ok(CkbChainState {
-            config,
-            secret_key,
-            funding_source_lock_script,
-        })
-    }
-
-    async fn handle(
-        &self,
-        myself: ActorRef<Self::Msg>,
-        message: Self::Msg,
-        state: &mut Self::State,
-    ) -> Result<(), ActorProcessingErr> {
+        myself: ActorRef<<Self as Actor>::Msg>,
+        message: <Self as Actor>::Msg,
+        state: &mut <Self as Actor>::State,
+    ) {
         use CkbChainMessage::{Fund, SendTx, Sign, TraceTx};
         match message {
             Fund(tx, request, reply_port) => {
@@ -251,7 +228,7 @@ impl Actor for CkbChainActor {
                                 // ignore error
                                 let _ = reply_port.send(status);
                             }
-                            return Ok(());
+                            return;
                         }
                         None => sleep(Duration::from_secs(5)).await,
                     }
@@ -272,6 +249,40 @@ impl Actor for CkbChainActor {
                 });
             }
         }
+    }
+}
+
+#[ractor::async_trait]
+impl Actor for CkbChainActor {
+    type Msg = CkbChainMessage;
+    type State = CkbChainState;
+    type Arguments = CkbConfig;
+
+    async fn pre_start(
+        &self,
+        _myself: ActorRef<Self::Msg>,
+        config: Self::Arguments,
+    ) -> Result<Self::State, ActorProcessingErr> {
+        let secret_key = config.read_secret_key()?;
+        let secp = secp256k1::Secp256k1::new();
+        let pub_key = secret_key.public_key(&secp);
+        let pub_key_hash = ckb_hash::blake2b_256(pub_key.serialize());
+        let funding_source_lock_script =
+            get_script_by_contract(Contract::Secp256k1Lock, &pub_key_hash[0..20]);
+        Ok(CkbChainState {
+            config,
+            secret_key,
+            funding_source_lock_script,
+        })
+    }
+
+    async fn handle(
+        &self,
+        myself: ActorRef<Self::Msg>,
+        message: Self::Msg,
+        state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        self.handle_actor_message(myself, message, state).await;
         Ok(())
     }
 }
