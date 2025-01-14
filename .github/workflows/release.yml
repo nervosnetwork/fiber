@@ -59,19 +59,22 @@ jobs:
         export OPENSSL_INCLUDE_DIR=${PWD_DIR}/openssl-1.1.1s/include
         export OPENSSL_STATIC=1
         cargo build --release --features portable
+        cd migration
+        cargo build --release --features portable
+        cd ..
     - if: matrix.os == 'ubuntu-22.04'
       name: Build linux
-      run: cargo build --release
+      run: cargo build --release && cd migration && cargo build --release && cd ..
     - if: matrix.os == 'macos-13'
       name: Build macos portable
       run: |
         export OPENSSL_LIB_DIR=/usr/local/opt/openssl@1.1/lib
         export OPENSSL_INCLUDE_DIR=/usr/local/opt/openssl@1.1/include
         export OPENSSL_STATIC=1
-        cargo build --release --features portable
+        cargo build --release --features portable && cd migration && cargo build --release --features portable && cd ..
     - if: matrix.os == 'windows-2019'
       name: Build windows
-      run: cargo build --release
+      run: cargo build --release && cd migration && cargo build --release && cd ..
     - name: Get the Version
       id: get_version
       shell: bash
@@ -82,7 +85,8 @@ jobs:
       run: |
         pkgname="fnn_${{ steps.get_version.outputs.VERSION }}-${{ matrix.pkg_suffix }}.tar.gz"
         cp "target/release/fnn${{ matrix.bin_suffix }}" "fnn${{ matrix.bin_suffix }}"
-        tar czvf "${pkgname}" "fnn${{ matrix.bin_suffix }}" "config"
+        cp "migration/target/release/fnn-migrate${{ matrix.bin_suffix }}" "fnn-migrate${{ matrix.bin_suffix }}"
+        tar czvf "${pkgname}" "fnn${{ matrix.bin_suffix }}" "fnn-migrate${{ matrix.bin_suffix }}" "config"
         echo "PKGNAME=${pkgname}" >> $GITHUB_OUTPUT
     - name: Upload Release Asset
       uses: softprops/action-gh-release@v1
