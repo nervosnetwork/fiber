@@ -4,12 +4,15 @@ use ckb_types::packed;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+/// HashAlgorithm is the hash algorithm used in the hash lock.
 #[repr(u8)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum HashAlgorithm {
+    /// The default hash algorithm, CkbHash
     #[default]
     CkbHash = 0,
+    /// The sha256 hash algorithm
     Sha256 = 1,
 }
 

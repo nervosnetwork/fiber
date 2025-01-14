@@ -59,8 +59,11 @@ impl Display for CkbInvoiceStatus {
 /// The currency of the invoice, can also used to represent the CKB network chain.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
 pub enum Currency {
+    /// The mainnet currency of CKB.
     Fibb,
+    /// The testnet currency of the CKB network.
     Fibt,
+    /// The devnet currency of the CKB network.
     Fibd,
 }
 
@@ -136,10 +139,14 @@ pub struct InvoiceData {
 #[serde_as]
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct CkbInvoice {
+    /// The currency of the invoice
     pub currency: Currency,
     #[serde_as(as = "Option<U128Hex>")]
+    /// The amount of the invoice
     pub amount: Option<u128>,
+    /// The signature of the invoice
     pub signature: Option<InvoiceSignature>,
+    /// The invoice data, including the payment hash, timestamp and other attributes
     pub data: InvoiceData,
 }
 

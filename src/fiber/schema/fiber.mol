@@ -95,6 +95,16 @@ struct ClosingSigned {
     partial_signature:  Byte32,
 }
 
+struct UpdateTlcInfo {
+    channel_id: Byte32,
+    timestamp: Uint64,
+    channel_flags: Uint32,
+    tlc_expiry_delta: Uint64,
+    tlc_minimum_value: Uint128,
+    tlc_maximum_value: Uint128,
+    tlc_fee_proportional_millionths: Uint128,
+}
+
 table AddTlc {
     channel_id:     Byte32,
     tlc_id:         Uint64,
@@ -180,6 +190,7 @@ union FiberMessage {
     TxAckRBF,
     CommitmentSigned,
     ChannelReady,
+    UpdateTlcInfo,
     AddTlc,
     RemoveTlc,
     RevokeAndAck,

@@ -1,4 +1,4 @@
-use super::channel::ChannelActorStateStore;
+use super::channel::{ChannelActorState, ChannelActorStateStore, ChannelTlcInfo};
 use super::config::AnnouncedNodeName;
 use super::gossip::GossipMessageStore;
 use super::history::{Direction, InternalResult, PaymentHistory, TimedResult};
@@ -138,21 +138,64 @@ impl ChannelInfo {
         }
     }
 
-    fn get_update_info_with(&self, node: Pubkey) -> Option<&ChannelUpdateInfo> {
-        if self.node2() == node {
-            self.update_of_node2.as_ref()
-        } else if self.node1() == node {
-            self.update_of_node1.as_ref()
-        } else {
-            None
-        }
-    }
-
     pub fn channel_last_update_time(&self) -> Option<u64> {
         self.update_of_node2
             .as_ref()
             .map(|n| n.timestamp)
             .max(self.update_of_node1.as_ref().map(|n| n.timestamp))
+    }
+
+    #[cfg(test)]
+    pub fn get_channel_update_of(&self, node: Pubkey) -> Option<&ChannelUpdateInfo> {
+        if self.node1() == node {
+            self.update_of_node1.as_ref()
+        } else if self.node2() == node {
+            self.update_of_node2.as_ref()
+        } else {
+            None
+        }
+    }
+}
+
+impl TryFrom<&ChannelActorState> for ChannelInfo {
+    type Error = String;
+
+    fn try_from(state: &ChannelActorState) -> Result<Self, Self::Error> {
+        if !state.is_ready() {
+            return Err("Channel is not ready".to_string());
+        }
+
+        let timestamp = state.must_get_funding_transaction_timestamp();
+        let channel_outpoint = state.must_get_funding_transaction_outpoint();
+        let capacity = state.get_liquid_capacity();
+        let udt_type_script = state.funding_udt_type_script.clone();
+
+        let (node1, node2, update_of_node1, update_of_node2) = if state.local_is_node1() {
+            (
+                state.local_pubkey,
+                state.remote_pubkey,
+                Some(state.get_local_channel_update_info()),
+                state.get_remote_channel_update_info(),
+            )
+        } else {
+            (
+                state.remote_pubkey,
+                state.local_pubkey,
+                state.get_remote_channel_update_info(),
+                Some(state.get_local_channel_update_info()),
+            )
+        };
+        Ok(Self {
+            channel_outpoint,
+            timestamp,
+            features: 0,
+            node1,
+            node2,
+            capacity,
+            udt_type_script,
+            update_of_node1,
+            update_of_node2,
+        })
     }
 }
 
@@ -178,11 +221,35 @@ pub struct ChannelUpdateInfo {
     pub timestamp: u64,
     /// Whether the channel can be currently used for payments (in this one direction).
     pub enabled: bool,
+    /// The exact amount of balance that we can receive from the other party via the channel.
+    /// Note that this is not our balance, but the balance of the other party.
+    /// This node is forwarding the balance for the other party, so we need to use the receivable balance
+    /// instead of our balance.
+    pub inbound_liquidity: Option<u128>,
     /// The difference in htlc expiry values that you must have when routing through this channel (in milliseconds).
     pub tlc_expiry_delta: u64,
     /// The minimum value, which must be relayed to the next hop via the channel
     pub tlc_minimum_value: u128,
     pub fee_rate: u64,
+}
+
+impl From<&ChannelTlcInfo> for ChannelUpdateInfo {
+    fn from(info: &ChannelTlcInfo) -> Self {
+        Self {
+            timestamp: info.timestamp,
+            enabled: info.enabled,
+            inbound_liquidity: None,
+            tlc_expiry_delta: info.tlc_expiry_delta,
+            tlc_minimum_value: info.tlc_minimum_value,
+            fee_rate: info.tlc_fee_proportional_millionths as u64,
+        }
+    }
+}
+
+impl From<ChannelTlcInfo> for ChannelUpdateInfo {
+    fn from(info: ChannelTlcInfo) -> Self {
+        Self::from(&info)
+    }
 }
 
 impl From<ChannelUpdate> for ChannelUpdateInfo {
@@ -196,6 +263,7 @@ impl From<&ChannelUpdate> for ChannelUpdateInfo {
         Self {
             timestamp: update.timestamp,
             enabled: !update.is_disabled(),
+            inbound_liquidity: None,
             tlc_expiry_delta: update.tlc_expiry_delta,
             tlc_minimum_value: update.tlc_minimum_value,
             fee_rate: update.tlc_fee_proportional_millionths as u64,
@@ -203,8 +271,29 @@ impl From<&ChannelUpdate> for ChannelUpdateInfo {
     }
 }
 
+/// Update for our own channel has been made. We can use those events to update our graph.
+/// The events only contain the information that is relevant for our own channels.
+/// Other channel update events should be processed by gossip messages.
+#[derive(Debug)]
+pub enum OwnedChannelUpdateEvent {
+    /// The channel is back online and can be used for routing payments.
+    /// This normally means the peer is now reachable.
+    Up(ChannelInfo),
+    /// The channel is down and should not be used for routing payments.
+    /// This normally means the peer is not reachable.
+    Down(OutPoint),
+    /// One direction of the channel is updated (e.g. new balance, new fee rate).
+    Updated(OutPoint, Pubkey, ChannelUpdateInfo),
+}
+
 #[derive(Clone, Debug)]
 pub struct NetworkGraph<S> {
+    // Whether to always process gossip messages for our own channels.
+    // See comments in should_process_gossip_message_for_channel for why we need this.
+    // TLDR: Most of the tests do not need this. Only tests in src/fiber/tests/graph.rs need this.
+    // We will only set this to true for tests in src/fiber/tests/graph.rs.
+    #[cfg(test)]
+    pub always_process_gossip_message: bool,
     // The pubkey of the node that is running this instance of the network graph.
     source: Pubkey,
     // All the channels in the network.
@@ -235,10 +324,19 @@ pub enum PathFindError {
     Other(String),
 }
 
-#[derive(Clone, Debug)]
+// An edge along the payment path from the source to the target.
+// This represents a TLC transfer from one node to another.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PathEdge {
-    pub target: Pubkey,
-    pub channel_outpoint: OutPoint,
+    pub(crate) target: Pubkey,
+    pub(crate) channel_outpoint: OutPoint,
+    // The amount that the source node will transfer to the target node.
+    // We have already added up all the fees along the path, so this amount can be used directly for the TLC.
+    pub(crate) amount_received: u128,
+    // The expiry for the TLC that the source node sends to the target node.
+    // We have already added up all the expiry deltas along the path,
+    // the only thing missing is current time. So the expiry is the current time plus the expiry delta.
+    pub(crate) incoming_tlc_expiry: u64,
 }
 
 impl<S> NetworkGraph<S>
@@ -253,6 +351,8 @@ where
 {
     pub fn new(store: S, source: Pubkey, announce_private_addr: bool) -> Self {
         let mut network_graph = Self {
+            #[cfg(test)]
+            always_process_gossip_message: false,
             source,
             channels: HashMap::new(),
             nodes: HashMap::new(),
@@ -314,6 +414,31 @@ where
         return true;
     }
 
+    // Process the events that are relevant for our own channels, and update the graph accordingly.
+    pub(crate) fn process_owned_channel_update_event(&mut self, event: OwnedChannelUpdateEvent) {
+        match event {
+            OwnedChannelUpdateEvent::Up(channel_info) => {
+                // Normally the channel_info passed here is the latest channel info,
+                // so we can just overwrite the old channel info.
+                self.channels
+                    .insert(channel_info.channel_outpoint.clone(), channel_info);
+            }
+            OwnedChannelUpdateEvent::Down(channel_outpoint) => {
+                self.channels.remove(&channel_outpoint);
+            }
+            OwnedChannelUpdateEvent::Updated(channel_outpoint, node, channel_update) => {
+                if let Some(channel) = self.channels.get_mut(&channel_outpoint) {
+                    if node == channel.node2() {
+                        channel.update_of_node2 = Some(channel_update);
+                    }
+                    if node == channel.node1() {
+                        channel.update_of_node1 = Some(channel_update);
+                    }
+                }
+            }
+        }
+    }
+
     // Load all the broadcast messages starting from latest_cursor from the store.
     // Process them and set nodes and channels accordingly.
     pub(crate) fn load_from_store(&mut self) {
@@ -364,11 +489,33 @@ where
         self.channels.get_mut(channel_outpoint)
     }
 
+    // We don't need to process our own channel announcement with gossip messages.
+    // They are processed by passing OwnedChannelUpdateEvents to the graph.
+    // These are real-time events with more detailed information (e.g. balance).
+    // We don't want to overwrite their detailed information here.
+    // But tests in src/fiber/tests/graph.rs need to process gossip messages
+    // to update the network graph. Many of the tests are messages from the graph.source.
+    // If we ignore these messages, the graph won't be updated. And many tests will fail.
+    fn should_process_gossip_message_for_nodes(&self, node1: &Pubkey, node2: &Pubkey) -> bool {
+        #[cfg(test)]
+        if self.always_process_gossip_message {
+            return true;
+        }
+        !(&self.source == node1 || &self.source == node2)
+    }
+
     fn process_channel_announcement(
         &mut self,
         timestamp: u64,
         channel_announcement: ChannelAnnouncement,
     ) -> Option<Cursor> {
+        if !self.should_process_gossip_message_for_nodes(
+            &channel_announcement.node1_id,
+            &channel_announcement.node2_id,
+        ) {
+            return None;
+        }
+
         match self.channels.get(&channel_announcement.channel_outpoint) {
             Some(_channel) => {
                 trace!(
@@ -409,11 +556,16 @@ where
     }
 
     fn process_channel_update(&mut self, channel_update: ChannelUpdate) -> Option<Cursor> {
-        let channel_outpoint = &channel_update.channel_outpoint;
-        // The channel update message may have smaller timestamp than channel announcement.
-        // So it is possible that the channel announcement is not loaded into the graph yet,
-        // when we receive the channel update message.
-        let channel = self.load_channel_info_mut(channel_outpoint)?;
+        match self.get_channel(&channel_update.channel_outpoint) {
+            Some(channel)
+                if !self
+                    .should_process_gossip_message_for_nodes(&channel.node1, &channel.node2) =>
+            {
+                return None;
+            }
+            _ => {}
+        }
+        let channel = self.load_channel_info_mut(&channel_update.channel_outpoint)?;
         let update_info = if channel_update.is_update_of_node_1() {
             &mut channel.update_of_node1
         } else {
@@ -595,15 +747,28 @@ where
 
         // Iterating over HashMap's values is not guaranteed to be in order,
         // which may introduce randomness in the path finding.
-        // the weight algorithm in find_path does not considering capacity,
-        // so the channel with larger capacity maybe have the same weight with the channel with smaller capacity
-        // so we sort by capacity reverse order to make sure we try channel with larger capacity firstly
-        channels.sort_by(|(_, _, a, _), (_, _, b, _)| {
-            b.capacity().cmp(&a.capacity()).then(
-                b.channel_last_update_time()
-                    .cmp(&a.channel_last_update_time()),
-            )
-        });
+        // We will first sort the channels by inbound_liquidity, then capacity, and at last update time.
+        // This is because the weight algorithm in find_path does not considering inbound_liquidity and capacity,
+        // so the channel with larger inbound_liquidity/capacity maybe have the same weight with the channel
+        // with smaller inbound_liquidity/capacity, even though the former have better chance to success.
+        channels.sort_by(
+            |(_, _, a_channel_info, a_channel_update_info),
+             (_, _, b_channel_info, b_channel_update_info)| {
+                b_channel_update_info
+                    .inbound_liquidity
+                    .cmp(&a_channel_update_info.inbound_liquidity)
+                    .then(
+                        b_channel_info
+                            .capacity()
+                            .cmp(&a_channel_info.capacity())
+                            .then(
+                                b_channel_info
+                                    .channel_last_update_time()
+                                    .cmp(&a_channel_info.channel_last_update_time()),
+                            ),
+                    )
+            },
+        );
         channels.into_iter()
     }
 
@@ -716,68 +881,29 @@ where
         )?;
         assert!(!route.is_empty());
 
-        let mut current_amount = amount;
-        let current_time = now_timestamp_as_millis_u64();
-        let mut current_expiry = current_time + final_tlc_expiry_delta;
-        let mut hops_data = vec![];
+        let route_len = route.len();
+        let now = now_timestamp_as_millis_u64();
+        let mut hops_data = Vec::with_capacity(route.len() + 1);
 
-        for i in (0..route.len()).rev() {
-            let is_last = i == route.len() - 1;
-            let (next_hop, next_channel_outpoint) = if is_last {
-                (None, None)
-            } else {
-                (
-                    Some(route[i + 1].target),
-                    Some(route[i + 1].channel_outpoint.clone()),
-                )
-            };
-            let (fee, expiry_delta) = if is_last {
-                (0, 0)
-            } else {
-                let channel_info = self
-                    .get_channel(&route[i].channel_outpoint)
-                    .expect("channel not found");
-                let channel_update = channel_info
-                    .get_update_info_with(route[i].target)
-                    .expect("channel_update not found");
-                let fee_rate = channel_update.fee_rate;
-                let fee =
-                    calculate_tlc_forward_fee(current_amount, fee_rate as u128).expect("fee is ok");
-                let expiry = channel_update.tlc_expiry_delta;
-                (fee, expiry)
-            };
-
-            let funding_tx_hash = if let Some(next_channel_outpoint) = next_channel_outpoint {
-                next_channel_outpoint.tx_hash().into()
-            } else {
-                Hash256::default()
-            };
-            // make sure the final hop's amount is the same as the payment amount
-            // the last hop will check the amount from TLC and the amount from the onion packet
-
+        for r in route {
             hops_data.push(PaymentHopData {
-                amount: current_amount,
-                next_hop,
+                amount: r.amount_received,
+                next_hop: Some(r.target),
                 hash_algorithm: hash_algorithm,
-                expiry: current_expiry,
-                funding_tx_hash,
-                payment_preimage: if is_last { preimage } else { None },
+                expiry: now + r.incoming_tlc_expiry,
+                funding_tx_hash: r.channel_outpoint.tx_hash().into(),
+                payment_preimage: None,
             });
-            current_expiry += expiry_delta;
-            current_amount += fee;
         }
-        // Add the first hop as the instruction for the current node, so the logic for send HTLC can be reused.
         hops_data.push(PaymentHopData {
-            amount: current_amount,
-            next_hop: Some(route[0].target),
+            amount: amount,
+            next_hop: None,
             hash_algorithm: hash_algorithm,
-            expiry: current_expiry,
-            funding_tx_hash: route[0].channel_outpoint.tx_hash().into(),
-            payment_preimage: None,
+            expiry: now + final_tlc_expiry_delta,
+            funding_tx_hash: Default::default(),
+            payment_preimage: preimage,
         });
-        hops_data.reverse();
-        assert_eq!(hops_data.len(), route.len() + 1);
-        assert_eq!(hops_data[route.len()].amount, amount);
+
         // assert there is no duplicate node in the route
         assert_eq!(
             hops_data
@@ -785,7 +911,7 @@ where
                 .filter_map(|x| x.next_hop)
                 .collect::<HashSet<_>>()
                 .len(),
-            route.len()
+            route_len
         );
 
         Ok(hops_data)
@@ -837,15 +963,21 @@ where
             .collect::<HashMap<_, _>>();
 
         let mut target = target;
-        let mut current_expiry = final_tlc_expiry_delta;
+        let mut expiry = final_tlc_expiry_delta;
         let mut last_edge = None;
 
         if route_to_self {
-            let (new_target, expiry, edge) =
-                self.adjust_target_for_route_self(&hop_hint_map, amount, source, target)?;
-            target = new_target;
-            last_edge = edge;
-            current_expiry += expiry;
+            let (t, edge, e) = self.adjust_target_for_route_self(
+                &hop_hint_map,
+                amount,
+                final_tlc_expiry_delta,
+                source,
+                target,
+            )?;
+            assert_ne!(target, t);
+            target = t;
+            expiry = expiry + e;
+            last_edge = Some(edge);
         }
         assert_ne!(source, target);
         // initialize the target node
@@ -853,11 +985,11 @@ where
             node_id: target,
             weight: 0,
             distance: 0,
-            amount_received: amount,
+            amount_to_send: amount,
             fee_charged: 0,
             probability: 1.0,
             next_hop: None,
-            incoming_tlc_expiry: current_expiry,
+            incoming_tlc_expiry: expiry,
         });
 
         while let Some(cur_hop) = nodes_heap.pop() {
@@ -865,6 +997,9 @@ where
 
             for (from, to, channel_info, channel_update) in self.get_node_inbounds(cur_hop.node_id)
             {
+                let is_initial = from == source;
+                let is_final = (to == target) && !route_to_self;
+
                 assert_eq!(to, cur_hop.node_id);
                 if &udt_type_script != channel_info.udt_type_script() {
                     continue;
@@ -881,15 +1016,15 @@ where
                     }
                 }
 
-                if let Some((_node, channel)) = &last_edge {
-                    if channel == channel_info.out_point() {
+                if let Some(last_edge) = &last_edge {
+                    if &last_edge.channel_outpoint == channel_info.out_point() {
                         continue;
                     }
                 }
 
                 edges_expanded += 1;
 
-                let next_hop_received_amount = cur_hop.amount_received;
+                let next_hop_received_amount = cur_hop.amount_to_send;
                 if next_hop_received_amount > channel_info.capacity() {
                     debug!(
                         "next_hop_received_amount: {} > channel_info.capacity {}",
@@ -899,7 +1034,7 @@ where
                     continue;
                 }
 
-                let fee = if from == source {
+                let fee = if is_final {
                     0
                 } else {
                     calculate_tlc_forward_fee(
@@ -935,31 +1070,21 @@ where
                     continue;
                 }
 
-                // if this is a direct channel, try to load the channel actor state for balance
-                if from == self.source || to == self.source {
-                    if let Some(state) = self
-                        .store
-                        .get_channel_state_by_outpoint(&channel_info.out_point())
-                    {
-                        let balance = if from == self.source {
-                            state.to_local_amount
-                        } else {
-                            state.to_remote_amount
-                        };
-                        if amount_to_send > balance {
-                            continue;
-                        }
+                // If we already know the balance of the channel, check if we can send the amount.
+                if let Some(balance) = channel_update.inbound_liquidity {
+                    if amount_to_send > balance {
+                        continue;
                     }
                 }
 
-                let expiry_delta = if from == source {
+                let expiry_delta = if is_initial {
                     0
                 } else {
                     channel_update.tlc_expiry_delta
                 };
 
-                let incoming_htlc_expiry = cur_hop.incoming_tlc_expiry + expiry_delta;
-                if incoming_htlc_expiry > tlc_expiry_limit {
+                let incoming_tlc_expiry = cur_hop.incoming_tlc_expiry + expiry_delta;
+                if incoming_tlc_expiry > tlc_expiry_limit {
                     continue;
                 }
 
@@ -997,11 +1122,23 @@ where
                     node_id: from,
                     weight,
                     distance,
-                    amount_received: amount_to_send,
-                    incoming_tlc_expiry: incoming_htlc_expiry,
+                    amount_to_send,
+                    incoming_tlc_expiry,
                     fee_charged: fee,
                     probability,
-                    next_hop: Some((cur_hop.node_id, channel_info.out_point().clone())),
+                    next_hop: Some(PathEdge {
+                        target: to,
+                        channel_outpoint: channel_info.out_point().clone(),
+                        // Here we need to use the amount accumulated so far (i.e. with the fees in current hop)
+                        // because the fee here is for the receiving node to forward the amount to the next node.
+                        // So the total amount in AddTlc packet should include the fee.
+                        amount_received: amount_to_send,
+                        // We need to use cur_hop.incoming_tlc_expiry instead of incoming_tlc_expiry here
+                        // because we need the expiry for the AddTlc packet sent from source to target.
+                        // cur_hop.incoming_tlc_expiry is the expiry time for the TLC that is going to be received by the target,
+                        // while incoming_tlc_expiry is the expiry time for the TLC that is going to be received by the source.
+                        incoming_tlc_expiry: cur_hop.incoming_tlc_expiry,
+                    }),
                 };
                 distances.insert(node.node_id, node.clone());
                 nodes_heap.push_or_fix(node);
@@ -1010,15 +1147,19 @@ where
 
         let mut current = source;
         while let Some(elem) = distances.remove(&current) {
-            let (next_pubkey, next_out_point) = elem.next_hop.expect("next_hop is none");
-            result.push(PathEdge {
-                target: next_pubkey,
-                channel_outpoint: next_out_point,
-            });
-            current = next_pubkey;
+            let edge = elem.next_hop.expect("next_hop is none");
+            current = edge.target;
+            result.push(edge);
             if current == target {
                 break;
             }
+        }
+
+        if result.is_empty() || current != target {
+            return Err(PathFindError::PathFind("no path found".to_string()));
+        }
+        if let Some(edge) = last_edge {
+            result.push(edge)
         }
 
         info!(
@@ -1028,16 +1169,6 @@ where
             started_time.elapsed(),
             result
         );
-        if result.is_empty() || current != target {
-            return Err(PathFindError::PathFind("no path found".to_string()));
-        }
-        if let Some((node, channel)) = last_edge {
-            result.push(PathEdge {
-                target: node,
-                channel_outpoint: channel.clone(),
-            })
-        }
-
         Ok(result)
     }
 
@@ -1045,9 +1176,10 @@ where
         &self,
         hop_hint_map: &HashMap<(Pubkey, bool), OutPoint>,
         amount: u128,
+        expiry: u64,
         source: Pubkey,
         target: Pubkey,
-    ) -> Result<(Pubkey, u64, Option<(Pubkey, OutPoint)>), PathFindError> {
+    ) -> Result<(Pubkey, PathEdge, u64), PathFindError> {
         let direct_channels: Vec<(Pubkey, Pubkey, &ChannelInfo, &ChannelUpdateInfo)> = self
             .get_node_inbounds(source)
             .filter(|(_, _, channel_info, _)| {
@@ -1082,14 +1214,17 @@ where
         // a proper hop hint for route self will limit the direct_channels to only one
         // if there are multiple channels, we will randomly select a channel from the source node for route to self
         // so that the following part of algorithm will always trying to find a path without cycle
-        if let Some(&(from, _, channel_info, channel_update)) =
+        if let Some(&(from, to, channel_info, channel_update)) =
             direct_channels.choose(&mut thread_rng())
         {
-            let last_edge = Some((source, channel_info.out_point().clone()));
-            let current_expiry = channel_update.tlc_expiry_delta;
             assert_ne!(target, from);
-            let target = from;
-            Ok((target, current_expiry, last_edge))
+            let last_edge = PathEdge {
+                target: to,
+                channel_outpoint: channel_info.out_point().clone(),
+                amount_received: amount,
+                incoming_tlc_expiry: expiry,
+            };
+            Ok((from, last_edge, channel_update.tlc_expiry_delta))
         } else {
             return Err(PathFindError::PathFind(
                 "no direct channel found for source node".to_string(),
@@ -1126,34 +1261,40 @@ pub trait NetworkGraphStateStore {
     fn get_payment_history_results(&self) -> Vec<(OutPoint, Direction, TimedResult)>;
 }
 
+/// The status of a payment, will update as the payment progresses.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum PaymentSessionStatus {
-    // initial status, payment session is created, no HTLC is sent
+    /// initial status, payment session is created, no HTLC is sent
     Created,
-    // the first hop AddTlc is sent successfully and waiting for the response
+    /// the first hop AddTlc is sent successfully and waiting for the response
     Inflight,
-    // related HTLC is successfully settled
+    /// related HTLC is successfully settled
     Success,
-    // related HTLC is failed
+    /// related HTLC is failed
     Failed,
 }
 
+/// The node and channel information in a payment route hop
 #[serde_as]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SessionRouteNode {
+    /// the public key of the node
     pub pubkey: Pubkey,
+    /// the amount for this hop
     pub amount: u128,
+    /// the channel outpoint for this hop
     #[serde_as(as = "EntityHex")]
     pub channel_outpoint: OutPoint,
 }
 
-// The router is a list of nodes that the payment will go through.
-// We store in the payment session and then will use it to track the payment history.
-// The router is a list of nodes that the payment will go through.
-// For example:
-//    A(amount, channel) -> B -> C -> D means A will send `amount` with `channel` to B.
+/// The router is a list of nodes that the payment will go through.
+/// We store in the payment session and then will use it to track the payment history.
+/// The router is a list of nodes that the payment will go through.
+/// For example:
+///    A(amount, channel) -> B -> C -> D means A will send `amount` with `channel` to B.
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct SessionRoute {
+    /// the nodes in the route
     pub nodes: Vec<SessionRouteNode>,
 }
 

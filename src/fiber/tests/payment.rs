@@ -10,6 +10,9 @@ use crate::fiber::NetworkActorCommand;
 use crate::fiber::NetworkActorMessage;
 use ractor::call;
 
+// This test will send two payments from node_0 to node_1, the first payment will run
+// with dry_run, the second payment will run without dry_run. Both payments will be successful.
+// But only one payment balance will be deducted from node_0.
 #[tokio::test]
 async fn test_send_payment_for_direct_channel_and_dry_run() {
     init_tracing();
@@ -17,15 +20,13 @@ async fn test_send_payment_for_direct_channel_and_dry_run() {
     // from https://github.com/nervosnetwork/fiber/issues/359
 
     let (nodes, channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
-        &[
-            ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
-            ((0, 1), (MIN_RESERVED_CKB, MIN_RESERVED_CKB + 10000000000)),
-        ],
+        &[((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB))],
         2,
         true,
     )
     .await;
-    let [mut node_0, mut node_1] = nodes.try_into().expect("2 nodes");
+    let [mut node_0, node_1] = nodes.try_into().expect("2 nodes");
+    let channel = channels[0];
     let source_node = &mut node_0;
 
     let res = source_node
@@ -42,36 +43,195 @@ async fn test_send_payment_for_direct_channel_and_dry_run() {
     eprintln!("res: {:?}", res);
     assert!(res.is_ok());
     let payment_hash = res.unwrap().payment_hash;
-
     source_node.wait_until_success(payment_hash).await;
 
-    let res = node_1
-        .send_payment_keysend(&source_node, 10000000000, false)
-        .await;
-
-    eprintln!("res: {:?}", res);
-    assert!(res.is_ok());
-
-    // sleep for a while
-    let payment_hash = res.unwrap().payment_hash;
-    node_1.wait_until_success(payment_hash).await;
-    node_1
-        .assert_payment_status(payment_hash, PaymentSessionStatus::Success, Some(1))
-        .await;
-
-    let node_0_balance = source_node.get_local_balance_from_channel(channels[0]);
-    let node_1_balance = node_1.get_local_balance_from_channel(channels[0]);
+    let node_0_balance = source_node.get_local_balance_from_channel(channel);
+    let node_1_balance = node_1.get_local_balance_from_channel(channel);
 
     // A -> B: 10000000000 use the first channel
     assert_eq!(node_0_balance, 0);
     assert_eq!(node_1_balance, 10000000000);
+}
 
-    let node_0_balance = source_node.get_local_balance_from_channel(channels[1]);
-    let node_1_balance = node_1.get_local_balance_from_channel(channels[1]);
+#[tokio::test]
+async fn test_send_payment_prefer_newer_channels() {
+    init_tracing();
+    let _span = tracing::info_span!("node", node = "test").entered();
 
-    // B -> A: 10000000000 use the second channel
+    let (nodes, channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+        &[
+            ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+            ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+        ],
+        2,
+        true,
+    )
+    .await;
+    let [mut node_0, node_1] = nodes.try_into().expect("2 nodes");
+    let source_node = &mut node_0;
+    let target_pubkey = node_1.pubkey.clone();
+
+    let res = source_node
+        .send_payment(SendPaymentCommand {
+            target_pubkey: Some(target_pubkey.clone()),
+            amount: Some(10000000000),
+            payment_hash: None,
+            final_tlc_expiry_delta: None,
+            tlc_expiry_limit: None,
+            invoice: None,
+            timeout: None,
+            max_fee_amount: None,
+            max_parts: None,
+            keysend: Some(true),
+            udt_type_script: None,
+            allow_self_payment: false,
+            hop_hints: None,
+            dry_run: false,
+        })
+        .await;
+
+    eprintln!("res: {:?}", res);
+    assert!(res.is_ok());
+    let payment_hash = res.unwrap().payment_hash;
+    source_node.wait_until_success(payment_hash).await;
+
+    // We are using the second (newer) channel, so the first channel's balances are unchanged.
+    let node_0_balance = source_node.get_local_balance_from_channel(channels[0]);
+    let node_1_balance = node_1.get_local_balance_from_channel(channels[0]);
     assert_eq!(node_0_balance, 10000000000);
     assert_eq!(node_1_balance, 0);
+
+    // We are using the second (newer) channel, so the second channel's balances are changed.
+    let node_0_balance = source_node.get_local_balance_from_channel(channels[1]);
+    let node_1_balance = node_1.get_local_balance_from_channel(channels[1]);
+    assert_eq!(node_0_balance, 0);
+    assert_eq!(node_1_balance, 10000000000);
+}
+
+#[tokio::test]
+async fn test_send_payment_prefer_channels_with_larger_balance() {
+    init_tracing();
+    let _span = tracing::info_span!("node", node = "test").entered();
+
+    let (nodes, channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+        &[
+            // These two channnels have the same overall capacity, but the second channel has more balance for node_0.
+            (
+                (0, 1),
+                (MIN_RESERVED_CKB + 5000000000, MIN_RESERVED_CKB + 5000000000),
+            ),
+            ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+        ],
+        2,
+        true,
+    )
+    .await;
+    let [mut node_0, node_1] = nodes.try_into().expect("2 nodes");
+    let source_node = &mut node_0;
+    let target_pubkey = node_1.pubkey.clone();
+
+    let res = source_node
+        .send_payment(SendPaymentCommand {
+            target_pubkey: Some(target_pubkey.clone()),
+            amount: Some(5000000000),
+            payment_hash: None,
+            final_tlc_expiry_delta: None,
+            tlc_expiry_limit: None,
+            invoice: None,
+            timeout: None,
+            max_fee_amount: None,
+            max_parts: None,
+            keysend: Some(true),
+            udt_type_script: None,
+            allow_self_payment: false,
+            hop_hints: None,
+            dry_run: false,
+        })
+        .await;
+
+    eprintln!("res: {:?}", res);
+    assert!(res.is_ok());
+    let payment_hash = res.unwrap().payment_hash;
+    source_node.wait_until_success(payment_hash).await;
+
+    // We are using the second channel (with larger balance), so the first channel's balances are unchanged.
+    let node_0_balance = source_node.get_local_balance_from_channel(channels[0]);
+    let node_1_balance = node_1.get_local_balance_from_channel(channels[0]);
+    assert_eq!(node_0_balance, 5000000000);
+    assert_eq!(node_1_balance, 5000000000);
+
+    // We are using the second channel (with larger balance), so the second channel's balances are changed.
+    let node_0_balance = source_node.get_local_balance_from_channel(channels[1]);
+    let node_1_balance = node_1.get_local_balance_from_channel(channels[1]);
+    assert_eq!(node_0_balance, 5000000000);
+    assert_eq!(node_1_balance, 5000000000);
+}
+
+#[tokio::test]
+async fn test_send_payment_over_private_channel() {
+    async fn test(amount_to_send: u128, is_payment_ok: bool) {
+        let (nodes, _channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+            &[((1, 2), (MIN_RESERVED_CKB + 20000000000, MIN_RESERVED_CKB))],
+            3,
+            true,
+        )
+        .await;
+        let [mut node1, mut node2, node3] = nodes.try_into().expect("3 nodes");
+
+        let (_new_channel_id, _funding_tx) = establish_channel_between_nodes(
+            &mut node1,
+            &mut node2,
+            false,
+            MIN_RESERVED_CKB + 20000000000,
+            MIN_RESERVED_CKB,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        // sleep for a while
+        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
+        let source_node = &mut node1;
+        let target_pubkey = node3.pubkey.clone();
+
+        let res = source_node
+            .send_payment(SendPaymentCommand {
+                target_pubkey: Some(target_pubkey.clone()),
+                amount: Some(amount_to_send),
+                payment_hash: None,
+                final_tlc_expiry_delta: None,
+                tlc_expiry_limit: None,
+                invoice: None,
+                timeout: None,
+                max_fee_amount: None,
+                max_parts: None,
+                keysend: Some(true),
+                udt_type_script: None,
+                allow_self_payment: false,
+                hop_hints: None,
+                dry_run: false,
+            })
+            .await;
+
+        eprintln!("res: {:?}", res);
+        if is_payment_ok {
+            assert!(res.is_ok());
+        } else {
+            assert!(res.is_err());
+        }
+    }
+
+    test(10000000000, true).await;
+    test(30000000000, false).await;
 }
 
 #[tokio::test]
@@ -1331,7 +1491,7 @@ async fn test_send_payment_middle_hop_stopped() {
         true,
     )
     .await;
-    let [mut node_0, _node_1, mut node_2, node_3, mut node_4] = nodes.try_into().expect("5 nodes");
+    let [mut node_0, _node_1, _node_2, node_3, mut node_4] = nodes.try_into().expect("5 nodes");
 
     // dry run node_0 -> node_3 will select  0 -> 4 -> 3
     let res = node_0
@@ -1345,32 +1505,8 @@ async fn test_send_payment_middle_hop_stopped() {
     node_4.stop().await;
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
-    let res = node_0
-        .send_payment_keysend(&node_3, 1000, true)
-        .await
-        .unwrap();
-    eprintln!("res: {:?}", res);
-    // when node_4 stopped, the first try path is still 0 -> 4 -> 3
-    // so the fee is 1
-    assert_eq!(res.fee, 1);
-
-    let res = node_0
-        .send_payment_keysend(&node_3, 1000, false)
-        .await
-        .unwrap();
-    eprintln!("res: {:?}", res);
-    assert_eq!(res.fee, 1);
-
-    node_0.wait_until_success(res.payment_hash).await;
-
-    // after the first payment try failed, the payment session will find another path
-    // 0 -> 1 -> 2 -> 3, so it will succeed, but the fee change from 1 to 3
-    let payment = node_0.get_payment_result(res.payment_hash).await;
-    assert_eq!(payment.fee, 3);
-    eprintln!("payment: {:?}", payment);
-
-    // node_2 stopped, payment will fail
-    node_2.stop().await;
+    // when node_4 stopped, node 0 learned that channel 0 -> 4 was not available
+    // so it will try another path 0 -> 1 -> 2 -> 3
     let res = node_0
         .send_payment_keysend(&node_3, 1000, false)
         .await
@@ -1378,7 +1514,7 @@ async fn test_send_payment_middle_hop_stopped() {
     eprintln!("res: {:?}", res);
     assert_eq!(res.fee, 3);
 
-    node_0.wait_until_failed(res.payment_hash).await;
+    node_0.wait_until_success(res.payment_hash).await;
 }
 
 #[tokio::test]
@@ -1539,4 +1675,79 @@ async fn test_send_payment_max_value_in_flight_in_first_hop() {
     node_0
         .expect_payment_used_channel(payment_hash, channel_id)
         .await;
+}
+
+#[tokio::test]
+async fn test_send_payment_target_hop_stopped() {
+    init_tracing();
+    let _span = tracing::info_span!("node", node = "test").entered();
+    let (nodes, _channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+        &[
+            ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((2, 3), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((3, 4), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+        ],
+        5,
+        true,
+    )
+    .await;
+    let [mut node_0, _node_1, _node_2, _node_3, mut node_4] = nodes.try_into().expect("5 nodes");
+
+    // dry run node_0 -> node_4 will select  0 -> 1 -> 2 -> 3 -> 4
+    let res = node_0
+        .send_payment_keysend(&node_4, 1000, true)
+        .await
+        .unwrap();
+    eprintln!("res: {:?}", res);
+    assert_eq!(res.fee, 5);
+
+    // node_4 stopped
+    node_4.stop().await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+    let res = node_0
+        .send_payment_keysend(&node_4, 1000, false)
+        .await
+        .unwrap();
+    eprintln!("res: {:?}", res);
+    // when node_4 stopped, the first try path is still 0 -> 1 -> 2 -> 3 -> 4
+    // so the fee is 5
+    assert_eq!(res.fee, 5);
+
+    node_0.wait_until_failed(res.payment_hash).await;
+}
+
+#[tokio::test]
+async fn test_send_payment_middle_hop_balance_is_not_enough() {
+    // https://github.com/nervosnetwork/fiber/issues/286
+    init_tracing();
+    let _span = tracing::info_span!("node", node = "test").entered();
+    let (nodes, _channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+        &[
+            ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((2, 3), (MIN_RESERVED_CKB, HUGE_CKB_AMOUNT)),
+        ],
+        4,
+        true,
+    )
+    .await;
+    let [mut node_0, _node_1, _node_2, node_3] = nodes.try_into().expect("3 nodes");
+
+    let res = node_0
+        .send_payment_keysend(&node_3, 1000, false)
+        .await
+        .unwrap();
+    eprintln!("res: {:?}", res);
+
+    // path is still 0 -> 1 -> 2 -> 3,
+    // 2 -> 3 don't have enough balance
+    node_0.wait_until_failed(res.payment_hash).await;
+    let result = node_0.get_payment_result(res.payment_hash).await;
+    eprintln!("debug result: {:?}", result);
+    assert!(result
+        .failed_error
+        .expect("got error")
+        .contains("Failed to build route"));
 }

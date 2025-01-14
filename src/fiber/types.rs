@@ -1,6 +1,4 @@
-use super::channel::{
-    ChannelFlags, ProcessingChannelError, CHANNEL_DISABLED_FLAG, MESSAGE_OF_NODE2_FLAG,
-};
+use super::channel::{ChannelFlags, ChannelTlcInfo, ProcessingChannelError};
 use super::config::AnnouncedNodeName;
 use super::gen::fiber::{
     self as molecule_fiber, ChannelUpdateOpt, PaymentPreimageOpt, PubNonce as Byte66, PubkeyOpt,
@@ -53,6 +51,20 @@ use tracing::{error, trace};
 pub fn secp256k1_instance() -> &'static Secp256k1<All> {
     static INSTANCE: OnceCell<Secp256k1<All>> = OnceCell::new();
     INSTANCE.get_or_init(Secp256k1::new)
+}
+
+bitflags::bitflags! {
+    #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct ChannelUpdateChannelFlags: u32 {
+        const DISABLED = 1;
+    }
+    #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct ChannelUpdateMessageFlags: u32 {
+        const UPDATE_OF_NODE1 = 0;
+        const UPDATE_OF_NODE2 = 1;
+    }
 }
 
 impl From<&Byte66> for PubNonce {
@@ -135,6 +147,7 @@ impl AsRef<[u8; 32]> for Privkey {
     }
 }
 
+/// A 256-bit hash digest, used as identifier of channnel, payment, transaction hash etc.
 #[serde_as]
 #[derive(Copy, Clone, Serialize, Deserialize, Hash, Eq, PartialEq, Default)]
 pub struct Hash256(#[serde_as(as = "SliceHex")] [u8; 32]);
@@ -267,6 +280,7 @@ impl Privkey {
     }
 }
 
+/// The public key for a Node
 #[derive(Copy, Clone, Debug, PartialOrd, Ord, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Pubkey(pub PublicKey);
 
@@ -996,6 +1010,64 @@ impl TryFrom<molecule_fiber::ClosingSigned> for ClosingSigned {
             )
             .map_err(|e| anyhow!(e))?,
         })
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct UpdateTlcInfo {
+    pub channel_id: Hash256,
+    pub timestamp: u64,
+    pub channel_flags: ChannelUpdateChannelFlags,
+    pub tlc_expiry_delta: u64,
+    pub tlc_minimum_value: u128,
+    pub tlc_maximum_value: u128,
+    pub tlc_fee_proportional_millionths: u128,
+}
+
+impl From<UpdateTlcInfo> for molecule_fiber::UpdateTlcInfo {
+    fn from(update_tlc_info: UpdateTlcInfo) -> Self {
+        molecule_fiber::UpdateTlcInfo::new_builder()
+            .channel_id(update_tlc_info.channel_id.into())
+            .timestamp(update_tlc_info.timestamp.pack())
+            .channel_flags(update_tlc_info.channel_flags.bits().pack())
+            .tlc_expiry_delta(update_tlc_info.tlc_expiry_delta.pack())
+            .tlc_minimum_value(update_tlc_info.tlc_minimum_value.pack())
+            .tlc_maximum_value(update_tlc_info.tlc_maximum_value.pack())
+            .tlc_fee_proportional_millionths(update_tlc_info.tlc_fee_proportional_millionths.pack())
+            .build()
+    }
+}
+
+impl From<molecule_fiber::UpdateTlcInfo> for UpdateTlcInfo {
+    fn from(update_tlc_info: molecule_fiber::UpdateTlcInfo) -> Self {
+        UpdateTlcInfo {
+            channel_id: update_tlc_info.channel_id().into(),
+            timestamp: update_tlc_info.timestamp().unpack(),
+            channel_flags: ChannelUpdateChannelFlags::from_bits_truncate(
+                update_tlc_info.channel_flags().unpack(),
+            ),
+            tlc_expiry_delta: update_tlc_info.tlc_expiry_delta().unpack(),
+            tlc_minimum_value: update_tlc_info.tlc_minimum_value().unpack(),
+            tlc_maximum_value: update_tlc_info.tlc_maximum_value().unpack(),
+            tlc_fee_proportional_millionths: update_tlc_info
+                .tlc_fee_proportional_millionths()
+                .unpack(),
+        }
+    }
+}
+
+impl From<UpdateTlcInfo> for ChannelTlcInfo {
+    fn from(update_tlc_info: UpdateTlcInfo) -> Self {
+        ChannelTlcInfo {
+            timestamp: update_tlc_info.timestamp,
+            enabled: !update_tlc_info
+                .channel_flags
+                .contains(ChannelUpdateChannelFlags::DISABLED),
+            tlc_expiry_delta: update_tlc_info.tlc_expiry_delta,
+            tlc_minimum_value: update_tlc_info.tlc_minimum_value,
+            tlc_maximum_value: update_tlc_info.tlc_maximum_value,
+            tlc_fee_proportional_millionths: update_tlc_info.tlc_fee_proportional_millionths,
+        }
     }
 }
 
@@ -2074,10 +2146,10 @@ pub struct ChannelUpdate {
     // Currently only the first bit is used to indicate the direction of the channel.
     // If it is 0, it means this channel message is from node 1 (thus applies to tlcs
     // sent from node 2 to node 1). Otherwise, it is from node 2.
-    pub message_flags: u32,
+    pub message_flags: ChannelUpdateMessageFlags,
     // Currently only the first bit is used to indicate if the channel is disabled.
     // If the first bit is set, the channel is disabled.
-    pub channel_flags: u32,
+    pub channel_flags: ChannelUpdateChannelFlags,
     pub tlc_expiry_delta: u64,
     pub tlc_minimum_value: u128,
     pub tlc_fee_proportional_millionths: u128,
@@ -2087,15 +2159,15 @@ impl ChannelUpdate {
     pub fn new_unsigned(
         channel_outpoint: OutPoint,
         timestamp: u64,
-        message_flags: u32,
-        channel_flags: u32,
+        message_flags: ChannelUpdateMessageFlags,
+        channel_flags: ChannelUpdateChannelFlags,
         tlc_expiry_delta: u64,
         tlc_minimum_value: u128,
         tlc_fee_proportional_millionths: u128,
     ) -> Self {
         // To avoid having the same timestamp for both channel updates, we will use an even
         // timestamp number for node1 and an odd timestamp number for node2.
-        let timestamp = if message_flags & MESSAGE_OF_NODE2_FLAG == MESSAGE_OF_NODE2_FLAG {
+        let timestamp = if message_flags.contains(ChannelUpdateMessageFlags::UPDATE_OF_NODE2) {
             timestamp | 1u64
         } else {
             timestamp & !1u64
@@ -2133,11 +2205,13 @@ impl ChannelUpdate {
     }
 
     pub fn is_update_of_node_2(&self) -> bool {
-        self.message_flags & MESSAGE_OF_NODE2_FLAG == MESSAGE_OF_NODE2_FLAG
+        self.message_flags
+            .contains(ChannelUpdateMessageFlags::UPDATE_OF_NODE2)
     }
 
     pub fn is_disabled(&self) -> bool {
-        self.channel_flags & CHANNEL_DISABLED_FLAG == CHANNEL_DISABLED_FLAG
+        self.channel_flags
+            .contains(ChannelUpdateChannelFlags::DISABLED)
     }
 
     pub fn cursor(&self) -> Cursor {
@@ -2154,8 +2228,8 @@ impl From<ChannelUpdate> for molecule_fiber::ChannelUpdate {
             .chain_hash(channel_update.chain_hash.into())
             .channel_outpoint(channel_update.channel_outpoint)
             .timestamp(channel_update.timestamp.pack())
-            .message_flags(channel_update.message_flags.pack())
-            .channel_flags(channel_update.channel_flags.pack())
+            .message_flags(channel_update.message_flags.bits().pack())
+            .channel_flags(channel_update.channel_flags.bits().pack())
             .tlc_expiry_delta(channel_update.tlc_expiry_delta.pack())
             .tlc_minimum_value(channel_update.tlc_minimum_value.pack())
             .tlc_fee_proportional_millionths(channel_update.tlc_fee_proportional_millionths.pack());
@@ -2179,8 +2253,12 @@ impl TryFrom<molecule_fiber::ChannelUpdate> for ChannelUpdate {
             chain_hash: channel_update.chain_hash().into(),
             channel_outpoint: channel_update.channel_outpoint(),
             timestamp: channel_update.timestamp().unpack(),
-            message_flags: channel_update.message_flags().unpack(),
-            channel_flags: channel_update.channel_flags().unpack(),
+            message_flags: ChannelUpdateMessageFlags::from_bits_truncate(
+                channel_update.message_flags().unpack(),
+            ),
+            channel_flags: ChannelUpdateChannelFlags::from_bits_truncate(
+                channel_update.channel_flags().unpack(),
+            ),
             tlc_expiry_delta: channel_update.tlc_expiry_delta().unpack(),
             tlc_minimum_value: channel_update.tlc_minimum_value().unpack(),
             tlc_fee_proportional_millionths: channel_update
@@ -2291,6 +2369,7 @@ pub enum FiberChannelMessage {
     TxAckRBF(TxAckRBF),
     Shutdown(Shutdown),
     ClosingSigned(ClosingSigned),
+    UpdateTlcInfo(UpdateTlcInfo),
     AddTlc(AddTlc),
     RevokeAndAck(RevokeAndAck),
     RemoveTlc(RemoveTlc),
@@ -2314,6 +2393,7 @@ impl FiberChannelMessage {
             FiberChannelMessage::TxAckRBF(tx_ack_rbf) => tx_ack_rbf.channel_id,
             FiberChannelMessage::Shutdown(shutdown) => shutdown.channel_id,
             FiberChannelMessage::ClosingSigned(closing_signed) => closing_signed.channel_id,
+            FiberChannelMessage::UpdateTlcInfo(update_tlc_info) => update_tlc_info.channel_id,
             FiberChannelMessage::AddTlc(add_tlc) => add_tlc.channel_id,
             FiberChannelMessage::RevokeAndAck(revoke_and_ack) => revoke_and_ack.channel_id,
             FiberChannelMessage::RemoveTlc(remove_tlc) => remove_tlc.channel_id,
@@ -3313,6 +3393,9 @@ impl From<FiberMessage> for molecule_fiber::FiberMessageUnion {
                 FiberChannelMessage::ClosingSigned(closing_signed) => {
                     molecule_fiber::FiberMessageUnion::ClosingSigned(closing_signed.into())
                 }
+                FiberChannelMessage::UpdateTlcInfo(update_tlc_info) => {
+                    molecule_fiber::FiberMessageUnion::UpdateTlcInfo(update_tlc_info.into())
+                }
                 FiberChannelMessage::AddTlc(add_tlc) => {
                     molecule_fiber::FiberMessageUnion::AddTlc(add_tlc.into())
                 }
@@ -3398,6 +3481,11 @@ impl TryFrom<molecule_fiber::FiberMessageUnion> for FiberMessage {
             molecule_fiber::FiberMessageUnion::ClosingSigned(closing_signed) => {
                 FiberMessage::ChannelNormalOperation(FiberChannelMessage::ClosingSigned(
                     closing_signed.try_into()?,
+                ))
+            }
+            molecule_fiber::FiberMessageUnion::UpdateTlcInfo(update_tlc_info) => {
+                FiberMessage::ChannelNormalOperation(FiberChannelMessage::UpdateTlcInfo(
+                    update_tlc_info.into(),
                 ))
             }
             molecule_fiber::FiberMessageUnion::AddTlc(add_tlc) => {

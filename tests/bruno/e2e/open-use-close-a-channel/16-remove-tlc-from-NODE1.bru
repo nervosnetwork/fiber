@@ -1,7 +1,7 @@
 meta {
   name: remove tlc from NODE1
   type: http
-  seq: 20
+  seq: 16
 }
 
 post {
@@ -23,13 +23,17 @@ body:json {
     "params": [
       {
         "channel_id": "{{CHANNEL_ID}}",
-        "tlc_id": "{{TLC_ID6}}",
+        "tlc_id": "{{TLC_ID3}}",
         "reason": {
           "error_code": "TemporaryNodeFailure"
         }
       }
     ]
   }
+}
+
+script:pre-request {
+  await new Promise(r => setTimeout(r, 2000));
 }
 
 assert {
