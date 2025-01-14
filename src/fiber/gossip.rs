@@ -2453,7 +2453,10 @@ where
                         }
                     }
                     GossipMessage::GetBroadcastMessages(get_broadcast_messages) => {
-                        check_chain_hash(&get_broadcast_messages.chain_hash)?;
+                        if let Err(e) = check_chain_hash(&get_broadcast_messages.chain_hash) {
+                            error!("Failed to check chain hash: {:?}", e);
+                            return Ok(());
+                        }
                         if get_broadcast_messages.count > MAX_NUM_OF_BROADCAST_MESSAGES {
                             warn!(
                                 "Received GetBroadcastMessages with too many messages: {:?}",
