@@ -28,6 +28,10 @@ struct Args {
     /// Path to the database
     #[arg(short, long)]
     path: String,
+
+    /// Skip confirmation prompts
+    #[arg(short, long, default_value_t = false)]
+    skip_confirm: bool,
 }
 
 fn main() {
@@ -39,9 +43,11 @@ fn main() {
     let args = Args::parse();
     let path = Path::new(&args.path);
 
+    let skip_confirm = args.skip_confirm;
+
     let db = open_db(path).expect("failed to open db");
     let migrate = init_db_migrate(db);
-    if let Err(err) = migrate.check_or_run_migrate(path, true) {
+    if let Err(err) = migrate.check_or_run_migrate(path, true, skip_confirm) {
         eprintln!("{}", err);
     }
 }

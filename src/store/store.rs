@@ -75,7 +75,7 @@ fn update_channel_timestamp(
 impl Store {
     pub fn new<P: AsRef<Path>>(path: P) -> Result<Self, String> {
         let db = Self::open_db(path.as_ref())?;
-        let db = Self::start_migrate(path, db, false)?;
+        let db = Self::check_migrate(path, db, false)?;
         Ok(Self { db })
     }
 
@@ -130,13 +130,13 @@ impl Store {
     }
 
     /// Open or create a rocksdb
-    fn start_migrate<P: AsRef<Path>>(
+    fn check_migrate<P: AsRef<Path>>(
         path: P,
         db: Arc<DB>,
         run_migrate: bool,
     ) -> Result<Arc<DB>, String> {
         let migrate = DbMigrate::new(db);
-        migrate.check_or_run_migrate(path, run_migrate)
+        migrate.check_or_run_migrate(path, run_migrate, false)
     }
 }
 
