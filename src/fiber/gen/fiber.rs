@@ -7326,10 +7326,6 @@ impl ::core::fmt::Display for UpdateTlcInfo {
             "tlc_fee_proportional_millionths",
             self.tlc_fee_proportional_millionths()
         )?;
-        let extra_count = self.count_extra_fields();
-        if extra_count != 0 {
-            write!(f, ", .. ({} fields)", extra_count)?;
-        }
         write!(f, " }}")
     }
 }
@@ -7340,75 +7336,35 @@ impl ::core::default::Default for UpdateTlcInfo {
     }
 }
 impl UpdateTlcInfo {
-    const DEFAULT_VALUE: [u8; 132] = [
-        132, 0, 0, 0, 32, 0, 0, 0, 64, 0, 0, 0, 72, 0, 0, 0, 76, 0, 0, 0, 84, 0, 0, 0, 100, 0, 0,
-        0, 116, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    const DEFAULT_VALUE: [u8; 100] = [
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     ];
+    pub const TOTAL_SIZE: usize = 100;
+    pub const FIELD_SIZES: [usize; 7] = [32, 8, 4, 8, 16, 16, 16];
     pub const FIELD_COUNT: usize = 7;
-    pub fn total_size(&self) -> usize {
-        molecule::unpack_number(self.as_slice()) as usize
-    }
-    pub fn field_count(&self) -> usize {
-        if self.total_size() == molecule::NUMBER_SIZE {
-            0
-        } else {
-            (molecule::unpack_number(&self.as_slice()[molecule::NUMBER_SIZE..]) as usize / 4) - 1
-        }
-    }
-    pub fn count_extra_fields(&self) -> usize {
-        self.field_count() - Self::FIELD_COUNT
-    }
-    pub fn has_extra_fields(&self) -> bool {
-        Self::FIELD_COUNT != self.field_count()
-    }
     pub fn channel_id(&self) -> Byte32 {
-        let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[4..]) as usize;
-        let end = molecule::unpack_number(&slice[8..]) as usize;
-        Byte32::new_unchecked(self.0.slice(start..end))
+        Byte32::new_unchecked(self.0.slice(0..32))
     }
     pub fn timestamp(&self) -> Uint64 {
-        let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[8..]) as usize;
-        let end = molecule::unpack_number(&slice[12..]) as usize;
-        Uint64::new_unchecked(self.0.slice(start..end))
+        Uint64::new_unchecked(self.0.slice(32..40))
     }
     pub fn channel_flags(&self) -> Uint32 {
-        let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[12..]) as usize;
-        let end = molecule::unpack_number(&slice[16..]) as usize;
-        Uint32::new_unchecked(self.0.slice(start..end))
+        Uint32::new_unchecked(self.0.slice(40..44))
     }
     pub fn tlc_expiry_delta(&self) -> Uint64 {
-        let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[16..]) as usize;
-        let end = molecule::unpack_number(&slice[20..]) as usize;
-        Uint64::new_unchecked(self.0.slice(start..end))
+        Uint64::new_unchecked(self.0.slice(44..52))
     }
     pub fn tlc_minimum_value(&self) -> Uint128 {
-        let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[20..]) as usize;
-        let end = molecule::unpack_number(&slice[24..]) as usize;
-        Uint128::new_unchecked(self.0.slice(start..end))
+        Uint128::new_unchecked(self.0.slice(52..68))
     }
     pub fn tlc_maximum_value(&self) -> Uint128 {
-        let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[24..]) as usize;
-        let end = molecule::unpack_number(&slice[28..]) as usize;
-        Uint128::new_unchecked(self.0.slice(start..end))
+        Uint128::new_unchecked(self.0.slice(68..84))
     }
     pub fn tlc_fee_proportional_millionths(&self) -> Uint128 {
-        let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[28..]) as usize;
-        if self.has_extra_fields() {
-            let end = molecule::unpack_number(&slice[32..]) as usize;
-            Uint128::new_unchecked(self.0.slice(start..end))
-        } else {
-            Uint128::new_unchecked(self.0.slice(start..))
-        }
+        Uint128::new_unchecked(self.0.slice(84..100))
     }
     pub fn as_reader<'r>(&'r self) -> UpdateTlcInfoReader<'r> {
         UpdateTlcInfoReader::new_unchecked(self.as_slice())
@@ -7477,76 +7433,33 @@ impl<'r> ::core::fmt::Display for UpdateTlcInfoReader<'r> {
             "tlc_fee_proportional_millionths",
             self.tlc_fee_proportional_millionths()
         )?;
-        let extra_count = self.count_extra_fields();
-        if extra_count != 0 {
-            write!(f, ", .. ({} fields)", extra_count)?;
-        }
         write!(f, " }}")
     }
 }
 impl<'r> UpdateTlcInfoReader<'r> {
+    pub const TOTAL_SIZE: usize = 100;
+    pub const FIELD_SIZES: [usize; 7] = [32, 8, 4, 8, 16, 16, 16];
     pub const FIELD_COUNT: usize = 7;
-    pub fn total_size(&self) -> usize {
-        molecule::unpack_number(self.as_slice()) as usize
-    }
-    pub fn field_count(&self) -> usize {
-        if self.total_size() == molecule::NUMBER_SIZE {
-            0
-        } else {
-            (molecule::unpack_number(&self.as_slice()[molecule::NUMBER_SIZE..]) as usize / 4) - 1
-        }
-    }
-    pub fn count_extra_fields(&self) -> usize {
-        self.field_count() - Self::FIELD_COUNT
-    }
-    pub fn has_extra_fields(&self) -> bool {
-        Self::FIELD_COUNT != self.field_count()
-    }
     pub fn channel_id(&self) -> Byte32Reader<'r> {
-        let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[4..]) as usize;
-        let end = molecule::unpack_number(&slice[8..]) as usize;
-        Byte32Reader::new_unchecked(&self.as_slice()[start..end])
+        Byte32Reader::new_unchecked(&self.as_slice()[0..32])
     }
     pub fn timestamp(&self) -> Uint64Reader<'r> {
-        let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[8..]) as usize;
-        let end = molecule::unpack_number(&slice[12..]) as usize;
-        Uint64Reader::new_unchecked(&self.as_slice()[start..end])
+        Uint64Reader::new_unchecked(&self.as_slice()[32..40])
     }
     pub fn channel_flags(&self) -> Uint32Reader<'r> {
-        let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[12..]) as usize;
-        let end = molecule::unpack_number(&slice[16..]) as usize;
-        Uint32Reader::new_unchecked(&self.as_slice()[start..end])
+        Uint32Reader::new_unchecked(&self.as_slice()[40..44])
     }
     pub fn tlc_expiry_delta(&self) -> Uint64Reader<'r> {
-        let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[16..]) as usize;
-        let end = molecule::unpack_number(&slice[20..]) as usize;
-        Uint64Reader::new_unchecked(&self.as_slice()[start..end])
+        Uint64Reader::new_unchecked(&self.as_slice()[44..52])
     }
     pub fn tlc_minimum_value(&self) -> Uint128Reader<'r> {
-        let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[20..]) as usize;
-        let end = molecule::unpack_number(&slice[24..]) as usize;
-        Uint128Reader::new_unchecked(&self.as_slice()[start..end])
+        Uint128Reader::new_unchecked(&self.as_slice()[52..68])
     }
     pub fn tlc_maximum_value(&self) -> Uint128Reader<'r> {
-        let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[24..]) as usize;
-        let end = molecule::unpack_number(&slice[28..]) as usize;
-        Uint128Reader::new_unchecked(&self.as_slice()[start..end])
+        Uint128Reader::new_unchecked(&self.as_slice()[68..84])
     }
     pub fn tlc_fee_proportional_millionths(&self) -> Uint128Reader<'r> {
-        let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[28..]) as usize;
-        if self.has_extra_fields() {
-            let end = molecule::unpack_number(&slice[32..]) as usize;
-            Uint128Reader::new_unchecked(&self.as_slice()[start..end])
-        } else {
-            Uint128Reader::new_unchecked(&self.as_slice()[start..])
-        }
+        Uint128Reader::new_unchecked(&self.as_slice()[84..100])
     }
 }
 impl<'r> molecule::prelude::Reader<'r> for UpdateTlcInfoReader<'r> {
@@ -7561,47 +7474,12 @@ impl<'r> molecule::prelude::Reader<'r> for UpdateTlcInfoReader<'r> {
     fn as_slice(&self) -> &'r [u8] {
         self.0
     }
-    fn verify(slice: &[u8], compatible: bool) -> molecule::error::VerificationResult<()> {
+    fn verify(slice: &[u8], _compatible: bool) -> molecule::error::VerificationResult<()> {
         use molecule::verification_error as ve;
         let slice_len = slice.len();
-        if slice_len < molecule::NUMBER_SIZE {
-            return ve!(Self, HeaderIsBroken, molecule::NUMBER_SIZE, slice_len);
+        if slice_len != Self::TOTAL_SIZE {
+            return ve!(Self, TotalSizeNotMatch, Self::TOTAL_SIZE, slice_len);
         }
-        let total_size = molecule::unpack_number(slice) as usize;
-        if slice_len != total_size {
-            return ve!(Self, TotalSizeNotMatch, total_size, slice_len);
-        }
-        if slice_len < molecule::NUMBER_SIZE * 2 {
-            return ve!(Self, HeaderIsBroken, molecule::NUMBER_SIZE * 2, slice_len);
-        }
-        let offset_first = molecule::unpack_number(&slice[molecule::NUMBER_SIZE..]) as usize;
-        if offset_first % molecule::NUMBER_SIZE != 0 || offset_first < molecule::NUMBER_SIZE * 2 {
-            return ve!(Self, OffsetsNotMatch);
-        }
-        if slice_len < offset_first {
-            return ve!(Self, HeaderIsBroken, offset_first, slice_len);
-        }
-        let field_count = offset_first / molecule::NUMBER_SIZE - 1;
-        if field_count < Self::FIELD_COUNT {
-            return ve!(Self, FieldCountNotMatch, Self::FIELD_COUNT, field_count);
-        } else if !compatible && field_count > Self::FIELD_COUNT {
-            return ve!(Self, FieldCountNotMatch, Self::FIELD_COUNT, field_count);
-        };
-        let mut offsets: Vec<usize> = slice[molecule::NUMBER_SIZE..offset_first]
-            .chunks_exact(molecule::NUMBER_SIZE)
-            .map(|x| molecule::unpack_number(x) as usize)
-            .collect();
-        offsets.push(total_size);
-        if offsets.windows(2).any(|i| i[0] > i[1]) {
-            return ve!(Self, OffsetsNotMatch);
-        }
-        Byte32Reader::verify(&slice[offsets[0]..offsets[1]], compatible)?;
-        Uint64Reader::verify(&slice[offsets[1]..offsets[2]], compatible)?;
-        Uint32Reader::verify(&slice[offsets[2]..offsets[3]], compatible)?;
-        Uint64Reader::verify(&slice[offsets[3]..offsets[4]], compatible)?;
-        Uint128Reader::verify(&slice[offsets[4]..offsets[5]], compatible)?;
-        Uint128Reader::verify(&slice[offsets[5]..offsets[6]], compatible)?;
-        Uint128Reader::verify(&slice[offsets[6]..offsets[7]], compatible)?;
         Ok(())
     }
 }
@@ -7616,6 +7494,8 @@ pub struct UpdateTlcInfoBuilder {
     pub(crate) tlc_fee_proportional_millionths: Uint128,
 }
 impl UpdateTlcInfoBuilder {
+    pub const TOTAL_SIZE: usize = 100;
+    pub const FIELD_SIZES: [usize; 7] = [32, 8, 4, 8, 16, 16, 16];
     pub const FIELD_COUNT: usize = 7;
     pub fn channel_id(mut self, v: Byte32) -> Self {
         self.channel_id = v;
@@ -7650,36 +7530,9 @@ impl molecule::prelude::Builder for UpdateTlcInfoBuilder {
     type Entity = UpdateTlcInfo;
     const NAME: &'static str = "UpdateTlcInfoBuilder";
     fn expected_length(&self) -> usize {
-        molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1)
-            + self.channel_id.as_slice().len()
-            + self.timestamp.as_slice().len()
-            + self.channel_flags.as_slice().len()
-            + self.tlc_expiry_delta.as_slice().len()
-            + self.tlc_minimum_value.as_slice().len()
-            + self.tlc_maximum_value.as_slice().len()
-            + self.tlc_fee_proportional_millionths.as_slice().len()
+        Self::TOTAL_SIZE
     }
     fn write<W: molecule::io::Write>(&self, writer: &mut W) -> molecule::io::Result<()> {
-        let mut total_size = molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1);
-        let mut offsets = Vec::with_capacity(Self::FIELD_COUNT);
-        offsets.push(total_size);
-        total_size += self.channel_id.as_slice().len();
-        offsets.push(total_size);
-        total_size += self.timestamp.as_slice().len();
-        offsets.push(total_size);
-        total_size += self.channel_flags.as_slice().len();
-        offsets.push(total_size);
-        total_size += self.tlc_expiry_delta.as_slice().len();
-        offsets.push(total_size);
-        total_size += self.tlc_minimum_value.as_slice().len();
-        offsets.push(total_size);
-        total_size += self.tlc_maximum_value.as_slice().len();
-        offsets.push(total_size);
-        total_size += self.tlc_fee_proportional_millionths.as_slice().len();
-        writer.write_all(&molecule::pack_number(total_size as molecule::Number))?;
-        for offset in offsets.into_iter() {
-            writer.write_all(&molecule::pack_number(offset as molecule::Number))?;
-        }
         writer.write_all(self.channel_id.as_slice())?;
         writer.write_all(self.timestamp.as_slice())?;
         writer.write_all(self.channel_flags.as_slice())?;

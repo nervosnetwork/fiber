@@ -95,7 +95,7 @@ struct ClosingSigned {
     partial_signature:  Byte32,
 }
 
-table UpdateTlcInfo {
+struct UpdateTlcInfo {
     channel_id: Byte32,
     timestamp: Uint64,
     channel_flags: Uint32,
