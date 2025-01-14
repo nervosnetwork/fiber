@@ -6,8 +6,9 @@ use ckb_types::{packed::OutPoint, prelude::Pack};
 use secp256k1::{Keypair, PublicKey, Secp256k1, SecretKey, XOnlyPublicKey};
 
 use crate::ckb::contracts::{get_cell_deps_by_contracts, get_script_by_contract, Contract};
-use crate::fiber::channel::{MESSAGE_OF_NODE1_FLAG, MESSAGE_OF_NODE2_FLAG};
-use crate::fiber::types::{ChannelUpdate, EcdsaSignature};
+use crate::fiber::types::{
+    ChannelUpdate, ChannelUpdateChannelFlags, ChannelUpdateMessageFlags, EcdsaSignature,
+};
 use crate::{
     fiber::{
         config::AnnouncedNodeName,
@@ -131,7 +132,7 @@ impl ChannelTestContext {
 
     pub fn create_channel_update_of_node1(
         &self,
-        channel_flags: u32,
+        channel_flags: ChannelUpdateChannelFlags,
         tlc_expiry_delta: u64,
         tlc_minimum_value: u128,
         tlc_fee_proportional_millionths: u128,
@@ -139,7 +140,7 @@ impl ChannelTestContext {
         let mut unsigned_channel_update = ChannelUpdate::new_unsigned(
             self.channel_announcement.channel_outpoint.clone(),
             now_timestamp_as_millis_u64(),
-            MESSAGE_OF_NODE1_FLAG,
+            ChannelUpdateMessageFlags::UPDATE_OF_NODE1,
             channel_flags,
             tlc_expiry_delta,
             tlc_minimum_value,
@@ -153,7 +154,7 @@ impl ChannelTestContext {
 
     pub fn create_channel_update_of_node2(
         &self,
-        channel_flags: u32,
+        channel_flags: ChannelUpdateChannelFlags,
         tlc_expiry_delta: u64,
         tlc_minimum_value: u128,
         tlc_fee_proportional_millionths: u128,
@@ -161,7 +162,7 @@ impl ChannelTestContext {
         let mut unsigned_channel_update = ChannelUpdate::new_unsigned(
             self.channel_announcement.channel_outpoint.clone(),
             now_timestamp_as_millis_u64(),
-            MESSAGE_OF_NODE2_FLAG,
+            ChannelUpdateMessageFlags::UPDATE_OF_NODE2,
             channel_flags,
             tlc_expiry_delta,
             tlc_minimum_value,
