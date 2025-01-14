@@ -4,12 +4,14 @@ use rocksdb::ops::Iterate;
 use rocksdb::ops::Put;
 use rocksdb::DB;
 use std::sync::Arc;
-use tracing::debug;
+use tracing::info;
 
 const MIGRATION_DB_VERSION: &str = "20250112205923";
 
 pub use fiber_v020::fiber::channel::ChannelActorState as ChannelActorStateV020;
 pub use fiber_v021::fiber::channel::ChannelActorState as ChannelActorStateV021;
+
+use crate::util::convert;
 
 pub struct MigrationObj {
     version: String,
@@ -29,7 +31,7 @@ impl Migration for MigrationObj {
         db: Arc<DB>,
         _pb: Arc<dyn Fn(u64) -> ProgressBar + Send + Sync>,
     ) -> Result<Arc<DB>, Error> {
-        eprintln!("MigrationObj::migrate ...........");
+        info!("MigrationObj::migrate ...........");
 
         const CHANNEL_ACTOR_STATE_PREFIX: u8 = 0;
         let prefix = vec![CHANNEL_ACTOR_STATE_PREFIX];
@@ -38,11 +40,11 @@ impl Migration for MigrationObj {
             .prefix_iterator(prefix.as_slice())
             .take_while(move |(col_key, _)| col_key.starts_with(prefix.as_slice()))
         {
-            debug!(
-                key = hex::encode(k.as_ref()),
-                value = hex::encode(v.as_ref()),
-                "Obtained old channel state"
-            );
+            // debug!(
+            //     key = hex::encode(k.as_ref()),
+            //     value = hex::encode(v.as_ref()),
+            //     "Obtained old channel state"
+            // );
             let old_channel_state: ChannelActorStateV020 =
                 bincode::deserialize(&v).expect("deserialize to old channel state");
 
@@ -65,14 +67,47 @@ impl Migration for MigrationObj {
             let last_revoke_and_ack_remote_nonce =
                 all_remote_nonces.get(0).map(|(_, nonce)| nonce).cloned();
 
-            let serialized = serde_json::to_string(&old_channel_state).unwrap();
-            let mut new_channel_state: ChannelActorStateV021 =
-                serde_json::from_str(&serialized).expect("deserialize to new state");
-            new_channel_state.last_revoke_and_ack_remote_nonce = last_revoke_and_ack_remote_nonce;
-            new_channel_state.last_committed_remote_nonce = last_committed_remote_nonce;
-
-            new_channel_state.last_commitment_signed_remote_nonce =
-                old_channel_state.last_used_nonce_in_commitment_signed;
+            let new_channel_state = ChannelActorStateV021 {
+                state: convert(old_channel_state.state),
+                public_channel_info: old_channel_state
+                    .public_channel_info
+                    .map(|info| convert(info)),
+                local_pubkey: convert(old_channel_state.local_pubkey),
+                remote_pubkey: convert(old_channel_state.remote_pubkey),
+                id: convert(old_channel_state.id),
+                funding_tx: old_channel_state.funding_tx,
+                funding_tx_confirmed_at: old_channel_state.funding_tx_confirmed_at,
+                funding_udt_type_script: old_channel_state.funding_udt_type_script,
+                is_acceptor: old_channel_state.is_acceptor,
+                to_local_amount: old_channel_state.to_local_amount,
+                to_remote_amount: old_channel_state.to_remote_amount,
+                local_reserved_ckb_amount: old_channel_state.local_reserved_ckb_amount,
+                remote_reserved_ckb_amount: old_channel_state.remote_reserved_ckb_amount,
+                commitment_fee_rate: old_channel_state.commitment_fee_rate,
+                commitment_delay_epoch: old_channel_state.commitment_delay_epoch,
+                funding_fee_rate: old_channel_state.funding_fee_rate,
+                signer: convert(old_channel_state.signer),
+                local_channel_public_keys: convert(old_channel_state.local_channel_public_keys),
+                commitment_numbers: convert(old_channel_state.commitment_numbers),
+                local_constraints: convert(old_channel_state.local_constraints),
+                remote_constraints: convert(old_channel_state.remote_constraints),
+                tlc_state: convert(old_channel_state.tlc_state),
+                remote_shutdown_script: old_channel_state.remote_shutdown_script,
+                local_shutdown_script: old_channel_state.local_shutdown_script,
+                // ++++++++ new fields +++++++++++
+                last_commitment_signed_remote_nonce: old_channel_state
+                    .last_used_nonce_in_commitment_signed,
+                last_revoke_and_ack_remote_nonce,
+                last_committed_remote_nonce,
+                // --------- new fields ----------
+                latest_commitment_transaction: old_channel_state.latest_commitment_transaction,
+                remote_commitment_points: convert(old_channel_state.remote_commitment_points),
+                remote_channel_public_keys: convert(old_channel_state.remote_channel_public_keys),
+                local_shutdown_info: convert(old_channel_state.local_shutdown_info),
+                remote_shutdown_info: convert(old_channel_state.remote_shutdown_info),
+                reestablishing: old_channel_state.reestablishing,
+                created_at: old_channel_state.created_at,
+            };
 
             let new_channel_state_bytes =
                 bincode::serialize(&new_channel_state).expect("serialize to new channel state");
