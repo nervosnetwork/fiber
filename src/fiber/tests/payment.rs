@@ -519,6 +519,8 @@ async fn test_send_payment_with_route_to_self_with_hop_hints() {
                 pubkey: node_0.pubkey.clone(),
                 channel_funding_tx: channel_0_funding_tx,
                 inbound: true,
+                fee_rate: None,
+                tlc_expiry_delta: None,
             }]),
             dry_run: false,
         })
@@ -631,6 +633,8 @@ async fn test_send_payment_with_route_to_self_with_outbound_hop_hints() {
                 pubkey: node_0.pubkey.clone(),
                 channel_funding_tx: channel_0_funding_tx,
                 inbound: false,
+                fee_rate: None,
+                tlc_expiry_delta: None,
             }]),
             dry_run: false,
         })
@@ -722,6 +726,8 @@ async fn test_send_payment_select_channel_with_hop_hints() {
                 pubkey: node_2.pubkey.clone(),
                 channel_funding_tx: channel_3_funding_tx,
                 inbound: true,
+                fee_rate: None,
+                tlc_expiry_delta: None,
             }]),
             dry_run: false,
         })
@@ -769,6 +775,8 @@ async fn test_send_payment_select_channel_with_hop_hints() {
                 pubkey: node_1.pubkey.clone(),
                 channel_funding_tx: channel_2_funding_tx,
                 inbound: false,
+                fee_rate: None,
+                tlc_expiry_delta: None,
             }]),
             dry_run: false,
         })
@@ -813,6 +821,8 @@ async fn test_send_payment_select_channel_with_hop_hints() {
                 pubkey: node_2.pubkey.clone(),
                 channel_funding_tx: wrong_channel_hash,
                 inbound: true,
+                fee_rate: None,
+                tlc_expiry_delta: None,
             }]),
             dry_run: false,
         })
@@ -869,12 +879,16 @@ async fn test_send_payment_two_nodes_with_hop_hints_and_multiple_channels() {
                     pubkey: node_0.pubkey.clone(),
                     channel_funding_tx: channel_1_funding_tx,
                     inbound: false,
+                    fee_rate: None,
+                    tlc_expiry_delta: None,
                 },
                 // node2 - channel_3 -> node1
                 HopHint {
                     pubkey: node_0.pubkey.clone(),
                     channel_funding_tx: channel_3_funding_tx,
                     inbound: true,
+                    fee_rate: None,
+                    tlc_expiry_delta: None,
                 },
             ]),
             dry_run: false,

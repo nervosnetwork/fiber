@@ -17,6 +17,8 @@ use crate::fiber::types::PaymentHopData;
 use crate::invoice::CkbInvoice;
 use crate::now_timestamp_as_millis_u64;
 use ckb_types::packed::{OutPoint, Script};
+use ckb_types::prelude::{Builder, Pack};
+use molecule::prelude::Entity;
 use rand::seq::SliceRandom;
 use rand::thread_rng;
 use serde::{Deserialize, Serialize};
@@ -952,23 +954,13 @@ where
             ));
         }
 
-        let hop_hint_map: HashMap<(Pubkey, bool), OutPoint> = hop_hints
-            .into_iter()
-            .map(|hint| {
-                (
-                    (hint.pubkey, hint.inbound),
-                    OutPoint::new(hint.channel_funding_tx.into(), 0),
-                )
-            })
-            .collect::<HashMap<_, _>>();
-
         let mut target = target;
         let mut expiry = final_tlc_expiry_delta;
         let mut last_edge = None;
 
         if route_to_self {
             let (t, edge, e) = self.adjust_target_for_route_self(
-                &hop_hint_map,
+                &hop_hints,
                 amount,
                 final_tlc_expiry_delta,
                 source,
@@ -1002,17 +994,6 @@ where
                 assert_eq!(to, cur_hop.node_id);
                 if &udt_type_script != channel_info.udt_type_script() {
                     continue;
-                }
-
-                if let Some(channel) = hop_hint_map.get(&(from, false)) {
-                    if channel != channel_info.out_point() {
-                        continue;
-                    }
-                }
-                if let Some(channel) = hop_hint_map.get(&(to, true)) {
-                    if channel != channel_info.out_point() {
-                        continue;
-                    }
                 }
 
                 if let Some(last_edge) = &last_edge {
@@ -1173,59 +1154,52 @@ where
 
     fn adjust_target_for_route_self(
         &self,
-        hop_hint_map: &HashMap<(Pubkey, bool), OutPoint>,
+        hop_hints: &[HopHint],
         amount: u128,
         expiry: u64,
         node: Pubkey,
     ) -> Result<(Pubkey, PathEdge, u64), PathFindError> {
-        let direct_channels: Vec<(Pubkey, Pubkey, OutPoint, u64)> = self
-            .get_node_inbounds(node)
-            .filter(|(_, _, channel_info, _)| {
-                if let Some(channel) = hop_hint_map.get(&(node, true)) {
-                    // if there is a hop hint for node -> source,
-                    // try to use this channel as the last candidate hop for route self
-                    // and we event don't check the direct balance of channel,
-                    // hop hint's priority is higher than direct balance
-                    return channel == channel_info.out_point();
-                }
-                if let Some(channel) = hop_hint_map.get(&(node, false)) {
-                    // if there is a hop hint for source -> node,
-                    // then we can not set this node as the last candidate hop for route self
-                    // so skip this channel
-                    if channel == channel_info.out_point() {
-                        return false;
-                    }
-                }
-                if let Some(state) = self
-                    .store
-                    .get_channel_state_by_outpoint(&channel_info.out_point())
-                {
-                    let balance = state.to_remote_amount;
-                    return balance >= amount;
-                }
-                // normal code path will not reach here, we must can get balance for direct channels
-                // anyway, check the capacity here for safety
-                return channel_info.capacity() >= amount;
-            })
-            .map(|(from, to, channel_info, channel_update)| {
-                (
-                    from,
-                    to,
-                    channel_info.out_point().clone(),
-                    channel_update.tlc_expiry_delta,
-                )
+        let mut channels: Vec<(Pubkey, OutPoint, u64)> = hop_hints
+            .iter()
+            .map(|hint| {
+                let pubkey = hint.pubkey;
+                let outpoint = OutPoint::new_builder()
+                    .tx_hash(hint.channel_funding_tx.into())
+                    .index(0u32.pack())
+                    .build();
+                let expiry = hint.tlc_expiry_delta;
+                (pubkey, outpoint, expiry)
             })
             .collect();
+        for (from, _, channel_info, channel_update) in self.get_node_inbounds(node) {
+            if let Some(state) = self
+                .store
+                .get_channel_state_by_outpoint(&channel_info.out_point())
+            {
+                let balance = state.to_remote_amount;
+                if balance < amount {
+                    continue;
+                }
+            }
+            // normal code path will not reach here, we must can get balance for direct channels
+            // anyway, check the capacity here for safety
+            if channel_info.capacity() < amount {
+                continue;
+            }
+            channels.push((
+                from,
+                channel_info.out_point().clone(),
+                channel_update.tlc_expiry_delta,
+            ))
+        }
 
         // a proper hop hint for route self will limit the direct_channels to only one
         // if there are multiple channels, we will randomly select a channel from the source node for route to self
         // so that the following part of algorithm will always trying to find a path without cycle
-        if let Some((from, to, outpoint, tlc_expiry_delta)) =
-            direct_channels.choose(&mut thread_rng())
-        {
+        if let Some((from, outpoint, tlc_expiry_delta)) = channels.choose(&mut thread_rng()) {
             assert_ne!(node, *from);
             let last_edge = PathEdge {
-                target: *to,
+                target: node,
                 channel_outpoint: outpoint.clone(),
                 amount_received: amount,
                 incoming_tlc_expiry: expiry,

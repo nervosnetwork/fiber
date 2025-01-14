@@ -317,11 +317,13 @@ pub struct SendPaymentCommand {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HopHint {
     /// The public key of the node
-    pub pubkey: Pubkey,
+    pub(crate) pubkey: Pubkey,
     /// The funding transaction hash of the channel outpoint
-    pub channel_funding_tx: Hash256,
-    /// inbound or outbound for the channel
-    pub inbound: bool,
+    pub(crate) channel_funding_tx: Hash256,
+    /// The fee rate to use this hop to forward the payment.
+    pub(crate) fee_rate: u64,
+    /// The TLC expiry delta to use this hop to forward the payment.
+    pub(crate) tlc_expiry_delta: u64,
 }
 
 #[serde_as]
