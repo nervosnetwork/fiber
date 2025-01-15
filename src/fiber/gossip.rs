@@ -327,8 +327,6 @@ pub enum GossipActorMessage {
         Vec<BroadcastMessageQuery>,
         RpcReplyPort<Result<QueryBroadcastMessagesResult, GossipError>>,
     ),
-    // Save some broadcast messages to the store.
-    SaveBroadcastMessages(Option<PeerId>, Vec<BroadcastMessage>),
     // The querying of broadcast messages from a peer has timed out.
     QueryBroadcastMessagesTimeout(PeerId, u64),
     // Try to broadcast BroadcastMessage created by us to the network.
@@ -2407,11 +2405,6 @@ where
             GossipActorMessage::ProcessBroadcastMessage(message) => {
                 state
                     .try_to_verify_and_save_broadcast_messages(None, vec![message.clone()])
-                    .await;
-            }
-            GossipActorMessage::SaveBroadcastMessages(peer_id, vec) => {
-                state
-                    .try_to_verify_and_save_broadcast_messages(peer_id, vec)
                     .await;
             }
             GossipActorMessage::QueryBroadcastMessagesTimeout(peer, request_id) => {
