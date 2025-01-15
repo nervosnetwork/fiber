@@ -1,6 +1,8 @@
+#[cfg(debug_assertions)]
+use crate::fiber::graph::SessionRoute;
 use crate::fiber::{
     channel::ChannelActorStateStore,
-    graph::{PaymentSessionStatus, SessionRoute},
+    graph::PaymentSessionStatus,
     network::{HopHint as NetworkHopHint, SendPaymentCommand},
     serde_utils::{U128Hex, U64Hex},
     types::{Hash256, Pubkey},

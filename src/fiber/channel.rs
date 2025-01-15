@@ -756,6 +756,10 @@ where
             ProcessingChannelError::TlcForwardingError(tlc_err) => tlc_err,
             _ => {
                 let error_detail = self.get_tlc_error(state, &error.source).await;
+                debug!(
+                    "AddTlc failed: {:?} with error_code: {:?}",
+                    payment_hash, error_detail.error_code
+                );
                 #[cfg(debug_assertions)]
                 self.network
                     .clone()
