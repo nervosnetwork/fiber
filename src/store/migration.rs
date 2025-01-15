@@ -51,8 +51,10 @@ impl Migrations {
             }
         };
 
-        debug!("Current database version [{}]", db_version);
-        debug!("Latest database version [{}]", LATEST_DB_VERSION);
+        debug!(
+            "Current database version: [{}], latest db version: [{}]",
+            db_version, LATEST_DB_VERSION
+        );
         db_version.as_str().cmp(LATEST_DB_VERSION)
     }
 
