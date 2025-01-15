@@ -3,9 +3,11 @@ use crate::store::migration::DefaultMigration;
 use crate::store::migration::Migration;
 use crate::store::migration::Migrations;
 use crate::store::migration::LATEST_DB_VERSION;
+use crate::store::migration::MIGRATION_VERSION_KEY;
 use crate::Error;
 use indicatif::ProgressBar;
 use rocksdb::ops::Open;
+use rocksdb::ops::Put;
 use rocksdb::DBCompressionType;
 use rocksdb::Options;
 use rocksdb::DB;
@@ -36,7 +38,7 @@ fn test_default_migration() {
     assert_eq!(migrate.check(), Ordering::Less);
     migrate.init_db_version().unwrap();
     assert!(!migrate.need_init());
-    assert_eq!(migrate.check(), Ordering::Less);
+    assert_eq!(migrate.check(), Ordering::Equal);
 }
 
 #[test]
@@ -97,8 +99,13 @@ fn test_run_migration() {
         LATEST_DB_VERSION,
         run_count.clone(),
     )));
+    assert_eq!(migrations.check(db.clone()), Ordering::Equal);
 
+    // now manually set db version to a lower one
+    db.put(MIGRATION_VERSION_KEY, "20221116135521")
+        .expect("failed to set db version");
     assert_eq!(migrations.check(db.clone()), Ordering::Less);
+
     migrations.migrate(db.clone()).unwrap();
     assert_eq!(*run_count.read().unwrap(), 3);
     assert_eq!(migrations.check(db.clone()), Ordering::Equal);
