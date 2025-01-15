@@ -8,10 +8,9 @@ use tracing::info;
 
 const MIGRATION_DB_VERSION: &str = "20250112205923";
 
+use crate::util::convert;
 pub use fiber_v020::fiber::channel::ChannelActorState as ChannelActorStateV020;
 pub use fiber_v021::fiber::channel::ChannelActorState as ChannelActorStateV021;
-
-use crate::util::convert;
 
 pub struct MigrationObj {
     version: String,

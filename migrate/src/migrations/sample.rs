@@ -24,7 +24,7 @@ impl Migration for MigrationObj {
         db: Arc<DB>,
         _pb: Arc<dyn Fn(u64) -> ProgressBar + Send + Sync>,
     ) -> Result<Arc<DB>, Error> {
-        eprintln!("MigrationObj::migrate ...........");
+        eprintln!("MigrationObj::migrate .....{}....", MIGRATION_DB_VERSION);
         Ok(db)
     }
 

@@ -16,12 +16,12 @@ use tracing::info;
 
 const MIGRATION_DB_VERSION: &str = "20250115051223";
 
-pub use fiber_v022::fiber::channel::{
-    ChannelTlcInfo as ChannelTlcInfoV022, PublicChannelInfo as PublicChannelInfoV022,
+pub use fiber_v030::fiber::channel::{
+    ChannelTlcInfo as ChannelTlcInfoV030, PublicChannelInfo as PublicChannelInfoV030,
 };
 
 pub use fiber_v021::fiber::channel::ChannelActorState as ChannelActorStateV021;
-pub use fiber_v022::fiber::channel::ChannelActorState as ChannelActorStateV022;
+pub use fiber_v030::fiber::channel::ChannelActorState as ChannelActorStateV030;
 
 use crate::util::convert;
 
@@ -60,7 +60,7 @@ impl Migration for MigrationObj {
 
             let now_timestamp = now_timestamp_as_millis_u64();
             let local_tlc_info = match old_channel_state.public_channel_info {
-                Some(ref info) => ChannelTlcInfoV022 {
+                Some(ref info) => ChannelTlcInfoV030 {
                     timestamp: now_timestamp,
                     enabled: info.enabled,
                     tlc_fee_proportional_millionths: info.tlc_fee_proportional_millionths,
@@ -68,7 +68,7 @@ impl Migration for MigrationObj {
                     tlc_minimum_value: info.tlc_min_value,
                     tlc_maximum_value: DEFAULT_TLC_MAX_VALUE,
                 },
-                None => ChannelTlcInfoV022 {
+                None => ChannelTlcInfoV030 {
                     timestamp: now_timestamp,
                     enabled: true,
                     tlc_fee_proportional_millionths: DEFAULT_TLC_FEE_PROPORTIONAL_MILLIONTHS,
@@ -82,7 +82,7 @@ impl Migration for MigrationObj {
                 old_channel_state
                     .public_channel_info
                     .clone()
-                    .map(|info| PublicChannelInfoV022 {
+                    .map(|info| PublicChannelInfoV030 {
                         local_channel_announcement_signature: info
                             .remote_channel_announcement_signature
                             .clone()
@@ -96,7 +96,7 @@ impl Migration for MigrationObj {
                         channel_update: info.channel_update.clone().map(convert),
                     });
 
-            let new_channel_state = ChannelActorStateV022 {
+            let new_channel_state = ChannelActorStateV030 {
                 state: convert(old_channel_state.state),
                 local_pubkey: convert(old_channel_state.local_pubkey),
                 remote_pubkey: convert(old_channel_state.remote_pubkey),
