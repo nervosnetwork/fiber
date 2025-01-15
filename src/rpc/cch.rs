@@ -116,7 +116,6 @@ pub(crate) struct ReceiveBTCResponse {
 }
 
 /// RPC module for cross chain hub demonstration.
-/// This is the seccond line
 #[rpc(server)]
 trait CchRpc {
     /// Send BTC to a address.

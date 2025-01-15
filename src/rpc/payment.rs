@@ -1,6 +1,6 @@
 use crate::fiber::{
     channel::ChannelActorStateStore,
-    graph::PaymentSessionStatus as InnerPaymentSessionStatus,
+    graph::{PaymentSessionStatus, SessionRoute},
     network::{HopHint as NetworkHopHint, SendPaymentCommand},
     serde_utils::{U128Hex, U64Hex},
     types::{Hash256, Pubkey},
@@ -24,30 +24,6 @@ pub struct GetPaymentCommandParams {
     pub payment_hash: Hash256,
 }
 
-/// The status of a payment, will update as the payment progresses.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub enum PaymentSessionStatus {
-    /// initial status, payment session is created, no HTLC is sent
-    Created,
-    /// the first hop AddTlc is sent successfully and waiting for the response
-    Inflight,
-    /// related HTLC is successfully settled
-    Success,
-    /// related HTLC is failed
-    Failed,
-}
-
-impl From<InnerPaymentSessionStatus> for PaymentSessionStatus {
-    fn from(status: InnerPaymentSessionStatus) -> Self {
-        match status {
-            InnerPaymentSessionStatus::Created => PaymentSessionStatus::Created,
-            InnerPaymentSessionStatus::Inflight => PaymentSessionStatus::Inflight,
-            InnerPaymentSessionStatus::Success => PaymentSessionStatus::Success,
-            InnerPaymentSessionStatus::Failed => PaymentSessionStatus::Failed,
-        }
-    }
-}
-
 #[serde_as]
 #[derive(Serialize, Deserialize, Clone)]
 pub struct GetPaymentCommandResult {
@@ -66,6 +42,10 @@ pub struct GetPaymentCommandResult {
     /// fee paid for the payment
     #[serde_as(as = "U128Hex")]
     pub fee: u128,
+
+    #[cfg(debug_assertions)]
+    /// The route information for the payment
+    router: SessionRoute,
 }
 
 #[serde_as]
@@ -130,6 +110,7 @@ pub(crate) struct SendPaymentCommandParams {
     dry_run: Option<bool>,
 }
 
+/// A hop hint is a hint for a node to use a specific channel.
 #[serde_as]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HopHint {
@@ -220,6 +201,8 @@ where
             last_updated_at: response.last_updated_at,
             failed_error: response.failed_error,
             fee: response.fee,
+            #[cfg(debug_assertions)]
+            router: response.router.into(),
         })
     }
 
@@ -240,6 +223,8 @@ where
             created_at: response.created_at,
             failed_error: response.failed_error,
             fee: response.fee,
+            #[cfg(debug_assertions)]
+            router: response.router.into(),
         })
     }
 }

@@ -55,8 +55,8 @@ coverage: coverage-run-unittests coverage-collect-data coverage-generate-report
 
 .PHONY: gen-rpc-doc
 gen-rpc-doc:
-	$(if $(shell command -v fiber-rpc-gen),,cargo install fiber-rpc-gen --force)
-	fiber-rpc-gen ./src/rpc
+	$(if $(shell command -v fiber-rpc-gen),,cargo install fiber-rpc-gen --version 0.1.6 --force)
+	fiber-rpc-gen ./src/
 	if grep -q "TODO: add desc" ./src/rpc/README.md; then \
         echo "Warning: There are 'TODO: add desc' in src/rpc/README.md, please add documentation comments to resolve them"; \
 		exit 1; \

@@ -1,11 +1,11 @@
 use super::test_utils::{init_tracing, NetworkNode};
 use crate::fiber::channel::UpdateCommand;
 use crate::fiber::config::MAX_PAYMENT_TLC_EXPIRY_LIMIT;
-use crate::fiber::graph::PaymentSessionStatus;
+use crate::fiber::graph::{ChannelInfo, PaymentSessionStatus};
 use crate::fiber::network::{DebugEvent, SendPaymentCommand};
 use crate::fiber::tests::test_utils::*;
 use crate::fiber::types::{
-    Hash256, PaymentHopData, PeeledOnionPacket, TlcErrorCode, NO_SHARED_SECRET,
+    Hash256, PaymentHopData, PeeledOnionPacket, Pubkey, TlcErrorCode, NO_SHARED_SECRET,
 };
 use crate::invoice::{CkbInvoiceStatus, Currency, InvoiceBuilder};
 use crate::{
@@ -175,6 +175,38 @@ async fn test_create_private_channel() {
 }
 
 #[tokio::test]
+async fn test_create_channel_with_remote_tlc_info() {
+    async fn test(public: bool) {
+        let node_a_funding_amount = 100000000000;
+        let node_b_funding_amount = 6200000000;
+
+        let (node_a, node_b, channel_id, _) = NetworkNode::new_2_nodes_with_established_channel(
+            node_a_funding_amount,
+            node_b_funding_amount,
+            public,
+        )
+        .await;
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+        let node_a_channel_state = node_a.store.get_channel_actor_state(&channel_id).unwrap();
+        let node_b_channel_state = node_b.store.get_channel_actor_state(&channel_id).unwrap();
+
+        assert_eq!(
+            Some(node_a_channel_state.local_tlc_info),
+            node_b_channel_state.remote_tlc_info
+        );
+        assert_eq!(
+            Some(node_b_channel_state.local_tlc_info),
+            node_a_channel_state.remote_tlc_info
+        );
+    }
+
+    test(true).await;
+    test(false).await;
+}
+
+#[tokio::test]
 async fn test_create_public_channel() {
     init_tracing();
 
@@ -189,10 +221,7 @@ async fn test_create_public_channel() {
     .await;
 }
 
-#[tokio::test]
-async fn test_public_channel_saved_to_the_owner_graph() {
-    init_tracing();
-
+async fn do_test_owned_channel_saved_to_the_owner_graph(public: bool) {
     let node1_funding_amount = 100000000000;
     let node2_funding_amount = 6200000000;
 
@@ -200,12 +229,12 @@ async fn test_public_channel_saved_to_the_owner_graph() {
         NetworkNode::new_2_nodes_with_established_channel(
             node1_funding_amount,
             node2_funding_amount,
-            true,
+            public,
         )
         .await;
 
     // Wait for the channel announcement to be broadcasted
-    tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
     let node1_id = node1.peer_id.clone();
     node1.stop().await;
@@ -219,6 +248,8 @@ async fn test_public_channel_saved_to_the_owner_graph() {
         HashSet::from([node1_channel.node1_peerid(), node1_channel.node2_peerid()]),
         HashSet::from([node1_id.clone(), node2_id.clone()])
     );
+    assert_ne!(node1_channel.update_of_node1, None);
+    assert_ne!(node1_channel.update_of_node2, None);
     let node1_nodes = node1.get_network_graph_nodes().await;
     assert_eq!(node1_nodes.len(), 2);
     for node in node1_nodes {
@@ -228,6 +259,8 @@ async fn test_public_channel_saved_to_the_owner_graph() {
     let node2_channels = node2.get_network_graph_channels().await;
     assert_eq!(node2_channels.len(), 1);
     let node2_channel = &node2_channels[0];
+    assert_ne!(node2_channel.update_of_node1, None);
+    assert_ne!(node2_channel.update_of_node2, None);
     assert_eq!(
         HashSet::from([node2_channel.node1_peerid(), node2_channel.node2_peerid()]),
         HashSet::from([node1_id, node2_id])
@@ -237,6 +270,355 @@ async fn test_public_channel_saved_to_the_owner_graph() {
     for node in node2_nodes {
         assert!(node.node_id == node2_channel.node1() || node.node_id == node2_channel.node2());
     }
+}
+
+#[tokio::test]
+async fn test_owned_public_channel_saved_to_the_owner_graph() {
+    do_test_owned_channel_saved_to_the_owner_graph(true).await;
+}
+
+#[tokio::test]
+async fn test_owned_private_channel_saved_to_the_owner_graph() {
+    do_test_owned_channel_saved_to_the_owner_graph(false).await;
+}
+
+async fn do_test_owned_channel_removed_from_graph_on_disconnected(public: bool) {
+    let node1_funding_amount = 100000000000;
+    let node2_funding_amount = 6200000000;
+
+    let (mut node1, mut node2, _new_channel_id, _) =
+        NetworkNode::new_2_nodes_with_established_channel(
+            node1_funding_amount,
+            node2_funding_amount,
+            public,
+        )
+        .await;
+
+    let node1_id = node1.peer_id.clone();
+    let node2_id = node2.peer_id.clone();
+
+    let node1_channels = node1.get_network_graph_channels().await;
+    assert_ne!(node1_channels, vec![]);
+    let node2_channels = node2.get_network_graph_channels().await;
+    assert_ne!(node2_channels, vec![]);
+
+    node1
+        .network_actor
+        .send_message(NetworkActorMessage::new_command(
+            NetworkActorCommand::DisconnectPeer(node2_id.clone()),
+        ))
+        .expect("node_a alive");
+
+    node1
+        .expect_event(|event| match event {
+            NetworkServiceEvent::PeerDisConnected(peer_id, _) => {
+                assert_eq!(peer_id, &node2_id);
+                true
+            }
+            _ => false,
+        })
+        .await;
+
+    node2
+        .expect_event(|event| match event {
+            NetworkServiceEvent::PeerDisConnected(peer_id, _) => {
+                assert_eq!(peer_id, &node1_id);
+                true
+            }
+            _ => false,
+        })
+        .await;
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    let node1_channels = node1.get_network_graph_channels().await;
+    assert_eq!(node1_channels, vec![]);
+    let node2_channels = node2.get_network_graph_channels().await;
+    assert_eq!(node2_channels, vec![]);
+}
+
+#[tokio::test]
+async fn test_owned_channel_removed_from_graph_on_disconnected_public_channel() {
+    do_test_owned_channel_removed_from_graph_on_disconnected(true).await;
+}
+
+#[tokio::test]
+async fn test_owned_channel_removed_from_graph_on_disconnected_private_channel() {
+    do_test_owned_channel_removed_from_graph_on_disconnected(false).await;
+}
+
+async fn do_test_owned_channel_saved_to_graph_on_reconnected(public: bool) {
+    let node1_funding_amount = 100000000000;
+    let node2_funding_amount = 6200000000;
+
+    let (mut node1, mut node2, _new_channel_id, _) =
+        NetworkNode::new_2_nodes_with_established_channel(
+            node1_funding_amount,
+            node2_funding_amount,
+            public,
+        )
+        .await;
+
+    let node1_id = node1.peer_id.clone();
+    let node2_id = node2.peer_id.clone();
+
+    let node1_channels = node1.get_network_graph_channels().await;
+    assert_ne!(node1_channels, vec![]);
+    let node2_channels = node2.get_network_graph_channels().await;
+    assert_ne!(node2_channels, vec![]);
+
+    node1
+        .network_actor
+        .send_message(NetworkActorMessage::new_command(
+            NetworkActorCommand::DisconnectPeer(node2_id.clone()),
+        ))
+        .expect("node_a alive");
+
+    node1
+        .expect_event(|event| match event {
+            NetworkServiceEvent::PeerDisConnected(peer_id, _) => {
+                assert_eq!(peer_id, &node2_id);
+                true
+            }
+            _ => false,
+        })
+        .await;
+
+    node2
+        .expect_event(|event| match event {
+            NetworkServiceEvent::PeerDisConnected(peer_id, _) => {
+                assert_eq!(peer_id, &node1_id);
+                true
+            }
+            _ => false,
+        })
+        .await;
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    let node1_channels = node1.get_network_graph_channels().await;
+    assert_eq!(node1_channels, vec![]);
+    let node2_channels = node2.get_network_graph_channels().await;
+    assert_eq!(node2_channels, vec![]);
+
+    // Don't use `connect_to` here as that may consume the `ChannelCreated` event.
+    // This is due to tentacle connection is async. We may actually send
+    // the `ChannelCreated` event before the `PeerConnected` event.
+    node1.connect_to_nonblocking(&node2).await;
+
+    node1
+        .expect_event(|event| match event {
+            NetworkServiceEvent::ChannelCreated(peer_id, channel_id) => {
+                println!("A channel ({:?}) to {:?} create", channel_id, peer_id);
+                assert_eq!(peer_id, &node2_id);
+                true
+            }
+            _ => false,
+        })
+        .await;
+
+    node2
+        .expect_event(|event| match event {
+            NetworkServiceEvent::ChannelCreated(peer_id, channel_id) => {
+                println!("A channel ({:?}) to {:?} create", channel_id, peer_id);
+                assert_eq!(peer_id, &node1_id);
+                true
+            }
+            _ => false,
+        })
+        .await;
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    let node1_channels = node1.get_network_graph_channels().await;
+    assert_ne!(node1_channels, vec![]);
+    let node2_channels = node2.get_network_graph_channels().await;
+    assert_ne!(node2_channels, vec![]);
+}
+
+#[tokio::test]
+async fn test_owned_channel_saved_to_graph_on_reconnected_public_channel() {
+    do_test_owned_channel_saved_to_graph_on_reconnected(true).await;
+}
+
+#[tokio::test]
+async fn test_owned_channel_saved_to_graph_on_reconnected_private_channel() {
+    do_test_owned_channel_saved_to_graph_on_reconnected(false).await;
+}
+
+async fn do_test_update_graph_balance_after_payment(public: bool) {
+    init_tracing();
+
+    let _span = tracing::info_span!("node", node = "test").entered();
+    let node_a_funding_amount = 100000000000;
+    let node_b_funding_amount = 6200000000;
+
+    let (node_a, node_b, new_channel_id) =
+        create_nodes_with_established_channel(node_a_funding_amount, node_b_funding_amount, public)
+            .await;
+    let node_a_pubkey = node_a.pubkey;
+    let node_b_pubkey = node_b.pubkey;
+
+    // Wait for the channel announcement to be broadcasted
+    tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
+
+    let test_channel_info = |channels: Vec<ChannelInfo>,
+                             node_a_pubkey: Pubkey,
+                             node_b_pubkey: Pubkey,
+                             node_a_balance: u128,
+                             node_b_balance: u128| {
+        assert_eq!(channels.len(), 1);
+        let channel = &channels[0];
+        assert_ne!(channel.update_of_node1, None);
+        assert_ne!(channel.update_of_node2, None);
+        assert_ne!(channel.get_channel_update_of(node_a_pubkey), None);
+        assert_ne!(channel.get_channel_update_of(node_b_pubkey), None);
+        assert_eq!(
+            channel
+                .get_channel_update_of(node_a_pubkey)
+                .unwrap()
+                .inbound_liquidity,
+            Some(node_b_balance)
+        );
+        assert_eq!(
+            channel
+                .get_channel_update_of(node_b_pubkey)
+                .unwrap()
+                .inbound_liquidity,
+            Some(node_a_balance)
+        );
+    };
+
+    let node_a_old_balance = node_a.get_local_balance_from_channel(new_channel_id);
+    let node_b_old_balance = node_b.get_local_balance_from_channel(new_channel_id);
+    let node_a_old_channels = node_a.get_network_graph_channels().await;
+    let node_b_old_channels = node_b.get_network_graph_channels().await;
+    test_channel_info(
+        node_a_old_channels,
+        node_a_pubkey,
+        node_b_pubkey,
+        node_a_old_balance,
+        node_b_old_balance,
+    );
+    test_channel_info(
+        node_b_old_channels,
+        node_a_pubkey,
+        node_b_pubkey,
+        node_a_old_balance,
+        node_b_old_balance,
+    );
+
+    let message = |rpc_reply| -> NetworkActorMessage {
+        NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
+            SendPaymentCommand {
+                target_pubkey: Some(node_b_pubkey),
+                amount: Some(10000),
+                payment_hash: None,
+                final_tlc_expiry_delta: None,
+                tlc_expiry_limit: None,
+                invoice: None,
+                timeout: None,
+                max_fee_amount: None,
+                max_parts: None,
+                keysend: Some(true),
+                udt_type_script: None,
+                allow_self_payment: false,
+                hop_hints: None,
+                dry_run: false,
+            },
+            rpc_reply,
+        ))
+    };
+    let res1 = call!(node_a.network_actor, message)
+        .expect("node_a alive")
+        .unwrap();
+    // this is the payment_hash generated by keysend
+    assert_eq!(res1.status, PaymentSessionStatus::Created);
+    let payment_hash1 = res1.payment_hash;
+
+    // the second payment is send from node_b to node_a
+    let message = |rpc_reply| -> NetworkActorMessage {
+        NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
+            SendPaymentCommand {
+                target_pubkey: Some(node_a_pubkey),
+                amount: Some(9999),
+                payment_hash: None,
+                final_tlc_expiry_delta: None,
+                invoice: None,
+                timeout: None,
+                tlc_expiry_limit: None,
+                max_fee_amount: None,
+                max_parts: None,
+                keysend: Some(true),
+                udt_type_script: None,
+                allow_self_payment: false,
+                hop_hints: None,
+                dry_run: false,
+            },
+            rpc_reply,
+        ))
+    };
+    let res2 = call!(node_b.network_actor, message)
+        .expect("node_a alive")
+        .unwrap();
+    // this is the payment_hash generated by keysend
+    assert_eq!(res2.status, PaymentSessionStatus::Created);
+    let payment_hash2 = res2.payment_hash;
+
+    // sleep for 2 seconds to make sure the payment is processed
+    tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
+
+    let message = |rpc_reply| -> NetworkActorMessage {
+        NetworkActorMessage::Command(NetworkActorCommand::GetPayment(payment_hash1, rpc_reply))
+    };
+    let res = call!(node_a.network_actor, message)
+        .expect("node_a alive")
+        .unwrap();
+    assert_eq!(res.status, PaymentSessionStatus::Success);
+    assert_eq!(res.failed_error, None);
+
+    let message = |rpc_reply| -> NetworkActorMessage {
+        NetworkActorMessage::Command(NetworkActorCommand::GetPayment(payment_hash2, rpc_reply))
+    };
+    let res = call!(node_b.network_actor, message)
+        .expect("node_a alive")
+        .unwrap();
+
+    assert_eq!(res.status, PaymentSessionStatus::Success);
+    assert_eq!(res.failed_error, None);
+
+    let node_a_new_balance = node_a.get_local_balance_from_channel(new_channel_id);
+    let node_b_new_balance = node_b.get_local_balance_from_channel(new_channel_id);
+
+    // assert the balance is right,
+    // node_a send 10000 to node_b, and node_b send 9999 to node_a
+    // so the balance should be node_a_old_balance - 1, node_b_old_balance + 1
+    assert_eq!(node_a_new_balance, node_a_old_balance - 1);
+    assert_eq!(node_b_new_balance, node_b_old_balance + 1);
+
+    let node_a_new_channels = node_a.get_network_graph_channels().await;
+    let node_b_new_channels = node_b.get_network_graph_channels().await;
+    test_channel_info(
+        node_a_new_channels,
+        node_a_pubkey,
+        node_b_pubkey,
+        node_a_new_balance,
+        node_b_new_balance,
+    );
+    test_channel_info(
+        node_b_new_channels,
+        node_a_pubkey,
+        node_b_pubkey,
+        node_a_new_balance,
+        node_b_new_balance,
+    );
+}
+
+#[tokio::test]
+async fn test_update_graph_balance_after_payment_public_channel() {
+    do_test_update_graph_balance_after_payment(true).await;
+}
+
+#[tokio::test]
+async fn test_update_graph_balance_after_payment_private_channel() {
+    do_test_update_graph_balance_after_payment(false).await;
 }
 
 #[tokio::test]
@@ -4622,8 +5004,8 @@ async fn test_send_payment_with_disable_channel() {
     // sleep for a while
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
-    // begin to set channel disable
-    node_2.disable_channel(channels[1]).await;
+    // begin to set channel disable, but do not notify the network
+    node_2.disable_channel_stealthy(channels[1]).await;
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
     let message = |rpc_reply| -> NetworkActorMessage {

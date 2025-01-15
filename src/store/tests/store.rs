@@ -172,7 +172,7 @@ fn test_store_save_channel_update() {
     let path = TempDir::new("test-gossip-store");
     let store = Store::new(path).expect("created store failed");
 
-    let flags_for_update_of_node1 = 0;
+    let flags_for_update_of_node1 = ChannelUpdateMessageFlags::UPDATE_OF_NODE1;
     let channel_update_of_node1 = ChannelUpdate::new_unsigned(
         OutPoint::new_builder()
             .tx_hash(gen_rand_sha256_hash().into())
@@ -180,7 +180,7 @@ fn test_store_save_channel_update() {
             .build(),
         now_timestamp_as_millis_u64(),
         flags_for_update_of_node1,
-        0,
+        ChannelUpdateChannelFlags::empty(),
         0,
         0,
         0,
@@ -194,7 +194,7 @@ fn test_store_save_channel_update() {
     assert_eq!(store.get_latest_channel_update(&out_point, false), None);
 
     let mut channel_update_of_node2 = channel_update_of_node1.clone();
-    let flags_for_update_of_node2 = 1;
+    let flags_for_update_of_node2 = ChannelUpdateMessageFlags::UPDATE_OF_NODE2;
     channel_update_of_node2.message_flags = flags_for_update_of_node2;
     // Note that per discussion in Notion, we don't handle the rare case of two channel updates having the same timestamp.
     // In the current implementation, channel update from one side with the same timestamp will not overwrite the existing one
@@ -313,10 +313,6 @@ fn test_channel_actor_state_store() {
     let state = ChannelActorState {
         state: ChannelState::NegotiatingFunding(NegotiatingFundingFlags::THEIR_INIT_SENT),
         public_channel_info: Some(PublicChannelInfo {
-            enabled: false,
-            tlc_fee_proportional_millionths: 123,
-            tlc_expiry_delta: 3,
-            tlc_min_value: 10,
             local_channel_announcement_signature: Some((
                 mock_ecdsa_signature(),
                 MaybeScalar::two(),
@@ -329,6 +325,15 @@ fn test_channel_actor_state_store() {
             channel_announcement: None,
             channel_update: None,
         }),
+        local_tlc_info: ChannelTlcInfo {
+            enabled: false,
+            timestamp: 0,
+            tlc_fee_proportional_millionths: 123,
+            tlc_expiry_delta: 3,
+            tlc_minimum_value: 10,
+            tlc_maximum_value: 0,
+        },
+        remote_tlc_info: None,
         local_pubkey: gen_rand_fiber_public_key(),
         remote_pubkey: gen_rand_fiber_public_key(),
         funding_tx: Some(Transaction::default()),
@@ -383,15 +388,7 @@ fn test_channel_actor_state_store() {
 
     let get_state = store.get_channel_actor_state(&state.id);
     assert!(get_state.is_some());
-    assert_eq!(
-        get_state
-            .unwrap()
-            .public_channel_info
-            .as_ref()
-            .unwrap()
-            .enabled,
-        false
-    );
+    assert_eq!(get_state.unwrap().is_tlc_forwarding_enabled(), false);
 
     let remote_peer_id = state.get_remote_peer_id();
     assert_eq!(
