@@ -299,12 +299,6 @@ pub enum GossipActorMessage {
     PeerConnected(PeerId, Pubkey, SessionContext),
     PeerDisconnected(PeerId, SessionContext),
 
-    // Current implementation will take a few connected peers and send BroadcastMessageFilter to them.
-    // It is almost certain that we will send the filter to the peers that we connected to first.
-    // This message will be used to rotate the list of peers that we send the filter to,
-    // which will make the network more robust.
-    RotateOutboundPassiveSyncingPeers,
-
     // The function of TickNetworkMaintenance is to maintain the network state.
     // Currently it will do the following things:
     // 1. Check if we have sufficient number of peers to receive broadcasts. If not, send more BroadcastMessageFilter.
@@ -1727,32 +1721,6 @@ where
         }
     }
 
-    async fn stop_passive_syncer(&mut self, peer_id: &PeerId) {
-        let filter = BroadcastMessagesFilter {
-            chain_hash: get_chain_hash(),
-            after_cursor: Cursor::max(),
-        };
-        match self.peer_states.get(peer_id) {
-            Some(peer) if peer.sync_status.is_passive_syncing() => {
-                match self.send_broadcast_message_filter(peer_id, filter).await {
-                    Ok(_) => {
-                        self.peer_states
-                            .get_mut(peer_id)
-                            .expect("get peer state")
-                            .change_sync_status(PeerSyncStatus::NotSyncing());
-                    }
-                    Err(e) => {
-                        error!(
-                            "Failed to send BroadcastMessagesFilter to peer {:?}: {:?}",
-                            peer_id, e
-                        );
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-
     async fn send_broadcast_message_filter(
         &self,
         peer_id: &PeerId,
@@ -2426,37 +2394,6 @@ where
                         messages,
                     ))
                     .expect("store actor alive");
-            }
-            GossipActorMessage::RotateOutboundPassiveSyncingPeers => {
-                if !state.is_ready_for_passive_syncing() {
-                    return Ok(());
-                }
-
-                let current_peers = state
-                    .outbound_passive_syncing_peers()
-                    .into_iter()
-                    .collect::<HashSet<_>>();
-                let new_peers = state
-                    .peer_states
-                    .iter()
-                    .filter_map(|(peer, state)| {
-                        (state.session_type.is_outbound()
-                            && (state.sync_status.can_start_passive_syncing()
-                                || state.sync_status.is_passive_syncing()))
-                        .then_some(peer.clone())
-                    })
-                    .take(state.num_targeted_outbound_passive_syncing_peers)
-                    .collect::<HashSet<_>>();
-                debug!(
-                    "Rotating passive syncing peers: current {:?}, new {:?}",
-                    &current_peers, &new_peers
-                );
-                for peers in new_peers.difference(&current_peers) {
-                    state.start_passive_syncer(&peers).await;
-                }
-                for peers in current_peers.difference(&new_peers) {
-                    state.stop_passive_syncer(&peers).await;
-                }
             }
 
             GossipActorMessage::TickNetworkMaintenance => {
