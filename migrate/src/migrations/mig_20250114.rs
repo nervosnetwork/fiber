@@ -11,6 +11,7 @@ const MIGRATION_DB_VERSION: &str = "20250112205923";
 use crate::util::convert;
 pub use fiber_v020::fiber::channel::ChannelActorState as ChannelActorStateV020;
 pub use fiber_v021::fiber::channel::ChannelActorState as ChannelActorStateV021;
+pub use fiber_v030::fiber::channel::ChannelActorState as ChannelActorStateV030;
 
 pub struct MigrationObj {
     version: String,
@@ -42,9 +43,13 @@ impl Migration for MigrationObj {
             .prefix_iterator(prefix.as_slice())
             .take_while(move |(col_key, _)| col_key.starts_with(prefix.as_slice()))
         {
+            // there maybe some existing nodes didn't set correct db version,
+            // if we can deserialize the data correctly, just skip it.
+            if let Ok(_) = bincode::deserialize::<ChannelActorStateV030>(&v) {
+                continue;
+            }
+
             if let Ok(_) = bincode::deserialize::<ChannelActorStateV021>(&v) {
-                // there maybe some node with 0.2.1 but didn't set correct db version,
-                // if we can deserialize the data correctly, just skip it.
                 continue;
             }
 
