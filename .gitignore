@@ -13,4 +13,4 @@ tests/nodes/.ports
 /coverage-report
 /*.info
 .vscode
-/migration/target
+/migrate/target

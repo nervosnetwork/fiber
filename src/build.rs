@@ -3,12 +3,12 @@ use std::fs;
 use std::path::Path;
 
 fn main() {
-    println!("cargo:rerun-if-changed=migration/src/migrations");
+    println!("cargo:rerun-if-changed=migrate/src/migrations");
 
     let out_dir = env::var("OUT_DIR").unwrap();
     let dest_path = Path::new(&out_dir).join("latest_db_version.rs");
 
-    let migrations_dir = Path::new("migration/src/migrations");
+    let migrations_dir = Path::new("migrate/src/migrations");
     let mut migrations = Vec::new();
 
     let mut latest_db_version = "".to_string();
