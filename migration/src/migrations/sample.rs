@@ -3,8 +3,7 @@ use indicatif::ProgressBar;
 use rocksdb::{prelude::*, DB};
 use std::sync::Arc;
 
-// REMEMBER to update LATEST_DB_VERSION in src/store/migration.rs
-// if you added new migration
+// Remember to update the version number here
 const MIGRATION_DB_VERSION: &str = "20311116135521";
 
 pub struct MigrationObj {

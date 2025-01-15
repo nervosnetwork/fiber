@@ -13,7 +13,7 @@ use tracing::{debug, error, info};
 
 pub const MIGRATION_VERSION_KEY: &[u8] = b"db-version";
 pub const INIT_DB_VERSION: &str = "20241116135521";
-pub const LATEST_DB_VERSION: &str = "20250112205923";
+include!(concat!(env!("OUT_DIR"), "/latest_db_version.rs"));
 
 fn internal_error(reason: String) -> Error {
     Error::DBInternalError(reason)
