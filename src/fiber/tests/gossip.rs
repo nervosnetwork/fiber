@@ -6,6 +6,7 @@ use ckb_types::packed::Bytes;
 use ckb_types::prelude::{Builder, Entity};
 use molecule::prelude::Byte;
 use ractor::{async_trait, concurrency::Duration, Actor, ActorProcessingErr, ActorRef};
+use tentacle::secio::PeerId;
 use tokio::sync::RwLock;
 
 use crate::fiber::gossip::GossipService;
@@ -91,7 +92,7 @@ impl GossipTestingContext {
     fn save_message(&self, message: BroadcastMessage) {
         self.get_extended_actor()
             .send_message(ExtendedGossipMessageStoreMessage::SaveMessages(
-                None,
+                PeerId::random(),
                 vec![message],
             ))
             .expect("send message");

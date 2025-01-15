@@ -606,7 +606,7 @@ where
                         .store
                         .actor
                         .send_message(ExtendedGossipMessageStoreMessage::SaveMessages(
-                            Some(state.peer_id.clone()),
+                            state.peer_id.clone(),
                             messages,
                         ))
                         .expect("store actor alive");
@@ -1059,9 +1059,9 @@ pub struct ExtendedGossipMessageStoreState<S> {
     chain_actor: ActorRef<CkbChainMessage>,
     next_id: u64,
     output_ports: HashMap<u64, BroadcastMessageOutput>,
-    // A map from peer_id to the messages that need to be saved. If the peer_id is None,
-    // then the message is from the local node. Otherwise, the message is from a remote peer.
-    messages_to_be_saved: HashMap<Option<PeerId>, HashSet<BroadcastMessage>>,
+    // A map from peer_id to the messages that need to be saved.
+    // Our own messages are always saved directly to the store.
+    messages_to_be_saved: HashMap<PeerId, HashSet<BroadcastMessage>>,
 }
 
 impl<S: GossipMessageStore> ExtendedGossipMessageStoreState<S> {
@@ -1203,21 +1203,21 @@ impl<S: GossipMessageStore> ExtendedGossipMessageStoreState<S> {
 
     async fn insert_message_to_be_saved_list(
         &mut self,
-        peer_id: &Option<PeerId>,
+        peer_id: &PeerId,
         message: &BroadcastMessage,
     ) -> Result<(), GossipMessageProcessingError> {
+        if let Some(existing_messages) = self.messages_to_be_saved.get(peer_id) {
+            if existing_messages.contains(&message) {
+                return Ok(());
+            }
+        }
+
         if let Some(existing_message) = get_existing_newer_broadcast_message(message, &self.store) {
             if &BroadcastMessage::from(existing_message.clone()) != message {
                 return Err(GossipMessageProcessingError::NewerMessageSaved(
                     existing_message,
                 ));
             } else {
-                return Ok(());
-            }
-        }
-
-        if let Some(l) = self.messages_to_be_saved.get(peer_id) {
-            if l.contains(&message) {
                 return Ok(());
             }
         }
@@ -1452,16 +1452,6 @@ impl<S: GossipMessageStore + Send + Sync + 'static> Actor for ExtendedGossipMess
                 // The assumption is that when a peer sends us a message, it should have all the dependencies.
                 // So here we will send queries to the peer for the missing messages.
                 for (peer, incomplete_messages) in state.messages_to_be_saved.drain() {
-                    let peer = match peer {
-                        Some(peer) => peer,
-                        None => {
-                            warn!(
-                                "Our own messages are incomplete (this should not happen): messages {:?}",
-                                incomplete_messages
-                            );
-                            continue;
-                        }
-                    };
                     let gossip_actor = state.gossip_actor.clone();
                     let myself = myself.clone();
                     let incomplete_messages = incomplete_messages.into_iter().collect::<Vec<_>>();
@@ -1501,7 +1491,7 @@ impl<S: GossipMessageStore + Send + Sync + 'static> Actor for ExtendedGossipMess
                                     myself
                                         .send_message(
                                             ExtendedGossipMessageStoreMessage::SaveMessages(
-                                                Some(peer.clone()),
+                                                peer.clone(),
                                                 all_messages,
                                             ),
                                         )
@@ -1542,7 +1532,7 @@ pub enum ExtendedGossipMessageStoreMessage {
     UpdateSubscription(u64, Option<Cursor>, RpcReplyPort<()>),
     // Save new broadcast messages to the store. The messages will be first saved to the memory,
     // then if all the dependencies are met, they are periodically saved to the store and sent to the subscribers.
-    SaveMessages(Option<PeerId>, Vec<BroadcastMessage>),
+    SaveMessages(PeerId, Vec<BroadcastMessage>),
     // Save new messages to the store, and broadcast them to the subscribers immediately.
     // These messages will not be saved to the memory and wait for the dependencies to be met.
     // We normally use this variant to send our own messages to the subscribers.
@@ -1798,7 +1788,7 @@ where
 
     async fn try_to_verify_and_save_broadcast_messages(
         &mut self,
-        originator: Option<PeerId>,
+        originator: PeerId,
         messages: Vec<BroadcastMessage>,
     ) {
         self.store
@@ -2567,7 +2557,7 @@ where
                         BroadcastMessagesFilterResult { messages },
                     ) => {
                         state
-                            .try_to_verify_and_save_broadcast_messages(Some(peer_id), messages)
+                            .try_to_verify_and_save_broadcast_messages(peer_id, messages)
                             .await;
                     }
                     GossipMessage::GetBroadcastMessages(get_broadcast_messages) => {
