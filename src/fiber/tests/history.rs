@@ -638,6 +638,70 @@ fn test_history_interal_success_fail() {
 }
 
 #[test]
+fn test_history_interal_fuzz_assertion_crash() {
+    let mut history =
+        PaymentHistory::new(gen_rand_fiber_public_key().into(), None, generate_store());
+    let from = gen_rand_fiber_public_key();
+    let target = gen_rand_fiber_public_key();
+    let channel_outpoint = OutPoint::default();
+    let (direction, _) = output_direction(from, target);
+
+    let result = TimedResult {
+        fail_time: 1,
+        fail_amount: 2,
+        success_time: 3,
+        success_amount: 4,
+    };
+
+    history.add_result(channel_outpoint.clone(), direction, result);
+
+    let mut now = 0;
+    for _i in 0..10000 {
+        let rand_amount = rand::random::<u64>() % 1000;
+        let rand_succ = rand::random::<bool>();
+        eprintln!("rand_amount: {}, rand_succ: {}", rand_amount, rand_succ);
+        now += 60_001;
+        history.apply_pair_result(
+            channel_outpoint.clone(),
+            direction,
+            rand_amount.into(),
+            rand_succ,
+            now,
+        );
+    }
+}
+
+#[test]
+fn test_history_interal_fail_zero_after_succ() {
+    let mut history =
+        PaymentHistory::new(gen_rand_fiber_public_key().into(), None, generate_store());
+    let from = gen_rand_fiber_public_key();
+    let target = gen_rand_fiber_public_key();
+    let channel_outpoint = OutPoint::default();
+    let (direction, _) = output_direction(from, target);
+
+    let result = TimedResult {
+        fail_time: 1,
+        fail_amount: 2,
+        success_time: 3,
+        success_amount: 4,
+    };
+
+    history.add_result(channel_outpoint.clone(), direction, result);
+
+    history.apply_pair_result(channel_outpoint.clone(), direction, 0, false, 10);
+    assert_eq!(
+        history.get_result(&channel_outpoint, direction),
+        Some(&TimedResult {
+            fail_time: 10,
+            fail_amount: 0,
+            success_time: 3,
+            success_amount: 0, // set to be zero
+        })
+    );
+}
+
+#[test]
 fn test_history_probability() {
     let mut history =
         PaymentHistory::new(gen_rand_fiber_public_key().into(), None, generate_store());
