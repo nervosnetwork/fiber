@@ -702,6 +702,39 @@ fn test_history_interal_fail_zero_after_succ() {
 }
 
 #[test]
+fn test_history_interal_keep_valid_range() {
+    let mut history =
+        PaymentHistory::new(gen_rand_fiber_public_key().into(), None, generate_store());
+    let from = gen_rand_fiber_public_key();
+    let target = gen_rand_fiber_public_key();
+    let channel_outpoint = OutPoint::default();
+    let (direction, _) = output_direction(from, target);
+
+    let result = TimedResult {
+        fail_time: 1,
+        fail_amount: 2,
+        success_time: 3,
+        success_amount: 4,
+    };
+
+    history.add_result(channel_outpoint.clone(), direction, result);
+
+    history.apply_pair_result(channel_outpoint.clone(), direction, 100, true, 10);
+    history.apply_pair_result(channel_outpoint.clone(), direction, 102, false, 10 + 6001);
+    history.apply_pair_result(channel_outpoint.clone(), direction, 90, true, 10 + 6001 * 2);
+
+    assert_eq!(
+        history.get_result(&channel_outpoint, direction),
+        Some(&TimedResult {
+            fail_time: 1,
+            fail_amount: 101,
+            success_time: 12012,
+            success_amount: 100
+        })
+    );
+}
+
+#[test]
 fn test_history_probability() {
     let mut history =
         PaymentHistory::new(gen_rand_fiber_public_key().into(), None, generate_store());
