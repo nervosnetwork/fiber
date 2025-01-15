@@ -1,7 +1,7 @@
-use crate::fiber::gossip::GossipError;
+use crate::debug_event;
 #[cfg(debug_assertions)]
 use crate::fiber::network::DebugEvent;
-use crate::{debug_event, fiber::types::BroadcastMessageWithTimestamp};
+use crate::fiber::types::BroadcastMessageWithTimestamp;
 use bitflags::bitflags;
 use futures::future::OptionFuture;
 use secp256k1::XOnlyPublicKey;
@@ -25,13 +25,12 @@ use crate::{
         },
         serde_utils::{CompactSignatureAsBytes, EntityHex, PubNonceAsBytes},
         types::{
-            AcceptChannel, AddTlc, AnnouncementSignatures, BroadcastMessageQuery,
-            BroadcastMessageQueryFlags, ChannelAnnouncement, ChannelReady, ChannelUpdate,
-            ClosingSigned, CommitmentSigned, EcdsaSignature, FiberChannelMessage, FiberMessage,
-            Hash256, OpenChannel, PaymentOnionPacket, PeeledPaymentOnionPacket, Privkey, Pubkey,
-            ReestablishChannel, RemoveTlc, RemoveTlcFulfill, RemoveTlcReason, RevokeAndAck,
-            Shutdown, TlcErr, TlcErrPacket, TlcErrorCode, TxCollaborationMsg, TxComplete, TxUpdate,
-            NO_SHARED_SECRET,
+            AcceptChannel, AddTlc, AnnouncementSignatures, ChannelAnnouncement, ChannelReady,
+            ChannelUpdate, ClosingSigned, CommitmentSigned, EcdsaSignature, FiberChannelMessage,
+            FiberMessage, Hash256, OpenChannel, PaymentOnionPacket, PeeledPaymentOnionPacket,
+            Privkey, Pubkey, ReestablishChannel, RemoveTlc, RemoveTlcFulfill, RemoveTlcReason,
+            RevokeAndAck, Shutdown, TlcErr, TlcErrPacket, TlcErrorCode, TxCollaborationMsg,
+            TxComplete, TxUpdate, NO_SHARED_SECRET,
         },
         NetworkActorCommand, NetworkActorEvent, NetworkActorMessage, ASSUME_NETWORK_ACTOR_ALIVE,
     },
@@ -58,9 +57,8 @@ use musig2::{
     PubNonce, SecNonce,
 };
 use ractor::{
-    async_trait as rasync_trait, call,
-    concurrency::{sleep, Duration},
-    Actor, ActorProcessingErr, ActorRef, OutputPort, RpcReplyPort,
+    async_trait as rasync_trait, call, concurrency::Duration, Actor, ActorProcessingErr, ActorRef,
+    OutputPort, RpcReplyPort,
 };
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
@@ -5647,101 +5645,6 @@ impl ChannelActorState {
                     ]),
                 ))
                 .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-
-            // Note that there is a racing condition here. The peer may have not finished
-            // generating the channel update message yet. In order to reliably query the
-            // peer for the channel update message, we may to retry the query a few times.
-            let peer_id = self.get_remote_peer_id();
-            let queries = if self.local_is_node1() {
-                vec![
-                    BroadcastMessageQuery {
-                        channel_outpoint: self.must_get_funding_transaction_outpoint(),
-                        flags: BroadcastMessageQueryFlags::ChannelUpdateOfNode2,
-                    },
-                    BroadcastMessageQuery {
-                        channel_outpoint: self.must_get_funding_transaction_outpoint(),
-                        flags: BroadcastMessageQueryFlags::NodeAnnouncementNode2,
-                    },
-                ]
-            } else {
-                vec![
-                    BroadcastMessageQuery {
-                        channel_outpoint: self.must_get_funding_transaction_outpoint(),
-                        flags: BroadcastMessageQueryFlags::ChannelUpdateOfNode1,
-                    },
-                    BroadcastMessageQuery {
-                        channel_outpoint: self.must_get_funding_transaction_outpoint(),
-                        flags: BroadcastMessageQueryFlags::NodeAnnouncementNode1,
-                    },
-                ]
-            };
-            debug!(
-                "Querying for channel update and node announcement messages from {:?}",
-                &peer_id
-            );
-            let network = network.clone();
-            let channel_outpoint = self.must_get_funding_transaction_outpoint();
-            let peer = peer_id.clone();
-            // We will spawn a new task to query peer's information about the channel.
-            ractor::concurrency::tokio_primitives::spawn(async move {
-                // It is possible that while we are querying the peer for the channel update message,
-                // the peer has not yet generated the message (because it is still waiting for the
-                // funding transaction to be confirmed). In this case, we should retry the query.
-                const MAX_RETRY: u32 = 5;
-                let mut suceeded = false;
-                for i in 0..MAX_RETRY {
-                    let result = call!(network, |reply| NetworkActorMessage::Command(
-                        NetworkActorCommand::QueryBroadcastMessages(
-                            peer.clone(),
-                            queries.clone(),
-                            reply,
-                        )
-                    ));
-                    match result {
-                        Ok(Ok(result)) => {
-                            if result.missing_queries.is_empty() {
-                                debug!(
-                                    "Successfully queried broadcast messages for channel {}",
-                                    channel_outpoint
-                                );
-                                network
-                                    .send_message(NetworkActorMessage::Command(
-                                        NetworkActorCommand::SaveBroadcastMessages(
-                                            Some(peer.clone()),
-                                            result.messages,
-                                        ),
-                                    ))
-                                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-                                suceeded = true;
-                                break;
-                            } else {
-                                debug!(
-                                    "Querying channel information failed: {:?} missing, retrying...",
-                                    &result.missing_queries
-                                );
-                                sleep(Duration::from_secs(2u64.pow(i))).await;
-                            };
-                        }
-                        Ok(Err(GossipError::Timeout)) => {
-                            warn!("Timeout while query broadcast messages, retrying...");
-                        }
-                        Ok(Err(e)) => {
-                            error!("Failed to query broadcast messages: {}", e);
-                            break;
-                        }
-                        Err(e) => {
-                            error!("Failed to send query broadcast messages: {}", e);
-                            break;
-                        }
-                    }
-                }
-                if !suceeded {
-                    warn!(
-                        "Failed to query broadcast messages for channel {} after {} retries",
-                        channel_outpoint, MAX_RETRY
-                    );
-                }
-            });
         }
     }
 
