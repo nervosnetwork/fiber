@@ -317,10 +317,6 @@ pub enum GossipActorMessage {
     // A malicious peer is found. We should disconnect from the peer.
     MaliciousPeerFound(PeerId),
 
-    // Process BroadcastMessage from the network. This is mostly used to save a broadcast message
-    // not received from gossip message protocol to the store. Examples of such messages are
-    // our own node announcement messages, channel updates from the onion error packets, etc.
-    ProcessBroadcastMessage(BroadcastMessage),
     // Query some broadcast messages from a peer.
     QueryBroadcastMessages(
         PeerId,
@@ -2401,11 +2397,6 @@ where
             }
             GossipActorMessage::PeerDisconnected(peer_id, _session) => {
                 state.peer_states.remove(&peer_id);
-            }
-            GossipActorMessage::ProcessBroadcastMessage(message) => {
-                state
-                    .try_to_verify_and_save_broadcast_messages(None, vec![message.clone()])
-                    .await;
             }
             GossipActorMessage::QueryBroadcastMessagesTimeout(peer, request_id) => {
                 if let Some(reply) = state.query_reply_ports.remove(&(peer, request_id)) {

@@ -60,9 +60,9 @@ use super::gossip::{GossipActorMessage, GossipMessageStore, GossipMessageUpdates
 use super::graph::{NetworkGraph, NetworkGraphStateStore, OwnedChannelUpdateEvent, SessionRoute};
 use super::key::blake2b_hash_with_salt;
 use super::types::{
-    BroadcastMessage, BroadcastMessageWithTimestamp, EcdsaSignature, FiberMessage,
-    ForwardTlcResult, GossipMessage, Hash256, NodeAnnouncement, OpenChannel, PaymentHopData,
-    Privkey, Pubkey, RemoveTlcReason, TlcErr, TlcErrData, TlcErrorCode,
+    BroadcastMessageWithTimestamp, EcdsaSignature, FiberMessage, ForwardTlcResult, GossipMessage,
+    Hash256, NodeAnnouncement, OpenChannel, PaymentHopData, Privkey, Pubkey, RemoveTlcReason,
+    TlcErr, TlcErrData, TlcErrorCode,
 };
 use super::{FiberConfig, ASSUME_NETWORK_ACTOR_ALIVE};
 
@@ -227,8 +227,6 @@ pub enum NetworkActorCommand {
     ),
     UpdateChannelFunding(Hash256, Transaction, FundingRequest),
     SignTx(PeerId, Hash256, Transaction, Option<Vec<Vec<u8>>>),
-    // Process a broadcast message from the network.
-    ProcessBroadcastMessage(BroadcastMessage),
     // Broadcast our BroadcastMessage to the network.
     BroadcastMessages(Vec<BroadcastMessageWithTimestamp>),
     // Broadcast local information to the network.
@@ -1314,12 +1312,6 @@ where
                         NetworkActorCommand::SendFiberMessage(msg),
                     ))
                     .expect("network actor alive");
-            }
-            NetworkActorCommand::ProcessBroadcastMessage(message) => {
-                state
-                    .gossip_actor
-                    .send_message(GossipActorMessage::ProcessBroadcastMessage(message))
-                    .expect(ASSUME_GOSSIP_ACTOR_ALIVE);
             }
             NetworkActorCommand::BroadcastMessages(message) => {
                 state
@@ -3047,7 +3039,7 @@ where
         )
         .await;
         let gossip_handle = gossip_service.create_protocol_handle();
-        let graph = self.network_graph.read().await;
+        let mut graph = self.network_graph.write().await;
         let graph_subscribing_cursor = graph
             .get_latest_cursor()
             .go_back_for_some_time(MAX_GRAPH_MISSING_BROADCAST_MESSAGE_TIMESTAMP_DRIFT);
@@ -3179,14 +3171,8 @@ where
             min_outbound_peers: config.min_outbound_peers(),
         };
 
-        // Save our own NodeInfo to the network graph.
         let node_announcement = state.get_or_create_new_node_announcement_message();
-        myself.send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::ProcessBroadcastMessage(BroadcastMessage::NodeAnnouncement(
-                node_announcement.clone(),
-            )),
-        ))?;
-
+        graph.process_node_announcement(node_announcement);
         let announce_node_interval_seconds = config.announce_node_interval_seconds();
         if announce_node_interval_seconds > 0 {
             myself.send_interval(Duration::from_secs(announce_node_interval_seconds), || {
