@@ -270,12 +270,14 @@ async fn test_saving_channel_update_after_saving_channel_announcement() {
             42,
             42,
             42,
+            None,
         ),
         channel_context.create_channel_update_of_node2(
             ChannelUpdateChannelFlags::empty(),
             42,
             42,
             42,
+            None,
         ),
     ] {
         context.save_message(BroadcastMessage::ChannelUpdate(channel_update.clone()));
@@ -300,12 +302,14 @@ async fn test_saving_channel_update_before_saving_channel_announcement() {
             42,
             42,
             42,
+            None,
         ),
         channel_context.create_channel_update_of_node2(
             ChannelUpdateChannelFlags::empty(),
             42,
             42,
             42,
+            None,
         ),
     ] {
         context.save_message(BroadcastMessage::ChannelUpdate(channel_update.clone()));
@@ -357,12 +361,14 @@ async fn test_saving_invalid_channel_update() {
             42,
             42,
             42,
+            None,
         ),
         channel_context.create_channel_update_of_node2(
             ChannelUpdateChannelFlags::empty(),
             42,
             42,
             42,
+            None,
         ),
     ] {
         channel_update.signature = Some(create_invalid_ecdsa_signature());
@@ -398,12 +404,14 @@ async fn test_saving_channel_update_independency() {
                 42,
                 42,
                 42,
+                None,
             ),
             channel_context.create_channel_update_of_node2(
                 ChannelUpdateChannelFlags::empty(),
                 42,
                 42,
                 42,
+                None,
             ),
         ] {
             if channel_update.is_update_of_node_1() && node1_has_invalid_signature {
@@ -487,12 +495,14 @@ async fn test_saving_channel_update_with_invalid_channel_announcement() {
             42,
             42,
             42,
+            None,
         ),
         channel_context.create_channel_update_of_node2(
             ChannelUpdateChannelFlags::empty(),
             42,
             42,
             42,
+            None,
         ),
     ] {
         context.save_message(BroadcastMessage::ChannelUpdate(channel_update.clone()));
