@@ -1,13 +1,7 @@
 use super::migration::{DefaultMigration, Migration, Migrations};
 use crate::Error;
 use rocksdb::DB;
-use std::io::Write;
-use std::{
-    cmp::Ordering,
-    io::{stdin, stdout},
-    path::Path,
-    sync::Arc,
-};
+use std::{cmp::Ordering, path::Path, sync::Arc};
 use tracing::warn;
 use tracing::{error, info};
 
@@ -59,13 +53,12 @@ impl DbMigrate {
         self.migrations.need_init(&self.db)
     }
 
-    pub fn check_or_run_migrate<P: AsRef<Path>>(
-        &self,
-        path: P,
-        run_migrate: bool,
-        skip_confirm: bool,
-    ) -> Result<Arc<DB>, String> {
-        if !self.need_init() {
+    pub fn init_or_check<P: AsRef<Path>>(&self, path: P) -> Result<Arc<DB>, String> {
+        if self.need_init() {
+            info!("begin to init db version ...");
+            self.init_db_version().expect("failed to init db version");
+            Ok(self.db())
+        } else {
             match self.check() {
                 Ordering::Greater => {
                     error!(
@@ -80,50 +73,9 @@ impl DbMigrate {
                     return Ok(self.db());
                 }
                 Ordering::Less => {
-                    if !run_migrate {
-                        return Err(format!("Fiber need to run some database migrations, please run `fnn-migrate -p {}` to start migrations.", path.as_ref().display()));
-                    } else {
-                        if !skip_confirm {
-                            let path_buf = path.as_ref().to_path_buf();
-                            let input = Self::prompt(format!("\
-                            Once the migration started, the data will be no longer compatible with all older version,\n\
-                            so we strongly recommended you to backup the old data {} before migrating.\n\
-                            \n\
-                            \nIf you want to migrate the data, please input YES, otherwise, the current process will exit.\n\
-                            > ", path_buf.display()).as_str());
-
-                            if input.trim().to_lowercase() != "yes" {
-                                error!("Migration was declined since the user didn't confirm.");
-                                return Err("need to run database migration".to_string());
-                            }
-                        }
-                        eprintln!("begin to migrate db ...");
-                        let db = self.migrate().expect("failed to migrate db");
-                        eprintln!(
-                            "db migrated successfully, now your can restart the fiber node ..."
-                        );
-                        Ok(db)
-                    }
+                    return Err(format!("Fiber need to run some database migrations, please run `fnn-migrate -p {}` to start migrations.", path.as_ref().display()));
                 }
             }
-        } else {
-            info!("begin to init db version ...");
-            self.init_db_version().expect("failed to init db version");
-            Ok(self.db())
         }
-    }
-
-    fn prompt(msg: &str) -> String {
-        let stdout = stdout();
-        let mut stdout = stdout.lock();
-        let stdin = stdin();
-
-        write!(stdout, "{msg}").unwrap();
-        stdout.flush().unwrap();
-
-        let mut input = String::new();
-        let _ = stdin.read_line(&mut input);
-
-        input
     }
 }

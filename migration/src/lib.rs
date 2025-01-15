@@ -1,2 +1,2 @@
 pub mod migrations;
-mod util;
+pub mod util;
