@@ -55,6 +55,12 @@ impl Migration for MigrationObj {
             .prefix_iterator(prefix.as_slice())
             .take_while(move |(col_key, _)| col_key.starts_with(prefix.as_slice()))
         {
+            if let Ok(_) = bincode::deserialize::<ChannelTlcInfoV030>(&v) {
+                // there maybe some node didn't set correct db version,
+                // if we can deserialize the data correctly, just skip it.
+                continue;
+            }
+
             let old_channel_state: ChannelActorStateV021 =
                 bincode::deserialize(&v).expect("deserialize to old channel state");
 

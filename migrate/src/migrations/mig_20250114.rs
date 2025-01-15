@@ -42,11 +42,12 @@ impl Migration for MigrationObj {
             .prefix_iterator(prefix.as_slice())
             .take_while(move |(col_key, _)| col_key.starts_with(prefix.as_slice()))
         {
-            // debug!(
-            //     key = hex::encode(k.as_ref()),
-            //     value = hex::encode(v.as_ref()),
-            //     "Obtained old channel state"
-            // );
+            if let Ok(_) = bincode::deserialize::<ChannelActorStateV021>(&v) {
+                // there maybe some node with 0.2.1 but didn't set correct db version,
+                // if we can deserialize the data correctly, just skip it.
+                continue;
+            }
+
             let old_channel_state: ChannelActorStateV020 =
                 bincode::deserialize(&v).expect("deserialize to old channel state");
 
