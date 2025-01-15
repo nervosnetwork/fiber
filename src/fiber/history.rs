@@ -375,7 +375,7 @@ where
                 if amount > current.success_amount {
                     current.success_amount = amount;
                 }
-                if current.fail_time != 0 {
+                if current.fail_time != 0 && amount >= current.fail_amount {
                     current.fail_amount = amount + 1;
                 }
             } else {
@@ -387,10 +387,14 @@ where
                 }
                 current.fail_amount = amount;
                 current.fail_time = time;
-                if amount <= current.success_amount {
+                if amount == 0 {
+                    current.success_amount = 0;
+                } else if amount <= current.success_amount {
                     current.success_amount = amount.saturating_sub(1);
                 }
             }
+            // make sure success_amount is less than or equal to fail_amount,
+            // so that we can calculate the probability in a amount range.
             assert!(current.fail_time == 0 || current.success_amount <= current.fail_amount);
             *current
         } else {
