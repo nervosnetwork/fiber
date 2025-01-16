@@ -1789,7 +1789,7 @@ async fn test_send_payment_middle_hop_update_fee() {
                 enabled: None,
                 tlc_expiry_delta: None,
                 tlc_minimum_value: None,
-                tlc_fee_proportional_millionths: Some(10),
+                tlc_fee_proportional_millionths: Some(100000),
             },
         )
         .await;
