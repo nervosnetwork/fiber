@@ -972,7 +972,6 @@ where
                 amount,
                 final_tlc_expiry_delta,
                 source,
-                target,
             )?;
             assert_ne!(target, t);
             target = t;
@@ -1177,20 +1176,19 @@ where
         hop_hint_map: &HashMap<(Pubkey, bool), OutPoint>,
         amount: u128,
         expiry: u64,
-        source: Pubkey,
-        target: Pubkey,
+        node: Pubkey,
     ) -> Result<(Pubkey, PathEdge, u64), PathFindError> {
-        let direct_channels: Vec<(Pubkey, Pubkey, &ChannelInfo, &ChannelUpdateInfo)> = self
-            .get_node_inbounds(source)
+        let direct_channels: Vec<(Pubkey, Pubkey, OutPoint, u64)> = self
+            .get_node_inbounds(node)
             .filter(|(_, _, channel_info, _)| {
-                if let Some(channel) = hop_hint_map.get(&(source, true)) {
+                if let Some(channel) = hop_hint_map.get(&(node, true)) {
                     // if there is a hop hint for node -> source,
                     // try to use this channel as the last candidate hop for route self
                     // and we event don't check the direct balance of channel,
                     // hop hint's priority is higher than direct balance
                     return channel == channel_info.out_point();
                 }
-                if let Some(channel) = hop_hint_map.get(&(source, false)) {
+                if let Some(channel) = hop_hint_map.get(&(node, false)) {
                     // if there is a hop hint for source -> node,
                     // then we can not set this node as the last candidate hop for route self
                     // so skip this channel
@@ -1209,22 +1207,30 @@ where
                 // anyway, check the capacity here for safety
                 return channel_info.capacity() >= amount;
             })
+            .map(|(from, to, channel_info, channel_update)| {
+                (
+                    from,
+                    to,
+                    channel_info.out_point().clone(),
+                    channel_update.tlc_expiry_delta,
+                )
+            })
             .collect();
 
         // a proper hop hint for route self will limit the direct_channels to only one
         // if there are multiple channels, we will randomly select a channel from the source node for route to self
         // so that the following part of algorithm will always trying to find a path without cycle
-        if let Some(&(from, to, channel_info, channel_update)) =
+        if let Some((from, to, outpoint, tlc_expiry_delta)) =
             direct_channels.choose(&mut thread_rng())
         {
-            assert_ne!(target, from);
+            assert_ne!(node, *from);
             let last_edge = PathEdge {
-                target: to,
-                channel_outpoint: channel_info.out_point().clone(),
+                target: *to,
+                channel_outpoint: outpoint.clone(),
                 amount_received: amount,
                 incoming_tlc_expiry: expiry,
             };
-            Ok((from, last_edge, channel_update.tlc_expiry_delta))
+            Ok((*from, last_edge, *tlc_expiry_delta))
         } else {
             return Err(PathFindError::PathFind(
                 "no direct channel found for source node".to_string(),
