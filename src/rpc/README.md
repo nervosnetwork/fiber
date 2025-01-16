@@ -787,8 +787,9 @@ A hop hint is a hint for a node to use a specific channel.
 #### Fields
 
 * `pubkey` - <em>Pubkey</em>, The public key of the node
-* `channel_funding_tx` - <em>Hash256</em>, The funding transaction hash of the channel outpoint
-* `inbound` - <em>bool</em>, inbound or outbound to use this channel
+* `channel_outpoint` - <em>OutPoint</em>, The outpoint of the channel
+* `fee_rate` - <em>u64</em>, The fee rate to use this hop to forward the payment.
+* `tlc_expiry_delta` - <em>u64</em>, The TLC expiry delta to use this hop to forward the payment.
 ---
 
 <a id="#type-nodeinfo"></a>
