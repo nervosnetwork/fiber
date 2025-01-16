@@ -2,9 +2,12 @@ use crate::store::db_migrate::DbMigrate;
 use crate::store::migration::DefaultMigration;
 use crate::store::migration::Migration;
 use crate::store::migration::Migrations;
+use crate::store::migration::LATEST_DB_VERSION;
+use crate::store::migration::MIGRATION_VERSION_KEY;
 use crate::Error;
 use indicatif::ProgressBar;
 use rocksdb::ops::Open;
+use rocksdb::ops::Put;
 use rocksdb::DBCompressionType;
 use rocksdb::Options;
 use rocksdb::DB;
@@ -78,30 +81,37 @@ fn test_run_migration() {
     let db = migrate.db();
 
     let mut migrations = Migrations::default();
+    // a smaller version
     migrations.add_migration(Arc::new(DummyMigration::new(
         "20221116135521",
         run_count.clone(),
     )));
 
     migrations.add_migration(Arc::new(DummyMigration::new(
-        "20251116135521",
+        "20241216135521",
         run_count.clone(),
     )));
     migrations.add_migration(Arc::new(DummyMigration::new(
-        "20251116135522",
+        "20241216135522",
         run_count.clone(),
     )));
     migrations.add_migration(Arc::new(DummyMigration::new(
-        "20251116135523",
+        LATEST_DB_VERSION,
         run_count.clone(),
     )));
+    assert_eq!(migrations.check(db.clone()), Ordering::Equal);
 
+    // now manually set db version to a lower one
+    db.put(MIGRATION_VERSION_KEY, "20221116135521")
+        .expect("failed to set db version");
     assert_eq!(migrations.check(db.clone()), Ordering::Less);
+
     migrations.migrate(db.clone()).unwrap();
     assert_eq!(*run_count.read().unwrap(), 3);
     assert_eq!(migrations.check(db.clone()), Ordering::Equal);
 
     let mut migrations = Migrations::default();
     migrations.add_migration(Arc::new(DefaultMigration::new()));
-    assert_eq!(migrations.check(db), Ordering::Greater);
+    // checked by the LATEST_DB_VERSION
+    assert_eq!(migrations.check(db), Ordering::Equal);
 }
