@@ -17,8 +17,6 @@ use crate::fiber::types::PaymentHopData;
 use crate::invoice::CkbInvoice;
 use crate::now_timestamp_as_millis_u64;
 use ckb_types::packed::{OutPoint, Script};
-use ckb_types::prelude::{Builder, Pack};
-use molecule::prelude::Entity;
 use rand::seq::SliceRandom;
 use rand::thread_rng;
 use serde::{Deserialize, Serialize};
@@ -1163,10 +1161,7 @@ where
             .iter()
             .map(|hint| {
                 let pubkey = hint.pubkey;
-                let outpoint = OutPoint::new_builder()
-                    .tx_hash(hint.channel_funding_tx.into())
-                    .index(0u32.pack())
-                    .build();
+                let outpoint = hint.channel_outpoint.clone();
                 let expiry = hint.tlc_expiry_delta;
                 (pubkey, outpoint, expiry)
             })
