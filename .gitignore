@@ -5,7 +5,6 @@
 /result*
 
 /tests/nodes/*/fiber/store
-/tests/nodes/*/fiber/sk
 /tests/nodes/*/config.yml
 /tests/nodes/*/dev.toml
 /tests/deploy/udt-init/target
