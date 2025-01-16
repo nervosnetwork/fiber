@@ -1,6 +1,6 @@
 [package]
 name = "fnn-migrate"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2021"
 build = "build.rs"
 
@@ -28,4 +28,3 @@ fiber_v030 = { package = "fnn", git = "https://github.com/nervosnetwork/fiber.gi
 [features]
 default = []
 portable = ["rocksdb/portable"]
-
