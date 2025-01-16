@@ -1098,6 +1098,7 @@ where
                     ProcessingChannelError::InternalError("insert preimage failed".to_string())
                 })?;
         }
+        eprintln!("handled remove_tlc peer message: {:?}", &remove_tlc.tlc_id);
         Ok(())
     }
 
@@ -1200,6 +1201,10 @@ where
         };
         let (funding_tx_partial_signature, commitment_tx_partial_signature) =
             state.build_and_sign_commitment_tx()?;
+        eprintln!(
+            "sign funding_tx_partial_signature: {:?}",
+            &funding_tx_partial_signature
+        );
         let commitment_signed = CommitmentSigned {
             channel_id: state.get_id(),
             funding_tx_partial_signature,
@@ -1290,11 +1295,13 @@ where
                 reason: command.reason,
             }),
         );
+        eprintln!("begin to send remove tlc peer message");
         self.network
             .send_message(NetworkActorMessage::new_command(
                 NetworkActorCommand::SendFiberMessage(msg),
             ))
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+        eprintln!("end send remove tlc peer message");
 
         state.maybe_transition_to_shutdown(&self.network)?;
         self.handle_commitment_signed_command(state)?;
@@ -4338,12 +4345,22 @@ impl ChannelActorState {
                 [to_local_output, to_remote_output],
                 [to_local_output_data, to_remote_output_data],
             ) = self.build_settlement_transaction_outputs(false);
+            eprintln!("remote false");
+            eprintln!(
+                "to_local_output: {:?} to_remote_output: {:?}",
+                to_local_output, to_remote_output
+            );
+            eprintln!(
+                "to_local_output_data: {:?} to_remote_output_data: {:?}",
+                to_local_output_data, to_remote_output_data
+            );
             let commitment_lock_script_args = [
                 &blake2b_256(x_only_aggregated_pubkey)[0..20],
                 self.get_delay_epoch_as_lock_args_bytes().as_slice(),
                 self.get_remote_commitment_number().to_be_bytes().as_slice(),
             ]
             .concat();
+
             let message = blake2b_256(
                 [
                     to_local_output.as_slice(),
@@ -4354,9 +4371,14 @@ impl ChannelActorState {
                 ]
                 .concat(),
             );
+            eprintln!("sign commitment_tx_partial_signature: {:?}", message);
 
             sign_ctx.sign(message.as_slice())?
         };
+        eprintln!(
+            "sign commitment_tx_partial_signature: {:?}",
+            commitment_tx_partial_signature
+        );
 
         // Note that we must update channel state here to update commitment number,
         // so that next step will obtain the correct commitment point.
@@ -4851,6 +4873,7 @@ impl ChannelActorState {
         } else {
             let mut result = vec![tlcs.len() as u8];
             for (tlc, local, remote) in tlcs {
+                eprintln!("tlc: {:?} for_remote: {:?}", tlc, for_remote);
                 result.extend_from_slice(&tlc.get_htlc_type().to_le_bytes());
                 result.extend_from_slice(&tlc.amount.to_le_bytes());
                 result.extend_from_slice(&tlc.get_hash());
@@ -4862,6 +4885,7 @@ impl ChannelActorState {
                         .to_le_bytes(),
                 );
             }
+            eprintln!("htlc result: {:?}", result);
             result
         }
     }
@@ -5161,6 +5185,11 @@ impl ChannelActorState {
                     &args[0..36],
                 ]
                 .concat(),
+            );
+            eprintln!("signing message: {:?}", message);
+            eprintln!(
+                "sign psct.commitment_tx_partial_signature: {:?}",
+                psct.commitment_tx_partial_signature
             );
             let aggregated_signature = sign_ctx
                 .sign_and_aggregate(message.as_slice(), psct.commitment_tx_partial_signature)?;
@@ -5805,8 +5834,14 @@ impl ChannelActorState {
                 ]
                 .concat(),
             );
+            eprintln!("handle revoke message: {:?}", message);
+            eprintln!(
+                "handle revoke message revocation_partial_signature: {:?}",
+                revocation_partial_signature
+            );
             let aggregated_signature =
                 sign_ctx.sign_and_aggregate(message.as_slice(), revocation_partial_signature)?;
+            eprintln!("successfully sign_and_aggregate ...");
             RevocationData {
                 commitment_number,
                 x_only_aggregated_pubkey,
@@ -5821,6 +5856,15 @@ impl ChannelActorState {
                 [to_local_output, to_remote_output],
                 [to_local_output_data, to_remote_output_data],
             ) = self.build_settlement_transaction_outputs(true);
+            eprintln!("remote true ...........");
+            eprintln!(
+                "to_local_output: {:?} to_remote_output: {:?}",
+                to_local_output, to_remote_output
+            );
+            eprintln!(
+                "to_local_output_data: {:?} to_remote_output_data: {:?}",
+                to_local_output_data, to_remote_output_data
+            );
             let commitment_lock_script_args = [
                 &blake2b_256(x_only_aggregated_pubkey)[0..20],
                 self.get_delay_epoch_as_lock_args_bytes().as_slice(),
@@ -5837,8 +5881,15 @@ impl ChannelActorState {
                 ]
                 .concat(),
             );
+
+            eprintln!("handle revoke message settlement_data: {:?}", message);
+            eprintln!(
+                "handle revoke message revocation_partial_signature settlement_data: {:?}",
+                commitment_tx_partial_signature
+            );
             let aggregated_signature =
                 sign_ctx.sign_and_aggregate(message.as_slice(), commitment_tx_partial_signature)?;
+            eprintln!("successfully sign_and_aggregate settlement data...");
 
             SettlementData {
                 x_only_aggregated_pubkey,
@@ -6172,6 +6223,8 @@ impl ChannelActorState {
         );
 
         let settlement_data = {
+            eprintln!("check_init_commitment_tx_signature message: {:?}", message);
+
             let aggregated_signature =
                 sign_ctx.sign_and_aggregate(message.as_slice(), signature)?;
 
@@ -6562,6 +6615,7 @@ impl ChannelActorState {
                 .capacity(capacity.pack())
                 .build();
             let output_data = Bytes::default();
+            eprintln!("output_data: {:?}", output_data);
             (output, output_data)
         }
     }
@@ -6636,6 +6690,7 @@ impl ChannelActorState {
         let mut received_pending = 0;
         let mut received_fullfilled = 0;
         for info in pending_tlcs {
+            eprintln!("tlc info: {:?}", info);
             if info.is_offered() {
                 offered_pending += info.amount;
                 if (info.outbound_status() == OutboundTlcStatus::RemoveWaitAck
@@ -6646,6 +6701,7 @@ impl ChannelActorState {
                         .map(|r| matches!(r, RemoveTlcReason::RemoveTlcFulfill(_)))
                         .unwrap_or_default()
                 {
+                    eprintln!("offered_fullfilled + : {:?}", info.amount);
                     offered_fullfilled += info.amount;
                 }
             } else {
@@ -6657,10 +6713,18 @@ impl ChannelActorState {
                         .map(|r| matches!(r, RemoveTlcReason::RemoveTlcFulfill(_)))
                         .unwrap_or_default()
                 {
+                    eprintln!("received_fullfilled + : {:?}", info.amount);
                     received_fullfilled += info.amount;
                 }
             }
         }
+        eprintln!(
+            "self.to_local_amount: {:?}, self.to_remote_amount: {:?}",
+            self.to_local_amount, self.to_remote_amount
+        );
+        eprintln!("received_fullfilled: {:?}, offered_pending: {:?}, offered_fullfilled: {:?}, received_pending: {:?}",
+            received_fullfilled, offered_pending, offered_fullfilled, received_pending
+        );
         let to_local_value = self.to_local_amount + received_fullfilled - offered_pending;
         let to_remote_value = self.to_remote_amount + offered_fullfilled - received_pending;
 
@@ -6704,6 +6768,9 @@ impl ChannelActorState {
                         .pack(),
                 )
                 .build();
+            eprintln!("to_local_value: {:?}, local_reserved_ckb_amount: {:?}, commitment_tx_fee: {:?}, for_remote: {:?}",
+                to_local_value, self.local_reserved_ckb_amount, commitment_tx_fee, for_remote
+            );
             let to_local_output_data = Bytes::default();
 
             let to_remote_output = CellOutput::new_builder()
@@ -6713,6 +6780,10 @@ impl ChannelActorState {
                         .pack(),
                 )
                 .build();
+            eprintln!(
+                "to_remote_value: {:?}, remote_reserved_ckb_amount: {:?}, commitment_tx_fee: {:?}, for_remote: {:?}",
+                to_remote_value, self.remote_reserved_ckb_amount, commitment_tx_fee, for_remote
+            );
             let to_remote_output_data = Bytes::default();
             if for_remote {
                 (
@@ -6736,10 +6807,16 @@ impl ChannelActorState {
         let (commitment_tx, settlement_tx) = self.build_commitment_and_settlement_tx(false);
 
         let deterministic_verify_ctx = self.get_deterministic_verify_context();
+        eprintln!(
+            "verify funding_tx_partial_signature: {:?} deterministic_verify_ctx: {:?}",
+            funding_tx_partial_signature, deterministic_verify_ctx
+        );
+        eprintln!("commitment_tx hash: {:?}", commitment_tx.hash().as_slice());
         deterministic_verify_ctx.verify(
             funding_tx_partial_signature,
             commitment_tx.hash().as_slice(),
         )?;
+        eprintln!("verify successfully .....");
 
         let to_local_output = settlement_tx
             .outputs()
@@ -6792,6 +6869,11 @@ impl ChannelActorState {
         let (commitment_tx, settlement_tx) = self.build_commitment_and_settlement_tx(true);
 
         let deterministic_sign_ctx = self.get_deterministic_sign_context();
+        eprintln!("sign deterministic_sign_ctx: {:?}", deterministic_sign_ctx);
+        eprintln!(
+            "sign commitment_tx hash: {:?}",
+            commitment_tx.hash().as_slice()
+        );
         let funding_tx_partial_signature =
             deterministic_sign_ctx.sign(commitment_tx.hash().as_slice())?;
 
@@ -6975,6 +7057,7 @@ impl Musig2CommonContext {
     }
 }
 
+#[derive(Debug)]
 struct Musig2VerifyContext {
     common_ctx: Musig2CommonContext,
     pubkey: Pubkey,
@@ -6994,6 +7077,7 @@ impl Musig2VerifyContext {
     }
 }
 
+#[derive(Debug)]
 struct Musig2SignContext {
     common_ctx: Musig2CommonContext,
     seckey: Privkey,
