@@ -940,6 +940,90 @@ where
         let mut nodes_heap = NodeHeap::new(nodes_len);
         let mut distances = HashMap::<Pubkey, NodeHeapElement>::new();
 
+        // A helper function to evaluate whether an edge should be added to the heap of nodes to visit.
+        // We will check the accumulated probability of this edge to be a successful payment, and evaluate
+        // the distance from the source node to the final payee. If the distance is shorter than the current
+        // distance, we will update the distance and add the node to the heap.
+        // This should be called after some sanity checks on the edge, e.g. the amount to send
+        // is less than the capacity and the expiry is less than the limit.
+        let eval_and_update = |// The channel outpoint of the edge.
+                               channel_outpoint: &OutPoint,
+                               // The capacity of the channel.
+                               channel_capacity: u128,
+                               // The source node of the edge.
+                               from: Pubkey,
+                               // The target node of the edge.
+                               to: Pubkey,
+                               // The amount that the source node will send to the target node.
+                               amount_to_send: u128,
+                               // The amount that the source node will receive from forwarding `amount_to_send` to the target.
+                               fee: u128,
+                               // The TLC expiry for the TLC that the target node will receive.
+                               incoming_tlc_expiry: u64,
+                               // The difference in TLC expiry between the TLC that the source node will receive
+                               // and the TLC that the target node will receive.
+                               tlc_expiry_delta: u64,
+                               // The probability of a successful payment from current target to the final payee.
+                               cur_probability: f64,
+                               // The weight accumulated from the payment path from current target to the final payee.
+                               cur_weight: u128,
+                               // The distances from nodes to the final payee.
+                               distances: &mut HashMap<Pubkey, NodeHeapElement>,
+                               // The priority queue of nodes to be visited (sorted by distance and probability).
+                               nodes_heap: &mut NodeHeap| {
+            let total_tlc_expiry = incoming_tlc_expiry + tlc_expiry_delta;
+            let probability = cur_probability
+                * self.history.eval_probability(
+                    from,
+                    to,
+                    channel_outpoint,
+                    amount_to_send,
+                    channel_capacity,
+                );
+
+            debug!(
+                "probability: {} for channel_outpoint: {:?} from: {:?} => to: {:?}",
+                probability, channel_outpoint, from, to
+            );
+            if probability < DEFAULT_MIN_PROBABILITY {
+                debug!("probability is too low: {:?}", probability);
+                return;
+            }
+            let agg_weight = self.edge_weight(amount_to_send, fee, tlc_expiry_delta);
+            let weight = cur_weight + agg_weight;
+            let distance = self.calculate_distance_based_probability(probability, weight);
+
+            if let Some(node) = distances.get(&from) {
+                if distance >= node.distance {
+                    return;
+                }
+            }
+            let node = NodeHeapElement {
+                node_id: from,
+                weight,
+                distance,
+                amount_to_send,
+                incoming_tlc_expiry: total_tlc_expiry,
+                fee_charged: fee,
+                probability,
+                next_hop: Some(PathEdge {
+                    target: to,
+                    channel_outpoint: channel_outpoint.clone(),
+                    // Here we need to use the amount accumulated so far (i.e. with the fees in current hop)
+                    // because the fee here is for the receiving node to forward the amount to the next node.
+                    // So the total amount in AddTlc packet should include the fee.
+                    amount_received: amount_to_send,
+                    // We need to use cur_hop.incoming_tlc_expiry instead of incoming_tlc_expiry here
+                    // because we need the expiry for the AddTlc packet sent from source to target.
+                    // cur_hop.incoming_tlc_expiry is the expiry time for the TLC that is going to be received by the target,
+                    // while incoming_tlc_expiry is the expiry time for the TLC that is going to be received by the source.
+                    incoming_tlc_expiry,
+                }),
+            };
+            distances.insert(node.node_id, node.clone());
+            nodes_heap.push_or_fix(node);
+        };
+
         if amount == 0 {
             return Err(PathFindError::Amount(
                 "amount must be greater than 0".to_string(),
@@ -969,6 +1053,7 @@ where
             last_edge = Some(edge);
         }
         assert_ne!(source, target);
+
         // initialize the target node
         nodes_heap.push(NodeHeapElement {
             node_id: target,
@@ -1066,60 +1151,20 @@ where
                     continue;
                 }
 
-                let probability = cur_hop.probability
-                    * self.history.eval_probability(
-                        from,
-                        to,
-                        &channel_info.out_point(),
-                        amount_to_send,
-                        channel_info.capacity(),
-                    );
-
-                debug!(
-                    "probability: {} for channel_outpoint: {:?} from: {:?} => to: {:?}",
-                    probability,
+                eval_and_update(
                     channel_info.out_point(),
+                    channel_info.capacity(),
                     from,
-                    to
-                );
-                if probability < DEFAULT_MIN_PROBABILITY {
-                    debug!("probability is too low: {:?}", probability);
-                    continue;
-                }
-                let agg_weight =
-                    self.edge_weight(amount_to_send, fee, channel_update.tlc_expiry_delta);
-                let weight = cur_hop.weight + agg_weight;
-                let distance = self.calculate_distance_based_probability(probability, weight);
-
-                if let Some(node) = distances.get(&from) {
-                    if distance >= node.distance {
-                        continue;
-                    }
-                }
-                let node = NodeHeapElement {
-                    node_id: from,
-                    weight,
-                    distance,
+                    to,
                     amount_to_send,
-                    incoming_tlc_expiry,
-                    fee_charged: fee,
-                    probability,
-                    next_hop: Some(PathEdge {
-                        target: to,
-                        channel_outpoint: channel_info.out_point().clone(),
-                        // Here we need to use the amount accumulated so far (i.e. with the fees in current hop)
-                        // because the fee here is for the receiving node to forward the amount to the next node.
-                        // So the total amount in AddTlc packet should include the fee.
-                        amount_received: amount_to_send,
-                        // We need to use cur_hop.incoming_tlc_expiry instead of incoming_tlc_expiry here
-                        // because we need the expiry for the AddTlc packet sent from source to target.
-                        // cur_hop.incoming_tlc_expiry is the expiry time for the TLC that is going to be received by the target,
-                        // while incoming_tlc_expiry is the expiry time for the TLC that is going to be received by the source.
-                        incoming_tlc_expiry: cur_hop.incoming_tlc_expiry,
-                    }),
-                };
-                distances.insert(node.node_id, node.clone());
-                nodes_heap.push_or_fix(node);
+                    fee,
+                    cur_hop.incoming_tlc_expiry,
+                    expiry_delta,
+                    cur_hop.probability,
+                    cur_hop.weight,
+                    &mut distances,
+                    &mut nodes_heap,
+                );
             }
         }
 
