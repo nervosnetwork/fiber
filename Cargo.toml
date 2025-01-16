@@ -1,7 +1,8 @@
 [package]
 name = "fnn"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2021"
+build = "src/build.rs"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -79,6 +80,7 @@ panic = "abort"
 [dev-dependencies]
 tempfile = "3.10.1"
 ckb-testtool = "0.13.2"
+ciborium = "0.2.2"
 
 [lints.clippy]
 needless-return = "allow"

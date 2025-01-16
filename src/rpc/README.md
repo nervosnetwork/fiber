@@ -45,22 +45,27 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
         * [Method `disconnect_peer`](#peer-disconnect_peer)
 * [RPC Types](#rpc-types)
 
+    * [Type `CchOrderStatus`](#type-cchorderstatus)
     * [Type `Channel`](#type-channel)
     * [Type `ChannelInfo`](#type-channelinfo)
-    * [Type `ChannelState`](#type-channelstate)
+    * [Type `CkbInvoice`](#type-ckbinvoice)
+    * [Type `CkbInvoiceStatus`](#type-ckbinvoicestatus)
+    * [Type `Currency`](#type-currency)
+    * [Type `Hash256`](#type-hash256)
+    * [Type `HashAlgorithm`](#type-hashalgorithm)
+    * [Type `HopHint`](#type-hophint)
     * [Type `NodeInfo`](#type-nodeinfo)
     * [Type `PaymentSessionStatus`](#type-paymentsessionstatus)
+    * [Type `Pubkey`](#type-pubkey)
     * [Type `RemoveTlcReason`](#type-removetlcreason)
-    * [Type `UdtArgInfo`](#type-udtarginfo)
-    * [Type `UdtCellDep`](#type-udtcelldep)
+    * [Type `SessionRoute`](#type-sessionroute)
     * [Type `UdtCfgInfos`](#type-udtcfginfos)
-    * [Type `UdtScript`](#type-udtscript)
+
 ## RPC Modules
 
 <a id="cch"></a>
 ### Module `Cch`
 RPC module for cross chain hub demonstration.
- This is the seccond line
 
 
 <a id="cch-send_btc"></a>
@@ -70,22 +75,25 @@ Send BTC to a address.
 
 ##### Params
 
-* `btc_pay_req` - String, Bitcoin payment request string
-* `currency` - Currency, Request currency
+* `btc_pay_req` - <em>`String`</em>, Bitcoin payment request string
+* `currency` - <em>[Currency](#type-currency)</em>, Request currency
 
 ##### Returns
 
-* `timestamp` - u64, Seconds since epoch when the order is created
-* `expiry` - u64, Seconds after timestamp that the order expires
-* `ckb_final_tlc_expiry_delta` - u64, The minimal expiry in seconds of the final TLC in the CKB network
-* `currency` - Currency, Request currency
-* `wrapped_btc_type_script` - ckb_jsonrpc_types::Script, Wrapped BTC type script
-* `btc_pay_req` - String, Payment request for BTC
-* `ckb_pay_req` - String, Payment request for CKB
-* `payment_hash` - String, Payment hash for the HTLC for both CKB and BTC.
-* `amount_sats` - u128, Amount required to pay in Satoshis, including fee
-* `fee_sats` - u128, Fee in Satoshis
-* `status` - CchOrderStatus, Order status
+* `timestamp` - <em>`u64`</em>, Seconds since epoch when the order is created
+* `expiry` - <em>`u64`</em>, Seconds after timestamp that the order expires
+* `ckb_final_tlc_expiry_delta` - <em>`u64`</em>, The minimal expiry in seconds of the final TLC in the CKB network
+* `currency` - <em>[Currency](#type-currency)</em>, Request currency
+* `wrapped_btc_type_script` - <em>`ckb_jsonrpc_types::Script`</em>, Wrapped BTC type script
+* `btc_pay_req` - <em>`String`</em>, Payment request for BTC
+* `ckb_pay_req` - <em>`String`</em>, Payment request for CKB
+* `payment_hash` - <em>`String`</em>, Payment hash for the HTLC for both CKB and BTC.
+* `amount_sats` - <em>`u128`</em>, Amount required to pay in Satoshis, including fee
+* `fee_sats` - <em>`u128`</em>, Fee in Satoshis
+* `status` - <em>[CchOrderStatus](#type-cchorderstatus)</em>, Order status
+
+---
+
 
 
 <a id="cch-receive_btc"></a>
@@ -95,24 +103,27 @@ Receive BTC from a payment hash.
 
 ##### Params
 
-* `payment_hash` - String, Payment hash for the HTLC for both CKB and BTC.
-* `channel_id` - Hash256, Channel ID for the CKB payment.
-* `amount_sats` - u128, How many satoshis to receive, excluding cross-chain hub fee.
-* `final_tlc_expiry` - u64, Expiry set for the HTLC for the CKB payment to the payee.
+* `payment_hash` - <em>`String`</em>, Payment hash for the HTLC for both CKB and BTC.
+* `channel_id` - <em>[Hash256](#type-hash256)</em>, Channel ID for the CKB payment.
+* `amount_sats` - <em>`u128`</em>, How many satoshis to receive, excluding cross-chain hub fee.
+* `final_tlc_expiry` - <em>`u64`</em>, Expiry set for the HTLC for the CKB payment to the payee.
 
 ##### Returns
 
-* `timestamp` - u64, Seconds since epoch when the order is created
-* `expiry` - u64, Seconds after timestamp that the order expires
-* `ckb_final_tlc_expiry_delta` - u64, The minimal expiry in seconds of the final TLC in the CKB network
-* `wrapped_btc_type_script` - ckb_jsonrpc_types::Script, Wrapped BTC type script
-* `btc_pay_req` - String, Payment request for BTC
-* `payment_hash` - String, Payment hash for the HTLC for both CKB and BTC.
-* `channel_id` - Hash256, Channel ID for the CKB payment.
-* `tlc_id` - `Option<u64>`, TLC ID for the CKB payment.
-* `amount_sats` - u128, Amount will be received by the payee
-* `fee_sats` - u128, Fee in Satoshis
-* `status` - CchOrderStatus, Order status
+* `timestamp` - <em>`u64`</em>, Seconds since epoch when the order is created
+* `expiry` - <em>`u64`</em>, Seconds after timestamp that the order expires
+* `ckb_final_tlc_expiry_delta` - <em>`u64`</em>, The minimal expiry in seconds of the final TLC in the CKB network
+* `wrapped_btc_type_script` - <em>`ckb_jsonrpc_types::Script`</em>, Wrapped BTC type script
+* `btc_pay_req` - <em>`String`</em>, Payment request for BTC
+* `payment_hash` - <em>`String`</em>, Payment hash for the HTLC for both CKB and BTC.
+* `channel_id` - <em>[Hash256](#type-hash256)</em>, Channel ID for the CKB payment.
+* `tlc_id` - <em>`Option<u64>`</em>, TLC ID for the CKB payment.
+* `amount_sats` - <em>`u128`</em>, Amount will be received by the payee
+* `fee_sats` - <em>`u128`</em>, Fee in Satoshis
+* `status` - <em>[CchOrderStatus](#type-cchorderstatus)</em>, Order status
+
+---
+
 
 
 <a id="cch-get_receive_btc_order"></a>
@@ -122,21 +133,24 @@ Get receive BTC order by payment hash.
 
 ##### Params
 
-* `payment_hash` - String, Payment hash for the HTLC for both CKB and BTC.
+* `payment_hash` - <em>`String`</em>, Payment hash for the HTLC for both CKB and BTC.
 
 ##### Returns
 
-* `timestamp` - u64, Seconds since epoch when the order is created
-* `expiry` - u64, Seconds after timestamp that the order expires
-* `ckb_final_tlc_expiry_delta` - u64, The minimal expiry in seconds of the final TLC in the CKB network
-* `wrapped_btc_type_script` - ckb_jsonrpc_types::Script, Wrapped BTC type script
-* `btc_pay_req` - String, Payment request for BTC
-* `payment_hash` - String, Payment hash for the HTLC for both CKB and BTC.
-* `channel_id` - Hash256, Channel ID for the CKB payment.
-* `tlc_id` - `Option<u64>`, TLC ID for the CKB payment.
-* `amount_sats` - u128, Amount will be received by the payee
-* `fee_sats` - u128, Fee in Satoshis
-* `status` - CchOrderStatus, Order status
+* `timestamp` - <em>`u64`</em>, Seconds since epoch when the order is created
+* `expiry` - <em>`u64`</em>, Seconds after timestamp that the order expires
+* `ckb_final_tlc_expiry_delta` - <em>`u64`</em>, The minimal expiry in seconds of the final TLC in the CKB network
+* `wrapped_btc_type_script` - <em>`ckb_jsonrpc_types::Script`</em>, Wrapped BTC type script
+* `btc_pay_req` - <em>`String`</em>, Payment request for BTC
+* `payment_hash` - <em>`String`</em>, Payment hash for the HTLC for both CKB and BTC.
+* `channel_id` - <em>[Hash256](#type-hash256)</em>, Channel ID for the CKB payment.
+* `tlc_id` - <em>`Option<u64>`</em>, TLC ID for the CKB payment.
+* `amount_sats` - <em>`u128`</em>, Amount will be received by the payee
+* `fee_sats` - <em>`u128`</em>, Fee in Satoshis
+* `status` - <em>[CchOrderStatus](#type-cchorderstatus)</em>, Order status
+
+---
+
 
 
 <a id="channel"></a>
@@ -151,30 +165,33 @@ Attempts to open a channel with a peer.
 
 ##### Params
 
-* `peer_id` - PeerId, The peer ID to open a channel with, the peer must be connected through the [connect_peer](#peer-connect_peer) rpc first.
-* `funding_amount` - u128, The amount of CKB or UDT to fund the channel with.
-* `public` - `Option<bool>`, Whether this is a public channel (will be broadcasted to network, and can be used to forward TLCs), an optional parameter, default value is true.
-* `funding_udt_type_script` - `Option<Script>`, The type script of the UDT to fund the channel with, an optional parameter.
-* `shutdown_script` - `Option<Script>`, The script used to receive the channel balance, an optional parameter, default value is the secp256k1_blake160_sighash_all script corresponding to the configured private key.
-* `commitment_delay_epoch` - `Option<EpochNumberWithFraction>`, The delay time for the commitment transaction, must be an [EpochNumberWithFraction](https://github.com/nervosnetwork/rfcs/blob/master/rfcs/0017-tx-valid-since/e-i-l-encoding.png) in u64 format, an optional parameter, default value is 24 hours.
-* `commitment_fee_rate` - `Option<u64>`, The fee rate for the commitment transaction, an optional parameter.
-* `funding_fee_rate` - `Option<u64>`, The fee rate for the funding transaction, an optional parameter.
-* `tlc_expiry_delta` - `Option<u64>`, The expiry delta to forward a tlc, in milliseconds, default to 1 day, which is 24 * 60 * 60 * 1000 milliseconds
+* `peer_id` - <em>`PeerId`</em>, The peer ID to open a channel with, the peer must be connected through the [connect_peer](#peer-connect_peer) rpc first.
+* `funding_amount` - <em>`u128`</em>, The amount of CKB or UDT to fund the channel with.
+* `public` - <em>`Option<bool>`</em>, Whether this is a public channel (will be broadcasted to network, and can be used to forward TLCs), an optional parameter, default value is true.
+* `funding_udt_type_script` - <em>`Option<Script>`</em>, The type script of the UDT to fund the channel with, an optional parameter.
+* `shutdown_script` - <em>`Option<Script>`</em>, The script used to receive the channel balance, an optional parameter, default value is the secp256k1_blake160_sighash_all script corresponding to the configured private key.
+* `commitment_delay_epoch` - <em>`Option<EpochNumberWithFraction>`</em>, The delay time for the commitment transaction, must be an [EpochNumberWithFraction](https://github.com/nervosnetwork/rfcs/blob/master/rfcs/0017-tx-valid-since/e-i-l-encoding.png) in u64 format, an optional parameter, default value is 24 hours.
+* `commitment_fee_rate` - <em>`Option<u64>`</em>, The fee rate for the commitment transaction, an optional parameter.
+* `funding_fee_rate` - <em>`Option<u64>`</em>, The fee rate for the funding transaction, an optional parameter.
+* `tlc_expiry_delta` - <em>`Option<u64>`</em>, The expiry delta to forward a tlc, in milliseconds, default to 1 day, which is 24 * 60 * 60 * 1000 milliseconds
  This parameter can be updated with rpc `update_channel` later.
-* `tlc_min_value` - `Option<u128>`, The minimum value for a TLC our side can receive
+* `tlc_min_value` - <em>`Option<u128>`</em>, The minimum value for a TLC our side can receive
  an optional parameter, default is 0, which means we can receive any TLC is larger than 0.
  This parameter can be updated with rpc `update_channel` later.
-* `tlc_fee_proportional_millionths` - `Option<u128>`, The fee proportional millionths for a TLC, Proportional to the amount of the forwarded tlc.
+* `tlc_fee_proportional_millionths` - <em>`Option<u128>`</em>, The fee proportional millionths for a TLC, Proportional to the amount of the forwarded tlc.
  The unit is millionths of the amount. default is 1000 which means 0.1%.
  This parameter can be updated with rpc `update_channel` later.
-* `max_tlc_value_in_flight` - `Option<u128>`, The maximum value in flight for TLCs, an optional parameter.
+* `max_tlc_value_in_flight` - <em>`Option<u128>`</em>, The maximum value in flight for TLCs, an optional parameter.
  This parameter can not be updated after channel is opened.
-* `max_tlc_number_in_flight` - `Option<u64>`, The maximum number of TLCs that can be accepted, an optional parameter, default is 125
+* `max_tlc_number_in_flight` - <em>`Option<u64>`</em>, The maximum number of TLCs that can be accepted, an optional parameter, default is 125
  This parameter can not be updated after channel is opened.
 
 ##### Returns
 
-* `temporary_channel_id` - Hash256, The temporary channel ID of the channel being opened
+* `temporary_channel_id` - <em>[Hash256](#type-hash256)</em>, The temporary channel ID of the channel being opened
+
+---
+
 
 
 <a id="channel-accept_channel"></a>
@@ -184,26 +201,29 @@ Accepts a channel opening request from a peer.
 
 ##### Params
 
-* `temporary_channel_id` - Hash256, The temporary channel ID of the channel to accept
-* `funding_amount` - u128, The amount of CKB or UDT to fund the channel with
-* `shutdown_script` - `Option<Script>`, The script used to receive the channel balance, an optional parameter,
+* `temporary_channel_id` - <em>[Hash256](#type-hash256)</em>, The temporary channel ID of the channel to accept
+* `funding_amount` - <em>`u128`</em>, The amount of CKB or UDT to fund the channel with
+* `shutdown_script` - <em>`Option<Script>`</em>, The script used to receive the channel balance, an optional parameter,
  default value is the secp256k1_blake160_sighash_all script corresponding to the configured private key
-* `max_tlc_value_in_flight` - `Option<u128>`, The max tlc sum value in flight for the channel, default is u128::MAX
+* `max_tlc_value_in_flight` - <em>`Option<u128>`</em>, The max tlc sum value in flight for the channel, default is u128::MAX
  This parameter can not be updated after channel is opened.
-* `max_tlc_number_in_flight` - `Option<u64>`, The max tlc number in flight send from our side, default is 125
+* `max_tlc_number_in_flight` - <em>`Option<u64>`</em>, The max tlc number in flight send from our side, default is 125
  This parameter can not be updated after channel is opened.
-* `tlc_min_value` - `Option<u128>`, The minimum value for a TLC our side can receive
+* `tlc_min_value` - <em>`Option<u128>`</em>, The minimum value for a TLC our side can receive
  an optional parameter, default is 0, which means we can receive any TLC is larger than 0.
  This parameter can be updated with rpc `update_channel` later.
-* `tlc_fee_proportional_millionths` - `Option<u128>`, The fee proportional millionths for a TLC, Proportional to the amount of the forwarded tlc.
+* `tlc_fee_proportional_millionths` - <em>`Option<u128>`</em>, The fee proportional millionths for a TLC, Proportional to the amount of the forwarded tlc.
  The unit is millionths of the amount. default is 1000 which means 0.1%.
  This parameter can be updated with rpc `update_channel` later.
-* `tlc_expiry_delta` - `Option<u64>`, The expiry delta to forward a tlc, in milliseconds, default to 1 day, which is 24 * 60 * 60 * 1000 milliseconds
+* `tlc_expiry_delta` - <em>`Option<u64>`</em>, The expiry delta to forward a tlc, in milliseconds, default to 1 day, which is 24 * 60 * 60 * 1000 milliseconds
  This parameter can be updated with rpc `update_channel` later.
 
 ##### Returns
 
-* `channel_id` - Hash256, The final ID of the channel that was accepted, it's different from the temporary channel ID
+* `channel_id` - <em>[Hash256](#type-hash256)</em>, The final ID of the channel that was accepted, it's different from the temporary channel ID
+
+---
+
 
 
 <a id="channel-list_channels"></a>
@@ -213,12 +233,15 @@ Lists all channels.
 
 ##### Params
 
-* `peer_id` - `Option<PeerId>`, The peer ID to list channels for, an optional parameter, if not provided, all channels will be listed
-* `include_closed` - `Option<bool>`, Whether to include closed channels in the list, an optional parameter, default value is false
+* `peer_id` - <em>`Option<PeerId>`</em>, The peer ID to list channels for, an optional parameter, if not provided, all channels will be listed
+* `include_closed` - <em>`Option<bool>`</em>, Whether to include closed channels in the list, an optional parameter, default value is false
 
 ##### Returns
 
-* `channels` - `Vec<Channel>`, The list of channels
+* `channels` - <em>Vec<[Channel](#type-channel)></em>, The list of channels
+
+---
+
 
 
 <a id="channel-shutdown_channel"></a>
@@ -228,14 +251,17 @@ Shuts down a channel.
 
 ##### Params
 
-* `channel_id` - Hash256, The channel ID of the channel to shut down
-* `close_script` - Script, The script used to receive the channel balance, only support secp256k1_blake160_sighash_all script for now
-* `force` - `Option<bool>`, Whether to force the channel to close
-* `fee_rate` - u64, The fee rate for the closing transaction, the fee will be deducted from the closing initiator's channel balance
+* `channel_id` - <em>[Hash256](#type-hash256)</em>, The channel ID of the channel to shut down
+* `close_script` - <em>`Script`</em>, The script used to receive the channel balance, only support secp256k1_blake160_sighash_all script for now
+* `force` - <em>`Option<bool>`</em>, Whether to force the channel to close
+* `fee_rate` - <em>`u64`</em>, The fee rate for the closing transaction, the fee will be deducted from the closing initiator's channel balance
 
 ##### Returns
 
 * None
+
+---
+
 
 
 <a id="channel-update_channel"></a>
@@ -245,17 +271,20 @@ Updates a channel.
 
 ##### Params
 
-* `channel_id` - Hash256, The channel ID of the channel to update
-* `enabled` - `Option<bool>`, Whether the channel is enabled
-* `tlc_expiry_delta` - `Option<u64>`, The CLTV delta from the current height that should be used to set the timelock for the final hop
+* `channel_id` - <em>[Hash256](#type-hash256)</em>, The channel ID of the channel to update
+* `enabled` - <em>`Option<bool>`</em>, Whether the channel is enabled
+* `tlc_expiry_delta` - <em>`Option<u64>`</em>, The CLTV delta from the current height that should be used to set the timelock for the final hop
 
  The expiry delta for the TLC locktime
-* `tlc_minimum_value` - `Option<u128>`, The minimum value for a TLC
-* `tlc_fee_proportional_millionths` - `Option<u128>`, The fee proportional millionths for a TLC
+* `tlc_minimum_value` - <em>`Option<u128>`</em>, The minimum value for a TLC
+* `tlc_fee_proportional_millionths` - <em>`Option<u128>`</em>, The fee proportional millionths for a TLC
 
 ##### Returns
 
 * None
+
+---
+
 
 
 <a id="dev"></a>
@@ -271,11 +300,14 @@ Sends a commitment_signed message to the peer.
 
 ##### Params
 
-* `channel_id` - Hash256, The channel ID of the channel to send the commitment_signed message to
+* `channel_id` - <em>[Hash256](#type-hash256)</em>, The channel ID of the channel to send the commitment_signed message to
 
 ##### Returns
 
 * None
+
+---
+
 
 
 <a id="dev-add_tlc"></a>
@@ -285,15 +317,18 @@ Adds a TLC to a channel.
 
 ##### Params
 
-* `channel_id` - Hash256, The channel ID of the channel to add the TLC to
-* `amount` - u128, The amount of the TLC
-* `payment_hash` - Hash256, The payment hash of the TLC
-* `expiry` - u64, The expiry of the TLC
-* `hash_algorithm` - `Option<HashAlgorithm>`, The hash algorithm of the TLC
+* `channel_id` - <em>[Hash256](#type-hash256)</em>, The channel ID of the channel to add the TLC to
+* `amount` - <em>`u128`</em>, The amount of the TLC
+* `payment_hash` - <em>[Hash256](#type-hash256)</em>, The payment hash of the TLC
+* `expiry` - <em>`u64`</em>, The expiry of the TLC
+* `hash_algorithm` - <em>Option<[HashAlgorithm](#type-hashalgorithm)></em>, The hash algorithm of the TLC
 
 ##### Returns
 
-* `tlc_id` - u64, The ID of the TLC
+* `tlc_id` - <em>`u64`</em>, The ID of the TLC
+
+---
+
 
 
 <a id="dev-remove_tlc"></a>
@@ -303,13 +338,16 @@ Removes a TLC from a channel.
 
 ##### Params
 
-* `channel_id` - Hash256, The channel ID of the channel to remove the TLC from
-* `tlc_id` - u64, The ID of the TLC to remove
-* `reason` - RemoveTlcReason, The reason for removing the TLC, either a 32-byte hash for preimage fulfillment or an u32 error code for removal
+* `channel_id` - <em>[Hash256](#type-hash256)</em>, The channel ID of the channel to remove the TLC from
+* `tlc_id` - <em>`u64`</em>, The ID of the TLC to remove
+* `reason` - <em>[RemoveTlcReason](#type-removetlcreason)</em>, The reason for removing the TLC, either a 32-byte hash for preimage fulfillment or an u32 error code for removal
 
 ##### Returns
 
 * None
+
+---
+
 
 
 <a id="dev-submit_commitment_transaction"></a>
@@ -319,12 +357,15 @@ Submit a commitment transaction to the chain
 
 ##### Params
 
-* `channel_id` - Hash256, Channel ID
-* `commitment_number` - u64, Commitment number
+* `channel_id` - <em>[Hash256](#type-hash256)</em>, Channel ID
+* `commitment_number` - <em>`u64`</em>, Commitment number
 
 ##### Returns
 
-* `tx_hash` - Hash256, Submitted commitment transaction hash
+* `tx_hash` - <em>[Hash256](#type-hash256)</em>, Submitted commitment transaction hash
+
+---
+
 
 
 <a id="graph"></a>
@@ -339,13 +380,16 @@ Get the list of nodes in the network graph.
 
 ##### Params
 
-* `limit` - `Option<u64>`, The maximum number of nodes to return.
-* `after` - `Option<JsonBytes>`, The cursor to start returning nodes from.
+* `limit` - <em>`Option<u64>`</em>, The maximum number of nodes to return.
+* `after` - <em>`Option<JsonBytes>`</em>, The cursor to start returning nodes from.
 
 ##### Returns
 
-* `nodes` - `Vec<NodeInfo>`, The list of nodes.
-* `last_cursor` - JsonBytes, The last cursor.
+* `nodes` - <em>Vec<[NodeInfo](#type-nodeinfo)></em>, The list of nodes.
+* `last_cursor` - <em>`JsonBytes`</em>, The last cursor.
+
+---
+
 
 
 <a id="graph-graph_channels"></a>
@@ -355,13 +399,16 @@ Get the list of channels in the network graph.
 
 ##### Params
 
-* `limit` - `Option<u64>`, The maximum number of channels to return.
-* `after` - `Option<JsonBytes>`, The cursor to start returning channels from.
+* `limit` - <em>`Option<u64>`</em>, The maximum number of channels to return.
+* `after` - <em>`Option<JsonBytes>`</em>, The cursor to start returning channels from.
 
 ##### Returns
 
-* `channels` - `Vec<ChannelInfo>`, A list of channels.
-* `last_cursor` - JsonBytes, The last cursor for pagination.
+* `channels` - <em>Vec<[ChannelInfo](#type-channelinfo)></em>, A list of channels.
+* `last_cursor` - <em>`JsonBytes`</em>, The last cursor for pagination.
+
+---
+
 
 
 <a id="info"></a>
@@ -379,23 +426,26 @@ Get the node information.
 
 ##### Returns
 
-* `version` - String, The version of the node software.
-* `commit_hash` - String, The commit hash of the node software.
-* `node_id` - Pubkey, The identity public key of the node.
-* `node_name` - `Option<String>`, The optional name of the node.
-* `addresses` - `Vec<MultiAddr>`, A list of multi-addresses associated with the node.
-* `chain_hash` - Hash256, The hash of the blockchain that the node is connected to.
-* `open_channel_auto_accept_min_ckb_funding_amount` - u64, The minimum CKB funding amount for automatically accepting open channel requests, serialized as a hexadecimal string.
-* `auto_accept_channel_ckb_funding_amount` - u64, The CKB funding amount for automatically accepting channel requests, serialized as a hexadecimal string.
-* `default_funding_lock_script` - Script, The default funding lock script for the node.
-* `tlc_expiry_delta` - u64, The locktime expiry delta for Time-Locked Contracts (TLC), serialized as a hexadecimal string.
-* `tlc_min_value` - u128, The minimum value for Time-Locked Contracts (TLC), serialized as a hexadecimal string.
-* `tlc_max_value` - u128, The maximum value for Time-Locked Contracts (TLC), serialized as a hexadecimal string, `0` means no maximum value limit.
-* `tlc_fee_proportional_millionths` - u128, The fee proportional to the value of Time-Locked Contracts (TLC), expressed in millionths and serialized as a hexadecimal string.
-* `channel_count` - u32, The number of channels associated with the node, serialized as a hexadecimal string.
-* `pending_channel_count` - u32, The number of pending channels associated with the node, serialized as a hexadecimal string.
-* `peers_count` - u32, The number of peers connected to the node, serialized as a hexadecimal string.
-* `udt_cfg_infos` - UdtCfgInfos, Configuration information for User-Defined Tokens (UDT) associated with the node.
+* `version` - <em>`String`</em>, The version of the node software.
+* `commit_hash` - <em>`String`</em>, The commit hash of the node software.
+* `node_id` - <em>[Pubkey](#type-pubkey)</em>, The identity public key of the node.
+* `node_name` - <em>`Option<String>`</em>, The optional name of the node.
+* `addresses` - <em>`Vec<MultiAddr>`</em>, A list of multi-addresses associated with the node.
+* `chain_hash` - <em>[Hash256](#type-hash256)</em>, The hash of the blockchain that the node is connected to.
+* `open_channel_auto_accept_min_ckb_funding_amount` - <em>`u64`</em>, The minimum CKB funding amount for automatically accepting open channel requests, serialized as a hexadecimal string.
+* `auto_accept_channel_ckb_funding_amount` - <em>`u64`</em>, The CKB funding amount for automatically accepting channel requests, serialized as a hexadecimal string.
+* `default_funding_lock_script` - <em>`Script`</em>, The default funding lock script for the node.
+* `tlc_expiry_delta` - <em>`u64`</em>, The locktime expiry delta for Time-Locked Contracts (TLC), serialized as a hexadecimal string.
+* `tlc_min_value` - <em>`u128`</em>, The minimum value for Time-Locked Contracts (TLC), serialized as a hexadecimal string.
+* `tlc_max_value` - <em>`u128`</em>, The maximum value for Time-Locked Contracts (TLC), serialized as a hexadecimal string, `0` means no maximum value limit.
+* `tlc_fee_proportional_millionths` - <em>`u128`</em>, The fee proportional to the value of Time-Locked Contracts (TLC), expressed in millionths and serialized as a hexadecimal string.
+* `channel_count` - <em>`u32`</em>, The number of channels associated with the node, serialized as a hexadecimal string.
+* `pending_channel_count` - <em>`u32`</em>, The number of pending channels associated with the node, serialized as a hexadecimal string.
+* `peers_count` - <em>`u32`</em>, The number of peers connected to the node, serialized as a hexadecimal string.
+* `udt_cfg_infos` - <em>[UdtCfgInfos](#type-udtcfginfos)</em>, Configuration information for User-Defined Tokens (UDT) associated with the node.
+
+---
+
 
 
 <a id="invoice"></a>
@@ -410,20 +460,23 @@ Generates a new invoice.
 
 ##### Params
 
-* `amount` - u128, The amount of the invoice.
-* `description` - `Option<String>`, The description of the invoice.
-* `currency` - Currency, The currency of the invoice.
-* `payment_preimage` - Hash256, The payment preimage of the invoice.
-* `expiry` - `Option<u64>`, The expiry time of the invoice.
-* `fallback_address` - `Option<String>`, The fallback address of the invoice.
-* `final_expiry_delta` - `Option<u64>`, The final HTLC timeout of the invoice.
-* `udt_type_script` - `Option<Script>`, The UDT type script of the invoice.
-* `hash_algorithm` - `Option<HashAlgorithm>`, The hash algorithm of the invoice.
+* `amount` - <em>`u128`</em>, The amount of the invoice.
+* `description` - <em>`Option<String>`</em>, The description of the invoice.
+* `currency` - <em>[Currency](#type-currency)</em>, The currency of the invoice.
+* `payment_preimage` - <em>[Hash256](#type-hash256)</em>, The payment preimage of the invoice.
+* `expiry` - <em>`Option<u64>`</em>, The expiry time of the invoice.
+* `fallback_address` - <em>`Option<String>`</em>, The fallback address of the invoice.
+* `final_expiry_delta` - <em>`Option<u64>`</em>, The final HTLC timeout of the invoice.
+* `udt_type_script` - <em>`Option<Script>`</em>, The UDT type script of the invoice.
+* `hash_algorithm` - <em>Option<[HashAlgorithm](#type-hashalgorithm)></em>, The hash algorithm of the invoice.
 
 ##### Returns
 
-* `invoice_address` - String, The encoded invoice address.
-* `invoice` - CkbInvoice, The invoice.
+* `invoice_address` - <em>`String`</em>, The encoded invoice address.
+* `invoice` - <em>[CkbInvoice](#type-ckbinvoice)</em>, The invoice.
+
+---
+
 
 
 <a id="invoice-parse_invoice"></a>
@@ -433,11 +486,14 @@ Parses a encoded invoice.
 
 ##### Params
 
-* `invoice` - String, The encoded invoice address.
+* `invoice` - <em>`String`</em>, The encoded invoice address.
 
 ##### Returns
 
-* `invoice` - CkbInvoice, The invoice.
+* `invoice` - <em>[CkbInvoice](#type-ckbinvoice)</em>, The invoice.
+
+---
+
 
 
 <a id="invoice-get_invoice"></a>
@@ -447,13 +503,16 @@ Retrieves an invoice.
 
 ##### Params
 
-* `payment_hash` - Hash256, The payment hash of the invoice.
+* `payment_hash` - <em>[Hash256](#type-hash256)</em>, The payment hash of the invoice.
 
 ##### Returns
 
-* `invoice_address` - String, The encoded invoice address.
-* `invoice` - CkbInvoice, The invoice.
-* `status` - CkbInvoiceStatus, The invoice status
+* `invoice_address` - <em>`String`</em>, The encoded invoice address.
+* `invoice` - <em>[CkbInvoice](#type-ckbinvoice)</em>, The invoice.
+* `status` - <em>[CkbInvoiceStatus](#type-ckbinvoicestatus)</em>, The invoice status
+
+---
+
 
 
 <a id="invoice-cancel_invoice"></a>
@@ -463,13 +522,16 @@ Cancels an invoice, only when invoice is in status `Open` can be canceled.
 
 ##### Params
 
-* `payment_hash` - Hash256, The payment hash of the invoice.
+* `payment_hash` - <em>[Hash256](#type-hash256)</em>, The payment hash of the invoice.
 
 ##### Returns
 
-* `invoice_address` - String, The encoded invoice address.
-* `invoice` - CkbInvoice, The invoice.
-* `status` - CkbInvoiceStatus, The invoice status
+* `invoice_address` - <em>`String`</em>, The encoded invoice address.
+* `invoice` - <em>[CkbInvoice](#type-ckbinvoice)</em>, The invoice.
+* `status` - <em>[CkbInvoiceStatus](#type-ckbinvoicestatus)</em>, The invoice status
+
+---
+
 
 
 <a id="payment"></a>
@@ -484,39 +546,43 @@ Sends a payment to a peer.
 
 ##### Params
 
-* `target_pubkey` - `Option<Pubkey>`, the identifier of the payment target
-* `amount` - `Option<u128>`, the amount of the payment
-* `payment_hash` - `Option<Hash256>`, the hash to use within the payment's HTLC
-* `final_tlc_expiry_delta` - `Option<u64>`, the TLC expiry delta should be used to set the timelock for the final hop, in milliseconds
-* `tlc_expiry_limit` - `Option<u64>`, the TLC expiry limit for the whole payment, in milliseconds, each hop is with a default tlc delta of 1 day
+* `target_pubkey` - <em>Option<[Pubkey](#type-pubkey)></em>, the identifier of the payment target
+* `amount` - <em>`Option<u128>`</em>, the amount of the payment
+* `payment_hash` - <em>Option<[Hash256](#type-hash256)></em>, the hash to use within the payment's HTLC
+* `final_tlc_expiry_delta` - <em>`Option<u64>`</em>, the TLC expiry delta should be used to set the timelock for the final hop, in milliseconds
+* `tlc_expiry_limit` - <em>`Option<u64>`</em>, the TLC expiry limit for the whole payment, in milliseconds, each hop is with a default tlc delta of 1 day
  suppose the payment router is with N hops, the total tlc expiry limit is at least (N-1) days
  this is also the default value for the payment if this parameter is not provided
-* `invoice` - `Option<String>`, the encoded invoice to send to the recipient
-* `timeout` - `Option<u64>`, the payment timeout in seconds, if the payment is not completed within this time, it will be cancelled
-* `max_fee_amount` - `Option<u128>`, the maximum fee amounts in shannons that the sender is willing to pay
-* `max_parts` - `Option<u64>`, max parts for the payment, only used for multi-part payments
-* `keysend` - `Option<bool>`, keysend payment
-* `udt_type_script` - `Option<Script>`, udt type script for the payment
-* `allow_self_payment` - `Option<bool>`, allow self payment, default is false
-* `hop_hints` - `Option<Vec>`, Optional route hints to reach the destination through private channels.
+* `invoice` - <em>`Option<String>`</em>, the encoded invoice to send to the recipient
+* `timeout` - <em>`Option<u64>`</em>, the payment timeout in seconds, if the payment is not completed within this time, it will be cancelled
+* `max_fee_amount` - <em>`Option<u128>`</em>, the maximum fee amounts in shannons that the sender is willing to pay
+* `max_parts` - <em>`Option<u64>`</em>, max parts for the payment, only used for multi-part payments
+* `keysend` - <em>`Option<bool>`</em>, keysend payment
+* `udt_type_script` - <em>`Option<Script>`</em>, udt type script for the payment
+* `allow_self_payment` - <em>`Option<bool>`</em>, allow self payment, default is false
+* `hop_hints` - <em>Option<Vec<[HopHint](#type-hophint)>></em>, Optional route hints to reach the destination through private channels.
  A hop hint is a hint for a node to use a specific channel, for example
  (pubkey, funding_txid, inbound) where pubkey is the public key of the node,
  funding_txid is the funding transaction hash of the channel outpoint, and
  inbound is a boolean indicating whether to use the channel to send or receive.
  Note: an inproper hint may cause the payment to fail, and hop_hints maybe helpful for self payment scenario
  for helping the routing algorithm to find the correct path
-* `dry_run` - `Option<bool>`, dry_run for payment, used for check whether we can build valid router and the fee for this payment,
+* `dry_run` - <em>`Option<bool>`</em>, dry_run for payment, used for check whether we can build valid router and the fee for this payment,
  it's useful for the sender to double check the payment before sending it to the network,
  default is false
 
 ##### Returns
 
-* `payment_hash` - Hash256, The payment hash of the payment
-* `status` - PaymentSessionStatus, The status of the payment
-* `created_at` - u64, The time the payment was created at, in milliseconds from UNIX epoch
-* `last_updated_at` - u64, The time the payment was last updated at, in milliseconds from UNIX epoch
-* `failed_error` - `Option<String>`, The error message if the payment failed
-* `fee` - u128, fee paid for the payment
+* `payment_hash` - <em>[Hash256](#type-hash256)</em>, The payment hash of the payment
+* `status` - <em>[PaymentSessionStatus](#type-paymentsessionstatus)</em>, The status of the payment
+* `created_at` - <em>`u64`</em>, The time the payment was created at, in milliseconds from UNIX epoch
+* `last_updated_at` - <em>`u64`</em>, The time the payment was last updated at, in milliseconds from UNIX epoch
+* `failed_error` - <em>`Option<String>`</em>, The error message if the payment failed
+* `fee` - <em>`u128`</em>, fee paid for the payment
+* `router` - <em>[SessionRoute](#type-sessionroute)</em>, The route information for the payment
+
+---
+
 
 
 <a id="payment-get_payment"></a>
@@ -526,16 +592,20 @@ Retrieves a payment.
 
 ##### Params
 
-* `payment_hash` - Hash256, The payment hash of the payment to retrieve
+* `payment_hash` - <em>[Hash256](#type-hash256)</em>, The payment hash of the payment to retrieve
 
 ##### Returns
 
-* `payment_hash` - Hash256, The payment hash of the payment
-* `status` - PaymentSessionStatus, The status of the payment
-* `created_at` - u64, The time the payment was created at, in milliseconds from UNIX epoch
-* `last_updated_at` - u64, The time the payment was last updated at, in milliseconds from UNIX epoch
-* `failed_error` - `Option<String>`, The error message if the payment failed
-* `fee` - u128, fee paid for the payment
+* `payment_hash` - <em>[Hash256](#type-hash256)</em>, The payment hash of the payment
+* `status` - <em>[PaymentSessionStatus](#type-paymentsessionstatus)</em>, The status of the payment
+* `created_at` - <em>`u64`</em>, The time the payment was created at, in milliseconds from UNIX epoch
+* `last_updated_at` - <em>`u64`</em>, The time the payment was last updated at, in milliseconds from UNIX epoch
+* `failed_error` - <em>`Option<String>`</em>, The error message if the payment failed
+* `fee` - <em>`u128`</em>, fee paid for the payment
+* `router` - <em>[SessionRoute](#type-sessionroute)</em>, The route information for the payment
+
+---
+
 
 
 <a id="peer"></a>
@@ -550,12 +620,15 @@ Connect to a peer.
 
 ##### Params
 
-* `address` - MultiAddr, The address of the peer to connect to.
-* `save` - `Option<bool>`, Whether to save the peer address to the peer store.
+* `address` - <em>`MultiAddr`</em>, The address of the peer to connect to.
+* `save` - <em>`Option<bool>`</em>, Whether to save the peer address to the peer store.
 
 ##### Returns
 
 * None
+
+---
+
 
 
 <a id="peer-disconnect_peer"></a>
@@ -565,37 +638,34 @@ Disconnect from a peer.
 
 ##### Params
 
-* `peer_id` - PeerId, The peer ID of the peer to disconnect.
+* `peer_id` - <em>`PeerId`</em>, The peer ID of the peer to disconnect.
 
 ##### Returns
 
 * None
+
+---
+
 
 
 
 ## RPC Types
 
 
-<a id="#type-channelstate"></a>
-### Type `ChannelState`
+<a id="#type-cchorderstatus"></a>
+### Type `CchOrderStatus`
 
-The state of a channel
+The status of a cross-chain hub order, will update as the order progresses.
 
 
 #### Enum with values of
 
-* `NegotiatingFunding` - NegotiatingFundingFlags, We are negotiating the parameters required for the channel prior to funding it.
-* `CollaboratingFundingTx` - CollaboratingFundingTxFlags, We're collaborating with the other party on the funding transaction.
-* `SigningCommitment` - SigningCommitmentFlags, We have collaborated over the funding and are now waiting for CommitmentSigned messages.
-* `AwaitingTxSignatures` - AwaitingTxSignaturesFlags, We've received and sent `commitment_signed` and are now waiting for both
- party to collaborate on creating a valid funding transaction.
-* `AwaitingChannelReady` - AwaitingChannelReadyFlags, We've received/sent `funding_created` and `funding_signed` and are thus now waiting on the
- funding transaction to confirm.
-* `ChannelReady` - , Both we and our counterparty consider the funding transaction confirmed and the channel is
- now operational.
-* `ShuttingDown` - ShuttingDownFlags, We've successfully negotiated a `closing_signed` dance. At this point, the `ChannelManager`
- is about to drop us, but we store this anyway.
-* `Closed` - CloseFlags, This channel is closed.
+* `Pending` - Order is created and has not send out payments yet.
+* `Accepted` - HTLC in the first half is accepted.
+* `InFlight` - There's an outgoing payment in flight for the second half.
+* `Succeeded` - Order is settled.
+* `Failed` - Order is failed.
+---
 
 <a id="#type-channel"></a>
 ### Type `Channel`
@@ -605,92 +675,19 @@ The channel data structure
 
 #### Fields
 
-* `channel_id` - Hash256, The channel ID
-* `is_public` - bool, Whether the channel is public
-* `channel_outpoint` - `Option<OutPoint>`, The outpoint of the channel
-* `peer_id` - PeerId, The peer ID of the channel
-* `funding_udt_type_script` - `Option<Script>`, The UDT type script of the channel
-* `state` - ChannelState, The state of the channel
-* `local_balance` - u128, The local balance of the channel
-* `offered_tlc_balance` - u128, The offered balance of the channel
-* `remote_balance` - u128, The remote balance of the channel
-* `received_tlc_balance` - u128, The received balance of the channel
-* `latest_commitment_transaction_hash` - `Option<H256>`, The hash of the latest commitment transaction
-* `created_at` - u64, The time the channel was created at, in milliseconds from UNIX epoch
-
-<a id="#type-removetlcreason"></a>
-### Type `RemoveTlcReason`
-
-The reason for removing a TLC
-
-
-#### Enum with values of
-
-* `RemoveTlcFulfill` - , The reason for removing the TLC is that it was fulfilled
-* `RemoveTlcFail` - , The reason for removing the TLC is that it failed
-
-<a id="#type-udtscript"></a>
-### Type `UdtScript`
-
-The UDT script which is used to identify the UDT configuration for a Fiber Node
-
-
-#### Fields
-
-* `code_hash` - H256, The code hash of the script.
-* `hash_type` - ScriptHashType, The hash type of the script.
-* `args` - String, The arguments of the script.
-
-<a id="#type-udtcelldep"></a>
-### Type `UdtCellDep`
-
-The UDT cell dep which is used to identify the UDT configuration for a Fiber Node
-
-
-#### Fields
-
-* `dep_type` - DepType, The type of the cell dep.
-* `tx_hash` - H256, The transaction hash of the cell dep.
-* `index` - u32, The index of the cell dep.
-
-<a id="#type-udtarginfo"></a>
-### Type `UdtArgInfo`
-
-The UDT argument info which is used to identify the UDT configuration
-
-
-#### Fields
-
-* `name` - String, The name of the UDT.
-* `script` - UdtScript, The script of the UDT.
-* `auto_accept_amount` - `Option<u128>`, The minimum amount of the UDT that can be automatically accepted.
-* `cell_deps` - `Vec<UdtCellDep>`, The cell deps of the UDT.
-
-<a id="#type-udtcfginfos"></a>
-### Type `UdtCfgInfos`
-
-A list of UDT configuration infos.
-
-
-#### Fields
-
-* `` - `Vec<UdtArgInfo>`, The list of UDT configuration infos.
-
-<a id="#type-nodeinfo"></a>
-### Type `NodeInfo`
-
-The Node information.
-
-
-#### Fields
-
-* `node_name` - String, The name of the node.
-* `addresses` - `Vec<MultiAddr>`, The addresses of the node.
-* `node_id` - Pubkey, The identity public key of the node.
-* `timestamp` - u64, The timestamp of the node.
-* `chain_hash` - Hash256, The chain hash of the node.
-* `auto_accept_min_ckb_funding_amount` - u64, The minimum CKB funding amount for automatically accepting open channel requests.
-* `udt_cfg_infos` - UdtCfgInfos, The UDT configuration infos of the node.
+* `channel_id` - <em>Hash256</em>, The channel ID
+* `is_public` - <em>bool</em>, Whether the channel is public
+* `channel_outpoint` - <em>`Option<OutPoint>`</em>, The outpoint of the channel
+* `peer_id` - <em>PeerId</em>, The peer ID of the channel
+* `funding_udt_type_script` - <em>`Option<Script>`</em>, The UDT type script of the channel
+* `state` - <em>ChannelState</em>, The state of the channel
+* `local_balance` - <em>u128</em>, The local balance of the channel
+* `offered_tlc_balance` - <em>u128</em>, The offered balance of the channel
+* `remote_balance` - <em>u128</em>, The remote balance of the channel
+* `received_tlc_balance` - <em>u128</em>, The received balance of the channel
+* `latest_commitment_transaction_hash` - <em>`Option<H256>`</em>, The hash of the latest commitment transaction
+* `created_at` - <em>u64</em>, The time the channel was created at, in milliseconds from UNIX epoch
+---
 
 <a id="#type-channelinfo"></a>
 ### Type `ChannelInfo`
@@ -700,18 +697,116 @@ The Channel information.
 
 #### Fields
 
-* `channel_outpoint` - OutPoint, The outpoint of the channel.
-* `node1` - Pubkey, The identity public key of the first node.
-* `node2` - Pubkey, The identity public key of the second node.
-* `created_timestamp` - u64, The created timestamp of the channel, which is the block header timestamp of the block
+* `channel_outpoint` - <em>OutPoint</em>, The outpoint of the channel.
+* `node1` - <em>Pubkey</em>, The identity public key of the first node.
+* `node2` - <em>Pubkey</em>, The identity public key of the second node.
+* `created_timestamp` - <em>u64</em>, The created timestamp of the channel, which is the block header timestamp of the block
  that contains the channel funding transaction.
-* `last_updated_timestamp_of_node1` - `Option<u64>`, The timestamp of the last update to channel by node 1 (e.g. updating fee rate).
-* `last_updated_timestamp_of_node2` - `Option<u64>`, The timestamp of the last update to channel by node 2 (e.g. updating fee rate).
-* `fee_rate_of_node1` - `Option<u64>`, The fee rate set by node 1. This is the fee rate for node 1 to forward tlcs sent from node 2 to node 1.
-* `fee_rate_of_node2` - `Option<u64>`, The fee rate set by node 2. This is the fee rate for node 2 to forward tlcs sent from node 1 to node 2.
-* `capacity` - u128, The capacity of the channel.
-* `chain_hash` - Hash256, The chain hash of the channel.
-* `udt_type_script` - `Option<Script>`, The UDT type script of the channel.
+* `last_updated_timestamp_of_node1` - <em>`Option<u64>`</em>, The timestamp of the last update to channel by node 1 (e.g. updating fee rate).
+* `last_updated_timestamp_of_node2` - <em>`Option<u64>`</em>, The timestamp of the last update to channel by node 2 (e.g. updating fee rate).
+* `fee_rate_of_node1` - <em>`Option<u64>`</em>, The fee rate set by node 1. This is the fee rate for node 1 to forward tlcs sent from node 2 to node 1.
+* `fee_rate_of_node2` - <em>`Option<u64>`</em>, The fee rate set by node 2. This is the fee rate for node 2 to forward tlcs sent from node 1 to node 2.
+* `capacity` - <em>u128</em>, The capacity of the channel.
+* `chain_hash` - <em>Hash256</em>, The chain hash of the channel.
+* `udt_type_script` - <em>`Option<Script>`</em>, The UDT type script of the channel.
+---
+
+<a id="#type-ckbinvoice"></a>
+### Type `CkbInvoice`
+
+Represents a syntactically and semantically correct lightning BOLT11 invoice
+
+ There are three ways to construct a `CkbInvoice`:
+  1. using [`CkbInvoiceBuilder`]
+  2. using `str::parse::<CkbInvoice>(&str)` (see [`CkbInvoice::from_str`])
+
+
+#### Fields
+
+* `currency` - <em>Currency</em>, The currency of the invoice
+* `amount` - <em>`Option<u128>`</em>, The amount of the invoice
+* `signature` - <em>`Option<InvoiceSignature>`</em>, The signature of the invoice
+* `data` - <em>InvoiceData</em>, The invoice data, including the payment hash, timestamp and other attributes
+---
+
+<a id="#type-ckbinvoicestatus"></a>
+### Type `CkbInvoiceStatus`
+
+The currency of the invoice, can also used to represent the CKB network chain.
+
+
+#### Enum with values of
+
+* `Open` - The invoice is open and can be paid.
+* `Cancelled` - The invoice is cancelled.
+* `Expired` - The invoice is expired.
+* `Received` - The invoice is received, but not settled yet.
+* `Paid` - The invoice is paid.
+---
+
+<a id="#type-currency"></a>
+### Type `Currency`
+
+The currency of the invoice, can also used to represent the CKB network chain.
+
+
+#### Enum with values of
+
+* `Fibb` - The mainnet currency of CKB.
+* `Fibt` - The testnet currency of the CKB network.
+* `Fibd` - The devnet currency of the CKB network.
+---
+
+<a id="#type-hash256"></a>
+### Type `Hash256`
+
+A 256-bit hash digest, used as identifier of channnel, payment, transaction hash etc.
+
+
+
+---
+
+<a id="#type-hashalgorithm"></a>
+### Type `HashAlgorithm`
+
+HashAlgorithm is the hash algorithm used in the hash lock.
+
+
+#### Enum with values of
+
+* `CkbHash` - The default hash algorithm, CkbHash
+* `Sha256` - The sha256 hash algorithm
+---
+
+<a id="#type-hophint"></a>
+### Type `HopHint`
+
+A hop hint is a hint for a node to use a specific channel.
+
+
+#### Fields
+
+* `pubkey` - <em>Pubkey</em>, The public key of the node
+* `channel_funding_tx` - <em>Hash256</em>, The funding transaction hash of the channel outpoint
+* `inbound` - <em>bool</em>, inbound or outbound to use this channel
+---
+
+<a id="#type-nodeinfo"></a>
+### Type `NodeInfo`
+
+The Node information.
+
+
+#### Fields
+
+* `node_name` - <em>String</em>, The name of the node.
+* `addresses` - <em>`Vec<MultiAddr>`</em>, The addresses of the node.
+* `node_id` - <em>Pubkey</em>, The identity public key of the node.
+* `timestamp` - <em>u64</em>, The timestamp of the node.
+* `chain_hash` - <em>Hash256</em>, The chain hash of the node.
+* `auto_accept_min_ckb_funding_amount` - <em>u64</em>, The minimum CKB funding amount for automatically accepting open channel requests.
+* `udt_cfg_infos` - <em>UdtCfgInfos</em>, The UDT configuration infos of the node.
+---
 
 <a id="#type-paymentsessionstatus"></a>
 ### Type `PaymentSessionStatus`
@@ -721,8 +816,54 @@ The status of a payment, will update as the payment progresses.
 
 #### Enum with values of
 
-* `Created` - , initial status, payment session is created, no HTLC is sent
-* `Inflight` - , the first hop AddTlc is sent successfully and waiting for the response
-* `Success` - , related HTLC is successfully settled
-* `Failed` - , related HTLC is failed
+* `Created` - initial status, payment session is created, no HTLC is sent
+* `Inflight` - the first hop AddTlc is sent successfully and waiting for the response
+* `Success` - related HTLC is successfully settled
+* `Failed` - related HTLC is failed
+---
+
+<a id="#type-pubkey"></a>
+### Type `Pubkey`
+
+The public key for a Node
+
+
+
+---
+
+<a id="#type-removetlcreason"></a>
+### Type `RemoveTlcReason`
+
+The reason for removing a TLC
+
+
+#### Enum with values of
+
+* `RemoveTlcFulfill` - The reason for removing the TLC is that it was fulfilled
+* `RemoveTlcFail` - The reason for removing the TLC is that it failed
+---
+
+<a id="#type-sessionroute"></a>
+### Type `SessionRoute`
+
+The router is a list of nodes that the payment will go through.
+ We store in the payment session and then will use it to track the payment history.
+ The router is a list of nodes that the payment will go through.
+ For example:
+    A(amount, channel) -> B -> C -> D means A will send `amount` with `channel` to B.
+
+
+#### Fields
+
+* `nodes` - <em>`Vec<SessionRouteNode>`</em>, the nodes in the route
+---
+
+<a id="#type-udtcfginfos"></a>
+### Type `UdtCfgInfos`
+
+The UDT configurations
+
+
+
+---
 

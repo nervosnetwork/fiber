@@ -172,7 +172,7 @@ fn test_store_save_channel_update() {
     let path = TempDir::new("test-gossip-store");
     let store = Store::new(path).expect("created store failed");
 
-    let flags_for_update_of_node1 = 0;
+    let flags_for_update_of_node1 = ChannelUpdateMessageFlags::UPDATE_OF_NODE1;
     let channel_update_of_node1 = ChannelUpdate::new_unsigned(
         OutPoint::new_builder()
             .tx_hash(gen_rand_sha256_hash().into())
@@ -180,7 +180,7 @@ fn test_store_save_channel_update() {
             .build(),
         now_timestamp_as_millis_u64(),
         flags_for_update_of_node1,
-        0,
+        ChannelUpdateChannelFlags::empty(),
         0,
         0,
         0,
@@ -194,7 +194,7 @@ fn test_store_save_channel_update() {
     assert_eq!(store.get_latest_channel_update(&out_point, false), None);
 
     let mut channel_update_of_node2 = channel_update_of_node1.clone();
-    let flags_for_update_of_node2 = 1;
+    let flags_for_update_of_node2 = ChannelUpdateMessageFlags::UPDATE_OF_NODE2;
     channel_update_of_node2.message_flags = flags_for_update_of_node2;
     // Note that per discussion in Notion, we don't handle the rare case of two channel updates having the same timestamp.
     // In the current implementation, channel update from one side with the same timestamp will not overwrite the existing one
@@ -313,10 +313,6 @@ fn test_channel_actor_state_store() {
     let state = ChannelActorState {
         state: ChannelState::NegotiatingFunding(NegotiatingFundingFlags::THEIR_INIT_SENT),
         public_channel_info: Some(PublicChannelInfo {
-            enabled: false,
-            tlc_fee_proportional_millionths: 123,
-            tlc_expiry_delta: 3,
-            tlc_min_value: 10,
             local_channel_announcement_signature: Some((
                 mock_ecdsa_signature(),
                 MaybeScalar::two(),
@@ -329,6 +325,15 @@ fn test_channel_actor_state_store() {
             channel_announcement: None,
             channel_update: None,
         }),
+        local_tlc_info: ChannelTlcInfo {
+            enabled: false,
+            timestamp: 0,
+            tlc_fee_proportional_millionths: 123,
+            tlc_expiry_delta: 3,
+            tlc_minimum_value: 10,
+            tlc_maximum_value: 0,
+        },
+        remote_tlc_info: None,
         local_pubkey: gen_rand_fiber_public_key(),
         remote_pubkey: gen_rand_fiber_public_key(),
         funding_tx: Some(Transaction::default()),
@@ -383,15 +388,7 @@ fn test_channel_actor_state_store() {
 
     let get_state = store.get_channel_actor_state(&state.id);
     assert!(get_state.is_some());
-    assert_eq!(
-        get_state
-            .unwrap()
-            .public_channel_info
-            .as_ref()
-            .unwrap()
-            .enabled,
-        false
-    );
+    assert_eq!(get_state.unwrap().is_tlc_forwarding_enabled(), false);
 
     let remote_peer_id = state.get_remote_peer_id();
     assert_eq!(
@@ -410,6 +407,91 @@ fn test_channel_actor_state_store() {
     assert!(store
         .get_channel_state_by_outpoint(&channel_point)
         .is_none());
+}
+
+#[test]
+fn test_serde_channel_actor_state_ciborium() {
+    let seed = [0u8; 32];
+    let signer = InMemorySigner::generate_from_seed(&seed);
+
+    let seckey = blake2b_hash_with_salt(
+        signer.musig2_base_nonce.as_ref(),
+        b"channel_announcement".as_slice(),
+    );
+    let sec_nonce = SecNonce::build(seckey).build();
+    let pub_nonce = sec_nonce.public_nonce();
+
+    let state = ChannelActorState {
+        state: ChannelState::NegotiatingFunding(NegotiatingFundingFlags::THEIR_INIT_SENT),
+        public_channel_info: Some(PublicChannelInfo {
+            local_channel_announcement_signature: Some((
+                mock_ecdsa_signature(),
+                MaybeScalar::two(),
+            )),
+            remote_channel_announcement_signature: Some((
+                mock_ecdsa_signature(),
+                MaybeScalar::two(),
+            )),
+            remote_channel_announcement_nonce: Some(pub_nonce.clone()),
+            channel_announcement: None,
+            channel_update: None,
+        }),
+        local_tlc_info: ChannelTlcInfo {
+            enabled: false,
+            timestamp: 0,
+            tlc_fee_proportional_millionths: 123,
+            tlc_expiry_delta: 3,
+            tlc_minimum_value: 10,
+            tlc_maximum_value: 0,
+        },
+        remote_tlc_info: None,
+        local_pubkey: gen_rand_fiber_public_key(),
+        remote_pubkey: gen_rand_fiber_public_key(),
+        funding_tx: Some(Transaction::default()),
+        funding_tx_confirmed_at: Some((H256::default(), 1, 1)),
+        is_acceptor: true,
+        funding_udt_type_script: Some(Script::default()),
+        to_local_amount: 100,
+        to_remote_amount: 100,
+        commitment_fee_rate: 100,
+        commitment_delay_epoch: 100,
+        funding_fee_rate: 100,
+        id: gen_rand_sha256_hash(),
+        tlc_state: Default::default(),
+        local_shutdown_script: Script::default(),
+        local_channel_public_keys: ChannelBasePublicKeys {
+            funding_pubkey: gen_rand_fiber_public_key(),
+            tlc_base_key: gen_rand_fiber_public_key(),
+        },
+        signer,
+        remote_channel_public_keys: Some(ChannelBasePublicKeys {
+            funding_pubkey: gen_rand_fiber_public_key(),
+            tlc_base_key: gen_rand_fiber_public_key(),
+        }),
+        commitment_numbers: Default::default(),
+        remote_shutdown_script: Some(Script::default()),
+        last_committed_remote_nonce: None,
+        last_revoke_and_ack_remote_nonce: None,
+        last_commitment_signed_remote_nonce: None,
+        remote_commitment_points: vec![
+            (0, gen_rand_fiber_public_key()),
+            (1, gen_rand_fiber_public_key()),
+        ],
+        local_shutdown_info: None,
+        remote_shutdown_info: None,
+        local_reserved_ckb_amount: 100,
+        remote_reserved_ckb_amount: 100,
+        latest_commitment_transaction: None,
+        local_constraints: ChannelConstraints::default(),
+        remote_constraints: ChannelConstraints::default(),
+        reestablishing: false,
+        created_at: SystemTime::now(),
+    };
+
+    let mut serialized = Vec::new();
+    ciborium::into_writer(&state, &mut serialized).unwrap();
+    let _new_channel_state: ChannelActorState =
+        ciborium::from_reader(serialized.as_slice()).expect("deserialize to new state");
 }
 
 #[test]

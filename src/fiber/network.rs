@@ -48,7 +48,7 @@ use tracing::{debug, error, info, trace, warn};
 use super::channel::{
     get_funding_and_reserved_amount, occupied_capacity, AcceptChannelParameter, ChannelActor,
     ChannelActorMessage, ChannelActorStateStore, ChannelCommand, ChannelCommandWithId,
-    ChannelEvent, ChannelInitializationParameter, ChannelState, ChannelSubscribers,
+    ChannelEvent, ChannelInitializationParameter, ChannelState, ChannelSubscribers, ChannelTlcInfo,
     OpenChannelParameter, ProcessingChannelError, ProcessingChannelResult, PublicChannelInfo,
     RevocationData, SettlementData, ShuttingDownFlags, DEFAULT_COMMITMENT_FEE_RATE,
     DEFAULT_FEE_RATE, DEFAULT_MAX_TLC_VALUE_IN_FLIGHT, MAX_COMMITMENT_DELAY_EPOCHS,
@@ -57,7 +57,7 @@ use super::channel::{
 use super::config::{AnnouncedNodeName, MIN_TLC_EXPIRY_DELTA};
 use super::fee::calculate_commitment_tx_fee;
 use super::gossip::{GossipActorMessage, GossipMessageStore, GossipMessageUpdates};
-use super::graph::{NetworkGraph, NetworkGraphStateStore, SessionRoute};
+use super::graph::{NetworkGraph, NetworkGraphStateStore, OwnedChannelUpdateEvent, SessionRoute};
 use super::key::blake2b_hash_with_salt;
 use super::types::{
     BroadcastMessage, BroadcastMessageQuery, BroadcastMessageWithTimestamp, EcdsaSignature,
@@ -157,6 +157,8 @@ pub struct SendPaymentResponse {
     pub last_updated_at: u64,
     pub failed_error: Option<String>,
     pub fee: u128,
+    #[cfg(debug_assertions)]
+    pub router: SessionRoute,
 }
 
 /// What kind of local information should be broadcasted to the network.
@@ -652,6 +654,9 @@ pub enum NetworkActorEvent {
         Option<(ProcessingChannelError, TlcErr)>,
         Option<(Hash256, u64)>,
     ),
+
+    // An owned channel is updated.
+    OwnedChannelUpdateEvent(OwnedChannelUpdateEvent),
 }
 
 #[derive(Debug)]
@@ -953,6 +958,19 @@ where
             NetworkActorEvent::GossipMessageUpdates(gossip_message_updates) => {
                 let mut graph = self.network_graph.write().await;
                 graph.update_for_messages(gossip_message_updates.messages);
+            }
+            NetworkActorEvent::OwnedChannelUpdateEvent(owned_channel_update_event) => {
+                let mut graph = self.network_graph.write().await;
+                debug!(
+                    "Received owned channel update event: {:?}",
+                    owned_channel_update_event
+                );
+                let is_down =
+                    matches!(owned_channel_update_event, OwnedChannelUpdateEvent::Down(_));
+                graph.process_owned_channel_update_event(owned_channel_update_event);
+                if is_down {
+                    debug!("Owned channel is down");
+                }
             }
         }
         Ok(())
@@ -1584,12 +1602,8 @@ where
         payment_session: &mut PaymentSession,
         payment_data: &SendPaymentData,
     ) -> Result<Vec<PaymentHopData>, Error> {
-        match self
-            .network_graph
-            .read()
-            .await
-            .build_route(payment_data.clone())
-        {
+        let graph = self.network_graph.read().await;
+        match graph.build_route(payment_data.clone()) {
             Err(e) => {
                 let error = format!("Failed to build route, {}", e);
                 self.set_payment_fail_with_error(payment_session, &error);
@@ -1713,15 +1727,16 @@ where
             return;
         }
 
-        let need_to_retry = self
-            .network_graph
-            .write()
-            .await
-            .record_payment_fail(&payment_session, tlc_err.clone());
-        if matches!(channel_error, ProcessingChannelError::WaitingTlcAck) {
+        let need_to_retry = if matches!(channel_error, ProcessingChannelError::WaitingTlcAck) {
             payment_session.last_error = Some("WaitingTlcAck".to_string());
             self.store.insert_payment_session(payment_session.clone());
-        }
+            true
+        } else {
+            self.network_graph
+                .write()
+                .await
+                .record_payment_fail(&payment_session, tlc_err.clone())
+        };
         if need_to_retry {
             let _ = self.try_payment_session(myself, state, payment_hash).await;
         } else {
@@ -2099,11 +2114,12 @@ where
             ChannelInitializationParameter::OpenChannel(OpenChannelParameter {
                 funding_amount,
                 seed,
-                public_channel_info: public.then_some(PublicChannelInfo::new(
+                tlc_info: ChannelTlcInfo::new(
                     tlc_min_value.unwrap_or(self.tlc_min_value),
                     tlc_expiry_delta.unwrap_or(self.tlc_expiry_delta),
                     tlc_fee_proportional_millionths.unwrap_or(self.tlc_fee_proportional_millionths),
-                )),
+                ),
+                public_channel_info: public.then_some(PublicChannelInfo::new()),
                 funding_udt_type_script,
                 shutdown_script,
                 channel_id_sender: tx,
@@ -2185,11 +2201,12 @@ where
             ChannelInitializationParameter::AcceptChannel(AcceptChannelParameter {
                 funding_amount,
                 reserved_ckb_amount,
-                public_channel_info: open_channel.is_public().then_some(PublicChannelInfo::new(
+                tlc_info: ChannelTlcInfo::new(
                     min_tlc_value.unwrap_or(self.tlc_min_value),
                     tlc_expiry_delta.unwrap_or(self.tlc_expiry_delta),
                     tlc_fee_proportional_millionths.unwrap_or(self.tlc_fee_proportional_millionths),
-                )),
+                ),
+                public_channel_info: open_channel.is_public().then_some(PublicChannelInfo::new()),
                 seed,
                 open_channel,
                 shutdown_script,

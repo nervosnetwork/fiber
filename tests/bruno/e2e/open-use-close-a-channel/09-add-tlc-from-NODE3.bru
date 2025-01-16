@@ -37,6 +37,7 @@ assert {
 }
 
 script:pre-request {
+  await new Promise(r => setTimeout(r, 2000));
   let expiry = "0x" + (Date.now() + 1000 * 60 * 60 * 24).toString(16);
   bru.setVar("expiry", expiry);
 }

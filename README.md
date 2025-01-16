@@ -56,7 +56,22 @@ The current state of the FNN is not stable, the protocol and storage format may 
 rm -rf /folder-to/my-fnn/fiber/store
 ```
 
-3. Repalce the binary with the new version and start the node again.
+3. Repalce the fnn binary with the new version and start the node again.
+
+
+If you want to keep the channel state, you may try to migrate the storage format manually:
+
+1. Stop the node.
+
+2. Backup the storage folder `/folder-to/my-fnn/fiber/store`.
+
+3. Run the fnn-migrate (it can be found in the release binary package) to migrate the storage format:
+
+```
+fnn-migrate -p /folder-to/my-fnn/fiber/store
+```
+
+4. Repalce the fnn binary with the new version and start the node again.
 
 ## Documentation
 
