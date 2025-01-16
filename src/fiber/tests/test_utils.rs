@@ -3,6 +3,7 @@ use crate::fiber::channel::ChannelActorStateStore;
 use crate::fiber::channel::ChannelCommand;
 use crate::fiber::channel::ChannelCommandWithId;
 use crate::fiber::channel::ReloadParams;
+use crate::fiber::channel::UpdateCommand;
 use crate::fiber::graph::NetworkGraphStateStore;
 use crate::fiber::graph::PaymentSession;
 use crate::fiber::graph::PaymentSessionStatus;
@@ -760,6 +761,24 @@ impl NetworkNode {
             }),
         )
         .await;
+    }
+
+    pub async fn update_channel_with_command(
+        &mut self,
+        channel_id: Hash256,
+        command: UpdateCommand,
+    ) {
+        let message = |rpc_reply| -> NetworkActorMessage {
+            NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+                ChannelCommandWithId {
+                    channel_id,
+                    command: ChannelCommand::Update(command, rpc_reply),
+                },
+            ))
+        };
+        call!(self.network_actor, message)
+            .expect("node_a alive")
+            .expect("update channel success");
     }
 
     pub fn get_payment_session(&self, payment_hash: Hash256) -> Option<PaymentSession> {

@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 
 use super::test_utils::init_tracing;
+use crate::fiber::channel::UpdateCommand;
 use crate::fiber::graph::PaymentSessionStatus;
 use crate::fiber::network::HopHint;
 use crate::fiber::network::SendPaymentCommand;
@@ -1750,4 +1751,71 @@ async fn test_send_payment_middle_hop_balance_is_not_enough() {
         .failed_error
         .expect("got error")
         .contains("Failed to build route"));
+}
+
+#[tokio::test]
+async fn test_send_payment_middle_hop_update_fee() {
+    // https://github.com/nervosnetwork/fiber/issues/480
+    init_tracing();
+    let _span = tracing::info_span!("node", node = "test").entered();
+    let (nodes, channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+        &[
+            ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((2, 3), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+        ],
+        4,
+        true,
+    )
+    .await;
+    let [mut node_0, node_1, mut node_2, node_3] = nodes.try_into().expect("4 nodes");
+
+    let mut all_sent = HashSet::new();
+
+    for _i in 0..10 {
+        let res = node_0
+            .send_payment_keysend(&node_3, 1000, false)
+            .await
+            .unwrap();
+        eprintln!("res: {:?}", res);
+        all_sent.insert(res.payment_hash);
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+    }
+
+    node_2
+        .update_channel_with_command(
+            channels[1],
+            UpdateCommand {
+                enabled: None,
+                tlc_expiry_delta: None,
+                tlc_minimum_value: None,
+                tlc_fee_proportional_millionths: Some(10),
+            },
+        )
+        .await;
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+    loop {
+        for payment_hash in all_sent.clone().iter() {
+            let status = node_0.get_payment_status(*payment_hash).await;
+            eprintln!("got payment: {:?} status: {:?}", payment_hash, status);
+            if status == PaymentSessionStatus::Success {
+                eprintln!("payment_hash: {:?} success", payment_hash);
+                all_sent.remove(payment_hash);
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        }
+        let res = node_0.node_info().await;
+        eprintln!("node0 node_info: {:?}", res);
+        let res = node_1.node_info().await;
+        eprintln!("node1 node_info: {:?}", res);
+        let res = node_2.node_info().await;
+        eprintln!("node2 node_info: {:?}", res);
+        let res = node_3.node_info().await;
+        eprintln!("node3 node_info: {:?}", res);
+        if all_sent.is_empty() {
+            break;
+        }
+    }
 }
