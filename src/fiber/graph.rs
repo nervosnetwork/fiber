@@ -1051,6 +1051,40 @@ where
             target = t;
             expiry = expiry + e;
             last_edge = Some(edge);
+        } else {
+            // The calculation of probability and distance requires a capacity of the channel.
+            // We don't know the capacity of the channels in the hop hints. We just assume that the capacity
+            // of these channels is sufficiently large. We will use 10 times the amount as the capacity.
+            // See also https://github.com/lightningnetwork/lnd/blob/506586a37e18446af6ce63723e44b2d849bd7fc1/routing/pathfind.go#L46-L49
+            let sufficiently_large_capacity = 10 * amount;
+            for hint in hop_hints {
+                let HopHint {
+                    pubkey: from,
+                    channel_outpoint,
+                    fee_rate: _fee_rate,
+                    tlc_expiry_delta,
+                } = hint;
+                // Say we have a payment path A -- channel 1 --> B -- channel 2 --> C.
+                // For now, all the fees that B will receive are calculated based on the fee rate B sets in channel 1.
+                // We didn't use the outbound fees for B in channel 2 at all. This is different from lnd,
+                // which calculates both the inbound fees in channel 1 and the outbound fees in channel 2.
+                // For now, we set the fees to be 0. We may need to change this in the future.
+                let fee = 0;
+                eval_and_update(
+                    &channel_outpoint,
+                    sufficiently_large_capacity,
+                    from,
+                    target,
+                    amount,
+                    fee,
+                    expiry,
+                    tlc_expiry_delta,
+                    1.0,
+                    0,
+                    &mut distances,
+                    &mut nodes_heap,
+                );
+            }
         }
         assert_ne!(source, target);
 
