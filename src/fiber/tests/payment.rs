@@ -1,5 +1,3 @@
-use std::collections::HashSet;
-
 use super::test_utils::init_tracing;
 use crate::fiber::channel::UpdateCommand;
 use crate::fiber::graph::PaymentSessionStatus;
@@ -10,6 +8,7 @@ use crate::fiber::types::Hash256;
 use crate::fiber::NetworkActorCommand;
 use crate::fiber::NetworkActorMessage;
 use ractor::call;
+use std::collections::HashSet;
 
 // This test will send two payments from node_0 to node_1, the first payment will run
 // with dry_run, the second payment will run without dry_run. Both payments will be successful.
@@ -1754,7 +1753,46 @@ async fn test_send_payment_middle_hop_balance_is_not_enough() {
 }
 
 #[tokio::test]
-async fn test_send_payment_middle_hop_update_fee() {
+async fn test_send_payment_middle_hop_update_fee_send_payment_failed() {
+    init_tracing();
+    let _span = tracing::info_span!("node", node = "test").entered();
+    let (nodes, channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+        &[
+            ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((2, 3), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+        ],
+        4,
+        true,
+    )
+    .await;
+    let [mut node_0, _node_1, mut node_2, node_3] = nodes.try_into().expect("4 nodes");
+
+    // node_2 update fee rate to a higher one, so the payment will fail
+    let res = node_0
+        .send_payment_keysend(&node_3, 1000, false)
+        .await
+        .unwrap();
+    eprintln!("res: {:?}", res);
+    let payment_hash = res.payment_hash;
+
+    node_2
+        .update_channel_with_command(
+            channels[1],
+            UpdateCommand {
+                enabled: None,
+                tlc_expiry_delta: None,
+                tlc_minimum_value: None,
+                tlc_fee_proportional_millionths: Some(100000),
+            },
+        )
+        .await;
+
+    node_0.wait_until_failed(payment_hash).await;
+}
+
+#[tokio::test]
+async fn test_send_payment_middle_hop_update_fee_multiple_payments() {
     // https://github.com/nervosnetwork/fiber/issues/480
     init_tracing();
     let _span = tracing::info_span!("node", node = "test").entered();
@@ -1779,7 +1817,7 @@ async fn test_send_payment_middle_hop_update_fee() {
             .unwrap();
         eprintln!("res: {:?}", res);
         all_sent.insert(res.payment_hash);
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
     }
 
     node_2
@@ -1795,25 +1833,42 @@ async fn test_send_payment_middle_hop_update_fee() {
         .await;
 
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
-
+    node_1
+        .set_unexpected_events(vec![
+            "Musig2VerifyError".to_string(),
+            "Musig2RoundFinalizeError".to_string(),
+        ])
+        .await;
+    node_2
+        .set_unexpected_events(vec![
+            "Musig2VerifyError".to_string(),
+            "Musig2RoundFinalizeError".to_string(),
+        ])
+        .await;
     loop {
+        let triggered_unexpected_events = node_1.get_triggered_unexpected_events().await;
+        assert!(triggered_unexpected_events.is_empty());
+
+        let triggered_unexpected_events = node_2.get_triggered_unexpected_events().await;
+        assert!(triggered_unexpected_events.is_empty());
+
         for payment_hash in all_sent.clone().iter() {
             let status = node_0.get_payment_status(*payment_hash).await;
-            eprintln!("got payment: {:?} status: {:?}", payment_hash, status);
-            if status == PaymentSessionStatus::Success {
-                eprintln!("payment_hash: {:?} success", payment_hash);
+            //eprintln!("got payment: {:?} status: {:?}", payment_hash, status);
+            if status == PaymentSessionStatus::Failed || status == PaymentSessionStatus::Success {
+                //eprintln!("payment_hash: {:?} success", payment_hash);
                 all_sent.remove(payment_hash);
             }
             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         }
-        let res = node_0.node_info().await;
-        eprintln!("node0 node_info: {:?}", res);
-        let res = node_1.node_info().await;
-        eprintln!("node1 node_info: {:?}", res);
-        let res = node_2.node_info().await;
-        eprintln!("node2 node_info: {:?}", res);
-        let res = node_3.node_info().await;
-        eprintln!("node3 node_info: {:?}", res);
+        // let res = node_0.node_info().await;
+        // eprintln!("node0 node_info: {:?}", res);
+        // let res = node_1.node_info().await;
+        // eprintln!("node1 node_info: {:?}", res);
+        // let res = node_2.node_info().await;
+        // eprintln!("node2 node_info: {:?}", res);
+        // let res = node_3.node_info().await;
+        // eprintln!("node3 node_info: {:?}", res);
         if all_sent.is_empty() {
             break;
         }

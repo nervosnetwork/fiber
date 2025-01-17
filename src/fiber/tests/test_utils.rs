@@ -22,6 +22,7 @@ use ractor::{call, Actor, ActorRef};
 use rand::rngs::OsRng;
 use secp256k1::{Message, Secp256k1};
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::{
     env,
     ffi::OsStr,
@@ -187,6 +188,8 @@ pub struct NetworkNode {
     pub peer_id: PeerId,
     pub event_emitter: mpsc::Receiver<NetworkServiceEvent>,
     pub pubkey: Pubkey,
+    pub unexpected_events: Arc<TokioRwLock<HashSet<String>>>,
+    pub triggered_unexpected_events: Arc<TokioRwLock<HashSet<String>>>,
 }
 
 pub struct NetworkNodeConfig {
@@ -859,6 +862,31 @@ impl NetworkNode {
             }
         };
 
+        let unexpected_events = Arc::new(TokioRwLock::new(HashSet::<String>::new()));
+        let triggered_unexpected_events = Arc::new(TokioRwLock::new(HashSet::<String>::new()));
+        let (self_event_sender, self_event_receiver) = mpsc::channel(10000);
+        let unexpected_events_clone = unexpected_events.clone();
+        let triggered_unexpected_events_clone = triggered_unexpected_events.clone();
+        // spwan a new thread to collect all the events from event_receiver
+        tokio::spawn(async move {
+            while let Some(event) = event_receiver.recv().await {
+                self_event_sender
+                    .send(event.clone())
+                    .await
+                    .expect("send event");
+                let unexpected_events = unexpected_events_clone.read().await;
+                let event_content = format!("{:?}", event);
+                for unexpected_event in unexpected_events.iter() {
+                    if event_content.contains(unexpected_event) {
+                        triggered_unexpected_events_clone
+                            .write()
+                            .await
+                            .insert(unexpected_event.clone());
+                    }
+                }
+            }
+        });
+
         println!(
             "Network node started for peer_id {:?} in directory {:?}",
             &peer_id,
@@ -877,8 +905,10 @@ impl NetworkNode {
             chain_actor,
             private_key: secret_key.into(),
             peer_id,
-            event_emitter: event_receiver,
+            event_emitter: self_event_receiver,
             pubkey: public_key.into(),
+            unexpected_events,
+            triggered_unexpected_events,
         }
     }
 
@@ -889,6 +919,23 @@ impl NetworkNode {
             store: self.store.clone(),
             fiber_config: self.fiber_config.clone(),
         }
+    }
+
+    pub async fn set_unexpected_events(&self, events: Vec<String>) {
+        let mut unexpected_events = self.unexpected_events.write().await;
+        unexpected_events.clear();
+        for event in events {
+            unexpected_events.insert(event);
+        }
+    }
+
+    pub async fn get_triggered_unexpected_events(&self) -> Vec<String> {
+        self.triggered_unexpected_events
+            .read()
+            .await
+            .iter()
+            .cloned()
+            .collect()
     }
 
     pub async fn get_network_channels(&self) -> Vec<ChannelInfo> {
