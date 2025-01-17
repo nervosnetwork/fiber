@@ -4393,9 +4393,9 @@ impl ChannelActorState {
     }
 
     pub fn get_local_channel_update_info(&self) -> ChannelUpdateInfo {
-        let balance = self.get_remote_balance();
+        let balance = self.get_local_balance();
         let mut info = ChannelUpdateInfo::from(&self.local_tlc_info);
-        info.inbound_liquidity = Some(balance);
+        info.outbound_liquidity = Some(balance);
         info
     }
 
@@ -4408,10 +4408,10 @@ impl ChannelActorState {
     }
 
     pub fn get_remote_channel_update_info(&self) -> Option<ChannelUpdateInfo> {
-        let balance = self.get_local_balance();
+        let balance = self.get_remote_balance();
         self.remote_tlc_info.as_ref().map(|tlc_info| {
             let mut info = ChannelUpdateInfo::from(tlc_info);
-            info.inbound_liquidity = Some(balance);
+            info.outbound_liquidity = Some(balance);
             info
         })
     }

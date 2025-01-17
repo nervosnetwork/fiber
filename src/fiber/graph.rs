@@ -221,11 +221,8 @@ pub struct ChannelUpdateInfo {
     pub timestamp: u64,
     /// Whether the channel can be currently used for payments (in this one direction).
     pub enabled: bool,
-    /// The exact amount of balance that we can receive from the other party via the channel.
-    /// Note that this is not our balance, but the balance of the other party.
-    /// This node is forwarding the balance for the other party, so we need to use the receivable balance
-    /// instead of our balance.
-    pub inbound_liquidity: Option<u128>,
+    /// The exact amount of balance that we can send to the other party via the channel.
+    pub outbound_liquidity: Option<u128>,
     /// The difference in htlc expiry values that you must have when routing through this channel (in milliseconds).
     pub tlc_expiry_delta: u64,
     /// The minimum value, which must be relayed to the next hop via the channel
@@ -238,7 +235,7 @@ impl From<&ChannelTlcInfo> for ChannelUpdateInfo {
         Self {
             timestamp: info.timestamp,
             enabled: info.enabled,
-            inbound_liquidity: None,
+            outbound_liquidity: None,
             tlc_expiry_delta: info.tlc_expiry_delta,
             tlc_minimum_value: info.tlc_minimum_value,
             fee_rate: info.tlc_fee_proportional_millionths as u64,
@@ -263,7 +260,7 @@ impl From<&ChannelUpdate> for ChannelUpdateInfo {
         Self {
             timestamp: update.timestamp,
             enabled: !update.is_disabled(),
-            inbound_liquidity: None,
+            outbound_liquidity: None,
             tlc_expiry_delta: update.tlc_expiry_delta,
             tlc_minimum_value: update.tlc_minimum_value,
             fee_rate: update.tlc_fee_proportional_millionths as u64,
@@ -730,16 +727,17 @@ where
             .channels
             .values()
             .filter_map(move |channel| {
-                if let Some(info) = channel.update_of_node2.as_ref() {
-                    if info.enabled && channel.node2() == node_id {
+                match channel.update_of_node1.as_ref() {
+                    Some(info) if node_id == channel.node2() && info.enabled => {
                         return Some((channel.node1(), channel.node2(), channel, info));
                     }
+                    _ => {}
                 }
-
-                if let Some(info) = channel.update_of_node1.as_ref() {
-                    if info.enabled && channel.node1() == node_id {
+                match channel.update_of_node2.as_ref() {
+                    Some(info) if node_id == channel.node1() && info.enabled => {
                         return Some((channel.node2(), channel.node1(), channel, info));
                     }
+                    _ => {}
                 }
                 None
             })
@@ -755,8 +753,8 @@ where
             |(_, _, a_channel_info, a_channel_update_info),
              (_, _, b_channel_info, b_channel_update_info)| {
                 b_channel_update_info
-                    .inbound_liquidity
-                    .cmp(&a_channel_update_info.inbound_liquidity)
+                    .outbound_liquidity
+                    .cmp(&a_channel_update_info.outbound_liquidity)
                     .then(
                         b_channel_info
                             .capacity()
@@ -1072,7 +1070,7 @@ where
                 }
 
                 // If we already know the balance of the channel, check if we can send the amount.
-                if let Some(balance) = channel_update.inbound_liquidity {
+                if let Some(balance) = channel_update.outbound_liquidity {
                     if amount_to_send > balance {
                         continue;
                     }

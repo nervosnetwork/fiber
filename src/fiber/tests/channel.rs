@@ -474,14 +474,14 @@ async fn do_test_update_graph_balance_after_payment(public: bool) {
             channel
                 .get_channel_update_of(node_a_pubkey)
                 .unwrap()
-                .inbound_liquidity,
+                .outbound_liquidity,
             Some(node_b_balance)
         );
         assert_eq!(
             channel
                 .get_channel_update_of(node_b_pubkey)
                 .unwrap()
-                .inbound_liquidity,
+                .outbound_liquidity,
             Some(node_a_balance)
         );
     };
