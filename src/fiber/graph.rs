@@ -964,10 +964,11 @@ where
 
         let mut target = target;
         let mut expiry = final_tlc_expiry_delta;
+        let mut amount = amount;
         let mut last_edge = None;
 
         if route_to_self {
-            let (t, edge, e) = self.adjust_target_for_route_self(
+            let (edge, t, e, f) = self.adjust_target_for_route_self(
                 &hop_hint_map,
                 amount,
                 final_tlc_expiry_delta,
@@ -977,6 +978,7 @@ where
             assert_ne!(target, t);
             target = t;
             expiry = expiry + e;
+            amount = amount + f;
             last_edge = Some(edge);
         }
         assert_ne!(source, target);
@@ -998,7 +1000,6 @@ where
             for (from, to, channel_info, channel_update) in self.get_node_inbounds(cur_hop.node_id)
             {
                 let is_initial = from == source;
-                let is_final = (to == target) && !route_to_self;
 
                 assert_eq!(to, cur_hop.node_id);
                 if &udt_type_script != channel_info.udt_type_script() {
@@ -1034,7 +1035,7 @@ where
                     continue;
                 }
 
-                let fee = if is_final {
+                let fee = if is_initial {
                     0
                 } else {
                     calculate_tlc_forward_fee(
@@ -1129,10 +1130,9 @@ where
                     next_hop: Some(PathEdge {
                         target: to,
                         channel_outpoint: channel_info.out_point().clone(),
-                        // Here we need to use the amount accumulated so far (i.e. with the fees in current hop)
-                        // because the fee here is for the receiving node to forward the amount to the next node.
-                        // So the total amount in AddTlc packet should include the fee.
-                        amount_received: amount_to_send,
+                        // The amount_received is the amount that next hop is going to receive.
+                        // That is exactly next_hop_received_amount.
+                        amount_received: next_hop_received_amount,
                         // We need to use cur_hop.incoming_tlc_expiry instead of incoming_tlc_expiry here
                         // because we need the expiry for the AddTlc packet sent from source to target.
                         // cur_hop.incoming_tlc_expiry is the expiry time for the TLC that is going to be received by the target,
@@ -1179,7 +1179,7 @@ where
         expiry: u64,
         source: Pubkey,
         target: Pubkey,
-    ) -> Result<(Pubkey, PathEdge, u64), PathFindError> {
+    ) -> Result<(PathEdge, Pubkey, u64, u128), PathFindError> {
         let direct_channels: Vec<(Pubkey, Pubkey, &ChannelInfo, &ChannelUpdateInfo)> = self
             .get_node_inbounds(source)
             .filter(|(_, _, channel_info, _)| {
@@ -1224,7 +1224,12 @@ where
                 amount_received: amount,
                 incoming_tlc_expiry: expiry,
             };
-            Ok((from, last_edge, channel_update.tlc_expiry_delta))
+            let fee = calculate_tlc_forward_fee(amount, channel_update.fee_rate as u128).map_err(
+                |err| {
+                    PathFindError::PathFind(format!("calculate_tlc_forward_fee error: {:?}", err))
+                },
+            )?;
+            Ok((last_edge, from, channel_update.tlc_expiry_delta, fee))
         } else {
             return Err(PathFindError::PathFind(
                 "no direct channel found for source node".to_string(),
