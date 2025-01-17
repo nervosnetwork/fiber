@@ -189,7 +189,7 @@ pub struct NetworkNode {
     pub event_emitter: mpsc::Receiver<NetworkServiceEvent>,
     pub pubkey: Pubkey,
     pub unexpected_events: Arc<TokioRwLock<HashSet<String>>>,
-    pub triggered_unexpected_events: Arc<TokioRwLock<HashSet<String>>>,
+    pub triggered_unexpected_events: Arc<TokioRwLock<Vec<String>>>,
 }
 
 pub struct NetworkNodeConfig {
@@ -863,7 +863,7 @@ impl NetworkNode {
         };
 
         let unexpected_events = Arc::new(TokioRwLock::new(HashSet::<String>::new()));
-        let triggered_unexpected_events = Arc::new(TokioRwLock::new(HashSet::<String>::new()));
+        let triggered_unexpected_events = Arc::new(TokioRwLock::new(Vec::<String>::new()));
         let (self_event_sender, self_event_receiver) = mpsc::channel(10000);
         let unexpected_events_clone = unexpected_events.clone();
         let triggered_unexpected_events_clone = triggered_unexpected_events.clone();
@@ -881,7 +881,7 @@ impl NetworkNode {
                         triggered_unexpected_events_clone
                             .write()
                             .await
-                            .insert(unexpected_event.clone());
+                            .push(unexpected_event.clone());
                     }
                 }
             }
@@ -930,12 +930,7 @@ impl NetworkNode {
     }
 
     pub async fn get_triggered_unexpected_events(&self) -> Vec<String> {
-        self.triggered_unexpected_events
-            .read()
-            .await
-            .iter()
-            .cloned()
-            .collect()
+        self.triggered_unexpected_events.read().await.clone()
     }
 
     pub async fn get_network_channels(&self) -> Vec<ChannelInfo> {

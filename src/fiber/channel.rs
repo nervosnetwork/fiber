@@ -2521,6 +2521,7 @@ impl Debug for TlcInfo {
             .field("status", &self.status)
             .field("amount", &self.amount)
             .field("removed_reason", &self.removed_reason)
+            .field("payment_hash", &self.payment_hash)
             .finish()
     }
 }
@@ -4585,6 +4586,7 @@ impl ChannelActorState {
         tlc_id: TLCId,
     ) -> Result<(TlcInfo, RemoveTlcReason), ProcessingChannelError> {
         let current = self.tlc_state.get_mut(&tlc_id).expect("TLC exists").clone();
+        eprintln!("remove_tlc_with_reason: {:?}", current);
         let reason = current
             .removed_reason
             .clone()

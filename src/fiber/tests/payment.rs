@@ -1847,10 +1847,22 @@ async fn test_send_payment_middle_hop_update_fee_multiple_payments() {
         .await;
     loop {
         let triggered_unexpected_events = node_1.get_triggered_unexpected_events().await;
-        assert!(triggered_unexpected_events.is_empty());
+        if !triggered_unexpected_events.is_empty() {
+            assert!(
+                false,
+                "node_1 triggered_unexpected_events: {:?}",
+                triggered_unexpected_events
+            );
+        }
 
         let triggered_unexpected_events = node_2.get_triggered_unexpected_events().await;
-        assert!(triggered_unexpected_events.is_empty());
+        if !triggered_unexpected_events.is_empty() {
+            assert!(
+                false,
+                "node_2 triggered_unexpected_events: {:?}",
+                triggered_unexpected_events
+            );
+        }
 
         for payment_hash in all_sent.clone().iter() {
             let status = node_0.get_payment_status(*payment_hash).await;
