@@ -142,9 +142,9 @@ impl MockNetworkGraph {
             channel_outpoint.clone(),
             now_timestamp_as_millis_u64(),
             if node_a_is_node1 {
-                ChannelUpdateMessageFlags::UPDATE_OF_NODE2
-            } else {
                 ChannelUpdateMessageFlags::UPDATE_OF_NODE1
+            } else {
+                ChannelUpdateMessageFlags::UPDATE_OF_NODE2
             },
             ChannelUpdateChannelFlags::empty(),
             TLC_EXPIRY_DELTA_IN_TESTS,
@@ -156,9 +156,9 @@ impl MockNetworkGraph {
                 channel_outpoint.clone(),
                 now_timestamp_as_millis_u64(),
                 if node_a_is_node1 {
-                    ChannelUpdateMessageFlags::UPDATE_OF_NODE1
-                } else {
                     ChannelUpdateMessageFlags::UPDATE_OF_NODE2
+                } else {
+                    ChannelUpdateMessageFlags::UPDATE_OF_NODE1
                 },
                 ChannelUpdateChannelFlags::empty(),
                 22,
