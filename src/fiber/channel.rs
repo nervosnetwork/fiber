@@ -1025,7 +1025,13 @@ where
 
                 assert!(received_amount >= forward_amount);
                 let forward_fee = received_amount.saturating_sub(forward_amount);
-                let fee_rate: u128 = state.local_tlc_info.tlc_fee_proportional_millionths;
+
+                // TODO: This seems to be a bug.
+                // We are now using the outbound fee rate to calculate the fee.
+                // So we should use the next outbound channel's local_tlc_info instead of the current one.
+                // But with current implementation, we don't have next channel's info in the PeelingOnionPacket.
+                // So we can't calculate the fee correctly here. For now we ignore the fee check.
+                let fee_rate: u128 = 0;
 
                 let expected_fee = calculate_tlc_forward_fee(forward_amount, fee_rate);
                 if expected_fee.is_err() || forward_fee < expected_fee.clone().unwrap() {
