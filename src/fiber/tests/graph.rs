@@ -1315,6 +1315,45 @@ fn test_graph_payment_pay_self_with_one_node() {
 }
 
 #[test]
+fn test_graph_payment_pay_self_with_one_node_fee_rate() {
+    let mut network = MockNetworkGraph::new(9);
+    network.add_edge(0, 2, Some(500), Some(2));
+    network.add_edge(2, 0, Some(500), Some(200000));
+
+    let node0 = network.keys[0];
+
+    // node0 is the source node
+    let command = SendPaymentCommand {
+        target_pubkey: Some(network.keys[0].into()),
+        amount: Some(100),
+        payment_hash: Some(Hash256::default()),
+        final_tlc_expiry_delta: None,
+        tlc_expiry_limit: None,
+        invoice: None,
+        timeout: Some(10),
+        max_fee_amount: Some(1000),
+        max_parts: None,
+        keysend: Some(false),
+        udt_type_script: None,
+        allow_self_payment: true,
+        hop_hints: None,
+        dry_run: false,
+    };
+    let payment_data = SendPaymentData::new(command);
+    assert!(payment_data.is_ok());
+    let payment_data = payment_data.unwrap();
+
+    let route = network.graph.build_route(payment_data);
+    assert!(route.is_ok());
+    let route = route.unwrap();
+    assert_eq!(route.len(), 3);
+    assert_eq!(route[0].amount, 120);
+    assert_eq!(route[1].amount, 100);
+    assert_eq!(route[2].amount, 100);
+    assert_eq!(route[1].next_hop, Some(node0.into()));
+}
+
+#[test]
 fn test_graph_build_route_with_double_edge_node() {
     let mut network = MockNetworkGraph::new(3);
     // Add edges with min_tlc_value set to 50
