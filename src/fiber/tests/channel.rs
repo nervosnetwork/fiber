@@ -3766,6 +3766,77 @@ async fn test_forward_payment_tlc_minimum_value() {
 }
 
 #[tokio::test]
+async fn test_send_payment_with_outdated_fee_rate() {
+    init_tracing();
+    let (nodes, _) = create_n_nodes_with_index_and_amounts_with_established_channel(
+        &[
+            ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+        ],
+        3,
+        true,
+    )
+    .await;
+    let [node_a, node_b, node_c] = nodes.try_into().expect("3 nodes");
+
+    let node_b_pubkey = node_b.pubkey.clone();
+    let node_c_pubkey = node_c.pubkey.clone();
+    let hash_set: HashSet<_> = [node_b_pubkey, node_c_pubkey].into_iter().collect();
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+    node_a
+        .with_network_graph_mut(|graph| {
+            for channel in graph.channels.values_mut() {
+                tracing::debug!("channel: {:?}", channel);
+                if hash_set.contains(&channel.node1()) && hash_set.contains(&channel.node2()) {
+                    let channel_update = if channel.node1() == node_b_pubkey {
+                        channel.update_of_node1.as_mut().unwrap()
+                    } else {
+                        channel.update_of_node2.as_mut().unwrap()
+                    };
+                    tracing::debug!("channel_update: {:?}", channel_update);
+                    channel_update.fee_rate = 0;
+                }
+            }
+        })
+        .await;
+
+    // sending payment from A to C should fail because the forwarding value is too small
+    let message = |rpc_reply| -> NetworkActorMessage {
+        NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
+            SendPaymentCommand {
+                target_pubkey: Some(node_c_pubkey),
+                amount: Some(10000000000),
+                payment_hash: None,
+                final_tlc_expiry_delta: None,
+                tlc_expiry_limit: None,
+                invoice: None,
+                timeout: None,
+                max_fee_amount: None,
+                max_parts: None,
+                keysend: Some(true),
+                udt_type_script: None,
+                allow_self_payment: false,
+                hop_hints: None,
+                dry_run: false,
+            },
+            rpc_reply,
+        ))
+    };
+    let res = call!(node_a.network_actor, message).expect("node_a alive");
+    assert!(
+        res.is_ok(),
+        "Send payment should be ok because we can find path: {:?}",
+        res
+    );
+    let res = res.unwrap();
+    let payment_hash = res.payment_hash;
+    // The payment should fail because our fee rate is too low.
+    node_a.wait_until_failed(payment_hash).await;
+}
+
+#[tokio::test]
 async fn test_remove_tlc_with_wrong_hash_algorithm() {
     let supported_algorithms = HashAlgorithm::supported_algorithms();
     for algorithm1 in &supported_algorithms {

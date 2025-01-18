@@ -294,7 +294,7 @@ pub struct NetworkGraph<S> {
     // The pubkey of the node that is running this instance of the network graph.
     source: Pubkey,
     // All the channels in the network.
-    channels: HashMap<OutPoint, ChannelInfo>,
+    pub(crate) channels: HashMap<OutPoint, ChannelInfo>,
     // All the nodes in the network.
     nodes: HashMap<Pubkey, NodeInfo>,
     // The latest cursor we read from the GossipMessageStore. When we need to refresh our view of the
