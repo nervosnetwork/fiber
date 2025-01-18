@@ -3667,7 +3667,7 @@ async fn test_forward_payment_tlc_minimum_value() {
     // sleep for a while to make sure the AddTlc processed by both party
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
-    // AddTlc from B to C is OK when we are not forwarding TLCs
+    // AddTlc from B to C is not OK because the forwarding value is too small
     let add_tlc_result = call!(node_b.network_actor, |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
@@ -3677,7 +3677,7 @@ async fn test_forward_payment_tlc_minimum_value() {
         ))
     })
     .expect("node_b alive");
-    assert!(add_tlc_result.is_ok());
+    assert!(add_tlc_result.is_err());
     // sleep for a while to make sure the AddTlc processed by both party
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
@@ -3708,7 +3708,6 @@ async fn test_forward_payment_tlc_minimum_value() {
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
     // sending payment from B to C is not OK because the forwarding value is too small
-    // TODO: There is some inconsistency here, because the AddTlc is OK, but the payment is not OK
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
             SendPaymentCommand {

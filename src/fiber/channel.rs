@@ -1013,10 +1013,6 @@ where
             }
         } else {
             if state.is_public() && state.is_tlc_forwarding_enabled() {
-                if state.local_tlc_info.tlc_minimum_value > received_amount {
-                    return Err(ProcessingChannelError::TlcAmountIsTooLow);
-                }
-
                 if add_tlc.expiry
                     < peeled_onion_packet.current.expiry + state.local_tlc_info.tlc_expiry_delta
                 {
@@ -4942,8 +4938,14 @@ impl ChannelActorState {
         forward_amount: u128,
         forward_fee: Option<u128>,
     ) -> ProcessingChannelResult {
+        assert!(self.local_tlc_info.enabled, "TLC is disabled");
         if self.local_tlc_info.tlc_minimum_value != 0
-            && self.local_tlc_info.tlc_minimum_value < forward_amount
+            && forward_amount < self.local_tlc_info.tlc_minimum_value
+        {
+            return Err(ProcessingChannelError::TlcAmountIsTooLow);
+        }
+        if self.local_tlc_info.tlc_maximum_value != 0
+            && forward_amount > self.local_tlc_info.tlc_minimum_value
         {
             return Err(ProcessingChannelError::TlcAmountExceedLimit);
         }
