@@ -178,7 +178,7 @@ pub struct AddTlcCommand {
     /// Save it for outbound (offered) TLC to backward errors.
     /// Use all zeros when no shared secrets are available.
     pub shared_secret: [u8; 32],
-    pub previous_tlc: Option<(Hash256, u64)>,
+    pub previous_tlc: Option<(Hash256, u64, u128)>,
 }
 
 #[derive(Debug, Clone)]
@@ -1024,23 +1024,10 @@ where
                 }
 
                 assert!(received_amount >= forward_amount);
+
+                // Next forwarding channel will get the forward_fee and check if it's enough.
                 let forward_fee = received_amount.saturating_sub(forward_amount);
 
-                // TODO: This seems to be a bug.
-                // We are now using the outbound fee rate to calculate the fee.
-                // So we should use the next outbound channel's local_tlc_info instead of the current one.
-                // But with current implementation, we don't have next channel's info in the PeelingOnionPacket.
-                // So we can't calculate the fee correctly here. For now we ignore the fee check.
-                let fee_rate: u128 = 0;
-
-                let expected_fee = calculate_tlc_forward_fee(forward_amount, fee_rate);
-                if expected_fee.is_err() || forward_fee < expected_fee.clone().unwrap() {
-                    error!(
-                        "too low forward_fee: {}, expected_fee: {:?}",
-                        forward_fee, expected_fee
-                    );
-                    return Err(ProcessingChannelError::TlcForwardFeeIsTooLow);
-                }
                 // if this is not the last hop, forward TLC to next hop
                 self.register_retryable_forward_tlc(
                     myself,
@@ -1048,6 +1035,7 @@ where
                     add_tlc.tlc_id,
                     add_tlc.payment_hash,
                     peeled_onion_packet.clone(),
+                    forward_fee,
                 )
                 .await;
             } else {
@@ -1247,6 +1235,7 @@ where
     ) -> Result<u64, ProcessingChannelError> {
         state.check_for_tlc_update(Some(command.amount), true, true)?;
         state.check_tlc_expiry(command.expiry)?;
+        state.check_tlc_forward_amount(command.amount, command.previous_tlc.map(|x| x.2))?;
         let tlc = state.create_outbounding_tlc(command.clone());
         state.check_insert_tlc(&tlc)?;
         state.tlc_state.add_offered_tlc(tlc.clone());
@@ -1476,9 +1465,15 @@ where
         tlc_id: TLCId,
         payment_hash: Hash256,
         peeled_onion_packet: PeeledPaymentOnionPacket,
+        forward_fee: u128,
     ) {
-        let forward_tlc =
-            RetryableTlcOperation::ForwardTlc(payment_hash, tlc_id, peeled_onion_packet, true);
+        let forward_tlc = RetryableTlcOperation::ForwardTlc(
+            payment_hash,
+            tlc_id,
+            peeled_onion_packet,
+            forward_fee,
+            true,
+        );
         self.register_retryable_tlc_operation(myself, state, forward_tlc)
             .await;
     }
@@ -1504,11 +1499,10 @@ where
         payment_hash: Hash256,
         try_one_time: bool,
     ) {
-        if let Some(RetryableTlcOperation::ForwardTlc(_, _, _, ref mut sent)) = state
-            .tlc_state
-            .retryable_tlc_operations
-            .iter_mut()
-            .find(|op| matches!(op, RetryableTlcOperation::ForwardTlc(ph, _, _, _) if *ph == payment_hash))
+        if let Some(RetryableTlcOperation::ForwardTlc(.., ref mut sent)) =
+            state.tlc_state.retryable_tlc_operations.iter_mut().find(
+                |op| matches!(op, RetryableTlcOperation::ForwardTlc(ph,..) if *ph == payment_hash),
+            )
         {
             *sent = try_one_time;
         }
@@ -1560,6 +1554,7 @@ where
                     payment_hash,
                     tlc_id,
                     ref peeled_onion_packet,
+                    forward_fee,
                     try_one_time,
                 ) => {
                     // there is a potential deadlock for waiting the result from another channel actor
@@ -1577,7 +1572,11 @@ where
                         match self.network.send_message(NetworkActorMessage::Command(
                             NetworkActorCommand::SendPaymentOnionPacket(SendOnionPacketCommand {
                                 peeled_onion_packet: peeled_onion_packet.clone(),
-                                previous_tlc: Some((state.get_id(), u64::from(*tlc_id))),
+                                previous_tlc: Some((
+                                    state.get_id(),
+                                    u64::from(*tlc_id),
+                                    *forward_fee,
+                                )),
                                 payment_hash: *payment_hash,
                             }),
                         )) {
@@ -1614,7 +1613,7 @@ where
     ) {
         let pending_ops = state.tlc_state.get_pending_operations();
         if let Some((tlc_op, peeled_onion)) = pending_ops.iter().find_map(|op| match op {
-            RetryableTlcOperation::ForwardTlc(payment_hash, _, peel_onion_packet, _)
+            RetryableTlcOperation::ForwardTlc(payment_hash, _, peel_onion_packet, ..)
                 if *payment_hash == result.payment_hash =>
             {
                 Some((op, peel_onion_packet))
@@ -2588,7 +2587,7 @@ impl From<TlcInfo> for TlcNotifyInfo {
 pub enum RetryableTlcOperation {
     RemoveTlc(TLCId, RemoveTlcReason),
     RelayRemoveTlc(Hash256, u64, RemoveTlcReason),
-    ForwardTlc(Hash256, TLCId, PeeledPaymentOnionPacket, bool),
+    ForwardTlc(Hash256, TLCId, PeeledPaymentOnionPacket, u128, bool),
 }
 
 impl Debug for RetryableTlcOperation {
@@ -2605,10 +2604,11 @@ impl Debug for RetryableTlcOperation {
                 .field(tlc_id)
                 .field(reason)
                 .finish(),
-            RetryableTlcOperation::ForwardTlc(payment_hash, tlc_id, _, run_once) => f
+            RetryableTlcOperation::ForwardTlc(payment_hash, tlc_id, _, forward_fee, run_once) => f
                 .debug_tuple("ForwardTlc")
                 .field(payment_hash)
                 .field(tlc_id)
+                .field(forward_fee)
                 .field(run_once)
                 .finish(),
         }
@@ -4937,6 +4937,41 @@ impl ChannelActorState {
         Ok(())
     }
 
+    fn check_tlc_forward_amount(
+        &self,
+        forward_amount: u128,
+        forward_fee: Option<u128>,
+    ) -> ProcessingChannelResult {
+        if self.local_tlc_info.tlc_minimum_value != 0
+            && self.local_tlc_info.tlc_minimum_value < forward_amount
+        {
+            return Err(ProcessingChannelError::TlcAmountExceedLimit);
+        }
+        let forward_fee = match forward_fee {
+            Some(fee) => fee,
+            None => {
+                // We are not forwarding the tlc, so no need to check the fee.
+                return Ok(());
+            }
+        };
+        let fee_rate = self.local_tlc_info.tlc_fee_proportional_millionths;
+        let expected_fee = calculate_tlc_forward_fee(forward_amount, fee_rate);
+        match expected_fee {
+            Ok(expected_fee) if forward_fee >= expected_fee => Ok(()),
+            Ok(fee) => {
+                error!(
+                    "too low forward_fee: {}, expected_fee: {}",
+                    forward_fee, fee
+                );
+                Err(ProcessingChannelError::TlcForwardFeeIsTooLow)
+            }
+            Err(e) => {
+                error!("calculate_tlc_forward_fee error: {:?}", e);
+                Err(ProcessingChannelError::TlcForwardFeeIsTooLow)
+            }
+        }
+    }
+
     // Check whether the reason is valid for removing the tlc.
     fn check_remove_tlc_with_reason(
         &self,
@@ -5066,7 +5101,7 @@ impl ChannelActorState {
             shared_secret: command.shared_secret,
             previous_tlc: command
                 .previous_tlc
-                .map(|(channel_id, tlc_id)| (channel_id, TLCId::Received(tlc_id))),
+                .map(|(channel_id, tlc_id, _)| (channel_id, TLCId::Received(tlc_id))),
         }
     }
 
