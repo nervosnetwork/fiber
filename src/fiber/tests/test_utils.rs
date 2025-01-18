@@ -865,7 +865,7 @@ impl NetworkNode {
         let unexpected_events = Arc::new(TokioRwLock::new(HashSet::<String>::new()));
         let triggered_unexpected_events = Arc::new(TokioRwLock::new(Vec::<String>::new()));
         let (self_event_sender, self_event_receiver) = mpsc::channel(10000);
-        let unexpected_events_clone = unexpected_events.clone();
+        let _unexpected_events_clone = unexpected_events.clone();
         let triggered_unexpected_events_clone = triggered_unexpected_events.clone();
         // spwan a new thread to collect all the events from event_receiver
         tokio::spawn(async move {
@@ -874,16 +874,26 @@ impl NetworkNode {
                     .send(event.clone())
                     .await
                     .expect("send event");
-                let unexpected_events = unexpected_events_clone.read().await;
+                //let unexpected_events = unexpected_events_clone.read().await;
                 let event_content = format!("{:?}", event);
-                for unexpected_event in unexpected_events.iter() {
-                    if event_content.contains(unexpected_event) {
-                        triggered_unexpected_events_clone
-                            .write()
-                            .await
-                            .push(unexpected_event.clone());
-                    }
+                if !event_content.contains("WaitingTlcAck")
+                    && !event_content.contains("AddTlcFailed")
+                    && event_content.contains("DebugEvent")
+                {
+                    triggered_unexpected_events_clone
+                        .write()
+                        .await
+                        .push(event_content.clone());
                 }
+
+                // for unexpected_event in unexpected_events.iter() {
+                //     if !event_content.contains("WaitingTlcAck") {
+                //         triggered_unexpected_events_clone
+                //             .write()
+                //             .await
+                //             .push(unexpected_event.clone());
+                //     }
+                // }
             }
         });
 

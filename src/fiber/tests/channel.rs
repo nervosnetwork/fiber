@@ -2817,7 +2817,8 @@ async fn test_network_add_two_tlcs_remove_one() {
         "old_a_balance: {}, new_a_balance: {}, old_b_balance: {}, new_b_balance: {}",
         old_a_balance, new_a_balance, old_b_balance, new_b_balance
     );
-    assert_eq!(new_a_balance, old_a_balance - 1000);
+    // the second tlc balance is already accounted for the first node
+    assert_eq!(new_a_balance, old_a_balance - 1000 - 2000);
     assert_eq!(new_b_balance, old_b_balance + 1000);
 
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
@@ -4570,7 +4571,7 @@ async fn test_node_reestablish_resend_remove_tlc() {
     // assert balance does not changed since remove tlc is not processed by node_a
     let new_node_a_balance = node_a.get_local_balance_from_channel(new_channel_id);
     let new_node_b_balance = node_b.get_local_balance_from_channel(new_channel_id);
-    assert_eq!(node_a_balance, new_node_a_balance);
+    assert_eq!(node_a_balance - 1000, new_node_a_balance);
     assert_eq!(node_b_balance, new_node_b_balance);
 
     node_a.start().await;

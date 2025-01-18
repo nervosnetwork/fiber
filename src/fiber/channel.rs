@@ -714,7 +714,6 @@ where
         state: &mut ChannelActorState,
         inbound: bool,
     ) {
-        let previous_balance = state.get_local_balance();
         let pending_tlcs = if inbound {
             state.tlc_state.received_tlcs.tlcs.iter_mut()
         } else {
@@ -737,10 +736,9 @@ where
                 .await
                 .expect("expect remove tlc success");
         }
-        if state.get_local_balance() != previous_balance {
-            state.update_graph_for_local_channel_change(&self.network);
-            state.update_graph_for_remote_channel_change(&self.network);
-        }
+
+        state.update_graph_for_local_channel_change(&self.network);
+        state.update_graph_for_remote_channel_change(&self.network);
     }
 
     async fn process_add_tlc_error(
@@ -1069,6 +1067,7 @@ where
         state.check_insert_tlc(&tlc_info)?;
         state.tlc_state.add_received_tlc(tlc_info);
         state.increment_next_received_tlc_id();
+        state.to_remote_amount -= add_tlc.amount;
         Ok(())
     }
 
@@ -1098,7 +1097,7 @@ where
                     ProcessingChannelError::InternalError("insert preimage failed".to_string())
                 })?;
         }
-        eprintln!("handled remove_tlc peer message: {:?}", &remove_tlc.tlc_id);
+        //eprintln!("handled remove_tlc peer message: {:?}", &remove_tlc.tlc_id);
         Ok(())
     }
 
@@ -1266,7 +1265,8 @@ where
             state.get_remote_peer_id(),
             FiberMessage::add_tlc(add_tlc.clone()),
         );
-
+        state.to_local_amount -= command.amount;
+        state.update_graph_for_local_channel_change(&self.network);
         self.network
             .send_message(NetworkActorMessage::new_command(
                 NetworkActorCommand::SendFiberMessage(msg),
@@ -1295,13 +1295,13 @@ where
                 reason: command.reason,
             }),
         );
-        eprintln!("begin to send remove tlc peer message");
+        //eprintln!("begin to send remove tlc peer message");
         self.network
             .send_message(NetworkActorMessage::new_command(
                 NetworkActorCommand::SendFiberMessage(msg),
             ))
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-        eprintln!("end send remove tlc peer message");
+        //eprintln!("end send remove tlc peer message");
 
         state.maybe_transition_to_shutdown(&self.network)?;
         self.handle_commitment_signed_command(state)?;
@@ -2298,7 +2298,10 @@ where
             }
             ChannelActorMessage::Command(command) => {
                 if let Err(err) = self.handle_command(&myself, state, command).await {
-                    error!("Error while processing channel command: {:?}", err);
+                    //error!("Error while processing channel command: {:?}", err);
+                    if !matches!(err, ProcessingChannelError::WaitingTlcAck) {
+                        error!("Error while processing channel command: {:?}", err);
+                    }
                 }
             }
             ChannelActorMessage::Event(e) => {
@@ -2456,6 +2459,8 @@ pub enum InboundTlcStatus {
     Committed,
     // We have removed this tlc, but haven't received ACK from peer
     LocalRemoved,
+    // we are waiting to send ACK for the remote party's RemoveTlc
+    // RemoveAckPending,
     // We have received the ACK for the RemoveTlc, it's safe to remove this tlc
     RemoveAckConfirmed,
 }
@@ -2841,6 +2846,7 @@ impl TlcState {
                         InboundTlcStatus::AnnounceWaitAck => true,
                         InboundTlcStatus::Committed => true,
                         InboundTlcStatus::LocalRemoved => !for_remote,
+                        //InboundTlcStatus::RemoveAckPending => false,
                         InboundTlcStatus::RemoveAckConfirmed => false,
                     }),
             )
@@ -2876,7 +2882,19 @@ impl TlcState {
         self.need_another_commitment_signed()
     }
 
-    pub fn update_for_revoke_and_ack(&mut self) -> bool {
+    // pub fn update_send_revoke_and_ack(&mut self) {
+    //     for tlc in self.received_tlcs.tlcs.iter_mut() {
+    //         match tlc.inbound_status() {
+    //             InboundTlcStatus::RemoveAckPending => {
+    //                 eprintln!("now set RemoveAckConfirmed for tlc : {:?}", tlc);
+    //                 tlc.status = TlcStatus::Inbound(InboundTlcStatus::RemoveAckConfirmed);
+    //             }
+    //             _ => {}
+    //         }
+    //     }
+    // }
+
+    pub fn update_for_revoke_and_ack_peer_message(&mut self) -> bool {
         self.set_waiting_ack(false);
         for tlc in self.offered_tlcs.tlcs.iter_mut() {
             match tlc.outbound_status() {
@@ -2884,6 +2902,7 @@ impl TlcState {
                     tlc.status = TlcStatus::Outbound(OutboundTlcStatus::Committed);
                 }
                 OutboundTlcStatus::RemoveWaitPrevAck => {
+                    eprintln!("now set RemoveWaitAck for tlc : {:?}", tlc);
                     tlc.status = TlcStatus::Outbound(OutboundTlcStatus::RemoveWaitAck);
                 }
                 OutboundTlcStatus::RemoveWaitAck => {
@@ -4268,6 +4287,23 @@ impl ChannelActorState {
         self.to_local_amount as u64
             + self.to_remote_amount as u64
             + self.get_total_reserved_ckb_amount()
+            + self.total_pending_ckb_amount() as u64
+    }
+
+    fn total_pending_ckb_amount(&self) -> u128 {
+        self.tlc_state
+            .offered_tlcs
+            .tlcs
+            .iter()
+            .map(|tlc| tlc.amount)
+            .sum::<u128>()
+            + self
+                .tlc_state
+                .received_tlcs
+                .tlcs
+                .iter()
+                .map(|tlc| tlc.amount)
+                .sum::<u128>()
     }
 
     fn get_total_udt_amount(&self) -> u128 {
@@ -4338,6 +4374,7 @@ impl ChannelActorState {
                 .concat(),
             );
             let our_signature = sign_ctx.sign(message.as_slice()).expect("valid signature");
+            eprintln!("sign revocation_partial_signature: {:?}", our_signature);
             our_signature
         };
 
@@ -4586,7 +4623,10 @@ impl ChannelActorState {
         tlc_id: TLCId,
     ) -> Result<(TlcInfo, RemoveTlcReason), ProcessingChannelError> {
         let current = self.tlc_state.get_mut(&tlc_id).expect("TLC exists").clone();
-        eprintln!("remove_tlc_with_reason: {:?}", current);
+        eprintln!(
+            "node: {:?} remove_tlc_with_reason: {:?}",
+            self.local_pubkey, current
+        );
         let reason = current
             .removed_reason
             .clone()
@@ -4608,16 +4648,29 @@ impl ChannelActorState {
             let (mut to_local_amount, mut to_remote_amount) =
                 (self.to_local_amount, self.to_remote_amount);
             if current.is_offered() {
-                to_local_amount -= current.amount;
+                //to_local_amount -= current.amount;
                 to_remote_amount += current.amount;
             } else {
                 to_local_amount += current.amount;
-                to_remote_amount -= current.amount;
+                //to_remote_amount -= current.amount;
             }
 
             self.to_local_amount = to_local_amount;
             self.to_remote_amount = to_remote_amount;
 
+            debug!("Updated local balance to {} and remote balance to {} by removing tlc {:?} with reason {:?}",
+                            to_local_amount, to_remote_amount, tlc_id, reason);
+        } else {
+            let (mut to_local_amount, mut to_remote_amount) =
+                (self.to_local_amount, self.to_remote_amount);
+            if current.is_offered() {
+                to_local_amount += current.amount;
+            } else {
+                to_remote_amount += current.amount;
+            }
+
+            self.to_local_amount = to_local_amount;
+            self.to_remote_amount = to_remote_amount;
             debug!("Updated local balance to {} and remote balance to {} by removing tlc {:?} with reason {:?}",
                             to_local_amount, to_remote_amount, tlc_id, reason);
         }
@@ -4875,7 +4928,7 @@ impl ChannelActorState {
         } else {
             let mut result = vec![tlcs.len() as u8];
             for (tlc, local, remote) in tlcs {
-                eprintln!("tlc: {:?} for_remote: {:?}", tlc, for_remote);
+                //eprintln!("tlc: {:?} for_remote: {:?}", tlc, for_remote);
                 result.extend_from_slice(&tlc.get_htlc_type().to_le_bytes());
                 result.extend_from_slice(&tlc.amount.to_le_bytes());
                 result.extend_from_slice(&tlc.get_hash());
@@ -4887,7 +4940,7 @@ impl ChannelActorState {
                         .to_le_bytes(),
                 );
             }
-            eprintln!("htlc result: {:?}", result);
+            //eprintln!("htlc result: {:?}", result);
             result
         }
     }
@@ -5837,13 +5890,13 @@ impl ChannelActorState {
                 .concat(),
             );
             eprintln!("handle revoke message: {:?}", message);
-            eprintln!(
-                "handle revoke message revocation_partial_signature: {:?}",
-                revocation_partial_signature
-            );
+            // eprintln!(
+            //     "handle revoke message revocation_partial_signature: {:?}",
+            //     revocation_partial_signature
+            // );
             let aggregated_signature =
                 sign_ctx.sign_and_aggregate(message.as_slice(), revocation_partial_signature)?;
-            eprintln!("successfully sign_and_aggregate ...");
+            //eprintln!("successfully sign_and_aggregate ...");
             RevocationData {
                 commitment_number,
                 x_only_aggregated_pubkey,
@@ -5906,7 +5959,11 @@ impl ChannelActorState {
         self.increment_local_commitment_number();
         self.append_remote_commitment_point(next_per_commitment_point);
 
-        let need_commitment_signed = self.tlc_state.update_for_revoke_and_ack();
+        eprintln!(
+            "node: {:?} handle_revoke_and_ack_peer_message",
+            self.local_pubkey
+        );
+        let need_commitment_signed = self.tlc_state.update_for_revoke_and_ack_peer_message();
         network
             .send_message(NetworkActorMessage::new_notification(
                 NetworkServiceEvent::RevokeAndAckReceived(
@@ -6617,7 +6674,7 @@ impl ChannelActorState {
                 .capacity(capacity.pack())
                 .build();
             let output_data = Bytes::default();
-            eprintln!("output_data: {:?}", output_data);
+            eprintln!("output: {:?}", output);
             (output, output_data)
         }
     }
@@ -6669,7 +6726,7 @@ impl ChannelActorState {
             .tlcs
             .iter()
             .filter(move |tlc| match tlc.outbound_status() {
-                OutboundTlcStatus::LocalAnnounced => for_remote,
+                OutboundTlcStatus::LocalAnnounced => true,
                 OutboundTlcStatus::Committed => true,
                 OutboundTlcStatus::RemoteRemoved => true,
                 OutboundTlcStatus::RemoveWaitPrevAck => true,
@@ -6678,11 +6735,12 @@ impl ChannelActorState {
             })
             .chain(self.tlc_state.received_tlcs.tlcs.iter().filter(move |tlc| {
                 match tlc.inbound_status() {
-                    InboundTlcStatus::RemoteAnnounced => !for_remote,
-                    InboundTlcStatus::AnnounceWaitPrevAck => !for_remote,
+                    InboundTlcStatus::RemoteAnnounced => true,
+                    InboundTlcStatus::AnnounceWaitPrevAck => true,
                     InboundTlcStatus::AnnounceWaitAck => true,
                     InboundTlcStatus::Committed => true,
                     InboundTlcStatus::LocalRemoved => true,
+                    //InboundTlcStatus::RemoveAckPending => true,
                     InboundTlcStatus::RemoveAckConfirmed => true,
                 }
             }));
@@ -6691,10 +6749,13 @@ impl ChannelActorState {
         let mut offered_fullfilled = 0;
         let mut received_pending = 0;
         let mut received_fullfilled = 0;
+        eprintln!(
+            "node: {:?} build_settlement_transaction_outputs: {:?}",
+            self.local_pubkey, for_remote
+        );
         for info in pending_tlcs {
             eprintln!("tlc info: {:?}", info);
             if info.is_offered() {
-                offered_pending += info.amount;
                 if (info.outbound_status() == OutboundTlcStatus::RemoveWaitAck
                     || info.outbound_status() == OutboundTlcStatus::RemoveAckConfirmed)
                     && info
@@ -6705,9 +6766,10 @@ impl ChannelActorState {
                 {
                     eprintln!("offered_fullfilled + : {:?}", info.amount);
                     offered_fullfilled += info.amount;
+                } else {
+                    offered_pending += info.amount;
                 }
             } else {
-                received_pending += info.amount;
                 if info.inbound_status() == InboundTlcStatus::RemoveAckConfirmed
                     && info
                         .removed_reason
@@ -6717,6 +6779,8 @@ impl ChannelActorState {
                 {
                     eprintln!("received_fullfilled + : {:?}", info.amount);
                     received_fullfilled += info.amount;
+                } else {
+                    received_pending += info.amount;
                 }
             }
         }
@@ -6727,8 +6791,8 @@ impl ChannelActorState {
         eprintln!("received_fullfilled: {:?}, offered_pending: {:?}, offered_fullfilled: {:?}, received_pending: {:?}",
             received_fullfilled, offered_pending, offered_fullfilled, received_pending
         );
-        let to_local_value = self.to_local_amount + received_fullfilled - offered_pending;
-        let to_remote_value = self.to_remote_amount + offered_fullfilled - received_pending;
+        let to_local_value = self.to_local_amount + offered_pending + received_fullfilled;
+        let to_remote_value = self.to_remote_amount + received_pending + offered_fullfilled;
 
         let commitment_tx_fee =
             calculate_commitment_tx_fee(self.commitment_fee_rate, &self.funding_udt_type_script);
@@ -6810,8 +6874,8 @@ impl ChannelActorState {
 
         let deterministic_verify_ctx = self.get_deterministic_verify_context();
         eprintln!(
-            "verify funding_tx_partial_signature: {:?} deterministic_verify_ctx: {:?}",
-            funding_tx_partial_signature, deterministic_verify_ctx
+            "verify funding_tx_partial_signature: {:?}",
+            funding_tx_partial_signature
         );
         eprintln!("commitment_tx hash: {:?}", commitment_tx.hash().as_slice());
         deterministic_verify_ctx.verify(
@@ -6854,7 +6918,12 @@ impl ChannelActorState {
             .concat(),
         );
         let verify_ctx = self.get_verify_context();
+        eprintln!(
+            "node: {:?} begin to verify commitment_tx_partial_signature: {:?} with message: {:?}",
+            self.local_pubkey, commitment_tx_partial_signature, message
+        );
         verify_ctx.verify(commitment_tx_partial_signature, message.as_slice())?;
+        eprintln!("verify commitment_tx_partial_signature successfully .....");
 
         Ok(PartiallySignedCommitmentTransaction {
             version: self.get_current_commitment_number(false),
@@ -6871,7 +6940,7 @@ impl ChannelActorState {
         let (commitment_tx, settlement_tx) = self.build_commitment_and_settlement_tx(true);
 
         let deterministic_sign_ctx = self.get_deterministic_sign_context();
-        eprintln!("sign deterministic_sign_ctx: {:?}", deterministic_sign_ctx);
+        //eprintln!("sign deterministic_sign_ctx: {:?}", deterministic_sign_ctx);
         eprintln!(
             "sign commitment_tx hash: {:?}",
             commitment_tx.hash().as_slice()
@@ -6914,8 +6983,12 @@ impl ChannelActorState {
         );
 
         let sign_ctx = self.get_sign_context(true);
-        let commitment_tx_partial_signature = sign_ctx.sign(message.as_slice())?;
 
+        let commitment_tx_partial_signature = sign_ctx.sign(message.as_slice())?;
+        eprintln!(
+            "node: {:?} sign commitment_tx_partial_signature: {:?}, with message: {:?}",
+            self.local_pubkey, commitment_tx_partial_signature, message
+        );
         Ok((
             funding_tx_partial_signature,
             commitment_tx_partial_signature,

@@ -327,7 +327,7 @@ impl Actor for TlcActor {
                 let hash = sign_tlcs(tlcs);
                 assert_eq!(hash, peer_hash);
 
-                state.tlc_state.update_for_revoke_and_ack();
+                state.tlc_state.update_for_revoke_and_ack_peer_message();
             }
         }
         Ok(())
