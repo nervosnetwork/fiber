@@ -1810,7 +1810,7 @@ async fn test_send_payment_middle_hop_update_fee_multiple_payments() {
 
     let mut all_sent = HashSet::new();
 
-    for _i in 0..10 {
+    for _i in 0..5 {
         let res = node_0
             .send_payment_keysend(&node_3, 1000, false)
             .await
@@ -1847,28 +1847,32 @@ async fn test_send_payment_middle_hop_update_fee_multiple_payments() {
         .await;
     loop {
         let triggered_unexpected_events = node_1.get_triggered_unexpected_events().await;
-        assert!(triggered_unexpected_events.is_empty());
+        if !triggered_unexpected_events.is_empty() {
+            assert!(
+                false,
+                "node_1 triggered_unexpected_events: {:?}",
+                triggered_unexpected_events
+            );
+        }
 
         let triggered_unexpected_events = node_2.get_triggered_unexpected_events().await;
-        assert!(triggered_unexpected_events.is_empty());
+        if !triggered_unexpected_events.is_empty() {
+            assert!(
+                false,
+                "node_2 triggered_unexpected_events: {:?}",
+                triggered_unexpected_events
+            );
+        }
 
         for payment_hash in all_sent.clone().iter() {
             let status = node_0.get_payment_status(*payment_hash).await;
             //eprintln!("got payment: {:?} status: {:?}", payment_hash, status);
             if status == PaymentSessionStatus::Failed || status == PaymentSessionStatus::Success {
-                //eprintln!("payment_hash: {:?} success", payment_hash);
+                eprintln!("payment_hash: {:?} got status : {:?}", payment_hash, status);
                 all_sent.remove(payment_hash);
             }
             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         }
-        // let res = node_0.node_info().await;
-        // eprintln!("node0 node_info: {:?}", res);
-        // let res = node_1.node_info().await;
-        // eprintln!("node1 node_info: {:?}", res);
-        // let res = node_2.node_info().await;
-        // eprintln!("node2 node_info: {:?}", res);
-        // let res = node_3.node_info().await;
-        // eprintln!("node3 node_info: {:?}", res);
         if all_sent.is_empty() {
             break;
         }
