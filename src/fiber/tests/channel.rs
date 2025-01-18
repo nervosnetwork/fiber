@@ -3569,6 +3569,27 @@ async fn test_forward_payment_tlc_minimum_value() {
     let node_b_pubkey = node_b.pubkey.clone();
     let tlc_amount = 99;
 
+    // update B's ChannelUpdate in channel_b_c with tlc_minimum_value set to our tlc_amount
+    // this is used to override the default tlc_minimum_value value.
+    let update_result = call!(node_b.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id: channel_b_c,
+                command: ChannelCommand::Update(
+                    UpdateCommand {
+                        enabled: Some(true),
+                        tlc_expiry_delta: None,
+                        tlc_minimum_value: Some(tlc_amount),
+                        tlc_fee_proportional_millionths: None,
+                    },
+                    rpc_reply,
+                ),
+            },
+        ))
+    })
+    .unwrap();
+    assert!(update_result.is_ok());
+    // sleep for a while to make sure the Update processed by both party
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
     // A -> C now will be with no limit

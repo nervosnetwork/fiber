@@ -1065,7 +1065,9 @@ where
                 if amount_to_send > channel_info.capacity() {
                     continue;
                 }
-                if amount_to_send < channel_update.tlc_minimum_value {
+                // We should use next_hop_received_amount because that is the amount to be
+                // sent over the channel.
+                if next_hop_received_amount < channel_update.tlc_minimum_value {
                     continue;
                 }
 
