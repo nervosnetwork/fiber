@@ -70,7 +70,7 @@ use tokio::sync::oneshot;
 use super::{graph::ChannelUpdateInfo, types::ForwardTlcResult};
 use std::{
     collections::HashSet,
-    fmt::{self, Debug},
+    fmt::{self, Debug, Display},
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
     u128,
@@ -142,6 +142,22 @@ pub enum ChannelCommand {
     ForwardTlcResult(ForwardTlcResult),
     #[cfg(test)]
     ReloadState(ReloadParams),
+}
+
+impl Display for ChannelCommand {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ChannelCommand::TxCollaborationCommand(_) => write!(f, "TxCollaborationCommand"),
+            ChannelCommand::CommitmentSigned() => write!(f, "CommitmentSigned"),
+            ChannelCommand::AddTlc(_, _) => write!(f, "AddTlc"),
+            ChannelCommand::RemoveTlc(_, _) => write!(f, "RemoveTlc"),
+            ChannelCommand::Shutdown(_, _) => write!(f, "Shutdown"),
+            ChannelCommand::Update(_, _) => write!(f, "Update"),
+            ChannelCommand::ForwardTlcResult(_) => write!(f, "ForwardTlcResult"),
+            #[cfg(test)]
+            ChannelCommand::ReloadState(_) => write!(f, "ReloadState"),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -716,9 +732,9 @@ where
     ) {
         let previous_balance = state.get_local_balance();
         let pending_tlcs = if inbound {
-            state.tlc_state.received_tlcs.tlcs.iter_mut()
+            state.tlc_state.received_tlcs.tlcs.iter()
         } else {
-            state.tlc_state.offered_tlcs.tlcs.iter_mut()
+            state.tlc_state.offered_tlcs.tlcs.iter()
         };
         let settled_tlcs: Vec<_> = pending_tlcs
             .filter(|tlc| {
@@ -738,31 +754,46 @@ where
                 .expect("expect remove tlc success");
         }
 
-        // let pending_tlcs = if inbound {
-        //     state.tlc_state.received_tlcs.tlcs.iter_mut()
-        // } else {
-        //     state.tlc_state.offered_tlcs.tlcs.iter_mut()
-        // };
-        // let apply_removed_tlcs: Vec<_> = pending_tlcs
-        //     .filter(|tlc| {
-        //         tlc.removed_reason.is_some()
-        //             && matches!(
-        //                 tlc.status,
-        //                 TlcStatus::Inbound(InboundTlcStatus::RemoveApplyConfirmed)
-        //                     | TlcStatus::Outbound(OutboundTlcStatus::RemoveApplyConfirmed)
-        //             )
-        //     })
-        //     .map(|tlc| tlc.tlc_id)
-        //     .collect();
-        // for tlc_id in apply_removed_tlcs {
-        //     state.tlc_state.apply_remove_tlc(tlc_id);
-        // }
-
         if state.get_local_balance() != previous_balance {
             state.update_graph_for_local_channel_change(&self.network);
             state.update_graph_for_remote_channel_change(&self.network);
         }
+        //self.clean_up_failed_tlcs(state, inbound);
     }
+
+    // fn clean_up_failed_tlcs(&self, state: &mut ChannelActorState, inbound: bool) {
+    //     let pending_tlcs = if inbound {
+    //         state.tlc_state.received_tlcs.tlcs.iter()
+    //     } else {
+    //         state.tlc_state.offered_tlcs.tlcs.iter()
+    //     };
+
+    //     let apply_removed_tlcs: Vec<_> = pending_tlcs
+    //         .filter(|tlc| {
+    //             matches!(tlc.removed_reason, Some(RemoveTlcReason::RemoveTlcFail(_)))
+    //                 && matches!(
+    //                     tlc.status,
+    //                     TlcStatus::Inbound(InboundTlcStatus::RemoveAckConfirmed)
+    //                         | TlcStatus::Outbound(OutboundTlcStatus::RemoveAckConfirmed)
+    //                 )
+    //         })
+    //         .map(|tlc| tlc.tlc_id)
+    //         .collect();
+    //     for tlc_id in apply_removed_tlcs {
+    //         eprintln!(
+    //             "node: {:?} clean up failed tlc: {:?}",
+    //             state.get_local_peer_id(),
+    //             state.tlc_state.get_mut(&tlc_id).unwrap()
+    //         );
+    //         let tlc_info = state.tlc_state.get_mut(&tlc_id).unwrap();
+    //         tlc_info.status = match tlc_info.status {
+    //             TlcStatus::Inbound(_) => TlcStatus::Inbound(InboundTlcStatus::RemoveApplyConfirmed),
+    //             TlcStatus::Outbound(_) => {
+    //                 TlcStatus::Outbound(OutboundTlcStatus::RemoveApplyConfirmed)
+    //             }
+    //         };
+    //     }
+    // }
 
     async fn process_add_tlc_error(
         &self,
@@ -795,6 +826,11 @@ where
             tlc_err,
             // There's no shared secret stored in the received TLC, use the one found in the peeled onion packet.
             &error.shared_secret,
+        );
+        eprintln!(
+            "register remove tlc: {:?} reason: {:?}",
+            tlc_id,
+            RemoveTlcReason::RemoveTlcFail(error_packet.clone()),
         );
         self.register_retryable_tlc_remove(
             myself,
@@ -1544,6 +1580,7 @@ where
         pending_tlc_ops.retain_mut(|retryable_operation| {
             match retryable_operation {
                 RetryableTlcOperation::RemoveTlc(tlc_id, ref reason) => {
+                    eprintln!("remove tlc: {:?} reason: {:?}", tlc_id, reason);
                     match self.handle_remove_tlc_command(
                         state,
                         RemoveTlcCommand {
@@ -2297,14 +2334,19 @@ where
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         trace!(
-            "Channel actor processing message: id: {:?}, state: {:?}, message: {:?}",
-            &state.get_id(),
+            "\n\nChannel actor processing message: id: {:?}, state: {:?}, message: {:?}",
+            &state.local_pubkey,
             &state.state,
             message,
         );
 
         match message {
             ChannelActorMessage::PeerMessage(message) => {
+                eprintln!(
+                    "\n\n -- yukang_handle_peer_message: {} node: {:?}",
+                    message,
+                    state.get_local_peer_id()
+                );
                 if let Err(error) = self
                     .handle_peer_message(&myself, state, message.clone())
                     .await
@@ -2317,8 +2359,15 @@ where
                 }
             }
             ChannelActorMessage::Command(command) => {
+                eprintln!(
+                    "\n\n ++ yukang_handle_command: {} node: {:?}",
+                    command,
+                    state.get_local_peer_id()
+                );
                 if let Err(err) = self.handle_command(&myself, state, command).await {
-                    error!("Error while processing channel command: {:?}", err);
+                    if !matches!(err, ProcessingChannelError::WaitingTlcAck) {
+                        error!("Error while processing channel command: {:?}", err);
+                    }
                 }
             }
             ChannelActorMessage::Event(e) => {
@@ -2592,6 +2641,10 @@ impl TlcInfo {
         }
     }
 
+    pub fn is_fail_remove_confirmed(&self) -> bool {
+        matches!(self.removed_reason, Some(RemoveTlcReason::RemoveTlcFail(_)))
+    }
+
     fn get_hash(&self) -> ShortHash {
         self.payment_hash.as_ref()[..20]
             .try_into()
@@ -2830,10 +2883,36 @@ impl TlcState {
     }
 
     pub fn add_offered_tlc(&mut self, tlc: TlcInfo) {
+        let failed_tlcs = self
+            .offered_tlcs
+            .tlcs
+            .iter()
+            .filter(|info| info.outbound_status() == OutboundTlcStatus::RemoveApplyConfirmed)
+            .map(|info| info.tlc_id)
+            .collect::<Vec<_>>();
+
+        if failed_tlcs.len() >= 3 {
+            self.offered_tlcs
+                .tlcs
+                .retain(|info| info.tlc_id != failed_tlcs[0]);
+        }
         self.offered_tlcs.add_tlc(tlc);
     }
 
     pub fn add_received_tlc(&mut self, tlc: TlcInfo) {
+        let failed_tlcs = self
+            .received_tlcs
+            .tlcs
+            .iter()
+            .filter(|info| info.inbound_status() == InboundTlcStatus::RemoveApplyConfirmed)
+            .map(|info| info.tlc_id)
+            .collect::<Vec<_>>();
+
+        if failed_tlcs.len() >= 3 {
+            self.received_tlcs
+                .tlcs
+                .retain(|info| info.tlc_id != failed_tlcs[0]);
+        }
         self.received_tlcs.add_tlc(tlc);
     }
 
@@ -2923,13 +3002,18 @@ impl TlcState {
                     tlc.status = TlcStatus::Outbound(OutboundTlcStatus::RemoveWaitAck);
                 }
                 OutboundTlcStatus::RemoveWaitAck => {
+                    eprintln!(
+                        "set remove outbound to {:?}",
+                        OutboundTlcStatus::RemoveAckConfirmed
+                    );
                     tlc.status = TlcStatus::Outbound(OutboundTlcStatus::RemoveAckConfirmed);
                 }
-                // OutboundTlcStatus::RemoveAckConfirmed
-                //     if matches!(tlc.removed_reason, Some(RemoveTlcReason::RemoveTlcFail(_))) =>
-                // {
-                //     tlc.status = TlcStatus::Outbound(OutboundTlcStatus::RemoveApplyConfirmed);
-                // }
+                OutboundTlcStatus::RemoveAckConfirmed
+                    if matches!(tlc.removed_reason, Some(RemoveTlcReason::RemoveTlcFail(_))) =>
+                {
+                    eprintln!("set remove apply confirmed outbound: {:?}", tlc);
+                    tlc.status = TlcStatus::Outbound(OutboundTlcStatus::RemoveApplyConfirmed);
+                }
                 _ => {}
             }
         }
@@ -2940,16 +3024,22 @@ impl TlcState {
                     tlc.status = TlcStatus::Inbound(InboundTlcStatus::AnnounceWaitAck);
                 }
                 InboundTlcStatus::AnnounceWaitAck => {
+                    eprintln!("set inbound to committed : {:?}", tlc);
                     tlc.status = TlcStatus::Inbound(InboundTlcStatus::Committed);
                 }
                 InboundTlcStatus::LocalRemoved => {
+                    eprintln!(
+                        "set remove inbound to {:?}",
+                        OutboundTlcStatus::RemoveAckConfirmed
+                    );
                     tlc.status = TlcStatus::Inbound(InboundTlcStatus::RemoveAckConfirmed);
                 }
-                // InboundTlcStatus::RemoveAckConfirmed
-                //     if matches!(tlc.removed_reason, Some(RemoveTlcReason::RemoveTlcFail(_))) =>
-                // {
-                //     tlc.status = TlcStatus::Inbound(InboundTlcStatus::RemoveApplyConfirmed);
-                // }
+                InboundTlcStatus::RemoveAckConfirmed
+                    if matches!(tlc.removed_reason, Some(RemoveTlcReason::RemoveTlcFail(_))) =>
+                {
+                    eprintln!("set remove apply confirmed inbound: {:?}", tlc);
+                    tlc.status = TlcStatus::Inbound(InboundTlcStatus::RemoveApplyConfirmed);
+                }
                 _ => {}
             }
         }
@@ -4640,7 +4730,8 @@ impl ChannelActorState {
         let current = self.tlc_state.get_mut(&tlc_id).expect("TLC exists").clone();
         eprintln!(
             "node: {:?} remove_tlc_with_reason: {:?}",
-            self.local_pubkey, current
+            self.get_local_peer_id(),
+            current
         );
         let reason = current
             .removed_reason
@@ -5957,8 +6048,10 @@ impl ChannelActorState {
 
         eprintln!(
             "node: {:?} handle_revoke_and_ack_peer_message",
-            self.local_pubkey
+            self.get_local_peer_id()
         );
+
+        //self.clean_up_failed_tlcs();
         let need_commitment_signed = self.tlc_state.update_for_revoke_and_ack();
         network
             .send_message(NetworkActorMessage::new_notification(
@@ -5971,6 +6064,41 @@ impl ChannelActorState {
             ))
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
         Ok(need_commitment_signed)
+    }
+
+    fn clean_up_failed_tlcs(&mut self) {
+        let pending_tlcs = self
+            .tlc_state
+            .received_tlcs
+            .tlcs
+            .iter()
+            .chain(self.tlc_state.offered_tlcs.tlcs.iter());
+
+        // let pending_tlcs = if inbound {
+        //     state.tlc_state.offered_tlcs.tlcs.iter()
+        // } else {
+        //     state.tlc_state.received_tlcs.tlcs.iter()
+        // };
+
+        let apply_removed_tlcs: Vec<_> = pending_tlcs
+            .filter(|tlc| {
+                matches!(tlc.removed_reason, Some(RemoveTlcReason::RemoveTlcFail(_)))
+                    && matches!(
+                        tlc.status,
+                        TlcStatus::Inbound(InboundTlcStatus::RemoveApplyConfirmed)
+                            | TlcStatus::Outbound(OutboundTlcStatus::RemoveApplyConfirmed)
+                    )
+            })
+            .map(|tlc| tlc.tlc_id)
+            .collect();
+        for tlc_id in apply_removed_tlcs {
+            eprintln!(
+                "node: {:?} clean up failed tlc: {:?}",
+                self.get_local_peer_id(),
+                self.tlc_state.get_mut(&tlc_id).unwrap()
+            );
+            self.tlc_state.apply_remove_tlc(tlc_id);
+        }
     }
 
     async fn handle_reestablish_channel_message(
@@ -6728,7 +6856,7 @@ impl ChannelActorState {
                 OutboundTlcStatus::RemoveWaitPrevAck => true,
                 OutboundTlcStatus::RemoveWaitAck => true,
                 OutboundTlcStatus::RemoveAckConfirmed => true,
-                OutboundTlcStatus::RemoveApplyConfirmed => false,
+                OutboundTlcStatus::RemoveApplyConfirmed => true,
             })
             .chain(self.tlc_state.received_tlcs.tlcs.iter().filter(move |tlc| {
                 match tlc.inbound_status() {
@@ -6738,7 +6866,7 @@ impl ChannelActorState {
                     InboundTlcStatus::Committed => true,
                     InboundTlcStatus::LocalRemoved => true,
                     InboundTlcStatus::RemoveAckConfirmed => true,
-                    InboundTlcStatus::RemoveApplyConfirmed => false,
+                    InboundTlcStatus::RemoveApplyConfirmed => true,
                 }
             }));
 
@@ -6748,7 +6876,8 @@ impl ChannelActorState {
         let mut received_fullfilled = 0;
         eprintln!(
             "node: {:?} build_settlement_transaction_outputs: {:?}",
-            self.local_pubkey, for_remote
+            self.get_local_peer_id(),
+            for_remote
         );
         for info in pending_tlcs {
             eprintln!("tlc info: {:?}", info);
@@ -6915,7 +7044,9 @@ impl ChannelActorState {
         let verify_ctx = self.get_verify_context();
         eprintln!(
             "node: {:?} begin to verify commitment_tx_partial_signature: {:?} with message: {:?}",
-            self.local_pubkey, commitment_tx_partial_signature, message
+            self.get_local_peer_id(),
+            commitment_tx_partial_signature,
+            message
         );
         verify_ctx.verify(commitment_tx_partial_signature, message.as_slice())?;
         eprintln!("verify commitment_tx_partial_signature successfully .....");
@@ -6982,7 +7113,9 @@ impl ChannelActorState {
         let commitment_tx_partial_signature = sign_ctx.sign(message.as_slice())?;
         eprintln!(
             "node: {:?} sign commitment_tx_partial_signature: {:?}, with message: {:?}",
-            self.local_pubkey, commitment_tx_partial_signature, message
+            self.get_local_peer_id(),
+            commitment_tx_partial_signature,
+            message
         );
         Ok((
             funding_tx_partial_signature,
