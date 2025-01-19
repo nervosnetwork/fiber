@@ -1815,7 +1815,6 @@ async fn test_send_payment_middle_hop_update_fee_multiple_payments() {
             .send_payment_keysend(&node_3, 1000, false)
             .await
             .unwrap();
-        eprintln!("res: {:?}", res);
         all_sent.insert(res.payment_hash);
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
     }
