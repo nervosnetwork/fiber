@@ -1052,6 +1052,7 @@ where
                     );
                     return Err(ProcessingChannelError::TlcForwardFeeIsTooLow);
                 }
+                eprintln!("ok fee: {}, expected_fee: {:?}", forward_fee, expected_fee);
                 // if this is not the last hop, forward TLC to next hop
                 self.register_retryable_forward_tlc(
                     myself,
@@ -2308,7 +2309,10 @@ where
             }
             ChannelActorMessage::Command(command) => {
                 if let Err(err) = self.handle_command(&myself, state, command).await {
-                    error!("Error while processing channel command: {:?}", err);
+                    if !matches!(err, ProcessingChannelError::WaitingTlcAck) {
+                        error!("Error while processing channel command: {:?}", err);
+                    }
+                    //error!("Error while processing channel command: {:?}", err);
                 }
             }
             ChannelActorMessage::Event(e) => {
@@ -2818,7 +2822,11 @@ impl TlcState {
         }
     }
 
-    fn check_and_add_tlc(tlcs: &mut Vec<TlcInfo>, tlc: TlcInfo) {
+    fn check_and_add_tlc(
+        tlcs: &mut Vec<TlcInfo>,
+        tlc: TlcInfo,
+        retryable_tlc_operations: &mut Vec<RetryableTlcOperation>,
+    ) {
         let failed_tlcs = tlcs
             .iter()
             .filter(|info| info.is_fail_remove_confirmed())
@@ -2827,16 +2835,31 @@ impl TlcState {
 
         if failed_tlcs.len() >= 3 {
             tlcs.retain(|info| info.tlc_id != failed_tlcs[0]);
+            retryable_tlc_operations.retain(|op| match op {
+                RetryableTlcOperation::RemoveTlc(id, _) => id != &failed_tlcs[0],
+                // RetryableTlcOperation::RelayRemoveTlc(_, id, _) => {
+                //     id != &u64::try_from(failed_tlcs[0]).unwrap()
+                // }
+                _ => true,
+            });
         }
         tlcs.push(tlc);
     }
 
     pub fn add_offered_tlc(&mut self, tlc: TlcInfo) {
-        Self::check_and_add_tlc(&mut self.offered_tlcs.tlcs, tlc);
+        Self::check_and_add_tlc(
+            &mut self.offered_tlcs.tlcs,
+            tlc,
+            &mut self.retryable_tlc_operations,
+        );
     }
 
     pub fn add_received_tlc(&mut self, tlc: TlcInfo) {
-        Self::check_and_add_tlc(&mut self.received_tlcs.tlcs, tlc);
+        Self::check_and_add_tlc(
+            &mut self.received_tlcs.tlcs,
+            tlc,
+            &mut self.retryable_tlc_operations,
+        );
     }
 
     pub fn set_received_tlc_removed(&mut self, tlc_id: u64, reason: RemoveTlcReason) {
@@ -4575,6 +4598,19 @@ impl ChannelActorState {
         if let Some(tlc) = tlc_info {
             if tlc.is_remove_comfirmed() {
                 self.tlc_state.apply_remove_tlc(tlc.tlc_id);
+                eprintln!(
+                    "Remove tlc with payment hash {:?} with tlc {:?}",
+                    payment_hash, tlc
+                );
+                self.tlc_state
+                    .retryable_tlc_operations
+                    .retain(|op| match op {
+                        RetryableTlcOperation::RemoveTlc(id, _) => id != &tlc.tlc_id,
+                        RetryableTlcOperation::RelayRemoveTlc(_, id, _) => {
+                            id != &u64::try_from(tlc.tlc_id).unwrap()
+                        }
+                        _ => true,
+                    });
             } else {
                 return Err(ProcessingChannelError::RepeatedProcessing(format!(
                     "Trying to insert tlc with duplicate payment hash {:?} with tlc {:?}",
@@ -4988,6 +5024,10 @@ impl ChannelActorState {
     ) -> ProcessingChannelResult {
         if let Some(tlc) = self.tlc_state.get(&tlc_id) {
             if tlc.removed_reason.is_some() {
+                eprintln!(
+                    "TLC is already removed: {:?} reason: {:?}",
+                    tlc_id, tlc.removed_reason
+                );
                 return Err(ProcessingChannelError::RepeatedProcessing(
                     "TLC is already removed".to_string(),
                 ));

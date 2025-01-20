@@ -254,17 +254,36 @@ impl InternalResult {
                 TlcErrorCode::PermanentChannelFailure => {
                     self.fail_pair(nodes, index + 1);
                 }
-                TlcErrorCode::FeeInsufficient | TlcErrorCode::IncorrectTlcExpiry => {
+                TlcErrorCode::FeeInsufficient => {
+                    need_to_retry = true;
+                    eprintln!("need_to_retry: {:?}, index: {:?}", need_to_retry, index);
+                    self.fail_pair_balanced(nodes, index);
+                    if index > 1 {
+                        self.succeed_range_pairs(nodes, 0, index - 1);
+                    }
+                }
+                TlcErrorCode::IncorrectTlcExpiry => {
                     need_to_retry = false;
                     if index == 1 {
                         self.fail_node(nodes, 1);
                     } else {
-                        self.fail_pair(nodes, index - 1);
+                        self.fail_pair(nodes, index + 1);
                         if index > 1 {
                             self.succeed_range_pairs(nodes, 0, index - 2);
                         }
                     }
                 }
+                // TlcErrorCode::FeeInsufficient | TlcErrorCode::IncorrectTlcExpiry => {
+                //     need_to_retry = false;
+                //     if index == 1 {
+                //         self.fail_node(nodes, 1);
+                //     } else {
+                //         self.fail_pair(nodes, index - 1);
+                //         if index > 1 {
+                //             self.succeed_range_pairs(nodes, 0, index - 2);
+                //         }
+                //     }
+                // }
                 TlcErrorCode::TemporaryChannelFailure => {
                     self.fail_pair_balanced(nodes, index + 1);
                     self.succeed_range_pairs(nodes, 0, index);

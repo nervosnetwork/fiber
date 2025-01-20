@@ -1877,3 +1877,98 @@ async fn test_send_payment_middle_hop_update_fee_multiple_payments() {
         }
     }
 }
+
+// #[tokio::test]
+// async fn test_send_payment_middle_hop_update_fee_should_recovery() {
+//     // a variant test from
+//     // https://github.com/nervosnetwork/fiber/issues/480
+//     // in this test, we will make sure the payment should recovery after the fee is updated by the middle hop
+//     // there are two channels between node_1 and node_2, they are with the same fee rate
+//     // path finding will pick the channel with latest time, so channels[2] will be picked
+//     // but we will update the fee rate of channels[1] to a higher one
+//     // so the payment will fail, but after the payment failed, the path finding should pick the channels[1] in the next try
+//     // in the end, all the payments should success
+//     init_tracing();
+//     let _span = tracing::info_span!("node", node = "test").entered();
+//     let (nodes, channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+//         &[
+//             ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+//             ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+//             ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+//             ((2, 3), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+//         ],
+//         4,
+//         true,
+//     )
+//     .await;
+//     let [mut node_0, node_1, mut node_2, node_3] = nodes.try_into().expect("4 nodes");
+
+//     let mut all_sent = HashSet::new();
+
+//     for _i in 0..5 {
+//         let res = node_0
+//             .send_payment_keysend(&node_3, 1000, false)
+//             .await
+//             .unwrap();
+//         all_sent.insert(res.payment_hash);
+//         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+//     }
+
+//     node_2
+//         .update_channel_with_command(
+//             channels[2],
+//             UpdateCommand {
+//                 enabled: None,
+//                 tlc_expiry_delta: None,
+//                 tlc_minimum_value: None,
+//                 tlc_fee_proportional_millionths: Some(100000),
+//             },
+//         )
+//         .await;
+
+//     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+//     node_1
+//         .set_unexpected_events(vec![
+//             "Musig2VerifyError".to_string(),
+//             "Musig2RoundFinalizeError".to_string(),
+//         ])
+//         .await;
+//     node_2
+//         .set_unexpected_events(vec![
+//             "Musig2VerifyError".to_string(),
+//             "Musig2RoundFinalizeError".to_string(),
+//         ])
+//         .await;
+//     loop {
+//         let triggered_unexpected_events = node_1.get_triggered_unexpected_events().await;
+//         if !triggered_unexpected_events.is_empty() {
+//             assert!(
+//                 false,
+//                 "node_1 triggered_unexpected_events: {:?}",
+//                 triggered_unexpected_events
+//             );
+//         }
+
+//         let triggered_unexpected_events = node_2.get_triggered_unexpected_events().await;
+//         if !triggered_unexpected_events.is_empty() {
+//             assert!(
+//                 false,
+//                 "node_2 triggered_unexpected_events: {:?}",
+//                 triggered_unexpected_events
+//             );
+//         }
+
+//         for payment_hash in all_sent.clone().iter() {
+//             let status = node_0.get_payment_status(*payment_hash).await;
+//             //eprintln!("got payment: {:?} status: {:?}", payment_hash, status);
+//             if status == PaymentSessionStatus::Success || status == PaymentSessionStatus::Failed {
+//                 eprintln!("payment_hash: {:?} got status : {:?}", payment_hash, status);
+//                 all_sent.remove(payment_hash);
+//             }
+//             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+//         }
+//         if all_sent.is_empty() {
+//             break;
+//         }
+//     }
+// }
