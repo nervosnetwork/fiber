@@ -509,7 +509,9 @@ pub struct AcceptChannelCommand {
 #[derive(Debug, Clone)]
 pub struct SendOnionPacketCommand {
     pub peeled_onion_packet: PeeledPaymentOnionPacket,
-    pub previous_tlc: Option<(Hash256, u64)>,
+    // We are currently forwarding a previous tlc. The previous tlc's channel id, tlc id
+    // and the fee paid are included here.
+    pub previous_tlc: Option<(Hash256, u64, u128)>,
     pub payment_hash: Hash256,
 }
 
@@ -655,7 +657,7 @@ pub enum NetworkActorEvent {
     AddTlcResult(
         Hash256,
         Option<(ProcessingChannelError, TlcErr)>,
-        Option<(Hash256, u64)>,
+        Option<(Hash256, u64, u128)>,
     ),
 
     // An owned channel is updated.
@@ -1695,9 +1697,9 @@ where
         state: &mut NetworkActorState<S>,
         payment_hash: Hash256,
         error_info: Option<(ProcessingChannelError, TlcErr)>,
-        previous_tlc: Option<(Hash256, u64)>,
+        previous_tlc: Option<(Hash256, u64, u128)>,
     ) {
-        if let Some((channel_id, tlc_id)) = previous_tlc {
+        if let Some((channel_id, tlc_id, _)) = previous_tlc {
             myself
                 .send_message(NetworkActorMessage::new_command(
                     NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {

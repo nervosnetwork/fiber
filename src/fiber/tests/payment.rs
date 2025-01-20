@@ -171,6 +171,84 @@ async fn test_send_payment_prefer_channels_with_larger_balance() {
 }
 
 #[tokio::test]
+async fn test_send_payment_fee_rate() {
+    init_tracing();
+    let [mut node_0, mut node_1, mut node_2] = NetworkNode::new_n_interconnected_nodes().await;
+
+    let (_new_channel_id, funding_tx_0) = establish_channel_between_nodes(
+        &mut node_0,
+        &mut node_1,
+        true,
+        MIN_RESERVED_CKB + 1_000_000_000,
+        MIN_RESERVED_CKB,
+        None,
+        None,
+        None,
+        None,
+        Some(1_000_000),
+        None,
+        None,
+        None,
+        None,
+        Some(2_000_000),
+    )
+    .await;
+    node_2.submit_tx(funding_tx_0).await;
+
+    let (_new_channel_id, funding_tx_1) = establish_channel_between_nodes(
+        &mut node_1,
+        &mut node_2,
+        true,
+        MIN_RESERVED_CKB + 1_000_000_000,
+        MIN_RESERVED_CKB,
+        None,
+        None,
+        None,
+        None,
+        Some(3_000_000),
+        None,
+        None,
+        None,
+        None,
+        Some(4_000_000),
+    )
+    .await;
+    node_0.submit_tx(funding_tx_1).await;
+
+    // sleep for a while
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
+    let res = node_0
+        .send_payment_keysend(&node_2, 10_000_000, false)
+        .await;
+    assert!(res.is_ok(), "Send payment failed: {:?}", res);
+    let res = res.unwrap();
+    assert!(res.fee > 0);
+    let nodes = res.router.nodes;
+    assert_eq!(nodes.len(), 3);
+    assert_eq!(nodes[2].amount, 10_000_000);
+    assert_eq!(nodes[1].amount, 10_000_000);
+    // The fee is 10_000_000 * 3_000_000 (fee rate) / 1_000_000 = 30_000_000
+    assert_eq!(nodes[0].amount, 40_000_000);
+    let payment_hash = res.payment_hash;
+    node_0.wait_until_success(payment_hash).await;
+
+    let res = node_2.send_payment_keysend(&node_0, 1_000_000, false).await;
+    assert!(res.is_ok(), "Send payment failed: {:?}", res);
+    let res = res.unwrap();
+    assert!(res.fee > 0);
+    let nodes = res.router.nodes;
+    assert_eq!(nodes.len(), 3);
+    assert_eq!(nodes[2].amount, 1_000_000);
+    assert_eq!(nodes[1].amount, 1_000_000);
+    // The fee is 1_000_000 * 2_000_000 (fee rate) / 1_000_000 = 2_000_000
+    assert_eq!(nodes[0].amount, 3_000_000);
+
+    let payment_hash = res.payment_hash;
+    node_2.wait_until_success(payment_hash).await;
+}
+
+#[tokio::test]
 async fn test_send_payment_over_private_channel() {
     async fn test(amount_to_send: u128, is_payment_ok: bool) {
         let (nodes, _channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
