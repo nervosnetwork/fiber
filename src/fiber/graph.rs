@@ -1258,11 +1258,7 @@ where
             })
             .collect();
         for (from, _, channel_info, channel_update) in self.get_node_inbounds(node) {
-            if let Some(state) = self
-                .store
-                .get_channel_state_by_outpoint(&channel_info.out_point())
-            {
-                let balance = state.to_remote_amount;
+            if let Some(balance) = channel_update.outbound_liquidity {
                 if balance < amount {
                     continue;
                 }
