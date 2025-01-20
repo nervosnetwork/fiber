@@ -1521,8 +1521,8 @@ where
                             )
                             .unwrap_or(TlcErr::new(TlcErrorCode::InvalidOnionError));
                         eprintln!(
-                            "got on_remove_tlc_event: {:?} {:?} detail: {:?}",
-                            payment_hash, reason, error_detail
+                            "node {:?} got on_remove_tlc_event: {:?} {:?} detail: {:?}",
+                            state.peer_id, payment_hash, reason, error_detail
                         );
 
                         self.update_graph_with_tlc_fail(&state.network, &error_detail)
@@ -1779,13 +1779,19 @@ where
         let Some(mut payment_session) = self.store.get_payment_session(payment_hash) else {
             return Err(Error::InvalidParameter(payment_hash.to_string()));
         };
-        eprintln!("try_payment_session: {:?}", payment_session);
+
         if payment_session.status == PaymentSessionStatus::Failed {
             return Err(Error::SendPaymentError(format!(
                 "Payment session failed: {:?}",
                 payment_hash
             )));
         }
+
+        eprintln!(
+            "try_payment_session: {:?} times: {:?}",
+            payment_session.payment_hash(),
+            payment_session.retried_times
+        );
 
         let payment_data = payment_session.request.clone();
         if payment_session.can_retry() {
@@ -1796,6 +1802,8 @@ where
             let hops_info = self
                 .build_payment_route(&mut payment_session, &payment_data)
                 .await?;
+            let funding_txs: Vec<_> = hops_info.iter().map(|hop| hop.funding_tx_hash).collect();
+            eprintln!("payment funding_txs: {:?}", funding_txs);
             match self
                 .send_payment_onion_packet(state, &mut payment_session, &payment_data, hops_info)
                 .await
