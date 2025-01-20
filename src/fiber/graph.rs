@@ -1262,7 +1262,7 @@ where
                 .store
                 .get_channel_state_by_outpoint(&channel_info.out_point())
             {
-                let balance = state.to_local_amount;
+                let balance = state.to_remote_amount;
                 if balance < amount {
                     continue;
                 }
