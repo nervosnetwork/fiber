@@ -1062,7 +1062,7 @@ where
                 let HopHint {
                     pubkey: from,
                     channel_outpoint,
-                    fee_rate: _fee_rate,
+                    fee_rate,
                     tlc_expiry_delta,
                 } = hint;
                 // Say we have a payment path A -- channel 1 --> B -- channel 2 --> C.
@@ -1070,21 +1070,30 @@ where
                 // We didn't use the outbound fees for B in channel 2 at all. This is different from lnd,
                 // which calculates both the inbound fees in channel 1 and the outbound fees in channel 2.
                 // For now, we set the fees to be 0. We may need to change this in the future.
-                let fee = 0;
-                eval_and_update(
-                    &channel_outpoint,
-                    sufficiently_large_capacity,
-                    from,
-                    target,
-                    amount,
-                    fee,
-                    expiry,
-                    tlc_expiry_delta,
-                    1.0,
-                    0,
-                    &mut distances,
-                    &mut nodes_heap,
-                );
+                match calculate_tlc_forward_fee(amount, fee_rate as u128) {
+                    Ok(fee) => {
+                        eval_and_update(
+                            &channel_outpoint,
+                            sufficiently_large_capacity,
+                            from,
+                            target,
+                            amount,
+                            fee,
+                            expiry,
+                            tlc_expiry_delta,
+                            1.0,
+                            0,
+                            &mut distances,
+                            &mut nodes_heap,
+                        );
+                    }
+                    Err(err) => {
+                        return Err(PathFindError::PathFind(format!(
+                            "calculate_tlc_forward_fee error: {:?}",
+                            err
+                        )));
+                    }
+                }
             }
         }
         assert_ne!(source, target);
