@@ -175,12 +175,15 @@ Attempts to open a channel with a peer.
 * `funding_fee_rate` - <em>`Option<u64>`</em>, The fee rate for the funding transaction, an optional parameter.
 * `tlc_expiry_delta` - <em>`Option<u64>`</em>, The expiry delta to forward a tlc, in milliseconds, default to 1 day, which is 24 * 60 * 60 * 1000 milliseconds
  This parameter can be updated with rpc `update_channel` later.
-* `tlc_min_value` - <em>`Option<u128>`</em>, The minimum value for a TLC our side can receive
- an optional parameter, default is 0, which means we can receive any TLC is larger than 0.
+* `tlc_min_value` - <em>`Option<u128>`</em>, The minimum value for a TLC our side can send,
+ an optional parameter, default is 0, which means we can send any TLC is larger than 0.
  This parameter can be updated with rpc `update_channel` later.
-* `tlc_fee_proportional_millionths` - <em>`Option<u128>`</em>, The fee proportional millionths for a TLC, Proportional to the amount of the forwarded tlc.
+* `tlc_fee_proportional_millionths` - <em>`Option<u128>`</em>, The fee proportional millionths for a TLC, proportional to the amount of the forwarded tlc.
  The unit is millionths of the amount. default is 1000 which means 0.1%.
  This parameter can be updated with rpc `update_channel` later.
+ Not that, we use outbound channel to calculate the fee for TLC forwarding. For example,
+ if we have a path A -> B -> C, then the fee B requires for TLC forwarding, is calculated
+ the channel configuration of B and C, not A and B.
 * `max_tlc_value_in_flight` - <em>`Option<u128>`</em>, The maximum value in flight for TLCs, an optional parameter.
  This parameter can not be updated after channel is opened.
 * `max_tlc_number_in_flight` - <em>`Option<u64>`</em>, The maximum number of TLCs that can be accepted, an optional parameter, default is 125
@@ -209,12 +212,15 @@ Accepts a channel opening request from a peer.
  This parameter can not be updated after channel is opened.
 * `max_tlc_number_in_flight` - <em>`Option<u64>`</em>, The max tlc number in flight send from our side, default is 125
  This parameter can not be updated after channel is opened.
-* `tlc_min_value` - <em>`Option<u128>`</em>, The minimum value for a TLC our side can receive
- an optional parameter, default is 0, which means we can receive any TLC is larger than 0.
+* `tlc_min_value` - <em>`Option<u128>`</em>, The minimum value for a TLC our side can send,
+ an optional parameter, default is 0, which means we can send any TLC is larger than 0.
  This parameter can be updated with rpc `update_channel` later.
-* `tlc_fee_proportional_millionths` - <em>`Option<u128>`</em>, The fee proportional millionths for a TLC, Proportional to the amount of the forwarded tlc.
+* `tlc_fee_proportional_millionths` - <em>`Option<u128>`</em>, The fee proportional millionths for a TLC, proportional to the amount of the forwarded tlc.
  The unit is millionths of the amount. default is 1000 which means 0.1%.
  This parameter can be updated with rpc `update_channel` later.
+ Not that, we use outbound channel to calculate the fee for TLC forwarding. For example,
+ if we have a path A -> B -> C, then the fee B requires for TLC forwarding, is calculated
+ the channel configuration of B and C, not A and B.
 * `tlc_expiry_delta` - <em>`Option<u64>`</em>, The expiry delta to forward a tlc, in milliseconds, default to 1 day, which is 24 * 60 * 60 * 1000 milliseconds
  This parameter can be updated with rpc `update_channel` later.
 
@@ -436,9 +442,9 @@ Get the node information.
 * `auto_accept_channel_ckb_funding_amount` - <em>`u64`</em>, The CKB funding amount for automatically accepting channel requests, serialized as a hexadecimal string.
 * `default_funding_lock_script` - <em>`Script`</em>, The default funding lock script for the node.
 * `tlc_expiry_delta` - <em>`u64`</em>, The locktime expiry delta for Time-Locked Contracts (TLC), serialized as a hexadecimal string.
-* `tlc_min_value` - <em>`u128`</em>, The minimum value for Time-Locked Contracts (TLC), serialized as a hexadecimal string.
-* `tlc_max_value` - <em>`u128`</em>, The maximum value for Time-Locked Contracts (TLC), serialized as a hexadecimal string, `0` means no maximum value limit.
-* `tlc_fee_proportional_millionths` - <em>`u128`</em>, The fee proportional to the value of Time-Locked Contracts (TLC), expressed in millionths and serialized as a hexadecimal string.
+* `tlc_min_value` - <em>`u128`</em>, The minimum value for Time-Locked Contracts (TLC) we can send, serialized as a hexadecimal string.
+* `tlc_max_value` - <em>`u128`</em>, The maximum value for Time-Locked Contracts (TLC) we can send, serialized as a hexadecimal string, `0` means no maximum value limit.
+* `tlc_fee_proportional_millionths` - <em>`u128`</em>, The fee (to forward payments) proportional to the value of Time-Locked Contracts (TLC), expressed in millionths and serialized as a hexadecimal string.
 * `channel_count` - <em>`u32`</em>, The number of channels associated with the node, serialized as a hexadecimal string.
 * `pending_channel_count` - <em>`u32`</em>, The number of pending channels associated with the node, serialized as a hexadecimal string.
 * `peers_count` - <em>`u32`</em>, The number of peers connected to the node, serialized as a hexadecimal string.

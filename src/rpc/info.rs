@@ -54,15 +54,15 @@ pub(crate) struct NodeInfoResult {
     #[serde_as(as = "U64Hex")]
     tlc_expiry_delta: u64,
 
-    /// The minimum value for Time-Locked Contracts (TLC), serialized as a hexadecimal string.
+    /// The minimum value for Time-Locked Contracts (TLC) we can send, serialized as a hexadecimal string.
     #[serde_as(as = "U128Hex")]
     tlc_min_value: u128,
 
-    /// The maximum value for Time-Locked Contracts (TLC), serialized as a hexadecimal string, `0` means no maximum value limit.
+    /// The maximum value for Time-Locked Contracts (TLC) we can send, serialized as a hexadecimal string, `0` means no maximum value limit.
     #[serde_as(as = "U128Hex")]
     tlc_max_value: u128,
 
-    /// The fee proportional to the value of Time-Locked Contracts (TLC), expressed in millionths and serialized as a hexadecimal string.
+    /// The fee (to forward payments) proportional to the value of Time-Locked Contracts (TLC), expressed in millionths and serialized as a hexadecimal string.
     #[serde_as(as = "U128Hex")]
     tlc_fee_proportional_millionths: u128,
 
