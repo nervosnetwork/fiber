@@ -1293,7 +1293,7 @@ where
             let last_edge = PathEdge {
                 target: node,
                 channel_outpoint: outpoint.clone(),
-                amount_received: amount + fee,
+                amount_received: amount,
                 incoming_tlc_expiry: expiry,
             };
             Ok((last_edge, *from, *tlc_expiry_delta, fee))
