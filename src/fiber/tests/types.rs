@@ -260,22 +260,11 @@ fn test_create_and_verify_node_announcement() {
         now_timestamp_as_millis_u64(),
         0,
     );
-    let message = node_announcement.message_to_sign();
-    match node_announcement.signature {
-        Some(ref signature) => {
-            assert!(
-                signature.verify(&node_announcement.node_id, &message),
-                "Node announcement message signature verification failed: {:?}",
-                &node_announcement
-            );
-        }
-        _ => {
-            panic!(
-                "Node announcement signature is None: {:?}",
-                &node_announcement
-            );
-        }
-    }
+    assert!(
+        node_announcement.verify(),
+        "Node announcement message signature verification failed: {:?}",
+        &node_announcement
+    );
 }
 
 #[test]
