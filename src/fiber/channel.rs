@@ -178,7 +178,7 @@ pub struct AddTlcCommand {
     /// Save it for outbound (offered) TLC to backward errors.
     /// Use all zeros when no shared secrets are available.
     pub shared_secret: [u8; 32],
-    pub previous_tlc: Option<(Hash256, u64, u128)>,
+    pub previous_tlc: Option<PrevTlcInfo>,
 }
 
 #[derive(Debug, Clone)]
@@ -1231,7 +1231,10 @@ where
     ) -> Result<u64, ProcessingChannelError> {
         state.check_for_tlc_update(Some(command.amount), true, true)?;
         state.check_tlc_expiry(command.expiry)?;
-        state.check_tlc_forward_amount(command.amount, command.previous_tlc.map(|x| x.2))?;
+        state.check_tlc_forward_amount(
+            command.amount,
+            command.previous_tlc.map(|x| x.forwarding_fee),
+        )?;
         let tlc = state.create_outbounding_tlc(command.clone());
         state.check_insert_tlc(&tlc)?;
         state.tlc_state.add_offered_tlc(tlc.clone());
@@ -1568,7 +1571,7 @@ where
                         match self.network.send_message(NetworkActorMessage::Command(
                             NetworkActorCommand::SendPaymentOnionPacket(SendOnionPacketCommand {
                                 peeled_onion_packet: peeled_onion_packet.clone(),
-                                previous_tlc: Some((
+                                previous_tlc: Some(PrevTlcInfo::new(
                                     state.get_id(),
                                     u64::from(*tlc_id),
                                     *forward_fee,
@@ -2506,6 +2509,26 @@ pub struct TlcInfo {
     ///                ^^^^                 ^^^^
     ///
     pub previous_tlc: Option<(Hash256, TLCId)>,
+}
+
+// When we are forwarding a TLC, we need to know the previous TLC information.
+// This struct keeps the information of the previous TLC.
+#[derive(Debug, Copy, Clone)]
+pub struct PrevTlcInfo {
+    pub(crate) prev_channel_id: Hash256,
+    // The TLC is always a received TLC because we are forwarding it.
+    pub(crate) prev_tlc_id: u64,
+    pub(crate) forwarding_fee: u128,
+}
+
+impl PrevTlcInfo {
+    pub fn new(prev_channel_id: Hash256, prev_tlc_id: u64, forwarding_fee: u128) -> Self {
+        Self {
+            prev_channel_id,
+            prev_tlc_id,
+            forwarding_fee,
+        }
+    }
 }
 
 impl Debug for TlcInfo {
@@ -5101,9 +5124,12 @@ impl ChannelActorState {
             removed_reason: None,
             onion_packet: command.onion_packet,
             shared_secret: command.shared_secret,
-            previous_tlc: command
-                .previous_tlc
-                .map(|(channel_id, tlc_id, _)| (channel_id, TLCId::Received(tlc_id))),
+            previous_tlc: command.previous_tlc.map(|prev_tlc| {
+                (
+                    prev_tlc.prev_channel_id,
+                    TLCId::Received(prev_tlc.prev_tlc_id),
+                )
+            }),
         }
     }
 
