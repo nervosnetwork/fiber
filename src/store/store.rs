@@ -260,11 +260,6 @@ impl Batch {
     }
 
     fn put_kv(&mut self, key_value: KeyValue) {
-        tracing::debug!(
-            key = hex::encode(key_value.key()),
-            value = hex::encode(key_value.value()),
-            "put_kv",
-        );
         self.put(key_value.key(), key_value.value());
     }
 
@@ -675,11 +670,7 @@ impl GossipMessageStore for Store {
     }
 
     fn save_node_announcement(&self, node_announcement: crate::fiber::types::NodeAnnouncement) {
-        tracing::debug!(
-            "===============  Save node announcement: {:?}",
-            node_announcement
-        );
-        assert!(
+        debug_assert!(
             node_announcement.verify(),
             "Node announcement must be verified: {:?}",
             node_announcement

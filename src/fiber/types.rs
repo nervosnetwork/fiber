@@ -2720,11 +2720,6 @@ impl From<(BroadcastMessage, u64)> for BroadcastMessageWithTimestamp {
         match broadcast_message {
             BroadcastMessage::NodeAnnouncement(node_announcement) => {
                 debug_assert_eq!(timestamp, node_announcement.timestamp);
-                debug_assert!(
-                    node_announcement.verify(),
-                    "Invalid node announcement {:?}",
-                    node_announcement
-                );
                 BroadcastMessageWithTimestamp::NodeAnnouncement(node_announcement)
             }
             BroadcastMessage::ChannelAnnouncement(channel_announcement) => {
