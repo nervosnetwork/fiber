@@ -738,7 +738,7 @@ where
         };
         let settled_tlcs: Vec<_> = pending_tlcs
             .filter(|tlc| {
-                tlc.removed_reason.is_some()
+                matches!(tlc.removed_reason, Some(_))
                     && matches!(
                         tlc.status,
                         TlcStatus::Inbound(InboundTlcStatus::RemoveAckConfirmed)
@@ -761,6 +761,37 @@ where
                 .await
                 .expect("expect remove tlc success");
         }
+
+        // let pending_tlcs = if inbound {
+        //     state.tlc_state.received_tlcs.tlcs.iter()
+        // } else {
+        //     state.tlc_state.offered_tlcs.tlcs.iter()
+        // };
+        // let settled_tlcs: Vec<_> = pending_tlcs
+        //     .filter(|tlc| {
+        //         matches!(tlc.removed_reason, Some(RemoveTlcReason::RemoveTlcFail(_)))
+        //             && matches!(
+        //                 tlc.status,
+        //                 TlcStatus::Inbound(InboundTlcStatus::RemoveAckConfirmed)
+        //                     | TlcStatus::Outbound(OutboundTlcStatus::RemoveAckConfirmed)
+        //             )
+        //     })
+        //     .map(|tlc| tlc.tlc_id)
+        //     .collect();
+
+        // for tlc_id in settled_tlcs {
+        //     let local_peer_id = state.get_local_peer_id();
+        //     let tlc_info = state.tlc_state.get_mut(&tlc_id).expect("expect tlc");
+        //     eprintln!(
+        //         "node: {:?} apply_settled_remove_tlcs: tlc_id: {:?} with tlc_info payment_hash: {:?}",
+        //         local_peer_id,
+        //         tlc_id,
+        //         tlc_info.payment_hash
+        //     );
+        //     self.apply_remove_tlc_operation(myself, state, tlc_id)
+        //         .await
+        //         .expect("expect remove tlc success");
+        // }
 
         if state.get_local_balance() != previous_balance {
             state.update_graph_for_local_channel_change(&self.network);
@@ -3000,7 +3031,7 @@ impl TlcState {
         self.need_another_commitment_signed()
     }
 
-    pub fn update_for_revoke_and_ack(&mut self, local_commitment_number: u64) -> bool {
+    pub fn update_for_revoke_and_ack(&mut self, commitment_numbers: CommitmentNumbers) -> bool {
         self.set_waiting_ack(false);
         for tlc in self.offered_tlcs.tlcs.iter_mut() {
             match tlc.outbound_status() {
@@ -3012,7 +3043,7 @@ impl TlcState {
                 }
                 OutboundTlcStatus::RemoveWaitAck => {
                     tlc.status = TlcStatus::Outbound(OutboundTlcStatus::RemoveAckConfirmed);
-                    tlc.removed_confirmed_at = Some(local_commitment_number);
+                    tlc.removed_confirmed_at = Some(commitment_numbers.get_local());
                 }
                 _ => {}
             }
@@ -3028,7 +3059,7 @@ impl TlcState {
                 }
                 InboundTlcStatus::LocalRemoved => {
                     tlc.status = TlcStatus::Inbound(InboundTlcStatus::RemoveAckConfirmed);
-                    tlc.removed_confirmed_at = Some(local_commitment_number);
+                    tlc.removed_confirmed_at = Some(commitment_numbers.get_remote());
                 }
                 _ => {}
             }
@@ -4744,22 +4775,27 @@ impl ChannelActorState {
                             to_local_amount, to_remote_amount, tlc_id, reason);
             self.tlc_state.apply_remove_tlc(tlc_id);
         } else {
-            // if let Some(remove_confirmed_at) = current.removed_confirmed_at {
-            //     let current_local_commitment_number = self.get_local_commitment_number();
-            //     eprintln!(
-            //         "removed_confirmed_at: {:?} current_local_commitment_number: {:?}",
-            //         remove_confirmed_at, current_local_commitment_number
-            //     );
-            //     if remove_confirmed_at + 3 < current_local_commitment_number {
-            //         eprintln!(
-            //             "remove tlc: {:?} with reason {:?} is too old, remove it, payment_hash: {:?}",
-            //             current, reason, current.payment_hash
-            //         );
-            //         self.tlc_state.apply_remove_tlc(tlc_id);
-            //     } else {
-            //         eprintln!("keep tlc: {:?}", tlc_id);
-            //     }
-            // }
+            if let Some(remove_confirmed_at) = current.removed_confirmed_at {
+                //let current_local_commitment_number = self.get_remote_commitment_number();
+                let current_local_commitment_number = if current.is_offered() {
+                    self.get_local_commitment_number()
+                } else {
+                    self.get_remote_commitment_number()
+                };
+                eprintln!(
+                    "removed_confirmed_at: {:?} current_local_commitment_number: {:?}",
+                    remove_confirmed_at, current_local_commitment_number
+                );
+                if remove_confirmed_at + 3 < current_local_commitment_number {
+                    eprintln!(
+                        "remove tlc: {:?} with reason {:?} is too old, remove it, payment_hash: {:?}",
+                        current, reason, current.payment_hash
+                    );
+                    self.tlc_state.apply_remove_tlc(tlc_id);
+                } else {
+                    eprintln!("keep tlc: {:?}", tlc_id);
+                }
+            }
         }
         debug!(
             "Removed tlc payment_hash {:?} with reason {:?}",
@@ -6060,7 +6096,7 @@ impl ChannelActorState {
 
         let need_commitment_signed = self
             .tlc_state
-            .update_for_revoke_and_ack(self.get_local_commitment_number());
+            .update_for_revoke_and_ack(self.get_current_commitment_numbers());
         network
             .send_message(NetworkActorMessage::new_notification(
                 NetworkServiceEvent::RevokeAndAckReceived(
@@ -6814,23 +6850,6 @@ impl ChannelActorState {
         &mut self,
         for_remote: bool,
     ) -> ([CellOutput; 2], [Bytes; 2]) {
-        let tlcs = if for_remote {
-            &mut self.tlc_state.offered_tlcs.tlcs
-        } else {
-            &mut self.tlc_state.received_tlcs.tlcs
-        };
-
-        let failed_tlcs = tlcs
-            .iter()
-            .filter(|info| info.is_fail_remove_confirmed())
-            .map(|info| info.tlc_id)
-            .collect::<Vec<_>>();
-
-        if failed_tlcs.len() >= 3 {
-            eprintln!("remove failed_tlcs: {:?}", failed_tlcs[0]);
-            tlcs.retain(|info| info.tlc_id != failed_tlcs[0]);
-        }
-
         let pending_tlcs = self
             .tlc_state
             .offered_tlcs
