@@ -1808,7 +1808,7 @@ impl NodeAnnouncement {
             chain_hash: self.chain_hash,
             addresses: self.addresses.clone(),
             auto_accept_min_ckb_funding_amount: self.auto_accept_min_ckb_funding_amount,
-            udt_cfg_infos: get_udt_whitelist(),
+            udt_cfg_infos: self.udt_cfg_infos.clone(),
         };
         deterministically_hash(&molecule_gossip::NodeAnnouncement::from(
             unsigned_announcement,
