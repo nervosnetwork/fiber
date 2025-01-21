@@ -9,10 +9,13 @@ use crate::fiber::history::TimedResult;
 use crate::fiber::network::SendPaymentData;
 use crate::fiber::tests::test_utils::*;
 use crate::fiber::types::*;
+use crate::gen_rand_fiber_private_key;
 use crate::gen_rand_fiber_public_key;
 use crate::gen_rand_sha256_hash;
 use crate::invoice::*;
 use crate::now_timestamp_as_millis_u64;
+use crate::store::store::deserialize_from;
+use crate::store::store::serialize_to_vec;
 use crate::store::Store;
 use crate::watchtower::*;
 use ckb_hash::new_blake2b;
@@ -588,4 +591,29 @@ fn test_store_payment_history() {
     ];
     sort_results(&mut r2);
     assert_eq!(r1, r2);
+}
+
+#[test]
+fn test_serde_node_announcement_as_broadcast_message() {
+    let privkey = gen_rand_fiber_private_key();
+    let node_announcement = NodeAnnouncement::new(
+        AnnouncedNodeName::from_str("node1").expect("valid name"),
+        vec![],
+        &privkey,
+        now_timestamp_as_millis_u64(),
+        0,
+    );
+    assert!(
+        node_announcement.verify(),
+        "Node announcement verification failed: {:?}",
+        &node_announcement
+    );
+    let broadcast_message = BroadcastMessage::NodeAnnouncement(node_announcement.clone());
+    let serialized = serialize_to_vec(&broadcast_message, "BroadcastMessage");
+    dbg!("serialized", hex::encode(&serialized));
+    let deserialized: BroadcastMessage = deserialize_from(serialized.as_ref(), "BroadcastMessage");
+    assert_eq!(
+        BroadcastMessage::NodeAnnouncement(node_announcement),
+        deserialized
+    );
 }
