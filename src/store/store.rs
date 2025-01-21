@@ -161,12 +161,12 @@ pub trait StoreKeyValue {
     fn value(&self) -> Vec<u8>;
 }
 
-fn serialize_to_vec<T: ?Sized + Serialize>(value: &T, field_name: &str) -> Vec<u8> {
+pub(crate) fn serialize_to_vec<T: ?Sized + Serialize>(value: &T, field_name: &str) -> Vec<u8> {
     bincode::serialize(value)
         .unwrap_or_else(|e| panic!("serialization of {} failed: {}", field_name, e))
 }
 
-fn deserialize_from<'a, T>(slice: &'a [u8], field_name: &str) -> T
+pub(crate) fn deserialize_from<'a, T>(slice: &'a [u8], field_name: &str) -> T
 where
     T: serde::Deserialize<'a>,
 {
@@ -670,6 +670,11 @@ impl GossipMessageStore for Store {
     }
 
     fn save_node_announcement(&self, node_announcement: crate::fiber::types::NodeAnnouncement) {
+        debug_assert!(
+            node_announcement.verify(),
+            "Node announcement must be verified: {:?}",
+            node_announcement
+        );
         let mut batch = self.batch();
         let message_id = BroadcastMessageID::NodeAnnouncement(node_announcement.node_id.clone());
 
