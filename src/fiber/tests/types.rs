@@ -1,14 +1,16 @@
 use crate::{
     fiber::{
+        config::AnnouncedNodeName,
         gen::{fiber as molecule_fiber, gossip},
         hash_algorithm::HashAlgorithm,
         types::{
-            secp256k1_instance, AddTlc, BroadcastMessageID, Cursor, Hash256, PaymentHopData,
-            PeeledOnionPacket, Privkey, Pubkey, TlcErr, TlcErrPacket, TlcErrorCode,
+            secp256k1_instance, AddTlc, BroadcastMessageID, Cursor, Hash256, NodeAnnouncement,
+            PaymentHopData, PeeledOnionPacket, Privkey, Pubkey, TlcErr, TlcErrPacket, TlcErrorCode,
             NO_SHARED_SECRET,
         },
     },
     gen_rand_channel_outpoint, gen_rand_fiber_private_key, gen_rand_fiber_public_key,
+    now_timestamp_as_millis_u64,
 };
 use fiber_sphinx::OnionSharedSecretIter;
 use secp256k1::{PublicKey, Secp256k1, SecretKey};
@@ -246,4 +248,32 @@ fn test_tlc_error_code() {
     let code_int: u16 = code.into();
     let code = TlcErrorCode::try_from(code_int).expect("invalid code");
     assert_eq!(code, TlcErrorCode::IncorrectOrUnknownPaymentDetails);
+}
+
+#[test]
+fn test_create_and_verify_node_announcement() {
+    let privkey = gen_rand_fiber_private_key();
+    let node_announcement = NodeAnnouncement::new(
+        AnnouncedNodeName::from_str("node1").expect("valid name"),
+        vec![],
+        &privkey,
+        now_timestamp_as_millis_u64(),
+        0,
+    );
+    let message = node_announcement.message_to_sign();
+    match node_announcement.signature {
+        Some(ref signature) => {
+            assert!(
+                signature.verify(&node_announcement.node_id, &message),
+                "Node announcement message signature verification failed: {:?}",
+                &node_announcement
+            );
+        }
+        _ => {
+            panic!(
+                "Node announcement signature is None: {:?}",
+                &node_announcement
+            );
+        }
+    }
 }
