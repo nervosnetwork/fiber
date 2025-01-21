@@ -5318,7 +5318,7 @@ async fn test_send_payment_with_final_all_failed_middle_hops() {
 
     source_node.wait_until_failed(payment_hash).await;
     source_node
-        .assert_payment_status(payment_hash, PaymentSessionStatus::Failed, Some(3))
+        .assert_payment_status(payment_hash, PaymentSessionStatus::Failed, Some(2))
         .await;
 }
 

@@ -181,7 +181,8 @@ impl InternalResult {
 
         let Some(index) = error_index else {
             error!("Error index not found in the route: {:?}", tlc_err);
-            return need_to_retry;
+            // FIXME: what happended here?
+            return false;
         };
 
         let len = nodes.len();
