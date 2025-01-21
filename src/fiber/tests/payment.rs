@@ -1905,7 +1905,7 @@ async fn test_send_payment_middle_hop_update_fee_should_recovery() {
 
     let mut all_sent = HashSet::new();
 
-    for _i in 0..3 {
+    for _i in 0..5 {
         let res = node_0
             .send_payment_keysend(&node_3, 1000, false)
             .await

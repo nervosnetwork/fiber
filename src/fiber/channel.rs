@@ -73,7 +73,7 @@ use std::{
     fmt::{self, Debug, Display},
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
-    u128,
+    u128, u64,
 };
 
 use super::types::{ChannelUpdateChannelFlags, ChannelUpdateMessageFlags, UpdateTlcInfo};
@@ -761,37 +761,6 @@ where
                 .await
                 .expect("expect remove tlc success");
         }
-
-        // let pending_tlcs = if inbound {
-        //     state.tlc_state.received_tlcs.tlcs.iter()
-        // } else {
-        //     state.tlc_state.offered_tlcs.tlcs.iter()
-        // };
-        // let settled_tlcs: Vec<_> = pending_tlcs
-        //     .filter(|tlc| {
-        //         matches!(tlc.removed_reason, Some(RemoveTlcReason::RemoveTlcFail(_)))
-        //             && matches!(
-        //                 tlc.status,
-        //                 TlcStatus::Inbound(InboundTlcStatus::RemoveAckConfirmed)
-        //                     | TlcStatus::Outbound(OutboundTlcStatus::RemoveAckConfirmed)
-        //             )
-        //     })
-        //     .map(|tlc| tlc.tlc_id)
-        //     .collect();
-
-        // for tlc_id in settled_tlcs {
-        //     let local_peer_id = state.get_local_peer_id();
-        //     let tlc_info = state.tlc_state.get_mut(&tlc_id).expect("expect tlc");
-        //     eprintln!(
-        //         "node: {:?} apply_settled_remove_tlcs: tlc_id: {:?} with tlc_info payment_hash: {:?}",
-        //         local_peer_id,
-        //         tlc_id,
-        //         tlc_info.payment_hash
-        //     );
-        //     self.apply_remove_tlc_operation(myself, state, tlc_id)
-        //         .await
-        //         .expect("expect remove tlc success");
-        // }
 
         if state.get_local_balance() != previous_balance {
             state.update_graph_for_local_channel_change(&self.network);
@@ -2618,6 +2587,7 @@ impl Debug for TlcInfo {
             .field("amount", &self.amount)
             .field("removed_reason", &self.removed_reason)
             .field("payment_hash", &self.payment_hash)
+            .field("removed_confirmed_at", &self.removed_confirmed_at)
             .finish()
     }
 }
@@ -4448,6 +4418,7 @@ impl ChannelActorState {
         &mut self,
         network: &ActorRef<NetworkActorMessage>,
     ) -> ProcessingChannelResult {
+        self.clean_up_failed_tlcs();
         let sign_ctx = self.get_sign_context(false);
         let x_only_aggregated_pubkey = sign_ctx.common_ctx.x_only_aggregated_pubkey();
 
@@ -4774,28 +4745,6 @@ impl ChannelActorState {
             debug!("Updated local balance to {} and remote balance to {} by removing tlc {:?} with reason {:?}",
                             to_local_amount, to_remote_amount, tlc_id, reason);
             self.tlc_state.apply_remove_tlc(tlc_id);
-        } else {
-            if let Some(remove_confirmed_at) = current.removed_confirmed_at {
-                //let current_local_commitment_number = self.get_remote_commitment_number();
-                let current_local_commitment_number = if current.is_offered() {
-                    self.get_local_commitment_number()
-                } else {
-                    self.get_remote_commitment_number()
-                };
-                eprintln!(
-                    "removed_confirmed_at: {:?} current_local_commitment_number: {:?}",
-                    remove_confirmed_at, current_local_commitment_number
-                );
-                if remove_confirmed_at + 3 < current_local_commitment_number {
-                    eprintln!(
-                        "remove tlc: {:?} with reason {:?} is too old, remove it, payment_hash: {:?}",
-                        current, reason, current.payment_hash
-                    );
-                    self.tlc_state.apply_remove_tlc(tlc_id);
-                } else {
-                    eprintln!("keep tlc: {:?}", tlc_id);
-                }
-            }
         }
         debug!(
             "Removed tlc payment_hash {:?} with reason {:?}",
@@ -4803,6 +4752,40 @@ impl ChannelActorState {
         );
 
         Ok((current.clone(), reason))
+    }
+
+    pub fn clean_up_failed_tlcs(&mut self) {
+        eprintln!(
+            "node : {:?} begin to clean up failed tlcs",
+            self.get_local_peer_id(),
+        );
+        let mut failed_tlcs: Vec<_> = self
+            .tlc_state
+            .received_tlcs
+            .tlcs
+            .iter()
+            .chain(self.tlc_state.offered_tlcs.tlcs.iter())
+            .filter(|tlc| {
+                matches!(tlc.removed_reason, Some(RemoveTlcReason::RemoveTlcFail(_)))
+                    && matches!(
+                        tlc.status,
+                        TlcStatus::Inbound(InboundTlcStatus::RemoveAckConfirmed)
+                            | TlcStatus::Outbound(OutboundTlcStatus::RemoveAckConfirmed)
+                            | TlcStatus::Outbound(OutboundTlcStatus::RemoveWaitAck)
+                    )
+            })
+            .map(|tlc| (tlc.tlc_id, tlc.removed_confirmed_at.unwrap_or(u64::MAX)))
+            .collect();
+
+        if failed_tlcs.len() >= 3 {
+            failed_tlcs.sort_by(|a, b| a.1.cmp(&b.1));
+            eprintln!(
+                "node: {:?} remove failed tlc: {:?}",
+                self.get_local_peer_id(),
+                failed_tlcs
+            );
+            self.tlc_state.apply_remove_tlc(failed_tlcs[0].0);
+        }
     }
 
     pub fn get_local_channel_public_keys(&self) -> &ChannelBasePublicKeys {
@@ -5985,6 +5968,7 @@ impl ChannelActorState {
                 "unexpected RevokeAndAck message".to_string(),
             ));
         }
+        self.clean_up_failed_tlcs();
         let RevokeAndAck {
             channel_id: _,
             revocation_partial_signature,
@@ -6915,6 +6899,7 @@ impl ChannelActorState {
             "old to_local_amount: {}, old to_remote_amount: {}",
             self.to_local_amount, self.to_remote_amount
         );
+
         let to_local_value = self.to_local_amount + received_fullfilled - offered_pending;
         let to_remote_value = self.to_remote_amount + offered_fullfilled - received_pending;
         eprintln!(
@@ -6992,6 +6977,7 @@ impl ChannelActorState {
         funding_tx_partial_signature: PartialSignature,
         commitment_tx_partial_signature: PartialSignature,
     ) -> Result<PartiallySignedCommitmentTransaction, ProcessingChannelError> {
+        self.clean_up_failed_tlcs();
         let (commitment_tx, settlement_tx) = self.build_commitment_and_settlement_tx(false);
 
         let deterministic_verify_ctx = self.get_deterministic_verify_context();
@@ -7053,6 +7039,7 @@ impl ChannelActorState {
     fn build_and_sign_commitment_tx(
         &mut self,
     ) -> Result<(PartialSignature, PartialSignature), ProcessingChannelError> {
+        self.clean_up_failed_tlcs();
         let (commitment_tx, settlement_tx) = self.build_commitment_and_settlement_tx(true);
 
         let deterministic_sign_ctx = self.get_deterministic_sign_context();
