@@ -2977,7 +2977,7 @@ impl TlcState {
         self.need_another_commitment_signed()
     }
 
-    pub fn update_for_revoke_and_ack(&mut self, _commitment_numbers: CommitmentNumbers) -> bool {
+    pub fn update_for_revoke_and_ack(&mut self) -> bool {
         self.set_waiting_ack(false);
         for tlc in self.offered_tlcs.tlcs.iter_mut() {
             match tlc.outbound_status() {
@@ -6039,9 +6039,7 @@ impl ChannelActorState {
         self.increment_local_commitment_number();
         self.append_remote_commitment_point(next_per_commitment_point);
 
-        let need_commitment_signed = self
-            .tlc_state
-            .update_for_revoke_and_ack(self.get_current_commitment_numbers());
+        let need_commitment_signed = self.tlc_state.update_for_revoke_and_ack();
         network
             .send_message(NetworkActorMessage::new_notification(
                 NetworkServiceEvent::RevokeAndAckReceived(
