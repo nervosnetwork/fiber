@@ -1710,7 +1710,7 @@ dependencies = [
 
 [[package]]
 name = "fnn"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "arcode",
@@ -1772,7 +1772,7 @@ dependencies = [
  "fnn 0.2.0",
  "fnn 0.2.1 (git+https://github.com/nervosnetwork/fiber.git?tag=v0.2.1)",
  "fnn 0.2.1 (git+https://github.com/nervosnetwork/fiber.git?tag=v0.3.0-rc1)",
- "fnn 0.3.0",
+ "fnn 0.3.1",
  "hex",
  "indicatif",
  "serde",

@@ -2079,13 +2079,12 @@ fn verify_node_announcement<S: GossipMessageStore>(
             )));
         }
     }
-    let message = node_announcement.message_to_sign();
-    match node_announcement.signature {
-        Some(ref signature) if signature.verify(&node_announcement.node_id, &message) => Ok(false),
-        _ => Err(Error::InvalidParameter(format!(
-            "Node announcement message signature verification failed: {:?}",
-            &node_announcement
-        ))),
+    if !node_announcement.verify() {
+        Err(Error::InvalidParameter(
+            "Node announcement message signature verification failed".to_string(),
+        ))
+    } else {
+        Ok(false)
     }
 }
 

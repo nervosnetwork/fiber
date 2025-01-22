@@ -474,15 +474,15 @@ async fn do_test_update_graph_balance_after_payment(public: bool) {
             channel
                 .get_channel_update_of(node_a_pubkey)
                 .unwrap()
-                .inbound_liquidity,
-            Some(node_b_balance)
+                .outbound_liquidity,
+            Some(node_a_balance)
         );
         assert_eq!(
             channel
                 .get_channel_update_of(node_b_pubkey)
                 .unwrap()
-                .inbound_liquidity,
-            Some(node_a_balance)
+                .outbound_liquidity,
+            Some(node_b_balance)
         );
     };
 
@@ -3458,39 +3458,29 @@ async fn test_channel_update_tlc_expiry() {
 }
 
 #[tokio::test]
-async fn test_channel_update_tlc_sync_up() {
-    let node_a_funding_amount = 100000000000;
-    let node_b_funding_amount = 6200000000;
-
-    let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
-
-    let (new_channel_id, _funding_tx) = establish_channel_between_nodes(
-        &mut node_a,
-        &mut node_b,
+async fn test_forward_payment_channel_disabled() {
+    let (nodes, channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+        &[
+            ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+        ],
+        3,
         true,
-        node_a_funding_amount,
-        node_b_funding_amount,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
     )
     .await;
+    let [node_a, node_b, node_c] = nodes.try_into().expect("3 nodes");
+    let [_channel_a_b, channel_b_c] = channels.try_into().expect("2 channels");
+
+    let node_c_pubkey = node_c.pubkey.clone();
+
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
-    // A -> B now will be with no limit
-    let tlc_amount = 99;
-    let node_b_pubkey = node_b.pubkey.clone();
+    let tlc_amount = 100;
+
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
             SendPaymentCommand {
-                target_pubkey: Some(node_b_pubkey),
+                target_pubkey: Some(node_c_pubkey),
                 amount: Some(tlc_amount),
                 payment_hash: None,
                 final_tlc_expiry_delta: None,
@@ -3515,33 +3505,127 @@ async fn test_channel_update_tlc_sync_up() {
     assert_eq!(res.status, PaymentSessionStatus::Created);
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
-    // A -> B now will be with limit, add tlc command with amount 99
-    let add_tlc_command = AddTlcCommand {
-        amount: tlc_amount,
-        hash_algorithm: HashAlgorithm::CkbHash,
-        payment_hash: gen_rand_sha256_hash().into(),
-        expiry: now_timestamp_as_millis_u64() + 100000000,
-        onion_packet: None,
-        previous_tlc: None,
-        shared_secret: NO_SHARED_SECRET.clone(),
-    };
-    let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
-            ChannelCommandWithId {
-                channel_id: new_channel_id,
-                command: ChannelCommand::AddTlc(add_tlc_command, rpc_reply),
-            },
-        ))
-    })
-    .expect("node_b alive");
-    assert!(add_tlc_result.is_ok());
-    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
-
-    // update channel with new tlc_minimum_value
+    // update channel to disable it from node_b
     let update_result = call!(node_b.network_actor, |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
-                channel_id: new_channel_id,
+                channel_id: channel_b_c,
+                command: ChannelCommand::Update(
+                    UpdateCommand {
+                        enabled: Some(false),
+                        tlc_expiry_delta: None,
+                        tlc_minimum_value: None,
+                        tlc_fee_proportional_millionths: None,
+                    },
+                    rpc_reply,
+                ),
+            },
+        ))
+    })
+    .unwrap();
+    assert!(update_result.is_ok());
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+    let message = |rpc_reply| -> NetworkActorMessage {
+        NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
+            SendPaymentCommand {
+                target_pubkey: Some(node_c_pubkey),
+                amount: Some(tlc_amount),
+                payment_hash: None,
+                final_tlc_expiry_delta: None,
+                tlc_expiry_limit: None,
+                invoice: None,
+                timeout: None,
+                max_fee_amount: None,
+                max_parts: None,
+                keysend: Some(true),
+                udt_type_script: None,
+                allow_self_payment: false,
+                hop_hints: None,
+                dry_run: false,
+            },
+            rpc_reply,
+        ))
+    };
+    let res = call!(node_a.network_actor, message).expect("node_a alive");
+    assert!(res.is_err());
+}
+
+#[tokio::test]
+async fn test_forward_payment_tlc_minimum_value() {
+    let (nodes, channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+        &[
+            ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+        ],
+        3,
+        true,
+    )
+    .await;
+    let [node_a, node_b, node_c] = nodes.try_into().expect("3 nodes");
+    let [channel_a_b, channel_b_c] = channels.try_into().expect("2 channels");
+
+    let node_c_pubkey = node_c.pubkey.clone();
+    let node_b_pubkey = node_b.pubkey.clone();
+    let tlc_amount = 99;
+
+    // update B's ChannelUpdate in channel_b_c with tlc_minimum_value set to our tlc_amount
+    // this is used to override the default tlc_minimum_value value.
+    let update_result = call!(node_b.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id: channel_b_c,
+                command: ChannelCommand::Update(
+                    UpdateCommand {
+                        enabled: Some(true),
+                        tlc_expiry_delta: None,
+                        tlc_minimum_value: Some(tlc_amount),
+                        tlc_fee_proportional_millionths: None,
+                    },
+                    rpc_reply,
+                ),
+            },
+        ))
+    })
+    .unwrap();
+    assert!(update_result.is_ok());
+    // sleep for a while to make sure the Update processed by both party
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+    // A -> C now will be with no limit
+    let message = |rpc_reply| -> NetworkActorMessage {
+        NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
+            SendPaymentCommand {
+                target_pubkey: Some(node_c_pubkey),
+                amount: Some(tlc_amount),
+                payment_hash: None,
+                final_tlc_expiry_delta: None,
+                tlc_expiry_limit: None,
+                invoice: None,
+                timeout: None,
+                max_fee_amount: None,
+                max_parts: None,
+                keysend: Some(true),
+                udt_type_script: None,
+                allow_self_payment: false,
+                hop_hints: None,
+                dry_run: false,
+            },
+            rpc_reply,
+        ))
+    };
+    let res = call!(node_a.network_actor, message)
+        .expect("node_a alive")
+        .unwrap();
+    // this is the payment_hash generated by keysend
+    assert_eq!(res.status, PaymentSessionStatus::Created);
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+    // update B's ChannelUpdate in channel_b_c with new tlc_minimum_value
+    let update_result = call!(node_b.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id: channel_b_c,
                 command: ChannelCommand::Update(
                     UpdateCommand {
                         enabled: Some(true),
@@ -3559,11 +3643,101 @@ async fn test_channel_update_tlc_sync_up() {
     // sleep for a while to make sure the Update processed by both party
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
+    // AddTlc from A to B is OK because we didn't update the channel
     let tlc_amount = 99;
+    let add_tlc_command = AddTlcCommand {
+        amount: tlc_amount,
+        hash_algorithm: HashAlgorithm::CkbHash,
+        payment_hash: gen_rand_sha256_hash().into(),
+        expiry: now_timestamp_as_millis_u64() + 100000000,
+        onion_packet: None,
+        previous_tlc: None,
+        shared_secret: NO_SHARED_SECRET.clone(),
+    };
+    let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id: channel_a_b,
+                command: ChannelCommand::AddTlc(add_tlc_command.clone(), rpc_reply),
+            },
+        ))
+    })
+    .expect("node_b alive");
+    assert!(add_tlc_result.is_ok());
+    // sleep for a while to make sure the AddTlc processed by both party
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+    // AddTlc from B to C is not OK because the forwarding value is too small
+    let add_tlc_result = call!(node_b.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id: channel_b_c,
+                command: ChannelCommand::AddTlc(add_tlc_command.clone(), rpc_reply),
+            },
+        ))
+    })
+    .expect("node_b alive");
+    assert!(add_tlc_result.is_err());
+    // sleep for a while to make sure the AddTlc processed by both party
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+    // sending payment from A to B is OK because this has nothing to do with the channel_a_b.
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
             SendPaymentCommand {
                 target_pubkey: Some(node_b_pubkey),
+                amount: Some(tlc_amount),
+                payment_hash: None,
+                final_tlc_expiry_delta: None,
+                tlc_expiry_limit: None,
+                invoice: None,
+                timeout: None,
+                max_fee_amount: None,
+                max_parts: None,
+                keysend: Some(true),
+                udt_type_script: None,
+                allow_self_payment: false,
+                hop_hints: None,
+                dry_run: false,
+            },
+            rpc_reply,
+        ))
+    };
+    let res = call!(node_a.network_actor, message).expect("node_b alive");
+    assert!(res.is_ok());
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+    // sending payment from B to C is not OK because the forwarding value is too small
+    let message = |rpc_reply| -> NetworkActorMessage {
+        NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
+            SendPaymentCommand {
+                target_pubkey: Some(node_c_pubkey),
+                amount: Some(tlc_amount),
+                payment_hash: None,
+                final_tlc_expiry_delta: None,
+                tlc_expiry_limit: None,
+                invoice: None,
+                timeout: None,
+                max_fee_amount: None,
+                max_parts: None,
+                keysend: Some(true),
+                udt_type_script: None,
+                allow_self_payment: false,
+                hop_hints: None,
+                dry_run: false,
+            },
+            rpc_reply,
+        ))
+    };
+    let res = call!(node_b.network_actor, message).expect("node_b alive");
+    assert!(res.is_err());
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+    // sending payment from A to C should fail because the forwarding value is too small
+    let message = |rpc_reply| -> NetworkActorMessage {
+        NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
+            SendPaymentCommand {
+                target_pubkey: Some(node_c_pubkey),
                 amount: Some(tlc_amount),
                 payment_hash: None,
                 final_tlc_expiry_delta: None,
@@ -3588,84 +3762,51 @@ async fn test_channel_update_tlc_sync_up() {
         .to_string()
         .contains("Failed to build route, PathFind error: no path found"));
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+}
 
-    // A -> B is OK since we are not in the tlc relay context
-    let tlc_amount = 99;
-    let add_tlc_command = AddTlcCommand {
-        amount: tlc_amount,
-        hash_algorithm: HashAlgorithm::CkbHash,
-        payment_hash: gen_rand_sha256_hash().into(),
-        expiry: now_timestamp_as_millis_u64() + 100000000,
-        onion_packet: None,
-        previous_tlc: None,
-        shared_secret: NO_SHARED_SECRET.clone(),
-    };
-    let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
-            ChannelCommandWithId {
-                channel_id: new_channel_id,
-                command: ChannelCommand::AddTlc(add_tlc_command, rpc_reply),
-            },
-        ))
-    })
-    .expect("node_b alive");
-    assert!(add_tlc_result.is_ok());
-    // sleep for a while to make sure the AddTlc processed by both party
+#[tokio::test]
+async fn test_send_payment_with_outdated_fee_rate() {
+    init_tracing();
+    let (nodes, _) = create_n_nodes_with_index_and_amounts_with_established_channel(
+        &[
+            ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+        ],
+        3,
+        true,
+    )
+    .await;
+    let [node_a, node_b, node_c] = nodes.try_into().expect("3 nodes");
+
+    let node_b_pubkey = node_b.pubkey.clone();
+    let node_c_pubkey = node_c.pubkey.clone();
+    let hash_set: HashSet<_> = [node_b_pubkey, node_c_pubkey].into_iter().collect();
+
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
-    // B -> A is OK anyway
-    let node_a_pubkey = node_a.pubkey.clone();
+    node_a
+        .with_network_graph_mut(|graph| {
+            for channel in graph.channels.values_mut() {
+                tracing::debug!("channel: {:?}", channel);
+                if hash_set.contains(&channel.node1()) && hash_set.contains(&channel.node2()) {
+                    let channel_update = if channel.node1() == node_b_pubkey {
+                        channel.update_of_node1.as_mut().unwrap()
+                    } else {
+                        channel.update_of_node2.as_mut().unwrap()
+                    };
+                    tracing::debug!("channel_update: {:?}", channel_update);
+                    channel_update.fee_rate = 0;
+                }
+            }
+        })
+        .await;
+
+    // sending payment from A to C should fail because the forwarding value is too small
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
             SendPaymentCommand {
-                target_pubkey: Some(node_a_pubkey),
-                amount: Some(tlc_amount),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                tlc_expiry_limit: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                max_parts: None,
-                keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-            },
-            rpc_reply,
-        ))
-    };
-    let res = call!(node_b.network_actor, message).expect("node_a alive");
-    assert!(res.is_ok());
-    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
-
-    // update channel to disable it from node_a
-    let update_result = call!(node_a.network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
-            ChannelCommandWithId {
-                channel_id: new_channel_id,
-                command: ChannelCommand::Update(
-                    UpdateCommand {
-                        enabled: Some(false),
-                        tlc_expiry_delta: None,
-                        tlc_minimum_value: None,
-                        tlc_fee_proportional_millionths: None,
-                    },
-                    rpc_reply,
-                ),
-            },
-        ))
-    })
-    .unwrap();
-    assert!(update_result.is_ok());
-    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
-
-    let message = |rpc_reply| -> NetworkActorMessage {
-        NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
-            SendPaymentCommand {
-                target_pubkey: Some(node_b_pubkey),
-                amount: Some(tlc_amount),
+                target_pubkey: Some(node_c_pubkey),
+                amount: Some(10000000000),
                 payment_hash: None,
                 final_tlc_expiry_delta: None,
                 tlc_expiry_limit: None,
@@ -3683,7 +3824,15 @@ async fn test_channel_update_tlc_sync_up() {
         ))
     };
     let res = call!(node_a.network_actor, message).expect("node_a alive");
-    assert!(res.is_err());
+    assert!(
+        res.is_ok(),
+        "Send payment should be ok because we can find path: {:?}",
+        res
+    );
+    let res = res.unwrap();
+    let payment_hash = res.payment_hash;
+    // The payment should fail because our fee rate is too low.
+    node_a.wait_until_failed(payment_hash).await;
 }
 
 #[tokio::test]

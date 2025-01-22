@@ -1159,6 +1159,14 @@ impl NetworkNode {
         f(&*graph)
     }
 
+    pub async fn with_network_graph_mut<F, T>(&self, f: F) -> T
+    where
+        F: FnOnce(&mut NetworkGraph<Store>) -> T,
+    {
+        let mut graph = self.get_network_graph().write().await;
+        f(&mut graph)
+    }
+
     pub async fn get_network_graph_nodes(&self) -> Vec<NodeInfo> {
         self.with_network_graph(|graph| graph.nodes().into_iter().cloned().collect())
             .await
