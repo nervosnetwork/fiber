@@ -1229,6 +1229,13 @@ where
         state: &mut ChannelActorState,
         command: AddTlcCommand,
     ) -> Result<u64, ProcessingChannelError> {
+        if !state.local_tlc_info.enabled {
+            return Err(ProcessingChannelError::InvalidState(format!(
+                "TLC forwarding is not enabled for channel {}",
+                state.get_id()
+            )));
+        }
+
         state.check_for_tlc_update(Some(command.amount), true, true)?;
         state.check_tlc_expiry(command.expiry)?;
         state.check_tlc_forward_amount(
@@ -4961,7 +4968,6 @@ impl ChannelActorState {
         forward_amount: u128,
         forward_fee: Option<u128>,
     ) -> ProcessingChannelResult {
-        assert!(self.local_tlc_info.enabled, "TLC is disabled");
         if self.local_tlc_info.tlc_minimum_value != 0
             && forward_amount < self.local_tlc_info.tlc_minimum_value
         {
