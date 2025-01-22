@@ -270,7 +270,7 @@ impl InternalResult {
                     if index == 1 {
                         self.fail_node(nodes, 1);
                     } else {
-                        self.fail_pair(nodes, index + 1);
+                        self.fail_pair(nodes, index - 1);
                         if index > 1 {
                             self.succeed_range_pairs(nodes, 0, index - 2);
                         }

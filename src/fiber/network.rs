@@ -1526,10 +1526,6 @@ where
                                 debug_event!(myself, "InvalidOnionError");
                                 TlcErr::new(TlcErrorCode::InvalidOnionError)
                             });
-                        eprintln!(
-                            "node {:?} got on_remove_tlc_event: {:?} {:?} detail: {:?} session_key: {:?}",
-                            state.peer_id, payment_hash, reason, error_detail, payment_session.session_key
-                        );
 
                         self.update_graph_with_tlc_fail(&state.network, &error_detail)
                             .await;
@@ -1538,18 +1534,12 @@ where
                             .write()
                             .await
                             .record_payment_fail(&payment_session, error_detail.clone());
-                        eprintln!("need_to_retry: {:?}", need_to_retry);
                         if need_to_retry {
                             // If this is the first hop error, like the WaitingTlcAck error,
                             // we will just retry later, return Ok here for letting endpoint user
                             // know payment session is created successfully
                             self.register_payment_retry(myself, payment_hash);
                         } else {
-                            eprintln!(
-                                "set_payment_fail_with_error: {:?} with error code: {:?}",
-                                payment_hash,
-                                error_detail.error_code.as_ref()
-                            );
                             self.set_payment_fail_with_error(
                                 &mut payment_session,
                                 error_detail.error_code.as_ref(),
@@ -1623,10 +1613,6 @@ where
         match graph.build_route(payment_data.clone()) {
             Err(e) => {
                 let error = format!("Failed to build route, {}", e);
-                eprintln!(
-                    "Failed to build route: {:?} for payment hash: {:?}",
-                    e, payment_data.payment_hash
-                );
                 self.set_payment_fail_with_error(payment_session, &error);
                 return Err(Error::SendPaymentError(error));
             }
@@ -1793,14 +1779,7 @@ where
 
         assert!(payment_session.status != PaymentSessionStatus::Failed);
 
-        // if payment_session.status == PaymentSessionStatus::Failed {
-        //     return Err(Error::SendPaymentError(format!(
-        //         "Payment session failed: {:?}",
-        //         payment_hash
-        //     )));
-        // }
-
-        eprintln!(
+        debug!(
             "try_payment_session: {:?} times: {:?}",
             payment_session.payment_hash(),
             payment_session.retried_times

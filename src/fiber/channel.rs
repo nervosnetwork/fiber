@@ -738,7 +738,7 @@ where
         };
         let settled_tlcs: Vec<_> = pending_tlcs
             .filter(|tlc| {
-                matches!(tlc.removed_reason, Some(_))
+                tlc.removed_reason.is_some()
                     && matches!(
                         tlc.status,
                         TlcStatus::Inbound(InboundTlcStatus::RemoveAckConfirmed)
@@ -749,14 +749,6 @@ where
             .collect();
 
         for tlc_id in settled_tlcs {
-            let local_peer_id = state.get_local_peer_id();
-            let tlc_info = state.tlc_state.get_mut(&tlc_id).expect("expect tlc");
-            eprintln!(
-                "node: {:?} apply_settled_remove_tlcs: tlc_id: {:?} with tlc_info payment_hash: {:?}",
-                local_peer_id,
-                tlc_id,
-                tlc_info.payment_hash
-            );
             self.apply_remove_tlc_operation(myself, state, tlc_id)
                 .await
                 .expect("expect remove tlc success");
@@ -800,12 +792,7 @@ where
             // There's no shared secret stored in the received TLC, use the one found in the peeled onion packet.
             &error.shared_secret,
         );
-        eprintln!(
-            "node: {:?} process_add_tlc_error: tlc_id: {:?} with payment_hash: {:?}",
-            state.get_local_peer_id(),
-            tlc_id,
-            payment_hash
-        );
+
         self.register_retryable_tlc_remove(
             myself,
             state,
@@ -861,12 +848,7 @@ where
         assert!(previous_channel_id != state.get_id());
 
         let remove_reason = remove_reason.clone().backward(&tlc_info.shared_secret);
-        eprintln!(
-            "node: {:?} try_to_relay_remove_tlc: tlc_id: {:?} with payment_hash: {:?}",
-            state.get_local_peer_id(),
-            tlc_info.tlc_id,
-            tlc_info.payment_hash
-        );
+
         self.register_retryable_relay_tlc_remove(
             myself,
             state,
@@ -1140,13 +1122,6 @@ where
         }
         state.tlc_state.applied_remove_tlcs.insert(tlc_id);
         let (tlc_info, remove_reason) = state.remove_tlc_with_reason(tlc_id)?;
-        eprintln!(
-            "node {:?} apply_remove_tlc_operation: tlc_id: {:?} with payment_hash: {:?} with reason: {:?}",
-            state.get_local_peer_id(),
-            tlc_id,
-            tlc_info.payment_hash,
-            tlc_info.removed_reason,
-        );
         if matches!(remove_reason, RemoveTlcReason::RemoveTlcFulfill(_))
             && self.store.get_invoice(&tlc_info.payment_hash).is_some()
         {
@@ -1173,12 +1148,6 @@ where
         if tlc_info.previous_tlc.is_none() {
             // only the original sender of the TLC should send `TlcRemoveReceived` event
             // because only the original sender cares about the TLC event to settle the payment
-            eprintln!(
-                "{:?} send TlcRemoveReceived event: {:?} remove_reason: {:?}",
-                state.get_local_peer_id(),
-                tlc_info.payment_hash,
-                remove_reason,
-            );
             if tlc_info.is_offered() {
                 self.network
                     .send_message(NetworkActorMessage::new_event(
@@ -1515,7 +1484,6 @@ where
         reason: RemoveTlcReason,
     ) {
         let remove_tlc = RetryableTlcOperation::RelayRemoveTlc(channel_id, tlc_id, reason);
-        eprintln!("register retryable relay remove tlc: {:?}", remove_tlc);
         self.register_retryable_tlc_operation(myself, state, remove_tlc)
             .await;
     }
@@ -1579,12 +1547,6 @@ where
         pending_tlc_ops.retain_mut(|retryable_operation| {
             match retryable_operation {
                 RetryableTlcOperation::RemoveTlc(tlc_id, ref reason) => {
-                    eprintln!(
-                        "node {:?} call retryable remove tlc: {:?} with reason: {:?}",
-                        state.get_local_peer_id(),
-                        tlc_id,
-                        reason
-                    );
                     match self.handle_remove_tlc_command(
                         state,
                         RemoveTlcCommand {
@@ -1601,7 +1563,6 @@ where
                     // send relay remove tlc with network actor to previous hop
                     let (send, _recv) = oneshot::channel::<Result<(), ProcessingChannelError>>();
                     let port = RpcReplyPort::from(send);
-                    eprintln!("relay remove tlc: {:?} with reason: {:?}", tlc_id, reason);
                     self.network
                         .send_message(NetworkActorMessage::new_command(
                             NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
@@ -1700,12 +1661,6 @@ where
                         state.tlc_state.remove_pending_tlc_operation(tlc_op);
                     }
                     _ => {
-                        eprintln!(
-                            "node: {:?} got forward result : {:?} tlc_err: {:?}",
-                            state.get_local_peer_id(),
-                            channel_err,
-                            tlc_err
-                        );
                         let error = ProcessingChannelError::TlcForwardingError(tlc_err)
                             .with_shared_secret(peeled_onion.shared_secret.clone());
                         self.process_add_tlc_error(
@@ -2358,12 +2313,6 @@ where
 
         match message {
             ChannelActorMessage::PeerMessage(message) => {
-                eprintln!(
-                    "\n\n --yukang_handle peer message node {:?} -- {}  channel: {:?}",
-                    state.get_local_peer_id(),
-                    message,
-                    message.get_channel_id()
-                );
                 if let Err(error) = self
                     .handle_peer_message(&myself, state, message.clone())
                     .await
@@ -2378,21 +2327,12 @@ where
                 }
             }
             ChannelActorMessage::Command(command) => {
-                eprintln!(
-                    "\n\n --yukang_handle command node {:?} -- {} channel: {:?}",
-                    state.get_local_peer_id(),
-                    command,
-                    state.get_id()
-                );
                 if let Err(err) = self.handle_command(&myself, state, command).await {
-                    if !matches!(err, ProcessingChannelError::WaitingTlcAck) {
-                        error!(
-                            "{:?} Error while processing channel command: {:?}",
-                            state.get_local_peer_id(),
-                            err
-                        );
-                    }
-                    //error!("Error while processing channel command: {:?}", err);
+                    error!(
+                        "{:?} Error while processing channel command: {:?}",
+                        state.get_local_peer_id(),
+                        err
+                    );
                 }
             }
             ChannelActorMessage::Event(e) => {
@@ -4500,11 +4440,6 @@ impl ChannelActorState {
             );
             sign_ctx.sign(message.as_slice())?
         };
-        eprintln!(
-            "node: {:?} sign commitment_tx_partial_signature: {:?}",
-            self.get_local_peer_id(),
-            commitment_tx_partial_signature
-        );
 
         // Note that we must update channel state here to update commitment number,
         // so that next step will obtain the correct commitment point.
@@ -4679,8 +4614,8 @@ impl ChannelActorState {
             .collect();
         if !tlc_infos.is_empty() {
             if tlc_infos.iter().all(|t| t.is_fail_remove_confirmed()) {
-                // If all the tlcs with the same payment hash are failed and removed
-                // then we can insert the new tlc.
+                // If all the tlcs with the same payment hash are confirmed to be failed,
+                // then it's safe to insert the new tlc, the old tlcs will be removed later.
             } else {
                 return Err(ProcessingChannelError::RepeatedProcessing(format!(
                     "Trying to insert tlc with duplicate payment hash {:?} with tlcs {:?}",
@@ -4762,10 +4697,6 @@ impl ChannelActorState {
     }
 
     pub fn clean_up_failed_tlcs(&mut self) {
-        eprintln!(
-            "node : {:?} begin to clean up failed tlcs",
-            self.get_local_peer_id(),
-        );
         let mut failed_tlcs: Vec<_> = self
             .tlc_state
             .received_tlcs
@@ -4786,11 +4717,6 @@ impl ChannelActorState {
 
         if failed_tlcs.len() >= 3 {
             failed_tlcs.sort_by(|a, b| a.1.cmp(&b.1));
-            eprintln!(
-                "node: {:?} remove failed tlc: {:?}",
-                self.get_local_peer_id(),
-                failed_tlcs
-            );
             self.tlc_state.apply_remove_tlc(failed_tlcs[0].0);
         }
     }
@@ -5168,10 +5094,6 @@ impl ChannelActorState {
     ) -> ProcessingChannelResult {
         if let Some(tlc) = self.tlc_state.get(&tlc_id) {
             if tlc.removed_reason.is_some() {
-                eprintln!(
-                    "TLC is already removed: {:?} reason: {:?}",
-                    tlc_id, tlc.removed_reason
-                );
                 return Err(ProcessingChannelError::RepeatedProcessing(
                     "TLC is already removed".to_string(),
                 ));
@@ -6078,14 +6000,8 @@ impl ChannelActorState {
                 .concat(),
             );
 
-            eprintln!(
-                "node {:?} verify : {:?}",
-                self.get_local_peer_id(),
-                commitment_tx_partial_signature
-            );
             let aggregated_signature =
                 sign_ctx.sign_and_aggregate(message.as_slice(), commitment_tx_partial_signature)?;
-            eprintln!("verify success ...........");
 
             SettlementData {
                 x_only_aggregated_pubkey,
@@ -6884,9 +6800,7 @@ impl ChannelActorState {
         let mut offered_fullfilled = 0;
         let mut received_pending = 0;
         let mut received_fullfilled = 0;
-        eprintln!("\n----------------------------- {}", for_remote);
         for info in pending_tlcs {
-            eprintln!("info: {:?}", info);
             if info.is_offered() {
                 offered_pending += info.amount;
                 if (info.outbound_status() == OutboundTlcStatus::RemoveWaitAck
@@ -6913,21 +6827,8 @@ impl ChannelActorState {
             }
         }
 
-        eprintln!(
-            "offered_pending: {}, offered_fullfilled: {}, received_pending: {}, received_fullfilled: {}",
-            offered_pending, offered_fullfilled, received_pending, received_fullfilled
-        );
-        eprintln!(
-            "old to_local_amount: {}, old to_remote_amount: {}",
-            self.to_local_amount, self.to_remote_amount
-        );
-
         let to_local_value = self.to_local_amount + received_fullfilled - offered_pending;
         let to_remote_value = self.to_remote_amount + offered_fullfilled - received_pending;
-        eprintln!(
-            "to_local_value: {}, to_remote_value: {}",
-            to_local_value, to_remote_value
-        );
 
         let commitment_tx_fee =
             calculate_commitment_tx_fee(self.commitment_fee_rate, &self.funding_udt_type_script);
@@ -7041,12 +6942,7 @@ impl ChannelActorState {
             .concat(),
         );
         let verify_ctx = self.get_verify_context();
-        eprintln!(
-            "begin to verify commitment_tx_partial_signature: {:?}",
-            commitment_tx_partial_signature
-        );
         verify_ctx.verify(commitment_tx_partial_signature, message.as_slice())?;
-        eprintln!("verify successfully......");
 
         Ok(PartiallySignedCommitmentTransaction {
             version: self.get_current_commitment_number(false),
@@ -7101,12 +6997,8 @@ impl ChannelActorState {
         );
 
         let sign_ctx = self.get_sign_context(true);
-
         let commitment_tx_partial_signature = sign_ctx.sign(message.as_slice())?;
-        eprintln!(
-            "begin to sign commitment_tx_partial_signature: {:?}",
-            commitment_tx_partial_signature
-        );
+
         Ok((
             funding_tx_partial_signature,
             commitment_tx_partial_signature,
