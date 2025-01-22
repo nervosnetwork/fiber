@@ -1783,12 +1783,14 @@ where
             return Err(Error::InvalidParameter(payment_hash.to_string()));
         };
 
-        if payment_session.status == PaymentSessionStatus::Failed {
-            return Err(Error::SendPaymentError(format!(
-                "Payment session failed: {:?}",
-                payment_hash
-            )));
-        }
+        assert!(payment_session.status != PaymentSessionStatus::Failed);
+
+        // if payment_session.status == PaymentSessionStatus::Failed {
+        //     return Err(Error::SendPaymentError(format!(
+        //         "Payment session failed: {:?}",
+        //         payment_hash
+        //     )));
+        // }
 
         eprintln!(
             "try_payment_session: {:?} times: {:?}",
@@ -1805,8 +1807,7 @@ where
             let hops_info = self
                 .build_payment_route(&mut payment_session, &payment_data)
                 .await?;
-            let funding_txs: Vec<_> = hops_info.iter().map(|hop| hop.funding_tx_hash).collect();
-            eprintln!("payment funding_txs: {:?}", funding_txs);
+
             match self
                 .send_payment_onion_packet(state, &mut payment_session, &payment_data, hops_info)
                 .await

@@ -5104,7 +5104,7 @@ async fn test_send_payment_with_all_failed_middle_hops() {
     let _span = tracing::info_span!("node", node = "test").entered();
     // we have two chaneels between node_1 and node_2
     // they liquid capacity is enough for send payment, but actual balance are both not enough
-    // path finding will all try them but all failed, so we assert the payment retry times is 2
+    // path finding will all try them but all failed, so we assert the payment retry times is 3
     let (nodes, _channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
         &[
             ((0, 1), (100000000000, 100000000000)),

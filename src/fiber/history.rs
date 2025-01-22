@@ -181,7 +181,9 @@ impl InternalResult {
 
         let Some(index) = error_index else {
             error!("Error index not found in the route: {:?}", tlc_err);
-            // FIXME: what happended here?
+            // if the error node is not in the route,
+            // and we can not penalize the source node (which is ourself)
+            // it's better to stop the payment session
             return false;
         };
 
@@ -274,17 +276,6 @@ impl InternalResult {
                         }
                     }
                 }
-                // TlcErrorCode::FeeInsufficient | TlcErrorCode::IncorrectTlcExpiry => {
-                //     need_to_retry = false;
-                //     if index == 1 {
-                //         self.fail_node(nodes, 1);
-                //     } else {
-                //         self.fail_pair(nodes, index - 1);
-                //         if index > 1 {
-                //             self.succeed_range_pairs(nodes, 0, index - 2);
-                //         }
-                //     }
-                // }
                 TlcErrorCode::TemporaryChannelFailure => {
                     self.fail_pair_balanced(nodes, index + 1);
                     self.succeed_range_pairs(nodes, 0, index);

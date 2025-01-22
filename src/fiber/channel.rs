@@ -2896,56 +2896,12 @@ impl TlcState {
         }
     }
 
-    fn check_and_add_tlc(
-        tlcs: &mut Vec<TlcInfo>,
-        tlc: TlcInfo,
-        _retryable_tlc_operations: &mut Vec<RetryableTlcOperation>,
-    ) {
-        // let failed_tlcs = tlcs
-        //     .iter()
-        //     .filter(|info| info.is_fail_remove_confirmed())
-        //     .map(|info| info.tlc_id)
-        //     .collect::<Vec<_>>();
-
-        // if failed_tlcs.len() >= 3 {
-        //     tlcs.retain(|info| info.tlc_id != failed_tlcs[0]);
-        //     retryable_tlc_operations.retain(|op| match op {
-        //         RetryableTlcOperation::RemoveTlc(id, _) => id != &failed_tlcs[0],
-        //         RetryableTlcOperation::RelayRemoveTlc(_, id, _) => {
-        //             id != &u64::try_from(failed_tlcs[0]).unwrap()
-        //         }
-        //         _ => true,
-        //     });
-        // }
-        tlcs.push(tlc);
-    }
-
     pub fn add_offered_tlc(&mut self, tlc: TlcInfo) {
-        Self::check_and_add_tlc(
-            &mut self.offered_tlcs.tlcs,
-            tlc,
-            &mut self.retryable_tlc_operations,
-        );
-        // let all_payment_hash = self.all_tlcs().map(|x| x.payment_hash).collect::<Vec<_>>();
-        // // assert no duplicate payment hash
-        // assert_eq!(
-        //     all_payment_hash.len(),
-        //     all_payment_hash.iter().collect::<HashSet<_>>().len()
-        // );
+        self.offered_tlcs.add_tlc(tlc);
     }
 
     pub fn add_received_tlc(&mut self, tlc: TlcInfo) {
-        Self::check_and_add_tlc(
-            &mut self.received_tlcs.tlcs,
-            tlc,
-            &mut self.retryable_tlc_operations,
-        );
-        // let all_payment_hash = self.all_tlcs().map(|x| x.payment_hash).collect::<Vec<_>>();
-        // // assert no duplicate payment hash
-        // assert_eq!(
-        //     all_payment_hash.len(),
-        //     all_payment_hash.iter().collect::<HashSet<_>>().len()
-        // );
+        self.received_tlcs.add_tlc(tlc);
     }
 
     pub fn set_received_tlc_removed(&mut self, tlc_id: u64, reason: RemoveTlcReason) {
@@ -5203,34 +5159,6 @@ impl ChannelActorState {
         if let Some(add_amount) = add_tlc_amount {
             self.check_tlc_limits(add_amount, is_sent)?;
         }
-
-        // let failed_tlcs = self
-        //     .tlc_state
-        //     .all_tlcs()
-        //     .filter(|info| info.is_fail_remove_confirmed())
-        //     .map(|info| info.tlc_id)
-        //     .collect::<Vec<_>>();
-
-        // if failed_tlcs.len() >= 3 {
-        //     self.tlc_state
-        //         .offered_tlcs
-        //         .tlcs
-        //         .retain(|info| info.tlc_id != failed_tlcs[0]);
-        //     self.tlc_state
-        //         .offered_tlcs
-        //         .tlcs
-        //         .retain(|info| info.tlc_id != failed_tlcs[0]);
-        //     self.tlc_state
-        //         .retryable_tlc_operations
-        //         .retain(|op| match op {
-        //             RetryableTlcOperation::RemoveTlc(id, _) => id != &failed_tlcs[0],
-        //             // RetryableTlcOperation::RelayRemoveTlc(_, id, _) => {
-        //             //     id != &u64::try_from(failed_tlcs[0]).unwrap()
-        //             // }
-        //             _ => true,
-        //         });
-        // }
-
         Ok(())
     }
 
@@ -6364,7 +6292,7 @@ impl ChannelActorState {
         Ok(())
     }
 
-    fn build_init_commitment_tx_signature(&mut self) -> Result<PartialSignature, SigningError> {
+    fn build_init_commitment_tx_signature(&self) -> Result<PartialSignature, SigningError> {
         let sign_ctx = self.get_sign_context(true);
         let x_only_aggregated_pubkey = sign_ctx.common_ctx.x_only_aggregated_pubkey();
         let ([to_local_output, to_remote_output], [to_local_output_data, to_remote_output_data]) =
@@ -6392,7 +6320,7 @@ impl ChannelActorState {
     }
 
     fn check_init_commitment_tx_signature(
-        &mut self,
+        &self,
         signature: PartialSignature,
     ) -> Result<SettlementData, ProcessingChannelError> {
         let sign_ctx = self.get_sign_context(false);
@@ -6851,7 +6779,7 @@ impl ChannelActorState {
     }
 
     fn build_settlement_transaction_outputs(
-        &mut self,
+        &self,
         for_remote: bool,
     ) -> ([CellOutput; 2], [Bytes; 2]) {
         let pending_tlcs = self
@@ -6997,7 +6925,7 @@ impl ChannelActorState {
         funding_tx_partial_signature: PartialSignature,
         commitment_tx_partial_signature: PartialSignature,
     ) -> Result<PartiallySignedCommitmentTransaction, ProcessingChannelError> {
-        self.clean_up_failed_tlcs();
+        //self.clean_up_failed_tlcs();
         let (commitment_tx, settlement_tx) = self.build_commitment_and_settlement_tx(false);
 
         let deterministic_verify_ctx = self.get_deterministic_verify_context();
