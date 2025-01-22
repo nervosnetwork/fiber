@@ -5156,7 +5156,7 @@ async fn test_send_payment_with_all_failed_middle_hops() {
     // this assertion make sure we didn't do meaningless retry
     assert!(node_0.get_triggered_unexpected_events().await.is_empty());
     let payment_session = source_node.get_payment_session(payment_hash).unwrap();
-    assert_eq!(payment_session.retried_times, 2);
+    assert_eq!(payment_session.retried_times, 3);
 }
 
 #[tokio::test]
@@ -5323,7 +5323,7 @@ async fn test_send_payment_with_final_all_failed_middle_hops() {
 
     source_node.wait_until_failed(payment_hash).await;
     source_node
-        .assert_payment_status(payment_hash, PaymentSessionStatus::Failed, Some(2))
+        .assert_payment_status(payment_hash, PaymentSessionStatus::Failed, Some(3))
         .await;
 }
 

@@ -1524,8 +1524,8 @@ where
                                 TlcErr::new(TlcErrorCode::InvalidOnionError)
                             });
                         eprintln!(
-                            "node {:?} got on_remove_tlc_event: {:?} {:?} detail: {:?}",
-                            state.peer_id, payment_hash, reason, error_detail
+                            "node {:?} got on_remove_tlc_event: {:?} {:?} detail: {:?} session_key: {:?}",
+                            state.peer_id, payment_hash, reason, error_detail, payment_session.session_key
                         );
 
                         self.update_graph_with_tlc_fail(&state.network, &error_detail)

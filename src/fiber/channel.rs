@@ -860,13 +860,6 @@ where
         assert!(previous_tlc.is_received());
         assert!(previous_channel_id != state.get_id());
 
-        if state
-            .tlc_state
-            .applied_relay_remove_tlcs
-            .contains(&tlc_info.tlc_id)
-        {
-            return;
-        }
         let remove_reason = remove_reason.clone().backward(&tlc_info.shared_secret);
         eprintln!(
             "node: {:?} try_to_relay_remove_tlc: tlc_id: {:?} with payment_hash: {:?}",
@@ -874,10 +867,6 @@ where
             tlc_info.tlc_id,
             tlc_info.payment_hash
         );
-        state
-            .tlc_state
-            .applied_relay_remove_tlcs
-            .insert(tlc_info.tlc_id);
         self.register_retryable_relay_tlc_remove(
             myself,
             state,
@@ -1157,6 +1146,10 @@ where
         tlc_id: TLCId,
     ) -> Result<(), ProcessingChannelError> {
         let channel_id = state.get_id();
+        if state.tlc_state.applied_remove_tlcs.contains(&tlc_id) {
+            return Ok(());
+        }
+        state.tlc_state.applied_remove_tlcs.insert(tlc_id);
         let (tlc_info, remove_reason) = state.remove_tlc_with_reason(tlc_id)?;
         eprintln!(
             "node {:?} apply_remove_tlc_operation: tlc_id: {:?} with payment_hash: {:?} with reason: {:?}",
@@ -1192,9 +1185,10 @@ where
             // only the original sender of the TLC should send `TlcRemoveReceived` event
             // because only the original sender cares about the TLC event to settle the payment
             eprintln!(
-                "{:?} send TlcRemoveReceived event: {:?}",
+                "{:?} send TlcRemoveReceived event: {:?} remove_reason: {:?}",
                 state.get_local_peer_id(),
-                tlc_info.payment_hash
+                tlc_info.payment_hash,
+                remove_reason,
             );
             if tlc_info.is_offered() {
                 self.network
@@ -2772,7 +2766,7 @@ pub struct TlcState {
     pub received_tlcs: PendingTlcs,
     pub retryable_tlc_operations: Vec<RetryableTlcOperation>,
     pub applied_add_tlcs: HashSet<TLCId>,
-    pub applied_relay_remove_tlcs: HashSet<TLCId>,
+    pub applied_remove_tlcs: HashSet<TLCId>,
     pub waiting_ack: bool,
 }
 
@@ -2869,6 +2863,7 @@ impl TlcState {
 
     pub fn apply_remove_tlc(&mut self, tlc_id: TLCId) {
         self.applied_add_tlcs.remove(&tlc_id);
+        self.applied_remove_tlcs.remove(&tlc_id);
         if tlc_id.is_offered() {
             self.offered_tlcs.tlcs.retain(|tlc| tlc.tlc_id != tlc_id);
         } else {

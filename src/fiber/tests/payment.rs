@@ -1806,6 +1806,13 @@ async fn test_send_payment_middle_hop_update_fee_multiple_payments() {
         true,
     )
     .await;
+    for node in nodes.iter() {
+        node.set_unexpected_events(vec![
+            "Musig2VerifyError".to_string(),
+            "Musig2RoundFinalizeError".to_string(),
+        ])
+        .await;
+    }
     let [mut node_0, node_1, mut node_2, node_3] = nodes.try_into().expect("4 nodes");
 
     let mut all_sent = HashSet::new();
@@ -1832,36 +1839,12 @@ async fn test_send_payment_middle_hop_update_fee_multiple_payments() {
         .await;
 
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
-    node_1
-        .set_unexpected_events(vec![
-            "Musig2VerifyError".to_string(),
-            "Musig2RoundFinalizeError".to_string(),
-        ])
-        .await;
-    node_2
-        .set_unexpected_events(vec![
-            "Musig2VerifyError".to_string(),
-            "Musig2RoundFinalizeError".to_string(),
-        ])
-        .await;
-    loop {
-        let triggered_unexpected_events = node_1.get_triggered_unexpected_events().await;
-        if !triggered_unexpected_events.is_empty() {
-            assert!(
-                false,
-                "node_1 triggered_unexpected_events: {:?}",
-                triggered_unexpected_events
-            );
-        }
 
-        let triggered_unexpected_events = node_2.get_triggered_unexpected_events().await;
-        if !triggered_unexpected_events.is_empty() {
-            assert!(
-                false,
-                "node_2 triggered_unexpected_events: {:?}",
-                triggered_unexpected_events
-            );
-        }
+    loop {
+        assert!(node_0.get_triggered_unexpected_events().await.is_empty());
+        assert!(node_1.get_triggered_unexpected_events().await.is_empty());
+        assert!(node_2.get_triggered_unexpected_events().await.is_empty());
+        assert!(node_3.get_triggered_unexpected_events().await.is_empty());
 
         for payment_hash in all_sent.clone().iter() {
             let status = node_0.get_payment_status(*payment_hash).await;
@@ -1901,8 +1884,14 @@ async fn test_send_payment_middle_hop_update_fee_should_recovery() {
         true,
     )
     .await;
+    for node in nodes.iter() {
+        node.set_unexpected_events(vec![
+            "Musig2VerifyError".to_string(),
+            "Musig2RoundFinalizeError".to_string(),
+        ])
+        .await;
+    }
     let [mut node_0, node_1, mut node_2, node_3] = nodes.try_into().expect("4 nodes");
-
     let mut all_sent = HashSet::new();
 
     for _i in 0..5 {
@@ -1927,71 +1916,16 @@ async fn test_send_payment_middle_hop_update_fee_should_recovery() {
         .await;
 
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
-    node_0
-        .set_unexpected_events(vec![
-            "Musig2VerifyError".to_string(),
-            "Musig2RoundFinalizeError".to_string(),
-        ])
-        .await;
-    node_1
-        .set_unexpected_events(vec![
-            "Musig2VerifyError".to_string(),
-            "Musig2RoundFinalizeError".to_string(),
-        ])
-        .await;
-    node_2
-        .set_unexpected_events(vec![
-            "Musig2VerifyError".to_string(),
-            "Musig2RoundFinalizeError".to_string(),
-        ])
-        .await;
-    node_3
-        .set_unexpected_events(vec![
-            "Musig2VerifyError".to_string(),
-            "Musig2RoundFinalizeError".to_string(),
-        ])
-        .await;
+
     loop {
-        let triggered_unexpected_events = node_0.get_triggered_unexpected_events().await;
-        if !triggered_unexpected_events.is_empty() {
-            assert!(
-                false,
-                "node_0 triggered_unexpected_events: {:?}",
-                triggered_unexpected_events
-            );
-        }
-
-        let triggered_unexpected_events = node_1.get_triggered_unexpected_events().await;
-        if !triggered_unexpected_events.is_empty() {
-            assert!(
-                false,
-                "node_1 triggered_unexpected_events: {:?}",
-                triggered_unexpected_events
-            );
-        }
-
-        let triggered_unexpected_events = node_2.get_triggered_unexpected_events().await;
-        if !triggered_unexpected_events.is_empty() {
-            assert!(
-                false,
-                "node_2 triggered_unexpected_events: {:?}",
-                triggered_unexpected_events
-            );
-        }
-
-        let triggered_unexpected_events = node_3.get_triggered_unexpected_events().await;
-        if !triggered_unexpected_events.is_empty() {
-            assert!(
-                false,
-                "node_3 triggered_unexpected_events: {:?}",
-                triggered_unexpected_events
-            );
-        }
+        assert!(node_0.get_triggered_unexpected_events().await.is_empty());
+        assert!(node_1.get_triggered_unexpected_events().await.is_empty());
+        assert!(node_2.get_triggered_unexpected_events().await.is_empty());
+        assert!(node_3.get_triggered_unexpected_events().await.is_empty());
 
         for payment_hash in all_sent.clone().iter() {
             let status = node_0.get_payment_status(*payment_hash).await;
-            //eprintln!("got payment: {:?} status: {:?}", payment_hash, status);
-            if status == PaymentSessionStatus::Success || status == PaymentSessionStatus::Failed {
+            if status == PaymentSessionStatus::Success {
                 eprintln!("payment_hash: {:?} got status : {:?}", payment_hash, status);
                 all_sent.remove(payment_hash);
             }
