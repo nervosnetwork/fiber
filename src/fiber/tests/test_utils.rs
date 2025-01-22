@@ -553,7 +553,7 @@ impl NetworkNode {
     }
 
     pub async fn send_payment(
-        &mut self,
+        &self,
         command: SendPaymentCommand,
     ) -> std::result::Result<SendPaymentResponse, String> {
         let message = |rpc_reply| -> NetworkActorMessage {
@@ -566,7 +566,7 @@ impl NetworkNode {
     }
 
     pub async fn send_payment_keysend(
-        &mut self,
+        &self,
         recipient: &NetworkNode,
         amount: u128,
         dry_run: bool,
@@ -591,7 +591,7 @@ impl NetworkNode {
     }
 
     pub async fn send_payment_keysend_to_self(
-        &mut self,
+        &self,
         amount: u128,
         dry_run: bool,
     ) -> std::result::Result<SendPaymentResponse, String> {
