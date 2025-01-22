@@ -669,6 +669,7 @@ impl NetworkNode {
 
     pub async fn wait_until_success(&self, payment_hash: Hash256) {
         loop {
+            assert!(self.get_triggered_unexpected_events().await.is_empty());
             let status = self.get_payment_status(payment_hash).await;
             if status == PaymentSessionStatus::Success {
                 eprintln!("Payment success: {:?}\n\n", payment_hash);
@@ -684,6 +685,7 @@ impl NetworkNode {
 
     pub async fn wait_until_failed(&self, payment_hash: Hash256) {
         loop {
+            assert!(self.get_triggered_unexpected_events().await.is_empty());
             let status = self.get_payment_status(payment_hash).await;
             if status == PaymentSessionStatus::Failed {
                 eprintln!("Payment failed: {:?}\n\n", payment_hash);
@@ -862,7 +864,20 @@ impl NetworkNode {
             }
         };
 
-        let unexpected_events = Arc::new(TokioRwLock::new(HashSet::<String>::new()));
+        let mut unexpected_events: HashSet<String> = HashSet::new();
+
+        // Some usual unexpected events that we want to not happended
+        // use `assert!(node.get_triggered_unexpected_events().await.is_empty())` to check it
+        let default_unexpected_events = vec![
+            "Musig2VerifyError",
+            "Musig2RoundFinalizeError",
+            "InvalidOnionError",
+        ];
+        for event in default_unexpected_events {
+            unexpected_events.insert(event.to_string());
+        }
+
+        let unexpected_events = Arc::new(TokioRwLock::new(unexpected_events));
         let triggered_unexpected_events = Arc::new(TokioRwLock::new(Vec::<String>::new()));
         let (self_event_sender, self_event_receiver) = mpsc::channel(10000);
         let unexpected_events_clone = unexpected_events.clone();
@@ -921,9 +936,8 @@ impl NetworkNode {
         }
     }
 
-    pub async fn set_unexpected_events(&self, events: Vec<String>) {
+    pub async fn add_unexpected_events(&self, events: Vec<String>) {
         let mut unexpected_events = self.unexpected_events.write().await;
-        unexpected_events.clear();
         for event in events {
             unexpected_events.insert(event);
         }

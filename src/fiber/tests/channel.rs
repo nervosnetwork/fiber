@@ -5120,10 +5120,6 @@ async fn test_send_payment_with_all_failed_middle_hops() {
     let source_node = &node_0;
     let target_pubkey = node_3.pubkey.clone();
 
-    node_0
-        .set_unexpected_events(vec!["InvalidOnionError".to_string()])
-        .await;
-
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
             SendPaymentCommand {

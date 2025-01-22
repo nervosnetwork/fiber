@@ -1806,13 +1806,6 @@ async fn test_send_payment_middle_hop_update_fee_multiple_payments() {
         true,
     )
     .await;
-    for node in nodes.iter() {
-        node.set_unexpected_events(vec![
-            "Musig2VerifyError".to_string(),
-            "Musig2RoundFinalizeError".to_string(),
-        ])
-        .await;
-    }
     let [mut node_0, node_1, mut node_2, node_3] = nodes.try_into().expect("4 nodes");
 
     let mut all_sent = HashSet::new();
@@ -1884,13 +1877,6 @@ async fn test_send_payment_middle_hop_update_fee_should_recovery() {
         true,
     )
     .await;
-    for node in nodes.iter() {
-        node.set_unexpected_events(vec![
-            "Musig2VerifyError".to_string(),
-            "Musig2RoundFinalizeError".to_string(),
-        ])
-        .await;
-    }
     let [mut node_0, node_1, mut node_2, node_3] = nodes.try_into().expect("4 nodes");
     let mut all_sent = HashSet::new();
 
