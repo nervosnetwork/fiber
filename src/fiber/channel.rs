@@ -2730,6 +2730,34 @@ impl PendingTlcs {
             .cloned()
             .collect()
     }
+
+    pub fn get_oldest_failed_tlcs(&self) -> Vec<TLCId> {
+        let mut failed_tlcs = self
+            .tlcs
+            .iter()
+            .filter(|tlc| {
+                matches!(tlc.removed_reason, Some(RemoveTlcReason::RemoveTlcFail(_)))
+                    && matches!(
+                        tlc.status,
+                        TlcStatus::Inbound(InboundTlcStatus::RemoveAckConfirmed)
+                            | TlcStatus::Outbound(OutboundTlcStatus::RemoveAckConfirmed)
+                            | TlcStatus::Outbound(OutboundTlcStatus::RemoveWaitAck)
+                    )
+            })
+            .map(|tlc| (tlc.tlc_id, tlc.removed_confirmed_at.unwrap_or(u64::MAX)))
+            .collect::<Vec<_>>();
+
+        let keep_failed_num = 2;
+        if failed_tlcs.len() >= keep_failed_num {
+            failed_tlcs.sort_by(|a, b| a.1.cmp(&b.1));
+            failed_tlcs[0..failed_tlcs.len() - keep_failed_num]
+                .iter()
+                .map(|(tlc_id, _)| *tlc_id)
+                .collect()
+        } else {
+            return Vec::new();
+        }
+    }
 }
 
 #[derive(Default, Clone, Debug, Serialize, Deserialize)]
@@ -2949,7 +2977,7 @@ impl TlcState {
         self.need_another_commitment_signed()
     }
 
-    pub fn update_for_revoke_and_ack(&mut self, commitment_numbers: CommitmentNumbers) -> bool {
+    pub fn update_for_revoke_and_ack(&mut self, _commitment_numbers: CommitmentNumbers) -> bool {
         self.set_waiting_ack(false);
         for tlc in self.offered_tlcs.tlcs.iter_mut() {
             match tlc.outbound_status() {
@@ -2961,7 +2989,7 @@ impl TlcState {
                 }
                 OutboundTlcStatus::RemoveWaitAck => {
                     tlc.status = TlcStatus::Outbound(OutboundTlcStatus::RemoveAckConfirmed);
-                    tlc.removed_confirmed_at = Some(commitment_numbers.get_local());
+                    tlc.removed_confirmed_at = Some(now_timestamp_as_millis_u64());
                 }
                 _ => {}
             }
@@ -2977,7 +3005,7 @@ impl TlcState {
                 }
                 InboundTlcStatus::LocalRemoved => {
                     tlc.status = TlcStatus::Inbound(InboundTlcStatus::RemoveAckConfirmed);
-                    tlc.removed_confirmed_at = Some(commitment_numbers.get_remote());
+                    tlc.removed_confirmed_at = Some(now_timestamp_as_millis_u64());
                 }
                 _ => {}
             }
@@ -4697,27 +4725,22 @@ impl ChannelActorState {
     }
 
     pub fn clean_up_failed_tlcs(&mut self) {
-        let mut failed_tlcs: Vec<_> = self
-            .tlc_state
-            .received_tlcs
-            .tlcs
-            .iter()
-            .chain(self.tlc_state.offered_tlcs.tlcs.iter())
-            .filter(|tlc| {
-                matches!(tlc.removed_reason, Some(RemoveTlcReason::RemoveTlcFail(_)))
-                    && matches!(
-                        tlc.status,
-                        TlcStatus::Inbound(InboundTlcStatus::RemoveAckConfirmed)
-                            | TlcStatus::Outbound(OutboundTlcStatus::RemoveAckConfirmed)
-                            | TlcStatus::Outbound(OutboundTlcStatus::RemoveWaitAck)
-                    )
-            })
-            .map(|tlc| (tlc.tlc_id, tlc.removed_confirmed_at.unwrap_or(u64::MAX)))
-            .collect();
+        // Remove the oldest failed tlcs from the channel state turns out to be very tricky
+        // Because the different parties may have different views on the failed tlcs,
+        // so we need to be very careful here.
 
-        if failed_tlcs.len() >= 3 {
-            failed_tlcs.sort_by(|a, b| a.1.cmp(&b.1));
-            self.tlc_state.apply_remove_tlc(failed_tlcs[0].0);
+        // The basic idea is to remove the oldest failed tlcs that are confirmed by both parties.
+        // And we need to calculate the oldest failed tlcs independently from two directions,
+        // Because we may have tlc operations from both directions at the same time, order matters.
+        // see #475 for more details.
+        let failed_offered_tlcs = self.tlc_state.offered_tlcs.get_oldest_failed_tlcs();
+        let failed_received_tlcs = self.tlc_state.received_tlcs.get_oldest_failed_tlcs();
+
+        for tlc_id in failed_offered_tlcs
+            .iter()
+            .chain(failed_received_tlcs.iter())
+        {
+            self.tlc_state.apply_remove_tlc(*tlc_id);
         }
     }
 
@@ -6879,8 +6902,8 @@ impl ChannelActorState {
                         .pack(),
                 )
                 .build();
-
             let to_remote_output_data = Bytes::default();
+
             if for_remote {
                 (
                     [to_local_output, to_remote_output],

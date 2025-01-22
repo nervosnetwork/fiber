@@ -1568,8 +1568,8 @@ impl Debug for RemoveTlcReason {
             RemoveTlcReason::RemoveTlcFulfill(_fulfill) => {
                 write!(f, "RemoveTlcFulfill")
             }
-            RemoveTlcReason::RemoveTlcFail(fail) => {
-                write!(f, "RemoveTlcFail with packet ({:?})", fail)
+            RemoveTlcReason::RemoveTlcFail(_fail) => {
+                write!(f, "RemoveTlcFail")
             }
         }
     }
