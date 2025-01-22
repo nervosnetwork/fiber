@@ -317,13 +317,10 @@ async fn signal_listener() {
     let mut sigterm = signal(SignalKind::terminate()).expect("listen for SIGTERM");
     // SIGINT is usually sent due to ctrl-c in the terminal.
     let mut sigint = signal(SignalKind::interrupt()).expect("listen for SIGINT");
-    // SIGHUP is usually sent when the terminal closes or the user logs out (for instance logs out of an SSH session).
-    let mut sighup = signal(SignalKind::hangup()).expect("listen for SIGHUP");
 
     tokio::select! {
         _ = sigterm.recv() => info!("SIGTERM received, shutting down"),
         _ = sigint.recv() => info!("SIGINT received, shutting down"),
-        _ = sighup.recv() => info!("SIGHUP received, shutting down"),
     };
 }
 

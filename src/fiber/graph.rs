@@ -745,10 +745,10 @@ where
 
         // Iterating over HashMap's values is not guaranteed to be in order,
         // which may introduce randomness in the path finding.
-        // We will first sort the channels by inbound_liquidity, then capacity, and at last update time.
-        // This is because the weight algorithm in find_path does not considering inbound_liquidity and capacity,
-        // so the channel with larger inbound_liquidity/capacity maybe have the same weight with the channel
-        // with smaller inbound_liquidity/capacity, even though the former have better chance to success.
+        // We will first sort the channels by outbound_liquidity, then capacity, and at last update time.
+        // This is because the weight algorithm in find_path does not considering outbound_liquidity and capacity,
+        // so the channel with larger outbound_liquidity/capacity maybe have the same weight with the channel
+        // with smaller outbound_liquidity/capacity, even though the former have better chance to success.
         channels.sort_by(
             |(_, _, a_channel_info, a_channel_update_info),
              (_, _, b_channel_info, b_channel_update_info)| {

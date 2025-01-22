@@ -513,6 +513,20 @@ async fn test_sync_node_announcement_on_startup() {
     assert!(node_info.is_some());
 }
 
+#[tokio::test]
+async fn test_sync_node_announcement_of_connected_nodes() {
+    let [node1, node2] = NetworkNode::new_n_interconnected_nodes().await;
+
+    // Wait for the broadcast message to be processed.
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+    let node_info = node1.get_network_graph_node(&node2.get_public_key()).await;
+    assert!(node_info.is_some());
+
+    let node_info = node2.get_network_graph_node(&node1.get_public_key()).await;
+    assert!(node_info.is_some());
+}
+
 // Test that we can sync the network graph with peers.
 // We will first create a node and announce a fake node announcement to the network.
 // Then we will create another node and connect to the first node.
