@@ -800,6 +800,12 @@ where
             // There's no shared secret stored in the received TLC, use the one found in the peeled onion packet.
             &error.shared_secret,
         );
+        eprintln!(
+            "node: {:?} process_add_tlc_error: tlc_id: {:?} with payment_hash: {:?}",
+            state.get_local_peer_id(),
+            tlc_id,
+            payment_hash
+        );
         self.register_retryable_tlc_remove(
             myself,
             state,
@@ -862,6 +868,12 @@ where
             return;
         }
         let remove_reason = remove_reason.clone().backward(&tlc_info.shared_secret);
+        eprintln!(
+            "node: {:?} try_to_relay_remove_tlc: tlc_id: {:?} with payment_hash: {:?}",
+            state.get_local_peer_id(),
+            tlc_info.tlc_id,
+            tlc_info.payment_hash
+        );
         state
             .tlc_state
             .applied_relay_remove_tlcs
@@ -1146,6 +1158,13 @@ where
     ) -> Result<(), ProcessingChannelError> {
         let channel_id = state.get_id();
         let (tlc_info, remove_reason) = state.remove_tlc_with_reason(tlc_id)?;
+        eprintln!(
+            "node {:?} apply_remove_tlc_operation: tlc_id: {:?} with payment_hash: {:?} with reason: {:?}",
+            state.get_local_peer_id(),
+            tlc_id,
+            tlc_info.payment_hash,
+            tlc_info.removed_reason,
+        );
         if matches!(remove_reason, RemoveTlcReason::RemoveTlcFulfill(_))
             && self.store.get_invoice(&tlc_info.payment_hash).is_some()
         {
@@ -1676,6 +1695,12 @@ where
                         state.tlc_state.remove_pending_tlc_operation(tlc_op);
                     }
                     _ => {
+                        eprintln!(
+                            "node: {:?} got forward result : {:?} tlc_err: {:?}",
+                            state.get_local_peer_id(),
+                            channel_err,
+                            tlc_err
+                        );
                         let error = ProcessingChannelError::TlcForwardingError(tlc_err)
                             .with_shared_secret(peeled_onion.shared_secret.clone());
                         self.process_add_tlc_error(

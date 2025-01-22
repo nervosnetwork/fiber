@@ -5104,7 +5104,7 @@ async fn test_send_payment_with_all_failed_middle_hops() {
     let _span = tracing::info_span!("node", node = "test").entered();
     // we have two chaneels between node_1 and node_2
     // they liquid capacity is enough for send payment, but actual balance are both not enough
-    // path finding will all try them but all failed, so we assert the payment retry times is 3
+    // path finding will all try them but all failed, so we assert the payment retry times is 2
     let (nodes, _channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
         &[
             ((0, 1), (100000000000, 100000000000)),
@@ -5119,6 +5119,10 @@ async fn test_send_payment_with_all_failed_middle_hops() {
     let [node_0, _node_1, _node_2, node_3] = nodes.try_into().expect("4 nodes");
     let source_node = &node_0;
     let target_pubkey = node_3.pubkey.clone();
+
+    node_0
+        .set_unexpected_events(vec!["InvalidOnionError".to_string()])
+        .await;
 
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
@@ -5150,8 +5154,9 @@ async fn test_send_payment_with_all_failed_middle_hops() {
 
     // because there is only one path for the payment, the payment will fail in the second try
     // this assertion make sure we didn't do meaningless retry
+    assert!(node_0.get_triggered_unexpected_events().await.is_empty());
     let payment_session = source_node.get_payment_session(payment_hash).unwrap();
-    assert_eq!(payment_session.retried_times, 3);
+    assert_eq!(payment_session.retried_times, 2);
 }
 
 #[tokio::test]

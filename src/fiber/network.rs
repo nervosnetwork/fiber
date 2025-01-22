@@ -1519,7 +1519,10 @@ where
                                 &payment_session.session_key,
                                 payment_session.hops_public_keys(),
                             )
-                            .unwrap_or(TlcErr::new(TlcErrorCode::InvalidOnionError));
+                            .unwrap_or_else(|| {
+                                debug_event!(myself, "InvalidOnionError");
+                                TlcErr::new(TlcErrorCode::InvalidOnionError)
+                            });
                         eprintln!(
                             "node {:?} got on_remove_tlc_event: {:?} {:?} detail: {:?}",
                             state.peer_id, payment_hash, reason, error_detail
