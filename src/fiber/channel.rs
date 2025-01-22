@@ -1253,6 +1253,7 @@ where
                 )));
             }
         };
+        state.clean_up_failed_tlcs();
         let (funding_tx_partial_signature, commitment_tx_partial_signature) =
             state.build_and_sign_commitment_tx()?;
         let commitment_signed = CommitmentSigned {
@@ -4394,7 +4395,6 @@ impl ChannelActorState {
         &mut self,
         network: &ActorRef<NetworkActorMessage>,
     ) -> ProcessingChannelResult {
-        self.clean_up_failed_tlcs();
         let sign_ctx = self.get_sign_context(false);
         let x_only_aggregated_pubkey = sign_ctx.common_ctx.x_only_aggregated_pubkey();
 
@@ -5132,7 +5132,7 @@ impl ChannelActorState {
     }
 
     fn check_for_tlc_update(
-        &mut self,
+        &self,
         add_tlc_amount: Option<u128>,
         is_tlc_command_message: bool,
         is_sent: bool,
@@ -5646,6 +5646,7 @@ impl ChannelActorState {
             }
         };
 
+        self.clean_up_failed_tlcs();
         let (commitment_tx, settlement_data) = self.verify_and_complete_tx(
             commitment_signed.funding_tx_partial_signature,
             commitment_signed.commitment_tx_partial_signature,
@@ -5916,7 +5917,6 @@ impl ChannelActorState {
                 "unexpected RevokeAndAck message".to_string(),
             ));
         }
-        self.clean_up_failed_tlcs();
         let RevokeAndAck {
             channel_id: _,
             revocation_partial_signature,
@@ -6654,7 +6654,7 @@ impl ChannelActorState {
     // so as to consume the funding cell. The last element is the witnesses for the
     // commitment transaction.
     fn build_commitment_and_settlement_tx(
-        &mut self,
+        &self,
         for_remote: bool,
     ) -> (TransactionView, TransactionView) {
         let commitment_tx = {
@@ -6921,11 +6921,10 @@ impl ChannelActorState {
     }
 
     pub fn build_and_verify_commitment_tx(
-        &mut self,
+        &self,
         funding_tx_partial_signature: PartialSignature,
         commitment_tx_partial_signature: PartialSignature,
     ) -> Result<PartiallySignedCommitmentTransaction, ProcessingChannelError> {
-        //self.clean_up_failed_tlcs();
         let (commitment_tx, settlement_tx) = self.build_commitment_and_settlement_tx(false);
 
         let deterministic_verify_ctx = self.get_deterministic_verify_context();
@@ -6985,9 +6984,8 @@ impl ChannelActorState {
     }
 
     fn build_and_sign_commitment_tx(
-        &mut self,
+        &self,
     ) -> Result<(PartialSignature, PartialSignature), ProcessingChannelError> {
-        self.clean_up_failed_tlcs();
         let (commitment_tx, settlement_tx) = self.build_commitment_and_settlement_tx(true);
 
         let deterministic_sign_ctx = self.get_deterministic_sign_context();
@@ -7044,7 +7042,7 @@ impl ChannelActorState {
     /// Verify the partial signature from the peer and create a complete transaction
     /// with valid witnesses.
     fn verify_and_complete_tx(
-        &mut self,
+        &self,
         funding_tx_partial_signature: PartialSignature,
         commitment_tx_partial_signature: PartialSignature,
     ) -> Result<(TransactionView, SettlementData), ProcessingChannelError> {
