@@ -7,7 +7,6 @@ use crate::fiber::graph::PaymentSessionStatus;
 use crate::fiber::network::HopHint;
 use crate::fiber::network::SendPaymentCommand;
 use crate::fiber::tests::test_utils::*;
-use crate::fiber::types::Hash256;
 use crate::fiber::NetworkActorCommand;
 use crate::fiber::NetworkActorMessage;
 use ckb_types::packed::OutPoint;
