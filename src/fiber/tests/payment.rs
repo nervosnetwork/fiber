@@ -2052,3 +2052,64 @@ async fn test_send_payment_complex_network_payself() {
         }
     }
 }
+
+#[tokio::test]
+async fn test_send_payment_complex_network_payself_amount_exceeded() {
+    // variant from issue 475
+    // the channel amount is not enough, so payments will be failed
+    init_tracing();
+    let _span = tracing::info_span!("node", node = "test").entered();
+    let ckb_unit = 100_000_000;
+    let funding_amount = MIN_RESERVED_CKB + 1000 * ckb_unit;
+    let (nodes, _channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+        &[
+            ((0, 1), (funding_amount, funding_amount)),
+            ((1, 2), (funding_amount, funding_amount)),
+            ((3, 4), (funding_amount, funding_amount)),
+            ((4, 5), (funding_amount, funding_amount)),
+            ((0, 3), (funding_amount, funding_amount)),
+            ((1, 4), (funding_amount, funding_amount)),
+            ((2, 5), (funding_amount, funding_amount)),
+        ],
+        6,
+        true,
+    )
+    .await;
+
+    let mut all_sent = HashSet::new();
+    for _k in 0..2 {
+        for i in 0..6 {
+            let res = nodes[i]
+                .send_payment_keysend_to_self(500 * ckb_unit, false)
+                .await
+                .unwrap();
+            eprintln!("res: {:?}", res);
+            let payment_hash = res.payment_hash;
+            all_sent.insert((i, payment_hash));
+        }
+    }
+
+    let mut result = vec![];
+    loop {
+        for i in 0..6 {
+            assert!(nodes[i].get_triggered_unexpected_events().await.is_empty());
+        }
+
+        for (i, payment_hash) in all_sent.clone().into_iter() {
+            let status = nodes[i].get_payment_status(payment_hash).await;
+            if matches!(
+                status,
+                PaymentSessionStatus::Success | PaymentSessionStatus::Failed
+            ) {
+                eprintln!("payment_hash: {:?} got status : {:?}", payment_hash, status);
+                result.push((i, payment_hash, status));
+                all_sent.remove(&(i, payment_hash));
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        }
+        if all_sent.is_empty() {
+            break;
+        }
+    }
+    eprintln!("result:\n {:?}", result);
+}
