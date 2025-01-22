@@ -221,11 +221,8 @@ pub struct ChannelUpdateInfo {
     pub timestamp: u64,
     /// Whether the channel can be currently used for payments (in this one direction).
     pub enabled: bool,
-    /// The exact amount of balance that we can receive from the other party via the channel.
-    /// Note that this is not our balance, but the balance of the other party.
-    /// This node is forwarding the balance for the other party, so we need to use the receivable balance
-    /// instead of our balance.
-    pub inbound_liquidity: Option<u128>,
+    /// The exact amount of balance that we can send to the other party via the channel.
+    pub outbound_liquidity: Option<u128>,
     /// The difference in htlc expiry values that you must have when routing through this channel (in milliseconds).
     pub tlc_expiry_delta: u64,
     /// The minimum value, which must be relayed to the next hop via the channel
@@ -238,7 +235,7 @@ impl From<&ChannelTlcInfo> for ChannelUpdateInfo {
         Self {
             timestamp: info.timestamp,
             enabled: info.enabled,
-            inbound_liquidity: None,
+            outbound_liquidity: None,
             tlc_expiry_delta: info.tlc_expiry_delta,
             tlc_minimum_value: info.tlc_minimum_value,
             fee_rate: info.tlc_fee_proportional_millionths as u64,
@@ -263,7 +260,7 @@ impl From<&ChannelUpdate> for ChannelUpdateInfo {
         Self {
             timestamp: update.timestamp,
             enabled: !update.is_disabled(),
-            inbound_liquidity: None,
+            outbound_liquidity: None,
             tlc_expiry_delta: update.tlc_expiry_delta,
             tlc_minimum_value: update.tlc_minimum_value,
             fee_rate: update.tlc_fee_proportional_millionths as u64,
@@ -297,7 +294,7 @@ pub struct NetworkGraph<S> {
     // The pubkey of the node that is running this instance of the network graph.
     source: Pubkey,
     // All the channels in the network.
-    channels: HashMap<OutPoint, ChannelInfo>,
+    pub(crate) channels: HashMap<OutPoint, ChannelInfo>,
     // All the nodes in the network.
     nodes: HashMap<Pubkey, NodeInfo>,
     // The latest cursor we read from the GossipMessageStore. When we need to refresh our view of the
@@ -730,16 +727,17 @@ where
             .channels
             .values()
             .filter_map(move |channel| {
-                if let Some(info) = channel.update_of_node2.as_ref() {
-                    if info.enabled && channel.node2() == node_id {
+                match channel.update_of_node1.as_ref() {
+                    Some(info) if node_id == channel.node2() && info.enabled => {
                         return Some((channel.node1(), channel.node2(), channel, info));
                     }
+                    _ => {}
                 }
-
-                if let Some(info) = channel.update_of_node1.as_ref() {
-                    if info.enabled && channel.node1() == node_id {
+                match channel.update_of_node2.as_ref() {
+                    Some(info) if node_id == channel.node1() && info.enabled => {
                         return Some((channel.node2(), channel.node1(), channel, info));
                     }
+                    _ => {}
                 }
                 None
             })
@@ -747,16 +745,16 @@ where
 
         // Iterating over HashMap's values is not guaranteed to be in order,
         // which may introduce randomness in the path finding.
-        // We will first sort the channels by inbound_liquidity, then capacity, and at last update time.
-        // This is because the weight algorithm in find_path does not considering inbound_liquidity and capacity,
-        // so the channel with larger inbound_liquidity/capacity maybe have the same weight with the channel
-        // with smaller inbound_liquidity/capacity, even though the former have better chance to success.
+        // We will first sort the channels by outbound_liquidity, then capacity, and at last update time.
+        // This is because the weight algorithm in find_path does not considering outbound_liquidity and capacity,
+        // so the channel with larger outbound_liquidity/capacity maybe have the same weight with the channel
+        // with smaller outbound_liquidity/capacity, even though the former have better chance to success.
         channels.sort_by(
             |(_, _, a_channel_info, a_channel_update_info),
              (_, _, b_channel_info, b_channel_update_info)| {
                 b_channel_update_info
-                    .inbound_liquidity
-                    .cmp(&a_channel_update_info.inbound_liquidity)
+                    .outbound_liquidity
+                    .cmp(&a_channel_update_info.outbound_liquidity)
                     .then(
                         b_channel_info
                             .capacity()
@@ -964,10 +962,11 @@ where
 
         let mut target = target;
         let mut expiry = final_tlc_expiry_delta;
+        let mut amount = amount;
         let mut last_edge = None;
 
         if route_to_self {
-            let (t, edge, e) = self.adjust_target_for_route_self(
+            let (edge, t, e, f) = self.adjust_target_for_route_self(
                 &hop_hint_map,
                 amount,
                 final_tlc_expiry_delta,
@@ -977,6 +976,7 @@ where
             assert_ne!(target, t);
             target = t;
             expiry = expiry + e;
+            amount = amount + f;
             last_edge = Some(edge);
         }
         assert_ne!(source, target);
@@ -998,7 +998,6 @@ where
             for (from, to, channel_info, channel_update) in self.get_node_inbounds(cur_hop.node_id)
             {
                 let is_initial = from == source;
-                let is_final = (to == target) && !route_to_self;
 
                 assert_eq!(to, cur_hop.node_id);
                 if &udt_type_script != channel_info.udt_type_script() {
@@ -1034,7 +1033,7 @@ where
                     continue;
                 }
 
-                let fee = if is_final {
+                let fee = if is_initial {
                     0
                 } else {
                     calculate_tlc_forward_fee(
@@ -1066,12 +1065,14 @@ where
                 if amount_to_send > channel_info.capacity() {
                     continue;
                 }
-                if amount_to_send < channel_update.tlc_minimum_value {
+                // We should use next_hop_received_amount because that is the amount to be
+                // sent over the channel.
+                if next_hop_received_amount < channel_update.tlc_minimum_value {
                     continue;
                 }
 
                 // If we already know the balance of the channel, check if we can send the amount.
-                if let Some(balance) = channel_update.inbound_liquidity {
+                if let Some(balance) = channel_update.outbound_liquidity {
                     if amount_to_send > balance {
                         continue;
                     }
@@ -1129,10 +1130,9 @@ where
                     next_hop: Some(PathEdge {
                         target: to,
                         channel_outpoint: channel_info.out_point().clone(),
-                        // Here we need to use the amount accumulated so far (i.e. with the fees in current hop)
-                        // because the fee here is for the receiving node to forward the amount to the next node.
-                        // So the total amount in AddTlc packet should include the fee.
-                        amount_received: amount_to_send,
+                        // The amount_received is the amount that next hop is going to receive.
+                        // That is exactly next_hop_received_amount.
+                        amount_received: next_hop_received_amount,
                         // We need to use cur_hop.incoming_tlc_expiry instead of incoming_tlc_expiry here
                         // because we need the expiry for the AddTlc packet sent from source to target.
                         // cur_hop.incoming_tlc_expiry is the expiry time for the TLC that is going to be received by the target,
@@ -1179,7 +1179,7 @@ where
         expiry: u64,
         source: Pubkey,
         target: Pubkey,
-    ) -> Result<(Pubkey, PathEdge, u64), PathFindError> {
+    ) -> Result<(PathEdge, Pubkey, u64, u128), PathFindError> {
         let direct_channels: Vec<(Pubkey, Pubkey, &ChannelInfo, &ChannelUpdateInfo)> = self
             .get_node_inbounds(source)
             .filter(|(_, _, channel_info, _)| {
@@ -1224,7 +1224,12 @@ where
                 amount_received: amount,
                 incoming_tlc_expiry: expiry,
             };
-            Ok((from, last_edge, channel_update.tlc_expiry_delta))
+            let fee = calculate_tlc_forward_fee(amount, channel_update.fee_rate as u128).map_err(
+                |err| {
+                    PathFindError::PathFind(format!("calculate_tlc_forward_fee error: {:?}", err))
+                },
+            )?;
+            Ok((last_edge, from, channel_update.tlc_expiry_delta, fee))
         } else {
             return Err(PathFindError::PathFind(
                 "no direct channel found for source node".to_string(),

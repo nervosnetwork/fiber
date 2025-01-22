@@ -65,15 +65,18 @@ pub(crate) struct OpenChannelParams {
     #[serde_as(as = "Option<U64Hex>")]
     tlc_expiry_delta: Option<u64>,
 
-    /// The minimum value for a TLC our side can receive
-    /// an optional parameter, default is 0, which means we can receive any TLC is larger than 0.
+    /// The minimum value for a TLC our side can send,
+    /// an optional parameter, default is 0, which means we can send any TLC is larger than 0.
     /// This parameter can be updated with rpc `update_channel` later.
     #[serde_as(as = "Option<U128Hex>")]
     tlc_min_value: Option<u128>,
 
-    /// The fee proportional millionths for a TLC, Proportional to the amount of the forwarded tlc.
+    /// The fee proportional millionths for a TLC, proportional to the amount of the forwarded tlc.
     /// The unit is millionths of the amount. default is 1000 which means 0.1%.
     /// This parameter can be updated with rpc `update_channel` later.
+    /// Not that, we use outbound channel to calculate the fee for TLC forwarding. For example,
+    /// if we have a path A -> B -> C, then the fee B requires for TLC forwarding, is calculated
+    /// the channel configuration of B and C, not A and B.
     #[serde_as(as = "Option<U128Hex>")]
     tlc_fee_proportional_millionths: Option<u128>,
 
@@ -117,15 +120,18 @@ pub(crate) struct AcceptChannelParams {
     #[serde_as(as = "Option<U64Hex>")]
     max_tlc_number_in_flight: Option<u64>,
 
-    /// The minimum value for a TLC our side can receive
-    /// an optional parameter, default is 0, which means we can receive any TLC is larger than 0.
+    /// The minimum value for a TLC our side can send,
+    /// an optional parameter, default is 0, which means we can send any TLC is larger than 0.
     /// This parameter can be updated with rpc `update_channel` later.
     #[serde_as(as = "Option<U128Hex>")]
     tlc_min_value: Option<u128>,
 
-    /// The fee proportional millionths for a TLC, Proportional to the amount of the forwarded tlc.
+    /// The fee proportional millionths for a TLC, proportional to the amount of the forwarded tlc.
     /// The unit is millionths of the amount. default is 1000 which means 0.1%.
     /// This parameter can be updated with rpc `update_channel` later.
+    /// Not that, we use outbound channel to calculate the fee for TLC forwarding. For example,
+    /// if we have a path A -> B -> C, then the fee B requires for TLC forwarding, is calculated
+    /// the channel configuration of B and C, not A and B.
     #[serde_as(as = "Option<U128Hex>")]
     tlc_fee_proportional_millionths: Option<u128>,
 
