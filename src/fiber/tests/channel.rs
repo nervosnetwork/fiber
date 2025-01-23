@@ -4514,6 +4514,9 @@ async fn test_connect_to_peers_with_mutual_channel_on_restart_1() {
         )
         .await;
 
+    // sleep for a while to make sure this test works both for release mode
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
     node_a.restart().await;
 
     node_a.expect_event(
@@ -4553,6 +4556,9 @@ async fn test_connect_to_peers_with_mutual_channel_on_restart_2() {
             true,
         )
         .await;
+
+    // sleep for a while to make sure this test works both for release mode
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 
     node_a.stop().await;
 
