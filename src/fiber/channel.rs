@@ -744,6 +744,7 @@ where
                         TlcStatus::Inbound(InboundTlcStatus::RemoveAckConfirmed)
                             | TlcStatus::Outbound(OutboundTlcStatus::RemoveAckConfirmed)
                     )
+                    && !state.tlc_state.applied_remove_tlcs.contains(&tlc.tlc_id)
             })
             .map(|tlc| tlc.tlc_id)
             .collect();
@@ -1117,10 +1118,9 @@ where
         tlc_id: TLCId,
     ) -> Result<(), ProcessingChannelError> {
         let channel_id = state.get_id();
-        if state.tlc_state.applied_remove_tlcs.contains(&tlc_id) {
-            return Ok(());
-        }
+        assert!(!state.tlc_state.applied_remove_tlcs.contains(&tlc_id));
         state.tlc_state.applied_remove_tlcs.insert(tlc_id);
+
         let (tlc_info, remove_reason) = state.remove_tlc_with_reason(tlc_id)?;
         if matches!(remove_reason, RemoveTlcReason::RemoveTlcFulfill(_))
             && self.store.get_invoice(&tlc_info.payment_hash).is_some()
@@ -2735,22 +2735,19 @@ impl PendingTlcs {
         let mut failed_tlcs = self
             .tlcs
             .iter()
-            .filter(|tlc| {
-                matches!(tlc.removed_reason, Some(RemoveTlcReason::RemoveTlcFail(_)))
-                    && matches!(
-                        tlc.status,
-                        TlcStatus::Inbound(InboundTlcStatus::RemoveAckConfirmed)
-                            | TlcStatus::Outbound(OutboundTlcStatus::RemoveAckConfirmed)
-                            | TlcStatus::Outbound(OutboundTlcStatus::RemoveWaitAck)
-                    )
+            .filter_map(|tlc| {
+                if tlc.is_fail_remove_confirmed() {
+                    Some((tlc.tlc_id, tlc.removed_confirmed_at.unwrap_or(u64::MAX)))
+                } else {
+                    None
+                }
             })
-            .map(|tlc| (tlc.tlc_id, tlc.removed_confirmed_at.unwrap_or(u64::MAX)))
             .collect::<Vec<_>>();
 
-        let keep_failed_num = 2;
-        if failed_tlcs.len() >= keep_failed_num {
+        let failed_tlc_num_limit = 2;
+        if failed_tlcs.len() >= failed_tlc_num_limit {
             failed_tlcs.sort_by(|a, b| a.1.cmp(&b.1));
-            failed_tlcs[0..failed_tlcs.len() - keep_failed_num]
+            failed_tlcs[0..failed_tlcs.len() - failed_tlc_num_limit]
                 .iter()
                 .map(|(tlc_id, _)| *tlc_id)
                 .collect()

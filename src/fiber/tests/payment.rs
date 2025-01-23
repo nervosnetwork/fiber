@@ -2030,7 +2030,6 @@ async fn run_complex_network_with_params(
                 .send_payment_keysend_to_self(payment_amount, false)
                 .await;
             if let Ok(res) = res {
-                eprintln!("res: {:?}", res);
                 let payment_hash = res.payment_hash;
                 all_sent.insert((i, payment_hash));
             }
@@ -2040,7 +2039,6 @@ async fn run_complex_network_with_params(
     let mut result = vec![];
     loop {
         for i in 0..6 {
-            eprintln!("assert node: {:?}", i);
             assert!(nodes[i].get_triggered_unexpected_events().await.is_empty());
         }
 
@@ -2060,12 +2058,11 @@ async fn run_complex_network_with_params(
             break;
         }
     }
-    eprintln!("result:\n {:?}", result);
     result
 }
 
 #[tokio::test]
-async fn test_send_payment_complex_network_payself() {
+async fn test_send_payment_complex_network_payself_all_succeed() {
     // from issue 475
     // channel amount is enough, so all payments should success
     let res = run_complex_network_with_params(MIN_RESERVED_CKB + 100000000, || 1000).await;
@@ -2073,6 +2070,7 @@ async fn test_send_payment_complex_network_payself() {
         .iter()
         .filter(|(_, status)| *status == PaymentSessionStatus::Failed)
         .count();
+
     assert_eq!(failed_count, 0);
 }
 

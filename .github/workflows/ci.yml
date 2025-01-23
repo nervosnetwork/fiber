@@ -36,7 +36,7 @@ jobs:
         with:
           tool: nextest
       - run: |
-          RUST_BACKTRACE=full RUST_LOG=trace cargo nextest run --no-fail-fast
+          TEST_TEMP_RETAIN=1 RUST_BACKTRACE=full RUST_LOG=trace cargo nextest run --no-fail-fast
 
   fmt:
     name: Rustfmt
