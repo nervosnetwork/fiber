@@ -2740,11 +2740,11 @@ impl PendingTlcs {
             })
             .collect::<Vec<_>>();
 
-        let failed_tlc_num_limit = 2;
-        if failed_tlcs.len() >= failed_tlc_num_limit {
-            failed_tlcs.sort_by(|a, b| a.1.cmp(&b.1));
-            failed_tlcs[0..failed_tlcs.len() - failed_tlc_num_limit]
+        if failed_tlcs.len() > 1 {
+            failed_tlcs.sort_by_key(|a| a.1);
+            failed_tlcs
                 .iter()
+                .take(failed_tlcs.len() - 1)
                 .map(|(tlc_id, _)| *tlc_id)
                 .collect()
         } else {

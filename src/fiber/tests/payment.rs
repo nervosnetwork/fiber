@@ -1478,7 +1478,7 @@ async fn test_send_payment_three_nodes_send_each_other_no_wait() {
             break;
         }
     }
-    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
     let new_node_0_balance = nodes[0].get_local_balance_from_channel(channels[0]);
     let new_node_2_balance = nodes[2].get_local_balance_from_channel(channels[1]);
     eprintln!(
@@ -2121,7 +2121,11 @@ async fn run_complex_network_with_params(
     let mut result = vec![];
     loop {
         for i in 0..6 {
-            assert!(nodes[i].get_triggered_unexpected_events().await.is_empty());
+            let unexpected_events = nodes[i].get_triggered_unexpected_events().await;
+            if !unexpected_events.is_empty() {
+                eprintln!("node_{} got unexpected events: {:?}", i, unexpected_events);
+                unreachable!("unexpected events");
+            }
         }
 
         for (i, payment_hash) in all_sent.clone().into_iter() {
