@@ -1,15 +1,14 @@
-use crate::fiber::channel::{ChannelCommand, ChannelCommandWithId};
 use crate::fiber::config::MIN_TLC_EXPIRY_DELTA;
 use crate::fiber::hash_algorithm::HashAlgorithm;
 use crate::fiber::serde_utils::{U128Hex, U64Hex};
 use crate::fiber::types::{Hash256, Privkey};
-use crate::fiber::{NetworkActorCommand, NetworkActorMessage};
-use crate::invoice::{CkbInvoice, CkbInvoiceStatus, Currency, InvoiceBuilder, InvoiceStore};
+use crate::fiber::NetworkActorMessage;
+use crate::invoice::{
+    settle_invoice, CkbInvoice, CkbInvoiceStatus, Currency, InvoiceBuilder, InvoiceStore,
+};
 use crate::FiberConfig;
 use ckb_jsonrpc_types::Script;
-use jsonrpsee::types::error::{
-    CALL_EXECUTION_FAILED_CODE, INTERNAL_ERROR_CODE, INVALID_REQUEST_CODE,
-};
+use jsonrpsee::types::error::CALL_EXECUTION_FAILED_CODE;
 use jsonrpsee::{core::async_trait, proc_macros::rpc, types::ErrorObjectOwned};
 use ractor::ActorRef;
 use secp256k1::{PublicKey, Secp256k1, SecretKey};
@@ -369,72 +368,18 @@ where
             ref payment_hash,
             ref payment_preimage,
         } = params;
-        match self.store.get_invoice(&payment_hash) {
-            None => Err(ErrorObjectOwned::owned(
-                INVALID_REQUEST_CODE,
-                "invoice not found".to_string(),
+        match settle_invoice(
+            &self.store,
+            self.network_actor.as_ref(),
+            &payment_hash,
+            &payment_preimage,
+        ) {
+            Ok(_) => Ok(SettleInvoiceResult {}),
+            Err(e) => Err(ErrorObjectOwned::owned(
+                CALL_EXECUTION_FAILED_CODE,
+                e.to_string(),
                 Some(params),
             )),
-            Some(invoice) => {
-                match invoice.hash_algorithm() {
-                    Some(hash_algorithm) => {
-                        let hash = hash_algorithm.hash(payment_preimage);
-                        if hash.as_slice() != payment_hash.as_ref() {
-                            return Err(ErrorObjectOwned::owned(
-                                INVALID_REQUEST_CODE,
-                                format!("payment hash not match"),
-                                Some((params, hash_algorithm)),
-                            ));
-                        }
-                    }
-                    None => {
-                        return Err(ErrorObjectOwned::owned(
-                            INVALID_REQUEST_CODE,
-                            "hash algorithm not found for the invoice".to_string(),
-                            Some(params),
-                        ));
-                    }
-                }
-
-                match self
-                    .store
-                    .insert_payment_preimage(*payment_hash, *payment_preimage)
-                {
-                    Ok(_) => {}
-                    Err(e) => {
-                        return Err(ErrorObjectOwned::owned(
-                            INTERNAL_ERROR_CODE,
-                            e.to_string(),
-                            Some(params),
-                        ));
-                    }
-                }
-
-                // We will send network actor a message to settle the invoice immediately if possible.
-                if let Some(network_actor) = &self.network_actor {
-                    match self.store.get_invoice_status(payment_hash) {
-                        Some(CkbInvoiceStatus::Received) => {
-                            let channels = self.store.get_invoice_channels(payment_hash);
-                            for channel_id in channels {
-                                let _ =
-                                    network_actor.send_message(NetworkActorMessage::new_command(
-                                        NetworkActorCommand::ControlFiberChannel(
-                                            ChannelCommandWithId {
-                                                channel_id,
-                                                command: ChannelCommand::SettleHeldTlc(
-                                                    *payment_hash,
-                                                ),
-                                            },
-                                        ),
-                                    ));
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-
-                Ok(SettleInvoiceResult {})
-            }
         }
     }
 }
