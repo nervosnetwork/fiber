@@ -993,6 +993,23 @@ where
                 .or_else(|| self.store.get_invoice_preimage(&add_tlc.payment_hash));
 
             if let Some(preimage) = preimage {
+                if preimage == Default::default() {
+                    match self.store.get_invoice_status(&payment_hash) {
+                        Some(status) => {
+                            // Avoid double update invoice status, we may have already updated the status to `Paid` etc.
+                            if status == CkbInvoiceStatus::Open {
+                                self.store
+                                    .update_invoice_status(
+                                        &payment_hash,
+                                        CkbInvoiceStatus::PendingSettlement,
+                                    )
+                                    .expect("update invoice status failed");
+                            }
+                            return Ok(());
+                        }
+                        None => {}
+                    }
+                }
                 let filled_payment_hash: Hash256 = add_tlc.hash_algorithm.hash(preimage).into();
                 if add_tlc.payment_hash != filled_payment_hash {
                     return Err(ProcessingChannelError::FinalIncorrectPreimage);
