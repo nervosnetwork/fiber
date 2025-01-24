@@ -40,7 +40,8 @@ pub enum CkbInvoiceStatus {
     Expired,
     /// The invoice is received, but not settled yet.
     Received,
-    /// This is a hold invoice, the payment is pending settlement (we may only receive the preimage through some out of band procedures).
+    /// This is a hold invoice. We have received the TLC for the invoice,
+    /// but we don't have the preimage yet, so the invoice is pending settlement.
     PendingSettlement,
     /// The invoice is paid.
     Paid,

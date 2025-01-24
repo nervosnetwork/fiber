@@ -5,7 +5,9 @@ use crate::fiber::types::{Hash256, Privkey};
 use crate::invoice::{CkbInvoice, CkbInvoiceStatus, Currency, InvoiceBuilder, InvoiceStore};
 use crate::FiberConfig;
 use ckb_jsonrpc_types::Script;
-use jsonrpsee::types::error::CALL_EXECUTION_FAILED_CODE;
+use jsonrpsee::types::error::{
+    CALL_EXECUTION_FAILED_CODE, INTERNAL_ERROR_CODE, INVALID_REQUEST_CODE,
+};
 use jsonrpsee::{core::async_trait, proc_macros::rpc, types::ErrorObjectOwned};
 use secp256k1::{PublicKey, Secp256k1, SecretKey};
 use serde::{Deserialize, Serialize};
@@ -68,6 +70,17 @@ pub struct InvoiceParams {
     payment_hash: Hash256,
 }
 
+#[derive(Serialize, Deserialize, Debug)]
+pub struct SettleInvoiceParams {
+    /// The payment hash of the invoice.
+    payment_hash: Hash256,
+    /// The payment preimage of the invoice.
+    payment_preimage: Hash256,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct SettleInvoiceResult {}
+
 /// The status of the invoice.
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct GetInvoiceResult {
@@ -109,6 +122,13 @@ trait InvoiceRpc {
         &self,
         payment_hash: InvoiceParams,
     ) -> Result<GetInvoiceResult, ErrorObjectOwned>;
+
+    /// Cancels an invoice, only when invoice is in status `Open` can be canceled.
+    #[method(name = "settle_invoice")]
+    async fn settle_invoice(
+        &self,
+        payment_hash: SettleInvoiceParams,
+    ) -> Result<SettleInvoiceResult, ErrorObjectOwned>;
 }
 
 pub(crate) struct InvoiceRpcServerImpl<S> {
@@ -329,6 +349,74 @@ where
                 "invoice not found".to_string(),
                 Some(payment_hash),
             )),
+        }
+    }
+
+    async fn settle_invoice(
+        &self,
+        params: SettleInvoiceParams,
+    ) -> Result<SettleInvoiceResult, ErrorObjectOwned> {
+        let SettleInvoiceParams {
+            ref payment_hash,
+            ref payment_preimage,
+        } = params;
+        match self.store.get_invoice(&payment_hash) {
+            None => Err(ErrorObjectOwned::owned(
+                INVALID_REQUEST_CODE,
+                "invoice not found".to_string(),
+                Some(params),
+            )),
+            Some(invoice) => {
+                match invoice.hash_algorithm() {
+                    Some(hash_algorithm) => {
+                        let hash = hash_algorithm.hash(payment_preimage);
+                        if hash.as_slice() != payment_hash.as_ref() {
+                            return Err(ErrorObjectOwned::owned(
+                                INVALID_REQUEST_CODE,
+                                format!("payment hash not match"),
+                                Some((params, hash_algorithm)),
+                            ));
+                        }
+                    }
+                    None => {
+                        return Err(ErrorObjectOwned::owned(
+                            INVALID_REQUEST_CODE,
+                            "hash algorithm not found for the invoice".to_string(),
+                            Some(params),
+                        ));
+                    }
+                }
+
+                match self
+                    .store
+                    .insert_payment_preimage(*payment_hash, *payment_preimage)
+                {
+                    Ok(_) => {}
+                    Err(e) => {
+                        return Err(ErrorObjectOwned::owned(
+                            INTERNAL_ERROR_CODE,
+                            e.to_string(),
+                            Some(params),
+                        ));
+                    }
+                }
+
+                match self.store.get_invoice_status(payment_hash) {
+                    Some(CkbInvoiceStatus::PendingSettlement) => {
+                        self.store
+                            .update_invoice_status(payment_hash, CkbInvoiceStatus::Received)
+                            .map_err(|e| {
+                                ErrorObjectOwned::owned(
+                                    INTERNAL_ERROR_CODE,
+                                    e.to_string(),
+                                    Some(params),
+                                )
+                            })?;
+                    }
+                    _ => {}
+                }
+                Ok(SettleInvoiceResult {})
+            }
         }
     }
 }

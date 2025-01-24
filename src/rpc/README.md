@@ -37,6 +37,7 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
         * [Method `parse_invoice`](#invoice-parse_invoice)
         * [Method `get_invoice`](#invoice-get_invoice)
         * [Method `cancel_invoice`](#invoice-cancel_invoice)
+        * [Method `settle_invoice`](#invoice-settle_invoice)
     * [Module Payment](#module-payment)
         * [Method `send_payment`](#payment-send_payment)
         * [Method `get_payment`](#payment-get_payment)
@@ -541,6 +542,24 @@ Cancels an invoice, only when invoice is in status `Open` can be canceled.
 
 
 
+<a id="invoice-settle_invoice"></a>
+#### Method `settle_invoice`
+
+Cancels an invoice, only when invoice is in status `Open` can be canceled.
+
+##### Params
+
+* `payment_hash` - <em>[Hash256](#type-hash256)</em>, The payment hash of the invoice.
+* `payment_preimage` - <em>[Hash256](#type-hash256)</em>, The payment preimage of the invoice.
+
+##### Returns
+
+* None
+
+---
+
+
+
 <a id="payment"></a>
 ### Module `Payment`
 RPC module for channel management.
@@ -748,7 +767,8 @@ The currency of the invoice, can also used to represent the CKB network chain.
 * `Cancelled` - The invoice is cancelled.
 * `Expired` - The invoice is expired.
 * `Received` - The invoice is received, but not settled yet.
-* `PendingSettlement` - This is a hold invoice, the payment is pending settlement (we may only receive the preimage through some out of band procedures).
+* `PendingSettlement` - This is a hold invoice. We have received the TLC for the invoice,
+ but we don't have the preimage yet, so the invoice is pending settlement.
 * `Paid` - The invoice is paid.
 ---
 

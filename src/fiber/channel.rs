@@ -140,6 +140,7 @@ pub enum ChannelCommand {
     Shutdown(ShutdownCommand, RpcReplyPort<Result<(), String>>),
     Update(UpdateCommand, RpcReplyPort<Result<(), String>>),
     ForwardTlcResult(ForwardTlcResult),
+    SettleHeldTlc(Hash256),
     #[cfg(test)]
     ReloadState(ReloadParams),
 }
@@ -840,6 +841,25 @@ where
         .await;
     }
 
+    // Try to settle down a held TLC (i.e., a TLC whose preimage is not available when it is received).
+    // This is usually a TLC associated with a hold invoice. We call of this function should ensure that
+    // this TLC is already in a state that can be settled down (i.e. the invoice associated with it is
+    // in a Received state).
+    async fn try_to_settle_down_held_tlc(
+        &self,
+        myself: &ActorRef<ChannelActorMessage>,
+        state: &mut ChannelActorState,
+        hash: Hash256,
+    ) {
+        let tlc_id = match state.get_received_tlc_with_hash(hash) {
+            Some(tlc) => tlc.tlc_id,
+            None => {
+                return;
+            }
+        };
+        self.try_to_settle_down_tlc(myself, state, tlc_id).await;
+    }
+
     async fn try_to_settle_down_tlc(
         &self,
         myself: &ActorRef<ChannelActorMessage>,
@@ -888,6 +908,12 @@ where
 
         self.register_retryable_tlc_remove(myself, state, tlc.tlc_id, remove_reason)
             .await;
+
+        // We should have already added this tlc to applied_add_tlcs in apply_add_tlc_operation_with_peeled_onion_packet
+        // so we don't need to add it again here. Since applied_add_tlcs is a set, it's safe to add it multiple times.
+        // The only special case is for hold invoice whose preimage may not be available when we receive the tlc.
+        // If, however, the preimage is obtained in above code, then we can add it to applied_add_tlcs now.
+        state.tlc_state.applied_add_tlcs.insert(tlc_id);
     }
 
     async fn apply_add_tlc_operation(
@@ -1005,10 +1031,20 @@ where
                                     )
                                     .expect("update invoice status failed");
                             }
-                            return Ok(());
+                            // The tlcs in the list applied_add_tlcs wouldn't be processed again.
+                            // But for the unsettled hold invoice tlcs, we should process them indefinitely
+                            // until they expire or are settled.
+                            if status == CkbInvoiceStatus::Open
+                                || status == CkbInvoiceStatus::PendingSettlement
+                                || status == CkbInvoiceStatus::Received
+                            {
+                                state.tlc_state.applied_add_tlcs.remove(&add_tlc.tlc_id);
+                            }
                         }
                         None => {}
                     }
+                    // The updating of hold invoice is always done in settle_invoice rpc call.
+                    return Ok(());
                 }
                 let filled_payment_hash: Hash256 = add_tlc.hash_algorithm.hash(preimage).into();
                 if add_tlc.payment_hash != filled_payment_hash {
@@ -1872,6 +1908,11 @@ where
                     .await;
                 Ok(())
             }
+            ChannelCommand::SettleHeldTlc(hash) => {
+                self.try_to_settle_down_held_tlc(myself, state, hash).await;
+                Ok(())
+            }
+
             #[cfg(test)]
             ChannelCommand::ReloadState(reload_params) => {
                 *state = self
@@ -4557,6 +4598,14 @@ impl ChannelActorState {
 
     pub fn get_received_tlc(&self, tlc_id: TLCId) -> Option<&TlcInfo> {
         self.tlc_state.get(&tlc_id)
+    }
+
+    pub fn get_received_tlc_with_hash(&self, hash: Hash256) -> Option<&TlcInfo> {
+        self.tlc_state
+            .received_tlcs
+            .tlcs
+            .iter()
+            .find(|tlc| tlc.payment_hash == hash)
     }
 
     pub fn check_insert_tlc(&mut self, tlc: &TlcInfo) -> Result<(), ProcessingChannelError> {
