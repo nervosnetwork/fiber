@@ -47,8 +47,6 @@ pub trait InvoiceStore {
 pub(crate) enum SettleInvoiceError {
     #[error("Invoice not found")]
     InvoiceNotFound,
-    #[error("Hash algorithm missing")]
-    HashAlgorithmMissing,
     #[error("Hash mismatch")]
     HashMismatch,
     #[error("Internal error: {0}")]
@@ -67,16 +65,10 @@ pub(crate) fn settle_invoice<S: InvoiceStore>(
         .get_invoice(&payment_hash)
         .ok_or(SettleInvoiceError::InvoiceNotFound)?;
 
-    match invoice.hash_algorithm() {
-        Some(hash_algorithm) => {
-            let hash = hash_algorithm.hash(payment_preimage);
-            if hash.as_slice() != payment_hash.as_ref() {
-                return Err(SettleInvoiceError::HashMismatch);
-            }
-        }
-        None => {
-            return Err(SettleInvoiceError::HashAlgorithmMissing);
-        }
+    let hash_algorithm = invoice.hash_algorithm().copied().unwrap_or_default();
+    let hash = hash_algorithm.hash(payment_preimage);
+    if hash.as_slice() != payment_hash.as_ref() {
+        return Err(SettleInvoiceError::HashMismatch);
     }
 
     match store.insert_payment_preimage(*payment_hash, *payment_preimage) {
