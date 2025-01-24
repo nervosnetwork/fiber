@@ -857,7 +857,10 @@ where
                 return;
             }
         };
-        self.try_to_settle_down_tlc(myself, state, tlc_id).await;
+        // Only settle down this TLC if it is not already settled down.
+        if state.tlc_state.applied_add_tlcs.insert(tlc_id) {
+            self.try_to_settle_down_tlc(myself, state, tlc_id).await;
+        }
     }
 
     async fn try_to_settle_down_tlc(
@@ -908,12 +911,6 @@ where
 
         self.register_retryable_tlc_remove(myself, state, tlc.tlc_id, remove_reason)
             .await;
-
-        // We should have already added this tlc to applied_add_tlcs in apply_add_tlc_operation_with_peeled_onion_packet
-        // so we don't need to add it again here. Since applied_add_tlcs is a set, it's safe to add it multiple times.
-        // The only special case is for hold invoice whose preimage may not be available when we receive the tlc.
-        // If, however, the preimage is obtained in above code, then we can add it to applied_add_tlcs now.
-        state.tlc_state.applied_add_tlcs.insert(tlc_id);
     }
 
     async fn apply_add_tlc_operation(
@@ -1022,12 +1019,15 @@ where
                 if preimage == Default::default() {
                     match self.store.get_invoice_status(&payment_hash) {
                         Some(status) => {
-                            // The tlcs in the list applied_add_tlcs wouldn't be processed again.
-                            // But for the unsettled hold invoice tlcs, we should process them indefinitely
-                            // until they expire or are settled.
-                            if status == CkbInvoiceStatus::Open
-                                || status == CkbInvoiceStatus::Received
-                            {
+                            let is_active = status == CkbInvoiceStatus::Open
+                                || status == CkbInvoiceStatus::Received;
+                            let is_settled =
+                                self.store.get_invoice_preimage(&payment_hash).is_some();
+                            if is_active && !is_settled {
+                                // This TLC is added to applied_add_tlcs in above, but
+                                // TLCs in the list applied_add_tlcs wouldn't be processed again.
+                                // For the unsettled active hold invoice TLCs, we should process them indefinitely
+                                // until they expire or are settled.
                                 state.tlc_state.applied_add_tlcs.remove(&add_tlc.tlc_id);
                             }
                             if status == CkbInvoiceStatus::Open {
