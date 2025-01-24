@@ -80,6 +80,8 @@ fnn-migrate -p /folder-to/my-fnn/fiber/store
 * [P2P Message Protocol](./docs/specs/p2p-message.md)
 * [Invoice Protocol](./docs/specs/payment-invoice.md)
 
+**We are in a actively developing stage, don't hesitate to [report issues](https://github.com/nervosnetwork/fiber/issues) or ask for help in the [channel of the Nervos dev community](https://discord.gg/c5gntbFd).**
+
 ## Testnet deployment information
 
 * TODO: Add testnet deployed nodes information *
