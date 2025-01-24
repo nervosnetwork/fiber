@@ -2130,11 +2130,11 @@ async fn run_complex_network_with_params(
 
         for (i, payment_hash) in all_sent.clone().into_iter() {
             let status = nodes[i].get_payment_status(payment_hash).await;
+            eprintln!("payment_hash: {:?} got status : {:?}", payment_hash, status);
             if matches!(
                 status,
                 PaymentSessionStatus::Success | PaymentSessionStatus::Failed
             ) {
-                eprintln!("payment_hash: {:?} got status : {:?}", payment_hash, status);
                 result.push((payment_hash, status));
                 all_sent.remove(&(i, payment_hash));
             }
@@ -2142,6 +2142,13 @@ async fn run_complex_network_with_params(
         }
         if all_sent.is_empty() {
             break;
+        }
+    }
+
+    // make sure all the channels are still workable with small accounts
+    for i in 0..6 {
+        if let Ok(res) = nodes[i].send_payment_keysend_to_self(500, false).await {
+            nodes[i].wait_until_success(res.payment_hash).await;
         }
     }
 
@@ -2167,12 +2174,19 @@ async fn test_send_payment_complex_network_payself_amount_exceeded() {
     // the channel amount is not enough, so payments maybe be failed
     let ckb_unit = 100_000_000;
     let res = run_complex_network_with_params(MIN_RESERVED_CKB + 1000 * ckb_unit, || {
-        (450 as u128 + (rand::random::<u64>() % 100) as u128) * ckb_unit
+        (400 as u128 + (rand::random::<u64>() % 100) as u128) * ckb_unit
     })
     .await;
+
+    // some may failed and some may success
     let failed_count = res
         .iter()
         .filter(|(_, status)| *status == PaymentSessionStatus::Failed)
         .count();
     assert!(failed_count > 0);
+    let succ_count = res
+        .iter()
+        .filter(|(_, status)| *status == PaymentSessionStatus::Success)
+        .count();
+    assert!(succ_count > 0);
 }

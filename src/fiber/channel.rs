@@ -478,10 +478,10 @@ where
             FiberChannelMessage::RevokeAndAck(revoke_and_ack) => {
                 let need_commitment_signed =
                     state.handle_revoke_and_ack_peer_message(&self.network, revoke_and_ack)?;
+                self.update_tlc_status_on_ack(myself, state).await;
                 if need_commitment_signed {
                     self.handle_commitment_signed_command(state)?;
                 }
-                self.update_tlc_status_on_ack(myself, state).await;
                 Ok(())
             }
             FiberChannelMessage::ChannelReady(_channel_ready) => {
@@ -715,12 +715,14 @@ where
         );
 
         let need_commitment_signed = state.tlc_state.update_for_commitment_signed();
+
+        // flush remove tlc for received tlcs after replying ack for peer
+        self.apply_settled_remove_tlcs(myself, state, true).await;
+
         if need_commitment_signed && !state.tlc_state.waiting_ack {
             self.handle_commitment_signed_command(state)?;
         }
 
-        // flush remove tlc for received tlcs after replying ack for peer
-        self.apply_settled_remove_tlcs(myself, state, true).await;
         Ok(())
     }
 
@@ -2970,7 +2972,7 @@ impl TlcState {
         self.need_another_commitment_signed()
     }
 
-    pub fn update_for_revoke_and_ack(&mut self) -> bool {
+    pub fn update_for_revoke_and_ack(&mut self, commitment_number: CommitmentNumbers) -> bool {
         self.set_waiting_ack(false);
         for tlc in self.offered_tlcs.tlcs.iter_mut() {
             match tlc.outbound_status() {
@@ -2982,7 +2984,7 @@ impl TlcState {
                 }
                 OutboundTlcStatus::RemoveWaitAck => {
                     tlc.status = TlcStatus::Outbound(OutboundTlcStatus::RemoveAckConfirmed);
-                    tlc.removed_confirmed_at = Some(now_timestamp_as_millis_u64());
+                    tlc.removed_confirmed_at = Some(commitment_number.get_local());
                 }
                 _ => {}
             }
@@ -2998,7 +3000,7 @@ impl TlcState {
                 }
                 InboundTlcStatus::LocalRemoved => {
                     tlc.status = TlcStatus::Inbound(InboundTlcStatus::RemoveAckConfirmed);
-                    tlc.removed_confirmed_at = Some(now_timestamp_as_millis_u64());
+                    tlc.removed_confirmed_at = Some(commitment_number.get_remote());
                 }
                 _ => {}
             }
@@ -4629,20 +4631,20 @@ impl ChannelActorState {
             )));
         }
         let payment_hash = tlc.payment_hash;
-        let tlc_infos: Vec<_> = self
+        let mut tlc_infos = self
             .tlc_state
             .all_tlcs()
             .filter(|tlc| tlc.payment_hash == payment_hash)
-            .map(|info| info.clone())
-            .collect();
-        if !tlc_infos.is_empty() {
-            if tlc_infos.iter().all(|t| t.is_fail_remove_confirmed()) {
+            .peekable();
+
+        if tlc_infos.peek().is_some() {
+            if tlc_infos.all(|t| t.is_fail_remove_confirmed()) {
                 // If all the tlcs with the same payment hash are confirmed to be failed,
                 // then it's safe to insert the new tlc, the old tlcs will be removed later.
             } else {
                 return Err(ProcessingChannelError::RepeatedProcessing(format!(
-                    "Trying to insert tlc with duplicate payment hash {:?} with tlcs {:?}",
-                    payment_hash, tlc_infos
+                    "Trying to insert tlc with duplicate payment hash {:?}",
+                    payment_hash
                 )));
             }
         }
@@ -4735,6 +4737,12 @@ impl ChannelActorState {
             .iter()
             .chain(failed_received_tlcs.iter())
         {
+            assert!(matches!(
+                self.tlc_state.get(tlc_id).expect("TLC exists").status,
+                TlcStatus::Outbound(OutboundTlcStatus::RemoveAckConfirmed)
+                    | TlcStatus::Inbound(InboundTlcStatus::RemoveAckConfirmed)
+            ));
+            assert!(self.tlc_state.applied_remove_tlcs.contains(&tlc_id));
             self.tlc_state.apply_remove_tlc(*tlc_id);
         }
     }
@@ -6034,7 +6042,9 @@ impl ChannelActorState {
         self.increment_local_commitment_number();
         self.append_remote_commitment_point(next_per_commitment_point);
 
-        let need_commitment_signed = self.tlc_state.update_for_revoke_and_ack();
+        let need_commitment_signed = self
+            .tlc_state
+            .update_for_revoke_and_ack(self.commitment_numbers);
         network
             .send_message(NetworkActorMessage::new_notification(
                 NetworkServiceEvent::RevokeAndAckReceived(
