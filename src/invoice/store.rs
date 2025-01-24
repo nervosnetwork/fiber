@@ -20,4 +20,15 @@ pub trait InvoiceStore {
         payment_hash: Hash256,
         preimage: Hash256,
     ) -> Result<(), InvoiceError>;
+    // A payment to an invoice is made by sending a TLC over some channels
+    // (possibly multiple when atomic multi-path payment support is out).
+    // This function returns all the channels that were used to pay an invoice.
+    fn get_invoice_channels(&self, id: &Hash256) -> Vec<Hash256>;
+    // This function is used to add a channel to the list of channels that were
+    // used to pay an invoice.
+    fn add_invoice_channel(
+        &self,
+        id: &Hash256,
+        channel: &Hash256,
+    ) -> Result<Vec<Hash256>, InvoiceError>;
 }

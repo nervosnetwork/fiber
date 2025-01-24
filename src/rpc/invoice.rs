@@ -1,7 +1,9 @@
+use crate::fiber::channel::{ChannelCommand, ChannelCommandWithId};
 use crate::fiber::config::MIN_TLC_EXPIRY_DELTA;
 use crate::fiber::hash_algorithm::HashAlgorithm;
 use crate::fiber::serde_utils::{U128Hex, U64Hex};
 use crate::fiber::types::{Hash256, Privkey};
+use crate::fiber::{NetworkActorCommand, NetworkActorMessage};
 use crate::invoice::{CkbInvoice, CkbInvoiceStatus, Currency, InvoiceBuilder, InvoiceStore};
 use crate::FiberConfig;
 use ckb_jsonrpc_types::Script;
@@ -9,6 +11,7 @@ use jsonrpsee::types::error::{
     CALL_EXECUTION_FAILED_CODE, INTERNAL_ERROR_CODE, INVALID_REQUEST_CODE,
 };
 use jsonrpsee::{core::async_trait, proc_macros::rpc, types::ErrorObjectOwned};
+use ractor::ActorRef;
 use secp256k1::{PublicKey, Secp256k1, SecretKey};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
@@ -133,12 +136,17 @@ trait InvoiceRpc {
 
 pub(crate) struct InvoiceRpcServerImpl<S> {
     store: S,
+    network_actor: Option<ActorRef<NetworkActorMessage>>,
     keypair: Option<(PublicKey, SecretKey)>,
     currency: Option<Currency>,
 }
 
 impl<S> InvoiceRpcServerImpl<S> {
-    pub(crate) fn new(store: S, config: Option<FiberConfig>) -> Self {
+    pub(crate) fn new(
+        store: S,
+        network_actor: Option<ActorRef<NetworkActorMessage>>,
+        config: Option<FiberConfig>,
+    ) -> Self {
         let config = config.map(|config| {
             let kp = config
                 .read_or_generate_secret_key()
@@ -163,6 +171,7 @@ impl<S> InvoiceRpcServerImpl<S> {
         });
         Self {
             store,
+            network_actor,
             keypair: config.as_ref().map(|(kp, _)| kp.clone()),
             currency: config.as_ref().map(|(_, currency)| *currency),
         }
@@ -401,20 +410,29 @@ where
                     }
                 }
 
-                match self.store.get_invoice_status(payment_hash) {
-                    Some(CkbInvoiceStatus::PendingSettlement) => {
-                        self.store
-                            .update_invoice_status(payment_hash, CkbInvoiceStatus::Received)
-                            .map_err(|e| {
-                                ErrorObjectOwned::owned(
-                                    INTERNAL_ERROR_CODE,
-                                    e.to_string(),
-                                    Some(params),
-                                )
-                            })?;
+                // We will send network actor a message to settle the invoice immediately if possible.
+                if let Some(network_actor) = &self.network_actor {
+                    match self.store.get_invoice_status(payment_hash) {
+                        Some(CkbInvoiceStatus::Received) => {
+                            let channels = self.store.get_invoice_channels(payment_hash);
+                            for channel_id in channels {
+                                let _ =
+                                    network_actor.send_message(NetworkActorMessage::new_command(
+                                        NetworkActorCommand::ControlFiberChannel(
+                                            ChannelCommandWithId {
+                                                channel_id,
+                                                command: ChannelCommand::SettleHeldTlc(
+                                                    *payment_hash,
+                                                ),
+                                            },
+                                        ),
+                                    ));
+                            }
+                        }
+                        _ => {}
                     }
-                    _ => {}
                 }
+
                 Ok(SettleInvoiceResult {})
             }
         }

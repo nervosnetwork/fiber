@@ -1043,6 +1043,12 @@ where
                         }
                         None => {}
                     }
+                    if let Err(e) = self
+                        .store
+                        .add_invoice_channel(&payment_hash, &state.get_id())
+                    {
+                        error!("Failed to add invoice channel mapping: {:?}", e);
+                    }
                     // The updating of hold invoice is always done in settle_invoice rpc call.
                     return Ok(());
                 }
