@@ -439,7 +439,11 @@ impl SendPaymentData {
         }
 
         let keysend = command.keysend.unwrap_or(false);
-        let hold_payment = command.hold_payment;
+        let hold_payment = invoice
+            .as_ref()
+            .and_then(|i| i.is_hold_invoice())
+            .copied()
+            .unwrap_or(command.hold_payment);
         let (payment_hash, preimage) = if !keysend {
             (
                 validate_field(
