@@ -2614,18 +2614,14 @@ impl TlcInfo {
         self.status.as_inbound_status()
     }
 
-    pub fn is_remove_comfirmed(&self) -> bool {
-        match self.status {
-            TlcStatus::Outbound(OutboundTlcStatus::RemoveAckConfirmed) => true,
-            TlcStatus::Outbound(OutboundTlcStatus::RemoveWaitAck) => true,
-            TlcStatus::Inbound(InboundTlcStatus::RemoveAckConfirmed) => true,
-            _ => false,
-        }
-    }
-
     pub fn is_fail_remove_confirmed(&self) -> bool {
         matches!(self.removed_reason, Some(RemoveTlcReason::RemoveTlcFail(_)))
-            && self.is_remove_comfirmed()
+            && match self.status {
+                TlcStatus::Outbound(OutboundTlcStatus::RemoveAckConfirmed) => true,
+                TlcStatus::Outbound(OutboundTlcStatus::RemoveWaitAck) => true,
+                TlcStatus::Inbound(InboundTlcStatus::RemoveAckConfirmed) => true,
+                _ => false,
+            }
     }
 
     fn get_hash(&self) -> ShortHash {
@@ -4202,14 +4198,16 @@ impl ChannelActorState {
         self.to_remote_amount
     }
 
-    pub fn get_offered_tlc_balance(&self) -> u128 {
+    pub fn get_offered_tlc_balance(&self, exclude_failed_tls: bool) -> u128 {
         self.get_all_offer_tlcs()
+            .filter(|tlc| !(exclude_failed_tls && tlc.is_fail_remove_confirmed()))
             .map(|tlc| tlc.amount)
             .sum::<u128>()
     }
 
-    pub fn get_received_tlc_balance(&self) -> u128 {
+    pub fn get_received_tlc_balance(&self, exclude_failed_tls: bool) -> u128 {
         self.get_all_received_tlcs()
+            .filter(|tlc| !(exclude_failed_tls && tlc.is_fail_remove_confirmed()))
             .map(|tlc| tlc.amount)
             .sum::<u128>()
     }
@@ -4649,13 +4647,13 @@ impl ChannelActorState {
             }
         }
         if tlc.is_offered() {
-            let sent_tlc_value = self.get_offered_tlc_balance();
+            let sent_tlc_value = self.get_offered_tlc_balance(false);
             debug_assert!(self.to_local_amount >= sent_tlc_value);
             if sent_tlc_value + tlc.amount > self.to_local_amount {
                 return Err(ProcessingChannelError::TlcAmountExceedLimit);
             }
         } else {
-            let received_tlc_value = self.get_received_tlc_balance();
+            let received_tlc_value = self.get_received_tlc_balance(false);
             debug_assert!(self.to_remote_amount >= received_tlc_value);
             if received_tlc_value + tlc.amount > self.to_remote_amount {
                 debug!(

@@ -2009,7 +2009,7 @@ async fn test_send_payment_middle_hop_update_fee_should_recovery() {
     // in this test, we will make sure the payment should recovery after the fee is updated by the middle hop
     // there are two channels between node_1 and node_2, they are with the same fee rate
     // path finding will pick the channel with latest time, so channels[2] will be picked
-    // but we will update the fee rate of channels[1] to a higher one
+    // but we will update the fee rate of channels[2] to a higher one
     // so the payment will fail, but after the payment failed, the path finding should pick the channels[1] in the next try
     // in the end, all the payments should success
     init_tracing();
@@ -2025,7 +2025,7 @@ async fn test_send_payment_middle_hop_update_fee_should_recovery() {
         true,
     )
     .await;
-    let [node_0, node_1, mut node_2, node_3] = nodes.try_into().expect("4 nodes");
+    let [node_0, mut node_1, node_2, node_3] = nodes.try_into().expect("4 nodes");
     let mut all_sent = HashSet::new();
 
     for _i in 0..6 {
@@ -2037,7 +2037,7 @@ async fn test_send_payment_middle_hop_update_fee_should_recovery() {
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
     }
 
-    node_2
+    node_1
         .update_channel_with_command(
             channels[2],
             UpdateCommand {
@@ -2069,6 +2069,10 @@ async fn test_send_payment_middle_hop_update_fee_should_recovery() {
             break;
         }
     }
+
+    let channel_state = node_0.get_channel_actor_state(channels[0]);
+    assert_eq!(channel_state.get_offered_tlc_balance(true), 0);
+    assert!(channel_state.get_offered_tlc_balance(false) > 0);
 }
 
 async fn run_complex_network_with_params(
@@ -2128,6 +2132,7 @@ async fn run_complex_network_with_params(
             break;
         }
     }
+
     result
 }
 
