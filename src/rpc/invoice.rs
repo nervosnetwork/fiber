@@ -24,8 +24,10 @@ pub(crate) struct NewInvoiceParams {
     description: Option<String>,
     /// The currency of the invoice.
     currency: Currency,
-    /// The payment preimage of the invoice.
-    payment_preimage: Hash256,
+    /// The payment preimage of the invoice, may be empty for a hold invoice.
+    payment_preimage: Option<Hash256>,
+    /// The payment hash of the invoice, must be given when payment_preimage is empty.
+    payment_hash: Option<Hash256>,
     /// The expiry time of the invoice.
     #[serde_as(as = "Option<U64Hex>")]
     expiry: Option<u64>,
@@ -165,9 +167,14 @@ where
                 ));
             }
         }
-        let mut invoice_builder = InvoiceBuilder::new(params.currency)
-            .amount(Some(params.amount))
-            .payment_preimage(params.payment_preimage);
+        let mut invoice_builder = InvoiceBuilder::new(params.currency).amount(Some(params.amount));
+
+        if let Some(preimage) = params.payment_preimage {
+            invoice_builder = invoice_builder.payment_preimage(preimage);
+        }
+        if let Some(hash) = params.payment_hash {
+            invoice_builder = invoice_builder.payment_hash(hash);
+        }
         if let Some(description) = params.description.clone() {
             invoice_builder = invoice_builder.description(description);
         };
@@ -209,7 +216,7 @@ where
         match invoice {
             Ok(invoice) => match self
                 .store
-                .insert_invoice(invoice.clone(), Some(params.payment_preimage))
+                .insert_invoice(invoice.clone(), params.payment_preimage)
             {
                 Ok(_) => Ok(InvoiceResult {
                     invoice_address: invoice.to_string(),

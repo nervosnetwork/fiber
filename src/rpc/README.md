@@ -469,7 +469,8 @@ Generates a new invoice.
 * `amount` - <em>`u128`</em>, The amount of the invoice.
 * `description` - <em>`Option<String>`</em>, The description of the invoice.
 * `currency` - <em>[Currency](#type-currency)</em>, The currency of the invoice.
-* `payment_preimage` - <em>[Hash256](#type-hash256)</em>, The payment preimage of the invoice.
+* `payment_preimage` - <em>Option<[Hash256](#type-hash256)></em>, The payment preimage of the invoice, may be empty for a hold invoice.
+* `payment_hash` - <em>Option<[Hash256](#type-hash256)></em>, The payment hash of the invoice, must be given when payment_preimage is empty.
 * `expiry` - <em>`Option<u64>`</em>, The expiry time of the invoice.
 * `fallback_address` - <em>`Option<String>`</em>, The fallback address of the invoice.
 * `final_expiry_delta` - <em>`Option<u64>`</em>, The final HTLC timeout of the invoice.
@@ -747,6 +748,7 @@ The currency of the invoice, can also used to represent the CKB network chain.
 * `Cancelled` - The invoice is cancelled.
 * `Expired` - The invoice is expired.
 * `Received` - The invoice is received, but not settled yet.
+* `PendingSettlement` - This is a hold invoice, the payment is pending settlement (we may only receive the preimage through some out of band procedures).
 * `Paid` - The invoice is paid.
 ---
 
