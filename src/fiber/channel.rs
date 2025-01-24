@@ -1022,23 +1022,21 @@ where
                 if preimage == Default::default() {
                     match self.store.get_invoice_status(&payment_hash) {
                         Some(status) => {
-                            // Avoid double update invoice status, we may have already updated the status to `Paid` etc.
-                            if status == CkbInvoiceStatus::Open {
-                                self.store
-                                    .update_invoice_status(
-                                        &payment_hash,
-                                        CkbInvoiceStatus::PendingSettlement,
-                                    )
-                                    .expect("update invoice status failed");
-                            }
                             // The tlcs in the list applied_add_tlcs wouldn't be processed again.
                             // But for the unsettled hold invoice tlcs, we should process them indefinitely
                             // until they expire or are settled.
                             if status == CkbInvoiceStatus::Open
-                                || status == CkbInvoiceStatus::PendingSettlement
                                 || status == CkbInvoiceStatus::Received
                             {
                                 state.tlc_state.applied_add_tlcs.remove(&add_tlc.tlc_id);
+                            }
+                            if status == CkbInvoiceStatus::Open {
+                                self.store
+                                    .update_invoice_status(
+                                        &payment_hash,
+                                        CkbInvoiceStatus::Received,
+                                    )
+                                    .expect("update invoice status failed");
                             }
                         }
                         None => {}

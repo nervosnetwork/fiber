@@ -40,9 +40,6 @@ pub enum CkbInvoiceStatus {
     Expired,
     /// The invoice is received, but not settled yet.
     Received,
-    /// This is a hold invoice. We have received the TLC for the invoice,
-    /// but we don't have the preimage yet, so the invoice is pending settlement.
-    PendingSettlement,
     /// The invoice is paid.
     Paid,
 }
@@ -54,7 +51,6 @@ impl Display for CkbInvoiceStatus {
             CkbInvoiceStatus::Cancelled => write!(f, "Cancelled"),
             CkbInvoiceStatus::Expired => write!(f, "Expired"),
             CkbInvoiceStatus::Received => write!(f, "Received"),
-            CkbInvoiceStatus::PendingSettlement => write!(f, "PendingSettlement"),
             CkbInvoiceStatus::Paid => write!(f, "Paid"),
         }
     }

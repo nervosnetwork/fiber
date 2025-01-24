@@ -767,8 +767,6 @@ The currency of the invoice, can also used to represent the CKB network chain.
 * `Cancelled` - The invoice is cancelled.
 * `Expired` - The invoice is expired.
 * `Received` - The invoice is received, but not settled yet.
-* `PendingSettlement` - This is a hold invoice. We have received the TLC for the invoice,
- but we don't have the preimage yet, so the invoice is pending settlement.
 * `Paid` - The invoice is paid.
 ---
 
