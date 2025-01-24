@@ -545,7 +545,7 @@ Cancels an invoice, only when invoice is in status `Open` can be canceled.
 <a id="invoice-settle_invoice"></a>
 #### Method `settle_invoice`
 
-Cancels an invoice, only when invoice is in status `Open` can be canceled.
+Settles an invoice by saving the preimage to this invoice.
 
 ##### Params
 
@@ -584,6 +584,9 @@ Sends a payment to a peer.
 * `max_fee_amount` - <em>`Option<u128>`</em>, the maximum fee amounts in shannons that the sender is willing to pay
 * `max_parts` - <em>`Option<u64>`</em>, max parts for the payment, only used for multi-part payments
 * `keysend` - <em>`Option<bool>`</em>, keysend payment
+* `hold_payment` - <em>`Option<bool>`</em>, a hold_payment is a payment with the preimage set to an all zero hash
+ this is normally used to allow the recipient to hold the payment until he/she knows the preimage
+ default is false
 * `udt_type_script` - <em>`Option<Script>`</em>, udt type script for the payment
 * `allow_self_payment` - <em>`Option<bool>`</em>, allow self payment, default is false
 * `hop_hints` - <em>Option<Vec<[HopHint](#type-hophint)>></em>, Optional route hints to reach the destination through private channels.

@@ -94,7 +94,7 @@ pub(crate) struct SendPaymentCommandParams {
     /// a hold_payment is a payment with the preimage set to an all zero hash
     /// this is normally used to allow the recipient to hold the payment until he/she knows the preimage
     /// default is false
-    pub hold_payment: Option<bool>,
+    hold_payment: Option<bool>,
 
     /// udt type script for the payment
     udt_type_script: Option<Script>,

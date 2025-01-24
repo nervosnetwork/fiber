@@ -462,7 +462,7 @@ impl SendPaymentData {
                 return Err("keysend payment should not have invoice".to_string());
             }
             if hold_payment {
-                return Err("keysend payment should be hold_payment".to_string());
+                return Err("keysend payment should not be used with hold_payment".to_string());
             }
             if command.payment_hash.is_some() {
                 return Err("keysend payment should not have payment_hash".to_string());

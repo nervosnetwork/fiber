@@ -125,11 +125,11 @@ trait InvoiceRpc {
         payment_hash: InvoiceParams,
     ) -> Result<GetInvoiceResult, ErrorObjectOwned>;
 
-    /// Cancels an invoice, only when invoice is in status `Open` can be canceled.
+    /// Settles an invoice by saving the preimage to this invoice.
     #[method(name = "settle_invoice")]
     async fn settle_invoice(
         &self,
-        payment_hash: SettleInvoiceParams,
+        settle_invoice: SettleInvoiceParams,
     ) -> Result<SettleInvoiceResult, ErrorObjectOwned>;
 }
 

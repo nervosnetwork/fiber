@@ -6265,7 +6265,6 @@ async fn test_send_payment_succeed_with_hold_invoice_settled() {
         })
         .await;
 
-    // expect send payment to failed because we can not find preimage
     assert!(res.is_ok());
 
     let payment_hash = res.unwrap().payment_hash;
@@ -6356,7 +6355,6 @@ async fn test_send_payment_succeed_settle_invoice_before_send_payment() {
         })
         .await;
 
-    // expect send payment to failed because we can not find preimage
     assert!(res.is_ok());
 
     let payment_hash = res.unwrap().payment_hash;
@@ -6430,7 +6428,6 @@ async fn test_send_payment_succeed_settle_invoice_with_wrong_then_right_hash() {
         })
         .await;
 
-    // expect send payment to failed because we can not find preimage
     assert!(res.is_ok());
 
     let payment_hash = res.unwrap().payment_hash;

@@ -844,7 +844,7 @@ where
     // Try to settle down a held TLC (i.e., a TLC whose preimage is not available when it is received).
     // This is usually a TLC associated with a hold invoice. We call of this function should ensure that
     // this TLC is already in a state that can be settled down (i.e. the invoice associated with it is
-    // in a Received state).
+    // in a Received state and we have saved its preimage to the store).
     async fn try_to_settle_down_held_tlc(
         &self,
         myself: &ActorRef<ChannelActorMessage>,
@@ -1048,6 +1048,7 @@ where
                         error!("Failed to add invoice channel mapping: {:?}", e);
                     }
                     // The updating of hold invoice is always done in settle_invoice rpc call.
+                    // So we can return early here.
                     return Ok(());
                 }
                 let filled_payment_hash: Hash256 = add_tlc.hash_algorithm.hash(preimage).into();
