@@ -310,6 +310,9 @@ pub struct SendPaymentCommand {
     pub allow_self_payment: bool,
     // the hop hint which may help the find path algorithm to find the path
     pub hop_hints: Option<Vec<HopHint>>,
+    // a hold_payment is a payment with the preimage set to an all zero hash
+    // this is normally used to allow the recipient to hold the payment until he/she knows the preimage
+    pub hold_payment: bool,
     // dry_run only used for checking, default is false
     pub dry_run: bool,
 }
@@ -436,6 +439,7 @@ impl SendPaymentData {
         }
 
         let keysend = command.keysend.unwrap_or(false);
+        let hold_payment = command.hold_payment;
         let (payment_hash, preimage) = if !keysend {
             (
                 validate_field(
@@ -443,11 +447,18 @@ impl SendPaymentData {
                     invoice.as_ref().map(|i| *i.payment_hash()),
                     "payment_hash",
                 )?,
-                None,
+                if hold_payment {
+                    Some(Hash256::default())
+                } else {
+                    None
+                },
             )
         } else {
             if invoice.is_some() {
                 return Err("keysend payment should not have invoice".to_string());
+            }
+            if hold_payment {
+                return Err("keysend payment should be hold_payment".to_string());
             }
             if command.payment_hash.is_some() {
                 return Err("keysend payment should not have payment_hash".to_string());
