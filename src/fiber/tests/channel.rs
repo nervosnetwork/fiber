@@ -6220,19 +6220,17 @@ async fn test_send_payment_succeed_with_hold_invoice_settled() {
     let _span = tracing::info_span!("node", node = "test").entered();
     let (nodes, channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
         &[
-            ((0, 1), (100000000000, 100000000000)),
-            ((1, 2), (100000000000, 100000000000)),
-            ((2, 3), (MIN_RESERVED_CKB + 2000, MIN_RESERVED_CKB + 1000)),
-            ((2, 3), (MIN_RESERVED_CKB + 1005, MIN_RESERVED_CKB + 1000)),
+            ((0, 1), (HUGE_CKB_AMOUNT, MIN_RESERVED_CKB)),
+            ((1, 2), (HUGE_CKB_AMOUNT, MIN_RESERVED_CKB)),
         ],
-        4,
+        3,
         true,
     )
     .await;
-    let [mut node_0, _node_1, _node_2, mut node_3] = nodes.try_into().expect("4 nodes");
+    let [mut node_0, _node_1, mut node_2] = nodes.try_into().expect("3 nodes");
     let source_node = &mut node_0;
-    let target_pubkey = node_3.pubkey.clone();
-    let old_amount = node_3.get_local_balance_from_channel(channels[2]);
+    let target_pubkey = node_2.pubkey.clone();
+    let old_amount = node_2.get_local_balance_from_channel(channels[1]);
 
     let preimage = gen_rand_sha256_hash();
     let ckb_invoice = InvoiceBuilder::new(Currency::Fibd)
@@ -6243,7 +6241,7 @@ async fn test_send_payment_succeed_with_hold_invoice_settled() {
         .build()
         .expect("build invoice success");
 
-    node_3.insert_invoice(ckb_invoice.clone(), None);
+    node_2.insert_invoice(ckb_invoice.clone(), None);
 
     let res = source_node
         .send_payment(SendPaymentCommand {
@@ -6276,13 +6274,13 @@ async fn test_send_payment_succeed_with_hold_invoice_settled() {
         .await;
 
     assert_eq!(
-        node_3.get_invoice_status(ckb_invoice.payment_hash()),
+        node_2.get_invoice_status(ckb_invoice.payment_hash()),
         Some(CkbInvoiceStatus::Received)
     );
-    let new_amount = node_3.get_local_balance_from_channel(channels[2]);
+    let new_amount = node_2.get_local_balance_from_channel(channels[1]);
     assert_eq!(new_amount, old_amount);
 
-    node_3
+    node_2
         .settle_invoice(ckb_invoice.payment_hash(), &preimage)
         .expect("settle invoice success");
 
@@ -6290,10 +6288,10 @@ async fn test_send_payment_succeed_with_hold_invoice_settled() {
 
     // we should never update the invoice status if there is an error
     assert_eq!(
-        node_3.get_invoice_status(ckb_invoice.payment_hash()),
+        node_2.get_invoice_status(ckb_invoice.payment_hash()),
         Some(CkbInvoiceStatus::Paid)
     );
-    let new_amount = node_3.get_local_balance_from_channel(channels[2]);
+    let new_amount = node_2.get_local_balance_from_channel(channels[1]);
     assert_eq!(new_amount, old_amount + 100);
 
     source_node
@@ -6305,21 +6303,20 @@ async fn test_send_payment_succeed_with_hold_invoice_settled() {
 async fn test_send_payment_succeed_settle_hold_invoice_multiple_times() {
     init_tracing();
     let _span = tracing::info_span!("node", node = "test").entered();
+    let _span = tracing::info_span!("node", node = "test").entered();
     let (nodes, channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
         &[
-            ((0, 1), (100000000000, 100000000000)),
-            ((1, 2), (100000000000, 100000000000)),
-            ((2, 3), (MIN_RESERVED_CKB + 2000, MIN_RESERVED_CKB + 1000)),
-            ((2, 3), (MIN_RESERVED_CKB + 1005, MIN_RESERVED_CKB + 1000)),
+            ((0, 1), (HUGE_CKB_AMOUNT, MIN_RESERVED_CKB)),
+            ((1, 2), (HUGE_CKB_AMOUNT, MIN_RESERVED_CKB)),
         ],
-        4,
+        3,
         true,
     )
     .await;
-    let [mut node_0, _node_1, _node_2, mut node_3] = nodes.try_into().expect("4 nodes");
+    let [mut node_0, _node_1, mut node_2] = nodes.try_into().expect("3 nodes");
     let source_node = &mut node_0;
-    let target_pubkey = node_3.pubkey.clone();
-    let old_amount = node_3.get_local_balance_from_channel(channels[2]);
+    let target_pubkey = node_2.pubkey.clone();
+    let old_amount = node_2.get_local_balance_from_channel(channels[1]);
 
     let preimage = gen_rand_sha256_hash();
     let ckb_invoice = InvoiceBuilder::new(Currency::Fibd)
@@ -6330,7 +6327,7 @@ async fn test_send_payment_succeed_settle_hold_invoice_multiple_times() {
         .build()
         .expect("build invoice success");
 
-    node_3.insert_invoice(ckb_invoice.clone(), None);
+    node_2.insert_invoice(ckb_invoice.clone(), None);
 
     let res = source_node
         .send_payment(SendPaymentCommand {
@@ -6363,14 +6360,14 @@ async fn test_send_payment_succeed_settle_hold_invoice_multiple_times() {
         .await;
 
     assert_eq!(
-        node_3.get_invoice_status(ckb_invoice.payment_hash()),
+        node_2.get_invoice_status(ckb_invoice.payment_hash()),
         Some(CkbInvoiceStatus::Received)
     );
-    let new_amount = node_3.get_local_balance_from_channel(channels[2]);
+    let new_amount = node_2.get_local_balance_from_channel(channels[1]);
     assert_eq!(new_amount, old_amount);
 
     for _i in 0..100 {
-        node_3
+        node_2
             .settle_invoice(ckb_invoice.payment_hash(), &preimage)
             .expect("settle invoice success");
     }
@@ -6379,10 +6376,10 @@ async fn test_send_payment_succeed_settle_hold_invoice_multiple_times() {
 
     // we should never update the invoice status if there is an error
     assert_eq!(
-        node_3.get_invoice_status(ckb_invoice.payment_hash()),
+        node_2.get_invoice_status(ckb_invoice.payment_hash()),
         Some(CkbInvoiceStatus::Paid)
     );
-    let new_amount = node_3.get_local_balance_from_channel(channels[2]);
+    let new_amount = node_2.get_local_balance_from_channel(channels[1]);
     assert_eq!(new_amount, old_amount + 100);
 
     source_node
@@ -6394,21 +6391,20 @@ async fn test_send_payment_succeed_settle_hold_invoice_multiple_times() {
 async fn test_send_payment_succeed_settle_hold_invoice_when_sender_offline() {
     init_tracing();
     let _span = tracing::info_span!("node", node = "test").entered();
+    let _span = tracing::info_span!("node", node = "test").entered();
     let (nodes, channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
         &[
-            ((0, 1), (100000000000, 100000000000)),
-            ((1, 2), (100000000000, 100000000000)),
-            ((2, 3), (MIN_RESERVED_CKB + 2000, MIN_RESERVED_CKB + 1000)),
-            ((2, 3), (MIN_RESERVED_CKB + 1005, MIN_RESERVED_CKB + 1000)),
+            ((0, 1), (HUGE_CKB_AMOUNT, MIN_RESERVED_CKB)),
+            ((1, 2), (HUGE_CKB_AMOUNT, MIN_RESERVED_CKB)),
         ],
-        4,
+        3,
         true,
     )
     .await;
-    let [mut node_0, _node_1, _node_2, mut node_3] = nodes.try_into().expect("4 nodes");
+    let [mut node_0, _node_1, mut node_2] = nodes.try_into().expect("3 nodes");
     let source_node = &mut node_0;
-    let target_pubkey = node_3.pubkey.clone();
-    let old_amount = node_3.get_local_balance_from_channel(channels[2]);
+    let target_pubkey = node_2.pubkey.clone();
+    let old_amount = node_2.get_local_balance_from_channel(channels[1]);
 
     let preimage = gen_rand_sha256_hash();
     let ckb_invoice = InvoiceBuilder::new(Currency::Fibd)
@@ -6419,7 +6415,7 @@ async fn test_send_payment_succeed_settle_hold_invoice_when_sender_offline() {
         .build()
         .expect("build invoice success");
 
-    node_3.insert_invoice(ckb_invoice.clone(), None);
+    node_2.insert_invoice(ckb_invoice.clone(), None);
 
     let res = source_node
         .send_payment(SendPaymentCommand {
@@ -6452,14 +6448,14 @@ async fn test_send_payment_succeed_settle_hold_invoice_when_sender_offline() {
         .await;
 
     assert_eq!(
-        node_3.get_invoice_status(ckb_invoice.payment_hash()),
+        node_2.get_invoice_status(ckb_invoice.payment_hash()),
         Some(CkbInvoiceStatus::Received)
     );
-    let new_amount = node_3.get_local_balance_from_channel(channels[2]);
+    let new_amount = node_2.get_local_balance_from_channel(channels[1]);
     assert_eq!(new_amount, old_amount);
 
     source_node.stop().await;
-    node_3
+    node_2
         .settle_invoice(ckb_invoice.payment_hash(), &preimage)
         .expect("settle invoice success");
     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
@@ -6469,10 +6465,10 @@ async fn test_send_payment_succeed_settle_hold_invoice_when_sender_offline() {
 
     // we should never update the invoice status if there is an error
     assert_eq!(
-        node_3.get_invoice_status(ckb_invoice.payment_hash()),
+        node_2.get_invoice_status(ckb_invoice.payment_hash()),
         Some(CkbInvoiceStatus::Paid)
     );
-    let new_amount = node_3.get_local_balance_from_channel(channels[2]);
+    let new_amount = node_2.get_local_balance_from_channel(channels[1]);
     assert_eq!(new_amount, old_amount + 100);
 
     source_node
@@ -6484,21 +6480,20 @@ async fn test_send_payment_succeed_settle_hold_invoice_when_sender_offline() {
 async fn test_send_payment_succeed_settle_hold_invoice_when_forwarder_offline() {
     init_tracing();
     let _span = tracing::info_span!("node", node = "test").entered();
+    let _span = tracing::info_span!("node", node = "test").entered();
     let (nodes, channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
         &[
-            ((0, 1), (100000000000, 100000000000)),
-            ((1, 2), (100000000000, 100000000000)),
-            ((2, 3), (MIN_RESERVED_CKB + 2000, MIN_RESERVED_CKB + 1000)),
-            ((2, 3), (MIN_RESERVED_CKB + 1005, MIN_RESERVED_CKB + 1000)),
+            ((0, 1), (HUGE_CKB_AMOUNT, MIN_RESERVED_CKB)),
+            ((1, 2), (HUGE_CKB_AMOUNT, MIN_RESERVED_CKB)),
         ],
-        4,
+        3,
         true,
     )
     .await;
-    let [mut node_0, mut node_1, _node_2, mut node_3] = nodes.try_into().expect("4 nodes");
+    let [mut node_0, mut node_1, mut node_2] = nodes.try_into().expect("3 nodes");
     let source_node = &mut node_0;
-    let target_pubkey = node_3.pubkey.clone();
-    let old_amount = node_3.get_local_balance_from_channel(channels[2]);
+    let target_pubkey = node_2.pubkey.clone();
+    let old_amount = node_2.get_local_balance_from_channel(channels[1]);
 
     let preimage = gen_rand_sha256_hash();
     let ckb_invoice = InvoiceBuilder::new(Currency::Fibd)
@@ -6509,7 +6504,7 @@ async fn test_send_payment_succeed_settle_hold_invoice_when_forwarder_offline() 
         .build()
         .expect("build invoice success");
 
-    node_3.insert_invoice(ckb_invoice.clone(), None);
+    node_2.insert_invoice(ckb_invoice.clone(), None);
 
     let res = source_node
         .send_payment(SendPaymentCommand {
@@ -6542,14 +6537,14 @@ async fn test_send_payment_succeed_settle_hold_invoice_when_forwarder_offline() 
         .await;
 
     assert_eq!(
-        node_3.get_invoice_status(ckb_invoice.payment_hash()),
+        node_2.get_invoice_status(ckb_invoice.payment_hash()),
         Some(CkbInvoiceStatus::Received)
     );
-    let new_amount = node_3.get_local_balance_from_channel(channels[2]);
+    let new_amount = node_2.get_local_balance_from_channel(channels[1]);
     assert_eq!(new_amount, old_amount);
 
     node_1.stop().await;
-    node_3
+    node_2
         .settle_invoice(ckb_invoice.payment_hash(), &preimage)
         .expect("settle invoice success");
     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
@@ -6559,10 +6554,10 @@ async fn test_send_payment_succeed_settle_hold_invoice_when_forwarder_offline() 
 
     // we should never update the invoice status if there is an error
     assert_eq!(
-        node_3.get_invoice_status(ckb_invoice.payment_hash()),
+        node_2.get_invoice_status(ckb_invoice.payment_hash()),
         Some(CkbInvoiceStatus::Paid)
     );
-    let new_amount = node_3.get_local_balance_from_channel(channels[2]);
+    let new_amount = node_2.get_local_balance_from_channel(channels[1]);
     assert_eq!(new_amount, old_amount + 100);
 
     source_node
@@ -6574,21 +6569,20 @@ async fn test_send_payment_succeed_settle_hold_invoice_when_forwarder_offline() 
 async fn test_send_payment_succeed_settle_invoice_before_send_payment() {
     init_tracing();
     let _span = tracing::info_span!("node", node = "test").entered();
+    let _span = tracing::info_span!("node", node = "test").entered();
     let (nodes, channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
         &[
-            ((0, 1), (100000000000, 100000000000)),
-            ((1, 2), (100000000000, 100000000000)),
-            ((2, 3), (MIN_RESERVED_CKB + 2000, MIN_RESERVED_CKB + 1000)),
-            ((2, 3), (MIN_RESERVED_CKB + 1005, MIN_RESERVED_CKB + 1000)),
+            ((0, 1), (HUGE_CKB_AMOUNT, MIN_RESERVED_CKB)),
+            ((1, 2), (HUGE_CKB_AMOUNT, MIN_RESERVED_CKB)),
         ],
-        4,
+        3,
         true,
     )
     .await;
-    let [mut node_0, _node_1, _node_2, mut node_3] = nodes.try_into().expect("4 nodes");
+    let [mut node_0, _node_1, mut node_2] = nodes.try_into().expect("3 nodes");
     let source_node = &mut node_0;
-    let target_pubkey = node_3.pubkey.clone();
-    let old_amount = node_3.get_local_balance_from_channel(channels[2]);
+    let target_pubkey = node_2.pubkey.clone();
+    let old_amount = node_2.get_local_balance_from_channel(channels[1]);
 
     let preimage = gen_rand_sha256_hash();
     let ckb_invoice = InvoiceBuilder::new(Currency::Fibd)
@@ -6599,8 +6593,8 @@ async fn test_send_payment_succeed_settle_invoice_before_send_payment() {
         .build()
         .expect("build invoice success");
 
-    node_3.insert_invoice(ckb_invoice.clone(), None);
-    node_3
+    node_2.insert_invoice(ckb_invoice.clone(), None);
+    node_2
         .settle_invoice(ckb_invoice.payment_hash(), &preimage)
         .expect("settle invoice success");
 
@@ -6632,10 +6626,10 @@ async fn test_send_payment_succeed_settle_invoice_before_send_payment() {
 
     // we should never update the invoice status if there is an error
     assert_eq!(
-        node_3.get_invoice_status(ckb_invoice.payment_hash()),
+        node_2.get_invoice_status(ckb_invoice.payment_hash()),
         Some(CkbInvoiceStatus::Paid)
     );
-    let new_amount = node_3.get_local_balance_from_channel(channels[2]);
+    let new_amount = node_2.get_local_balance_from_channel(channels[1]);
     assert_eq!(new_amount, old_amount + 100);
 
     source_node
@@ -6647,21 +6641,20 @@ async fn test_send_payment_succeed_settle_invoice_before_send_payment() {
 async fn test_send_payment_succeed_settle_invoice_with_wrong_then_right_hash() {
     init_tracing();
     let _span = tracing::info_span!("node", node = "test").entered();
+    let _span = tracing::info_span!("node", node = "test").entered();
     let (nodes, channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
         &[
-            ((0, 1), (100000000000, 100000000000)),
-            ((1, 2), (100000000000, 100000000000)),
-            ((2, 3), (MIN_RESERVED_CKB + 2000, MIN_RESERVED_CKB + 1000)),
-            ((2, 3), (MIN_RESERVED_CKB + 1005, MIN_RESERVED_CKB + 1000)),
+            ((0, 1), (HUGE_CKB_AMOUNT, MIN_RESERVED_CKB)),
+            ((1, 2), (HUGE_CKB_AMOUNT, MIN_RESERVED_CKB)),
         ],
-        4,
+        3,
         true,
     )
     .await;
-    let [mut node_0, _node_1, _node_2, mut node_3] = nodes.try_into().expect("4 nodes");
+    let [mut node_0, _node_1, mut node_2] = nodes.try_into().expect("3 nodes");
     let source_node = &mut node_0;
-    let target_pubkey = node_3.pubkey.clone();
-    let old_amount = node_3.get_local_balance_from_channel(channels[2]);
+    let target_pubkey = node_2.pubkey.clone();
+    let old_amount = node_2.get_local_balance_from_channel(channels[1]);
 
     let preimage = gen_rand_sha256_hash();
     let bogus_preimage = gen_rand_sha256_hash();
@@ -6673,8 +6666,8 @@ async fn test_send_payment_succeed_settle_invoice_with_wrong_then_right_hash() {
         .build()
         .expect("build invoice success");
 
-    node_3.insert_invoice(ckb_invoice.clone(), None);
-    let result = node_3.settle_invoice(ckb_invoice.payment_hash(), &bogus_preimage);
+    node_2.insert_invoice(ckb_invoice.clone(), None);
+    let result = node_2.settle_invoice(ckb_invoice.payment_hash(), &bogus_preimage);
     assert!(result.is_err(), "settle with wrong preimage should fail");
 
     let res = source_node
@@ -6708,13 +6701,13 @@ async fn test_send_payment_succeed_settle_invoice_with_wrong_then_right_hash() {
         .await;
 
     assert_eq!(
-        node_3.get_invoice_status(ckb_invoice.payment_hash()),
+        node_2.get_invoice_status(ckb_invoice.payment_hash()),
         Some(CkbInvoiceStatus::Received)
     );
-    let new_amount = node_3.get_local_balance_from_channel(channels[2]);
+    let new_amount = node_2.get_local_balance_from_channel(channels[1]);
     assert_eq!(new_amount, old_amount);
 
-    node_3
+    node_2
         .settle_invoice(ckb_invoice.payment_hash(), &preimage)
         .expect("settle invoice success");
 
@@ -6722,10 +6715,10 @@ async fn test_send_payment_succeed_settle_invoice_with_wrong_then_right_hash() {
 
     // we should never update the invoice status if there is an error
     assert_eq!(
-        node_3.get_invoice_status(ckb_invoice.payment_hash()),
+        node_2.get_invoice_status(ckb_invoice.payment_hash()),
         Some(CkbInvoiceStatus::Paid)
     );
-    let new_amount = node_3.get_local_balance_from_channel(channels[2]);
+    let new_amount = node_2.get_local_balance_from_channel(channels[1]);
     assert_eq!(new_amount, old_amount + 100);
 
     source_node
