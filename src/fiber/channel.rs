@@ -1007,16 +1007,12 @@ where
                 }
             }
 
-            // if this is the last hop, store the preimage.
-            // though we will RemoveTlcFulfill the TLC in try_to_settle_down_tlc function,
-            // here we can do error check early here for better error handling.
-            let preimage = peeled_onion_packet
-                .current
-                .payment_preimage
-                .or_else(|| self.store.get_invoice_preimage(&add_tlc.payment_hash));
-
-            if let Some(preimage) = preimage {
-                if preimage == Default::default() {
+            let preimage = match peeled_onion_packet.current.payment_preimage {
+                None => self
+                    .store
+                    .get_invoice_preimage(&add_tlc.payment_hash)
+                    .ok_or(ProcessingChannelError::FinalIncorrectPaymentHash)?,
+                Some(preimage) if preimage == Hash256::default() => {
                     match self.store.get_invoice_status(&payment_hash) {
                         Some(status) => {
                             let is_active = status == CkbInvoiceStatus::Open
@@ -1051,24 +1047,24 @@ where
                     // So we can return early here.
                     return Ok(());
                 }
-                let filled_payment_hash: Hash256 = add_tlc.hash_algorithm.hash(preimage).into();
-                if add_tlc.payment_hash != filled_payment_hash {
-                    return Err(ProcessingChannelError::FinalIncorrectPreimage);
-                }
-                // update invoice status to received only all the error checking passed
-                if let Some(_invoice) = self.store.get_invoice(&payment_hash) {
-                    self.store
-                        .update_invoice_status(&payment_hash, CkbInvoiceStatus::Received)
-                        .expect("update invoice status failed");
-                }
-                self.store
-                    .insert_payment_preimage(payment_hash, preimage)
-                    .map_err(|_| {
-                        ProcessingChannelError::InternalError("insert preimage failed".to_string())
-                    })?;
-            } else {
-                return Err(ProcessingChannelError::FinalIncorrectPaymentHash);
+                Some(preimage) => preimage,
+            };
+
+            let filled_payment_hash: Hash256 = add_tlc.hash_algorithm.hash(preimage).into();
+            if add_tlc.payment_hash != filled_payment_hash {
+                return Err(ProcessingChannelError::FinalIncorrectPreimage);
             }
+            // update invoice status to received only all the error checking passed
+            if let Some(_invoice) = self.store.get_invoice(&payment_hash) {
+                self.store
+                    .update_invoice_status(&payment_hash, CkbInvoiceStatus::Received)
+                    .expect("update invoice status failed");
+            }
+            self.store
+                .insert_payment_preimage(payment_hash, preimage)
+                .map_err(|_| {
+                    ProcessingChannelError::InternalError("insert preimage failed".to_string())
+                })?;
         } else {
             if state.is_public() && state.is_tlc_forwarding_enabled() {
                 if add_tlc.expiry
