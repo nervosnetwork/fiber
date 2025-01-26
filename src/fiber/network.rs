@@ -1534,6 +1534,8 @@ where
                             .write()
                             .await
                             .record_payment_fail(&payment_session, error_detail.clone());
+                        eprintln!("yukang payment fail: {:?}", error_detail);
+                        eprintln!("yukang need_to_retry: {:?}", need_to_retry);
                         if need_to_retry {
                             // If this is the first hop error, like the WaitingTlcAck error,
                             // we will just retry later, return Ok here for letting endpoint user
