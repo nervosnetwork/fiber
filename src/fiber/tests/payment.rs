@@ -1944,7 +1944,7 @@ async fn test_send_payment_middle_hop_update_fee_multiple_payments() {
     // https://github.com/nervosnetwork/fiber/issues/480
     init_tracing();
     let _span = tracing::info_span!("node", node = "test").entered();
-    let (nodes, channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+    let (mut nodes, channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
         &[
             ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
             ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
@@ -1954,20 +1954,19 @@ async fn test_send_payment_middle_hop_update_fee_multiple_payments() {
         true,
     )
     .await;
-    let [node_0, node_1, mut node_2, node_3] = nodes.try_into().expect("4 nodes");
 
     let mut all_sent = HashSet::new();
 
     for _i in 0..5 {
-        let res = node_0
-            .send_payment_keysend(&node_3, 1000, false)
+        let res = nodes[0]
+            .send_payment_keysend(&nodes[3], 1000, false)
             .await
             .unwrap();
         all_sent.insert(res.payment_hash);
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
     }
 
-    node_2
+    nodes[2]
         .update_channel_with_command(
             channels[2],
             UpdateCommand {
@@ -1982,13 +1981,12 @@ async fn test_send_payment_middle_hop_update_fee_multiple_payments() {
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
     loop {
-        assert!(node_0.get_triggered_unexpected_events().await.is_empty());
-        assert!(node_1.get_triggered_unexpected_events().await.is_empty());
-        assert!(node_2.get_triggered_unexpected_events().await.is_empty());
-        assert!(node_3.get_triggered_unexpected_events().await.is_empty());
+        for i in 0..4 {
+            assert!(nodes[i].get_triggered_unexpected_events().await.is_empty());
+        }
 
         for payment_hash in all_sent.clone().iter() {
-            let status = node_0.get_payment_status(*payment_hash).await;
+            let status = nodes[0].get_payment_status(*payment_hash).await;
             //eprintln!("got payment: {:?} status: {:?}", payment_hash, status);
             if status == PaymentSessionStatus::Failed || status == PaymentSessionStatus::Success {
                 eprintln!("payment_hash: {:?} got status : {:?}", payment_hash, status);
@@ -2014,7 +2012,7 @@ async fn test_send_payment_middle_hop_update_fee_should_recovery() {
     // in the end, all the payments should success
     init_tracing();
     let _span = tracing::info_span!("node", node = "test").entered();
-    let (nodes, channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+    let (mut nodes, channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
         &[
             ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
             ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
@@ -2025,19 +2023,18 @@ async fn test_send_payment_middle_hop_update_fee_should_recovery() {
         true,
     )
     .await;
-    let [node_0, mut node_1, node_2, node_3] = nodes.try_into().expect("4 nodes");
     let mut all_sent = HashSet::new();
 
     for _i in 0..6 {
-        let res = node_0
-            .send_payment_keysend(&node_3, 1000, false)
+        let res = nodes[0]
+            .send_payment_keysend(&nodes[3], 1000, false)
             .await
             .unwrap();
         all_sent.insert(res.payment_hash);
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
     }
 
-    node_1
+    nodes[1]
         .update_channel_with_command(
             channels[2],
             UpdateCommand {
@@ -2053,13 +2050,12 @@ async fn test_send_payment_middle_hop_update_fee_should_recovery() {
 
     let mut succ_count = 0;
     loop {
-        assert!(node_0.get_triggered_unexpected_events().await.is_empty());
-        assert!(node_1.get_triggered_unexpected_events().await.is_empty());
-        assert!(node_2.get_triggered_unexpected_events().await.is_empty());
-        assert!(node_3.get_triggered_unexpected_events().await.is_empty());
+        for i in 0..4 {
+            assert!(nodes[i].get_triggered_unexpected_events().await.is_empty());
+        }
 
         for payment_hash in all_sent.clone().iter() {
-            let status = node_0.get_payment_status(*payment_hash).await;
+            let status = nodes[0].get_payment_status(*payment_hash).await;
             // FIXME: check why the first failed payment got build router error
             //        maybe the time gap of update graph
             if status == PaymentSessionStatus::Success || status == PaymentSessionStatus::Failed {
@@ -2078,7 +2074,7 @@ async fn test_send_payment_middle_hop_update_fee_should_recovery() {
     }
 
     assert!(succ_count > 0);
-    let channel_state = node_0.get_channel_actor_state(channels[0]);
+    let channel_state = nodes[0].get_channel_actor_state(channels[0]);
     assert_eq!(channel_state.get_offered_tlc_balance(true), 0);
     assert!(channel_state.get_offered_tlc_balance(false) > 0);
 }
