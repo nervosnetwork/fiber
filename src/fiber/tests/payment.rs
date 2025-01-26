@@ -2025,7 +2025,8 @@ async fn test_send_payment_middle_hop_update_fee_should_recovery() {
     .await;
     let mut all_sent = HashSet::new();
 
-    for _i in 0..6 {
+    let tx_count = 6;
+    for _i in 0..tx_count {
         let res = nodes[0]
             .send_payment_keysend(&nodes[3], 1000, false)
             .await
@@ -2056,8 +2057,6 @@ async fn test_send_payment_middle_hop_update_fee_should_recovery() {
 
         for payment_hash in all_sent.clone().iter() {
             let status = nodes[0].get_payment_status(*payment_hash).await;
-            // FIXME: check why the first failed payment got build router error
-            //        maybe the time gap of update graph
             if status == PaymentSessionStatus::Success || status == PaymentSessionStatus::Failed {
                 eprintln!("payment_hash: {:?} got status : {:?}", payment_hash, status);
                 all_sent.remove(payment_hash);
@@ -2073,7 +2072,7 @@ async fn test_send_payment_middle_hop_update_fee_should_recovery() {
         }
     }
 
-    assert!(succ_count > 0);
+    assert_eq!(succ_count, tx_count);
     let channel_state = nodes[0].get_channel_actor_state(channels[0]);
     assert_eq!(channel_state.get_offered_tlc_balance(true), 0);
     assert!(channel_state.get_offered_tlc_balance(false) > 0);

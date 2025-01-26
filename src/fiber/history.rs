@@ -259,9 +259,9 @@ impl InternalResult {
                 }
                 TlcErrorCode::FeeInsufficient => {
                     need_to_retry = true;
-                    self.fail_pair_balanced(nodes, index);
+                    self.fail_pair_balanced(nodes, index + 1);
                     if index > 1 {
-                        self.succeed_range_pairs(nodes, 0, index - 1);
+                        self.succeed_range_pairs(nodes, 0, index);
                     }
                 }
                 TlcErrorCode::IncorrectTlcExpiry => {

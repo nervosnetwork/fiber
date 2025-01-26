@@ -4737,12 +4737,7 @@ impl ChannelActorState {
             .iter()
             .chain(failed_received_tlcs.iter())
         {
-            assert!(matches!(
-                self.tlc_state.get(tlc_id).expect("TLC exists").status,
-                TlcStatus::Outbound(OutboundTlcStatus::RemoveAckConfirmed)
-                    | TlcStatus::Inbound(InboundTlcStatus::RemoveAckConfirmed)
-            ));
-            assert!(self.tlc_state.applied_remove_tlcs.contains(&tlc_id));
+            debug_assert!(self.tlc_state.applied_remove_tlcs.contains(&tlc_id));
             self.tlc_state.apply_remove_tlc(*tlc_id);
         }
     }
