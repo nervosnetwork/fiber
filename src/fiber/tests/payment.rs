@@ -308,14 +308,10 @@ async fn test_send_payment_over_private_channel() {
                 .await;
         } else {
             assert!(res.is_err());
-            source_node
-                .wait_until_failed(res.unwrap().payment_hash)
-                .await;
         }
     }
 
     test(10000000000, true).await;
-    tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
     test(30000000000, false).await;
 }
 

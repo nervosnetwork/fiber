@@ -661,7 +661,6 @@ where
                     TlcErrorCode::PermanentChannelFailure
                 }
                 ChannelState::ChannelReady() => {
-                    eprintln!("debug now InvalidState error: {}", error);
                     if !state.local_tlc_info.enabled {
                         // channel is disabled
                         TlcErrorCode::TemporaryChannelFailure
@@ -1036,38 +1035,30 @@ where
                 return Err(ProcessingChannelError::FinalIncorrectPaymentHash);
             }
         } else {
-            if state.is_public() {
-                if add_tlc.expiry
-                    < peeled_onion_packet.current.expiry + state.local_tlc_info.tlc_expiry_delta
-                {
-                    return Err(ProcessingChannelError::IncorrectTlcExpiry);
-                }
-
-                assert!(received_amount >= forward_amount);
-
-                // Next forwarding channel will get the forward_fee and check if it's enough.
-                let forward_fee = received_amount.saturating_sub(forward_amount);
-
-                // if this is not the last hop, forward TLC to next hop
-                self.register_retryable_forward_tlc(
-                    myself,
-                    state,
-                    add_tlc.tlc_id,
-                    add_tlc.payment_hash,
-                    peeled_onion_packet.clone(),
-                    forward_fee,
-                )
-                .await;
-            } else {
-                // if we don't have public channel info, we can not forward the TLC
-                // this may happended some malicious sender build a invalid onion router
-                // here we don't need to check the next channel maybe disabled, because
-                // handle_add_tlc_command will check the channel state before forwarding
-                eprintln!("got here .........");
-                return Err(ProcessingChannelError::InvalidState(
-                    "Received AddTlc message, but the channel is not public".to_string(),
-                ));
+            // here we don't need to check current config is public or enabled, because
+            // handle_add_tlc_command will check the channel state before forwarding
+            // and private channel can also forward TLC to public channel
+            if add_tlc.expiry
+                < peeled_onion_packet.current.expiry + state.local_tlc_info.tlc_expiry_delta
+            {
+                return Err(ProcessingChannelError::IncorrectTlcExpiry);
             }
+
+            assert!(received_amount >= forward_amount);
+
+            // Next forwarding channel will get the forward_fee and check if it's enough.
+            let forward_fee = received_amount.saturating_sub(forward_amount);
+
+            // if this is not the last hop, forward TLC to next hop
+            self.register_retryable_forward_tlc(
+                myself,
+                state,
+                add_tlc.tlc_id,
+                add_tlc.payment_hash,
+                peeled_onion_packet.clone(),
+                forward_fee,
+            )
+            .await;
         }
         Ok(())
     }
