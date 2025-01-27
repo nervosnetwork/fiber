@@ -1537,7 +1537,11 @@ where
                                 &payment_session.session_key,
                                 payment_session.hops_public_keys(),
                             )
-                            .unwrap_or(TlcErr::new(TlcErrorCode::InvalidOnionError));
+                            .unwrap_or_else(|| {
+                                debug_event!(myself, "InvalidOnionError");
+                                TlcErr::new(TlcErrorCode::InvalidOnionError)
+                            });
+
                         self.update_graph_with_tlc_fail(&state.network, &error_detail)
                             .await;
                         let need_to_retry = self
@@ -1787,7 +1791,14 @@ where
         let Some(mut payment_session) = self.store.get_payment_session(payment_hash) else {
             return Err(Error::InvalidParameter(payment_hash.to_string()));
         };
+
         assert!(payment_session.status != PaymentSessionStatus::Failed);
+
+        debug!(
+            "try_payment_session: {:?} times: {:?}",
+            payment_session.payment_hash(),
+            payment_session.retried_times
+        );
 
         let payment_data = payment_session.request.clone();
         if payment_session.can_retry() {
@@ -1798,6 +1809,7 @@ where
             let hops_info = self
                 .build_payment_route(&mut payment_session, &payment_data)
                 .await?;
+
             match self
                 .send_payment_onion_packet(state, &mut payment_session, &payment_data, hops_info)
                 .await

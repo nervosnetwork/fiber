@@ -4556,6 +4556,9 @@ async fn test_connect_to_peers_with_mutual_channel_on_restart_1() {
         )
         .await;
 
+    // sleep for a while to make sure this test works both for release mode
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
     node_a.restart().await;
 
     node_a.expect_event(
@@ -4595,6 +4598,9 @@ async fn test_connect_to_peers_with_mutual_channel_on_restart_2() {
             true,
         )
         .await;
+
+    // sleep for a while to make sure this test works both for release mode
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 
     node_a.stop().await;
 
@@ -5347,6 +5353,7 @@ async fn test_send_payment_with_all_failed_middle_hops() {
 
     // because there is only one path for the payment, the payment will fail in the second try
     // this assertion make sure we didn't do meaningless retry
+    assert!(node_0.get_triggered_unexpected_events().await.is_empty());
     let payment_session = source_node.get_payment_session(payment_hash).unwrap();
     assert_eq!(payment_session.retried_times, 3);
 }

@@ -24,6 +24,8 @@ serde_json = "1.0.135"
 fiber_v020 = { package = "fnn", git = "https://github.com/nervosnetwork/fiber.git", tag = "v0.2.0" }
 fiber_v021 = { package = "fnn", git = "https://github.com/nervosnetwork/fiber.git", tag = "v0.2.1" }
 fiber_v030 = { package = "fnn", git = "https://github.com/nervosnetwork/fiber.git", tag = "v0.3.0-rc1" }
+fiber_v031 = { package = "fnn", git = "https://github.com/nervosnetwork/fiber.git", tag = "v0.3.1" }
+fiber_v032 = { package = "fnn", git = "https://github.com/chenyukang/fiber.git", branch = "yukang-fix-480-keep-fail-tlc"}
 
 [features]
 default = []

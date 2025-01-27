@@ -213,6 +213,7 @@ impl Actor for TlcActor {
                     shared_secret: command.shared_secret,
                     previous_tlc: None,
                     status: TlcStatus::Outbound(OutboundTlcStatus::LocalAnnounced),
+                    removed_confirmed_at: None,
                 };
                 state.tlc_state.add_offered_tlc(add_tlc.clone());
                 state.tlc_state.increment_offering();
@@ -327,7 +328,9 @@ impl Actor for TlcActor {
                 let hash = sign_tlcs(tlcs);
                 assert_eq!(hash, peer_hash);
 
-                state.tlc_state.update_for_revoke_and_ack();
+                state
+                    .tlc_state
+                    .update_for_revoke_and_ack(CommitmentNumbers::default());
             }
         }
         Ok(())
@@ -467,6 +470,7 @@ fn test_tlc_state_v2() {
         created_at: CommitmentNumbers::default(),
         removed_reason: None,
         previous_tlc: None,
+        removed_confirmed_at: None,
     };
     let mut add_tlc2 = TlcInfo {
         amount: 20000,
@@ -481,6 +485,7 @@ fn test_tlc_state_v2() {
         created_at: CommitmentNumbers::default(),
         removed_reason: None,
         previous_tlc: None,
+        removed_confirmed_at: None,
     };
     tlc_state.add_offered_tlc(add_tlc1.clone());
     tlc_state.add_offered_tlc(add_tlc2.clone());
