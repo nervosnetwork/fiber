@@ -372,7 +372,7 @@ async fn test_tlc_actor() {
                 expiry: now_timestamp_as_millis_u64() + 1000,
                 hash_algorithm: HashAlgorithm::Sha256,
                 onion_packet: None,
-                shared_secret: NO_SHARED_SECRET.clone(),
+                shared_secret: NO_SHARED_SECRET,
                 previous_tlc: None,
             },
         ))
@@ -388,7 +388,7 @@ async fn test_tlc_actor() {
                 expiry: now_timestamp_as_millis_u64() + 1000,
                 hash_algorithm: HashAlgorithm::Sha256,
                 onion_packet: None,
-                shared_secret: NO_SHARED_SECRET.clone(),
+                shared_secret: NO_SHARED_SECRET,
                 previous_tlc: None,
             },
         ))
@@ -404,7 +404,7 @@ async fn test_tlc_actor() {
                 expiry: now_timestamp_as_millis_u64() + 1000,
                 hash_algorithm: HashAlgorithm::Sha256,
                 onion_packet: None,
-                shared_secret: NO_SHARED_SECRET.clone(),
+                shared_secret: NO_SHARED_SECRET,
                 previous_tlc: None,
             },
         ))
@@ -420,7 +420,7 @@ async fn test_tlc_actor() {
                 expiry: now_timestamp_as_millis_u64() + 1000,
                 hash_algorithm: HashAlgorithm::Sha256,
                 onion_packet: None,
-                shared_secret: NO_SHARED_SECRET.clone(),
+                shared_secret: NO_SHARED_SECRET,
                 previous_tlc: None,
             },
         ))
@@ -462,7 +462,7 @@ fn test_tlc_state_v2() {
         expiry: now_timestamp_as_millis_u64() + 1000,
         hash_algorithm: HashAlgorithm::Sha256,
         onion_packet: None,
-        shared_secret: NO_SHARED_SECRET.clone(),
+        shared_secret: NO_SHARED_SECRET,
         tlc_id: TLCId::Offered(0),
         created_at: CommitmentNumbers::default(),
         removed_reason: None,
@@ -476,7 +476,7 @@ fn test_tlc_state_v2() {
         expiry: now_timestamp_as_millis_u64() + 2000,
         hash_algorithm: HashAlgorithm::Sha256,
         onion_packet: None,
-        shared_secret: NO_SHARED_SECRET.clone(),
+        shared_secret: NO_SHARED_SECRET,
         tlc_id: TLCId::Offered(1),
         created_at: CommitmentNumbers::default(),
         removed_reason: None,

@@ -91,7 +91,7 @@ impl MockNetworkGraph {
             .iter()
             .find(|(a, b, _)| (*a == node_a && *b == node_b) || (*a == node_b && *b == node_a));
         if let Some((_, _, outpoint)) = outpoint {
-            self.graph.mark_channel_failed(&outpoint);
+            self.graph.mark_channel_failed(outpoint);
         }
     }
 
@@ -814,7 +814,7 @@ fn test_graph_build_route_three_nodes_amount() {
 // TODO: pass randomized input to this function.
 fn do_test_graph_build_route_expiry(n_nodes: usize) {
     let mut network = MockNetworkGraph::new(n_nodes);
-    let ns = (0..n_nodes).into_iter().collect::<Vec<_>>();
+    let ns = (0..n_nodes).collect::<Vec<_>>();
     for window in ns.windows(2) {
         let source = window[0];
         let target = window[1];

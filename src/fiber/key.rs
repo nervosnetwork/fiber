@@ -97,9 +97,9 @@ impl TryFrom<&[u8]> for KeyPair {
     }
 }
 
-impl Into<Privkey> for KeyPair {
-    fn into(self) -> Privkey {
-        Privkey::from(self.0)
+impl From<KeyPair> for Privkey {
+    fn from(val: KeyPair) -> Self {
+        Privkey::from(val.0)
     }
 }
 

@@ -11,7 +11,7 @@ use std::{fs, path::PathBuf, str::FromStr};
 use tentacle::secio::{PublicKey, SecioKeyPair};
 
 pub const CKB_SHANNONS: u64 = 100_000_000; // 1 CKB = 10 ^ 8 shannons
-pub const DEFAULT_MIN_SHUTDOWN_FEE: u64 = 1 * CKB_SHANNONS; // 1 CKB prepared for shutdown transaction fee
+pub const DEFAULT_MIN_SHUTDOWN_FEE: u64 = CKB_SHANNONS; // 1 CKB prepared for shutdown transaction fee
 
 /// By default, listen to any tcp port allocated by the kernel.
 pub const DEFAULT_LISTENING_ADDR: &str = "/ip4/0.0.0.0/tcp/0";
@@ -382,8 +382,7 @@ impl FiberConfig {
     #[cfg(not(test))]
     pub fn read_or_generate_secret_key(&self) -> Result<super::KeyPair> {
         FIBER_SECRET_KEY
-            .get_or_try_init(|| self.inner_read_or_generate_secret_key())
-            .map(|key| key.clone())
+            .get_or_try_init(|| self.inner_read_or_generate_secret_key()).cloned()
     }
 
     pub fn store_path(&self) -> PathBuf {

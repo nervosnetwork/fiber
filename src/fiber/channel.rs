@@ -904,7 +904,7 @@ where
             .await
             .map_err(ProcessingChannelError::without_shared_secret)?
         {
-            let shared_secret = peeled_onion_packet.shared_secret.clone();
+            let shared_secret = peeled_onion_packet.shared_secret;
             self.apply_add_tlc_operation_with_peeled_onion_packet(
                 myself,
                 state,
@@ -942,15 +942,13 @@ where
     ) -> Result<Option<PeeledPaymentOnionPacket>, ProcessingChannelError> {
         state.check_tlc_expiry(add_tlc.expiry)?;
 
-        assert!(state.get_received_tlc(add_tlc.tlc_id.into()).is_some());
+        assert!(state.get_received_tlc(add_tlc.tlc_id).is_some());
 
-        Ok(
-            OptionFuture::from(add_tlc.onion_packet.clone().map(|onion_packet| {
-                self.peel_onion_packet(onion_packet, add_tlc.payment_hash.clone())
+        OptionFuture::from(add_tlc.onion_packet.clone().map(|onion_packet| {
+                self.peel_onion_packet(onion_packet, add_tlc.payment_hash)
             }))
             .await
-            .transpose()?,
-        )
+            .transpose()
     }
 
     async fn apply_add_tlc_operation_with_peeled_onion_packet(
@@ -1545,7 +1543,7 @@ where
                                 channel_id: *channel_id,
                                 command: ChannelCommand::RemoveTlc(
                                     RemoveTlcCommand {
-                                        id: u64::from(*tlc_id),
+                                        id: (*tlc_id),
                                         reason: reason.clone(),
                                     },
                                     port,
@@ -1638,7 +1636,7 @@ where
                     }
                     _ => {
                         let error = ProcessingChannelError::TlcForwardingError(tlc_err)
-                            .with_shared_secret(peeled_onion.shared_secret.clone());
+                            .with_shared_secret(peeled_onion.shared_secret);
                         self.process_add_tlc_error(
                             myself,
                             state,
@@ -1774,7 +1772,7 @@ where
             ChannelCommand::AddTlc(command, reply) => {
                 let res = self.handle_add_tlc_command(state, command.clone());
                 let error_info = if let Err(ref err) = res {
-                    Some((err.clone(), self.get_tlc_error(state, &err).await))
+                    Some((err.clone(), self.get_tlc_error(state, err).await))
                 } else {
                     None
                 };
@@ -1950,7 +1948,7 @@ where
     fn get_invoice_status(&self, invoice: &CkbInvoice) -> CkbInvoiceStatus {
         match self
             .store
-            .get_invoice_status(&invoice.payment_hash())
+            .get_invoice_status(invoice.payment_hash())
             .expect("no invoice status found")
         {
             CkbInvoiceStatus::Open if invoice.is_expired() => CkbInvoiceStatus::Expired,
@@ -1967,7 +1965,7 @@ where
             NetworkActorCommand::PeelPaymentOnionPacket(onion_packet, payment_hash, tx)
         ))
         .expect(ASSUME_NETWORK_ACTOR_ALIVE)
-        .map_err(|err| ProcessingChannelError::PeelingOnionPacketError(err))
+        .map_err(ProcessingChannelError::PeelingOnionPacketError)
     }
 }
 
@@ -2808,14 +2806,11 @@ impl TlcState {
 
         // if we already finished the RemoveTlc operation for the tlc,
         // we should also remove the ForwardTlc to avoid any later retry.
-        match retryable_tlc_op {
-            RetryableTlcOperation::RemoveTlc(tlc_id, _) => {
-                self.retryable_tlc_operations.retain(|op| match op {
-                    RetryableTlcOperation::ForwardTlc(_, id, ..) => id != tlc_id,
-                    _ => true,
-                });
-            }
-            _ => {}
+        if let RetryableTlcOperation::RemoveTlc(tlc_id, _) = retryable_tlc_op {
+            self.retryable_tlc_operations.retain(|op| match op {
+                RetryableTlcOperation::ForwardTlc(_, id, ..) => id != tlc_id,
+                _ => true,
+            });
         }
     }
 
@@ -2872,29 +2867,23 @@ impl TlcState {
 
     pub fn update_for_commitment_signed(&mut self) -> bool {
         for tlc in self.offered_tlcs.tlcs.iter_mut() {
-            match tlc.outbound_status() {
-                OutboundTlcStatus::RemoteRemoved => {
-                    let status = if self.waiting_ack {
-                        OutboundTlcStatus::RemoveWaitPrevAck
-                    } else {
-                        OutboundTlcStatus::RemoveWaitAck
-                    };
-                    tlc.status = TlcStatus::Outbound(status);
-                }
-                _ => {}
+            if tlc.outbound_status() == OutboundTlcStatus::RemoteRemoved {
+                let status = if self.waiting_ack {
+                    OutboundTlcStatus::RemoveWaitPrevAck
+                } else {
+                    OutboundTlcStatus::RemoveWaitAck
+                };
+                tlc.status = TlcStatus::Outbound(status);
             }
         }
         for tlc in self.received_tlcs.tlcs.iter_mut() {
-            match tlc.inbound_status() {
-                InboundTlcStatus::RemoteAnnounced => {
-                    let status = if self.waiting_ack {
-                        InboundTlcStatus::AnnounceWaitPrevAck
-                    } else {
-                        InboundTlcStatus::AnnounceWaitAck
-                    };
-                    tlc.status = TlcStatus::Inbound(status)
-                }
-                _ => {}
+            if tlc.inbound_status() == InboundTlcStatus::RemoteAnnounced {
+                let status = if self.waiting_ack {
+                    InboundTlcStatus::AnnounceWaitPrevAck
+                } else {
+                    InboundTlcStatus::AnnounceWaitAck
+                };
+                tlc.status = TlcStatus::Inbound(status)
             }
         }
         self.need_another_commitment_signed()
@@ -3311,7 +3300,7 @@ impl ProcessingChannelError {
     }
 
     pub fn without_shared_secret(self) -> ProcessingChannelErrorWithSharedSecret {
-        self.with_shared_secret(NO_SHARED_SECRET.clone())
+        self.with_shared_secret(NO_SHARED_SECRET)
     }
 }
 
@@ -3568,15 +3557,15 @@ impl ChannelActorState {
                 } else {
                     (self.remote_pubkey, self.local_pubkey)
                 };
-                let channel_announcement = ChannelAnnouncement::new_unsigned(
+                
+                ChannelAnnouncement::new_unsigned(
                     &node1_id,
                     &node2_id,
                     channel_outpoint,
                     &self.get_funding_lock_script_xonly_key(),
                     capacity,
                     self.funding_udt_type_script.clone(),
-                );
-                channel_announcement
+                )
             }
         };
 
@@ -3779,14 +3768,10 @@ impl ChannelActorState {
             return None;
         }
 
-        match self
+        if let Some(x) = self
             .public_channel_info
             .as_ref()
-            .and_then(|state| state.channel_update.clone())
-        {
-            Some(x) => return Some(x),
-            _ => {}
-        };
+            .and_then(|state| state.channel_update.clone()) { return Some(x) };
 
         Some(self.generate_channel_update(network).await)
     }
@@ -3875,7 +3860,7 @@ impl ChannelActorState {
             funding_fee_rate,
             id: channel_id,
             tlc_state: Default::default(),
-            local_shutdown_script: local_shutdown_script,
+            local_shutdown_script,
             local_channel_public_keys: local_base_pubkeys,
             signer,
             remote_channel_public_keys: Some(remote_pubkeys),
@@ -4301,12 +4286,12 @@ impl ChannelActorState {
     // Get the total liquid capacity of the channel, which will exclude the reserved ckb amount.
     // This is the capacity used for gossiping channel information.
     pub(crate) fn get_liquid_capacity(&self) -> u128 {
-        let capacity = if self.funding_udt_type_script.is_some() {
+        
+        if self.funding_udt_type_script.is_some() {
             self.get_total_udt_amount()
         } else {
-            self.to_local_amount as u128 + self.to_remote_amount as u128
-        };
-        capacity
+            self.to_local_amount + self.to_remote_amount
+        }
     }
 
     // Send RevokeAndAck message to the counterparty, and update the
@@ -4694,7 +4679,7 @@ impl ChannelActorState {
             .iter()
             .find_map(|(number, point)| {
                 if *number == commitment_number {
-                    Some(point.clone())
+                    Some(*point)
                 } else {
                     None
                 }
@@ -4778,16 +4763,14 @@ impl ChannelActorState {
     fn get_active_received_tlcs(&self, for_remote: bool) -> Vec<TlcInfo> {
         self.tlc_state
             .commitment_signed_tlcs(for_remote)
-            .filter(|tlc| tlc.is_received())
-            .map(|tlc| tlc.clone())
+            .filter(|tlc| tlc.is_received()).cloned()
             .collect()
     }
 
     fn get_active_offered_tlcs(&self, for_remote: bool) -> Vec<TlcInfo> {
         self.tlc_state
             .commitment_signed_tlcs(for_remote)
-            .filter(|tlc| tlc.is_offered())
-            .map(|tlc| tlc.clone())
+            .filter(|tlc| tlc.is_offered()).cloned()
             .collect()
     }
 
@@ -5151,7 +5134,7 @@ impl ChannelActorState {
             // will be set when apply AddTlc operations after the signature is checked
             onion_packet: message.onion_packet,
             // No need to save shared secret for inbound TLC.
-            shared_secret: NO_SHARED_SECRET.clone(),
+            shared_secret: NO_SHARED_SECRET,
             created_at: self.get_current_commitment_numbers(),
             removed_reason: None,
             previous_tlc: None,
@@ -6336,7 +6319,7 @@ impl ChannelActorState {
         let common_ctx = self.get_deterministic_common_context();
         Musig2VerifyContext {
             common_ctx,
-            pubkey: self.get_remote_funding_pubkey().clone(),
+            pubkey: *self.get_remote_funding_pubkey(),
             pubnonce: self.get_last_committed_remote_nonce(),
         }
     }
@@ -6348,7 +6331,7 @@ impl ChannelActorState {
 
         Musig2VerifyContext {
             common_ctx,
-            pubkey: self.get_remote_funding_pubkey().clone(),
+            pubkey: *self.get_remote_funding_pubkey(),
             pubnonce: self.get_last_committed_remote_nonce(),
         }
     }

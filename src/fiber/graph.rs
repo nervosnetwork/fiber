@@ -538,11 +538,11 @@ where
                 // associated with the node as failed. Here we tell the history about
                 // the mapping between nodes and channels.
                 self.history.add_node_channel_map(
-                    channel_info.node1.clone(),
+                    channel_info.node1,
                     channel_info.out_point().clone(),
                 );
                 self.history.add_node_channel_map(
-                    channel_info.node2.clone(),
+                    channel_info.node2,
                     channel_info.out_point().clone(),
                 );
                 self.channels
@@ -791,10 +791,8 @@ where
                 if let Some(info) = channel.update_of_node2.as_mut() {
                     info.enabled = false;
                 }
-            } else {
-                if let Some(info) = channel.update_of_node1.as_mut() {
-                    info.enabled = false;
-                }
+            } else if let Some(info) = channel.update_of_node1.as_mut() {
+                info.enabled = false;
             }
         }
     }
@@ -887,16 +885,16 @@ where
             hops_data.push(PaymentHopData {
                 amount: r.amount_received,
                 next_hop: Some(r.target),
-                hash_algorithm: hash_algorithm,
+                hash_algorithm,
                 expiry: now + r.incoming_tlc_expiry,
                 funding_tx_hash: r.channel_outpoint.tx_hash().into(),
                 payment_preimage: None,
             });
         }
         hops_data.push(PaymentHopData {
-            amount: amount,
+            amount,
             next_hop: None,
-            hash_algorithm: hash_algorithm,
+            hash_algorithm,
             expiry: now + final_tlc_expiry_delta,
             funding_tx_hash: Default::default(),
             payment_preimage: preimage,
@@ -975,8 +973,8 @@ where
             )?;
             assert_ne!(target, t);
             target = t;
-            expiry = expiry + e;
-            amount = amount + f;
+            expiry += e;
+            amount += f;
             last_edge = Some(edge);
         }
         assert_ne!(source, target);
@@ -1093,7 +1091,7 @@ where
                     * self.history.eval_probability(
                         from,
                         to,
-                        &channel_info.out_point(),
+                        channel_info.out_point(),
                         amount_to_send,
                         channel_info.capacity(),
                     );
@@ -1200,7 +1198,7 @@ where
                 }
                 if let Some(state) = self
                     .store
-                    .get_channel_state_by_outpoint(&channel_info.out_point())
+                    .get_channel_state_by_outpoint(channel_info.out_point())
                 {
                     let balance = state.to_remote_amount;
                     return balance >= amount;
@@ -1314,7 +1312,7 @@ impl SessionRoute {
             .chain(
                 payment_hops
                     .iter()
-                    .map(|hop| hop.next_hop.clone().unwrap_or(target)),
+                    .map(|hop| hop.next_hop.unwrap_or(target)),
             )
             .zip(payment_hops)
             .map(|(pubkey, hop)| SessionRouteNode {

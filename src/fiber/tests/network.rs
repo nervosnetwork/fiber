@@ -91,7 +91,7 @@ fn create_fake_channel_announcement_mesage(
 fn create_node_announcement_mesage_with_priv_key(priv_key: &Privkey) -> NodeAnnouncement {
     let node_name = "fake node";
     let addresses =
-        vec!["/ip4/1.1.1.1/tcp/8346/p2p/QmaFDJb9CkMrXy7nhTWBY5y9mvuykre3EzzRsCJUAVXprZ"]
+        ["/ip4/1.1.1.1/tcp/8346/p2p/QmaFDJb9CkMrXy7nhTWBY5y9mvuykre3EzzRsCJUAVXprZ"]
             .iter()
             .map(|x| MultiAddr::from_str(x).expect("valid multiaddr"))
             .collect();
@@ -220,7 +220,7 @@ async fn test_sync_channel_announcement_on_startup() {
                 .lock(ScriptBuilder::default().args(pubkey_hash.pack()).build())
                 .build(),
         )
-        .output_data(vec![0u8; 8].pack())
+        .output_data([0u8; 8].pack())
         .build();
     let outpoint = tx.output_pts()[0].clone();
     let (node_announcement_1, node_announcement_2, channel_announcement) =
@@ -684,7 +684,7 @@ fn test_announcement_message_serialize() {
                 .lock(ScriptBuilder::default().args(pubkey_hash.pack()).build())
                 .build(),
         )
-        .output_data(vec![0u8; 8].pack())
+        .output_data([0u8; 8].pack())
         .build();
     let outpoint = tx.output_pts()[0].clone();
     let (_, _, mut channel_announcement) =
@@ -698,7 +698,7 @@ fn test_announcement_message_serialize() {
 
     let shutdown_info = ShutdownInfo {
         close_script: ScriptBuilder::default().build(),
-        fee_rate: 100 as u64,
+        fee_rate: 100_u64,
         signature: Some(PartialSignature::max()),
     };
     let serialized = bincode::serialize(&shutdown_info).unwrap();
