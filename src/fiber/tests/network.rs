@@ -1,5 +1,6 @@
 use super::test_utils::{init_tracing, NetworkNode};
 use crate::{
+    ckb::tests::test_utils::set_next_block_timestamp,
     fiber::{
         channel::ShutdownInfo,
         config::DEFAULT_TLC_EXPIRY_DELTA,
@@ -7,8 +8,8 @@ use crate::{
         network::{NetworkActorStateStore, SendPaymentCommand, SendPaymentData},
         tests::test_utils::NetworkNodeConfigBuilder,
         types::{
-            BroadcastMessage, ChannelAnnouncement, ChannelUpdateChannelFlags, NodeAnnouncement,
-            Privkey, Pubkey,
+            BroadcastMessage, BroadcastMessageWithTimestamp, ChannelAnnouncement,
+            ChannelUpdateChannelFlags, NodeAnnouncement, Privkey, Pubkey,
         },
         NetworkActorCommand, NetworkActorEvent, NetworkActorMessage,
     },
@@ -272,8 +273,13 @@ async fn test_node1_node2_channel_update() {
         .expect("send message to network actor");
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
-    let channel_update_of_node1 =
-        channel_context.create_channel_update_of_node1(ChannelUpdateChannelFlags::empty(), 1, 1, 1);
+    let channel_update_of_node1 = channel_context.create_channel_update_of_node1(
+        ChannelUpdateChannelFlags::empty(),
+        1,
+        1,
+        1,
+        None,
+    );
     node.network_actor
         .send_message(NetworkActorMessage::Event(
             NetworkActorEvent::GossipMessage(
@@ -291,8 +297,13 @@ async fn test_node1_node2_channel_update() {
         Some(ChannelUpdateInfo::from(&channel_update_of_node1))
     );
 
-    let channel_update_of_node2 =
-        channel_context.create_channel_update_of_node2(ChannelUpdateChannelFlags::empty(), 2, 2, 2);
+    let channel_update_of_node2 = channel_context.create_channel_update_of_node2(
+        ChannelUpdateChannelFlags::empty(),
+        2,
+        2,
+        2,
+        None,
+    );
     node.network_actor
         .send_message(NetworkActorMessage::Event(
             NetworkActorEvent::GossipMessage(
@@ -342,6 +353,7 @@ async fn test_channel_update_version() {
             i.into(),
             i.into(),
             i.into(),
+            None,
         ))
     }
     let [channel_update_1, channel_update_2, channel_update_3] =
@@ -396,6 +408,73 @@ async fn test_channel_update_version() {
         new_channel_info.update_of_node1,
         Some(ChannelUpdateInfo::from(&channel_update_3))
     );
+}
+
+#[tokio::test]
+async fn test_query_missing_broadcast_message() {
+    let channel_context = ChannelTestContext::gen();
+    let funding_tx = channel_context.funding_tx.clone();
+    let out_point = channel_context.channel_outpoint().clone();
+    let channel_announcement = channel_context.channel_announcement.clone();
+    // A timestamp so large that the other node will unlikely try to send GetBroadcastMessages
+    // with timestamp smaller than this one.
+    let long_long_time_ago = now_timestamp_as_millis_u64() - 30 * 24 * 3600 * 100;
+
+    let mut node1 = NetworkNode::new().await;
+    // Set a small timestamp for the ChannelAnnouncement.
+    // So that node2 will not sync this ChannelAnnouncement with node1.
+    set_next_block_timestamp(long_long_time_ago).await;
+    node1.submit_tx(funding_tx.clone()).await;
+    node1
+        .network_actor
+        .send_message(NetworkActorMessage::Event(
+            NetworkActorEvent::GossipMessage(
+                get_test_peer_id(),
+                BroadcastMessage::ChannelAnnouncement(channel_announcement)
+                    .create_broadcast_messages_filter_result(),
+            ),
+        ))
+        .expect("send message to network actor");
+    let channel_update = channel_context.create_channel_update_of_node1(
+        ChannelUpdateChannelFlags::empty(),
+        1,
+        1,
+        1,
+        Some(long_long_time_ago + 10),
+    );
+    node1
+        .network_actor
+        .send_message(NetworkActorMessage::Event(
+            NetworkActorEvent::GossipMessage(
+                get_test_peer_id(),
+                BroadcastMessage::ChannelUpdate(channel_update.clone())
+                    .create_broadcast_messages_filter_result(),
+            ),
+        ))
+        .expect("send message to network actor");
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    let node1_channel_info = node1.get_network_graph_channel(&out_point).await.unwrap();
+    assert_ne!(node1_channel_info.update_of_node1, None);
+
+    let mut node2 = NetworkNode::new().await;
+    node1.connect_to(&node2).await;
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    // Verify that node2 still does not have channel info after active syncing done.
+    let node2_channel_info = node2.get_network_graph_channel(&out_point).await;
+    assert_eq!(node2_channel_info, None);
+
+    node1
+        .network_actor
+        .send_message(NetworkActorMessage::Command(
+            NetworkActorCommand::BroadcastMessages(vec![
+                BroadcastMessageWithTimestamp::ChannelUpdate(channel_update.clone()),
+            ]),
+        ))
+        .expect("send message to network actor");
+    node2.submit_tx(funding_tx.clone()).await;
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    let node2_channel_info = node2.get_network_graph_channel(&out_point).await.unwrap();
+    assert_eq!(node1_channel_info, node2_channel_info);
 }
 
 #[tokio::test]
