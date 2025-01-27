@@ -3468,7 +3468,7 @@ async fn test_forward_payment_channel_disabled() {
         true,
     )
     .await;
-    let [mut node_a, mut node_b, mut node_c] = nodes.try_into().expect("3 nodes");
+    let [node_a, node_b, node_c] = nodes.try_into().expect("3 nodes");
     let [_channel_a_b, channel_b_c] = channels.try_into().expect("2 channels");
 
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
@@ -5154,7 +5154,7 @@ async fn test_send_payment_with_disable_channel() {
     let amounts = vec![(100000000000, 100000000000); nodes_num - 1];
     let (nodes, channels) =
         create_n_nodes_with_established_channel(&amounts, nodes_num, true).await;
-    let [mut node_0, _node_1, mut node_2, mut node_3] = nodes.try_into().expect("4 nodes");
+    let [node_0, _node_1, node_2, node_3] = nodes.try_into().expect("4 nodes");
 
     // begin to set channel disable, but do not notify the network
     node_2.disable_channel_stealthy(channels[1]).await;
