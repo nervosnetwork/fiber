@@ -504,7 +504,7 @@ where
         // this will make the probability calculation more stable
         let time_ago = if time_ago < 1000 { 0 } else { time_ago };
         let exponent = -(time_ago as f64) / (DEFAULT_BIMODAL_DECAY_TIME as f64);
-        
+
         exponent.exp()
     }
 
@@ -517,13 +517,12 @@ where
 
         let factor = self.time_factor(time);
 
-        
         capacity - (factor * (capacity - fail_amount) as f64) as u128
     }
 
     pub(crate) fn can_send(&self, amount: u128, time: u64) -> u128 {
         let factor = self.time_factor(time);
-        
+
         (amount as f64 * factor) as u128
     }
 
@@ -599,8 +598,7 @@ where
 
         // f128 is only on nightly, so we use f64 here, we may lose some precision
         // but it's acceptable since all the values are cast to f64
-        let mut prob =
-            self.integral_probability(capacity as f64, amount, fail_amount);
+        let mut prob = self.integral_probability(capacity as f64, amount, fail_amount);
         if prob.is_nan() {
             error!(
                 "probability is NaN: capacity: {} amount: {} fail_amount: {}",
@@ -608,13 +606,12 @@ where
             );
             return 0.0;
         }
-        let re_norm =
-            self.integral_probability(capacity as f64, success_amount, fail_amount);
+        let re_norm = self.integral_probability(capacity as f64, success_amount, fail_amount);
         if re_norm == 0.0 {
             return 0.0;
         }
         prob /= re_norm;
-        prob = prob.max(0.0).min(1.0);
+        prob = prob.clamp(0.0, 1.0);
         return prob;
     }
 

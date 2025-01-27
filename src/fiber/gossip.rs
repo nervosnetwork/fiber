@@ -725,24 +725,15 @@ enum PeerSyncStatus {
 
 impl PeerSyncStatus {
     fn is_passive_syncing(&self) -> bool {
-        match self {
-            PeerSyncStatus::PassiveFilter(_) => true,
-            _ => false,
-        }
+        matches!(self, PeerSyncStatus::PassiveFilter(_))
     }
 
     fn is_active_syncing(&self) -> bool {
-        match self {
-            PeerSyncStatus::ActiveGet(_) => true,
-            _ => false,
-        }
+        matches!(self, PeerSyncStatus::ActiveGet(_))
     }
 
     fn is_finished_active_syncing(&self) -> bool {
-        match self {
-            PeerSyncStatus::FinishedActiveSyncing(_, _) => true,
-            _ => false,
-        }
+        matches!(self, PeerSyncStatus::FinishedActiveSyncing(_, _))
     }
 
     fn can_start_active_syncing(&self) -> bool {
@@ -1041,7 +1032,7 @@ impl<S: GossipMessageStore> ExtendedGossipMessageStoreState<S> {
         for (id, subscription) in self.output_ports.iter() {
             let messages_to_send = messages
                 .iter()
-                .filter(|m| &m.cursor() > &subscription.filter)
+                .filter(|m| m.cursor() > subscription.filter)
                 .cloned()
                 .collect::<Vec<_>>();
             trace!(
@@ -1242,10 +1233,9 @@ impl<S: GossipMessageStore + Send + Sync + 'static> Actor for ExtendedGossipMess
 
                 match cursor {
                     Some(cursor) => {
-                        state
-                            .output_ports
-                            .get_mut(&id)
-                            .map(|output| output.filter = cursor);
+                        if let Some(outpout) = state.output_ports.get_mut(&id) {
+                            outpout.filter = cursor;
+                        }
                     }
                     _ => {
                         state.output_ports.remove(&id);
@@ -1597,8 +1587,7 @@ where
         let queries = get_dependent_message_queries(&message, self.get_store());
         self.pending_queries.extend(queries);
 
-        self
-            .store
+        self.store
             .actor
             .send_message(ExtendedGossipMessageStoreMessage::SaveMessages(vec![
                 message,
@@ -2085,6 +2074,7 @@ fn verify_node_announcement<S: GossipMessageStore>(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 impl GossipProtocolHandle {
     pub(crate) async fn new<S>(
         name: Option<String>,
@@ -2188,7 +2178,7 @@ where
             myself.get_cell(),
         )
         .await;
-        if let Err(_) = tx.send(store.clone()) {
+        if tx.send(store.clone()).is_err() {
             panic!("failed to send store to the caller");
         }
         let control = timeout(Duration::from_secs(1), rx)
@@ -2197,7 +2187,7 @@ where
             .expect("receive control");
         debug!("Gossip actor received service control");
 
-        let _ = myself.send_interval(network_maintenance_interval, || {
+        myself.send_interval(network_maintenance_interval, || {
             GossipActorMessage::TickNetworkMaintenance
         });
         let state = Self::State {
@@ -2556,7 +2546,7 @@ impl ServiceProtocol for GossipProtocolHandle {
             .sender
             .take()
             .expect("service control sender set and init called once");
-        if let Err(_) = sender.send(context.control().clone()) {
+        if sender.send(context.control().clone()).is_err() {
             panic!("Failed to send service control");
         }
     }

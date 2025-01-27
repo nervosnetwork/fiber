@@ -142,7 +142,7 @@ async fn run_dummy_tentacle_service(gossip_handle: GossipProtocolHandle) {
         .await
         .expect("listen tentacle");
 
-    let _ = spawn(async move {
+    spawn(async move {
         service.run().await;
     });
 }
@@ -271,12 +271,7 @@ async fn test_saving_invalid_channel_announcement() {
         .as_builder()
         .args(
             Bytes::new_builder()
-                .set(
-                    b"wrong lock args"
-                        .iter()
-                        .map(|b| Byte::new(*b))
-                        .collect(),
-                )
+                .set(b"wrong lock args".iter().map(|b| Byte::new(*b)).collect())
                 .build(),
         )
         .build();
@@ -501,12 +496,7 @@ async fn test_saving_channel_update_with_invalid_channel_announcement() {
         .as_builder()
         .args(
             Bytes::new_builder()
-                .set(
-                    b"wrong lock args"
-                        .iter()
-                        .map(|b| Byte::new(*b))
-                        .collect(),
-                )
+                .set(b"wrong lock args".iter().map(|b| Byte::new(*b)).collect())
                 .build(),
         )
         .build();

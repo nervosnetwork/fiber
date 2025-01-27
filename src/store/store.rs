@@ -469,8 +469,8 @@ impl NetworkGraphStateStore for Store {
         let prefix = vec![PAYMENT_HISTORY_TIMED_RESULT_PREFIX];
         let iter = self.prefix_iterator(&prefix);
         iter.map(|(key, value)| {
-            let channel_outpoint: OutPoint = OutPoint::from_slice(&key[1..=36])
-                .expect("deserialize OutPoint should be OK");
+            let channel_outpoint: OutPoint =
+                OutPoint::from_slice(&key[1..=36]).expect("deserialize OutPoint should be OK");
             let direction = deserialize_from(&key[37..], "Direction");
             let result = deserialize_from(value.as_ref(), "TimedResult");
             (channel_outpoint, direction, result)
@@ -491,7 +491,7 @@ impl GossipMessageStore for Store {
         self.db
             .iterator(mode)
             // We should skip the value with the same cursor (after_cursor is exclusive).
-            .skip_while(move |(key, _)| key.as_ref() == &start)
+            .skip_while(move |(key, _)| key.as_ref() == start)
             .take_while(move |(key, _)| key.starts_with(&prefix))
             .map(|(key, value)| {
                 debug_assert_eq!(key.len(), 1 + CURSOR_SIZE);

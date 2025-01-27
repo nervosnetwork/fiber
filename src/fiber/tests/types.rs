@@ -254,7 +254,7 @@ fn test_tlc_error_code() {
 fn test_create_and_verify_node_announcement() {
     let privkey = gen_rand_fiber_private_key();
     let node_announcement = NodeAnnouncement::new(
-        AnnouncedNodeName::from_str("node1").expect("valid name"),
+        AnnouncedNodeName::from_string("node1").expect("valid name"),
         vec![],
         &privkey,
         now_timestamp_as_millis_u64(),
@@ -271,7 +271,7 @@ fn test_create_and_verify_node_announcement() {
 fn test_serde_node_announcement() {
     let privkey = gen_rand_fiber_private_key();
     let node_announcement = NodeAnnouncement::new(
-        AnnouncedNodeName::from_str("node1").expect("valid name"),
+        AnnouncedNodeName::from_string("node1").expect("valid name"),
         vec![],
         &privkey,
         now_timestamp_as_millis_u64(),

@@ -537,14 +537,10 @@ where
                 // So that when a node is marked as failed, the history can mark all the channels
                 // associated with the node as failed. Here we tell the history about
                 // the mapping between nodes and channels.
-                self.history.add_node_channel_map(
-                    channel_info.node1,
-                    channel_info.out_point().clone(),
-                );
-                self.history.add_node_channel_map(
-                    channel_info.node2,
-                    channel_info.out_point().clone(),
-                );
+                self.history
+                    .add_node_channel_map(channel_info.node1, channel_info.out_point().clone());
+                self.history
+                    .add_node_channel_map(channel_info.node2, channel_info.out_point().clone());
                 self.channels
                     .insert(channel_info.channel_outpoint.clone(), channel_info);
                 return Some(cursor);
@@ -914,6 +910,7 @@ where
     }
 
     // the algorithm works from target-to-source to find the shortest path
+    #[allow(clippy::too_many_arguments)]
     pub fn find_path(
         &self,
         source: Pubkey,

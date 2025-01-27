@@ -249,7 +249,7 @@ fn get_contracts_context() -> &'static ContractsContext {
 }
 
 #[cfg(test)]
-fn get_contracts_context<'a>() -> ContractsContext {
+fn get_contracts_context() -> ContractsContext {
     super::tests::test_utils::MOCK_CONTEXT
         .read()
         .expect("read mock context")

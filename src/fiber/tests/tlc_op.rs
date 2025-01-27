@@ -338,15 +338,12 @@ impl Actor for TlcActor {
         _myself: ActorRef<Self::Msg>,
         args: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
-        eprintln!("TlcActor pre_start");
-        match args {
-            peer_id => {
-                eprintln!("peer_id: {:?}", peer_id);
-                Ok(TlcActorState {
-                    tlc_state: Default::default(),
-                    peer_id,
-                })
-            }
+        let peer_id = args;
+        {
+            Ok(TlcActorState {
+                tlc_state: Default::default(),
+                peer_id,
+            })
         }
     }
 }

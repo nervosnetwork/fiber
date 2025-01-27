@@ -206,6 +206,7 @@ pub struct NetworkNodeConfigBuilder {
     node_name: Option<String>,
     // We may generate a FiberConfig based on the base_dir and node_name,
     // but allow user to override it.
+    #[allow(clippy::type_complexity)]
     fiber_config_updater: Option<Box<dyn FnOnce(&mut FiberConfig) + 'static>>,
 }
 
@@ -267,6 +268,7 @@ impl NetworkNodeConfigBuilder {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn establish_channel_between_nodes(
     node_a: &mut NetworkNode,
     node_b: &mut NetworkNode,
@@ -443,6 +445,7 @@ pub(crate) async fn create_n_nodes_with_established_channel(
         .await
 }
 
+#[allow(clippy::type_complexity)]
 pub(crate) async fn create_n_nodes_with_index_and_amounts_with_established_channel(
     amounts: &[((usize, usize), (u128, u128))],
     n: usize,
@@ -486,9 +489,9 @@ pub(crate) async fn create_n_nodes_with_index_and_amounts_with_established_chann
         };
         channels.push(channel_id);
         // all the other nodes submit_tx
-        for k in 0..n {
-            let res = nodes[k].submit_tx(funding_tx.clone()).await;
-            nodes[k].add_channel_tx(channel_id, funding_tx.clone());
+        for node in nodes.iter_mut() {
+            let res = node.submit_tx(funding_tx.clone()).await;
+            node.add_channel_tx(channel_id, funding_tx.clone());
             assert_eq!(res, Status::Committed);
         }
     }
@@ -703,7 +706,7 @@ impl NetworkNode {
         let message =
             |rpc_reply| NetworkActorMessage::Command(NetworkActorCommand::NodeInfo((), rpc_reply));
         eprintln!("query node_info ...");
-        
+
         call!(self.network_actor, message)
             .expect("node_a alive")
             .unwrap()
@@ -942,6 +945,7 @@ impl NetworkNode {
             }
             nodes.push(new);
         }
+        #[allow(clippy::useless_conversion)]
         match nodes.try_into() {
             Ok(nodes) => nodes,
             Err(_) => unreachable!(),
@@ -1116,10 +1120,7 @@ impl NetworkNode {
     pub async fn get_network_graph_channel(&self, channel_id: &OutPoint) -> Option<ChannelInfo> {
         self.with_network_graph(|graph| {
             tracing::debug!("Getting channel info for {:?}", channel_id);
-            tracing::debug!(
-                "Channels: {:?}",
-                graph.channels().collect::<Vec<_>>()
-            );
+            tracing::debug!("Channels: {:?}", graph.channels().collect::<Vec<_>>());
             graph.get_channel(channel_id).cloned()
         })
         .await

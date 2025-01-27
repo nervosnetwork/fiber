@@ -21,7 +21,6 @@ use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::SystemTime;
-use std::{u128, u64};
 use tentacle::multiaddr::{MultiAddr, Protocol};
 use tentacle::service::SessionType;
 use tentacle::utils::{extract_peer_id, is_reachable, multiaddr_to_socketaddr};
@@ -3432,6 +3431,7 @@ fn try_send_actor_message(actor: &ActorRef<NetworkActorMessage>, message: Networ
     let _ = actor.send_message(message);
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn start_network<
     S: NetworkActorStateStore
         + ChannelActorStateStore

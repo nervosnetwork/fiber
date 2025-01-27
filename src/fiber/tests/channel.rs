@@ -3471,7 +3471,7 @@ async fn test_forward_payment_channel_disabled() {
     let [node_a, node_b, node_c] = nodes.try_into().expect("3 nodes");
     let [_channel_a_b, channel_b_c] = channels.try_into().expect("2 channels");
 
-    let node_c_pubkey = node_c.pubkey.clone();
+    let node_c_pubkey = node_c.pubkey;
 
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
@@ -5148,7 +5148,7 @@ async fn test_send_payment_with_disable_channel() {
         create_n_nodes_with_established_channel(&amounts, nodes_num, true).await;
     let [node_0, _node_1, mut node_2, node_3] = nodes.try_into().expect("4 nodes");
     let source_node = &node_0;
-    let target_pubkey = node_3.pubkey.clone();
+    let target_pubkey = node_3.pubkey;
 
     // sleep for a while
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
@@ -5160,7 +5160,7 @@ async fn test_send_payment_with_disable_channel() {
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
             SendPaymentCommand {
-                target_pubkey: Some(target_pubkey.clone()),
+                target_pubkey: Some(target_pubkey),
                 amount: Some(3000),
                 payment_hash: None,
                 final_tlc_expiry_delta: None,

@@ -90,11 +90,10 @@ fn create_fake_channel_announcement_mesage(
 
 fn create_node_announcement_mesage_with_priv_key(priv_key: &Privkey) -> NodeAnnouncement {
     let node_name = "fake node";
-    let addresses =
-        ["/ip4/1.1.1.1/tcp/8346/p2p/QmaFDJb9CkMrXy7nhTWBY5y9mvuykre3EzzRsCJUAVXprZ"]
-            .iter()
-            .map(|x| MultiAddr::from_str(x).expect("valid multiaddr"))
-            .collect();
+    let addresses = ["/ip4/1.1.1.1/tcp/8346/p2p/QmaFDJb9CkMrXy7nhTWBY5y9mvuykre3EzzRsCJUAVXprZ"]
+        .iter()
+        .map(|x| MultiAddr::from_str(x).expect("valid multiaddr"))
+        .collect();
     NodeAnnouncement::new(
         node_name.into(),
         addresses,
@@ -621,7 +620,7 @@ async fn test_persisting_announced_nodes() {
     let peers = node
         .with_network_graph(|graph| graph.sample_n_peers_to_connect(1))
         .await;
-    assert!(peers.get(&peer_id).is_some());
+    assert!(peers.contains_key(&peer_id));
 }
 
 #[tokio::test]

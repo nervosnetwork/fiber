@@ -1432,8 +1432,7 @@ impl TlcErrPacket {
             }
         }
 
-        let hops_public_keys: Vec<PublicKey> =
-            hops_public_keys.iter().map(|k| k.0).collect();
+        let hops_public_keys: Vec<PublicKey> = hops_public_keys.iter().map(|k| k.0).collect();
         let session_key = SecretKey::from_slice(session_key).inspect_err(|err|
             error!(target: "fnn::fiber::types::TlcErrPacket", "decode session_key error={} key={}", err, hex::encode(session_key))
         ).ok()?;
@@ -1543,16 +1542,16 @@ impl TlcErrorCode {
     }
 
     pub fn payment_failed(&self) -> bool {
-        match self {
+        matches!(
+            self,
             TlcErrorCode::IncorrectOrUnknownPaymentDetails
-            | TlcErrorCode::FinalIncorrectExpiryDelta
-            | TlcErrorCode::FinalIncorrectTlcAmount
-            | TlcErrorCode::InvoiceExpired
-            | TlcErrorCode::InvoiceCancelled
-            | TlcErrorCode::ExpiryTooFar
-            | TlcErrorCode::ExpiryTooSoon => true,
-            _ => false,
-        }
+                | TlcErrorCode::FinalIncorrectExpiryDelta
+                | TlcErrorCode::FinalIncorrectTlcAmount
+                | TlcErrorCode::InvoiceExpired
+                | TlcErrorCode::InvoiceCancelled
+                | TlcErrorCode::ExpiryTooFar
+                | TlcErrorCode::ExpiryTooSoon
+        )
     }
 }
 

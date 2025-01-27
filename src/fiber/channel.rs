@@ -73,7 +73,6 @@ use std::{
     fmt::{self, Debug},
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
-    u128,
 };
 
 use super::types::{ChannelUpdateChannelFlags, ChannelUpdateMessageFlags, UpdateTlcInfo};
@@ -651,7 +650,7 @@ where
                         // we expect `ChannelReady` will be both OK for tlc forwarding,
                         // so here are the unreachable point in normal workflow,
                         // set `TemporaryNodeFailure` for general temporary failure of the processing node here
-                        assert!(false, "unreachable point in normal workflow");
+                        debug_assert!(false, "unreachable point in normal workflow");
                         TlcErrorCode::TemporaryNodeFailure
                     }
                 }
@@ -944,11 +943,14 @@ where
 
         assert!(state.get_received_tlc(add_tlc.tlc_id).is_some());
 
-        OptionFuture::from(add_tlc.onion_packet.clone().map(|onion_packet| {
-                self.peel_onion_packet(onion_packet, add_tlc.payment_hash)
-            }))
-            .await
-            .transpose()
+        OptionFuture::from(
+            add_tlc
+                .onion_packet
+                .clone()
+                .map(|onion_packet| self.peel_onion_packet(onion_packet, add_tlc.payment_hash)),
+        )
+        .await
+        .transpose()
     }
 
     async fn apply_add_tlc_operation_with_peeled_onion_packet(
@@ -1009,37 +1011,34 @@ where
             } else {
                 return Err(ProcessingChannelError::FinalIncorrectPaymentHash);
             }
-        } else {
-            if state.is_public() && state.is_tlc_forwarding_enabled() {
-                if add_tlc.expiry
-                    < peeled_onion_packet.current.expiry + state.local_tlc_info.tlc_expiry_delta
-                {
-                    return Err(ProcessingChannelError::IncorrectTlcExpiry);
-                }
-
-                assert!(received_amount >= forward_amount);
-
-                // Next forwarding channel will get the forward_fee and check if it's enough.
-                let forward_fee = received_amount.saturating_sub(forward_amount);
-
-                // if this is not the last hop, forward TLC to next hop
-                self.register_retryable_forward_tlc(
-                    myself,
-                    state,
-                    add_tlc.tlc_id,
-                    add_tlc.payment_hash,
-                    peeled_onion_packet.clone(),
-                    forward_fee,
-                )
-                .await;
-            } else {
-                // if we don't have public channel info, we can not forward the TLC
-                // this may happended some malicious sender build a invalid onion router
-                return Err(ProcessingChannelError::InvalidState(
-                    "Received AddTlc message, but the channel is not public or disabled"
-                        .to_string(),
-                ));
+        } else if state.is_public() && state.is_tlc_forwarding_enabled() {
+            if add_tlc.expiry
+                < peeled_onion_packet.current.expiry + state.local_tlc_info.tlc_expiry_delta
+            {
+                return Err(ProcessingChannelError::IncorrectTlcExpiry);
             }
+
+            assert!(received_amount >= forward_amount);
+
+            // Next forwarding channel will get the forward_fee and check if it's enough.
+            let forward_fee = received_amount.saturating_sub(forward_amount);
+
+            // if this is not the last hop, forward TLC to next hop
+            self.register_retryable_forward_tlc(
+                myself,
+                state,
+                add_tlc.tlc_id,
+                add_tlc.payment_hash,
+                peeled_onion_packet.clone(),
+                forward_fee,
+            )
+            .await;
+        } else {
+            // if we don't have public channel info, we can not forward the TLC
+            // this may happended some malicious sender build a invalid onion router
+            return Err(ProcessingChannelError::InvalidState(
+                "Received AddTlc message, but the channel is not public or disabled".to_string(),
+            ));
         }
         Ok(())
     }
@@ -2667,15 +2666,9 @@ impl PendingTlcs {
             .iter()
             .filter(|tlc| {
                 if tlc.is_offered() {
-                    match tlc.outbound_status() {
-                        OutboundTlcStatus::Committed => true,
-                        _ => false,
-                    }
+                    matches!(tlc.outbound_status(), OutboundTlcStatus::Committed)
                 } else {
-                    match tlc.inbound_status() {
-                        InboundTlcStatus::Committed => true,
-                        _ => false,
-                    }
+                    matches!(tlc.inbound_status(), InboundTlcStatus::Committed)
                 }
             })
             .cloned()
@@ -3557,7 +3550,7 @@ impl ChannelActorState {
                 } else {
                     (self.remote_pubkey, self.local_pubkey)
                 };
-                
+
                 ChannelAnnouncement::new_unsigned(
                     &node1_id,
                     &node2_id,
@@ -3771,7 +3764,10 @@ impl ChannelActorState {
         if let Some(x) = self
             .public_channel_info
             .as_ref()
-            .and_then(|state| state.channel_update.clone()) { return Some(x) };
+            .and_then(|state| state.channel_update.clone())
+        {
+            return Some(x);
+        };
 
         Some(self.generate_channel_update(network).await)
     }
@@ -3802,7 +3798,7 @@ impl ChannelActorState {
         ))
     }
 
-    pub fn new_inbound_channel<'a>(
+    pub fn new_inbound_channel(
         temp_channel_id: Hash256,
         public_channel_info: Option<PublicChannelInfo>,
         local_value: u128,
@@ -4286,7 +4282,6 @@ impl ChannelActorState {
     // Get the total liquid capacity of the channel, which will exclude the reserved ckb amount.
     // This is the capacity used for gossiping channel information.
     pub(crate) fn get_liquid_capacity(&self) -> u128 {
-        
         if self.funding_udt_type_script.is_some() {
             self.get_total_udt_amount()
         } else {
@@ -4763,14 +4758,16 @@ impl ChannelActorState {
     fn get_active_received_tlcs(&self, for_remote: bool) -> Vec<TlcInfo> {
         self.tlc_state
             .commitment_signed_tlcs(for_remote)
-            .filter(|tlc| tlc.is_received()).cloned()
+            .filter(|tlc| tlc.is_received())
+            .cloned()
             .collect()
     }
 
     fn get_active_offered_tlcs(&self, for_remote: bool) -> Vec<TlcInfo> {
         self.tlc_state
             .commitment_signed_tlcs(for_remote)
-            .filter(|tlc| tlc.is_offered()).cloned()
+            .filter(|tlc| tlc.is_offered())
+            .cloned()
             .collect()
     }
 

@@ -40,6 +40,7 @@ impl KeyPair {
     pub fn write_to_file(&self, path: &Path) -> Result<(), Error> {
         fs::OpenOptions::new()
             .create(true)
+            .truncate(true)
             .write(true)
             .open(path)
             .and_then(|mut file| {

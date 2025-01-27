@@ -300,7 +300,7 @@ impl AnnouncedNodeName {
         Ok(Self(bytes))
     }
 
-    pub fn from_str(value: &str) -> std::result::Result<Self, String> {
+    pub fn from_string(value: &str) -> std::result::Result<Self, String> {
         let str_bytes = value.as_bytes();
         Self::from_slice(str_bytes)
     }
@@ -328,7 +328,7 @@ impl std::fmt::Debug for AnnouncedNodeName {
 
 impl<'s> From<&'s str> for AnnouncedNodeName {
     fn from(value: &'s str) -> Self {
-        Self::from_str(value).expect("Valid announced node name")
+        Self::from_string(value).expect("Valid announced node name")
     }
 }
 
@@ -347,7 +347,7 @@ impl<'de> serde::Deserialize<'de> for AnnouncedNodeName {
         D: Deserializer<'de>,
     {
         let s = String::deserialize(deserializer)?;
-        Self::from_str(&s).map_err(serde::de::Error::custom)
+        Self::from_string(&s).map_err(serde::de::Error::custom)
     }
 }
 
@@ -382,7 +382,8 @@ impl FiberConfig {
     #[cfg(not(test))]
     pub fn read_or_generate_secret_key(&self) -> Result<super::KeyPair> {
         FIBER_SECRET_KEY
-            .get_or_try_init(|| self.inner_read_or_generate_secret_key()).cloned()
+            .get_or_try_init(|| self.inner_read_or_generate_secret_key())
+            .cloned()
     }
 
     pub fn store_path(&self) -> PathBuf {

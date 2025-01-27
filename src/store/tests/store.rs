@@ -44,7 +44,7 @@ fn mock_node() -> (Privkey, NodeAnnouncement) {
     (
         sk.clone(),
         NodeAnnouncement::new(
-            AnnouncedNodeName::from_str("node1").expect("invalid name"),
+            AnnouncedNodeName::from_string("node1").expect("invalid name"),
             vec![],
             &sk,
             now_timestamp_as_millis_u64(),
@@ -544,7 +544,7 @@ fn test_store_payment_history() {
         vec![(channel_outpoint.clone(), direction, result)]
     );
 
-    fn sort_results(results: &mut Vec<(OutPoint, Direction, TimedResult)>) {
+    fn sort_results(results: &mut [(OutPoint, Direction, TimedResult)]) {
         results.sort_by(|a, b| match a.0.cmp(&b.0) {
             Ordering::Equal => a.1.cmp(&b.1),
             other => other,
@@ -597,7 +597,7 @@ fn test_store_payment_history() {
 fn test_serde_node_announcement_as_broadcast_message() {
     let privkey = gen_rand_fiber_private_key();
     let node_announcement = NodeAnnouncement::new(
-        AnnouncedNodeName::from_str("node1").expect("valid name"),
+        AnnouncedNodeName::from_string("node1").expect("valid name"),
         vec![],
         &privkey,
         now_timestamp_as_millis_u64(),
