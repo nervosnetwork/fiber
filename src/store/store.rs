@@ -1,9 +1,8 @@
-use super::db_migrate::DbMigrate;
+use super::hook::{NoopStoreUpdateHook, PaymentUpdateHook};
 use super::schema::*;
-use super::subscription::{
-    new_subscription, NoopStoreUpdateHook, OnInvoiceUpdated, OnPaymentUpdated,
-    StoreUpdateSubscription, SubscriptionImpl,
-};
+use super::subscription::StoreUpdateSubscription;
+use super::subscription_impl::{new_subscription_impl, SubscriptionImpl};
+use super::{db_migrate::DbMigrate, hook::InvoiceUpdateHook};
 use crate::{
     fiber::{
         channel::{
@@ -32,7 +31,7 @@ use tentacle::secio::PeerId;
 /// An example of a hook is the [SubscriptionImpl] which is used to notify subscribers of updates of
 /// invoices and payments. Another example is the [NoopStoreUpdateHook] which does nothing.
 #[derive(Clone, Debug)]
-pub struct GenericStore<IH: OnInvoiceUpdated, PH: OnPaymentUpdated> {
+pub struct GenericStore<IH: InvoiceUpdateHook, PH: PaymentUpdateHook> {
     pub(crate) db: Arc<DB>,
     pub(crate) invoice_hook: IH,
     pub(crate) payment_hook: PH,
@@ -101,7 +100,7 @@ impl StoreWithHooks {
         path: P,
     ) -> Result<(Self, impl StoreUpdateSubscription), String> {
         let store = Store::new(path.as_ref())?;
-        let subscription_impl = new_subscription(store.clone()).await;
+        let subscription_impl = new_subscription_impl(store.clone()).await;
         let store = Self {
             db: store.db,
             payment_hook: subscription_impl.clone(),
@@ -111,7 +110,7 @@ impl StoreWithHooks {
     }
 }
 
-impl<IH: OnInvoiceUpdated, PH: OnPaymentUpdated> GenericStore<IH, PH> {
+impl<IH: InvoiceUpdateHook, PH: PaymentUpdateHook> GenericStore<IH, PH> {
     fn open_db(path: &Path) -> Result<Arc<DB>, String> {
         // add more migrations here
         let mut options = Options::default();
@@ -322,7 +321,7 @@ impl Batch {
     }
 }
 
-impl<IH: OnInvoiceUpdated, PH: OnPaymentUpdated> NetworkActorStateStore for GenericStore<IH, PH> {
+impl<IH: InvoiceUpdateHook, PH: PaymentUpdateHook> NetworkActorStateStore for GenericStore<IH, PH> {
     fn get_network_actor_state(&self, id: &PeerId) -> Option<PersistentNetworkActorState> {
         let key = [&[PEER_ID_NETWORK_ACTOR_STATE_PREFIX], id.as_bytes()].concat();
         self.get(key)
@@ -336,7 +335,7 @@ impl<IH: OnInvoiceUpdated, PH: OnPaymentUpdated> NetworkActorStateStore for Gene
     }
 }
 
-impl<IH: OnInvoiceUpdated, PH: OnPaymentUpdated> ChannelActorStateStore for GenericStore<IH, PH> {
+impl<IH: InvoiceUpdateHook, PH: PaymentUpdateHook> ChannelActorStateStore for GenericStore<IH, PH> {
     fn get_channel_actor_state(&self, id: &Hash256) -> Option<ChannelActorState> {
         let key = [&[CHANNEL_ACTOR_STATE_PREFIX], id.as_ref()].concat();
         self.get(key)
@@ -418,7 +417,7 @@ impl<IH: OnInvoiceUpdated, PH: OnPaymentUpdated> ChannelActorStateStore for Gene
     }
 }
 
-impl<IH: OnInvoiceUpdated, PH: OnPaymentUpdated> InvoiceStore for GenericStore<IH, PH> {
+impl<IH: InvoiceUpdateHook, PH: PaymentUpdateHook> InvoiceStore for GenericStore<IH, PH> {
     fn get_invoice(&self, id: &Hash256) -> Option<CkbInvoice> {
         let key = [&[CKB_INVOICE_PREFIX], id.as_ref()].concat();
         self.get(key).map(|v| deserialize_from(&v, "CkbInvoice"))
@@ -512,7 +511,7 @@ impl<IH: OnInvoiceUpdated, PH: OnPaymentUpdated> InvoiceStore for GenericStore<I
     }
 }
 
-impl<IH: OnInvoiceUpdated, PH: OnPaymentUpdated> NetworkGraphStateStore for GenericStore<IH, PH> {
+impl<IH: InvoiceUpdateHook, PH: PaymentUpdateHook> NetworkGraphStateStore for GenericStore<IH, PH> {
     fn get_payment_session(&self, payment_hash: Hash256) -> Option<PaymentSession> {
         let prefix = [&[PAYMENT_SESSION_PREFIX], payment_hash.as_ref()].concat();
         self.get(prefix)
@@ -557,7 +556,7 @@ impl<IH: OnInvoiceUpdated, PH: OnPaymentUpdated> NetworkGraphStateStore for Gene
     }
 }
 
-impl<IH: OnInvoiceUpdated, PH: OnPaymentUpdated> GossipMessageStore for GenericStore<IH, PH> {
+impl<IH: InvoiceUpdateHook, PH: PaymentUpdateHook> GossipMessageStore for GenericStore<IH, PH> {
     fn get_broadcast_messages_iter(
         &self,
         after_cursor: &Cursor,
@@ -787,7 +786,7 @@ impl<IH: OnInvoiceUpdated, PH: OnPaymentUpdated> GossipMessageStore for GenericS
     }
 }
 
-impl<IH: OnInvoiceUpdated, PH: OnPaymentUpdated> WatchtowerStore for GenericStore<IH, PH> {
+impl<IH: InvoiceUpdateHook, PH: PaymentUpdateHook> WatchtowerStore for GenericStore<IH, PH> {
     fn get_watch_channels(&self) -> Vec<ChannelData> {
         let prefix = vec![WATCHTOWER_CHANNEL_PREFIX];
         self.prefix_iterator(&prefix)

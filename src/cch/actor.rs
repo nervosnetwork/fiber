@@ -23,7 +23,8 @@ use crate::fiber::types::{Hash256, RemoveTlcFulfill, RemoveTlcReason, NO_SHARED_
 use crate::fiber::{NetworkActorCommand, NetworkActorMessage};
 use crate::invoice::Currency;
 use crate::now_timestamp_as_millis_u64;
-use crate::store::subscription::{InvoiceUpdate, PaymentUpdate, SubscriptionError};
+use crate::store::subscription::{InvoiceUpdate, PaymentUpdate};
+use crate::store::SubscriptionError;
 
 use super::error::CchDbError;
 use super::{CchConfig, CchError, CchOrderStatus, CchOrdersDb, ReceiveBTCOrder, SendBTCOrder};
