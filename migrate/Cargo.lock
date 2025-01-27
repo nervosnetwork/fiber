@@ -1711,8 +1711,6 @@ dependencies = [
 [[package]]
 name = "fnn"
 version = "0.3.1"
-<<<<<<< HEAD
-=======
 dependencies = [
  "anyhow",
  "arcode",
@@ -1821,7 +1819,6 @@ dependencies = [
 name = "fnn"
 version = "0.3.1"
 source = "git+https://github.com/chenyukang/fiber.git?branch=yukang-fix-480-keep-fail-tlc#07d054da4a2e9769eb12da35558183dcfb48bb8c"
->>>>>>> develop
 dependencies = [
  "anyhow",
  "arcode",
@@ -1884,11 +1881,8 @@ dependencies = [
  "fnn 0.2.1 (git+https://github.com/nervosnetwork/fiber.git?tag=v0.2.1)",
  "fnn 0.2.1 (git+https://github.com/nervosnetwork/fiber.git?tag=v0.3.0-rc1)",
  "fnn 0.3.1",
-<<<<<<< HEAD
-=======
  "fnn 0.3.1 (git+https://github.com/nervosnetwork/fiber.git?tag=v0.3.1)",
  "fnn 0.3.1 (git+https://github.com/chenyukang/fiber.git?branch=yukang-fix-480-keep-fail-tlc)",
->>>>>>> develop
  "hex",
  "indicatif",
  "serde",

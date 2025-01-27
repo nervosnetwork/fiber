@@ -399,6 +399,7 @@ fn test_history_apply_internal_result_fail_node() {
             ..
         })
     ));
+
     assert!(matches!(
         history.get_result(&channel_outpoint1, rev_direction1),
         Some(&TimedResult {
