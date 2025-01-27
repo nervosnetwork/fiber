@@ -1267,7 +1267,7 @@ pub trait NetworkGraphStateStore {
 }
 
 /// The status of a payment, will update as the payment progresses.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub enum PaymentSessionStatus {
     /// initial status, payment session is created, no HTLC is sent
     Created,
