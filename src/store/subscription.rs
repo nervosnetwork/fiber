@@ -1,6 +1,8 @@
 use std::collections::{hash_map::Entry, HashMap};
 
-use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef, MessagingErr};
+use ractor::{
+    async_trait, call_t, Actor, ActorProcessingErr, ActorRef, MessagingErr, RactorErr, RpcReplyPort,
+};
 use thiserror::Error;
 use tracing::warn;
 
@@ -10,6 +12,8 @@ use crate::{
 };
 
 use super::Store;
+
+const CALLING_ACTOR_TIMEOUT_MS: u64 = 1000;
 
 pub(crate) struct SubscriptionActor {
     store: Store,
@@ -42,19 +46,29 @@ pub async fn start(
 pub enum SubscriptionActorMessage {
     InvoiceUpdated(Hash256, CkbInvoiceStatus),
     PaymentUpdated(Hash256, PaymentSessionStatus),
-    SubscribeInvoiceUpdates(Hash256, ActorRef<InvoiceUpdate>),
-    UnsubscribeInvoiceUpdates(Hash256),
-    SubscribePaymentUpdates(Hash256, ActorRef<PaymentUpdate>),
-    UnsubscribePaymentUpdates(Hash256),
+    SubscribeInvoiceUpdates(
+        Hash256,
+        ActorRef<InvoiceUpdate>,
+        RpcReplyPort<SubscriptionId>,
+    ),
+    UnsubscribeInvoiceUpdates(SubscriptionId),
+    SubscribePaymentUpdates(
+        Hash256,
+        ActorRef<PaymentUpdate>,
+        RpcReplyPort<SubscriptionId>,
+    ),
+    UnsubscribePaymentUpdates(SubscriptionId),
 }
 
+type SubscriptionId = u64;
+
 struct InvoiceSubscriber {
-    id: u64,
+    id: SubscriptionId,
     receiver: ActorRef<InvoiceUpdate>,
 }
 
 impl InvoiceSubscriber {
-    pub fn new(id: u64, receiver: ActorRef<InvoiceUpdate>) -> Self {
+    pub fn new(id: SubscriptionId, receiver: ActorRef<InvoiceUpdate>) -> Self {
         Self { id, receiver }
     }
 
@@ -64,12 +78,12 @@ impl InvoiceSubscriber {
 }
 
 struct PaymentSubscriber {
-    id: u64,
+    id: SubscriptionId,
     receiver: ActorRef<PaymentUpdate>,
 }
 
 impl PaymentSubscriber {
-    pub fn new(id: u64, receiver: ActorRef<PaymentUpdate>) -> Self {
+    pub fn new(id: SubscriptionId, receiver: ActorRef<PaymentUpdate>) -> Self {
         Self { id, receiver }
     }
 
@@ -80,7 +94,7 @@ impl PaymentSubscriber {
 
 #[derive(Default)]
 pub struct SubscriptionActorState {
-    next_subscriber_id: u64,
+    next_subscriber_id: SubscriptionId,
     invoice_subscriptions: HashMap<Hash256, Vec<InvoiceSubscriber>>,
     payment_subscriptions: HashMap<Hash256, Vec<PaymentSubscriber>>,
 }
@@ -108,7 +122,7 @@ impl SubscriptionActorState {
         }
     }
 
-    pub fn get_next_subscriber_id(&mut self) -> u64 {
+    pub fn get_next_subscriber_id(&mut self) -> SubscriptionId {
         let id = self.next_subscriber_id;
         self.next_subscriber_id += 1;
         id
@@ -118,24 +132,26 @@ impl SubscriptionActorState {
         &mut self,
         invoice_hash: Hash256,
         receiver: ActorRef<InvoiceUpdate>,
-    ) {
+    ) -> SubscriptionId {
         let id = self.get_next_subscriber_id();
         self.invoice_subscriptions
             .entry(invoice_hash)
             .or_default()
             .push(InvoiceSubscriber::new(id, receiver));
+        id
     }
 
     pub fn add_payment_subscriber(
         &mut self,
         payment_hash: Hash256,
         receiver: ActorRef<PaymentUpdate>,
-    ) {
+    ) -> SubscriptionId {
         let id = self.get_next_subscriber_id();
         self.payment_subscriptions
             .entry(payment_hash)
             .or_default()
             .push(PaymentSubscriber::new(id, receiver));
+        id
     }
 }
 
@@ -147,7 +163,7 @@ impl Actor for SubscriptionActor {
 
     async fn pre_start(
         &self,
-        myself: ActorRef<Self::Msg>,
+        _myself: ActorRef<Self::Msg>,
         _: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
         Ok(Self::State::default())
@@ -155,7 +171,7 @@ impl Actor for SubscriptionActor {
 
     async fn handle(
         &self,
-        myself: ActorRef<Self::Msg>,
+        _myself: ActorRef<Self::Msg>,
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
@@ -176,27 +192,35 @@ impl Actor for SubscriptionActor {
                     }
                 }
             }
-            SubscriptionActorMessage::SubscribeInvoiceUpdates(hash, receiver) => {
-                state.add_invoice_subscriber(hash, receiver);
+            SubscriptionActorMessage::SubscribeInvoiceUpdates(hash, receiver, reply) => {
+                let _ = reply.send(state.add_invoice_subscriber(hash, receiver));
             }
-            SubscriptionActorMessage::UnsubscribeInvoiceUpdates(hash) => {
-                state.invoice_subscriptions.remove(&hash);
+            SubscriptionActorMessage::UnsubscribeInvoiceUpdates(subscription) => {
+                for subscribers in state.invoice_subscriptions.values_mut() {
+                    // TODO: maybe remember which hash the subscription is for to avoid iterating over all
+                    // the subscriptions
+                    let old_num_subscribers = subscribers.len();
+                    subscribers.retain(|s| s.id != subscription);
+                    if subscribers.len() != old_num_subscribers {
+                        break;
+                    }
+                }
             }
-            SubscriptionActorMessage::SubscribePaymentUpdates(hash, receiver) => {
-                state.add_payment_subscriber(hash, receiver);
+            SubscriptionActorMessage::SubscribePaymentUpdates(hash, receiver, reply) => {
+                let _ = reply.send(state.add_payment_subscriber(hash, receiver));
             }
-            SubscriptionActorMessage::UnsubscribePaymentUpdates(hash) => {
-                state.payment_subscriptions.remove(&hash);
+            SubscriptionActorMessage::UnsubscribePaymentUpdates(subscription) => {
+                // TODO: maybe remember which hash the subscription is for to avoid iterating over all
+                // the subscriptions
+                for subscribers in state.payment_subscriptions.values_mut() {
+                    let old_num_subscribers = subscribers.len();
+                    subscribers.retain(|s| s.id != subscription);
+                    if subscribers.len() != old_num_subscribers {
+                        break;
+                    }
+                }
             }
         }
-        Ok(())
-    }
-
-    async fn post_stop(
-        &self,
-        myself: ActorRef<Self::Msg>,
-        _state: &mut Self::State,
-    ) -> Result<(), ActorProcessingErr> {
         Ok(())
     }
 }
@@ -233,6 +257,8 @@ impl SubscriptionActor {
 pub enum SubscriptionError {
     #[error("Error while sending actor message: {0:?}")]
     MessagingErr(#[from] MessagingErr<SubscriptionActorMessage>),
+    #[error("Error while processing actor message: {0:?}")]
+    RactorErr(#[from] RactorErr<SubscriptionActorMessage>),
 }
 
 // The state of an invoice. Basically the same as CkbInvoiceStatus,
@@ -341,51 +367,67 @@ pub trait FiberSubscription: InvoiceSubscription + PaymentSubscription {}
 
 #[async_trait]
 pub trait InvoiceSubscription {
+    type Subscription;
     type Error: std::error::Error;
 
     async fn subscribe_invoice(
         &self,
         invoice_hash: Hash256,
         receiver: ActorRef<InvoiceUpdate>,
-    ) -> Result<(), Self::Error>;
+    ) -> Result<Self::Subscription, Self::Error>;
 
-    async fn unsubscribe_invoice(&self, invoice_hash: Hash256) -> Result<(), Self::Error>;
+    async fn unsubscribe_invoice(
+        &self,
+        subscription: Self::Subscription,
+    ) -> Result<(), Self::Error>;
 }
 
 #[async_trait]
 pub trait PaymentSubscription {
+    type Subscription;
     type Error: std::error::Error;
 
     async fn subscribe_payment(
         &self,
         payment_hash: Hash256,
         receiver: ActorRef<PaymentUpdate>,
-    ) -> Result<(), Self::Error>;
+    ) -> Result<Self::Subscription, Self::Error>;
 
-    async fn unsubscribe_payment(&self, payment_hash: Hash256) -> Result<(), Self::Error>;
+    async fn unsubscribe_payment(
+        &self,
+        subscription: Self::Subscription,
+    ) -> Result<(), Self::Error>;
 }
 
 #[async_trait]
 impl InvoiceSubscription for SubscriptionImpl {
+    type Subscription = SubscriptionId;
     type Error = SubscriptionError;
 
     async fn subscribe_invoice(
         &self,
         invoice_hash: Hash256,
         receiver: ActorRef<InvoiceUpdate>,
-    ) -> Result<(), Self::Error> {
-        self.actor
-            .send_message(SubscriptionActorMessage::SubscribeInvoiceUpdates(
+    ) -> Result<Self::Subscription, Self::Error> {
+        let id = call_t!(
+            self.actor,
+            |reply| SubscriptionActorMessage::SubscribeInvoiceUpdates(
                 invoice_hash,
                 receiver,
-            ))?;
-        Ok(())
+                reply
+            ),
+            CALLING_ACTOR_TIMEOUT_MS
+        )?;
+        Ok(id)
     }
 
-    async fn unsubscribe_invoice(&self, invoice_hash: Hash256) -> Result<(), Self::Error> {
+    async fn unsubscribe_invoice(
+        &self,
+        subscription: Self::Subscription,
+    ) -> Result<(), Self::Error> {
         self.actor
             .send_message(SubscriptionActorMessage::UnsubscribeInvoiceUpdates(
-                invoice_hash,
+                subscription,
             ))?;
         Ok(())
     }
@@ -393,25 +435,33 @@ impl InvoiceSubscription for SubscriptionImpl {
 
 #[async_trait]
 impl PaymentSubscription for SubscriptionImpl {
+    type Subscription = SubscriptionId;
     type Error = SubscriptionError;
 
     async fn subscribe_payment(
         &self,
         payment_hash: Hash256,
         receiver: ActorRef<PaymentUpdate>,
-    ) -> Result<(), Self::Error> {
-        self.actor
-            .send_message(SubscriptionActorMessage::SubscribePaymentUpdates(
+    ) -> Result<Self::Subscription, Self::Error> {
+        let id = call_t!(
+            self.actor,
+            |reply| SubscriptionActorMessage::SubscribePaymentUpdates(
                 payment_hash,
                 receiver,
-            ))?;
-        Ok(())
+                reply
+            ),
+            CALLING_ACTOR_TIMEOUT_MS
+        )?;
+        Ok(id)
     }
 
-    async fn unsubscribe_payment(&self, payment_hash: Hash256) -> Result<(), Self::Error> {
+    async fn unsubscribe_payment(
+        &self,
+        subscription: Self::Subscription,
+    ) -> Result<(), Self::Error> {
         self.actor
             .send_message(SubscriptionActorMessage::UnsubscribePaymentUpdates(
-                payment_hash,
+                subscription,
             ))?;
         Ok(())
     }
