@@ -1567,7 +1567,9 @@ impl Debug for RemoveTlcReason {
             RemoveTlcReason::RemoveTlcFulfill(_fulfill) => {
                 write!(f, "RemoveTlcFulfill")
             }
-            RemoveTlcReason::RemoveTlcFail(_fail) => write!(f, "RemoveTlcFail"),
+            RemoveTlcReason::RemoveTlcFail(_fail) => {
+                write!(f, "RemoveTlcFail")
+            }
         }
     }
 }
@@ -2382,6 +2384,30 @@ pub enum FiberChannelMessage {
     RemoveTlc(RemoveTlc),
     ReestablishChannel(ReestablishChannel),
     AnnouncementSignatures(AnnouncementSignatures),
+}
+
+impl Display for FiberChannelMessage {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            FiberChannelMessage::AcceptChannel(_) => write!(f, "AcceptChannel"),
+            FiberChannelMessage::CommitmentSigned(_) => write!(f, "CommitmentSigned"),
+            FiberChannelMessage::TxSignatures(_) => write!(f, "TxSignatures"),
+            FiberChannelMessage::ChannelReady(_) => write!(f, "ChannelReady"),
+            FiberChannelMessage::TxUpdate(_) => write!(f, "TxUpdate"),
+            FiberChannelMessage::TxComplete(_) => write!(f, "TxComplete"),
+            FiberChannelMessage::TxAbort(_) => write!(f, "TxAbort"),
+            FiberChannelMessage::TxInitRBF(_) => write!(f, "TxInitRBF"),
+            FiberChannelMessage::TxAckRBF(_) => write!(f, "TxAckRBF"),
+            FiberChannelMessage::Shutdown(_) => write!(f, "Shutdown"),
+            FiberChannelMessage::ClosingSigned(_) => write!(f, "ClosingSigned"),
+            FiberChannelMessage::UpdateTlcInfo(_) => write!(f, "UpdateTlcInfo"),
+            FiberChannelMessage::AddTlc(_) => write!(f, "AddTlc"),
+            FiberChannelMessage::RevokeAndAck(_) => write!(f, "RevokeAndAck"),
+            FiberChannelMessage::RemoveTlc(_) => write!(f, "RemoveTlc"),
+            FiberChannelMessage::ReestablishChannel(_) => write!(f, "ReestablishChannel"),
+            FiberChannelMessage::AnnouncementSignatures(_) => write!(f, "AnnouncementSignatures"),
+        }
+    }
 }
 
 impl FiberChannelMessage {

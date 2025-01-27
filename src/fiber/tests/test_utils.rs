@@ -3,6 +3,7 @@ use crate::fiber::channel::ChannelActorStateStore;
 use crate::fiber::channel::ChannelCommand;
 use crate::fiber::channel::ChannelCommandWithId;
 use crate::fiber::channel::ReloadParams;
+use crate::fiber::channel::UpdateCommand;
 use crate::fiber::graph::NetworkGraphStateStore;
 use crate::fiber::graph::PaymentSession;
 use crate::fiber::graph::PaymentSessionStatus;
@@ -21,6 +22,7 @@ use ractor::{call, Actor, ActorRef};
 use rand::rngs::OsRng;
 use secp256k1::{Message, Secp256k1};
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::{
     env,
     ffi::OsStr,
@@ -186,6 +188,8 @@ pub struct NetworkNode {
     pub peer_id: PeerId,
     pub event_emitter: mpsc::Receiver<NetworkServiceEvent>,
     pub pubkey: Pubkey,
+    pub unexpected_events: Arc<TokioRwLock<HashSet<String>>>,
+    pub triggered_unexpected_events: Arc<TokioRwLock<Vec<String>>>,
 }
 
 pub struct NetworkNodeConfig {
@@ -558,7 +562,7 @@ impl NetworkNode {
     }
 
     pub async fn send_payment(
-        &mut self,
+        &self,
         command: SendPaymentCommand,
     ) -> std::result::Result<SendPaymentResponse, String> {
         let message = |rpc_reply| -> NetworkActorMessage {
@@ -571,7 +575,7 @@ impl NetworkNode {
     }
 
     pub async fn send_payment_keysend(
-        &mut self,
+        &self,
         recipient: &NetworkNode,
         amount: u128,
         dry_run: bool,
@@ -596,7 +600,7 @@ impl NetworkNode {
     }
 
     pub async fn send_payment_keysend_to_self(
-        &mut self,
+        &self,
         amount: u128,
         dry_run: bool,
     ) -> std::result::Result<SendPaymentResponse, String> {
@@ -674,6 +678,7 @@ impl NetworkNode {
 
     pub async fn wait_until_success(&self, payment_hash: Hash256) {
         loop {
+            assert!(self.get_triggered_unexpected_events().await.is_empty());
             let status = self.get_payment_status(payment_hash).await;
             if status == PaymentSessionStatus::Success {
                 eprintln!("Payment success: {:?}\n\n", payment_hash);
@@ -689,6 +694,7 @@ impl NetworkNode {
 
     pub async fn wait_until_failed(&self, payment_hash: Hash256) {
         loop {
+            assert!(self.get_triggered_unexpected_events().await.is_empty());
             let status = self.get_payment_status(payment_hash).await;
             if status == PaymentSessionStatus::Failed {
                 eprintln!("Payment failed: {:?}\n\n", payment_hash);
@@ -771,6 +777,24 @@ impl NetworkNode {
         .await;
     }
 
+    pub async fn update_channel_with_command(
+        &mut self,
+        channel_id: Hash256,
+        command: UpdateCommand,
+    ) {
+        let message = |rpc_reply| -> NetworkActorMessage {
+            NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+                ChannelCommandWithId {
+                    channel_id,
+                    command: ChannelCommand::Update(command, rpc_reply),
+                },
+            ))
+        };
+        call!(self.network_actor, message)
+            .expect("node_a alive")
+            .expect("update channel success");
+    }
+
     pub fn get_payment_session(&self, payment_hash: Hash256) -> Option<PaymentSession> {
         self.store.get_payment_session(payment_hash)
     }
@@ -849,6 +873,44 @@ impl NetworkNode {
             }
         };
 
+        let mut unexpected_events: HashSet<String> = HashSet::new();
+
+        // Some usual unexpected events that we want to not happended
+        // use `assert!(node.get_triggered_unexpected_events().await.is_empty())` to check it
+        let default_unexpected_events = vec![
+            "Musig2VerifyError",
+            "Musig2RoundFinalizeError",
+            "InvalidOnionError",
+        ];
+        for event in default_unexpected_events {
+            unexpected_events.insert(event.to_string());
+        }
+
+        let unexpected_events = Arc::new(TokioRwLock::new(unexpected_events));
+        let triggered_unexpected_events = Arc::new(TokioRwLock::new(Vec::<String>::new()));
+        let (self_event_sender, self_event_receiver) = mpsc::channel(10000);
+        let unexpected_events_clone = unexpected_events.clone();
+        let triggered_unexpected_events_clone = triggered_unexpected_events.clone();
+        // spwan a new thread to collect all the events from event_receiver
+        tokio::spawn(async move {
+            while let Some(event) = event_receiver.recv().await {
+                self_event_sender
+                    .send(event.clone())
+                    .await
+                    .expect("send event");
+                let unexpected_events = unexpected_events_clone.read().await;
+                let event_content = format!("{:?}", event);
+                for unexpected_event in unexpected_events.iter() {
+                    if event_content.contains(unexpected_event) {
+                        triggered_unexpected_events_clone
+                            .write()
+                            .await
+                            .push(unexpected_event.clone());
+                    }
+                }
+            }
+        });
+
         println!(
             "Network node started for peer_id {:?} in directory {:?}",
             &peer_id,
@@ -867,8 +929,10 @@ impl NetworkNode {
             chain_actor,
             private_key: secret_key,
             peer_id,
-            event_emitter: event_receiver,
+            event_emitter: self_event_receiver,
             pubkey: public_key,
+            unexpected_events,
+            triggered_unexpected_events,
         }
     }
 
@@ -879,6 +943,17 @@ impl NetworkNode {
             store: self.store.clone(),
             fiber_config: self.fiber_config.clone(),
         }
+    }
+
+    pub async fn add_unexpected_events(&self, events: Vec<String>) {
+        let mut unexpected_events = self.unexpected_events.write().await;
+        for event in events {
+            unexpected_events.insert(event);
+        }
+    }
+
+    pub async fn get_triggered_unexpected_events(&self) -> Vec<String> {
+        self.triggered_unexpected_events.read().await.clone()
     }
 
     pub async fn get_network_channels(&self) -> Vec<ChannelInfo> {

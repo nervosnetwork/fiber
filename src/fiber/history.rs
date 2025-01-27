@@ -181,7 +181,10 @@ impl InternalResult {
 
         let Some(index) = error_index else {
             error!("Error index not found in the route: {:?}", tlc_err);
-            return need_to_retry;
+            // if the error node is not in the route,
+            // and we can not penalize the source node (which is ourself)
+            // it's better to stop the payment session
+            return false;
         };
 
         let len = nodes.len();
@@ -254,7 +257,14 @@ impl InternalResult {
                 TlcErrorCode::PermanentChannelFailure => {
                     self.fail_pair(nodes, index + 1);
                 }
-                TlcErrorCode::FeeInsufficient | TlcErrorCode::IncorrectTlcExpiry => {
+                TlcErrorCode::FeeInsufficient => {
+                    need_to_retry = true;
+                    self.fail_pair_balanced(nodes, index + 1);
+                    if index > 1 {
+                        self.succeed_range_pairs(nodes, 0, index);
+                    }
+                }
+                TlcErrorCode::IncorrectTlcExpiry => {
                     need_to_retry = false;
                     if index == 1 {
                         self.fail_node(nodes, 1);

@@ -420,8 +420,8 @@ where
                         state: state.state.into(),
                         local_balance: state.get_local_balance(),
                         remote_balance: state.get_remote_balance(),
-                        offered_tlc_balance: state.get_offered_tlc_balance(),
-                        received_tlc_balance: state.get_received_tlc_balance(),
+                        offered_tlc_balance: state.get_offered_tlc_balance(true),
+                        received_tlc_balance: state.get_received_tlc_balance(true),
                         latest_commitment_transaction_hash: state
                             .latest_commitment_transaction
                             .as_ref()
