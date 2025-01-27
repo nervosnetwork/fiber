@@ -655,7 +655,7 @@ where
             }
             ProcessingChannelError::WaitingTlcAck => TlcErrorCode::TemporaryChannelFailure,
             ProcessingChannelError::InternalError(_) => TlcErrorCode::TemporaryNodeFailure,
-            ProcessingChannelError::InvalidState(error) => match state.state {
+            ProcessingChannelError::InvalidState(_error) => match state.state {
                 // we can not revert back up `ChannelReady` after `ShuttingDown`
                 ChannelState::Closed(_) | ChannelState::ShuttingDown(_) => {
                     TlcErrorCode::PermanentChannelFailure
@@ -668,7 +668,7 @@ where
                         // we expect `ChannelReady` will be both OK for tlc forwarding,
                         // so here are the unreachable point in normal workflow,
                         // set `TemporaryNodeFailure` for general temporary failure of the processing node here
-                        assert!(false, "unreachable point in normal workflow");
+                        debug_assert!(false, "unreachable point in normal workflow");
                         TlcErrorCode::TemporaryNodeFailure
                     }
                 }
@@ -844,7 +844,6 @@ where
         tlc_info: &TlcInfo,
         remove_reason: RemoveTlcReason,
     ) {
-        assert!(tlc_info.is_offered());
         let (previous_channel_id, previous_tlc) =
             tlc_info.previous_tlc.expect("expect previous tlc");
         assert!(tlc_info.is_offered());
@@ -1044,7 +1043,11 @@ where
                 return Err(ProcessingChannelError::IncorrectTlcExpiry);
             }
 
-            assert!(received_amount >= forward_amount);
+            if received_amount < forward_amount {
+                return Err(ProcessingChannelError::InvalidParameter(
+                    "received_amount is less than forward_amount".to_string(),
+                ));
+            }
 
             // Next forwarding channel will get the forward_fee and check if it's enough.
             let forward_fee = received_amount.saturating_sub(forward_amount);
