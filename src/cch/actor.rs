@@ -23,6 +23,7 @@ use crate::fiber::types::{Hash256, RemoveTlcFulfill, RemoveTlcReason, NO_SHARED_
 use crate::fiber::{NetworkActorCommand, NetworkActorMessage};
 use crate::invoice::Currency;
 use crate::now_timestamp_as_millis_u64;
+use crate::store::subscription::{InvoiceUpdate, PaymentUpdate, SubscriptionError};
 
 use super::error::CchDbError;
 use super::{CchConfig, CchError, CchOrderStatus, CchOrdersDb, ReceiveBTCOrder, SendBTCOrder};
@@ -93,6 +94,22 @@ pub enum CchMessage {
 
     PendingReceivedTlcNotification(TlcNotification),
     SettledTlcNotification(TlcNotification),
+
+    SubscribeFiberPayment(
+        Hash256,
+        ActorRef<PaymentUpdate>,
+        RpcReplyPort<Result<(), SubscriptionError>>,
+    ),
+
+    UnsubscribeFiberPayment(Hash256, RpcReplyPort<Result<(), SubscriptionError>>),
+
+    SubscribeFiberInvoice(
+        Hash256,
+        ActorRef<InvoiceUpdate>,
+        RpcReplyPort<Result<(), SubscriptionError>>,
+    ),
+
+    UnsubscribeFiberInvoice(Hash256, RpcReplyPort<Result<(), SubscriptionError>>),
 }
 
 #[derive(Clone)]
@@ -250,6 +267,10 @@ impl Actor for CchActor {
                 }
                 Ok(())
             }
+            CchMessage::SubscribeFiberPayment(hash256, actor_ref, rpc_reply_port) => todo!(),
+            CchMessage::UnsubscribeFiberPayment(hash256, rpc_reply_port) => todo!(),
+            CchMessage::SubscribeFiberInvoice(hash256, actor_ref, rpc_reply_port) => todo!(),
+            CchMessage::UnsubscribeFiberInvoice(hash256, rpc_reply_port) => todo!(),
         }
     }
 }

@@ -3,5 +3,8 @@ pub mod migration;
 mod schema;
 pub mod store;
 pub use store::Store;
+pub mod subscription;
+pub(crate) use subscription::SubscriptionImpl;
+
 #[cfg(test)]
 mod tests;
