@@ -1917,7 +1917,7 @@ async fn test_send_payment_middle_hop_update_fee_send_payment_failed() {
         true,
     )
     .await;
-    let [node_0, _node_1, mut node_2, node_3] = nodes.try_into().expect("4 nodes");
+    let [node_0, _node_1, node_2, node_3] = nodes.try_into().expect("4 nodes");
 
     // node_2 update fee rate to a higher one, so the payment will fail
     let res = node_0
@@ -1947,7 +1947,7 @@ async fn test_send_payment_middle_hop_update_fee_multiple_payments() {
     // https://github.com/nervosnetwork/fiber/issues/480
     init_tracing();
     let _span = tracing::info_span!("node", node = "test").entered();
-    let (mut nodes, channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+    let (nodes, channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
         &[
             ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
             ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
@@ -2015,7 +2015,7 @@ async fn test_send_payment_middle_hop_update_fee_should_recovery() {
     // in the end, all the payments should success
     init_tracing();
     let _span = tracing::info_span!("node", node = "test").entered();
-    let (mut nodes, channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+    let (nodes, channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
         &[
             ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
             ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),

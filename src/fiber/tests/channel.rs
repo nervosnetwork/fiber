@@ -5070,7 +5070,7 @@ async fn test_send_payment_with_channel_balance_error() {
     let amounts = vec![(100000000000, 100000000000); nodes_num - 1];
     let (nodes, channels) =
         create_n_nodes_with_established_channel(&amounts, nodes_num, true).await;
-    let [node_0, _node_1, mut node_2, node_3] = nodes.try_into().expect("4 nodes");
+    let [node_0, _node_1, node_2, node_3] = nodes.try_into().expect("4 nodes");
     let source_node = &node_0;
     let target_pubkey = node_3.pubkey.clone();
 
@@ -5758,7 +5758,7 @@ async fn test_send_payment_will_succeed_with_retry_in_middle_hops() {
         true,
     )
     .await;
-    let [mut node_0, _node_1, mut node_2, node_3] = nodes.try_into().expect("4 nodes");
+    let [mut node_0, _node_1, node_2, node_3] = nodes.try_into().expect("4 nodes");
     let source_node = &mut node_0;
     let node_0_amount = source_node.get_local_balance_from_channel(channels[0]);
     let target_pubkey = node_3.pubkey.clone();
