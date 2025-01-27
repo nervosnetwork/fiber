@@ -25,15 +25,12 @@ impl SubscriptionActor {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) struct SubscriptionImpl {
     actor: ActorRef<SubscriptionActorMessage>,
 }
 
-pub async fn start(
-    store: Store,
-) -> impl InvoiceSubscription + PaymentSubscription + OnInvoiceUpdated + OnPaymentUpdated + Send + Clone
-{
+pub async fn new_subscription(store: Store) -> SubscriptionImpl {
     let actor = SubscriptionActor::new(store);
     let actor_ref = Actor::spawn(Some("store subscription actor".to_string()), actor, ())
         .await
@@ -363,10 +360,10 @@ pub struct PaymentUpdate {
     state: PaymentState,
 }
 
-pub trait FiberSubscription: InvoiceSubscription + PaymentSubscription {}
+trait StoreUpdateSubscription: InvoiceSubscription + PaymentSubscription {}
 
 #[async_trait]
-pub trait InvoiceSubscription {
+pub trait InvoiceSubscription: Send + Clone {
     type Subscription;
     type Error: std::error::Error;
 
@@ -383,7 +380,7 @@ pub trait InvoiceSubscription {
 }
 
 #[async_trait]
-pub trait PaymentSubscription {
+pub trait PaymentSubscription: Send + Clone {
     type Subscription;
     type Error: std::error::Error;
 
@@ -467,11 +464,13 @@ impl PaymentSubscription for SubscriptionImpl {
     }
 }
 
-pub(crate) trait OnInvoiceUpdated {
+impl StoreUpdateSubscription for SubscriptionImpl {}
+
+pub trait OnInvoiceUpdated: Send + Clone {
     fn on_invoice_updated(&self, invoice_hash: Hash256, status: CkbInvoiceStatus);
 }
 
-pub(crate) trait OnPaymentUpdated {
+pub trait OnPaymentUpdated: Send + Clone {
     fn on_payment_updated(&self, payment_hash: Hash256, status: PaymentSessionStatus);
 }
 
@@ -495,4 +494,16 @@ impl OnPaymentUpdated for SubscriptionImpl {
                 status,
             ));
     }
+}
+
+pub type NoopStoreUpdateHook = ();
+
+impl OnInvoiceUpdated for NoopStoreUpdateHook {
+    #[inline]
+    fn on_invoice_updated(&self, _invoice_hash: Hash256, _status: CkbInvoiceStatus) {}
+}
+
+impl OnPaymentUpdated for NoopStoreUpdateHook {
+    #[inline]
+    fn on_payment_updated(&self, _payment_hash: Hash256, _status: PaymentSessionStatus) {}
 }
