@@ -360,7 +360,7 @@ pub struct PaymentUpdate {
     state: PaymentState,
 }
 
-trait StoreUpdateSubscription: InvoiceSubscription + PaymentSubscription {}
+pub trait StoreUpdateSubscription: InvoiceSubscription + PaymentSubscription {}
 
 #[async_trait]
 pub trait InvoiceSubscription: Send + Clone {

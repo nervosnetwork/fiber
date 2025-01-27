@@ -1,7 +1,8 @@
 use super::db_migrate::DbMigrate;
 use super::schema::*;
 use super::subscription::{
-    NoopStoreUpdateHook, OnInvoiceUpdated, OnPaymentUpdated, SubscriptionImpl,
+    new_subscription, NoopStoreUpdateHook, OnInvoiceUpdated, OnPaymentUpdated,
+    StoreUpdateSubscription, SubscriptionImpl,
 };
 use crate::{
     fiber::{
@@ -38,6 +39,8 @@ pub struct GenericStore<IH: OnInvoiceUpdated, PH: OnPaymentUpdated> {
 }
 
 pub type Store = GenericStore<NoopStoreUpdateHook, NoopStoreUpdateHook>;
+
+pub type StoreWithHooks = GenericStore<SubscriptionImpl, SubscriptionImpl>;
 
 #[derive(Copy, Clone)]
 enum ChannelTimestamp {
@@ -84,13 +87,27 @@ fn update_channel_timestamp(
 
 impl Store {
     pub fn new<P: AsRef<Path>>(path: P) -> Result<Self, String> {
-        let db = Self::open_db(path.as_ref())?;
-        let db = Self::check_migrate(path, db)?;
+        let db = Self::open_db_and_migrate(path.as_ref())?;
         Ok(Self {
             db,
             payment_hook: NoopStoreUpdateHook::default(),
             invoice_hook: NoopStoreUpdateHook::default(),
         })
+    }
+}
+
+impl StoreWithHooks {
+    pub async fn new<P: AsRef<Path>>(
+        path: P,
+    ) -> Result<(Self, impl StoreUpdateSubscription), String> {
+        let store = Store::new(path.as_ref())?;
+        let subscription_impl = new_subscription(store.clone()).await;
+        let store = Self {
+            db: store.db,
+            payment_hook: subscription_impl.clone(),
+            invoice_hook: subscription_impl.clone(),
+        };
+        Ok((store, subscription_impl))
     }
 }
 
@@ -101,6 +118,12 @@ impl<IH: OnInvoiceUpdated, PH: OnPaymentUpdated> GenericStore<IH, PH> {
         options.create_if_missing(true);
         options.set_compression_type(DBCompressionType::Lz4);
         let db = Arc::new(DB::open(&options, path).map_err(|e| e.to_string())?);
+        Ok(db)
+    }
+
+    fn open_db_and_migrate(path: &Path) -> Result<Arc<DB>, String> {
+        let db = Self::open_db(path.as_ref())?;
+        let db = Self::check_migrate(path, db)?;
         Ok(db)
     }
 
