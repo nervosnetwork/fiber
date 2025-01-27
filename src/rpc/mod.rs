@@ -45,6 +45,7 @@ use ractor::ActorRef;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use tracing::warn;
 
 async fn build_server(addr: &str) -> Server {
     #[cfg(debug_assertions)]
@@ -105,8 +106,14 @@ pub async fn start_rpc<
     let server = build_server(listening_addr).await;
     let mut modules = RpcModule::new(());
     if config.is_module_enabled("invoice") {
+        if network_actor.is_none() {
+            warn!("network_actor should be set when invoice module is enabled");
+        }
         modules
-            .merge(InvoiceRpcServerImpl::new(store.clone(), fiber_config).into_rpc())
+            .merge(
+                InvoiceRpcServerImpl::new(store.clone(), network_actor.clone(), fiber_config)
+                    .into_rpc(),
+            )
             .unwrap();
     }
     if config.is_module_enabled("graph") {

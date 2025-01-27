@@ -12,9 +12,11 @@ use crate::fiber::network::SendPaymentCommand;
 use crate::fiber::network::SendPaymentResponse;
 use crate::fiber::types::EcdsaSignature;
 use crate::fiber::types::Pubkey;
+use crate::invoice::settle_invoice;
 use crate::invoice::CkbInvoice;
 use crate::invoice::CkbInvoiceStatus;
 use crate::invoice::InvoiceStore;
+use crate::invoice::SettleInvoiceError;
 use ckb_jsonrpc_types::Status;
 use ckb_types::packed::OutPoint;
 use ckb_types::{core::TransactionView, packed::Byte32};
@@ -552,6 +554,20 @@ impl NetworkNode {
             .expect("cancell success");
     }
 
+    #[allow(private_interfaces)]
+    pub fn settle_invoice(
+        &self,
+        payment_hash: &Hash256,
+        preimage: &Hash256,
+    ) -> Result<(), SettleInvoiceError> {
+        settle_invoice(
+            &self.store,
+            Some(&self.network_actor),
+            payment_hash,
+            preimage,
+        )
+    }
+
     pub async fn send_payment(
         &self,
         command: SendPaymentCommand,
@@ -582,6 +598,7 @@ impl NetworkNode {
             max_fee_amount: None,
             max_parts: None,
             keysend: Some(true),
+            hold_payment: false,
             udt_type_script: None,
             allow_self_payment: false,
             dry_run,
@@ -607,6 +624,7 @@ impl NetworkNode {
             max_fee_amount: None,
             max_parts: None,
             keysend: Some(true),
+            hold_payment: false,
             udt_type_script: None,
             allow_self_payment: true,
             dry_run,

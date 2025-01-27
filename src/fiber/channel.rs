@@ -140,6 +140,7 @@ pub enum ChannelCommand {
     Shutdown(ShutdownCommand, RpcReplyPort<Result<(), String>>),
     Update(UpdateCommand, RpcReplyPort<Result<(), String>>),
     ForwardTlcResult(ForwardTlcResult),
+    SettleHeldTlc(Hash256),
     #[cfg(test)]
     ReloadState(ReloadParams),
 }
@@ -154,6 +155,7 @@ impl Display for ChannelCommand {
             ChannelCommand::Shutdown(_, _) => write!(f, "Shutdown"),
             ChannelCommand::Update(_, _) => write!(f, "Update"),
             ChannelCommand::ForwardTlcResult(_) => write!(f, "ForwardTlcResult"),
+            ChannelCommand::SettleHeldTlc(_) => write!(f, "SettleHeldTlc"),
             #[cfg(test)]
             ChannelCommand::ReloadState(_) => write!(f, "ReloadState"),
         }
@@ -862,6 +864,28 @@ where
         .await;
     }
 
+    // Try to settle down a held TLC (i.e., a TLC whose preimage is not available when it is received).
+    // This is usually a TLC associated with a hold invoice. We call of this function should ensure that
+    // this TLC is already in a state that can be settled down (i.e. the invoice associated with it is
+    // in a Received state and we have saved its preimage to the store).
+    async fn try_to_settle_down_held_tlc(
+        &self,
+        myself: &ActorRef<ChannelActorMessage>,
+        state: &mut ChannelActorState,
+        hash: Hash256,
+    ) {
+        let tlc_id = match state.get_received_tlc_with_hash(hash) {
+            Some(tlc) => tlc.tlc_id,
+            None => {
+                return;
+            }
+        };
+        // Only settle down this TLC if it is not already settled down.
+        if state.tlc_state.applied_add_tlcs.insert(tlc_id) {
+            self.try_to_settle_down_tlc(myself, state, tlc_id).await;
+        }
+    }
+
     async fn try_to_settle_down_tlc(
         &self,
         myself: &ActorRef<ChannelActorMessage>,
@@ -1006,33 +1030,64 @@ where
                 }
             }
 
-            // if this is the last hop, store the preimage.
-            // though we will RemoveTlcFulfill the TLC in try_to_settle_down_tlc function,
-            // here we can do error check early here for better error handling.
-            let preimage = peeled_onion_packet
-                .current
-                .payment_preimage
-                .or_else(|| self.store.get_invoice_preimage(&add_tlc.payment_hash));
+            let preimage = match peeled_onion_packet.current.payment_preimage {
+                None => self
+                    .store
+                    .get_invoice_preimage(&add_tlc.payment_hash)
+                    .ok_or(ProcessingChannelError::FinalIncorrectPaymentHash)?,
+                Some(preimage) if preimage == Hash256::default() => {
+                    match self.store.get_invoice_status(&payment_hash) {
+                        Some(status) => {
+                            let is_active = status == CkbInvoiceStatus::Open
+                                || status == CkbInvoiceStatus::Received;
+                            let is_settled =
+                                self.store.get_invoice_preimage(&payment_hash).is_some();
+                            if is_active && !is_settled {
+                                // This TLC is added to applied_add_tlcs in above, but
+                                // TLCs in the list applied_add_tlcs wouldn't be processed again.
+                                // For the unsettled active hold invoice TLCs, we should process them indefinitely
+                                // until they expire or are settled.
+                                state.tlc_state.applied_add_tlcs.remove(&add_tlc.tlc_id);
+                            }
+                            if status == CkbInvoiceStatus::Open {
+                                self.store
+                                    .update_invoice_status(
+                                        &payment_hash,
+                                        CkbInvoiceStatus::Received,
+                                    )
+                                    .expect("update invoice status failed");
+                            }
+                        }
+                        None => {}
+                    }
+                    if let Err(e) = self
+                        .store
+                        .add_invoice_channel(&payment_hash, &state.get_id())
+                    {
+                        error!("Failed to add invoice channel mapping: {:?}", e);
+                    }
+                    // The updating of hold invoice is always done in settle_invoice rpc call.
+                    // So we can return early here.
+                    return Ok(());
+                }
+                Some(preimage) => preimage,
+            };
 
-            if let Some(preimage) = preimage {
-                let filled_payment_hash: Hash256 = add_tlc.hash_algorithm.hash(preimage).into();
-                if add_tlc.payment_hash != filled_payment_hash {
-                    return Err(ProcessingChannelError::FinalIncorrectPreimage);
-                }
-                // update invoice status to received only all the error checking passed
-                if let Some(_invoice) = self.store.get_invoice(&payment_hash) {
-                    self.store
-                        .update_invoice_status(&payment_hash, CkbInvoiceStatus::Received)
-                        .expect("update invoice status failed");
-                }
-                self.store
-                    .insert_payment_preimage(payment_hash, preimage)
-                    .map_err(|_| {
-                        ProcessingChannelError::InternalError("insert preimage failed".to_string())
-                    })?;
-            } else {
-                return Err(ProcessingChannelError::FinalIncorrectPaymentHash);
+            let filled_payment_hash: Hash256 = add_tlc.hash_algorithm.hash(preimage).into();
+            if add_tlc.payment_hash != filled_payment_hash {
+                return Err(ProcessingChannelError::FinalIncorrectPreimage);
             }
+            // update invoice status to received only all the error checking passed
+            if let Some(_invoice) = self.store.get_invoice(&payment_hash) {
+                self.store
+                    .update_invoice_status(&payment_hash, CkbInvoiceStatus::Received)
+                    .expect("update invoice status failed");
+            }
+            self.store
+                .insert_payment_preimage(payment_hash, preimage)
+                .map_err(|_| {
+                    ProcessingChannelError::InternalError("insert preimage failed".to_string())
+                })?;
         } else {
             if state.is_public() && state.is_tlc_forwarding_enabled() {
                 if add_tlc.expiry
@@ -1881,6 +1936,11 @@ where
                     .await;
                 Ok(())
             }
+            ChannelCommand::SettleHeldTlc(hash) => {
+                self.try_to_settle_down_held_tlc(myself, state, hash).await;
+                Ok(())
+            }
+
             #[cfg(test)]
             ChannelCommand::ReloadState(reload_params) => {
                 *state = self
@@ -4616,6 +4676,14 @@ impl ChannelActorState {
 
     pub fn get_received_tlc(&self, tlc_id: TLCId) -> Option<&TlcInfo> {
         self.tlc_state.get(&tlc_id)
+    }
+
+    pub fn get_received_tlc_with_hash(&self, hash: Hash256) -> Option<&TlcInfo> {
+        self.tlc_state
+            .received_tlcs
+            .tlcs
+            .iter()
+            .find(|tlc| tlc.payment_hash == hash)
     }
 
     pub fn check_insert_tlc(&mut self, tlc: &TlcInfo) -> Result<(), ProcessingChannelError> {

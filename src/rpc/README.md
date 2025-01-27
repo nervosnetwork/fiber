@@ -39,6 +39,7 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
         * [Method `parse_invoice`](#invoice-parse_invoice)
         * [Method `get_invoice`](#invoice-get_invoice)
         * [Method `cancel_invoice`](#invoice-cancel_invoice)
+        * [Method `settle_invoice`](#invoice-settle_invoice)
     * [Module Payment](#module-payment)
         * [Method `send_payment`](#payment-send_payment)
         * [Method `get_payment`](#payment-get_payment)
@@ -471,7 +472,8 @@ Generates a new invoice.
 * `amount` - <em>`u128`</em>, The amount of the invoice.
 * `description` - <em>`Option<String>`</em>, The description of the invoice.
 * `currency` - <em>[Currency](#type-currency)</em>, The currency of the invoice.
-* `payment_preimage` - <em>[Hash256](#type-hash256)</em>, The payment preimage of the invoice.
+* `payment_preimage` - <em>Option<[Hash256](#type-hash256)></em>, The payment preimage of the invoice, may be empty for a hold invoice.
+* `payment_hash` - <em>Option<[Hash256](#type-hash256)></em>, The payment hash of the invoice, must be given when payment_preimage is empty.
 * `expiry` - <em>`Option<u64>`</em>, The expiry time of the invoice.
 * `fallback_address` - <em>`Option<String>`</em>, The fallback address of the invoice.
 * `final_expiry_delta` - <em>`Option<u64>`</em>, The final HTLC timeout of the invoice.
@@ -542,6 +544,24 @@ Cancels an invoice, only when invoice is in status `Open` can be canceled.
 
 
 
+<a id="invoice-settle_invoice"></a>
+#### Method `settle_invoice`
+
+Settles an invoice by saving the preimage to this invoice.
+
+##### Params
+
+* `payment_hash` - <em>[Hash256](#type-hash256)</em>, The payment hash of the invoice.
+* `payment_preimage` - <em>[Hash256](#type-hash256)</em>, The payment preimage of the invoice.
+
+##### Returns
+
+* None
+
+---
+
+
+
 <a id="payment"></a>
 ### Module `Payment`
 RPC module for channel management.
@@ -566,6 +586,9 @@ Sends a payment to a peer.
 * `max_fee_amount` - <em>`Option<u128>`</em>, the maximum fee amounts in shannons that the sender is willing to pay
 * `max_parts` - <em>`Option<u64>`</em>, max parts for the payment, only used for multi-part payments
 * `keysend` - <em>`Option<bool>`</em>, keysend payment
+* `hold_payment` - <em>`Option<bool>`</em>, a hold_payment is a payment with the preimage set to an all zero hash
+ this is normally used to allow the recipient to hold the payment until he/she knows the preimage
+ default is false
 * `udt_type_script` - <em>`Option<Script>`</em>, udt type script for the payment
 * `allow_self_payment` - <em>`Option<bool>`</em>, allow self payment, default is false
 * `hop_hints` - <em>Option<Vec<[HopHint](#type-hophint)>></em>, Optional route hints to reach the destination through private channels.
