@@ -1,3 +1,4 @@
+#![allow(clippy::needless_range_loop)]
 use super::test_utils::init_tracing;
 use crate::fiber::channel::UpdateCommand;
 use crate::fiber::graph::PaymentSessionStatus;
@@ -2169,7 +2170,7 @@ async fn test_send_payment_complex_network_payself_amount_exceeded() {
     // the channel amount is not enough, so payments maybe be failed
     let ckb_unit = 100_000_000;
     let res = run_complex_network_with_params(MIN_RESERVED_CKB + 1000 * ckb_unit, || {
-        (400 as u128 + (rand::random::<u64>() % 100) as u128) * ckb_unit
+        (400_u128 + (rand::random::<u64>() % 100) as u128) * ckb_unit
     })
     .await;
 

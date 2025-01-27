@@ -212,8 +212,7 @@ fn test_tlc_err_packet_encryption() {
 
     let session_key = SecretKey::from_slice(&[0x41; 32]).expect("32 bytes, within curve order");
     let hops_ss: Vec<[u8; 32]> =
-        OnionSharedSecretIter::new(hops_path.iter().map(|k| &k.0), session_key, &secp)
-            .collect();
+        OnionSharedSecretIter::new(hops_path.iter().map(|k| &k.0), session_key, &secp).collect();
 
     let tlc_fail_detail = TlcErr::new(TlcErrorCode::InvalidOnionVersion);
     {

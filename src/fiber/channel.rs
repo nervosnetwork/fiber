@@ -2615,12 +2615,12 @@ impl TlcInfo {
 
     pub fn is_fail_remove_confirmed(&self) -> bool {
         matches!(self.removed_reason, Some(RemoveTlcReason::RemoveTlcFail(_)))
-            && match self.status {
-                TlcStatus::Outbound(OutboundTlcStatus::RemoveAckConfirmed) => true,
-                TlcStatus::Outbound(OutboundTlcStatus::RemoveWaitAck) => true,
-                TlcStatus::Inbound(InboundTlcStatus::RemoveAckConfirmed) => true,
-                _ => false,
-            }
+            && matches!(
+                self.status,
+                TlcStatus::Outbound(OutboundTlcStatus::RemoveAckConfirmed)
+                    | TlcStatus::Outbound(OutboundTlcStatus::RemoveWaitAck)
+                    | TlcStatus::Inbound(InboundTlcStatus::RemoveAckConfirmed)
+            )
     }
 
     fn get_hash(&self) -> ShortHash {
@@ -4717,7 +4717,7 @@ impl ChannelActorState {
             .iter()
             .chain(failed_received_tlcs.iter())
         {
-            debug_assert!(self.tlc_state.applied_remove_tlcs.contains(&tlc_id));
+            debug_assert!(self.tlc_state.applied_remove_tlcs.contains(tlc_id));
             self.tlc_state.apply_remove_tlc(*tlc_id);
         }
     }
