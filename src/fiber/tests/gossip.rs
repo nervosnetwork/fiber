@@ -68,8 +68,8 @@ impl GossipTestingContext {
         let root_actor = get_test_root_actor().await;
         let (gossip_handle, store_update_subscriber) = GossipProtocolHandle::new(
             None,
-            Duration::from_millis(50).into(),
-            Duration::from_millis(50).into(),
+            Duration::from_millis(50),
+            Duration::from_millis(50),
             true,
             None,
             None,
@@ -142,7 +142,7 @@ async fn run_dummy_tentacle_service(gossip_handle: GossipProtocolHandle) {
         .await
         .expect("listen tentacle");
 
-    let _ = spawn(async move {
+    spawn(async move {
         service.run().await;
     });
 }
@@ -219,7 +219,7 @@ async fn test_save_gossip_message() {
     let context = GossipTestingContext::new().await;
     let (_, announcement) = gen_rand_node_announcement();
     context.save_message(BroadcastMessage::NodeAnnouncement(announcement.clone()));
-    tokio::time::sleep(Duration::from_millis(200).into()).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
     let new_announcement = context
         .get_store()
         .get_latest_node_announcement(&announcement.node_id)
@@ -234,7 +234,7 @@ async fn test_saving_unconfirmed_channel_announcement() {
     context.save_message(BroadcastMessage::ChannelAnnouncement(
         channel_context.channel_announcement.clone(),
     ));
-    tokio::time::sleep(Duration::from_millis(200).into()).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
     let new_announcement = context
         .get_store()
         .get_latest_channel_announcement(channel_context.channel_outpoint());
@@ -250,7 +250,7 @@ async fn test_saving_confirmed_channel_announcement() {
     ));
     let status = context.submit_tx(channel_context.funding_tx.clone()).await;
     assert_eq!(status, Status::Committed);
-    tokio::time::sleep(Duration::from_millis(200).into()).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
     let new_announcement = context
         .get_store()
         .get_latest_channel_announcement(channel_context.channel_outpoint());
@@ -271,12 +271,7 @@ async fn test_saving_invalid_channel_announcement() {
         .as_builder()
         .args(
             Bytes::new_builder()
-                .set(
-                    b"wrong lock args"
-                        .into_iter()
-                        .map(|b| Byte::new(*b))
-                        .collect(),
-                )
+                .set(b"wrong lock args".iter().map(|b| Byte::new(*b)).collect())
                 .build(),
         )
         .build();
@@ -287,7 +282,7 @@ async fn test_saving_invalid_channel_announcement() {
         .build();
     let status = context.submit_tx(invalid_tx).await;
     assert_eq!(status, Status::Committed);
-    tokio::time::sleep(Duration::from_millis(200).into()).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
     let new_announcement = context
         .get_store()
         .get_latest_channel_announcement(channel_context.channel_outpoint());
@@ -303,7 +298,7 @@ async fn test_saving_channel_update_after_saving_channel_announcement() {
     ));
     let status = context.submit_tx(channel_context.funding_tx.clone()).await;
     assert_eq!(status, Status::Committed);
-    tokio::time::sleep(Duration::from_millis(200).into()).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
     let new_announcement = context
         .get_store()
         .get_latest_channel_announcement(channel_context.channel_outpoint());
@@ -324,7 +319,7 @@ async fn test_saving_channel_update_after_saving_channel_announcement() {
     ] {
         context.save_message(BroadcastMessage::ChannelUpdate(channel_update.clone()));
     }
-    tokio::time::sleep(Duration::from_millis(200).into()).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
     for b in [true, false] {
         let channel_update = context
             .get_store()
@@ -354,7 +349,7 @@ async fn test_saving_channel_update_before_saving_channel_announcement() {
     ] {
         context.save_message(BroadcastMessage::ChannelUpdate(channel_update.clone()));
     }
-    tokio::time::sleep(Duration::from_millis(200).into()).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
     for b in [true, false] {
         let channel_update = context
             .get_store()
@@ -367,7 +362,7 @@ async fn test_saving_channel_update_before_saving_channel_announcement() {
     ));
     let status = context.submit_tx(channel_context.funding_tx.clone()).await;
     assert_eq!(status, Status::Committed);
-    tokio::time::sleep(Duration::from_millis(200).into()).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
     let new_announcement = context
         .get_store()
         .get_latest_channel_announcement(channel_context.channel_outpoint());
@@ -389,7 +384,7 @@ async fn test_saving_invalid_channel_update() {
     ));
     let status = context.submit_tx(channel_context.funding_tx.clone()).await;
     assert_eq!(status, Status::Committed);
-    tokio::time::sleep(Duration::from_millis(200).into()).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
     let new_announcement = context
         .get_store()
         .get_latest_channel_announcement(channel_context.channel_outpoint());
@@ -411,7 +406,7 @@ async fn test_saving_invalid_channel_update() {
         channel_update.signature = Some(create_invalid_ecdsa_signature());
         context.save_message(BroadcastMessage::ChannelUpdate(channel_update.clone()));
     }
-    tokio::time::sleep(Duration::from_millis(200).into()).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
     for b in [true, false] {
         let channel_update = context
             .get_store()
@@ -430,7 +425,7 @@ async fn test_saving_channel_update_independency() {
         ));
         let status = context.submit_tx(channel_context.funding_tx.clone()).await;
         assert_eq!(status, Status::Committed);
-        tokio::time::sleep(Duration::from_millis(200).into()).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
         let new_announcement = context
             .get_store()
             .get_latest_channel_announcement(channel_context.channel_outpoint());
@@ -457,7 +452,7 @@ async fn test_saving_channel_update_independency() {
             }
             context.save_message(BroadcastMessage::ChannelUpdate(channel_update.clone()));
         }
-        tokio::time::sleep(Duration::from_millis(200).into()).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
         for is_channel_update_of_node1 in [true, false] {
             let channel_update = context.get_store().get_latest_channel_update(
                 channel_context.channel_outpoint(),
@@ -469,12 +464,10 @@ async fn test_saving_channel_update_independency() {
                 } else {
                     assert_ne!(channel_update, None);
                 }
+            } else if node2_has_invalid_signature {
+                assert_eq!(channel_update, None);
             } else {
-                if node2_has_invalid_signature {
-                    assert_eq!(channel_update, None);
-                } else {
-                    assert_ne!(channel_update, None);
-                }
+                assert_ne!(channel_update, None);
             }
         }
     }
@@ -503,12 +496,7 @@ async fn test_saving_channel_update_with_invalid_channel_announcement() {
         .as_builder()
         .args(
             Bytes::new_builder()
-                .set(
-                    b"wrong lock args"
-                        .into_iter()
-                        .map(|b| Byte::new(*b))
-                        .collect(),
-                )
+                .set(b"wrong lock args".iter().map(|b| Byte::new(*b)).collect())
                 .build(),
         )
         .build();
@@ -519,7 +507,7 @@ async fn test_saving_channel_update_with_invalid_channel_announcement() {
         .build();
     let status = context.submit_tx(invalid_tx).await;
     assert_eq!(status, Status::Committed);
-    tokio::time::sleep(Duration::from_millis(200).into()).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
     let new_announcement = context
         .get_store()
         .get_latest_channel_announcement(channel_context.channel_outpoint());
@@ -540,7 +528,7 @@ async fn test_saving_channel_update_with_invalid_channel_announcement() {
     ] {
         context.save_message(BroadcastMessage::ChannelUpdate(channel_update.clone()));
     }
-    tokio::time::sleep(Duration::from_millis(200).into()).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
     for b in [true, false] {
         let channel_update = context
             .get_store()
@@ -554,10 +542,10 @@ async fn test_save_outdated_gossip_message() {
     let context = GossipTestingContext::new().await;
     let (sk, old_announcement) = gen_rand_node_announcement();
     // Make sure new announcement has a different timestamp
-    tokio::time::sleep(Duration::from_millis(2).into()).await;
+    tokio::time::sleep(Duration::from_millis(2)).await;
     let new_announcement = gen_node_announcement_from_privkey(&sk);
     context.save_message(BroadcastMessage::NodeAnnouncement(new_announcement.clone()));
-    tokio::time::sleep(Duration::from_millis(200).into()).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
     let announcement_in_store = context
         .get_store()
         .get_latest_node_announcement(&new_announcement.node_id)
@@ -565,7 +553,7 @@ async fn test_save_outdated_gossip_message() {
     assert_eq!(announcement_in_store, new_announcement);
 
     context.save_message(BroadcastMessage::NodeAnnouncement(old_announcement.clone()));
-    tokio::time::sleep(Duration::from_millis(200).into()).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
     let announcement_in_store = context
         .get_store()
         .get_latest_node_announcement(&new_announcement.node_id)
@@ -579,7 +567,7 @@ async fn test_gossip_store_updates_basic_subscription() {
     let messages = context.subscribe(Default::default()).await;
     let (_, announcement) = gen_rand_node_announcement();
     context.save_message(BroadcastMessage::NodeAnnouncement(announcement.clone()));
-    tokio::time::sleep(Duration::from_millis(200).into()).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
     let messages = messages.read().await;
     assert!(messages.len() == 1);
     assert_eq!(
@@ -596,7 +584,7 @@ async fn test_gossip_store_updates_repeated_saving() {
     for _ in 0..10 {
         context.save_message(BroadcastMessage::NodeAnnouncement(announcement.clone()));
     }
-    tokio::time::sleep(Duration::from_millis(200).into()).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
     let messages = messages.read().await;
     assert!(messages.len() == 1);
     assert_eq!(
@@ -610,19 +598,18 @@ async fn test_gossip_store_updates_saving_multiple_messages() {
     let context = GossipTestingContext::new().await;
     let messages = context.subscribe(Default::default()).await;
     let announcements = (0..10)
-        .into_iter()
         .map(|_| gen_rand_node_announcement().1)
         .collect::<Vec<_>>();
     for annoncement in &announcements {
         context.save_message(BroadcastMessage::NodeAnnouncement(annoncement.clone()));
     }
-    tokio::time::sleep(Duration::from_millis(200).into()).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
     let messages = messages.read().await;
     assert_eq!(
         messages.iter().cloned().collect::<HashSet<_>>(),
         announcements
             .into_iter()
-            .map(|a| BroadcastMessageWithTimestamp::NodeAnnouncement(a))
+            .map(BroadcastMessageWithTimestamp::NodeAnnouncement)
             .collect::<HashSet<_>>()
     );
 }
@@ -633,13 +620,13 @@ async fn test_gossip_store_updates_saving_outdated_message() {
     let messages = context.subscribe(Default::default()).await;
     let (sk, old_announcement) = gen_rand_node_announcement();
     // Make sure new announcement has a different timestamp
-    tokio::time::sleep(Duration::from_millis(2).into()).await;
+    tokio::time::sleep(Duration::from_millis(2)).await;
     let new_announcement = gen_node_announcement_from_privkey(&sk);
     for announcement in [&old_announcement, &new_announcement] {
         context.save_message(BroadcastMessage::NodeAnnouncement(announcement.clone()));
     }
 
-    tokio::time::sleep(Duration::from_millis(200).into()).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
     let messages = messages.read().await;
     // The subscriber may or may not receive the old announcement, but it should always receive the
     // new announcement.
@@ -663,7 +650,7 @@ async fn check_two_node_announcements_with_one_invalid(
         for announcement in announcements {
             context.save_message(BroadcastMessage::NodeAnnouncement(announcement.clone()));
         }
-        tokio::time::sleep(Duration::from_millis(200).into()).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
         let messages = messages.read().await;
         assert_eq!(messages.len(), 1);
         assert_eq!(
@@ -679,7 +666,7 @@ async fn test_gossip_store_updates_saving_invalid_message_1() {
     let (sk, mut old_announcement) = gen_rand_node_announcement();
     old_announcement.signature = Some(create_invalid_ecdsa_signature());
     // Make sure new announcement has a different timestamp
-    tokio::time::sleep(Duration::from_millis(2).into()).await;
+    tokio::time::sleep(Duration::from_millis(2)).await;
     let new_announcement = gen_node_announcement_from_privkey(&sk);
 
     check_two_node_announcements_with_one_invalid(new_announcement, old_announcement).await;
@@ -690,7 +677,7 @@ async fn test_gossip_store_updates_saving_invalid_message_1() {
 async fn test_gossip_store_updates_saving_invalid_message_2() {
     let (sk, old_announcement) = gen_rand_node_announcement();
     // Make sure new announcement has a different timestamp
-    tokio::time::sleep(Duration::from_millis(2).into()).await;
+    tokio::time::sleep(Duration::from_millis(2)).await;
     let mut new_announcement = gen_node_announcement_from_privkey(&sk);
     new_announcement.signature = Some(create_invalid_ecdsa_signature());
 
@@ -737,14 +724,14 @@ async fn test_our_own_channel_gossip_message_propagated() {
 
     for node in [&node_a, &node_b] {
         node.with_network_graph(|graph| {
-            let channels = graph.channels().into_iter().collect::<Vec<_>>();
+            let channels = graph.channels().collect::<Vec<_>>();
             assert_eq!(channels.len(), 1);
 
             let channel = channels[0].clone();
             assert!(channel.update_of_node1.is_some());
             assert!(channel.update_of_node2.is_some());
 
-            let nodes = graph.nodes().into_iter().collect::<Vec<_>>();
+            let nodes = graph.nodes().collect::<Vec<_>>();
             assert_eq!(nodes.len(), 2);
         })
         .await;
@@ -758,7 +745,7 @@ async fn test_never_miss_any_message() {
     let context = GossipTestingContext::new().await;
     let messages = context.subscribe(Default::default()).await;
     context.save_message(BroadcastMessage::NodeAnnouncement(announcement.clone()));
-    tokio::time::sleep(Duration::from_secs(1).into()).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
     let messages = messages.read().await;
     assert_eq!(messages.len(), 1);
     assert_eq!(

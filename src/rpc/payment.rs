@@ -198,13 +198,13 @@ where
         };
         handle_actor_call!(self.actor, message, params).map(|response| GetPaymentCommandResult {
             payment_hash: response.payment_hash,
-            status: response.status.into(),
+            status: response.status,
             created_at: response.created_at,
             last_updated_at: response.last_updated_at,
             failed_error: response.failed_error,
             fee: response.fee,
             #[cfg(debug_assertions)]
-            router: response.router.into(),
+            router: response.router,
         })
     }
 
@@ -220,13 +220,13 @@ where
         };
         handle_actor_call!(self.actor, message, params).map(|response| GetPaymentCommandResult {
             payment_hash: response.payment_hash,
-            status: response.status.into(),
+            status: response.status,
             last_updated_at: response.last_updated_at,
             created_at: response.created_at,
             failed_error: response.failed_error,
             fee: response.fee,
             #[cfg(debug_assertions)]
-            router: response.router.into(),
+            router: response.router,
         })
     }
 }

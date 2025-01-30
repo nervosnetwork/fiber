@@ -1,3 +1,4 @@
+#![allow(clippy::needless_range_loop)]
 use super::test_utils::init_tracing;
 use crate::fiber::channel::UpdateCommand;
 use crate::fiber::graph::PaymentSessionStatus;
@@ -69,11 +70,11 @@ async fn test_send_payment_prefer_newer_channels() {
     .await;
     let [mut node_0, node_1] = nodes.try_into().expect("2 nodes");
     let source_node = &mut node_0;
-    let target_pubkey = node_1.pubkey.clone();
+    let target_pubkey = node_1.pubkey;
 
     let res = source_node
         .send_payment(SendPaymentCommand {
-            target_pubkey: Some(target_pubkey.clone()),
+            target_pubkey: Some(target_pubkey),
             amount: Some(10000000000),
             payment_hash: None,
             final_tlc_expiry_delta: None,
@@ -128,11 +129,11 @@ async fn test_send_payment_prefer_channels_with_larger_balance() {
     .await;
     let [mut node_0, node_1] = nodes.try_into().expect("2 nodes");
     let source_node = &mut node_0;
-    let target_pubkey = node_1.pubkey.clone();
+    let target_pubkey = node_1.pubkey;
 
     let res = source_node
         .send_payment(SendPaymentCommand {
-            target_pubkey: Some(target_pubkey.clone()),
+            target_pubkey: Some(target_pubkey),
             amount: Some(5000000000),
             payment_hash: None,
             final_tlc_expiry_delta: None,
@@ -279,11 +280,11 @@ async fn test_send_payment_over_private_channel() {
         tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 
         let source_node = &mut node1;
-        let target_pubkey = node3.pubkey.clone();
+        let target_pubkey = node3.pubkey;
 
         let res = source_node
             .send_payment(SendPaymentCommand {
-                target_pubkey: Some(target_pubkey.clone()),
+                target_pubkey: Some(target_pubkey),
                 amount: Some(amount_to_send),
                 payment_hash: None,
                 final_tlc_expiry_delta: None,
@@ -581,7 +582,7 @@ async fn test_send_payment_with_route_to_self_with_hop_hints() {
     // then the only valid route will be node0 -> node2 -> node1 -> node0
     let res = node_0
         .send_payment(SendPaymentCommand {
-            target_pubkey: Some(node_0.pubkey.clone()),
+            target_pubkey: Some(node_0.pubkey),
             amount: Some(60000000),
             payment_hash: None,
             final_tlc_expiry_delta: None,
@@ -594,7 +595,7 @@ async fn test_send_payment_with_route_to_self_with_hop_hints() {
             udt_type_script: None,
             allow_self_payment: true,
             hop_hints: Some(vec![HopHint {
-                pubkey: node_0.pubkey.clone(),
+                pubkey: node_0.pubkey,
                 channel_funding_tx: channel_0_funding_tx,
                 inbound: true,
             }]),
@@ -693,7 +694,7 @@ async fn test_send_payment_with_route_to_self_with_outbound_hop_hints() {
     // then the only valid route will be node0 -> node1 -> node2 -> node0
     let res = node_0
         .send_payment(SendPaymentCommand {
-            target_pubkey: Some(node_0.pubkey.clone()),
+            target_pubkey: Some(node_0.pubkey),
             amount: Some(60000000),
             payment_hash: None,
             final_tlc_expiry_delta: None,
@@ -706,7 +707,7 @@ async fn test_send_payment_with_route_to_self_with_outbound_hop_hints() {
             udt_type_script: None,
             allow_self_payment: true,
             hop_hints: Some(vec![HopHint {
-                pubkey: node_0.pubkey.clone(),
+                pubkey: node_0.pubkey,
                 channel_funding_tx: channel_0_funding_tx,
                 inbound: false,
             }]),
@@ -783,7 +784,7 @@ async fn test_send_payment_select_channel_with_hop_hints() {
     eprintln!("channel_3_funding_tx: {:?}", channel_3_funding_tx);
     let res = node_0
         .send_payment(SendPaymentCommand {
-            target_pubkey: Some(node_3.pubkey.clone()),
+            target_pubkey: Some(node_3.pubkey),
             amount: Some(60000000),
             payment_hash: None,
             final_tlc_expiry_delta: None,
@@ -797,7 +798,7 @@ async fn test_send_payment_select_channel_with_hop_hints() {
             allow_self_payment: true,
             // at node_1, we must use channel_3 to reach node_2
             hop_hints: Some(vec![HopHint {
-                pubkey: node_2.pubkey.clone(),
+                pubkey: node_2.pubkey,
                 channel_funding_tx: channel_3_funding_tx,
                 inbound: true,
             }]),
@@ -830,7 +831,7 @@ async fn test_send_payment_select_channel_with_hop_hints() {
     eprintln!("channel_2_funding_tx: {:?}", channel_2_funding_tx);
     let res = node_0
         .send_payment(SendPaymentCommand {
-            target_pubkey: Some(node_3.pubkey.clone()),
+            target_pubkey: Some(node_3.pubkey),
             amount: Some(60000000),
             payment_hash: None,
             final_tlc_expiry_delta: None,
@@ -844,7 +845,7 @@ async fn test_send_payment_select_channel_with_hop_hints() {
             allow_self_payment: true,
             // at node_1, we must use channel_2 to reach node_2
             hop_hints: Some(vec![HopHint {
-                pubkey: node_1.pubkey.clone(),
+                pubkey: node_1.pubkey,
                 channel_funding_tx: channel_2_funding_tx,
                 inbound: false,
             }]),
@@ -874,7 +875,7 @@ async fn test_send_payment_select_channel_with_hop_hints() {
     // if we specify a wrong funding_tx, the payment will fail
     let res = node_0
         .send_payment(SendPaymentCommand {
-            target_pubkey: Some(node_3.pubkey.clone()),
+            target_pubkey: Some(node_3.pubkey),
             amount: Some(60000000),
             payment_hash: None,
             final_tlc_expiry_delta: None,
@@ -888,7 +889,7 @@ async fn test_send_payment_select_channel_with_hop_hints() {
             allow_self_payment: true,
             // at node_1, we must use channel_3 to reach node_2
             hop_hints: Some(vec![HopHint {
-                pubkey: node_2.pubkey.clone(),
+                pubkey: node_2.pubkey,
                 channel_funding_tx: wrong_channel_hash,
                 inbound: true,
             }]),
@@ -929,7 +930,7 @@ async fn test_send_payment_two_nodes_with_hop_hints_and_multiple_channels() {
     eprintln!("channel_1_funding_tx: {:?}", channel_1_funding_tx);
     let res = node_0
         .send_payment(SendPaymentCommand {
-            target_pubkey: Some(node_0.pubkey.clone()),
+            target_pubkey: Some(node_0.pubkey),
             amount: Some(60000000),
             payment_hash: None,
             final_tlc_expiry_delta: None,
@@ -944,13 +945,13 @@ async fn test_send_payment_two_nodes_with_hop_hints_and_multiple_channels() {
             hop_hints: Some(vec![
                 // node1 - channel_1 -> node2
                 HopHint {
-                    pubkey: node_0.pubkey.clone(),
+                    pubkey: node_0.pubkey,
                     channel_funding_tx: channel_1_funding_tx,
                     inbound: false,
                 },
                 // node2 - channel_3 -> node1
                 HopHint {
-                    pubkey: node_0.pubkey.clone(),
+                    pubkey: node_0.pubkey,
                     channel_funding_tx: channel_3_funding_tx,
                     inbound: true,
                 },
@@ -1008,8 +1009,8 @@ async fn test_network_send_payment_randomly_send_each_other() {
     let node_a_old_balance = node_a.get_local_balance_from_channel(new_channel_id);
     let node_b_old_balance = node_b.get_local_balance_from_channel(new_channel_id);
 
-    let node_a_pubkey = node_a.pubkey.clone();
-    let node_b_pubkey = node_b.pubkey.clone();
+    let node_a_pubkey = node_a.pubkey;
+    let node_b_pubkey = node_b.pubkey;
 
     let mut node_a_sent = 0;
     let mut node_b_sent = 0;
@@ -1022,9 +1023,9 @@ async fn test_network_send_payment_randomly_send_each_other() {
         let amount = rand::random::<u128>() % 10000;
         eprintln!("generated ampunt: {}", amount);
         let (source, target) = if rand_num == 0 {
-            (&node_a.network_actor, node_b_pubkey.clone())
+            (&node_a.network_actor, node_b_pubkey)
         } else {
-            (&node_b.network_actor, node_a_pubkey.clone())
+            (&node_b.network_actor, node_a_pubkey)
         };
         let message = |rpc_reply| -> NetworkActorMessage {
             NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
@@ -1203,14 +1204,14 @@ async fn test_network_three_nodes_send_each_other() {
         node_b_old_balance_channel_2, node_b_old_balance_channel_3
     );
 
-    let node_a_pubkey = node_a.pubkey.clone();
-    let node_c_pubkey = node_c.pubkey.clone();
+    let node_a_pubkey = node_a.pubkey;
+    let node_c_pubkey = node_c.pubkey;
 
     let amount_a_to_c = 60000;
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
             SendPaymentCommand {
-                target_pubkey: Some(node_c_pubkey.clone()),
+                target_pubkey: Some(node_c_pubkey),
                 amount: Some(amount_a_to_c),
                 payment_hash: None,
                 final_tlc_expiry_delta: None,
@@ -1240,7 +1241,7 @@ async fn test_network_three_nodes_send_each_other() {
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
             SendPaymentCommand {
-                target_pubkey: Some(node_a_pubkey.clone()),
+                target_pubkey: Some(node_a_pubkey),
                 amount: Some(amount_c_to_a),
                 payment_hash: None,
                 final_tlc_expiry_delta: None,
@@ -2169,7 +2170,7 @@ async fn test_send_payment_complex_network_payself_amount_exceeded() {
     // the channel amount is not enough, so payments maybe be failed
     let ckb_unit = 100_000_000;
     let res = run_complex_network_with_params(MIN_RESERVED_CKB + 1000 * ckb_unit, || {
-        (400 as u128 + (rand::random::<u64>() % 100) as u128) * ckb_unit
+        (400_u128 + (rand::random::<u64>() % 100) as u128) * ckb_unit
     })
     .await;
 

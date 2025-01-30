@@ -501,21 +501,21 @@ where
             return 1.0;
         }
         let ret = self.get_channel_probability(capacity, success_amount, fail_amount, amount);
-        assert!(ret >= 0.0 && ret <= 1.0);
+        assert!((0.0..=1.0).contains(&ret));
         ret
     }
 
     // The factor approaches 0 for success_time a long time in the past,
     // is 1 when the success_time is now.
     fn time_factor(&self, time: u64) -> f64 {
-        let time_ago = (now_timestamp_as_millis_u64() - time).max(0);
+        let time_ago = now_timestamp_as_millis_u64() - time;
         // if time_ago is less than 1 second, we treat it as 0, this makes the factor 1
         // this is to avoid the factor is too small when the time is very close to now,
         // this will make the probability calculation more stable
         let time_ago = if time_ago < 1000 { 0 } else { time_ago };
         let exponent = -(time_ago as f64) / (DEFAULT_BIMODAL_DECAY_TIME as f64);
-        let factor = exponent.exp();
-        factor
+
+        exponent.exp()
     }
 
     pub(crate) fn cannot_send(&self, fail_amount: u128, time: u64, capacity: u128) -> u128 {
@@ -527,14 +527,13 @@ where
 
         let factor = self.time_factor(time);
 
-        let cannot_send = capacity - (factor * (capacity - fail_amount) as f64) as u128;
-        cannot_send
+        capacity - (factor * (capacity - fail_amount) as f64) as u128
     }
 
     pub(crate) fn can_send(&self, amount: u128, time: u64) -> u128 {
         let factor = self.time_factor(time);
-        let can_send = (amount as f64 * factor) as u128;
-        can_send
+
+        (amount as f64 * factor) as u128
     }
 
     // Get the probability of a payment success through a direct channel,
@@ -548,7 +547,7 @@ where
         let mut prob = 1.0;
         if let Some(result) = self.get_result(channel, direction) {
             if result.fail_time != 0 {
-                let time_ago = (now_timestamp_as_millis_u64() - result.fail_time).max(0);
+                let time_ago = now_timestamp_as_millis_u64() - result.fail_time;
                 let exponent = -(time_ago as f64) / (DEFAULT_BIMODAL_DECAY_TIME as f64);
                 prob -= exponent.exp();
             }
@@ -609,8 +608,7 @@ where
 
         // f128 is only on nightly, so we use f64 here, we may lose some precision
         // but it's acceptable since all the values are cast to f64
-        let mut prob =
-            self.integral_probability(capacity as f64, amount as f64, fail_amount as f64);
+        let mut prob = self.integral_probability(capacity as f64, amount, fail_amount);
         if prob.is_nan() {
             error!(
                 "probability is NaN: capacity: {} amount: {} fail_amount: {}",
@@ -618,13 +616,12 @@ where
             );
             return 0.0;
         }
-        let re_norm =
-            self.integral_probability(capacity as f64, success_amount as f64, fail_amount as f64);
+        let re_norm = self.integral_probability(capacity as f64, success_amount, fail_amount);
         if re_norm == 0.0 {
             return 0.0;
         }
         prob /= re_norm;
-        prob = prob.max(0.0).min(1.0);
+        prob = prob.clamp(0.0, 1.0);
         return prob;
     }
 

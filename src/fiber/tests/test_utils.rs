@@ -62,7 +62,7 @@ use crate::{
 
 static RETAIN_VAR: &str = "TEST_TEMP_RETAIN";
 pub(crate) const MIN_RESERVED_CKB: u128 = 4200000000;
-pub(crate) const HUGE_CKB_AMOUNT: u128 = MIN_RESERVED_CKB + 1000000000000 as u128;
+pub(crate) const HUGE_CKB_AMOUNT: u128 = MIN_RESERVED_CKB + 1000000000000_u128;
 
 #[derive(Debug)]
 pub struct TempDir(ManuallyDrop<OldTempDir>);
@@ -159,7 +159,7 @@ pub fn get_fiber_config<P: AsRef<Path>>(base_dir: P, node_name: Option<&str>) ->
 // Mock function to create a dummy EcdsaSignature
 pub fn mock_ecdsa_signature() -> EcdsaSignature {
     let secp = Secp256k1::new();
-    let mut rng = OsRng::default();
+    let mut rng = OsRng;
     let (secret_key, _public_key) = secp.generate_keypair(&mut rng);
     let message = Message::from_digest_slice(&[0u8; 32]).expect("32 bytes");
     let signature = secp.sign_ecdsa(&message, &secret_key);
@@ -210,7 +210,14 @@ pub struct NetworkNodeConfigBuilder {
     node_name: Option<String>,
     // We may generate a FiberConfig based on the base_dir and node_name,
     // but allow user to override it.
+    #[allow(clippy::type_complexity)]
     fiber_config_updater: Option<Box<dyn FnOnce(&mut FiberConfig) + 'static>>,
+}
+
+impl Default for NetworkNodeConfigBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl NetworkNodeConfigBuilder {
@@ -265,6 +272,7 @@ impl NetworkNodeConfigBuilder {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn establish_channel_between_nodes(
     node_a: &mut NetworkNode,
     node_b: &mut NetworkNode,
@@ -441,6 +449,7 @@ pub(crate) async fn create_n_nodes_with_established_channel(
         .await
 }
 
+#[allow(clippy::type_complexity)]
 pub(crate) async fn create_n_nodes_with_index_and_amounts_with_established_channel(
     amounts: &[((usize, usize), (u128, u128))],
     n: usize,
@@ -484,9 +493,9 @@ pub(crate) async fn create_n_nodes_with_index_and_amounts_with_established_chann
         };
         channels.push(channel_id);
         // all the other nodes submit_tx
-        for k in 0..n {
-            let res = nodes[k].submit_tx(funding_tx.clone()).await;
-            nodes[k].add_channel_tx(channel_id, funding_tx.clone());
+        for node in nodes.iter_mut() {
+            let res = node.submit_tx(funding_tx.clone()).await;
+            node.add_channel_tx(channel_id, funding_tx.clone());
             assert_eq!(res, Status::Committed);
         }
     }
@@ -572,7 +581,7 @@ impl NetworkNode {
         dry_run: bool,
     ) -> std::result::Result<SendPaymentResponse, String> {
         self.send_payment(SendPaymentCommand {
-            target_pubkey: Some(recipient.pubkey.clone()),
+            target_pubkey: Some(recipient.pubkey),
             amount: Some(amount),
             payment_hash: None,
             final_tlc_expiry_delta: None,
@@ -595,7 +604,7 @@ impl NetworkNode {
         amount: u128,
         dry_run: bool,
     ) -> std::result::Result<SendPaymentResponse, String> {
-        let pubkey = self.pubkey.clone();
+        let pubkey = self.pubkey;
         self.send_payment(SendPaymentCommand {
             target_pubkey: Some(pubkey),
             amount: Some(amount),
@@ -703,10 +712,10 @@ impl NetworkNode {
         let message =
             |rpc_reply| NetworkActorMessage::Command(NetworkActorCommand::NodeInfo((), rpc_reply));
         eprintln!("query node_info ...");
-        let res = call!(self.network_actor, message)
+
+        call!(self.network_actor, message)
             .expect("node_a alive")
-            .unwrap();
-        res
+            .unwrap()
     }
 
     pub async fn update_channel_actor_state(
@@ -714,7 +723,7 @@ impl NetworkNode {
         state: ChannelActorState,
         reload_params: Option<ReloadParams>,
     ) {
-        let channel_id = state.id.clone();
+        let channel_id = state.id;
         self.store.insert_channel_actor_state(state);
         self.network_actor
             .send_message(NetworkActorMessage::Command(
@@ -828,7 +837,7 @@ impl NetworkNode {
 
         let network_graph = Arc::new(TokioRwLock::new(NetworkGraph::new(
             store.clone(),
-            public_key.clone(),
+            public_key,
             true,
         )));
 
@@ -918,10 +927,10 @@ impl NetworkNode {
             network_actor,
             network_graph,
             chain_actor,
-            private_key: secret_key.into(),
+            private_key: secret_key,
             peer_id,
             event_emitter: self_event_receiver,
-            pubkey: public_key.into(),
+            pubkey: public_key,
             unexpected_events,
             triggered_unexpected_events,
         }
@@ -1011,6 +1020,7 @@ impl NetworkNode {
             }
             nodes.push(new);
         }
+        #[allow(clippy::useless_conversion)]
         match nodes.try_into() {
             Ok(nodes) => nodes,
             Err(_) => unreachable!(),
@@ -1156,7 +1166,7 @@ impl NetworkNode {
         F: FnOnce(&NetworkGraph<Store>) -> T,
     {
         let graph = self.get_network_graph().read().await;
-        f(&*graph)
+        f(&graph)
     }
 
     pub async fn with_network_graph_mut<F, T>(&self, f: F) -> T
@@ -1168,7 +1178,7 @@ impl NetworkNode {
     }
 
     pub async fn get_network_graph_nodes(&self) -> Vec<NodeInfo> {
-        self.with_network_graph(|graph| graph.nodes().into_iter().cloned().collect())
+        self.with_network_graph(|graph| graph.nodes().cloned().collect())
             .await
     }
 
@@ -1178,17 +1188,14 @@ impl NetworkNode {
     }
 
     pub async fn get_network_graph_channels(&self) -> Vec<ChannelInfo> {
-        self.with_network_graph(|graph| graph.channels().into_iter().cloned().collect())
+        self.with_network_graph(|graph| graph.channels().cloned().collect())
             .await
     }
 
     pub async fn get_network_graph_channel(&self, channel_id: &OutPoint) -> Option<ChannelInfo> {
         self.with_network_graph(|graph| {
             tracing::debug!("Getting channel info for {:?}", channel_id);
-            tracing::debug!(
-                "Channels: {:?}",
-                graph.channels().into_iter().collect::<Vec<_>>()
-            );
+            tracing::debug!("Channels: {:?}", graph.channels().collect::<Vec<_>>());
             graph.get_channel(channel_id).cloned()
         })
         .await

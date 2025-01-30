@@ -178,6 +178,12 @@ pub struct DefaultMigration {
     version: String,
 }
 
+impl Default for DefaultMigration {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DefaultMigration {
     pub fn new() -> Self {
         Self {

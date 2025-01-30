@@ -11,7 +11,7 @@ test:
 
 .PHONY: clippy
 clippy:
-	cargo clippy --all --all-targets --all-features
+	cargo clippy --all --all-targets --all-features -- -D warnings -A clippy::module-inception
 
 .PHONY: bless
 bless:
