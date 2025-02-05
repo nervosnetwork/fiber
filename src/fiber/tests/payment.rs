@@ -20,7 +20,7 @@ async fn test_send_payment_for_direct_channel_and_dry_run() {
     let _span = tracing::info_span!("node", node = "test").entered();
     // from https://github.com/nervosnetwork/fiber/issues/359
 
-    let (nodes, channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+    let (nodes, channels) = create_n_nodes_and_channels_with_index_amounts(
         &[((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB))],
         2,
         true,
@@ -59,7 +59,7 @@ async fn test_send_payment_prefer_newer_channels() {
     init_tracing();
     let _span = tracing::info_span!("node", node = "test").entered();
 
-    let (nodes, channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+    let (nodes, channels) = create_n_nodes_and_channels_with_index_amounts(
         &[
             ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
             ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
@@ -114,7 +114,7 @@ async fn test_send_payment_prefer_channels_with_larger_balance() {
     init_tracing();
     let _span = tracing::info_span!("node", node = "test").entered();
 
-    let (nodes, channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+    let (nodes, channels) = create_n_nodes_and_channels_with_index_amounts(
         &[
             // These two channnels have the same overall capacity, but the second channel has more balance for node_0.
             (
@@ -249,7 +249,7 @@ async fn test_send_payment_fee_rate() {
 #[tokio::test]
 async fn test_send_payment_over_private_channel() {
     async fn test(amount_to_send: u128, is_payment_ok: bool) {
-        let (nodes, _channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+        let (nodes, _channels) = create_n_nodes_and_channels_with_index_amounts(
             &[((1, 2), (MIN_RESERVED_CKB + 20000000000, MIN_RESERVED_CKB))],
             3,
             true,
@@ -322,7 +322,7 @@ async fn test_send_payment_for_pay_self() {
     let _span = tracing::info_span!("node", node = "test").entered();
     // from https://github.com/nervosnetwork/fiber/issues/362
 
-    let (nodes, channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+    let (nodes, channels) = create_n_nodes_and_channels_with_index_amounts(
         &[
             ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
             ((1, 2), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
@@ -397,7 +397,7 @@ async fn test_send_payment_for_pay_self_with_two_nodes() {
     let _span = tracing::info_span!("node", node = "test").entered();
     // from https://github.com/nervosnetwork/fiber/issues/355
 
-    let (nodes, channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+    let (nodes, channels) = create_n_nodes_and_channels_with_index_amounts(
         &[
             ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
             ((1, 0), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
@@ -445,7 +445,7 @@ async fn test_send_payment_with_more_capacity_for_payself() {
     let _span = tracing::info_span!("node", node = "test").entered();
     // from https://github.com/nervosnetwork/fiber/issues/362
 
-    let (nodes, channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+    let (nodes, channels) = create_n_nodes_and_channels_with_index_amounts(
         &[
             (
                 (0, 1),
@@ -540,7 +540,7 @@ async fn test_send_payment_with_route_to_self_with_hop_hints() {
     init_tracing();
     let _span = tracing::info_span!("node", node = "test").entered();
 
-    let (nodes, channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+    let (nodes, channels) = create_n_nodes_and_channels_with_index_amounts(
         &[
             (
                 (0, 1),
@@ -652,7 +652,7 @@ async fn test_send_payment_with_route_to_self_with_outbound_hop_hints() {
     init_tracing();
     let _span = tracing::info_span!("node", node = "test").entered();
 
-    let (nodes, channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+    let (nodes, channels) = create_n_nodes_and_channels_with_index_amounts(
         &[
             (
                 (0, 1),
@@ -764,7 +764,7 @@ async fn test_send_payment_select_channel_with_hop_hints() {
     init_tracing();
     let _span = tracing::info_span!("node", node = "test").entered();
 
-    let (nodes, channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+    let (nodes, channels) = create_n_nodes_and_channels_with_index_amounts(
         &[
             ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
             // there are 3 channels from node1 -> node2
@@ -911,7 +911,7 @@ async fn test_send_payment_two_nodes_with_hop_hints_and_multiple_channels() {
     init_tracing();
     let _span = tracing::info_span!("node", node = "test").entered();
 
-    let (nodes, channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+    let (nodes, channels) = create_n_nodes_and_channels_with_index_amounts(
         &[
             ((0, 1), (HUGE_CKB_AMOUNT, MIN_RESERVED_CKB)),
             ((0, 1), (HUGE_CKB_AMOUNT, MIN_RESERVED_CKB)),
@@ -1124,7 +1124,7 @@ async fn test_network_three_nodes_two_channels_send_each_other() {
     init_tracing();
 
     let _span = tracing::info_span!("node", node = "test").entered();
-    let (nodes, channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+    let (nodes, channels) = create_n_nodes_and_channels_with_index_amounts(
         &[
             ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
             ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
@@ -1179,7 +1179,7 @@ async fn test_network_three_nodes_send_each_other() {
     init_tracing();
 
     let _span = tracing::info_span!("node", node = "test").entered();
-    let (nodes, channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+    let (nodes, channels) = create_n_nodes_and_channels_with_index_amounts(
         &[
             ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
             ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
@@ -1296,7 +1296,7 @@ async fn test_network_three_nodes_send_each_other() {
 async fn test_send_payment_bench_test() {
     init_tracing();
     let _span = tracing::info_span!("node", node = "test").entered();
-    let (nodes, _channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+    let (nodes, _channels) = create_n_nodes_and_channels_with_index_amounts(
         &[
             ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
             ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
@@ -1350,7 +1350,7 @@ async fn test_send_payment_bench_test() {
 async fn test_send_payment_three_nodes_wait_succ_bench_test() {
     init_tracing();
     let _span = tracing::info_span!("node", node = "test").entered();
-    let (nodes, _channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+    let (nodes, _channels) = create_n_nodes_and_channels_with_index_amounts(
         &[
             ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
             ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
@@ -1386,7 +1386,7 @@ async fn test_send_payment_three_nodes_wait_succ_bench_test() {
 async fn test_send_payment_three_nodes_send_each_other_bench_test() {
     init_tracing();
     let _span = tracing::info_span!("node", node = "test").entered();
-    let (nodes, _channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+    let (nodes, _channels) = create_n_nodes_and_channels_with_index_amounts(
         &[
             ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
             ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
@@ -1426,7 +1426,7 @@ async fn test_send_payment_three_nodes_send_each_other_bench_test() {
 async fn test_send_payment_three_nodes_send_each_other_no_wait() {
     init_tracing();
     let _span = tracing::info_span!("node", node = "test").entered();
-    let (nodes, channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+    let (nodes, channels) = create_n_nodes_and_channels_with_index_amounts(
         &[
             ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
             ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
@@ -1507,7 +1507,7 @@ async fn test_send_payment_three_nodes_send_each_other_no_wait() {
 async fn test_send_payment_three_nodes_bench_test() {
     init_tracing();
     let _span = tracing::info_span!("node", node = "test").entered();
-    let (nodes, channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+    let (nodes, channels) = create_n_nodes_and_channels_with_index_amounts(
         &[
             ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
             ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
@@ -1631,7 +1631,7 @@ async fn test_send_payment_three_nodes_bench_test() {
 async fn test_send_payment_middle_hop_stopped() {
     init_tracing();
     let _span = tracing::info_span!("node", node = "test").entered();
-    let (nodes, _channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+    let (nodes, _channels) = create_n_nodes_and_channels_with_index_amounts(
         &[
             ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
             ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
@@ -1673,7 +1673,7 @@ async fn test_send_payment_middle_hop_stopped() {
 async fn test_send_payment_middle_hop_stopped_retry_longer_path() {
     init_tracing();
     let _span = tracing::info_span!("node", node = "test").entered();
-    let (nodes, channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+    let (nodes, channels) = create_n_nodes_and_channels_with_index_amounts(
         &[
             ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
             ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
@@ -1833,7 +1833,7 @@ async fn test_send_payment_max_value_in_flight_in_first_hop() {
 async fn test_send_payment_target_hop_stopped() {
     init_tracing();
     let _span = tracing::info_span!("node", node = "test").entered();
-    let (nodes, _channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+    let (nodes, _channels) = create_n_nodes_and_channels_with_index_amounts(
         &[
             ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
             ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
@@ -1875,7 +1875,7 @@ async fn test_send_payment_middle_hop_balance_is_not_enough() {
     // https://github.com/nervosnetwork/fiber/issues/286
     init_tracing();
     let _span = tracing::info_span!("node", node = "test").entered();
-    let (nodes, _channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+    let (nodes, _channels) = create_n_nodes_and_channels_with_index_amounts(
         &[
             ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
             ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
@@ -1908,7 +1908,7 @@ async fn test_send_payment_middle_hop_balance_is_not_enough() {
 async fn test_send_payment_middle_hop_update_fee_send_payment_failed() {
     init_tracing();
     let _span = tracing::info_span!("node", node = "test").entered();
-    let (nodes, channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+    let (nodes, channels) = create_n_nodes_and_channels_with_index_amounts(
         &[
             ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
             ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
@@ -1948,7 +1948,7 @@ async fn test_send_payment_middle_hop_update_fee_multiple_payments() {
     // https://github.com/nervosnetwork/fiber/issues/480
     init_tracing();
     let _span = tracing::info_span!("node", node = "test").entered();
-    let (nodes, channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+    let (nodes, channels) = create_n_nodes_and_channels_with_index_amounts(
         &[
             ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
             ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
@@ -2016,7 +2016,7 @@ async fn test_send_payment_middle_hop_update_fee_should_recovery() {
     // in the end, all the payments should success
     init_tracing();
     let _span = tracing::info_span!("node", node = "test").entered();
-    let (nodes, channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+    let (nodes, channels) = create_n_nodes_and_channels_with_index_amounts(
         &[
             ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
             ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
@@ -2088,7 +2088,7 @@ async fn run_complex_network_with_params(
 ) -> Vec<(Hash256, PaymentSessionStatus)> {
     init_tracing();
     let _span = tracing::info_span!("node", node = "test").entered();
-    let (nodes, _channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+    let (nodes, _channels) = create_n_nodes_and_channels_with_index_amounts(
         &[
             ((0, 1), (funding_amount, funding_amount)),
             ((1, 2), (funding_amount, funding_amount)),

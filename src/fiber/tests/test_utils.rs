@@ -445,12 +445,11 @@ pub(crate) async fn create_n_nodes_with_established_channel(
         .map(|i| ((i, i + 1), (amounts[i].0, amounts[i].1)))
         .collect();
 
-    create_n_nodes_with_index_and_amounts_with_established_channel(&nodes_index_map, n, public)
-        .await
+    create_n_nodes_and_channels_with_index_amounts(&nodes_index_map, n, public).await
 }
 
 #[allow(clippy::type_complexity)]
-pub(crate) async fn create_n_nodes_with_index_and_amounts_with_established_channel(
+pub(crate) async fn create_n_nodes_and_channels_with_index_amounts(
     amounts: &[((usize, usize), (u128, u128))],
     n: usize,
     public: bool,
