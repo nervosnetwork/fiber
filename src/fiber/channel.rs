@@ -6284,7 +6284,7 @@ impl ChannelActorState {
     }
 
     fn build_init_commitment_tx_signature(&self) -> Result<PartialSignature, SigningError> {
-        let sign_ctx = self.get_sign_context(true);
+        let sign_ctx = self.get_sign_context(false);
         let x_only_aggregated_pubkey = sign_ctx.common_ctx.x_only_aggregated_pubkey();
         let ([to_local_output, to_remote_output], [to_local_output_data, to_remote_output_data]) =
             self.build_settlement_transaction_outputs(false);
@@ -6314,7 +6314,7 @@ impl ChannelActorState {
         &self,
         signature: PartialSignature,
     ) -> Result<SettlementData, ProcessingChannelError> {
-        let sign_ctx = self.get_sign_context(false);
+        let sign_ctx = self.get_sign_context(true);
         let x_only_aggregated_pubkey = sign_ctx.common_ctx.x_only_aggregated_pubkey();
 
         let ([to_local_output, to_remote_output], [to_local_output_data, to_remote_output_data]) =
@@ -6803,9 +6803,9 @@ impl ChannelActorState {
         let mut received_fullfilled = 0;
         for info in pending_tlcs {
             if info.is_offered() {
-                offered_pending += info.amount;
                 if (info.outbound_status() == OutboundTlcStatus::RemoveWaitAck
-                    || info.outbound_status() == OutboundTlcStatus::RemoveAckConfirmed)
+                    || info.outbound_status() == OutboundTlcStatus::RemoveAckConfirmed
+                    || (info.outbound_status() == OutboundTlcStatus::RemoteRemoved && !for_remote))
                     && info
                         .removed_reason
                         .as_ref()
@@ -6813,10 +6813,12 @@ impl ChannelActorState {
                         .unwrap_or_default()
                 {
                     offered_fullfilled += info.amount;
+                } else {
+                    offered_pending += info.amount;
                 }
             } else {
-                received_pending += info.amount;
-                if info.inbound_status() == InboundTlcStatus::RemoveAckConfirmed
+                if (info.inbound_status() == InboundTlcStatus::RemoveAckConfirmed
+                    || (info.inbound_status() == InboundTlcStatus::LocalRemoved && for_remote))
                     && info
                         .removed_reason
                         .as_ref()
@@ -6824,12 +6826,16 @@ impl ChannelActorState {
                         .unwrap_or_default()
                 {
                     received_fullfilled += info.amount;
+                } else {
+                    received_pending += info.amount;
                 }
             }
         }
 
-        let to_local_value = self.to_local_amount + received_fullfilled - offered_pending;
-        let to_remote_value = self.to_remote_amount + offered_fullfilled - received_pending;
+        let to_local_value =
+            self.to_local_amount + received_fullfilled - offered_pending - offered_fullfilled;
+        let to_remote_value =
+            self.to_remote_amount + offered_fullfilled - received_pending - received_fullfilled;
 
         let commitment_tx_fee =
             calculate_commitment_tx_fee(self.commitment_fee_rate, &self.funding_udt_type_script);
