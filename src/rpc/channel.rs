@@ -348,7 +348,6 @@ where
                     shutdown_script: params.shutdown_script.clone().map(|s| s.into()),
                     commitment_delay_epoch: params
                         .commitment_delay_epoch
-                        .clone()
                         .map(|e| EpochNumberWithFractionCore::from_full_value(e.value())),
                     funding_udt_type_script: params
                         .funding_udt_type_script

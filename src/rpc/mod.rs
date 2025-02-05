@@ -79,6 +79,8 @@ async fn build_server(addr: &str) -> Server {
     }
 }
 
+#[allow(clippy::type_complexity)]
+#[allow(clippy::too_many_arguments)]
 pub async fn start_rpc<
     S: ChannelActorStateStore
         + InvoiceStore

@@ -44,7 +44,7 @@ fn mock_node() -> (Privkey, NodeAnnouncement) {
     (
         sk.clone(),
         NodeAnnouncement::new(
-            AnnouncedNodeName::from_str("node1").expect("invalid name"),
+            AnnouncedNodeName::from_string("node1").expect("invalid name"),
             vec![],
             &sk,
             now_timestamp_as_millis_u64(),
@@ -391,12 +391,12 @@ fn test_channel_actor_state_store() {
 
     let get_state = store.get_channel_actor_state(&state.id);
     assert!(get_state.is_some());
-    assert_eq!(get_state.unwrap().is_tlc_forwarding_enabled(), false);
+    assert!(!get_state.unwrap().is_tlc_forwarding_enabled());
 
     let remote_peer_id = state.get_remote_peer_id();
     assert_eq!(
         store.get_channel_ids_by_peer(&remote_peer_id),
-        vec![state.id.clone()]
+        vec![state.id]
     );
     let channel_point = state.must_get_funding_transaction_outpoint();
     assert!(store
@@ -538,13 +538,13 @@ fn test_store_payment_history() {
     };
     let channel_outpoint = OutPoint::default();
     let direction = Direction::Forward;
-    store.insert_payment_history_result(channel_outpoint.clone(), direction, result.clone());
+    store.insert_payment_history_result(channel_outpoint.clone(), direction, result);
     assert_eq!(
         store.get_payment_history_results(),
         vec![(channel_outpoint.clone(), direction, result)]
     );
 
-    fn sort_results(results: &mut Vec<(OutPoint, Direction, TimedResult)>) {
+    fn sort_results(results: &mut [(OutPoint, Direction, TimedResult)]) {
         results.sort_by(|a, b| match a.0.cmp(&b.0) {
             Ordering::Equal => a.1.cmp(&b.1),
             other => other,
@@ -558,7 +558,7 @@ fn test_store_payment_history() {
         success_amount: 5,
     };
     let direction_2 = Direction::Backward;
-    store.insert_payment_history_result(channel_outpoint.clone(), direction_2, result_2.clone());
+    store.insert_payment_history_result(channel_outpoint.clone(), direction_2, result_2);
     let mut r1 = store.get_payment_history_results();
     sort_results(&mut r1);
     let mut r2: Vec<(OutPoint, Direction, TimedResult)> = vec![
@@ -580,7 +580,7 @@ fn test_store_payment_history() {
         success_amount: 6,
     };
 
-    store.insert_payment_history_result(outpoint_3.clone(), direction_3, result_3.clone());
+    store.insert_payment_history_result(outpoint_3.clone(), direction_3, result_3);
     let mut r1 = store.get_payment_history_results();
     sort_results(&mut r1);
 
@@ -597,7 +597,7 @@ fn test_store_payment_history() {
 fn test_serde_node_announcement_as_broadcast_message() {
     let privkey = gen_rand_fiber_private_key();
     let node_announcement = NodeAnnouncement::new(
-        AnnouncedNodeName::from_str("node1").expect("valid name"),
+        AnnouncedNodeName::from_string("node1").expect("valid name"),
         vec![],
         &privkey,
         now_timestamp_as_millis_u64(),

@@ -155,13 +155,13 @@ impl FundingTxBuilder {
 
         match self.request.udt_type_script {
             Some(ref udt_type_script) => {
-                let mut udt_amount = self.request.local_amount as u128;
+                let mut udt_amount = self.request.local_amount;
                 let mut ckb_amount = self.request.local_reserved_ckb_amount;
 
                 // To make tx building easier, do not include the amount not funded yet in the
                 // funding cell.
                 if remote_funded {
-                    udt_amount += self.request.remote_amount as u128;
+                    udt_amount += self.request.remote_amount;
                     ckb_amount = ckb_amount
                         .checked_add(self.request.remote_reserved_ckb_amount)
                         .ok_or(FundingError::InvalidChannel)?;
@@ -190,7 +190,7 @@ impl FundingTxBuilder {
                         .ok_or(FundingError::InvalidChannel)?;
                 }
                 let ckb_output = packed::CellOutput::new_builder()
-                    .capacity(Capacity::shannons(ckb_amount as u64).pack())
+                    .capacity(Capacity::shannons(ckb_amount).pack())
                     .lock(self.context.funding_cell_lock_script.clone())
                     .build();
                 Ok((ckb_output, packed::Bytes::default()))
@@ -206,7 +206,7 @@ impl FundingTxBuilder {
         outputs_data: &mut Vec<packed::Bytes>,
         cell_deps: &mut HashSet<packed::CellDep>,
     ) -> Result<(), TxBuilderError> {
-        let udt_amount = self.request.local_amount as u128;
+        let udt_amount = self.request.local_amount;
         // return early if we don't need to build UDT cell
         if self.request.udt_type_script.is_none() || udt_amount == 0 {
             return Ok(());
@@ -306,7 +306,7 @@ impl FundingTxBuilder {
         let ckb_client = CkbRpcClient::new(&self.context.rpc_url);
         let cell_dep_resolver = ckb_client
             .get_block_by_number(0.into())
-            .map_err(|err| FundingError::CkbRpcError(err))?
+            .map_err(FundingError::CkbRpcError)?
             .and_then(|genesis_block| {
                 DefaultCellDepResolver::from_genesis(&BlockView::from(genesis_block)).ok()
             })
