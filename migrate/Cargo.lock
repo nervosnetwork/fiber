@@ -1818,7 +1818,7 @@ dependencies = [
 [[package]]
 name = "fnn"
 version = "0.3.1"
-source = "git+https://github.com/chenyukang/fiber.git?branch=yukang-fix-480-keep-fail-tlc#07d054da4a2e9769eb12da35558183dcfb48bb8c"
+source = "git+https://github.com/chenyukang/fiber.git?branch=yukang-fix-480-keep-fail-tlc#6eb9d269517cb592f9f0526293d51a178c9d4cc0"
 dependencies = [
  "anyhow",
  "arcode",

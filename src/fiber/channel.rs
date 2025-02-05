@@ -654,13 +654,14 @@ where
             }
             ProcessingChannelError::WaitingTlcAck => TlcErrorCode::TemporaryChannelFailure,
             ProcessingChannelError::InternalError(_) => TlcErrorCode::TemporaryNodeFailure,
-            ProcessingChannelError::InvalidState(error) => match state.state {
+            ProcessingChannelError::InvalidState(_error) => match state.state {
                 // we can not revert back up `ChannelReady` after `ShuttingDown`
                 ChannelState::Closed(_) | ChannelState::ShuttingDown(_) => {
                     TlcErrorCode::PermanentChannelFailure
                 }
                 ChannelState::ChannelReady() => {
-                    if error.contains("channel is not public or disabled") {
+                    if !state.local_tlc_info.enabled {
+                        // channel is disabled
                         TlcErrorCode::TemporaryChannelFailure
                     } else {
                         // we expect `ChannelReady` will be both OK for tlc forwarding,
@@ -842,7 +843,6 @@ where
         tlc_info: &TlcInfo,
         remove_reason: RemoveTlcReason,
     ) {
-        assert!(tlc_info.is_offered());
         let (previous_channel_id, previous_tlc) =
             tlc_info.previous_tlc.expect("expect previous tlc");
         assert!(tlc_info.is_offered());
@@ -1033,14 +1033,21 @@ where
             } else {
                 return Err(ProcessingChannelError::FinalIncorrectPaymentHash);
             }
-        } else if state.is_public() && state.is_tlc_forwarding_enabled() {
+        } else {
+            // here we don't need to check current config is public or enabled, because
+            // handle_add_tlc_command will check the channel state before forwarding
+            // and private channel can also forward TLC to public channel
             if add_tlc.expiry
                 < peeled_onion_packet.current.expiry + state.local_tlc_info.tlc_expiry_delta
             {
                 return Err(ProcessingChannelError::IncorrectTlcExpiry);
             }
 
-            assert!(received_amount >= forward_amount);
+            if received_amount < forward_amount {
+                return Err(ProcessingChannelError::InvalidParameter(
+                    "received_amount is less than forward_amount".to_string(),
+                ));
+            }
 
             // Next forwarding channel will get the forward_fee and check if it's enough.
             let forward_fee = received_amount.saturating_sub(forward_amount);
@@ -1055,12 +1062,6 @@ where
                 forward_fee,
             )
             .await;
-        } else {
-            // if we don't have public channel info, we can not forward the TLC
-            // this may happended some malicious sender build a invalid onion router
-            return Err(ProcessingChannelError::InvalidState(
-                "Received AddTlc message, but the channel is not public or disabled".to_string(),
-            ));
         }
         Ok(())
     }

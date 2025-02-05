@@ -445,12 +445,11 @@ pub(crate) async fn create_n_nodes_with_established_channel(
         .map(|i| ((i, i + 1), (amounts[i].0, amounts[i].1)))
         .collect();
 
-    create_n_nodes_with_index_and_amounts_with_established_channel(&nodes_index_map, n, public)
-        .await
+    create_n_nodes_and_channels_with_index_amounts(&nodes_index_map, n, public).await
 }
 
 #[allow(clippy::type_complexity)]
-pub(crate) async fn create_n_nodes_with_index_and_amounts_with_established_channel(
+pub(crate) async fn create_n_nodes_and_channels_with_index_amounts(
     amounts: &[((usize, usize), (u128, u128))],
     n: usize,
     public: bool,
@@ -719,7 +718,7 @@ impl NetworkNode {
     }
 
     pub async fn update_channel_actor_state(
-        &mut self,
+        &self,
         state: ChannelActorState,
         reload_params: Option<ReloadParams>,
     ) {
@@ -737,7 +736,7 @@ impl NetworkNode {
     }
 
     pub async fn update_channel_local_balance(
-        &mut self,
+        &self,
         channel_id: Hash256,
         new_to_local_amount: u128,
     ) {
@@ -748,7 +747,7 @@ impl NetworkNode {
     }
 
     pub async fn update_channel_remote_balance(
-        &mut self,
+        &self,
         channel_id: Hash256,
         new_to_remote_amount: u128,
     ) {
@@ -765,7 +764,7 @@ impl NetworkNode {
             .await;
     }
 
-    pub async fn disable_channel_stealthy(&mut self, channel_id: Hash256) {
+    pub async fn disable_channel_stealthy(&self, channel_id: Hash256) {
         let mut channel_actor_state = self.get_channel_actor_state(channel_id);
         channel_actor_state.local_tlc_info.enabled = false;
         self.update_channel_actor_state(
@@ -777,11 +776,7 @@ impl NetworkNode {
         .await;
     }
 
-    pub async fn update_channel_with_command(
-        &mut self,
-        channel_id: Hash256,
-        command: UpdateCommand,
-    ) {
+    pub async fn update_channel_with_command(&self, channel_id: Hash256, command: UpdateCommand) {
         let message = |rpc_reply| -> NetworkActorMessage {
             NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
                 ChannelCommandWithId {
