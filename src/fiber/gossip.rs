@@ -1004,7 +1004,7 @@ impl<S: GossipMessageStore> ExtendedGossipMessageStoreState<S> {
         verified_sorted_messages
     }
 
-    fn store_messages(&mut self, messages: &[BroadcastMessageWithTimestamp]) {
+    fn store_messages(&self, messages: &[BroadcastMessageWithTimestamp]) {
         for message in messages {
             match message {
                 BroadcastMessageWithTimestamp::ChannelAnnouncement(
@@ -1024,7 +1024,7 @@ impl<S: GossipMessageStore> ExtendedGossipMessageStoreState<S> {
         }
     }
 
-    fn broadcast_messages(&mut self, messages: &[BroadcastMessageWithTimestamp]) {
+    fn broadcast_messages(&self, messages: &[BroadcastMessageWithTimestamp]) {
         if messages.is_empty() {
             return;
         }
@@ -1048,7 +1048,7 @@ impl<S: GossipMessageStore> ExtendedGossipMessageStoreState<S> {
         }
     }
 
-    fn store_and_broadcast_messages(&mut self, messages: &[BroadcastMessageWithTimestamp]) {
+    fn store_and_broadcast_messages(&self, messages: &[BroadcastMessageWithTimestamp]) {
         self.store_messages(messages);
         self.broadcast_messages(messages);
     }
