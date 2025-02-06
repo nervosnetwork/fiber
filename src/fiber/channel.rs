@@ -6817,19 +6817,17 @@ impl ChannelActorState {
                 } else {
                     offered_pending += info.amount;
                 }
+            } else if (info.inbound_status() == InboundTlcStatus::RemoveAckConfirmed
+                || (info.inbound_status() == InboundTlcStatus::LocalRemoved && for_remote))
+                && info
+                    .removed_reason
+                    .as_ref()
+                    .map(|r| matches!(r, RemoveTlcReason::RemoveTlcFulfill(_)))
+                    .unwrap_or_default()
+            {
+                received_fullfilled += info.amount;
             } else {
-                if (info.inbound_status() == InboundTlcStatus::RemoveAckConfirmed
-                    || (info.inbound_status() == InboundTlcStatus::LocalRemoved && for_remote))
-                    && info
-                        .removed_reason
-                        .as_ref()
-                        .map(|r| matches!(r, RemoveTlcReason::RemoveTlcFulfill(_)))
-                        .unwrap_or_default()
-                {
-                    received_fullfilled += info.amount;
-                } else {
-                    received_pending += info.amount;
-                }
+                received_pending += info.amount;
             }
         }
 
