@@ -20,4 +20,5 @@ pub trait InvoiceStore {
         payment_hash: Hash256,
         preimage: Hash256,
     ) -> Result<(), InvoiceError>;
+    fn remove_payment_preimage(&self, payment_hash: &Hash256) -> Result<(), InvoiceError>;
 }
