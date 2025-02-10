@@ -38,7 +38,7 @@ impl SubscriptionActor {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct SubscriptionImpl {
+pub struct SubscriptionImpl {
     actor: ActorRef<SubscriptionActorMessage>,
 }
 

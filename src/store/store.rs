@@ -1,6 +1,5 @@
 use super::hook::{NoopStoreUpdateHook, PaymentUpdateHook};
 use super::schema::*;
-use super::subscription::StoreUpdateSubscription;
 use super::subscription_impl::{new_subscription_impl, SubscriptionImpl};
 use super::{db_migrate::DbMigrate, hook::InvoiceUpdateHook};
 use crate::{
@@ -96,9 +95,7 @@ impl Store {
 }
 
 impl StoreWithHooks {
-    pub async fn new<P: AsRef<Path>>(
-        path: P,
-    ) -> Result<(Self, impl StoreUpdateSubscription), String> {
+    pub async fn new<P: AsRef<Path>>(path: P) -> Result<(Self, SubscriptionImpl), String> {
         let store = Store::new(path.as_ref())?;
         let subscription_impl = new_subscription_impl(store.clone()).await;
         let store = Self {

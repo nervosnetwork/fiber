@@ -23,8 +23,11 @@ use crate::fiber::types::{Hash256, RemoveTlcFulfill, RemoveTlcReason, NO_SHARED_
 use crate::fiber::{NetworkActorCommand, NetworkActorMessage};
 use crate::invoice::Currency;
 use crate::now_timestamp_as_millis_u64;
-use crate::store::subscription::{InvoiceUpdate, PaymentUpdate};
-use crate::store::SubscriptionError;
+use crate::store::subscription::{
+    InvoiceSubscription, InvoiceUpdate, PaymentSubscription, PaymentUpdate,
+};
+use crate::store::subscription_impl::SubscriptionImpl;
+use crate::store::{SubscriptionError, SubscriptionId};
 
 use super::error::CchDbError;
 use super::{CchConfig, CchError, CchOrderStatus, CchOrdersDb, ReceiveBTCOrder, SendBTCOrder};
@@ -38,10 +41,11 @@ pub async fn start_cch(
     token: CancellationToken,
     root_actor: ActorCell,
     network_actor: Option<ActorRef<NetworkActorMessage>>,
+    subscription: SubscriptionImpl,
 ) -> Result<ActorRef<CchMessage>> {
     let (actor, _handle) = Actor::spawn_linked(
         Some("cch actor".to_string()),
-        CchActor::new(config, tracker, token, network_actor),
+        CchActor::new(config, tracker, token, network_actor, subscription),
         (),
         root_actor,
     )
@@ -99,18 +103,18 @@ pub enum CchMessage {
     SubscribeFiberPayment(
         Hash256,
         ActorRef<PaymentUpdate>,
-        RpcReplyPort<Result<(), SubscriptionError>>,
+        RpcReplyPort<Result<SubscriptionId, SubscriptionError>>,
     ),
 
-    UnsubscribeFiberPayment(Hash256, RpcReplyPort<Result<(), SubscriptionError>>),
+    UnsubscribeFiberPayment(SubscriptionId, RpcReplyPort<Result<(), SubscriptionError>>),
 
     SubscribeFiberInvoice(
         Hash256,
         ActorRef<InvoiceUpdate>,
-        RpcReplyPort<Result<(), SubscriptionError>>,
+        RpcReplyPort<Result<SubscriptionId, SubscriptionError>>,
     ),
 
-    UnsubscribeFiberInvoice(Hash256, RpcReplyPort<Result<(), SubscriptionError>>),
+    UnsubscribeFiberInvoice(SubscriptionId, RpcReplyPort<Result<(), SubscriptionError>>),
 }
 
 #[derive(Clone)]
@@ -149,6 +153,7 @@ pub struct CchActor {
     tracker: TaskTracker,
     token: CancellationToken,
     network_actor: Option<ActorRef<NetworkActorMessage>>,
+    subscription: SubscriptionImpl,
 }
 
 pub struct CchState {
@@ -268,10 +273,46 @@ impl Actor for CchActor {
                 }
                 Ok(())
             }
-            CchMessage::SubscribeFiberPayment(hash256, actor_ref, rpc_reply_port) => todo!(),
-            CchMessage::UnsubscribeFiberPayment(hash256, rpc_reply_port) => todo!(),
-            CchMessage::SubscribeFiberInvoice(hash256, actor_ref, rpc_reply_port) => todo!(),
-            CchMessage::UnsubscribeFiberInvoice(hash256, rpc_reply_port) => todo!(),
+            CchMessage::SubscribeFiberPayment(hash256, actor_ref, rpc_reply_port) => {
+                let result = self
+                    .subscription
+                    .subscribe_payment(hash256, actor_ref.clone())
+                    .await
+                    .map_err(Into::into);
+
+                let _ = rpc_reply_port.send(result);
+                Ok(())
+            }
+            CchMessage::UnsubscribeFiberPayment(subscription_id, rpc_reply_port) => {
+                let result = self
+                    .subscription
+                    .unsubscribe_payment(subscription_id)
+                    .await
+                    .map_err(Into::into);
+
+                let _ = rpc_reply_port.send(result);
+                Ok(())
+            }
+            CchMessage::SubscribeFiberInvoice(hash256, actor_ref, rpc_reply_port) => {
+                let result = self
+                    .subscription
+                    .subscribe_invoice(hash256, actor_ref.clone())
+                    .await
+                    .map_err(Into::into);
+
+                let _ = rpc_reply_port.send(result);
+                Ok(())
+            }
+            CchMessage::UnsubscribeFiberInvoice(subscription_id, rpc_reply_port) => {
+                let result = self
+                    .subscription
+                    .unsubscribe_invoice(subscription_id)
+                    .await
+                    .map_err(Into::into);
+
+                let _ = rpc_reply_port.send(result);
+                Ok(())
+            }
         }
     }
 }
@@ -282,12 +323,14 @@ impl CchActor {
         tracker: TaskTracker,
         token: CancellationToken,
         network_actor: Option<ActorRef<NetworkActorMessage>>,
+        subscription: SubscriptionImpl,
     ) -> Self {
         Self {
             config,
             tracker,
             token,
             network_actor,
+            subscription,
         }
     }
 

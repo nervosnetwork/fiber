@@ -5,7 +5,7 @@ use fnn::actors::RootActor;
 use fnn::cch::CchMessage;
 use fnn::ckb::{contracts::try_init_contracts_context, CkbChainActor};
 use fnn::fiber::{channel::ChannelSubscribers, graph::NetworkGraph, network::init_chain_hash};
-use fnn::store::Store;
+use fnn::store::store::StoreWithHooks;
 use fnn::tasks::{
     cancel_tasks_and_wait_for_completion, new_tokio_cancellation_token, new_tokio_task_tracker,
 };
@@ -67,7 +67,9 @@ pub async fn main() -> Result<(), ExitMessage> {
         .ok_or_else(|| ExitMessage("fiber config is required but absent".to_string()))?
         .store_path();
 
-    let store = Store::new(store_path).map_err(|err| ExitMessage(err.to_string()))?;
+    let (store, store_update_subscription) = StoreWithHooks::new(store_path)
+        .await
+        .map_err(|err| ExitMessage(err.to_string()))?;
 
     let tracker = new_tokio_task_tracker();
     let token = new_tokio_cancellation_token();
@@ -227,6 +229,7 @@ pub async fn main() -> Result<(), ExitMessage> {
                 new_tokio_cancellation_token(),
                 root_actor.get_cell(),
                 network_actor.clone(),
+                store_update_subscription,
             )
             .await
             {
