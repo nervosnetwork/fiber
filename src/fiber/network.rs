@@ -84,7 +84,7 @@ use crate::fiber::types::{
     FiberChannelMessage, PaymentOnionPacket, PeeledPaymentOnionPacket, TxSignatures,
 };
 use crate::fiber::KeyPair;
-use crate::invoice::{CkbInvoice, InvoiceStore};
+use crate::invoice::{settle_invoice, CkbInvoice, InvoiceStore, SettleInvoiceError};
 use crate::{now_timestamp_as_millis_u64, unwrap_or_return, Error};
 
 pub const FIBER_PROTOCOL_ID: ProtocolId = ProtocolId::new(42);
@@ -248,6 +248,12 @@ pub enum NetworkActorCommand {
 
     // Send a message to the gossip actor.
     GossipActorMessage(GossipActorMessage),
+
+    SettleInvoice(
+        Hash256,
+        Hash256,
+        RpcReplyPort<Result<(), SettleInvoiceError>>,
+    ),
 
     NodeInfo((), RpcReplyPort<Result<NodeInfoResponse, String>>),
 }
@@ -1418,6 +1424,9 @@ where
                     udt_cfg_infos: get_udt_whitelist(),
                 };
                 let _ = rpc.send(Ok(response));
+            }
+            NetworkActorCommand::SettleInvoice(hash, preimage, reply) => {
+                let _ = reply.send(settle_invoice(&self.store, Some(&myself), &hash, &preimage));
             }
         };
         Ok(())

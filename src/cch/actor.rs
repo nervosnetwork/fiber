@@ -15,16 +15,14 @@ use tokio::{select, time::sleep};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::ckb::contracts::{get_script_by_contract, Contract};
-use crate::fiber::channel::{
-    AddTlcCommand, ChannelCommand, ChannelCommandWithId, RemoveTlcCommand, TlcNotification,
-};
+use crate::fiber::channel::{AddTlcCommand, ChannelCommand, ChannelCommandWithId};
 use crate::fiber::hash_algorithm::HashAlgorithm;
-use crate::fiber::types::{Hash256, RemoveTlcFulfill, RemoveTlcReason, NO_SHARED_SECRET};
+use crate::fiber::types::{Hash256, NO_SHARED_SECRET};
 use crate::fiber::{NetworkActorCommand, NetworkActorMessage};
 use crate::invoice::Currency;
 use crate::now_timestamp_as_millis_u64;
 use crate::store::subscription::{
-    InvoiceSubscription, InvoiceUpdate, PaymentSubscription, PaymentUpdate,
+    InvoiceSubscription, InvoiceUpdate, PaymentState, PaymentSubscription, PaymentUpdate,
 };
 use crate::store::subscription_impl::SubscriptionImpl;
 use crate::store::{SubscriptionError, SubscriptionId};
@@ -96,9 +94,6 @@ pub enum CchMessage {
 
     SettleSendBTCOrder(SettleSendBTCOrderEvent),
     SettleReceiveBTCOrder(SettleReceiveBTCOrderEvent),
-
-    PendingReceivedTlcNotification(TlcNotification),
-    SettledTlcNotification(TlcNotification),
 
     PaymentUpdate(PaymentUpdate),
     InvoiceUpdate(InvoiceUpdate),
@@ -250,9 +245,6 @@ impl Actor for CchActor {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
-            CchMessage::PaymentUpdate(payment_update) => todo!(),
-            CchMessage::InvoiceUpdate(invoice_update) => todo!(),
-
             CchMessage::SendBTC(send_btc, port) => {
                 let result = self.send_btc(state, send_btc, myself.get_derived()).await;
                 if !port.is_closed() {
@@ -297,24 +289,28 @@ impl Actor for CchActor {
                 }
                 Ok(())
             }
-            CchMessage::PendingReceivedTlcNotification(tlc_notification) => {
-                if let Err(err) = self
-                    .handle_pending_received_tlc_notification(state, tlc_notification)
-                    .await
-                {
-                    tracing::error!("handle_pending_received_tlc_notification failed: {}", err);
+            CchMessage::PaymentUpdate(payment_update) => {
+                tracing::debug!(
+                    payment_update = ?payment_update,
+                    "Cch actor received payment update"
+                );
+                if let Err(err) = self.handle_payment_update(state, payment_update).await {
+                    tracing::error!("handle_payment_update failed: {}", err);
                 }
                 Ok(())
             }
-            CchMessage::SettledTlcNotification(tlc_notification) => {
-                if let Err(err) = self
-                    .handle_settled_tlc_notification(state, tlc_notification)
-                    .await
-                {
-                    tracing::error!("handle_settled_tlc_notification failed: {}", err);
+
+            CchMessage::InvoiceUpdate(invoice_update) => {
+                tracing::debug!(
+                    invoice_update = ?invoice_update,
+                    "Cch actor received invoice update"
+                );
+                if let Err(err) = self.handle_invoice_update(state, invoice_update).await {
+                    tracing::error!("handle_invoice_update failed: {}", err);
                 }
                 Ok(())
             }
+
             CchMessage::SubscribeFiberPayment(hash256, actor_ref, rpc_reply_port) => {
                 let result = self
                     .subscription
@@ -425,8 +421,6 @@ impl CchActor {
             ckb_pay_req: Default::default(),
             payment_hash: format!("0x{}", invoice.payment_hash().encode_hex::<String>()),
             payment_preimage: None,
-            channel_id: None,
-            tlc_id: None,
             amount_sats: amount_msat.div_ceil(1_000u128) + fee_sats,
             status: CchOrderStatus::Pending,
         };
@@ -446,12 +440,12 @@ impl CchActor {
     }
 
     // On receiving new TLC, check whether it matches the SendBTC order
-    async fn handle_pending_received_tlc_notification(
+    async fn handle_invoice_update(
         &self,
         state: &mut CchState,
-        tlc_notification: TlcNotification,
+        invoice_update: InvoiceUpdate,
     ) -> Result<()> {
-        let payment_hash = format!("{:#x}", tlc_notification.tlc.payment_hash);
+        let payment_hash = format!("{:#x}", invoice_update.hash);
         tracing::debug!("[inbounding tlc] payment hash: {}", payment_hash);
 
         let mut order = match state.orders_db.get_send_btc_order(&payment_hash).await {
@@ -464,13 +458,7 @@ impl CchActor {
             return Err(CchError::SendBTCOrderAlreadyPaid.into());
         }
 
-        if tlc_notification.tlc.amount < order.amount_sats {
-            // TODO: split the payment into multiple parts
-            return Err(CchError::SendBTCReceivedAmountTooSmall.into());
-        }
-
-        order.channel_id = Some(tlc_notification.channel_id);
-        order.tlc_id = Some(tlc_notification.tlc.tlc_id.into());
+        order.status = CchOrderStatus::Accepted;
         state.orders_db.update_send_btc_order(order.clone()).await?;
 
         let req = routerrpc::SendPaymentRequest {
@@ -503,12 +491,12 @@ impl CchActor {
         Ok(())
     }
 
-    async fn handle_settled_tlc_notification(
+    async fn handle_payment_update(
         &self,
         state: &mut CchState,
-        tlc_notification: TlcNotification,
+        payment_update: PaymentUpdate,
     ) -> Result<()> {
-        let payment_hash = format!("{:#x}", tlc_notification.tlc.payment_hash);
+        let payment_hash = format!("{:#x}", payment_update.hash);
         tracing::debug!("[settled tlc] payment hash: {}", payment_hash);
 
         match state.orders_db.get_receive_btc_order(&payment_hash).await {
@@ -519,10 +507,19 @@ impl CchActor {
             }
         };
 
-        let preimage = tlc_notification
-            .tlc
-            .payment_preimage
-            .ok_or(CchError::ReceiveBTCMissingPreimage)?;
+        let preimage = match payment_update.state {
+            PaymentState::Success { preimage } => preimage,
+            PaymentState::Failed => {
+                // TODO: handle failed payment
+                return Ok(());
+            }
+            _ => {
+                tracing::debug!(
+                    payment_update = ?payment_update,
+                    "Ignore payment update");
+                return Ok(());
+            }
+        };
 
         tracing::debug!("[settled tlc] preimage: {:#x}", preimage);
 
@@ -555,35 +552,21 @@ impl CchActor {
             Ok(order) => order,
         };
 
+        let hash = Hash256::from_str(&event.payment_hash)?;
+
         order.status = event.status;
-        if let (Some(preimage), Some(network_actor), Some(channel_id), Some(tlc_id)) = (
-            event.preimage,
-            &self.network_actor,
-            order.channel_id,
-            order.tlc_id,
-        ) {
+        if let (Some(preimage_str), Some(network_actor)) = (event.preimage, &self.network_actor) {
             tracing::info!(
                 "SettleSendBTCOrder: payment_hash={}, status={:?}",
                 event.payment_hash,
                 event.status
             );
-            order.payment_preimage = Some(preimage.clone());
+            let preimage = Hash256::from_str(&preimage_str)?;
+            order.payment_preimage = Some(preimage_str);
 
             let message = move |rpc_reply| -> NetworkActorMessage {
-                NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
-                    ChannelCommandWithId {
-                        channel_id,
-                        command: ChannelCommand::RemoveTlc(
-                            RemoveTlcCommand {
-                                id: tlc_id,
-                                reason: RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
-                                    payment_preimage: Hash256::from_str(&preimage)
-                                        .expect("decode preimage"),
-                                }),
-                            },
-                            rpc_reply,
-                        ),
-                    },
+                NetworkActorMessage::Command(NetworkActorCommand::SettleInvoice(
+                    hash, preimage, rpc_reply,
                 ))
             };
 

@@ -74,9 +74,6 @@ pub struct SendBTCOrder {
     pub ckb_pay_req: String,
     pub payment_hash: String,
     pub payment_preimage: Option<String>,
-    pub channel_id: Option<Hash256>,
-    #[serde_as(as = "Option<U64Hex>")]
-    pub tlc_id: Option<u64>,
 
     #[serde_as(as = "U128Hex")]
     /// Amount required to pay in Satoshis via wrapped BTC, including the fee for the cross-chain hub

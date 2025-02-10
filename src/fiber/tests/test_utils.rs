@@ -837,7 +837,6 @@ impl NetworkNode {
             NetworkActorStartArguments {
                 config: fiber_config.clone(),
                 tracker: new_tokio_task_tracker(),
-                channel_subscribers: Default::default(),
                 default_shutdown_script: Default::default(),
             },
             root.get_cell(),

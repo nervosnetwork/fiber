@@ -11,7 +11,7 @@ use crate::{
 
 // The state of an invoice. Basically the same as CkbInvoiceStatus,
 // but with additional information for downstream services.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum InvoiceState {
     /// The invoice is open and can be paid.
     Open,
@@ -59,7 +59,7 @@ impl From<CkbInvoiceStatus> for Option<InvoiceState> {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct InvoiceUpdate {
     pub hash: Hash256,
     pub state: InvoiceState,
@@ -67,7 +67,7 @@ pub struct InvoiceUpdate {
 
 // The state of a payment session. Basically the same as PaymentSessionStatus,
 // but with additional information for downstream services.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum PaymentState {
     /// initial status, payment session is created, no HTLC is sent
     Created,
@@ -105,7 +105,7 @@ impl From<PaymentSessionStatus> for Option<PaymentState> {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct PaymentUpdate {
     pub hash: Hash256,
     pub state: PaymentState,

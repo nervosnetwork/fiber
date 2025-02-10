@@ -2,7 +2,6 @@ use ckb_chain_spec::ChainSpec;
 use ckb_resource::Resource;
 use core::default::Default;
 use fnn::actors::RootActor;
-use fnn::cch::CchMessage;
 use fnn::ckb::{contracts::try_init_contracts_context, CkbChainActor};
 use fnn::fiber::{graph::NetworkGraph, network::init_chain_hash};
 use fnn::store::store::StoreWithHooks;
@@ -242,22 +241,7 @@ pub async fn main() -> Result<(), ExitMessage> {
                         ));
                     }
                 }
-                Ok(actor) => {
-                    subscribers.pending_received_tlcs_subscribers.subscribe(
-                        actor.clone(),
-                        |tlc_notification| {
-                            Some(CchMessage::PendingReceivedTlcNotification(tlc_notification))
-                        },
-                    );
-                    subscribers.settled_tlcs_subscribers.subscribe(
-                        actor.clone(),
-                        |tlc_notification| {
-                            Some(CchMessage::SettledTlcNotification(tlc_notification))
-                        },
-                    );
-
-                    Some(actor)
-                }
+                Ok(actor) => Some(actor),
             }
         }
         None => None,

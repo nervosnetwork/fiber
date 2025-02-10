@@ -44,7 +44,7 @@ pub trait InvoiceStore {
 }
 
 #[derive(Error, Debug)]
-pub(crate) enum SettleInvoiceError {
+pub enum SettleInvoiceError {
     #[error("Invoice not found")]
     InvoiceNotFound,
     #[error("Hash mismatch")]
