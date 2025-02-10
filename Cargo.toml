@@ -82,7 +82,6 @@ tempfile = "3.10.1"
 ckb-testtool = "0.13.2"
 ciborium = "0.2.2"
 lnd = { version = "0.1.6", features = ["download"] }
-tonic_lnd = "0.5.1"
 
 [lints.clippy]
 needless-return = "allow"
