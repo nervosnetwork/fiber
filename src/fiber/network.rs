@@ -48,7 +48,7 @@ use tracing::{debug, error, info, trace, warn};
 use super::channel::{
     get_funding_and_reserved_amount, occupied_capacity, AcceptChannelParameter, ChannelActor,
     ChannelActorMessage, ChannelActorStateStore, ChannelCommand, ChannelCommandWithId,
-    ChannelEvent, ChannelInitializationParameter, ChannelState, ChannelSubscribers, ChannelTlcInfo,
+    ChannelEvent, ChannelInitializationParameter, ChannelState, ChannelTlcInfo,
     OpenChannelParameter, PrevTlcInfo, ProcessingChannelError, ProcessingChannelResult,
     PublicChannelInfo, RevocationData, SettlementData, ShuttingDownFlags,
     DEFAULT_COMMITMENT_FEE_RATE, DEFAULT_FEE_RATE, DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
@@ -1924,7 +1924,6 @@ pub struct NetworkActorState<S> {
     tlc_fee_proportional_millionths: u128,
     // The gossip messages actor to process and send gossip messages.
     gossip_actor: ActorRef<GossipActorMessage>,
-    channel_subscribers: ChannelSubscribers,
     max_inbound_peers: usize,
     min_outbound_peers: usize,
 }
@@ -2127,13 +2126,7 @@ where
         let (tx, rx) = oneshot::channel::<Hash256>();
         let channel = Actor::spawn_linked(
             Some(generate_channel_actor_name(&self.peer_id, &peer_id)),
-            ChannelActor::new(
-                self.get_public_key(),
-                remote_pubkey,
-                network.clone(),
-                store,
-                self.channel_subscribers.clone(),
-            ),
+            ChannelActor::new(self.get_public_key(), remote_pubkey, network.clone(), store),
             ChannelInitializationParameter::OpenChannel(OpenChannelParameter {
                 funding_amount,
                 seed,
@@ -2214,13 +2207,7 @@ where
         let (tx, rx) = oneshot::channel::<Hash256>();
         let channel = Actor::spawn_linked(
             Some(generate_channel_actor_name(&self.peer_id, &peer_id)),
-            ChannelActor::new(
-                self.get_public_key(),
-                remote_pubkey,
-                network.clone(),
-                store,
-                self.channel_subscribers.clone(),
-            ),
+            ChannelActor::new(self.get_public_key(), remote_pubkey, network.clone(), store),
             ChannelInitializationParameter::AcceptChannel(AcceptChannelParameter {
                 funding_amount,
                 reserved_ckb_amount,
@@ -2549,7 +2536,6 @@ where
                 remote_pubkey,
                 self.network.clone(),
                 self.store.clone(),
-                self.channel_subscribers.clone(),
             ),
             ChannelInitializationParameter::ReestablishChannel(channel_id),
             self.network.get_cell(),
@@ -3017,7 +3003,6 @@ where
 pub struct NetworkActorStartArguments {
     pub config: FiberConfig,
     pub tracker: TaskTracker,
-    pub channel_subscribers: ChannelSubscribers,
     pub default_shutdown_script: Script,
 }
 
@@ -3046,7 +3031,6 @@ where
         let NetworkActorStartArguments {
             config,
             tracker,
-            channel_subscribers,
             default_shutdown_script,
         } = args;
         let now = SystemTime::now()
@@ -3207,7 +3191,6 @@ where
             tlc_max_value: config.tlc_max_value(),
             tlc_fee_proportional_millionths: config.tlc_fee_proportional_millionths(),
             gossip_actor,
-            channel_subscribers,
             max_inbound_peers: config.max_inbound_peers(),
             min_outbound_peers: config.min_outbound_peers(),
         };
@@ -3465,7 +3448,6 @@ pub async fn start_network<
     tracker: TaskTracker,
     root_actor: ActorCell,
     store: S,
-    channel_subscribers: ChannelSubscribers,
     network_graph: Arc<RwLock<NetworkGraph<S>>>,
     default_shutdown_script: Script,
 ) -> ActorRef<NetworkActorMessage> {
@@ -3478,7 +3460,6 @@ pub async fn start_network<
         NetworkActorStartArguments {
             config,
             tracker,
-            channel_subscribers,
             default_shutdown_script,
         },
         root_actor,

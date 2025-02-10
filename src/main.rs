@@ -4,7 +4,7 @@ use core::default::Default;
 use fnn::actors::RootActor;
 use fnn::cch::CchMessage;
 use fnn::ckb::{contracts::try_init_contracts_context, CkbChainActor};
-use fnn::fiber::{channel::ChannelSubscribers, graph::NetworkGraph, network::init_chain_hash};
+use fnn::fiber::{graph::NetworkGraph, network::init_chain_hash};
 use fnn::store::store::StoreWithHooks;
 use fnn::tasks::{
     cancel_tasks_and_wait_for_completion, new_tokio_cancellation_token, new_tokio_task_tracker,
@@ -74,7 +74,6 @@ pub async fn main() -> Result<(), ExitMessage> {
     let tracker = new_tokio_task_tracker();
     let token = new_tokio_cancellation_token();
     let root_actor = RootActor::start(tracker, token).await;
-    let subscribers = ChannelSubscribers::default();
 
     #[cfg(debug_assertions)]
     let rpc_dev_module_commitment_txs = config.rpc.as_ref().and_then(|rpc_config| {
@@ -148,7 +147,6 @@ pub async fn main() -> Result<(), ExitMessage> {
                 new_tokio_task_tracker(),
                 root_actor.get_cell(),
                 store.clone(),
-                subscribers.clone(),
                 network_graph.clone(),
                 default_shutdown_script,
             )

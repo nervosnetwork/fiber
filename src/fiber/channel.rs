@@ -59,7 +59,7 @@ use musig2::{
 };
 use ractor::{
     async_trait as rasync_trait, call, concurrency::Duration, Actor, ActorProcessingErr, ActorRef,
-    OutputPort, RpcReplyPort,
+    RpcReplyPort,
 };
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
@@ -71,7 +71,6 @@ use super::{graph::ChannelUpdateInfo, types::ForwardTlcResult};
 use std::{
     collections::HashSet,
     fmt::{self, Debug},
-    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
     u128,
 };
@@ -269,27 +268,11 @@ pub enum ChannelInitializationParameter {
     ReestablishChannel(Hash256),
 }
 
-#[derive(Clone)]
-pub struct ChannelSubscribers {
-    pub pending_received_tlcs_subscribers: Arc<OutputPort<TlcNotification>>,
-    pub settled_tlcs_subscribers: Arc<OutputPort<TlcNotification>>,
-}
-
-impl Default for ChannelSubscribers {
-    fn default() -> Self {
-        Self {
-            pending_received_tlcs_subscribers: Arc::new(OutputPort::default()),
-            settled_tlcs_subscribers: Arc::new(OutputPort::default()),
-        }
-    }
-}
-
 pub struct ChannelActor<S> {
     local_pubkey: Pubkey,
     remote_pubkey: Pubkey,
     network: ActorRef<NetworkActorMessage>,
     store: S,
-    subscribers: ChannelSubscribers,
 }
 
 impl<S> ChannelActor<S>
@@ -301,14 +284,12 @@ where
         remote_pubkey: Pubkey,
         network: ActorRef<NetworkActorMessage>,
         store: S,
-        subscribers: ChannelSubscribers,
     ) -> Self {
         Self {
             local_pubkey,
             remote_pubkey,
             network,
             store,
-            subscribers,
         }
     }
 
@@ -938,16 +919,6 @@ where
             .map_err(move |err| err.with_shared_secret(shared_secret))?;
         }
 
-        if let Some(ref udt_type_script) = state.funding_udt_type_script {
-            self.subscribers
-                .pending_received_tlcs_subscribers
-                .send(TlcNotification {
-                    tlc: add_tlc.clone().into(),
-                    channel_id: state.get_id(),
-                    script: udt_type_script.clone(),
-                });
-        }
-
         // we don't need to settle down the tlc if it is not the last hop here,
         // some e2e tests are calling AddTlc manually, so we can not use onion packet to
         // check whether it's the last hop here, maybe need to revisit in future.
@@ -1151,7 +1122,6 @@ where
         state: &mut ChannelActorState,
         tlc_id: TLCId,
     ) -> Result<(), ProcessingChannelError> {
-        let channel_id = state.get_id();
         let (tlc_info, remove_reason) = state.remove_tlc_with_reason(tlc_id)?;
         if matches!(remove_reason, RemoveTlcReason::RemoveTlcFulfill(_))
             && self.store.get_invoice(&tlc_info.payment_hash).is_some()
@@ -1161,21 +1131,6 @@ where
                 .expect("update invoice status failed");
         }
 
-        if let (
-            Some(ref udt_type_script),
-            RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill { payment_preimage }),
-        ) = (state.funding_udt_type_script.clone(), &remove_reason)
-        {
-            let mut tlc_notify_info: TlcNotifyInfo = tlc_info.clone().into();
-            tlc_notify_info.payment_preimage = Some(*payment_preimage);
-            self.subscribers
-                .settled_tlcs_subscribers
-                .send(TlcNotification {
-                    tlc: tlc_notify_info,
-                    channel_id,
-                    script: udt_type_script.clone(),
-                });
-        }
         if tlc_info.previous_tlc.is_none() {
             // only the original sender of the TLC should send `TlcRemoveReceived` event
             // because only the original sender cares about the TLC event to settle the payment
