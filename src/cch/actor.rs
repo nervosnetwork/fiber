@@ -6,7 +6,7 @@ use lnd_grpc_tonic_client::{
     create_invoices_client, create_router_client, invoicesrpc, lnrpc, routerrpc, InvoicesClient,
     RouterClient, Uri,
 };
-use ractor::{call, RpcReplyPort};
+use ractor::{call, DerivedActorRef, RpcReplyPort};
 use ractor::{Actor, ActorCell, ActorProcessingErr, ActorRef};
 use serde::Deserialize;
 use std::str::FromStr;
@@ -100,9 +100,12 @@ pub enum CchMessage {
     PendingReceivedTlcNotification(TlcNotification),
     SettledTlcNotification(TlcNotification),
 
+    PaymentUpdate(PaymentUpdate),
+    InvoiceUpdate(InvoiceUpdate),
+
     SubscribeFiberPayment(
         Hash256,
-        ActorRef<PaymentUpdate>,
+        DerivedActorRef<PaymentUpdate>,
         RpcReplyPort<Result<SubscriptionId, SubscriptionError>>,
     ),
 
@@ -110,11 +113,45 @@ pub enum CchMessage {
 
     SubscribeFiberInvoice(
         Hash256,
-        ActorRef<InvoiceUpdate>,
+        DerivedActorRef<InvoiceUpdate>,
         RpcReplyPort<Result<SubscriptionId, SubscriptionError>>,
     ),
 
     UnsubscribeFiberInvoice(SubscriptionId, RpcReplyPort<Result<(), SubscriptionError>>),
+}
+
+impl From<PaymentUpdate> for CchMessage {
+    fn from(update: PaymentUpdate) -> Self {
+        CchMessage::PaymentUpdate(update)
+    }
+}
+
+impl TryFrom<CchMessage> for PaymentUpdate {
+    type Error = anyhow::Error;
+
+    fn try_from(msg: CchMessage) -> Result<Self, Self::Error> {
+        match msg {
+            CchMessage::PaymentUpdate(update) => Ok(update),
+            _ => Err(anyhow!("CchMessage is not PaymentUpdate")),
+        }
+    }
+}
+
+impl From<InvoiceUpdate> for CchMessage {
+    fn from(update: InvoiceUpdate) -> Self {
+        CchMessage::InvoiceUpdate(update)
+    }
+}
+
+impl TryFrom<CchMessage> for InvoiceUpdate {
+    type Error = anyhow::Error;
+
+    fn try_from(msg: CchMessage) -> Result<Self, Self::Error> {
+        match msg {
+            CchMessage::InvoiceUpdate(update) => Ok(update),
+            _ => Err(anyhow!("CchMessage is not InvoiceUpdate")),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -213,8 +250,11 @@ impl Actor for CchActor {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
+            CchMessage::PaymentUpdate(payment_update) => todo!(),
+            CchMessage::InvoiceUpdate(invoice_update) => todo!(),
+
             CchMessage::SendBTC(send_btc, port) => {
-                let result = self.send_btc(state, send_btc).await;
+                let result = self.send_btc(state, send_btc, myself.get_derived()).await;
                 if !port.is_closed() {
                     // ignore error
                     let _ = port.send(result);
@@ -222,7 +262,9 @@ impl Actor for CchActor {
                 Ok(())
             }
             CchMessage::ReceiveBTC(receive_btc, port) => {
-                let result = self.receive_btc(myself, state, receive_btc).await;
+                let result = self
+                    .receive_btc(myself.clone(), state, receive_btc, myself.get_derived())
+                    .await;
                 if !port.is_closed() {
                     // ignore error
                     let _ = port.send(result);
@@ -338,6 +380,7 @@ impl CchActor {
         &self,
         state: &mut CchState,
         send_btc: SendBTC,
+        fiber_invoice_tracker: DerivedActorRef<InvoiceUpdate>,
     ) -> Result<SendBTCOrder, CchError> {
         let duration_since_epoch = SystemTime::now().duration_since(UNIX_EPOCH)?;
 
@@ -389,7 +432,14 @@ impl CchActor {
         };
         order.generate_ckb_invoice()?;
 
+        let hash = Hash256::from(*invoice.payment_hash());
+
+        self.subscription
+            .subscribe_invoice(hash, fiber_invoice_tracker)
+            .await?;
+
         state.orders_db.insert_send_btc_order(order.clone()).await?;
+
         // TODO(now): save order and invoice into db: store.insert_invoice(invoice.clone())
 
         Ok(order)
@@ -552,10 +602,13 @@ impl CchActor {
         myself: ActorRef<CchMessage>,
         state: &mut CchState,
         receive_btc: ReceiveBTC,
+        fiber_payment_tracker: DerivedActorRef<PaymentUpdate>,
     ) -> Result<ReceiveBTCOrder, CchError> {
         let duration_since_epoch = SystemTime::now().duration_since(UNIX_EPOCH)?;
         let hash_bin = hex::decode(receive_btc.payment_hash.trim_start_matches("0x"))
             .map_err(|_| CchError::HexDecodingError(receive_btc.payment_hash.clone()))?;
+        let hash256 = Hash256::try_from(hash_bin.as_slice())
+            .map_err(|_err| CchError::HexDecodingError(receive_btc.payment_hash.clone()))?;
 
         let amount_sats = receive_btc.amount_sats;
         let fee_sats = amount_sats * (self.config.fee_rate_per_million_sats as u128)
@@ -611,6 +664,10 @@ impl CchActor {
             channel_id: receive_btc.channel_id,
             tlc_id: None,
         };
+
+        self.subscription
+            .subscribe_payment(hash256, fiber_payment_tracker)
+            .await?;
 
         state
             .orders_db

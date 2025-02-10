@@ -2,7 +2,7 @@
 //! This mod contains the traits definition of the subscription interfaces. The mod subscription_impl contains an
 //! implementation that sends out payment/invoice update events to subscribers.
 
-use ractor::{async_trait, ActorRef};
+use ractor::{async_trait, DerivedActorRef};
 
 use crate::{
     fiber::{graph::PaymentSessionStatus, types::Hash256},
@@ -121,7 +121,7 @@ pub trait InvoiceSubscription: Send + Clone {
     async fn subscribe_invoice(
         &self,
         invoice_hash: Hash256,
-        receiver: ActorRef<InvoiceUpdate>,
+        receiver: DerivedActorRef<InvoiceUpdate>,
     ) -> Result<Self::Subscription, Self::Error>;
 
     async fn unsubscribe_invoice(
@@ -138,7 +138,7 @@ pub trait PaymentSubscription: Send + Clone {
     async fn subscribe_payment(
         &self,
         payment_hash: Hash256,
-        receiver: ActorRef<PaymentUpdate>,
+        receiver: DerivedActorRef<PaymentUpdate>,
     ) -> Result<Self::Subscription, Self::Error>;
 
     async fn unsubscribe_payment(

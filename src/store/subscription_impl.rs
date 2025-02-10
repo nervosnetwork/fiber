@@ -6,7 +6,8 @@
 use std::collections::{hash_map::Entry, HashMap};
 
 use ractor::{
-    async_trait, call_t, Actor, ActorProcessingErr, ActorRef, MessagingErr, RactorErr, RpcReplyPort,
+    async_trait, call_t, Actor, ActorProcessingErr, ActorRef, DerivedActorRef, MessagingErr,
+    RactorErr, RpcReplyPort,
 };
 use thiserror::Error;
 use tracing::warn;
@@ -57,13 +58,13 @@ pub enum SubscriptionActorMessage {
     PaymentUpdated(Hash256, PaymentSessionStatus),
     SubscribeInvoiceUpdates(
         Hash256,
-        ActorRef<InvoiceUpdate>,
+        DerivedActorRef<InvoiceUpdate>,
         RpcReplyPort<SubscriptionId>,
     ),
     UnsubscribeInvoiceUpdates(SubscriptionId),
     SubscribePaymentUpdates(
         Hash256,
-        ActorRef<PaymentUpdate>,
+        DerivedActorRef<PaymentUpdate>,
         RpcReplyPort<SubscriptionId>,
     ),
     UnsubscribePaymentUpdates(SubscriptionId),
@@ -73,11 +74,11 @@ pub type SubscriptionId = u64;
 
 struct InvoiceSubscriber {
     id: SubscriptionId,
-    receiver: ActorRef<InvoiceUpdate>,
+    receiver: DerivedActorRef<InvoiceUpdate>,
 }
 
 impl InvoiceSubscriber {
-    pub fn new(id: SubscriptionId, receiver: ActorRef<InvoiceUpdate>) -> Self {
+    pub fn new(id: SubscriptionId, receiver: DerivedActorRef<InvoiceUpdate>) -> Self {
         Self { id, receiver }
     }
 
@@ -88,11 +89,11 @@ impl InvoiceSubscriber {
 
 struct PaymentSubscriber {
     id: SubscriptionId,
-    receiver: ActorRef<PaymentUpdate>,
+    receiver: DerivedActorRef<PaymentUpdate>,
 }
 
 impl PaymentSubscriber {
-    pub fn new(id: SubscriptionId, receiver: ActorRef<PaymentUpdate>) -> Self {
+    pub fn new(id: SubscriptionId, receiver: DerivedActorRef<PaymentUpdate>) -> Self {
         Self { id, receiver }
     }
 
@@ -140,7 +141,7 @@ impl SubscriptionActorState {
     pub fn add_invoice_subscriber(
         &mut self,
         invoice_hash: Hash256,
-        receiver: ActorRef<InvoiceUpdate>,
+        receiver: DerivedActorRef<InvoiceUpdate>,
     ) -> SubscriptionId {
         let id = self.get_next_subscriber_id();
         self.invoice_subscriptions
@@ -153,7 +154,7 @@ impl SubscriptionActorState {
     pub fn add_payment_subscriber(
         &mut self,
         payment_hash: Hash256,
-        receiver: ActorRef<PaymentUpdate>,
+        receiver: DerivedActorRef<PaymentUpdate>,
     ) -> SubscriptionId {
         let id = self.get_next_subscriber_id();
         self.payment_subscriptions
@@ -278,7 +279,7 @@ impl InvoiceSubscription for SubscriptionImpl {
     async fn subscribe_invoice(
         &self,
         invoice_hash: Hash256,
-        receiver: ActorRef<InvoiceUpdate>,
+        receiver: DerivedActorRef<InvoiceUpdate>,
     ) -> Result<Self::Subscription, Self::Error> {
         let id = call_t!(
             self.actor,
@@ -312,7 +313,7 @@ impl PaymentSubscription for SubscriptionImpl {
     async fn subscribe_payment(
         &self,
         payment_hash: Hash256,
-        receiver: ActorRef<PaymentUpdate>,
+        receiver: DerivedActorRef<PaymentUpdate>,
     ) -> Result<Self::Subscription, Self::Error> {
         let id = call_t!(
             self.actor,

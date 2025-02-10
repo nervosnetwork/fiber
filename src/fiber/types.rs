@@ -11,6 +11,7 @@ use super::r#gen::fiber::PubNonceOpt;
 use super::serde_utils::{EntityHex, SliceHex};
 use crate::ckb::config::{UdtArgInfo, UdtCellDep, UdtCfgInfos, UdtScript};
 use crate::ckb::contracts::get_udt_whitelist;
+use bitcoin::hashes::Hash;
 use ckb_jsonrpc_types::CellOutput;
 use num_enum::IntoPrimitive;
 use num_enum::TryFromPrimitive;
@@ -185,6 +186,31 @@ impl From<&MByte32> for Hash256 {
 impl From<MByte32> for Hash256 {
     fn from(value: MByte32) -> Self {
         (&value).into()
+    }
+}
+
+impl From<lightning_invoice::Sha256> for Hash256 {
+    fn from(value: lightning_invoice::Sha256) -> Self {
+        Hash256(value.0.to_byte_array())
+    }
+}
+
+impl From<bitcoin::hashes::sha256::Hash> for Hash256 {
+    fn from(value: bitcoin::hashes::sha256::Hash) -> Self {
+        Hash256(value.to_byte_array())
+    }
+}
+
+impl TryFrom<&[u8]> for Hash256 {
+    type Error = anyhow::Error;
+
+    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
+        if value.len() != 32 {
+            return Err(anyhow!("Invalid hash length"));
+        }
+        let mut data = [0u8; 32];
+        data.copy_from_slice(value);
+        Ok(Hash256(data))
     }
 }
 
