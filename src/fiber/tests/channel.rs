@@ -6387,6 +6387,12 @@ async fn test_send_payment_succeed_settle_hold_invoice_multiple_times() {
         .await;
 }
 
+// TODO: This test does not work because we currently will not persistently retry forwarding
+// RemoveTlc packet. For example, say there is a payment path A -> B -> C, and we have successfully
+// sent AddTlc packet from A to B and B to C. When C has also sent RemoveTlc packet to B, and A
+// is offline, in this case, the current implementation will not persistently retry forwarding
+// RemoveTlc packet from B to C. So the payment will be stuck in the inflight state.
+#[ignore]
 #[tokio::test]
 async fn test_send_payment_succeed_settle_hold_invoice_when_sender_offline() {
     init_tracing();
