@@ -16,12 +16,12 @@ fn get_lnd_exe_path() -> String {
     lnd::exe_path().expect("lnd executable does not exist. See https://docs.rs/lnd/0.1.6/lnd/fn.exe_path.html for how the lnd executable is searched")
 }
 
-pub(crate) enum LndBitcoinDConf {
-    New(Option<bitcoind::Conf<'static>>),
+pub enum LndBitcoinDConf<'a> {
+    New(Option<bitcoind::Conf<'a>>),
     Existing(Arc<BitcoinD>),
 }
 
-impl Default for LndBitcoinDConf {
+impl<'a> Default for LndBitcoinDConf<'a> {
     fn default() -> Self {
         Self::New(None)
     }
@@ -34,7 +34,10 @@ pub struct LndNode {
 }
 
 impl LndNode {
-    async fn new<'a>(lnd_conf: Option<LndConf<'static>>, bitcoind_conf: LndBitcoinDConf) -> Self {
+    async fn new<'a, 'b>(
+        lnd_conf: Option<LndConf<'a>>,
+        bitcoind_conf: LndBitcoinDConf<'b>,
+    ) -> Self {
         let bitcoind = match bitcoind_conf {
             LndBitcoinDConf::New(conf) => {
                 let conf = conf.unwrap_or_default();
@@ -89,6 +92,21 @@ impl LndNode {
         Self::new(lnd_conf, LndBitcoinDConf::Existing(self.bitcoind.clone())).await
     }
 
+    async fn new_two_nodes_with_established_channel(
+        bitcoind_conf: Option<bitcoind::Conf<'static>>,
+        lnd_conf1: Option<LndConf<'static>>,
+        lnd_conf2: Option<LndConf<'static>>,
+    ) -> (Self, Self, lnd::tonic_lnd::lnrpc::ChannelPoint) {
+        let mut lnd1 = Self::new(lnd_conf1, LndBitcoinDConf::New(bitcoind_conf)).await;
+        lnd1.make_some_money();
+        let mut lnd2 = lnd1.new_lnd_with_the_same_bitcoind(lnd_conf2).await;
+        lnd2.make_some_money();
+
+        let channel = lnd1.open_channel_with(&mut lnd2).await;
+
+        (lnd1, lnd2, channel)
+    }
+
     async fn get_info(&mut self) -> GetInfoResponse {
         self.lnd
             .client
@@ -119,15 +137,12 @@ impl LndNode {
         request.addr = Some(address);
         request.perm = false;
 
-        let response = self
-            .lnd
-            .client
-            .lightning()
-            .connect_peer(request)
-            .await
-            .expect("open channel")
-            .into_inner();
-        println!("connect response: {:?}", response);
+        let response = self.lnd.client.lightning().connect_peer(request).await;
+        match response {
+            Ok(_) => {}
+            Err(e) if e.message().contains("already connected to peer") => {}
+            Err(e) => panic!("connect peer failed: {}", e),
+        }
     }
 
     async fn wait_synced_to_chain(&mut self) {
@@ -144,6 +159,8 @@ impl LndNode {
     async fn open_channel_with(&mut self, other: &mut Self) -> lnd::tonic_lnd::lnrpc::ChannelPoint {
         self.connect(other).await;
 
+        // We need to wait for the nodes to be synced to the chain before opening a channel.
+        // This is a requirement of LND.
         self.wait_synced_to_chain().await;
         other.wait_synced_to_chain().await;
 
@@ -187,7 +204,7 @@ async fn test_run_lnd_two_nodes_with_the_same_bitcoind() {
     let mut lnd = LndNode::new(Default::default(), Default::default()).await;
     let bitcoin_info = lnd.bitcoind.client.get_network_info();
     assert!(bitcoin_info.is_ok());
-    println!("node_info: {:?}", lnd.get_info().await);
+    println!("lnd 1 node_info: {:?}", lnd.get_info().await);
 
     let mut lnd2 = lnd.new_lnd_with_the_same_bitcoind(Default::default()).await;
     // The second node should be able to run independently of the first node.
@@ -195,28 +212,17 @@ async fn test_run_lnd_two_nodes_with_the_same_bitcoind() {
 
     let bitcoin_info = lnd2.bitcoind.client.get_network_info();
     assert!(bitcoin_info.is_ok());
-    let node_info = lnd2
-        .lnd
-        .client
-        .lightning()
-        .get_info(GetInfoRequest {})
-        .await;
-    assert!(node_info.is_ok());
+    println!("lnd 2 node_info: {:?}", lnd2.get_info().await);
 }
 
 #[cfg_attr(not(feature = "lnd-tests"), ignore)]
 #[tokio::test]
 async fn test_run_lnd_two_nodes_with_established_channel() {
-    let mut lnd = LndNode::new(Default::default(), Default::default()).await;
-    let bitcoin_info = lnd.bitcoind.client.get_network_info();
-    assert!(bitcoin_info.is_ok());
-    lnd.make_some_money();
-
-    let mut lnd2 = lnd.new_lnd_with_the_same_bitcoind(Default::default()).await;
-    let bitcoin_info = lnd2.bitcoind.client.get_network_info();
-    assert!(bitcoin_info.is_ok());
-    lnd2.make_some_money();
-
-    let channel = lnd.open_channel_with(&mut lnd2).await;
+    let (_lnd1, _lnd2, channel) = LndNode::new_two_nodes_with_established_channel(
+        Default::default(),
+        Default::default(),
+        Default::default(),
+    )
+    .await;
     println!("channel: {:?}", channel);
 }
