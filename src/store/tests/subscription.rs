@@ -1,6 +1,6 @@
 use std::{marker::PhantomData, sync::Arc, time::Duration};
 
-use ractor::{async_trait, Actor, ActorCell, ActorProcessingErr, ActorRef};
+use ractor::{async_trait, Actor, ActorCell, ActorProcessingErr, ActorRef, DerivedActorRef};
 use tokio::sync::Mutex;
 
 use crate::{
@@ -14,7 +14,7 @@ use crate::{
     },
     gen_rand_sha256_hash,
     invoice::{CkbInvoiceStatus, Currency, InvoiceBuilder},
-    store::subscription::{InvoiceUpdate, PaymentUpdate},
+    store::subscription::{InvoiceSubscription, InvoiceUpdate, PaymentSubscription, PaymentUpdate},
 };
 
 #[derive(Debug, Clone)]
@@ -42,6 +42,52 @@ impl<T> MessageQueue<T> {
 pub struct MockSubscriber<T> {
     pub message_queue: MessageQueue<T>,
     pub actor: ActorRef<T>,
+}
+
+impl<T> MockSubscriber<T>
+where
+    T: ractor::Message,
+    MockActor<T>: Actor<Msg = T, Arguments = MessageQueue<T>>,
+{
+    pub async fn new(supervisor: Option<ActorCell>) -> Self {
+        let queue = MessageQueue::new();
+        let a: MockActor<T> = MockActor::new();
+        let actor = match supervisor {
+            Some(supervisor) => {
+                Actor::spawn_linked(
+                    None,
+                    a,
+                    MessageQueue {
+                        queue: queue.queue.clone(),
+                    },
+                    supervisor,
+                )
+                .await
+                .expect("spawn actor success")
+                .0
+            }
+            None => {
+                Actor::spawn(
+                    None,
+                    a,
+                    MessageQueue {
+                        queue: queue.queue.clone(),
+                    },
+                )
+                .await
+                .expect("spawn actor success")
+                .0
+            }
+        };
+        Self {
+            message_queue: queue,
+            actor,
+        }
+    }
+
+    pub fn get_subscriber(&self) -> DerivedActorRef<T> {
+        self.actor.get_derived()
+    }
 }
 
 pub struct MockActor<T> {
@@ -96,31 +142,6 @@ macro_rules! impl_mock_actor {
                 Ok(())
             }
         }
-
-        impl MockSubscriber<$type> {
-            pub async fn new(supervisor: Option<ActorCell>) -> Self {
-                let queue = MessageQueue::new();
-                let a: MockActor<$type> = MockActor::new();
-                let actor = match supervisor {
-                    Some(supervisor) => {
-                        Actor::spawn_linked(None, a, queue.clone(), supervisor)
-                            .await
-                            .expect("spawn actor success")
-                            .0
-                    }
-                    None => {
-                        Actor::spawn(None, a, queue.clone())
-                            .await
-                            .expect("spawn actor success")
-                            .0
-                    }
-                };
-                Self {
-                    message_queue: queue,
-                    actor,
-                }
-            }
-        }
     };
 }
 
@@ -128,24 +149,22 @@ impl_mock_actor!(InvoiceUpdate);
 impl_mock_actor!(PaymentUpdate);
 
 #[tokio::test]
-async fn test_payment_subscription_1() {
+async fn test_subscription_for_normal_payment() {
     init_tracing();
 
     let (nodes, channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
         &[
-            ((0, 1), (100000000000, 100000000000)),
-            ((1, 2), (100000000000, 100000000000)),
-            ((2, 3), (MIN_RESERVED_CKB + 2000, MIN_RESERVED_CKB + 1000)),
-            ((2, 3), (MIN_RESERVED_CKB + 1005, MIN_RESERVED_CKB + 1000)),
+            ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
         ],
-        4,
+        3,
         true,
     )
     .await;
-    let [mut node_0, _node_1, _node_2, mut node_3] = nodes.try_into().expect("4 nodes");
-    let source_node = &mut node_0;
-    let target_pubkey = node_3.pubkey.clone();
-    let old_amount = node_3.get_local_balance_from_channel(channels[2]);
+
+    let target_pubkey = nodes[nodes.len() - 1].pubkey.clone();
+    let target_old_amount =
+        nodes[nodes.len() - 1].get_local_balance_from_channel(channels[channels.len() - 1]);
 
     let preimage = gen_rand_sha256_hash();
     let ckb_invoice = InvoiceBuilder::new(Currency::Fibd)
@@ -155,8 +174,30 @@ async fn test_payment_subscription_1() {
         .expiry_time(Duration::from_secs(100))
         .build()
         .expect("build invoice success");
+    let hash = *ckb_invoice.payment_hash();
 
-    node_3.insert_invoice(ckb_invoice.clone(), Some(preimage));
+    let mut invoice_subscribers = Vec::with_capacity(nodes.len());
+    let mut payment_subscribers = Vec::with_capacity(nodes.len());
+    for node in &nodes {
+        let invoice_subscriber = MockSubscriber::new(Some(node.network_actor.get_cell())).await;
+        let payment_subscriber = MockSubscriber::new(Some(node.network_actor.get_cell())).await;
+
+        node.get_store_update_subscription()
+            .subscribe_invoice(hash, invoice_subscriber.get_subscriber())
+            .await
+            .expect("subscribe invoice success");
+
+        node.get_store_update_subscription()
+            .subscribe_payment(hash, payment_subscriber.get_subscriber())
+            .await
+            .expect("subscribe payment success");
+
+        invoice_subscribers.push(invoice_subscriber);
+        payment_subscribers.push(payment_subscriber);
+    }
+
+    let [mut source_node, _node_1, mut target_node] = nodes.try_into().expect("3 nodes");
+    target_node.insert_invoice(ckb_invoice.clone(), Some(preimage));
 
     let res = source_node
         .send_payment(SendPaymentCommand {
@@ -182,19 +223,22 @@ async fn test_payment_subscription_1() {
     assert!(res.is_ok());
 
     let payment_hash = res.unwrap().payment_hash;
+    assert_eq!(hash, payment_hash);
     source_node.wait_until_success(payment_hash).await;
 
     source_node
         .assert_payment_status(payment_hash, PaymentSessionStatus::Success, Some(1))
         .await;
 
-    let new_amount = node_3.get_local_balance_from_channel(channels[2]);
-    assert_eq!(new_amount, old_amount + 100);
+    let target_new_amount =
+        target_node.get_local_balance_from_channel(channels[channels.len() - 1]);
+    assert_eq!(target_new_amount, target_old_amount + 100);
     assert_eq!(
-        node_3.get_invoice_status(ckb_invoice.payment_hash()),
+        target_node.get_invoice_status(&hash),
         Some(CkbInvoiceStatus::Paid)
     );
 }
+
 #[tokio::test]
 async fn test_payment_subscription() {
     init_tracing();
