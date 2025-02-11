@@ -13,8 +13,11 @@ use thiserror::Error;
 use tracing::warn;
 
 use crate::{
-    fiber::{graph::PaymentSessionStatus, types::Hash256},
-    invoice::CkbInvoiceStatus,
+    fiber::{
+        graph::{NetworkGraphStateStore, PaymentSessionStatus},
+        types::Hash256,
+    },
+    invoice::{CkbInvoiceStatus, InvoiceStore},
 };
 
 use super::{
@@ -237,11 +240,45 @@ impl Actor for SubscriptionActor {
 
 impl SubscriptionActor {
     pub fn get_current_invoice_state(&self, invoice_hash: Hash256) -> Option<InvoiceState> {
-        unimplemented!()
+        self.store
+            .get_invoice_status(&invoice_hash)
+            .and_then(|status| match status {
+                CkbInvoiceStatus::Paid => Some(InvoiceState::Paid),
+                CkbInvoiceStatus::Expired => Some(InvoiceState::Expired),
+                CkbInvoiceStatus::Received => {
+                    // TODO: We should save received amount to the store. This is useful to
+                    // determine if the invoice is fully paid.
+                    // Currently we assume that the invoice is fully paid if the status is
+                    // Received.
+                    let amount = self
+                        .store
+                        .get_invoice(&invoice_hash)
+                        .and_then(|invoice| invoice.amount);
+                    amount.map(|amount| InvoiceState::Received {
+                        amount: amount,
+                        is_finished: true,
+                    })
+                }
+                CkbInvoiceStatus::Cancelled => Some(InvoiceState::Cancelled),
+                CkbInvoiceStatus::Open => Some(InvoiceState::Open),
+            })
     }
 
     pub fn get_current_payment_state(&self, payment_hash: Hash256) -> Option<PaymentState> {
-        unimplemented!()
+        self.store
+            .get_payment_session(payment_hash)
+            .and_then(|session| match session.status {
+                PaymentSessionStatus::Success => {
+                    // TODO: the preimage may have been removed from the store by this PR
+                    // https://github.com/nervosnetwork/fiber/pull/454 . We need to make sure code here
+                    // and there are consistent.
+                    let preimage = self.store.get_invoice_preimage(&payment_hash);
+                    preimage.map(|preimage| PaymentState::Success { preimage: preimage })
+                }
+                PaymentSessionStatus::Failed => Some(PaymentState::Failed),
+                PaymentSessionStatus::Inflight => Some(PaymentState::Inflight),
+                PaymentSessionStatus::Created => Some(PaymentState::Created),
+            })
     }
 
     pub fn create_invoice_state_from_status(
@@ -250,6 +287,10 @@ impl SubscriptionActor {
         status: CkbInvoiceStatus,
     ) -> Option<InvoiceState> {
         let state: Option<InvoiceState> = status.into();
+        // TODO: there is a race condition here. If the status passed is not self-contained,
+        // we need to query the store to get the current state. E.g. a CkbInvoiceStatus::Received
+        // status does not contain the amount, so we need to query the store to get the amount.
+        // But when we query the store, the status might have changed. We need to handle this.
         state.or_else(|| self.get_current_invoice_state(invoice_hash))
     }
 
@@ -259,6 +300,10 @@ impl SubscriptionActor {
         status: PaymentSessionStatus,
     ) -> Option<PaymentState> {
         let state: Option<PaymentState> = status.into();
+        // TODO: there is a race condition here. If the status passed is not self-contained,
+        // we need to query the store to get the current state. E.g. a PaymentSessionStatus::Success
+        // status does not contain the preimage, so we need to query the store to get the preimage.
+        // But when we query the store, the status might have changed. We need to handle this.
         state.or_else(|| self.get_current_payment_state(payment_hash))
     }
 }
