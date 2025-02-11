@@ -130,39 +130,45 @@ impl LndNode {
         println!("connect response: {:?}", response);
     }
 
-    async fn open_channel_with(&mut self, other: &mut Self) {
+    async fn wait_synced_to_chain(&mut self) {
+        for _ in 0..100 {
+            let info = self.get_info().await;
+            if info.synced_to_chain {
+                return;
+            }
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        }
+        panic!("not synced to chain");
+    }
+
+    async fn open_channel_with(&mut self, other: &mut Self) -> lnd::tonic_lnd::lnrpc::ChannelPoint {
         self.connect(other).await;
+
+        self.wait_synced_to_chain().await;
+        other.wait_synced_to_chain().await;
 
         let other_info = other.get_info().await;
         let mut request = lnd::tonic_lnd::lnrpc::OpenChannelRequest::default();
-        request.node_pubkey_string = other_info.identity_pubkey;
+        request.node_pubkey = hex::decode(other_info.identity_pubkey).expect("valid pubkey hex");
         request.local_funding_amount = 1_000_000;
         request.sat_per_vbyte = 1;
         request.min_confs = 0;
 
-        for _ in 0..10 {
-            match self
-                .lnd
-                .client
-                .lightning()
-                .open_channel_sync(request.clone())
-                .await
-            {
-                Ok(response) => {
-                    println!("open_channel response: {:?}", response);
-                    return;
-                }
-                Err(e) => {
-                    // self.make_some_money();
-                    self.bitcoind
-                        .client
-                        .generate_to_address(100, &self.address)
-                        .expect("Blocks generated to address.");
-                    println!("open_channel error: {:?}", e);
-                }
-            }
-        }
-        panic!("open_channel failed");
+        let channel = self
+            .lnd
+            .client
+            .lightning()
+            .open_channel_sync(request.clone())
+            .await
+            .expect("open channel")
+            .into_inner();
+
+        // Generate some blocks to confirm the channel.
+        self.make_some_money();
+        self.wait_synced_to_chain().await;
+        other.wait_synced_to_chain().await;
+
+        return channel;
     }
 }
 
@@ -204,15 +210,13 @@ async fn test_run_lnd_two_nodes_with_established_channel() {
     let mut lnd = LndNode::new(Default::default(), Default::default()).await;
     let bitcoin_info = lnd.bitcoind.client.get_network_info();
     assert!(bitcoin_info.is_ok());
-    println!("node_info: {:?}", lnd.get_info().await);
     lnd.make_some_money();
 
     let mut lnd2 = lnd.new_lnd_with_the_same_bitcoind(Default::default()).await;
     let bitcoin_info = lnd2.bitcoind.client.get_network_info();
     assert!(bitcoin_info.is_ok());
-    println!("node_info: {:?}", lnd.get_info().await);
-    lnd.make_some_money();
     lnd2.make_some_money();
 
-    lnd.open_channel_with(&mut lnd2).await;
+    let channel = lnd.open_channel_with(&mut lnd2).await;
+    println!("channel: {:?}", channel);
 }
