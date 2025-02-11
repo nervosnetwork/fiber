@@ -45,7 +45,7 @@ pub struct SubscriptionImpl {
 
 pub async fn new_subscription_impl(store: Store) -> SubscriptionImpl {
     let actor = SubscriptionActor::new(store);
-    let actor_ref = Actor::spawn(Some("store subscription actor".to_string()), actor, ())
+    let actor_ref = Actor::spawn(None, actor, ())
         .await
         .expect("start store subscription actor")
         .0;

@@ -97,13 +97,17 @@ impl Store {
 impl StoreWithHooks {
     pub async fn new<P: AsRef<Path>>(path: P) -> Result<(Self, SubscriptionImpl), String> {
         let store = Store::new(path.as_ref())?;
+        Ok(Self::new_from_vanilla_store(store).await)
+    }
+
+    pub async fn new_from_vanilla_store(store: Store) -> (Self, SubscriptionImpl) {
         let subscription_impl = new_subscription_impl(store.clone()).await;
         let store = Self {
             db: store.db,
             payment_hook: subscription_impl.clone(),
             invoice_hook: subscription_impl.clone(),
         };
-        Ok((store, subscription_impl))
+        (store, subscription_impl)
     }
 }
 

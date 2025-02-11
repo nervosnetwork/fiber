@@ -145,6 +145,7 @@ async fn test_set_announced_addrs_with_valid_peer_id() {
     let mut node = NetworkNode::new().await;
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
     node.stop().await;
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 
     let peer_id = node.get_peer_id();
     let addr = format!("/ip4/1.1.1.1/tcp/8346/p2p/{}", peer_id);
@@ -160,6 +161,7 @@ async fn test_set_announced_addrs_with_valid_peer_id() {
     .await;
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
     node.stop().await;
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
     let nodes = node.get_network_graph_nodes().await;
     assert_eq!(nodes.len(), 1);
     assert_eq!(nodes[0].node_id, node.get_public_key());
@@ -568,7 +570,7 @@ async fn test_sync_node_announcement_after_restart() {
 #[tokio::test]
 async fn test_persisting_network_state() {
     let mut node = NetworkNode::new().await;
-    let state = node.store.clone();
+    let state = node.get_store().clone();
     let peer_id = node.peer_id.clone();
     node.stop().await;
     assert!(state.get_network_actor_state(&peer_id).is_some())
@@ -585,7 +587,7 @@ async fn test_persisting_bootnode() {
             .build(),
     )
     .await;
-    let state = node.store.clone();
+    let state = node.get_store().clone();
     let peer_id = node.peer_id.clone();
     node.stop().await;
 

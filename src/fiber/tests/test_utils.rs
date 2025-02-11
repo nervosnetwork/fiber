@@ -16,6 +16,8 @@ use crate::invoice::CkbInvoice;
 use crate::invoice::CkbInvoiceStatus;
 use crate::invoice::InvoiceStore;
 use crate::invoice::SettleInvoiceError;
+use crate::store::store::StoreWithHooks;
+use crate::store::subscription_impl::SubscriptionImpl;
 use ckb_jsonrpc_types::Status;
 use ckb_types::packed::OutPoint;
 use ckb_types::{core::TransactionView, packed::Byte32};
@@ -177,12 +179,13 @@ pub struct NetworkNode {
     /// The base directory of the node, will be deleted after this struct dropped.
     pub base_dir: Arc<TempDir>,
     pub node_name: Option<String>,
-    pub store: Store,
+    pub store: Option<StoreWithHooks>,
+    pub store_update_subscription: Option<SubscriptionImpl>,
     pub channels_tx_map: HashMap<Hash256, Hash256>,
     pub fiber_config: FiberConfig,
     pub listening_addrs: Vec<MultiAddr>,
     pub network_actor: ActorRef<NetworkActorMessage>,
-    pub network_graph: Arc<TokioRwLock<NetworkGraph<Store>>>,
+    pub network_graph: Arc<TokioRwLock<NetworkGraph<StoreWithHooks>>>,
     pub chain_actor: ActorRef<CkbChainMessage>,
     pub private_key: Privkey,
     pub peer_id: PeerId,
@@ -193,7 +196,6 @@ pub struct NetworkNode {
 pub struct NetworkNodeConfig {
     base_dir: Arc<TempDir>,
     node_name: Option<String>,
-    store: Store,
     fiber_config: FiberConfig,
 }
 
@@ -248,12 +250,10 @@ impl NetworkNodeConfigBuilder {
             .clone()
             .unwrap_or_else(|| Arc::new(TempDir::new("test-fnn-node")));
         let node_name = self.node_name.clone();
-        let store = generate_store();
         let fiber_config = get_fiber_config(base_dir.as_ref(), node_name.as_deref());
         let mut config = NetworkNodeConfig {
             base_dir,
             node_name,
-            store,
             fiber_config,
         };
         if let Some(updater) = self.fiber_config_updater {
@@ -515,37 +515,37 @@ impl NetworkNode {
     }
 
     pub fn get_local_balance_from_channel(&self, channel_id: Hash256) -> u128 {
-        self.store
+        self.get_store()
             .get_channel_actor_state(&channel_id)
             .expect("get channel")
             .to_local_amount
     }
 
     pub fn get_remote_balance_from_channel(&self, channel_id: Hash256) -> u128 {
-        self.store
+        self.get_store()
             .get_channel_actor_state(&channel_id)
             .expect("get channel")
             .to_remote_amount
     }
 
     pub fn get_channel_actor_state(&self, channel_id: Hash256) -> ChannelActorState {
-        self.store
+        self.get_store()
             .get_channel_actor_state(&channel_id)
             .expect("get channel")
     }
 
     pub fn insert_invoice(&mut self, invoice: CkbInvoice, preimage: Option<Hash256>) {
-        self.store
+        self.get_store()
             .insert_invoice(invoice, preimage)
             .expect("insert success");
     }
 
     pub fn get_invoice_status(&mut self, payment_hash: &Hash256) -> Option<CkbInvoiceStatus> {
-        self.store.get_invoice_status(payment_hash)
+        self.get_store().get_invoice_status(payment_hash)
     }
 
     pub fn cancel_invoice(&mut self, payment_hash: &Hash256) {
-        self.store
+        self.get_store()
             .update_invoice_status(payment_hash, CkbInvoiceStatus::Cancelled)
             .expect("cancell success");
     }
@@ -557,7 +557,7 @@ impl NetworkNode {
         preimage: &Hash256,
     ) -> Result<(), SettleInvoiceError> {
         settle_invoice(
-            &self.store,
+            self.get_store(),
             Some(&self.network_actor),
             payment_hash,
             preimage,
@@ -727,7 +727,7 @@ impl NetworkNode {
         reload_params: Option<ReloadParams>,
     ) {
         let channel_id = state.id.clone();
-        self.store.insert_channel_actor_state(state);
+        self.get_store().insert_channel_actor_state(state);
         self.network_actor
             .send_message(NetworkActorMessage::Command(
                 NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
@@ -781,7 +781,7 @@ impl NetworkNode {
     }
 
     pub fn get_payment_session(&self, payment_hash: Hash256) -> Option<PaymentSession> {
-        self.store.get_payment_session(payment_hash)
+        self.get_store().get_payment_session(payment_hash)
     }
 
     pub async fn new_with_node_name(node_name: &str) -> Self {
@@ -800,11 +800,14 @@ impl NetworkNode {
         let NetworkNodeConfig {
             base_dir,
             node_name,
-            store,
             fiber_config,
         } = config;
 
         let _span = tracing::info_span!("NetworkNode", node_name = &node_name).entered();
+
+        let (store, store_update_subscription) = StoreWithHooks::new(base_dir.as_ref())
+            .await
+            .expect("create store");
 
         let root = get_test_root_actor().await;
         let (event_sender, mut event_receiver) = mpsc::channel(10000);
@@ -866,7 +869,8 @@ impl NetworkNode {
         Self {
             base_dir,
             node_name,
-            store,
+            store: Some(store),
+            store_update_subscription: Some(store_update_subscription),
             fiber_config,
             channels_tx_map: Default::default(),
             listening_addrs: announced_addrs,
@@ -884,9 +888,19 @@ impl NetworkNode {
         NetworkNodeConfig {
             base_dir: self.base_dir.clone(),
             node_name: self.node_name.clone(),
-            store: self.store.clone(),
             fiber_config: self.fiber_config.clone(),
         }
+    }
+
+    pub fn get_store(&self) -> &StoreWithHooks {
+        &self.store.as_ref().expect("store")
+    }
+
+    pub fn get_store_update_subscription(&self) -> &SubscriptionImpl {
+        &self
+            .store_update_subscription
+            .as_ref()
+            .expect("store update subscription")
     }
 
     pub async fn get_network_channels(&self) -> Vec<ChannelInfo> {
@@ -917,6 +931,8 @@ impl NetworkNode {
             |event| matches!(event, NetworkServiceEvent::NetworkStopped(id) if id == &my_peer_id),
         )
         .await;
+        self.store.take();
+        self.store_update_subscription.take();
     }
 
     pub async fn restart(&mut self) {
@@ -1089,13 +1105,13 @@ impl NetworkNode {
         get_tx_from_hash(self.chain_actor.clone(), tx_hash).await
     }
 
-    pub fn get_network_graph(&self) -> &Arc<TokioRwLock<NetworkGraph<Store>>> {
+    pub fn get_network_graph(&self) -> &Arc<TokioRwLock<NetworkGraph<StoreWithHooks>>> {
         &self.network_graph
     }
 
     pub async fn with_network_graph<F, T>(&self, f: F) -> T
     where
-        F: FnOnce(&NetworkGraph<Store>) -> T,
+        F: FnOnce(&NetworkGraph<StoreWithHooks>) -> T,
     {
         let graph = self.get_network_graph().read().await;
         f(&*graph)
@@ -1103,7 +1119,7 @@ impl NetworkNode {
 
     pub async fn with_network_graph_mut<F, T>(&self, f: F) -> T
     where
-        F: FnOnce(&mut NetworkGraph<Store>) -> T,
+        F: FnOnce(&mut NetworkGraph<StoreWithHooks>) -> T,
     {
         let mut graph = self.get_network_graph().write().await;
         f(&mut graph)

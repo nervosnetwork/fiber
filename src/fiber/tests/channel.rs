@@ -189,8 +189,14 @@ async fn test_create_channel_with_remote_tlc_info() {
 
         tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
-        let node_a_channel_state = node_a.store.get_channel_actor_state(&channel_id).unwrap();
-        let node_b_channel_state = node_b.store.get_channel_actor_state(&channel_id).unwrap();
+        let node_a_channel_state = node_a
+            .get_store()
+            .get_channel_actor_state(&channel_id)
+            .unwrap();
+        let node_b_channel_state = node_b
+            .get_store()
+            .get_channel_actor_state(&channel_id)
+            .unwrap();
 
         assert_eq!(
             Some(node_a_channel_state.local_tlc_info),
@@ -4529,7 +4535,10 @@ async fn test_commitment_tx_capacity() {
     let (node_a, _node_b, channel_id, _) =
         NetworkNode::new_2_nodes_with_established_channel(amount_a, amount_b, true).await;
 
-    let state = node_a.store.get_channel_actor_state(&channel_id).unwrap();
+    let state = node_a
+        .get_store()
+        .get_channel_actor_state(&channel_id)
+        .unwrap();
     let commitment_tx = state.latest_commitment_transaction.unwrap().into_view();
     let output_capacity: u64 = commitment_tx.output(0).unwrap().capacity().unpack();
 
