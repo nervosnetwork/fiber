@@ -148,20 +148,13 @@ async fn test_set_announced_addrs_with_valid_peer_id() {
     let peer_id = node.get_peer_id();
     let addr = format!("/ip4/1.1.1.1/tcp/8346/p2p/{}", peer_id);
     let multiaddr = Multiaddr::from_str(&addr).expect("valid multiaddr");
-    let config = NetworkNodeConfigBuilder::new()
-        .base_dir(node.base_dir.clone())
-        .fiber_config_updater(move |config| {
-            config.announced_addrs = vec![addr.clone()];
-        })
-        .build();
     node.stop().await;
-    drop(node);
+    node.fiber_config.announced_addrs = vec![addr.clone()];
+    node.start().await;
 
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-
-    let mut node = NetworkNode::new_with_config(config).await;
-    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
     node.stop().await;
+
     let nodes = node.get_network_graph_nodes().await;
     assert_eq!(nodes.len(), 1);
     assert_eq!(nodes[0].node_id, node.get_public_key());
@@ -554,7 +547,7 @@ async fn test_sync_node_announcement_after_restart() {
         ))
         .expect("send message to network actor");
 
-    let mut node2 = node2.start().await;
+    node2.start().await;
     node2.connect_to(&node1).await;
 
     // Wait for the broadcast message to be processed.
@@ -665,7 +658,7 @@ async fn test_saving_and_connecting_to_node() {
     // Wait for the above message to be processed.
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
-    let mut node2 = node2.restart().await;
+    node2.restart().await;
 
     node2.expect_event(
         |event| matches!(event, NetworkServiceEvent::PeerConnected(id, _addr) if id == node1_id),

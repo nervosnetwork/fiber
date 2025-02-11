@@ -924,10 +924,15 @@ impl NetworkNode {
             .get_nodes_with_params(1000, None)
     }
 
-    pub async fn start(self) -> Self {
+    pub async fn start(&mut self) {
         let config = self.get_node_config();
-        drop(self);
-        Self::new_with_config(config).await
+        // TODO: This is actually different from rerunning the node from scratch.
+        // We can't really create a new store from the same directory because some other
+        // services are still using rocksdb store. So we may encounter error like
+        // IO error: lock hold by current process, acquire time 1739265247 acquiring thread 158410: /tmp/test-fnn-node-0-bnbY8P/LOCK: No locks available
+        let store = self.get_store().clone();
+        let subscription = self.get_store_update_subscription().clone();
+        *self = Self::new_with_config_and_store(config, Some((store, subscription))).await;
     }
 
     pub async fn stop(&mut self) {
@@ -940,16 +945,15 @@ impl NetworkNode {
         .await;
     }
 
-    pub async fn restart(mut self) -> Self {
-        let mut_self = &mut self;
-        mut_self.stop().await;
+    pub async fn restart(&mut self) {
+        self.stop().await;
         // Tentacle shutdown may require some time to propagate to other nodes.
         // If we start the node immediately, other nodes may deem our new connection
         // as a duplicate connection and report RepeatedConnection error.
         // And we will receive `ProtocolSelectError` error from tentacle.
         tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
         tracing::debug!("Node stopped, restarting");
-        self.start().await
+        self.start().await;
     }
 
     pub async fn new_n_interconnected_nodes<const N: usize>() -> [Self; N] {
