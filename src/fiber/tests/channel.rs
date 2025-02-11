@@ -6224,7 +6224,91 @@ async fn test_send_payment_will_fail_with_cancelled_invoice() {
 }
 
 #[tokio::test]
-async fn test_send_payment_succeed_with_hold_invoice_settled() {
+async fn test_send_payment_succeed_with_hold_invoice_settled_direct_payment() {
+    init_tracing();
+    let _span = tracing::info_span!("node", node = "test").entered();
+    let n_nodes = 2;
+    let (nodes, channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+        &[((0, 1), (HUGE_CKB_AMOUNT, MIN_RESERVED_CKB))],
+        n_nodes,
+        true,
+    )
+    .await;
+    let last_channel = *channels.last().unwrap();
+    let [mut node_0, mut node_1] = nodes.try_into().expect("2 nodes");
+    let source_node = &mut node_0;
+    let target_pubkey = node_1.pubkey.clone();
+    let old_amount = node_1.get_local_balance_from_channel(last_channel);
+
+    let preimage = gen_rand_sha256_hash();
+    let ckb_invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(100))
+        .payment_preimage(preimage.clone())
+        .payee_pub_key(target_pubkey.into())
+        .expiry_time(Duration::from_secs(100))
+        .build()
+        .expect("build invoice success");
+
+    node_1.insert_invoice(ckb_invoice.clone(), None);
+
+    let res = source_node
+        .send_payment(SendPaymentCommand {
+            target_pubkey: Some(target_pubkey.clone()),
+            amount: Some(100),
+            payment_hash: None,
+            final_tlc_expiry_delta: None,
+            tlc_expiry_limit: None,
+            invoice: Some(ckb_invoice.to_string()),
+            timeout: None,
+            max_fee_amount: None,
+            max_parts: None,
+            keysend: None,
+            hold_payment: true,
+            udt_type_script: None,
+            allow_self_payment: false,
+            hop_hints: None,
+            dry_run: false,
+        })
+        .await;
+
+    assert!(res.is_ok());
+
+    let payment_hash = res.unwrap().payment_hash;
+
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
+    source_node
+        .assert_payment_status(payment_hash, PaymentSessionStatus::Inflight, Some(1))
+        .await;
+
+    assert_eq!(
+        node_1.get_invoice_status(ckb_invoice.payment_hash()),
+        Some(CkbInvoiceStatus::Received)
+    );
+    let new_amount = node_1.get_local_balance_from_channel(last_channel);
+    assert_eq!(new_amount, old_amount);
+
+    node_1
+        .settle_invoice(ckb_invoice.payment_hash(), &preimage)
+        .expect("settle invoice success");
+
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
+    // we should never update the invoice status if there is an error
+    assert_eq!(
+        node_1.get_invoice_status(ckb_invoice.payment_hash()),
+        Some(CkbInvoiceStatus::Paid)
+    );
+    let new_amount = node_1.get_local_balance_from_channel(last_channel);
+    assert_eq!(new_amount, old_amount + 100);
+
+    source_node
+        .assert_payment_status(payment_hash, PaymentSessionStatus::Success, Some(1))
+        .await;
+}
+
+#[tokio::test]
+async fn test_send_payment_succeed_with_hold_invoice_settled_indirect_payment() {
     init_tracing();
     let _span = tracing::info_span!("node", node = "test").entered();
     let (nodes, channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
