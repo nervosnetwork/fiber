@@ -36,10 +36,6 @@ impl<T> MessageQueue<T> {
         self.queue.lock().await.push(update);
     }
 
-    pub async fn pop(&self) -> Option<T> {
-        self.queue.lock().await.pop()
-    }
-
     pub async fn take(&self) -> Vec<T> {
         let mut queue = self.queue.lock().await;
         std::mem::take(&mut *queue)
@@ -157,7 +153,7 @@ impl_mock_actor!(InvoiceUpdate);
 impl_mock_actor!(PaymentUpdate);
 
 #[tokio::test]
-async fn test_subscription_for_normal_payment() {
+async fn test_store_update_subscription_normal_payment() {
     init_tracing();
 
     let n_nodes = 3;
@@ -307,37 +303,61 @@ async fn test_subscription_for_normal_payment() {
 }
 
 #[tokio::test]
-async fn test_payment_subscription() {
+async fn test_store_update_subscription_settlement_payment() {
     init_tracing();
     let _span = tracing::info_span!("node", node = "test").entered();
+    let n_nodes = 3;
     let (nodes, channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
         &[
             ((0, 1), (HUGE_CKB_AMOUNT, MIN_RESERVED_CKB)),
             ((1, 2), (HUGE_CKB_AMOUNT, MIN_RESERVED_CKB)),
         ],
-        3,
+        n_nodes,
         true,
     )
     .await;
-    let [mut node_0, _node_1, mut node_2] = nodes.try_into().expect("3 nodes");
-    let source_node = &mut node_0;
-    let target_pubkey = node_2.pubkey.clone();
-    let old_amount = node_2.get_local_balance_from_channel(channels[1]);
 
+    let node_2_pubkey = nodes[n_nodes - 1].pubkey;
     let preimage = gen_rand_sha256_hash();
+    let amount = 100;
     let ckb_invoice = InvoiceBuilder::new(Currency::Fibd)
-        .amount(Some(100))
+        .amount(Some(amount))
         .payment_preimage(preimage.clone())
-        .payee_pub_key(target_pubkey.into())
+        .payee_pub_key(node_2_pubkey.into())
         .expiry_time(Duration::from_secs(100))
         .build()
         .expect("build invoice success");
 
+    let hash = *ckb_invoice.payment_hash();
+
+    let mut invoice_subscribers = Vec::with_capacity(n_nodes);
+    let mut payment_subscribers = Vec::with_capacity(n_nodes);
+    for node in &nodes {
+        let invoice_subscriber = MockSubscriber::new(Some(node.network_actor.get_cell())).await;
+        let payment_subscriber = MockSubscriber::new(Some(node.network_actor.get_cell())).await;
+
+        node.get_store_update_subscription()
+            .subscribe_invoice(hash, invoice_subscriber.get_subscriber())
+            .await
+            .expect("subscribe invoice success");
+
+        node.get_store_update_subscription()
+            .subscribe_payment(hash, payment_subscriber.get_subscriber())
+            .await
+            .expect("subscribe payment success");
+
+        invoice_subscribers.push(invoice_subscriber);
+        payment_subscribers.push(payment_subscriber);
+    }
+
+    let [mut node_0, _node_1, mut node_2] = nodes.try_into().expect("3 nodes");
+    let old_amount = node_2.get_local_balance_from_channel(channels[1]);
+
     node_2.insert_invoice(ckb_invoice.clone(), None);
 
-    let res = source_node
+    let res = node_0
         .send_payment(SendPaymentCommand {
-            target_pubkey: Some(target_pubkey.clone()),
+            target_pubkey: Some(node_2_pubkey.clone()),
             amount: Some(100),
             payment_hash: None,
             final_tlc_expiry_delta: None,
@@ -361,7 +381,7 @@ async fn test_payment_subscription() {
 
     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 
-    source_node
+    node_0
         .assert_payment_status(payment_hash, PaymentSessionStatus::Inflight, Some(1))
         .await;
 
@@ -371,6 +391,57 @@ async fn test_payment_subscription() {
     );
     let new_amount = node_2.get_local_balance_from_channel(channels[1]);
     assert_eq!(new_amount, old_amount);
+
+    for (n, subscriber) in invoice_subscribers.iter().enumerate() {
+        let mut updates = subscriber.message_queue.take().await;
+        // We may push the same update multiple times, so we need to dedup
+        updates.dedup();
+        if n != n_nodes - 1 {
+            assert_eq!(updates, vec![]);
+        } else {
+            // Before settling the invoice, we should not have the Paid state
+            assert_eq!(
+                updates,
+                vec![
+                    InvoiceUpdate {
+                        hash,
+                        state: InvoiceState::Open,
+                    },
+                    InvoiceUpdate {
+                        hash,
+                        state: InvoiceState::Received {
+                            amount,
+                            is_finished: true,
+                        },
+                    },
+                ]
+            );
+        }
+    }
+
+    for (n, subscriber) in payment_subscribers.iter().enumerate() {
+        let mut updates = subscriber.message_queue.take().await;
+        // We may push the same update multiple times, so we need to dedup
+        updates.dedup();
+        if n != 0 {
+            assert_eq!(updates, vec![]);
+        } else {
+            // Before settling the invoice, we should not have the Success state
+            assert_eq!(
+                updates,
+                vec![
+                    PaymentUpdate {
+                        hash,
+                        state: PaymentState::Created,
+                    },
+                    PaymentUpdate {
+                        hash,
+                        state: PaymentState::Inflight,
+                    },
+                ]
+            );
+        }
+    }
 
     node_2
         .settle_invoice(ckb_invoice.payment_hash(), &preimage)
@@ -386,7 +457,43 @@ async fn test_payment_subscription() {
     let new_amount = node_2.get_local_balance_from_channel(channels[1]);
     assert_eq!(new_amount, old_amount + 100);
 
-    source_node
+    node_0
         .assert_payment_status(payment_hash, PaymentSessionStatus::Success, Some(1))
         .await;
+
+    for (n, subscriber) in invoice_subscribers.iter().enumerate() {
+        let mut updates = subscriber.message_queue.take().await;
+        // We may push the same update multiple times, so we need to dedup
+        updates.dedup();
+        if n != n_nodes - 1 {
+            assert_eq!(updates, vec![]);
+        } else {
+            // Invoice is now paid.
+            assert_eq!(
+                updates,
+                vec![InvoiceUpdate {
+                    hash,
+                    state: InvoiceState::Paid,
+                }]
+            );
+        }
+    }
+
+    for (n, subscriber) in payment_subscribers.iter().enumerate() {
+        let mut updates = subscriber.message_queue.take().await;
+        // We may push the same update multiple times, so we need to dedup
+        updates.dedup();
+        if n != 0 {
+            assert_eq!(updates, vec![]);
+        } else {
+            // Payment is now successful.
+            assert_eq!(
+                updates,
+                vec![PaymentUpdate {
+                    hash,
+                    state: PaymentState::Success { preimage },
+                }]
+            );
+        }
+    }
 }
