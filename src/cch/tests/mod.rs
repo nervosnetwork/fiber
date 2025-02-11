@@ -9,16 +9,11 @@ use lnd::tonic_lnd::lnrpc::{GetInfoRequest, GetInfoResponse};
 use lnd::{self, Lnd, LndConf};
 
 fn get_bitcoind_exe_path() -> String {
-    bitcoind::exe_path()
-        .or(bitcoind::downloaded_exe_path())
-        .expect("bitcoind executable either exists locally or can be downloaded")
+    bitcoind::exe_path().expect("bitcoind executable does not exist. See https://docs.rs/bitcoind/0.34.3/bitcoind/fn.exe_path.html for how the bitcoind executable is searched")
 }
 
 fn get_lnd_exe_path() -> String {
-    lnd::exe_path()
-        .ok()
-        .or(lnd::downloaded_exe_path())
-        .expect("lnd executable either exists locally or can be downloaded")
+    lnd::exe_path().expect("lnd executable does not exist. See https://docs.rs/lnd/0.1.6/lnd/fn.exe_path.html for how the lnd executable is searched")
 }
 
 pub(crate) enum LndBitcoinDConf {
@@ -171,6 +166,7 @@ impl LndNode {
     }
 }
 
+#[cfg_attr(not(feature = "lnd-tests"), ignore)]
 #[tokio::test]
 async fn test_run_lnd_one_node() {
     let mut lnd = LndNode::new(Default::default(), Default::default()).await;
@@ -179,6 +175,7 @@ async fn test_run_lnd_one_node() {
     println!("node_info: {:?}", lnd.get_info().await);
 }
 
+#[cfg_attr(not(feature = "lnd-tests"), ignore)]
 #[tokio::test]
 async fn test_run_lnd_two_nodes_with_the_same_bitcoind() {
     let mut lnd = LndNode::new(Default::default(), Default::default()).await;
@@ -201,6 +198,7 @@ async fn test_run_lnd_two_nodes_with_the_same_bitcoind() {
     assert!(node_info.is_ok());
 }
 
+#[cfg_attr(not(feature = "lnd-tests"), ignore)]
 #[tokio::test]
 async fn test_run_lnd_two_nodes_with_established_channel() {
     let mut lnd = LndNode::new(Default::default(), Default::default()).await;

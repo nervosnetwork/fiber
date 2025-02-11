@@ -69,6 +69,8 @@ num_enum = "0.7.3"
 [features]
 default = []
 portable = ["rocksdb/portable"]
+# Some lnd related unit tests will only run if this feature is enabled.
+lnd-tests = []
 
 [profile.release]
 panic = "abort"
@@ -81,7 +83,7 @@ panic = "abort"
 tempfile = "3.10.1"
 ckb-testtool = "0.13.2"
 ciborium = "0.2.2"
-lnd = { version = "0.1.6", features = ["download"] }
+lnd = "0.1.6"
 
 [lints.clippy]
 needless-return = "allow"
