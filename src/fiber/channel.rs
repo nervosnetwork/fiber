@@ -1123,9 +1123,16 @@ where
         tlc_id: TLCId,
     ) -> Result<(), ProcessingChannelError> {
         let (tlc_info, remove_reason) = state.remove_tlc_with_reason(tlc_id)?;
-        if matches!(remove_reason, RemoveTlcReason::RemoveTlcFulfill(_))
+        // We should only update invoice status to paid if the peer is paying us (i.e., the TLC is received).
+        // For the TLC sent by ourselves (we're paying the peer), we should leave any invoice as it is.
+        // The reason for this is that it is possible that we're paying another peer by sending a TLC and
+        // we have a local invoice with the same payment hash. See the test
+        // test_store_update_subscription_mock_cross_chain_payment for a concrete example.
+        if tlc_id.is_received()
+            && matches!(remove_reason, RemoveTlcReason::RemoveTlcFulfill(_))
             && self.store.get_invoice(&tlc_info.payment_hash).is_some()
         {
+            debug!(channel = ?state.get_id(), hash = ?tlc_info.payment_hash, "update invoice status to paid");
             self.store
                 .update_invoice_status(&tlc_info.payment_hash, CkbInvoiceStatus::Paid)
                 .expect("update invoice status failed");
