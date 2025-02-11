@@ -258,11 +258,10 @@ async fn test_subscription_for_normal_payment() {
             assert_eq!(
                 updates,
                 vec![
-                    // TODO: should also have this update
-                    // InvoiceUpdate {
-                    //     hash,
-                    //     state: InvoiceState::Open,
-                    // },
+                    InvoiceUpdate {
+                        hash,
+                        state: InvoiceState::Open,
+                    },
                     InvoiceUpdate {
                         hash,
                         state: InvoiceState::Received {

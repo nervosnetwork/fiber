@@ -445,6 +445,8 @@ impl<IH: InvoiceUpdateHook, PH: PaymentUpdateHook> InvoiceStore for GenericStore
             CkbInvoiceStatus::Open,
         ));
         batch.commit();
+        self.invoice_hook
+            .on_invoice_updated(payment_hash, CkbInvoiceStatus::Open);
         return Ok(());
     }
 
