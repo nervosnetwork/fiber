@@ -179,10 +179,10 @@ pub struct NetworkNode {
     /// The base directory of the node, will be deleted after this struct dropped.
     pub base_dir: Arc<TempDir>,
     pub node_name: Option<String>,
-    pub store: Option<StoreWithHooks>,
-    pub store_update_subscription: Option<SubscriptionImpl>,
-    pub channels_tx_map: HashMap<Hash256, Hash256>,
     pub fiber_config: FiberConfig,
+    pub store: StoreWithHooks,
+    pub store_update_subscription: SubscriptionImpl,
+    pub channels_tx_map: HashMap<Hash256, Hash256>,
     pub listening_addrs: Vec<MultiAddr>,
     pub network_actor: ActorRef<NetworkActorMessage>,
     pub network_graph: Arc<TokioRwLock<NetworkGraph<StoreWithHooks>>>,
@@ -797,6 +797,13 @@ impl NetworkNode {
     }
 
     pub async fn new_with_config(config: NetworkNodeConfig) -> Self {
+        Self::new_with_config_and_store(config, None).await
+    }
+
+    pub async fn new_with_config_and_store(
+        config: NetworkNodeConfig,
+        store: Option<(StoreWithHooks, SubscriptionImpl)>,
+    ) -> Self {
         let NetworkNodeConfig {
             base_dir,
             node_name,
@@ -805,9 +812,12 @@ impl NetworkNode {
 
         let _span = tracing::info_span!("NetworkNode", node_name = &node_name).entered();
 
-        let (store, store_update_subscription) = StoreWithHooks::new(base_dir.as_ref())
-            .await
-            .expect("create store");
+        let (store, store_update_subscription) = match store {
+            Some((store, subscription)) => (store, subscription),
+            None => StoreWithHooks::new(base_dir.as_ref())
+                .await
+                .expect("create store"),
+        };
 
         let root = get_test_root_actor().await;
         let (event_sender, mut event_receiver) = mpsc::channel(10000);
@@ -869,8 +879,8 @@ impl NetworkNode {
         Self {
             base_dir,
             node_name,
-            store: Some(store),
-            store_update_subscription: Some(store_update_subscription),
+            store,
+            store_update_subscription,
             fiber_config,
             channels_tx_map: Default::default(),
             listening_addrs: announced_addrs,
@@ -893,14 +903,11 @@ impl NetworkNode {
     }
 
     pub fn get_store(&self) -> &StoreWithHooks {
-        &self.store.as_ref().expect("store")
+        &self.store
     }
 
     pub fn get_store_update_subscription(&self) -> &SubscriptionImpl {
-        &self
-            .store_update_subscription
-            .as_ref()
-            .expect("store update subscription")
+        &self.store_update_subscription
     }
 
     pub async fn get_network_channels(&self) -> Vec<ChannelInfo> {
@@ -917,10 +924,10 @@ impl NetworkNode {
             .get_nodes_with_params(1000, None)
     }
 
-    pub async fn start(&mut self) {
+    pub async fn start(self) -> Self {
         let config = self.get_node_config();
-        let new = Self::new_with_config(config).await;
-        *self = new;
+        drop(self);
+        Self::new_with_config(config).await
     }
 
     pub async fn stop(&mut self) {
@@ -931,19 +938,18 @@ impl NetworkNode {
             |event| matches!(event, NetworkServiceEvent::NetworkStopped(id) if id == &my_peer_id),
         )
         .await;
-        self.store.take();
-        self.store_update_subscription.take();
     }
 
-    pub async fn restart(&mut self) {
-        self.stop().await;
+    pub async fn restart(mut self) -> Self {
+        let mut_self = &mut self;
+        mut_self.stop().await;
         // Tentacle shutdown may require some time to propagate to other nodes.
         // If we start the node immediately, other nodes may deem our new connection
         // as a duplicate connection and report RepeatedConnection error.
         // And we will receive `ProtocolSelectError` error from tentacle.
         tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
         tracing::debug!("Node stopped, restarting");
-        self.start().await;
+        self.start().await
     }
 
     pub async fn new_n_interconnected_nodes<const N: usize>() -> [Self; N] {

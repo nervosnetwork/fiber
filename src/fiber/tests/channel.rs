@@ -4565,7 +4565,7 @@ async fn test_connect_to_peers_with_mutual_channel_on_restart_1() {
         )
         .await;
 
-    node_a.restart().await;
+    let mut node_a = node_a.restart().await;
 
     node_a.expect_event(
         |event| matches!(event, NetworkServiceEvent::PeerConnected(id, _addr) if id == &node_b.peer_id),
@@ -4612,7 +4612,7 @@ async fn test_connect_to_peers_with_mutual_channel_on_restart_2() {
     )
     .await;
 
-    node_a.start().await;
+    let mut node_a = node_a.start().await;
 
     node_a.expect_event(
         |event| matches!(event, NetworkServiceEvent::PeerConnected(id, _addr) if id == &node_b.peer_id),
@@ -4670,7 +4670,7 @@ async fn test_send_payment_with_node_restart_then_resend_add_tlc() {
     let payment_status = node_a.get_payment_status(payment_hash).await;
     assert_eq!(payment_status, PaymentSessionStatus::Inflight);
 
-    node_b.start().await;
+    let node_b = node_b.start().await;
 
     node_a.expect_event(
         |event| matches!(event, NetworkServiceEvent::PeerConnected(id, _addr) if id == &node_b.peer_id),
@@ -4774,7 +4774,7 @@ async fn test_node_reestablish_resend_remove_tlc() {
     assert_eq!(node_a_balance, new_node_a_balance);
     assert_eq!(node_b_balance, new_node_b_balance);
 
-    node_a.start().await;
+    let node_a = node_a.start().await;
     node_b
         .expect_event(|event| {
             matches!(
@@ -6417,7 +6417,7 @@ async fn test_send_payment_succeed_settle_hold_invoice_when_sender_offline() {
     )
     .await;
     let [mut node_0, _node_1, mut node_2] = nodes.try_into().expect("3 nodes");
-    let source_node = &mut node_0;
+    let mut source_node = node_0;
     let target_pubkey = node_2.pubkey.clone();
     let old_amount = node_2.get_local_balance_from_channel(channels[1]);
 
@@ -6474,7 +6474,7 @@ async fn test_send_payment_succeed_settle_hold_invoice_when_sender_offline() {
         .settle_invoice(ckb_invoice.payment_hash(), &preimage)
         .expect("settle invoice success");
     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-    source_node.start().await;
+    let mut source_node = source_node.start().await;
 
     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 
@@ -6563,7 +6563,7 @@ async fn test_send_payment_succeed_settle_hold_invoice_when_forwarder_offline() 
         .settle_invoice(ckb_invoice.payment_hash(), &preimage)
         .expect("settle invoice success");
     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-    node_1.start().await;
+    let node_1 = node_1.start().await;
 
     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 
