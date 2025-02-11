@@ -498,13 +498,141 @@ impl FundingTx {
 
     // TODO: verify the transaction
     pub fn update_for_self(&mut self, tx: TransactionView) -> Result<(), FundingError> {
+        if !self.is_incremental_building(&tx) {
+            return Err(FundingError::NotIncrementalBuilding);
+        }
         self.tx = Some(tx);
         Ok(())
     }
 
     // TODO: verify the transaction
     pub fn update_for_peer(&mut self, tx: TransactionView) -> Result<(), FundingError> {
+        if !self.is_incremental_building(&tx) {
+            return Err(FundingError::NotIncrementalBuilding);
+        }
         self.tx = Some(tx);
         Ok(())
     }
+
+    fn is_incremental_building(&self, new_tx: &TransactionView) -> bool {
+        let old_tx = match self.tx.as_ref() {
+            Some(prev) => prev,
+            None => return true,
+        };
+
+        // Version must be the same
+        if new_tx.version() != old_tx.version() {
+            debug!(
+                "non-incremental funding tx building (version): new={} old={}",
+                new_tx.version(),
+                old_tx.version()
+            );
+            return false;
+        }
+
+        // New cell_deps
+        if new_tx.cell_deps().len() < old_tx.cell_deps().len() {
+            debug!(
+                "non-incremental funding tx building (cell_deps.len): new={} old={}",
+                new_tx.cell_deps().len(),
+                old_tx.cell_deps().len(),
+            );
+            return false;
+        }
+        // It's OK to replace cell_deps
+
+        // New header_deps
+        if new_tx.header_deps().len() < old_tx.header_deps().len() {
+            debug!(
+                "non-incremental funding tx building (header_deps.len): new={} old={}",
+                new_tx.header_deps().len(),
+                old_tx.header_deps().len(),
+            );
+            return false;
+        }
+        if new_tx
+            .header_deps()
+            .into_iter()
+            .zip(old_tx.header_deps())
+            .any(|(new, old)| new != old)
+        {
+            debug!("non-incremental funding tx building (header_deps)");
+            return false;
+        }
+
+        // New inputs
+        if new_tx.inputs().len() < old_tx.inputs().len() {
+            debug!(
+                "non-incremental funding tx building (inputs.len): new={} old={}",
+                new_tx.inputs().len(),
+                old_tx.inputs().len(),
+            );
+            return false;
+        }
+        if new_tx
+            .inputs()
+            .into_iter()
+            .zip(old_tx.inputs())
+            .any(|(new, old)| new != old)
+        {
+            debug!("non-incremental funding tx building (inputs)");
+            return false;
+        }
+
+        // New outputs
+        if new_tx.outputs().len() < old_tx.outputs().len() {
+            debug!(
+                "non-incremental funding tx building (outputs.len): new={} old={}",
+                new_tx.outputs().len(),
+                old_tx.outputs().len(),
+            );
+            return false;
+        }
+        if let Some((index, (new_output, old_output))) = new_tx
+            .outputs()
+            .into_iter()
+            .zip(old_tx.outputs())
+            .enumerate()
+            .find(|(_, (new, old))| !is_incremental_building_output(new, old))
+        {
+            if tracing::enabled!(tracing::Level::DEBUG) {
+                let new_output: ckb_jsonrpc_types::CellOutput = new_output.into();
+                let old_output: ckb_jsonrpc_types::CellOutput = old_output.into();
+                debug!(
+                    "non-incremental funding tx building (outputs[{}]): new={:?} old={:?}",
+                    index, new_output, old_output
+                );
+            }
+            return false;
+        }
+
+        // New outputs_data
+        if new_tx.outputs_data().len() < old_tx.outputs_data().len() {
+            debug!(
+                "non-incremental funding tx building (outputs_data.len): new={} old={}",
+                new_tx.outputs_data().len(),
+                old_tx.outputs_data().len(),
+            );
+            return false;
+        }
+        if new_tx
+            .outputs_data()
+            .into_iter()
+            .zip(old_tx.outputs_data())
+            .any(|(new, old)| new != old)
+        {
+            debug!("non-incremental funding tx building (outputs_data)");
+            return false;
+        }
+
+        // Ignore witnesses
+
+        true
+    }
+}
+
+fn is_incremental_building_output(new_output: &CellOutput, old_output: &CellOutput) -> bool {
+    // Allow different capacity for change cells. SUDT may reuse the change cell for both CKB and
+    // UDT tokens.
+    new_output.lock() == old_output.lock() && new_output.type_() == old_output.type_()
 }

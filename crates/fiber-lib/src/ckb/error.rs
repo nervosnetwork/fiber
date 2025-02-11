@@ -9,6 +9,9 @@ pub enum FundingError {
     #[error("Funding tx is absent")]
     AbsentTx,
 
+    #[error("Funding new tx can only append new content to the previous version")]
+    NotIncrementalBuilding,
+
     #[error("Failed to build CKB tx: {0}")]
     CkbTxBuilderError(#[from] TxBuilderError),
 
