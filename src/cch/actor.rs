@@ -21,7 +21,8 @@ use crate::fiber::{NetworkActorCommand, NetworkActorMessage};
 use crate::invoice::Currency;
 use crate::now_timestamp_as_millis_u64;
 use crate::store::subscription::{
-    InvoiceSubscription, InvoiceUpdate, PaymentState, PaymentSubscription, PaymentUpdate,
+    InvoiceState, InvoiceSubscription, InvoiceUpdate, PaymentState, PaymentSubscription,
+    PaymentUpdate,
 };
 use crate::store::subscription_impl::SubscriptionImpl;
 use crate::store::{SubscriptionError, SubscriptionId};
@@ -419,6 +420,15 @@ impl CchActor {
         state: &mut CchState,
         invoice_update: InvoiceUpdate,
     ) -> Result<()> {
+        match invoice_update.state {
+            InvoiceState::Received {
+                is_finished: true, ..
+            } => {}
+            _ => {
+                // TODO: handle other states
+                return Ok(());
+            }
+        }
         let payment_hash = format!("{:#x}", invoice_update.hash);
         tracing::debug!("[inbounding tlc] payment hash: {}", payment_hash);
 
@@ -450,6 +460,7 @@ impl CchActor {
             payment_result_opt = stream.next() => {
                 tracing::debug!("[inbounding tlc] payment result: {:?}", payment_result_opt);
                 if let Some(Ok(payment)) = payment_result_opt {
+                    // TODO: the payment result here may indicate a failure, we need to handle it
                     order.status = lnrpc::payment::PaymentStatus::try_from(payment.status)?.into();
                     state.orders_db
                         .update_send_btc_order(order)
