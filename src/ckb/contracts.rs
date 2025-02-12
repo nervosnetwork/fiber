@@ -269,13 +269,6 @@ fn get_udt_info(script: &Script) -> Option<UdtArgInfo> {
     get_contracts_context().get_udt_info(script).cloned()
 }
 
-// Allow all udt scripts for testing
-#[cfg(test)]
-pub fn check_udt_script(_script: &Script) -> bool {
-    true
-}
-
-#[cfg(not(test))]
 pub fn check_udt_script(script: &Script) -> bool {
     get_udt_info(script).is_some()
 }

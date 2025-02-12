@@ -9,13 +9,16 @@ use ckb_types::{
     H256,
 };
 use once_cell::sync::{Lazy, OnceCell};
-use std::{collections::HashMap, sync::Arc, sync::RwLock};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{Arc, RwLock},
+};
 use tokio::sync::RwLock as TokioRwLock;
 
 use crate::{
     ckb::{
-        config::UdtCfgInfos,
-        contracts::{Contract, ContractsContext, ContractsInfo},
+        config::{UdtArgInfo, UdtCfgInfos, UdtScript},
+        contracts::{get_udt_cell_deps, Contract, ContractsContext, ContractsInfo},
         TraceTxRequest, TraceTxResponse,
     },
     now_timestamp_as_millis_u64,
@@ -119,10 +122,23 @@ impl MockContext {
             script_cell_deps.insert(contract, cell_deps);
         }
 
+        let contract = Contract::SimpleUDT;
+        let script = contract_default_scripts.get(&contract).unwrap();
+        let cell_dep = script_cell_deps
+            .get(&contract)
+            .map(|x| x.iter().map(Into::into).collect())
+            .unwrap_or_else(|| vec![]);
+        let udt_whitelist = vec![UdtArgInfo {
+            name: "SimpleUDT".to_string(),
+            script: UdtScript::allow_all_for_script(script),
+            auto_accept_amount: None,
+            cell_deps: cell_dep.clone(),
+        }];
+
         let contracts = ContractsInfo {
             contract_default_scripts,
             script_cell_deps,
-            udt_whitelist: UdtCfgInfos::default(),
+            udt_whitelist: UdtCfgInfos(udt_whitelist),
         };
         let contracts_context = ContractsContext { contracts };
         MockContext {
@@ -408,10 +424,25 @@ impl Actor for MockChainActor {
                     builder.build()
                 };
 
+                let cell_deps = [
+                    fulfilled_tx.as_ref().map(|x| x.cell_deps()),
+                    request
+                        .udt_type_script
+                        .as_ref()
+                        .and_then(|script| get_udt_cell_deps(script)),
+                ]
+                .into_iter()
+                .map(|cell_deps| cell_deps.unwrap_or_default().into_iter())
+                .flatten()
+                .collect::<HashSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>();
+
                 let new_tx = fulfilled_tx
-                    .take()
+                    .as_ref()
                     .map(|x| x.as_advanced_builder())
                     .unwrap_or_default()
+                    .set_cell_deps(cell_deps)
                     .set_outputs(outputs.into_iter().collect())
                     .set_outputs_data(outputs_data.into_iter().collect())
                     .build();
