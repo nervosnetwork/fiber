@@ -190,6 +190,21 @@ impl LndNode {
 
         return channel;
     }
+
+    pub async fn add_invoice(
+        &mut self,
+        value_msat: u64,
+    ) -> lnd::tonic_lnd::lnrpc::AddInvoiceResponse {
+        let mut request = lnd::tonic_lnd::lnrpc::Invoice::default();
+        request.value_msat = value_msat as i64;
+        self.lnd
+            .client
+            .lightning()
+            .add_invoice(request)
+            .await
+            .expect("add hold invoice")
+            .into_inner()
+    }
 }
 
 #[cfg_attr(not(feature = "lnd-tests"), ignore)]
