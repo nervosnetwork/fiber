@@ -3,9 +3,9 @@ use ckb_jsonrpc_types::TxStatus;
 use ckb_testtool::context::Context;
 use ckb_types::{
     bytes::Bytes,
-    core::{DepType, TransactionView},
+    core::{Capacity, DepType, TransactionView},
     packed::{CellDep, CellOutput, OutPoint, Script, Transaction},
-    prelude::{Builder, Entity, IntoTransactionView, Pack, PackVec, Unpack},
+    prelude::{Builder, Entity, IntoTransactionView, Pack, Unpack},
     H256,
 };
 use once_cell::sync::{Lazy, OnceCell};
@@ -313,87 +313,110 @@ impl Actor for MockChainActor {
         use CkbChainMessage::*;
         match message {
             Fund(tx, request, reply_port) => {
-                // match request.udt_type_script {
-                //     Some(ref udt_type_script) => {
-                //         let mut udt_amount = self.request.local_amount as u128;
-                //         let mut ckb_amount = self.request.local_reserved_ckb_amount;
-
-                //         // To make tx building easier, do not include the amount not funded yet in the
-                //         // funding cell.
-                //         if remote_funded {
-                //             udt_amount += self.request.remote_amount as u128;
-                //             ckb_amount = ckb_amount
-                //                 .checked_add(self.request.remote_reserved_ckb_amount)
-                //                 .ok_or(FundingError::InvalidChannel)?;
-                //         }
-
-                //         let udt_output = packed::CellOutput::new_builder()
-                //             .capacity(Capacity::shannons(ckb_amount).pack())
-                //             .type_(Some(udt_type_script.clone()).pack())
-                //             .lock(self.context.funding_cell_lock_script.clone())
-                //             .build();
-                //         let mut data = BytesMut::with_capacity(16);
-                //         data.put(&udt_amount.to_le_bytes()[..]);
-
-                //         // TODO: xudt extension
-                //         Ok((udt_output, data.freeze().pack()))
-                //     }
-                // }
                 let mut fulfilled_tx = tx.clone();
+
+                let is_udt = request.udt_type_script.is_some();
+
+                let (first_output, first_output_data) = match fulfilled_tx
+                    .as_ref()
+                    .and_then(|x| x.output_with_data(0))
+                {
+                    Some((output, output_data)) => {
+                        if output.lock() != request.script {
+                            error!(
+                                "funding request script ({:?}) does not match the first output lock script ({:?})", request.script, output.lock()
+                            );
+                            return Ok(());
+                        }
+                        if output.type_() != request.udt_type_script.pack() {
+                            error!(
+                                "funding request udt type script ({:?}) does not match the first output type script ({:?})", request.udt_type_script, output.type_()
+                            );
+                            return Ok(());
+                        }
+                        if is_udt && output_data.len() < 16 {
+                            error!(
+                                "funding request output data is too short: {:?}, expected at least 16 bytes", output_data
+                            );
+                            return Ok(());
+                        }
+                        (output, output_data)
+                    }
+                    // Create a dummy output and output_data so that we can "update" existing output and output_data.
+                    _ => (
+                        CellOutput::new_builder()
+                            .capacity(Capacity::shannons(0).pack())
+                            .lock(request.script.clone())
+                            .type_(request.udt_type_script.clone().pack())
+                            .build(),
+                        if is_udt {
+                            [0u8; 16].to_vec().into()
+                        } else {
+                            Default::default()
+                        },
+                    ),
+                };
+
+                let (output, output_data) = if is_udt {
+                    let mut data = [0u8; 16];
+                    data.copy_from_slice(&first_output_data.as_ref()[..16]);
+                    let udt_amount = request.local_amount + u128::from_le_bytes(data);
+                    let current_capacity: u64 = first_output.capacity().unpack();
+                    let ckb_amount = request.local_reserved_ckb_amount + current_capacity;
+                    (
+                        first_output
+                            .as_builder()
+                            .capacity(ckb_amount.pack())
+                            .build(),
+                        udt_amount.to_le_bytes().pack(),
+                    )
+                } else {
+                    let current_capacity: u64 = first_output.capacity().unpack();
+                    let ckb_amount = request.local_amount as u64
+                        + request.local_reserved_ckb_amount
+                        + current_capacity;
+                    (
+                        first_output
+                            .as_builder()
+                            .capacity(ckb_amount.pack())
+                            .build(),
+                        first_output_data.pack(),
+                    )
+                };
+
                 let outputs = fulfilled_tx
                     .as_ref()
                     .map(|x| x.outputs())
                     .unwrap_or_default();
-                let (outputs, outputs_data) = match outputs.get(0) {
-                    Some(output) => {
-                        if output.lock() != request.script {
-                            error!(
-                                    "funding request script ({:?}) does not match the first output lock script ({:?})", request.script, output.lock()
-                                );
-                            return Ok(());
-                        }
-                        let current_capacity: u64 = output.capacity().unpack();
-                        let capacity = request.local_amount as u64
-                            + request.local_reserved_ckb_amount
-                            + current_capacity;
-                        let mut outputs_builder = outputs.as_builder();
-
-                        outputs_builder
-                            .replace(0, output.as_builder().capacity(capacity.pack()).build());
-                        (
-                            outputs_builder.build(),
-                            fulfilled_tx
-                                .as_ref()
-                                .map(|x| x.outputs_data())
-                                .unwrap_or([Default::default()].pack()),
-                        )
-                    }
-                    None => (
-                        [CellOutput::new_builder()
-                            .capacity(
-                                (request.local_amount as u64 + request.local_reserved_ckb_amount)
-                                    .pack(),
-                            )
-                            .lock(request.script.clone())
-                            .build()]
-                        .pack(),
-                        [Default::default()].pack(),
-                    ),
+                let outputs = if outputs.is_empty() {
+                    outputs.as_builder().push(output).build()
+                } else {
+                    let mut builder = outputs.as_builder();
+                    builder.replace(0, output);
+                    builder.build()
                 };
 
-                let tx_builder = fulfilled_tx
+                let outputs_data = fulfilled_tx
+                    .as_ref()
+                    .map(|x| x.outputs_data())
+                    .unwrap_or_default();
+                let outputs_data = if outputs_data.is_empty() {
+                    outputs_data.as_builder().push(output_data).build()
+                } else {
+                    let mut builder = outputs_data.as_builder();
+                    builder.replace(0, output_data);
+                    builder.build()
+                };
+
+                let new_tx = fulfilled_tx
                     .take()
                     .map(|x| x.as_advanced_builder())
-                    .unwrap_or_default();
+                    .unwrap_or_default()
+                    .set_outputs(outputs.into_iter().collect())
+                    .set_outputs_data(outputs_data.into_iter().collect())
+                    .build();
 
-                fulfilled_tx
-                    .update_for_self(
-                        tx_builder
-                            .set_outputs(outputs.into_iter().collect())
-                            .set_outputs_data(outputs_data.into_iter().collect())
-                            .build(),
-                    )
-                    .expect("update tx");
+                fulfilled_tx.update_for_self(new_tx).expect("update tx");
 
                 debug!(
                     "Fulfilling funding request: request: {:?}, original tx: {:?}, fulfilled tx: {:?}",
