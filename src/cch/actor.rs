@@ -761,6 +761,7 @@ impl LndPaymentsTracker {
             .await?
             .into_inner();
 
+        tracing::debug!("Subscribed to lnd payments");
         loop {
             select! {
                 payment_opt = stream.next() => {
@@ -867,7 +868,7 @@ impl LndInvoiceTracker {
             })
             .await?
             .into_inner();
-
+        tracing::debug!("Subscribed to lnd invoice: {}", self.payment_hash);
         loop {
             select! {
                 invoice_opt = stream.next() => {

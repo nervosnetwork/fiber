@@ -108,6 +108,7 @@ async fn test_cross_chain_payment() {
     //     Some(hub.pubkey.into())
     // );
     let hub_amount = fiber_invoice.amount.expect("has amount");
+    assert!(hub_amount >= lnd_amount);
 
     let res = fiber_node
         .send_payment(SendPaymentCommand {
@@ -121,7 +122,7 @@ async fn test_cross_chain_payment() {
             max_fee_amount: None,
             max_parts: None,
             keysend: None,
-            hold_payment: false,
+            hold_payment: true,
             udt_type_script: Some(udt_script.clone()),
             allow_self_payment: false,
             hop_hints: None,
@@ -134,7 +135,7 @@ async fn test_cross_chain_payment() {
     let payment_hash = res.unwrap().payment_hash;
     assert_eq!(hash, payment_hash);
 
-    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
 
     // For now, the payment is inflight because node 1 does not have the preimage yet.
     fiber_node
