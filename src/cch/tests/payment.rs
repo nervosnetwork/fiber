@@ -12,6 +12,7 @@ use crate::{
     fiber::{
         graph::PaymentSessionStatus,
         network::SendPaymentCommand,
+        serde_utils::serialize_entity_to_hex_string,
         tests::test_utils::{
             establish_udt_channel_between_nodes, init_tracing, NetworkNode,
             NetworkNodeConfigBuilder, HUGE_CKB_AMOUNT, MIN_RESERVED_CKB,
@@ -42,7 +43,7 @@ async fn test_cross_chain_payment() {
         let mut builder = NetworkNodeConfigBuilder::new();
         if n == 1 {
             let mut cch_config = CchConfig::default();
-            cch_config.udt_script = udt_script.clone();
+            cch_config.wrapped_btc_type_script = serialize_entity_to_hex_string(&udt_script);
             builder = builder.should_start_lnd(true).cch_config(cch_config);
         }
         builder.build()

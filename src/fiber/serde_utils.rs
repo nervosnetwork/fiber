@@ -1,42 +1,61 @@
+use anyhow::anyhow;
 use molecule::prelude::Entity;
 use musig2::{BinaryEncoding, CompactSignature, PubNonce, SCHNORR_SIGNATURE_SIZE};
 use serde::{de::Error, Deserialize, Deserializer, Serializer};
 use serde_with::{serde_conv, DeserializeAs, SerializeAs};
 
-pub fn from_hex<'de, D, E>(deserializer: D) -> Result<E, D::Error>
+pub fn deserialize_entity_from_hex_str<E>(str: &str) -> Result<E, anyhow::Error>
+where
+    E: Entity,
+{
+    let v: Vec<u8> = deserialize_from_hex_str(str)?;
+    E::from_slice(&v).map_err(|err| anyhow!("failed to convert slice into entity: {:?}", err))
+}
+
+pub fn serialize_entity_to_hex_string<E>(entity: &E) -> String
+where
+    E: Entity,
+{
+    serialize_to_hex_string(entity.as_slice())
+}
+
+pub fn deserialize_from_hex_str<E>(string: &str) -> Result<E, anyhow::Error>
+where
+    E: TryFrom<Vec<u8>>,
+    E::Error: core::fmt::Debug,
+{
+    if string.len() < 2 || &string[..2].to_lowercase() != "0x" {
+        return Err(anyhow!("hex string does not start with 0x: {}", &string));
+    };
+    let vec = hex::decode(&string[2..])
+        .map_err(|err| anyhow!("failed to decode hex string {}: {:?}", &string, err))?;
+    vec.try_into()
+        .map_err(|err| anyhow!("failed to convert vector into type: {:?}", err))
+}
+
+pub fn serialize_to_hex_string<E>(e: E) -> String
+where
+    E: AsRef<[u8]>,
+{
+    format!("0x{}", &hex::encode(e.as_ref()))
+}
+
+pub fn deserialize_from_hex<'de, D, E>(deserializer: D) -> Result<E, D::Error>
 where
     D: Deserializer<'de>,
     E: TryFrom<Vec<u8>>,
     E::Error: core::fmt::Debug,
 {
     String::deserialize(deserializer)
-        .and_then(|string| {
-            if string.len() < 2 || &string[..2].to_lowercase() != "0x" {
-                return Err(Error::custom(format!(
-                    "hex string does not start with 0x: {}",
-                    &string
-                )));
-            };
-            hex::decode(&string[2..]).map_err(|err| {
-                Error::custom(format!(
-                    "failed to decode hex string {}: {:?}",
-                    &string, err
-                ))
-            })
-        })
-        .and_then(|vec| {
-            vec.try_into().map_err(|err| {
-                Error::custom(format!("failed to convert vector into type: {:?}", err))
-            })
-        })
+        .and_then(|string| deserialize_from_hex_str(&string).map_err(Error::custom))
 }
 
-pub fn to_hex<E, S>(e: E, serializer: S) -> Result<S::Ok, S::Error>
+pub fn serialize_to_hex<E, S>(e: E, serializer: S) -> Result<S::Ok, S::Error>
 where
     E: AsRef<[u8]>,
     S: Serializer,
 {
-    serializer.serialize_str(&format!("0x{}", &hex::encode(e.as_ref())))
+    serializer.serialize_str(&serialize_to_hex_string(e))
 }
 
 pub struct SliceHex;
@@ -49,7 +68,7 @@ where
     where
         S: Serializer,
     {
-        to_hex(source, serializer)
+        serialize_to_hex(source, serializer)
     }
 }
 
@@ -62,7 +81,7 @@ where
     where
         D: Deserializer<'de>,
     {
-        from_hex(deserializer)
+        deserialize_from_hex(deserializer)
     }
 }
 
@@ -76,7 +95,7 @@ where
     where
         S: Serializer,
     {
-        to_hex(source.as_slice(), serializer)
+        serialize_to_hex(source.as_slice(), serializer)
     }
 }
 
@@ -88,7 +107,7 @@ where
     where
         D: Deserializer<'de>,
     {
-        let v: Vec<u8> = from_hex(deserializer)?;
+        let v: Vec<u8> = deserialize_from_hex(deserializer)?;
         T::from_slice(&v).map_err(Error::custom)
     }
 }

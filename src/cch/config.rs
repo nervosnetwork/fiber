@@ -3,6 +3,8 @@ use std::path::PathBuf;
 use anyhow::Context;
 use clap_serde_derive::ClapSerde;
 
+use crate::fiber::serde_utils::deserialize_entity_from_hex_str;
+
 /// Default cross-chain order expiry time in seconds.
 pub const DEFAULT_ORDER_EXPIRY_TIME: u64 = 3600;
 /// Default BTC final-hop HTLC expiry time in seconds.
@@ -65,12 +67,12 @@ pub struct CchConfig {
 
     // TODO: use hex type
     #[arg(
-        name = "CCH_WRAPPED_BTC_TYPE_SCRIPT_ARGS",
-        long = "cch-wrapped-btc-type-script-args",
+        name = "CCH_WRAPPED_BTC_TYPE_SCRIPT",
+        long = "cch-wrapped-btc-type-script",
         env,
-        help = "Wrapped BTC type script args. It must be a UDT with 8 decimal places."
+        help = "Wrapped BTC type script."
     )]
-    pub wrapped_btc_type_script_args: String,
+    pub wrapped_btc_type_script: String,
 
     /// Cross-chain order expiry time in seconds.
     #[default(DEFAULT_ORDER_EXPIRY_TIME)]
@@ -173,5 +175,10 @@ impl CchConfig {
                 _ => path,
             }
         })
+    }
+
+    pub fn get_wrapped_btc_script(&self) -> ckb_types::packed::Script {
+        deserialize_entity_from_hex_str(&self.wrapped_btc_type_script)
+            .expect("valid wrapped btc script")
     }
 }

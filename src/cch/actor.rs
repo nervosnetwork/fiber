@@ -14,7 +14,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::{select, time::sleep};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
-use crate::ckb::contracts::{get_script_by_contract, Contract};
 use crate::fiber::channel::{AddTlcCommand, ChannelCommand, ChannelCommandWithId};
 use crate::fiber::hash_algorithm::HashAlgorithm;
 use crate::fiber::types::{Hash256, NO_SHARED_SECRET};
@@ -383,19 +382,8 @@ impl CchActor {
             / 1_000_000_000u128
             + (self.config.base_fee_sats as u128);
 
-        let wrapped_btc_type_script: ckb_jsonrpc_types::Script = get_script_by_contract(
-            Contract::SimpleUDT,
-            hex::decode(
-                self.config
-                    .wrapped_btc_type_script_args
-                    .trim_start_matches("0x"),
-            )
-            .map_err(|_| {
-                CchError::HexDecodingError(self.config.wrapped_btc_type_script_args.clone())
-            })?
-            .as_ref(),
-        )
-        .into();
+        let wrapped_btc_type_script: ckb_jsonrpc_types::Script =
+            self.config.get_wrapped_btc_script().into();
         let mut order = SendBTCOrder {
             expires_after: expiry,
             wrapped_btc_type_script,
@@ -605,19 +593,8 @@ impl CchActor {
             .into_inner();
         let btc_pay_req = invoice.payment_request;
 
-        let wrapped_btc_type_script: ckb_jsonrpc_types::Script = get_script_by_contract(
-            Contract::AlwaysSuccess,
-            hex::decode(
-                self.config
-                    .wrapped_btc_type_script_args
-                    .trim_start_matches("0x"),
-            )
-            .map_err(|_| {
-                CchError::HexDecodingError(self.config.wrapped_btc_type_script_args.clone())
-            })?
-            .as_ref(),
-        )
-        .into();
+        let wrapped_btc_type_script: ckb_jsonrpc_types::Script =
+            self.config.get_wrapped_btc_script().into();
         let order = ReceiveBTCOrder {
             created_at: duration_since_epoch.as_secs(),
             expires_after: DEFAULT_ORDER_EXPIRY_SECONDS,
