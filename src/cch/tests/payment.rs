@@ -83,7 +83,11 @@ async fn test_cross_chain_payment() {
 
     hub.get_lnd_node_mut().make_some_money();
     lnd_node.make_some_money();
-    let lightning_channel = lnd_node.open_channel_with(hub.get_lnd_node_mut()).await;
+    let lightning_channel = hub
+        .get_lnd_node_mut()
+        .open_channel_with(&mut lnd_node)
+        .await;
+    let lightning_channel_2 = lnd_node.open_channel_with(hub.get_lnd_node_mut()).await;
 
     let lnd_amount = 100000;
     let add_invoice_result = lnd_node.add_invoice(lnd_amount as u64).await;
