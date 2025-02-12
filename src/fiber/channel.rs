@@ -738,6 +738,13 @@ where
             ProcessingChannelError::TlcForwardingError(tlc_err) => tlc_err,
             _ => {
                 let error_detail = self.get_tlc_error(state, &error.source).await;
+                debug!(
+                    payment_hash = ?payment_hash,
+                    tlc_id = ?tlc_id,
+                    error_source = ?error.source,
+                    error_detail = ?error_detail,
+                    "Processing AddTlc failed",
+                );
                 #[cfg(debug_assertions)]
                 self.network
                     .clone()
@@ -867,12 +874,14 @@ where
             let status = self.get_invoice_status(&invoice);
             match status {
                 CkbInvoiceStatus::Expired => {
+                    debug!("invoice expired, remove tlc");
                     remove_reason = RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
                         TlcErr::new(TlcErrorCode::InvoiceExpired),
                         &tlc.shared_secret,
                     ));
                 }
                 CkbInvoiceStatus::Cancelled => {
+                    debug!("invoice cancelled, remove tlc");
                     remove_reason = RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
                         TlcErr::new(TlcErrorCode::InvoiceCancelled),
                         &tlc.shared_secret,
