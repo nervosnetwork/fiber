@@ -84,7 +84,7 @@ async fn test_cross_chain_payment() {
     lnd_node.make_some_money();
     let lightning_channel = lnd_node.open_channel_with(hub.get_lnd_node_mut()).await;
 
-    let lnd_amount = 100;
+    let lnd_amount = 100000;
     let add_invoice_result = lnd_node.add_invoice(lnd_amount as u64).await;
 
     let hash = Hash256::try_from(add_invoice_result.r_hash.as_slice()).expect("valid hash");
@@ -95,7 +95,7 @@ async fn test_cross_chain_payment() {
         CALL_ACTOR_TIMEOUT_MS,
         SendBTC {
             btc_pay_req: add_invoice_result.payment_request,
-            currency: Currency::Fibt,
+            currency: Currency::Fibd,
         }
     )
     .expect("send btc actor call")
