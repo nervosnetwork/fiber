@@ -17,4 +17,4 @@ mod orders_db;
 pub use orders_db::CchOrdersDb;
 
 #[cfg(test)]
-mod tests;
+pub mod tests;

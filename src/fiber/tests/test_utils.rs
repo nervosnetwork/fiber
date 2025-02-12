@@ -1,3 +1,5 @@
+use crate::cch::tests::lnd::LndNode;
+use crate::cch::CchMessage;
 use crate::fiber::channel::ChannelActorState;
 use crate::fiber::channel::ChannelActorStateStore;
 use crate::fiber::channel::ChannelCommand;
@@ -16,8 +18,10 @@ use crate::invoice::CkbInvoice;
 use crate::invoice::CkbInvoiceStatus;
 use crate::invoice::InvoiceStore;
 use crate::invoice::SettleInvoiceError;
+use crate::start_cch;
 use crate::store::store::StoreWithHooks;
 use crate::store::subscription_impl::SubscriptionImpl;
+use crate::CchConfig;
 use ckb_jsonrpc_types::Status;
 use ckb_types::packed::OutPoint;
 use ckb_types::{core::TransactionView, packed::Byte32};
@@ -187,16 +191,75 @@ pub struct NetworkNode {
     pub network_actor: ActorRef<NetworkActorMessage>,
     pub network_graph: Arc<TokioRwLock<NetworkGraph<StoreWithHooks>>>,
     pub chain_actor: ActorRef<CkbChainMessage>,
+    pub cch: Option<Cch>,
     pub private_key: Privkey,
     pub peer_id: PeerId,
     pub event_emitter: mpsc::Receiver<NetworkServiceEvent>,
     pub pubkey: Pubkey,
 }
 
+pub struct Cch {
+    pub actor: ActorRef<CchMessage>,
+    pub config: CchConfig,
+    pub lnd_node: Option<LndNode>,
+}
+
+impl Cch {
+    pub async fn start(
+        config: CchConfig,
+        should_start_lnd: bool,
+        network_actor: ActorRef<NetworkActorMessage>,
+        store_update_subscription: SubscriptionImpl,
+    ) -> Self {
+        let (config, lnd_node) = if should_start_lnd {
+            let lnd_node = LndNode::new(Default::default(), Default::default()).await;
+            let mut config = config;
+            // Override the lnd config with the lnd node we just created.
+            config.lnd_rpc_url = lnd_node.lnd.grpc_url.clone();
+            config.lnd_cert_hex = Some(lnd_node.lnd.tls_cert.clone());
+            config.lnd_macaroon_hex = Some(lnd_node.lnd.admin_macaroon.clone());
+            (config, Some(lnd_node))
+        } else {
+            (config, None)
+        };
+        let actor = start_cch(
+            config.clone(),
+            new_tokio_task_tracker(),
+            new_tokio_cancellation_token(),
+            network_actor.get_cell(),
+            Some(network_actor.clone()),
+            store_update_subscription.clone(),
+        )
+        .await
+        .expect("start cch actor");
+
+        Cch {
+            actor,
+            config,
+            lnd_node,
+        }
+    }
+
+    fn stop_actor(&self) {
+        self.actor.stop(Some("stop cch actor".to_string()));
+    }
+}
+
+impl std::fmt::Debug for Cch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Cch")
+            .field("actor", &self.actor)
+            .field("config", &self.config)
+            .finish()
+    }
+}
+
 pub struct NetworkNodeConfig {
     base_dir: Arc<TempDir>,
     node_name: Option<String>,
     fiber_config: FiberConfig,
+    should_start_lnd: bool,
+    cch_config: Option<CchConfig>,
 }
 
 impl NetworkNodeConfig {
@@ -205,9 +268,12 @@ impl NetworkNodeConfig {
     }
 }
 
+#[derive(Default)]
 pub struct NetworkNodeConfigBuilder {
     base_dir: Option<Arc<TempDir>>,
     node_name: Option<String>,
+    should_start_lnd: Option<bool>,
+    cch_config: Option<CchConfig>,
     // We may generate a FiberConfig based on the base_dir and node_name,
     // but allow user to override it.
     fiber_config_updater: Option<Box<dyn FnOnce(&mut FiberConfig) + 'static>>,
@@ -215,11 +281,7 @@ pub struct NetworkNodeConfigBuilder {
 
 impl NetworkNodeConfigBuilder {
     pub fn new() -> Self {
-        Self {
-            base_dir: None,
-            node_name: None,
-            fiber_config_updater: None,
-        }
+        Self::default()
     }
 
     pub fn base_dir(mut self, base_dir: Arc<TempDir>) -> Self {
@@ -244,6 +306,16 @@ impl NetworkNodeConfigBuilder {
         self
     }
 
+    pub fn should_start_lnd(mut self, should_start_lnd: bool) -> Self {
+        self.should_start_lnd = Some(should_start_lnd);
+        self
+    }
+
+    pub fn cch_config(mut self, cch_config: CchConfig) -> Self {
+        self.cch_config = Some(cch_config);
+        self
+    }
+
     pub fn build(self) -> NetworkNodeConfig {
         let base_dir = self
             .base_dir
@@ -255,6 +327,8 @@ impl NetworkNodeConfigBuilder {
             base_dir,
             node_name,
             fiber_config,
+            should_start_lnd: self.should_start_lnd.unwrap_or(false),
+            cch_config: self.cch_config,
         };
         if let Some(updater) = self.fiber_config_updater {
             updater(&mut config.fiber_config);
@@ -808,6 +882,8 @@ impl NetworkNode {
             base_dir,
             node_name,
             fiber_config,
+            should_start_lnd,
+            cch_config: config,
         } = config;
 
         let _span = tracing::info_span!("NetworkNode", node_name = &node_name).entered();
@@ -819,13 +895,14 @@ impl NetworkNode {
                 .expect("create store"),
         };
 
-        let root = get_test_root_actor().await;
+        let root_actor = get_test_root_actor().await;
         let (event_sender, mut event_receiver) = mpsc::channel(10000);
 
-        let chain_actor = Actor::spawn_linked(None, MockChainActor::new(), (), root.get_cell())
-            .await
-            .expect("start mock chain actor")
-            .0;
+        let chain_actor =
+            Actor::spawn_linked(None, MockChainActor::new(), (), root_actor.get_cell())
+                .await
+                .expect("start mock chain actor")
+                .0;
 
         let secret_key: Privkey = fiber_config
             .read_or_generate_secret_key()
@@ -852,7 +929,7 @@ impl NetworkNode {
                 tracker: new_tokio_task_tracker(),
                 default_shutdown_script: Default::default(),
             },
-            root.get_cell(),
+            root_actor.get_cell(),
         )
         .await
         .expect("start network actor")
@@ -876,6 +953,19 @@ impl NetworkNode {
             base_dir.as_ref()
         );
 
+        let cch = match config {
+            Some(config) => Some(
+                Cch::start(
+                    config,
+                    should_start_lnd,
+                    network_actor.clone(),
+                    store_update_subscription.clone(),
+                )
+                .await,
+            ),
+            None => None,
+        };
+
         Self {
             base_dir,
             node_name,
@@ -887,6 +977,7 @@ impl NetworkNode {
             network_actor,
             network_graph,
             chain_actor,
+            cch,
             private_key: secret_key.into(),
             peer_id,
             event_emitter: event_receiver,
@@ -899,6 +990,8 @@ impl NetworkNode {
             base_dir: self.base_dir.clone(),
             node_name: self.node_name.clone(),
             fiber_config: self.fiber_config.clone(),
+            should_start_lnd: false,
+            cch_config: self.cch.as_ref().map(|cch| cch.config.clone()),
         }
     }
 
@@ -943,6 +1036,9 @@ impl NetworkNode {
             |event| matches!(event, NetworkServiceEvent::NetworkStopped(id) if id == &my_peer_id),
         )
         .await;
+        if let Some(cch) = self.cch.as_ref() {
+            cch.stop_actor();
+        }
     }
 
     pub async fn restart(&mut self) {
@@ -1174,4 +1270,35 @@ async fn test_connect_to_other_node() {
 async fn test_restart_network_node() {
     let mut node = NetworkNode::new().await;
     node.restart().await;
+}
+
+#[cfg_attr(not(feature = "lnd-tests"), ignore)]
+#[tokio::test]
+async fn test_start_node_with_cch_connected_to_internal_lnd_node() {
+    let mut node = NetworkNode::new_with_config(
+        NetworkNodeConfigBuilder::new()
+            .cch_config(CchConfig::default())
+            .should_start_lnd(true)
+            .build(),
+    )
+    .await;
+    let cch = node.cch.as_mut().expect("cch started");
+    let lnd_node = cch.lnd_node.as_mut().expect("lnd node started");
+    println!("lnd_node: {:?}", lnd_node.get_info().await);
+}
+
+#[tokio::test]
+async fn test_start_node_with_cch_connected_to_external_lnd_node() {
+    let mut cch_config = CchConfig::default();
+    // The default lnd_rpc_url may actually work, so we need to set it to an invalid value.
+    // Let's assume that the following URL is not a valid lnd RPC URL.
+    cch_config.lnd_rpc_url = "http://1.1.1.1:1".to_string();
+    let mut node = NetworkNode::new_with_config(
+        NetworkNodeConfigBuilder::new()
+            .cch_config(cch_config)
+            .build(),
+    )
+    .await;
+    let cch = node.cch.as_mut().expect("cch started");
+    assert!(cch.lnd_node.is_none());
 }

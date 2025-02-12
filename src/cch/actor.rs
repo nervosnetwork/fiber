@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Result};
 use futures::StreamExt as _;
 use hex::ToHex;
 use lightning_invoice::Bolt11Invoice;
@@ -205,22 +205,8 @@ impl Actor for CchActor {
         _config: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
         let lnd_rpc_url: Uri = self.config.lnd_rpc_url.clone().try_into()?;
-        let cert = match self.config.resolve_lnd_cert_path() {
-            Some(path) => Some(
-                tokio::fs::read(&path)
-                    .await
-                    .with_context(|| format!("read cert file {}", path.display()))?,
-            ),
-            None => None,
-        };
-        let macaroon = match self.config.resolve_lnd_macaroon_path() {
-            Some(path) => Some(
-                tokio::fs::read(&path)
-                    .await
-                    .with_context(|| format!("read macaroon file {}", path.display()))?,
-            ),
-            None => None,
-        };
+        let cert = self.config.get_lnd_tlc_cert().await?;
+        let macaroon = self.config.get_lnd_macaroon().await?;
         let lnd_connection = LndConnectionInfo {
             uri: lnd_rpc_url,
             cert,
