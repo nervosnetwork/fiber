@@ -19,6 +19,7 @@ use crate::{
         types::Hash256,
     },
     invoice::{CkbInvoice, CkbInvoiceStatus, Currency},
+    CchConfig,
 };
 
 pub const CALL_ACTOR_TIMEOUT_MS: u64 = 3 * 1000;
@@ -28,7 +29,7 @@ fn get_udt_args() -> Vec<u8> {
 }
 
 fn get_udt_script() -> Script {
-    get_script_by_contract(Contract::SimpleUDT, &get_udt_args())
+    get_script_by_contract(Contract::Secp256k1Lock, &get_udt_args())
 }
 
 #[tokio::test]
@@ -36,12 +37,13 @@ async fn test_cross_chain_payment() {
     init_tracing();
     let _span = tracing::info_span!("node", node = "test").entered();
 
+    let udt_script = get_udt_script();
     let [mut fiber_node, mut hub] = NetworkNode::new_n_interconnected_nodes_with_config(2, |n| {
         let mut builder = NetworkNodeConfigBuilder::new();
         if n == 1 {
-            builder = builder
-                .should_start_lnd(true)
-                .cch_config(Default::default());
+            let mut cch_config = CchConfig::default();
+            cch_config.udt_script = udt_script.clone();
+            builder = builder.should_start_lnd(true).cch_config(cch_config);
         }
         builder.build()
     })
@@ -65,7 +67,7 @@ async fn test_cross_chain_payment() {
         None,
         None,
         None,
-        get_udt_script(),
+        udt_script.clone(),
     )
     .await;
 
@@ -119,7 +121,7 @@ async fn test_cross_chain_payment() {
             max_parts: None,
             keysend: None,
             hold_payment: false,
-            udt_type_script: None,
+            udt_type_script: Some(udt_script.clone()),
             allow_self_payment: false,
             hop_hints: None,
             dry_run: false,

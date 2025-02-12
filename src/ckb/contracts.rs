@@ -21,6 +21,8 @@ pub enum Contract {
     CommitmentLock,
     Secp256k1Lock,
     SimpleUDT,
+    #[cfg(test)]
+    AlwaysSuccess,
 }
 
 #[derive(Clone, Debug)]

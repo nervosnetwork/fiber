@@ -86,6 +86,12 @@ impl MockContext {
                 Contract::SimpleUDT,
                 Bytes::from_static(include_bytes!("../../../tests/deploy/contracts/simple_udt")),
             ),
+            (
+                Contract::AlwaysSuccess,
+                Bytes::from_static(include_bytes!(
+                    "../../../tests/deploy/contracts/always_success"
+                )),
+            ),
         ];
         let mut context = Context::new_with_deterministic_rng();
         let mut contract_default_scripts: HashMap<Contract, Script> = HashMap::new();
@@ -122,19 +128,22 @@ impl MockContext {
             script_cell_deps.insert(contract, cell_deps);
         }
 
-        let contract = Contract::SimpleUDT;
-        let script = contract_default_scripts.get(&contract).unwrap();
-        let cell_dep = script_cell_deps
-            .get(&contract)
-            .map(|x| x.iter().map(Into::into).collect())
-            .unwrap_or_else(|| vec![]);
-        let udt_whitelist = vec![UdtArgInfo {
-            name: "SimpleUDT".to_string(),
-            script: UdtScript::allow_all_for_script(script),
-            auto_accept_amount: None,
-            cell_deps: cell_dep.clone(),
-        }];
-
+        let udt_whitelist = [Contract::SimpleUDT, Contract::AlwaysSuccess]
+            .into_iter()
+            .map(|contract| {
+                let script = contract_default_scripts.get(&contract).unwrap();
+                let cell_dep = script_cell_deps
+                    .get(&contract)
+                    .map(|x| x.iter().map(Into::into).collect())
+                    .unwrap_or_else(|| vec![]);
+                UdtArgInfo {
+                    name: format!("{:?}", contract),
+                    script: UdtScript::allow_all_for_script(script),
+                    auto_accept_amount: None,
+                    cell_deps: cell_dep.clone(),
+                }
+            })
+            .collect();
         let contracts = ContractsInfo {
             contract_default_scripts,
             script_cell_deps,

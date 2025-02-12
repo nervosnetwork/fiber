@@ -606,7 +606,7 @@ impl CchActor {
         let btc_pay_req = invoice.payment_request;
 
         let wrapped_btc_type_script: ckb_jsonrpc_types::Script = get_script_by_contract(
-            Contract::SimpleUDT,
+            Contract::AlwaysSuccess,
             hex::decode(
                 self.config
                     .wrapped_btc_type_script_args
