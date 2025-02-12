@@ -1,5 +1,6 @@
 use std::str::FromStr;
 
+use ckb_types::packed::Script;
 use ractor::call_t;
 
 use crate::{
@@ -7,12 +8,13 @@ use crate::{
         tests::lnd::{LndBitcoinDConf, LndNode},
         CchMessage, SendBTC, SendBTCOrder,
     },
+    ckb::contracts::{get_script_by_contract, Contract},
     fiber::{
         graph::PaymentSessionStatus,
         network::SendPaymentCommand,
         tests::test_utils::{
-            establish_channel_between_nodes, init_tracing, NetworkNode, NetworkNodeConfigBuilder,
-            HUGE_CKB_AMOUNT, MIN_RESERVED_CKB,
+            establish_udt_channel_between_nodes, init_tracing, NetworkNode,
+            NetworkNodeConfigBuilder, HUGE_CKB_AMOUNT, MIN_RESERVED_CKB,
         },
         types::Hash256,
     },
@@ -20,6 +22,14 @@ use crate::{
 };
 
 pub const CALL_ACTOR_TIMEOUT_MS: u64 = 3 * 1000;
+
+fn get_udt_args() -> Vec<u8> {
+    hex::decode("32e555f3ff8e135cece1351a6a2971518392c1e30375c1e006ad0ce8eac07947").unwrap()
+}
+
+fn get_udt_script() -> Script {
+    get_script_by_contract(Contract::SimpleUDT, &get_udt_args())
+}
 
 #[tokio::test]
 async fn test_cross_chain_payment() {
@@ -39,7 +49,7 @@ async fn test_cross_chain_payment() {
     .try_into()
     .expect("2 nodes");
 
-    let (fiber_channel, _funding_tx) = establish_channel_between_nodes(
+    let (fiber_channel, _funding_tx) = establish_udt_channel_between_nodes(
         &mut fiber_node,
         &mut hub,
         true,
@@ -55,6 +65,7 @@ async fn test_cross_chain_payment() {
         None,
         None,
         None,
+        get_udt_script(),
     )
     .await;
 
@@ -97,7 +108,7 @@ async fn test_cross_chain_payment() {
 
     let res = fiber_node
         .send_payment(SendPaymentCommand {
-            target_pubkey: None,
+            target_pubkey: Some(hub.pubkey),
             amount: None,
             payment_hash: None,
             final_tlc_expiry_delta: None,

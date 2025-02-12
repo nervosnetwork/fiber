@@ -313,12 +313,38 @@ impl Actor for MockChainActor {
         use CkbChainMessage::*;
         match message {
             Fund(tx, request, reply_port) => {
+                // match request.udt_type_script {
+                //     Some(ref udt_type_script) => {
+                //         let mut udt_amount = self.request.local_amount as u128;
+                //         let mut ckb_amount = self.request.local_reserved_ckb_amount;
+
+                //         // To make tx building easier, do not include the amount not funded yet in the
+                //         // funding cell.
+                //         if remote_funded {
+                //             udt_amount += self.request.remote_amount as u128;
+                //             ckb_amount = ckb_amount
+                //                 .checked_add(self.request.remote_reserved_ckb_amount)
+                //                 .ok_or(FundingError::InvalidChannel)?;
+                //         }
+
+                //         let udt_output = packed::CellOutput::new_builder()
+                //             .capacity(Capacity::shannons(ckb_amount).pack())
+                //             .type_(Some(udt_type_script.clone()).pack())
+                //             .lock(self.context.funding_cell_lock_script.clone())
+                //             .build();
+                //         let mut data = BytesMut::with_capacity(16);
+                //         data.put(&udt_amount.to_le_bytes()[..]);
+
+                //         // TODO: xudt extension
+                //         Ok((udt_output, data.freeze().pack()))
+                //     }
+                // }
                 let mut fulfilled_tx = tx.clone();
                 let outputs = fulfilled_tx
                     .as_ref()
                     .map(|x| x.outputs())
                     .unwrap_or_default();
-                let outputs = match outputs.get(0) {
+                let (outputs, outputs_data) = match outputs.get(0) {
                     Some(output) => {
                         if output.lock() != request.script {
                             error!(
@@ -334,26 +360,25 @@ impl Actor for MockChainActor {
 
                         outputs_builder
                             .replace(0, output.as_builder().capacity(capacity.pack()).build());
-                        outputs_builder.build()
-                    }
-                    None => [CellOutput::new_builder()
-                        .capacity(
-                            (request.local_amount as u64 + request.local_reserved_ckb_amount)
-                                .pack(),
+                        (
+                            outputs_builder.build(),
+                            fulfilled_tx
+                                .as_ref()
+                                .map(|x| x.outputs_data())
+                                .unwrap_or([Default::default()].pack()),
                         )
-                        .lock(request.script.clone())
-                        .build()]
-                    .pack(),
-                };
-
-                let outputs_data = fulfilled_tx
-                    .as_ref()
-                    .map(|x| x.outputs_data())
-                    .unwrap_or_default();
-                let outputs_data = if outputs_data.is_empty() {
-                    [Default::default()].pack()
-                } else {
-                    outputs_data
+                    }
+                    None => (
+                        [CellOutput::new_builder()
+                            .capacity(
+                                (request.local_amount as u64 + request.local_reserved_ckb_amount)
+                                    .pack(),
+                            )
+                            .lock(request.script.clone())
+                            .build()]
+                        .pack(),
+                        [Default::default()].pack(),
+                    ),
                 };
 
                 let tx_builder = fulfilled_tx
