@@ -25,6 +25,7 @@ use crate::CchConfig;
 use ckb_jsonrpc_types::Status;
 use ckb_types::packed::OutPoint;
 use ckb_types::{core::TransactionView, packed::Byte32};
+use lnd::bitcoind::BitcoinD;
 use ractor::{call, Actor, ActorRef};
 use rand::rngs::OsRng;
 use secp256k1::{Message, Secp256k1};
@@ -1256,6 +1257,26 @@ impl NetworkNode {
             graph.get_channel(channel_id).cloned()
         })
         .await
+    }
+
+    pub fn get_bitcoind(&self) -> Arc<BitcoinD> {
+        self.cch
+            .as_ref()
+            .expect("cch started")
+            .lnd_node
+            .as_ref()
+            .expect("lnd started")
+            .bitcoind
+            .clone()
+    }
+
+    pub fn get_lnd_node_mut(&mut self) -> &mut LndNode {
+        self.cch
+            .as_mut()
+            .expect("cch started")
+            .lnd_node
+            .as_mut()
+            .expect("lnd started")
     }
 }
 
