@@ -11,6 +11,7 @@ use crate::{
     ckb::contracts::{get_script_by_contract, Contract},
     fiber::{
         graph::PaymentSessionStatus,
+        hash_algorithm::HashAlgorithm,
         network::SendPaymentCommand,
         serde_utils::serialize_entity_to_hex_string,
         tests::test_utils::{
@@ -103,6 +104,7 @@ async fn test_cross_chain_payment() {
 
     let fiber_invoice = CkbInvoice::from_str(&send_btc_result.ckb_pay_req).expect("valid invoice");
     assert_eq!(fiber_invoice.payment_hash(), &hash);
+    assert_eq!(fiber_invoice.hash_algorithm(), Some(&HashAlgorithm::Sha256));
 
     hub.insert_invoice(fiber_invoice.clone(), None);
 

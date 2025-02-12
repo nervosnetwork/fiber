@@ -6,6 +6,7 @@ use std::{str::FromStr as _, time::Duration};
 
 use crate::{
     fiber::{
+        hash_algorithm::HashAlgorithm,
         serde_utils::{U128Hex, U64Hex},
         types::Hash256,
     },
@@ -92,6 +93,7 @@ impl SendBTCOrder {
                 Hash256::from_str(&self.payment_hash)
                     .map_err(|_| CchError::HexDecodingError(self.payment_hash.clone()))?,
             )
+            .hash_algorithm(HashAlgorithm::Sha256)
             .expiry_time(Duration::from_secs(self.expires_after))
             .final_expiry_delta(self.ckb_final_tlc_expiry_delta)
             .udt_type_script(self.wrapped_btc_type_script.clone().into());
