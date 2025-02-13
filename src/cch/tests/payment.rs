@@ -89,8 +89,10 @@ async fn test_cross_chain_payment() {
         .await;
     let lightning_channel_2 = lnd_node.open_channel_with(hub.get_lnd_node_mut()).await;
 
-    let lnd_amount = 100000;
-    let add_invoice_result = lnd_node.add_invoice(lnd_amount as u64).await;
+    let lnd_amount_sats = 100;
+    let lnd_amount_msats = lnd_amount_sats * 1000;
+    let add_invoice_result = lnd_node.add_invoice(lnd_amount_msats).await;
+    let lnd_old_amount = lnd_node.get_balance_sats().await;
 
     let hash = Hash256::try_from(add_invoice_result.r_hash.as_slice()).expect("valid hash");
 
@@ -112,17 +114,13 @@ async fn test_cross_chain_payment() {
 
     hub.insert_invoice(fiber_invoice.clone(), None);
 
-    // assert_eq!(
-    //     fiber_invoice.payee_pub_key().copied(),
-    //     Some(hub.pubkey.into())
-    // );
     let hub_amount = fiber_invoice.amount.expect("has amount");
-    // assert!(
-    //     hub_amount >= lnd_amount,
-    //     "hub should receive more money than lnd, but we have hub_amount: {}, lnd_amount: {}",
-    //     hub_amount,
-    //     lnd_amount
-    // );
+    assert!(
+        hub_amount >= lnd_amount_sats.try_into().expect("valid amount"),
+        "hub should receive more money than lnd, but we have hub_amount: {}, lnd_amount: {}",
+        hub_amount,
+        lnd_amount_sats
+    );
 
     let res = fiber_node
         .send_payment(SendPaymentCommand {
@@ -160,5 +158,6 @@ async fn test_cross_chain_payment() {
     let hub_new_amount = hub.get_local_balance_from_channel(fiber_channel);
     assert_eq!(hub_new_amount, hub_old_amount + hub_amount);
 
-    // TODO: assert that lnd_node received the payment
+    let lnd_new_amount = lnd_node.get_balance_sats().await;
+    assert_eq!(lnd_new_amount, lnd_old_amount + lnd_amount_sats);
 }

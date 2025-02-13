@@ -205,6 +205,30 @@ impl LndNode {
             .expect("add hold invoice")
             .into_inner()
     }
+
+    pub async fn get_balance_sats(&mut self) -> u64 {
+        let response = self
+            .lnd
+            .client
+            .lightning()
+            .channel_balance(lnd::tonic_lnd::lnrpc::ChannelBalanceRequest::default())
+            .await
+            .expect("get wallet balance")
+            .into_inner();
+        response.local_balance.expect("local balance exists").sat
+    }
+
+    pub async fn get_balance_msats(&mut self) -> u64 {
+        let response = self
+            .lnd
+            .client
+            .lightning()
+            .channel_balance(lnd::tonic_lnd::lnrpc::ChannelBalanceRequest::default())
+            .await
+            .expect("get wallet balance")
+            .into_inner();
+        response.local_balance.expect("local balance exists").msat
+    }
 }
 
 #[cfg_attr(not(feature = "lnd-tests"), ignore)]
