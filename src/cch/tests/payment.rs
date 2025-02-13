@@ -34,8 +34,9 @@ fn get_udt_script() -> Script {
     get_script_by_contract(Contract::Secp256k1Lock, &get_udt_args())
 }
 
+#[cfg_attr(not(feature = "lnd-tests"), ignore)]
 #[tokio::test]
-async fn test_cross_chain_payment() {
+async fn test_cross_chain_payment_hub_send_btc() {
     init_tracing();
     let _span = tracing::info_span!("node", node = "test").entered();
 
