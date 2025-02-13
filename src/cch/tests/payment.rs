@@ -82,12 +82,15 @@ async fn test_cross_chain_payment() {
     let hub_old_amount = hub.get_local_balance_from_channel(fiber_channel);
 
     hub.get_lnd_node_mut().make_some_money();
-    lnd_node.make_some_money();
-    let lightning_channel = hub
-        .get_lnd_node_mut()
+    hub.get_lnd_node_mut()
         .open_channel_with(&mut lnd_node)
         .await;
-    let lightning_channel_2 = lnd_node.open_channel_with(hub.get_lnd_node_mut()).await;
+
+    // TODO: without the sleep below, we may fail to send the payment below. The root cause is unknown to me.
+    // We will see two payments in the logs, which tells us the payment is failed because of FailureReasonInsufficientBalance.
+    // Payment { payment_hash: "650feb233a22fb60a7e2458d03c0a5afa7043207a39c8c1c8a05d183bb5b7455", value: 100, creation_date: 1739422958, fee: 0, payment_preimage: "0000000000000000000000000000000000000000000000000000000000000000", value_sat: 100, value_msat: 100000, payment_request: "lnbcrt1u1pn66l8wpp5v587kge6ytakpflzgkxs8s9947nsgvs85wwgc8y2qhgc8w6mw32sdqqcqzzsxqyz5vqsp53k09akasd35ldkhl4twt9mmxd63cgu2l9j7jept03g6djv5nkazq9qxpqysgqq2dpmpqrsglycahtz4vsuy29a5kjhjt3w4ea664h0tfs0g5cwyn9dm54c2qe4tzxzatcw7dnfhuht5kewdqmn0zrg4cj7h74xejre2sqnhmf42", status: InFlight, fee_sat: 0, fee_msat: 0, creation_time_ns: 1739422958687770515, htlcs: [], payment_index: 1, failure_reason: FailureReasonNone })
+    // Payment { payment_hash: "650feb233a22fb60a7e2458d03c0a5afa7043207a39c8c1c8a05d183bb5b7455", value: 100, creation_date: 1739422958, fee: 0, payment_preimage: "0000000000000000000000000000000000000000000000000000000000000000", value_sat: 100, value_msat: 100000, payment_request: "lnbcrt1u1pn66l8wpp5v587kge6ytakpflzgkxs8s9947nsgvs85wwgc8y2qhgc8w6mw32sdqqcqzzsxqyz5vqsp53k09akasd35ldkhl4twt9mmxd63cgu2l9j7jept03g6djv5nkazq9qxpqysgqq2dpmpqrsglycahtz4vsuy29a5kjhjt3w4ea664h0tfs0g5cwyn9dm54c2qe4tzxzatcw7dnfhuht5kewdqmn0zrg4cj7h74xejre2sqnhmf42", status: Failed, fee_sat: 0, fee_msat: 0, creation_time_ns: 1739422958687770515, htlcs: [], payment_index: 1, failure_reason: FailureReasonInsufficientBalance }
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 
     let lnd_amount_sats = 100;
     let lnd_amount_msats = lnd_amount_sats * 1000;

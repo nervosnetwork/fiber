@@ -156,6 +156,43 @@ impl LndNode {
         panic!("not synced to chain");
     }
 
+    pub async fn get_active_channels(&mut self) -> Vec<lnd::tonic_lnd::lnrpc::Channel> {
+        self.lnd
+            .client
+            .lightning()
+            .list_channels(lnd::tonic_lnd::lnrpc::ListChannelsRequest {
+                active_only: true,
+                ..Default::default()
+            })
+            .await
+            .expect("get channel info")
+            .into_inner()
+            .channels
+    }
+
+    pub async fn wait_for_channel_to_be_active(
+        &mut self,
+        channel_outpoint: &lnd::tonic_lnd::lnrpc::ChannelPoint,
+    ) {
+        let channel_outpoint_str = channel_outpoint_to_string(channel_outpoint);
+        for _ in 1..=10 {
+            let channels = self.get_active_channels().await;
+            for channel in channels {
+                if channel.channel_point == channel_outpoint_str {
+                    return;
+                }
+            }
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        }
+
+        panic!(
+            "Opened channel but failed to wait for confirmation: {:?}",
+            channel_outpoint
+        );
+    }
+
+    /// Open channel with another node. Returns the channel point.
+    /// self will have some money in the channel, while other will have none.
     pub async fn open_channel_with(
         &mut self,
         other: &mut Self,
@@ -183,11 +220,12 @@ impl LndNode {
             .expect("open channel")
             .into_inner();
 
-        // Generate some blocks to confirm the channel.
+        // Confirm that the channel is now active.
         self.make_some_money();
         self.wait_synced_to_chain().await;
         other.wait_synced_to_chain().await;
-
+        self.wait_for_channel_to_be_active(&channel).await;
+        other.wait_for_channel_to_be_active(&channel).await;
         return channel;
     }
 
@@ -229,6 +267,24 @@ impl LndNode {
             .into_inner();
         response.local_balance.expect("local balance exists").msat
     }
+}
+
+fn channel_outpoint_to_string(channel_outpoint: &lnd::tonic_lnd::lnrpc::ChannelPoint) -> String {
+    let output_index = channel_outpoint.output_index;
+    let funding_txid = match channel_outpoint
+        .funding_txid
+        .clone()
+        .expect("funding_txid exists")
+    {
+        lnd::tonic_lnd::lnrpc::channel_point::FundingTxid::FundingTxidBytes(mut bytes) => {
+            // Don't know why the bytes returned from open_channel_sync are reversed with
+            // the order of the channel_point string returned from list_channels.
+            bytes.reverse();
+            hex::encode(bytes)
+        }
+        lnd::tonic_lnd::lnrpc::channel_point::FundingTxid::FundingTxidStr(str) => str,
+    };
+    format!("{}:{}", funding_txid, output_index)
 }
 
 #[cfg_attr(not(feature = "lnd-tests"), ignore)]
