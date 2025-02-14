@@ -26,12 +26,8 @@ use crate::{
 
 pub const CALL_ACTOR_TIMEOUT_MS: u64 = 3 * 1000;
 
-fn get_udt_args() -> Vec<u8> {
-    hex::decode("32e555f3ff8e135cece1351a6a2971518392c1e30375c1e006ad0ce8eac07947").unwrap()
-}
-
-fn get_udt_script() -> Script {
-    get_script_by_contract(Contract::Secp256k1Lock, &get_udt_args())
+fn get_always_success_udt_script() -> Script {
+    get_script_by_contract(Contract::AlwaysSuccess, &vec![])
 }
 
 #[cfg_attr(not(feature = "lnd-tests"), ignore)]
@@ -40,7 +36,7 @@ async fn test_cross_chain_payment_hub_send_btc() {
     init_tracing();
     let _span = tracing::info_span!("node", node = "test").entered();
 
-    let udt_script = get_udt_script();
+    let udt_script = get_always_success_udt_script();
     let [mut fiber_node, mut hub] = NetworkNode::new_n_interconnected_nodes_with_config(2, |n| {
         let mut builder = NetworkNodeConfigBuilder::new();
         if n == 1 {
