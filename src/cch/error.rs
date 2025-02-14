@@ -26,6 +26,8 @@ pub enum CchError {
     BTCInvoiceMissingAmount,
     #[error("CKB invoice error: {0}")]
     CKBInvoiceError(#[from] crate::invoice::InvoiceError),
+    #[error("CKB invoice missing amount")]
+    CKBInvoiceMissingAmount,
     #[error("SendBTC order already paid")]
     SendBTCOrderAlreadyPaid,
     #[error("SendBTC received payment amount is too small")]

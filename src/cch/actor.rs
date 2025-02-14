@@ -14,12 +14,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::{select, time::sleep};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
-use crate::fiber::channel::{AddTlcCommand, ChannelCommand, ChannelCommandWithId};
-use crate::fiber::hash_algorithm::HashAlgorithm;
-use crate::fiber::types::{Hash256, Pubkey, NO_SHARED_SECRET};
+use crate::fiber::graph::PaymentSessionStatus;
+use crate::fiber::network::SendPaymentCommand;
+use crate::fiber::types::{Hash256, Pubkey};
 use crate::fiber::{NetworkActorCommand, NetworkActorMessage};
-use crate::invoice::Currency;
-use crate::now_timestamp_as_millis_u64;
+use crate::invoice::{CkbInvoice, Currency};
 use crate::store::subscription::{
     InvoiceState, InvoiceSubscription, InvoiceUpdate, PaymentState, PaymentSubscription,
     PaymentUpdate,
@@ -74,17 +73,7 @@ pub struct SendBTC {
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct ReceiveBTC {
-    /// Payment hash for the HTLC for both CKB and BTC.
-    pub payment_hash: String,
-
-    /// Assume that the cross-chain hub already has a channel to the payee and the channel has
-    /// enough balance to pay the order.
-    /// TODO: Let the cross-chain hub create a channel to the payee on demand.
-    pub channel_id: Hash256,
-    /// Amount required to pay in Satoshis via BTC, including the fee for the cross-chain hub
-    pub amount_sats: u128,
-    /// Expiry set for the HTLC for the CKB payment to the payee.
-    pub final_tlc_expiry: u64,
+    pub fiber_pay_req: String,
 }
 
 pub enum CchMessage {
@@ -570,13 +559,13 @@ impl CchActor {
         receive_btc: ReceiveBTC,
         fiber_payment_tracker: DerivedActorRef<PaymentUpdate>,
     ) -> Result<ReceiveBTCOrder, CchError> {
+        let invoice = CkbInvoice::from_str(&receive_btc.fiber_pay_req)?;
+        let payment_hash = *invoice.payment_hash();
+        let payment_hash_str = format!("0x{}", hex::encode(payment_hash));
+        let amount_sats = invoice.amount().ok_or(CchError::CKBInvoiceMissingAmount)?;
+        let final_tlc_minimum_expiry_delta =
+            *invoice.final_tlc_minimum_expiry_delta().unwrap_or(&0);
         let duration_since_epoch = SystemTime::now().duration_since(UNIX_EPOCH)?;
-        let hash_bin = hex::decode(receive_btc.payment_hash.trim_start_matches("0x"))
-            .map_err(|_| CchError::HexDecodingError(receive_btc.payment_hash.clone()))?;
-        let hash256 = Hash256::try_from(hash_bin.as_slice())
-            .map_err(|_err| CchError::HexDecodingError(receive_btc.payment_hash.clone()))?;
-
-        let amount_sats = receive_btc.amount_sats;
         let fee_sats = amount_sats * (self.config.fee_rate_per_million_sats as u128)
             / 1_000_000u128
             + (self.config.base_fee_sats as u128);
@@ -589,10 +578,10 @@ impl CchActor {
 
         let mut client = state.lnd_connection.create_invoices_client().await?;
         let req = invoicesrpc::AddHoldInvoiceRequest {
-            hash: hash_bin,
+            hash: payment_hash.into(),
             value_msat: (amount_sats * 1_000u128) as i64,
             expiry: DEFAULT_ORDER_EXPIRY_SECONDS as i64,
-            cltv_expiry: self.config.btc_final_tlc_expiry + receive_btc.final_tlc_expiry,
+            cltv_expiry: self.config.btc_final_tlc_expiry + final_tlc_minimum_expiry_delta,
             ..Default::default()
         };
         let invoice = client
@@ -607,21 +596,19 @@ impl CchActor {
         let order = ReceiveBTCOrder {
             created_at: duration_since_epoch.as_secs(),
             expires_after: DEFAULT_ORDER_EXPIRY_SECONDS,
-            ckb_final_tlc_expiry_delta: receive_btc.final_tlc_expiry,
+            ckb_final_tlc_expiry_delta: final_tlc_minimum_expiry_delta,
             btc_pay_req,
-            payment_hash: receive_btc.payment_hash.clone(),
+            fiber_pay_req: receive_btc.fiber_pay_req,
+            payment_hash: payment_hash_str.clone(),
             payment_preimage: None,
             amount_sats,
             fee_sats,
             status: CchOrderStatus::Pending,
             wrapped_btc_type_script,
-            // TODO: check the channel exists and has enough local balance.
-            channel_id: receive_btc.channel_id,
-            tlc_id: None,
         };
 
         self.subscription
-            .subscribe_payment(hash256, fiber_payment_tracker)
+            .subscribe_payment(payment_hash, fiber_payment_tracker)
             .await?;
 
         state
@@ -631,7 +618,7 @@ impl CchActor {
 
         let invoice_tracker = LndInvoiceTracker::new(
             myself,
-            receive_btc.payment_hash,
+            payment_hash_str,
             state.lnd_connection.clone(),
             self.token.clone(),
         );
@@ -655,38 +642,33 @@ impl CchActor {
             Err(err) => return Err(err.into()),
             Ok(order) => order,
         };
+        order.status = event.status;
+        order.payment_preimage = event.preimage.clone();
 
         if event.status == CchOrderStatus::Accepted {
-            // AddTlc to initiate the CKB payment
+            tracing::debug!(
+                payment_hash = ?event.payment_hash,
+                "Sending payment to fiber node because we received payment from LND",
+            );
             let message = |rpc_reply| -> NetworkActorMessage {
-                NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
-                    ChannelCommandWithId {
-                        channel_id: order.channel_id,
-                        command: ChannelCommand::AddTlc(
-                            AddTlcCommand {
-                                amount: order.amount_sats - order.fee_sats,
-                                payment_hash: Hash256::from_str(&order.payment_hash)
-                                    .expect("parse Hash256"),
-                                expiry: now_timestamp_as_millis_u64()
-                                    + self.config.ckb_final_tlc_expiry_delta,
-                                hash_algorithm: HashAlgorithm::Sha256,
-                                onion_packet: None,
-                                shared_secret: NO_SHARED_SECRET.clone(),
-                                previous_tlc: None,
-                            },
-                            rpc_reply,
-                        ),
+                NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
+                    SendPaymentCommand {
+                        invoice: Some(order.fiber_pay_req.clone()),
+                        ..Default::default()
                     },
+                    rpc_reply,
                 ))
             };
+
+            // TODO: handle payment failure here.
             let tlc_response = call!(self.network_actor, message)
                 .expect("call actor")
                 .map_err(|msg| anyhow!(msg))?;
-            order.tlc_id = Some(tlc_response.tlc_id);
+            // TODO: handle payment failure here.
+            if tlc_response.status == PaymentSessionStatus::Failed {
+                order.status = CchOrderStatus::Failed;
+            }
         }
-
-        order.status = event.status;
-        order.payment_preimage = event.preimage.clone();
 
         state
             .orders_db

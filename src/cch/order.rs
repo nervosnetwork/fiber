@@ -123,11 +123,9 @@ pub struct ReceiveBTCOrder {
     pub wrapped_btc_type_script: ckb_jsonrpc_types::Script,
 
     pub btc_pay_req: String,
+    pub fiber_pay_req: String,
     pub payment_hash: String,
     pub payment_preimage: Option<String>,
-    pub channel_id: Hash256,
-    #[serde_as(as = "Option<U64Hex>")]
-    pub tlc_id: Option<u64>,
 
     /// Amount required to pay in Satoshis via BTC, including the fee for the cross-chain hub
     #[serde_as(as = "U128Hex")]

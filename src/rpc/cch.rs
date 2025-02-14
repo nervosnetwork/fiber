@@ -1,9 +1,6 @@
 use crate::{
     cch::{CchMessage, CchOrderStatus, ReceiveBTCOrder},
-    fiber::{
-        serde_utils::{U128Hex, U64Hex},
-        types::Hash256,
-    },
+    fiber::serde_utils::{U128Hex, U64Hex},
     invoice::Currency,
 };
 use jsonrpsee::{
@@ -60,16 +57,8 @@ pub(crate) struct SendBTCResponse {
 #[serde_as]
 #[derive(Serialize, Deserialize)]
 pub(crate) struct ReceiveBtcParams {
-    /// Payment hash for the HTLC for both CKB and BTC.
-    payment_hash: String,
-    /// Channel ID for the CKB payment.
-    channel_id: Hash256,
-    /// How many satoshis to receive, excluding cross-chain hub fee.
-    #[serde_as(as = "U128Hex")]
-    amount_sats: u128,
-    /// Expiry set for the HTLC for the CKB payment to the payee.
-    #[serde_as(as = "U64Hex")]
-    final_tlc_expiry: u64,
+    /// Fiber payment request string
+    pub fiber_pay_req: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -98,11 +87,6 @@ pub(crate) struct ReceiveBTCResponse {
     btc_pay_req: String,
     /// Payment hash for the HTLC for both CKB and BTC.
     payment_hash: String,
-    /// Channel ID for the CKB payment.
-    channel_id: Hash256,
-    /// TLC ID for the CKB payment.
-    #[serde_as(as = "Option<U64Hex>")]
-    tlc_id: Option<u64>,
 
     /// Amount will be received by the payee
     #[serde_as(as = "U128Hex")]
@@ -195,10 +179,7 @@ impl CchRpcServer for CchRpcServerImpl {
             CchMessage::ReceiveBTC,
             TIMEOUT,
             crate::cch::ReceiveBTC {
-                payment_hash: params.payment_hash,
-                channel_id: params.channel_id,
-                amount_sats: params.amount_sats,
-                final_tlc_expiry: params.final_tlc_expiry,
+                fiber_pay_req: params.fiber_pay_req,
             }
         )
         .map_err(|ractor_error| {
@@ -243,8 +224,6 @@ impl From<ReceiveBTCOrder> for ReceiveBTCResponse {
             wrapped_btc_type_script: value.wrapped_btc_type_script,
             btc_pay_req: value.btc_pay_req,
             payment_hash: value.payment_hash,
-            channel_id: value.channel_id,
-            tlc_id: value.tlc_id,
             amount_sats: value.amount_sats,
             fee_sats: value.fee_sats,
             status: value.status,

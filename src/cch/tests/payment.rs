@@ -239,10 +239,7 @@ async fn do_test_cross_chain_payment_hub_receive_btc(udt_script: Script) {
         CchMessage::ReceiveBTC,
         CALL_ACTOR_TIMEOUT_MS,
         ReceiveBTC {
-            payment_hash: hex::encode(payment_hash),
-            channel_id: fiber_channel,
-            amount_sats: fiber_amount_sats,
-            final_tlc_expiry: 10,
+            fiber_pay_req: fiber_invoice.to_string(),
         }
     )
     .expect("receive btc actor call")
@@ -270,7 +267,7 @@ async fn do_test_cross_chain_payment_hub_receive_btc(udt_script: Script) {
 
     lnd_node.send_payment(&lightning_invoice).await;
 
-    tokio::time::sleep(tokio::time::Duration::from_secs(600)).await;
+    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
 
     hub.assert_payment_status(payment_hash, PaymentSessionStatus::Success, Some(1))
         .await;
