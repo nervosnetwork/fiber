@@ -131,20 +131,9 @@ async fn do_test_cross_chain_payment_hub_send_btc(udt_script: Script) {
     let res = fiber_node
         .send_payment(SendPaymentCommand {
             target_pubkey: Some(hub.pubkey),
-            amount: None,
-            payment_hash: None,
-            final_tlc_expiry_delta: None,
-            tlc_expiry_limit: None,
             invoice: Some(send_btc_result.ckb_pay_req.clone()),
-            timeout: None,
-            max_fee_amount: None,
-            max_parts: None,
-            keysend: None,
             hold_payment: true,
-            udt_type_script: None,
-            allow_self_payment: false,
-            hop_hints: None,
-            dry_run: false,
+            ..Default::default()
         })
         .await;
 

@@ -287,7 +287,7 @@ pub struct OpenChannelCommand {
 }
 
 #[serde_as]
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct SendPaymentCommand {
     // the identifier of the payment target
     pub target_pubkey: Option<Pubkey>,
