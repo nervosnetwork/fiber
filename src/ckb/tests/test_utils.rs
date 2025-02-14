@@ -18,7 +18,9 @@ use tokio::sync::RwLock as TokioRwLock;
 use crate::{
     ckb::{
         config::{UdtArgInfo, UdtCfgInfos, UdtScript},
-        contracts::{get_udt_cell_deps, Contract, ContractsContext, ContractsInfo},
+        contracts::{
+            get_script_by_contract, get_udt_cell_deps, Contract, ContractsContext, ContractsInfo,
+        },
         TraceTxRequest, TraceTxResponse,
     },
     now_timestamp_as_millis_u64,
@@ -341,6 +343,17 @@ impl Actor for MockChainActor {
                 let mut fulfilled_tx = tx.clone();
 
                 let is_udt = request.udt_type_script.is_some();
+
+                // We only know how to build the funding transaction for SimpleUDT and AlwaysSuccess.
+                if let Some(script) = request.udt_type_script.as_ref() {
+                    let supported_contracts = [Contract::SimpleUDT, Contract::AlwaysSuccess];
+                    let current_args: Vec<u8> = script.args().unpack();
+                    if !supported_contracts.into_iter().any(|contract| {
+                        script == &get_script_by_contract(contract, current_args.as_slice())
+                    }) {
+                        panic!("Unsupported UDT type script for mock chain actor (supported contracts: {:?}): {:?}", supported_contracts, script);
+                    }
+                }
 
                 let (first_output, first_output_data) = match fulfilled_tx
                     .as_ref()

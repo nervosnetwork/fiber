@@ -26,17 +26,20 @@ use crate::{
 
 pub const CALL_ACTOR_TIMEOUT_MS: u64 = 3 * 1000;
 
-fn get_always_success_udt_script() -> Script {
+fn get_simple_udt_script() -> Script {
+    let args =
+        hex::decode("32e555f3ff8e135cece1351a6a2971518392c1e30375c1e006ad0ce8eac07947").unwrap();
+    get_script_by_contract(Contract::SimpleUDT, &args)
+}
+
+fn get_always_success_script() -> Script {
     get_script_by_contract(Contract::AlwaysSuccess, &vec![])
 }
 
-#[cfg_attr(not(feature = "lnd-tests"), ignore)]
-#[tokio::test]
-async fn test_cross_chain_payment_hub_send_btc() {
+async fn do_test_cross_chain_payment_hub_send_btc(udt_script: Script) {
     init_tracing();
     let _span = tracing::info_span!("node", node = "test").entered();
 
-    let udt_script = get_always_success_udt_script();
     let [mut fiber_node, mut hub] = NetworkNode::new_n_interconnected_nodes_with_config(2, |n| {
         let mut builder = NetworkNodeConfigBuilder::new();
         if n == 1 {
@@ -160,4 +163,16 @@ async fn test_cross_chain_payment_hub_send_btc() {
 
     let lnd_new_amount = lnd_node.get_balance_sats().await;
     assert_eq!(lnd_new_amount, lnd_old_amount + lnd_amount_sats);
+}
+
+#[cfg_attr(not(feature = "lnd-tests"), ignore)]
+#[tokio::test]
+async fn test_cross_chain_payment_hub_send_btc_always_success() {
+    do_test_cross_chain_payment_hub_send_btc(get_always_success_script()).await;
+}
+
+#[cfg_attr(not(feature = "lnd-tests"), ignore)]
+#[tokio::test]
+async fn test_cross_chain_payment_hub_send_btc_simple_udt() {
+    do_test_cross_chain_payment_hub_send_btc(get_simple_udt_script()).await;
 }
