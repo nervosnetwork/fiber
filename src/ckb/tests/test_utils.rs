@@ -19,7 +19,8 @@ use crate::{
     ckb::{
         config::{UdtArgInfo, UdtCfgInfos, UdtScript},
         contracts::{
-            get_script_by_contract, get_udt_cell_deps, Contract, ContractsContext, ContractsInfo,
+            get_cell_deps_by_contracts, get_script_by_contract, get_udt_cell_deps, Contract,
+            ContractsContext, ContractsInfo,
         },
         TraceTxRequest, TraceTxResponse,
     },
@@ -440,14 +441,16 @@ impl Actor for MockChainActor {
                 };
 
                 let cell_deps = [
-                    tx.as_ref().map(|x| x.cell_deps()),
+                    tx.as_ref().map(|x| x.cell_deps()).unwrap_or_default(),
                     request
                         .udt_type_script
                         .as_ref()
-                        .and_then(|script| get_udt_cell_deps(script)),
+                        .and_then(|script| get_udt_cell_deps(script))
+                        .unwrap_or_default(),
+                    // AlwaysSuccess is needed to unlock the input cells
+                    get_cell_deps_by_contracts(vec![Contract::AlwaysSuccess]),
                 ]
                 .into_iter()
-                .map(|cell_deps| cell_deps.unwrap_or_default().into_iter())
                 .flatten()
                 .collect::<HashSet<_>>()
                 .into_iter()
