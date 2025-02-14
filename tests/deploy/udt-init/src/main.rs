@@ -287,6 +287,8 @@ fn genrate_nodes_config() {
         data["rpc"]["listening_addr"] =
             serde_yaml::Value::String(format!("127.0.0.1:{}", rpc_port));
         data["ckb"]["udt_whitelist"] = serde_yaml::to_value(&udt_infos).unwrap();
+        data["cch"]["wrapped_btc_type_script"] =
+            serde_yaml::Value::String(format!("0x{}", hex::encode(get_sudt_script().as_slice())));
 
         // Node 3 acts as a CCH node.
         if i == 3 {
@@ -326,6 +328,11 @@ fn genrate_nodes_config() {
 
     let port_file_path = nodes_dir.join(".ports");
     std::fs::write(port_file_path, content).expect("write ports list");
+}
+
+fn get_sudt_script() -> Script {
+    let udt_owner = get_nodes_info("deployer");
+    generate_udt_type_script("SIMPLE_UDT", &udt_owner.0)
 }
 
 fn init_udt_accounts() -> Result<(), Box<dyn StdErr>> {
