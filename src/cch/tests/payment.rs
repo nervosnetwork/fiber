@@ -229,6 +229,7 @@ async fn do_test_cross_chain_payment_hub_receive_btc(udt_script: Script) {
         .hash_algorithm(HashAlgorithm::Sha256)
         .payee_pub_key(fiber_node.pubkey.into())
         .expiry_time(Duration::from_secs(100))
+        .udt_type_script(udt_script.clone())
         .build()
         .expect("build invoice success");
     fiber_node.insert_invoice(fiber_invoice.clone(), Some(preimage));
