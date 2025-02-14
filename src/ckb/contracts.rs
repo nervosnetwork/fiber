@@ -1,6 +1,6 @@
 use ckb_types::{
     core::{BlockView, DepType, ScriptHashType},
-    packed::{CellDep, CellDepVec, CellDepVecBuilder, CellOutput, OutPoint, Script},
+    packed::{CellDep, CellDepVec, CellDepVecBuilder, CellInput, CellOutput, OutPoint, Script},
     prelude::{Builder, Entity, Pack, PackVec},
 };
 use once_cell::sync::OnceCell;

@@ -1,10 +1,10 @@
 use anyhow::anyhow;
 use ckb_jsonrpc_types::TxStatus;
-use ckb_testtool::context::Context;
+use ckb_testtool::{ckb_hash, context::Context};
 use ckb_types::{
     bytes::Bytes,
     core::{Capacity, DepType, TransactionView},
-    packed::{CellDep, CellOutput, OutPoint, Script, Transaction},
+    packed::{CellDep, CellInput, CellOutput, OutPoint, Script, Transaction},
     prelude::{Builder, Entity, IntoTransactionView, Pack, Unpack},
     H256,
 };
@@ -12,6 +12,7 @@ use once_cell::sync::{Lazy, OnceCell};
 use std::{
     collections::{HashMap, HashSet},
     sync::{Arc, RwLock},
+    u128,
 };
 use tokio::sync::RwLock as TokioRwLock;
 
@@ -339,23 +340,22 @@ impl Actor for MockChainActor {
     ) -> Result<(), ActorProcessingErr> {
         use CkbChainMessage::*;
         match message {
-            Fund(tx, request, reply_port) => {
-                let mut fulfilled_tx = tx.clone();
+            Fund(mut tx, request, reply_port) => {
+                // We only know how to build the funding transaction for SimpleUDT and AlwaysSuccess.
+                let contract = request.udt_type_script.as_ref().map(|script| {
+                    let supported_contracts = [Contract::SimpleUDT, Contract::AlwaysSuccess];
+                    let current_args: Vec<u8> = script.args().unpack();
+                    supported_contracts
+                        .into_iter()
+                        .find(|contract| {
+                            script == &get_script_by_contract(*contract, current_args.as_slice())
+                        })
+                        .expect("Script should be one of the supported contracts")
+                });
 
                 let is_udt = request.udt_type_script.is_some();
 
-                // We only know how to build the funding transaction for SimpleUDT and AlwaysSuccess.
-                if let Some(script) = request.udt_type_script.as_ref() {
-                    let supported_contracts = [Contract::SimpleUDT, Contract::AlwaysSuccess];
-                    let current_args: Vec<u8> = script.args().unpack();
-                    if !supported_contracts.into_iter().any(|contract| {
-                        script == &get_script_by_contract(contract, current_args.as_slice())
-                    }) {
-                        panic!("Unsupported UDT type script for mock chain actor (supported contracts: {:?}): {:?}", supported_contracts, script);
-                    }
-                }
-
-                let (first_output, first_output_data) = match fulfilled_tx
+                let (first_output, first_output_data) = match tx
                     .as_ref()
                     .and_then(|x| x.output_with_data(0))
                 {
@@ -422,10 +422,7 @@ impl Actor for MockChainActor {
                     )
                 };
 
-                let outputs = fulfilled_tx
-                    .as_ref()
-                    .map(|x| x.outputs())
-                    .unwrap_or_default();
+                let outputs = tx.as_ref().map(|x| x.outputs()).unwrap_or_default();
                 let outputs = if outputs.is_empty() {
                     outputs.as_builder().push(output).build()
                 } else {
@@ -434,10 +431,7 @@ impl Actor for MockChainActor {
                     builder.build()
                 };
 
-                let outputs_data = fulfilled_tx
-                    .as_ref()
-                    .map(|x| x.outputs_data())
-                    .unwrap_or_default();
+                let outputs_data = tx.as_ref().map(|x| x.outputs_data()).unwrap_or_default();
                 let outputs_data = if outputs_data.is_empty() {
                     outputs_data.as_builder().push(output_data).build()
                 } else {
@@ -447,7 +441,7 @@ impl Actor for MockChainActor {
                 };
 
                 let cell_deps = [
-                    fulfilled_tx.as_ref().map(|x| x.cell_deps()),
+                    tx.as_ref().map(|x| x.cell_deps()),
                     request
                         .udt_type_script
                         .as_ref()
@@ -460,7 +454,7 @@ impl Actor for MockChainActor {
                 .into_iter()
                 .collect::<Vec<_>>();
 
-                let new_tx = fulfilled_tx
+                let new_tx = tx
                     .as_ref()
                     .map(|x| x.as_advanced_builder())
                     .unwrap_or_default()
@@ -469,14 +463,37 @@ impl Actor for MockChainActor {
                     .set_outputs_data(outputs_data.into_iter().collect())
                     .build();
 
-                fulfilled_tx.update_for_self(new_tx).expect("update tx");
+                let new_tx = match contract {
+                    Some(Contract::SimpleUDT) if new_tx.inputs().is_empty() => {
+                        let context = &mut MOCK_CONTEXT.write().unwrap().context;
+                        let outpoint =
+                            create_deterministic_outpoint_from_seed(new_tx.hash().as_slice());
+                        context.create_cell_with_out_point(
+                            outpoint.clone(),
+                            CellOutput::new_builder()
+                                .lock(get_script_by_contract(Contract::AlwaysSuccess, &vec![]))
+                                .type_(request.udt_type_script.clone().pack())
+                                .build(),
+                            u128::MAX.to_le_bytes().to_vec().into(),
+                        );
+                        new_tx
+                            .as_advanced_builder()
+                            .set_inputs(vec![CellInput::new_builder()
+                                .previous_output(outpoint)
+                                .build()])
+                            .build()
+                    }
+                    _ => new_tx,
+                };
 
                 debug!(
                     "Fulfilling funding request: request: {:?}, original tx: {:?}, fulfilled tx: {:?}",
-                    request, &tx, &fulfilled_tx
+                    request, &tx, &new_tx
                 );
 
-                if let Err(e) = reply_port.send(Ok(fulfilled_tx)) {
+                tx.update_for_self(new_tx).expect("update tx");
+
+                if let Err(e) = reply_port.send(Ok(tx)) {
                     error!(
                         "[{}] send reply failed: {:?}",
                         myself.get_name().unwrap_or_default(),
@@ -687,4 +704,9 @@ pub async fn get_tx_from_hash(
     .tx
     .map(|tx| Transaction::from(tx.inner).into_view())
     .ok_or(anyhow!("tx not found in trace tx response"))
+}
+
+pub fn create_deterministic_outpoint_from_seed<S: AsRef<[u8]>>(seed: S) -> OutPoint {
+    let hash = ckb_hash::blake2b_256(seed.as_ref());
+    OutPoint::new_builder().tx_hash(hash.pack()).build()
 }
