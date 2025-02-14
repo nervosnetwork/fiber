@@ -211,6 +211,7 @@ impl Cch {
         config: CchConfig,
         should_start_lnd: bool,
         network_actor: ActorRef<NetworkActorMessage>,
+        pubkey: Pubkey,
         store_update_subscription: SubscriptionImpl,
     ) -> Self {
         let (config, lnd_node) = if should_start_lnd {
@@ -229,7 +230,8 @@ impl Cch {
             new_tokio_task_tracker(),
             new_tokio_cancellation_token(),
             network_actor.get_cell(),
-            Some(network_actor.clone()),
+            network_actor,
+            pubkey,
             store_update_subscription.clone(),
         )
         .await
@@ -1074,6 +1076,7 @@ impl NetworkNode {
                     config,
                     should_start_lnd,
                     network_actor.clone(),
+                    public_key,
                     store_update_subscription.clone(),
                 )
                 .await,

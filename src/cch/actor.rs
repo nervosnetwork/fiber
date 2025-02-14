@@ -16,7 +16,7 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::fiber::channel::{AddTlcCommand, ChannelCommand, ChannelCommandWithId};
 use crate::fiber::hash_algorithm::HashAlgorithm;
-use crate::fiber::types::{Hash256, NO_SHARED_SECRET};
+use crate::fiber::types::{Hash256, Pubkey, NO_SHARED_SECRET};
 use crate::fiber::{NetworkActorCommand, NetworkActorMessage};
 use crate::invoice::Currency;
 use crate::now_timestamp_as_millis_u64;
@@ -38,12 +38,13 @@ pub async fn start_cch(
     tracker: TaskTracker,
     token: CancellationToken,
     root_actor: ActorCell,
-    network_actor: Option<ActorRef<NetworkActorMessage>>,
+    network_actor: ActorRef<NetworkActorMessage>,
+    pubkey: Pubkey,
     subscription: SubscriptionImpl,
 ) -> Result<ActorRef<CchMessage>> {
     let (actor, _handle) = Actor::spawn_linked(
         Some("cch actor".to_string()),
-        CchActor::new(config, tracker, token, network_actor, subscription),
+        CchActor::new(config, tracker, token, network_actor, pubkey, subscription),
         (),
         root_actor,
     )
@@ -184,7 +185,8 @@ pub struct CchActor {
     config: CchConfig,
     tracker: TaskTracker,
     token: CancellationToken,
-    network_actor: Option<ActorRef<NetworkActorMessage>>,
+    network_actor: ActorRef<NetworkActorMessage>,
+    pubkey: Pubkey,
     subscription: SubscriptionImpl,
 }
 
@@ -339,7 +341,8 @@ impl CchActor {
         config: CchConfig,
         tracker: TaskTracker,
         token: CancellationToken,
-        network_actor: Option<ActorRef<NetworkActorMessage>>,
+        network_actor: ActorRef<NetworkActorMessage>,
+        pubkey: Pubkey,
         subscription: SubscriptionImpl,
     ) -> Self {
         Self {
@@ -347,6 +350,7 @@ impl CchActor {
             tracker,
             token,
             network_actor,
+            pubkey,
             subscription,
         }
     }
@@ -386,7 +390,8 @@ impl CchActor {
             created_at: duration_since_epoch.as_secs(),
             ckb_final_tlc_expiry_delta: self.config.ckb_final_tlc_expiry_delta,
             btc_pay_req: send_btc.btc_pay_req,
-            ckb_pay_req: Default::default(),
+            fiber_payee_pubkey: self.pubkey.clone(),
+            fiber_pay_req: Default::default(),
             payment_hash: format!("0x{}", invoice.payment_hash().encode_hex::<String>()),
             payment_preimage: None,
             amount_sats: amount_msat.div_ceil(1_000u128) + fee_sats,
@@ -533,7 +538,7 @@ impl CchActor {
         let hash = Hash256::from_str(&event.payment_hash)?;
 
         order.status = event.status;
-        if let (Some(preimage_str), Some(network_actor)) = (event.preimage, &self.network_actor) {
+        if let Some(preimage_str) = event.preimage {
             tracing::info!(
                 "SettleSendBTCOrder: payment_hash={}, status={:?}",
                 event.payment_hash,
@@ -548,7 +553,7 @@ impl CchActor {
                 ))
             };
 
-            call!(network_actor, message)
+            call!(&self.network_actor, message)
                 .expect("call actor")
                 .map_err(|msg| anyhow!(msg))?;
         }
@@ -651,7 +656,7 @@ impl CchActor {
             Ok(order) => order,
         };
 
-        if event.status == CchOrderStatus::Accepted && self.network_actor.is_some() {
+        if event.status == CchOrderStatus::Accepted {
             // AddTlc to initiate the CKB payment
             let message = |rpc_reply| -> NetworkActorMessage {
                 NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
@@ -674,14 +679,9 @@ impl CchActor {
                     },
                 ))
             };
-            let tlc_response = call!(
-                self.network_actor
-                    .as_ref()
-                    .expect("CCH requires network actor"),
-                message
-            )
-            .expect("call actor")
-            .map_err(|msg| anyhow!(msg))?;
+            let tlc_response = call!(self.network_actor, message)
+                .expect("call actor")
+                .map_err(|msg| anyhow!(msg))?;
             order.tlc_id = Some(tlc_response.tlc_id);
         }
 

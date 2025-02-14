@@ -114,7 +114,8 @@ async fn do_test_cross_chain_payment_hub_send_btc(udt_script: Script) {
     .expect("send btc actor call")
     .expect("send btc result");
 
-    let fiber_invoice = CkbInvoice::from_str(&send_btc_result.ckb_pay_req).expect("valid invoice");
+    let fiber_invoice =
+        CkbInvoice::from_str(&send_btc_result.fiber_pay_req).expect("valid invoice");
     assert_eq!(fiber_invoice.payment_hash(), &hash);
     assert_eq!(fiber_invoice.hash_algorithm(), Some(&HashAlgorithm::Sha256));
 
@@ -130,8 +131,7 @@ async fn do_test_cross_chain_payment_hub_send_btc(udt_script: Script) {
 
     let res = fiber_node
         .send_payment(SendPaymentCommand {
-            target_pubkey: Some(hub.pubkey),
-            invoice: Some(send_btc_result.ckb_pay_req.clone()),
+            invoice: Some(send_btc_result.fiber_pay_req.clone()),
             hold_payment: true,
             ..Default::default()
         })

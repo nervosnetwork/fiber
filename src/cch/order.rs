@@ -8,7 +8,7 @@ use crate::{
     fiber::{
         hash_algorithm::HashAlgorithm,
         serde_utils::{U128Hex, U64Hex},
-        types::Hash256,
+        types::{Hash256, Pubkey},
     },
     invoice::{Currency, InvoiceBuilder},
 };
@@ -72,7 +72,8 @@ pub struct SendBTCOrder {
     pub wrapped_btc_type_script: ckb_jsonrpc_types::Script,
 
     pub btc_pay_req: String,
-    pub ckb_pay_req: String,
+    pub fiber_payee_pubkey: Pubkey,
+    pub fiber_pay_req: String,
     pub payment_hash: String,
     pub payment_preimage: Option<String>,
 
@@ -88,6 +89,7 @@ pub struct SendBTCOrder {
 impl SendBTCOrder {
     pub fn generate_ckb_invoice(&mut self) -> Result<(), CchError> {
         let invoice_builder = InvoiceBuilder::new(self.currency)
+            .payee_pub_key(self.fiber_payee_pubkey.into())
             .amount(Some(self.amount_sats))
             .payment_hash(
                 Hash256::from_str(&self.payment_hash)
@@ -99,7 +101,7 @@ impl SendBTCOrder {
             .udt_type_script(self.wrapped_btc_type_script.clone().into());
 
         let invoice = invoice_builder.build()?;
-        self.ckb_pay_req = invoice.to_string();
+        self.fiber_pay_req = invoice.to_string();
 
         Ok(())
     }

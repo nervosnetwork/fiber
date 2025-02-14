@@ -177,7 +177,7 @@ impl CchRpcServer for CchRpcServerImpl {
                 currency: order.currency,
                 wrapped_btc_type_script: order.wrapped_btc_type_script,
                 btc_pay_req: order.btc_pay_req,
-                ckb_pay_req: order.ckb_pay_req,
+                ckb_pay_req: order.fiber_pay_req,
                 payment_hash: order.payment_hash,
                 amount_sats: order.amount_sats,
                 fee_sats: order.fee_sats,
