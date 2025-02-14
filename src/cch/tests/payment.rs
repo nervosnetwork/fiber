@@ -119,8 +119,6 @@ async fn do_test_cross_chain_payment_hub_send_btc(udt_script: Script) {
     assert_eq!(fiber_invoice.payment_hash(), &hash);
     assert_eq!(fiber_invoice.hash_algorithm(), Some(&HashAlgorithm::Sha256));
 
-    hub.insert_invoice(fiber_invoice.clone(), None);
-
     let hub_amount = fiber_invoice.amount.expect("has amount");
     assert!(
         hub_amount >= lnd_amount_sats.try_into().expect("valid amount"),
@@ -232,8 +230,8 @@ async fn do_test_cross_chain_payment_hub_receive_btc(udt_script: Script) {
         .udt_type_script(udt_script.clone())
         .build()
         .expect("build invoice success");
-    fiber_node.insert_invoice(fiber_invoice.clone(), Some(preimage));
     let payment_hash = *fiber_invoice.payment_hash();
+    fiber_node.insert_invoice(fiber_invoice.clone(), Some(preimage));
 
     let receive_btc_result: ReceiveBTCOrder = call_t!(
         hub.get_cch_actor(),

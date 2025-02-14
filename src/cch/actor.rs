@@ -388,15 +388,24 @@ impl CchActor {
         };
         order.generate_ckb_invoice()?;
 
-        let hash = Hash256::from(*invoice.payment_hash());
+        let fiber_invoice = CkbInvoice::from_str(&order.fiber_pay_req).expect("parse invoice");
+        let hash = Hash256::from(*fiber_invoice.payment_hash());
+
+        let message = move |rpc_reply| -> NetworkActorMessage {
+            NetworkActorMessage::Command(NetworkActorCommand::AddInvoice(
+                fiber_invoice,
+                None,
+                rpc_reply,
+            ))
+        };
+
+        call!(&self.network_actor, message).expect("call actor")?;
 
         self.subscription
             .subscribe_invoice(hash, fiber_invoice_tracker)
             .await?;
 
         state.orders_db.insert_send_btc_order(order.clone()).await?;
-
-        // TODO(now): save order and invoice into db: store.insert_invoice(invoice.clone())
 
         Ok(order)
     }
@@ -584,12 +593,12 @@ impl CchActor {
             cltv_expiry: self.config.btc_final_tlc_expiry + final_tlc_minimum_expiry_delta,
             ..Default::default()
         };
-        let invoice = client
+        let add_invoice_resp = client
             .add_hold_invoice(req)
             .await
             .map_err(|err| CchError::LndRpcError(err.to_string()))?
             .into_inner();
-        let btc_pay_req = invoice.payment_request;
+        let btc_pay_req = add_invoice_resp.payment_request;
 
         let wrapped_btc_type_script: ckb_jsonrpc_types::Script =
             self.config.get_wrapped_btc_script().into();

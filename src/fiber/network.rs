@@ -84,7 +84,9 @@ use crate::fiber::types::{
     FiberChannelMessage, PaymentOnionPacket, PeeledPaymentOnionPacket, TxSignatures,
 };
 use crate::fiber::KeyPair;
-use crate::invoice::{settle_invoice, CkbInvoice, InvoiceStore, SettleInvoiceError};
+use crate::invoice::{
+    add_invoice, settle_invoice, CkbInvoice, InvoiceError, InvoiceStore, SettleInvoiceError,
+};
 use crate::{now_timestamp_as_millis_u64, unwrap_or_return, Error};
 
 pub const FIBER_PROTOCOL_ID: ProtocolId = ProtocolId::new(42);
@@ -248,6 +250,12 @@ pub enum NetworkActorCommand {
 
     // Send a message to the gossip actor.
     GossipActorMessage(GossipActorMessage),
+
+    AddInvoice(
+        CkbInvoice,
+        Option<Hash256>,
+        RpcReplyPort<Result<(), InvoiceError>>,
+    ),
 
     SettleInvoice(
         Hash256,
@@ -1428,6 +1436,9 @@ where
             NetworkActorCommand::SettleInvoice(hash, preimage, reply) => {
                 let _ = reply.send(settle_invoice(&self.store, Some(&myself), &hash, &preimage));
             }
+            NetworkActorCommand::AddInvoice(invoice, preimage, reply) => {
+                let _ = reply.send(add_invoice(&self.store, invoice, preimage));
+            }
         };
         Ok(())
     }
@@ -1848,6 +1859,7 @@ where
         state: &mut NetworkActorState<S>,
         payment_request: SendPaymentCommand,
     ) -> Result<SendPaymentResponse, Error> {
+        debug!("Received send payment request: {:?}", payment_request);
         let payment_data = SendPaymentData::new(payment_request.clone()).map_err(|e| {
             error!("Failed to validate payment request: {:?}", e);
             Error::InvalidParameter(format!("Failed to validate payment request: {:?}", e))

@@ -4,7 +4,8 @@ use crate::fiber::serde_utils::{U128Hex, U64Hex};
 use crate::fiber::types::{Hash256, Privkey};
 use crate::fiber::NetworkActorMessage;
 use crate::invoice::{
-    settle_invoice, CkbInvoice, CkbInvoiceStatus, Currency, InvoiceBuilder, InvoiceStore,
+    add_invoice, settle_invoice, CkbInvoice, CkbInvoiceStatus, Currency, InvoiceBuilder,
+    InvoiceStore,
 };
 use crate::FiberConfig;
 use ckb_jsonrpc_types::Script;
@@ -242,9 +243,7 @@ where
         };
 
         match invoice {
-            Ok(invoice) => match self
-                .store
-                .insert_invoice(invoice.clone(), params.payment_preimage)
+            Ok(invoice) => match add_invoice(&self.store, invoice.clone(), params.payment_preimage)
             {
                 Ok(_) => Ok(InvoiceResult {
                     invoice_address: invoice.to_string(),

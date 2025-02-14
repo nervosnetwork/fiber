@@ -101,3 +101,15 @@ pub(crate) fn settle_invoice<S: InvoiceStore>(
 
     Ok(())
 }
+
+pub(crate) fn add_invoice<S: InvoiceStore>(
+    store: &S,
+    invoice: CkbInvoice,
+    preimage: Option<Hash256>,
+) -> Result<(), InvoiceError> {
+    let hash = invoice.payment_hash();
+    if store.get_invoice(&hash).is_some() {
+        return Err(InvoiceError::InvoiceAlreadyExists);
+    }
+    store.insert_invoice(invoice, preimage)
+}
