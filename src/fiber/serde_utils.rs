@@ -24,10 +24,15 @@ where
     E: TryFrom<Vec<u8>>,
     E::Error: core::fmt::Debug,
 {
-    if string.len() < 2 || &string[..2].to_lowercase() != "0x" {
-        return Err(anyhow!("hex string does not start with 0x: {}", &string));
+    if string.len() < 2 {
+        return Err(anyhow!("hex string too short: {}", &string));
     };
-    let vec = hex::decode(&string[2..])
+    let start = if &string[..2].to_lowercase() == "0x" {
+        2
+    } else {
+        0
+    };
+    let vec = hex::decode(&string[start..])
         .map_err(|err| anyhow!("failed to decode hex string {}: {:?}", &string, err))?;
     vec.try_into()
         .map_err(|err| anyhow!("failed to convert vector into type: {:?}", err))

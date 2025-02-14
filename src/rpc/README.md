@@ -87,7 +87,7 @@ Send BTC to a address.
 * `currency` - <em>[Currency](#type-currency)</em>, Request currency
 * `wrapped_btc_type_script` - <em>`ckb_jsonrpc_types::Script`</em>, Wrapped BTC type script
 * `btc_pay_req` - <em>`String`</em>, Payment request for BTC
-* `ckb_pay_req` - <em>`String`</em>, Payment request for CKB
+* `fiber_pay_req` - <em>`String`</em>, Payment request for CKB
 * `payment_hash` - <em>`String`</em>, Payment hash for the HTLC for both CKB and BTC.
 * `amount_sats` - <em>`u128`</em>, Amount required to pay in Satoshis, including fee
 * `fee_sats` - <em>`u128`</em>, Fee in Satoshis
@@ -104,10 +104,7 @@ Receive BTC from a payment hash.
 
 ##### Params
 
-* `payment_hash` - <em>`String`</em>, Payment hash for the HTLC for both CKB and BTC.
-* `channel_id` - <em>[Hash256](#type-hash256)</em>, Channel ID for the CKB payment.
-* `amount_sats` - <em>`u128`</em>, How many satoshis to receive, excluding cross-chain hub fee.
-* `final_tlc_expiry` - <em>`u64`</em>, Expiry set for the HTLC for the CKB payment to the payee.
+* `fiber_pay_req` - <em>`String`</em>, Fiber payment request string
 
 ##### Returns
 
@@ -117,8 +114,6 @@ Receive BTC from a payment hash.
 * `wrapped_btc_type_script` - <em>`ckb_jsonrpc_types::Script`</em>, Wrapped BTC type script
 * `btc_pay_req` - <em>`String`</em>, Payment request for BTC
 * `payment_hash` - <em>`String`</em>, Payment hash for the HTLC for both CKB and BTC.
-* `channel_id` - <em>[Hash256](#type-hash256)</em>, Channel ID for the CKB payment.
-* `tlc_id` - <em>`Option<u64>`</em>, TLC ID for the CKB payment.
 * `amount_sats` - <em>`u128`</em>, Amount will be received by the payee
 * `fee_sats` - <em>`u128`</em>, Fee in Satoshis
 * `status` - <em>[CchOrderStatus](#type-cchorderstatus)</em>, Order status
@@ -144,8 +139,6 @@ Get receive BTC order by payment hash.
 * `wrapped_btc_type_script` - <em>`ckb_jsonrpc_types::Script`</em>, Wrapped BTC type script
 * `btc_pay_req` - <em>`String`</em>, Payment request for BTC
 * `payment_hash` - <em>`String`</em>, Payment hash for the HTLC for both CKB and BTC.
-* `channel_id` - <em>[Hash256](#type-hash256)</em>, Channel ID for the CKB payment.
-* `tlc_id` - <em>`Option<u64>`</em>, TLC ID for the CKB payment.
 * `amount_sats` - <em>`u128`</em>, Amount will be received by the payee
 * `fee_sats` - <em>`u128`</em>, Fee in Satoshis
 * `status` - <em>[CchOrderStatus](#type-cchorderstatus)</em>, Order status
