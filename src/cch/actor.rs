@@ -150,14 +150,14 @@ impl TryFrom<CchMessage> for InvoiceUpdate {
 }
 
 #[derive(Clone)]
-struct LndConnectionInfo {
-    uri: Uri,
-    cert: Option<Vec<u8>>,
-    macaroon: Option<Vec<u8>>,
+pub struct LndConnectionInfo {
+    pub uri: Uri,
+    pub cert: Option<Vec<u8>>,
+    pub macaroon: Option<Vec<u8>>,
 }
 
 impl LndConnectionInfo {
-    async fn create_router_client(
+    pub(crate) async fn create_router_client(
         &self,
     ) -> Result<RouterClient, lnd_grpc_tonic_client::channel::Error> {
         create_router_client(
@@ -168,7 +168,7 @@ impl LndConnectionInfo {
         .await
     }
 
-    async fn create_invoices_client(
+    pub(crate) async fn create_invoices_client(
         &self,
     ) -> Result<InvoicesClient, lnd_grpc_tonic_client::channel::Error> {
         create_invoices_client(
@@ -204,14 +204,7 @@ impl Actor for CchActor {
         myself: ActorRef<Self::Msg>,
         _config: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
-        let lnd_rpc_url: Uri = self.config.lnd_rpc_url.clone().try_into()?;
-        let cert = self.config.get_lnd_tlc_cert().await?;
-        let macaroon = self.config.get_lnd_macaroon().await?;
-        let lnd_connection = LndConnectionInfo {
-            uri: lnd_rpc_url,
-            cert,
-            macaroon,
-        };
+        let lnd_connection = self.config.get_lnd_connection_info().await?;
 
         let payments_tracker =
             LndPaymentsTracker::new(myself.clone(), lnd_connection.clone(), self.token.clone());

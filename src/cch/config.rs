@@ -2,8 +2,11 @@ use std::path::PathBuf;
 
 use anyhow::Context;
 use clap_serde_derive::ClapSerde;
+use lnd_grpc_tonic_client::Uri;
 
 use crate::fiber::serde_utils::deserialize_entity_from_hex_str;
+
+use super::actor::LndConnectionInfo;
 
 /// Default cross-chain order expiry time in seconds.
 pub const DEFAULT_ORDER_EXPIRY_TIME: u64 = 3600;
@@ -180,5 +183,16 @@ impl CchConfig {
     pub fn get_wrapped_btc_script(&self) -> ckb_types::packed::Script {
         deserialize_entity_from_hex_str(&self.wrapped_btc_type_script)
             .expect("valid wrapped btc script")
+    }
+
+    pub(crate) async fn get_lnd_connection_info(&self) -> Result<LndConnectionInfo, anyhow::Error> {
+        let lnd_rpc_url: Uri = self.lnd_rpc_url.clone().try_into()?;
+        let cert = self.get_lnd_tlc_cert().await?;
+        let macaroon = self.get_lnd_macaroon().await?;
+        Ok(LndConnectionInfo {
+            uri: lnd_rpc_url,
+            cert,
+            macaroon,
+        })
     }
 }

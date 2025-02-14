@@ -1,12 +1,18 @@
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Duration;
 
+use futures::StreamExt;
+use lightning_invoice::Bolt11Invoice;
 use lnd::bitcoind::bitcoincore_rpc::bitcoin::address::NetworkChecked;
 use lnd::bitcoind::bitcoincore_rpc::bitcoin::Address;
 use lnd::bitcoind::bitcoincore_rpc::RpcApi;
 use lnd::bitcoind::{self, BitcoinD};
 use lnd::tonic_lnd::lnrpc::{GetInfoRequest, GetInfoResponse};
 use lnd::{self, Lnd, LndConf};
+use tokio::select;
+
+use crate::cch::actor::LndConnectionInfo;
 
 fn get_bitcoind_exe_path() -> String {
     bitcoind::exe_path().expect("bitcoind executable does not exist. See https://docs.rs/bitcoind/0.34.3/bitcoind/fn.exe_path.html for how the bitcoind executable is searched")
@@ -105,6 +111,14 @@ impl LndNode {
         let channel = lnd1.open_channel_with(&mut lnd2).await;
 
         (lnd1, lnd2, channel)
+    }
+
+    pub fn get_lnd_connection_info(&self) -> LndConnectionInfo {
+        LndConnectionInfo {
+            uri: self.lnd.grpc_url.clone().try_into().expect("valid uri"),
+            cert: hex::decode(&self.lnd.tls_cert).ok(),
+            macaroon: hex::decode(&self.lnd.admin_macaroon).ok(),
+        }
     }
 
     pub async fn get_info(&mut self) -> GetInfoResponse {
@@ -242,6 +256,40 @@ impl LndNode {
             .await
             .expect("add hold invoice")
             .into_inner()
+    }
+
+    pub async fn send_payment(&self, invoice: &Bolt11Invoice) {
+        let lnd_connection = self.get_lnd_connection_info();
+        let mut lnd_client = lnd_connection
+            .create_router_client()
+            .await
+            .expect("create lnd client");
+        let timeout_seconds = 10;
+        let request = lnd_grpc_tonic_client::routerrpc::SendPaymentRequest {
+            payment_request: invoice.to_string(),
+            timeout_seconds,
+            ..Default::default()
+        };
+        let mut stream = lnd_client
+            .send_payment_v2(request)
+            .await
+            .expect("call send_payment_v2")
+            .into_inner();
+        let mut ticker = tokio::time::interval(Duration::from_secs(timeout_seconds as u64));
+        loop {
+            select! {
+                Some(payment) = stream.next() => {
+                    let payment = payment.expect("payment");
+                    use lnd_grpc_tonic_client::lnrpc::payment::PaymentStatus;
+                    if PaymentStatus::InFlight == payment.status.try_into().expect("payment status") {
+                        return;
+                    }
+                }
+                _ = ticker.tick() => {
+                    panic!("payment failed");
+                }
+            }
+        }
     }
 
     pub async fn get_balance_sats(&mut self) -> u64 {
