@@ -11,10 +11,9 @@ use ckb_types::{
 use once_cell::sync::{Lazy, OnceCell};
 use std::{
     collections::{HashMap, HashSet},
-    sync::{Arc, RwLock},
-    u128,
+    sync::Arc,
 };
-use tokio::sync::RwLock as TokioRwLock;
+use tokio::sync::RwLock;
 
 use crate::{
     ckb::{
@@ -52,10 +51,10 @@ pub enum CellStatus {
     Consumed,
 }
 
-pub static MOCK_CONTEXT: Lazy<RwLock<MockContext>> = Lazy::new(|| RwLock::new(MockContext::new()));
+pub static MOCK_CONTEXT: Lazy<MockContext> = Lazy::new(|| MockContext::new());
 
 pub struct MockContext {
-    pub context: Context,
+    pub context: RwLock<Context>,
     pub contracts_context: ContractsContext,
 }
 
@@ -154,7 +153,7 @@ impl MockContext {
         };
         let contracts_context = ContractsContext { contracts };
         MockContext {
-            context,
+            context: RwLock::new(context),
             contracts_context,
         }
     }
@@ -465,7 +464,7 @@ impl Actor for MockChainActor {
 
                 let new_tx = match contract {
                     Some(Contract::SimpleUDT) if new_tx.inputs().is_empty() => {
-                        let context = &mut MOCK_CONTEXT.write().unwrap().context;
+                        let context = &mut MOCK_CONTEXT.context.write().await;
                         let outpoint =
                             create_deterministic_outpoint_from_seed(new_tx.hash().as_slice());
                         context.create_cell_with_out_point(
@@ -521,58 +520,57 @@ impl Actor for MockChainActor {
             }
             SendTx(tx, reply_port) => {
                 const MAX_CYCLES: u64 = 100_000_000;
-                let mut f = || {
-                    // Mark the inputs as consumed
-                    for input in tx.input_pts_iter() {
-                        match state.cell_status.entry(input.clone()) {
-                            std::collections::hash_map::Entry::Occupied(mut entry) => {
-                                if *entry.get() == CellStatus::Consumed {
-                                    return (
-                                        ckb_jsonrpc_types::Status::Rejected,
-                                        Err(ckb_sdk::RpcError::Other(anyhow!(
-                                            "Cell {:?} already consumed",
-                                            &input
-                                        ))),
-                                    );
-                                }
-                                *entry.get_mut() = CellStatus::Consumed;
-                            }
-                            std::collections::hash_map::Entry::Vacant(entry) => {
-                                debug!("Consuming cell {:?}", &input);
-                                entry.insert(CellStatus::Consumed);
-                            }
-                        }
-                    }
-                    let context = &mut MOCK_CONTEXT.write().unwrap().context;
-                    match context.verify_tx(&tx, MAX_CYCLES) {
-                        Ok(c) => {
-                            debug!("Verified transaction: {:?} with {} CPU cycles", tx, c);
-                            // Also save the outputs to the context, so that we can refer to
-                            // these out points later.
-                            for outpoint in tx.output_pts().into_iter() {
-                                let index: u32 = outpoint.index().unpack();
-                                let index = index as usize;
-                                let cell = tx.outputs().get(index).unwrap();
-                                let data = tx.outputs_data().get(index).unwrap();
-                                context.create_cell_with_out_point(
-                                    outpoint.clone(),
-                                    cell,
-                                    data.as_bytes(),
-                                );
-                            }
-                            (ckb_jsonrpc_types::Status::Committed, Ok(()))
-                        }
-                        Err(e) => (
+                let (status, result) = {
+                    match tx.input_pts_iter().find(|input| {
+                        state
+                            .cell_status
+                            .get(&input)
+                            .map_or(false, |status| *status == CellStatus::Consumed)
+                    }) {
+                        Some(input) => (
                             ckb_jsonrpc_types::Status::Rejected,
                             Err(ckb_sdk::RpcError::Other(anyhow!(
-                                "Failed to verify transaction: {:?}, error: {:?}",
-                                tx,
-                                e
+                                "Transaction {:?} contains consumed input {:?}",
+                                &tx,
+                                &input
                             ))),
                         ),
+                        None => {
+                            // Mark the inputs as consumed
+                            for input in tx.input_pts_iter() {
+                                state.cell_status.insert(input, CellStatus::Consumed);
+                            }
+                            let verify_context = &mut MOCK_CONTEXT.context.write().await;
+                            match verify_context.verify_tx(&tx, MAX_CYCLES) {
+                                Ok(c) => {
+                                    debug!("Verified transaction: {:?} with {} CPU cycles", tx, c);
+                                    // Also save the outputs to the context, so that we can refer to
+                                    // these out points later.
+                                    for outpoint in tx.output_pts().into_iter() {
+                                        let index: u32 = outpoint.index().unpack();
+                                        let index = index as usize;
+                                        let cell = tx.outputs().get(index).unwrap();
+                                        let data = tx.outputs_data().get(index).unwrap();
+                                        verify_context.create_cell_with_out_point(
+                                            outpoint.clone(),
+                                            cell,
+                                            data.as_bytes(),
+                                        );
+                                    }
+                                    (ckb_jsonrpc_types::Status::Committed, Ok(()))
+                                }
+                                Err(e) => (
+                                    ckb_jsonrpc_types::Status::Rejected,
+                                    Err(ckb_sdk::RpcError::Other(anyhow!(
+                                        "Failed to verify transaction: {:?}, error: {:?}",
+                                        tx,
+                                        e
+                                    ))),
+                                ),
+                            }
+                        }
                     }
                 };
-                let (status, result) = f();
                 debug!(
                     "Transaction verfication result: tx {:?}, status: {:?}",
                     &tx, &status
@@ -619,8 +617,8 @@ impl Actor for MockChainActor {
                 // cause an infinite loop.
                 // So here we create an static lock which is shared across all nodes, and we use this lock to
                 // guarantee that the block timestamp is the same across all nodes.
-                static BLOCK_TIMESTAMP: OnceCell<TokioRwLock<HashMap<H256, u64>>> = OnceCell::new();
-                BLOCK_TIMESTAMP.get_or_init(|| TokioRwLock::new(HashMap::new()));
+                static BLOCK_TIMESTAMP: OnceCell<RwLock<HashMap<H256, u64>>> = OnceCell::new();
+                BLOCK_TIMESTAMP.get_or_init(|| RwLock::new(HashMap::new()));
                 let timestamp = *BLOCK_TIMESTAMP
                     .get()
                     .unwrap()
