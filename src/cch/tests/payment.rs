@@ -141,7 +141,7 @@ async fn do_test_cross_chain_payment_hub_send_btc(udt_script: Script) {
             max_parts: None,
             keysend: None,
             hold_payment: true,
-            udt_type_script: Some(udt_script.clone()),
+            udt_type_script: None,
             allow_self_payment: false,
             hop_hints: None,
             dry_run: false,
