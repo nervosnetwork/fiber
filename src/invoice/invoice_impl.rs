@@ -80,12 +80,12 @@ impl TryFrom<u8> for Currency {
     }
 }
 
-impl ToString for Currency {
-    fn to_string(&self) -> String {
+impl Display for Currency {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Currency::Fibb => "fibb".to_string(),
-            Currency::Fibt => "fibt".to_string(),
-            Currency::Fibd => "fibd".to_string(),
+            Currency::Fibb => write!(f, "fibb"),
+            Currency::Fibt => write!(f, "fibt"),
+            Currency::Fibd => write!(f, "fibd"),
         }
     }
 }
@@ -170,7 +170,7 @@ impl CkbInvoice {
     fn hrp_part(&self) -> String {
         format!(
             "{}{}",
-            self.currency.to_string(),
+            self.currency,
             self.amount
                 .map_or_else(|| "".to_string(), |x| x.to_string()),
         )
@@ -408,13 +408,8 @@ impl InvoiceSignature {
     }
 }
 
-impl ToString for CkbInvoice {
-    ///   hrp: fib{currency}{amount}{prefix}
-    ///   data: compressed(InvoiceData) + signature
-    ///   signature: 64 bytes + 1 byte recovery id = Vec<u8>
-    ///     if signature is present: bech32m(hrp, 1 + data + signature)
-    ///     else if signature is not present: bech32m(hrp, 0 + data)
-    fn to_string(&self) -> String {
+impl Display for CkbInvoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let hrp = self.hrp_part();
         let mut data = self.data_part();
         data.insert(
@@ -424,7 +419,11 @@ impl ToString for CkbInvoice {
         if let Some(signature) = &self.signature {
             data.extend_from_slice(&signature.to_base32());
         }
-        encode(&hrp, data, Variant::Bech32m).expect("encode invoice using Bech32m")
+        write!(
+            f,
+            "{}",
+            encode(&hrp, data, Variant::Bech32m).expect("encode invoice using Bech32m")
+        )
     }
 }
 

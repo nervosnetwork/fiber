@@ -59,6 +59,12 @@ pub struct MockContext {
     pub contracts_context: ContractsContext,
 }
 
+impl Default for MockContext {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MockContext {
     pub fn new() -> Self {
         let binaries = [
@@ -121,7 +127,7 @@ impl MockContext {
                         .get(&Contract::CkbAuth)
                         .unwrap()
                         .clone()
-                        .get(0)
+                        .first()
                         .unwrap()
                         .clone(),
                 ]
@@ -195,7 +201,7 @@ impl Actor for TraceTxReplier {
         myself: ActorRef<Self::Msg>,
         (notifier, timeout, reply_port): Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
-        let _ = myself.send_after(timeout, || TraceTxResult::Timeout());
+        myself.send_after(timeout, TraceTxResult::Timeout);
         let hash = self.tx_hash.clone();
         notifier.subscribe(myself, move |notification| {
             if notification.0 == hash {

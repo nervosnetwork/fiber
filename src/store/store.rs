@@ -556,9 +556,8 @@ impl<IH: InvoiceUpdateHook, PH: PaymentUpdateHook> NetworkGraphStateStore for Ge
         let prefix = vec![PAYMENT_HISTORY_TIMED_RESULT_PREFIX];
         let iter = self.prefix_iterator(&prefix);
         iter.map(|(key, value)| {
-            let channel_outpoint: OutPoint = OutPoint::from_slice(&key[1..=36])
-                .expect("deserialize OutPoint should be OK")
-                .into();
+            let channel_outpoint: OutPoint =
+                OutPoint::from_slice(&key[1..=36]).expect("deserialize OutPoint should be OK");
             let direction = deserialize_from(&key[37..], "Direction");
             let result = deserialize_from(value.as_ref(), "TimedResult");
             (channel_outpoint, direction, result)
@@ -579,7 +578,7 @@ impl<IH: InvoiceUpdateHook, PH: PaymentUpdateHook> GossipMessageStore for Generi
         self.db
             .iterator(mode)
             // We should skip the value with the same cursor (after_cursor is exclusive).
-            .skip_while(move |(key, _)| key.as_ref() == &start)
+            .skip_while(move |(key, _)| key.as_ref() == start)
             .take_while(move |(key, _)| key.starts_with(&prefix))
             .map(|(key, value)| {
                 debug_assert_eq!(key.len(), 1 + CURSOR_SIZE);
@@ -618,7 +617,7 @@ impl<IH: InvoiceUpdateHook, PH: PaymentUpdateHook> GossipMessageStore for Generi
 
     fn get_latest_channel_announcement_timestamp(&self, outpoint: &OutPoint) -> Option<u64> {
         self.get(
-            &[
+            [
                 [BROADCAST_MESSAGE_TIMESTAMP_PREFIX].as_slice(),
                 BroadcastMessageID::ChannelAnnouncement(outpoint.clone())
                     .to_bytes()
@@ -642,7 +641,7 @@ impl<IH: InvoiceUpdateHook, PH: PaymentUpdateHook> GossipMessageStore for Generi
         is_node1: bool,
     ) -> Option<u64> {
         self.get(
-            &[
+            [
                 [BROADCAST_MESSAGE_TIMESTAMP_PREFIX].as_slice(),
                 BroadcastMessageID::ChannelUpdate(outpoint.clone())
                     .to_bytes()
@@ -666,9 +665,9 @@ impl<IH: InvoiceUpdateHook, PH: PaymentUpdateHook> GossipMessageStore for Generi
         pk: &crate::fiber::types::Pubkey,
     ) -> Option<u64> {
         self.get(
-            &[
+            [
                 [BROADCAST_MESSAGE_TIMESTAMP_PREFIX].as_slice(),
-                BroadcastMessageID::NodeAnnouncement(pk.clone())
+                BroadcastMessageID::NodeAnnouncement(*pk)
                     .to_bytes()
                     .as_slice(),
             ]
@@ -763,7 +762,7 @@ impl<IH: InvoiceUpdateHook, PH: PaymentUpdateHook> GossipMessageStore for Generi
             node_announcement
         );
         let mut batch = self.batch();
-        let message_id = BroadcastMessageID::NodeAnnouncement(node_announcement.node_id.clone());
+        let message_id = BroadcastMessageID::NodeAnnouncement(node_announcement.node_id);
 
         if let Some(old_timestamp) =
             self.get_latest_node_announcement_timestamp(&node_announcement.node_id)
@@ -785,7 +784,7 @@ impl<IH: InvoiceUpdateHook, PH: PaymentUpdateHook> GossipMessageStore for Generi
             );
         }
         batch.put_kv(KeyValue::BroadcastMessageTimestamp(
-            BroadcastMessageID::NodeAnnouncement(node_announcement.node_id.clone()),
+            BroadcastMessageID::NodeAnnouncement(node_announcement.node_id),
             node_announcement.timestamp,
         ));
 

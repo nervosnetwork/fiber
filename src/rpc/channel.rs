@@ -348,7 +348,6 @@ where
                     shutdown_script: params.shutdown_script.clone().map(|s| s.into()),
                     commitment_delay_epoch: params
                         .commitment_delay_epoch
-                        .clone()
                         .map(|e| EpochNumberWithFractionCore::from_full_value(e.value())),
                     funding_udt_type_script: params
                         .funding_udt_type_script
@@ -421,8 +420,8 @@ where
                         state: state.state.into(),
                         local_balance: state.get_local_balance(),
                         remote_balance: state.get_remote_balance(),
-                        offered_tlc_balance: state.get_offered_tlc_balance(),
-                        received_tlc_balance: state.get_received_tlc_balance(),
+                        offered_tlc_balance: state.get_offered_tlc_balance(true),
+                        received_tlc_balance: state.get_received_tlc_balance(true),
                         latest_commitment_transaction_hash: state
                             .latest_commitment_transaction
                             .as_ref()

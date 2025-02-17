@@ -175,7 +175,7 @@ impl DevRpcServer for DevRpcServerImpl {
                             expiry: params.expiry,
                             hash_algorithm: params.hash_algorithm.unwrap_or_default(),
                             onion_packet: None,
-                            shared_secret: NO_SHARED_SECRET.clone(),
+                            shared_secret: NO_SHARED_SECRET,
                             previous_tlc: None,
                         },
                         rpc_reply,
@@ -191,7 +191,7 @@ impl DevRpcServer for DevRpcServerImpl {
     async fn remove_tlc(&self, params: RemoveTlcParams) -> Result<(), ErrorObjectOwned> {
         let err_code = match &params.reason {
             RemoveTlcReason::RemoveTlcFail { error_code } => {
-                let Ok(err) = TlcErrorCode::from_str(&error_code) else {
+                let Ok(err) = TlcErrorCode::from_str(error_code) else {
                     return log_and_error!(params, format!("invalid error code: {}", error_code));
                 };
                 Some(err)

@@ -8,8 +8,8 @@ use crate::{
         graph::PaymentSessionStatus,
         network::SendPaymentCommand,
         tests::test_utils::{
-            create_n_nodes_with_index_and_amounts_with_established_channel, init_tracing,
-            HUGE_CKB_AMOUNT, MIN_RESERVED_CKB,
+            create_n_nodes_and_channels_with_index_amounts, init_tracing, HUGE_CKB_AMOUNT,
+            MIN_RESERVED_CKB,
         },
     },
     gen_rand_sha256_hash,
@@ -157,7 +157,7 @@ async fn test_store_update_subscription_normal_payment() {
     init_tracing();
 
     let n_nodes = 3;
-    let (nodes, channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+    let (nodes, channels) = create_n_nodes_and_channels_with_index_amounts(
         &[
             ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
             ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
@@ -201,7 +201,7 @@ async fn test_store_update_subscription_normal_payment() {
         payment_subscribers.push(payment_subscriber);
     }
 
-    let [mut source_node, _node_1, mut target_node] = nodes.try_into().expect("3 nodes");
+    let [source_node, _node_1, mut target_node] = nodes.try_into().expect("3 nodes");
     target_node.insert_invoice(ckb_invoice.clone(), Some(preimage));
 
     let amount = 100;
@@ -307,7 +307,7 @@ async fn test_store_update_subscription_settlement_payment() {
     init_tracing();
     let _span = tracing::info_span!("node", node = "test").entered();
     let n_nodes = 3;
-    let (nodes, channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+    let (nodes, channels) = create_n_nodes_and_channels_with_index_amounts(
         &[
             ((0, 1), (HUGE_CKB_AMOUNT, MIN_RESERVED_CKB)),
             ((1, 2), (HUGE_CKB_AMOUNT, MIN_RESERVED_CKB)),
@@ -350,7 +350,7 @@ async fn test_store_update_subscription_settlement_payment() {
         payment_subscribers.push(payment_subscriber);
     }
 
-    let [mut node_0, _node_1, mut node_2] = nodes.try_into().expect("3 nodes");
+    let [node_0, _node_1, mut node_2] = nodes.try_into().expect("3 nodes");
     let old_amount = node_2.get_local_balance_from_channel(channels[1]);
 
     node_2.insert_invoice(ckb_invoice.clone(), None);
@@ -502,7 +502,7 @@ async fn test_store_update_subscription_mock_cross_chain_payment() {
     init_tracing();
     let _span = tracing::info_span!("node", node = "test").entered();
     let n_nodes = 3;
-    let (nodes, channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+    let (nodes, channels) = create_n_nodes_and_channels_with_index_amounts(
         &[
             ((0, 1), (HUGE_CKB_AMOUNT, MIN_RESERVED_CKB)),
             ((1, 2), (HUGE_CKB_AMOUNT, MIN_RESERVED_CKB)),
@@ -556,7 +556,7 @@ async fn test_store_update_subscription_mock_cross_chain_payment() {
         payment_subscribers.push(payment_subscriber);
     }
 
-    let [mut node_0, mut node_1, mut node_2] = nodes.try_into().expect("3 nodes");
+    let [node_0, mut node_1, mut node_2] = nodes.try_into().expect("3 nodes");
     let node_2_old_amount = node_2.get_local_balance_from_channel(channels[1]);
     let node_1_old_amount = node_1.get_local_balance_from_channel(channels[0]);
 

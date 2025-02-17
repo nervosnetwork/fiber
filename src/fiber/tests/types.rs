@@ -67,8 +67,8 @@ fn test_cursor_timestamp() {
     let node_id = gen_rand_fiber_public_key();
     // 255 is larger than 256 in little endian.
     assert!(
-        Cursor::new(255, BroadcastMessageID::NodeAnnouncement(node_id.clone()))
-            < Cursor::new(256, BroadcastMessageID::NodeAnnouncement(node_id.clone()))
+        Cursor::new(255, BroadcastMessageID::NodeAnnouncement(node_id))
+            < Cursor::new(256, BroadcastMessageID::NodeAnnouncement(node_id))
     );
 }
 
@@ -80,7 +80,7 @@ fn test_cursor_types() {
         Cursor::new(
             0,
             BroadcastMessageID::ChannelAnnouncement(channel_outpoint.clone())
-        ) < Cursor::new(0, BroadcastMessageID::NodeAnnouncement(node_id.clone()))
+        ) < Cursor::new(0, BroadcastMessageID::NodeAnnouncement(node_id))
     );
     assert!(
         Cursor::new(
@@ -95,7 +95,7 @@ fn test_cursor_types() {
         Cursor::new(
             0,
             BroadcastMessageID::ChannelUpdate(channel_outpoint.clone())
-        ) < Cursor::new(0, BroadcastMessageID::NodeAnnouncement(node_id.clone()))
+        ) < Cursor::new(0, BroadcastMessageID::NodeAnnouncement(node_id))
     );
 }
 
@@ -118,14 +118,14 @@ fn test_add_tlc_serialization() {
 #[test]
 fn test_peeled_onion_packet() {
     let secp = Secp256k1::new();
-    let keys: Vec<Privkey> = std::iter::repeat_with(|| gen_rand_fiber_private_key())
+    let keys: Vec<Privkey> = std::iter::repeat_with(gen_rand_fiber_private_key)
         .take(3)
         .collect();
     let hops_infos = vec![
         PaymentHopData {
             amount: 2,
             expiry: 3,
-            next_hop: Some(keys[1].pubkey().into()),
+            next_hop: Some(keys[1].pubkey()),
             funding_tx_hash: Hash256::default(),
             hash_algorithm: HashAlgorithm::Sha256,
             payment_preimage: None,
@@ -133,7 +133,7 @@ fn test_peeled_onion_packet() {
         PaymentHopData {
             amount: 5,
             expiry: 6,
-            next_hop: Some(keys[2].pubkey().into()),
+            next_hop: Some(keys[2].pubkey()),
             funding_tx_hash: Hash256::default(),
             hash_algorithm: HashAlgorithm::Sha256,
             payment_preimage: None,
@@ -212,8 +212,7 @@ fn test_tlc_err_packet_encryption() {
 
     let session_key = SecretKey::from_slice(&[0x41; 32]).expect("32 bytes, within curve order");
     let hops_ss: Vec<[u8; 32]> =
-        OnionSharedSecretIter::new(hops_path.iter().map(|k| &k.0), session_key.clone(), &secp)
-            .collect();
+        OnionSharedSecretIter::new(hops_path.iter().map(|k| &k.0), session_key, &secp).collect();
 
     let tlc_fail_detail = TlcErr::new(TlcErrorCode::InvalidOnionVersion);
     {
@@ -254,7 +253,7 @@ fn test_tlc_error_code() {
 fn test_create_and_verify_node_announcement() {
     let privkey = gen_rand_fiber_private_key();
     let node_announcement = NodeAnnouncement::new(
-        AnnouncedNodeName::from_str("node1").expect("valid name"),
+        AnnouncedNodeName::from_string("node1").expect("valid name"),
         vec![],
         &privkey,
         now_timestamp_as_millis_u64(),
@@ -271,7 +270,7 @@ fn test_create_and_verify_node_announcement() {
 fn test_serde_node_announcement() {
     let privkey = gen_rand_fiber_private_key();
     let node_announcement = NodeAnnouncement::new(
-        AnnouncedNodeName::from_str("node1").expect("valid name"),
+        AnnouncedNodeName::from_string("node1").expect("valid name"),
         vec![],
         &privkey,
         now_timestamp_as_millis_u64(),

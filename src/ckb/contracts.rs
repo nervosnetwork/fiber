@@ -211,7 +211,7 @@ impl ContractsContext {
 
     pub(crate) fn get_udt_info(&self, udt_script: &Script) -> Option<&UdtArgInfo> {
         for udt in &self.get_udt_whitelist().0 {
-            if let Some(_type) = udt_script.hash_type().try_into().ok() {
+            if let Ok(_type) = udt_script.hash_type().try_into() {
                 if udt.script.code_hash.pack() == udt_script.code_hash()
                     && udt.script.hash_type == _type
                 {
@@ -251,7 +251,7 @@ fn get_contracts_context() -> &'static ContractsContext {
 }
 
 #[cfg(test)]
-fn get_contracts_context<'a>() -> ContractsContext {
+fn get_contracts_context() -> ContractsContext {
     super::tests::test_utils::MOCK_CONTEXT
         .contracts_context
         .clone()

@@ -737,7 +737,7 @@ async fn test_network_send_payment_normal_keysend_workflow() {
     // Wait for the channel announcement to be broadcasted
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
-    let node_b_pubkey = node_b.pubkey.clone();
+    let node_b_pubkey = node_b.pubkey;
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
             SendPaymentCommand {
@@ -845,8 +845,8 @@ async fn test_network_send_payment_send_each_other() {
     let node_a_old_balance = node_a.get_local_balance_from_channel(new_channel_id);
     let node_b_old_balance = node_b.get_local_balance_from_channel(new_channel_id);
 
-    let node_a_pubkey = node_a.pubkey.clone();
-    let node_b_pubkey = node_b.pubkey.clone();
+    let node_a_pubkey = node_a.pubkey;
+    let node_b_pubkey = node_b.pubkey;
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
             SendPaymentCommand {
@@ -962,8 +962,8 @@ async fn test_network_send_payment_more_send_each_other() {
     let node_a_old_balance = node_a.get_local_balance_from_channel(new_channel_id);
     let node_b_old_balance = node_b.get_local_balance_from_channel(new_channel_id);
 
-    let node_a_pubkey = node_a.pubkey.clone();
-    let node_b_pubkey = node_b.pubkey.clone();
+    let node_a_pubkey = node_a.pubkey;
+    let node_b_pubkey = node_b.pubkey;
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
             SendPaymentCommand {
@@ -1110,7 +1110,7 @@ async fn test_network_send_payment_send_with_ack() {
     // Wait for the channel announcement to be broadcasted
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
-    let node_b_pubkey = node_b.pubkey.clone();
+    let node_b_pubkey = node_b.pubkey;
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
             SendPaymentCommand {
@@ -1190,14 +1190,14 @@ async fn test_network_send_previous_tlc_error() {
     tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
 
     let secp = Secp256k1::new();
-    let keys: Vec<Privkey> = std::iter::repeat_with(|| gen_rand_fiber_private_key().into())
+    let keys: Vec<Privkey> = std::iter::repeat_with(gen_rand_fiber_private_key)
         .take(1)
         .collect();
     let hops_infos = vec![
         PaymentHopData {
             amount: 2,
             expiry: 3,
-            next_hop: Some(keys[0].pubkey().into()),
+            next_hop: Some(keys[0].pubkey()),
             funding_tx_hash: Hash256::default(),
             hash_algorithm: HashAlgorithm::Sha256,
             payment_preimage: None,
@@ -1235,7 +1235,7 @@ async fn test_network_send_previous_tlc_error() {
                         hash_algorithm: HashAlgorithm::Sha256,
                         // invalid onion packet
                         onion_packet: packet.next.clone(),
-                        shared_secret: packet.shared_secret.clone(),
+                        shared_secret: packet.shared_secret,
                         previous_tlc: None,
                     },
                     rpc_reply,
@@ -1312,7 +1312,7 @@ async fn test_network_send_payment_keysend_with_payment_hash() {
     // Wait for the channel announcement to be broadcasted
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
-    let node_b_pubkey = node_b.pubkey.clone();
+    let node_b_pubkey = node_b.pubkey;
     let payment_hash = gen_rand_sha256_hash();
 
     // This payment request is without an invoice, the receiver will return an error `IncorrectOrUnknownPaymentDetails`
@@ -1362,7 +1362,7 @@ async fn test_network_send_payment_final_incorrect_hash() {
     let node_a_local_balance = node_a.get_local_balance_from_channel(channel_id);
     let node_b_local_balance = node_b.get_local_balance_from_channel(channel_id);
 
-    let node_b_pubkey = node_b.pubkey.clone();
+    let node_b_pubkey = node_b.pubkey;
     let payment_hash = gen_rand_sha256_hash();
 
     // This payment request is without an invoice, the receiver will return an error `IncorrectOrUnknownPaymentDetails`
@@ -1432,7 +1432,7 @@ async fn test_network_send_payment_target_not_found() {
     // Wait for the channel announcement to be broadcasted
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
-    let node_b_pubkey = gen_rand_fiber_public_key().into();
+    let node_b_pubkey = gen_rand_fiber_public_key();
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
             SendPaymentCommand {
@@ -1474,7 +1474,7 @@ async fn test_network_send_payment_amount_is_too_large() {
     // Wait for the channel announcement to be broadcasted
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
-    let node_b_pubkey = node_b.pubkey.clone();
+    let node_b_pubkey = node_b.pubkey;
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
             SendPaymentCommand {
@@ -1520,7 +1520,7 @@ async fn test_network_send_payment_with_dry_run() {
     // Wait for the channel announcement to be broadcasted
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
-    let node_b_pubkey = node_b.pubkey.clone();
+    let node_b_pubkey = node_b.pubkey;
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
             SendPaymentCommand {
@@ -1595,7 +1595,7 @@ async fn test_send_payment_with_3_nodes() {
     // sleep for 2 seconds to make sure the channel is established
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
     let sent_amount = 1000000 + 5;
-    let node_c_pubkey = node_c.pubkey.clone();
+    let node_c_pubkey = node_c.pubkey;
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
             SendPaymentCommand {
@@ -1653,7 +1653,7 @@ async fn test_send_payment_with_3_nodes() {
 async fn test_send_payment_with_rev_3_nodes() {
     init_tracing();
     let _span = tracing::info_span!("node", node = "test").entered();
-    let (nodes, channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+    let (nodes, channels) = create_n_nodes_and_channels_with_index_amounts(
         vec![
             ((2, 1), (100000000000, 100000000000)),
             ((1, 0), (100000000000, 100000000000)),
@@ -1673,7 +1673,7 @@ async fn test_send_payment_with_rev_3_nodes() {
     let node_a_local = node_a.get_local_balance_from_channel(channel_2);
 
     let sent_amount = 1000000 + 5;
-    let node_a_pubkey = node_a.pubkey.clone();
+    let node_a_pubkey = node_a.pubkey;
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
             SendPaymentCommand {
@@ -1737,7 +1737,7 @@ async fn test_send_payment_with_max_nodes() {
     let (nodes, channels) =
         create_n_nodes_with_established_channel(&amounts, nodes_num, true).await;
     let source_node = &nodes[0];
-    let target_pubkey = nodes[last].pubkey.clone();
+    let target_pubkey = nodes[last].pubkey;
 
     let sender_local = nodes[0].get_local_balance_from_channel(channels[0]);
     let receiver_local = nodes[last].get_local_balance_from_channel(channels[last - 1]);
@@ -1828,7 +1828,7 @@ async fn test_send_payment_with_3_nodes_overflow() {
     // sleep for 2 seconds to make sure the channel is established
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
     let sent_amount = 0xfffffffffffffffffffffffffffffff;
-    let node_c_pubkey = node_c.pubkey.clone();
+    let node_c_pubkey = node_c.pubkey;
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
             SendPaymentCommand {
@@ -1878,7 +1878,7 @@ async fn test_send_payment_fail_with_3_nodes_invalid_hash() {
 
     // sleep for 2 seconds to make sure the channel is established
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
-    let node_c_pubkey = node_c.pubkey.clone();
+    let node_c_pubkey = node_c.pubkey;
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
             SendPaymentCommand {
@@ -1951,7 +1951,7 @@ async fn test_send_payment_fail_with_3_nodes_final_tlc_expiry_delta() {
 
     // sleep for 2 seconds to make sure the channel is established
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
-    let node_c_pubkey = node_c.pubkey.clone();
+    let node_c_pubkey = node_c.pubkey;
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
             SendPaymentCommand {
@@ -1979,7 +1979,7 @@ async fn test_send_payment_fail_with_3_nodes_final_tlc_expiry_delta() {
     let res = res.unwrap();
     assert_eq!(res.status, PaymentSessionStatus::Created);
 
-    let node_c_pubkey = node_c.pubkey.clone();
+    let node_c_pubkey = node_c.pubkey;
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
             SendPaymentCommand {
@@ -2006,7 +2006,7 @@ async fn test_send_payment_fail_with_3_nodes_final_tlc_expiry_delta() {
     assert!(res.is_err());
     assert!(res.unwrap_err().contains("invalid final_tlc_expiry_delta"));
 
-    let node_c_pubkey = node_c.pubkey.clone();
+    let node_c_pubkey = node_c.pubkey;
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
             SendPaymentCommand {
@@ -2050,7 +2050,7 @@ async fn test_send_payment_fail_with_3_nodes_dry_run_fee() {
 
     // sleep for 2 seconds to make sure the channel is established
     tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
-    let node_c_pubkey = node_c.pubkey.clone();
+    let node_c_pubkey = node_c.pubkey;
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
             SendPaymentCommand {
@@ -2106,7 +2106,7 @@ async fn test_send_payment_fail_with_3_nodes_dry_run_fee() {
     // expect smaller fee since amount is smaller
     assert_eq!(res.fee, 1000000);
 
-    let node_c_pubkey = node_c.pubkey.clone();
+    let node_c_pubkey = node_c.pubkey;
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
             SendPaymentCommand {
@@ -2134,7 +2134,7 @@ async fn test_send_payment_fail_with_3_nodes_dry_run_fee() {
     let res = res.unwrap();
     assert_eq!(res.fee, 1000000);
 
-    let node_c_pubkey = node_c.pubkey.clone();
+    let node_c_pubkey = node_c.pubkey;
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
             SendPaymentCommand {
@@ -2176,7 +2176,7 @@ async fn test_network_send_payment_dry_run_can_still_query() {
     tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
 
     let payment_hash = gen_rand_sha256_hash();
-    let node_b_pubkey = node_b.pubkey.clone();
+    let node_b_pubkey = node_b.pubkey;
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
             SendPaymentCommand {
@@ -2245,7 +2245,7 @@ async fn test_network_send_payment_dry_run_will_not_create_payment_session() {
     tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
 
     let payment_hash = gen_rand_sha256_hash();
-    let node_b_pubkey = node_b.pubkey.clone();
+    let node_b_pubkey = node_b.pubkey;
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
             SendPaymentCommand {
@@ -2411,7 +2411,7 @@ async fn do_test_channel_commitment_tx_after_add_tlc(algorithm: HashAlgorithm) {
         .await;
 
     let preimage = [1; 32];
-    let digest = algorithm.hash(&preimage);
+    let digest = algorithm.hash(preimage);
     let tlc_amount = 1000000000;
 
     let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
@@ -2425,7 +2425,7 @@ async fn do_test_channel_commitment_tx_after_add_tlc(algorithm: HashAlgorithm) {
                         payment_hash: digest.into(),
                         expiry: now_timestamp_as_millis_u64() + DEFAULT_EXPIRY_DELTA,
                         onion_packet: None,
-                        shared_secret: NO_SHARED_SECRET.clone(),
+                        shared_secret: NO_SHARED_SECRET,
                         previous_tlc: None,
                     },
                     rpc_reply,
@@ -2531,7 +2531,7 @@ async fn do_test_remove_tlc_with_wrong_hash_algorithm(
     .await;
 
     let preimage = [1; 32];
-    let digest = correct_algorithm.hash(&preimage);
+    let digest = correct_algorithm.hash(preimage);
     let tlc_amount = 1000000000;
 
     let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
@@ -2545,7 +2545,7 @@ async fn do_test_remove_tlc_with_wrong_hash_algorithm(
                         payment_hash: digest.into(),
                         expiry: now_timestamp_as_millis_u64() + DEFAULT_EXPIRY_DELTA,
                         onion_packet: None,
-                        shared_secret: NO_SHARED_SECRET.clone(),
+                        shared_secret: NO_SHARED_SECRET,
                         previous_tlc: None,
                     },
                     rpc_reply,
@@ -2585,7 +2585,7 @@ async fn do_test_remove_tlc_with_wrong_hash_algorithm(
 
     let preimage = [2; 32];
     // create a new payment hash
-    let digest = correct_algorithm.hash(&preimage);
+    let digest = correct_algorithm.hash(preimage);
     let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
@@ -2597,7 +2597,7 @@ async fn do_test_remove_tlc_with_wrong_hash_algorithm(
                         payment_hash: digest.into(),
                         expiry: now_timestamp_as_millis_u64() + DEFAULT_EXPIRY_DELTA,
                         onion_packet: None,
-                        shared_secret: NO_SHARED_SECRET.clone(),
+                        shared_secret: NO_SHARED_SECRET,
                         previous_tlc: None,
                     },
                     rpc_reply,
@@ -2670,7 +2670,7 @@ async fn do_test_channel_remote_commitment_error() {
 
         // create a new payment hash
         let hash_algorithm = HashAlgorithm::Sha256;
-        let digest = hash_algorithm.hash(&preimage);
+        let digest = hash_algorithm.hash(preimage);
         if let Ok(add_tlc_result) = call!(node_a.network_actor, |rpc_reply| {
             NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
                 ChannelCommandWithId {
@@ -2682,7 +2682,7 @@ async fn do_test_channel_remote_commitment_error() {
                             payment_hash: digest.into(),
                             expiry: now_timestamp_as_millis_u64() + DEFAULT_EXPIRY_DELTA,
                             onion_packet: None,
-                            shared_secret: NO_SHARED_SECRET.clone(),
+                            shared_secret: NO_SHARED_SECRET,
                             previous_tlc: None,
                         },
                         rpc_reply,
@@ -2698,7 +2698,7 @@ async fn do_test_channel_remote_commitment_error() {
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
         if all_sent.len() >= tlc_number_in_flight_limit {
             while all_sent.len() > tlc_number_in_flight_limit - 2 {
-                if let Some((preimage, tlc_id)) = all_sent.iter().next().cloned() {
+                if let Some((preimage, tlc_id)) = all_sent.first().cloned() {
                     let remove_tlc_result = call!(node_b.network_actor, |rpc_reply| {
                         NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
                             ChannelCommandWithId {
@@ -2752,12 +2752,12 @@ async fn test_network_add_two_tlcs_remove_one() {
 
     let preimage_a = [1; 32];
     let algorithm = HashAlgorithm::Sha256;
-    let digest = algorithm.hash(&preimage_a);
+    let digest = algorithm.hash(preimage_a);
 
     let add_tlc_result_a = call!(node_a.network_actor, |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
-                channel_id: channel_id,
+                channel_id,
                 command: ChannelCommand::AddTlc(
                     AddTlcCommand {
                         amount: 1000,
@@ -2765,7 +2765,7 @@ async fn test_network_add_two_tlcs_remove_one() {
                         payment_hash: digest.into(),
                         expiry: now_timestamp_as_millis_u64() + DEFAULT_EXPIRY_DELTA,
                         onion_packet: None,
-                        shared_secret: NO_SHARED_SECRET.clone(),
+                        shared_secret: NO_SHARED_SECRET,
                         previous_tlc: None,
                     },
                     rpc_reply,
@@ -2780,11 +2780,11 @@ async fn test_network_add_two_tlcs_remove_one() {
     // if we don't wait for a while, the next add_tlc will fail with temporary failure
     let preimage_b = [2; 32];
     let algorithm = HashAlgorithm::Sha256;
-    let digest = algorithm.hash(&preimage_b);
+    let digest = algorithm.hash(preimage_b);
     let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
-                channel_id: channel_id,
+                channel_id,
                 command: ChannelCommand::AddTlc(
                     AddTlcCommand {
                         amount: 2000,
@@ -2792,7 +2792,7 @@ async fn test_network_add_two_tlcs_remove_one() {
                         payment_hash: digest.into(),
                         expiry: now_timestamp_as_millis_u64() + DEFAULT_EXPIRY_DELTA,
                         onion_packet: None,
-                        shared_secret: NO_SHARED_SECRET.clone(),
+                        shared_secret: NO_SHARED_SECRET,
                         previous_tlc: None,
                     },
                     rpc_reply,
@@ -2808,7 +2808,7 @@ async fn test_network_add_two_tlcs_remove_one() {
     let add_tlc_result_b = call!(node_a.network_actor, |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
-                channel_id: channel_id,
+                channel_id,
                 command: ChannelCommand::AddTlc(
                     AddTlcCommand {
                         amount: 2000,
@@ -2816,7 +2816,7 @@ async fn test_network_add_two_tlcs_remove_one() {
                         payment_hash: digest.into(),
                         expiry: now_timestamp_as_millis_u64() + DEFAULT_EXPIRY_DELTA,
                         onion_packet: None,
-                        shared_secret: NO_SHARED_SECRET.clone(),
+                        shared_secret: NO_SHARED_SECRET,
                         previous_tlc: None,
                     },
                     rpc_reply,
@@ -2831,10 +2831,10 @@ async fn test_network_add_two_tlcs_remove_one() {
 
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
     // remove tlc from node_b
-    let res = call!(node_b.network_actor, |rpc_reply| {
+    call!(node_b.network_actor, |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
-                channel_id: channel_id,
+                channel_id,
                 command: ChannelCommand::RemoveTlc(
                     RemoveTlcCommand {
                         id: add_tlc_result_a.tlc_id,
@@ -2849,7 +2849,7 @@ async fn test_network_add_two_tlcs_remove_one() {
     })
     .expect("node_b alive")
     .expect("successfully removed tlc");
-    eprintln!("remove tlc result: {:?}", res);
+    eprintln!("remove tlc result: {:?}", ());
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
     let new_a_balance = node_a.get_local_balance_from_channel(channel_id);
@@ -2863,10 +2863,10 @@ async fn test_network_add_two_tlcs_remove_one() {
 
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
     // remove the later tlc from node_b
-    let res = call!(node_b.network_actor, |rpc_reply| {
+    call!(node_b.network_actor, |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
-                channel_id: channel_id,
+                channel_id,
                 command: ChannelCommand::RemoveTlc(
                     RemoveTlcCommand {
                         id: add_tlc_result_b.unwrap().tlc_id,
@@ -2881,7 +2881,7 @@ async fn test_network_add_two_tlcs_remove_one() {
     })
     .expect("node_b alive")
     .expect("successfully removed tlc");
-    eprintln!("remove tlc result: {:?}", res);
+    eprintln!("remove tlc result: {:?}", ());
     tokio::time::sleep(tokio::time::Duration::from_millis(400)).await;
 
     let new_a_balance = node_a.get_local_balance_from_channel(channel_id);
@@ -2904,7 +2904,7 @@ async fn test_remove_tlc_with_expiry_error() {
             .await;
 
     let preimage = [1; 32];
-    let digest = HashAlgorithm::CkbHash.hash(&preimage);
+    let digest = HashAlgorithm::CkbHash.hash(preimage);
     let tlc_amount = 1000000000;
 
     // add tlc command with expiry soon
@@ -2914,7 +2914,7 @@ async fn test_remove_tlc_with_expiry_error() {
         payment_hash: digest.into(),
         expiry: now_timestamp_as_millis_u64() + 10,
         onion_packet: None,
-        shared_secret: NO_SHARED_SECRET.clone(),
+        shared_secret: NO_SHARED_SECRET,
         previous_tlc: None,
     };
 
@@ -2937,7 +2937,7 @@ async fn test_remove_tlc_with_expiry_error() {
         payment_hash: digest.into(),
         expiry: now_timestamp_as_millis_u64() + MAX_PAYMENT_TLC_EXPIRY_LIMIT + 20 * 1000,
         onion_packet: None,
-        shared_secret: NO_SHARED_SECRET.clone(),
+        shared_secret: NO_SHARED_SECRET,
         previous_tlc: None,
     };
 
@@ -2964,7 +2964,7 @@ async fn do_test_add_tlc_duplicated() {
             .await;
 
     let preimage = [1; 32];
-    let digest = HashAlgorithm::CkbHash.hash(&preimage);
+    let digest = HashAlgorithm::CkbHash.hash(preimage);
     let tlc_amount = 1000000000;
 
     for i in 1..=2 {
@@ -2976,7 +2976,7 @@ async fn do_test_add_tlc_duplicated() {
             payment_hash: digest.into(),
             expiry: now_timestamp_as_millis_u64() + 10,
             onion_packet: None,
-            shared_secret: NO_SHARED_SECRET.clone(),
+            shared_secret: NO_SHARED_SECRET,
             previous_tlc: None,
         };
         let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
@@ -3012,10 +3012,10 @@ async fn do_test_add_tlc_waiting_ack() {
         let add_tlc_command = AddTlcCommand {
             amount: tlc_amount,
             hash_algorithm: HashAlgorithm::CkbHash,
-            payment_hash: gen_rand_sha256_hash().into(),
+            payment_hash: gen_rand_sha256_hash(),
             expiry: now_timestamp_as_millis_u64() + 100000000,
             onion_packet: None,
-            shared_secret: NO_SHARED_SECRET.clone(),
+            shared_secret: NO_SHARED_SECRET,
             previous_tlc: None,
         };
         let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
@@ -3043,11 +3043,11 @@ async fn do_test_add_tlc_waiting_ack() {
         let add_tlc_command = AddTlcCommand {
             amount: tlc_amount,
             hash_algorithm: HashAlgorithm::CkbHash,
-            payment_hash: gen_rand_sha256_hash().into(),
+            payment_hash: gen_rand_sha256_hash(),
             expiry: now_timestamp_as_millis_u64() + 100000000,
             onion_packet: None,
             previous_tlc: None,
-            shared_secret: NO_SHARED_SECRET.clone(),
+            shared_secret: NO_SHARED_SECRET,
         };
         let add_tlc_result = call!(node_b.network_actor, |rpc_reply| {
             NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
@@ -3104,10 +3104,10 @@ async fn do_test_add_tlc_with_number_limit() {
         let add_tlc_command = AddTlcCommand {
             amount: tlc_amount,
             hash_algorithm: HashAlgorithm::CkbHash,
-            payment_hash: gen_rand_sha256_hash().into(),
+            payment_hash: gen_rand_sha256_hash(),
             expiry: now_timestamp_as_millis_u64() + 100000000,
             onion_packet: None,
-            shared_secret: NO_SHARED_SECRET.clone(),
+            shared_secret: NO_SHARED_SECRET,
             previous_tlc: None,
         };
         let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
@@ -3135,10 +3135,10 @@ async fn do_test_add_tlc_with_number_limit() {
         let add_tlc_command = AddTlcCommand {
             amount: tlc_amount,
             hash_algorithm: HashAlgorithm::CkbHash,
-            payment_hash: gen_rand_sha256_hash().into(),
+            payment_hash: gen_rand_sha256_hash(),
             expiry: now_timestamp_as_millis_u64() + 100000000,
             onion_packet: None,
-            shared_secret: NO_SHARED_SECRET.clone(),
+            shared_secret: NO_SHARED_SECRET,
             previous_tlc: None,
         };
         let add_tlc_result = call!(node_b.network_actor, |rpc_reply| {
@@ -3189,10 +3189,10 @@ async fn do_test_add_tlc_number_limit_reverse() {
         let add_tlc_command = AddTlcCommand {
             amount: tlc_amount,
             hash_algorithm: HashAlgorithm::CkbHash,
-            payment_hash: gen_rand_sha256_hash().into(),
+            payment_hash: gen_rand_sha256_hash(),
             expiry: now_timestamp_as_millis_u64() + 100000000,
             onion_packet: None,
-            shared_secret: NO_SHARED_SECRET.clone(),
+            shared_secret: NO_SHARED_SECRET,
             previous_tlc: None,
         };
         let add_tlc_result = call!(node_b.network_actor, |rpc_reply| {
@@ -3220,10 +3220,10 @@ async fn do_test_add_tlc_number_limit_reverse() {
         let add_tlc_command = AddTlcCommand {
             amount: tlc_amount,
             hash_algorithm: HashAlgorithm::CkbHash,
-            payment_hash: gen_rand_sha256_hash().into(),
+            payment_hash: gen_rand_sha256_hash(),
             expiry: now_timestamp_as_millis_u64() + 100000000,
             onion_packet: None,
-            shared_secret: NO_SHARED_SECRET.clone(),
+            shared_secret: NO_SHARED_SECRET,
             previous_tlc: None,
         };
         let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
@@ -3275,10 +3275,10 @@ async fn do_test_add_tlc_value_limit() {
         let add_tlc_command = AddTlcCommand {
             amount: tlc_amount,
             hash_algorithm: HashAlgorithm::CkbHash,
-            payment_hash: gen_rand_sha256_hash().into(),
+            payment_hash: gen_rand_sha256_hash(),
             expiry: now_timestamp_as_millis_u64() + 100000000,
             onion_packet: None,
-            shared_secret: NO_SHARED_SECRET.clone(),
+            shared_secret: NO_SHARED_SECRET,
             previous_tlc: None,
         };
         let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
@@ -3307,10 +3307,10 @@ async fn do_test_add_tlc_value_limit() {
         let add_tlc_command = AddTlcCommand {
             amount: tlc_amount,
             hash_algorithm: HashAlgorithm::CkbHash,
-            payment_hash: gen_rand_sha256_hash().into(),
+            payment_hash: gen_rand_sha256_hash(),
             expiry: now_timestamp_as_millis_u64() + 100000000,
             onion_packet: None,
-            shared_secret: NO_SHARED_SECRET.clone(),
+            shared_secret: NO_SHARED_SECRET,
             previous_tlc: None,
         };
         let add_tlc_result = call!(node_b.network_actor, |rpc_reply| {
@@ -3360,11 +3360,11 @@ async fn do_test_add_tlc_min_tlc_value_limit() {
     let add_tlc_command = AddTlcCommand {
         amount: tlc_amount,
         hash_algorithm: HashAlgorithm::CkbHash,
-        payment_hash: gen_rand_sha256_hash().into(),
+        payment_hash: gen_rand_sha256_hash(),
         expiry: now_timestamp_as_millis_u64() + 100000000,
         onion_packet: None,
         previous_tlc: None,
-        shared_secret: NO_SHARED_SECRET.clone(),
+        shared_secret: NO_SHARED_SECRET,
     };
     let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
@@ -3384,11 +3384,11 @@ async fn do_test_add_tlc_min_tlc_value_limit() {
     let add_tlc_command = AddTlcCommand {
         amount: tlc_amount,
         hash_algorithm: HashAlgorithm::CkbHash,
-        payment_hash: gen_rand_sha256_hash().into(),
+        payment_hash: gen_rand_sha256_hash(),
         expiry: now_timestamp_as_millis_u64() + 100000000,
         onion_packet: None,
         previous_tlc: None,
-        shared_secret: NO_SHARED_SECRET.clone(),
+        shared_secret: NO_SHARED_SECRET,
     };
     let add_tlc_result = call!(node_b.network_actor, |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
@@ -3408,11 +3408,11 @@ async fn do_test_add_tlc_min_tlc_value_limit() {
     let add_tlc_command = AddTlcCommand {
         amount: tlc_amount,
         hash_algorithm: HashAlgorithm::CkbHash,
-        payment_hash: gen_rand_sha256_hash().into(),
+        payment_hash: gen_rand_sha256_hash(),
         expiry: now_timestamp_as_millis_u64() + 100000000,
         onion_packet: None,
         previous_tlc: None,
-        shared_secret: NO_SHARED_SECRET.clone(),
+        shared_secret: NO_SHARED_SECRET,
     };
     let add_tlc_result = call!(node_b.network_actor, |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
@@ -3500,7 +3500,7 @@ async fn test_channel_update_tlc_expiry() {
 
 #[tokio::test]
 async fn test_forward_payment_channel_disabled() {
-    let (nodes, channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+    let (nodes, channels) = create_n_nodes_and_channels_with_index_amounts(
         &[
             ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
             ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
@@ -3512,40 +3512,39 @@ async fn test_forward_payment_channel_disabled() {
     let [node_a, node_b, node_c] = nodes.try_into().expect("3 nodes");
     let [_channel_a_b, channel_b_c] = channels.try_into().expect("2 channels");
 
-    let node_c_pubkey = node_c.pubkey.clone();
-
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
-    let tlc_amount = 100;
+    let res = node_a
+        .send_payment_keysend(&node_c, 10_000_000, false)
+        .await;
+    assert!(res.is_ok(), "Send payment failed: {:?}", res);
+    let res = res.unwrap();
+    let payment_hash = res.payment_hash;
+    node_a.wait_until_success(payment_hash).await;
 
-    let message = |rpc_reply| -> NetworkActorMessage {
-        NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
-            SendPaymentCommand {
-                target_pubkey: Some(node_c_pubkey),
-                amount: Some(tlc_amount),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                tlc_expiry_limit: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                max_parts: None,
-                keysend: Some(true),
-                hold_payment: false,
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-            },
-            rpc_reply,
-        ))
-    };
-    let res = call!(node_a.network_actor, message)
-        .expect("node_a alive")
-        .unwrap();
-    // this is the payment_hash generated by keysend
-    assert_eq!(res.status, PaymentSessionStatus::Created);
-    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+    let res = node_b
+        .send_payment_keysend(&node_c, 10_000_000, false)
+        .await;
+    assert!(res.is_ok(), "Send payment failed: {:?}", res);
+    let res = res.unwrap();
+    let payment_hash = res.payment_hash;
+    node_b.wait_until_success(payment_hash).await;
+
+    let res = node_c
+        .send_payment_keysend(&node_a, 10_000_000, false)
+        .await;
+    assert!(res.is_ok(), "Send payment failed: {:?}", res);
+    let res = res.unwrap();
+    let payment_hash = res.payment_hash;
+    node_c.wait_until_success(payment_hash).await;
+
+    let res = node_b
+        .send_payment_keysend(&node_a, 10_000_000, false)
+        .await;
+    assert!(res.is_ok(), "Send payment failed: {:?}", res);
+    let res = res.unwrap();
+    let payment_hash = res.payment_hash;
+    node_b.wait_until_success(payment_hash).await;
 
     // update channel to disable it from node_b
     let update_result = call!(node_b.network_actor, |rpc_reply| {
@@ -3568,35 +3567,36 @@ async fn test_forward_payment_channel_disabled() {
     assert!(update_result.is_ok());
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
-    let message = |rpc_reply| -> NetworkActorMessage {
-        NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
-            SendPaymentCommand {
-                target_pubkey: Some(node_c_pubkey),
-                amount: Some(tlc_amount),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                tlc_expiry_limit: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                max_parts: None,
-                keysend: Some(true),
-                hold_payment: false,
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-            },
-            rpc_reply,
-        ))
-    };
-    let res = call!(node_a.network_actor, message).expect("node_a alive");
-    assert!(res.is_err());
+    let res = node_a
+        .send_payment_keysend(&node_c, 10_000_000, false)
+        .await;
+    assert!(res.is_err(), "Send payment should fail: {:?}", res);
+
+    let res = node_b
+        .send_payment_keysend(&node_c, 10_000_000, false)
+        .await;
+    assert!(res.is_err(), "Send payment should fail: {:?}", res);
+
+    let res = node_c
+        .send_payment_keysend(&node_b, 10_000_000, false)
+        .await;
+    assert!(res.is_ok(), "Send payment failed: {:?}", res);
+    let res = res.unwrap();
+    let payment_hash = res.payment_hash;
+    node_c.wait_until_success(payment_hash).await;
+
+    let res = node_c
+        .send_payment_keysend(&node_a, 80_000_000, false)
+        .await;
+    assert!(res.is_ok(), "Send payment failed: {:?}", res);
+    let res = res.unwrap();
+    let payment_hash = res.payment_hash;
+    node_c.wait_until_success(payment_hash).await;
 }
 
 #[tokio::test]
 async fn test_forward_payment_tlc_minimum_value() {
-    let (nodes, channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+    let (nodes, channels) = create_n_nodes_and_channels_with_index_amounts(
         &[
             ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
             ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
@@ -3608,8 +3608,8 @@ async fn test_forward_payment_tlc_minimum_value() {
     let [node_a, node_b, node_c] = nodes.try_into().expect("3 nodes");
     let [channel_a_b, channel_b_c] = channels.try_into().expect("2 channels");
 
-    let node_c_pubkey = node_c.pubkey.clone();
-    let node_b_pubkey = node_b.pubkey.clone();
+    let node_c_pubkey = node_c.pubkey;
+    let node_b_pubkey = node_b.pubkey;
     let tlc_amount = 99;
 
     // update B's ChannelUpdate in channel_b_c with tlc_minimum_value set to our tlc_amount
@@ -3692,11 +3692,11 @@ async fn test_forward_payment_tlc_minimum_value() {
     let add_tlc_command = AddTlcCommand {
         amount: tlc_amount,
         hash_algorithm: HashAlgorithm::CkbHash,
-        payment_hash: gen_rand_sha256_hash().into(),
+        payment_hash: gen_rand_sha256_hash(),
         expiry: now_timestamp_as_millis_u64() + 100000000,
         onion_packet: None,
         previous_tlc: None,
-        shared_secret: NO_SHARED_SECRET.clone(),
+        shared_secret: NO_SHARED_SECRET,
     };
     let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
@@ -3814,7 +3814,7 @@ async fn test_forward_payment_tlc_minimum_value() {
 #[tokio::test]
 async fn test_send_payment_with_outdated_fee_rate() {
     init_tracing();
-    let (nodes, _) = create_n_nodes_with_index_and_amounts_with_established_channel(
+    let (nodes, _) = create_n_nodes_and_channels_with_index_amounts(
         &[
             ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
             ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
@@ -3825,8 +3825,8 @@ async fn test_send_payment_with_outdated_fee_rate() {
     .await;
     let [node_a, node_b, node_c] = nodes.try_into().expect("3 nodes");
 
-    let node_b_pubkey = node_b.pubkey.clone();
-    let node_c_pubkey = node_c.pubkey.clone();
+    let node_b_pubkey = node_b.pubkey;
+    let node_c_pubkey = node_c.pubkey;
     let hash_set: HashSet<_> = [node_b_pubkey, node_c_pubkey].into_iter().collect();
 
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
@@ -3909,7 +3909,7 @@ async fn do_test_channel_with_simple_update_operation(algorithm: HashAlgorithm) 
         .await;
 
     let preimage = [1; 32];
-    let digest = algorithm.hash(&preimage);
+    let digest = algorithm.hash(preimage);
     let tlc_amount = 1000000000;
 
     let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
@@ -3923,7 +3923,7 @@ async fn do_test_channel_with_simple_update_operation(algorithm: HashAlgorithm) 
                         payment_hash: digest.into(),
                         expiry: now_timestamp_as_millis_u64() + DEFAULT_EXPIRY_DELTA,
                         onion_packet: None,
-                        shared_secret: NO_SHARED_SECRET.clone(),
+                        shared_secret: NO_SHARED_SECRET,
                         previous_tlc: None,
                     },
                     rpc_reply,
@@ -4201,7 +4201,7 @@ async fn test_revoke_old_commitment_transaction() {
         .cell_deps(get_cell_deps(vec![Contract::CommitmentLock], &None))
         .input(
             CellInput::new_builder()
-                .previous_output(commitment_tx.output_pts().get(0).unwrap().clone())
+                .previous_output(commitment_tx.output_pts().first().unwrap().clone())
                 .build(),
         )
         .output(revocation_data.output)
@@ -4565,6 +4565,9 @@ async fn test_connect_to_peers_with_mutual_channel_on_restart_1() {
         )
         .await;
 
+    // sleep for a while to make sure this test works both for release mode
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
     node_a.restart().await;
 
     node_a.expect_event(
@@ -4605,6 +4608,9 @@ async fn test_connect_to_peers_with_mutual_channel_on_restart_2() {
         )
         .await;
 
+    // sleep for a while to make sure this test works both for release mode
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
     node_a.stop().await;
 
     node_b.expect_event(
@@ -4637,7 +4643,7 @@ async fn test_send_payment_with_node_restart_then_resend_add_tlc() {
 
     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 
-    let node_b_pubkey = node_b.pubkey.clone();
+    let node_b_pubkey = node_b.pubkey;
     let tlc_amount = 99;
     let message = |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
@@ -4714,7 +4720,7 @@ async fn test_node_reestablish_resend_remove_tlc() {
 
     let preimage = [2; 32];
     // create a new payment hash
-    let payment_hash = HashAlgorithm::CkbHash.hash(&preimage);
+    let payment_hash = HashAlgorithm::CkbHash.hash(preimage);
 
     let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
@@ -4724,10 +4730,10 @@ async fn test_node_reestablish_resend_remove_tlc() {
                     AddTlcCommand {
                         amount: 1000,
                         hash_algorithm: HashAlgorithm::CkbHash,
-                        payment_hash: payment_hash.clone().into(),
+                        payment_hash: payment_hash.into(),
                         expiry: now_timestamp_as_millis_u64() + DEFAULT_EXPIRY_DELTA,
                         onion_packet: None,
-                        shared_secret: NO_SHARED_SECRET.clone(),
+                        shared_secret: NO_SHARED_SECRET,
                         previous_tlc: None,
                     },
                     rpc_reply,
@@ -4812,7 +4818,7 @@ async fn test_open_channel_with_large_size_shutdown_script_should_fail() {
             OpenChannelCommand {
                 peer_id: node_b.peer_id.clone(),
                 public: false,
-                shutdown_script: Some(Script::new_builder().args(vec![0u8; 40].pack()).build()),
+                shutdown_script: Some(Script::new_builder().args([0u8; 40].pack()).build()),
                 funding_amount: (81 + 1) * 100000000 - 1,
                 funding_udt_type_script: None,
                 commitment_fee_rate: None,
@@ -4861,7 +4867,7 @@ async fn test_accept_channel_with_large_size_shutdown_script_should_fail() {
             OpenChannelCommand {
                 peer_id: node_b.peer_id.clone(),
                 public: false,
-                shutdown_script: Some(Script::new_builder().args(vec![0u8; 40].pack()).build()),
+                shutdown_script: Some(Script::new_builder().args([0u8; 40].pack()).build()),
                 funding_amount: (81 + 1 + 90) * 100000000,
                 funding_udt_type_script: None,
                 commitment_fee_rate: None,
@@ -4924,7 +4930,7 @@ async fn test_shutdown_channel_with_large_size_shutdown_script_should_fail() {
                 channel_id: new_channel_id,
                 command: ChannelCommand::Shutdown(
                     ShutdownCommand {
-                        close_script: Script::new_builder().args(vec![0u8; 21].pack()).build(),
+                        close_script: Script::new_builder().args([0u8; 21].pack()).build(),
                         fee_rate: FeeRate::from_u64(DEFAULT_COMMITMENT_FEE_RATE),
                         force: false,
                     },
@@ -4958,7 +4964,7 @@ async fn test_shutdown_channel_with_different_size_shutdown_script() {
                 channel_id: new_channel_id,
                 command: ChannelCommand::Shutdown(
                     ShutdownCommand {
-                        close_script: Script::new_builder().args(vec![0u8; 19].pack()).build(),
+                        close_script: Script::new_builder().args([0u8; 19].pack()).build(),
                         fee_rate: FeeRate::from_u64(DEFAULT_COMMITMENT_FEE_RATE),
                         force: false,
                     },
@@ -5074,10 +5080,10 @@ async fn test_shutdown_channel_network_graph_with_sync_up() {
     let message = |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
-                channel_id: channel_id,
+                channel_id,
                 command: ChannelCommand::Shutdown(
                     ShutdownCommand {
-                        close_script: Script::new_builder().args(vec![0u8; 19].pack()).build(),
+                        close_script: Script::new_builder().args([0u8; 19].pack()).build(),
                         fee_rate: FeeRate::from_u64(DEFAULT_COMMITMENT_FEE_RATE),
                         force: false,
                     },
@@ -5114,9 +5120,9 @@ async fn test_send_payment_with_channel_balance_error() {
     let amounts = vec![(100000000000, 100000000000); nodes_num - 1];
     let (nodes, channels) =
         create_n_nodes_with_established_channel(&amounts, nodes_num, true).await;
-    let [node_0, _node_1, mut node_2, node_3] = nodes.try_into().expect("4 nodes");
+    let [node_0, _node_1, node_2, node_3] = nodes.try_into().expect("4 nodes");
     let source_node = &node_0;
-    let target_pubkey = node_3.pubkey.clone();
+    let target_pubkey = node_3.pubkey;
 
     // sleep for a while
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
@@ -5124,7 +5130,7 @@ async fn test_send_payment_with_channel_balance_error() {
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
             SendPaymentCommand {
-                target_pubkey: Some(target_pubkey.clone()),
+                target_pubkey: Some(target_pubkey),
                 amount: Some(3000),
                 payment_hash: None,
                 final_tlc_expiry_delta: None,
@@ -5155,7 +5161,7 @@ async fn test_send_payment_with_channel_balance_error() {
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
             SendPaymentCommand {
-                target_pubkey: Some(target_pubkey.clone()),
+                target_pubkey: Some(target_pubkey),
                 amount: Some(3000),
                 payment_hash: None,
                 final_tlc_expiry_delta: None,
@@ -5200,50 +5206,33 @@ async fn test_send_payment_with_disable_channel() {
     let amounts = vec![(100000000000, 100000000000); nodes_num - 1];
     let (nodes, channels) =
         create_n_nodes_with_established_channel(&amounts, nodes_num, true).await;
-    let [node_0, _node_1, mut node_2, node_3] = nodes.try_into().expect("4 nodes");
-    let source_node = &node_0;
-    let target_pubkey = node_3.pubkey.clone();
-
-    // sleep for a while
-    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    let [node_0, _node_1, node_2, node_3] = nodes.try_into().expect("4 nodes");
 
     // begin to set channel disable, but do not notify the network
     node_2.disable_channel_stealthy(channels[1]).await;
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
-    let message = |rpc_reply| -> NetworkActorMessage {
-        NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
-            SendPaymentCommand {
-                target_pubkey: Some(target_pubkey.clone()),
-                amount: Some(3000),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                tlc_expiry_limit: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                max_parts: None,
-                keysend: Some(true),
-                hold_payment: false,
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-            },
-            rpc_reply,
-        ))
-    };
-
-    // expect send payment failed
-    let res = call!(source_node.network_actor, message).expect("source_node alive");
+    // expect send payment failed from node_3 to node_0
+    let res = node_3.send_payment_keysend(&node_0, 3000, false).await;
     assert!(res.is_ok());
     let payment_hash = res.unwrap().payment_hash;
 
-    source_node.wait_until_failed(payment_hash).await;
+    node_3.wait_until_failed(payment_hash).await;
+
     // because there is only one path for the payment, the payment will fail in the second try
     // this assertion make sure we didn't do meaningless retry
-    let payment_session = source_node.get_payment_session(payment_hash).unwrap();
+    let payment_session = node_3.get_payment_session(payment_hash).unwrap();
     assert_eq!(payment_session.retried_times, 2);
+
+    // expect send payment successfully from node_0 to node_3
+    let res = node_0.send_payment_keysend(&node_3, 3000, false).await;
+    assert!(res.is_ok());
+    let payment_hash = res.unwrap().payment_hash;
+
+    node_0.wait_until_success(payment_hash).await;
+
+    let payment_session = node_0.get_payment_session(payment_hash).unwrap();
+    assert_eq!(payment_session.retried_times, 1);
 }
 
 #[tokio::test]
@@ -5253,7 +5242,7 @@ async fn test_send_payment_with_multiple_edges_in_middle_hops() {
     // we have two chaneels between node_1 and node_2, they are all with the same meta information except the later one has more capacity
     // path finding will try the channel with larger capacity first, so we assert the payment retry times is 1
     // the send payment should be succeed
-    let (nodes, _channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+    let (nodes, _channels) = create_n_nodes_and_channels_with_index_amounts(
         &[
             ((0, 1), (100000000000, 100000000000)),
             ((1, 2), (MIN_RESERVED_CKB + 900, 5200000000)),
@@ -5266,12 +5255,12 @@ async fn test_send_payment_with_multiple_edges_in_middle_hops() {
     .await;
     let [node_0, _node_1, _node_2, node_3] = nodes.try_into().expect("4 nodes");
     let source_node = &node_0;
-    let target_pubkey = node_3.pubkey.clone();
+    let target_pubkey = node_3.pubkey;
 
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
             SendPaymentCommand {
-                target_pubkey: Some(target_pubkey.clone()),
+                target_pubkey: Some(target_pubkey),
                 amount: Some(999),
                 payment_hash: None,
                 final_tlc_expiry_delta: None,
@@ -5310,7 +5299,7 @@ async fn test_send_payment_with_all_failed_middle_hops() {
     // we have two chaneels between node_1 and node_2
     // they liquid capacity is enough for send payment, but actual balance are both not enough
     // path finding will all try them but all failed, so we assert the payment retry times is 3
-    let (nodes, _channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+    let (nodes, _channels) = create_n_nodes_and_channels_with_index_amounts(
         &[
             ((0, 1), (100000000000, 100000000000)),
             ((1, 2), (MIN_RESERVED_CKB + 900, MIN_RESERVED_CKB + 1000)),
@@ -5323,12 +5312,12 @@ async fn test_send_payment_with_all_failed_middle_hops() {
     .await;
     let [node_0, _node_1, _node_2, node_3] = nodes.try_into().expect("4 nodes");
     let source_node = &node_0;
-    let target_pubkey = node_3.pubkey.clone();
+    let target_pubkey = node_3.pubkey;
 
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
             SendPaymentCommand {
-                target_pubkey: Some(target_pubkey.clone()),
+                target_pubkey: Some(target_pubkey),
                 amount: Some(999),
                 payment_hash: None,
                 final_tlc_expiry_delta: None,
@@ -5356,6 +5345,7 @@ async fn test_send_payment_with_all_failed_middle_hops() {
 
     // because there is only one path for the payment, the payment will fail in the second try
     // this assertion make sure we didn't do meaningless retry
+    assert!(node_0.get_triggered_unexpected_events().await.is_empty());
     let payment_session = source_node.get_payment_session(payment_hash).unwrap();
     assert_eq!(payment_session.retried_times, 3);
 }
@@ -5368,7 +5358,7 @@ async fn test_send_payment_with_multiple_edges_can_succeed_in_retry() {
     // but even channel_2's capacity is larger, the to_local_amount is not enough for the payment
     // path finding will retry the first channel and the send payment should be succeed
     // the payment retry times should be 2
-    let (nodes, _channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+    let (nodes, _channels) = create_n_nodes_and_channels_with_index_amounts(
         &[
             ((0, 1), (100000000000, 100000000000)),
             ((1, 2), (MIN_RESERVED_CKB + 1000, 5200000000)),
@@ -5381,12 +5371,12 @@ async fn test_send_payment_with_multiple_edges_can_succeed_in_retry() {
     .await;
     let [node_0, _node_1, _node_2, node_3] = nodes.try_into().expect("4 nodes");
     let source_node = &node_0;
-    let target_pubkey = node_3.pubkey.clone();
+    let target_pubkey = node_3.pubkey;
 
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
             SendPaymentCommand {
-                target_pubkey: Some(target_pubkey.clone()),
+                target_pubkey: Some(target_pubkey),
                 amount: Some(999),
                 payment_hash: None,
                 final_tlc_expiry_delta: None,
@@ -5425,7 +5415,7 @@ async fn test_send_payment_with_final_hop_multiple_edges_in_middle_hops() {
     // we have two chaneels between node_2 and node_3, they are all with the same meta information except the later one has more capacity
     // path finding will try the channel with larger capacity first, so we assert the payment retry times is 1
     // the send payment should be succeed
-    let (nodes, _channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+    let (nodes, _channels) = create_n_nodes_and_channels_with_index_amounts(
         &[
             ((0, 1), (100000000000, 100000000000)),
             ((1, 2), (100000000000, 100000000000)),
@@ -5438,12 +5428,12 @@ async fn test_send_payment_with_final_hop_multiple_edges_in_middle_hops() {
     .await;
     let [node_0, _node_1, _node_2, node_3] = nodes.try_into().expect("4 nodes");
     let source_node = &node_0;
-    let target_pubkey = node_3.pubkey.clone();
+    let target_pubkey = node_3.pubkey;
 
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
             SendPaymentCommand {
-                target_pubkey: Some(target_pubkey.clone()),
+                target_pubkey: Some(target_pubkey),
                 amount: Some(999),
                 payment_hash: None,
                 final_tlc_expiry_delta: None,
@@ -5482,7 +5472,7 @@ async fn test_send_payment_with_final_all_failed_middle_hops() {
     // we have two chaneels between node_2 and node_3
     // they liquid capacity is enough for send payment, but actual balance are both not enough
     // path finding will all try them but all failed, so we assert the payment retry times is 3
-    let (nodes, _channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+    let (nodes, _channels) = create_n_nodes_and_channels_with_index_amounts(
         &[
             ((0, 1), (100000000000, 100000000000)),
             ((1, 2), (100000000000, 100000000000)),
@@ -5495,12 +5485,12 @@ async fn test_send_payment_with_final_all_failed_middle_hops() {
     .await;
     let [node_0, _node_1, _node_2, node_3] = nodes.try_into().expect("4 nodes");
     let source_node = &node_0;
-    let target_pubkey = node_3.pubkey.clone();
+    let target_pubkey = node_3.pubkey;
 
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
             SendPaymentCommand {
-                target_pubkey: Some(target_pubkey.clone()),
+                target_pubkey: Some(target_pubkey),
                 amount: Some(999),
                 payment_hash: None,
                 final_tlc_expiry_delta: None,
@@ -5539,7 +5529,7 @@ async fn test_send_payment_with_final_multiple_edges_can_succeed_in_retry() {
     // but even channel_2's capacity is larger, the to_local_amount is not enough for the payment
     // path finding will retry the first channel and the send payment should be succeed
     // the payment retry times should be 2
-    let (nodes, _channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+    let (nodes, _channels) = create_n_nodes_and_channels_with_index_amounts(
         &[
             ((0, 1), (100000000000, 100000000000)),
             ((1, 2), (100000000000, 100000000000)),
@@ -5552,12 +5542,12 @@ async fn test_send_payment_with_final_multiple_edges_can_succeed_in_retry() {
     .await;
     let [node_0, _node_1, _node_2, node_3] = nodes.try_into().expect("4 nodes");
     let source_node = &node_0;
-    let target_pubkey = node_3.pubkey.clone();
+    let target_pubkey = node_3.pubkey;
 
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
             SendPaymentCommand {
-                target_pubkey: Some(target_pubkey.clone()),
+                target_pubkey: Some(target_pubkey),
                 amount: Some(999),
                 payment_hash: None,
                 final_tlc_expiry_delta: None,
@@ -5592,7 +5582,7 @@ async fn test_send_payment_with_final_multiple_edges_can_succeed_in_retry() {
 async fn test_send_payment_with_first_hop_failed_with_fee() {
     init_tracing();
     let _span = tracing::info_span!("node", node = "test").entered();
-    let (nodes, _channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+    let (nodes, _channels) = create_n_nodes_and_channels_with_index_amounts(
         &[
             // even 1000 > 999, but it's not enough for fee, and this is the direct channel
             // so we can check the actual balance of channel
@@ -5607,12 +5597,12 @@ async fn test_send_payment_with_first_hop_failed_with_fee() {
     .await;
     let [node_0, _node_1, _node_2, node_3] = nodes.try_into().expect("4 nodes");
     let source_node = &node_0;
-    let target_pubkey = node_3.pubkey.clone();
+    let target_pubkey = node_3.pubkey;
 
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
             SendPaymentCommand {
-                target_pubkey: Some(target_pubkey.clone()),
+                target_pubkey: Some(target_pubkey),
                 amount: Some(999),
                 payment_hash: None,
                 final_tlc_expiry_delta: None,
@@ -5645,7 +5635,7 @@ async fn test_send_payment_succeed_with_multiple_edges_in_first_hop() {
     // we have two chaneels between node_0 and node_1, they are all with the same meta information except the later one has more capacity
     // path finding will try the channel with larger capacity first, so we assert the payment retry times is 1
     // the send payment should be succeed
-    let (nodes, _channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+    let (nodes, _channels) = create_n_nodes_and_channels_with_index_amounts(
         &[
             ((0, 1), (MIN_RESERVED_CKB + 900, 5200000000)),
             ((0, 1), (MIN_RESERVED_CKB + 1001, 5200000000)),
@@ -5658,12 +5648,12 @@ async fn test_send_payment_succeed_with_multiple_edges_in_first_hop() {
     .await;
     let [node_0, _node_1, _node_2, node_3] = nodes.try_into().expect("4 nodes");
     let source_node = &node_0;
-    let target_pubkey = node_3.pubkey.clone();
+    let target_pubkey = node_3.pubkey;
 
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
             SendPaymentCommand {
-                target_pubkey: Some(target_pubkey.clone()),
+                target_pubkey: Some(target_pubkey),
                 amount: Some(999),
                 payment_hash: None,
                 final_tlc_expiry_delta: None,
@@ -5701,7 +5691,7 @@ async fn test_send_payment_with_first_hop_all_failed() {
     // we have two chaneels between node_0 and node_1
     // they liquid capacity is enough for send payment, but actual balance are both not enough
     // path finding will fail in the first time of send payment
-    let (nodes, _channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+    let (nodes, _channels) = create_n_nodes_and_channels_with_index_amounts(
         &[
             ((0, 1), (MIN_RESERVED_CKB + 900, MIN_RESERVED_CKB + 1000)),
             ((0, 1), (MIN_RESERVED_CKB + 910, MIN_RESERVED_CKB + 1000)),
@@ -5714,12 +5704,12 @@ async fn test_send_payment_with_first_hop_all_failed() {
     .await;
     let [node_0, _node_1, _node_2, node_3] = nodes.try_into().expect("4 nodes");
     let source_node = &node_0;
-    let target_pubkey = node_3.pubkey.clone();
+    let target_pubkey = node_3.pubkey;
 
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
             SendPaymentCommand {
-                target_pubkey: Some(target_pubkey.clone()),
+                target_pubkey: Some(target_pubkey),
                 amount: Some(999),
                 payment_hash: None,
                 final_tlc_expiry_delta: None,
@@ -5754,7 +5744,7 @@ async fn test_send_payment_will_succeed_with_direct_channel_info_first_hop() {
     // but we manually set the to_local_amount to smaller value for testing
     // path finding will get the direct channel info with actual balance of channel,
     // so it will try the channel with smaller capacity and the payment will succeed
-    let (nodes, channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+    let (nodes, channels) = create_n_nodes_and_channels_with_index_amounts(
         &[
             ((0, 1), (MIN_RESERVED_CKB + 2000, MIN_RESERVED_CKB + 1000)),
             ((0, 1), (MIN_RESERVED_CKB + 1005, MIN_RESERVED_CKB + 1000)),
@@ -5767,7 +5757,7 @@ async fn test_send_payment_will_succeed_with_direct_channel_info_first_hop() {
     .await;
     let [mut node_0, _node_1, _node_2, node_3] = nodes.try_into().expect("4 nodes");
     let source_node = &mut node_0;
-    let target_pubkey = node_3.pubkey.clone();
+    let target_pubkey = node_3.pubkey;
 
     // manually update the channel's to_local_amount
     source_node
@@ -5778,7 +5768,7 @@ async fn test_send_payment_will_succeed_with_direct_channel_info_first_hop() {
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
             SendPaymentCommand {
-                target_pubkey: Some(target_pubkey.clone()),
+                target_pubkey: Some(target_pubkey),
                 amount: Some(999),
                 payment_hash: None,
                 final_tlc_expiry_delta: None,
@@ -5818,7 +5808,7 @@ async fn test_send_payment_will_succeed_with_retry_in_middle_hops() {
     // but we manually set the to_local_amount to smaller value for testing
     // path finding will get a temporary failure in the first try and retry the second channel
     // so it will try the channel with smaller capacity and the payment will succeed
-    let (nodes, channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+    let (nodes, channels) = create_n_nodes_and_channels_with_index_amounts(
         &[
             ((0, 1), (100000000000, 100000000000)),
             ((1, 2), (100000000000, 100000000000)),
@@ -5829,10 +5819,10 @@ async fn test_send_payment_will_succeed_with_retry_in_middle_hops() {
         true,
     )
     .await;
-    let [mut node_0, _node_1, mut node_2, node_3] = nodes.try_into().expect("4 nodes");
+    let [mut node_0, _node_1, node_2, node_3] = nodes.try_into().expect("4 nodes");
     let source_node = &mut node_0;
     let node_0_amount = source_node.get_local_balance_from_channel(channels[0]);
-    let target_pubkey = node_3.pubkey.clone();
+    let target_pubkey = node_3.pubkey;
 
     // manually update the channel's to_local_amount
     node_2.update_channel_local_balance(channels[2], 100).await;
@@ -5842,7 +5832,7 @@ async fn test_send_payment_will_succeed_with_retry_in_middle_hops() {
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
             SendPaymentCommand {
-                target_pubkey: Some(target_pubkey.clone()),
+                target_pubkey: Some(target_pubkey),
                 amount: Some(amount),
                 payment_hash: None,
                 final_tlc_expiry_delta: None,
@@ -5889,7 +5879,7 @@ async fn test_send_payment_will_fail_with_last_hop_info_in_add_tlc_peer() {
     // but we manually set the to_remote_amount for node_3 to a larger amount,
     // this will make node3 trigger error in add_tlc_peer and got an Musig2VerifyError(BadSignature)
     // the send_payment will failed with retry times of 1
-    let (nodes, channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+    let (nodes, channels) = create_n_nodes_and_channels_with_index_amounts(
         &[
             ((0, 1), (100000000000, 100000000000)),
             ((1, 2), (100000000000, 100000000000)),
@@ -5902,7 +5892,7 @@ async fn test_send_payment_will_fail_with_last_hop_info_in_add_tlc_peer() {
     .await;
     let [mut node_0, _node_1, _node_2, mut node_3] = nodes.try_into().expect("4 nodes");
     let source_node = &mut node_0;
-    let target_pubkey = node_3.pubkey.clone();
+    let target_pubkey = node_3.pubkey;
 
     // manually update the channel's to_remote_amount
     node_3
@@ -5912,7 +5902,7 @@ async fn test_send_payment_will_fail_with_last_hop_info_in_add_tlc_peer() {
 
     let res = source_node
         .send_payment(SendPaymentCommand {
-            target_pubkey: Some(target_pubkey.clone()),
+            target_pubkey: Some(target_pubkey),
             amount: Some(999),
             payment_hash: None,
             final_tlc_expiry_delta: None,
@@ -5956,7 +5946,7 @@ async fn test_send_payment_will_fail_with_invoice_not_generated_by_target() {
     init_tracing();
     let _span = tracing::info_span!("node", node = "test").entered();
 
-    let (nodes, _channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+    let (nodes, _channels) = create_n_nodes_and_channels_with_index_amounts(
         &[
             ((0, 1), (100000000000, 100000000000)),
             ((1, 2), (100000000000, 100000000000)),
@@ -5969,7 +5959,7 @@ async fn test_send_payment_will_fail_with_invoice_not_generated_by_target() {
     .await;
     let [mut node_0, _node_1, _node_2, node_3] = nodes.try_into().expect("4 nodes");
     let source_node = &mut node_0;
-    let target_pubkey = node_3.pubkey.clone();
+    let target_pubkey = node_3.pubkey;
 
     let invoice = InvoiceBuilder::new(Currency::Fibd)
         .amount(Some(100))
@@ -5982,7 +5972,7 @@ async fn test_send_payment_will_fail_with_invoice_not_generated_by_target() {
 
     let res = source_node
         .send_payment(SendPaymentCommand {
-            target_pubkey: Some(target_pubkey.clone()),
+            target_pubkey: Some(target_pubkey),
             amount: Some(100),
             payment_hash: None,
             final_tlc_expiry_delta: None,
@@ -6015,7 +6005,7 @@ async fn test_send_payment_will_succeed_with_valid_invoice() {
     init_tracing();
     let _span = tracing::info_span!("node", node = "test").entered();
 
-    let (nodes, channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+    let (nodes, channels) = create_n_nodes_and_channels_with_index_amounts(
         &[
             ((0, 1), (100000000000, 100000000000)),
             ((1, 2), (100000000000, 100000000000)),
@@ -6028,13 +6018,13 @@ async fn test_send_payment_will_succeed_with_valid_invoice() {
     .await;
     let [mut node_0, _node_1, _node_2, mut node_3] = nodes.try_into().expect("4 nodes");
     let source_node = &mut node_0;
-    let target_pubkey = node_3.pubkey.clone();
+    let target_pubkey = node_3.pubkey;
     let old_amount = node_3.get_local_balance_from_channel(channels[2]);
 
     let preimage = gen_rand_sha256_hash();
     let ckb_invoice = InvoiceBuilder::new(Currency::Fibd)
         .amount(Some(100))
-        .payment_preimage(preimage.clone())
+        .payment_preimage(preimage)
         .payee_pub_key(target_pubkey.into())
         .expiry_time(Duration::from_secs(100))
         .build()
@@ -6044,7 +6034,7 @@ async fn test_send_payment_will_succeed_with_valid_invoice() {
 
     let res = source_node
         .send_payment(SendPaymentCommand {
-            target_pubkey: Some(target_pubkey.clone()),
+            target_pubkey: Some(target_pubkey),
             amount: Some(100),
             payment_hash: None,
             final_tlc_expiry_delta: None,
@@ -6084,7 +6074,7 @@ async fn test_send_payment_will_succeed_with_valid_invoice() {
 async fn test_send_payment_will_fail_with_no_invoice_preimage() {
     init_tracing();
     let _span = tracing::info_span!("node", node = "test").entered();
-    let (nodes, channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+    let (nodes, channels) = create_n_nodes_and_channels_with_index_amounts(
         &[
             ((0, 1), (100000000000, 100000000000)),
             ((1, 2), (100000000000, 100000000000)),
@@ -6097,13 +6087,13 @@ async fn test_send_payment_will_fail_with_no_invoice_preimage() {
     .await;
     let [mut node_0, _node_1, _node_2, mut node_3] = nodes.try_into().expect("4 nodes");
     let source_node = &mut node_0;
-    let target_pubkey = node_3.pubkey.clone();
+    let target_pubkey = node_3.pubkey;
     let old_amount = node_3.get_local_balance_from_channel(channels[2]);
 
     let preimage = gen_rand_sha256_hash();
     let ckb_invoice = InvoiceBuilder::new(Currency::Fibd)
         .amount(Some(100))
-        .payment_preimage(preimage.clone())
+        .payment_preimage(preimage)
         .payee_pub_key(target_pubkey.into())
         .expiry_time(Duration::from_secs(100))
         .build()
@@ -6114,7 +6104,7 @@ async fn test_send_payment_will_fail_with_no_invoice_preimage() {
 
     let res = source_node
         .send_payment(SendPaymentCommand {
-            target_pubkey: Some(target_pubkey.clone()),
+            target_pubkey: Some(target_pubkey),
             amount: Some(100),
             payment_hash: None,
             final_tlc_expiry_delta: None,
@@ -6157,7 +6147,7 @@ async fn test_send_payment_will_fail_with_cancelled_invoice() {
     init_tracing();
     let _span = tracing::info_span!("node", node = "test").entered();
 
-    let (nodes, channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+    let (nodes, channels) = create_n_nodes_and_channels_with_index_amounts(
         &[
             ((0, 1), (100000000000, 100000000000)),
             ((1, 2), (100000000000, 100000000000)),
@@ -6170,13 +6160,13 @@ async fn test_send_payment_will_fail_with_cancelled_invoice() {
     .await;
     let [mut node_0, _node_1, _node_2, mut node_3] = nodes.try_into().expect("4 nodes");
     let source_node = &mut node_0;
-    let target_pubkey = node_3.pubkey.clone();
+    let target_pubkey = node_3.pubkey;
     let old_amount = node_3.get_local_balance_from_channel(channels[2]);
 
     let preimage = gen_rand_sha256_hash();
     let ckb_invoice = InvoiceBuilder::new(Currency::Fibd)
         .amount(Some(100))
-        .payment_preimage(preimage.clone())
+        .payment_preimage(preimage)
         .payee_pub_key(target_pubkey.into())
         .expiry_time(Duration::from_secs(100))
         .build()
@@ -6189,7 +6179,7 @@ async fn test_send_payment_will_fail_with_cancelled_invoice() {
 
     let res = source_node
         .send_payment(SendPaymentCommand {
-            target_pubkey: Some(target_pubkey.clone()),
+            target_pubkey: Some(target_pubkey),
             amount: Some(100),
             payment_hash: None,
             final_tlc_expiry_delta: None,
@@ -6228,7 +6218,7 @@ async fn test_send_payment_succeed_with_hold_invoice_settled_direct_payment() {
     init_tracing();
     let _span = tracing::info_span!("node", node = "test").entered();
     let n_nodes = 2;
-    let (nodes, channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+    let (nodes, channels) = create_n_nodes_and_channels_with_index_amounts(
         &[((0, 1), (HUGE_CKB_AMOUNT, MIN_RESERVED_CKB))],
         n_nodes,
         true,
@@ -6311,7 +6301,7 @@ async fn test_send_payment_succeed_with_hold_invoice_settled_direct_payment() {
 async fn test_send_payment_succeed_with_hold_invoice_settled_indirect_payment() {
     init_tracing();
     let _span = tracing::info_span!("node", node = "test").entered();
-    let (nodes, channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+    let (nodes, channels) = create_n_nodes_and_channels_with_index_amounts(
         &[
             ((0, 1), (HUGE_CKB_AMOUNT, MIN_RESERVED_CKB)),
             ((1, 2), (HUGE_CKB_AMOUNT, MIN_RESERVED_CKB)),
@@ -6397,7 +6387,7 @@ async fn test_send_payment_succeed_settle_hold_invoice_multiple_times() {
     init_tracing();
     let _span = tracing::info_span!("node", node = "test").entered();
     let _span = tracing::info_span!("node", node = "test").entered();
-    let (nodes, channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+    let (nodes, channels) = create_n_nodes_and_channels_with_index_amounts(
         &[
             ((0, 1), (HUGE_CKB_AMOUNT, MIN_RESERVED_CKB)),
             ((1, 2), (HUGE_CKB_AMOUNT, MIN_RESERVED_CKB)),
@@ -6491,7 +6481,7 @@ async fn test_send_payment_succeed_settle_hold_invoice_when_sender_offline() {
     init_tracing();
     let _span = tracing::info_span!("node", node = "test").entered();
     let _span = tracing::info_span!("node", node = "test").entered();
-    let (nodes, channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+    let (nodes, channels) = create_n_nodes_and_channels_with_index_amounts(
         &[
             ((0, 1), (HUGE_CKB_AMOUNT, MIN_RESERVED_CKB)),
             ((1, 2), (HUGE_CKB_AMOUNT, MIN_RESERVED_CKB)),
@@ -6580,7 +6570,7 @@ async fn test_send_payment_succeed_settle_hold_invoice_when_forwarder_offline() 
     init_tracing();
     let _span = tracing::info_span!("node", node = "test").entered();
     let _span = tracing::info_span!("node", node = "test").entered();
-    let (nodes, channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+    let (nodes, channels) = create_n_nodes_and_channels_with_index_amounts(
         &[
             ((0, 1), (HUGE_CKB_AMOUNT, MIN_RESERVED_CKB)),
             ((1, 2), (HUGE_CKB_AMOUNT, MIN_RESERVED_CKB)),
@@ -6669,7 +6659,7 @@ async fn test_send_payment_succeed_settle_invoice_before_send_payment() {
     init_tracing();
     let _span = tracing::info_span!("node", node = "test").entered();
     let _span = tracing::info_span!("node", node = "test").entered();
-    let (nodes, channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+    let (nodes, channels) = create_n_nodes_and_channels_with_index_amounts(
         &[
             ((0, 1), (HUGE_CKB_AMOUNT, MIN_RESERVED_CKB)),
             ((1, 2), (HUGE_CKB_AMOUNT, MIN_RESERVED_CKB)),
@@ -6741,7 +6731,7 @@ async fn test_send_payment_succeed_settle_invoice_with_wrong_then_right_hash() {
     init_tracing();
     let _span = tracing::info_span!("node", node = "test").entered();
     let _span = tracing::info_span!("node", node = "test").entered();
-    let (nodes, channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+    let (nodes, channels) = create_n_nodes_and_channels_with_index_amounts(
         &[
             ((0, 1), (HUGE_CKB_AMOUNT, MIN_RESERVED_CKB)),
             ((1, 2), (HUGE_CKB_AMOUNT, MIN_RESERVED_CKB)),
@@ -6831,7 +6821,7 @@ async fn test_send_payment_will_succeed_with_large_tlc_expiry_limit() {
     let _span = tracing::info_span!("node", node = "test").entered();
     // from https://github.com/nervosnetwork/fiber/issues/367
 
-    let (nodes, _channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+    let (nodes, _channels) = create_n_nodes_and_channels_with_index_amounts(
         &[
             ((0, 1), (MIN_RESERVED_CKB + 2000, MIN_RESERVED_CKB + 1000)),
             ((1, 2), (100000000000, 100000000000)),
@@ -6843,13 +6833,13 @@ async fn test_send_payment_will_succeed_with_large_tlc_expiry_limit() {
     .await;
     let [mut node_0, _node_1, _node_2, node_3] = nodes.try_into().expect("4 nodes");
     let source_node = &mut node_0;
-    let target_pubkey = node_3.pubkey.clone();
+    let target_pubkey = node_3.pubkey;
 
     let expected_minimal_tlc_expiry_limit = (24 * 60 * 60 * 1000) * 3;
 
     let res = source_node
         .send_payment(SendPaymentCommand {
-            target_pubkey: Some(target_pubkey.clone()),
+            target_pubkey: Some(target_pubkey),
             amount: Some(999),
             payment_hash: None,
             final_tlc_expiry_delta: None,
@@ -6871,7 +6861,7 @@ async fn test_send_payment_will_succeed_with_large_tlc_expiry_limit() {
 
     let res = source_node
         .send_payment(SendPaymentCommand {
-            target_pubkey: Some(target_pubkey.clone()),
+            target_pubkey: Some(target_pubkey),
             amount: Some(999),
             payment_hash: None,
             final_tlc_expiry_delta: None,
