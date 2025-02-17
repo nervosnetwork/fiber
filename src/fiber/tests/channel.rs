@@ -6227,13 +6227,13 @@ async fn test_send_payment_succeed_with_hold_invoice_settled_direct_payment() {
     let last_channel = *channels.last().unwrap();
     let [mut node_0, mut node_1] = nodes.try_into().expect("2 nodes");
     let source_node = &mut node_0;
-    let target_pubkey = node_1.pubkey.clone();
+    let target_pubkey = node_1.pubkey;
     let old_amount = node_1.get_local_balance_from_channel(last_channel);
 
     let preimage = gen_rand_sha256_hash();
     let ckb_invoice = InvoiceBuilder::new(Currency::Fibd)
         .amount(Some(100))
-        .payment_preimage(preimage.clone())
+        .payment_preimage(preimage)
         .payee_pub_key(target_pubkey.into())
         .expiry_time(Duration::from_secs(100))
         .build()
@@ -6243,7 +6243,7 @@ async fn test_send_payment_succeed_with_hold_invoice_settled_direct_payment() {
 
     let res = source_node
         .send_payment(SendPaymentCommand {
-            target_pubkey: Some(target_pubkey.clone()),
+            target_pubkey: Some(target_pubkey),
             amount: Some(100),
             payment_hash: None,
             final_tlc_expiry_delta: None,
@@ -6312,13 +6312,13 @@ async fn test_send_payment_succeed_with_hold_invoice_settled_indirect_payment() 
     .await;
     let [mut node_0, _node_1, mut node_2] = nodes.try_into().expect("3 nodes");
     let source_node = &mut node_0;
-    let target_pubkey = node_2.pubkey.clone();
+    let target_pubkey = node_2.pubkey;
     let old_amount = node_2.get_local_balance_from_channel(channels[1]);
 
     let preimage = gen_rand_sha256_hash();
     let ckb_invoice = InvoiceBuilder::new(Currency::Fibd)
         .amount(Some(100))
-        .payment_preimage(preimage.clone())
+        .payment_preimage(preimage)
         .payee_pub_key(target_pubkey.into())
         .expiry_time(Duration::from_secs(100))
         .build()
@@ -6328,7 +6328,7 @@ async fn test_send_payment_succeed_with_hold_invoice_settled_indirect_payment() 
 
     let res = source_node
         .send_payment(SendPaymentCommand {
-            target_pubkey: Some(target_pubkey.clone()),
+            target_pubkey: Some(target_pubkey),
             amount: Some(100),
             payment_hash: None,
             final_tlc_expiry_delta: None,
@@ -6398,13 +6398,13 @@ async fn test_send_payment_succeed_settle_hold_invoice_multiple_times() {
     .await;
     let [mut node_0, _node_1, mut node_2] = nodes.try_into().expect("3 nodes");
     let source_node = &mut node_0;
-    let target_pubkey = node_2.pubkey.clone();
+    let target_pubkey = node_2.pubkey;
     let old_amount = node_2.get_local_balance_from_channel(channels[1]);
 
     let preimage = gen_rand_sha256_hash();
     let ckb_invoice = InvoiceBuilder::new(Currency::Fibd)
         .amount(Some(100))
-        .payment_preimage(preimage.clone())
+        .payment_preimage(preimage)
         .payee_pub_key(target_pubkey.into())
         .expiry_time(Duration::from_secs(100))
         .build()
@@ -6414,7 +6414,7 @@ async fn test_send_payment_succeed_settle_hold_invoice_multiple_times() {
 
     let res = source_node
         .send_payment(SendPaymentCommand {
-            target_pubkey: Some(target_pubkey.clone()),
+            target_pubkey: Some(target_pubkey),
             amount: Some(100),
             payment_hash: None,
             final_tlc_expiry_delta: None,
@@ -6492,13 +6492,13 @@ async fn test_send_payment_succeed_settle_hold_invoice_when_sender_offline() {
     .await;
     let [node_0, _node_1, mut node_2] = nodes.try_into().expect("3 nodes");
     let mut source_node = node_0;
-    let target_pubkey = node_2.pubkey.clone();
+    let target_pubkey = node_2.pubkey;
     let old_amount = node_2.get_local_balance_from_channel(channels[1]);
 
     let preimage = gen_rand_sha256_hash();
     let ckb_invoice = InvoiceBuilder::new(Currency::Fibd)
         .amount(Some(100))
-        .payment_preimage(preimage.clone())
+        .payment_preimage(preimage)
         .payee_pub_key(target_pubkey.into())
         .expiry_time(Duration::from_secs(100))
         .build()
@@ -6508,7 +6508,7 @@ async fn test_send_payment_succeed_settle_hold_invoice_when_sender_offline() {
 
     let res = source_node
         .send_payment(SendPaymentCommand {
-            target_pubkey: Some(target_pubkey.clone()),
+            target_pubkey: Some(target_pubkey),
             amount: Some(100),
             payment_hash: None,
             final_tlc_expiry_delta: None,
@@ -6581,13 +6581,13 @@ async fn test_send_payment_succeed_settle_hold_invoice_when_forwarder_offline() 
     .await;
     let [mut node_0, mut node_1, mut node_2] = nodes.try_into().expect("3 nodes");
     let source_node = &mut node_0;
-    let target_pubkey = node_2.pubkey.clone();
+    let target_pubkey = node_2.pubkey;
     let old_amount = node_2.get_local_balance_from_channel(channels[1]);
 
     let preimage = gen_rand_sha256_hash();
     let ckb_invoice = InvoiceBuilder::new(Currency::Fibd)
         .amount(Some(100))
-        .payment_preimage(preimage.clone())
+        .payment_preimage(preimage)
         .payee_pub_key(target_pubkey.into())
         .expiry_time(Duration::from_secs(100))
         .build()
@@ -6597,7 +6597,7 @@ async fn test_send_payment_succeed_settle_hold_invoice_when_forwarder_offline() 
 
     let res = source_node
         .send_payment(SendPaymentCommand {
-            target_pubkey: Some(target_pubkey.clone()),
+            target_pubkey: Some(target_pubkey),
             amount: Some(100),
             payment_hash: None,
             final_tlc_expiry_delta: None,
@@ -6670,13 +6670,13 @@ async fn test_send_payment_succeed_settle_invoice_before_send_payment() {
     .await;
     let [mut node_0, _node_1, mut node_2] = nodes.try_into().expect("3 nodes");
     let source_node = &mut node_0;
-    let target_pubkey = node_2.pubkey.clone();
+    let target_pubkey = node_2.pubkey;
     let old_amount = node_2.get_local_balance_from_channel(channels[1]);
 
     let preimage = gen_rand_sha256_hash();
     let ckb_invoice = InvoiceBuilder::new(Currency::Fibd)
         .amount(Some(100))
-        .payment_preimage(preimage.clone())
+        .payment_preimage(preimage)
         .payee_pub_key(target_pubkey.into())
         .expiry_time(Duration::from_secs(100))
         .build()
@@ -6689,7 +6689,7 @@ async fn test_send_payment_succeed_settle_invoice_before_send_payment() {
 
     let res = source_node
         .send_payment(SendPaymentCommand {
-            target_pubkey: Some(target_pubkey.clone()),
+            target_pubkey: Some(target_pubkey),
             amount: Some(100),
             payment_hash: None,
             final_tlc_expiry_delta: None,
@@ -6742,14 +6742,14 @@ async fn test_send_payment_succeed_settle_invoice_with_wrong_then_right_hash() {
     .await;
     let [mut node_0, _node_1, mut node_2] = nodes.try_into().expect("3 nodes");
     let source_node = &mut node_0;
-    let target_pubkey = node_2.pubkey.clone();
+    let target_pubkey = node_2.pubkey;
     let old_amount = node_2.get_local_balance_from_channel(channels[1]);
 
     let preimage = gen_rand_sha256_hash();
     let bogus_preimage = gen_rand_sha256_hash();
     let ckb_invoice = InvoiceBuilder::new(Currency::Fibd)
         .amount(Some(100))
-        .payment_preimage(preimage.clone())
+        .payment_preimage(preimage)
         .payee_pub_key(target_pubkey.into())
         .expiry_time(Duration::from_secs(100))
         .build()
@@ -6761,7 +6761,7 @@ async fn test_send_payment_succeed_settle_invoice_with_wrong_then_right_hash() {
 
     let res = source_node
         .send_payment(SendPaymentCommand {
-            target_pubkey: Some(target_pubkey.clone()),
+            target_pubkey: Some(target_pubkey),
             amount: Some(100),
             payment_hash: None,
             final_tlc_expiry_delta: None,

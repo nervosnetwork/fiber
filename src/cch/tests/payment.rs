@@ -36,7 +36,7 @@ fn get_simple_udt_script() -> Script {
 }
 
 fn get_always_success_script() -> Script {
-    get_script_by_contract(Contract::AlwaysSuccess, &vec![])
+    get_script_by_contract(Contract::AlwaysSuccess, &[])
 }
 
 async fn do_test_cross_chain_payment_hub_send_btc(udt_script: Script, multiple_hops: bool) {
@@ -48,15 +48,17 @@ async fn do_test_cross_chain_payment_hub_send_btc(udt_script: Script, multiple_h
     let nodes = NetworkNode::new_n_interconnected_nodes_with_config(num_nodes, |n| {
         let mut builder = NetworkNodeConfigBuilder::new();
         if n == num_nodes - 1 {
-            let mut cch_config = CchConfig::default();
-            cch_config.wrapped_btc_type_script = serialize_entity_to_hex_string(&udt_script);
+            let cch_config = CchConfig {
+                wrapped_btc_type_script: serialize_entity_to_hex_string(&udt_script),
+                ..Default::default()
+            };
             builder = builder.should_start_lnd(true).cch_config(cch_config);
         }
         builder.build()
     })
     .await;
 
-    let (hub_channel, mut fiber_node, mut hub) = if multiple_hops {
+    let (hub_channel, fiber_node, mut hub) = if multiple_hops {
         let [mut fiber_node, mut middle_hop, mut hub] = nodes.try_into().expect("3 nodes");
         let (_channel, funding_tx_1) = establish_udt_channel_between_nodes(
             &mut fiber_node,
@@ -169,7 +171,7 @@ async fn do_test_cross_chain_payment_hub_send_btc(udt_script: Script, multiple_h
 
     let hub_amount = fiber_invoice.amount.expect("has amount");
     assert!(
-        hub_amount >= lnd_amount_sats.try_into().expect("valid amount"),
+        hub_amount >= lnd_amount_sats.into(),
         "hub should receive more money than lnd, but we have hub_amount: {}, lnd_amount: {}",
         hub_amount,
         lnd_amount_sats
@@ -235,8 +237,10 @@ async fn do_test_cross_chain_payment_hub_receive_btc(udt_script: Script, multipl
     let nodes = NetworkNode::new_n_interconnected_nodes_with_config(num_nodes, |n| {
         let mut builder = NetworkNodeConfigBuilder::new();
         if n == num_nodes - 1 {
-            let mut cch_config = CchConfig::default();
-            cch_config.wrapped_btc_type_script = serialize_entity_to_hex_string(&udt_script);
+            let cch_config = CchConfig {
+                wrapped_btc_type_script: serialize_entity_to_hex_string(&udt_script),
+                ..Default::default()
+            };
             builder = builder.should_start_lnd(true).cch_config(cch_config);
         }
         builder.build()
@@ -331,7 +335,7 @@ async fn do_test_cross_chain_payment_hub_receive_btc(udt_script: Script, multipl
     let preimage = gen_rand_sha256_hash();
     let fiber_invoice = InvoiceBuilder::new(Currency::Fibd)
         .amount(Some(fiber_amount_msats))
-        .payment_preimage(preimage.clone())
+        .payment_preimage(preimage)
         .hash_algorithm(HashAlgorithm::Sha256)
         .payee_pub_key(fiber_node.pubkey.into())
         .expiry_time(Duration::from_secs(100))

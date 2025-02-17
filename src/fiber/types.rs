@@ -255,15 +255,15 @@ impl FromStr for Hash256 {
     }
 }
 
-impl Into<[u8; 32]> for Hash256 {
-    fn into(self) -> [u8; 32] {
-        self.0
+impl From<Hash256> for [u8; 32] {
+    fn from(val: Hash256) -> Self {
+        val.0
     }
 }
 
-impl Into<Vec<u8>> for Hash256 {
-    fn into(self) -> Vec<u8> {
-        self.0.to_vec()
+impl From<Hash256> for Vec<u8> {
+    fn from(val: Hash256) -> Self {
+        val.0.to_vec()
     }
 }
 

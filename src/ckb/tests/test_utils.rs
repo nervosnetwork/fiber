@@ -17,7 +17,7 @@ use tokio::sync::RwLock;
 
 use crate::{
     ckb::{
-        config::{UdtArgInfo, UdtCfgInfos, UdtScript},
+        config::{UdtArgInfo, UdtCellDep, UdtCfgInfos, UdtScript},
         contracts::{
             get_cell_deps_by_contracts, get_script_by_contract, get_udt_cell_deps, Contract,
             ContractsContext, ContractsInfo,
@@ -52,7 +52,7 @@ pub enum CellStatus {
     Consumed,
 }
 
-pub static MOCK_CONTEXT: Lazy<MockContext> = Lazy::new(|| MockContext::new());
+pub static MOCK_CONTEXT: Lazy<MockContext> = Lazy::new(MockContext::new);
 
 pub struct MockContext {
     pub context: RwLock<Context>,
@@ -141,15 +141,15 @@ impl MockContext {
             .into_iter()
             .map(|contract| {
                 let script = contract_default_scripts.get(&contract).unwrap();
-                let cell_dep = script_cell_deps
+                let cell_deps: Vec<UdtCellDep> = script_cell_deps
                     .get(&contract)
                     .map(|x| x.iter().map(Into::into).collect())
-                    .unwrap_or_else(|| vec![]);
+                    .unwrap_or_default();
                 UdtArgInfo {
                     name: format!("{:?}", contract),
                     script: UdtScript::allow_all_for_script(script),
                     auto_accept_amount: None,
-                    cell_deps: cell_dep.clone(),
+                    cell_deps,
                 }
             })
             .collect();
@@ -451,7 +451,7 @@ impl Actor for MockChainActor {
                     request
                         .udt_type_script
                         .as_ref()
-                        .and_then(|script| get_udt_cell_deps(script))
+                        .and_then(get_udt_cell_deps)
                         .unwrap_or_default(),
                     // AlwaysSuccess is needed to unlock the input cells
                     get_cell_deps_by_contracts(vec![Contract::AlwaysSuccess]),
@@ -479,7 +479,7 @@ impl Actor for MockChainActor {
                         context.create_cell_with_out_point(
                             outpoint.clone(),
                             CellOutput::new_builder()
-                                .lock(get_script_by_contract(Contract::AlwaysSuccess, &vec![]))
+                                .lock(get_script_by_contract(Contract::AlwaysSuccess, &[]))
                                 .type_(request.udt_type_script.clone().pack())
                                 .build(),
                             u128::MAX.to_le_bytes().to_vec().into(),
@@ -533,7 +533,7 @@ impl Actor for MockChainActor {
                     match tx.input_pts_iter().find(|input| {
                         state
                             .cell_status
-                            .get(&input)
+                            .get(input)
                             .map_or(false, |status| *status == CellStatus::Consumed)
                     }) {
                         Some(input) => (

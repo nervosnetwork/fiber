@@ -167,14 +167,14 @@ async fn test_store_update_subscription_normal_payment() {
     )
     .await;
 
-    let target_pubkey = nodes[n_nodes - 1].pubkey.clone();
+    let target_pubkey = nodes[n_nodes - 1].pubkey;
     let target_old_amount =
         nodes[n_nodes - 1].get_local_balance_from_channel(channels[channels.len() - 1]);
 
     let preimage = gen_rand_sha256_hash();
     let ckb_invoice = InvoiceBuilder::new(Currency::Fibd)
         .amount(Some(100))
-        .payment_preimage(preimage.clone())
+        .payment_preimage(preimage)
         .payee_pub_key(target_pubkey.into())
         .expiry_time(Duration::from_secs(100))
         .build()
@@ -207,7 +207,7 @@ async fn test_store_update_subscription_normal_payment() {
     let amount = 100;
     let res = source_node
         .send_payment(SendPaymentCommand {
-            target_pubkey: Some(target_pubkey.clone()),
+            target_pubkey: Some(target_pubkey),
             amount: Some(amount),
             payment_hash: None,
             final_tlc_expiry_delta: None,
@@ -322,7 +322,7 @@ async fn test_store_update_subscription_settlement_payment() {
     let amount = 100;
     let ckb_invoice = InvoiceBuilder::new(Currency::Fibd)
         .amount(Some(amount))
-        .payment_preimage(preimage.clone())
+        .payment_preimage(preimage)
         .payee_pub_key(node_2_pubkey.into())
         .expiry_time(Duration::from_secs(100))
         .build()
@@ -357,7 +357,7 @@ async fn test_store_update_subscription_settlement_payment() {
 
     let res = node_0
         .send_payment(SendPaymentCommand {
-            target_pubkey: Some(node_2_pubkey.clone()),
+            target_pubkey: Some(node_2_pubkey),
             amount: Some(100),
             payment_hash: None,
             final_tlc_expiry_delta: None,
@@ -518,7 +518,7 @@ async fn test_store_update_subscription_mock_cross_chain_payment() {
     let node_2_amount = 100;
     let node_2_ckb_invoice = InvoiceBuilder::new(Currency::Fibd)
         .amount(Some(node_2_amount))
-        .payment_preimage(preimage.clone())
+        .payment_preimage(preimage)
         .payee_pub_key(node_2_pubkey.into())
         .expiry_time(Duration::from_secs(100))
         .build()
@@ -568,7 +568,7 @@ async fn test_store_update_subscription_mock_cross_chain_payment() {
     // Node 0 sends a payment to node 1.
     let res = node_0
         .send_payment(SendPaymentCommand {
-            target_pubkey: Some(node_1_pubkey.clone()),
+            target_pubkey: Some(node_1_pubkey),
             amount: Some(node_1_amount),
             payment_hash: None,
             final_tlc_expiry_delta: None,
@@ -647,7 +647,7 @@ async fn test_store_update_subscription_mock_cross_chain_payment() {
     // Now that node 1 has received the payment from node 0, he should pay node 2 now.
     let res = node_1
         .send_payment(SendPaymentCommand {
-            target_pubkey: Some(node_2_pubkey.clone()),
+            target_pubkey: Some(node_2_pubkey),
             amount: Some(node_2_amount),
             payment_hash: None,
             final_tlc_expiry_delta: None,

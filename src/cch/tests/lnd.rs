@@ -152,7 +152,6 @@ impl LndNode {
                 .listen_url
                 .clone()
                 .expect("have listening address"),
-            ..Default::default()
         };
         let request = lnd::tonic_lnd::lnrpc::ConnectPeerRequest {
             addr: Some(address),
@@ -241,11 +240,13 @@ impl LndNode {
         other.wait_synced_to_chain().await;
 
         let other_info = other.get_info().await;
-        let mut request = lnd::tonic_lnd::lnrpc::OpenChannelRequest::default();
-        request.node_pubkey = hex::decode(other_info.identity_pubkey).expect("valid pubkey hex");
-        request.local_funding_amount = 1_000_000;
-        request.sat_per_vbyte = 1;
-        request.min_confs = 0;
+        let request = lnd::tonic_lnd::lnrpc::OpenChannelRequest {
+            node_pubkey: hex::decode(other_info.identity_pubkey).expect("valid pubkey hex"),
+            local_funding_amount: 1_000_000,
+            sat_per_vbyte: 1,
+            min_confs: 0,
+            ..Default::default()
+        };
 
         let channel = self
             .lnd
@@ -269,8 +270,10 @@ impl LndNode {
         &mut self,
         value_msat: u64,
     ) -> lnd::tonic_lnd::lnrpc::AddInvoiceResponse {
-        let mut request = lnd::tonic_lnd::lnrpc::Invoice::default();
-        request.value_msat = value_msat as i64;
+        let request = lnd::tonic_lnd::lnrpc::Invoice {
+            value_msat: value_msat as i64,
+            ..Default::default()
+        };
         self.lnd
             .client
             .lightning()

@@ -123,7 +123,7 @@ impl<IH: InvoiceUpdateHook, PH: PaymentUpdateHook> GenericStore<IH, PH> {
     }
 
     fn open_db_and_migrate(path: &Path) -> Result<Arc<DB>, String> {
-        let db = Self::open_db(path.as_ref())?;
+        let db = Self::open_db(path)?;
         let db = Self::check_migrate(path, db)?;
         Ok(db)
     }

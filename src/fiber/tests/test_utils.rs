@@ -346,6 +346,7 @@ impl NetworkNodeConfigBuilder {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn establish_udt_channel_between_nodes(
     node_a: &mut NetworkNode,
     node_b: &mut NetworkNode,
@@ -1502,10 +1503,12 @@ async fn test_start_node_with_cch_connected_to_internal_lnd_node() {
 
 #[tokio::test]
 async fn test_start_node_with_cch_connected_to_external_lnd_node() {
-    let mut cch_config = CchConfig::default();
-    // The default lnd_rpc_url may actually work, so we need to set it to an invalid value.
-    // Let's assume that the following URL is not a valid lnd RPC URL.
-    cch_config.lnd_rpc_url = "http://1.1.1.1:1".to_string();
+    let cch_config = CchConfig {
+        // The default lnd_rpc_url may actually work, so we need to set it to an invalid value.
+        // Let's assume that the following URL is not a valid lnd RPC URL.
+        lnd_rpc_url: "http://1.1.1.1:1".to_string(),
+        ..Default::default()
+    };
     let mut node = NetworkNode::new_with_config(
         NetworkNodeConfigBuilder::new()
             .cch_config(cch_config)

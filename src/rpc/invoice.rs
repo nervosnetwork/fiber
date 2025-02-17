@@ -370,8 +370,8 @@ where
         match settle_invoice(
             &self.store,
             self.network_actor.as_ref(),
-            &payment_hash,
-            &payment_preimage,
+            payment_hash,
+            payment_preimage,
         ) {
             Ok(_) => Ok(SettleInvoiceResult {}),
             Err(e) => Err(ErrorObjectOwned::owned(

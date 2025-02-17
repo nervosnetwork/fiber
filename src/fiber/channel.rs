@@ -1016,29 +1016,22 @@ where
                     .get_invoice_preimage(&add_tlc.payment_hash)
                     .ok_or(ProcessingChannelError::FinalIncorrectPaymentHash)?,
                 Some(preimage) if preimage == Hash256::default() => {
-                    match self.store.get_invoice_status(&payment_hash) {
-                        Some(status) => {
-                            let is_active = status == CkbInvoiceStatus::Open
-                                || status == CkbInvoiceStatus::Received;
-                            let is_settled =
-                                self.store.get_invoice_preimage(&payment_hash).is_some();
-                            if is_active && !is_settled {
-                                // This TLC is added to applied_add_tlcs in above, but
-                                // TLCs in the list applied_add_tlcs wouldn't be processed again.
-                                // For the unsettled active hold invoice TLCs, we should process them indefinitely
-                                // until they expire or are settled.
-                                state.tlc_state.applied_add_tlcs.remove(&add_tlc.tlc_id);
-                            }
-                            if status == CkbInvoiceStatus::Open {
-                                self.store
-                                    .update_invoice_status(
-                                        &payment_hash,
-                                        CkbInvoiceStatus::Received,
-                                    )
-                                    .expect("update invoice status failed");
-                            }
+                    if let Some(status) = self.store.get_invoice_status(&payment_hash) {
+                        let is_active = status == CkbInvoiceStatus::Open
+                            || status == CkbInvoiceStatus::Received;
+                        let is_settled = self.store.get_invoice_preimage(&payment_hash).is_some();
+                        if is_active && !is_settled {
+                            // This TLC is added to applied_add_tlcs in above, but
+                            // TLCs in the list applied_add_tlcs wouldn't be processed again.
+                            // For the unsettled active hold invoice TLCs, we should process them indefinitely
+                            // until they expire or are settled.
+                            state.tlc_state.applied_add_tlcs.remove(&add_tlc.tlc_id);
                         }
-                        None => {}
+                        if status == CkbInvoiceStatus::Open {
+                            self.store
+                                .update_invoice_status(&payment_hash, CkbInvoiceStatus::Received)
+                                .expect("update invoice status failed");
+                        }
                     }
                     if let Err(e) = self.store.add_invoice_channel_info(
                         &payment_hash,

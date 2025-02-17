@@ -255,7 +255,7 @@ impl SubscriptionActor {
                         .get_invoice(&invoice_hash)
                         .and_then(|invoice| invoice.amount);
                     amount.map(|amount| InvoiceState::Received {
-                        amount: amount,
+                        amount,
                         is_finished: true,
                     })
                 }
@@ -273,7 +273,7 @@ impl SubscriptionActor {
                     // https://github.com/nervosnetwork/fiber/pull/454 . We need to make sure code here
                     // and there are consistent.
                     let preimage = self.store.get_invoice_preimage(&payment_hash);
-                    preimage.map(|preimage| PaymentState::Success { preimage: preimage })
+                    preimage.map(|preimage| PaymentState::Success { preimage })
                 }
                 PaymentSessionStatus::Failed => Some(PaymentState::Failed),
                 PaymentSessionStatus::Inflight => Some(PaymentState::Inflight),

@@ -379,7 +379,7 @@ impl CchActor {
             created_at: duration_since_epoch.as_secs(),
             ckb_final_tlc_expiry_delta: self.config.ckb_final_tlc_expiry_delta,
             btc_pay_req: send_btc.btc_pay_req,
-            fiber_payee_pubkey: self.pubkey.clone(),
+            fiber_payee_pubkey: self.pubkey,
             fiber_pay_req: Default::default(),
             payment_hash: format!("0x{}", invoice.payment_hash().encode_hex::<String>()),
             payment_preimage: None,
@@ -389,7 +389,7 @@ impl CchActor {
         order.generate_ckb_invoice()?;
 
         let fiber_invoice = CkbInvoice::from_str(&order.fiber_pay_req).expect("parse invoice");
-        let hash = Hash256::from(*fiber_invoice.payment_hash());
+        let hash = *fiber_invoice.payment_hash();
 
         let message = move |rpc_reply| -> NetworkActorMessage {
             NetworkActorMessage::Command(NetworkActorCommand::AddInvoice(
