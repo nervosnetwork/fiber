@@ -2,6 +2,7 @@ use super::hook::{NoopStoreUpdateHook, PaymentUpdateHook};
 use super::schema::*;
 use super::subscription_impl::{new_subscription_impl, SubscriptionImpl};
 use super::{db_migrate::DbMigrate, hook::InvoiceUpdateHook};
+use crate::invoice::InvoiceChannelInfo;
 use crate::{
     fiber::{
         channel::{
@@ -185,7 +186,7 @@ enum KeyValue {
     CkbInvoice(Hash256, CkbInvoice),
     CkbInvoicePreimage(Hash256, Hash256),
     CkbInvoiceStatus(Hash256, CkbInvoiceStatus),
-    CkbInvoiceChannels(Hash256, Vec<Hash256>),
+    CkbInvoiceChannels(Hash256, Vec<InvoiceChannelInfo>),
     PeerIdChannelId((PeerId, Hash256), ChannelState),
     OutPointChannelId(OutPoint, Hash256),
     BroadcastMessageTimestamp(BroadcastMessageID, u64),
@@ -486,28 +487,35 @@ impl<IH: InvoiceUpdateHook, PH: PaymentUpdateHook> InvoiceStore for GenericStore
         Ok(())
     }
 
-    fn get_invoice_channels(&self, id: &Hash256) -> Vec<Hash256> {
-        let key = [&[CKB_INVOICE_CHANNELS_PREFIX], id.as_ref()].concat();
+    fn get_invoice_channel_info(&self, payment_hash: &Hash256) -> Vec<InvoiceChannelInfo> {
+        let key = [&[CKB_INVOICE_CHANNELS_PREFIX], payment_hash.as_ref()].concat();
         self.get(key)
             .map(|v| deserialize_from(&v, "CkbInvoiceChannels"))
             .unwrap_or_default()
     }
 
-    fn add_invoice_channel(
+    fn add_invoice_channel_info(
         &self,
         id: &Hash256,
-        channel: &Hash256,
-    ) -> Result<Vec<Hash256>, InvoiceError> {
+        channel_info: InvoiceChannelInfo,
+    ) -> Result<Vec<InvoiceChannelInfo>, InvoiceError> {
         let mut batch = self.batch();
         let key = [&[CKB_INVOICE_CHANNELS_PREFIX], id.as_ref()].concat();
-        let mut channels: Vec<Hash256> = batch
+        let mut channels: Vec<InvoiceChannelInfo> = batch
             .get(&key)
             .map(|v| deserialize_from(&v, "CkbInvoiceChannels"))
             .unwrap_or_default();
-        if channels.contains(channel) {
-            return Ok(channels);
+        match channels
+            .iter_mut()
+            .find(|info| info.channel_id == channel_info.channel_id)
+        {
+            Some(info) => {
+                info.amount += channel_info.amount;
+            }
+            None => {
+                channels.push(channel_info);
+            }
         }
-        channels.push(*channel);
         batch.put_kv(KeyValue::CkbInvoiceChannels(*id, channels.clone()));
         batch.commit();
         Ok(channels)

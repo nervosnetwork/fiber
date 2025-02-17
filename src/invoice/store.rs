@@ -1,4 +1,5 @@
 use ractor::ActorRef;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::{CkbInvoiceStatus, InvoiceError};
@@ -33,14 +34,26 @@ pub trait InvoiceStore {
     // A payment to an invoice is made by sending a TLC over some channels
     // (possibly multiple when atomic multi-path payment support is out).
     // This function returns all the channels that were used to pay an invoice.
-    fn get_invoice_channels(&self, id: &Hash256) -> Vec<Hash256>;
-    // This function is used to add a channel to the list of channels that were
-    // used to pay an invoice.
-    fn add_invoice_channel(
+    fn get_invoice_channel_info(&self, payment_hash: &Hash256) -> Vec<InvoiceChannelInfo>;
+    // This function is used to add a channel (with the amount paid through this channel)
+    // to the list of channels that were used to pay an invoice.
+    fn add_invoice_channel_info(
         &self,
-        id: &Hash256,
-        channel: &Hash256,
-    ) -> Result<Vec<Hash256>, InvoiceError>;
+        payment_hash: &Hash256,
+        invoice_channel_info: InvoiceChannelInfo,
+    ) -> Result<Vec<InvoiceChannelInfo>, InvoiceError>;
+}
+
+#[derive(Copy, Clone, Serialize, Deserialize)]
+pub struct InvoiceChannelInfo {
+    pub channel_id: Hash256,
+    pub amount: u128,
+}
+
+impl InvoiceChannelInfo {
+    pub fn new(channel_id: Hash256, amount: u128) -> Self {
+        Self { channel_id, amount }
+    }
 }
 
 #[derive(Error, Debug)]
@@ -82,21 +95,28 @@ pub(crate) fn settle_invoice<S: InvoiceStore>(
     }
 
     // We will send network actor a message to settle the invoice immediately if possible.
-    if let Some(network_actor) = network_actor {
-        match store.get_invoice_status(payment_hash) {
-            Some(CkbInvoiceStatus::Received) => {
-                let channels = store.get_invoice_channels(payment_hash);
-                for channel_id in channels {
-                    let _ = network_actor.send_message(NetworkActorMessage::new_command(
-                        NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
-                            channel_id,
-                            command: ChannelCommand::SettleHeldTlc(*payment_hash),
-                        }),
-                    ));
+    match (store.get_invoice_status(payment_hash), network_actor) {
+        (Some(CkbInvoiceStatus::Received), Some(network_actor)) => {
+            let channels = store.get_invoice_channel_info(payment_hash);
+            let total_amount: u128 = channels.iter().map(|c| c.amount).sum();
+            match invoice.amount() {
+                Some(amount) if total_amount < amount => {
+                    return Ok(());
+                }
+                _ => {
+                    // Only settle the invoice if the client has paid the full amount.
+                    for channel in channels {
+                        let _ = network_actor.send_message(NetworkActorMessage::new_command(
+                            NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
+                                channel_id: channel.channel_id,
+                                command: ChannelCommand::SettleHeldTlc(*payment_hash),
+                            }),
+                        ));
+                    }
                 }
             }
-            _ => {}
         }
+        _ => {}
     }
 
     Ok(())

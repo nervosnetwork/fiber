@@ -1,7 +1,7 @@
-use crate::debug_event;
 #[cfg(debug_assertions)]
 use crate::fiber::network::DebugEvent;
 use crate::fiber::types::BroadcastMessageWithTimestamp;
+use crate::{debug_event, invoice::InvoiceChannelInfo};
 use bitflags::bitflags;
 use futures::future::OptionFuture;
 use secp256k1::XOnlyPublicKey;
@@ -1017,10 +1017,10 @@ where
                         }
                         None => {}
                     }
-                    if let Err(e) = self
-                        .store
-                        .add_invoice_channel(&payment_hash, &state.get_id())
-                    {
+                    if let Err(e) = self.store.add_invoice_channel_info(
+                        &payment_hash,
+                        InvoiceChannelInfo::new(state.get_id(), received_amount),
+                    ) {
                         error!("Failed to add invoice channel mapping: {:?}", e);
                     }
                     // The updating of hold invoice is always done in settle_invoice rpc call.
