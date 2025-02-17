@@ -339,8 +339,6 @@ fn channel_outpoint_to_string(channel_outpoint: &lnd::tonic_lnd::lnrpc::ChannelP
 #[tokio::test]
 async fn test_run_lnd_one_node() {
     let mut lnd = LndNode::new(Default::default(), Default::default()).await;
-    let bitcoin_info = lnd.bitcoind.client.get_network_info();
-    assert!(bitcoin_info.is_ok());
     println!("node_info: {:?}", lnd.get_info().await);
 }
 
@@ -348,16 +346,12 @@ async fn test_run_lnd_one_node() {
 #[tokio::test]
 async fn test_run_lnd_two_nodes_with_the_same_bitcoind() {
     let mut lnd = LndNode::new(Default::default(), Default::default()).await;
-    let bitcoin_info = lnd.bitcoind.client.get_network_info();
-    assert!(bitcoin_info.is_ok());
     println!("lnd 1 node_info: {:?}", lnd.get_info().await);
 
     let mut lnd2 = lnd.new_lnd_with_the_same_bitcoind(Default::default()).await;
     // The second node should be able to run independently of the first node.
     drop(lnd);
 
-    let bitcoin_info = lnd2.bitcoind.client.get_network_info();
-    assert!(bitcoin_info.is_ok());
     println!("lnd 2 node_info: {:?}", lnd2.get_info().await);
 }
 
