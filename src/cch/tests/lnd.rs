@@ -76,22 +76,27 @@ impl LndNode {
         let mut request = NewAddressRequest::default();
         request.set_type(AddressType::TaprootPubkey);
         let client = lnd.client.lightning();
-        let address = client
-            .new_address(request)
-            .await
-            .unwrap()
-            .into_inner()
-            .address;
-
-        let address = Address::from_str(&address)
-            .expect("valid address")
-            .assume_checked();
-
-        Self {
-            lnd,
-            bitcoind,
-            address,
+        for _ in 1..=10 {
+            match client.new_address(request.clone()).await {
+                Ok(response) => {
+                    return Self {
+                        lnd,
+                        bitcoind,
+                        address: Address::from_str(&response.into_inner().address)
+                            .expect("valid address")
+                            .assume_checked(),
+                    };
+                }
+                Err(e)
+                    if e.message()
+                        .contains("the RPC server is in the process of starting up, but not yet ready to accept calls") =>
+                {
+                    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                }
+                Err(e) => panic!("new address failed: {}", e),
+            }
         }
+        panic!("Creating new address failed, server is still starting");
     }
 
     pub async fn new_lnd_with_the_same_bitcoind(&self, lnd_conf: Option<LndConf<'static>>) -> Self {
@@ -140,23 +145,40 @@ impl LndNode {
 
     pub async fn connect(&mut self, other: &mut Self) {
         let other_info = other.get_info().await;
-        let mut request = lnd::tonic_lnd::lnrpc::ConnectPeerRequest::default();
-        let mut address = lnd::tonic_lnd::lnrpc::LightningAddress::default();
-        address.pubkey = other_info.identity_pubkey;
-        address.host = other
-            .lnd
-            .listen_url
-            .clone()
-            .expect("have listening address");
-        request.addr = Some(address);
-        request.perm = false;
-
-        let response = self.lnd.client.lightning().connect_peer(request).await;
-        match response {
-            Ok(_) => {}
-            Err(e) if e.message().contains("already connected to peer") => {}
-            Err(e) => panic!("connect peer failed: {}", e),
+        let address = lnd::tonic_lnd::lnrpc::LightningAddress {
+            pubkey: other_info.identity_pubkey,
+            host: other
+                .lnd
+                .listen_url
+                .clone()
+                .expect("have listening address"),
+            ..Default::default()
+        };
+        let request = lnd::tonic_lnd::lnrpc::ConnectPeerRequest {
+            addr: Some(address),
+            perm: false,
+            ..Default::default()
+        };
+        for _ in 1..=10 {
+            let response = self
+                .lnd
+                .client
+                .lightning()
+                .connect_peer(request.clone())
+                .await;
+            match response {
+                Ok(_) => return,
+                Err(e) if e.message().contains("already connected to peer") => return,
+                Err(e)
+                    if e.message()
+                        .contains("server is still in the process of starting") =>
+                {
+                    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                }
+                Err(e) => panic!("connect peer failed: {}", e),
+            }
         }
+        panic!("Connect peer failed after 5 retries, server is still starting");
     }
 
     pub async fn wait_synced_to_chain(&mut self) {
