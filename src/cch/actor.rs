@@ -20,8 +20,8 @@ use crate::fiber::types::{Hash256, Pubkey};
 use crate::fiber::{NetworkActorCommand, NetworkActorMessage};
 use crate::invoice::{CkbInvoice, Currency};
 use crate::store::subscription::{
-    InvoiceState, InvoiceSubscription, InvoiceUpdate, PaymentState, PaymentSubscription,
-    PaymentUpdate,
+    InvoiceState, InvoiceSubscription, InvoiceUpdate as FiberInvoiceUpdate, PaymentState,
+    PaymentSubscription, PaymentUpdate as FiberPaymentUpdate,
 };
 use crate::store::subscription_impl::SubscriptionImpl;
 use crate::store::{SubscriptionError, SubscriptionId};
@@ -52,14 +52,14 @@ pub async fn start_cch(
 }
 
 #[derive(Debug)]
-pub struct SettleSendBTCOrderEvent {
+pub struct LightningPaymentUpdate {
     payment_hash: String,
     preimage: Option<String>,
     status: CchOrderStatus,
 }
 
 #[derive(Debug)]
-pub struct SettleReceiveBTCOrderEvent {
+pub struct LightningInvoiceUpdate {
     payment_hash: String,
     preimage: Option<String>,
     status: CchOrderStatus,
@@ -82,15 +82,15 @@ pub enum CchMessage {
 
     GetReceiveBTCOrder(String, RpcReplyPort<Result<ReceiveBTCOrder, CchError>>),
 
-    SettleSendBTCOrder(SettleSendBTCOrderEvent),
-    SettleReceiveBTCOrder(SettleReceiveBTCOrderEvent),
+    LightningPaymentUpdate(LightningPaymentUpdate),
+    LightningInvoiceUpdate(LightningInvoiceUpdate),
 
-    PaymentUpdate(PaymentUpdate),
-    InvoiceUpdate(InvoiceUpdate),
+    FiberPaymentUpdate(FiberPaymentUpdate),
+    FiberInvoiceUpdate(FiberInvoiceUpdate),
 
     SubscribeFiberPayment(
         Hash256,
-        DerivedActorRef<PaymentUpdate>,
+        DerivedActorRef<FiberPaymentUpdate>,
         RpcReplyPort<Result<SubscriptionId, SubscriptionError>>,
     ),
 
@@ -98,42 +98,42 @@ pub enum CchMessage {
 
     SubscribeFiberInvoice(
         Hash256,
-        DerivedActorRef<InvoiceUpdate>,
+        DerivedActorRef<FiberInvoiceUpdate>,
         RpcReplyPort<Result<SubscriptionId, SubscriptionError>>,
     ),
 
     UnsubscribeFiberInvoice(SubscriptionId, RpcReplyPort<Result<(), SubscriptionError>>),
 }
 
-impl From<PaymentUpdate> for CchMessage {
-    fn from(update: PaymentUpdate) -> Self {
-        CchMessage::PaymentUpdate(update)
+impl From<FiberPaymentUpdate> for CchMessage {
+    fn from(update: FiberPaymentUpdate) -> Self {
+        CchMessage::FiberPaymentUpdate(update)
     }
 }
 
-impl TryFrom<CchMessage> for PaymentUpdate {
+impl TryFrom<CchMessage> for FiberPaymentUpdate {
     type Error = anyhow::Error;
 
     fn try_from(msg: CchMessage) -> Result<Self, Self::Error> {
         match msg {
-            CchMessage::PaymentUpdate(update) => Ok(update),
+            CchMessage::FiberPaymentUpdate(update) => Ok(update),
             _ => Err(anyhow!("CchMessage is not PaymentUpdate")),
         }
     }
 }
 
-impl From<InvoiceUpdate> for CchMessage {
-    fn from(update: InvoiceUpdate) -> Self {
-        CchMessage::InvoiceUpdate(update)
+impl From<FiberInvoiceUpdate> for CchMessage {
+    fn from(update: FiberInvoiceUpdate) -> Self {
+        CchMessage::FiberInvoiceUpdate(update)
     }
 }
 
-impl TryFrom<CchMessage> for InvoiceUpdate {
+impl TryFrom<CchMessage> for FiberInvoiceUpdate {
     type Error = anyhow::Error;
 
     fn try_from(msg: CchMessage) -> Result<Self, Self::Error> {
         match msg {
-            CchMessage::InvoiceUpdate(update) => Ok(update),
+            CchMessage::FiberInvoiceUpdate(update) => Ok(update),
             _ => Err(anyhow!("CchMessage is not InvoiceUpdate")),
         }
     }
@@ -245,21 +245,21 @@ impl Actor for CchActor {
                 }
                 Ok(())
             }
-            CchMessage::SettleSendBTCOrder(event) => {
+            CchMessage::LightningPaymentUpdate(event) => {
                 tracing::debug!("settle_send_btc_order {:?}", event);
                 if let Err(err) = self.settle_send_btc_order(state, event).await {
                     tracing::error!("settle_send_btc_order failed: {}", err);
                 }
                 Ok(())
             }
-            CchMessage::SettleReceiveBTCOrder(event) => {
+            CchMessage::LightningInvoiceUpdate(event) => {
                 tracing::debug!("settle_receive_btc_order {:?}", event);
                 if let Err(err) = self.settle_receive_btc_order(state, event).await {
                     tracing::error!("settle_receive_btc_order failed: {}", err);
                 }
                 Ok(())
             }
-            CchMessage::PaymentUpdate(payment_update) => {
+            CchMessage::FiberPaymentUpdate(payment_update) => {
                 tracing::debug!(
                     payment_update = ?payment_update,
                     "Cch actor received payment update"
@@ -270,7 +270,7 @@ impl Actor for CchActor {
                 Ok(())
             }
 
-            CchMessage::InvoiceUpdate(invoice_update) => {
+            CchMessage::FiberInvoiceUpdate(invoice_update) => {
                 tracing::debug!(
                     invoice_update = ?invoice_update,
                     "Cch actor received invoice update"
@@ -348,7 +348,7 @@ impl CchActor {
         &self,
         state: &mut CchState,
         send_btc: SendBTC,
-        fiber_invoice_tracker: DerivedActorRef<InvoiceUpdate>,
+        fiber_invoice_tracker: DerivedActorRef<FiberInvoiceUpdate>,
     ) -> Result<SendBTCOrder, CchError> {
         let duration_since_epoch = SystemTime::now().duration_since(UNIX_EPOCH)?;
 
@@ -413,7 +413,7 @@ impl CchActor {
     async fn handle_invoice_update(
         &self,
         state: &mut CchState,
-        invoice_update: InvoiceUpdate,
+        invoice_update: FiberInvoiceUpdate,
     ) -> Result<()> {
         match invoice_update.state {
             InvoiceState::Received {
@@ -474,7 +474,7 @@ impl CchActor {
     async fn handle_payment_update(
         &self,
         state: &mut CchState,
-        payment_update: PaymentUpdate,
+        payment_update: FiberPaymentUpdate,
     ) -> Result<()> {
         let payment_hash = format!("{:#x}", payment_update.hash);
         tracing::debug!("[settled tlc] payment hash: {}", payment_hash);
@@ -520,7 +520,7 @@ impl CchActor {
     async fn settle_send_btc_order(
         &self,
         state: &mut CchState,
-        event: SettleSendBTCOrderEvent,
+        event: LightningPaymentUpdate,
     ) -> Result<()> {
         let mut order = match state
             .orders_db
@@ -565,7 +565,7 @@ impl CchActor {
         myself: ActorRef<CchMessage>,
         state: &mut CchState,
         receive_btc: ReceiveBTC,
-        fiber_payment_tracker: DerivedActorRef<PaymentUpdate>,
+        fiber_payment_tracker: DerivedActorRef<FiberPaymentUpdate>,
     ) -> Result<ReceiveBTCOrder, CchError> {
         let invoice = CkbInvoice::from_str(&receive_btc.fiber_pay_req)?;
         let payment_hash = *invoice.payment_hash();
@@ -639,7 +639,7 @@ impl CchActor {
     async fn settle_receive_btc_order(
         &self,
         state: &mut CchState,
-        event: SettleReceiveBTCOrderEvent,
+        event: LightningInvoiceUpdate,
     ) -> Result<()> {
         let mut order = match state
             .orders_db
@@ -775,7 +775,7 @@ impl LndPaymentsTracker {
 
     async fn on_payment(&self, payment: lnrpc::Payment) -> Result<()> {
         tracing::debug!(target: "fnn::cch::actor::tracker::lnd_payments", "payment: {:?}", payment);
-        let event = CchMessage::SettleSendBTCOrder(SettleSendBTCOrderEvent {
+        let event = CchMessage::LightningPaymentUpdate(LightningPaymentUpdate {
             payment_hash: format!("0x{}", payment.payment_hash),
             preimage: (!payment.payment_preimage.is_empty())
                 .then(|| format!("0x{}", payment.payment_preimage)),
@@ -888,7 +888,7 @@ impl LndInvoiceTracker {
         let status = lnrpc::invoice::InvoiceState::try_from(invoice.state)
             .map(Into::into)
             .unwrap_or(CchOrderStatus::Pending);
-        let event = CchMessage::SettleReceiveBTCOrder(SettleReceiveBTCOrderEvent {
+        let event = CchMessage::LightningInvoiceUpdate(LightningInvoiceUpdate {
             payment_hash: format!("0x{}", hex::encode(invoice.r_hash)),
             preimage: (!invoice.r_preimage.is_empty())
                 .then(|| format!("0x{}", hex::encode(invoice.r_preimage))),
