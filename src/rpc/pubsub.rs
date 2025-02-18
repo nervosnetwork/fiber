@@ -6,13 +6,15 @@ use ractor::{Actor, ActorCell, ActorProcessingErr, ActorRef};
 use serde::Serialize;
 use tracing::debug;
 
-use crate::{
+use crate::store::{
+    subscription::{InvoiceSubscription, PaymentSubscription},
+    subscription_impl::SubscriptionImpl,
+    SubscriptionId,
+};
+
+pub use crate::{
     fiber::types::Hash256,
-    store::{
-        subscription::{InvoiceSubscription, InvoiceUpdate, PaymentSubscription, PaymentUpdate},
-        subscription_impl::SubscriptionImpl,
-        SubscriptionId,
-    },
+    store::subscription::{InvoiceUpdate, PaymentUpdate},
 };
 
 pub(crate) async fn start_pubsub_server<C: Send + Sync + 'static>(

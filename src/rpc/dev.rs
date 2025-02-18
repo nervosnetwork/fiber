@@ -30,53 +30,53 @@ use crate::{
 
 // TODO @quake remove this unnecessary pub(crate) struct and rpc after refactoring
 #[derive(Serialize, Deserialize, Debug)]
-pub(crate) struct CommitmentSignedParams {
+pub struct CommitmentSignedParams {
     /// The channel ID of the channel to send the commitment_signed message to
-    channel_id: Hash256,
+    pub channel_id: Hash256,
 }
 
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug)]
-pub(crate) struct AddTlcParams {
+pub struct AddTlcParams {
     /// The channel ID of the channel to add the TLC to
-    channel_id: Hash256,
+    pub channel_id: Hash256,
     /// The amount of the TLC
     #[serde_as(as = "U128Hex")]
-    amount: u128,
+    pub amount: u128,
     /// The payment hash of the TLC
-    payment_hash: Hash256,
+    pub payment_hash: Hash256,
     /// The expiry of the TLC
     #[serde_as(as = "U64Hex")]
-    expiry: u64,
+    pub expiry: u64,
     /// The hash algorithm of the TLC
-    hash_algorithm: Option<HashAlgorithm>,
+    pub hash_algorithm: Option<HashAlgorithm>,
 }
 
 #[serde_as]
-#[derive(Clone, Serialize)]
-pub(crate) struct AddTlcResult {
+#[derive(Clone, Serialize, Deserialize)]
+pub struct AddTlcResult {
     /// The ID of the TLC
     #[serde_as(as = "U64Hex")]
-    tlc_id: u64,
+    pub tlc_id: u64,
 }
 
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub(crate) struct RemoveTlcParams {
+pub struct RemoveTlcParams {
     /// The channel ID of the channel to remove the TLC from
-    channel_id: Hash256,
+    pub channel_id: Hash256,
     #[serde_as(as = "U64Hex")]
     /// The ID of the TLC to remove
-    tlc_id: u64,
+    pub tlc_id: u64,
     /// The reason for removing the TLC, either a 32-byte hash for preimage fulfillment or an u32 error code for removal
-    reason: RemoveTlcReason,
+    pub reason: RemoveTlcReason,
 }
 
 /// The reason for removing a TLC
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(untagged)]
-enum RemoveTlcReason {
+pub enum RemoveTlcReason {
     /// The reason for removing the TLC is that it was fulfilled
     RemoveTlcFulfill { payment_preimage: Hash256 },
     /// The reason for removing the TLC is that it failed
@@ -85,20 +85,20 @@ enum RemoveTlcReason {
 
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub(crate) struct SubmitCommitmentTransactionParams {
+pub struct SubmitCommitmentTransactionParams {
     /// Channel ID
-    channel_id: Hash256,
+    pub channel_id: Hash256,
     /// Commitment number
     #[serde_as(as = "U64Hex")]
-    commitment_number: u64,
+    pub commitment_number: u64,
 }
 
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug, Clone)]
 
-pub(crate) struct SubmitCommitmentTransactionResult {
+pub struct SubmitCommitmentTransactionResult {
     /// Submitted commitment transaction hash
-    tx_hash: Hash256,
+    pub tx_hash: Hash256,
 }
 
 /// RPC module for development purposes, this module is not intended to be used in production.

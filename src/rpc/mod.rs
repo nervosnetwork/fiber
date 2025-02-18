@@ -1,15 +1,15 @@
-mod cch;
-mod channel;
-mod config;
+pub mod cch;
+pub mod channel;
+pub mod config;
 #[cfg(debug_assertions)]
-mod dev;
-mod graph;
-mod info;
-mod invoice;
-mod payment;
-mod peer;
-mod pubsub;
-mod utils;
+pub mod dev;
+pub mod graph;
+pub mod info;
+pub mod invoice;
+pub mod payment;
+pub mod peer;
+pub mod pubsub;
+pub mod utils;
 
 use crate::cch::CchOrderStore;
 use crate::ckb::CkbConfig;

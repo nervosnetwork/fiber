@@ -24,25 +24,25 @@ use serde_with::{serde_as, DisplayFromStr};
 use thiserror::Error;
 
 #[derive(Serialize, Deserialize)]
-pub(crate) struct SendBtcParams {
+pub struct SendBtcParams {
     /// Bitcoin payment request string
-    btc_pay_req: String,
+    pub btc_pay_req: String,
     /// Request currency
-    currency: Currency,
+    pub currency: Currency,
 }
 
 #[serde_as]
 #[derive(Serialize, Deserialize)]
-pub(crate) struct ReceiveBtcParams {
+pub struct ReceiveBtcParams {
     /// Fiber payment request string
     pub fiber_pay_req: String,
 }
 
 #[derive(Serialize, Deserialize)]
-pub(crate) struct GetCchOrderParams {
+pub struct GetCchOrderParams {
     /// Payment hash for the HTLC for both CKB and BTC. If not provided, return all orders.
     /// TODO: Add support for pagination.
-    payment_hash: Option<Hash256>,
+    pub payment_hash: Option<Hash256>,
 }
 
 /// RPC module for cross chain hub demonstration.
