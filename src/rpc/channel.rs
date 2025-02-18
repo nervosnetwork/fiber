@@ -250,6 +250,20 @@ pub(crate) struct Channel {
     /// The time the channel was created at, in milliseconds from UNIX epoch
     #[serde_as(as = "U64Hex")]
     created_at: u64,
+    /// Whether the channel is enabled
+    enabled: bool,
+    /// The expiry delta to forward a tlc, in milliseconds, default to 1 day, which is 24 * 60 * 60 * 1000 milliseconds
+    /// This parameter can be updated with rpc `update_channel` later.
+    #[serde_as(as = "U64Hex")]
+    tlc_expiry_delta: u64,
+    /// The fee proportional millionths for a TLC, proportional to the amount of the forwarded tlc.
+    /// The unit is millionths of the amount. default is 1000 which means 0.1%.
+    /// This parameter can be updated with rpc `update_channel` later.
+    /// Not that, we use outbound channel to calculate the fee for TLC forwarding. For example,
+    /// if we have a path A -> B -> C, then the fee B requires for TLC forwarding, is calculated
+    /// the channel configuration of B and C, not A and B.
+    #[serde_as(as = "U128Hex")]
+    tlc_fee_proportional_millionths: u128,
 }
 
 #[serde_as]
@@ -427,6 +441,11 @@ where
                             .as_ref()
                             .map(|tx| tx.clone().into_view().hash().unpack()),
                         created_at: state.get_created_at_in_millis(),
+                        enabled: state.local_tlc_info.enabled,
+                        tlc_expiry_delta: state.local_tlc_info.tlc_expiry_delta,
+                        tlc_fee_proportional_millionths: state
+                            .local_tlc_info
+                            .tlc_fee_proportional_millionths,
                     })
             })
             .collect();
