@@ -379,14 +379,13 @@ impl CchActor {
             created_at: duration_since_epoch.as_secs(),
             ckb_final_tlc_expiry_delta: self.config.ckb_final_tlc_expiry_delta,
             btc_pay_req: send_btc.btc_pay_req,
-            fiber_payee_pubkey: self.pubkey,
             fiber_pay_req: Default::default(),
             payment_hash: format!("0x{}", invoice.payment_hash().encode_hex::<String>()),
             payment_preimage: None,
             amount_sats: amount_msat.div_ceil(1_000u128) + fee_sats,
             status: CchOrderStatus::Pending,
         };
-        order.generate_ckb_invoice()?;
+        order.generate_ckb_invoice(self.pubkey)?;
 
         let fiber_invoice = CkbInvoice::from_str(&order.fiber_pay_req).expect("parse invoice");
         let hash = *fiber_invoice.payment_hash();
