@@ -75,41 +75,25 @@ pub enum SubscriptionActorMessage {
 
 pub type SubscriptionId = u64;
 
-struct InvoiceSubscriber {
-    id: SubscriptionId,
-    receiver: DerivedActorRef<InvoiceUpdate>,
+struct Subscriber<T> {
+    receiver: DerivedActorRef<T>,
 }
 
-impl InvoiceSubscriber {
-    pub fn new(id: SubscriptionId, receiver: DerivedActorRef<InvoiceUpdate>) -> Self {
-        Self { id, receiver }
+impl<T> Subscriber<T> {
+    pub fn new(receiver: DerivedActorRef<T>) -> Self {
+        Self { receiver }
     }
 
-    pub fn send_update(&self, update: InvoiceUpdate) -> bool {
-        self.receiver.send_message(update).is_ok()
-    }
-}
-
-struct PaymentSubscriber {
-    id: SubscriptionId,
-    receiver: DerivedActorRef<PaymentUpdate>,
-}
-
-impl PaymentSubscriber {
-    pub fn new(id: SubscriptionId, receiver: DerivedActorRef<PaymentUpdate>) -> Self {
-        Self { id, receiver }
-    }
-
-    pub fn send_update(&self, update: PaymentUpdate) -> bool {
-        self.receiver.send_message(update).is_ok()
+    pub fn send_update(&self, update: T) -> Result<(), MessagingErr<T>> {
+        self.receiver.send_message(update)
     }
 }
 
 #[derive(Default)]
 pub struct SubscriptionActorState {
     next_subscriber_id: SubscriptionId,
-    invoice_subscriptions: HashMap<Hash256, Vec<InvoiceSubscriber>>,
-    payment_subscriptions: HashMap<Hash256, Vec<PaymentSubscriber>>,
+    invoice_subscriptions: HashMap<Hash256, HashMap<SubscriptionId, Subscriber<InvoiceUpdate>>>,
+    payment_subscriptions: HashMap<Hash256, HashMap<SubscriptionId, Subscriber<PaymentUpdate>>>,
 }
 
 impl SubscriptionActorState {
@@ -117,7 +101,7 @@ impl SubscriptionActorState {
         if let Entry::Occupied(mut entry) = self.invoice_subscriptions.entry(invoice_hash) {
             entry
                 .get_mut()
-                .retain(|subscription| subscription.send_update(update.clone()));
+                .retain(|_, subscription| subscription.send_update(update.clone()).is_ok());
             if entry.get().is_empty() {
                 entry.remove();
             }
@@ -128,7 +112,7 @@ impl SubscriptionActorState {
         if let Entry::Occupied(mut entry) = self.payment_subscriptions.entry(payment_hash) {
             entry
                 .get_mut()
-                .retain(|subscription| subscription.send_update(update.clone()));
+                .retain(|_, subscription| subscription.send_update(update.clone()).is_ok());
             if entry.get().is_empty() {
                 entry.remove();
             }
@@ -150,7 +134,7 @@ impl SubscriptionActorState {
         self.invoice_subscriptions
             .entry(invoice_hash)
             .or_default()
-            .push(InvoiceSubscriber::new(id, receiver));
+            .insert(id, Subscriber::new(receiver));
         id
     }
 
@@ -163,7 +147,7 @@ impl SubscriptionActorState {
         self.payment_subscriptions
             .entry(payment_hash)
             .or_default()
-            .push(PaymentSubscriber::new(id, receiver));
+            .insert(id, Subscriber::new(receiver));
         id
     }
 }
@@ -210,10 +194,8 @@ impl Actor for SubscriptionActor {
             }
             SubscriptionActorMessage::UnsubscribeInvoiceUpdates(subscription) => {
                 for subscribers in state.invoice_subscriptions.values_mut() {
-                    // TODO: maybe remember which hash the subscription is for to avoid iterating over all
-                    // the subscriptions
                     let old_num_subscribers = subscribers.len();
-                    subscribers.retain(|s| s.id != subscription);
+                    subscribers.retain(|id, _| *id != subscription);
                     if subscribers.len() != old_num_subscribers {
                         break;
                     }
@@ -223,11 +205,9 @@ impl Actor for SubscriptionActor {
                 let _ = reply.send(state.add_payment_subscriber(hash, receiver));
             }
             SubscriptionActorMessage::UnsubscribePaymentUpdates(subscription) => {
-                // TODO: maybe remember which hash the subscription is for to avoid iterating over all
-                // the subscriptions
                 for subscribers in state.payment_subscriptions.values_mut() {
                     let old_num_subscribers = subscribers.len();
-                    subscribers.retain(|s| s.id != subscription);
+                    subscribers.retain(|id, _| *id != subscription);
                     if subscribers.len() != old_num_subscribers {
                         break;
                     }
