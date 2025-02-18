@@ -217,7 +217,6 @@ async fn test_store_update_subscription_normal_payment() {
             max_fee_amount: None,
             max_parts: None,
             keysend: None,
-            hold_payment: false,
             udt_type_script: None,
             allow_self_payment: false,
             hop_hints: None,
@@ -359,18 +358,7 @@ async fn test_store_update_subscription_settlement_payment() {
         .send_payment(SendPaymentCommand {
             target_pubkey: Some(node_2_pubkey),
             amount: Some(100),
-            payment_hash: None,
-            final_tlc_expiry_delta: None,
-            tlc_expiry_limit: None,
             invoice: Some(ckb_invoice.to_string()),
-            timeout: None,
-            max_fee_amount: None,
-            max_parts: None,
-            keysend: None,
-            udt_type_script: None,
-            allow_self_payment: false,
-            hop_hints: None,
-            dry_run: false,
             ..Default::default()
         })
         .await;
@@ -570,18 +558,7 @@ async fn test_store_update_subscription_mock_cross_chain_payment() {
         .send_payment(SendPaymentCommand {
             target_pubkey: Some(node_1_pubkey),
             amount: Some(node_1_amount),
-            payment_hash: None,
-            final_tlc_expiry_delta: None,
-            tlc_expiry_limit: None,
             invoice: Some(node_1_ckb_invoice.to_string()),
-            timeout: None,
-            max_fee_amount: None,
-            max_parts: None,
-            keysend: None,
-            udt_type_script: None,
-            allow_self_payment: false,
-            hop_hints: None,
-            dry_run: false,
             ..Default::default()
         })
         .await;
@@ -649,18 +626,7 @@ async fn test_store_update_subscription_mock_cross_chain_payment() {
         .send_payment(SendPaymentCommand {
             target_pubkey: Some(node_2_pubkey),
             amount: Some(node_2_amount),
-            payment_hash: None,
-            final_tlc_expiry_delta: None,
-            tlc_expiry_limit: None,
             invoice: Some(node_2_ckb_invoice.to_string()),
-            timeout: None,
-            max_fee_amount: None,
-            max_parts: None,
-            keysend: None,
-            udt_type_script: None,
-            allow_self_payment: false,
-            hop_hints: None,
-            dry_run: false,
             ..Default::default()
         })
         .await;

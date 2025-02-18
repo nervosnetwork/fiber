@@ -52,12 +52,6 @@ struct HashAlgorithm {
     value: byte,
 }
 
-// 0 - is not hold invoice (Default)
-// 1 - is hold invoice
-struct IsHoldInvoice {
-    value: byte,
-}
-
 union InvoiceAttr {
     ExpiryTime,
     Description,
@@ -68,7 +62,6 @@ union InvoiceAttr {
     UdtScript,
     PayeePublicKey,
     HashAlgorithm,
-    IsHoldInvoice,
 }
 
 vector InvoiceAttrsVec <InvoiceAttr>;

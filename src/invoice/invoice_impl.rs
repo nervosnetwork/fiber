@@ -118,7 +118,6 @@ pub enum Attribute {
     UdtScript(CkbScript),
     PayeePublicKey(PublicKey),
     HashAlgorithm(HashAlgorithm),
-    IsHoldInvoice(bool),
     Feature(u64),
 }
 
@@ -325,7 +324,6 @@ impl CkbInvoice {
     );
     attr_getter!(fallback_address, FallbackAddr, String);
     attr_getter!(hash_algorithm, HashAlgorithm, HashAlgorithm);
-    attr_getter!(is_hold_invoice, IsHoldInvoice, bool);
 }
 
 /// Recoverable signature
@@ -515,11 +513,6 @@ impl From<Attribute> for InvoiceAttr {
                     .value(Byte::new(hash_algorithm as u8))
                     .build(),
             ),
-            Attribute::IsHoldInvoice(is_hold_invoice) => InvoiceAttrUnion::IsHoldInvoice(
-                gen_invoice::IsHoldInvoice::new_builder()
-                    .value(Byte::new(is_hold_invoice as u8))
-                    .build(),
-            ),
         };
         InvoiceAttr::new_builder().set(a).build()
     }
@@ -566,9 +559,6 @@ impl From<InvoiceAttr> for Attribute {
                 // Consider unknown algorithm as the default one.
                 let hash_algorithm = value.try_into().unwrap_or_default();
                 Attribute::HashAlgorithm(hash_algorithm)
-            }
-            InvoiceAttrUnion::IsHoldInvoice(x) => {
-                Attribute::IsHoldInvoice(u8::from(x.value()) != 0)
             }
         }
     }
@@ -645,7 +635,6 @@ impl InvoiceBuilder {
     attr_setter!(expiry_time, ExpiryTime, Duration);
     attr_setter!(fallback_address, FallbackAddr, String);
     attr_setter!(final_expiry_delta, FinalHtlcMinimumExpiryDelta, u64);
-    attr_setter!(hold_invoice, IsHoldInvoice, bool);
 
     pub fn build(self) -> Result<CkbInvoice, InvoiceError> {
         let preimage = self.payment_preimage;

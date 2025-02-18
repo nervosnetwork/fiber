@@ -91,11 +91,6 @@ pub(crate) struct SendPaymentCommandParams {
     /// keysend payment
     keysend: Option<bool>,
 
-    /// a hold_payment is a payment with the preimage set to an all zero hash
-    /// this is normally used to allow the recipient to hold the payment until he/she knows the preimage
-    /// default is false
-    hold_payment: Option<bool>,
-
     /// udt type script for the payment
     udt_type_script: Option<Script>,
 
@@ -190,7 +185,6 @@ where
                     max_fee_amount: params.max_fee_amount,
                     max_parts: params.max_parts,
                     keysend: params.keysend,
-                    hold_payment: params.hold_payment.unwrap_or(false),
                     udt_type_script: params.udt_type_script.clone().map(|s| s.into()),
                     allow_self_payment: params.allow_self_payment.unwrap_or(false),
                     hop_hints: params
