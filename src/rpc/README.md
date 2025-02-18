@@ -695,6 +695,15 @@ The channel data structure
 * `received_tlc_balance` - <em>u128</em>, The received balance of the channel
 * `latest_commitment_transaction_hash` - <em>`Option<H256>`</em>, The hash of the latest commitment transaction
 * `created_at` - <em>u64</em>, The time the channel was created at, in milliseconds from UNIX epoch
+* `enabled` - <em>bool</em>, Whether the channel is enabled
+* `tlc_expiry_delta` - <em>u64</em>, The expiry delta to forward a tlc, in milliseconds, default to 1 day, which is 24 * 60 * 60 * 1000 milliseconds
+ This parameter can be updated with rpc `update_channel` later.
+* `tlc_fee_proportional_millionths` - <em>u128</em>, The fee proportional millionths for a TLC, proportional to the amount of the forwarded tlc.
+ The unit is millionths of the amount. default is 1000 which means 0.1%.
+ This parameter can be updated with rpc `update_channel` later.
+ Not that, we use outbound channel to calculate the fee for TLC forwarding. For example,
+ if we have a path A -> B -> C, then the fee B requires for TLC forwarding, is calculated
+ the channel configuration of B and C, not A and B.
 ---
 
 <a id="#type-channelinfo"></a>
