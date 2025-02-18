@@ -861,16 +861,13 @@ where
         state: &mut ChannelActorState,
         hash: Hash256,
     ) {
-        let tlc_id = match state.get_received_tlc_with_hash(hash) {
-            Some(tlc) => tlc.tlc_id,
-            None => {
-                return;
+        if let Some(tlc) = state.get_received_tlc_with_hash(hash) {
+            let tlc_id = tlc.tlc_id;
+            // Only settle down this TLC if it is not already settled down.
+            if state.tlc_state.applied_add_tlcs.insert(tlc_id) {
+                self.try_to_settle_down_tlc(myself, state, tlc_id).await;
             }
         };
-        // Only settle down this TLC if it is not already settled down.
-        if state.tlc_state.applied_add_tlcs.insert(tlc_id) {
-            self.try_to_settle_down_tlc(myself, state, tlc_id).await;
-        }
     }
 
     async fn try_to_settle_down_tlc(

@@ -147,7 +147,7 @@ impl MockContext {
                     .unwrap_or_default();
                 UdtArgInfo {
                     name: format!("{:?}", contract),
-                    script: UdtScript::allow_all_for_script(script),
+                    script: allow_all_for_script(script),
                     auto_accept_amount: None,
                     cell_deps,
                 }
@@ -716,4 +716,11 @@ pub async fn get_tx_from_hash(
 pub fn create_deterministic_outpoint_from_seed<S: AsRef<[u8]>>(seed: S) -> OutPoint {
     let hash = ckb_hash::blake2b_256(seed.as_ref());
     OutPoint::new_builder().tx_hash(hash.pack()).build()
+}
+fn allow_all_for_script(script: &Script) -> UdtScript {
+    UdtScript {
+        code_hash: H256(script.code_hash().as_slice().try_into().expect("32 bytes")),
+        hash_type: script.hash_type().try_into().expect("valid hash type"),
+        args: "0x.*".to_string(),
+    }
 }
