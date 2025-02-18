@@ -607,19 +607,10 @@ impl NetworkNode {
         self.send_payment(SendPaymentCommand {
             target_pubkey: Some(recipient.pubkey),
             amount: Some(amount),
-            payment_hash: None,
-            final_tlc_expiry_delta: None,
-            tlc_expiry_limit: None,
-            invoice: None,
-            timeout: None,
-            max_fee_amount: None,
-            max_parts: None,
             keysend: Some(true),
-            udt_type_script: None,
             allow_self_payment: false,
             dry_run,
-            hop_hints: None,
-            custom_records: None,
+            ..Default::default()
         })
         .await
     }
@@ -633,19 +624,10 @@ impl NetworkNode {
         self.send_payment(SendPaymentCommand {
             target_pubkey: Some(pubkey),
             amount: Some(amount),
-            payment_hash: None,
-            final_tlc_expiry_delta: None,
-            tlc_expiry_limit: None,
-            invoice: None,
-            timeout: None,
-            max_fee_amount: None,
-            max_parts: None,
             keysend: Some(true),
-            udt_type_script: None,
             allow_self_payment: true,
             dry_run,
-            hop_hints: None,
-            custom_records: None,
+            ..Default::default()
         })
         .await
     }

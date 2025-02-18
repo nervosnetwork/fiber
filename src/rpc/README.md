@@ -43,6 +43,7 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
     * [Module Payment](#module-payment)
         * [Method `send_payment`](#payment-send_payment)
         * [Method `get_payment`](#payment-get_payment)
+        * [Method `build_router`](#payment-build_router)
     * [Module Peer](#module-peer)
         * [Method `connect_peer`](#peer-connect_peer)
         * [Method `disconnect_peer`](#peer-disconnect_peer)
@@ -57,8 +58,10 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
     * [Type `Hash256`](#type-hash256)
     * [Type `HashAlgorithm`](#type-hashalgorithm)
     * [Type `HopHint`](#type-hophint)
+    * [Type `HopRequire`](#type-hoprequire)
     * [Type `NodeInfo`](#type-nodeinfo)
     * [Type `PaymentCustomRecords`](#type-paymentcustomrecords)
+    * [Type `PaymentHopData`](#type-paymenthopdata)
     * [Type `PaymentSessionStatus`](#type-paymentsessionstatus)
     * [Type `Pubkey`](#type-pubkey)
     * [Type `RemoveTlcReason`](#type-removetlcreason)
@@ -574,7 +577,7 @@ Sends a payment to a peer.
 ##### Params
 
 * `target_pubkey` - <em>Option<[Pubkey](#type-pubkey)></em>, the identifier of the payment target
-* `amount` - <em>`Option<u128>`</em>, the amount of the payment
+* `amount` - <em>`Option<u128>`</em>, the amount of the payment, the unit is Shannons for non UDT payment
 * `payment_hash` - <em>Option<[Hash256](#type-hash256)></em>, the hash to use within the payment's HTLC
 * `final_tlc_expiry_delta` - <em>`Option<u64>`</em>, the TLC expiry delta should be used to set the timelock for the final hop, in milliseconds
 * `tlc_expiry_limit` - <em>`Option<u64>`</em>, the TLC expiry limit for the whole payment, in milliseconds, each hop is with a default tlc delta of 1 day
@@ -643,6 +646,33 @@ Retrieves a payment.
 * `fee` - <em>`u128`</em>, fee paid for the payment
 * `custom_records` - <em>Option<[PaymentCustomRecords](#type-paymentcustomrecords)></em>, The custom records to be included in the payment.
 * `router` - <em>[SessionRoute](#type-sessionroute)</em>, The route information for the payment
+
+---
+
+
+
+<a id="payment-build_router"></a>
+#### Method `build_router`
+
+Builds a router with a list of pubkeys and required channels.
+
+##### Params
+
+* `amount` - <em>`Option<u128>`</em>, the amount of the payment, the unit is Shannons for non UDT payment
+ If not set, the minimum routable amount is used
+* `udt_type_script` - <em>`Option<Script>`</em>, udt type script for the payment router
+* `hops_info` - <em>Vec<[HopRequire](#type-hoprequire)></em>, A list of hops that defines the route. This does not include the source hop pubkey.
+ A hop info is a tuple of pubkey and the channel(specified by channel funding tx) will be used.
+ This is a strong restriction given on payment router, which means these specified hops and channels
+ must be adapted in the router. This is different from hop hints, which maybe ignored by find path.
+ If channel is not specified, find path algorithm will pick a channel within these two peers.
+
+ An error will be returned if there is no router could be build from given hops and channels
+* `final_tlc_expiry_delta` - <em>`Option<u64>`</em>, the TLC expiry delta should be used to set the timelock for the final hop, in milliseconds
+
+##### Returns
+
+* `hops_info` - <em>Vec<[PaymentHopData](#type-paymenthopdata)></em>, TODO: add desc
 
 ---
 
@@ -838,9 +868,21 @@ A hop hint is a hint for a node to use a specific channel.
 #### Fields
 
 * `pubkey` - <em>Pubkey</em>, The public key of the node
-* `channel_outpoint` - <em>OutPoint</em>, The outpoint of the channel
+* `channel_outpoint` - <em>OutPoint</em>, The outpoint for the channel
 * `fee_rate` - <em>u64</em>, The fee rate to use this hop to forward the payment.
 * `tlc_expiry_delta` - <em>u64</em>, The TLC expiry delta to use this hop to forward the payment.
+---
+
+<a id="#type-hoprequire"></a>
+### Type `HopRequire`
+
+A hop requirement need to meet when building router
+
+
+#### Fields
+
+* `pubkey` - <em>Pubkey</em>, The public key of the node
+* `channel_outpoint` - <em>`Option<OutPoint>`</em>, The outpoint for the channel
 ---
 
 <a id="#type-nodeinfo"></a>
@@ -880,6 +922,23 @@ The custom records to be included in the payment.
 #### Fields
 
 * `data` - <em>`HashMap<`u32::Vec<u8>`>`</em>, The custom records to be included in the payment.
+---
+
+<a id="#type-paymenthopdata"></a>
+### Type `PaymentHopData`
+
+TODO: add desc
+
+
+#### Fields
+
+* `amount` - <em>u128</em>, TODO: add desc
+* `expiry` - <em>u64</em>, TODO: add desc
+* `payment_preimage` - <em>`Option<Hash256>`</em>, TODO: add desc
+* `hash_algorithm` - <em>HashAlgorithm</em>, TODO: add desc
+* `funding_tx_hash` - <em>Hash256</em>, TODO: add desc
+* `next_hop` - <em>`Option<Pubkey>`</em>, TODO: add desc
+* `custom_records` - <em>`Option<PaymentCustomRecords>`</em>, TODO: add desc
 ---
 
 <a id="#type-paymentsessionstatus"></a>

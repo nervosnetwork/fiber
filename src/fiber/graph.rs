@@ -1038,8 +1038,6 @@ where
         let mut edges_expanded = 0;
         let mut nodes_heap = NodeHeap::new(nodes_len);
         let mut distances = HashMap::<Pubkey, NodeHeapElement>::new();
-        let mut hop_reqs = hop_reqs.clone();
-        hop_reqs.reverse();
 
         if amount == 0 {
             return Err(PathFindError::Amount(
@@ -1057,6 +1055,8 @@ where
         let mut expiry = final_tlc_expiry_delta;
         let mut amount = amount;
         let mut last_edge = None;
+        let mut hop_reqs = hop_reqs.clone();
+        hop_reqs.reverse();
 
         if route_to_self {
             let (edge, new_target, e, f) = self.adjust_target_for_route_self(

@@ -1263,18 +1263,10 @@ fn test_graph_payment_self_default_is_false() {
         target_pubkey: Some(node0.into()),
         amount: Some(100),
         payment_hash: Some(Hash256::default()),
-        final_tlc_expiry_delta: None,
-        tlc_expiry_limit: None,
-        invoice: None,
         timeout: Some(10),
         max_fee_amount: Some(1000),
-        max_parts: None,
         keysend: Some(false),
-        udt_type_script: None,
-        allow_self_payment: false,
-        hop_hints: None,
-        dry_run: false,
-        custom_records: None,
+        ..Default::default()
     };
     let payment_data = SendPaymentData::new(command);
     assert!(payment_data.is_ok());
@@ -1299,18 +1291,11 @@ fn test_graph_payment_pay_single_path() {
         target_pubkey: Some(network.keys[6].into()),
         amount: Some(100),
         payment_hash: Some(Hash256::default()),
-        final_tlc_expiry_delta: None,
-        tlc_expiry_limit: None,
-        invoice: None,
         timeout: Some(10),
         max_fee_amount: Some(1000),
-        max_parts: None,
         keysend: Some(false),
-        udt_type_script: None,
         allow_self_payment: true,
-        hop_hints: None,
-        dry_run: false,
-        custom_records: None,
+        ..Default::default()
     };
     let payment_data = SendPaymentData::new(command);
     assert!(payment_data.is_ok());
@@ -1333,18 +1318,11 @@ fn test_graph_payment_pay_self_with_one_node() {
         target_pubkey: Some(network.keys[0].into()),
         amount: Some(100),
         payment_hash: Some(Hash256::default()),
-        final_tlc_expiry_delta: None,
-        tlc_expiry_limit: None,
-        invoice: None,
         timeout: Some(10),
         max_fee_amount: Some(1000),
-        max_parts: None,
         keysend: Some(false),
-        udt_type_script: None,
         allow_self_payment: true,
-        hop_hints: None,
-        dry_run: false,
-        custom_records: None,
+        ..Default::default()
     };
     let payment_data = SendPaymentData::new(command);
     assert!(payment_data.is_ok());
@@ -1369,18 +1347,11 @@ fn test_graph_payment_pay_self_with_one_node_fee_rate() {
         target_pubkey: Some(network.keys[0].into()),
         amount: Some(100),
         payment_hash: Some(Hash256::default()),
-        final_tlc_expiry_delta: None,
-        tlc_expiry_limit: None,
-        invoice: None,
         timeout: Some(10),
         max_fee_amount: Some(1000),
-        max_parts: None,
         keysend: Some(false),
-        udt_type_script: None,
         allow_self_payment: true,
-        hop_hints: None,
-        dry_run: false,
-        custom_records: None,
+        ..Default::default()
     };
     let payment_data = SendPaymentData::new(command);
     assert!(payment_data.is_ok());
@@ -1410,18 +1381,11 @@ fn test_graph_build_route_with_double_edge_node() {
         target_pubkey: Some(network.keys[0].into()),
         amount: Some(100),
         payment_hash: Some(Hash256::default()),
-        final_tlc_expiry_delta: None,
-        tlc_expiry_limit: None,
-        invoice: None,
         timeout: Some(10),
         max_fee_amount: Some(1000),
-        max_parts: None,
         keysend: Some(false),
-        udt_type_script: None,
         allow_self_payment: true,
-        hop_hints: None,
-        dry_run: false,
-        custom_records: None,
+        ..Default::default()
     };
     let payment_data = SendPaymentData::new(command).unwrap();
     let route = network.graph.build_route(payment_data);
@@ -1447,18 +1411,11 @@ fn test_graph_build_route_with_other_node_maybe_better() {
         target_pubkey: Some(network.keys[0].into()),
         amount: Some(100),
         payment_hash: Some(Hash256::default()),
-        final_tlc_expiry_delta: None,
-        tlc_expiry_limit: None,
-        invoice: None,
         timeout: Some(10),
         max_fee_amount: Some(1000),
-        max_parts: None,
         keysend: Some(false),
-        udt_type_script: None,
         allow_self_payment: true,
-        hop_hints: None,
-        dry_run: false,
-        custom_records: None,
+        ..Default::default()
     };
     let payment_data = SendPaymentData::new(command).unwrap();
     let route = network.graph.build_route(payment_data);
@@ -1482,18 +1439,11 @@ fn test_graph_payment_pay_self_will_ok() {
         target_pubkey: Some(network.keys[0].into()),
         amount: Some(100),
         payment_hash: Some(Hash256::default()),
-        final_tlc_expiry_delta: None,
-        tlc_expiry_limit: None,
-        invoice: None,
         timeout: Some(10),
         max_fee_amount: Some(1000),
-        max_parts: None,
         keysend: Some(false),
-        udt_type_script: None,
         allow_self_payment: true,
-        hop_hints: None,
-        dry_run: false,
-        custom_records: None,
+        ..Default::default()
     };
     let payment_data = SendPaymentData::new(command);
     assert!(payment_data.is_ok());
@@ -1545,18 +1495,11 @@ fn test_graph_build_route_with_path_limits() {
         target_pubkey: Some(node99.into()),
         amount: Some(100),
         payment_hash: Some(Hash256::default()),
-        final_tlc_expiry_delta: None,
-        tlc_expiry_limit: None,
-        invoice: None,
         timeout: Some(10),
         max_fee_amount: Some(10000000),
-        max_parts: None,
         keysend: Some(false),
-        udt_type_script: None,
         allow_self_payment: true,
-        hop_hints: None,
-        dry_run: false,
-        custom_records: None,
+        ..Default::default()
     };
     let payment_data = SendPaymentData::new(command).unwrap();
     let route = network.graph.build_route(payment_data);
@@ -1596,18 +1539,11 @@ fn test_graph_build_route_with_path_limit_fail_with_fee_not_enough() {
         target_pubkey: Some(node99.into()),
         amount: Some(100),
         payment_hash: Some(Hash256::default()),
-        final_tlc_expiry_delta: None,
-        tlc_expiry_limit: None,
-        invoice: None,
         timeout: Some(10),
         max_fee_amount: Some(1000),
-        max_parts: None,
         keysend: Some(false),
-        udt_type_script: None,
         allow_self_payment: true,
-        hop_hints: None,
-        dry_run: false,
-        custom_records: None,
+        ..Default::default()
     };
     let payment_data = SendPaymentData::new(command).unwrap();
     let route = network.graph.build_route(payment_data);
@@ -1627,18 +1563,10 @@ fn test_graph_payment_expiry_is_in_right_order() {
         target_pubkey: Some(node3.into()),
         amount: Some(100),
         payment_hash: Some(Hash256::default()),
-        final_tlc_expiry_delta: None,
-        tlc_expiry_limit: None,
-        invoice: None,
         timeout: Some(10),
         max_fee_amount: Some(1000),
-        max_parts: None,
         keysend: Some(false),
-        udt_type_script: None,
-        allow_self_payment: false,
-        hop_hints: None,
-        dry_run: false,
-        custom_records: None,
+        ..Default::default()
     };
     let payment_data = SendPaymentData::new(command);
     assert!(payment_data.is_ok());
@@ -1660,17 +1588,10 @@ fn test_graph_payment_expiry_is_in_right_order() {
         amount: Some(100),
         payment_hash: Some(Hash256::default()),
         final_tlc_expiry_delta: Some(final_tlc_expiry_delta),
-        tlc_expiry_limit: None,
-        invoice: None,
         timeout: Some(10),
         max_fee_amount: Some(1000),
-        max_parts: None,
         keysend: Some(false),
-        udt_type_script: None,
-        allow_self_payment: false,
-        hop_hints: None,
-        dry_run: false,
-        custom_records: None,
+        ..Default::default()
     };
     let payment_data = SendPaymentData::new(command);
     assert!(payment_data.is_ok());
