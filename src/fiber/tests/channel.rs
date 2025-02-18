@@ -6256,6 +6256,7 @@ async fn test_send_payment_succeed_with_hold_invoice_settled_direct_payment() {
 
     node_1
         .settle_invoice(ckb_invoice.payment_hash(), &preimage)
+        .await
         .expect("settle invoice success");
 
     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
@@ -6328,6 +6329,7 @@ async fn test_send_payment_succeed_with_hold_invoice_settled_indirect_payment() 
 
     node_2
         .settle_invoice(ckb_invoice.payment_hash(), &preimage)
+        .await
         .expect("settle invoice success");
 
     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
@@ -6402,6 +6404,7 @@ async fn test_send_payment_succeed_settle_hold_invoice_multiple_times() {
     for _i in 0..100 {
         node_2
             .settle_invoice(ckb_invoice.payment_hash(), &preimage)
+            .await
             .expect("settle invoice success");
     }
 
@@ -6483,6 +6486,7 @@ async fn test_send_payment_succeed_settle_hold_invoice_when_sender_offline() {
     source_node.stop().await;
     node_2
         .settle_invoice(ckb_invoice.payment_hash(), &preimage)
+        .await
         .expect("settle invoice success");
     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
     source_node.start().await;
@@ -6559,6 +6563,7 @@ async fn test_send_payment_succeed_settle_hold_invoice_when_forwarder_offline() 
     node_1.stop().await;
     node_2
         .settle_invoice(ckb_invoice.payment_hash(), &preimage)
+        .await
         .expect("settle invoice success");
     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
     node_1.start().await;
@@ -6609,6 +6614,7 @@ async fn test_send_payment_succeed_settle_invoice_before_send_payment() {
     node_2.insert_invoice(ckb_invoice.clone(), None);
     node_2
         .settle_invoice(ckb_invoice.payment_hash(), &preimage)
+        .await
         .expect("settle invoice success");
 
     let res = source_node
@@ -6667,7 +6673,9 @@ async fn test_send_payment_succeed_settle_invoice_with_wrong_then_right_hash() {
         .expect("build invoice success");
 
     node_2.insert_invoice(ckb_invoice.clone(), None);
-    let result = node_2.settle_invoice(ckb_invoice.payment_hash(), &bogus_preimage);
+    let result = node_2
+        .settle_invoice(ckb_invoice.payment_hash(), &bogus_preimage)
+        .await;
     assert!(result.is_err(), "settle with wrong preimage should fail");
 
     let res = source_node
@@ -6696,6 +6704,7 @@ async fn test_send_payment_succeed_settle_invoice_with_wrong_then_right_hash() {
 
     node_2
         .settle_invoice(ckb_invoice.payment_hash(), &preimage)
+        .await
         .expect("settle invoice success");
 
     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;

@@ -2,21 +2,22 @@ use crate::fiber::config::MIN_TLC_EXPIRY_DELTA;
 use crate::fiber::hash_algorithm::HashAlgorithm;
 use crate::fiber::serde_utils::{U128Hex, U64Hex};
 use crate::fiber::types::{Hash256, Privkey};
-use crate::fiber::NetworkActorMessage;
+use crate::fiber::{NetworkActorCommand, NetworkActorMessage};
 use crate::invoice::{
-    add_invoice, settle_invoice, CkbInvoice, CkbInvoiceStatus, Currency, InvoiceBuilder,
-    InvoiceStore,
+    add_invoice, CkbInvoice, CkbInvoiceStatus, Currency, InvoiceBuilder, InvoiceStore,
 };
 use crate::FiberConfig;
 use ckb_jsonrpc_types::Script;
 use jsonrpsee::types::error::CALL_EXECUTION_FAILED_CODE;
 use jsonrpsee::{core::async_trait, proc_macros::rpc, types::ErrorObjectOwned};
-use ractor::ActorRef;
+use ractor::{call_t, ActorRef};
 use secp256k1::{PublicKey, Secp256k1, SecretKey};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use std::time::Duration;
 use tentacle::secio::SecioKeyPair;
+
+const RPC_TIMEOUT_MS: u64 = 3000;
 
 /// The parameter struct for generating a new invoice.
 #[serde_as]
@@ -363,16 +364,32 @@ where
         &self,
         params: SettleInvoiceParams,
     ) -> Result<SettleInvoiceResult, ErrorObjectOwned> {
+        let network_actor = self.network_actor.as_ref().ok_or(ErrorObjectOwned::owned(
+            CALL_EXECUTION_FAILED_CODE,
+            "network actor not initialized".to_string(),
+            Option::<()>::None,
+        ))?;
+
         let SettleInvoiceParams {
             ref payment_hash,
             ref payment_preimage,
         } = params;
-        match settle_invoice(
-            &self.store,
-            self.network_actor.as_ref(),
-            payment_hash,
-            payment_preimage,
-        ) {
+
+        let message = move |rpc_reply| -> NetworkActorMessage {
+            NetworkActorMessage::Command(NetworkActorCommand::SettleInvoice(
+                *payment_hash,
+                *payment_preimage,
+                rpc_reply,
+            ))
+        };
+
+        match call_t!(network_actor, message, RPC_TIMEOUT_MS).map_err(|ractor_error| {
+            ErrorObjectOwned::owned(
+                CALL_EXECUTION_FAILED_CODE,
+                ractor_error.to_string(),
+                Option::<()>::None,
+            )
+        })? {
             Ok(_) => Ok(SettleInvoiceResult {}),
             Err(e) => Err(ErrorObjectOwned::owned(
                 CALL_EXECUTION_FAILED_CODE,

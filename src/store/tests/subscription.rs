@@ -433,6 +433,7 @@ async fn test_store_update_subscription_settlement_payment() {
 
     node_2
         .settle_invoice(ckb_invoice.payment_hash(), &preimage)
+        .await
         .expect("settle invoice success");
 
     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
@@ -701,6 +702,7 @@ async fn test_store_update_subscription_mock_cross_chain_payment() {
     // Node 1 can now settle the invoice.
     node_1
         .settle_invoice(&hash, &preimage)
+        .await
         .expect("settle invoice success");
 
     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;

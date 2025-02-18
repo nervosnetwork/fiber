@@ -14,7 +14,6 @@ use crate::fiber::network::SendPaymentCommand;
 use crate::fiber::network::SendPaymentResponse;
 use crate::fiber::types::EcdsaSignature;
 use crate::fiber::types::Pubkey;
-use crate::invoice::settle_invoice;
 use crate::invoice::CkbInvoice;
 use crate::invoice::CkbInvoiceStatus;
 use crate::invoice::InvoiceStore;
@@ -749,17 +748,19 @@ impl NetworkNode {
     }
 
     #[allow(private_interfaces)]
-    pub fn settle_invoice(
+    pub async fn settle_invoice(
         &self,
         payment_hash: &Hash256,
         preimage: &Hash256,
     ) -> Result<(), SettleInvoiceError> {
-        settle_invoice(
-            self.get_store(),
-            Some(&self.network_actor),
-            payment_hash,
-            preimage,
-        )
+        let message = move |rpc_reply| -> NetworkActorMessage {
+            NetworkActorMessage::Command(NetworkActorCommand::SettleInvoice(
+                *payment_hash,
+                *preimage,
+                rpc_reply,
+            ))
+        };
+        call!(&self.network_actor, message).expect("call network actor")
     }
 
     pub async fn send_payment(

@@ -84,7 +84,7 @@ use crate::fiber::types::{
 };
 use crate::fiber::KeyPair;
 use crate::invoice::{
-    add_invoice, settle_invoice, CkbInvoice, InvoiceError, InvoiceStore, SettleInvoiceError,
+    add_invoice, CkbInvoice, CkbInvoiceStatus, InvoiceError, InvoiceStore, SettleInvoiceError,
 };
 use crate::{now_timestamp_as_millis_u64, unwrap_or_return, Error};
 
@@ -1417,12 +1417,67 @@ where
                 let _ = rpc.send(Ok(response));
             }
             NetworkActorCommand::SettleInvoice(hash, preimage, reply) => {
-                let _ = reply.send(settle_invoice(&self.store, Some(&myself), &hash, &preimage));
+                let _ = reply.send(self.settle_invoice(&myself, &hash, &preimage));
             }
             NetworkActorCommand::AddInvoice(invoice, preimage, reply) => {
                 let _ = reply.send(add_invoice(&self.store, invoice, preimage));
             }
         };
+        Ok(())
+    }
+
+    pub(crate) fn settle_invoice(
+        &self,
+        myself: &ActorRef<NetworkActorMessage>,
+        payment_hash: &Hash256,
+        payment_preimage: &Hash256,
+    ) -> Result<(), SettleInvoiceError> {
+        let invoice = self
+            .store
+            .get_invoice(payment_hash)
+            .ok_or(SettleInvoiceError::InvoiceNotFound)?;
+
+        let hash_algorithm = invoice.hash_algorithm().copied().unwrap_or_default();
+        let hash = hash_algorithm.hash(payment_preimage);
+        if hash.as_slice() != payment_hash.as_ref() {
+            return Err(SettleInvoiceError::HashMismatch);
+        }
+
+        match self
+            .store
+            .insert_payment_preimage(*payment_hash, *payment_preimage)
+        {
+            Ok(_) => {}
+            Err(e) => {
+                return Err(SettleInvoiceError::InternalError(format!(
+                    "Failed to save payment preimage: {:?}",
+                    e
+                )));
+            }
+        }
+
+        // We will send network actor a message to settle the invoice immediately if possible.
+        if let Some(CkbInvoiceStatus::Received) = self.store.get_invoice_status(payment_hash) {
+            let channels = self.store.get_invoice_channel_info(payment_hash);
+            let total_amount: u128 = channels.iter().map(|c| c.amount).sum();
+            match invoice.amount() {
+                Some(amount) if total_amount < amount => {
+                    return Ok(());
+                }
+                _ => {
+                    // Only settle the invoice if the client has paid the full amount.
+                    for channel in channels {
+                        let _ = myself.send_message(NetworkActorMessage::new_command(
+                            NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
+                                channel_id: channel.channel_id,
+                                command: ChannelCommand::SettleHeldTlc(*payment_hash),
+                            }),
+                        ));
+                    }
+                }
+            }
+        }
+
         Ok(())
     }
 
