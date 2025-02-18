@@ -1,21 +1,27 @@
 use anyhow::anyhow;
 use ckb_jsonrpc_types::TxStatus;
-use ckb_testtool::context::Context;
+use ckb_testtool::{ckb_hash, context::Context};
 use ckb_types::{
     bytes::Bytes,
-    core::{DepType, TransactionView},
-    packed::{CellDep, CellOutput, OutPoint, Script, Transaction},
-    prelude::{Builder, Entity, IntoTransactionView, Pack, PackVec, Unpack},
+    core::{Capacity, DepType, TransactionView},
+    packed::{CellDep, CellInput, CellOutput, OutPoint, Script, Transaction},
+    prelude::{Builder, Entity, IntoTransactionView, Pack, Unpack},
     H256,
 };
 use once_cell::sync::{Lazy, OnceCell};
-use std::{collections::HashMap, sync::Arc, sync::RwLock};
-use tokio::sync::RwLock as TokioRwLock;
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
+use tokio::sync::RwLock;
 
 use crate::{
     ckb::{
-        config::UdtCfgInfos,
-        contracts::{Contract, ContractsContext, ContractsInfo},
+        config::{UdtArgInfo, UdtCellDep, UdtCfgInfos, UdtScript},
+        contracts::{
+            get_cell_deps_by_contracts, get_script_by_contract, get_udt_cell_deps, Contract,
+            ContractsContext, ContractsInfo,
+        },
         TraceTxRequest, TraceTxResponse,
     },
     now_timestamp_as_millis_u64,
@@ -46,10 +52,10 @@ pub enum CellStatus {
     Consumed,
 }
 
-pub static MOCK_CONTEXT: Lazy<RwLock<MockContext>> = Lazy::new(|| RwLock::new(MockContext::new()));
+pub static MOCK_CONTEXT: Lazy<MockContext> = Lazy::new(MockContext::new);
 
 pub struct MockContext {
-    pub context: Context,
+    pub context: RwLock<Context>,
     pub contracts_context: ContractsContext,
 }
 
@@ -89,6 +95,12 @@ impl MockContext {
                 Contract::SimpleUDT,
                 Bytes::from_static(include_bytes!("../../../tests/deploy/contracts/simple_udt")),
             ),
+            (
+                Contract::AlwaysSuccess,
+                Bytes::from_static(include_bytes!(
+                    "../../../tests/deploy/contracts/always_success"
+                )),
+            ),
         ];
         let mut context = Context::new_with_deterministic_rng();
         let mut contract_default_scripts: HashMap<Contract, Script> = HashMap::new();
@@ -125,14 +137,30 @@ impl MockContext {
             script_cell_deps.insert(contract, cell_deps);
         }
 
+        let udt_whitelist = [Contract::SimpleUDT, Contract::AlwaysSuccess]
+            .into_iter()
+            .map(|contract| {
+                let script = contract_default_scripts.get(&contract).unwrap();
+                let cell_deps: Vec<UdtCellDep> = script_cell_deps
+                    .get(&contract)
+                    .map(|x| x.iter().map(Into::into).collect())
+                    .unwrap_or_default();
+                UdtArgInfo {
+                    name: format!("{:?}", contract),
+                    script: allow_all_for_script(script),
+                    auto_accept_amount: None,
+                    cell_deps,
+                }
+            })
+            .collect();
         let contracts = ContractsInfo {
             contract_default_scripts,
             script_cell_deps,
-            udt_whitelist: UdtCfgInfos::default(),
+            udt_whitelist: UdtCfgInfos(udt_whitelist),
         };
         let contracts_context = ContractsContext { contracts };
         MockContext {
-            context,
+            context: RwLock::new(context),
             contracts_context,
         }
     }
@@ -318,70 +346,162 @@ impl Actor for MockChainActor {
     ) -> Result<(), ActorProcessingErr> {
         use CkbChainMessage::*;
         match message {
-            Fund(tx, request, reply_port) => {
-                let mut fulfilled_tx = tx.clone();
-                let outputs = fulfilled_tx
+            Fund(mut tx, request, reply_port) => {
+                // We only know how to build the funding transaction for SimpleUDT and AlwaysSuccess.
+                let contract = request.udt_type_script.as_ref().map(|script| {
+                    let supported_contracts = [Contract::SimpleUDT, Contract::AlwaysSuccess];
+                    let current_args: Vec<u8> = script.args().unpack();
+                    supported_contracts
+                        .into_iter()
+                        .find(|contract| {
+                            script == &get_script_by_contract(*contract, current_args.as_slice())
+                        })
+                        .expect("Script should be one of the supported contracts")
+                });
+
+                let is_udt = request.udt_type_script.is_some();
+
+                let (first_output, first_output_data) = match tx
                     .as_ref()
-                    .map(|x| x.outputs())
-                    .unwrap_or_default();
-                let outputs = match outputs.get(0) {
-                    Some(output) => {
+                    .and_then(|x| x.output_with_data(0))
+                {
+                    Some((output, output_data)) => {
                         if output.lock() != request.script {
                             error!(
-                                    "funding request script ({:?}) does not match the first output lock script ({:?})", request.script, output.lock()
-                                );
+                                "funding request script ({:?}) does not match the first output lock script ({:?})", request.script, output.lock()
+                            );
                             return Ok(());
                         }
-                        let current_capacity: u64 = output.capacity().unpack();
-                        let capacity = request.local_amount as u64
-                            + request.local_reserved_ckb_amount
-                            + current_capacity;
-                        let mut outputs_builder = outputs.as_builder();
-
-                        outputs_builder
-                            .replace(0, output.as_builder().capacity(capacity.pack()).build());
-                        outputs_builder.build()
+                        if output.type_() != request.udt_type_script.pack() {
+                            error!(
+                                "funding request udt type script ({:?}) does not match the first output type script ({:?})", request.udt_type_script, output.type_()
+                            );
+                            return Ok(());
+                        }
+                        if is_udt && output_data.len() < 16 {
+                            error!(
+                                "funding request output data is too short: {:?}, expected at least 16 bytes", output_data
+                            );
+                            return Ok(());
+                        }
+                        (output, output_data)
                     }
-                    None => [CellOutput::new_builder()
-                        .capacity(
-                            (request.local_amount as u64 + request.local_reserved_ckb_amount)
-                                .pack(),
-                        )
-                        .lock(request.script.clone())
-                        .build()]
-                    .pack(),
-                };
-
-                let outputs_data = fulfilled_tx
-                    .as_ref()
-                    .map(|x| x.outputs_data())
-                    .unwrap_or_default();
-                let outputs_data = if outputs_data.is_empty() {
-                    [Default::default()].pack()
-                } else {
-                    outputs_data
-                };
-
-                let tx_builder = fulfilled_tx
-                    .take()
-                    .map(|x| x.as_advanced_builder())
-                    .unwrap_or_default();
-
-                fulfilled_tx
-                    .update_for_self(
-                        tx_builder
-                            .set_outputs(outputs.into_iter().collect())
-                            .set_outputs_data(outputs_data.into_iter().collect())
+                    // Create a dummy output and output_data so that we can "update" existing output and output_data.
+                    _ => (
+                        CellOutput::new_builder()
+                            .capacity(Capacity::shannons(0).pack())
+                            .lock(request.script.clone())
+                            .type_(request.udt_type_script.clone().pack())
                             .build(),
+                        if is_udt {
+                            [0u8; 16].to_vec().into()
+                        } else {
+                            Default::default()
+                        },
+                    ),
+                };
+
+                let (output, output_data) = if is_udt {
+                    let mut data = [0u8; 16];
+                    data.copy_from_slice(&first_output_data.as_ref()[..16]);
+                    let udt_amount = request.local_amount + u128::from_le_bytes(data);
+                    let current_capacity: u64 = first_output.capacity().unpack();
+                    let ckb_amount = request.local_reserved_ckb_amount + current_capacity;
+                    (
+                        first_output
+                            .as_builder()
+                            .capacity(ckb_amount.pack())
+                            .build(),
+                        udt_amount.to_le_bytes().pack(),
                     )
-                    .expect("update tx");
+                } else {
+                    let current_capacity: u64 = first_output.capacity().unpack();
+                    let ckb_amount = request.local_amount as u64
+                        + request.local_reserved_ckb_amount
+                        + current_capacity;
+                    (
+                        first_output
+                            .as_builder()
+                            .capacity(ckb_amount.pack())
+                            .build(),
+                        first_output_data.pack(),
+                    )
+                };
+
+                let outputs = tx.as_ref().map(|x| x.outputs()).unwrap_or_default();
+                let outputs = if outputs.is_empty() {
+                    outputs.as_builder().push(output).build()
+                } else {
+                    let mut builder = outputs.as_builder();
+                    builder.replace(0, output);
+                    builder.build()
+                };
+
+                let outputs_data = tx.as_ref().map(|x| x.outputs_data()).unwrap_or_default();
+                let outputs_data = if outputs_data.is_empty() {
+                    outputs_data.as_builder().push(output_data).build()
+                } else {
+                    let mut builder = outputs_data.as_builder();
+                    builder.replace(0, output_data);
+                    builder.build()
+                };
+
+                let cell_deps = [
+                    tx.as_ref().map(|x| x.cell_deps()).unwrap_or_default(),
+                    request
+                        .udt_type_script
+                        .as_ref()
+                        .and_then(get_udt_cell_deps)
+                        .unwrap_or_default(),
+                    // AlwaysSuccess is needed to unlock the input cells
+                    get_cell_deps_by_contracts(vec![Contract::AlwaysSuccess]),
+                ]
+                .into_iter()
+                .flatten()
+                .collect::<HashSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>();
+
+                let new_tx = tx
+                    .as_ref()
+                    .map(|x| x.as_advanced_builder())
+                    .unwrap_or_default()
+                    .set_cell_deps(cell_deps)
+                    .set_outputs(outputs.into_iter().collect())
+                    .set_outputs_data(outputs_data.into_iter().collect())
+                    .build();
+
+                let new_tx = match contract {
+                    Some(Contract::SimpleUDT) if new_tx.inputs().is_empty() => {
+                        let context = &mut MOCK_CONTEXT.context.write().await;
+                        let outpoint =
+                            create_deterministic_outpoint_from_seed(new_tx.hash().as_slice());
+                        context.create_cell_with_out_point(
+                            outpoint.clone(),
+                            CellOutput::new_builder()
+                                .lock(get_script_by_contract(Contract::AlwaysSuccess, &[]))
+                                .type_(request.udt_type_script.clone().pack())
+                                .build(),
+                            u128::MAX.to_le_bytes().to_vec().into(),
+                        );
+                        new_tx
+                            .as_advanced_builder()
+                            .set_inputs(vec![CellInput::new_builder()
+                                .previous_output(outpoint)
+                                .build()])
+                            .build()
+                    }
+                    _ => new_tx,
+                };
 
                 debug!(
                     "Fulfilling funding request: request: {:?}, original tx: {:?}, fulfilled tx: {:?}",
-                    request, &tx, &fulfilled_tx
+                    request, &tx, &new_tx
                 );
 
-                if let Err(e) = reply_port.send(Ok(fulfilled_tx)) {
+                tx.update_for_self(new_tx).expect("update tx");
+
+                if let Err(e) = reply_port.send(Ok(tx)) {
                     error!(
                         "[{}] send reply failed: {:?}",
                         myself.get_name().unwrap_or_default(),
@@ -409,58 +529,57 @@ impl Actor for MockChainActor {
             }
             SendTx(tx, reply_port) => {
                 const MAX_CYCLES: u64 = 100_000_000;
-                let mut f = || {
-                    // Mark the inputs as consumed
-                    for input in tx.input_pts_iter() {
-                        match state.cell_status.entry(input.clone()) {
-                            std::collections::hash_map::Entry::Occupied(mut entry) => {
-                                if *entry.get() == CellStatus::Consumed {
-                                    return (
-                                        ckb_jsonrpc_types::Status::Rejected,
-                                        Err(ckb_sdk::RpcError::Other(anyhow!(
-                                            "Cell {:?} already consumed",
-                                            &input
-                                        ))),
-                                    );
-                                }
-                                *entry.get_mut() = CellStatus::Consumed;
-                            }
-                            std::collections::hash_map::Entry::Vacant(entry) => {
-                                debug!("Consuming cell {:?}", &input);
-                                entry.insert(CellStatus::Consumed);
-                            }
-                        }
-                    }
-                    let context = &mut MOCK_CONTEXT.write().unwrap().context;
-                    match context.verify_tx(&tx, MAX_CYCLES) {
-                        Ok(c) => {
-                            debug!("Verified transaction: {:?} with {} CPU cycles", tx, c);
-                            // Also save the outputs to the context, so that we can refer to
-                            // these out points later.
-                            for outpoint in tx.output_pts().into_iter() {
-                                let index: u32 = outpoint.index().unpack();
-                                let index = index as usize;
-                                let cell = tx.outputs().get(index).unwrap();
-                                let data = tx.outputs_data().get(index).unwrap();
-                                context.create_cell_with_out_point(
-                                    outpoint.clone(),
-                                    cell,
-                                    data.as_bytes(),
-                                );
-                            }
-                            (ckb_jsonrpc_types::Status::Committed, Ok(()))
-                        }
-                        Err(e) => (
+                let (status, result) = {
+                    match tx.input_pts_iter().find(|input| {
+                        state
+                            .cell_status
+                            .get(input)
+                            .map_or(false, |status| *status == CellStatus::Consumed)
+                    }) {
+                        Some(input) => (
                             ckb_jsonrpc_types::Status::Rejected,
                             Err(ckb_sdk::RpcError::Other(anyhow!(
-                                "Failed to verify transaction: {:?}, error: {:?}",
-                                tx,
-                                e
+                                "Transaction {:?} contains consumed input {:?}",
+                                &tx,
+                                &input
                             ))),
                         ),
+                        None => {
+                            // Mark the inputs as consumed
+                            for input in tx.input_pts_iter() {
+                                state.cell_status.insert(input, CellStatus::Consumed);
+                            }
+                            let verify_context = &mut MOCK_CONTEXT.context.write().await;
+                            match verify_context.verify_tx(&tx, MAX_CYCLES) {
+                                Ok(c) => {
+                                    debug!("Verified transaction: {:?} with {} CPU cycles", tx, c);
+                                    // Also save the outputs to the context, so that we can refer to
+                                    // these out points later.
+                                    for outpoint in tx.output_pts().into_iter() {
+                                        let index: u32 = outpoint.index().unpack();
+                                        let index = index as usize;
+                                        let cell = tx.outputs().get(index).unwrap();
+                                        let data = tx.outputs_data().get(index).unwrap();
+                                        verify_context.create_cell_with_out_point(
+                                            outpoint.clone(),
+                                            cell,
+                                            data.as_bytes(),
+                                        );
+                                    }
+                                    (ckb_jsonrpc_types::Status::Committed, Ok(()))
+                                }
+                                Err(e) => (
+                                    ckb_jsonrpc_types::Status::Rejected,
+                                    Err(ckb_sdk::RpcError::Other(anyhow!(
+                                        "Failed to verify transaction: {:?}, error: {:?}",
+                                        tx,
+                                        e
+                                    ))),
+                                ),
+                            }
+                        }
                     }
                 };
-                let (status, result) = f();
                 debug!(
                     "Transaction verfication result: tx {:?}, status: {:?}",
                     &tx, &status
@@ -507,8 +626,8 @@ impl Actor for MockChainActor {
                 // cause an infinite loop.
                 // So here we create an static lock which is shared across all nodes, and we use this lock to
                 // guarantee that the block timestamp is the same across all nodes.
-                static BLOCK_TIMESTAMP: OnceCell<TokioRwLock<HashMap<H256, u64>>> = OnceCell::new();
-                BLOCK_TIMESTAMP.get_or_init(|| TokioRwLock::new(HashMap::new()));
+                static BLOCK_TIMESTAMP: OnceCell<RwLock<HashMap<H256, u64>>> = OnceCell::new();
+                BLOCK_TIMESTAMP.get_or_init(|| RwLock::new(HashMap::new()));
                 let timestamp = *BLOCK_TIMESTAMP
                     .get()
                     .unwrap()
@@ -592,4 +711,16 @@ pub async fn get_tx_from_hash(
     .tx
     .map(|tx| Transaction::from(tx.inner).into_view())
     .ok_or(anyhow!("tx not found in trace tx response"))
+}
+
+pub fn create_deterministic_outpoint_from_seed<S: AsRef<[u8]>>(seed: S) -> OutPoint {
+    let hash = ckb_hash::blake2b_256(seed.as_ref());
+    OutPoint::new_builder().tx_hash(hash.pack()).build()
+}
+fn allow_all_for_script(script: &Script) -> UdtScript {
+    UdtScript {
+        code_hash: H256(script.code_hash().as_slice().try_into().expect("32 bytes")),
+        hash_type: script.hash_type().try_into().expect("valid hash type"),
+        args: "0x.*".to_string(),
+    }
 }

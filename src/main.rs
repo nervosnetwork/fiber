@@ -2,10 +2,10 @@ use ckb_chain_spec::ChainSpec;
 use ckb_resource::Resource;
 use core::default::Default;
 use fnn::actors::RootActor;
-use fnn::cch::CchMessage;
 use fnn::ckb::{contracts::try_init_contracts_context, CkbChainActor};
-use fnn::fiber::{channel::ChannelSubscribers, graph::NetworkGraph, network::init_chain_hash};
-use fnn::store::Store;
+use fnn::fiber::types::Pubkey;
+use fnn::fiber::{graph::NetworkGraph, network::init_chain_hash};
+use fnn::store::store::StoreWithHooks;
 use fnn::tasks::{
     cancel_tasks_and_wait_for_completion, new_tokio_cancellation_token, new_tokio_task_tracker,
 };
@@ -67,12 +67,13 @@ pub async fn main() -> Result<(), ExitMessage> {
         .ok_or_else(|| ExitMessage("fiber config is required but absent".to_string()))?
         .store_path();
 
-    let store = Store::new(store_path).map_err(|err| ExitMessage(err.to_string()))?;
+    let (store, store_update_subscription) = StoreWithHooks::new(store_path)
+        .await
+        .map_err(|err| ExitMessage(err.to_string()))?;
 
     let tracker = new_tokio_task_tracker();
     let token = new_tokio_cancellation_token();
     let root_actor = RootActor::start(tracker, token).await;
-    let subscribers = ChannelSubscribers::default();
 
     #[cfg(debug_assertions)]
     let rpc_dev_module_commitment_txs = config.rpc.as_ref().and_then(|rpc_config| {
@@ -83,7 +84,10 @@ pub async fn main() -> Result<(), ExitMessage> {
         }
     });
 
-    let (network_actor, ckb_chain_actor, network_graph) = match config.fiber.clone() {
+    let (network_actor, ckb_chain_actor, network_graph, node_public_key) = match config
+        .fiber
+        .clone()
+    {
         Some(fiber_config) => {
             // TODO: this is not a super user friendly error message which has actionable information
             // for the user to fix the error and start the node.
@@ -93,7 +97,7 @@ pub async fn main() -> Result<(), ExitMessage> {
                         .to_string(),
                 )
             })?;
-            let node_public_key = fiber_config.public_key();
+            let node_public_key: Pubkey = fiber_config.public_key().into();
 
             let chain = fiber_config.chain.as_str();
             let chain_spec = ChainSpec::load_from(&match chain {
@@ -129,7 +133,7 @@ pub async fn main() -> Result<(), ExitMessage> {
 
             let network_graph = Arc::new(RwLock::new(NetworkGraph::new(
                 store.clone(),
-                node_public_key.clone().into(),
+                node_public_key,
                 fiber_config.announce_private_addr(),
             )));
 
@@ -146,7 +150,6 @@ pub async fn main() -> Result<(), ExitMessage> {
                 new_tokio_task_tracker(),
                 root_actor.get_cell(),
                 store.clone(),
-                subscribers.clone(),
                 network_graph.clone(),
                 default_shutdown_script,
             )
@@ -212,9 +215,10 @@ pub async fn main() -> Result<(), ExitMessage> {
                 Some(network_actor),
                 Some(ckb_chain_actor),
                 Some(network_graph),
+                Some(node_public_key),
             )
         }
-        None => (None, None, None),
+        None => (None, None, None, None),
     };
 
     let cch_actor = match config.cch {
@@ -226,7 +230,11 @@ pub async fn main() -> Result<(), ExitMessage> {
                 new_tokio_task_tracker(),
                 new_tokio_cancellation_token(),
                 root_actor.get_cell(),
-                network_actor.clone(),
+                network_actor
+                    .clone()
+                    .expect("Cch service requires network actor"),
+                node_public_key.expect("Cch service requires node public key"),
+                store_update_subscription,
             )
             .await
             {
@@ -241,22 +249,7 @@ pub async fn main() -> Result<(), ExitMessage> {
                         ));
                     }
                 }
-                Ok(actor) => {
-                    subscribers.pending_received_tlcs_subscribers.subscribe(
-                        actor.clone(),
-                        |tlc_notification| {
-                            Some(CchMessage::PendingReceivedTlcNotification(tlc_notification))
-                        },
-                    );
-                    subscribers.settled_tlcs_subscribers.subscribe(
-                        actor.clone(),
-                        |tlc_notification| {
-                            Some(CchMessage::SettledTlcNotification(tlc_notification))
-                        },
-                    );
-
-                    Some(actor)
-                }
+                Ok(actor) => Some(actor),
             }
         }
         None => None,

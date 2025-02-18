@@ -1,7 +1,7 @@
-use crate::debug_event;
 #[cfg(debug_assertions)]
 use crate::fiber::network::DebugEvent;
 use crate::fiber::types::BroadcastMessageWithTimestamp;
+use crate::{debug_event, invoice::InvoiceChannelInfo};
 use bitflags::bitflags;
 use futures::future::OptionFuture;
 use secp256k1::XOnlyPublicKey;
@@ -59,7 +59,7 @@ use musig2::{
 };
 use ractor::{
     async_trait as rasync_trait, call, concurrency::Duration, Actor, ActorProcessingErr, ActorRef,
-    OutputPort, RpcReplyPort,
+    RpcReplyPort,
 };
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
@@ -71,7 +71,6 @@ use super::{graph::ChannelUpdateInfo, types::ForwardTlcResult};
 use std::{
     collections::HashSet,
     fmt::{self, Debug, Display},
-    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -139,6 +138,7 @@ pub enum ChannelCommand {
     Shutdown(ShutdownCommand, RpcReplyPort<Result<(), String>>),
     Update(UpdateCommand, RpcReplyPort<Result<(), String>>),
     ForwardTlcResult(ForwardTlcResult),
+    SettleHeldTlc(Hash256),
     #[cfg(test)]
     ReloadState(ReloadParams),
 }
@@ -153,6 +153,7 @@ impl Display for ChannelCommand {
             ChannelCommand::Shutdown(_, _) => write!(f, "Shutdown"),
             ChannelCommand::Update(_, _) => write!(f, "Update"),
             ChannelCommand::ForwardTlcResult(_) => write!(f, "ForwardTlcResult"),
+            ChannelCommand::SettleHeldTlc(_) => write!(f, "SettleHeldTlc"),
             #[cfg(test)]
             ChannelCommand::ReloadState(_) => write!(f, "ReloadState"),
         }
@@ -283,27 +284,11 @@ pub enum ChannelInitializationParameter {
     ReestablishChannel(Hash256),
 }
 
-#[derive(Clone)]
-pub struct ChannelSubscribers {
-    pub pending_received_tlcs_subscribers: Arc<OutputPort<TlcNotification>>,
-    pub settled_tlcs_subscribers: Arc<OutputPort<TlcNotification>>,
-}
-
-impl Default for ChannelSubscribers {
-    fn default() -> Self {
-        Self {
-            pending_received_tlcs_subscribers: Arc::new(OutputPort::default()),
-            settled_tlcs_subscribers: Arc::new(OutputPort::default()),
-        }
-    }
-}
-
 pub struct ChannelActor<S> {
     local_pubkey: Pubkey,
     remote_pubkey: Pubkey,
     network: ActorRef<NetworkActorMessage>,
     store: S,
-    subscribers: ChannelSubscribers,
 }
 
 impl<S> ChannelActor<S>
@@ -315,14 +300,12 @@ where
         remote_pubkey: Pubkey,
         network: ActorRef<NetworkActorMessage>,
         store: S,
-        subscribers: ChannelSubscribers,
     ) -> Self {
         Self {
             local_pubkey,
             remote_pubkey,
             network,
             store,
-            subscribers,
         }
     }
 
@@ -776,6 +759,13 @@ where
             ProcessingChannelError::TlcForwardingError(tlc_err) => tlc_err,
             _ => {
                 let error_detail = self.get_tlc_error(state, &error.source).await;
+                debug!(
+                    payment_hash = ?payment_hash,
+                    tlc_id = ?tlc_id,
+                    error_source = ?error.source,
+                    error_detail = ?error_detail,
+                    "Processing AddTlc failed",
+                );
                 #[cfg(debug_assertions)]
                 self.network
                     .clone()
@@ -861,6 +851,25 @@ where
         .await;
     }
 
+    // Try to settle down a held TLC (i.e., a TLC whose preimage is not available when it is received).
+    // This is usually a TLC associated with a hold invoice. We call of this function should ensure that
+    // this TLC is already in a state that can be settled down (i.e. the invoice associated with it is
+    // in a Received state and we have saved its preimage to the store).
+    async fn try_to_settle_down_held_tlc(
+        &self,
+        myself: &ActorRef<ChannelActorMessage>,
+        state: &mut ChannelActorState,
+        hash: Hash256,
+    ) {
+        if let Some(tlc) = state.get_received_tlc_with_hash(hash) {
+            let tlc_id = tlc.tlc_id;
+            // Only settle down this TLC if it is not already settled down.
+            if state.tlc_state.applied_add_tlcs.insert(tlc_id) {
+                self.try_to_settle_down_tlc(myself, state, tlc_id).await;
+            }
+        };
+    }
+
     async fn try_to_settle_down_tlc(
         &self,
         myself: &ActorRef<ChannelActorMessage>,
@@ -884,12 +893,14 @@ where
             let status = self.get_invoice_status(&invoice);
             match status {
                 CkbInvoiceStatus::Expired => {
+                    debug!("invoice expired, remove tlc");
                     remove_reason = RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
                         TlcErr::new(TlcErrorCode::InvoiceExpired),
                         &tlc.shared_secret,
                     ));
                 }
                 CkbInvoiceStatus::Cancelled => {
+                    debug!("invoice cancelled, remove tlc");
                     remove_reason = RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
                         TlcErr::new(TlcErrorCode::InvoiceCancelled),
                         &tlc.shared_secret,
@@ -934,16 +945,6 @@ where
             )
             .await
             .map_err(move |err| err.with_shared_secret(shared_secret))?;
-        }
-
-        if let Some(ref udt_type_script) = state.funding_udt_type_script {
-            self.subscribers
-                .pending_received_tlcs_subscribers
-                .send(TlcNotification {
-                    tlc: add_tlc.clone().into(),
-                    channel_id: state.get_id(),
-                    script: udt_type_script.clone(),
-                });
         }
 
         // we don't need to settle down the tlc if it is not the last hop here,
@@ -1006,33 +1007,65 @@ where
                 }
             }
 
-            // if this is the last hop, store the preimage.
-            // though we will RemoveTlcFulfill the TLC in try_to_settle_down_tlc function,
-            // here we can do error check early here for better error handling.
-            let preimage = peeled_onion_packet
-                .current
-                .payment_preimage
-                .or_else(|| self.store.get_invoice_preimage(&add_tlc.payment_hash));
+            let preimage = match peeled_onion_packet.current.payment_preimage {
+                None => {
+                    match self.store.get_invoice_preimage(&payment_hash) {
+                        Some(preimage) => preimage,
+                        None => {
+                            let status = self
+                                .store
+                                .get_invoice_status(&payment_hash)
+                                // The sender sent a TLC with no invoice associated with it.
+                                .ok_or(ProcessingChannelError::FinalIncorrectPaymentHash)?;
+                            let is_active = status == CkbInvoiceStatus::Open
+                                || status == CkbInvoiceStatus::Received;
+                            let is_settled =
+                                self.store.get_invoice_preimage(&payment_hash).is_some();
+                            if is_active && !is_settled {
+                                // This TLC is added to applied_add_tlcs in above, but
+                                // TLCs in the list applied_add_tlcs wouldn't be processed again.
+                                // For the unsettled active hold invoice TLCs, we should process them indefinitely
+                                // until they expire or are settled.
+                                state.tlc_state.applied_add_tlcs.remove(&add_tlc.tlc_id);
+                            }
+                            if status == CkbInvoiceStatus::Open {
+                                self.store
+                                    .update_invoice_status(
+                                        &payment_hash,
+                                        CkbInvoiceStatus::Received,
+                                    )
+                                    .expect("update invoice status failed");
+                            }
+                            if let Err(e) = self.store.add_invoice_channel_info(
+                                &payment_hash,
+                                InvoiceChannelInfo::new(state.get_id(), received_amount),
+                            ) {
+                                error!("Failed to add invoice channel mapping: {:?}", e);
+                            }
+                            // The updating of hold invoice is always done in settle_invoice rpc call.
+                            // So we can return early here.
+                            return Ok(());
+                        }
+                    }
+                }
+                Some(preimage) => preimage,
+            };
 
-            if let Some(preimage) = preimage {
-                let filled_payment_hash: Hash256 = add_tlc.hash_algorithm.hash(preimage).into();
-                if add_tlc.payment_hash != filled_payment_hash {
-                    return Err(ProcessingChannelError::FinalIncorrectPreimage);
-                }
-                // update invoice status to received only all the error checking passed
-                if let Some(_invoice) = self.store.get_invoice(&payment_hash) {
-                    self.store
-                        .update_invoice_status(&payment_hash, CkbInvoiceStatus::Received)
-                        .expect("update invoice status failed");
-                }
-                self.store
-                    .insert_payment_preimage(payment_hash, preimage)
-                    .map_err(|_| {
-                        ProcessingChannelError::InternalError("insert preimage failed".to_string())
-                    })?;
-            } else {
-                return Err(ProcessingChannelError::FinalIncorrectPaymentHash);
+            let filled_payment_hash: Hash256 = add_tlc.hash_algorithm.hash(preimage).into();
+            if add_tlc.payment_hash != filled_payment_hash {
+                return Err(ProcessingChannelError::FinalIncorrectPreimage);
             }
+            // update invoice status to received only all the error checking passed
+            if let Some(_invoice) = self.store.get_invoice(&payment_hash) {
+                self.store
+                    .update_invoice_status(&payment_hash, CkbInvoiceStatus::Received)
+                    .expect("update invoice status failed");
+            }
+            self.store
+                .insert_payment_preimage(payment_hash, preimage)
+                .map_err(|_| {
+                    ProcessingChannelError::InternalError("insert preimage failed".to_string())
+                })?;
         } else {
             // here we don't need to check current config is public or enabled, because
             // handle_add_tlc_command will check the channel state before forwarding
@@ -1122,29 +1155,21 @@ where
         state.tlc_state.applied_remove_tlcs.insert(tlc_id);
 
         let (tlc_info, remove_reason) = state.remove_tlc_with_reason(tlc_id)?;
-        if matches!(remove_reason, RemoveTlcReason::RemoveTlcFulfill(_))
+        // We should only update invoice status to paid if the peer is paying us (i.e., the TLC is received).
+        // For the TLC sent by ourselves (we're paying the peer), we should leave any invoice as it is.
+        // The reason for this is that it is possible that we're paying another peer by sending a TLC and
+        // we have a local invoice with the same payment hash. See the test
+        // test_store_update_subscription_mock_cross_chain_payment for a concrete example.
+        if tlc_id.is_received()
+            && matches!(remove_reason, RemoveTlcReason::RemoveTlcFulfill(_))
             && self.store.get_invoice(&tlc_info.payment_hash).is_some()
         {
+            debug!(channel = ?channel_id, hash = ?tlc_info.payment_hash, "update invoice status to paid");
             self.store
                 .update_invoice_status(&tlc_info.payment_hash, CkbInvoiceStatus::Paid)
                 .expect("update invoice status failed");
         }
 
-        if let (
-            Some(ref udt_type_script),
-            RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill { payment_preimage }),
-        ) = (state.funding_udt_type_script.clone(), &remove_reason)
-        {
-            let mut tlc_notify_info: TlcNotifyInfo = tlc_info.clone().into();
-            tlc_notify_info.payment_preimage = Some(*payment_preimage);
-            self.subscribers
-                .settled_tlcs_subscribers
-                .send(TlcNotification {
-                    tlc: tlc_notify_info,
-                    channel_id,
-                    script: udt_type_script.clone(),
-                });
-        }
         if tlc_info.previous_tlc.is_none() {
             // only the original sender of the TLC should send `TlcRemoveReceived` event
             // because only the original sender cares about the TLC event to settle the payment
@@ -1879,6 +1904,11 @@ where
                     .await;
                 Ok(())
             }
+            ChannelCommand::SettleHeldTlc(hash) => {
+                self.try_to_settle_down_held_tlc(myself, state, hash).await;
+                Ok(())
+            }
+
             #[cfg(test)]
             ChannelCommand::ReloadState(reload_params) => {
                 *state = self
@@ -4597,6 +4627,14 @@ impl ChannelActorState {
 
     pub fn get_received_tlc(&self, tlc_id: TLCId) -> Option<&TlcInfo> {
         self.tlc_state.get(&tlc_id)
+    }
+
+    pub fn get_received_tlc_with_hash(&self, hash: Hash256) -> Option<&TlcInfo> {
+        self.tlc_state
+            .received_tlcs
+            .tlcs
+            .iter()
+            .find(|tlc| tlc.payment_hash == hash)
     }
 
     pub fn check_insert_tlc(&mut self, tlc: &TlcInfo) -> Result<(), ProcessingChannelError> {
