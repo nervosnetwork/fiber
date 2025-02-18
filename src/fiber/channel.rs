@@ -1011,37 +1011,45 @@ where
             }
 
             let preimage = match peeled_onion_packet.current.payment_preimage {
-                None => self
-                    .store
-                    .get_invoice_preimage(&add_tlc.payment_hash)
-                    .ok_or(ProcessingChannelError::FinalIncorrectPaymentHash)?,
-                Some(preimage) if preimage == Hash256::default() => {
-                    if let Some(status) = self.store.get_invoice_status(&payment_hash) {
-                        let is_active = status == CkbInvoiceStatus::Open
-                            || status == CkbInvoiceStatus::Received;
-                        let is_settled = self.store.get_invoice_preimage(&payment_hash).is_some();
-                        if is_active && !is_settled {
-                            // This TLC is added to applied_add_tlcs in above, but
-                            // TLCs in the list applied_add_tlcs wouldn't be processed again.
-                            // For the unsettled active hold invoice TLCs, we should process them indefinitely
-                            // until they expire or are settled.
-                            state.tlc_state.applied_add_tlcs.remove(&add_tlc.tlc_id);
-                        }
-                        if status == CkbInvoiceStatus::Open {
-                            self.store
-                                .update_invoice_status(&payment_hash, CkbInvoiceStatus::Received)
-                                .expect("update invoice status failed");
+                None => {
+                    match self.store.get_invoice_preimage(&payment_hash) {
+                        Some(preimage) => preimage,
+                        None => {
+                            let status = self
+                                .store
+                                .get_invoice_status(&payment_hash)
+                                // The sender sent a TLC with no invoice associated with it.
+                                .ok_or(ProcessingChannelError::FinalIncorrectPaymentHash)?;
+                            let is_active = status == CkbInvoiceStatus::Open
+                                || status == CkbInvoiceStatus::Received;
+                            let is_settled =
+                                self.store.get_invoice_preimage(&payment_hash).is_some();
+                            if is_active && !is_settled {
+                                // This TLC is added to applied_add_tlcs in above, but
+                                // TLCs in the list applied_add_tlcs wouldn't be processed again.
+                                // For the unsettled active hold invoice TLCs, we should process them indefinitely
+                                // until they expire or are settled.
+                                state.tlc_state.applied_add_tlcs.remove(&add_tlc.tlc_id);
+                            }
+                            if status == CkbInvoiceStatus::Open {
+                                self.store
+                                    .update_invoice_status(
+                                        &payment_hash,
+                                        CkbInvoiceStatus::Received,
+                                    )
+                                    .expect("update invoice status failed");
+                            }
+                            if let Err(e) = self.store.add_invoice_channel_info(
+                                &payment_hash,
+                                InvoiceChannelInfo::new(state.get_id(), received_amount),
+                            ) {
+                                error!("Failed to add invoice channel mapping: {:?}", e);
+                            }
+                            // The updating of hold invoice is always done in settle_invoice rpc call.
+                            // So we can return early here.
+                            return Ok(());
                         }
                     }
-                    if let Err(e) = self.store.add_invoice_channel_info(
-                        &payment_hash,
-                        InvoiceChannelInfo::new(state.get_id(), received_amount),
-                    ) {
-                        error!("Failed to add invoice channel mapping: {:?}", e);
-                    }
-                    // The updating of hold invoice is always done in settle_invoice rpc call.
-                    // So we can return early here.
-                    return Ok(());
                 }
                 Some(preimage) => preimage,
             };

@@ -367,11 +367,11 @@ async fn test_store_update_subscription_settlement_payment() {
             max_fee_amount: None,
             max_parts: None,
             keysend: None,
-            hold_payment: true,
             udt_type_script: None,
             allow_self_payment: false,
             hop_hints: None,
             dry_run: false,
+            ..Default::default()
         })
         .await;
 
@@ -578,11 +578,11 @@ async fn test_store_update_subscription_mock_cross_chain_payment() {
             max_fee_amount: None,
             max_parts: None,
             keysend: None,
-            hold_payment: true,
             udt_type_script: None,
             allow_self_payment: false,
             hop_hints: None,
             dry_run: false,
+            ..Default::default()
         })
         .await;
 
@@ -657,11 +657,11 @@ async fn test_store_update_subscription_mock_cross_chain_payment() {
             max_fee_amount: None,
             max_parts: None,
             keysend: None,
-            hold_payment: true,
             udt_type_script: None,
             allow_self_payment: false,
             hop_hints: None,
             dry_run: false,
+            ..Default::default()
         })
         .await;
 

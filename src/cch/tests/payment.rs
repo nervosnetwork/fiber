@@ -180,7 +180,6 @@ async fn do_test_cross_chain_payment_hub_send_btc(udt_script: Script, multiple_h
     let res = fiber_node
         .send_payment(SendPaymentCommand {
             invoice: Some(send_btc_result.fiber_pay_req.clone()),
-            hold_payment: true,
             ..Default::default()
         })
         .await;
