@@ -1354,10 +1354,17 @@ where
             let transaction = state
                 .latest_commitment_transaction
                 .clone()
-                .expect("latest_commitment_transaction should exist when channel is in ChannelReady of ShuttingDown state");
+                .expect("latest_commitment_transaction should exist when channel is in ChannelReady of ShuttingDown state")
+                .into_view();
+
             self.network
                 .send_message(NetworkActorMessage::new_event(
-                    NetworkActorEvent::CommitmentTransactionPending(transaction, state.get_id()),
+                    NetworkActorEvent::ClosingTransactionPending(
+                        state.get_id(),
+                        self.get_remote_peer_id(),
+                        transaction,
+                        true,
+                    ),
                 ))
                 .expect(ASSUME_NETWORK_ACTOR_ALIVE);
 
@@ -1365,51 +1372,51 @@ where
                 ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION,
             ));
             return Ok(());
+        } else {
+            let flags = match state.state {
+                ChannelState::ChannelReady() => {
+                    debug!("Handling shutdown command in ChannelReady state");
+                    ShuttingDownFlags::empty()
+                }
+                _ => {
+                    debug!("Handling shutdown command in state {:?}", &state.state);
+                    return Err(ProcessingChannelError::InvalidState(format!(
+                        "Trying to send shutdown message while in invalid state {:?}",
+                        &state.state
+                    )));
+                }
+            };
+
+            state.check_shutdown_fee_rate(command.fee_rate, &command.close_script)?;
+            self.network
+                .send_message(NetworkActorMessage::new_command(
+                    NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
+                        self.get_remote_peer_id(),
+                        FiberMessage::shutdown(Shutdown {
+                            channel_id: state.get_id(),
+                            close_script: command.close_script.clone(),
+                            fee_rate: command.fee_rate,
+                        }),
+                    )),
+                ))
+                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+
+            let shutdown_info = ShutdownInfo {
+                close_script: command.close_script,
+                fee_rate: command.fee_rate.as_u64(),
+                signature: None,
+            };
+            state.local_shutdown_info = Some(shutdown_info);
+            state.update_state(ChannelState::ShuttingDown(
+                flags | ShuttingDownFlags::OUR_SHUTDOWN_SENT,
+            ));
+            debug!(
+                "Channel state updated to {:?} after processing shutdown command",
+                &state.state
+            );
+
+            state.maybe_transition_to_shutdown(&self.network)
         }
-
-        let flags = match state.state {
-            ChannelState::ChannelReady() => {
-                debug!("Handling shutdown command in ChannelReady state");
-                ShuttingDownFlags::empty()
-            }
-            _ => {
-                debug!("Handling shutdown command in state {:?}", &state.state);
-                return Err(ProcessingChannelError::InvalidState(format!(
-                    "Trying to send shutdown message while in invalid state {:?}",
-                    &state.state
-                )));
-            }
-        };
-
-        state.check_shutdown_fee_rate(command.fee_rate, &command.close_script)?;
-        self.network
-            .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
-                    self.get_remote_peer_id(),
-                    FiberMessage::shutdown(Shutdown {
-                        channel_id: state.get_id(),
-                        close_script: command.close_script.clone(),
-                        fee_rate: command.fee_rate,
-                    }),
-                )),
-            ))
-            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-
-        let shutdown_info = ShutdownInfo {
-            close_script: command.close_script,
-            fee_rate: command.fee_rate.as_u64(),
-            signature: None,
-        };
-        state.local_shutdown_info = Some(shutdown_info);
-        state.update_state(ChannelState::ShuttingDown(
-            flags | ShuttingDownFlags::OUR_SHUTDOWN_SENT,
-        ));
-        debug!(
-            "Channel state updated to {:?} after processing shutdown command",
-            &state.state
-        );
-
-        state.maybe_transition_to_shutdown(&self.network)
     }
 
     pub async fn handle_update_command(
@@ -1932,26 +1939,28 @@ where
                 state.update_state(ChannelState::AwaitingChannelReady(flags));
                 state.maybe_channel_is_ready(&self.network).await;
             }
-            ChannelEvent::CommitmentTransactionConfirmed => {
-                match state.state {
-                    ChannelState::ShuttingDown(flags)
-                        if flags.contains(ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION) => {}
-                    _ => {
-                        return Err(ProcessingChannelError::InvalidState(format!(
-                            "Expecting commitment transaction confirmed event in state ShuttingDown, but got state {:?}", &state.state)
-                        ));
-                    }
-                };
-                state.update_state(ChannelState::Closed(CloseFlags::UNCOOPERATIVE));
-                debug!("Channel closed with uncooperative close");
-            }
             ChannelEvent::CheckTlcRetryOperation => {
                 self.apply_retryable_tlc_operations(myself, state).await;
             }
             ChannelEvent::PeerDisconnected => {
                 myself.stop(Some("PeerDisconnected".to_string()));
             }
-            ChannelEvent::ClosingTransactionConfirmed => {
+            ChannelEvent::ClosingTransactionConfirmed(force) => {
+                if force {
+                    match state.state {
+                        ChannelState::ShuttingDown(flags)
+                            if flags
+                                .contains(ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION) => {}
+                        _ => {
+                            return Err(ProcessingChannelError::InvalidState(format!(
+                            "Expecting commitment transaction confirmed event in state ShuttingDown, but got state {:?}", &state.state)
+                        ));
+                        }
+                    };
+                    state.update_state(ChannelState::Closed(CloseFlags::UNCOOPERATIVE));
+                    debug!("Channel closed with uncooperative close");
+                }
+
                 // Broadcast the channel update message which disables the channel.
                 if state.is_public() {
                     let update = state.generate_disabled_channel_update(&self.network).await;
@@ -3283,8 +3292,7 @@ pub struct ClosedChannel {}
 pub enum ChannelEvent {
     PeerDisconnected,
     FundingTransactionConfirmed(H256, u32, u64),
-    CommitmentTransactionConfirmed,
-    ClosingTransactionConfirmed,
+    ClosingTransactionConfirmed(bool),
     CheckTlcRetryOperation,
 }
 
@@ -5424,6 +5432,7 @@ impl ChannelActorState {
                             self.get_id(),
                             self.get_remote_peer_id(),
                             tx,
+                            false,
                         ),
                     ))
                     .expect(ASSUME_NETWORK_ACTOR_ALIVE);

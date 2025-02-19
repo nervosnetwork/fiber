@@ -615,8 +615,8 @@ pub enum NetworkActorEvent {
     ),
     /// A channel is ready to use.
     ChannelReady(Hash256, PeerId, OutPoint),
-    /// A channel is already closed.
-    ClosingTransactionPending(Hash256, PeerId, TransactionView),
+    /// A channel is going to be closed, waiting the closing transaction to be broadcasted and confirmed.
+    ClosingTransactionPending(Hash256, PeerId, TransactionView, bool),
 
     /// Both parties are now able to broadcast a valid funding transaction.
     FundingTransactionPending(Transaction, OutPoint, Hash256),
@@ -628,17 +628,8 @@ pub enum NetworkActorEvent {
     /// A funding transaction has failed.
     FundingTransactionFailed(OutPoint),
 
-    /// Channel is going to be closed forcely, and the closing transaction is ready to be broadcasted.
-    CommitmentTransactionPending(Transaction, Hash256),
-
-    /// A commitment transaction is broacasted successfully.
-    CommitmentTransactionConfirmed(Hash256, Hash256),
-
-    /// A commitment transaction is failed to be broacasted.
-    CommitmentTransactionFailed(Hash256, Byte32),
-
     /// A closing transaction has been confirmed.
-    ClosingTransactionConfirmed(PeerId, Hash256, Byte32),
+    ClosingTransactionConfirmed(PeerId, Hash256, Byte32, bool),
 
     /// A closing transaction has failed (either because of invalid transaction or timeout)
     ClosingTransactionFailed(PeerId, Hash256, Byte32),
@@ -901,33 +892,17 @@ where
                     .on_funding_transaction_confirmed(outpoint, block_hash, tx_index, timestamp)
                     .await;
             }
-            NetworkActorEvent::CommitmentTransactionPending(transaction, channel_id) => {
-                state
-                    .on_commitment_transaction_pending(transaction, channel_id)
-                    .await;
-            }
-            NetworkActorEvent::CommitmentTransactionConfirmed(tx_hash, channel_id) => {
-                state
-                    .on_commitment_transaction_confirmed(tx_hash, channel_id)
-                    .await;
-            }
-            NetworkActorEvent::CommitmentTransactionFailed(tx_hash, channel_id) => {
-                error!(
-                    "Commitment transaction failed for channel {:?}, tx hash: {:?}",
-                    channel_id, tx_hash
-                );
-            }
             NetworkActorEvent::FundingTransactionFailed(outpoint) => {
                 error!("Funding transaction failed: {:?}", outpoint);
             }
-            NetworkActorEvent::ClosingTransactionPending(channel_id, peer_id, tx) => {
+            NetworkActorEvent::ClosingTransactionPending(channel_id, peer_id, tx, force) => {
                 state
-                    .on_closing_transaction_pending(channel_id, peer_id.clone(), tx.clone())
+                    .on_closing_transaction_pending(channel_id, peer_id.clone(), tx.clone(), force)
                     .await;
             }
-            NetworkActorEvent::ClosingTransactionConfirmed(peer_id, channel_id, tx_hash) => {
+            NetworkActorEvent::ClosingTransactionConfirmed(peer_id, channel_id, tx_hash, force) => {
                 state
-                    .on_closing_transaction_confirmed(&peer_id, &channel_id, tx_hash)
+                    .on_closing_transaction_confirmed(&peer_id, &channel_id, tx_hash, force)
                     .await;
             }
             NetworkActorEvent::ClosingTransactionFailed(peer_id, tx_hash, channel_id) => {
@@ -2485,12 +2460,16 @@ where
                             let transaction = state
                                 .latest_commitment_transaction
                                 .clone()
-                                .expect("latest_commitment_transaction should exist when channel is in ChannelReady of ShuttingDown state");
+                                .expect("latest_commitment_transaction should exist when channel is in ChannelReady of ShuttingDown state")
+                                .into_view();
+
                             self.network
                                 .send_message(NetworkActorMessage::new_event(
-                                    NetworkActorEvent::CommitmentTransactionPending(
+                                    NetworkActorEvent::ClosingTransactionPending(
+                                        state.get_id(),
+                                        state.get_remote_peer_id(),
                                         transaction,
-                                        channel_id,
+                                        true,
                                     ),
                                 ))
                                 .expect(ASSUME_NETWORK_ACTOR_ALIVE);
@@ -2670,11 +2649,12 @@ where
         channel_id: Hash256,
         peer_id: PeerId,
         transaction: TransactionView,
+        force: bool,
     ) {
         let tx_hash: Byte32 = transaction.hash();
         info!(
-            "Channel ({:?}) to peer {:?} is closed. Broadcasting closing transaction ({:?}) now.",
-            &channel_id, &peer_id, &tx_hash
+            "Channel ({:?}) to peer {:?} is closed {:?}. Broadcasting closing transaction ({:?}) now.",
+            &channel_id, &peer_id, &tx_hash, if force { "forcefully" } else { "cooperatively" }
         );
         let network: ActorRef<NetworkActorMessage> = self.network.clone();
         self.broadcast_tx_with_callback(transaction, move |result| {
@@ -2688,7 +2668,9 @@ where
                     ..
                 }) => {
                     info!("Cloisng transaction {:?} confirmed", &tx_hash);
-                    NetworkActorEvent::ClosingTransactionConfirmed(peer_id, channel_id, tx_hash)
+                    NetworkActorEvent::ClosingTransactionConfirmed(
+                        peer_id, channel_id, tx_hash, force,
+                    )
                 }
                 Ok(status) => {
                     error!(
@@ -2714,11 +2696,12 @@ where
         peer_id: &PeerId,
         channel_id: &Hash256,
         tx_hash: Byte32,
+        force: bool,
     ) {
         self.send_message_to_channel_actor(
             *channel_id,
             None,
-            ChannelActorMessage::Event(ChannelEvent::ClosingTransactionConfirmed),
+            ChannelActorMessage::Event(ChannelEvent::ClosingTransactionConfirmed(force)),
         )
         .await;
         self.remove_channel(channel_id);
@@ -2877,54 +2860,6 @@ where
         .await;
     }
 
-    async fn on_commitment_transaction_pending(
-        &mut self,
-        transaction: Transaction,
-        channel_id: Hash256,
-    ) {
-        let transaction = transaction.into_view();
-        let tx_hash: Byte32 = transaction.hash();
-        debug!(
-            "Commitment transaction for channel {:?} is now ready. Broadcast it {:?} now.",
-            &channel_id, &tx_hash
-        );
-
-        let network = self.network.clone();
-        self.broadcast_tx_with_callback(transaction, move |result| {
-            let message = match result {
-                Ok(TraceTxResponse {
-                    status:
-                        TxStatus {
-                            status: Status::Committed,
-                            ..
-                        },
-                    ..
-                }) => {
-                    info!("Commitment transaction {:?} confirmed", tx_hash,);
-                    NetworkActorEvent::CommitmentTransactionConfirmed(tx_hash.into(), channel_id)
-                }
-                Ok(status) => {
-                    error!(
-                        "Commitment transaction {:?} failed to be confirmed with final status {:?}",
-                        &tx_hash, &status
-                    );
-                    NetworkActorEvent::CommitmentTransactionFailed(channel_id, tx_hash)
-                }
-                Err(err) => {
-                    error!(
-                        "Failed to trace commitment transaction {:?}: {:?}",
-                        &tx_hash, &err
-                    );
-                    NetworkActorEvent::CommitmentTransactionFailed(channel_id, tx_hash)
-                }
-            };
-            network
-                .send_message(NetworkActorMessage::new_event(message))
-                .expect(ASSUME_NETWORK_MYSELF_ALIVE);
-        })
-        .await;
-    }
-
     async fn on_funding_transaction_confirmed(
         &mut self,
         outpoint: OutPoint,
@@ -2949,16 +2884,6 @@ where
             ChannelActorMessage::Event(ChannelEvent::FundingTransactionConfirmed(
                 block_hash, tx_index, timestamp,
             )),
-        )
-        .await;
-    }
-
-    async fn on_commitment_transaction_confirmed(&mut self, tx_hash: Hash256, channel_id: Hash256) {
-        debug!("Commitment transaction is confirmed: {:?}", tx_hash);
-        self.send_message_to_channel_actor(
-            channel_id,
-            None,
-            ChannelActorMessage::Event(ChannelEvent::CommitmentTransactionConfirmed),
         )
         .await;
     }
