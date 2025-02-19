@@ -148,9 +148,12 @@ pub struct CchPaymentUpdate {
     pub update: PaymentUpdate,
 }
 
+/// A cross-chain hub invoice, which can be either a lightning network invoice or a fiber network invoice.
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum CchInvoice {
+    /// A lightning network invoice
     Lightning(#[serde_as(as = "DisplayFromStr")] Bolt11Invoice),
-    Fiber(CkbInvoice),
+    /// A fiber network invoice
+    Fiber(#[serde_as(as = "DisplayFromStr")] CkbInvoice),
 }

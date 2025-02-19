@@ -366,7 +366,7 @@ impl SendPaymentData {
             .as_ref()
             .map(|invoice| invoice.parse::<CkbInvoice>())
             .transpose()
-            .map_err(|_| "invoice is invalid".to_string())?;
+            .map_err(|e| format!("Invoice is invalid: {e}"))?;
 
         if let Some(invoice) = invoice.clone() {
             if invoice.is_expired() {

@@ -15,7 +15,7 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
     * [Module Cch](#module-cch)
         * [Method `send_btc`](#cch-send_btc)
         * [Method `receive_btc`](#cch-receive_btc)
-        * [Method `get_receive_btc_order`](#cch-get_receive_btc_order)
+        * [Method `get_cch_order`](#cch-get_cch_order)
     * [Module Channel](#module-channel)
         * [Method `open_channel`](#channel-open_channel)
         * [Method `accept_channel`](#channel-accept_channel)
@@ -46,6 +46,7 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
         * [Method `disconnect_peer`](#peer-disconnect_peer)
 * [RPC Types](#rpc-types)
 
+    * [Type `CchInvoice`](#type-cchinvoice)
     * [Type `CchOrderStatus`](#type-cchorderstatus)
     * [Type `Channel`](#type-channel)
     * [Type `ChannelInfo`](#type-channelinfo)
@@ -81,17 +82,17 @@ Send BTC to a address.
 
 ##### Returns
 
-* `timestamp` - <em>`u64`</em>, Seconds since epoch when the order is created
-* `expiry` - <em>`u64`</em>, Seconds after timestamp that the order expires
-* `ckb_final_tlc_expiry_delta` - <em>`u64`</em>, The minimal expiry in seconds of the final TLC in the CKB network
-* `currency` - <em>[Currency](#type-currency)</em>, Request currency
-* `wrapped_btc_type_script` - <em>`ckb_jsonrpc_types::Script`</em>, Wrapped BTC type script
-* `btc_pay_req` - <em>`String`</em>, Payment request for BTC
-* `fiber_pay_req` - <em>`String`</em>, Payment request for CKB
 * `payment_hash` - <em>`String`</em>, Payment hash for the HTLC for both CKB and BTC.
+* `payment_preimage` - <em>`Option<String>`</em>, Payment preimage for the HTLC for both CKB and BTC.
+* `created_at` - <em>`u64`</em>, Seconds since epoch when the order is created.
+* `expires_after` - <em>`u64`</em>, Seconds after timestamp that the order expires
 * `amount_sats` - <em>`u128`</em>, Amount required to pay in Satoshis, including fee
 * `fee_sats` - <em>`u128`</em>, Fee in Satoshis
-* `status` - <em>[CchOrderStatus](#type-cchorderstatus)</em>, Order status
+* `btc_pay_req` - <em>`Bolt11Invoice`</em>, Payment request for BTC
+* `fiber_pay_req` - <em>[CkbInvoice](#type-ckbinvoice)</em>, Payment request for CKB
+* `in_state` - <em>`CchInvoiceState`</em>, The state of the payment that is sent to the cross-chain hub.
+* `out_state` - <em>`CchPaymentState`</em>, The state of the payment that is sent from the cross-chain hub.
+* `status` - <em>[CchOrderStatus](#type-cchorderstatus)</em>, The status of the order.
 
 ---
 
@@ -108,40 +109,44 @@ Receive BTC from a payment hash.
 
 ##### Returns
 
-* `timestamp` - <em>`u64`</em>, Seconds since epoch when the order is created
-* `expiry` - <em>`u64`</em>, Seconds after timestamp that the order expires
-* `ckb_final_tlc_expiry_delta` - <em>`u64`</em>, The minimal expiry in seconds of the final TLC in the CKB network
-* `wrapped_btc_type_script` - <em>`ckb_jsonrpc_types::Script`</em>, Wrapped BTC type script
-* `btc_pay_req` - <em>`String`</em>, Payment request for BTC
 * `payment_hash` - <em>`String`</em>, Payment hash for the HTLC for both CKB and BTC.
-* `amount_sats` - <em>`u128`</em>, Amount will be received by the payee
+* `payment_preimage` - <em>`Option<String>`</em>, Payment preimage for the HTLC for both CKB and BTC.
+* `created_at` - <em>`u64`</em>, Seconds since epoch when the order is created.
+* `expires_after` - <em>`u64`</em>, Seconds after timestamp that the order expires
+* `amount_sats` - <em>`u128`</em>, Amount required to pay in Satoshis, including fee
 * `fee_sats` - <em>`u128`</em>, Fee in Satoshis
-* `status` - <em>[CchOrderStatus](#type-cchorderstatus)</em>, Order status
+* `btc_pay_req` - <em>`Bolt11Invoice`</em>, Payment request for BTC
+* `fiber_pay_req` - <em>[CkbInvoice](#type-ckbinvoice)</em>, Payment request for CKB
+* `in_state` - <em>`CchInvoiceState`</em>, The state of the payment that is sent to the cross-chain hub.
+* `out_state` - <em>`CchPaymentState`</em>, The state of the payment that is sent from the cross-chain hub.
+* `status` - <em>[CchOrderStatus](#type-cchorderstatus)</em>, The status of the order.
 
 ---
 
 
 
-<a id="cch-get_receive_btc_order"></a>
-#### Method `get_receive_btc_order`
+<a id="cch-get_cch_order"></a>
+#### Method `get_cch_order`
 
 Get receive BTC order by payment hash.
 
 ##### Params
 
-* `payment_hash` - <em>`String`</em>, Payment hash for the HTLC for both CKB and BTC.
+* `payment_hash` - <em>[Hash256](#type-hash256)</em>, Payment hash for the HTLC for both CKB and BTC.
 
 ##### Returns
 
-* `timestamp` - <em>`u64`</em>, Seconds since epoch when the order is created
-* `expiry` - <em>`u64`</em>, Seconds after timestamp that the order expires
-* `ckb_final_tlc_expiry_delta` - <em>`u64`</em>, The minimal expiry in seconds of the final TLC in the CKB network
-* `wrapped_btc_type_script` - <em>`ckb_jsonrpc_types::Script`</em>, Wrapped BTC type script
-* `btc_pay_req` - <em>`String`</em>, Payment request for BTC
-* `payment_hash` - <em>`String`</em>, Payment hash for the HTLC for both CKB and BTC.
-* `amount_sats` - <em>`u128`</em>, Amount will be received by the payee
+* `payment_hash` - <em>`String`</em>, Payment hash for the HTLC.
+* `payment_preimage` - <em>`Option<String>`</em>, Payment preimage for the HTLC.
+* `created_at` - <em>`u64`</em>, Seconds since epoch when the order is created.
+* `expires_after` - <em>`u64`</em>, Seconds after timestamp that the order expires
+* `amount_sats` - <em>`u128`</em>, Amount required to pay in Satoshis, including fee
 * `fee_sats` - <em>`u128`</em>, Fee in Satoshis
-* `status` - <em>[CchOrderStatus](#type-cchorderstatus)</em>, Order status
+* `in_invoice` - <em>[CchInvoice](#type-cchinvoice)</em>, The invoice for the payment that is sent to the cross-chain hub.
+* `out_invoice` - <em>[CchInvoice](#type-cchinvoice)</em>, The invoice for the payment that is sent from the cross-chain hub.
+* `in_state` - <em>`CchInvoiceState`</em>, The state of the payment that is sent to the cross-chain hub.
+* `out_state` - <em>`CchPaymentState`</em>, The state of the payment that is sent from the cross-chain hub.
+* `status` - <em>[CchOrderStatus](#type-cchorderstatus)</em>, The status of the order.
 
 ---
 
@@ -671,6 +676,18 @@ Disconnect from a peer.
 ## RPC Types
 
 
+<a id="#type-cchinvoice"></a>
+### Type `CchInvoice`
+
+A cross-chain hub invoice, which can be either a lightning network invoice or a fiber network invoice.
+
+
+#### Enum with values of
+
+* `Lightning` - <em>Bolt11Invoice</em>, A lightning network invoice
+* `Fiber` - <em>CkbInvoice</em>, A fiber network invoice
+---
+
 <a id="#type-cchorderstatus"></a>
 ### Type `CchOrderStatus`
 
@@ -679,10 +696,11 @@ The status of a cross-chain hub order, will update as the order progresses.
 
 #### Enum with values of
 
-* `Pending` - Order is created and has not send out payments yet.
-* `Accepted` - HTLC in the first half is accepted.
-* `InFlight` - There's an outgoing payment in flight for the second half.
-* `Succeeded` - Order is settled.
+* `Pending` - Order is created and the first half has not received complete payment yet.
+* `FirstHalfAccepted` - HTLC in the first half is accepted.
+* `SecondHalfInFlight` - There's an outgoing payment in flight for the second half.
+* `SecondHalfSucceeded` - The second half payment is succeeded.
+* `FirstHalfSucceeded` - The first half payment is succeeded.
 * `Failed` - Order is failed.
 ---
 
