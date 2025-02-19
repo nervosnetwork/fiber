@@ -3474,8 +3474,7 @@ pub enum ChannelState {
     /// Both we and our counterparty consider the funding transaction confirmed and the channel is
     /// now operational.
     ChannelReady(),
-    /// We've successfully negotiated a `closing_signed` dance. At this point, the `ChannelManager`
-    /// is about to drop us, but we store this anyway.
+    /// We've successfully negotiated a `closing_signed` dance, the channel is now in the process of being shutdown.
     ShuttingDown(ShuttingDownFlags),
     /// This channel is closed.
     Closed(CloseFlags),
