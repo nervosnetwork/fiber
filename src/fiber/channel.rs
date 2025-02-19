@@ -152,7 +152,7 @@ impl Display for ChannelCommand {
             ChannelCommand::RemoveTlc(_, _) => write!(f, "RemoveTlc"),
             ChannelCommand::Shutdown(_, _) => write!(f, "Shutdown"),
             ChannelCommand::Update(_, _) => write!(f, "Update"),
-            ChannelCommand::ForwardTlcResult(_) => write!(f, "ForwardTlcResult"),
+            ChannelCommand::ForwardTlcResult(res) => write!(f, "ForwardTlcResult [{:?}]", res),
             #[cfg(test)]
             ChannelCommand::ReloadState(_) => write!(f, "ReloadState"),
         }
@@ -537,12 +537,11 @@ where
                         )));
                     }
                 };
-                let shutdown_info = ShutdownInfo {
+                state.remote_shutdown_info = Some(ShutdownInfo {
                     close_script: shutdown.close_script,
                     fee_rate: shutdown.fee_rate.as_u64(),
                     signature: None,
-                };
-                state.remote_shutdown_info = Some(shutdown_info);
+                });
 
                 let mut flags = flags | ShuttingDownFlags::THEIR_SHUTDOWN_SENT;
 
@@ -567,12 +566,11 @@ where
                             )),
                         ))
                         .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-                    let shutdown_info = ShutdownInfo {
+                    state.local_shutdown_info = Some(ShutdownInfo {
                         close_script,
                         fee_rate: 0,
                         signature: None,
-                    };
-                    state.local_shutdown_info = Some(shutdown_info);
+                    });
                     flags |= ShuttingDownFlags::OUR_SHUTDOWN_SENT;
                     debug!("Auto accept shutdown ...");
                 }
@@ -1678,6 +1676,7 @@ where
                             error,
                         )
                         .await;
+                        eprintln!("forward tlc error, remove tlc_Op: {:?}", tlc_op);
                         state.tlc_state.remove_pending_tlc_operation(tlc_op);
                     }
                 }
@@ -2336,12 +2335,15 @@ where
                 }
             }
             ChannelActorMessage::Command(command) => {
+                //error!("exe command {}", command);
                 if let Err(err) = self.handle_command(&myself, state, command).await {
-                    error!(
-                        "{:?} Error while processing channel command: {:?}",
-                        state.get_local_peer_id(),
-                        err
-                    );
+                    if !matches!(err, ProcessingChannelError::WaitingTlcAck) {
+                        error!(
+                            "{:?} Error while processing channel command: {:?}",
+                            state.get_local_peer_id(),
+                            err,
+                        );
+                    }
                 }
             }
             ChannelActorMessage::Event(e) => {

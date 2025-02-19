@@ -2191,6 +2191,54 @@ async fn test_send_payment_complex_network_payself_amount_exceeded() {
 }
 
 #[tokio::test]
+async fn test_send_payment_with_one_node_stop() {
+    // make sure part of the payments will fail, since the node is stopped
+    // TLC forwarding will fail and proper error will be returned
+    init_tracing();
+    let _span = tracing::info_span!("node", node = "test").entered();
+    let (mut nodes, _channels) = create_n_nodes_and_channels_with_index_amounts(
+        &[
+            ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((2, 3), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+        ],
+        4,
+        true,
+    )
+    .await;
+
+    let mut all_sent = HashSet::new();
+    for i in 0..10 {
+        let res = nodes[0].send_payment_keysend(&nodes[3], 1000, false).await;
+        if let Ok(send_payment_res) = res {
+            if i > 5 {
+                all_sent.insert(send_payment_res.payment_hash);
+            }
+        }
+
+        if i == 5 {
+            let _ = nodes[3].stop().await;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+    }
+
+    let mut failed_count = 0;
+    while !all_sent.is_empty() {
+        for payment_hash in all_sent.clone().iter() {
+            let res = nodes[0].get_payment_result(*payment_hash).await;
+            eprintln!("payment_hash: {:?} status: {:?}", payment_hash, res.status);
+            if res.status == PaymentSessionStatus::Failed {
+                failed_count += 1;
+                all_sent.remove(payment_hash);
+            }
+
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        }
+    }
+    assert_eq!(failed_count, 4);
+}
+
+#[tokio::test]
 async fn test_send_payment_shutdown_with_force() {
     init_tracing();
     let _span = tracing::info_span!("node", node = "test").entered();
@@ -2231,5 +2279,5 @@ async fn test_send_payment_shutdown_with_force() {
         );
     }
 
-    tokio::time::sleep(tokio::time::Duration::from_millis(1000 * 100)).await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000 * 10)).await;
 }
