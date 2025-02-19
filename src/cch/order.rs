@@ -157,3 +157,16 @@ pub enum CchInvoice {
     /// A fiber network invoice
     Fiber(#[serde_as(as = "DisplayFromStr")] CkbInvoice),
 }
+
+impl CchInvoice {
+    pub fn is_fiber(&self) -> bool {
+        matches!(self, CchInvoice::Fiber(_))
+    }
+
+    pub fn payment_hash(&self) -> Hash256 {
+        match self {
+            CchInvoice::Lightning(invoice) => invoice.payment_hash().into(),
+            CchInvoice::Fiber(invoice) => *invoice.payment_hash(),
+        }
+    }
+}
