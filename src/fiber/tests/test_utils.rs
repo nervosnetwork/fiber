@@ -16,7 +16,9 @@ use crate::invoice::CkbInvoice;
 use crate::invoice::CkbInvoiceStatus;
 use crate::invoice::InvoiceStore;
 use ckb_jsonrpc_types::Status;
+use ckb_sdk::core::TransactionBuilder;
 use ckb_types::packed::OutPoint;
+use ckb_types::packed::Script;
 use ckb_types::{core::TransactionView, packed::Byte32};
 use ractor::{call, Actor, ActorRef};
 use rand::rngs::OsRng;
@@ -571,6 +573,47 @@ impl NetworkNode {
         let res = call!(self.network_actor, message).expect("source_node alive");
         eprintln!("result: {:?}", res);
         res
+    }
+
+    pub async fn send_shutdown(
+        &self,
+        channel_id: Hash256,
+        force: bool,
+    ) -> std::result::Result<(), String> {
+        use crate::fiber::channel::ShutdownCommand;
+        use ckb_types::core::FeeRate;
+        let message = |rpc_reply| -> NetworkActorMessage {
+            NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+                ChannelCommandWithId {
+                    channel_id,
+                    command: ChannelCommand::Shutdown(
+                        ShutdownCommand {
+                            close_script: Script::default(),
+                            fee_rate: FeeRate::from_u64(1000000000),
+                            force,
+                        },
+                        rpc_reply,
+                    ),
+                },
+            ))
+        };
+
+        call!(self.network_actor, message).expect("source_node alive")
+    }
+
+    pub async fn send_channel_shutdown_tx_confirmed_event(
+        &self,
+        peer_id: PeerId,
+        channel_id: Hash256,
+        force: bool,
+    ) {
+        use crate::fiber::NetworkActorEvent::ClosingTransactionConfirmed;
+
+        let tx_hash = TransactionBuilder::default().build().hash();
+        let event = ClosingTransactionConfirmed(peer_id, channel_id, tx_hash, force);
+        self.network_actor
+            .send_message(NetworkActorMessage::Event(event))
+            .expect("network actor alive");
     }
 
     pub async fn send_payment_keysend(

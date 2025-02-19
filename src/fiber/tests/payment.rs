@@ -2189,3 +2189,47 @@ async fn test_send_payment_complex_network_payself_amount_exceeded() {
         .count();
     assert!(succ_count > 0);
 }
+
+#[tokio::test]
+async fn test_send_payment_shutdown_with_force() {
+    init_tracing();
+    let _span = tracing::info_span!("node", node = "test").entered();
+    let (nodes, channels) = create_n_nodes_and_channels_with_index_amounts(
+        &[
+            ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((2, 3), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+        ],
+        4,
+        true,
+    )
+    .await;
+
+    let mut all_sent = HashSet::new();
+    for i in 0..10 {
+        let res = nodes[0].send_payment_keysend(&nodes[3], 1000, false).await;
+        eprintln!("res: {:?}", res);
+        if let Ok(send_payment_res) = res {
+            all_sent.insert(send_payment_res.payment_hash);
+        }
+
+        if i == 5 {
+            let _ = nodes[3].send_shutdown(channels[2], true).await;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        nodes[3]
+            .send_channel_shutdown_tx_confirmed_event(nodes[2].peer_id.clone(), channels[2], true)
+            .await;
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+    }
+
+    for payment_hash in all_sent.clone().iter() {
+        let payment_status = nodes[0].get_payment_result(*payment_hash).await;
+        eprintln!(
+            "payment_hash: {:?} status: {:?}",
+            payment_hash, payment_status.status
+        );
+    }
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000 * 100)).await;
+}
