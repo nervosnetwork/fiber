@@ -1,17 +1,18 @@
 use std::time::SystemTimeError;
 
+use ckb_types::packed::Script;
 use jsonrpsee::types::{error::CALL_EXECUTION_FAILED_CODE, ErrorObjectOwned};
 use thiserror::Error;
 
-use crate::store::SubscriptionError;
+use crate::{fiber::types::Hash256, store::SubscriptionError};
 
 #[derive(Error, Debug)]
 pub enum CchDbError {
     #[error("Inserting duplicated key: {0}")]
-    Duplicated(String),
+    Duplicated(Hash256),
 
     #[error("Key not found: {0}")]
-    NotFound(String),
+    NotFound(Hash256),
 }
 
 #[derive(Error, Debug)]
@@ -33,15 +34,15 @@ pub enum CchError {
     #[error("SendBTC received payment amount is too small")]
     SendBTCReceivedAmountTooSmall,
     #[error("ReceiveBTC order payment amount is too small")]
-    ReceiveBTCOrderAmountTooSmall,
+    CchOrderAmountTooSmall,
     #[error("ReceiveBTC order payment amount is too large")]
-    ReceiveBTCOrderAmountTooLarge,
+    CchOrderAmountTooLarge,
     #[error("ReceiveBTC order already paid")]
-    ReceiveBTCOrderAlreadyPaid,
+    CchOrderAlreadyPaid,
     #[error("ReceiveBTC received payment amount is too small")]
     ReceiveBTCReceivedAmountTooSmall,
-    #[error("ReceiveBTC expected preimage but missing")]
-    ReceiveBTCMissingPreimage,
+    #[error("Invalid UDT script in ReceiveBTC order: expecting {0:?}, got {1:?}")]
+    ReceiveBTCInvalidUdtScript(Script, Option<Script>),
     #[error("System time error: {0}")]
     SystemTimeError(#[from] SystemTimeError),
     #[error("JSON serialization error: {0}")]

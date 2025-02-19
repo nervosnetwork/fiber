@@ -189,9 +189,21 @@ impl From<MByte32> for Hash256 {
     }
 }
 
+impl From<&lightning_invoice::Sha256> for Hash256 {
+    fn from(value: &lightning_invoice::Sha256) -> Self {
+        Hash256(value.0.to_byte_array())
+    }
+}
+
 impl From<lightning_invoice::Sha256> for Hash256 {
     fn from(value: lightning_invoice::Sha256) -> Self {
         Hash256(value.0.to_byte_array())
+    }
+}
+
+impl From<&bitcoin::hashes::sha256::Hash> for Hash256 {
+    fn from(value: &bitcoin::hashes::sha256::Hash) -> Self {
+        Hash256(value.to_byte_array())
     }
 }
 

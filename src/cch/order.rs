@@ -1,80 +1,46 @@
-use super::CchError;
-use lnd_grpc_tonic_client::lnrpc;
+use lightning_invoice::Bolt11Invoice;
 use serde::{Deserialize, Serialize};
-use serde_with::serde_as;
-use std::{str::FromStr as _, time::Duration};
+use serde_with::{serde_as, DisplayFromStr};
 
 use crate::{
     fiber::{
-        hash_algorithm::HashAlgorithm,
         serde_utils::{U128Hex, U64Hex},
-        types::{Hash256, Pubkey},
+        types::Hash256,
     },
-    invoice::{Currency, InvoiceBuilder},
+    invoice::CkbInvoice,
+    store::subscription::{InvoiceState, InvoiceUpdate, PaymentState, PaymentUpdate},
 };
 
 /// The status of a cross-chain hub order, will update as the order progresses.
 #[derive(Debug, Copy, Clone, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum CchOrderStatus {
-    /// Order is created and has not send out payments yet.
+    /// Order is created and the first half has not received complete payment yet.
     Pending = 0,
     /// HTLC in the first half is accepted.
-    Accepted = 1,
+    FirstHalfAccepted = 1,
     /// There's an outgoing payment in flight for the second half.
-    InFlight = 2,
-    /// Order is settled.
-    Succeeded = 3,
+    SecondHalfInFlight = 2,
+    /// The second half payment is succeeded.
+    SecondHalfSucceeded = 3,
+    /// The first half payment is succeeded.
+    FirstHalfSucceeded = 4,
     /// Order is failed.
-    Failed = 4,
-}
-
-/// lnd payment is the second half of SendBTCOrder
-impl From<lnrpc::payment::PaymentStatus> for CchOrderStatus {
-    fn from(status: lnrpc::payment::PaymentStatus) -> Self {
-        use lnrpc::payment::PaymentStatus;
-        match status {
-            PaymentStatus::Succeeded => CchOrderStatus::Succeeded,
-            PaymentStatus::Failed => CchOrderStatus::Failed,
-            _ => CchOrderStatus::InFlight,
-        }
-    }
-}
-
-/// lnd invoice is the first half of ReceiveBTCOrder
-impl From<lnrpc::invoice::InvoiceState> for CchOrderStatus {
-    fn from(state: lnrpc::invoice::InvoiceState) -> Self {
-        use lnrpc::invoice::InvoiceState;
-        // Set to InFlight only when a CKB HTLC is created
-        match state {
-            InvoiceState::Accepted => CchOrderStatus::Accepted,
-            InvoiceState::Canceled => CchOrderStatus::Failed,
-            InvoiceState::Settled => CchOrderStatus::Succeeded,
-            _ => CchOrderStatus::Pending,
-        }
-    }
+    Failed = 5,
 }
 
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SendBTCOrder {
+pub struct CchOrder {
+    // The payment hash of the order
+    pub payment_hash: Hash256,
+    pub payment_preimage: Option<Hash256>,
     // Seconds since epoch when the order is created
     #[serde_as(as = "U64Hex")]
     pub created_at: u64,
     // Seconds after timestamp that the order expires
     #[serde_as(as = "U64Hex")]
     pub expires_after: u64,
-    // The minimal expiry delta in milliseconds of the final TLC hop in the CKB network
-    #[serde_as(as = "U64Hex")]
-    pub ckb_final_tlc_expiry_delta: u64,
-
-    pub currency: Currency,
-    pub wrapped_btc_type_script: ckb_jsonrpc_types::Script,
-
-    pub btc_pay_req: String,
-    pub fiber_pay_req: String,
-    pub payment_hash: String,
-    pub payment_preimage: Option<String>,
 
     #[serde_as(as = "U128Hex")]
     /// Amount required to pay in Satoshis via wrapped BTC, including the fee for the cross-chain hub
@@ -82,55 +48,109 @@ pub struct SendBTCOrder {
     #[serde_as(as = "U128Hex")]
     pub fee_sats: u128,
 
-    pub status: CchOrderStatus,
+    pub in_invoice: CchInvoice,
+    pub out_invoice: CchInvoice,
+    pub in_state: InvoiceState,
+    pub out_state: PaymentState,
 }
 
-impl SendBTCOrder {
-    pub fn generate_ckb_invoice(&mut self, pubkey: Pubkey) -> Result<(), CchError> {
-        let invoice_builder = InvoiceBuilder::new(self.currency)
-            .payee_pub_key(pubkey.into())
-            .amount(Some(self.amount_sats))
-            .payment_hash(
-                Hash256::from_str(&self.payment_hash)
-                    .map_err(|_| CchError::HexDecodingError(self.payment_hash.clone()))?,
-            )
-            .hash_algorithm(HashAlgorithm::Sha256)
-            .expiry_time(Duration::from_secs(self.expires_after))
-            .final_expiry_delta(self.ckb_final_tlc_expiry_delta)
-            .udt_type_script(self.wrapped_btc_type_script.clone().into());
-
-        let invoice = invoice_builder.build()?;
-        self.fiber_pay_req = invoice.to_string();
-
-        Ok(())
+impl CchOrder {
+    pub fn new(
+        payment_hash: Hash256,
+        created_at: u64,
+        expires_after: u64,
+        amount_sats: u128,
+        fee_sats: u128,
+        in_invoice: CchInvoice,
+        out_invoice: CchInvoice,
+    ) -> Self {
+        Self {
+            payment_hash,
+            payment_preimage: None,
+            created_at,
+            expires_after,
+            amount_sats,
+            fee_sats,
+            in_invoice,
+            out_invoice,
+            in_state: InvoiceState::Open,
+            out_state: PaymentState::Created,
+        }
     }
+
+    pub fn status(&self) -> Result<CchOrderStatus, CchStateError> {
+        let status = match (self.in_state, self.out_state) {
+            (InvoiceState::Cancelled | InvoiceState::Expired, _) => CchOrderStatus::Failed,
+            (_, PaymentState::Failed) => CchOrderStatus::Failed,
+            (InvoiceState::Open, PaymentState::Created) => CchOrderStatus::Pending,
+            (InvoiceState::Open, _) => {
+                return Err(format!(
+                    "The second payment has a state too new for a just open first payment: {:?}",
+                    self.out_state
+                ))
+            }
+            (
+                InvoiceState::Received {
+                    amount: _amount,
+                    is_finished,
+                },
+                PaymentState::Created,
+            ) => {
+                if is_finished {
+                    CchOrderStatus::FirstHalfAccepted
+                } else {
+                    CchOrderStatus::Pending
+                }
+            }
+            (
+                InvoiceState::Received {
+                    amount: _amount,
+                    is_finished,
+                },
+                PaymentState::Inflight,
+            ) => {
+                if !is_finished {
+                    return Err("The second payment should be inflight when the first one is unfinished".to_string());
+                }
+                CchOrderStatus::SecondHalfInFlight
+            }
+            (InvoiceState::Received { .. }, PaymentState::Success { .. }) => {
+                CchOrderStatus::SecondHalfSucceeded
+            }
+            (InvoiceState::Paid, PaymentState::Success { .. }) => {
+                CchOrderStatus::SecondHalfSucceeded
+            }
+            (InvoiceState::Paid, _) => {
+                return Err(format!(
+                    "The first payment succeeded while the second payment has state (should have been succeeded or failed): {:?}",
+                    self.out_state
+                ))
+            }
+        };
+        Ok(status)
+    }
+}
+
+pub type CchStateError = String;
+
+pub type FiberInvoiceUpdate = InvoiceUpdate;
+pub type FiberPaymentUpdate = PaymentUpdate;
+pub type LightningInvoiceUpdate = InvoiceUpdate;
+pub type LightningPaymentUpdate = PaymentUpdate;
+
+pub struct CchInvoiceUpdate {
+    pub is_fiber: bool,
+    pub update: InvoiceUpdate,
+}
+
+pub struct CchPaymentUpdate {
+    pub is_fiber: bool,
+    pub update: PaymentUpdate,
 }
 
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReceiveBTCOrder {
-    // Seconds since epoch when the order is created
-    #[serde_as(as = "U64Hex")]
-    pub created_at: u64,
-    // Seconds after timestamp that the order expires
-    #[serde_as(as = "U64Hex")]
-    pub expires_after: u64,
-    // The minimal expiry in seconds of the final TLC in the CKB network
-    #[serde_as(as = "U64Hex")]
-    pub ckb_final_tlc_expiry_delta: u64,
-
-    pub wrapped_btc_type_script: ckb_jsonrpc_types::Script,
-
-    pub btc_pay_req: String,
-    pub fiber_pay_req: String,
-    pub payment_hash: String,
-    pub payment_preimage: Option<String>,
-
-    /// Amount required to pay in Satoshis via BTC, including the fee for the cross-chain hub
-    #[serde_as(as = "U128Hex")]
-    pub amount_sats: u128,
-    #[serde_as(as = "U128Hex")]
-    pub fee_sats: u128,
-
-    pub status: CchOrderStatus,
+pub enum CchInvoice {
+    Lightning(#[serde_as(as = "DisplayFromStr")] Bolt11Invoice),
+    Fiber(CkbInvoice),
 }

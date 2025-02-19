@@ -170,16 +170,6 @@ pub struct UdtScript {
     pub args: String,
 }
 
-impl UdtScript {
-    pub fn allow_all_for_script(script: &Script) -> Self {
-        Self {
-            code_hash: H256(script.code_hash().as_slice().try_into().expect("32 bytes")),
-            hash_type: script.hash_type().try_into().expect("valid hash type"),
-            args: "0x.*".to_string(),
-        }
-    }
-}
-
 #[serde_as]
 #[derive(Serialize, Deserialize, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct UdtCellDep {

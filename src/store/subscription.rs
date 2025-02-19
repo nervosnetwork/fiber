@@ -2,7 +2,11 @@
 //! This mod contains the traits definition of the subscription interfaces. The mod subscription_impl contains an
 //! implementation that sends out payment/invoice update events to subscribers.
 
+use std::str::FromStr;
+
+use lnd_grpc_tonic_client::lnrpc;
 use ractor::{async_trait, DerivedActorRef};
+use serde::{Deserialize, Serialize};
 
 use crate::{
     fiber::{graph::PaymentSessionStatus, types::Hash256},
@@ -11,7 +15,7 @@ use crate::{
 
 // The state of an invoice. Basically the same as CkbInvoiceStatus,
 // but with additional information for downstream services.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum InvoiceState {
     /// The invoice is open and can be paid.
     Open,
@@ -31,6 +35,12 @@ pub enum InvoiceState {
     Paid,
 }
 
+impl InvoiceState {
+    pub fn is_final(&self) -> bool {
+        matches!(self, Self::Paid | Self::Cancelled | Self::Expired)
+    }
+}
+
 impl From<InvoiceState> for CkbInvoiceStatus {
     fn from(state: InvoiceState) -> Self {
         match state {
@@ -40,6 +50,33 @@ impl From<InvoiceState> for CkbInvoiceStatus {
             InvoiceState::Received { .. } => CkbInvoiceStatus::Received,
             InvoiceState::Paid => CkbInvoiceStatus::Paid,
         }
+    }
+}
+
+impl From<lnrpc::Invoice> for InvoiceState {
+    fn from(invoice: lnrpc::Invoice) -> Self {
+        match lnrpc::invoice::InvoiceState::try_from(invoice.state) {
+            Ok(lnrpc::invoice::InvoiceState::Open) => Self::Open,
+            Ok(lnrpc::invoice::InvoiceState::Settled) => Self::Paid,
+            Ok(lnrpc::invoice::InvoiceState::Canceled) => Self::Cancelled,
+            Ok(lnrpc::invoice::InvoiceState::Accepted) => Self::Received {
+                amount: invoice.value_msat as u128,
+                is_finished: true,
+            },
+            Err(_) => {
+                tracing::error!(invoice = ?invoice, "Unknown lnd invoice state (should not happen)");
+                Self::Cancelled
+            }
+        }
+    }
+}
+
+impl TryFrom<lnrpc::Invoice> for InvoiceUpdate {
+    type Error = anyhow::Error;
+    fn try_from(value: lnrpc::Invoice) -> Result<Self, Self::Error> {
+        let hash = Hash256::try_from(value.r_hash.as_slice())?;
+        let state = InvoiceState::from(value);
+        Ok(Self { hash, state })
     }
 }
 
@@ -59,7 +96,7 @@ impl From<CkbInvoiceStatus> for Option<InvoiceState> {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct InvoiceUpdate {
     pub hash: Hash256,
     pub state: InvoiceState,
@@ -67,7 +104,7 @@ pub struct InvoiceUpdate {
 
 // The state of a payment session. Basically the same as PaymentSessionStatus,
 // but with additional information for downstream services.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum PaymentState {
     /// initial status, payment session is created, no HTLC is sent
     Created,
@@ -105,7 +142,43 @@ impl From<PaymentSessionStatus> for Option<PaymentState> {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+impl From<lnrpc::Payment> for PaymentState {
+    fn from(payment: lnrpc::Payment) -> Self {
+        match lnrpc::payment::PaymentStatus::try_from(payment.status) {
+            Ok(lnrpc::payment::PaymentStatus::Unknown) => Self::Failed,
+            Ok(lnrpc::payment::PaymentStatus::InFlight) => Self::Inflight,
+            Ok(lnrpc::payment::PaymentStatus::Succeeded) => {
+                match Hash256::from_str(&payment.payment_preimage) {
+                    Ok(preimage) => Self::Success { preimage },
+                    Err(_) => {
+                        tracing::error!(
+                            payment = ?payment,
+                            "Failed to parse preimage from lnd payment (should not happen)",
+                        );
+                        Self::Failed
+                    }
+                }
+            }
+            Ok(lnrpc::payment::PaymentStatus::Failed) => Self::Failed,
+            Ok(lnrpc::payment::PaymentStatus::Initiated) => Self::Created,
+            Err(_) => {
+                tracing::error!(payment = ?payment, "Unknown lnd payment status (should not happen)");
+                Self::Failed
+            }
+        }
+    }
+}
+
+impl TryFrom<lnrpc::Payment> for PaymentUpdate {
+    type Error = anyhow::Error;
+    fn try_from(value: lnrpc::Payment) -> Result<Self, Self::Error> {
+        let hash = Hash256::from_str(&value.payment_hash)?;
+        let state = PaymentState::from(value);
+        Ok(Self { hash, state })
+    }
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct PaymentUpdate {
     pub hash: Hash256,
     pub state: PaymentState,

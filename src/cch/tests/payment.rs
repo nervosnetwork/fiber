@@ -1,14 +1,13 @@
-use std::{str::FromStr, time::Duration};
+use std::time::Duration;
 
 use bitcoin::hashes::Hash;
 use ckb_types::packed::Script;
-use lightning_invoice::Bolt11Invoice;
 use ractor::call_t;
 
 use crate::{
     cch::{
         tests::lnd::{LndBitcoinDConf, LndNode},
-        CchMessage, ReceiveBTC, ReceiveBTCOrder, SendBTC, SendBTCOrder,
+        CchInvoice, CchMessage, CchOrder, ReceiveBTC, SendBTC,
     },
     ckb::contracts::{get_script_by_contract, Contract},
     fiber::{
@@ -23,7 +22,7 @@ use crate::{
         types::Hash256,
     },
     gen_rand_sha256_hash,
-    invoice::{CkbInvoice, CkbInvoiceStatus, Currency, InvoiceBuilder},
+    invoice::{CkbInvoiceStatus, Currency, InvoiceBuilder},
     CchConfig,
 };
 
@@ -152,7 +151,7 @@ async fn do_test_cross_chain_payment_hub_send_btc(udt_script: Script, multiple_h
 
     let hash = Hash256::try_from(add_invoice_result.r_hash.as_slice()).expect("valid hash");
 
-    let send_btc_result: SendBTCOrder = call_t!(
+    let send_btc_result: CchOrder = call_t!(
         hub.get_cch_actor(),
         CchMessage::SendBTC,
         CALL_ACTOR_TIMEOUT_MS,
@@ -164,8 +163,13 @@ async fn do_test_cross_chain_payment_hub_send_btc(udt_script: Script, multiple_h
     .expect("send btc actor call")
     .expect("send btc result");
 
-    let fiber_invoice =
-        CkbInvoice::from_str(&send_btc_result.fiber_pay_req).expect("valid invoice");
+    let fiber_invoice = match &send_btc_result.in_invoice {
+        CchInvoice::Fiber(invoice) => invoice,
+        _ => panic!(
+            "expecting fiber invoice while recevied {:?}",
+            send_btc_result.out_invoice
+        ),
+    };
     assert_eq!(fiber_invoice.payment_hash(), &hash);
     assert_eq!(fiber_invoice.hash_algorithm(), Some(&HashAlgorithm::Sha256));
 
@@ -179,7 +183,7 @@ async fn do_test_cross_chain_payment_hub_send_btc(udt_script: Script, multiple_h
 
     let res = fiber_node
         .send_payment(SendPaymentCommand {
-            invoice: Some(send_btc_result.fiber_pay_req.clone()),
+            invoice: Some(fiber_invoice.to_string()),
             ..Default::default()
         })
         .await;
@@ -344,7 +348,7 @@ async fn do_test_cross_chain_payment_hub_receive_btc(udt_script: Script, multipl
     let payment_hash = *fiber_invoice.payment_hash();
     fiber_node.insert_invoice(fiber_invoice.clone(), Some(preimage));
 
-    let receive_btc_result: ReceiveBTCOrder = call_t!(
+    let receive_btc_result: CchOrder = call_t!(
         hub.get_cch_actor(),
         CchMessage::ReceiveBTC,
         CALL_ACTOR_TIMEOUT_MS,
@@ -355,8 +359,13 @@ async fn do_test_cross_chain_payment_hub_receive_btc(udt_script: Script, multipl
     .expect("receive btc actor call")
     .expect("receive btc result");
 
-    let lightning_invoice =
-        Bolt11Invoice::from_str(&receive_btc_result.btc_pay_req).expect("valid invoice");
+    let lightning_invoice = match &receive_btc_result.in_invoice {
+        CchInvoice::Lightning(invoice) => invoice,
+        _ => panic!(
+            "expecting lightning invoice, while received {:?}",
+            receive_btc_result.in_invoice
+        ),
+    };
     assert_eq!(
         payment_hash,
         Hash256::from(lightning_invoice.payment_hash().to_byte_array())
@@ -375,7 +384,7 @@ async fn do_test_cross_chain_payment_hub_receive_btc(udt_script: Script, multipl
     let fiber_old_amount = fiber_node.get_local_balance_from_channel(fiber_node_channel);
     let hub_old_amount = hub.get_lnd_node_mut().get_balance_msats().await;
 
-    lnd_node.send_payment(&lightning_invoice).await;
+    lnd_node.send_payment(lightning_invoice).await;
 
     tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
 

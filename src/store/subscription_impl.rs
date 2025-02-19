@@ -101,7 +101,7 @@ impl SubscriptionActorState {
         if let Entry::Occupied(mut entry) = self.invoice_subscriptions.entry(invoice_hash) {
             entry
                 .get_mut()
-                .retain(|_, subscription| subscription.send_update(update.clone()).is_ok());
+                .retain(|_, subscription| subscription.send_update(update).is_ok());
             if entry.get().is_empty() {
                 entry.remove();
             }
@@ -112,7 +112,7 @@ impl SubscriptionActorState {
         if let Entry::Occupied(mut entry) = self.payment_subscriptions.entry(payment_hash) {
             entry
                 .get_mut()
-                .retain(|_, subscription| subscription.send_update(update.clone()).is_ok());
+                .retain(|_, subscription| subscription.send_update(update).is_ok());
             if entry.get().is_empty() {
                 entry.remove();
             }
