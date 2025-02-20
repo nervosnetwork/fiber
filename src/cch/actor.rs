@@ -32,7 +32,7 @@ use super::order::{
     CchInvoiceUpdate, CchOrderActorMessage, CchPaymentUpdate, LightningInvoiceUpdate,
     LightningPaymentUpdate,
 };
-use super::{CchConfig, CchError, CchOrder, CchOrderStore};
+use super::{CchConfig, CchError, CchOrder, CchOrderStatus, CchOrderStore};
 
 pub const BTC_PAYMENT_TIMEOUT_SECONDS: i32 = 60;
 pub const DEFAULT_ORDER_EXPIRY_SECONDS: u64 = 86400; // 24 hours
@@ -98,6 +98,8 @@ pub enum CchMessage {
 
     LightningPaymentUpdate(LightningPaymentUpdate),
     LightningInvoiceUpdate(LightningInvoiceUpdate),
+
+    NotifyOrderOutCome(Hash256, CchOrderStatus),
 }
 
 #[derive(Clone)]
@@ -303,6 +305,18 @@ where
                         update: event,
                     }),
                 );
+                Ok(())
+            }
+            CchMessage::NotifyOrderOutCome(hash, cch_order_status) => {
+                if matches!(
+                    cch_order_status,
+                    CchOrderStatus::Succeeded | CchOrderStatus::Failed
+                ) {
+                    tracing::debug!(hash = ?hash, status = ?cch_order_status, "Cch order finished");
+                    if let Some(order) = state.orders.remove(&hash) {
+                        self.stop_cch_order_actor(hash, order).await;
+                    }
+                }
                 Ok(())
             }
         }

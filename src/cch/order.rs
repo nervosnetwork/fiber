@@ -357,11 +357,13 @@ impl CchOrder {
                 .expect("call cch actor")
                 .map_err(|e| CchOrderError::FailedToSettleInvoice(self.in_invoice.clone(), e))?;
             }
-            CchOrderStatus::Failed => {
-                // TODO:
-            }
-            CchOrderStatus::Succeeded => {
-                // TODO:
+            CchOrderStatus::Failed | CchOrderStatus::Succeeded => {
+                cch_actor
+                    .send_message(CchMessage::NotifyOrderOutCome(
+                        self.payment_hash,
+                        self.get_status(),
+                    ))
+                    .expect("send order finalized message to cch actor");
             }
             CchOrderStatus::Pending | CchOrderStatus::SecondHalfInFlight => {
                 // Waiting for next invoice/payment update to arrive
