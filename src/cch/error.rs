@@ -65,6 +65,8 @@ pub enum CchError {
     LndGrpcRequestError(String),
     #[error("Unexpected lnd data: {0}")]
     UnexpectedLndData(String),
+    #[error("Cch order not found: {0}")]
+    OrderNotFound(Hash256),
 }
 
 pub type CchResult<T> = std::result::Result<T, CchError>;
