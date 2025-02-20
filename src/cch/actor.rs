@@ -704,12 +704,88 @@ impl CchActor {
             .map_err(Into::into)
     }
 
-    fn start_lightning_payment_tracker(
+    async fn start_lightning_payment_tracker(
         &self,
-        _payment_hash: Hash256,
-        _myself: &ActorRef<CchMessage>,
+        payment_hash: Hash256,
+        myself: &ActorRef<CchMessage>,
     ) -> Result<LightningTrackingHandle, CchError> {
-        // TODO: we need to obtain the payment status immediately in case of restart.
+        let token = self.token.child_token();
+        let myself = myself.clone();
+        let lnd_connection = self.lnd_connection.clone();
+
+        // Start a payment tracking. Return an error when non-retriable error occurs.
+        // Return Ok(None) when retriable error occurs. Return Ok(Some(payment_update)) when payment is successful.
+        async fn get_payment(
+            payment_hash: Hash256,
+            lnd_connection: &LndConnectionInfo,
+        ) -> Result<Option<PaymentUpdate>, CchError> {
+            let mut stream = match lnd_connection.create_router_client().await {
+                Ok(mut client) => match client
+                    .track_payment_v2(routerrpc::TrackPaymentRequest {
+                        no_inflight_updates: true,
+                        payment_hash: payment_hash.as_ref().to_vec(),
+                    })
+                    .await
+                {
+                    Ok(stream) => stream.into_inner(),
+                    Err(error) => {
+                        tracing::warn!(error = ?error, "Failed to track payment");
+                        return Ok(None);
+                    }
+                },
+                Err(error) => {
+                    tracing::warn!(error = ?error, "Failed to create router client");
+                    return Ok(None);
+                }
+            };
+            let payment_opt = stream.next().await;
+            match payment_opt {
+                Some(Ok(payment)) => {
+                    let payment_update = PaymentUpdate::try_from(payment)
+                        .map_err(|err| CchError::UnexpectedLndData(err.to_string()))?;
+                    Ok(Some(payment_update))
+                }
+                Some(Err(err)) => {
+                    tracing::error!(error = ?err, "Failed to track payment");
+                    Ok(None)
+                }
+                None => {
+                    tracing::error!("Unexpected closed stream while tracking lightning payment");
+                    Ok(None)
+                }
+            }
+        }
+
+        self.tracker.spawn(async move {
+            loop {
+                select! {
+                    payment_opt = get_payment(payment_hash, &lnd_connection) => {
+                        match payment_opt {
+                            Ok(Some(payment_update)) => {
+                                let message = CchMessage::LightningPaymentUpdate(payment_update);
+                                myself.cast(message).expect("send message to cch actor");
+                                return;
+                            }
+                            Ok(None) => {
+                                // Sleep for a while before retrying
+                                sleep(Duration::from_secs(15)).await;
+                            }
+                            Err(err) => {
+                                tracing::error!(error = ?err, "Failed to track lightning payment");
+                                return;
+                            }
+                        }
+                    }
+                    _ = token.cancelled() => {
+                        tracing::debug!("Cancellation received while tracking lightning payment");
+                        return;
+                    }
+                }
+            }
+        });
+
+        tracing::debug!("Subscribed to lnd payments");
+
         let token = self.token.child_token();
         Ok(token)
     }
@@ -747,7 +823,10 @@ impl CchActor {
                     .await?,
             )
         } else {
-            TrackingHandle::Lightning(self.start_lightning_payment_tracker(payment_hash, myself)?)
+            TrackingHandle::Lightning(
+                self.start_lightning_payment_tracker(payment_hash, myself)
+                    .await?,
+            )
         };
         state.orders.insert(
             order.payment_hash,
