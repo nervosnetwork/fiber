@@ -48,7 +48,6 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
         * [Method `disconnect_peer`](#peer-disconnect_peer)
 * [RPC Types](#rpc-types)
 
-    * [Type `CchInvoice`](#type-cchinvoice)
     * [Type `CchOrderStatus`](#type-cchorderstatus)
     * [Type `Channel`](#type-channel)
     * [Type `ChannelInfo`](#type-channelinfo)
@@ -84,8 +83,8 @@ Send BTC to a address.
 
 ##### Returns
 
-* `payment_hash` - <em>`String`</em>, Payment hash for the HTLC for both CKB and BTC.
-* `payment_preimage` - <em>`Option<String>`</em>, Payment preimage for the HTLC for both CKB and BTC.
+* `payment_hash` - <em>[Hash256](#type-hash256)</em>, Payment hash for the HTLC for both CKB and BTC.
+* `payment_preimage` - <em>Option<[Hash256](#type-hash256)></em>, Payment preimage for the HTLC for both CKB and BTC.
 * `created_at` - <em>`u64`</em>, Seconds since epoch when the order is created.
 * `expires_after` - <em>`u64`</em>, Seconds after timestamp that the order expires
 * `amount_sats` - <em>`u128`</em>, Amount required to pay in Satoshis, including fee
@@ -111,8 +110,8 @@ Receive BTC from a payment hash.
 
 ##### Returns
 
-* `payment_hash` - <em>`String`</em>, Payment hash for the HTLC for both CKB and BTC.
-* `payment_preimage` - <em>`Option<String>`</em>, Payment preimage for the HTLC for both CKB and BTC.
+* `payment_hash` - <em>[Hash256](#type-hash256)</em>, Payment hash for the HTLC for both CKB and BTC.
+* `payment_preimage` - <em>Option<[Hash256](#type-hash256)></em>, Payment preimage for the HTLC for both CKB and BTC.
 * `created_at` - <em>`u64`</em>, Seconds since epoch when the order is created.
 * `expires_after` - <em>`u64`</em>, Seconds after timestamp that the order expires
 * `amount_sats` - <em>`u128`</em>, Amount required to pay in Satoshis, including fee
@@ -134,21 +133,12 @@ Get receive BTC order by payment hash.
 
 ##### Params
 
-* `payment_hash` - <em>[Hash256](#type-hash256)</em>, Payment hash for the HTLC for both CKB and BTC.
+* `payment_hash` - <em>Option<[Hash256](#type-hash256)></em>, Payment hash for the HTLC for both CKB and BTC. If not provided, return all orders.
+ TODO: Add support for pagination.
 
 ##### Returns
 
-* `payment_hash` - <em>`String`</em>, Payment hash for the HTLC.
-* `payment_preimage` - <em>`Option<String>`</em>, Payment preimage for the HTLC.
-* `created_at` - <em>`u64`</em>, Seconds since epoch when the order is created.
-* `expires_after` - <em>`u64`</em>, Seconds after timestamp that the order expires
-* `amount_sats` - <em>`u128`</em>, Amount required to pay in Satoshis, including fee
-* `fee_sats` - <em>`u128`</em>, Fee in Satoshis
-* `in_invoice` - <em>[CchInvoice](#type-cchinvoice)</em>, The invoice for the payment that is sent to the cross-chain hub.
-* `out_invoice` - <em>[CchInvoice](#type-cchinvoice)</em>, The invoice for the payment that is sent from the cross-chain hub.
-* `in_state` - <em>`CchInvoiceState`</em>, The state of the payment that is sent to the cross-chain hub.
-* `out_state` - <em>`CchPaymentState`</em>, The state of the payment that is sent from the cross-chain hub.
-* `status` - <em>[CchOrderStatus](#type-cchorderstatus)</em>, The status of the order.
+* `CchOrderResponse` - <em>CchOrderResponse</em>, 
 
 ---
 
@@ -677,18 +667,6 @@ Disconnect from a peer.
 
 ## RPC Types
 
-
-<a id="#type-cchinvoice"></a>
-### Type `CchInvoice`
-
-A cross-chain hub invoice, which can be either a lightning network invoice or a fiber network invoice.
-
-
-#### Enum with values of
-
-* `Lightning` - <em>Bolt11Invoice</em>, A lightning network invoice
-* `Fiber` - <em>CkbInvoice</em>, A fiber network invoice
----
 
 <a id="#type-cchorderstatus"></a>
 ### Type `CchOrderStatus`

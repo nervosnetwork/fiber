@@ -63,4 +63,4 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-pub const ALREADY_EXISTS_DESCRIPTION: &'static str = "The same entity already exists";
+pub const ALREADY_EXISTS_DESCRIPTION: &str = "The same entity already exists";
