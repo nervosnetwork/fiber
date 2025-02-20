@@ -519,64 +519,7 @@ where
                 self.handle_remove_tlc_peer_message(state, remove_tlc)
             }
             FiberChannelMessage::Shutdown(shutdown) => {
-                let flags = match state.state {
-                    ChannelState::ChannelReady() => ShuttingDownFlags::empty(),
-                    ChannelState::ShuttingDown(flags)
-                        if flags.contains(ShuttingDownFlags::THEIR_SHUTDOWN_SENT) =>
-                    {
-                        return Err(ProcessingChannelError::InvalidParameter(
-                            "Received Shutdown message, but we're already in ShuttingDown state"
-                                .to_string(),
-                        ));
-                    }
-                    ChannelState::ShuttingDown(flags) => flags,
-                    _ => {
-                        return Err(ProcessingChannelError::InvalidState(format!(
-                            "received Shutdown message, but we're not ready for Shutdown, state is currently {:?}",
-                            state.state
-                        )));
-                    }
-                };
-                state.remote_shutdown_info = Some(ShutdownInfo {
-                    close_script: shutdown.close_script,
-                    fee_rate: shutdown.fee_rate.as_u64(),
-                    signature: None,
-                });
-
-                let mut flags = flags | ShuttingDownFlags::THEIR_SHUTDOWN_SENT;
-
-                // Only automatically reply shutdown if only their shutdown message is sent.
-                // If we are in a state other than only their shutdown is sent,
-                // e.g. our shutdown message is also sent, or we are trying to force shutdown,
-                // we should not reply.
-                let should_we_reply_shutdown =
-                    matches!(flags, ShuttingDownFlags::THEIR_SHUTDOWN_SENT);
-
-                if state.check_valid_to_auto_accept_shutdown() && should_we_reply_shutdown {
-                    let close_script = state.get_local_shutdown_script();
-                    self.network
-                        .send_message(NetworkActorMessage::new_command(
-                            NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
-                                state.get_remote_peer_id(),
-                                FiberMessage::shutdown(Shutdown {
-                                    channel_id: state.get_id(),
-                                    close_script: close_script.clone(),
-                                    fee_rate: FeeRate::from_u64(0),
-                                }),
-                            )),
-                        ))
-                        .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-                    state.local_shutdown_info = Some(ShutdownInfo {
-                        close_script,
-                        fee_rate: 0,
-                        signature: None,
-                    });
-                    flags |= ShuttingDownFlags::OUR_SHUTDOWN_SENT;
-                    debug!("Auto accept shutdown ...");
-                }
-                state.update_state(ChannelState::ShuttingDown(flags));
-                state.maybe_transition_to_shutdown(&self.network)?;
-                Ok(())
+                self.handle_shutdown_peer_message(state, shutdown)
             }
             FiberChannelMessage::ClosingSigned(closing) => {
                 let ClosingSigned {
@@ -1109,6 +1052,70 @@ where
         Ok(())
     }
 
+    fn handle_shutdown_peer_message(
+        &self,
+        state: &mut ChannelActorState,
+        shutdown: Shutdown,
+    ) -> Result<(), ProcessingChannelError> {
+        let flags = match state.state {
+            ChannelState::ChannelReady() => ShuttingDownFlags::empty(),
+            ChannelState::ShuttingDown(flags)
+                if flags.contains(ShuttingDownFlags::THEIR_SHUTDOWN_SENT) =>
+            {
+                return Err(ProcessingChannelError::InvalidParameter(
+                    "Received Shutdown message, but we're already in ShuttingDown state"
+                        .to_string(),
+                ));
+            }
+            ChannelState::ShuttingDown(flags) => flags,
+            _ => {
+                return Err(ProcessingChannelError::InvalidState(format!(
+                    "received Shutdown message, but we're not ready for Shutdown, state is currently {:?}",
+                    state.state
+                )));
+            }
+        };
+        state.remote_shutdown_info = Some(ShutdownInfo {
+            close_script: shutdown.close_script,
+            fee_rate: shutdown.fee_rate.as_u64(),
+            signature: None,
+        });
+
+        let mut flags = flags | ShuttingDownFlags::THEIR_SHUTDOWN_SENT;
+
+        // Only automatically reply shutdown if only their shutdown message is sent.
+        // If we are in a state other than only their shutdown is sent,
+        // e.g. our shutdown message is also sent, or we are trying to force shutdown,
+        // we should not reply.
+        let should_we_reply_shutdown = matches!(flags, ShuttingDownFlags::THEIR_SHUTDOWN_SENT);
+
+        if state.check_valid_to_auto_accept_shutdown() && should_we_reply_shutdown {
+            let close_script = state.get_local_shutdown_script();
+            self.network
+                .send_message(NetworkActorMessage::new_command(
+                    NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
+                        state.get_remote_peer_id(),
+                        FiberMessage::shutdown(Shutdown {
+                            channel_id: state.get_id(),
+                            close_script: close_script.clone(),
+                            fee_rate: FeeRate::from_u64(0),
+                        }),
+                    )),
+                ))
+                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+            state.local_shutdown_info = Some(ShutdownInfo {
+                close_script,
+                fee_rate: 0,
+                signature: None,
+            });
+            flags |= ShuttingDownFlags::OUR_SHUTDOWN_SENT;
+            debug!("Auto accept shutdown ...");
+        }
+        state.update_state(ChannelState::ShuttingDown(flags));
+        state.maybe_transition_to_shutdown(&self.network)?;
+        Ok(())
+    }
+
     async fn apply_remove_tlc_operation(
         &self,
         myself: &ActorRef<ChannelActorMessage>,
@@ -1412,6 +1419,7 @@ where
                 "Channel state updated to {:?} after processing shutdown command",
                 &state.state
             );
+            eprintln!("now here ....");
 
             state.maybe_transition_to_shutdown(&self.network)
         }
@@ -1945,20 +1953,24 @@ where
                 myself.stop(Some("PeerDisconnected".to_string()));
             }
             ChannelEvent::ClosingTransactionConfirmed(force) => {
-                if force {
-                    match state.state {
-                        ChannelState::ShuttingDown(flags)
-                            if flags
-                                .contains(ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION) => {}
-                        _ => {
-                            return Err(ProcessingChannelError::InvalidState(format!(
+                match state.state {
+                    ChannelState::ShuttingDown(flags)
+                        if flags.contains(ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION) => {}
+                    _ => {
+                        return Err(ProcessingChannelError::InvalidState(format!(
                             "Expecting commitment transaction confirmed event in state ShuttingDown, but got state {:?}", &state.state)
                         ));
-                        }
-                    };
-                    state.update_state(ChannelState::Closed(CloseFlags::UNCOOPERATIVE));
+                    }
+                };
+
+                let closed_state = if force {
                     debug!("Channel closed with uncooperative close");
-                }
+                    ChannelState::Closed(CloseFlags::UNCOOPERATIVE)
+                } else {
+                    debug!("Channel closed with cooperative close");
+                    ChannelState::Closed(CloseFlags::COOPERATIVE)
+                };
+                state.update_state(closed_state);
 
                 // Broadcast the channel update message which disables the channel.
                 if state.is_public() {
@@ -5426,7 +5438,9 @@ impl ChannelActorState {
                     shutdown_tx_size(&self.funding_udt_type_script, shutdown_scripts)
                 );
 
-                self.update_state(ChannelState::Closed(CloseFlags::COOPERATIVE));
+                self.update_state(ChannelState::ShuttingDown(
+                    ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION,
+                ));
 
                 network
                     .send_message(NetworkActorMessage::new_event(
