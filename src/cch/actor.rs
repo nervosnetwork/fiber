@@ -15,6 +15,7 @@ use tokio::{select, time::sleep};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::cch::order::{CchInvoice, CchOrderActor};
+use crate::errors::ALREADY_EXISTS_DESCRIPTION;
 use crate::fiber::graph::PaymentSessionStatus;
 use crate::fiber::hash_algorithm::HashAlgorithm;
 use crate::fiber::network::SendPaymentCommand;
@@ -511,6 +512,12 @@ where
         }
     }
 
+    // Pay an invoice and return the optional payment update. Since we are sending a payment,
+    // we may or may not an immediate payment status update (for example, when the same payment
+    // is sent twice, lnd/fiber APIs currently will tell us the payment exists, but won't give
+    // out detailed information), so we return an optional payment update. But the caller needs
+    // to track the payment for progress anyway. So the payment update should really be treated
+    // a nice-to-have information.
     async fn pay_invoice(&self, invoice: CchInvoice) -> Result<Option<CchPaymentUpdate>, CchError> {
         let payment_hash = invoice.payment_hash();
         tracing::debug!(
@@ -531,26 +538,39 @@ where
 
                 let mut client = self.lnd_connection.create_router_client().await?;
                 // TODO: set a fee
-                let mut stream = client
-                    .send_payment_v2(req)
-                    .await
-                    .map_err(|err| CchError::LndGrpcRequestError(err.to_string()))?
-                    .into_inner();
+                let mut stream = match client.send_payment_v2(req).await {
+                    Ok(stream) => stream.into_inner(),
+                    // 6 is the standard code for grpc error ALREADY_EXISTS.
+                    // https://grpc.io/docs/guides/status-codes/
+                    // tonic is not reexported by lnd_grpc_tonic_client, so we have to use the raw code.
+                    Err(status) if i32::from(status.code()) == 6 => {
+                        return Ok(None);
+                    }
+                    Err(err) => {
+                        return Err(CchError::LndGrpcRequestError(err.to_string()));
+                    }
+                };
                 // Wait for the first message then quit
                 select! {
                     payment_result_opt = stream.next() => {
-                        tracing::debug!("[inbounding tlc] payment result: {:?}", payment_result_opt);
-                        if let Some(Ok(payment)) = payment_result_opt {
-                            Ok(Some(
-                                CchPaymentUpdate {
-                                is_fiber: false,
-                                update: PaymentUpdate::try_from(payment).map_err(|err| {
-                                    CchError::UnexpectedLndData(err.to_string())
-                                })?
+                        match payment_result_opt {
+                            Some(Ok(payment)) => {
+                                Ok(Some(
+                                    CchPaymentUpdate {
+                                        is_fiber: false,
+                                        update: PaymentUpdate::try_from(payment).map_err(|err| {
+                                            CchError::UnexpectedLndData(err.to_string())
+                                        })?
+                                    }
+                                ))
                             }
-                            ))
-                        } else {
-                            Ok(None)
+                            Some(Err(status)) => {
+                                tracing::error!(payment_hash = ?payment_hash, status = ?status, status_code = i32::from(status.code()), "Sending lnd payment failed");
+                                Err(CchError::LndGrpcRequestError(status.to_string()))
+                            }
+                            // We don't really know if the payment is successful or not.
+                            // But in this case we can always retry the payment.
+                            None => Ok(None)
                         }
                     }
                     _ = self.token.cancelled() => {
@@ -571,10 +591,11 @@ where
                 };
 
                 // TODO: handle payment failure here.
-                let tlc_response = call!(self.network_actor, message)
-                    .expect("call actor")
-                    .map_err(CchError::SendFiberPaymentError)?;
-                // TODO: handle payment failure here.
+                let tlc_response = match call!(self.network_actor, message).expect("call actor") {
+                    Ok(tlc_response) => tlc_response,
+                    Err(err) if err.contains(ALREADY_EXISTS_DESCRIPTION) => return Ok(None),
+                    Err(err) => return Err(CchError::SendFiberPaymentError(err.to_string())),
+                };
                 let state = if tlc_response.status == PaymentSessionStatus::Failed {
                     PaymentState::Failed
                 } else {

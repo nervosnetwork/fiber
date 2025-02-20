@@ -57,6 +57,10 @@ pub enum Error {
     InternalError(anyhow::Error),
     #[error("Invalid chain hash: {0} (expecting {1})")]
     InvalidChainHash(Hash256, Hash256),
+    #[error("{ALREADY_EXISTS_DESCRIPTION}: {0}")]
+    AlreadyExists(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+pub const ALREADY_EXISTS_DESCRIPTION: &'static str = "The same entity already exists";

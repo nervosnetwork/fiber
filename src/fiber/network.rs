@@ -1932,7 +1932,7 @@ where
             // we only allow retrying payment session with status failed
             debug!("Payment session already exists: {:?}", payment_session);
             if payment_session.status != PaymentSessionStatus::Failed {
-                return Err(Error::InvalidParameter(format!(
+                return Err(Error::AlreadyExists(format!(
                     "Payment session already exists: {} with payment session status: {:?}",
                     payment_data.payment_hash, payment_session.status
                 )));
