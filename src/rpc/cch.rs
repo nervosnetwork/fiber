@@ -176,7 +176,6 @@ where
                 .map(Into::into)
                 .collect(),
         };
-        dbg!(&orders);
         Ok(orders)
     }
 }
