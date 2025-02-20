@@ -46,7 +46,7 @@ impl fmt::Debug for InvalidStateTransition {
 #[derive(Error, Debug)]
 pub enum CchOrderError {
     #[error("Invalid state transition: {0:?}")]
-    InvalidStateTransition(InvalidStateTransition),
+    InvalidStateTransition(Box<InvalidStateTransition>),
     #[error("Failed to pay invoice {0:?}: {1:?}")]
     FailedToPayInvoice(CchInvoice, CchError),
     #[error("Failed to settle invoice {0:?}: {1:?}")]
@@ -198,7 +198,7 @@ impl CchOrder {
     ) -> Result<(CchOrderStatus, CchOrderStatus), CchOrderError> {
         let old_status = self.status().expect("status is valid");
         if self.in_invoice.is_fiber() != invoice_update.is_fiber {
-            return Err(CchOrderError::InvalidStateTransition(
+            return Err(CchOrderError::InvalidStateTransition(Box::new(
                 InvalidStateTransition {
                     previous_in_state: self.in_state,
                     previous_out_state: self.out_state,
@@ -207,11 +207,11 @@ impl CchOrder {
                     ),
                     error: "The invoice update is for the wrong network".to_string(),
                 },
-            ));
+            )));
         }
         self.in_state = invoice_update.update.state;
         match self.status() {
-            Err(error) => Err(CchOrderError::InvalidStateTransition(
+            Err(error) => Err(CchOrderError::InvalidStateTransition(Box::new(
                 InvalidStateTransition {
                     previous_in_state: self.in_state,
                     previous_out_state: self.out_state,
@@ -220,7 +220,7 @@ impl CchOrder {
                     ),
                     error,
                 },
-            )),
+            ))),
             Ok(new_status) => Ok((old_status, new_status)),
         }
     }
@@ -261,7 +261,7 @@ impl CchOrder {
         tracing::trace!(payment_update = ?payment_update, "Cch received payment update");
         let old_status = self.status().expect("status is valid");
         if self.out_invoice.is_fiber() != payment_update.is_fiber {
-            return Err(CchOrderError::InvalidStateTransition(
+            return Err(CchOrderError::InvalidStateTransition(Box::new(
                 InvalidStateTransition {
                     previous_in_state: self.in_state,
                     previous_out_state: self.out_state,
@@ -270,7 +270,7 @@ impl CchOrder {
                     ),
                     error: "The payment update is for the wrong network".to_string(),
                 },
-            ));
+            )));
         }
 
         self.out_state = payment_update.update.state;
@@ -278,7 +278,7 @@ impl CchOrder {
             self.payment_preimage = Some(preimage);
         }
         match self.status() {
-            Err(error) => Err(CchOrderError::InvalidStateTransition(
+            Err(error) => Err(CchOrderError::InvalidStateTransition(Box::new(
                 InvalidStateTransition {
                     previous_in_state: self.in_state,
                     previous_out_state: self.out_state,
@@ -287,7 +287,7 @@ impl CchOrder {
                     ),
                     error,
                 },
-            )),
+            ))),
             Ok(new_status) => Ok((old_status, new_status)),
         }
     }
@@ -379,10 +379,7 @@ where
             store,
         };
         Actor::spawn_linked(
-            Some(format!(
-                "cch order actor {}",
-                order.payment_hash.to_string()
-            )),
+            Some(format!("cch order actor {}", order.payment_hash)),
             actor,
             order,
             cch_actor.get_cell(),
@@ -448,6 +445,9 @@ where
     }
 }
 
+// The From and TryFrom implementations are used to convert a ActorRef<CchOrderActorMessage>
+// to a DerivedActorRef<FiberPaymentUpdate>.
+// https://docs.rs/ractor/latest/ractor/actor/derived_actor/struct.DerivedActorRef.html
 impl From<FiberPaymentUpdate> for CchOrderActorMessage {
     fn from(update: FiberPaymentUpdate) -> Self {
         CchOrderActorMessage::PaymentUpdate(CchPaymentUpdate {
@@ -468,6 +468,9 @@ impl TryFrom<CchOrderActorMessage> for FiberPaymentUpdate {
     }
 }
 
+// The From and TryFrom implementations are used to convert a ActorRef<CchOrderActorMessage>
+// to a DerivedActorRef<FiberInvoiceUpdate>.
+// https://docs.rs/ractor/latest/ractor/actor/derived_actor/struct.DerivedActorRef.html
 impl From<FiberInvoiceUpdate> for CchOrderActorMessage {
     fn from(update: FiberInvoiceUpdate) -> Self {
         CchOrderActorMessage::InvoiceUpdate(CchInvoiceUpdate {

@@ -36,6 +36,7 @@ use super::{CchConfig, CchError, CchOrder, CchOrderStore};
 pub const BTC_PAYMENT_TIMEOUT_SECONDS: i32 = 60;
 pub const DEFAULT_ORDER_EXPIRY_SECONDS: u64 = 86400; // 24 hours
 
+#[allow(clippy::too_many_arguments)]
 pub async fn start_cch<S: CchOrderStore + Clone + Send + Sync + 'static>(
     config: CchConfig,
     tracker: TaskTracker,
@@ -322,6 +323,7 @@ impl<S> CchActor<S>
 where
     S: CchOrderStore + Clone + Send + Sync + 'static,
 {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         config: CchConfig,
         tracker: TaskTracker,
@@ -408,7 +410,7 @@ where
 
         self.store.create_cch_order(order.clone())?;
         let order_actor = CchOrderActor::start(myself, self.store.clone(), order.clone()).await;
-        self.subscribe_updates_for_order(&myself, state, &order, &order_actor)
+        self.subscribe_updates_for_order(myself, state, &order, &order_actor)
             .await?;
 
         Ok(order)
@@ -474,7 +476,7 @@ where
         );
 
         let order_actor = CchOrderActor::start(myself, self.store.clone(), order.clone()).await;
-        self.subscribe_updates_for_order(&myself, state, &order, &order_actor)
+        self.subscribe_updates_for_order(myself, state, &order, &order_actor)
             .await?;
         self.store.create_cch_order(order.clone())?;
 
