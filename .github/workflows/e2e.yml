@@ -13,7 +13,8 @@ jobs:
           - open-use-close-a-channel
           - udt
           - reestablish
-          - cross-chain-hub
+          - cross-chain-hub/send-btc
+          - cross-chain-hub/receive-btc
           - router-pay
           - udt-router-pay
           - watchtower
@@ -45,7 +46,8 @@ jobs:
           wget "https://github.com/nervosnetwork/ckb/releases/download/v${version}/ckb_v${version}_x86_64-unknown-linux-gnu-portable.tar.gz"
           tar -xvaf "ckb_v${version}_x86_64-unknown-linux-gnu-portable.tar.gz"
           sudo mv "ckb_v${version}_x86_64-unknown-linux-gnu-portable"/* /usr/local/bin/
-          if [ ${{ matrix.workflow }} = "cross-chain-hub" ]; then
+          # if ${{ matrix.workflow }} starts with cross-chain-hub, we need to install bitcoin and lnd 
+          if [ "$(dirname "${{ matrix.workflow }}")" = "cross-chain-hub" ]; then
             wget "https://bitcoin.org/bin/bitcoin-core-27.0/bitcoin-27.0-x86_64-linux-gnu.tar.gz"
             tar -xvaf "bitcoin-27.0-x86_64-linux-gnu.tar.gz"
             echo "$(pwd)/bitcoin-27.0/bin" >> $GITHUB_PATH
@@ -58,7 +60,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          if [ ${{ matrix.workflow }} = "cross-chain-hub" ]; then
+          if [ "$(dirname "${{ matrix.workflow }}")" = "cross-chain-hub" ]; then
             ./tests/deploy/lnd-init/setup-lnd.sh
           fi
 

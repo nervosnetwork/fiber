@@ -1,0 +1,64 @@
+meta {
+  name: 10-check-cch-order-succeeded
+  type: http
+  seq: 10
+}
+
+post {
+  url: {{NODE3_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "get_cch_order",
+    "params": [
+      {
+        "payment_hash": "{{PAYMENT_HASH}}"
+      }
+    ]
+  }
+}
+
+assert {
+  res.status: eq 200
+  res.body.error: isUndefined
+  res.body.result: length 1
+  res.body.result[0].status: isDefined
+}
+
+script:pre-request {
+  if(bru.getVar("iteration") === undefined){
+    bru.setVar("iteration", 0);
+  }
+}
+
+script:post-response {
+  console.dir(res.body, { depth: null });
+  const i = bru.getVar("iteration");
+  const n = bru.getVar("max_iterations");
+  if (i < n) {
+    console.log(`Try ${i+1}/${n}`);
+  }
+  console.dir(res.body, { depth: null })
+
+  if (res.body.result[0].status == "succeeded") {
+    console.log("Cch order succeeded");
+    bru.setVar("iteration", 0);
+  } else if (i+1 < n) {
+    await new Promise(r => setTimeout(r, 100));
+    bru.setVar("iteration", i + 1);
+    bru.setNextRequest("10-check-cch-order-succeeded");
+  } else {
+    bru.setVar("iteration", 0);
+    throw new Error("Cch order did not succeed");
+  }
+}

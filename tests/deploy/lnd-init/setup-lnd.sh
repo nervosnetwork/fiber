@@ -67,7 +67,7 @@ setup-lnd() {
   echo "remaining retries=$retries"
 }
 
-setup-channels() {
+setup-channels-1() {
   echo "=> open channel from ingrid to bob"
   local bob_dir="$script_dir/lnd-bob"
   local ingrid_dir="$script_dir/lnd-ingrid"
@@ -85,12 +85,44 @@ setup-channels() {
   echo "openchannel"
   local retries=5
   while [[ $retries -gt 0 ]] && ! lncli -n regtest --lnddir="$ingrid_dir" --no-macaroons --rpcserver "localhost:$ingrid_port" \
-      openchannel \
-      --node_key "$bob_node_key" \
-      --connect localhost:9835 \
-      --local_amt 1000000 \
-      --sat_per_vbyte 1 \
-      --min_confs 0; do
+    openchannel \
+    --node_key "$bob_node_key" \
+    --connect localhost:9835 \
+    --local_amt 1000000 \
+    --sat_per_vbyte 1 \
+    --min_confs 0; do
+    sleep 3
+    retries=$((retries - 1))
+  done
+
+  echo "generate blocks"
+  bitcoin-cli -conf="$bitcoind_conf" -generate 3 >/dev/null
+}
+
+setup-channels-2() {
+  echo "=> open channel from bob to ingrid"
+  local bob_dir="$script_dir/lnd-bob"
+  local ingrid_dir="$script_dir/lnd-ingrid"
+  local bob_p2tr_address="$(lncli -n regtest --lnddir="$bob_dir" --no-macaroons --rpcserver "localhost:$bob_port" newaddress p2tr | jq -r .address)"
+  local ingrid_node_key="$(lncli -n regtest --lnddir="$ingrid_dir" --no-macaroons --rpcserver "localhost:$ingrid_port" getinfo | jq -r .identity_pubkey)"
+  echo "bob_p2tr_address=$bob_p2tr_address"
+  echo "ingrid_node_key=$ingrid_node_key"
+
+  echo "deposit btc"
+  local bitcoind_dir="$script_dir/bitcoind"
+  local bitcoind_conf="$bitcoind_dir/bitcoin.conf"
+  bitcoin-cli -conf="$bitcoind_conf" -rpcwait -named sendtoaddress address="$bob_p2tr_address" amount=5 fee_rate=25
+  bitcoin-cli -conf="$bitcoind_conf" -generate 1 >/dev/null
+
+  echo "openchannel"
+  local retries=5
+  while [[ $retries -gt 0 ]] && ! lncli -n regtest --lnddir="$bob_dir" --no-macaroons --rpcserver "localhost:$bob_port" \
+    openchannel \
+    --node_key "$ingrid_node_key" \
+    --connect localhost:9834 \
+    --local_amt 1000000 \
+    --sat_per_vbyte 1 \
+    --min_confs 0; do
     sleep 3
     retries=$((retries - 1))
   done
@@ -103,4 +135,5 @@ cleanup
 setup-bitcoind
 setup-lnd lnd-bob $bob_port
 setup-lnd lnd-ingrid $ingrid_port
-setup-channels
+setup-channels-1
+setup-channels-2

@@ -1,11 +1,11 @@
 meta {
-  name: 13-get-invoice-status
+  name: 10-check-cch-order-succeeded
   type: http
-  seq: 13
+  seq: 10
 }
 
 post {
-  url: {{NODE1_RPC_URL}}
+  url: {{NODE3_RPC_URL}}
   body: json
   auth: none
 }
@@ -19,7 +19,7 @@ body:json {
   {
     "id": "42",
     "jsonrpc": "2.0",
-    "method": "get_invoice",
+    "method": "get_cch_order",
     "params": [
       {
         "payment_hash": "{{PAYMENT_HASH}}"
@@ -29,10 +29,11 @@ body:json {
 }
 
 assert {
+  res.status: eq 200
   res.body.error: isUndefined
-  res.body.result.status: isDefined
+  res.body.result: length 1
+  res.body.result[0].status: isDefined
 }
-
 
 script:pre-request {
   if(bru.getVar("iteration") === undefined){
@@ -40,27 +41,24 @@ script:pre-request {
   }
 }
 
-vars:post-response {
-  max_iterations: 20
-}
-
 script:post-response {
+  console.dir(res.body, { depth: null });
   const i = bru.getVar("iteration");
   const n = bru.getVar("max_iterations");
   if (i < n) {
     console.log(`Try ${i+1}/${n}`);
-    console.log(res.body)
   }
+  console.dir(res.body, { depth: null })
 
-  if (res.body.result.status != "Paid") {
-    console.log("Invoicee is paid");
+  if (res.body.result[0].status == "succeeded") {
+    console.log("Cch order succeeded");
     bru.setVar("iteration", 0);
   } else if (i+1 < n) {
     await new Promise(r => setTimeout(r, 100));
     bru.setVar("iteration", i + 1);
-    bru.setNextRequest("12-get-invoice-status");
+    bru.setNextRequest("10-check-cch-order-succeeded");
   } else {
     bru.setVar("iteration", 0);
-    throw new Error("Bob has not received the payment");
+    throw new Error("Cch order did not succeed");
   }
 }

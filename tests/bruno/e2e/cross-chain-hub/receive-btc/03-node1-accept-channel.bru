@@ -1,11 +1,11 @@
 meta {
-  name: 05-node3-accept-channel
+  name: 03-node1-accept-channel
   type: http
-  seq: 5
+  seq: 3
 }
 
 post {
-  url: {{NODE3_RPC_URL}}
+  url: {{NODE1_RPC_URL}}
   body: json
   auth: none
 }
@@ -22,7 +22,7 @@ body:json {
     "method": "list_channels",
     "params": [
       {
-        "peer_id": "{{NODE1_PEERID}}"
+        "peer_id": "{{NODE3_PEERID}}"
       }
     ]
   }

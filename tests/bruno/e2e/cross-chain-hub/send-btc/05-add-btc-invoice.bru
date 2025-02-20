@@ -1,7 +1,7 @@
 meta {
-  name: 01-add-btc-invoice
+  name: 05-add-btc-invoice
   type: http
-  seq: 1
+  seq: 5
 }
 
 post {
@@ -11,7 +11,7 @@ post {
 }
 
 body:json {
-  {"value":20000}
+  {"value":100}
 }
 
 assert {
@@ -23,6 +23,7 @@ script:post-response {
   const payment_hash = Buffer.from(res.body.r_hash, 'base64').toString('hex');
   console.log(payment_hash);
   bru.setVar("PAYMENT_HASH", `0x${payment_hash}`);
+  bru.setVar("PAYMENT_HASH_NO_0x", payment_hash);
 }
 
 docs {

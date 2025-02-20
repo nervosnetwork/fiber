@@ -1,7 +1,7 @@
 meta {
-  name: 09-create-fiber-invoice
+  name: 05-create-fiber-invoice
   type: http
-  seq: 9
+  seq: 5
 }
 
 post {
@@ -45,6 +45,7 @@ assert {
 script:post-response {
   bru.setVar("FIBER_PAY_REQ", res.body.result.invoice_address);
   bru.setVar("PAYMENT_HASH", res.body.result.invoice.data.payment_hash);
+  bru.setVar("PAYMENT_HASH_NO_0x", res.body.result.invoice.data.payment_hash.replace(/^0x/, ''));
 }
 
 docs {

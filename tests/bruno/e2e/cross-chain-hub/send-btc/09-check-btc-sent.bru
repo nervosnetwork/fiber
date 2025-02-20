@@ -5,8 +5,8 @@ meta {
 }
 
 get {
-  url: {{LND_BOB_RPC_URL}}/v1/balance/channels
-  body: none
+  url: {{LND_BOB_RPC_URL}}/v1/invoice/{{PAYMENT_HASH_NO_0x}}
+  body: json
   auth: none
 }
 
@@ -16,6 +16,7 @@ vars:post-response {
 
 assert {
   res.status: eq 200
+  res.body.state: isDefined
 }
 
 script:pre-request {
@@ -30,8 +31,9 @@ script:post-response {
   if (i < n) {
     console.log(`Try ${i+1}/${n}`);
   }
+  console.dir(res.body, { depth: null })
 
-  if (parseInt(res.body.local_balance.sat, 10) > 0) {
+  if (res.body.state == "SETTLED") {
     console.log("Bob has received the payment");
     bru.setVar("iteration", 0);
   } else if (i+1 < n) {

@@ -1,11 +1,11 @@
 meta {
-  name: 07-node1-send-payment
+  name: 03-node3-accept-channel
   type: http
-  seq: 7
+  seq: 3
 }
 
 post {
-  url: {{NODE1_RPC_URL}}
+  url: {{NODE3_RPC_URL}}
   body: json
   auth: none
 }
@@ -19,10 +19,10 @@ body:json {
   {
     "id": "42",
     "jsonrpc": "2.0",
-    "method": "send_payment",
+    "method": "list_channels",
     "params": [
       {
-        "invoice": "{{FIBER_PAY_REQ}}"
+        "peer_id": "{{NODE1_PEERID}}"
       }
     ]
   }
@@ -30,15 +30,12 @@ body:json {
 
 assert {
   res.body.error: isUndefined
-}
-
-script:pre-request {
-  let expiry = "0x" + (Date.now() + 1000 * 60 * 60 * 24).toString(16);
-  bru.setVar("expiry", expiry);
+  res.body.result.channels: isDefined
 }
 
 script:post-response {
   // Sleep for sometime to make sure current operation finishes before next request starts.
-  await new Promise(r => setTimeout(r, 100));
-  console.log("response from node1 AddTlc:", res.body);
+  await new Promise(r => setTimeout(r, 2000));
+  console.log("accept channel result: ", res.body);
+  bru.setVar("N1N3_CHANNEL_ID", res.body.result.channels[0].channel_id);
 }

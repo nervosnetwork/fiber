@@ -1,11 +1,11 @@
 meta {
-  name: 04-node1-open-channel-to-node3
+  name: 02-node3-open-channel-to-node1
   type: http
-  seq: 4
+  seq: 2
 }
 
 post {
-  url: {{NODE1_RPC_URL}}
+  url: {{NODE3_RPC_URL}}
   body: json
   auth: none
 }
@@ -22,8 +22,8 @@ body:json {
     "method": "open_channel",
     "params": [
       {
-        "peer_id": "{{NODE3_PEERID}}",
-        "funding_amount": "0xc350",
+        "peer_id": "{{NODE1_PEERID}}",
+        "funding_amount": "0x5f5e100",
         "funding_udt_type_script": {
           "code_hash": "{{UDT_CODE_HASH}}",
           "hash_type": "data1",

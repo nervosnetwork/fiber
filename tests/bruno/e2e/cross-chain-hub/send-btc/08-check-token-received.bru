@@ -1,0 +1,66 @@
+meta {
+  name: 08-check-token-received
+  type: http
+  seq: 8
+}
+
+post {
+  url: {{NODE1_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "get_payment",
+    "params": [
+      {
+        "payment_hash": "{{PAYMENT_HASH}}"
+      }
+    ]
+  }
+}
+
+vars:post-response {
+  max_iterations: 10
+}
+
+assert {
+  res.status: eq 200
+  res.body.error: isUndefined
+  res.body.result.status: isDefined
+}
+
+script:pre-request {
+  if(bru.getVar("iteration") === undefined){
+    bru.setVar("iteration", 0);
+  }
+}
+
+script:post-response {
+  const i = bru.getVar("iteration");
+  const n = bru.getVar("max_iterations");
+  if (i < n) {
+    console.log(`Try ${i+1}/${n}`);
+  }
+
+  if (res.body.result.status == "Success") {
+    console.log("The payment succeeded");
+    bru.setVar("iteration", 0);
+  } else if (i+1 < n) {
+    await new Promise(r => setTimeout(r, 100));
+    bru.setVar("iteration", i + 1);
+    bru.setNextRequest("08-check-token-received");
+  } else {
+    bru.setVar("iteration", 0);
+    console.dir(res.body, {depth: null})
+    throw new Error("The payment has still not succeeded");
+  }
+}
