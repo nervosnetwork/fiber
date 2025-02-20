@@ -12,6 +12,7 @@
 /// | 65...........| OutPoint             | ChannelId                   |
 /// | 96           | Cursor               | BroadcastMessage            |
 /// | 97           | BroadcastMessageID   | u64                         |
+/// | 128          | Hash256              | CchOrder                    |
 /// | 192          | Hash256              | PaymentSession              |
 /// | 193          | OutPoint | Direction | TimedResult                 |
 /// | 224          | Hash256              | ChannelData                 |
@@ -28,6 +29,7 @@ pub(crate) const PEER_ID_CHANNEL_ID_PREFIX: u8 = 64;
 pub(crate) const CHANNEL_OUTPOINT_CHANNEL_ID_PREFIX: u8 = 65;
 pub(crate) const BROADCAST_MESSAGE_PREFIX: u8 = 96;
 pub(crate) const BROADCAST_MESSAGE_TIMESTAMP_PREFIX: u8 = 97;
+pub(crate) const CCH_ORDER_PREFIX: u8 = 128;
 pub(crate) const PAYMENT_SESSION_PREFIX: u8 = 192;
 pub(crate) const PAYMENT_HISTORY_TIMED_RESULT_PREFIX: u8 = 193;
 pub(crate) const WATCHTOWER_CHANNEL_PREFIX: u8 = 224;

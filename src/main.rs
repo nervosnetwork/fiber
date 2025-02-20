@@ -235,6 +235,7 @@ pub async fn main() -> Result<(), ExitMessage> {
                     .expect("Cch service requires network actor"),
                 node_public_key.expect("Cch service requires node public key"),
                 store_update_subscription,
+                store.clone(),
             )
             .await
             {

@@ -2,7 +2,7 @@ mod actor;
 pub use actor::{start_cch, CchActor, CchMessage, ReceiveBTC, SendBTC};
 
 mod error;
-pub use error::{CchError, CchResult};
+pub use error::{CchDbError, CchError, CchResult};
 
 mod config;
 pub use config::{
@@ -13,8 +13,8 @@ pub use config::{
 mod order;
 pub use order::{CchInvoice, CchOrder, CchOrderStatus};
 
-mod orders_db;
-pub use orders_db::CchOrdersDb;
+mod store;
+pub use store::CchOrderStore;
 
 pub use crate::store::subscription::{
     InvoiceState as CchInvoiceState, PaymentState as CchPaymentState,

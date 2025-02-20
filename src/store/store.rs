@@ -2,6 +2,7 @@ use super::hook::{NoopStoreUpdateHook, PaymentUpdateHook};
 use super::schema::*;
 use super::subscription_impl::{new_subscription_impl, SubscriptionImpl};
 use super::{db_migrate::DbMigrate, hook::InvoiceUpdateHook};
+use crate::cch::{CchDbError, CchOrder, CchOrderStore};
 use crate::invoice::InvoiceChannelInfo;
 use crate::{
     fiber::{
@@ -195,6 +196,7 @@ enum KeyValue {
     PaymentSession(Hash256, PaymentSession),
     PaymentHistoryTimedResult((OutPoint, Direction), TimedResult),
     NetworkActorState(PeerId, PersistentNetworkActorState),
+    CchOrder(Hash256, CchOrder),
 }
 
 pub trait StoreKeyValue {
@@ -263,6 +265,7 @@ impl StoreKeyValue for KeyValue {
             KeyValue::BroadcastMessage(cursor, _) => {
                 [&[BROADCAST_MESSAGE_PREFIX], cursor.to_bytes().as_slice()].concat()
             }
+            KeyValue::CchOrder(hash256, _) => [&[CCH_ORDER_PREFIX], hash256.as_ref()].concat(),
         }
     }
 
@@ -294,6 +297,7 @@ impl StoreKeyValue for KeyValue {
             KeyValue::PaymentHistoryTimedResult(_, result) => {
                 serialize_to_vec(result, "TimedResult")
             }
+            KeyValue::CchOrder(_, cch_order) => serialize_to_vec(cch_order, "CchOrder"),
         }
     }
 }
@@ -861,5 +865,44 @@ impl<IH: InvoiceUpdateHook, PH: PaymentUpdateHook> WatchtowerStore for GenericSt
             batch.put_kv(KeyValue::WatchtowerChannel(channel_id, channel_data));
             batch.commit();
         }
+    }
+}
+
+impl<IH: InvoiceUpdateHook, PH: PaymentUpdateHook> CchOrderStore for GenericStore<IH, PH> {
+    fn create_cch_order(&self, order: CchOrder) -> Result<(), CchDbError> {
+        let key = order.payment_hash;
+        let mut batch = self.batch();
+        batch.put_kv(KeyValue::CchOrder(key, order));
+        batch.commit();
+        Ok(())
+    }
+
+    fn get_cch_order(&self, payment_hash: &Hash256) -> Result<CchOrder, CchDbError> {
+        let prefix = [[CCH_ORDER_PREFIX].as_ref(), payment_hash.as_ref()].concat();
+        self.get(prefix)
+            .map(|v| deserialize_from(v.as_ref(), "CchOrder"))
+            .ok_or(CchDbError::NotFound(*payment_hash))
+    }
+
+    fn update_cch_order(&self, order: CchOrder) -> Result<(), CchDbError> {
+        let key = order.payment_hash;
+        let mut batch = self.batch();
+        batch.put_kv(KeyValue::CchOrder(key, order));
+        batch.commit();
+        Ok(())
+    }
+
+    fn get_cch_orders(&self) -> Result<impl IntoIterator<Item = CchOrder>, CchDbError> {
+        const PREFIX: [u8; 1] = [CCH_ORDER_PREFIX];
+        let iter = self.prefix_iterator(&PREFIX).map(|(key, value)| {
+            let key_len = key.len();
+            let payment_hash: Hash256 = key[key_len - 32..]
+                .try_into()
+                .expect("payment hash should be 32 bytes");
+            let order: CchOrder = deserialize_from(value.as_ref(), "CchOrder");
+            debug_assert_eq!(order.payment_hash, payment_hash);
+            order
+        });
+        Ok(iter)
     }
 }

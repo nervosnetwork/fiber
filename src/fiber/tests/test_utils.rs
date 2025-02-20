@@ -216,6 +216,7 @@ impl Cch {
         network_actor: ActorRef<NetworkActorMessage>,
         pubkey: Pubkey,
         store_update_subscription: SubscriptionImpl,
+        store: StoreWithHooks,
     ) -> Self {
         let (config, lnd_node) = if should_start_lnd {
             let lnd_node = LndNode::new(Default::default(), Default::default()).await;
@@ -236,6 +237,7 @@ impl Cch {
             network_actor,
             pubkey,
             store_update_subscription.clone(),
+            store,
         )
         .await
         .expect("start cch actor");
@@ -1122,6 +1124,7 @@ impl NetworkNode {
                     network_actor.clone(),
                     public_key,
                     store_update_subscription.clone(),
+                    store.clone(),
                 )
                 .await,
             ),

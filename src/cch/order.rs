@@ -16,7 +16,7 @@ use crate::{
     store::subscription::{InvoiceState, InvoiceUpdate, PaymentState, PaymentUpdate},
 };
 
-use super::{CchError, CchMessage, CchOrdersDb};
+use super::{CchError, CchMessage, CchOrderStore};
 
 #[derive(Debug)]
 pub enum StateTransitionEvent {
@@ -126,6 +126,15 @@ impl CchOrder {
 
     pub fn is_second_half_fiber(&self) -> bool {
         self.out_invoice.is_fiber()
+    }
+
+    pub fn is_finalized(&self) -> bool {
+        self.status().map_or(false, |status| {
+            matches!(
+                status,
+                CchOrderStatus::Failed | CchOrderStatus::FirstHalfSucceeded
+            )
+        })
     }
 
     pub fn status(&self) -> Result<CchOrderStatus, CchStateError> {
@@ -351,20 +360,23 @@ impl CchInvoice {
     }
 }
 
-pub struct CchOrderActor {
+pub struct CchOrderActor<S> {
     pub cch_actor: ActorRef<CchMessage>,
-    pub orders_db: CchOrdersDb,
+    pub store: S,
 }
 
-impl CchOrderActor {
+impl<S> CchOrderActor<S>
+where
+    S: CchOrderStore + Clone + Send + Sync + 'static,
+{
     pub async fn start(
         cch_actor: &ActorRef<CchMessage>,
-        orders_db: CchOrdersDb,
+        store: S,
         order: CchOrder,
     ) -> ActorRef<CchOrderActorMessage> {
         let actor = CchOrderActor {
             cch_actor: cch_actor.clone(),
-            orders_db,
+            store,
         };
         Actor::spawn_linked(
             Some(format!(
@@ -387,7 +399,10 @@ pub enum CchOrderActorMessage {
 }
 
 #[ractor::async_trait]
-impl Actor for CchOrderActor {
+impl<S> Actor for CchOrderActor<S>
+where
+    S: CchOrderStore + Clone + Send + Sync + 'static,
+{
     type Msg = CchOrderActorMessage;
     type State = CchOrder;
     type Arguments = CchOrder;
@@ -424,10 +439,9 @@ impl Actor for CchOrderActor {
                 }
             }
         }
-        self.orders_db
+        self.store
             .update_cch_order(state.clone())
-            .await
-            .unwrap();
+            .expect("update cch order");
         Ok(())
     }
 }

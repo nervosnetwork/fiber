@@ -31,12 +31,12 @@ use super::order::{
     CchInvoiceUpdate, CchOrderActorMessage, CchPaymentUpdate, LightningInvoiceUpdate,
     LightningPaymentUpdate,
 };
-use super::{CchConfig, CchError, CchOrder, CchOrdersDb};
+use super::{CchConfig, CchError, CchOrder, CchOrderStore};
 
 pub const BTC_PAYMENT_TIMEOUT_SECONDS: i32 = 60;
 pub const DEFAULT_ORDER_EXPIRY_SECONDS: u64 = 86400; // 24 hours
 
-pub async fn start_cch(
+pub async fn start_cch<S: CchOrderStore + Clone + Send + Sync + 'static>(
     config: CchConfig,
     tracker: TaskTracker,
     token: CancellationToken,
@@ -44,6 +44,7 @@ pub async fn start_cch(
     network_actor: ActorRef<NetworkActorMessage>,
     pubkey: Pubkey,
     subscription: SubscriptionImpl,
+    store: S,
 ) -> Result<ActorRef<CchMessage>> {
     let lnd_connection = config.get_lnd_connection_info().await?;
     let (actor, _handle) = Actor::spawn_linked(
@@ -56,7 +57,7 @@ pub async fn start_cch(
             pubkey,
             subscription,
             lnd_connection,
-            Default::default(),
+            store,
         ),
         (),
         root_actor,
@@ -128,7 +129,7 @@ impl LndConnectionInfo {
     }
 }
 
-pub struct CchActor {
+pub struct CchActor<S> {
     config: CchConfig,
     tracker: TaskTracker,
     token: CancellationToken,
@@ -136,7 +137,7 @@ pub struct CchActor {
     pubkey: Pubkey,
     subscription: SubscriptionImpl,
     lnd_connection: LndConnectionInfo,
-    orders_db: CchOrdersDb,
+    store: S,
 }
 
 #[derive(Default)]
@@ -200,7 +201,10 @@ impl CchState {
 }
 
 #[ractor::async_trait]
-impl Actor for CchActor {
+impl<S> Actor for CchActor<S>
+where
+    S: CchOrderStore + Clone + Send + Sync + 'static,
+{
     type Msg = CchMessage;
     type State = CchState;
     type Arguments = ();
@@ -238,11 +242,7 @@ impl Actor for CchActor {
                 Ok(())
             }
             CchMessage::GetCchOrder(payment_hash, port) => {
-                let result = self
-                    .orders_db
-                    .get_cch_order(&payment_hash)
-                    .await
-                    .map_err(Into::into);
+                let result = self.store.get_cch_order(&payment_hash).map_err(Into::into);
                 let _ = port.send(result);
                 Ok(())
             }
@@ -296,7 +296,10 @@ impl Actor for CchActor {
     }
 }
 
-impl CchActor {
+impl<S> CchActor<S>
+where
+    S: CchOrderStore + Clone + Send + Sync + 'static,
+{
     pub fn new(
         config: CchConfig,
         tracker: TaskTracker,
@@ -305,7 +308,7 @@ impl CchActor {
         pubkey: Pubkey,
         subscription: SubscriptionImpl,
         lnd_connection: LndConnectionInfo,
-        orders_db: CchOrdersDb,
+        store: S,
     ) -> Self {
         Self {
             config,
@@ -315,7 +318,7 @@ impl CchActor {
             pubkey,
             subscription,
             lnd_connection,
-            orders_db,
+            store,
         }
     }
 
@@ -381,8 +384,8 @@ impl CchActor {
 
         call!(&self.network_actor, message).expect("call actor")?;
 
-        self.orders_db.insert_cch_order(order.clone()).await?;
-        let order_actor = CchOrderActor::start(myself, self.orders_db.clone(), order.clone()).await;
+        self.store.create_cch_order(order.clone())?;
+        let order_actor = CchOrderActor::start(myself, self.store.clone(), order.clone()).await;
         self.subscribe_updates_for_order(&myself, state, &order, &order_actor)
             .await?;
 
@@ -448,10 +451,10 @@ impl CchActor {
             CchInvoice::Fiber(invoice.clone()),
         );
 
-        let order_actor = CchOrderActor::start(myself, self.orders_db.clone(), order.clone()).await;
+        let order_actor = CchOrderActor::start(myself, self.store.clone(), order.clone()).await;
         self.subscribe_updates_for_order(&myself, state, &order, &order_actor)
             .await?;
-        self.orders_db.insert_cch_order(order.clone()).await?;
+        self.store.create_cch_order(order.clone())?;
 
         Ok(order)
     }
