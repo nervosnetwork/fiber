@@ -250,8 +250,9 @@ impl CchOrder {
     // Update the order state based on the invoice update.
     async fn handle_invoice_update(
         &mut self,
-        invoice_update: CchInvoiceUpdate,
+        myself: &ActorRef<CchOrderActorMessage>,
         cch_actor: &ActorRef<CchMessage>,
+        invoice_update: CchInvoiceUpdate,
     ) -> Result<(), CchOrderError> {
         tracing::trace!(invoice_update = ?invoice_update, "Cch received invoice update");
         let is_updated = self.try_save_invoice_update(invoice_update)?;
@@ -259,16 +260,7 @@ impl CchOrder {
             return Ok(());
         }
 
-        if let CchOrderStatus::FirstHalfAccepted = self.get_status() {
-            if let Some(payment_update) =
-                call!(&cch_actor, CchMessage::PayInvoice, self.out_invoice.clone())
-                    .expect("call cch actor")
-                    .map_err(|e| CchOrderError::FailedToPayInvoice(self.out_invoice.clone(), e))?
-            {
-                self.handle_payment_update(payment_update, cch_actor)
-                    .await?;
-            }
-        };
+        self.on_status_updated(myself, cch_actor).await?;
 
         Ok(())
     }
@@ -316,25 +308,65 @@ impl CchOrder {
     // Update the order state based on the payment update.
     async fn handle_payment_update(
         &mut self,
-        payment_update: CchPaymentUpdate,
+        myself: &ActorRef<CchOrderActorMessage>,
         cch_actor: &ActorRef<CchMessage>,
+        payment_update: CchPaymentUpdate,
     ) -> Result<(), CchOrderError> {
         let is_updated = self.try_save_payment_update(payment_update)?;
         if !is_updated {
             return Ok(());
         }
-        if let CchOrderStatus::SecondHalfSucceeded = self.get_status() {
-            let preimage = self.payment_preimage.expect("preimage is set");
-            call!(
-                cch_actor,
-                CchMessage::SettleInvoice,
-                self.in_invoice.clone(),
-                preimage
-            )
-            .expect("call cch actor")
-            .map_err(|e| CchOrderError::FailedToSettleInvoice(self.in_invoice.clone(), e))?;
-        }
+        self.on_status_updated(myself, cch_actor).await?;
 
+        Ok(())
+    }
+
+    // This function will be called when the status of the order is updated or when the order actor is started.
+    // We need to make sure that this function is idempotent. E.g., if the order is in the FirstHalfAccepted state,
+    // and we may call this function twice to send a payment over the second half, we need to make sure that
+    // even though the function is called twice, but the payment is sent only once.
+    // Making this function idempotent simplifies the state of the order. In the above example,
+    // We don't have to track if the payment attempt succeeded or failed, we just need to resend the payment again.
+    async fn on_status_updated(
+        &mut self,
+        myself: &ActorRef<CchOrderActorMessage>,
+        cch_actor: &ActorRef<CchMessage>,
+    ) -> Result<(), CchOrderError> {
+        match self.get_status() {
+            CchOrderStatus::FirstHalfAccepted => {
+                if let Some(payment_update) =
+                    call!(&cch_actor, CchMessage::PayInvoice, self.out_invoice.clone())
+                        .expect("call cch actor")
+                        .map_err(|e| {
+                            CchOrderError::FailedToPayInvoice(self.out_invoice.clone(), e)
+                        })?
+                {
+                    myself
+                        .send_message(CchOrderActorMessage::PaymentUpdate(payment_update))
+                        .expect("send payment update to myself");
+                }
+            }
+            CchOrderStatus::SecondHalfSucceeded => {
+                let preimage = self.payment_preimage.expect("preimage is set");
+                call!(
+                    cch_actor,
+                    CchMessage::SettleInvoice,
+                    self.in_invoice.clone(),
+                    preimage
+                )
+                .expect("call cch actor")
+                .map_err(|e| CchOrderError::FailedToSettleInvoice(self.in_invoice.clone(), e))?;
+            }
+            CchOrderStatus::Failed => {
+                // TODO:
+            }
+            CchOrderStatus::Succeeded => {
+                // TODO:
+            }
+            CchOrderStatus::Pending | CchOrderStatus::SecondHalfInFlight => {
+                // Waiting for next invoice/payment update to arrive
+            }
+        }
         Ok(())
     }
 }
@@ -427,24 +459,26 @@ where
 
     async fn pre_start(
         &self,
-        _myself: ActorRef<Self::Msg>,
+        myself: ActorRef<Self::Msg>,
         order: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
         order.check_state_consistency()?;
         tracing::debug!(payment_hash = ?order.payment_hash, status = ?order.get_status(), "Cch order started");
-        Ok(order)
+        let mut state = order;
+        state.on_status_updated(&myself, &self.cch_actor).await?;
+        Ok(state)
     }
 
     async fn handle(
         &self,
-        _myself: ActorRef<Self::Msg>,
+        myself: ActorRef<Self::Msg>,
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
             CchOrderActorMessage::InvoiceUpdate(invoice_update) => {
                 if let Err(error) = state
-                    .handle_invoice_update(invoice_update, &self.cch_actor)
+                    .handle_invoice_update(&myself, &self.cch_actor, invoice_update)
                     .await
                 {
                     tracing::error!(error = ?error, "Failed to handle invoice update");
@@ -452,7 +486,7 @@ where
             }
             CchOrderActorMessage::PaymentUpdate(payment_update) => {
                 if let Err(error) = state
-                    .handle_payment_update(payment_update, &self.cch_actor)
+                    .handle_payment_update(&myself, &self.cch_actor, payment_update)
                     .await
                 {
                     tracing::error!(error = ?error, "Failed to handle payment update");
