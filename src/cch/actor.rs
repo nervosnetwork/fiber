@@ -5,7 +5,7 @@ use lnd_grpc_tonic_client::{
     create_invoices_client, create_router_client, invoicesrpc, lnrpc, routerrpc, InvoicesClient,
     RouterClient, Uri,
 };
-use ractor::{call, DerivedActorRef, RpcReplyPort};
+use ractor::{call, RpcReplyPort};
 use ractor::{Actor, ActorCell, ActorProcessingErr, ActorRef};
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -25,11 +25,11 @@ use crate::store::subscription::{
     InvoiceSubscription, PaymentState, PaymentSubscription, PaymentUpdate,
 };
 use crate::store::subscription_impl::SubscriptionImpl;
-use crate::store::{SubscriptionError, SubscriptionId};
+use crate::store::SubscriptionId;
 
 use super::order::{
-    CchInvoiceUpdate, CchOrderActorMessage, CchPaymentUpdate, FiberInvoiceUpdate,
-    FiberPaymentUpdate, LightningInvoiceUpdate, LightningPaymentUpdate,
+    CchInvoiceUpdate, CchOrderActorMessage, CchPaymentUpdate, LightningInvoiceUpdate,
+    LightningPaymentUpdate,
 };
 use super::{CchConfig, CchError, CchOrder, CchOrdersDb};
 
@@ -95,25 +95,6 @@ pub enum CchMessage {
 
     LightningPaymentUpdate(LightningPaymentUpdate),
     LightningInvoiceUpdate(LightningInvoiceUpdate),
-
-    FiberPaymentUpdate(FiberPaymentUpdate),
-    FiberInvoiceUpdate(FiberInvoiceUpdate),
-
-    SubscribeFiberPayment(
-        Hash256,
-        DerivedActorRef<FiberPaymentUpdate>,
-        RpcReplyPort<Result<SubscriptionId, SubscriptionError>>,
-    ),
-
-    UnsubscribeFiberPayment(SubscriptionId, RpcReplyPort<Result<(), SubscriptionError>>),
-
-    SubscribeFiberInvoice(
-        Hash256,
-        DerivedActorRef<FiberInvoiceUpdate>,
-        RpcReplyPort<Result<SubscriptionId, SubscriptionError>>,
-    ),
-
-    UnsubscribeFiberInvoice(SubscriptionId, RpcReplyPort<Result<(), SubscriptionError>>),
 }
 
 #[derive(Clone)]
@@ -287,68 +268,6 @@ impl Actor for CchActor {
                         update: event,
                     }),
                 );
-                Ok(())
-            }
-            CchMessage::FiberPaymentUpdate(payment_update) => {
-                state.send_message_to_order_actor(
-                    &payment_update.hash,
-                    CchOrderActorMessage::PaymentUpdate(CchPaymentUpdate {
-                        is_fiber: true,
-                        update: payment_update,
-                    }),
-                );
-                Ok(())
-            }
-
-            CchMessage::FiberInvoiceUpdate(invoice_update) => {
-                state.send_message_to_order_actor(
-                    &invoice_update.hash,
-                    CchOrderActorMessage::InvoiceUpdate(CchInvoiceUpdate {
-                        is_fiber: true,
-                        update: invoice_update,
-                    }),
-                );
-                Ok(())
-            }
-
-            CchMessage::SubscribeFiberPayment(hash256, actor_ref, rpc_reply_port) => {
-                let result = self
-                    .subscription
-                    .subscribe_payment(hash256, actor_ref.clone())
-                    .await
-                    .map_err(Into::into);
-
-                let _ = rpc_reply_port.send(result);
-                Ok(())
-            }
-            CchMessage::UnsubscribeFiberPayment(subscription_id, rpc_reply_port) => {
-                let result = self
-                    .subscription
-                    .unsubscribe_payment(subscription_id)
-                    .await
-                    .map_err(Into::into);
-
-                let _ = rpc_reply_port.send(result);
-                Ok(())
-            }
-            CchMessage::SubscribeFiberInvoice(hash256, actor_ref, rpc_reply_port) => {
-                let result = self
-                    .subscription
-                    .subscribe_invoice(hash256, actor_ref.clone())
-                    .await
-                    .map_err(Into::into);
-
-                let _ = rpc_reply_port.send(result);
-                Ok(())
-            }
-            CchMessage::UnsubscribeFiberInvoice(subscription_id, rpc_reply_port) => {
-                let result = self
-                    .subscription
-                    .unsubscribe_invoice(subscription_id)
-                    .await
-                    .map_err(Into::into);
-
-                let _ = rpc_reply_port.send(result);
                 Ok(())
             }
         }
