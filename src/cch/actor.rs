@@ -221,7 +221,29 @@ where
         self.tracker
             .spawn(async move { payments_tracker.run().await });
 
-        Ok(Default::default())
+        let mut state = CchState::default();
+
+        let orders = match self.store.get_active_cch_orders() {
+            Ok(orders) => orders.into_iter().collect::<Vec<_>>(),
+            Err(err) => {
+                tracing::error!(error = ?err, "Failed to get active cch orders");
+                return Ok(state);
+            }
+        };
+        for order in orders {
+            let payment_hash = order.payment_hash;
+            let order_actor =
+                CchOrderActor::start(&myself, self.store.clone(), order.clone()).await;
+            if let Err(err) = self
+                .subscribe_updates_for_order(&myself, &mut state, &order, &order_actor)
+                .await
+            {
+                tracing::error!(error = ?err, payment_hash = ?payment_hash,  "Failed to subscribe updates for order");
+                continue;
+            }
+        }
+
+        Ok(state)
     }
 
     async fn handle(

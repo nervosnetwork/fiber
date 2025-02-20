@@ -412,6 +412,8 @@ where
         _myself: ActorRef<Self::Msg>,
         order: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
+        let status = order.status()?;
+        tracing::debug!(status = ?status, payment_hash = ?order.payment_hash, "Cch order started");
         Ok(order)
     }
 
