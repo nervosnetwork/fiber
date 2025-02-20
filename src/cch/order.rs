@@ -120,6 +120,14 @@ impl CchOrder {
         }
     }
 
+    pub fn is_first_half_fiber(&self) -> bool {
+        self.in_invoice.is_fiber()
+    }
+
+    pub fn is_second_half_fiber(&self) -> bool {
+        self.out_invoice.is_fiber()
+    }
+
     pub fn status(&self) -> Result<CchOrderStatus, CchStateError> {
         let status = match (self.in_state, self.out_state) {
             (InvoiceState::Cancelled | InvoiceState::Expired, _) => CchOrderStatus::Failed,

@@ -160,23 +160,45 @@ pub struct CchActor {
 
 #[derive(Default)]
 pub struct CchState {
-    orders: HashMap<Hash256, ActorRef<CchOrderActorMessage>>,
+    orders: HashMap<Hash256, CchOrderActorWithTrackingHandle>,
+}
+
+// This is the cch order actor with the tracking handles.
+// When the actor is stopped, the tracking handles will be dropped.
+pub struct CchOrderActorWithTrackingHandle {
+    actor: ActorRef<CchOrderActorMessage>,
+    invoice_tracking_handle: TrackingHandle,
+    payment_tracking_handle: TrackingHandle,
+}
+
+impl CchOrderActorWithTrackingHandle {
+    pub fn new(
+        actor: ActorRef<CchOrderActorMessage>,
+        invoice_tracking_handle: TrackingHandle,
+        payment_tracking_handle: TrackingHandle,
+    ) -> Self {
+        Self {
+            actor,
+            invoice_tracking_handle,
+            payment_tracking_handle,
+        }
+    }
 }
 
 impl CchState {
-    fn get_order_actor(
+    fn get_order(
         &self,
         payment_hash: &Hash256,
-    ) -> Result<&ActorRef<CchOrderActorMessage>, CchError> {
+    ) -> Result<&CchOrderActorWithTrackingHandle, CchError> {
         self.orders
             .get(payment_hash)
             .ok_or(CchError::OrderNotFound(*payment_hash))
     }
 
     fn send_message_to_order_actor(&self, payment_hash: &Hash256, message: CchOrderActorMessage) {
-        match self.get_order_actor(payment_hash) {
+        match self.get_order(payment_hash) {
             Ok(order_actor) => {
-                if let Err(err) = order_actor.send_message(message) {
+                if let Err(err) = order_actor.actor.send_message(message) {
                     tracing::error!(error = ?err, "Failed to send message to order actor");
                 }
             }
@@ -331,6 +353,17 @@ impl Actor for CchActor {
             }
         }
     }
+
+    async fn post_stop(
+        &self,
+        _myself: ActorRef<Self::Msg>,
+        state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        for (payment_hash, order) in state.orders.drain() {
+            self.stop_cch_order_actor(payment_hash, order).await;
+        }
+        Ok(())
+    }
 }
 
 impl CchActor {
@@ -420,10 +453,7 @@ impl CchActor {
 
         self.orders_db.insert_cch_order(order.clone()).await?;
         let order_actor = CchOrderActor::start(myself, self.orders_db.clone(), order.clone()).await;
-        state.orders.insert(order.payment_hash, order_actor.clone());
-
-        self.subscription
-            .subscribe_invoice(order.payment_hash, order_actor.get_derived())
+        self.subscribe_updates_for_order(&myself, state, &order, &order_actor)
             .await?;
 
         Ok(order)
@@ -446,7 +476,6 @@ impl CchActor {
             ));
         }
         let payment_hash = *invoice.payment_hash();
-        let payment_hash_str = format!("0x{}", hex::encode(payment_hash));
         let amount_sats = invoice.amount().ok_or(CchError::CKBInvoiceMissingAmount)?;
         let final_tlc_minimum_expiry_delta =
             *invoice.final_tlc_minimum_expiry_delta().unwrap_or(&0);
@@ -489,23 +518,40 @@ impl CchActor {
             CchInvoice::Fiber(invoice.clone()),
         );
 
-        let invoice_tracker = LndInvoiceTracker::new(
-            myself.clone(),
-            payment_hash_str,
-            self.lnd_connection.clone(),
-            self.token.clone(),
-        );
-        self.tracker
-            .spawn(async move { invoice_tracker.run().await });
-
-        self.orders_db.insert_cch_order(order.clone()).await?;
         let order_actor = CchOrderActor::start(myself, self.orders_db.clone(), order.clone()).await;
-        state.orders.insert(order.payment_hash, order_actor.clone());
-        self.subscription
-            .subscribe_payment(payment_hash, order_actor.get_derived())
+        self.subscribe_updates_for_order(&myself, state, &order, &order_actor)
             .await?;
+        self.orders_db.insert_cch_order(order.clone()).await?;
 
         Ok(order)
+    }
+
+    async fn stop_cch_order_actor(
+        &self,
+        payment_hash: Hash256,
+        order: CchOrderActorWithTrackingHandle,
+    ) {
+        tracing::debug!(hash = ?payment_hash, "Order finished, stopping invoice/payment tracking");
+        match order.invoice_tracking_handle {
+            TrackingHandle::Fiber(subscription_id) => {
+                if let Err(error) = self.subscription.unsubscribe_invoice(subscription_id).await {
+                    tracing::error!(error = ?error, hash = ?payment_hash, "Failed to unsubscribe invoice");
+                }
+            }
+            TrackingHandle::Lightning(handle) => {
+                handle.cancel();
+            }
+        }
+        match order.payment_tracking_handle {
+            TrackingHandle::Fiber(subscription_id) => {
+                if let Err(error) = self.subscription.unsubscribe_payment(subscription_id).await {
+                    tracing::error!(error = ?error, hash = ?payment_hash, "Failed to unsubscribe payment");
+                }
+            }
+            TrackingHandle::Lightning(handle) => {
+                handle.cancel();
+            }
+        }
     }
 
     async fn pay_invoice(&self, invoice: CchInvoice) -> Result<Option<CchPaymentUpdate>, CchError> {
@@ -626,6 +672,92 @@ impl CchActor {
                 call!(&self.network_actor, message).expect("call actor")?;
             }
         }
+        Ok(())
+    }
+
+    fn start_lightning_invoice_tracker(
+        &self,
+        payment_hash: Hash256,
+        myself: &ActorRef<CchMessage>,
+    ) -> Result<LightningTrackingHandle, CchError> {
+        let token = self.token.child_token();
+        let payment_hash_str = format!("0x{}", hex::encode(payment_hash));
+        let invoice_tracker = LndInvoiceTracker::new(
+            myself.clone(),
+            payment_hash_str,
+            self.lnd_connection.clone(),
+            token.clone(),
+        );
+        self.tracker
+            .spawn(async move { invoice_tracker.run().await });
+        Ok(token)
+    }
+
+    async fn start_fiber_invoice_tracker(
+        &self,
+        payment_hash: Hash256,
+        order_actor: &ActorRef<CchOrderActorMessage>,
+    ) -> Result<FiberTrackingHandle, CchError> {
+        self.subscription
+            .subscribe_invoice(payment_hash, order_actor.get_derived())
+            .await
+            .map_err(Into::into)
+    }
+
+    fn start_lightning_payment_tracker(
+        &self,
+        _payment_hash: Hash256,
+        _myself: &ActorRef<CchMessage>,
+    ) -> Result<LightningTrackingHandle, CchError> {
+        // TODO: we need to obtain the payment status immediately in case of restart.
+        let token = self.token.child_token();
+        Ok(token)
+    }
+
+    async fn start_fiber_payment_tracker(
+        &self,
+        payment_hash: Hash256,
+        order_actor: &ActorRef<CchOrderActorMessage>,
+    ) -> Result<FiberTrackingHandle, CchError> {
+        self.subscription
+            .subscribe_payment(payment_hash, order_actor.get_derived())
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn subscribe_updates_for_order(
+        &self,
+        myself: &ActorRef<CchMessage>,
+        state: &mut CchState,
+        order: &CchOrder,
+        order_actor: &ActorRef<CchOrderActorMessage>,
+    ) -> Result<(), CchError> {
+        let payment_hash = order.payment_hash;
+        let invoice_tracking_handle = if order.is_first_half_fiber() {
+            TrackingHandle::Fiber(
+                self.start_fiber_invoice_tracker(payment_hash, order_actor)
+                    .await?,
+            )
+        } else {
+            TrackingHandle::Lightning(self.start_lightning_invoice_tracker(payment_hash, myself)?)
+        };
+        let payment_tracking_handle = if order.is_second_half_fiber() {
+            TrackingHandle::Fiber(
+                self.start_fiber_payment_tracker(payment_hash, order_actor)
+                    .await?,
+            )
+        } else {
+            TrackingHandle::Lightning(self.start_lightning_payment_tracker(payment_hash, myself)?)
+        };
+        state.orders.insert(
+            order.payment_hash,
+            CchOrderActorWithTrackingHandle::new(
+                order_actor.clone(),
+                invoice_tracking_handle,
+                payment_tracking_handle,
+            ),
+        );
+
         Ok(())
     }
 }
@@ -849,4 +981,12 @@ impl LndInvoiceTracker {
 
         Ok(should_quit)
     }
+}
+
+pub type LightningTrackingHandle = CancellationToken;
+pub type FiberTrackingHandle = SubscriptionId;
+
+pub enum TrackingHandle {
+    Lightning(LightningTrackingHandle),
+    Fiber(FiberTrackingHandle),
 }
