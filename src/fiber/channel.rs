@@ -3504,7 +3504,11 @@ pub enum ChannelState {
 
 impl ChannelState {
     fn is_closed(&self) -> bool {
-        matches!(self, ChannelState::Closed(_))
+        matches!(
+            self,
+            ChannelState::Closed(_)
+                | ChannelState::ShuttingDown(ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION)
+        )
     }
 }
 
