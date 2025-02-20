@@ -147,9 +147,6 @@ pub struct CchOrder {
     pub in_state: InvoiceState,
     pub out_state: PaymentState,
 
-    // This field is redundant to the in_state and out_state fields,
-    // so we skip it when serializing/deserializing.
-    #[serde(skip)]
     pub status: CchOrderStatus,
 }
 
