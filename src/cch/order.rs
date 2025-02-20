@@ -47,6 +47,8 @@ impl fmt::Debug for InvalidStateTransition {
 pub enum CchOrderError {
     #[error("Invalid state transition: {0:?}")]
     InvalidStateTransition(Box<InvalidStateTransition>),
+    #[error("The state is inconsistent: cch order status, {0:?}, invoice state, {1:?}, payment state, {2:?}")]
+    InconsistentState(CchOrderStatus, InvoiceState, PaymentState),
     #[error("Failed to pay invoice {0:?}: {1:?}")]
     FailedToPayInvoice(CchInvoice, CchError),
     #[error("Failed to settle invoice {0:?}: {1:?}")]
@@ -54,21 +56,71 @@ pub enum CchOrderError {
 }
 
 /// The status of a cross-chain hub order, will update as the order progresses.
-#[derive(Debug, Copy, Clone, Serialize, Deserialize, Eq, PartialEq)]
+#[derive(Default, Debug, Copy, Clone, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum CchOrderStatus {
     /// Order is created and the first half has not received complete payment yet.
+    #[default]
     Pending = 0,
-    /// HTLC in the first half is accepted.
+    /// HTLC in the first half is accepted (the middleman has received a HTLC).
     FirstHalfAccepted = 1,
-    /// There's an outgoing payment in flight for the second half.
+    /// There's an outgoing payment in flight for the second half (implies the first half HTLC is accepted).
     SecondHalfInFlight = 2,
-    /// The second half payment is succeeded.
+    /// The second half payment has succeeded (payment settled).
     SecondHalfSucceeded = 3,
-    /// The first half payment is succeeded.
-    FirstHalfSucceeded = 4,
+    /// The first half payment has succeeded (implies the second half payment has succeeded).
+    Succeeded = 4,
     /// Order is failed.
     Failed = 5,
+}
+
+impl TryFrom<(InvoiceState, PaymentState)> for CchOrderStatus {
+    type Error = CchStateError;
+
+    fn try_from((in_state, out_state): (InvoiceState, PaymentState)) -> Result<Self, Self::Error> {
+        match (in_state, out_state) {
+            (InvoiceState::Cancelled | InvoiceState::Expired, _) => Ok(CchOrderStatus::Failed),
+            (_, PaymentState::Failed) => Ok(CchOrderStatus::Failed),
+            (InvoiceState::Open, PaymentState::Created) => Ok(CchOrderStatus::Pending),
+            (InvoiceState::Open, _) => Err(format!(
+                "The second payment has a state too new for a just open first payment: {:?}",
+                out_state
+            )),
+            (
+                InvoiceState::Received {
+                    amount: _amount,
+                    is_finished,
+                },
+                PaymentState::Created,
+            ) => {
+                if is_finished {
+                    Ok(CchOrderStatus::FirstHalfAccepted)
+                } else {
+                    Ok(CchOrderStatus::Pending)
+                }
+            }
+            (
+                InvoiceState::Received {
+                    amount: _amount,
+                    is_finished,
+                },
+                PaymentState::Inflight,
+            ) => {
+                if !is_finished {
+                    return Err("The second payment should be inflight when the first one is unfinished".to_string());
+                }
+                Ok(CchOrderStatus::SecondHalfInFlight)
+            }
+            (InvoiceState::Received { .. }, PaymentState::Success { .. }) => {
+                Ok(CchOrderStatus::SecondHalfSucceeded)
+            }
+            (InvoiceState::Paid, PaymentState::Success { .. }) => Ok(CchOrderStatus::Succeeded),
+            (InvoiceState::Paid, _) => Err(format!(
+                "The first payment succeeded while the second payment has state (should have been succeeded or failed): {:?}",
+                out_state
+            )),
+        }
+    }
 }
 
 #[serde_as]
@@ -94,6 +146,11 @@ pub struct CchOrder {
     pub out_invoice: CchInvoice,
     pub in_state: InvoiceState,
     pub out_state: PaymentState,
+
+    // This field is redundant to the in_state and out_state fields,
+    // so we skip it when serializing/deserializing.
+    #[serde(skip)]
+    pub status: CchOrderStatus,
 }
 
 impl CchOrder {
@@ -108,15 +165,16 @@ impl CchOrder {
     ) -> Self {
         Self {
             payment_hash,
-            payment_preimage: None,
+            payment_preimage: Default::default(),
             created_at,
             expires_after,
             amount_sats,
             fee_sats,
             in_invoice,
             out_invoice,
-            in_state: InvoiceState::Open,
-            out_state: PaymentState::Created,
+            in_state: Default::default(),
+            out_state: Default::default(),
+            status: Default::default(),
         }
     }
 
@@ -129,74 +187,36 @@ impl CchOrder {
     }
 
     pub fn is_finalized(&self) -> bool {
-        self.status().map_or(false, |status| {
-            matches!(
-                status,
-                CchOrderStatus::Failed | CchOrderStatus::FirstHalfSucceeded
-            )
-        })
+        matches!(
+            self.get_status(),
+            CchOrderStatus::Failed | CchOrderStatus::Succeeded
+        )
     }
 
-    pub fn status(&self) -> Result<CchOrderStatus, CchStateError> {
-        let status = match (self.in_state, self.out_state) {
-            (InvoiceState::Cancelled | InvoiceState::Expired, _) => CchOrderStatus::Failed,
-            (_, PaymentState::Failed) => CchOrderStatus::Failed,
-            (InvoiceState::Open, PaymentState::Created) => CchOrderStatus::Pending,
-            (InvoiceState::Open, _) => {
-                return Err(format!(
-                    "The second payment has a state too new for a just open first payment: {:?}",
-                    self.out_state
-                ))
-            }
-            (
-                InvoiceState::Received {
-                    amount: _amount,
-                    is_finished,
-                },
-                PaymentState::Created,
-            ) => {
-                if is_finished {
-                    CchOrderStatus::FirstHalfAccepted
-                } else {
-                    CchOrderStatus::Pending
-                }
-            }
-            (
-                InvoiceState::Received {
-                    amount: _amount,
-                    is_finished,
-                },
-                PaymentState::Inflight,
-            ) => {
-                if !is_finished {
-                    return Err("The second payment should be inflight when the first one is unfinished".to_string());
-                }
-                CchOrderStatus::SecondHalfInFlight
-            }
-            (InvoiceState::Received { .. }, PaymentState::Success { .. }) => {
-                CchOrderStatus::SecondHalfSucceeded
-            }
-            (InvoiceState::Paid, PaymentState::Success { .. }) => {
-                CchOrderStatus::SecondHalfSucceeded
-            }
-            (InvoiceState::Paid, _) => {
-                return Err(format!(
-                    "The first payment succeeded while the second payment has state (should have been succeeded or failed): {:?}",
-                    self.out_state
-                ))
-            }
-        };
-        Ok(status)
+    pub fn get_status(&self) -> CchOrderStatus {
+        self.status
+    }
+
+    pub fn check_state_consistency(&self) -> Result<(), CchOrderError> {
+        if !CchOrderStatus::try_from((self.in_state, self.out_state))
+            .map_or(false, |status| status == self.get_status())
+        {
+            return Err(CchOrderError::InconsistentState(
+                self.get_status(),
+                self.in_state,
+                self.out_state,
+            ));
+        }
+        Ok(())
     }
 
     // Try to save the invoice update and update the state of the order.
-    // If the state transition is invalid, return an error, else the
-    // old status and the new status will be returned.
+    // If the state transition is invalid, return an error, else if the state
+    // is updated, return true, else return false.
     fn try_save_invoice_update(
         &mut self,
         invoice_update: CchInvoiceUpdate,
-    ) -> Result<(CchOrderStatus, CchOrderStatus), CchOrderError> {
-        let old_status = self.status().expect("status is valid");
+    ) -> Result<bool, CchOrderError> {
         if self.in_invoice.is_fiber() != invoice_update.is_fiber {
             return Err(CchOrderError::InvalidStateTransition(Box::new(
                 InvalidStateTransition {
@@ -209,20 +229,22 @@ impl CchOrder {
                 },
             )));
         }
-        self.in_state = invoice_update.update.state;
-        match self.status() {
-            Err(error) => Err(CchOrderError::InvalidStateTransition(Box::new(
-                InvalidStateTransition {
+        let new_state = invoice_update.update.state;
+        if new_state == self.in_state {
+            return Ok(false);
+        }
+        let new_status = CchOrderStatus::try_from((invoice_update.update.state, self.out_state))
+            .map_err(|error| {
+                CchOrderError::InvalidStateTransition(Box::new(InvalidStateTransition {
                     previous_in_state: self.in_state,
                     previous_out_state: self.out_state,
-                    state_transition_event: StateTransitionEvent::InvoiceUpdate(
-                        invoice_update.update.state,
-                    ),
+                    state_transition_event: StateTransitionEvent::InvoiceUpdate(new_state),
                     error,
-                },
-            ))),
-            Ok(new_status) => Ok((old_status, new_status)),
-        }
+                }))
+            })?;
+        self.status = new_status;
+        self.in_state = new_state;
+        Ok(true)
     }
 
     // Update the order state based on the invoice update.
@@ -232,12 +254,12 @@ impl CchOrder {
         cch_actor: &ActorRef<CchMessage>,
     ) -> Result<(), CchOrderError> {
         tracing::trace!(invoice_update = ?invoice_update, "Cch received invoice update");
-        let (old_status, new_status) = self.try_save_invoice_update(invoice_update)?;
-        if old_status == new_status {
+        let is_updated = self.try_save_invoice_update(invoice_update)?;
+        if !is_updated {
             return Ok(());
         }
 
-        if let CchOrderStatus::FirstHalfAccepted = new_status {
+        if let CchOrderStatus::FirstHalfAccepted = self.get_status() {
             if let Some(payment_update) =
                 call!(&cch_actor, CchMessage::PayInvoice, self.out_invoice.clone())
                     .expect("call cch actor")
@@ -252,14 +274,13 @@ impl CchOrder {
     }
 
     // Try to save the payment update and update the state of the order.
-    // If the state transition is invalid, return an error, else the
-    // old status and the new status will be returned.
+    // If the state transition is invalid, return an error, else if the state
+    // is updated, return true, else return false.
     fn try_save_payment_update(
         &mut self,
         payment_update: CchPaymentUpdate,
-    ) -> Result<(CchOrderStatus, CchOrderStatus), CchOrderError> {
+    ) -> Result<bool, CchOrderError> {
         tracing::trace!(payment_update = ?payment_update, "Cch received payment update");
-        let old_status = self.status().expect("status is valid");
         if self.out_invoice.is_fiber() != payment_update.is_fiber {
             return Err(CchOrderError::InvalidStateTransition(Box::new(
                 InvalidStateTransition {
@@ -273,23 +294,23 @@ impl CchOrder {
             )));
         }
 
-        self.out_state = payment_update.update.state;
-        if let PaymentState::Success { preimage } = self.out_state {
-            self.payment_preimage = Some(preimage);
-        }
-        match self.status() {
-            Err(error) => Err(CchOrderError::InvalidStateTransition(Box::new(
-                InvalidStateTransition {
+        let new_status = CchOrderStatus::try_from((self.in_state, payment_update.update.state))
+            .map_err(|error| {
+                CchOrderError::InvalidStateTransition(Box::new(InvalidStateTransition {
                     previous_in_state: self.in_state,
                     previous_out_state: self.out_state,
                     state_transition_event: StateTransitionEvent::PaymentUpdate(
                         payment_update.update.state,
                     ),
                     error,
-                },
-            ))),
-            Ok(new_status) => Ok((old_status, new_status)),
+                }))
+            })?;
+        self.status = new_status;
+        self.out_state = payment_update.update.state;
+        if let PaymentState::Success { preimage } = payment_update.update.state {
+            self.payment_preimage = Some(preimage);
         }
+        Ok(true)
     }
 
     // Update the order state based on the payment update.
@@ -298,11 +319,11 @@ impl CchOrder {
         payment_update: CchPaymentUpdate,
         cch_actor: &ActorRef<CchMessage>,
     ) -> Result<(), CchOrderError> {
-        let (old_status, new_status) = self.try_save_payment_update(payment_update)?;
-        if old_status == new_status {
+        let is_updated = self.try_save_payment_update(payment_update)?;
+        if !is_updated {
             return Ok(());
         }
-        if let CchOrderStatus::SecondHalfSucceeded = new_status {
+        if let CchOrderStatus::SecondHalfSucceeded = self.get_status() {
             let preimage = self.payment_preimage.expect("preimage is set");
             call!(
                 cch_actor,
@@ -409,8 +430,8 @@ where
         _myself: ActorRef<Self::Msg>,
         order: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
-        let status = order.status()?;
-        tracing::debug!(status = ?status, payment_hash = ?order.payment_hash, "Cch order started");
+        order.check_state_consistency()?;
+        tracing::debug!(payment_hash = ?order.payment_hash, status = ?order.get_status(), "Cch order started");
         Ok(order)
     }
 

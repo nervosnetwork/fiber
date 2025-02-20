@@ -6,7 +6,6 @@ use crate::{
     },
     invoice::{CkbInvoice, Currency},
 };
-use anyhow::Context;
 use jsonrpsee::{
     core::async_trait,
     proc_macros::rpc,
@@ -152,13 +151,7 @@ impl CchRpcServer for CchRpcServerImpl {
             )
         })??;
 
-        CchOrderResponse::try_from(result).map_err(|error| {
-            ErrorObjectOwned::owned(
-                CALL_EXECUTION_FAILED_CODE,
-                error.to_string(),
-                Option::<()>::None,
-            )
-        })
+        Ok(CchOrderResponse::from(result))
     }
 }
 
@@ -272,15 +265,9 @@ impl From<ConversionError> for ErrorObjectOwned {
     }
 }
 
-impl TryFrom<CchOrder> for CchOrderResponse {
-    type Error = ConversionError;
-
-    fn try_from(value: CchOrder) -> Result<Self, Self::Error> {
-        let status = value
-            .status()
-            .map_err(|e| anyhow::anyhow!(e))
-            .with_context(|| format!("Get status of cch order: {:?}", &value))?;
-        Ok(Self {
+impl From<CchOrder> for CchOrderResponse {
+    fn from(value: CchOrder) -> Self {
+        Self {
             payment_hash: value.payment_hash.to_string(),
             payment_preimage: value.payment_preimage.map(|hash| hash.to_string()),
             created_at: value.created_at,
@@ -291,8 +278,8 @@ impl TryFrom<CchOrder> for CchOrderResponse {
             out_invoice: value.out_invoice,
             in_state: value.in_state,
             out_state: value.out_state,
-            status,
-        })
+            status: value.status,
+        }
     }
 }
 
@@ -300,10 +287,7 @@ impl TryFrom<CchOrder> for SendBTCResponse {
     type Error = ConversionError;
 
     fn try_from(value: CchOrder) -> Result<Self, Self::Error> {
-        let status = value
-            .status()
-            .map_err(|e| anyhow::anyhow!(e))
-            .with_context(|| format!("Get status of cch order: {:?}", &value))?;
+        let status = value.get_status();
         let btc_pay_req = match value.out_invoice {
             CchInvoice::Lightning(ref btc_invoice) => btc_invoice.clone(),
             _ => Err(anyhow::anyhow!(
@@ -337,10 +321,7 @@ impl TryFrom<CchOrder> for ReceiveBTCResponse {
     type Error = ConversionError;
 
     fn try_from(value: CchOrder) -> Result<Self, Self::Error> {
-        let status = value
-            .status()
-            .map_err(|e| anyhow::anyhow!(e))
-            .with_context(|| format!("Get status of cch order: {:?}", &value))?;
+        let status = value.get_status();
         let btc_pay_req = match value.in_invoice {
             CchInvoice::Lightning(ref btc_invoice) => btc_invoice.clone(),
             _ => Err(anyhow::anyhow!(

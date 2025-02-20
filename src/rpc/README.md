@@ -699,10 +699,10 @@ The status of a cross-chain hub order, will update as the order progresses.
 #### Enum with values of
 
 * `Pending` - Order is created and the first half has not received complete payment yet.
-* `FirstHalfAccepted` - HTLC in the first half is accepted.
-* `SecondHalfInFlight` - There's an outgoing payment in flight for the second half.
-* `SecondHalfSucceeded` - The second half payment is succeeded.
-* `FirstHalfSucceeded` - The first half payment is succeeded.
+* `FirstHalfAccepted` - HTLC in the first half is accepted (the middleman has received a HTLC).
+* `SecondHalfInFlight` - There's an outgoing payment in flight for the second half (implies the first half HTLC is accepted).
+* `SecondHalfSucceeded` - The second half payment has succeeded (payment settled).
+* `Succeeded` - The first half payment has succeeded (implies the second half payment has succeeded).
 * `Failed` - Order is failed.
 ---
 
