@@ -1,5 +1,8 @@
 use crate::{
-    cch::{CchInvoice, CchInvoiceState, CchMessage, CchOrder, CchOrderStatus, CchPaymentState},
+    cch::{
+        CchInvoice, CchInvoiceState, CchMessage, CchOrder, CchOrderStatus, CchOrderStore,
+        CchPaymentState,
+    },
     fiber::{
         serde_utils::{U128Hex, U64Hex},
         types::Hash256,
@@ -37,8 +40,9 @@ pub(crate) struct ReceiveBtcParams {
 
 #[derive(Serialize, Deserialize)]
 pub(crate) struct GetCchOrderParams {
-    /// Payment hash for the HTLC for both CKB and BTC.
-    payment_hash: Hash256,
+    /// Payment hash for the HTLC for both CKB and BTC. If not provided, return all orders.
+    /// TODO: Add support for pagination.
+    payment_hash: Option<Hash256>,
 }
 
 /// RPC module for cross chain hub demonstration.
@@ -63,20 +67,27 @@ trait CchRpc {
     ) -> Result<CchOrderResponse, ErrorObjectOwned>;
 }
 
-pub(crate) struct CchRpcServerImpl {
+pub(crate) struct CchRpcServerImpl<S> {
     cch_actor: ActorRef<CchMessage>,
+    cch_store: S,
 }
 
-impl CchRpcServerImpl {
-    pub(crate) fn new(cch_actor: ActorRef<CchMessage>) -> Self {
-        CchRpcServerImpl { cch_actor }
+impl<S> CchRpcServerImpl<S> {
+    pub(crate) fn new(cch_actor: ActorRef<CchMessage>, cch_store: S) -> Self {
+        CchRpcServerImpl {
+            cch_actor,
+            cch_store,
+        }
     }
 }
 
 const TIMEOUT: u64 = 1000;
 
 #[async_trait]
-impl CchRpcServer for CchRpcServerImpl {
+impl<S> CchRpcServer for CchRpcServerImpl<S>
+where
+    S: CchOrderStore + Send + Sync + 'static,
+{
     async fn send_btc(&self, params: SendBtcParams) -> Result<SendBTCResponse, ErrorObjectOwned> {
         let result = call_t!(
             self.cch_actor,
@@ -137,21 +148,36 @@ impl CchRpcServer for CchRpcServerImpl {
         &self,
         params: GetCchOrderParams,
     ) -> Result<CchOrderResponse, ErrorObjectOwned> {
-        let result = call_t!(
-            self.cch_actor,
-            CchMessage::GetCchOrder,
-            TIMEOUT,
-            params.payment_hash
-        )
-        .map_err(|ractor_error| {
-            ErrorObjectOwned::owned(
-                CALL_EXECUTION_FAILED_CODE,
-                ractor_error.to_string(),
-                Option::<()>::None,
-            )
-        })??;
-
-        Ok(CchOrderResponse::from(result))
+        let orders = match params.payment_hash {
+            Some(payment_hash) => {
+                let order = self
+                    .cch_store
+                    .get_cch_order(&payment_hash)
+                    .map_err(|error| {
+                        ErrorObjectOwned::owned(
+                            CALL_EXECUTION_FAILED_CODE,
+                            error.to_string(),
+                            Option::<()>::None,
+                        )
+                    })?;
+                vec![CchOrderItem::from(order)]
+            }
+            None => self
+                .cch_store
+                .get_cch_orders()
+                .map_err(|error| {
+                    ErrorObjectOwned::owned(
+                        CALL_EXECUTION_FAILED_CODE,
+                        error.to_string(),
+                        Option::<()>::None,
+                    )
+                })?
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+        };
+        dbg!(&orders);
+        Ok(orders)
     }
 }
 
@@ -221,9 +247,12 @@ pub struct ReceiveBTCResponse {
     pub status: CchOrderStatus,
 }
 
+/// The response for get_cch_order RPC. It contains a list of cch orders.
+pub type CchOrderResponse = Vec<CchOrderItem>;
+
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CchOrderResponse {
+pub struct CchOrderItem {
     /// Payment hash for the HTLC.
     pub payment_hash: Hash256,
     /// Payment preimage for the HTLC.
@@ -265,7 +294,7 @@ impl From<ConversionError> for ErrorObjectOwned {
     }
 }
 
-impl From<CchOrder> for CchOrderResponse {
+impl From<CchOrder> for CchOrderItem {
     fn from(value: CchOrder) -> Self {
         Self {
             payment_hash: value.payment_hash,

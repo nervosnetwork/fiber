@@ -10,6 +10,7 @@ mod payment;
 mod peer;
 mod utils;
 
+use crate::cch::CchOrderStore;
 use crate::ckb::CkbConfig;
 use crate::fiber::gossip::GossipMessageStore;
 use crate::rpc::info::InfoRpcServer;
@@ -87,6 +88,7 @@ pub async fn start_rpc<
         + InvoiceStore
         + NetworkGraphStateStore
         + GossipMessageStore
+        + CchOrderStore
         + Clone
         + Send
         + Sync
@@ -172,7 +174,7 @@ pub async fn start_rpc<
     if let Some(cch_actor) = cch_actor {
         if config.is_module_enabled("cch") {
             modules
-                .merge(CchRpcServerImpl::new(cch_actor).into_rpc())
+                .merge(CchRpcServerImpl::new(cch_actor, store.clone()).into_rpc())
                 .unwrap();
         }
     }

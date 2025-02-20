@@ -83,8 +83,6 @@ pub enum CchMessage {
     SendBTC(SendBTC, RpcReplyPort<Result<CchOrder, CchError>>),
     ReceiveBTC(ReceiveBTC, RpcReplyPort<Result<CchOrder, CchError>>),
 
-    GetCchOrder(Hash256, RpcReplyPort<Result<CchOrder, CchError>>),
-
     PayInvoice(
         CchInvoice,
         RpcReplyPort<Result<Option<CchPaymentUpdate>, CchError>>,
@@ -264,11 +262,6 @@ where
             }
             CchMessage::ReceiveBTC(receive_btc, port) => {
                 let result = self.receive_btc(&myself, state, receive_btc).await;
-                let _ = port.send(result);
-                Ok(())
-            }
-            CchMessage::GetCchOrder(payment_hash, port) => {
-                let result = self.store.get_cch_order(&payment_hash).map_err(Into::into);
                 let _ = port.send(result);
                 Ok(())
             }
