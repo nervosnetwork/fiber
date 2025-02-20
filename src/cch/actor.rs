@@ -188,6 +188,15 @@ impl CchState {
             }
         }
     }
+
+    // We use https://lightning.engineering/api-docs/api/lnd/router/track-payments/
+    // to track all the payments sent to the lnd node. But not all payments are related to the CCH.
+    // We use this function to filter out the payments that are not related to the CCH.
+    fn is_lightning_payment_subscribed(&self, payment_hash: &Hash256) -> bool {
+        self.orders
+            .get(payment_hash)
+            .map_or(false, |order| !order.payment_tracking_handle.is_fiber())
+    }
 }
 
 #[ractor::async_trait]
@@ -251,13 +260,15 @@ impl Actor for CchActor {
                 Ok(())
             }
             CchMessage::LightningPaymentUpdate(payment_update) => {
-                state.send_message_to_order_actor(
-                    &payment_update.hash,
-                    CchOrderActorMessage::PaymentUpdate(CchPaymentUpdate {
-                        is_fiber: false,
-                        update: payment_update,
-                    }),
-                );
+                if state.is_lightning_payment_subscribed(&payment_update.hash) {
+                    state.send_message_to_order_actor(
+                        &payment_update.hash,
+                        CchOrderActorMessage::PaymentUpdate(CchPaymentUpdate {
+                            is_fiber: false,
+                            update: payment_update,
+                        }),
+                    );
+                }
                 Ok(())
             }
             CchMessage::LightningInvoiceUpdate(event) => {
@@ -987,4 +998,10 @@ pub type FiberTrackingHandle = SubscriptionId;
 pub enum TrackingHandle {
     Lightning(LightningTrackingHandle),
     Fiber(FiberTrackingHandle),
+}
+
+impl TrackingHandle {
+    pub fn is_fiber(&self) -> bool {
+        matches!(self, TrackingHandle::Fiber(_))
+    }
 }
