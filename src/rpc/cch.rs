@@ -159,9 +159,9 @@ impl CchRpcServer for CchRpcServerImpl {
 #[derive(Debug, Clone, Serialize)]
 pub struct SendBTCResponse {
     /// Payment hash for the HTLC for both CKB and BTC.
-    pub payment_hash: String,
+    pub payment_hash: Hash256,
     /// Payment preimage for the HTLC for both CKB and BTC.
-    pub payment_preimage: Option<String>,
+    pub payment_preimage: Option<Hash256>,
     /// Seconds since epoch when the order is created.
     #[serde_as(as = "U64Hex")]
     pub created_at: u64,
@@ -192,9 +192,9 @@ pub struct SendBTCResponse {
 #[derive(Debug, Clone, Serialize)]
 pub struct ReceiveBTCResponse {
     /// Payment hash for the HTLC for both CKB and BTC.
-    pub payment_hash: String,
+    pub payment_hash: Hash256,
     /// Payment preimage for the HTLC for both CKB and BTC.
-    pub payment_preimage: Option<String>,
+    pub payment_preimage: Option<Hash256>,
     /// Seconds since epoch when the order is created.
     #[serde_as(as = "U64Hex")]
     pub created_at: u64,
@@ -225,9 +225,9 @@ pub struct ReceiveBTCResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CchOrderResponse {
     /// Payment hash for the HTLC.
-    pub payment_hash: String,
+    pub payment_hash: Hash256,
     /// Payment preimage for the HTLC.
-    pub payment_preimage: Option<String>,
+    pub payment_preimage: Option<Hash256>,
 
     /// Seconds since epoch when the order is created.
     #[serde_as(as = "U64Hex")]
@@ -268,8 +268,8 @@ impl From<ConversionError> for ErrorObjectOwned {
 impl From<CchOrder> for CchOrderResponse {
     fn from(value: CchOrder) -> Self {
         Self {
-            payment_hash: value.payment_hash.to_string(),
-            payment_preimage: value.payment_preimage.map(|hash| hash.to_string()),
+            payment_hash: value.payment_hash,
+            payment_preimage: value.payment_preimage,
             created_at: value.created_at,
             expires_after: value.expires_after,
             amount_sats: value.amount_sats,
@@ -302,8 +302,8 @@ impl TryFrom<CchOrder> for SendBTCResponse {
         };
 
         Ok(Self {
-            payment_hash: value.payment_hash.to_string(),
-            payment_preimage: value.payment_preimage.map(|hash| hash.to_string()),
+            payment_hash: value.payment_hash,
+            payment_preimage: value.payment_preimage,
             created_at: value.created_at,
             expires_after: value.expires_after,
             amount_sats: value.amount_sats,
@@ -336,8 +336,8 @@ impl TryFrom<CchOrder> for ReceiveBTCResponse {
         };
 
         Ok(Self {
-            payment_hash: value.payment_hash.to_string(),
-            payment_preimage: value.payment_preimage.map(|hash| hash.to_string()),
+            payment_hash: value.payment_hash,
+            payment_preimage: value.payment_preimage,
             created_at: value.created_at,
             expires_after: value.expires_after,
             amount_sats: value.amount_sats,
