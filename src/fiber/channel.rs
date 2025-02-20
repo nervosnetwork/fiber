@@ -5153,9 +5153,6 @@ impl ChannelActorState {
         is_tlc_command_message: bool,
         is_sent: bool,
     ) -> ProcessingChannelResult {
-        if is_tlc_command_message && self.tlc_state.waiting_ack {
-            return Err(ProcessingChannelError::WaitingTlcAck);
-        }
         match self.state {
             ChannelState::ChannelReady() => {}
             ChannelState::ShuttingDown(_) if add_tlc_amount.is_none() => {}
@@ -5175,6 +5172,13 @@ impl ChannelActorState {
         if let Some(add_amount) = add_tlc_amount {
             self.check_tlc_limits(add_amount, is_sent)?;
         }
+
+        // check waiting ack is placed at last so that retryable operations can get the correct error
+        // we don't want to retry if there is already some other errors for the TLC
+        if is_tlc_command_message && self.tlc_state.waiting_ack {
+            return Err(ProcessingChannelError::WaitingTlcAck);
+        }
+
         Ok(())
     }
 
