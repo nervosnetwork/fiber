@@ -51,7 +51,7 @@ pub struct GetPaymentCommandResult {
 }
 
 #[serde_as]
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Default, Clone, Debug, Serialize, Deserialize)]
 pub struct SendPaymentCommandParams {
     /// the identifier of the payment target
     pub target_pubkey: Option<Pubkey>,

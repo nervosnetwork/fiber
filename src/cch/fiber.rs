@@ -1,21 +1,24 @@
 use jsonrpsee::{
-    core::client::SubscriptionClientT,
+    core::client::{ClientT, SubscriptionClientT},
     http_client::{HttpClient, HttpClientBuilder},
     rpc_params,
     ws_client::{WsClient, WsClientBuilder},
 };
 use ractor::{call, ActorRef, DerivedActorRef};
-use serde::de::DeserializeOwned;
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use tokio::select;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
     errors::ALREADY_EXISTS_DESCRIPTION,
     fiber::{
-        graph::PaymentSessionStatus, network::SendPaymentCommand, types::Hash256,
-        NetworkActorCommand, NetworkActorMessage,
+        network::SendPaymentCommand, types::Hash256, NetworkActorCommand, NetworkActorMessage,
     },
     invoice::CkbInvoice,
+    rpc::{
+        invoice::{AddInvoiceParams, InvoiceResult, SettleInvoiceParams, SettleInvoiceResult},
+        payment::{GetPaymentCommandResult, SendPaymentCommandParams},
+    },
     store::{
         subscription::{
             InvoiceSubscription, InvoiceUpdate, PaymentState, PaymentSubscription, PaymentUpdate,
@@ -76,12 +79,17 @@ impl HttpBackend {
         Ok(self.ws_client.as_ref().expect("Created ws client above"))
     }
 
-    pub async fn get_http_client(&mut self) -> Result<&HttpClient, jsonrpsee::core::ClientError> {
-        self.http_client = Some(HttpClientBuilder::default().build(self.http_url())?);
-        Ok(self
-            .http_client
-            .as_ref()
-            .expect("Created http client above"))
+    pub async fn get_http_client(&self) -> Result<HttpClient, jsonrpsee::core::ClientError> {
+        HttpClientBuilder::default().build(self.http_url())
+    }
+
+    async fn call<T, R>(&self, method: &str, params: T) -> Result<R, jsonrpsee::core::ClientError>
+    where
+        T: Serialize,
+        R: for<'de> Deserialize<'de>,
+    {
+        let client = self.get_http_client().await?;
+        Ok(client.request(method, rpc_params!(params)).await?)
     }
 
     pub fn http_url(&self) -> &str {
@@ -217,9 +225,16 @@ impl FiberBackend {
                 call!(&backend.network_actor, message).expect("call actor")?;
                 Ok(())
             }
-            FiberBackend::Http(_backend) => {
-                unimplemented!("Adding invoice over http is not implemented yet");
-            }
+            FiberBackend::Http(backend) => backend
+                .call(
+                    "add_invoice",
+                    AddInvoiceParams {
+                        invoice: invoice.to_string(),
+                    },
+                )
+                .await
+                .map(|_: InvoiceResult| ())
+                .map_err(Into::into),
         }
     }
 
@@ -246,19 +261,31 @@ impl FiberBackend {
                         Err(err) if err.contains(ALREADY_EXISTS_DESCRIPTION) => return Ok(None),
                         Err(err) => return Err(CchError::SendFiberPaymentError(err.to_string())),
                     };
-                let state = if send_payment_response.status == PaymentSessionStatus::Failed {
-                    PaymentState::Failed
-                } else {
-                    PaymentState::Inflight
-                };
-                Ok(Some(PaymentUpdate {
-                    hash: payment_hash,
-                    state,
-                }))
+                Ok(
+                    Option::<PaymentState>::from(send_payment_response.status).map(|state| {
+                        FiberPaymentUpdate {
+                            hash: payment_hash,
+                            state,
+                        }
+                    }),
+                )
             }
-            FiberBackend::Http(_backend) => {
-                unimplemented!("Sending payment over http is not implemented yet");
-            }
+            FiberBackend::Http(backend) => backend
+                .call(
+                    "send_payment",
+                    SendPaymentCommandParams {
+                        invoice: Some(invoice.to_string()),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .map(|response: GetPaymentCommandResult| {
+                    Option::<PaymentState>::from(response.status).map(|state| PaymentUpdate {
+                        hash: payment_hash,
+                        state,
+                    })
+                })
+                .map_err(Into::into),
         }
     }
 
@@ -280,9 +307,17 @@ impl FiberBackend {
                 call!(&backend.network_actor, message).expect("call actor")?;
                 Ok(())
             }
-            FiberBackend::Http(_backend) => {
-                unimplemented!("Settling invoice over http is not implemented yet");
-            }
+            FiberBackend::Http(backend) => backend
+                .call(
+                    "settle_invoice",
+                    SettleInvoiceParams {
+                        payment_hash: *invoice.payment_hash(),
+                        payment_preimage: preimage,
+                    },
+                )
+                .await
+                .map(|_: SettleInvoiceResult| ())
+                .map_err(Into::into),
         }
     }
 }
