@@ -268,6 +268,7 @@ pub async fn main() -> Result<(), ExitMessage> {
                 store,
                 network_graph,
                 store_update_subscription.clone(),
+                root_actor.get_cell(),
                 #[cfg(debug_assertions)] ckb_chain_actor,
                 #[cfg(debug_assertions)] rpc_dev_module_commitment_txs,
             )

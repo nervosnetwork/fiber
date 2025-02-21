@@ -44,7 +44,7 @@ use jsonrpsee::RpcModule;
 use payment::PaymentRpcServerImpl;
 use peer::{PeerRpcServer, PeerRpcServerImpl};
 use pubsub::start_pubsub_server;
-use ractor::ActorRef;
+use ractor::{ActorCell, ActorRef};
 #[cfg(debug_assertions)]
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -105,6 +105,7 @@ pub async fn start_rpc<
     store: S,
     network_graph: Arc<RwLock<NetworkGraph<S>>>,
     subscription: SubscriptionImpl,
+    supervisor: ActorCell,
     #[cfg(debug_assertions)] ckb_chain_actor: Option<ActorRef<CkbChainMessage>>,
     #[cfg(debug_assertions)] rpc_dev_module_commitment_txs: Option<
         Arc<RwLock<HashMap<(Hash256, u64), TransactionView>>>,
@@ -162,7 +163,7 @@ pub async fn start_rpc<
         }
 
         if config.is_module_enabled("pubsub") {
-            start_pubsub_server(&mut modules, subscription).await;
+            start_pubsub_server(&mut modules, &subscription, &supervisor).await;
         }
 
         #[cfg(debug_assertions)]

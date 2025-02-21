@@ -97,7 +97,7 @@ impl From<CkbInvoiceStatus> for Option<InvoiceState> {
     }
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct InvoiceUpdate {
     pub hash: Hash256,
     pub state: InvoiceState,
@@ -180,7 +180,7 @@ impl TryFrom<lnrpc::Payment> for PaymentUpdate {
     }
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct PaymentUpdate {
     pub hash: Hash256,
     pub state: PaymentState,
