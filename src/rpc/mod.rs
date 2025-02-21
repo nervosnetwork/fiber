@@ -107,6 +107,7 @@ pub async fn start_rpc<
     >,
 ) -> ServerHandle {
     let listening_addr = config.listening_addr.as_deref().unwrap_or("[::]:0");
+    tracing::info!(listening_addr = listening_addr, "Starting RPC server");
     let server = build_server(listening_addr).await;
     let mut modules = RpcModule::new(());
     if config.is_module_enabled("invoice") {

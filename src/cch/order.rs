@@ -239,6 +239,14 @@ impl CchOrder {
                     error,
                 }))
             })?;
+        tracing::trace!(
+            old_status = ?self.status,
+            new_status = ?new_status,
+            old_in_state = ?self.in_state,
+            new_in_state = ?new_state,
+            out_state = ?self.out_state,
+            "Updated cch order status from invoice update"
+        );
         self.status = new_status;
         self.in_state = new_state;
         Ok(true)
@@ -294,6 +302,14 @@ impl CchOrder {
                     error,
                 }))
             })?;
+        tracing::trace!(
+            old_status = ?self.status,
+            new_status = ?new_status,
+            in_state = ?self.in_state,
+            old_out_state = ?self.out_state,
+            new_out_state = ?payment_update.update.state,
+            "Updated cch order status from payment update"
+        );
         self.status = new_status;
         self.out_state = payment_update.update.state;
         if let PaymentState::Success { preimage } = payment_update.update.state {
