@@ -230,9 +230,7 @@ pub async fn main() -> Result<(), ExitMessage> {
                 new_tokio_task_tracker(),
                 new_tokio_cancellation_token(),
                 root_actor.get_cell(),
-                network_actor
-                    .clone()
-                    .expect("Cch service requires network actor"),
+                network_actor.clone(),
                 node_public_key.expect("Cch service requires node public key"),
                 store_update_subscription.clone(),
                 store.clone(),

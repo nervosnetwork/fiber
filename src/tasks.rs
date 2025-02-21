@@ -35,6 +35,13 @@ pub fn new_tokio_cancellation_token() -> CancellationToken {
     TOKIO_TASK_TRACKER_WITH_CANCELLATION.token.clone()
 }
 
+/// Create a new CancellationToken which is a child of the global exit signal token.
+/// This is normally used to cancel a sub-task when the global exit signal is triggered,
+/// while keeping the ability to cancel the sub-tasks independently.
+pub fn new_tokio_cancellation_child_token() -> CancellationToken {
+    TOKIO_TASK_TRACKER_WITH_CANCELLATION.token.child_token()
+}
+
 /// Create a new TaskTracker to track task progress
 pub fn new_tokio_task_tracker() -> TaskTracker {
     TOKIO_TASK_TRACKER_WITH_CANCELLATION.tracker.clone()

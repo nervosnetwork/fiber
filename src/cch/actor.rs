@@ -5,7 +5,7 @@ use lnd_grpc_tonic_client::{
     create_invoices_client, create_router_client, invoicesrpc, lnrpc, routerrpc, InvoicesClient,
     RouterClient, Uri,
 };
-use ractor::{call, RpcReplyPort};
+use ractor::RpcReplyPort;
 use ractor::{Actor, ActorCell, ActorProcessingErr, ActorRef};
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -15,17 +15,17 @@ use tokio::{select, time::sleep};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::cch::order::{CchInvoice, CchOrderActor};
-use crate::errors::ALREADY_EXISTS_DESCRIPTION;
-use crate::fiber::graph::PaymentSessionStatus;
 use crate::fiber::hash_algorithm::HashAlgorithm;
-use crate::fiber::network::SendPaymentCommand;
 use crate::fiber::types::{Hash256, Pubkey};
-use crate::fiber::{NetworkActorCommand, NetworkActorMessage};
+use crate::fiber::NetworkActorMessage;
 use crate::invoice::{CkbInvoice, Currency, InvoiceBuilder};
-use crate::store::subscription::{PaymentState, PaymentUpdate};
+use crate::store::subscription::PaymentUpdate;
 use crate::store::subscription_impl::SubscriptionImpl;
+use crate::tasks::{
+    new_tokio_cancellation_child_token, new_tokio_cancellation_token, new_tokio_task_tracker,
+};
 
-use super::fiber::{FiberSubcriptionBackend, FiberTrackingHandle};
+use super::fiber::{FiberBackend, FiberTrackingHandle, HttpBackend, InProcessFiberBackend};
 use super::order::{
     CchInvoiceUpdate, CchOrderActorMessage, CchPaymentUpdate, LightningInvoiceUpdate,
     LightningPaymentUpdate,
@@ -41,29 +41,36 @@ pub async fn start_cch<S: CchOrderStore + Clone + Send + Sync + 'static>(
     tracker: TaskTracker,
     token: CancellationToken,
     root_actor: ActorCell,
-    network_actor: ActorRef<NetworkActorMessage>,
+    network_actor: Option<ActorRef<NetworkActorMessage>>,
     pubkey: Pubkey,
     subscription: SubscriptionImpl,
     store: S,
 ) -> Result<ActorRef<CchMessage>> {
     let lnd_connection = config.get_lnd_connection_info().await?;
-    let ws_client = config.get_fiber_ws_client().await?;
-    let subscription = ws_client
-        .map(FiberSubcriptionBackend::Websocket)
-        .unwrap_or_else(|| FiberSubcriptionBackend::InProcess(subscription));
+    let fiber_backend = match (config.fiber_rpc_url.as_ref(), network_actor) {
+        (None, None) => panic!("Either fiber_rpc_url or network_actor must be provided"),
+        (Some(fiber_rpc_url), n) => {
+            if n.is_some() {
+                tracing::info!(
+                    "Both fiber_rpc_url and network_acto are provided, but fiber_rpc_url will be used"
+                );
+            }
+            let mut http_backend = HttpBackend::new(fiber_rpc_url);
+            if let Err(error) = http_backend.connect().await {
+                if !config.ignore_startup_failure {
+                    return Err(anyhow!(error));
+                }
+            }
+            FiberBackend::Http(http_backend)
+        }
+        (None, Some(network_actor)) => {
+            FiberBackend::InProcess(InProcessFiberBackend::new(network_actor, subscription))
+        }
+    };
     let (actor, _handle) = Actor::spawn_linked(
         Some("cch actor".to_string()),
-        CchActor::new(
-            config,
-            tracker,
-            token,
-            network_actor,
-            pubkey,
-            subscription,
-            lnd_connection,
-            store,
-        ),
-        (),
+        CchActor::new(config, tracker, token, pubkey, lnd_connection, store),
+        fiber_backend,
         root_actor,
     )
     .await?;
@@ -137,41 +144,333 @@ pub struct CchActor<S> {
     config: CchConfig,
     tracker: TaskTracker,
     token: CancellationToken,
-    network_actor: ActorRef<NetworkActorMessage>,
     pubkey: Pubkey,
-    subscription: FiberSubcriptionBackend,
     lnd_connection: LndConnectionInfo,
     store: S,
 }
 
-#[derive(Default)]
 pub struct CchState {
+    fiber: FiberBackend,
+    lnd_connection: LndConnectionInfo,
     orders: HashMap<Hash256, CchOrderActorWithTrackingHandle>,
 }
 
-// This is the cch order actor with the tracking handles.
-// When the actor is stopped, the tracking handles will be dropped.
-pub struct CchOrderActorWithTrackingHandle {
-    actor: ActorRef<CchOrderActorMessage>,
-    invoice_tracking_handle: TrackingHandle,
-    payment_tracking_handle: TrackingHandle,
-}
-
-impl CchOrderActorWithTrackingHandle {
-    pub fn new(
-        actor: ActorRef<CchOrderActorMessage>,
-        invoice_tracking_handle: TrackingHandle,
-        payment_tracking_handle: TrackingHandle,
-    ) -> Self {
+impl CchState {
+    pub fn new(fiber: FiberBackend, lnd_connection: LndConnectionInfo) -> Self {
         Self {
-            actor,
-            invoice_tracking_handle,
-            payment_tracking_handle,
+            fiber,
+            lnd_connection,
+            orders: HashMap::new(),
         }
     }
-}
 
-impl CchState {
+    async fn stop_cch_order_actor(
+        &self,
+        payment_hash: Hash256,
+        order: CchOrderActorWithTrackingHandle,
+    ) {
+        tracing::debug!(hash = ?payment_hash, "Order finished, stopping invoice/payment tracking");
+        match order.invoice_tracking_handle {
+            TrackingHandle::Fiber(subscription_id) => {
+                if let Err(error) = self.fiber.unsubscribe_invoice(subscription_id).await {
+                    tracing::error!(error = ?error, hash = ?payment_hash, "Failed to unsubscribe invoice");
+                }
+            }
+            TrackingHandle::Lightning(handle) => {
+                handle.cancel();
+            }
+        }
+        match order.payment_tracking_handle {
+            TrackingHandle::Fiber(subscription_id) => {
+                if let Err(error) = self.fiber.unsubscribe_payment(subscription_id).await {
+                    tracing::error!(error = ?error, hash = ?payment_hash, "Failed to unsubscribe payment");
+                }
+            }
+            TrackingHandle::Lightning(handle) => {
+                handle.cancel();
+            }
+        }
+    }
+
+    // Pay an invoice and return the optional payment update. Since we are sending a payment,
+    // we may or may not an immediate payment status update (for example, when the same payment
+    // is sent twice, lnd/fiber APIs currently will tell us the payment exists, but won't give
+    // out detailed information), so we return an optional payment update. But the caller needs
+    // to track the payment for progress anyway. So the payment update should really be treated
+    // a nice-to-have information.
+    async fn pay_invoice(
+        &mut self,
+        invoice: CchInvoice,
+    ) -> Result<Option<CchPaymentUpdate>, CchError> {
+        let payment_hash = invoice.payment_hash();
+        tracing::debug!(
+            payment_hash = ?payment_hash,
+            invoice = ?invoice,
+            "Paying invoice",
+        );
+
+        match &invoice {
+            CchInvoice::Lightning(invoice) => {
+                let out_invoice = invoice.to_string();
+                let req = routerrpc::SendPaymentRequest {
+                    payment_request: out_invoice,
+                    timeout_seconds: BTC_PAYMENT_TIMEOUT_SECONDS,
+                    ..Default::default()
+                };
+                tracing::debug!("[inbounding tlc] SendPaymentRequest: {:?}", req);
+
+                let mut client = self.lnd_connection.create_router_client().await?;
+                // TODO: set a fee
+                let mut stream = match client.send_payment_v2(req).await {
+                    Ok(stream) => stream.into_inner(),
+                    // 6 is the standard code for grpc error ALREADY_EXISTS.
+                    // https://grpc.io/docs/guides/status-codes/
+                    // tonic is not reexported by lnd_grpc_tonic_client, so we have to use the raw code.
+                    Err(status) if i32::from(status.code()) == 6 => {
+                        return Ok(None);
+                    }
+                    Err(err) => {
+                        return Err(CchError::LndGrpcRequestError(err.to_string()));
+                    }
+                };
+                let token = new_tokio_cancellation_token();
+                // Wait for the first message then quit
+                select! {
+                    payment_result_opt = stream.next() => {
+                        match payment_result_opt {
+                            Some(Ok(payment)) => {
+                                Ok(Some(
+                                    CchPaymentUpdate {
+                                        is_fiber: false,
+                                        update: PaymentUpdate::try_from(payment).map_err(|err| {
+                                            CchError::UnexpectedLndData(err.to_string())
+                                        })?
+                                    }
+                                ))
+                            }
+                            Some(Err(status)) => {
+                                tracing::error!(payment_hash = ?payment_hash, status = ?status, status_code = i32::from(status.code()), "Sending lnd payment failed");
+                                Err(CchError::LndGrpcRequestError(status.to_string()))
+                            }
+                            // We don't really know if the payment is successful or not.
+                            // But in this case we can always retry the payment.
+                            None => Ok(None)
+                        }
+                    }
+                    _ = token.cancelled() => {
+                        tracing::debug!("Cancellation received, shutting down cch service");
+                        Err(CchError::TaskCanceled)
+                    }
+                }
+            }
+            CchInvoice::Fiber(fiber_invoice) => {
+                let payment_update = self.fiber.pay_invoice(fiber_invoice).await?;
+                Ok(payment_update.map(|update| CchPaymentUpdate {
+                    is_fiber: true,
+                    update,
+                }))
+            }
+        }
+    }
+
+    async fn settle_invoice(
+        &mut self,
+        invoice: &CchInvoice,
+        preimage: Hash256,
+    ) -> Result<(), CchError> {
+        let payment_hash = invoice.payment_hash();
+        tracing::debug!(
+            hash = ?payment_hash,
+            preimage = ?preimage,
+            invoice = ?invoice,
+            "Settling invoice",
+        );
+        match &invoice {
+            CchInvoice::Lightning(_) => {
+                let req = invoicesrpc::SettleInvoiceMsg {
+                    preimage: preimage.as_ref().to_vec(),
+                };
+                let mut client = self.lnd_connection.create_invoices_client().await?;
+                let _ = client
+                    .settle_invoice(req)
+                    .await
+                    .map_err(|error| CchError::LndGrpcRequestError(error.to_string()))?
+                    .into_inner();
+                // TODO: settle_invoice response actually contains no useful information.
+                // We need to check the invoice state to see if it's settled.
+            }
+            CchInvoice::Fiber(invoice) => {
+                self.fiber.settle_invoice(invoice, preimage).await?;
+            }
+        }
+        Ok(())
+    }
+
+    fn start_lightning_invoice_tracker(
+        &self,
+        payment_hash: Hash256,
+        myself: &ActorRef<CchMessage>,
+    ) -> Result<LightningTrackingHandle, CchError> {
+        let token = new_tokio_cancellation_child_token();
+        let tracker = new_tokio_task_tracker();
+        let payment_hash_str = format!("0x{}", hex::encode(payment_hash));
+        let invoice_tracker = LndInvoiceTracker::new(
+            myself.clone(),
+            payment_hash_str,
+            self.lnd_connection.clone(),
+            token.clone(),
+        );
+        tracker.spawn(async move { invoice_tracker.run().await });
+        Ok(token)
+    }
+
+    async fn start_fiber_invoice_tracker(
+        &mut self,
+        payment_hash: Hash256,
+        order_actor: &ActorRef<CchOrderActorMessage>,
+    ) -> Result<FiberTrackingHandle, CchError> {
+        self.fiber
+            .subscribe_invoice(payment_hash, order_actor.get_derived())
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn start_lightning_payment_tracker(
+        &self,
+        payment_hash: Hash256,
+        myself: &ActorRef<CchMessage>,
+    ) -> Result<LightningTrackingHandle, CchError> {
+        let token = new_tokio_cancellation_child_token();
+        let cloned_token = token.clone();
+        let tracker = new_tokio_task_tracker();
+        let myself = myself.clone();
+        let lnd_connection = self.lnd_connection.clone();
+
+        // Start a payment tracking. Return an error when non-retriable error occurs.
+        // Return Ok(None) when retriable error occurs. Return Ok(Some(payment_update)) when payment is successful.
+        async fn get_payment(
+            payment_hash: Hash256,
+            lnd_connection: &LndConnectionInfo,
+        ) -> Result<Option<PaymentUpdate>, CchError> {
+            let mut stream = match lnd_connection.create_router_client().await {
+                Ok(mut client) => match client
+                    .track_payment_v2(routerrpc::TrackPaymentRequest {
+                        no_inflight_updates: true,
+                        payment_hash: payment_hash.as_ref().to_vec(),
+                    })
+                    .await
+                {
+                    Ok(stream) => stream.into_inner(),
+                    Err(error) => {
+                        tracing::warn!(error = ?error, "Failed to track payment");
+                        return Ok(None);
+                    }
+                },
+                Err(error) => {
+                    tracing::warn!(error = ?error, "Failed to create router client");
+                    return Ok(None);
+                }
+            };
+            let payment_opt = stream.next().await;
+            match payment_opt {
+                Some(Ok(payment)) => {
+                    let payment_update = PaymentUpdate::try_from(payment)
+                        .map_err(|err| CchError::UnexpectedLndData(err.to_string()))?;
+                    Ok(Some(payment_update))
+                }
+                Some(Err(err)) => {
+                    tracing::error!(error = ?err, "Failed to track payment");
+                    Ok(None)
+                }
+                None => {
+                    tracing::error!("Unexpected closed stream while tracking lightning payment");
+                    Ok(None)
+                }
+            }
+        }
+
+        tracker.spawn(async move {
+            loop {
+                select! {
+                    payment_opt = get_payment(payment_hash, &lnd_connection) => {
+                        match payment_opt {
+                            Ok(Some(payment_update)) => {
+                                let message = CchMessage::LightningPaymentUpdate(payment_update);
+                                myself.cast(message).expect("send message to cch actor");
+                                return;
+                            }
+                            Ok(None) => {
+                                // Sleep for a while before retrying
+                                sleep(Duration::from_secs(15)).await;
+                            }
+                            Err(err) => {
+                                tracing::error!(error = ?err, "Failed to track lightning payment");
+                                return;
+                            }
+                        }
+                    }
+                    _ = token.cancelled() => {
+                        tracing::debug!("Cancellation received while tracking lightning payment");
+                        return;
+                    }
+                }
+            }
+        });
+
+        tracing::debug!("Subscribed to lnd payments");
+
+        Ok(cloned_token)
+    }
+
+    async fn start_fiber_payment_tracker(
+        &mut self,
+        payment_hash: Hash256,
+        order_actor: &ActorRef<CchOrderActorMessage>,
+    ) -> Result<FiberTrackingHandle, CchError> {
+        self.fiber
+            .subscribe_payment(payment_hash, order_actor.get_derived())
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn subscribe_updates_for_order(
+        &mut self,
+        myself: &ActorRef<CchMessage>,
+        order: &CchOrder,
+        order_actor: &ActorRef<CchOrderActorMessage>,
+    ) -> Result<(), CchError> {
+        let payment_hash = order.payment_hash;
+        let invoice_tracking_handle = if order.is_first_half_fiber() {
+            TrackingHandle::Fiber(
+                self.start_fiber_invoice_tracker(payment_hash, order_actor)
+                    .await?,
+            )
+        } else {
+            TrackingHandle::Lightning(self.start_lightning_invoice_tracker(payment_hash, myself)?)
+        };
+        let payment_tracking_handle = if order.is_second_half_fiber() {
+            TrackingHandle::Fiber(
+                self.start_fiber_payment_tracker(payment_hash, order_actor)
+                    .await?,
+            )
+        } else {
+            TrackingHandle::Lightning(
+                self.start_lightning_payment_tracker(payment_hash, myself)
+                    .await?,
+            )
+        };
+        self.orders.insert(
+            order.payment_hash,
+            CchOrderActorWithTrackingHandle::new(
+                order_actor.clone(),
+                invoice_tracking_handle,
+                payment_tracking_handle,
+            ),
+        );
+
+        Ok(())
+    }
+
     fn get_order(
         &self,
         payment_hash: &Hash256,
@@ -204,6 +503,28 @@ impl CchState {
     }
 }
 
+// This is the cch order actor with the tracking handles.
+// When the actor is stopped, the tracking handles will be dropped.
+pub struct CchOrderActorWithTrackingHandle {
+    actor: ActorRef<CchOrderActorMessage>,
+    invoice_tracking_handle: TrackingHandle,
+    payment_tracking_handle: TrackingHandle,
+}
+
+impl CchOrderActorWithTrackingHandle {
+    pub fn new(
+        actor: ActorRef<CchOrderActorMessage>,
+        invoice_tracking_handle: TrackingHandle,
+        payment_tracking_handle: TrackingHandle,
+    ) -> Self {
+        Self {
+            actor,
+            invoice_tracking_handle,
+            payment_tracking_handle,
+        }
+    }
+}
+
 #[ractor::async_trait]
 impl<S> Actor for CchActor<S>
 where
@@ -211,12 +532,12 @@ where
 {
     type Msg = CchMessage;
     type State = CchState;
-    type Arguments = ();
+    type Arguments = FiberBackend;
 
     async fn pre_start(
         &self,
         myself: ActorRef<Self::Msg>,
-        _config: Self::Arguments,
+        fiber_backend: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
         let lnd_connection = self.config.get_lnd_connection_info().await?;
 
@@ -225,7 +546,7 @@ where
         self.tracker
             .spawn(async move { payments_tracker.run().await });
 
-        let mut state = CchState::default();
+        let mut state = CchState::new(fiber_backend, lnd_connection);
 
         let orders = match self.store.get_active_cch_orders() {
             Ok(orders) => orders.into_iter().collect::<Vec<_>>(),
@@ -238,8 +559,8 @@ where
             let payment_hash = order.payment_hash;
             let order_actor =
                 CchOrderActor::start(&myself, self.store.clone(), order.clone()).await;
-            if let Err(err) = self
-                .subscribe_updates_for_order(&myself, &mut state, &order, &order_actor)
+            if let Err(err) = state
+                .subscribe_updates_for_order(&myself, &order, &order_actor)
                 .await
             {
                 tracing::error!(error = ?err, payment_hash = ?payment_hash,  "Failed to subscribe updates for order");
@@ -268,12 +589,12 @@ where
                 Ok(())
             }
             CchMessage::PayInvoice(cch_invoice, rpc_reply_port) => {
-                let result = self.pay_invoice(cch_invoice).await.map_err(Into::into);
+                let result = state.pay_invoice(cch_invoice).await.map_err(Into::into);
                 let _ = rpc_reply_port.send(result);
                 Ok(())
             }
             CchMessage::SettleInvoice(cch_invoice, hash256, rpc_reply_port) => {
-                let result = self
+                let result = state
                     .settle_invoice(&cch_invoice, hash256)
                     .await
                     .map_err(Into::into);
@@ -309,7 +630,7 @@ where
                 ) {
                     tracing::debug!(hash = ?hash, status = ?cch_order_status, "Cch order finished");
                     if let Some(order) = state.orders.remove(&hash) {
-                        self.stop_cch_order_actor(hash, order).await;
+                        state.stop_cch_order_actor(hash, order).await;
                     }
                 }
                 Ok(())
@@ -322,8 +643,9 @@ where
         _myself: ActorRef<Self::Msg>,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        for (payment_hash, order) in state.orders.drain() {
-            self.stop_cch_order_actor(payment_hash, order).await;
+        let orders = core::mem::take(&mut state.orders);
+        for (payment_hash, order) in orders {
+            state.stop_cch_order_actor(payment_hash, order).await;
         }
         Ok(())
     }
@@ -338,9 +660,7 @@ where
         config: CchConfig,
         tracker: TaskTracker,
         token: CancellationToken,
-        network_actor: ActorRef<NetworkActorMessage>,
         pubkey: Pubkey,
-        subscription: FiberSubcriptionBackend,
         lnd_connection: LndConnectionInfo,
         store: S,
     ) -> Self {
@@ -348,9 +668,7 @@ where
             config,
             tracker,
             token,
-            network_actor,
             pubkey,
-            subscription,
             lnd_connection,
             store,
         }
@@ -408,19 +726,12 @@ where
             CchInvoice::Lightning(out_invoice),
         );
 
-        let message = move |rpc_reply| -> NetworkActorMessage {
-            NetworkActorMessage::Command(NetworkActorCommand::AddInvoice(
-                fiber_invoice.clone(),
-                None,
-                rpc_reply,
-            ))
-        };
-
-        call!(&self.network_actor, message).expect("call actor")?;
+        state.fiber.add_invoice(fiber_invoice.clone()).await?;
 
         self.store.create_cch_order(order.clone())?;
         let order_actor = CchOrderActor::start(myself, self.store.clone(), order.clone()).await;
-        self.subscribe_updates_for_order(myself, state, &order, &order_actor)
+        state
+            .subscribe_updates_for_order(myself, &order, &order_actor)
             .await?;
 
         Ok(order)
@@ -491,345 +802,12 @@ where
         );
 
         let order_actor = CchOrderActor::start(myself, self.store.clone(), order.clone()).await;
-        self.subscribe_updates_for_order(myself, state, &order, &order_actor)
+        state
+            .subscribe_updates_for_order(myself, &order, &order_actor)
             .await?;
         self.store.create_cch_order(order.clone())?;
 
         Ok(order)
-    }
-
-    async fn stop_cch_order_actor(
-        &self,
-        payment_hash: Hash256,
-        order: CchOrderActorWithTrackingHandle,
-    ) {
-        tracing::debug!(hash = ?payment_hash, "Order finished, stopping invoice/payment tracking");
-        match order.invoice_tracking_handle {
-            TrackingHandle::Fiber(subscription_id) => {
-                if let Err(error) = self.subscription.unsubscribe_invoice(subscription_id).await {
-                    tracing::error!(error = ?error, hash = ?payment_hash, "Failed to unsubscribe invoice");
-                }
-            }
-            TrackingHandle::Lightning(handle) => {
-                handle.cancel();
-            }
-        }
-        match order.payment_tracking_handle {
-            TrackingHandle::Fiber(subscription_id) => {
-                if let Err(error) = self.subscription.unsubscribe_payment(subscription_id).await {
-                    tracing::error!(error = ?error, hash = ?payment_hash, "Failed to unsubscribe payment");
-                }
-            }
-            TrackingHandle::Lightning(handle) => {
-                handle.cancel();
-            }
-        }
-    }
-
-    // Pay an invoice and return the optional payment update. Since we are sending a payment,
-    // we may or may not an immediate payment status update (for example, when the same payment
-    // is sent twice, lnd/fiber APIs currently will tell us the payment exists, but won't give
-    // out detailed information), so we return an optional payment update. But the caller needs
-    // to track the payment for progress anyway. So the payment update should really be treated
-    // a nice-to-have information.
-    async fn pay_invoice(&self, invoice: CchInvoice) -> Result<Option<CchPaymentUpdate>, CchError> {
-        let payment_hash = invoice.payment_hash();
-        tracing::debug!(
-            payment_hash = ?payment_hash,
-            invoice = ?invoice,
-            "Paying invoice",
-        );
-
-        match &invoice {
-            CchInvoice::Lightning(invoice) => {
-                let out_invoice = invoice.to_string();
-                let req = routerrpc::SendPaymentRequest {
-                    payment_request: out_invoice,
-                    timeout_seconds: BTC_PAYMENT_TIMEOUT_SECONDS,
-                    ..Default::default()
-                };
-                tracing::debug!("[inbounding tlc] SendPaymentRequest: {:?}", req);
-
-                let mut client = self.lnd_connection.create_router_client().await?;
-                // TODO: set a fee
-                let mut stream = match client.send_payment_v2(req).await {
-                    Ok(stream) => stream.into_inner(),
-                    // 6 is the standard code for grpc error ALREADY_EXISTS.
-                    // https://grpc.io/docs/guides/status-codes/
-                    // tonic is not reexported by lnd_grpc_tonic_client, so we have to use the raw code.
-                    Err(status) if i32::from(status.code()) == 6 => {
-                        return Ok(None);
-                    }
-                    Err(err) => {
-                        return Err(CchError::LndGrpcRequestError(err.to_string()));
-                    }
-                };
-                // Wait for the first message then quit
-                select! {
-                    payment_result_opt = stream.next() => {
-                        match payment_result_opt {
-                            Some(Ok(payment)) => {
-                                Ok(Some(
-                                    CchPaymentUpdate {
-                                        is_fiber: false,
-                                        update: PaymentUpdate::try_from(payment).map_err(|err| {
-                                            CchError::UnexpectedLndData(err.to_string())
-                                        })?
-                                    }
-                                ))
-                            }
-                            Some(Err(status)) => {
-                                tracing::error!(payment_hash = ?payment_hash, status = ?status, status_code = i32::from(status.code()), "Sending lnd payment failed");
-                                Err(CchError::LndGrpcRequestError(status.to_string()))
-                            }
-                            // We don't really know if the payment is successful or not.
-                            // But in this case we can always retry the payment.
-                            None => Ok(None)
-                        }
-                    }
-                    _ = self.token.cancelled() => {
-                        tracing::debug!("Cancellation received, shutting down cch service");
-                        Err(CchError::TaskCanceled)
-                    }
-                }
-            }
-            CchInvoice::Fiber(fiber_invoice) => {
-                let message = |rpc_reply| -> NetworkActorMessage {
-                    NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
-                        SendPaymentCommand {
-                            invoice: Some(fiber_invoice.to_string()),
-                            ..Default::default()
-                        },
-                        rpc_reply,
-                    ))
-                };
-
-                // TODO: handle payment failure here.
-                let tlc_response = match call!(self.network_actor, message).expect("call actor") {
-                    Ok(tlc_response) => tlc_response,
-                    Err(err) if err.contains(ALREADY_EXISTS_DESCRIPTION) => return Ok(None),
-                    Err(err) => return Err(CchError::SendFiberPaymentError(err.to_string())),
-                };
-                let state = if tlc_response.status == PaymentSessionStatus::Failed {
-                    PaymentState::Failed
-                } else {
-                    PaymentState::Inflight
-                };
-                Ok(Some(CchPaymentUpdate {
-                    is_fiber: true,
-                    update: PaymentUpdate {
-                        hash: payment_hash,
-                        state,
-                    },
-                }))
-            }
-        }
-    }
-
-    async fn settle_invoice(
-        &self,
-        invoice: &CchInvoice,
-        preimage: Hash256,
-    ) -> Result<(), CchError> {
-        let payment_hash = invoice.payment_hash();
-        tracing::debug!(
-            hash = ?payment_hash,
-            preimage = ?preimage,
-            invoice = ?invoice,
-            "Settling invoice",
-        );
-        match &invoice {
-            CchInvoice::Lightning(_) => {
-                let req = invoicesrpc::SettleInvoiceMsg {
-                    preimage: preimage.as_ref().to_vec(),
-                };
-                let mut client = self.lnd_connection.create_invoices_client().await?;
-                let _ = client
-                    .settle_invoice(req)
-                    .await
-                    .map_err(|error| CchError::LndGrpcRequestError(error.to_string()))?
-                    .into_inner();
-                // TODO: settle_invoice response actually contains no useful information.
-                // We need to check the invoice state to see if it's settled.
-            }
-            CchInvoice::Fiber(_) => {
-                let message = move |rpc_reply| -> NetworkActorMessage {
-                    NetworkActorMessage::Command(NetworkActorCommand::SettleInvoice(
-                        payment_hash,
-                        preimage,
-                        rpc_reply,
-                    ))
-                };
-
-                call!(&self.network_actor, message).expect("call actor")?;
-            }
-        }
-        Ok(())
-    }
-
-    fn start_lightning_invoice_tracker(
-        &self,
-        payment_hash: Hash256,
-        myself: &ActorRef<CchMessage>,
-    ) -> Result<LightningTrackingHandle, CchError> {
-        let token = self.token.child_token();
-        let payment_hash_str = format!("0x{}", hex::encode(payment_hash));
-        let invoice_tracker = LndInvoiceTracker::new(
-            myself.clone(),
-            payment_hash_str,
-            self.lnd_connection.clone(),
-            token.clone(),
-        );
-        self.tracker
-            .spawn(async move { invoice_tracker.run().await });
-        Ok(token)
-    }
-
-    async fn start_fiber_invoice_tracker(
-        &self,
-        payment_hash: Hash256,
-        order_actor: &ActorRef<CchOrderActorMessage>,
-    ) -> Result<FiberTrackingHandle, CchError> {
-        self.subscription
-            .subscribe_invoice(payment_hash, order_actor.get_derived())
-            .await
-            .map_err(Into::into)
-    }
-
-    async fn start_lightning_payment_tracker(
-        &self,
-        payment_hash: Hash256,
-        myself: &ActorRef<CchMessage>,
-    ) -> Result<LightningTrackingHandle, CchError> {
-        let token = self.token.child_token();
-        let myself = myself.clone();
-        let lnd_connection = self.lnd_connection.clone();
-
-        // Start a payment tracking. Return an error when non-retriable error occurs.
-        // Return Ok(None) when retriable error occurs. Return Ok(Some(payment_update)) when payment is successful.
-        async fn get_payment(
-            payment_hash: Hash256,
-            lnd_connection: &LndConnectionInfo,
-        ) -> Result<Option<PaymentUpdate>, CchError> {
-            let mut stream = match lnd_connection.create_router_client().await {
-                Ok(mut client) => match client
-                    .track_payment_v2(routerrpc::TrackPaymentRequest {
-                        no_inflight_updates: true,
-                        payment_hash: payment_hash.as_ref().to_vec(),
-                    })
-                    .await
-                {
-                    Ok(stream) => stream.into_inner(),
-                    Err(error) => {
-                        tracing::warn!(error = ?error, "Failed to track payment");
-                        return Ok(None);
-                    }
-                },
-                Err(error) => {
-                    tracing::warn!(error = ?error, "Failed to create router client");
-                    return Ok(None);
-                }
-            };
-            let payment_opt = stream.next().await;
-            match payment_opt {
-                Some(Ok(payment)) => {
-                    let payment_update = PaymentUpdate::try_from(payment)
-                        .map_err(|err| CchError::UnexpectedLndData(err.to_string()))?;
-                    Ok(Some(payment_update))
-                }
-                Some(Err(err)) => {
-                    tracing::error!(error = ?err, "Failed to track payment");
-                    Ok(None)
-                }
-                None => {
-                    tracing::error!("Unexpected closed stream while tracking lightning payment");
-                    Ok(None)
-                }
-            }
-        }
-
-        self.tracker.spawn(async move {
-            loop {
-                select! {
-                    payment_opt = get_payment(payment_hash, &lnd_connection) => {
-                        match payment_opt {
-                            Ok(Some(payment_update)) => {
-                                let message = CchMessage::LightningPaymentUpdate(payment_update);
-                                myself.cast(message).expect("send message to cch actor");
-                                return;
-                            }
-                            Ok(None) => {
-                                // Sleep for a while before retrying
-                                sleep(Duration::from_secs(15)).await;
-                            }
-                            Err(err) => {
-                                tracing::error!(error = ?err, "Failed to track lightning payment");
-                                return;
-                            }
-                        }
-                    }
-                    _ = token.cancelled() => {
-                        tracing::debug!("Cancellation received while tracking lightning payment");
-                        return;
-                    }
-                }
-            }
-        });
-
-        tracing::debug!("Subscribed to lnd payments");
-
-        let token = self.token.child_token();
-        Ok(token)
-    }
-
-    async fn start_fiber_payment_tracker(
-        &self,
-        payment_hash: Hash256,
-        order_actor: &ActorRef<CchOrderActorMessage>,
-    ) -> Result<FiberTrackingHandle, CchError> {
-        self.subscription
-            .subscribe_payment(payment_hash, order_actor.get_derived())
-            .await
-            .map_err(Into::into)
-    }
-
-    async fn subscribe_updates_for_order(
-        &self,
-        myself: &ActorRef<CchMessage>,
-        state: &mut CchState,
-        order: &CchOrder,
-        order_actor: &ActorRef<CchOrderActorMessage>,
-    ) -> Result<(), CchError> {
-        let payment_hash = order.payment_hash;
-        let invoice_tracking_handle = if order.is_first_half_fiber() {
-            TrackingHandle::Fiber(
-                self.start_fiber_invoice_tracker(payment_hash, order_actor)
-                    .await?,
-            )
-        } else {
-            TrackingHandle::Lightning(self.start_lightning_invoice_tracker(payment_hash, myself)?)
-        };
-        let payment_tracking_handle = if order.is_second_half_fiber() {
-            TrackingHandle::Fiber(
-                self.start_fiber_payment_tracker(payment_hash, order_actor)
-                    .await?,
-            )
-        } else {
-            TrackingHandle::Lightning(
-                self.start_lightning_payment_tracker(payment_hash, myself)
-                    .await?,
-            )
-        };
-        state.orders.insert(
-            order.payment_hash,
-            CchOrderActorWithTrackingHandle::new(
-                order_actor.clone(),
-                invoice_tracking_handle,
-                payment_tracking_handle,
-            ),
-        );
-
-        Ok(())
     }
 }
 

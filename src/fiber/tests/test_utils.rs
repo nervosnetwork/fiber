@@ -234,7 +234,7 @@ impl Cch {
             new_tokio_task_tracker(),
             new_tokio_cancellation_token(),
             network_actor.get_cell(),
-            network_actor,
+            Some(network_actor),
             pubkey,
             store_update_subscription.clone(),
             store,

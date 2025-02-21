@@ -2,7 +2,6 @@ use std::path::PathBuf;
 
 use anyhow::Context;
 use clap_serde_derive::ClapSerde;
-use jsonrpsee::ws_client::{WsClient, WsClientBuilder};
 use lnd_grpc_tonic_client::Uri;
 
 use crate::fiber::serde_utils::deserialize_entity_from_hex_str;
@@ -204,15 +203,5 @@ impl CchConfig {
             cert,
             macaroon,
         })
-    }
-
-    pub(crate) async fn get_fiber_ws_client(
-        &self,
-    ) -> Result<Option<WsClient>, jsonrpsee::core::ClientError> {
-        let url = match self.fiber_rpc_url {
-            Some(ref url) => format!("ws{}", url.trim_start_matches("http")),
-            None => return Ok(None),
-        };
-        WsClientBuilder::default().build(&url).await.map(Some)
     }
 }
