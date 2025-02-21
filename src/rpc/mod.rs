@@ -8,6 +8,7 @@ mod info;
 mod invoice;
 mod payment;
 mod peer;
+mod pubsub;
 mod utils;
 
 use crate::cch::CchOrderStore;
@@ -15,6 +16,7 @@ use crate::ckb::CkbConfig;
 use crate::fiber::gossip::GossipMessageStore;
 use crate::rpc::info::InfoRpcServer;
 use crate::rpc::payment::PaymentRpcServer;
+use crate::store::subscription_impl::SubscriptionImpl;
 use crate::{
     cch::CchMessage,
     fiber::{
@@ -41,6 +43,7 @@ use jsonrpsee::server::{Server, ServerHandle};
 use jsonrpsee::RpcModule;
 use payment::PaymentRpcServerImpl;
 use peer::{PeerRpcServer, PeerRpcServerImpl};
+use pubsub::start_pubsub_server;
 use ractor::ActorRef;
 #[cfg(debug_assertions)]
 use std::collections::HashMap;
@@ -101,6 +104,7 @@ pub async fn start_rpc<
     cch_actor: Option<ActorRef<CchMessage>>,
     store: S,
     network_graph: Arc<RwLock<NetworkGraph<S>>>,
+    subscription: SubscriptionImpl,
     #[cfg(debug_assertions)] ckb_chain_actor: Option<ActorRef<CkbChainMessage>>,
     #[cfg(debug_assertions)] rpc_dev_module_commitment_txs: Option<
         Arc<RwLock<HashMap<(Hash256, u64), TransactionView>>>,
@@ -155,6 +159,10 @@ pub async fn start_rpc<
             modules
                 .merge(PaymentRpcServerImpl::new(network_actor.clone(), store.clone()).into_rpc())
                 .unwrap();
+        }
+
+        if config.is_module_enabled("pubsub") {
+            start_pubsub_server(&mut modules, subscription).await;
         }
 
         #[cfg(debug_assertions)]
