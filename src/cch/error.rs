@@ -73,6 +73,8 @@ pub enum CchError {
     UnexpectedLndData(String),
     #[error("Cch order not found: {0}")]
     OrderNotFound(Hash256),
+    #[error("Jsonrpcsee client error: {0}")]
+    JsonrpcseeClientError(#[from] jsonrpsee::core::ClientError),
 }
 
 pub type CchResult<T> = std::result::Result<T, CchError>;

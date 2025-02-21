@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use anyhow::Context;
 use clap_serde_derive::ClapSerde;
+use jsonrpsee::ws_client::{WsClient, WsClientBuilder};
 use lnd_grpc_tonic_client::Uri;
 
 use crate::fiber::serde_utils::deserialize_entity_from_hex_str;
@@ -35,6 +36,15 @@ pub struct CchConfig {
         help = "lnd grpc endpoint, default is http://127.0.0.1:10009"
     )]
     pub lnd_rpc_url: String,
+
+    #[default(None)]
+    #[arg(
+        name = "CCH_FIBER_WS_URL",
+        long = "cch-cch-fiber-url",
+        env,
+        help = "fiber endpoint, default is None. May be used to connect to an external fiber node with websocket and normal http jsonrpc support. The address format shoudl be in the format http[s]://<host>:<port>, if http is specified, the websocket connection will be ws://<host>:<port>, if https is specified, the websocket connection will be wss://<host>:<port>"
+    )]
+    pub fiber_rpc_url: Option<String>,
 
     #[arg(
         name = "CCH_LND_CERT_HEX",
@@ -194,5 +204,15 @@ impl CchConfig {
             cert,
             macaroon,
         })
+    }
+
+    pub(crate) async fn get_fiber_ws_client(
+        &self,
+    ) -> Result<Option<WsClient>, jsonrpsee::core::ClientError> {
+        let url = match self.fiber_rpc_url {
+            Some(ref url) => format!("ws{}", url.trim_start_matches("http")),
+            None => return Ok(None),
+        };
+        WsClientBuilder::default().build(&url).await.map(Some)
     }
 }

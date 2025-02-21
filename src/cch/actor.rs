@@ -22,12 +22,10 @@ use crate::fiber::network::SendPaymentCommand;
 use crate::fiber::types::{Hash256, Pubkey};
 use crate::fiber::{NetworkActorCommand, NetworkActorMessage};
 use crate::invoice::{CkbInvoice, Currency, InvoiceBuilder};
-use crate::store::subscription::{
-    InvoiceSubscription, PaymentState, PaymentSubscription, PaymentUpdate,
-};
+use crate::store::subscription::{PaymentState, PaymentUpdate};
 use crate::store::subscription_impl::SubscriptionImpl;
-use crate::store::SubscriptionId;
 
+use super::fiber::{FiberSubcriptionBackend, FiberTrackingHandle};
 use super::order::{
     CchInvoiceUpdate, CchOrderActorMessage, CchPaymentUpdate, LightningInvoiceUpdate,
     LightningPaymentUpdate,
@@ -49,6 +47,10 @@ pub async fn start_cch<S: CchOrderStore + Clone + Send + Sync + 'static>(
     store: S,
 ) -> Result<ActorRef<CchMessage>> {
     let lnd_connection = config.get_lnd_connection_info().await?;
+    let ws_client = config.get_fiber_ws_client().await?;
+    let subscription = ws_client
+        .map(FiberSubcriptionBackend::Websocket)
+        .unwrap_or_else(|| FiberSubcriptionBackend::InProcess(subscription));
     let (actor, _handle) = Actor::spawn_linked(
         Some("cch actor".to_string()),
         CchActor::new(
@@ -137,7 +139,7 @@ pub struct CchActor<S> {
     token: CancellationToken,
     network_actor: ActorRef<NetworkActorMessage>,
     pubkey: Pubkey,
-    subscription: SubscriptionImpl,
+    subscription: FiberSubcriptionBackend,
     lnd_connection: LndConnectionInfo,
     store: S,
 }
@@ -338,7 +340,7 @@ where
         token: CancellationToken,
         network_actor: ActorRef<NetworkActorMessage>,
         pubkey: Pubkey,
-        subscription: SubscriptionImpl,
+        subscription: FiberSubcriptionBackend,
         lnd_connection: LndConnectionInfo,
         store: S,
     ) -> Self {
@@ -1053,7 +1055,6 @@ impl LndInvoiceTracker {
 }
 
 pub type LightningTrackingHandle = CancellationToken;
-pub type FiberTrackingHandle = SubscriptionId;
 
 pub enum TrackingHandle {
     Lightning(LightningTrackingHandle),

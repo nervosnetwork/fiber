@@ -20,5 +20,7 @@ pub use crate::store::subscription::{
     InvoiceState as CchInvoiceState, PaymentState as CchPaymentState,
 };
 
+mod fiber;
+
 #[cfg(test)]
 pub mod tests;
