@@ -29,26 +29,26 @@ pub struct GraphNodesParams {
 
 /// The UDT script which is used to identify the UDT configuration for a Fiber Node
 #[derive(Serialize, Deserialize, Clone, Debug)]
-struct UdtScript {
+pub struct UdtScript {
     /// The code hash of the script.
-    code_hash: H256,
+    pub code_hash: H256,
     /// The hash type of the script.
-    hash_type: ScriptHashType,
+    pub hash_type: ScriptHashType,
     /// The arguments of the script.
-    args: String,
+    pub args: String,
 }
 
 /// The UDT cell dep which is used to identify the UDT configuration for a Fiber Node
 #[serde_as]
 #[derive(Serialize, Deserialize, Clone, Debug)]
-struct UdtCellDep {
+pub struct UdtCellDep {
     /// The type of the cell dep.
-    dep_type: DepType,
+    pub dep_type: DepType,
     /// The transaction hash of the cell dep.
-    tx_hash: H256,
+    pub tx_hash: H256,
     /// The index of the cell dep.
     #[serde_as(as = "U32Hex")]
-    index: u32,
+    pub index: u32,
 }
 
 /// The UDT argument info which is used to identify the UDT configuration
@@ -56,21 +56,21 @@ struct UdtCellDep {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct UdtArgInfo {
     /// The name of the UDT.
-    name: String,
+    pub name: String,
     /// The script of the UDT.
-    script: UdtScript,
+    pub script: UdtScript,
     #[serde_as(as = "Option<U128Hex>")]
     /// The minimum amount of the UDT that can be automatically accepted.
-    auto_accept_amount: Option<u128>,
+    pub auto_accept_amount: Option<u128>,
     /// The cell deps of the UDT.
-    cell_deps: Vec<UdtCellDep>,
+    pub cell_deps: Vec<UdtCellDep>,
 }
 
 /// A list of UDT configuration infos.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct UdtCfgInfos(
     /// The list of UDT configuration infos.
-    Vec<UdtArgInfo>,
+    pub Vec<UdtArgInfo>,
 );
 
 impl From<ConfigUdtCfgInfos> for UdtCfgInfos {
