@@ -431,6 +431,11 @@ where
         receive_btc: ReceiveBTC,
     ) -> Result<CchOrder, CchError> {
         let invoice = CkbInvoice::from_str(&receive_btc.fiber_pay_req)?;
+        if invoice.hash_algorithm() != Some(&HashAlgorithm::Sha256) {
+            return Err(CchError::CKBInvoiceInvalidHashAlgorithm(
+                invoice.hash_algorithm().copied(),
+            ));
+        }
         tracing::debug!(ckb_invoice = ?invoice, "Received ReceiveBTC order");
         let wbtc_script = self.config.get_wrapped_btc_script();
         let udt_type_script = invoice.udt_type_script();

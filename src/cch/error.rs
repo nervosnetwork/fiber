@@ -4,7 +4,11 @@ use ckb_types::packed::Script;
 use jsonrpsee::types::{error::CALL_EXECUTION_FAILED_CODE, ErrorObjectOwned};
 use thiserror::Error;
 
-use crate::{fiber::types::Hash256, invoice::SettleInvoiceError, store::SubscriptionError};
+use crate::{
+    fiber::{hash_algorithm::HashAlgorithm, types::Hash256},
+    invoice::SettleInvoiceError,
+    store::SubscriptionError,
+};
 
 #[derive(Error, Debug)]
 pub enum CchDbError {
@@ -29,6 +33,8 @@ pub enum CchError {
     CKBInvoiceError(#[from] crate::invoice::InvoiceError),
     #[error("CKB invoice missing amount")]
     CKBInvoiceMissingAmount,
+    #[error("CKB invoice invalid hash algorithm (sha256 required): {0:?}")]
+    CKBInvoiceInvalidHashAlgorithm(Option<HashAlgorithm>),
     #[error("SendBTC order already paid")]
     SendBTCOrderAlreadyPaid,
     #[error("SendBTC received payment amount is too small")]
