@@ -2508,6 +2508,17 @@ where
             );
             return Ok(actor.clone());
         }
+
+        if let Some(channel_actor_state) = self.store.get_channel_actor_state(&channel_id) {
+            // this function is also called from `send_message_to_channel_actor`,
+            // which may happened when peer received a message from a channel that is not in the channel map.
+            // we should not restart the channel actor in a closed state.
+            if channel_actor_state.is_closed() {
+                return Err(Error::ChannelError(ProcessingChannelError::InvalidState(
+                    format!("Channel {:x} is already closed", &channel_id),
+                )));
+            }
+        }
         let remote_pubkey =
             self.get_peer_pubkey(peer_id)
                 .ok_or(ProcessingChannelError::InvalidState(format!(
@@ -2897,10 +2908,6 @@ where
     ) {
         match self.channels.get(&channel_id) {
             None => match (message, peer_id) {
-                // There is some chance that the peer send a message related to a channel that is not created yet,
-                // e.g. when we just started trying to reestablish channel, we may have
-                // no reference to that channel yet.
-                // We should stash the message and process it later.
                 // TODO: ban the adversary who constantly send messages related to non-existing channels.
                 (
                     ChannelActorMessage::PeerMessage(FiberChannelMessage::ReestablishChannel(r)),
