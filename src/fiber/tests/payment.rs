@@ -1,5 +1,7 @@
 #![allow(clippy::needless_range_loop)]
 use super::test_utils::init_tracing;
+use crate::fiber::channel::ChannelState;
+use crate::fiber::channel::CloseFlags;
 use crate::fiber::channel::UpdateCommand;
 use crate::fiber::graph::PaymentSessionStatus;
 use crate::fiber::network::HopHint;
@@ -2298,10 +2300,32 @@ async fn test_send_payment_shutdown_with_force() {
         }
     }
     assert!(failed_count >= expect_failed_count);
+
+    let node_3_channel_actor_state = nodes[3].get_channel_actor_state(channels[2]);
+    eprintln!(
+        "node_3_channel_actor_state: {:?}",
+        node_3_channel_actor_state.state
+    );
+    assert_eq!(
+        node_3_channel_actor_state.state,
+        ChannelState::Closed(CloseFlags::UNCOOPERATIVE)
+    );
+
+    // because node2 didn't receive the shutdown message,
+    // so it will still think the channel is ready
+    let node_2_channel_actor_state = nodes[2].get_channel_actor_state(channels[2]);
+    eprintln!(
+        "node_2_channel_actor_state: {:?}",
+        node_2_channel_actor_state.state
+    );
+    assert_eq!(
+        node_2_channel_actor_state.state,
+        ChannelState::ChannelReady()
+    );
 }
 
 #[tokio::test]
-async fn test_send_payment_shutdown_without_force() {
+async fn test_send_payment_shutdown_cooperative() {
     init_tracing();
     let _span = tracing::info_span!("node", node = "test").entered();
     let (nodes, channels) = create_n_nodes_and_channels_with_index_amounts(
@@ -2318,7 +2342,6 @@ async fn test_send_payment_shutdown_without_force() {
     let mut all_sent = HashSet::new();
     for i in 0..10 {
         let res = nodes[0].send_payment_keysend(&nodes[3], 1000, false).await;
-        eprintln!("res: {:?}", res);
         if let Ok(send_payment_res) = res {
             if i > 5 {
                 all_sent.insert(send_payment_res.payment_hash);
@@ -2327,16 +2350,6 @@ async fn test_send_payment_shutdown_without_force() {
 
         if i == 5 {
             let _ = nodes[3].send_shutdown(channels[2], false).await;
-
-            tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
-            nodes[3]
-                .send_channel_shutdown_tx_confirmed_event(
-                    nodes[2].peer_id.clone(),
-                    channels[2],
-                    false,
-                )
-                .await;
-            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
         }
     }
 
@@ -2346,7 +2359,7 @@ async fn test_send_payment_shutdown_without_force() {
         for payment_hash in all_sent.clone().iter() {
             let res = nodes[0].get_payment_result(*payment_hash).await;
             eprintln!(
-                "payment_hasfh: {:?} status: {:?} failed_count: {:?}",
+                "payment_hash: {:?} status: {:?} failed_count: {:?}",
                 payment_hash, res.status, failed_count
             );
             if res.status == PaymentSessionStatus::Failed
@@ -2360,4 +2373,36 @@ async fn test_send_payment_shutdown_without_force() {
         }
     }
     assert_eq!(failed_count, all_tx_count);
+
+    loop {
+        let node_3_channel_actor_state = nodes[3].get_channel_actor_state(channels[2]);
+        eprintln!(
+            "node_3_channel_actor_state: {:?}",
+            node_3_channel_actor_state.state
+        );
+        let node_2_channel_actor_state = nodes[2].get_channel_actor_state(channels[2]);
+        eprintln!(
+            "node_2_channel_actor_state: {:?}",
+            node_2_channel_actor_state.state
+        );
+        tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+        if !node_2_channel_actor_state.any_tlc_pending()
+            && !node_3_channel_actor_state.any_tlc_pending()
+        {
+            break;
+        }
+    }
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+    let node_3_channel_actor_state = nodes[3].get_channel_actor_state(channels[2]);
+    assert_eq!(
+        node_3_channel_actor_state.state,
+        ChannelState::Closed(CloseFlags::COOPERATIVE)
+    );
+    let node_2_channel_actor_state = nodes[2].get_channel_actor_state(channels[2]);
+    assert_eq!(
+        node_2_channel_actor_state.state,
+        ChannelState::Closed(CloseFlags::COOPERATIVE)
+    );
 }

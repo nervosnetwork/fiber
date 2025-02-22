@@ -5042,7 +5042,7 @@ impl ChannelActorState {
         }
     }
 
-    fn any_tlc_pending(&self) -> bool {
+    pub fn any_tlc_pending(&self) -> bool {
         self.tlc_state
             .all_tlcs()
             .any(|tlc| tlc.removed_reason.is_none())
