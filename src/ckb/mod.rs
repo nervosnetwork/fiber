@@ -1,6 +1,7 @@
 mod actor;
 mod error;
 mod funding;
+mod tx_tracing_actor;
 
 pub use actor::{
     CkbChainActor, CkbChainMessage, GetBlockTimestampRequest, GetBlockTimestampResponse,
