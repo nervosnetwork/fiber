@@ -6,6 +6,9 @@ pub enum FundingError {
     #[error("Funding tx is absent")]
     AbsentTx,
 
+    #[error("Funding new tx can only append new content to the previous version")]
+    NotIncrementalBuilding,
+
     #[error("Failed to call CKB node RPC: {0}")]
     CkbRpcError(#[from] RpcError),
 
