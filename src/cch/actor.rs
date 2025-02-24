@@ -21,6 +21,7 @@ use crate::fiber::NetworkActorMessage;
 use crate::invoice::{CkbInvoice, Currency, InvoiceBuilder};
 use crate::store::subscription::PaymentUpdate;
 use crate::store::subscription_impl::SubscriptionImpl;
+use crate::store::Store;
 use crate::tasks::{
     new_tokio_cancellation_child_token, new_tokio_cancellation_token, new_tokio_task_tracker,
 };
@@ -36,18 +37,17 @@ pub const BTC_PAYMENT_TIMEOUT_SECONDS: i32 = 60;
 pub const DEFAULT_ORDER_EXPIRY_SECONDS: u64 = 86400; // 24 hours
 
 #[allow(clippy::too_many_arguments)]
-pub async fn start_cch<S: CchOrderStore + Clone + Send + Sync + 'static>(
+pub async fn start_cch(
     config: CchConfig,
     tracker: TaskTracker,
     token: CancellationToken,
     root_actor: ActorCell,
-    network_actor: Option<ActorRef<NetworkActorMessage>>,
     pubkey: Pubkey,
-    subscription: SubscriptionImpl,
-    store: S,
-) -> Result<ActorRef<CchMessage>> {
+    fiber_network: Option<(ActorRef<NetworkActorMessage>, SubscriptionImpl)>,
+) -> Result<(ActorRef<CchMessage>, Store)> {
+    let store = Store::new(config.store_path()).expect("create cch store");
     let lnd_connection = config.get_lnd_connection_info().await?;
-    let fiber_backend = match (config.fiber_rpc_url.as_ref(), network_actor) {
+    let fiber_backend = match (config.fiber_rpc_url.as_ref(), fiber_network) {
         (None, None) => panic!("Either fiber_rpc_url or network_actor must be provided"),
         (Some(fiber_rpc_url), n) => {
             if n.is_some() {
@@ -63,18 +63,25 @@ pub async fn start_cch<S: CchOrderStore + Clone + Send + Sync + 'static>(
             }
             FiberBackend::Http(http_backend)
         }
-        (None, Some(network_actor)) => {
-            FiberBackend::InProcess(InProcessFiberBackend::new(network_actor, subscription))
+        (None, Some((actor, subscription))) => {
+            FiberBackend::InProcess(InProcessFiberBackend::new(actor, subscription))
         }
     };
     let (actor, _handle) = Actor::spawn_linked(
         Some("cch actor".to_string()),
-        CchActor::new(config, tracker, token, pubkey, lnd_connection, store),
+        CchActor::new(
+            config,
+            tracker,
+            token,
+            pubkey,
+            lnd_connection,
+            store.clone(),
+        ),
         fiber_backend,
         root_actor,
     )
     .await?;
-    Ok(actor)
+    Ok((actor, store))
 }
 
 #[derive(Clone, Debug, Deserialize)]

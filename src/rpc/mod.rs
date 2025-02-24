@@ -87,7 +87,7 @@ async fn build_server(addr: &str) -> Server {
 #[allow(clippy::type_complexity)]
 #[allow(clippy::too_many_arguments)]
 pub async fn start_rpc<
-    S: ChannelActorStateStore
+    S1: ChannelActorStateStore
         + InvoiceStore
         + NetworkGraphStateStore
         + GossipMessageStore
@@ -96,16 +96,17 @@ pub async fn start_rpc<
         + Send
         + Sync
         + 'static,
+    S2: CchOrderStore + Clone + Send + Sync + 'static,
 >(
     config: RpcConfig,
     ckb_config: Option<CkbConfig>,
     fiber_config: Option<FiberConfig>,
     network_actor: Option<ActorRef<NetworkActorMessage>>,
-    cch_actor: Option<ActorRef<CchMessage>>,
-    store: S,
-    network_graph: Arc<RwLock<NetworkGraph<S>>>,
-    subscription: SubscriptionImpl,
+    fiber_store: Option<S1>,
+    network_graph: Arc<RwLock<NetworkGraph<S1>>>,
+    subscription: Option<SubscriptionImpl>,
     supervisor: ActorCell,
+    cch: Option<(ActorRef<CchMessage>, S2)>,
     #[cfg(debug_assertions)] ckb_chain_actor: Option<ActorRef<CkbChainMessage>>,
     #[cfg(debug_assertions)] rpc_dev_module_commitment_txs: Option<
         Arc<RwLock<HashMap<(Hash256, u64), TransactionView>>>,
@@ -121,14 +122,28 @@ pub async fn start_rpc<
         }
         modules
             .merge(
-                InvoiceRpcServerImpl::new(store.clone(), network_actor.clone(), fiber_config)
-                    .into_rpc(),
+                InvoiceRpcServerImpl::new(
+                    fiber_store
+                        .clone()
+                        .expect("rpc invoice module requires fiber service"),
+                    network_actor.clone(),
+                    fiber_config,
+                )
+                .into_rpc(),
             )
             .unwrap();
     }
     if config.is_module_enabled("graph") {
         modules
-            .merge(GraphRpcServerImpl::new(network_graph, store.clone()).into_rpc())
+            .merge(
+                GraphRpcServerImpl::new(
+                    network_graph,
+                    fiber_store
+                        .clone()
+                        .expect("rpc graph module requires fiber service"),
+                )
+                .into_rpc(),
+            )
             .unwrap();
     }
     if let Some(network_actor) = network_actor {
@@ -152,18 +167,39 @@ pub async fn start_rpc<
 
         if config.is_module_enabled("channel") {
             modules
-                .merge(ChannelRpcServerImpl::new(network_actor.clone(), store.clone()).into_rpc())
+                .merge(
+                    ChannelRpcServerImpl::new(
+                        network_actor.clone(),
+                        fiber_store
+                            .clone()
+                            .expect("rpc channel module requires fiber service"),
+                    )
+                    .into_rpc(),
+                )
                 .unwrap();
         }
 
         if config.is_module_enabled("payment") {
             modules
-                .merge(PaymentRpcServerImpl::new(network_actor.clone(), store.clone()).into_rpc())
+                .merge(
+                    PaymentRpcServerImpl::new(
+                        network_actor.clone(),
+                        fiber_store
+                            .clone()
+                            .expect("rpc payment module requires fiber service"),
+                    )
+                    .into_rpc(),
+                )
                 .unwrap();
         }
 
         if config.is_module_enabled("pubsub") {
-            start_pubsub_server(&mut modules, &subscription, &supervisor).await;
+            start_pubsub_server(
+                &mut modules,
+                &subscription.expect("rpc pubsub module requires fiber service"),
+                &supervisor,
+            )
+            .await;
         }
 
         #[cfg(debug_assertions)]
@@ -181,10 +217,10 @@ pub async fn start_rpc<
                 .unwrap();
         }
     }
-    if let Some(cch_actor) = cch_actor {
+    if let Some((cch_actor, cch_store)) = cch {
         if config.is_module_enabled("cch") {
             modules
-                .merge(CchRpcServerImpl::new(cch_actor, store.clone()).into_rpc())
+                .merge(CchRpcServerImpl::new(cch_actor, cch_store).into_rpc())
                 .unwrap();
         }
     }

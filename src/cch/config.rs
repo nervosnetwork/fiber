@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{fs, path::PathBuf};
 
 use anyhow::Context;
 use clap_serde_derive::ClapSerde;
@@ -141,6 +141,18 @@ pub struct CchConfig {
 }
 
 impl CchConfig {
+    pub fn base_dir(&self) -> &PathBuf {
+        self.base_dir.as_ref().expect("have set base dir")
+    }
+
+    pub fn store_path(&self) -> PathBuf {
+        let path = self.base_dir().join("store");
+        if !path.exists() {
+            fs::create_dir_all(&path).expect("create store directory");
+        }
+        path
+    }
+
     pub async fn get_lnd_tlc_cert(&self) -> Result<Option<Vec<u8>>, anyhow::Error> {
         if let Some(cert_hex) = self.lnd_cert_hex.as_deref() {
             return Ok(Some(hex::decode(cert_hex).with_context(|| {

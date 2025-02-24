@@ -47,7 +47,10 @@ impl FromStr for Service {
             "cch" | "CCH" => Ok(Self::CCH),
             "rpc" | "RPC" => Ok(Self::RPC),
             "ckb" | "CKB" => Ok(Self::CkbChain),
-            _ => Err(format!("invalid service {}", s)),
+            _ => Err(format!(
+                "invalid service {} (must be any of fiber, cch, rpc or ckb)",
+                s
+            )),
         }
     }
 }
@@ -67,7 +70,7 @@ struct Args {
     base_dir: Option<std::path::PathBuf>,
 
     /// services to run (can be any of `ckb`, separated by `,`)
-    #[arg(short, long, value_parser, num_args = 0.., value_delimiter = ',')]
+    #[arg(short, long, value_parser, env = "FIBER_SERVICES", num_args = 0.., value_delimiter = ',')]
     services: Vec<Service>,
 
     /// config for fiber network

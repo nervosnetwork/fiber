@@ -61,16 +61,6 @@ pub async fn main() -> Result<(), ExitMessage> {
 
     let config = Config::parse();
 
-    let store_path = config
-        .fiber
-        .as_ref()
-        .ok_or_else(|| ExitMessage("fiber config is required but absent".to_string()))?
-        .store_path();
-
-    let (store, store_update_subscription) = StoreWithHooks::new(store_path)
-        .await
-        .map_err(|err| ExitMessage(err.to_string()))?;
-
     let tracker = new_tokio_task_tracker();
     let token = new_tokio_cancellation_token();
     let root_actor = RootActor::start(tracker, token).await;
@@ -84,11 +74,22 @@ pub async fn main() -> Result<(), ExitMessage> {
         }
     });
 
-    let (network_actor, ckb_chain_actor, network_graph, node_public_key) = match config
-        .fiber
-        .clone()
-    {
+    let (
+        network_actor,
+        ckb_chain_actor,
+        network_graph,
+        node_public_key,
+        fiber_store,
+        fiber_store_update_subscription,
+    ) = match config.fiber.clone() {
         Some(fiber_config) => {
+            let fiber_store_path = fiber_config.store_path();
+
+            let (fiber_store, fiber_store_update_subscription) =
+                StoreWithHooks::new(fiber_store_path)
+                    .await
+                    .map_err(|err| ExitMessage(err.to_string()))?;
+
             // TODO: this is not a super user friendly error message which has actionable information
             // for the user to fix the error and start the node.
             let ckb_config = config.ckb.clone().ok_or_else(|| {
@@ -132,7 +133,7 @@ pub async fn main() -> Result<(), ExitMessage> {
             let (event_sender, mut event_receiver) = mpsc::channel(CHANNEL_SIZE);
 
             let network_graph = Arc::new(RwLock::new(NetworkGraph::new(
-                store.clone(),
+                fiber_store.clone(),
                 node_public_key,
                 fiber_config.announce_private_addr(),
             )));
@@ -149,7 +150,7 @@ pub async fn main() -> Result<(), ExitMessage> {
                 event_sender,
                 new_tokio_task_tracker(),
                 root_actor.get_cell(),
-                store.clone(),
+                fiber_store.clone(),
                 network_graph.clone(),
                 default_shutdown_script,
             )
@@ -157,7 +158,7 @@ pub async fn main() -> Result<(), ExitMessage> {
 
             let watchtower_actor = Actor::spawn_linked(
                 Some("watchtower".to_string()),
-                WatchtowerActor::new(store.clone()),
+                WatchtowerActor::new(fiber_store.clone()),
                 ckb_config,
                 root_actor.get_cell(),
             )
@@ -216,12 +217,14 @@ pub async fn main() -> Result<(), ExitMessage> {
                 Some(ckb_chain_actor),
                 Some(network_graph),
                 Some(node_public_key),
+                Some(fiber_store),
+                Some(fiber_store_update_subscription),
             )
         }
-        None => (None, None, None, None),
+        None => (None, None, None, None, None, None),
     };
 
-    let cch_actor = match config.cch {
+    let cch = match config.cch {
         Some(cch_config) => {
             info!("Starting cch");
             let ignore_startup_failure = cch_config.ignore_startup_failure;
@@ -230,10 +233,12 @@ pub async fn main() -> Result<(), ExitMessage> {
                 new_tokio_task_tracker(),
                 new_tokio_cancellation_token(),
                 root_actor.get_cell(),
-                network_actor.clone(),
                 node_public_key.expect("Cch service requires node public key"),
-                store_update_subscription.clone(),
-                store.clone(),
+                network_actor.clone().and_then(|actor| {
+                    fiber_store_update_subscription
+                        .clone()
+                        .map(|sub| (actor, sub))
+                }),
             )
             .await
             {
@@ -248,7 +253,7 @@ pub async fn main() -> Result<(), ExitMessage> {
                         ));
                     }
                 }
-                Ok(actor) => Some(actor),
+                Ok(cch) => Some(cch),
             }
         }
         None => None,
@@ -262,11 +267,11 @@ pub async fn main() -> Result<(), ExitMessage> {
                 config.ckb,
                 config.fiber,
                 network_actor,
-                cch_actor,
-                store,
+                fiber_store,
                 network_graph,
-                store_update_subscription.clone(),
+                fiber_store_update_subscription.clone(),
                 root_actor.get_cell(),
+                cch,
                 #[cfg(debug_assertions)] ckb_chain_actor,
                 #[cfg(debug_assertions)] rpc_dev_module_commitment_txs,
             )

@@ -205,6 +205,7 @@ pub struct NetworkNode {
 
 pub struct Cch {
     pub actor: ActorRef<CchMessage>,
+    pub store: Store,
     pub config: CchConfig,
     pub lnd_node: Option<LndNode>,
 }
@@ -216,7 +217,6 @@ impl Cch {
         network_actor: ActorRef<NetworkActorMessage>,
         pubkey: Pubkey,
         store_update_subscription: SubscriptionImpl,
-        store: StoreWithHooks,
     ) -> Self {
         let (config, lnd_node) = if should_start_lnd {
             let lnd_node = LndNode::new(Default::default(), Default::default()).await;
@@ -229,21 +229,19 @@ impl Cch {
         } else {
             (config, None)
         };
-        let actor = start_cch(
+        let (actor, store) = start_cch(
             config.clone(),
             new_tokio_task_tracker(),
             new_tokio_cancellation_token(),
             network_actor.get_cell(),
-            Some(network_actor),
             pubkey,
-            store_update_subscription.clone(),
-            store,
+            Some((network_actor, store_update_subscription.clone())),
         )
         .await
         .expect("start cch actor");
-
         Cch {
             actor,
+            store,
             config,
             lnd_node,
         }
@@ -1008,8 +1006,14 @@ impl NetworkNode {
             node_name,
             fiber_config,
             should_start_lnd,
-            cch_config: config,
+            mut cch_config,
         } = config;
+        if let Some(config) = cch_config.as_mut() {
+            if config.base_dir == None {
+                let base_dir = base_dir.as_ref();
+                config.base_dir = Some(base_dir.as_ref().join("cch").clone());
+            }
+        }
 
         let _span = tracing::info_span!("NetworkNode", node_name = &node_name).entered();
 
@@ -1116,7 +1120,7 @@ impl NetworkNode {
             base_dir.as_ref()
         );
 
-        let cch = match config {
+        let cch = match cch_config {
             Some(config) => Some(
                 Cch::start(
                     config,
@@ -1124,7 +1128,6 @@ impl NetworkNode {
                     network_actor.clone(),
                     public_key,
                     store_update_subscription.clone(),
-                    store.clone(),
                 )
                 .await,
             ),
