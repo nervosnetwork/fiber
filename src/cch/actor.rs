@@ -170,7 +170,9 @@ impl CchState {
     async fn get_pub_key(&self) -> Result<Pubkey, CchError> {
         match self.fiber {
             FiberBackend::InProcess(ref backend) => Ok(backend.pukey),
-            FiberBackend::Http(ref backend) => backend.pubkey.ok_or(CchError::NotReady("Cch node is not connected to fiber node yet, pubkey is not available".to_string())),
+            FiberBackend::Http(ref backend) => backend.pubkey.ok_or(CchError::NotReady(
+                "Cch node is not connected to fiber node yet, pubkey is not available".to_string(),
+            )),
         }
     }
 

@@ -5,7 +5,7 @@ meta {
 }
 
 post {
-  url: {{NODE3_RPC_URL}}
+  url: {{CCH_RPC_URL}}
   body: json
   auth: none
 }
@@ -36,6 +36,7 @@ assert {
 }
 
 script:post-response {
+  console.dir(res.body, {depth: null})
   bru.setVar("FIBER_PAY_REQ", res.body.result.fiber_pay_req);
   console.log(res.body.result.payment_hash);
 }

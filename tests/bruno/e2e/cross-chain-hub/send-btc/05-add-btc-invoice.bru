@@ -16,6 +16,8 @@ body:json {
 
 assert {
   res.status: eq 200
+  res.body.payment_request: isDefined
+  res.body.r_hash: isDefined
 }
 
 script:post-response {
