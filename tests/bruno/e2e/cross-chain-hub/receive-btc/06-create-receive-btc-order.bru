@@ -35,6 +35,7 @@ assert {
 }
 
 script:post-response {
+  console.dir(res.body, {depth: null})
   bru.setVar("BTC_PAY_REQ", res.body.result.btc_pay_req);
   console.log(res.body.result.btc_pay_req);
 }
