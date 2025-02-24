@@ -1,6 +1,5 @@
 use ckb_hash::blake2b_256;
-use ckb_jsonrpc_types::{Status, TxStatus};
-use ckb_types::core::{EpochNumberWithFraction, TransactionView};
+use ckb_types::core::{tx_pool::TxStatus, EpochNumberWithFraction, TransactionView};
 use ckb_types::packed::{Byte32, OutPoint, Script, Transaction};
 use ckb_types::prelude::{IntoTransactionView, Pack, Unpack};
 use ckb_types::H256;
@@ -69,8 +68,8 @@ use super::{FiberConfig, ASSUME_NETWORK_ACTOR_ALIVE};
 use crate::ckb::config::UdtCfgInfos;
 use crate::ckb::contracts::{check_udt_script, get_udt_whitelist, is_udt_type_auto_accept};
 use crate::ckb::{
-    CkbChainMessage, FundingRequest, FundingTx, GetBlockTimestampRequest, TraceTxRequest,
-    TraceTxResponse,
+    CkbChainMessage, CkbTxTracer, CkbTxTracingMask, CkbTxTracingResult, FundingRequest, FundingTx,
+    GetBlockTimestampRequest,
 };
 use crate::fiber::channel::{
     AddTlcCommand, AddTlcResponse, TxCollaborationCommand, TxUpdateCommand,
@@ -1303,6 +1302,9 @@ where
                         let funding_tx = funding_tx.take().expect("take tx");
                         let witnesses = funding_tx.witnesses();
 
+                        // Once sending the funding tx to the peer, we must trace the tx.
+                        // TODO: trace the tx
+
                         debug!("Partially signed funding tx {:?}", &funding_tx);
                         FiberMessageWithPeerId {
                             peer_id: peer_id.clone(),
@@ -2248,7 +2250,7 @@ where
     // the error.
     async fn broadcast_tx_with_callback<F>(&self, transaction: TransactionView, callback: F)
     where
-        F: Send + 'static + FnOnce(Result<TraceTxResponse, RactorErr<CkbChainMessage>>),
+        F: Send + 'static + FnOnce(Result<CkbTxTracingResult, RactorErr<CkbChainMessage>>),
     {
         let chain = self.chain_actor.clone();
         // Spawn a new task to avoid blocking current actor message processing.
@@ -2266,35 +2268,30 @@ where
                     error!("Failed to send transaction to the network: {:?}", &err);
                     // TODO: the caller of this function will deem the failure returned here as permanent.
                     // But SendTx may only fail temporarily. We need to handle this case.
-                    Ok(TraceTxResponse {
-                        tx: None,
-                        status: TxStatus {
-                            status: Status::Rejected,
-                            block_number: None,
-                            block_hash: None,
-                            tx_index: None,
-                            reason: Some(format!("Sending transaction failed: {:?}", &err)),
-                        },
+                    Ok(CkbTxTracingResult {
+                        tx_hash: transaction.hash().into(),
+                        tx_status: TxStatus::Rejected(
+                            "Failed to send transaction to the network".to_string(),
+                        ),
                     })
                 }
                 Ok(_) => {
                     let tx_hash = transaction.hash();
                     // TODO: make number of confirmation to transaction configurable.
                     const NUM_CONFIRMATIONS: u64 = 4;
-                    let request = TraceTxRequest {
-                        tx_hash: tx_hash.clone(),
-                        confirmations: NUM_CONFIRMATIONS,
+                    let request = |tx| {
+                        CkbChainMessage::CreateTxTracer(CkbTxTracer {
+                            tx_hash: tx_hash.clone().into(),
+                            confirmations: NUM_CONFIRMATIONS,
+                            mask: CkbTxTracingMask::Committed,
+                            callback: tx,
+                        })
                     };
                     debug!(
                         "Transaction sent to the network, waiting for it to be confirmed: {:?}",
-                        &request.tx_hash
+                        tx_hash
                     );
-                    call_t!(
-                        chain,
-                        CkbChainMessage::TraceTx,
-                        DEFAULT_CHAIN_ACTOR_TIMEOUT,
-                        request.clone()
-                    )
+                    call_t!(chain, request, DEFAULT_CHAIN_ACTOR_TIMEOUT)
                 }
             };
 
@@ -2679,12 +2676,8 @@ where
         let network: ActorRef<NetworkActorMessage> = self.network.clone();
         self.broadcast_tx_with_callback(transaction, move |result| {
             let message = match result {
-                Ok(TraceTxResponse {
-                    status:
-                        TxStatus {
-                            status: Status::Committed,
-                            ..
-                        },
+                Ok(CkbTxTracingResult {
+                    tx_status: TxStatus::Committed(..),
                     ..
                 }) => {
                     info!("Cloisng transaction {:?} confirmed", &tx_hash);
@@ -2802,20 +2795,15 @@ where
         let chain = self.chain_actor.clone();
         self.broadcast_tx_with_callback(transaction, move |result| {
             match result {
-                Ok(TraceTxResponse {
-                    status:
-                        TxStatus {
-                            status: Status::Committed,
-                            block_hash: Some(block_hash),
-                            ..
-                        },
+                Ok(CkbTxTracingResult {
+                    tx_status: TxStatus::Committed(_, block_hash, _),
                     ..
                 }) => {
                     tokio::spawn( async move  {
                         match call!(
                             chain,
                             |reply| CkbChainMessage::GetBlockTimestamp(
-                                GetBlockTimestampRequest::from_block_hash(block_hash.clone()), reply
+                                GetBlockTimestampRequest::from_block_hash(block_hash.clone().into()), reply
                             )
                         ) {
                             Ok(Ok(Some(timestamp))) => {
@@ -2892,12 +2880,8 @@ where
         let network = self.network.clone();
         self.broadcast_tx_with_callback(transaction, move |result| {
             let message = match result {
-                Ok(TraceTxResponse {
-                    status:
-                        TxStatus {
-                            status: Status::Committed,
-                            ..
-                        },
+                Ok(CkbTxTracingResult {
+                    tx_status: TxStatus::Committed(..),
                     ..
                 }) => {
                     info!("Commitment transaction {:?} confirmed", tx_hash,);

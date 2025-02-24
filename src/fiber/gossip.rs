@@ -6,8 +6,10 @@ use std::{
 };
 
 use ckb_hash::blake2b_256;
-use ckb_jsonrpc_types::{Status, TransactionView, TxStatus};
-use ckb_types::{packed::OutPoint, H256};
+use ckb_types::{
+    core::{tx_pool::TxStatus, TransactionView},
+    packed::OutPoint,
+};
 use ractor::{
     async_trait as rasync_trait, call, call_t,
     concurrency::{timeout, JoinHandle},
@@ -30,7 +32,7 @@ use tokio::sync::oneshot;
 use tracing::{debug, error, info, trace, warn};
 
 use crate::{
-    ckb::{CkbChainMessage, GetBlockTimestampRequest, TraceTxRequest, TraceTxResponse},
+    ckb::{CkbChainMessage, GetBlockTimestampRequest, GetTxResponse},
     fiber::{network::DEFAULT_CHAIN_ACTOR_TIMEOUT, types::secp256k1_instance},
     now_timestamp_as_millis_u64, unwrap_or_return, Error,
 };
@@ -41,7 +43,7 @@ use super::{
         BroadcastMessage, BroadcastMessageID, BroadcastMessageQuery, BroadcastMessageQueryFlags,
         BroadcastMessageWithTimestamp, BroadcastMessagesFilter, BroadcastMessagesFilterResult,
         ChannelAnnouncement, ChannelOnchainInfo, ChannelUpdate, Cursor, GetBroadcastMessages,
-        GetBroadcastMessagesResult, GossipMessage, NodeAnnouncement, Pubkey,
+        GetBroadcastMessagesResult, GossipMessage, Hash256, NodeAnnouncement, Pubkey,
         QueryBroadcastMessages, QueryBroadcastMessagesResult,
     },
 };
@@ -1789,29 +1791,30 @@ async fn verify_and_save_broadcast_message<S: GossipMessageStore>(
 async fn get_channel_tx(
     outpoint: &OutPoint,
     chain: &ActorRef<CkbChainMessage>,
-) -> Result<(TransactionView, H256), Error> {
+) -> Result<(TransactionView, Hash256), Error> {
     match call_t!(
         chain,
-        CkbChainMessage::TraceTx,
+        CkbChainMessage::GetTx,
         DEFAULT_CHAIN_ACTOR_TIMEOUT,
-        TraceTxRequest {
-            tx_hash: outpoint.tx_hash(),
-            confirmations: 2,
-        }
+        outpoint.tx_hash().into()
     ) {
-        Ok(TraceTxResponse {
-            tx: Some(tx),
-            status:
-                TxStatus {
-                    status: Status::Committed,
-                    block_hash: Some(block_hash),
-                    ..
-                },
-        }) => Ok((tx, block_hash)),
-        err => Err(Error::InvalidParameter(format!(
+        Ok(Ok(GetTxResponse {
+            transaction: Some(tx),
+            tx_status: TxStatus::Committed(_, block_hash, _)
+        })) => Ok((tx, block_hash.into())),
+        Ok(Err(err)) => Err(Error::InvalidParameter(format!(
             "Channel announcement transaction {:?} not found or not confirmed, result is: {:?}",
             &outpoint.tx_hash(),
             err
+        ))),
+        Err(err) => Err(Error::InvalidParameter(format!(
+            "Channel announcement transaction {:?} not found or not confirmed, result is: {:?}",
+            &outpoint.tx_hash(),
+            err
+        ))),
+        _ => Err(Error::InvalidParameter(format!(
+            "Channel announcement transaction {:?} not found or not confirmed, the reason is unknown",
+            &outpoint.tx_hash(),
         ))),
     }
 }
@@ -1835,21 +1838,21 @@ async fn get_channel_on_chain_info(
     chain: &ActorRef<CkbChainMessage>,
 ) -> Result<ChannelOnchainInfo, Error> {
     let (tx, block_hash) = get_channel_tx(outpoint, chain).await?;
-    let first_output = match tx.inner.outputs.first() {
+    let first_output = match tx.outputs().get(0) {
         None => {
             return Err(Error::InvalidParameter(format!(
                 "On-chain transaction found but no output: {:?}",
                 &outpoint
             )));
         }
-        Some(output) => output.clone(),
+        Some(output) => output.clone().into(),
     };
 
     let timestamp: u64 = match call_t!(
         chain,
         CkbChainMessage::GetBlockTimestamp,
         DEFAULT_CHAIN_ACTOR_TIMEOUT,
-        GetBlockTimestampRequest::from_block_hash(block_hash.clone())
+        GetBlockTimestampRequest::from_block_hash(block_hash)
     ) {
         Ok(Ok(Some(timestamp))) => timestamp,
         Ok(Ok(None)) => {

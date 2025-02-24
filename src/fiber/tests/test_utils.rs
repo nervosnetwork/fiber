@@ -1,3 +1,5 @@
+use crate::ckb::tests::test_utils::get_tx_from_hash;
+use crate::ckb::GetTxResponse;
 use crate::fiber::channel::ChannelActorState;
 use crate::fiber::channel::ChannelActorStateStore;
 use crate::fiber::channel::ChannelCommand;
@@ -15,9 +17,10 @@ use crate::fiber::types::Pubkey;
 use crate::invoice::CkbInvoice;
 use crate::invoice::CkbInvoiceStatus;
 use crate::invoice::InvoiceStore;
-use ckb_jsonrpc_types::Status;
-use ckb_types::packed::OutPoint;
-use ckb_types::{core::TransactionView, packed::Byte32};
+use ckb_types::{
+    core::{tx_pool::TxStatus, TransactionView},
+    packed::OutPoint,
+};
 use ractor::{call, Actor, ActorRef};
 use rand::rngs::OsRng;
 use secp256k1::{Message, Secp256k1};
@@ -47,9 +50,7 @@ use crate::fiber::types::Privkey;
 use crate::store::Store;
 use crate::{
     actors::{RootActor, RootActorMessage},
-    ckb::tests::test_utils::{
-        get_tx_from_hash, submit_tx, trace_tx, trace_tx_hash, MockChainActor,
-    },
+    ckb::tests::test_utils::{submit_tx, trace_tx, MockChainActor},
     ckb::CkbChainMessage,
     fiber::graph::NetworkGraph,
     fiber::network::{
@@ -289,7 +290,7 @@ pub(crate) async fn establish_channel_between_nodes(
     b_tlc_expiry_delta: Option<u64>,
     b_tlc_min_value: Option<u128>,
     b_tlc_fee_proportional_millionths: Option<u128>,
-) -> (Hash256, TransactionView) {
+) -> (Hash256, Hash256) {
     let message = |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
             OpenChannelCommand {
@@ -374,15 +375,11 @@ pub(crate) async fn establish_channel_between_nodes(
         })
         .await;
 
-    let funding_tx = node_a
-        .get_tx_from_hash(funding_tx_outpoint.tx_hash())
-        .await
-        .expect("tx found");
+    let funding_tx_hash = funding_tx_outpoint.tx_hash().into();
+    node_a.add_channel_tx(new_channel_id, funding_tx_hash);
+    node_b.add_channel_tx(new_channel_id, funding_tx_hash);
 
-    node_a.add_channel_tx(new_channel_id, funding_tx.clone());
-    node_b.add_channel_tx(new_channel_id, funding_tx.clone());
-
-    (new_channel_id, funding_tx)
+    (new_channel_id, funding_tx_hash)
 }
 
 pub(crate) async fn create_nodes_with_established_channel(
@@ -392,7 +389,7 @@ pub(crate) async fn create_nodes_with_established_channel(
 ) -> (NetworkNode, NetworkNode, Hash256) {
     let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
 
-    let (channel_id, _funding_tx) = establish_channel_between_nodes(
+    let (channel_id, _funding_tx_hash) = establish_channel_between_nodes(
         &mut node_a,
         &mut node_b,
         public,
@@ -471,7 +468,7 @@ pub(crate) async fn create_n_nodes_and_channels_with_index_amounts(
                     (&mut right[i - j - 1], &mut left[j])
                 }
             };
-            establish_channel_between_nodes(
+            let (channel_id, funding_tx_hash) = establish_channel_between_nodes(
                 node_a,
                 node_b,
                 public,
@@ -488,14 +485,20 @@ pub(crate) async fn create_n_nodes_and_channels_with_index_amounts(
                 None,
                 None,
             )
-            .await
+            .await;
+            let funding_tx = node_a
+                .get_transaction_view_from_hash(funding_tx_hash)
+                .await
+                .expect("get funding tx");
+
+            (channel_id, funding_tx)
         };
         channels.push(channel_id);
         // all the other nodes submit_tx
         for node in nodes.iter_mut() {
             let res = node.submit_tx(funding_tx.clone()).await;
-            node.add_channel_tx(channel_id, funding_tx.clone());
-            assert_eq!(res, Status::Committed);
+            node.add_channel_tx(channel_id, funding_tx.hash().into());
+            assert!(matches!(res, TxStatus::Committed(..)));
         }
     }
     // sleep for a while to make sure network graph is updated
@@ -1029,7 +1032,7 @@ impl NetworkNode {
     ) -> (NetworkNode, NetworkNode, Hash256, TransactionView) {
         let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
 
-        let (channel_id, funding_tx) = establish_channel_between_nodes(
+        let (channel_id, funding_tx_hash) = establish_channel_between_nodes(
             &mut node_a,
             &mut node_b,
             public,
@@ -1047,6 +1050,10 @@ impl NetworkNode {
             None,
         )
         .await;
+        let funding_tx = node_a
+            .get_transaction_view_from_hash(funding_tx_hash)
+            .await
+            .expect("get funding tx");
 
         (node_a, node_b, channel_id, funding_tx)
     }
@@ -1125,31 +1132,39 @@ impl NetworkNode {
             .await;
     }
 
-    pub async fn submit_tx(&mut self, tx: TransactionView) -> ckb_jsonrpc_types::Status {
+    pub async fn submit_tx(&mut self, tx: TransactionView) -> TxStatus {
         submit_tx(self.chain_actor.clone(), tx).await
     }
 
-    pub fn add_channel_tx(&mut self, channel_id: Hash256, tx: TransactionView) {
-        self.channels_tx_map.insert(channel_id, tx.hash().into());
+    pub fn add_channel_tx(&mut self, channel_id: Hash256, tx_hash: Hash256) {
+        self.channels_tx_map.insert(channel_id, tx_hash);
     }
 
     pub fn get_channel_funding_tx(&self, channel_id: &Hash256) -> Option<Hash256> {
         self.channels_tx_map.get(channel_id).cloned()
     }
 
-    pub async fn trace_tx(&mut self, tx: TransactionView) -> ckb_jsonrpc_types::Status {
-        trace_tx(self.chain_actor.clone(), tx).await
-    }
-
-    pub async fn trace_tx_hash(&mut self, tx_hash: Byte32) -> ckb_jsonrpc_types::Status {
-        trace_tx_hash(self.chain_actor.clone(), tx_hash).await
+    pub async fn trace_tx(&mut self, tx_hash: Hash256) -> TxStatus {
+        trace_tx(self.chain_actor.clone(), tx_hash).await
     }
 
     pub async fn get_tx_from_hash(
         &mut self,
-        tx_hash: Byte32,
-    ) -> Result<TransactionView, anyhow::Error> {
-        get_tx_from_hash(self.chain_actor.clone(), tx_hash).await
+        tx_hash: Hash256,
+    ) -> Result<GetTxResponse, anyhow::Error> {
+        get_tx_from_hash(self.chain_actor.clone(), tx_hash)
+            .await
+            .map_err(Into::into)
+    }
+
+    pub async fn get_transaction_view_from_hash(
+        &mut self,
+        tx_hash: Hash256,
+    ) -> Option<TransactionView> {
+        self.get_tx_from_hash(tx_hash)
+            .await
+            .ok()
+            .and_then(|response| response.transaction)
     }
 
     pub fn get_network_graph(&self) -> &Arc<TokioRwLock<NetworkGraph<Store>>> {

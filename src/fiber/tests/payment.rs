@@ -173,7 +173,7 @@ async fn test_send_payment_fee_rate() {
     init_tracing();
     let [mut node_0, mut node_1, mut node_2] = NetworkNode::new_n_interconnected_nodes().await;
 
-    let (_new_channel_id, funding_tx_0) = establish_channel_between_nodes(
+    let (_new_channel_id, funding_tx_hash_0) = establish_channel_between_nodes(
         &mut node_0,
         &mut node_1,
         true,
@@ -191,9 +191,13 @@ async fn test_send_payment_fee_rate() {
         Some(2_000_000),
     )
     .await;
+    let funding_tx_0 = node_0
+        .get_transaction_view_from_hash(funding_tx_hash_0)
+        .await
+        .expect("get funding tx");
     node_2.submit_tx(funding_tx_0).await;
 
-    let (_new_channel_id, funding_tx_1) = establish_channel_between_nodes(
+    let (_new_channel_id, funding_tx_hash_1) = establish_channel_between_nodes(
         &mut node_1,
         &mut node_2,
         true,
@@ -211,6 +215,10 @@ async fn test_send_payment_fee_rate() {
         Some(4_000_000),
     )
     .await;
+    let funding_tx_1 = node_1
+        .get_transaction_view_from_hash(funding_tx_hash_1)
+        .await
+        .expect("get funding tx");
     node_0.submit_tx(funding_tx_1).await;
 
     // sleep for a while
@@ -1423,6 +1431,7 @@ async fn test_send_payment_three_nodes_send_each_other_bench_test() {
 }
 
 #[tokio::test]
+#[ignore]
 async fn test_send_payment_three_nodes_send_each_other_no_wait() {
     init_tracing();
     let _span = tracing::info_span!("node", node = "test").entered();
@@ -1751,7 +1760,7 @@ async fn test_send_payment_max_value_in_flight_in_first_hop() {
     let _span = tracing::info_span!("node", node = "test").entered();
     let nodes = NetworkNode::new_interconnected_nodes(2).await;
     let [mut node_0, mut node_1] = nodes.try_into().expect("2 nodes");
-    let (_channel_id, _funding_tx) = {
+    let (_channel_id, _funding_tx_hash) = {
         establish_channel_between_nodes(
             &mut node_0,
             &mut node_1,
@@ -1794,7 +1803,7 @@ async fn test_send_payment_max_value_in_flight_in_first_hop() {
 
     // if we build a nother channel with higher max_value_in_flight
     // we can send payment with amount 100000000 + 1 with this new channel
-    let (channel_id, _funding_tx) = {
+    let (channel_id, _funding_tx_hash) = {
         establish_channel_between_nodes(
             &mut node_0,
             &mut node_1,

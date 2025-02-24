@@ -9,6 +9,8 @@ use ractor::{concurrency::Duration, Actor, ActorProcessingErr, ActorRef, RpcRepl
 
 use crate::fiber::types::Hash256;
 
+use super::jsonrpc_types_convert::tx_status_from_json;
+
 #[derive(Debug, Clone)]
 pub struct CkbTxTracingResult {
     pub tx_hash: Hash256,
@@ -292,21 +294,5 @@ impl TracingTask {
         }
 
         Ok(())
-    }
-}
-
-fn tx_status_from_json(status: ckb_jsonrpc_types::TxStatus) -> TxStatus {
-    match status.status {
-        ckb_jsonrpc_types::Status::Pending => TxStatus::Pending,
-        ckb_jsonrpc_types::Status::Proposed => TxStatus::Proposed,
-        ckb_jsonrpc_types::Status::Committed => TxStatus::Committed(
-            status.block_number.unwrap_or_default().into(),
-            status.block_hash.unwrap_or_default(),
-            status.tx_index.unwrap_or_default().into(),
-        ),
-        ckb_jsonrpc_types::Status::Unknown => TxStatus::Unknown,
-        ckb_jsonrpc_types::Status::Rejected => {
-            TxStatus::Rejected(status.reason.unwrap_or_default())
-        }
     }
 }
