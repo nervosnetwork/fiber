@@ -157,7 +157,6 @@ async fn do_test_cross_chain_payment_hub_send_btc(udt_script: Script, multiple_h
         CALL_ACTOR_TIMEOUT_MS,
         SendBTC {
             btc_pay_req: add_invoice_result.payment_request,
-            currency: Currency::Fibd,
         }
     )
     .expect("send btc actor call")

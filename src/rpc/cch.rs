@@ -7,7 +7,7 @@ use crate::{
         serde_utils::{U128Hex, U64Hex},
         types::Hash256,
     },
-    invoice::{CkbInvoice, Currency},
+    invoice::CkbInvoice,
 };
 use jsonrpsee::{
     core::async_trait,
@@ -27,8 +27,6 @@ use thiserror::Error;
 pub struct SendBtcParams {
     /// Bitcoin payment request string
     pub btc_pay_req: String,
-    /// Request currency
-    pub currency: Currency,
 }
 
 #[serde_as]
@@ -95,7 +93,6 @@ where
             TIMEOUT,
             crate::cch::SendBTC {
                 btc_pay_req: params.btc_pay_req,
-                currency: params.currency,
             }
         )
         .map_err(|ractor_error| {

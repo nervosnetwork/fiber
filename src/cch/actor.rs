@@ -19,7 +19,7 @@ use crate::fiber::hash_algorithm::HashAlgorithm;
 use crate::fiber::network::NewInvoiceCommand;
 use crate::fiber::types::Hash256;
 use crate::fiber::NetworkActorMessage;
-use crate::invoice::{CkbInvoice, Currency};
+use crate::invoice::CkbInvoice;
 use crate::store::subscription::PaymentUpdate;
 use crate::store::subscription_impl::SubscriptionImpl;
 use crate::store::Store;
@@ -80,7 +80,6 @@ pub async fn start_cch(
 #[derive(Clone, Debug, Deserialize)]
 pub struct SendBTC {
     pub btc_pay_req: String,
-    pub currency: Currency,
 }
 
 #[derive(Clone, Debug, Deserialize)]

@@ -80,7 +80,6 @@ Send BTC to a address.
 ##### Params
 
 * `btc_pay_req` - <em>`String`</em>, Bitcoin payment request string
-* `currency` - <em>[Currency](#type-currency)</em>, Request currency
 
 ##### Returns
 
