@@ -267,16 +267,16 @@ fn genrate_nodes_config() {
         "# this is generated from nodes/deployer/config.yml, any changes will not be checked in",
         "# you can edit nodes/deployer/config.yml and run `REMOVE_OLD_STATE=y ./tests/nodes/start.sh` to regenerate"
     );
-    let config_dirs = if is_separate_cch_enabled() {
-        vec!["bootnode", "1", "2", "3", "4"]
+    let (config_dirs, num_ports) = if is_separate_cch_enabled() {
+        (vec!["bootnode", "1", "2", "3", "4"], 7) // 3 nodes each with 2 ports and 1 cch node with 1 port
     } else {
-        vec!["bootnode", "1", "2", "3"]
+        (vec!["bootnode", "1", "2", "3"], 6)
     };
     let mut node3_rpc_address = String::default();
     let mut cch_rpc_port: Option<u16> = None;
     let mut replaced_ports = vec![];
     let on_github_action = std::env::var("ON_GITHUB_ACTION").is_ok();
-    let gen_ports = generate_ports(8);
+    let gen_ports = generate_ports(num_ports);
     let mut ports_iter = gen_ports.iter();
     let dev_config = nodes_dir.join("deployer/dev.toml");
     for (i, config_dir) in config_dirs.iter().enumerate() {
@@ -284,10 +284,16 @@ fn genrate_nodes_config() {
         let default_fiber_port = (8343 + i) as u16;
         let default_rpc_port = (21713 + i) as u16;
         let (fiber_port, rpc_port) = if use_gen_port {
-            let fiber_port = *ports_iter.next().unwrap();
             let rpc_port = *ports_iter.next().unwrap();
-            replaced_ports.push((default_fiber_port, fiber_port));
             replaced_ports.push((default_rpc_port, rpc_port));
+            let fiber_port = match ports_iter.next() {
+                Some(port) => {
+                    replaced_ports.push((default_fiber_port, *port));
+                    *port
+                }
+                // Fiber port is actually not used for cch node.
+                None => 0,
+            };
             (fiber_port, rpc_port)
         } else {
             (default_fiber_port, default_rpc_port)

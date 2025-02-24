@@ -22,24 +22,37 @@ jobs:
           - "0.116.1"
         test_env:
           - "test"
-        extra_bru_args:
+        extra_environment_variables:
           - ""
         include:
           # add an extra workflow to run udt using the env file xudt-test
           - workflow: "udt"
             test_env: "xudt-test"
             release: "0.116.1"
+          - workflow: "cross-chain-hub/send-btc"
+            test_env: "test"
+            release: "0.116.1"
+            extra_environment_variables: "ENABLE_SEPARATED_CCH=y"
+          - workflow: "cross-chain-hub/receive-btc"
+            test_env: "test"
+            release: "0.116.1"
+            extra_environment_variables: "ENABLE_SEPARATED_CCH=y"
           # add an extra workflow to run 3-nodes-transfer with sha256 hash algorithm
           - workflow: "3-nodes-transfer"
             test_env: "test"
             release: "0.116.1"
-            extra_bru_args: "--env-var HASH_ALGORITHM=sha256"
-    name: e2e test for ${{ matrix.workflow }} --env ${{ matrix.test_env }} ${{ matrix.extra_bru_args }}
+            extra_environment_variables: "HASH_ALGORITHM=sha256"
+    name: ${{ matrix.workflow }} --env ${{ matrix.test_env }} ${{ matrix.extra_environment_variables }} e2e test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2
       - uses: Swatinem/rust-cache@v2
       - uses: dsherret/rust-toolchain-file@v1
+      - name: Set environment variables
+        run: |
+          if [[ -n "${{ matrix.extra_environment_variables }}" ]]; then
+            echo "${{ matrix.extra_environment_variables }}" | xargs | tr ' ' '\n' >> $GITHUB_ENV
+          fi
       - name: Install dependencies
         run: |
           version=${{ matrix.release }}
