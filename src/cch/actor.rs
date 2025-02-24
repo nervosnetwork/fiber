@@ -13,6 +13,7 @@ use std::str::FromStr;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::{select, time::sleep};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
+use tracing::debug;
 
 use crate::cch::order::{CchInvoice, CchOrderActor};
 use crate::fiber::hash_algorithm::HashAlgorithm;
@@ -461,6 +462,7 @@ impl CchState {
                     .await?,
             )
         };
+        debug!(payment_hash = ?payment_hash, "Subscribed to updates for cch order");
         self.orders.insert(
             order.payment_hash,
             CchOrderActorWithTrackingHandle::new(
@@ -728,12 +730,12 @@ where
             CchInvoice::Lightning(out_invoice),
         );
 
-        self.store.create_cch_order(order.clone())?;
         let order_actor = CchOrderActor::start(myself, self.store.clone(), order.clone()).await;
         state
             .subscribe_updates_for_order(myself, &order, &order_actor)
             .await?;
-
+        self.store.create_cch_order(order.clone())?;
+        debug!(order = ?order, "Cch send_btc order created");
         Ok(order)
     }
 
@@ -806,6 +808,7 @@ where
             .subscribe_updates_for_order(myself, &order, &order_actor)
             .await?;
         self.store.create_cch_order(order.clone())?;
+        debug!(order = ?order, "Cch receive_btc order created");
 
         Ok(order)
     }

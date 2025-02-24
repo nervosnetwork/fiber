@@ -17,6 +17,11 @@ pub use crate::{
     store::subscription::{InvoiceUpdate, PaymentUpdate},
 };
 
+pub const SUBSCRIBE_INVOICE_UPDATE_METHOD: &str = "subscribe_invoice_update";
+pub const SUBSCRIBE_PAYMENT_UPDATE_METHOD: &str = "subscribe_payment_update";
+pub const UNSUBSCRIBE_INVOICE_UPDATE_METHOD: &str = "unsubscribe_invoice_update";
+pub const UNSUBSCRIBE_PAYMENT_UPDATE_METHOD: &str = "unsubscribe_payment_update";
+
 pub(crate) async fn start_pubsub_server<C: Send + Sync + 'static>(
     module: &mut RpcModule<C>,
     subscription_impl: &SubscriptionImpl,
@@ -30,9 +35,9 @@ pub(crate) async fn start_pubsub_server<C: Send + Sync + 'static>(
     let supervisor_2 = supervisor.clone();
     module
         .register_subscription(
-            "subscribe_invoice_update",
-            "subscribe_invoice_update",
-            "unsubscribe_invoice_update",
+            SUBSCRIBE_INVOICE_UPDATE_METHOD,
+            SUBSCRIBE_INVOICE_UPDATE_METHOD,
+            UNSUBSCRIBE_INVOICE_UPDATE_METHOD,
             move |params, pending_sink, _context| {
                 let subscription_impl: SubscriptionImpl = subscription_impl_1.clone();
                 let supervisor = supervisor_1.clone();
@@ -46,9 +51,9 @@ pub(crate) async fn start_pubsub_server<C: Send + Sync + 'static>(
         .expect("register subscribe_invoice_update");
     module
         .register_subscription(
-            "subscribe_payment_update",
-            "subscribe_payment_update",
-            "unsubscribe_payment_update",
+            SUBSCRIBE_PAYMENT_UPDATE_METHOD,
+            SUBSCRIBE_PAYMENT_UPDATE_METHOD,
+            UNSUBSCRIBE_PAYMENT_UPDATE_METHOD,
             move |params, pending_sink, _context| {
                 let subscription_impl: SubscriptionImpl = subscription_impl_2.clone();
                 let supervisor = supervisor_2.clone();

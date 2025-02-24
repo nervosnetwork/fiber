@@ -20,6 +20,10 @@ use crate::{
     rpc::{
         invoice::{InvoiceResult, NewInvoiceParams, SettleInvoiceParams, SettleInvoiceResult},
         payment::{GetPaymentCommandResult, SendPaymentCommandParams},
+        pubsub::{
+            SUBSCRIBE_INVOICE_UPDATE_METHOD, SUBSCRIBE_PAYMENT_UPDATE_METHOD,
+            UNSUBSCRIBE_INVOICE_UPDATE_METHOD, UNSUBSCRIBE_PAYMENT_UPDATE_METHOD,
+        },
     },
     store::{
         subscription::{
@@ -129,9 +133,9 @@ impl FiberBackend {
                 let ws_client = backend.get_ws_client().await?;
                 let subscription = ws_client
                     .subscribe(
-                        "subscribe_invoice",
+                        SUBSCRIBE_INVOICE_UPDATE_METHOD,
                         rpc_params![hash],
-                        "unsubscribe_invoice",
+                        UNSUBSCRIBE_INVOICE_UPDATE_METHOD,
                     )
                     .await?;
                 let token = process_subscription(receiver, subscription);
@@ -179,9 +183,9 @@ impl FiberBackend {
                 let ws_client = backend.get_ws_client().await?;
                 let subscription = ws_client
                     .subscribe(
-                        "subscribe_payment",
+                        SUBSCRIBE_PAYMENT_UPDATE_METHOD,
                         rpc_params![hash],
-                        "unsubscribe_payment",
+                        UNSUBSCRIBE_PAYMENT_UPDATE_METHOD,
                     )
                     .await?;
                 let token = process_subscription(receiver, subscription);
