@@ -103,7 +103,7 @@ pub async fn start_rpc<
     fiber_config: Option<FiberConfig>,
     network_actor: Option<ActorRef<NetworkActorMessage>>,
     fiber_store: Option<S1>,
-    network_graph: Arc<RwLock<NetworkGraph<S1>>>,
+    network_graph: Option<Arc<RwLock<NetworkGraph<S1>>>>,
     subscription: Option<SubscriptionImpl>,
     supervisor: ActorCell,
     cch: Option<(ActorRef<CchMessage>, S2)>,
@@ -137,7 +137,7 @@ pub async fn start_rpc<
         modules
             .merge(
                 GraphRpcServerImpl::new(
-                    network_graph,
+                    network_graph.expect("rpc graph module requires fiber service"),
                     fiber_store
                         .clone()
                         .expect("rpc graph module requires fiber service"),

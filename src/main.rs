@@ -258,8 +258,8 @@ pub async fn main() -> Result<(), ExitMessage> {
     };
 
     // Start rpc service
-    let rpc_server_handle = match (config.rpc, network_graph) {
-        (Some(rpc_config), Some(network_graph)) => {
+    let rpc_server_handle = match config.rpc {
+        Some(rpc_config) => {
             let handle = start_rpc(
                 rpc_config,
                 config.ckb,
@@ -270,16 +270,14 @@ pub async fn main() -> Result<(), ExitMessage> {
                 fiber_store_update_subscription.clone(),
                 root_actor.get_cell(),
                 cch,
-                #[cfg(debug_assertions)] ckb_chain_actor,
-                #[cfg(debug_assertions)] rpc_dev_module_commitment_txs,
+                #[cfg(debug_assertions)]
+                ckb_chain_actor,
+                #[cfg(debug_assertions)]
+                rpc_dev_module_commitment_txs,
             )
             .await;
             Some(handle)
-        },
-        (Some(_), None) => return ExitMessage::err(
-            "RPC requires network graph in the fiber service which is not enabled in the config file"
-            .to_string()
-        ),
+        }
         _ => None,
     };
 
