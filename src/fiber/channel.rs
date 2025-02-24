@@ -5695,7 +5695,9 @@ impl ChannelActorState {
             }
             ChannelState::ChannelReady() => CommitmentSignedFlags::ChannelReady(),
             ChannelState::ShuttingDown(flags) => {
-                if flags.contains(ShuttingDownFlags::AWAITING_PENDING_TLCS) {
+                if flags.contains(ShuttingDownFlags::AWAITING_PENDING_TLCS)
+                    || flags.contains(ShuttingDownFlags::OUR_SHUTDOWN_SENT)
+                {
                     debug!(
                         "Signing commitment transactions while shutdown is pending, current state {:?}",
                         &self.state

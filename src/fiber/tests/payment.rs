@@ -2406,3 +2406,73 @@ async fn test_send_payment_shutdown_cooperative() {
         ChannelState::Closed(CloseFlags::COOPERATIVE)
     );
 }
+
+#[tokio::test]
+async fn test_send_payment_shutdown_under_send_each_other() {
+    init_tracing();
+    let _span = tracing::info_span!("node", node = "test").entered();
+    let (nodes, channels) = create_n_nodes_and_channels_with_index_amounts(
+        &[
+            ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((2, 3), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+        ],
+        4,
+        true,
+    )
+    .await;
+
+    let mut all_sent = HashSet::new();
+    let mut node0_sent_payments = HashSet::new();
+    let mut node3_sent_payments = HashSet::new();
+    for _i in 0..10 {
+        let res = nodes[0].send_payment_keysend(&nodes[3], 1000, false).await;
+        if let Ok(send_payment_res) = res {
+            all_sent.insert(send_payment_res.payment_hash);
+            node0_sent_payments.insert(send_payment_res.payment_hash);
+        }
+        let res = nodes[3].send_payment_keysend(&nodes[0], 1000, false).await;
+        if let Ok(send_payment_res) = res {
+            all_sent.insert(send_payment_res.payment_hash);
+            node3_sent_payments.insert(send_payment_res.payment_hash);
+        }
+    }
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+    let _ = nodes[3].send_shutdown(channels[2], false).await;
+
+    loop {
+        let node_2_channel_actor_state = nodes[2].get_channel_actor_state(channels[2]);
+        eprintln!(
+            "node_2_channel_actor_state: {:?} tlc_pending:\n",
+            node_2_channel_actor_state.state,
+        );
+        node_2_channel_actor_state.tlc_state.debug();
+
+        let node_3_channel_actor_state = nodes[3].get_channel_actor_state(channels[2]);
+        eprintln!(
+            "node_3_channel_actor_state: {:?} tlc_pending:\n",
+            node_3_channel_actor_state.state,
+        );
+        node_3_channel_actor_state.tlc_state.debug();
+        tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+        if !node_2_channel_actor_state.any_tlc_pending()
+            && !node_3_channel_actor_state.any_tlc_pending()
+        {
+            break;
+        }
+    }
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+    let node_3_channel_actor_state = nodes[3].get_channel_actor_state(channels[2]);
+    assert_eq!(
+        node_3_channel_actor_state.state,
+        ChannelState::Closed(CloseFlags::COOPERATIVE)
+    );
+    let node_2_channel_actor_state = nodes[2].get_channel_actor_state(channels[2]);
+    assert_eq!(
+        node_2_channel_actor_state.state,
+        ChannelState::Closed(CloseFlags::COOPERATIVE)
+    );
+}
