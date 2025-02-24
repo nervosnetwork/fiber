@@ -234,8 +234,7 @@ impl Cch {
             new_tokio_task_tracker(),
             new_tokio_cancellation_token(),
             network_actor.get_cell(),
-            pubkey,
-            Some((network_actor, store_update_subscription.clone())),
+            Some((pubkey, network_actor, store_update_subscription.clone())),
         )
         .await
         .expect("start cch actor");
@@ -1009,7 +1008,7 @@ impl NetworkNode {
             mut cch_config,
         } = config;
         if let Some(config) = cch_config.as_mut() {
-            if config.base_dir == None {
+            if config.base_dir.is_none() {
                 let base_dir = base_dir.as_ref();
                 config.base_dir = Some(base_dir.as_ref().join("cch").clone());
             }

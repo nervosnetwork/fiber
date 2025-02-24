@@ -42,8 +42,7 @@ pub async fn start_cch(
     tracker: TaskTracker,
     token: CancellationToken,
     root_actor: ActorCell,
-    pubkey: Pubkey,
-    fiber_network: Option<(ActorRef<NetworkActorMessage>, SubscriptionImpl)>,
+    fiber_network: Option<(Pubkey, ActorRef<NetworkActorMessage>, SubscriptionImpl)>,
 ) -> Result<(ActorRef<CchMessage>, Store)> {
     let store = Store::new(config.store_path()).expect("create cch store");
     let lnd_connection = config.get_lnd_connection_info().await?;
@@ -56,27 +55,25 @@ pub async fn start_cch(
                 );
             }
             let mut http_backend = HttpBackend::new(fiber_rpc_url);
-            if let Err(error) = http_backend.connect().await {
+            if let Err(error) = http_backend.get_node_info().await {
+                if !config.ignore_startup_failure {
+                    return Err(anyhow!(error));
+                }
+            }
+            if let Err(error) = http_backend.connect_ws().await {
                 if !config.ignore_startup_failure {
                     return Err(anyhow!(error));
                 }
             }
             FiberBackend::Http(http_backend)
         }
-        (None, Some((actor, subscription))) => {
-            FiberBackend::InProcess(InProcessFiberBackend::new(actor, subscription))
+        (None, Some((pubkey, actor, subscription))) => {
+            FiberBackend::InProcess(InProcessFiberBackend::new(pubkey, actor, subscription))
         }
     };
     let (actor, _handle) = Actor::spawn_linked(
         Some("cch actor".to_string()),
-        CchActor::new(
-            config,
-            tracker,
-            token,
-            pubkey,
-            lnd_connection,
-            store.clone(),
-        ),
+        CchActor::new(config, tracker, token, lnd_connection, store.clone()),
         fiber_backend,
         root_actor,
     )
@@ -151,7 +148,6 @@ pub struct CchActor<S> {
     config: CchConfig,
     tracker: TaskTracker,
     token: CancellationToken,
-    pubkey: Pubkey,
     lnd_connection: LndConnectionInfo,
     store: S,
 }
@@ -168,6 +164,13 @@ impl CchState {
             fiber,
             lnd_connection,
             orders: HashMap::new(),
+        }
+    }
+
+    async fn get_pub_key(&self) -> Result<Pubkey, CchError> {
+        match self.fiber {
+            FiberBackend::InProcess(ref backend) => Ok(backend.pukey),
+            FiberBackend::Http(ref backend) => backend.pubkey.ok_or(CchError::NotReady("Cch node is not connected to fiber node yet, pubkey is not available".to_string())),
         }
     }
 
@@ -667,7 +670,6 @@ where
         config: CchConfig,
         tracker: TaskTracker,
         token: CancellationToken,
-        pubkey: Pubkey,
         lnd_connection: LndConnectionInfo,
         store: S,
     ) -> Self {
@@ -675,7 +677,6 @@ where
             config,
             tracker,
             token,
-            pubkey,
             lnd_connection,
             store,
         }
@@ -690,7 +691,7 @@ where
         let out_invoice = Bolt11Invoice::from_str(&send_btc.btc_pay_req)?;
         tracing::debug!(btc_invoice = ?out_invoice, "Received SentBTC order");
 
-        let our_pubkey = self.pubkey;
+        let our_pubkey = state.get_pub_key().await?;
         let out_final_expiry_delta = self.config.ckb_final_tlc_expiry_delta;
         let out_currency = Currency::Fibb;
         let out_script = self.config.get_wrapped_btc_script();

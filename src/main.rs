@@ -233,12 +233,10 @@ pub async fn main() -> Result<(), ExitMessage> {
                 new_tokio_task_tracker(),
                 new_tokio_cancellation_token(),
                 root_actor.get_cell(),
-                node_public_key.expect("Cch service requires node public key"),
-                network_actor.clone().and_then(|actor| {
-                    fiber_store_update_subscription
-                        .clone()
-                        .map(|sub| (actor, sub))
-                }),
+                node_public_key
+                    .zip(network_actor.clone())
+                    .zip(fiber_store_update_subscription.clone())
+                    .map(|((pk, na), fsus)| (pk, na, fsus)),
             )
             .await
             {

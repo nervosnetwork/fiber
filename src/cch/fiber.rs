@@ -12,10 +12,13 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     errors::ALREADY_EXISTS_DESCRIPTION,
     fiber::{
-        network::SendPaymentCommand, types::Hash256, NetworkActorCommand, NetworkActorMessage,
+        network::SendPaymentCommand,
+        types::{Hash256, Pubkey},
+        NetworkActorCommand, NetworkActorMessage,
     },
     invoice::CkbInvoice,
     rpc::{
+        info::NodeInfoResult,
         invoice::{AddInvoiceParams, InvoiceResult, SettleInvoiceParams, SettleInvoiceResult},
         payment::{GetPaymentCommandResult, SendPaymentCommandParams},
     },
@@ -37,16 +40,19 @@ pub enum FiberBackend {
 }
 
 pub struct InProcessFiberBackend {
+    pub pukey: Pubkey,
     pub network_actor: ActorRef<NetworkActorMessage>,
     pub subscription: SubscriptionImpl,
 }
 
 impl InProcessFiberBackend {
     pub fn new(
+        pukey: Pubkey,
         network_actor: ActorRef<NetworkActorMessage>,
         subscription: SubscriptionImpl,
     ) -> Self {
         Self {
+            pukey,
             network_actor,
             subscription,
         }
@@ -56,6 +62,7 @@ impl InProcessFiberBackend {
 #[derive(Default)]
 pub struct HttpBackend {
     pub url: String,
+    pub pubkey: Option<Pubkey>,
     pub ws_client: Option<WsClient>,
     pub http_client: Option<HttpClient>,
 }
@@ -64,12 +71,19 @@ impl HttpBackend {
     pub fn new(url: &str) -> Self {
         Self {
             url: url.to_string(),
+            pubkey: None,
             ws_client: None,
             http_client: None,
         }
     }
 
-    pub async fn connect(&mut self) -> Result<(), jsonrpsee::core::ClientError> {
+    pub async fn get_node_info(&mut self) -> Result<NodeInfoResult, jsonrpsee::core::ClientError> {
+        let node_info: NodeInfoResult = self.call("node_info", ()).await?;
+        self.pubkey = Some(node_info.node_id);
+        Ok(node_info)
+    }
+
+    pub async fn connect_ws(&mut self) -> Result<(), jsonrpsee::core::ClientError> {
         self.get_ws_client().await?;
         Ok(())
     }

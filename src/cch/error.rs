@@ -75,6 +75,8 @@ pub enum CchError {
     OrderNotFound(Hash256),
     #[error("Jsonrpcsee client error: {0}")]
     JsonrpcseeClientError(#[from] jsonrpsee::core::ClientError),
+    #[error("Cch node not ready: {0}")]
+    NotReady(String),
 }
 
 pub type CchResult<T> = std::result::Result<T, CchError>;
