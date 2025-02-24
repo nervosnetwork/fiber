@@ -47,14 +47,21 @@ pub async fn start_cch(
 ) -> Result<(ActorRef<CchMessage>, Store)> {
     let store = Store::new(config.store_path()).expect("create cch store");
     let lnd_connection = config.get_lnd_connection_info().await?;
-    let fiber_backend = match (config.fiber_rpc_url.as_ref(), fiber_network) {
+    let fiber_backend = match (&config.fiber_rpc_url, fiber_network) {
         (None, None) => panic!("Either fiber_rpc_url or network_actor must be provided"),
-        (Some(fiber_rpc_url), n) => {
-            if n.is_some() {
+        (f, Some((actor, subscription))) => {
+            if f.is_some() {
                 tracing::info!(
-                    "Both fiber_rpc_url and network_acto are provided, but fiber_rpc_url will be used"
+                    "Both fiber_rpc_url and network_actor are provided, but network_actor will be used"
                 );
             }
+            FiberBackend::InProcess(InProcessFiberBackend::new(actor, subscription))
+        }
+        (Some(fiber_rpc_url), _) => {
+            debug!(
+                fiber_rpc_url = fiber_rpc_url.as_str(),
+                "Connecting to fiber node"
+            );
             let mut http_backend = HttpBackend::new(fiber_rpc_url);
             if let Err(error) = http_backend.connect_ws().await {
                 if !config.ignore_startup_failure {
@@ -62,9 +69,6 @@ pub async fn start_cch(
                 }
             }
             FiberBackend::Http(http_backend)
-        }
-        (None, Some((actor, subscription))) => {
-            FiberBackend::InProcess(InProcessFiberBackend::new(actor, subscription))
         }
     };
     let (actor, _handle) = Actor::spawn_linked(
