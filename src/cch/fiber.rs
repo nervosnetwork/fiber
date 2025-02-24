@@ -12,14 +12,13 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     errors::ALREADY_EXISTS_DESCRIPTION,
     fiber::{
-        network::SendPaymentCommand,
-        types::{Hash256, Pubkey},
+        network::{NewInvoiceCommand, SendPaymentCommand},
+        types::Hash256,
         NetworkActorCommand, NetworkActorMessage,
     },
     invoice::CkbInvoice,
     rpc::{
-        info::NodeInfoResult,
-        invoice::{AddInvoiceParams, InvoiceResult, SettleInvoiceParams, SettleInvoiceResult},
+        invoice::{InvoiceResult, NewInvoiceParams, SettleInvoiceParams, SettleInvoiceResult},
         payment::{GetPaymentCommandResult, SendPaymentCommandParams},
     },
     store::{
@@ -40,19 +39,16 @@ pub enum FiberBackend {
 }
 
 pub struct InProcessFiberBackend {
-    pub pukey: Pubkey,
     pub network_actor: ActorRef<NetworkActorMessage>,
     pub subscription: SubscriptionImpl,
 }
 
 impl InProcessFiberBackend {
     pub fn new(
-        pukey: Pubkey,
         network_actor: ActorRef<NetworkActorMessage>,
         subscription: SubscriptionImpl,
     ) -> Self {
         Self {
-            pukey,
             network_actor,
             subscription,
         }
@@ -62,7 +58,6 @@ impl InProcessFiberBackend {
 #[derive(Default)]
 pub struct HttpBackend {
     pub url: String,
-    pub pubkey: Option<Pubkey>,
     pub ws_client: Option<WsClient>,
     pub http_client: Option<HttpClient>,
 }
@@ -71,16 +66,9 @@ impl HttpBackend {
     pub fn new(url: &str) -> Self {
         Self {
             url: url.to_string(),
-            pubkey: None,
             ws_client: None,
             http_client: None,
         }
-    }
-
-    pub async fn get_node_info(&mut self) -> Result<NodeInfoResult, jsonrpsee::core::ClientError> {
-        let node_info: NodeInfoResult = self.call("node_info", ()).await?;
-        self.pubkey = Some(node_info.node_id);
-        Ok(node_info)
     }
 
     pub async fn connect_ws(&mut self) -> Result<(), jsonrpsee::core::ClientError> {
@@ -225,56 +213,25 @@ impl FiberBackend {
         }
     }
 
-    pub async fn new_invoice(&mut self, invoice: CkbInvoice) -> Result<(), CchError> {
+    pub async fn new_invoice<I: Into<NewInvoiceCommand>>(
+        &mut self,
+        request: I,
+    ) -> Result<CkbInvoice, CchError> {
+        let request = request.into();
         match self {
             FiberBackend::InProcess(backend) => {
-                let message = move |rpc_reply| -> NetworkActorMessage {
-                    NetworkActorMessage::Command(NetworkActorCommand::AddInvoice(
-                        invoice.clone(),
-                        None,
-                        rpc_reply,
+                let message = |rpc_reply| -> NetworkActorMessage {
+                    NetworkActorMessage::Command(NetworkActorCommand::NewInvoice(
+                        request, rpc_reply,
                     ))
                 };
 
-                call!(&backend.network_actor, message).expect("call actor")?;
-                Ok(())
+                Ok(call!(&backend.network_actor, message).expect("call actor")?)
             }
             FiberBackend::Http(backend) => backend
-                .call(
-                    "add_invoice",
-                    AddInvoiceParams {
-                        invoice: invoice.to_string(),
-                    },
-                )
+                .call("new_invoice", NewInvoiceParams::from(request))
                 .await
-                .map(|_: InvoiceResult| ())
-                .map_err(Into::into),
-        }
-    }
-
-    pub async fn add_invoice(&mut self, invoice: CkbInvoice) -> Result<(), CchError> {
-        match self {
-            FiberBackend::InProcess(backend) => {
-                let message = move |rpc_reply| -> NetworkActorMessage {
-                    NetworkActorMessage::Command(NetworkActorCommand::AddInvoice(
-                        invoice.clone(),
-                        None,
-                        rpc_reply,
-                    ))
-                };
-
-                call!(&backend.network_actor, message).expect("call actor")?;
-                Ok(())
-            }
-            FiberBackend::Http(backend) => backend
-                .call(
-                    "add_invoice",
-                    AddInvoiceParams {
-                        invoice: invoice.to_string(),
-                    },
-                )
-                .await
-                .map(|_: InvoiceResult| ())
+                .map(|r: InvoiceResult| r.invoice)
                 .map_err(Into::into),
         }
     }

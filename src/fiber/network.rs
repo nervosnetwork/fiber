@@ -190,7 +190,7 @@ pub struct NodeInfoResponse {
 }
 
 /// The command to generate a new invoice.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct NewInvoiceCommand {
     /// The amount of the invoice.
     pub amount: u128,
@@ -1490,8 +1490,7 @@ where
                     invoice_builder = invoice_builder.final_expiry_delta(final_expiry_delta);
                 };
                 if let Some(udt_type_script) = &params.udt_type_script {
-                    invoice_builder =
-                        invoice_builder.udt_type_script(udt_type_script.clone());
+                    invoice_builder = invoice_builder.udt_type_script(udt_type_script.clone());
                 };
                 if let Some(hash_algorithm) = params.hash_algorithm {
                     invoice_builder = invoice_builder.hash_algorithm(hash_algorithm);

@@ -460,7 +460,7 @@ Generates a new invoice.
 
 * `amount` - <em>`u128`</em>, The amount of the invoice.
 * `description` - <em>`Option<String>`</em>, The description of the invoice.
-* `currency` - <em>[Currency](#type-currency)</em>, The currency of the invoice.
+* `currency` - <em>Option<[Currency](#type-currency)></em>, The currency of the invoice.
 * `payment_preimage` - <em>Option<[Hash256](#type-hash256)></em>, The payment preimage of the invoice, may be empty for a hold invoice.
 * `payment_hash` - <em>Option<[Hash256](#type-hash256)></em>, The payment hash of the invoice, must be given when payment_preimage is empty.
 * `expiry` - <em>`Option<u64>`</em>, The expiry time of the invoice.
@@ -468,6 +468,7 @@ Generates a new invoice.
 * `final_expiry_delta` - <em>`Option<u64>`</em>, The final HTLC timeout of the invoice.
 * `udt_type_script` - <em>`Option<Script>`</em>, The UDT type script of the invoice.
 * `hash_algorithm` - <em>Option<[HashAlgorithm](#type-hashalgorithm)></em>, The hash algorithm of the invoice.
+* `save_to_store` - <em>`Option<bool>`</em>, Whether to save the invoice to the store, default is true.
 
 ##### Returns
 

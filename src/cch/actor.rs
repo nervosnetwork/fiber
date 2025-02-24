@@ -16,9 +16,10 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::cch::order::{CchInvoice, CchOrderActor};
 use crate::fiber::hash_algorithm::HashAlgorithm;
-use crate::fiber::types::{Hash256, Pubkey};
+use crate::fiber::network::NewInvoiceCommand;
+use crate::fiber::types::Hash256;
 use crate::fiber::NetworkActorMessage;
-use crate::invoice::{CkbInvoice, Currency, InvoiceBuilder};
+use crate::invoice::{CkbInvoice, Currency};
 use crate::store::subscription::PaymentUpdate;
 use crate::store::subscription_impl::SubscriptionImpl;
 use crate::store::Store;
@@ -42,7 +43,7 @@ pub async fn start_cch(
     tracker: TaskTracker,
     token: CancellationToken,
     root_actor: ActorCell,
-    fiber_network: Option<(Pubkey, ActorRef<NetworkActorMessage>, SubscriptionImpl)>,
+    fiber_network: Option<(ActorRef<NetworkActorMessage>, SubscriptionImpl)>,
 ) -> Result<(ActorRef<CchMessage>, Store)> {
     let store = Store::new(config.store_path()).expect("create cch store");
     let lnd_connection = config.get_lnd_connection_info().await?;
@@ -55,11 +56,6 @@ pub async fn start_cch(
                 );
             }
             let mut http_backend = HttpBackend::new(fiber_rpc_url);
-            if let Err(error) = http_backend.get_node_info().await {
-                if !config.ignore_startup_failure {
-                    return Err(anyhow!(error));
-                }
-            }
             if let Err(error) = http_backend.connect_ws().await {
                 if !config.ignore_startup_failure {
                     return Err(anyhow!(error));
@@ -67,8 +63,8 @@ pub async fn start_cch(
             }
             FiberBackend::Http(http_backend)
         }
-        (None, Some((pubkey, actor, subscription))) => {
-            FiberBackend::InProcess(InProcessFiberBackend::new(pubkey, actor, subscription))
+        (None, Some((actor, subscription))) => {
+            FiberBackend::InProcess(InProcessFiberBackend::new(actor, subscription))
         }
     };
     let (actor, _handle) = Actor::spawn_linked(
@@ -164,15 +160,6 @@ impl CchState {
             fiber,
             lnd_connection,
             orders: HashMap::new(),
-        }
-    }
-
-    async fn get_pub_key(&self) -> Result<Pubkey, CchError> {
-        match self.fiber {
-            FiberBackend::InProcess(ref backend) => Ok(backend.pukey),
-            FiberBackend::Http(ref backend) => backend.pubkey.ok_or(CchError::NotReady(
-                "Cch node is not connected to fiber node yet, pubkey is not available".to_string(),
-            )),
         }
     }
 
@@ -693,9 +680,7 @@ where
         let out_invoice = Bolt11Invoice::from_str(&send_btc.btc_pay_req)?;
         tracing::debug!(btc_invoice = ?out_invoice, "Received SentBTC order");
 
-        let our_pubkey = state.get_pub_key().await?;
         let out_final_expiry_delta = self.config.ckb_final_tlc_expiry_delta;
-        let out_currency = Currency::Fibb;
         let out_script = self.config.get_wrapped_btc_script();
         let fee_rate_per_million_sats = self.config.fee_rate_per_million_sats as u128;
         let base_fee_sats = self.config.base_fee_sats as u128;
@@ -716,15 +701,19 @@ where
 
         let amount = amount_msat.div_ceil(1_000u128) + fee_sats;
 
-        let fiber_invoice = InvoiceBuilder::new(out_currency)
-            .payee_pub_key(our_pubkey.into())
-            .amount(Some(amount))
-            .payment_hash(out_invoice.payment_hash().into())
-            .hash_algorithm(HashAlgorithm::Sha256)
-            .expiry_time(Duration::from_secs(expiry))
-            .final_expiry_delta(out_final_expiry_delta)
-            .udt_type_script(out_script.clone())
-            .build()?;
+        let fiber_invoice = state
+            .fiber
+            .new_invoice(NewInvoiceCommand {
+                amount,
+                payment_hash: Some(out_invoice.payment_hash().into()),
+                hash_algorithm: Some(HashAlgorithm::Sha256),
+                expiry: Some(expiry),
+                final_expiry_delta: Some(out_final_expiry_delta),
+                udt_type_script: Some(out_script.clone()),
+                save_to_store: Some(true),
+                ..Default::default()
+            })
+            .await?;
 
         let order = CchOrder::new(
             *fiber_invoice.payment_hash(),
@@ -735,8 +724,6 @@ where
             CchInvoice::Fiber(fiber_invoice.clone()),
             CchInvoice::Lightning(out_invoice),
         );
-
-        state.fiber.add_invoice(fiber_invoice.clone()).await?;
 
         self.store.create_cch_order(order.clone())?;
         let order_actor = CchOrderActor::start(myself, self.store.clone(), order.clone()).await;

@@ -78,7 +78,6 @@ pub async fn main() -> Result<(), ExitMessage> {
         network_actor,
         ckb_chain_actor,
         network_graph,
-        node_public_key,
         fiber_store,
         fiber_store_update_subscription,
     ) = match config.fiber.clone() {
@@ -216,12 +215,11 @@ pub async fn main() -> Result<(), ExitMessage> {
                 Some(network_actor),
                 Some(ckb_chain_actor),
                 Some(network_graph),
-                Some(node_public_key),
                 Some(fiber_store),
                 Some(fiber_store_update_subscription),
             )
         }
-        None => (None, None, None, None, None, None),
+        None => (None, None, None, None, None),
     };
 
     let cch = match config.cch {
@@ -233,10 +231,9 @@ pub async fn main() -> Result<(), ExitMessage> {
                 new_tokio_task_tracker(),
                 new_tokio_cancellation_token(),
                 root_actor.get_cell(),
-                node_public_key
-                    .zip(network_actor.clone())
-                    .zip(fiber_store_update_subscription.clone())
-                    .map(|((pk, na), fsus)| (pk, na, fsus)),
+                network_actor
+                    .clone()
+                    .zip(fiber_store_update_subscription.clone()),
             )
             .await
             {
