@@ -89,7 +89,7 @@ impl HttpBackend {
         R: for<'de> Deserialize<'de>,
     {
         let client = self.get_http_client().await?;
-        Ok(client.request(method, rpc_params!(params)).await?)
+        client.request(method, rpc_params!(params)).await
     }
 
     pub fn http_url(&self) -> &str {

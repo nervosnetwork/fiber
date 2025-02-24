@@ -36,6 +36,7 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
         * [Method `node_info`](#info-node_info)
     * [Module Invoice](#module-invoice)
         * [Method `new_invoice`](#invoice-new_invoice)
+        * [Method `add_invoice`](#invoice-add_invoice)
         * [Method `parse_invoice`](#invoice-parse_invoice)
         * [Method `get_invoice`](#invoice-get_invoice)
         * [Method `cancel_invoice`](#invoice-cancel_invoice)
@@ -467,6 +468,24 @@ Generates a new invoice.
 * `final_expiry_delta` - <em>`Option<u64>`</em>, The final HTLC timeout of the invoice.
 * `udt_type_script` - <em>`Option<Script>`</em>, The UDT type script of the invoice.
 * `hash_algorithm` - <em>Option<[HashAlgorithm](#type-hashalgorithm)></em>, The hash algorithm of the invoice.
+
+##### Returns
+
+* `invoice_address` - <em>`String`</em>, The encoded invoice address.
+* `invoice` - <em>[CkbInvoice](#type-ckbinvoice)</em>, The invoice.
+
+---
+
+
+
+<a id="invoice-add_invoice"></a>
+#### Method `add_invoice`
+
+Adds a new invoice to the store.
+
+##### Params
+
+* `invoice` - <em>`String`</em>, The encoded invoice address.
 
 ##### Returns
 

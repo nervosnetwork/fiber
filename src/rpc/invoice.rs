@@ -35,6 +35,7 @@ pub struct NewInvoiceParams {
     pub payment_preimage: Option<Hash256>,
     /// The payment hash of the invoice, must be given when payment_preimage is empty.
     pub payment_hash: Option<Hash256>,
+    /// The expiry time of the invoice.
     #[serde_as(as = "Option<U64Hex>")]
     pub expiry: Option<u64>,
     /// The fallback address of the invoice.
