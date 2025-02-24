@@ -25,7 +25,6 @@ use crate::{
         NetworkActorMessage,
     },
     invoice::InvoiceStore,
-    FiberConfig,
 };
 #[cfg(debug_assertions)]
 use crate::{ckb::CkbChainMessage, fiber::types::Hash256};
@@ -100,7 +99,6 @@ pub async fn start_rpc<
 >(
     config: RpcConfig,
     ckb_config: Option<CkbConfig>,
-    fiber_config: Option<FiberConfig>,
     network_actor: Option<ActorRef<NetworkActorMessage>>,
     fiber_store: Option<S1>,
     network_graph: Option<Arc<RwLock<NetworkGraph<S1>>>>,
@@ -126,8 +124,9 @@ pub async fn start_rpc<
                     fiber_store
                         .clone()
                         .expect("rpc invoice module requires fiber service"),
-                    network_actor.clone(),
-                    fiber_config,
+                    network_actor
+                        .clone()
+                        .expect("rpc invoice module requires fiber service"),
                 )
                 .into_rpc(),
             )

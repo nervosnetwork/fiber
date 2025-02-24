@@ -61,4 +61,6 @@ pub enum InvoiceError {
     InvoiceNotFound,
     #[error("Invoice already exists")]
     InvoiceAlreadyExists,
+    #[error("Invalid final expiry delta: {0}")]
+    InvalidFinalExpiryDelta(String),
 }

@@ -58,6 +58,7 @@ use super::config::{AnnouncedNodeName, MIN_TLC_EXPIRY_DELTA};
 use super::fee::calculate_commitment_tx_fee;
 use super::gossip::{GossipActorMessage, GossipMessageStore, GossipMessageUpdates};
 use super::graph::{NetworkGraph, NetworkGraphStateStore, OwnedChannelUpdateEvent, SessionRoute};
+use super::hash_algorithm::HashAlgorithm;
 use super::key::blake2b_hash_with_salt;
 use super::types::{
     BroadcastMessage, BroadcastMessageQuery, BroadcastMessageWithTimestamp, EcdsaSignature,
@@ -84,7 +85,8 @@ use crate::fiber::types::{
 };
 use crate::fiber::KeyPair;
 use crate::invoice::{
-    add_invoice, CkbInvoice, CkbInvoiceStatus, InvoiceError, InvoiceStore, SettleInvoiceError,
+    add_invoice, CkbInvoice, CkbInvoiceStatus, Currency, InvoiceBuilder, InvoiceError,
+    InvoiceStore, SettleInvoiceError,
 };
 use crate::{now_timestamp_as_millis_u64, unwrap_or_return, Error};
 
@@ -187,6 +189,33 @@ pub struct NodeInfoResponse {
     pub udt_cfg_infos: UdtCfgInfos,
 }
 
+/// The command to generate a new invoice.
+#[derive(Debug, Clone)]
+pub struct NewInvoiceCommand {
+    /// The amount of the invoice.
+    pub amount: u128,
+    /// The description of the invoice.
+    pub description: Option<String>,
+    /// The currency of the invoice.
+    pub currency: Option<Currency>,
+    /// The payment preimage of the invoice, may be empty for a hold invoice.
+    pub payment_preimage: Option<Hash256>,
+    /// The payment hash of the invoice, must be given when payment_preimage is empty.
+    pub payment_hash: Option<Hash256>,
+    /// The expiry time of the invoice.
+    pub expiry: Option<u64>,
+    /// The fallback address of the invoice.
+    pub fallback_address: Option<String>,
+    /// The final HTLC timeout of the invoice.
+    pub final_expiry_delta: Option<u64>,
+    /// The UDT type script of the invoice.
+    pub udt_type_script: Option<Script>,
+    /// The hash algorithm of the invoice.
+    pub hash_algorithm: Option<HashAlgorithm>,
+    /// Whether to save the invoice to the store, default is true.
+    pub save_to_store: Option<bool>,
+}
+
 /// The struct here is used both internally and as an API to the outside world.
 /// If we want to send a reply to the caller, we need to wrap the message with
 /// a RpcReplyPort. Since outsider users have no knowledge of RpcReplyPort, we
@@ -249,6 +278,11 @@ pub enum NetworkActorCommand {
 
     // Send a message to the gossip actor.
     GossipActorMessage(GossipActorMessage),
+
+    NewInvoice(
+        NewInvoiceCommand,
+        RpcReplyPort<Result<CkbInvoice, InvoiceError>>,
+    ),
 
     AddInvoice(
         CkbInvoice,
@@ -1001,7 +1035,6 @@ where
             NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId { peer_id, message }) => {
                 state.send_fiber_message_to_peer(&peer_id, message).await?;
             }
-
             NetworkActorCommand::ConnectPeer(addr) => {
                 // TODO: It is more than just dialing a peer. We need to exchange capabilities of the peer,
                 // e.g. whether the peer support some specific feature.
@@ -1028,13 +1061,11 @@ where
                 // Tentacle sends an event by calling handle_error function instead, which
                 // may receive errors like DialerError.
             }
-
             NetworkActorCommand::DisconnectPeer(peer_id) => {
                 if let Some(session) = state.get_peer_session(&peer_id) {
                     state.control.disconnect(session).await?;
                 }
             }
-
             NetworkActorCommand::SavePeerAddress(addr) => match extract_peer_id(&addr) {
                 Some(peer) => {
                     debug!("Saved peer id {:?} with address {:?}", &peer, &addr);
@@ -1044,7 +1075,6 @@ where
                     error!("Failed to save address to peer store: unable to extract peer id from address {:?}", &addr);
                 }
             },
-
             NetworkActorCommand::MaintainConnections => {
                 let mut inbound_peer_sessions = state.inbound_peer_sessions();
                 let num_inbound_peers = inbound_peer_sessions.len();
@@ -1054,17 +1084,17 @@ where
 
                 if num_inbound_peers > state.max_inbound_peers {
                     debug!(
-                        "Already connected to {} inbound peers, only wants {} peers, disconnecting some",
-                        num_inbound_peers, state.max_inbound_peers
-                    );
+                                "Already connected to {} inbound peers, only wants {} peers, disconnecting some",
+                                num_inbound_peers, state.max_inbound_peers
+                            );
                     inbound_peer_sessions.retain(|k| !state.session_channels_map.contains_key(k));
                     let sessions_to_disconnect = if inbound_peer_sessions.len()
                         < num_inbound_peers - state.max_inbound_peers
                     {
                         warn!(
-                            "Wants to disconnect more {} inbound peers, but all peers except {:?} have channels, will not disconnect any peer with channels",
-                            num_inbound_peers - state.max_inbound_peers, &inbound_peer_sessions
-                        );
+                                    "Wants to disconnect more {} inbound peers, but all peers except {:?} have channels, will not disconnect any peer with channels",
+                                    num_inbound_peers - state.max_inbound_peers, &inbound_peer_sessions
+                                );
                         &inbound_peer_sessions[..]
                     } else {
                         &inbound_peer_sessions[..num_inbound_peers - state.max_inbound_peers]
@@ -1082,9 +1112,9 @@ where
 
                 if num_outbound_peers >= state.min_outbound_peers {
                     debug!(
-                        "Already connected to {} outbound peers, wants a minimal of {} peers, skipping connecting to more peers",
-                        num_outbound_peers, state.min_outbound_peers
-                    );
+                                "Already connected to {} outbound peers, wants a minimal of {} peers, skipping connecting to more peers",
+                                num_outbound_peers, state.min_outbound_peers
+                            );
                     return Ok(());
                 }
 
@@ -1121,9 +1151,9 @@ where
                 for (peer_id, addresses) in peers_to_connect {
                     if let Some(session) = state.get_peer_session(&peer_id) {
                         debug!(
-                            "Randomly selected peer {:?} already connected with session id {:?}, skipping connection",
-                            peer_id, session
-                        );
+                                    "Randomly selected peer {:?} already connected with session id {:?}, skipping connection",
+                                    peer_id, session
+                                );
                         continue;
                     }
                     for addr in addresses {
@@ -1136,7 +1166,6 @@ where
                     }
                 }
             }
-
             NetworkActorCommand::OpenChannel(open_channel, reply) => {
                 match state.create_outbound_channel(open_channel).await {
                     Ok((_, channel_id)) => {
@@ -1162,13 +1191,11 @@ where
                     }
                 }
             }
-
             NetworkActorCommand::ControlFiberChannel(c) => {
                 state
                     .send_command_to_channel(c.channel_id, c.command)
                     .await?
             }
-
             NetworkActorCommand::SendPaymentOnionPacket(command) => {
                 let res = self
                     .handle_send_onion_packet_command(state, command.clone())
@@ -1195,7 +1222,6 @@ where
 
                 let _ = reply.send(response);
             }
-
             NetworkActorCommand::UpdateChannelFunding(channel_id, transaction, request) => {
                 let old_tx = transaction.into_view();
                 let mut tx = FundingTx::new();
@@ -1245,13 +1271,13 @@ where
                 let msg = match partial_witnesses {
                     Some(partial_witnesses) => {
                         debug!(
-                            "Received SignTx request with for transaction {:?} and partial witnesses {:?}",
-                            &funding_tx,
-                            partial_witnesses
-                                .iter()
-                                .map(hex::encode)
-                                .collect::<Vec<_>>()
-                        );
+                                    "Received SignTx request with for transaction {:?} and partial witnesses {:?}",
+                                    &funding_tx,
+                                    partial_witnesses
+                                        .iter()
+                                        .map(hex::encode)
+                                        .collect::<Vec<_>>()
+                                );
                         let funding_tx = funding_tx
                             .into_view()
                             .as_advanced_builder()
@@ -1303,9 +1329,9 @@ where
                     }
                     None => {
                         debug!(
-                            "Received SignTx request with for transaction {:?} without partial witnesses, so start signing it now",
-                            &funding_tx,
-                        );
+                                    "Received SignTx request with for transaction {:?} without partial witnesses, so start signing it now",
+                                    &funding_tx,
+                                );
                         let mut funding_tx = call_t!(
                             self.chain_actor,
                             CkbChainMessage::Sign,
@@ -1421,6 +1447,68 @@ where
             }
             NetworkActorCommand::AddInvoice(invoice, preimage, reply) => {
                 let _ = reply.send(add_invoice(&self.store, invoice, preimage));
+            }
+            NetworkActorCommand::NewInvoice(params, rpc_reply_port) => {
+                if let Some(currency) = params.currency {
+                    if currency != state.invoice_currency {
+                        let _ = rpc_reply_port.send(Err(InvoiceError::UnknownCurrency(format!(
+                            "Currency {:?} is not supported",
+                            currency
+                        ))));
+                        return Ok(());
+                    }
+                }
+                let mut invoice_builder =
+                    InvoiceBuilder::new(state.invoice_currency).amount(Some(params.amount));
+
+                if let Some(preimage) = params.payment_preimage {
+                    invoice_builder = invoice_builder.payment_preimage(preimage);
+                }
+                if let Some(hash) = params.payment_hash {
+                    invoice_builder = invoice_builder.payment_hash(hash);
+                }
+                if let Some(description) = params.description.clone() {
+                    invoice_builder = invoice_builder.description(description);
+                };
+                if let Some(expiry) = params.expiry {
+                    let duration: Duration = Duration::from_secs(expiry);
+                    invoice_builder = invoice_builder.expiry_time(duration);
+                };
+                if let Some(fallback_address) = params.fallback_address.clone() {
+                    invoice_builder = invoice_builder.fallback_address(fallback_address);
+                };
+                if let Some(final_expiry_delta) = params.final_expiry_delta {
+                    if final_expiry_delta < MIN_TLC_EXPIRY_DELTA {
+                        let _ = rpc_reply_port.send(Err(InvoiceError::InvalidFinalExpiryDelta(
+                            format!(
+                                "Final expiry delta must be greater than or equal to {}",
+                                MIN_TLC_EXPIRY_DELTA
+                            ),
+                        )));
+                        return Ok(());
+                    }
+                    invoice_builder = invoice_builder.final_expiry_delta(final_expiry_delta);
+                };
+                if let Some(udt_type_script) = &params.udt_type_script {
+                    invoice_builder =
+                        invoice_builder.udt_type_script(udt_type_script.clone());
+                };
+                if let Some(hash_algorithm) = params.hash_algorithm {
+                    invoice_builder = invoice_builder.hash_algorithm(hash_algorithm);
+                };
+
+                invoice_builder = invoice_builder.payee_pub_key(state.get_public_key().into());
+                let secret_key = state.private_key.clone().into();
+                let result = match invoice_builder.build_with_sign(|hash| {
+                    Secp256k1::new().sign_ecdsa_recoverable(hash, &secret_key)
+                }) {
+                    Ok(invoice) if params.save_to_store.unwrap_or(true) => {
+                        add_invoice(&state.store, invoice.clone(), params.payment_preimage)
+                            .map(|_| invoice)
+                    }
+                    result => result,
+                };
+                let _ = rpc_reply_port.send(result);
             }
         };
         Ok(())
@@ -1953,6 +2041,7 @@ pub struct NetworkActorState<S> {
     state_to_be_persisted: PersistentNetworkActorState,
     // The name of the node to be announced to the network, may be empty.
     node_name: Option<AnnouncedNodeName>,
+    invoice_currency: Currency,
     peer_id: PeerId,
     announced_addrs: Vec<Multiaddr>,
     auto_announce: bool,
@@ -3238,6 +3327,7 @@ where
             store: self.store.clone(),
             state_to_be_persisted,
             node_name: config.announced_node_name,
+            invoice_currency: config.invoice_currency(),
             peer_id: my_peer_id,
             announced_addrs,
             auto_announce: config.auto_announce_node(),

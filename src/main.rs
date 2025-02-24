@@ -263,7 +263,6 @@ pub async fn main() -> Result<(), ExitMessage> {
             let handle = start_rpc(
                 rpc_config,
                 config.ckb,
-                config.fiber,
                 network_actor,
                 fiber_store,
                 network_graph,

@@ -1,28 +1,22 @@
-use crate::fiber::config::MIN_TLC_EXPIRY_DELTA;
 use crate::fiber::hash_algorithm::HashAlgorithm;
+use crate::fiber::network::NewInvoiceCommand;
 use crate::fiber::serde_utils::{U128Hex, U64Hex};
-use crate::fiber::types::{Hash256, Privkey};
+use crate::fiber::types::Hash256;
 use crate::fiber::{NetworkActorCommand, NetworkActorMessage};
-use crate::invoice::{
-    add_invoice, CkbInvoice, CkbInvoiceStatus, Currency, InvoiceBuilder, InvoiceStore,
-};
-use crate::FiberConfig;
+use crate::invoice::{add_invoice, CkbInvoice, CkbInvoiceStatus, Currency, InvoiceStore};
 use ckb_jsonrpc_types::Script;
 use jsonrpsee::types::error::CALL_EXECUTION_FAILED_CODE;
 use jsonrpsee::{core::async_trait, proc_macros::rpc, types::ErrorObjectOwned};
 use ractor::{call_t, ActorRef};
-use secp256k1::{PublicKey, Secp256k1, SecretKey};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use std::str::FromStr;
-use std::time::Duration;
-use tentacle::secio::SecioKeyPair;
 
 const RPC_TIMEOUT_MS: u64 = 3000;
 
 /// The parameter struct for generating a new invoice.
 #[serde_as]
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct NewInvoiceParams {
     /// The amount of the invoice.
     #[serde_as(as = "U128Hex")]
@@ -30,7 +24,7 @@ pub struct NewInvoiceParams {
     /// The description of the invoice.
     pub description: Option<String>,
     /// The currency of the invoice.
-    pub currency: Currency,
+    pub currency: Option<Currency>,
     /// The payment preimage of the invoice, may be empty for a hold invoice.
     pub payment_preimage: Option<Hash256>,
     /// The payment hash of the invoice, must be given when payment_preimage is empty.
@@ -47,6 +41,44 @@ pub struct NewInvoiceParams {
     pub udt_type_script: Option<Script>,
     /// The hash algorithm of the invoice.
     pub hash_algorithm: Option<HashAlgorithm>,
+    /// Whether to save the invoice to the store, default is true.
+    pub save_to_store: Option<bool>,
+}
+
+impl From<NewInvoiceCommand> for NewInvoiceParams {
+    fn from(command: NewInvoiceCommand) -> Self {
+        Self {
+            amount: command.amount,
+            description: command.description,
+            currency: command.currency,
+            payment_preimage: command.payment_preimage,
+            payment_hash: command.payment_hash,
+            expiry: command.expiry,
+            fallback_address: command.fallback_address,
+            final_expiry_delta: command.final_expiry_delta,
+            udt_type_script: command.udt_type_script.map(Script::from),
+            hash_algorithm: command.hash_algorithm,
+            save_to_store: command.save_to_store,
+        }
+    }
+}
+
+impl From<NewInvoiceParams> for NewInvoiceCommand {
+    fn from(params: NewInvoiceParams) -> Self {
+        Self {
+            amount: params.amount,
+            description: params.description,
+            currency: params.currency,
+            payment_preimage: params.payment_preimage,
+            payment_hash: params.payment_hash,
+            expiry: params.expiry,
+            fallback_address: params.fallback_address,
+            final_expiry_delta: params.final_expiry_delta,
+            udt_type_script: params.udt_type_script.map(ckb_types::packed::Script::from),
+            hash_algorithm: params.hash_algorithm,
+            save_to_store: params.save_to_store,
+        }
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -151,44 +183,14 @@ trait InvoiceRpc {
 
 pub(crate) struct InvoiceRpcServerImpl<S> {
     store: S,
-    network_actor: Option<ActorRef<NetworkActorMessage>>,
-    keypair: Option<(PublicKey, SecretKey)>,
-    currency: Option<Currency>,
+    network_actor: ActorRef<NetworkActorMessage>,
 }
 
 impl<S> InvoiceRpcServerImpl<S> {
-    pub(crate) fn new(
-        store: S,
-        network_actor: Option<ActorRef<NetworkActorMessage>>,
-        config: Option<FiberConfig>,
-    ) -> Self {
-        let config = config.map(|config| {
-            let kp = config
-                .read_or_generate_secret_key()
-                .expect("read or generate secret key");
-            let private_key: Privkey = <[u8; 32]>::try_from(kp.as_ref())
-                .expect("valid length for key")
-                .into();
-            let secio_kp = SecioKeyPair::from(kp);
-            let keypair = (
-                PublicKey::from_slice(secio_kp.public_key().inner_ref()).expect("valid public key"),
-                private_key.into(),
-            );
-
-            // restrict currency to be the same as network
-            let currency = match config.chain.as_str() {
-                "mainnet" => Currency::Fibb,
-                "testnet" => Currency::Fibt,
-                _ => Currency::Fibd,
-            };
-
-            (keypair, currency)
-        });
+    pub(crate) fn new(store: S, network_actor: ActorRef<NetworkActorMessage>) -> Self {
         Self {
             store,
             network_actor,
-            keypair: config.as_ref().map(|(kp, _)| *kp),
-            currency: config.as_ref().map(|(_, currency)| *currency),
         }
     }
 }
@@ -202,82 +204,28 @@ where
         &self,
         params: NewInvoiceParams,
     ) -> Result<InvoiceResult, ErrorObjectOwned> {
-        if let Some(currency) = self.currency {
-            if currency != params.currency {
-                return Err(ErrorObjectOwned::owned(
+        let message = |rpc_reply| -> NetworkActorMessage {
+            NetworkActorMessage::Command(NetworkActorCommand::NewInvoice(
+                params.clone().into(),
+                rpc_reply,
+            ))
+        };
+
+        call_t!(&self.network_actor, message, RPC_TIMEOUT_MS)
+            .map_err(|ractor_error| {
+                ErrorObjectOwned::owned(
                     CALL_EXECUTION_FAILED_CODE,
-                    format!("Currency must be {:?} with the chain network", currency),
-                    Some(params),
-                ));
-            }
-        }
-        let mut invoice_builder = InvoiceBuilder::new(params.currency).amount(Some(params.amount));
-
-        if let Some(preimage) = params.payment_preimage {
-            invoice_builder = invoice_builder.payment_preimage(preimage);
-        }
-        if let Some(hash) = params.payment_hash {
-            invoice_builder = invoice_builder.payment_hash(hash);
-        }
-        if let Some(description) = params.description.clone() {
-            invoice_builder = invoice_builder.description(description);
-        };
-        if let Some(expiry) = params.expiry {
-            let duration: Duration = Duration::from_secs(expiry);
-            invoice_builder = invoice_builder.expiry_time(duration);
-        };
-        if let Some(fallback_address) = params.fallback_address.clone() {
-            invoice_builder = invoice_builder.fallback_address(fallback_address);
-        };
-        if let Some(final_expiry_delta) = params.final_expiry_delta {
-            if final_expiry_delta < MIN_TLC_EXPIRY_DELTA {
-                return Err(ErrorObjectOwned::owned(
-                    CALL_EXECUTION_FAILED_CODE,
-                    format!(
-                        "final_expiry_delta must be greater than or equal to {}",
-                        MIN_TLC_EXPIRY_DELTA
-                    ),
-                    Some(params),
-                ));
-            }
-            invoice_builder = invoice_builder.final_expiry_delta(final_expiry_delta);
-        };
-        if let Some(udt_type_script) = &params.udt_type_script {
-            invoice_builder = invoice_builder.udt_type_script(udt_type_script.clone().into());
-        };
-        if let Some(hash_algorithm) = params.hash_algorithm {
-            invoice_builder = invoice_builder.hash_algorithm(hash_algorithm);
-        };
-
-        let invoice = if let Some((public_key, secret_key)) = &self.keypair {
-            invoice_builder = invoice_builder.payee_pub_key(*public_key);
-            invoice_builder
-                .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, secret_key))
-        } else {
-            invoice_builder.build()
-        };
-
-        match invoice {
-            Ok(invoice) => match add_invoice(&self.store, invoice.clone(), params.payment_preimage)
-            {
-                Ok(_) => Ok(InvoiceResult {
-                    invoice_address: invoice.to_string(),
-                    invoice,
-                }),
-                Err(e) => {
-                    return Err(ErrorObjectOwned::owned(
-                        CALL_EXECUTION_FAILED_CODE,
-                        e.to_string(),
-                        Some(params),
-                    ))
-                }
-            },
-            Err(e) => Err(ErrorObjectOwned::owned(
-                CALL_EXECUTION_FAILED_CODE,
-                e.to_string(),
-                Some(params),
-            )),
-        }
+                    ractor_error.to_string(),
+                    Option::<()>::None,
+                )
+            })?
+            .map_err(|err| {
+                ErrorObjectOwned::owned(CALL_EXECUTION_FAILED_CODE, err.to_string(), Some(params))
+            })
+            .map(|invoice| InvoiceResult {
+                invoice_address: invoice.to_string(),
+                invoice,
+            })
     }
 
     async fn add_invoice(
@@ -395,12 +343,6 @@ where
         &self,
         params: SettleInvoiceParams,
     ) -> Result<SettleInvoiceResult, ErrorObjectOwned> {
-        let network_actor = self.network_actor.as_ref().ok_or(ErrorObjectOwned::owned(
-            CALL_EXECUTION_FAILED_CODE,
-            "network actor not initialized".to_string(),
-            Option::<()>::None,
-        ))?;
-
         let SettleInvoiceParams {
             ref payment_hash,
             ref payment_preimage,
@@ -414,7 +356,7 @@ where
             ))
         };
 
-        match call_t!(network_actor, message, RPC_TIMEOUT_MS).map_err(|ractor_error| {
+        match call_t!(&self.network_actor, message, RPC_TIMEOUT_MS).map_err(|ractor_error| {
             ErrorObjectOwned::owned(
                 CALL_EXECUTION_FAILED_CODE,
                 ractor_error.to_string(),

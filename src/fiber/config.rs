@@ -1,4 +1,4 @@
-use crate::{ckb::contracts::Contract, Result};
+use crate::{ckb::contracts::Contract, invoice::Currency, Result};
 use ckb_jsonrpc_types::{CellDep, Script};
 use clap_serde_derive::{
     clap::{self},
@@ -475,6 +475,14 @@ impl FiberConfig {
     pub fn sync_network_graph(&self) -> bool {
         self.sync_network_graph
             .unwrap_or(DEFAULT_SYNC_NETWORK_GRAPH)
+    }
+
+    pub fn invoice_currency(&self) -> Currency {
+        match self.chain.as_str() {
+            "mainnet" => Currency::Fibb,
+            "testnet" => Currency::Fibt,
+            _ => Currency::Fibd,
+        }
     }
 }
 

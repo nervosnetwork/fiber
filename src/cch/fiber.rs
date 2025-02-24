@@ -225,6 +225,33 @@ impl FiberBackend {
         }
     }
 
+    pub async fn new_invoice(&mut self, invoice: CkbInvoice) -> Result<(), CchError> {
+        match self {
+            FiberBackend::InProcess(backend) => {
+                let message = move |rpc_reply| -> NetworkActorMessage {
+                    NetworkActorMessage::Command(NetworkActorCommand::AddInvoice(
+                        invoice.clone(),
+                        None,
+                        rpc_reply,
+                    ))
+                };
+
+                call!(&backend.network_actor, message).expect("call actor")?;
+                Ok(())
+            }
+            FiberBackend::Http(backend) => backend
+                .call(
+                    "add_invoice",
+                    AddInvoiceParams {
+                        invoice: invoice.to_string(),
+                    },
+                )
+                .await
+                .map(|_: InvoiceResult| ())
+                .map_err(Into::into),
+        }
+    }
+
     pub async fn add_invoice(&mut self, invoice: CkbInvoice) -> Result<(), CchError> {
         match self {
             FiberBackend::InProcess(backend) => {
