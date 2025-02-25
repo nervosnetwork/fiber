@@ -2269,7 +2269,10 @@ where
             };
 
             let (task, _) = Actor::spawn_linked(
-                Some(format!("in flight tx actor {}", tx_hash)),
+                Some(format!(
+                    "peer {} in flight tx actor {}",
+                    self.peer_id, tx_hash
+                )),
                 handler,
                 InFlightCkbTxActorArguments { transaction: None },
                 self.network.get_cell(),
@@ -2298,7 +2301,10 @@ where
                 };
 
                 let (task, _) = Actor::spawn_linked(
-                    Some(format!("in flight tx actor {}", tx_hash)),
+                    Some(format!(
+                        "peer {} in flight tx actor {}",
+                        self.peer_id, tx_hash
+                    )),
                     handler,
                     InFlightCkbTxActorArguments {
                         transaction: Some(tx),

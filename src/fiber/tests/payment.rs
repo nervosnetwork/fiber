@@ -1431,7 +1431,6 @@ async fn test_send_payment_three_nodes_send_each_other_bench_test() {
 }
 
 #[tokio::test]
-#[ignore]
 async fn test_send_payment_three_nodes_send_each_other_no_wait() {
     init_tracing();
     let _span = tracing::info_span!("node", node = "test").entered();

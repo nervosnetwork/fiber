@@ -1707,7 +1707,6 @@ async fn test_send_payment_with_rev_3_nodes() {
 }
 
 #[tokio::test]
-#[ignore]
 async fn test_send_payment_with_max_nodes() {
     init_tracing();
     let _span = tracing::info_span!("node", node = "test").entered();
