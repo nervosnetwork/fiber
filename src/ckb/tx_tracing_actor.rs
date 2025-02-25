@@ -1,5 +1,3 @@
-// TODO: integrate this actor and remove dead code warnings
-#![allow(dead_code)]
 use std::collections::HashMap;
 
 use bitmask_enum::bitmask;

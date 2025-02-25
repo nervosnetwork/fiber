@@ -2574,6 +2574,7 @@ where
         .await?;
         info!("channel {:x} reestablished successfully", &channel_id);
         self.on_channel_created(channel_id, peer_id, channel.clone());
+
         Ok(channel)
     }
 
