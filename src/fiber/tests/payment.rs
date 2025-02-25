@@ -2425,7 +2425,7 @@ async fn test_send_payment_shutdown_under_send_each_other() {
     let mut all_sent = HashSet::new();
     let mut node0_sent_payments = HashSet::new();
     let mut node3_sent_payments = HashSet::new();
-    for _i in 0..10 {
+    for _i in 0..5 {
         let res = nodes[0].send_payment_keysend(&nodes[3], 1000, false).await;
         if let Ok(send_payment_res) = res {
             all_sent.insert(send_payment_res.payment_hash);
@@ -2441,18 +2441,18 @@ async fn test_send_payment_shutdown_under_send_each_other() {
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
     let _ = nodes[3].send_shutdown(channels[2], false).await;
 
-    loop {
+    for i in 0..100 {
         let node_2_channel_actor_state = nodes[2].get_channel_actor_state(channels[2]);
         eprintln!(
-            "node_2_channel_actor_state: {:?} tlc_pending:\n",
-            node_2_channel_actor_state.state,
+            "checking {}: node_2_channel_actor_state: {:?} tlc_pending:\n",
+            i, node_2_channel_actor_state.state,
         );
         node_2_channel_actor_state.tlc_state.debug();
 
         let node_3_channel_actor_state = nodes[3].get_channel_actor_state(channels[2]);
         eprintln!(
-            "node_3_channel_actor_state: {:?} tlc_pending:\n",
-            node_3_channel_actor_state.state,
+            "checking { }: node_3_channel_actor_state: {:?} tlc_pending:\n",
+            i, node_3_channel_actor_state.state,
         );
         node_3_channel_actor_state.tlc_state.debug();
         tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;

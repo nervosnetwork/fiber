@@ -525,7 +525,8 @@ where
                 self.handle_remove_tlc_peer_message(state, remove_tlc)
             }
             FiberChannelMessage::Shutdown(shutdown) => {
-                self.handle_shutdown_peer_message(state, shutdown)
+                self.handle_shutdown_peer_message(myself, state, shutdown)
+                    .await
             }
             FiberChannelMessage::ClosingSigned(closing) => {
                 let ClosingSigned {
@@ -1058,8 +1059,9 @@ where
         Ok(())
     }
 
-    fn handle_shutdown_peer_message(
+    async fn handle_shutdown_peer_message(
         &self,
+        myself: &ActorRef<ChannelActorMessage>,
         state: &mut ChannelActorState,
         shutdown: Shutdown,
     ) -> Result<(), ProcessingChannelError> {
@@ -1117,8 +1119,25 @@ where
             flags |= ShuttingDownFlags::OUR_SHUTDOWN_SENT;
             debug!("Auto accept shutdown ...");
         }
+
         state.update_state(ChannelState::ShuttingDown(flags));
+
+        let pending_ack_tlcs = state.get_ack_pending_tlcs();
+        // if there are still some TLCs are waiting for ACK, they will never be acked
+        // so we need to remove them from the channel and setting WaitingTlcAck to false
+        if !pending_ack_tlcs.is_empty() {
+            state.set_waiting_ack(&self.network, false);
+            for tlc in pending_ack_tlcs.iter() {
+                let reason = RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
+                    TlcErr::new(TlcErrorCode::TemporaryChannelFailure),
+                    &tlc.shared_secret,
+                ));
+                self.register_retryable_tlc_remove(myself, state, tlc.tlc_id, reason)
+                    .await;
+            }
+        }
         state.maybe_transition_to_shutdown(&self.network)?;
+
         Ok(())
     }
 
@@ -5053,6 +5072,22 @@ impl ChannelActorState {
             .any(|tlc| tlc.removed_reason.is_none())
     }
 
+    pub fn get_ack_pending_tlcs(&self) -> Vec<TlcInfo> {
+        self.tlc_state
+            .all_tlcs()
+            .filter(|tlc| {
+                tlc.is_received()
+                    && matches!(
+                        tlc.status.as_inbound_status(),
+                        InboundTlcStatus::RemoteAnnounced
+                            | InboundTlcStatus::AnnounceWaitPrevAck
+                            | InboundTlcStatus::AnnounceWaitAck
+                    )
+            })
+            .cloned()
+            .collect()
+    }
+
     pub fn get_local_funding_pubkey(&self) -> &Pubkey {
         &self.get_local_channel_public_keys().funding_pubkey
     }
@@ -5222,14 +5257,6 @@ impl ChannelActorState {
             self.check_tlc_limits(add_amount, is_sent)?;
         }
 
-        // if it's remove_tlc operation and the channel is shutting down, we don't need to check waiting ack.
-        // the reason is if actor status is ShuttingDown, means peer sent a shutdown or peer received shutdown message
-        // in any case two peers will not process adding tlc, is safe only open a door for removing tlc.
-        // otherwise a peer may be blocked at WaitingTlcAck and makes some tlcs are left in channel,
-        // makes normal shutdown can not move on
-        if add_tlc_amount.is_none() && matches!(self.state, ChannelState::ShuttingDown(_)) {
-            return Ok(());
-        }
         if is_tlc_command_message && self.tlc_state.waiting_ack {
             return Err(ProcessingChannelError::WaitingTlcAck);
         }
