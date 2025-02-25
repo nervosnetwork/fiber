@@ -3617,6 +3617,11 @@ impl ChannelActorState {
     }
 
     pub fn should_disconnect_peer_awaiting_response(&self) -> bool {
+        // this check only needed when other peer already shutdown force and we don't know it
+        // if we are already got in ShuttingDown, means we already in normal shutdown process
+        if matches!(self.state, ChannelState::ShuttingDown(_)) {
+            return false;
+        }
         if let Some(timestamp) = self.waiting_peer_response {
             let elapsed = now_timestamp_as_millis_u64() - timestamp;
             elapsed > PEER_CHANNEL_RESPONSE_TIMEOUT
@@ -5217,8 +5222,14 @@ impl ChannelActorState {
             self.check_tlc_limits(add_amount, is_sent)?;
         }
 
-        // check waiting ack is placed at last so that retryable operations can get the correct error
-        // we don't want to retry if there is already some other errors for the TLC
+        // if it's remove_tlc operation and the channel is shutting down, we don't need to check waiting ack.
+        // the reason is if actor status is ShuttingDown, means peer sent a shutdown or peer received shutdown message
+        // in any case two peers will not process adding tlc, is safe only open a door for removing tlc.
+        // otherwise a peer may be blocked at WaitingTlcAck and makes some tlcs are left in channel,
+        // makes normal shutdown can not move on
+        if add_tlc_amount.is_none() && matches!(self.state, ChannelState::ShuttingDown(_)) {
+            return Ok(());
+        }
         if is_tlc_command_message && self.tlc_state.waiting_ack {
             return Err(ProcessingChannelError::WaitingTlcAck);
         }
@@ -5695,9 +5706,7 @@ impl ChannelActorState {
             }
             ChannelState::ChannelReady() => CommitmentSignedFlags::ChannelReady(),
             ChannelState::ShuttingDown(flags) => {
-                if flags.contains(ShuttingDownFlags::AWAITING_PENDING_TLCS)
-                    || flags.contains(ShuttingDownFlags::OUR_SHUTDOWN_SENT)
-                {
+                if flags.contains(ShuttingDownFlags::AWAITING_PENDING_TLCS) {
                     debug!(
                         "Signing commitment transactions while shutdown is pending, current state {:?}",
                         &self.state
