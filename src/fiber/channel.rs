@@ -5826,7 +5826,7 @@ impl ChannelActorState {
 
         network
             .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::SignTx(
+                NetworkActorCommand::SignFundingTx(
                     self.get_remote_peer_id(),
                     self.get_id(),
                     funding_tx,
