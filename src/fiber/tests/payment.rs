@@ -169,6 +169,7 @@ async fn test_send_payment_fee_rate() {
         None,
         None,
         Some(2_000_000),
+        None,
     )
     .await;
     node_2.submit_tx(funding_tx_0).await;
@@ -189,6 +190,7 @@ async fn test_send_payment_fee_rate() {
         None,
         None,
         Some(4_000_000),
+        None,
     )
     .await;
     node_0.submit_tx(funding_tx_1).await;
@@ -243,6 +245,7 @@ async fn test_send_payment_over_private_channel() {
             false,
             MIN_RESERVED_CKB + 20000000000,
             MIN_RESERVED_CKB,
+            None,
             None,
             None,
             None,
@@ -1660,6 +1663,7 @@ async fn test_send_payment_max_value_in_flight_in_first_hop() {
             None,
             None,
             None,
+            None,
         )
         .await
     };
@@ -1695,6 +1699,7 @@ async fn test_send_payment_max_value_in_flight_in_first_hop() {
             HUGE_CKB_AMOUNT,
             None,
             Some(100000000 + 2),
+            None,
             None,
             None,
             None,

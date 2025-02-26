@@ -16,8 +16,8 @@ use crate::{
         hash_algorithm::HashAlgorithm,
         network::SendPaymentCommand,
         tests::test_utils::{
-            establish_udt_channel_between_nodes, init_tracing, NetworkNode,
-            NetworkNodeConfigBuilder, HUGE_CKB_AMOUNT,
+            establish_channel_between_nodes, init_tracing, NetworkNode, NetworkNodeConfigBuilder,
+            HUGE_CKB_AMOUNT,
         },
         types::Hash256,
     },
@@ -59,7 +59,7 @@ async fn do_test_cross_chain_payment_hub_send_btc(udt_script: Script, multiple_h
 
     let (hub_channel, fiber_node, mut hub) = if multiple_hops {
         let [mut fiber_node, mut middle_hop, mut hub] = nodes.try_into().expect("3 nodes");
-        let (_channel, funding_tx_1) = establish_udt_channel_between_nodes(
+        let (_channel, funding_tx_1) = establish_channel_between_nodes(
             &mut fiber_node,
             &mut middle_hop,
             true,
@@ -75,11 +75,11 @@ async fn do_test_cross_chain_payment_hub_send_btc(udt_script: Script, multiple_h
             None,
             None,
             None,
-            udt_script.clone(),
+            Some(udt_script.clone()),
         )
         .await;
         hub.submit_tx(funding_tx_1).await;
-        let (hub_channel, funding_tx_2) = establish_udt_channel_between_nodes(
+        let (hub_channel, funding_tx_2) = establish_channel_between_nodes(
             &mut middle_hop,
             &mut hub,
             true,
@@ -95,14 +95,14 @@ async fn do_test_cross_chain_payment_hub_send_btc(udt_script: Script, multiple_h
             None,
             None,
             None,
-            udt_script.clone(),
+            Some(udt_script.clone()),
         )
         .await;
         fiber_node.submit_tx(funding_tx_2).await;
         (hub_channel, fiber_node, hub)
     } else {
         let [mut fiber_node, mut hub] = nodes.try_into().expect("2 nodes");
-        let (fiber_channel, _funding_tx) = establish_udt_channel_between_nodes(
+        let (fiber_channel, _funding_tx) = establish_channel_between_nodes(
             &mut fiber_node,
             &mut hub,
             true,
@@ -118,7 +118,7 @@ async fn do_test_cross_chain_payment_hub_send_btc(udt_script: Script, multiple_h
             None,
             None,
             None,
-            udt_script.clone(),
+            Some(udt_script.clone()),
         )
         .await;
 
@@ -247,7 +247,7 @@ async fn do_test_cross_chain_payment_hub_receive_btc(udt_script: Script, multipl
 
     let (fiber_node_channel, mut fiber_node, mut hub) = if multiple_hops {
         let [mut fiber_node, mut middle_hop, mut hub] = nodes.try_into().expect("3 nodes");
-        let (fiber_node_channel, funding_tx_1) = establish_udt_channel_between_nodes(
+        let (fiber_node_channel, funding_tx_1) = establish_channel_between_nodes(
             &mut middle_hop,
             &mut fiber_node,
             true,
@@ -263,11 +263,11 @@ async fn do_test_cross_chain_payment_hub_receive_btc(udt_script: Script, multipl
             None,
             None,
             None,
-            udt_script.clone(),
+            Some(udt_script.clone()),
         )
         .await;
         hub.submit_tx(funding_tx_1).await;
-        let (_, funding_tx_2) = establish_udt_channel_between_nodes(
+        let (_, funding_tx_2) = establish_channel_between_nodes(
             &mut hub,
             &mut middle_hop,
             true,
@@ -283,14 +283,14 @@ async fn do_test_cross_chain_payment_hub_receive_btc(udt_script: Script, multipl
             None,
             None,
             None,
-            udt_script.clone(),
+            Some(udt_script.clone()),
         )
         .await;
         fiber_node.submit_tx(funding_tx_2).await;
         (fiber_node_channel, fiber_node, hub)
     } else {
         let [mut fiber_node, mut hub] = nodes.try_into().expect("2 nodes");
-        let (fiber_channel, _funding_tx) = establish_udt_channel_between_nodes(
+        let (fiber_channel, _funding_tx) = establish_channel_between_nodes(
             &mut hub,
             &mut fiber_node,
             true,
@@ -306,7 +306,7 @@ async fn do_test_cross_chain_payment_hub_receive_btc(udt_script: Script, multipl
             None,
             None,
             None,
-            udt_script.clone(),
+            Some(udt_script.clone()),
         )
         .await;
 

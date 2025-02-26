@@ -346,120 +346,6 @@ impl NetworkNodeConfigBuilder {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn establish_udt_channel_between_nodes(
-    node_a: &mut NetworkNode,
-    node_b: &mut NetworkNode,
-    public: bool,
-    node_a_funding_amount: u128,
-    node_b_funding_amount: u128,
-    a_max_tlc_number_in_flight: Option<u64>,
-    a_max_tlc_value_in_flight: Option<u128>,
-    a_tlc_expiry_delta: Option<u64>,
-    a_tlc_min_value: Option<u128>,
-    a_tlc_fee_proportional_millionths: Option<u128>,
-    b_max_tlc_number_in_flight: Option<u64>,
-    b_max_tlc_value_in_flight: Option<u128>,
-    b_tlc_expiry_delta: Option<u64>,
-    b_tlc_min_value: Option<u128>,
-    b_tlc_fee_proportional_millionths: Option<u128>,
-    udt_script: Script,
-) -> (Hash256, TransactionView) {
-    let message = |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
-            OpenChannelCommand {
-                peer_id: node_b.peer_id.clone(),
-                public,
-                shutdown_script: None,
-                funding_amount: node_a_funding_amount,
-                funding_udt_type_script: Some(udt_script),
-                commitment_fee_rate: None,
-                commitment_delay_epoch: None,
-                funding_fee_rate: None,
-                tlc_expiry_delta: a_tlc_expiry_delta,
-                tlc_min_value: a_tlc_min_value,
-                tlc_fee_proportional_millionths: a_tlc_fee_proportional_millionths,
-                max_tlc_number_in_flight: a_max_tlc_number_in_flight,
-                max_tlc_value_in_flight: a_max_tlc_value_in_flight,
-            },
-            rpc_reply,
-        ))
-    };
-    let open_channel_result = call!(node_a.network_actor, message)
-        .expect("node_a alive")
-        .expect("open channel success");
-
-    node_b
-        .expect_event(|event| match event {
-            NetworkServiceEvent::ChannelPendingToBeAccepted(peer_id, channel_id) => {
-                println!("A channel ({:?}) to {:?} create", &channel_id, peer_id);
-                assert_eq!(peer_id, &node_a.peer_id);
-                true
-            }
-            _ => false,
-        })
-        .await;
-    let message = |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::AcceptChannel(
-            AcceptChannelCommand {
-                temp_channel_id: open_channel_result.channel_id,
-                funding_amount: node_b_funding_amount,
-                shutdown_script: None,
-                max_tlc_number_in_flight: b_max_tlc_number_in_flight,
-                max_tlc_value_in_flight: b_max_tlc_value_in_flight,
-                min_tlc_value: b_tlc_min_value,
-                tlc_fee_proportional_millionths: b_tlc_fee_proportional_millionths,
-                tlc_expiry_delta: b_tlc_expiry_delta,
-            },
-            rpc_reply,
-        ))
-    };
-    let accept_channel_result = call!(node_b.network_actor, message)
-        .expect("node_b alive")
-        .expect("accept channel success");
-    let new_channel_id = accept_channel_result.new_channel_id;
-
-    let funding_tx_outpoint = node_a
-        .expect_to_process_event(|event| match event {
-            NetworkServiceEvent::ChannelReady(peer_id, channel_id, funding_tx_outpoint) => {
-                println!(
-                    "A channel ({:?}) to {:?} is now ready",
-                    &channel_id, &peer_id
-                );
-                assert_eq!(peer_id, &node_b.peer_id);
-                assert_eq!(channel_id, &new_channel_id);
-                Some(funding_tx_outpoint.clone())
-            }
-            _ => None,
-        })
-        .await;
-
-    node_b
-        .expect_event(|event| match event {
-            NetworkServiceEvent::ChannelReady(peer_id, channel_id, _funding_tx_hash) => {
-                println!(
-                    "A channel ({:?}) to {:?} is now ready",
-                    &channel_id, &peer_id
-                );
-                assert_eq!(peer_id, &node_a.peer_id);
-                assert_eq!(channel_id, &new_channel_id);
-                true
-            }
-            _ => false,
-        })
-        .await;
-
-    let funding_tx = node_a
-        .get_tx_from_hash(funding_tx_outpoint.tx_hash())
-        .await
-        .expect("tx found");
-
-    node_a.add_channel_tx(new_channel_id, funding_tx.clone());
-    node_b.add_channel_tx(new_channel_id, funding_tx.clone());
-
-    (new_channel_id, funding_tx)
-}
-
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn establish_channel_between_nodes(
     node_a: &mut NetworkNode,
     node_b: &mut NetworkNode,
@@ -476,6 +362,7 @@ pub(crate) async fn establish_channel_between_nodes(
     b_tlc_expiry_delta: Option<u64>,
     b_tlc_min_value: Option<u128>,
     b_tlc_fee_proportional_millionths: Option<u128>,
+    udt_script: Option<Script>,
 ) -> (Hash256, TransactionView) {
     let message = |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
@@ -484,7 +371,7 @@ pub(crate) async fn establish_channel_between_nodes(
                 public,
                 shutdown_script: None,
                 funding_amount: node_a_funding_amount,
-                funding_udt_type_script: None,
+                funding_udt_type_script: udt_script,
                 commitment_fee_rate: None,
                 commitment_delay_epoch: None,
                 funding_fee_rate: None,
@@ -595,6 +482,7 @@ pub(crate) async fn create_nodes_with_established_channel(
         None,
         None,
         None,
+        None,
     )
     .await;
 
@@ -664,6 +552,7 @@ pub(crate) async fn create_n_nodes_and_channels_with_index_amounts(
                 public,
                 node_a_amount,
                 node_b_amount,
+                None,
                 None,
                 None,
                 None,
@@ -1270,6 +1159,7 @@ impl NetworkNode {
             public,
             node_a_funding_amount,
             node_b_funding_amount,
+            None,
             None,
             None,
             None,

@@ -648,6 +648,7 @@ async fn test_public_channel_saved_to_the_other_nodes_graph() {
         None,
         None,
         None,
+        None,
     )
     .await;
     let status = node3.submit_tx(funding_tx).await;
@@ -688,6 +689,7 @@ async fn test_public_channel_with_unconfirmed_funding_tx() {
         true,
         node1_funding_amount,
         node2_funding_amount,
+        None,
         None,
         None,
         None,
@@ -2621,6 +2623,7 @@ async fn do_test_channel_remote_commitment_error() {
         None,
         None,
         None,
+        None,
     )
     .await;
 
@@ -3055,6 +3058,7 @@ async fn do_test_add_tlc_with_number_limit() {
         None,
         None,
         None,
+        None,
     )
     .await;
 
@@ -3137,6 +3141,7 @@ async fn do_test_add_tlc_number_limit_reverse() {
         None,
         None,
         Some(node_b_max_tlc_number),
+        None,
         None,
         None,
         None,
@@ -3226,6 +3231,7 @@ async fn do_test_add_tlc_value_limit() {
         None,
         None,
         None,
+        None,
     )
     .await;
 
@@ -3306,6 +3312,7 @@ async fn do_test_add_tlc_min_tlc_value_limit() {
         None,
         None,
         Some(100),
+        None,
         None,
         None,
         None,
@@ -3401,6 +3408,7 @@ async fn test_channel_update_tlc_expiry() {
         true,
         node_a_funding_amount,
         node_b_funding_amount,
+        None,
         None,
         None,
         None,
