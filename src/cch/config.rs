@@ -4,8 +4,6 @@ use anyhow::Context;
 use clap_serde_derive::ClapSerde;
 use lnd_grpc_tonic_client::Uri;
 
-use crate::fiber::serde_utils::deserialize_entity_from_hex_str;
-
 use super::actor::LndConnectionInfo;
 
 /// Default cross-chain order expiry time in seconds.
@@ -68,14 +66,14 @@ pub struct CchConfig {
     )]
     pub lnd_macaroon_path: Option<String>,
 
-    // TODO: use hex type
     #[arg(
         name = "CCH_WRAPPED_BTC_TYPE_SCRIPT",
         long = "cch-wrapped-btc-type-script",
         env,
+        value_parser = parse_script_from_str,
         help = "Wrapped BTC type script."
     )]
-    pub wrapped_btc_type_script: String,
+    pub wrapped_btc_type_script: ckb_jsonrpc_types::Script,
 
     /// Cross-chain order expiry time in seconds.
     #[default(DEFAULT_ORDER_EXPIRY_TIME)]
@@ -181,8 +179,7 @@ impl CchConfig {
     }
 
     pub fn get_wrapped_btc_script(&self) -> ckb_types::packed::Script {
-        deserialize_entity_from_hex_str(&self.wrapped_btc_type_script)
-            .expect("valid wrapped btc script")
+        ckb_types::packed::Script::from(self.wrapped_btc_type_script.clone())
     }
 
     pub(crate) async fn get_lnd_connection_info(&self) -> Result<LndConnectionInfo, anyhow::Error> {
@@ -195,4 +192,8 @@ impl CchConfig {
             macaroon,
         })
     }
+}
+
+fn parse_script_from_str(s: &str) -> Result<ckb_jsonrpc_types::Script, anyhow::Error> {
+    serde_json::from_str(s).map_err(Into::into)
 }

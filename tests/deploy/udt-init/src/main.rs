@@ -287,8 +287,13 @@ fn genrate_nodes_config() {
         data["rpc"]["listening_addr"] =
             serde_yaml::Value::String(format!("127.0.0.1:{}", rpc_port));
         data["ckb"]["udt_whitelist"] = serde_yaml::to_value(&udt_infos).unwrap();
-        data["cch"]["wrapped_btc_type_script"] =
-            serde_yaml::Value::String(format!("0x{}", hex::encode(get_sudt_script().as_slice())));
+        let script: serde_yaml::Mapping = serde_yaml::from_str(
+            serde_yaml::to_string(&ckb_jsonrpc_types::Script::from(get_sudt_script()))
+                .expect("save script")
+                .as_str(),
+        )
+        .expect("parse script");
+        data["cch"]["wrapped_btc_type_script"] = serde_yaml::Value::Mapping(script);
 
         // Node 3 acts as a CCH node.
         if i == 3 {
