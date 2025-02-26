@@ -1,29 +1,30 @@
-use crate::{store::migration::Migration, Error};
+use fiber::{store::migration::Migration, Error};
 use indicatif::ProgressBar;
 use rocksdb::{prelude::*, DB};
 use std::sync::Arc;
 
-const INIT_DB_VERSION: &str = "20311116135521";
+// Remember to update the version number here
+const MIGRATION_DB_VERSION: &str = "20311116135521";
 
-pub struct SampleMigration {
+pub struct MigrationObj {
     version: String,
 }
 
-impl SampleMigration {
+impl MigrationObj {
     pub fn new() -> Self {
         Self {
-            version: INIT_DB_VERSION.to_string(),
+            version: MIGRATION_DB_VERSION.to_string(),
         }
     }
 }
 
-impl Migration for SampleMigration {
+impl Migration for MigrationObj {
     fn migrate(
         &self,
         db: Arc<DB>,
         _pb: Arc<dyn Fn(u64) -> ProgressBar + Send + Sync>,
     ) -> Result<Arc<DB>, Error> {
-        eprintln!("SampleMigration::migrate ...........");
+        eprintln!("MigrationObj::migrate .....{}....", MIGRATION_DB_VERSION);
         Ok(db)
     }
 

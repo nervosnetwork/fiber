@@ -7,9 +7,8 @@ fiber:
     - "/ip4/54.179.226.154/tcp/18228/p2p/QmdyQWjPtbK4NWWsvy8s69NGJaQULwgeQDT5ZpNDrTNaeV"
   announce_listening_addr: true
   announced_addrs:
-    # If you want to announce your fiber node public address to the network, you need to add the address here.
-    # You can find this value in the `addresses` field returned by the `node_info` rpc, and change the ip to your public ip accordingly.
-    # - "/ip4/YOUR-FIBER-NODE-PUBLIC-IP/tcp/8228/p2p/YOUR-FIBER-NODE-PEER-ID"
+    # If you want to announce your fiber node public address to the network, you need to add the address here, please change the ip to your public ip accordingly.
+    # - "/ip4/YOUR-FIBER-NODE-PUBLIC-IP/tcp/8228"
   chain: testnet
   # lock script configurations related to fiber network
   # https://github.com/nervosnetwork/fiber-scripts/blob/main/deployment/testnet/migrations/2024-09-14-084742.json

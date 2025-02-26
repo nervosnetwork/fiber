@@ -86,7 +86,7 @@ pub trait GossipMessageStore {
     ) -> Vec<BroadcastMessageWithTimestamp> {
         self.get_broadcast_messages_iter(after_cursor)
             .into_iter()
-            .take(count.unwrap_or(DEFAULT_NUM_OF_BROADCAST_MESSAGE as u16) as usize)
+            .take(count.unwrap_or(DEFAULT_NUM_OF_BROADCAST_MESSAGE) as usize)
             .collect()
     }
 
@@ -121,10 +121,10 @@ pub trait GossipMessageStore {
                 }),
             BroadcastMessageQueryFlags::ChannelUpdateOfNode1 => self
                 .get_latest_channel_update(&query.channel_outpoint, true)
-                .map(|channel_update| BroadcastMessageWithTimestamp::ChannelUpdate(channel_update)),
+                .map(BroadcastMessageWithTimestamp::ChannelUpdate),
             BroadcastMessageQueryFlags::ChannelUpdateOfNode2 => self
                 .get_latest_channel_update(&query.channel_outpoint, false)
-                .map(|channel_update| BroadcastMessageWithTimestamp::ChannelUpdate(channel_update)),
+                .map(BroadcastMessageWithTimestamp::ChannelUpdate),
 
             BroadcastMessageQueryFlags::NodeAnnouncementNode1
             | BroadcastMessageQueryFlags::NodeAnnouncementNode2 => self
@@ -136,7 +136,7 @@ pub trait GossipMessageStore {
                         &channel_announcement.node2_id
                     };
                     self.get_latest_node_announcement(node)
-                        .map(|m| BroadcastMessageWithTimestamp::NodeAnnouncement(m))
+                        .map(BroadcastMessageWithTimestamp::NodeAnnouncement)
                 }),
         }
     }
@@ -167,11 +167,11 @@ pub trait GossipMessageStore {
                  self.get_broadcast_message_with_cursor(&Cursor::new(
                     timestamp,
                     BroadcastMessageID::ChannelAnnouncement(outpoint.clone()),
-                )).and_then(|message| match message {
+                )).map(|message| match message {
                     BroadcastMessageWithTimestamp::ChannelAnnouncement(
                         _,
                         channel_announcement,
-                    ) => Some((timestamp, channel_announcement)),
+                    ) => (timestamp, channel_announcement),
                     _ => panic!(
                         "get_latest_channel_announcement returned non-ChannelAnnouncement message from db: channel outpoint {:?}, message {:?}", outpoint, message
                     ),
@@ -189,8 +189,8 @@ pub trait GossipMessageStore {
                  self.get_broadcast_message_with_cursor(&Cursor::new(
                     timestamp,
                     BroadcastMessageID::ChannelUpdate(outpoint.clone()),
-                )).and_then(|message| match message {
-                    BroadcastMessageWithTimestamp::ChannelUpdate(channel_update) => Some(channel_update),
+                )).map(|message| match message {
+                    BroadcastMessageWithTimestamp::ChannelUpdate(channel_update) => channel_update,
                     _ => panic!("get_latest_channel_update returned non-ChannelUpdate message from db: channel outpoint {:?}, is_node1 {:?}, message {:?}", outpoint, is_node1, message),
                 })
             })
@@ -200,10 +200,10 @@ pub trait GossipMessageStore {
         self.get_latest_node_announcement_timestamp(pk).and_then(|timestamp| {
             self.get_broadcast_message_with_cursor(&Cursor::new(
                 timestamp,
-                BroadcastMessageID::NodeAnnouncement(pk.clone()),
-            )).and_then(|message|
+                BroadcastMessageID::NodeAnnouncement(*pk),
+            )).map(|message|
                     match message {
-                    BroadcastMessageWithTimestamp::NodeAnnouncement(node_announcement) => Some(node_announcement),
+                    BroadcastMessageWithTimestamp::NodeAnnouncement(node_announcement) => node_announcement,
                     _ => panic!("get_lastest_node_announcement returned non-NodeAnnouncement message from db: pk {:?}, message {:?}", pk, message),
                     }
                 )
@@ -809,24 +809,15 @@ enum PeerSyncStatus {
 
 impl PeerSyncStatus {
     fn is_passive_syncing(&self) -> bool {
-        match self {
-            PeerSyncStatus::PassiveFilter(_) => true,
-            _ => false,
-        }
+        matches!(self, PeerSyncStatus::PassiveFilter(_))
     }
 
     fn is_active_syncing(&self) -> bool {
-        match self {
-            PeerSyncStatus::ActiveGet(_) => true,
-            _ => false,
-        }
+        matches!(self, PeerSyncStatus::ActiveGet(_))
     }
 
     fn is_finished_active_syncing(&self) -> bool {
-        match self {
-            PeerSyncStatus::FinishedActiveSyncing(_, _) => true,
-            _ => false,
-        }
+        matches!(self, PeerSyncStatus::FinishedActiveSyncing(_, _))
     }
 
     fn can_start_active_syncing(&self) -> bool {
@@ -866,11 +857,8 @@ impl Drop for PeerState {
                 .actor
                 .stop(Some("peer state dropped".to_string()));
         }
-        match &self.sync_status {
-            PeerSyncStatus::ActiveGet(actor) => {
-                actor.stop(Some("peer state dropped".to_string()));
-            }
-            _ => {}
+        if let PeerSyncStatus::ActiveGet(actor) = &self.sync_status {
+            actor.stop(Some("peer state dropped".to_string()));
         }
     }
 }
@@ -1156,7 +1144,7 @@ impl<S: GossipMessageStore> ExtendedGossipMessageStoreState<S> {
         for (id, subscription) in self.output_ports.iter() {
             let messages_to_send = messages
                 .iter()
-                .filter(|m| &m.cursor() > &subscription.filter)
+                .filter(|m| m.cursor() > subscription.filter)
                 .cloned()
                 .collect::<Vec<_>>();
             trace!(
@@ -1462,10 +1450,9 @@ impl<S: GossipMessageStore + Send + Sync + 'static> Actor for ExtendedGossipMess
 
                 match cursor {
                     Some(cursor) => {
-                        state
-                            .output_ports
-                            .get_mut(&id)
-                            .map(|output| output.filter = cursor);
+                        if let Some(outpout) = state.output_ports.get_mut(&id) {
+                            outpout.filter = cursor;
+                        }
                     }
                     _ => {
                         state.output_ports.remove(&id);
@@ -1886,7 +1873,7 @@ async fn get_message_cursor<S: GossipMessageStore>(
         )),
         BroadcastMessage::NodeAnnouncement(node_announcement) => Ok(Cursor::new(
             node_announcement.timestamp,
-            BroadcastMessageID::NodeAnnouncement(node_announcement.node_id.clone()),
+            BroadcastMessageID::NodeAnnouncement(node_announcement.node_id),
         )),
     }
 }
@@ -2002,7 +1989,7 @@ async fn get_channel_timestamp<S: GossipMessageStore>(
     store: &S,
     chain: &ActorRef<CkbChainMessage>,
 ) -> Result<u64, Error> {
-    if let Some((timestamp, _)) = store.get_latest_channel_announcement(&outpoint) {
+    if let Some((timestamp, _)) = store.get_latest_channel_announcement(outpoint) {
         return Ok(timestamp);
     }
 
@@ -2246,16 +2233,16 @@ fn verify_node_announcement<S: GossipMessageStore>(
             )));
         }
     }
-    let message = node_announcement.message_to_sign();
-    match node_announcement.signature {
-        Some(ref signature) if signature.verify(&node_announcement.node_id, &message) => Ok(false),
-        _ => Err(Error::InvalidParameter(format!(
-            "Node announcement message signature verification failed: {:?}",
-            &node_announcement
-        ))),
+    if !node_announcement.verify() {
+        Err(Error::InvalidParameter(
+            "Node announcement message signature verification failed".to_string(),
+        ))
+    } else {
+        Ok(false)
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 impl GossipProtocolHandle {
     pub(crate) fn new(
         actor: ActorRef<GossipActorMessage>,
@@ -2325,7 +2312,7 @@ where
             myself.get_cell(),
         )
         .await;
-        if let Err(_) = tx.send(store.clone()) {
+        if tx.send(store.clone()).is_err() {
             panic!("failed to send store to the caller");
         }
 
@@ -2348,7 +2335,7 @@ where
             }
         });
 
-        let _ = myself.send_interval(network_maintenance_interval, || {
+        myself.send_interval(network_maintenance_interval, || {
             GossipActorMessage::TickNetworkMaintenance
         });
         let state = Self::State {
@@ -2562,7 +2549,7 @@ where
                         let id = get_broadcast_messages.id;
                         let messages = state.get_store().get_broadcast_messages(
                             &get_broadcast_messages.after_cursor,
-                            Some(get_broadcast_messages.count as u16),
+                            Some(get_broadcast_messages.count),
                         );
                         let result =
                             GossipMessage::GetBroadcastMessagesResult(GetBroadcastMessagesResult {
@@ -2614,7 +2601,7 @@ where
                             QueryBroadcastMessagesResult {
                                 id,
                                 messages: results.into_iter().map(|m| m.into()).collect(),
-                                missing_queries: missing_queries,
+                                missing_queries,
                             },
                         );
                         if let Err(error) = state.send_message_to_peer(&peer_id, result).await {
@@ -2647,7 +2634,7 @@ impl ServiceProtocol for GossipProtocolHandle {
             .sender
             .take()
             .expect("service control sender set and init called once");
-        if let Err(_) = sender.send(context.control().clone()) {
+        if sender.send(context.control().clone()).is_err() {
             panic!("Failed to send service control");
         }
     }
@@ -2685,7 +2672,7 @@ impl ServiceProtocol for GossipProtocolHandle {
 
         match context.session.remote_pubkey.as_ref() {
             Some(remote_pubkey) => {
-                let remote_peer_id = PeerId::from_public_key(&remote_pubkey);
+                let remote_peer_id = PeerId::from_public_key(remote_pubkey);
                 let _ = self
                     .actor
                     .send_message(GossipActorMessage::PeerDisconnected(

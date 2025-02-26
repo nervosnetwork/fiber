@@ -91,11 +91,10 @@ fn create_fake_channel_announcement_mesage(
 
 fn create_node_announcement_mesage_with_priv_key(priv_key: &Privkey) -> NodeAnnouncement {
     let node_name = "fake node";
-    let addresses =
-        vec!["/ip4/1.1.1.1/tcp/8346/p2p/QmaFDJb9CkMrXy7nhTWBY5y9mvuykre3EzzRsCJUAVXprZ"]
-            .iter()
-            .map(|x| MultiAddr::from_str(x).expect("valid multiaddr"))
-            .collect();
+    let addresses = ["/ip4/1.1.1.1/tcp/8346/p2p/QmaFDJb9CkMrXy7nhTWBY5y9mvuykre3EzzRsCJUAVXprZ"]
+        .iter()
+        .map(|x| MultiAddr::from_str(x).expect("valid multiaddr"))
+        .collect();
     NodeAnnouncement::new(
         node_name.into(),
         addresses,
@@ -221,7 +220,7 @@ async fn test_sync_channel_announcement_on_startup() {
                 .lock(ScriptBuilder::default().args(pubkey_hash.pack()).build())
                 .build(),
         )
-        .output_data(vec![0u8; 8].pack())
+        .output_data([0u8; 8].pack())
         .build();
     let outpoint = tx.output_pts()[0].clone();
     let (node_announcement_1, node_announcement_2, channel_announcement) =
@@ -592,6 +591,20 @@ async fn test_sync_node_announcement_on_startup() {
     assert!(node_info.is_some());
 }
 
+#[tokio::test]
+async fn test_sync_node_announcement_of_connected_nodes() {
+    let [node1, node2] = NetworkNode::new_n_interconnected_nodes().await;
+
+    // Wait for the broadcast message to be processed.
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+    let node_info = node1.get_network_graph_node(&node2.get_public_key()).await;
+    assert!(node_info.is_some());
+
+    let node_info = node2.get_network_graph_node(&node1.get_public_key()).await;
+    assert!(node_info.is_some());
+}
+
 // Test that we can sync the network graph with peers.
 // We will first create a node and announce a fake node announcement to the network.
 // Then we will create another node and connect to the first node.
@@ -686,7 +699,7 @@ async fn test_persisting_announced_nodes() {
     let peers = node
         .with_network_graph(|graph| graph.sample_n_peers_to_connect(1))
         .await;
-    assert!(peers.get(&peer_id).is_some());
+    assert!(peers.contains_key(&peer_id));
 }
 
 #[tokio::test]
@@ -749,7 +762,7 @@ fn test_announcement_message_serialize() {
                 .lock(ScriptBuilder::default().args(pubkey_hash.pack()).build())
                 .build(),
         )
-        .output_data(vec![0u8; 8].pack())
+        .output_data([0u8; 8].pack())
         .build();
     let outpoint = tx.output_pts()[0].clone();
     let (_, _, mut channel_announcement) =
@@ -763,7 +776,7 @@ fn test_announcement_message_serialize() {
 
     let shutdown_info = ShutdownInfo {
         close_script: ScriptBuilder::default().build(),
-        fee_rate: 100 as u64,
+        fee_rate: 100_u64,
         signature: Some(PartialSignature::max()),
     };
     let serialized = bincode::serialize(&shutdown_info).unwrap();

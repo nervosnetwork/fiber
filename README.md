@@ -56,7 +56,22 @@ The current state of the FNN is not stable, the protocol and storage format may 
 rm -rf /folder-to/my-fnn/fiber/store
 ```
 
-3. Repalce the binary with the new version and start the node again.
+3. Repalce the fnn binary with the new version and start the node again.
+
+
+If you want to keep the channel state, you may try to migrate the storage format manually:
+
+1. Stop the node.
+
+2. Backup the storage folder `/folder-to/my-fnn/fiber/store`.
+
+3. Run the fnn-migrate (it can be found in the release binary package) to migrate the storage format:
+
+```
+fnn-migrate -p /folder-to/my-fnn/fiber/store
+```
+
+4. Repalce the fnn binary with the new version and start the node again.
 
 ## Documentation
 
@@ -64,6 +79,8 @@ rm -rf /folder-to/my-fnn/fiber/store
 * [RPC Documentation](./src/rpc/README.md)
 * [P2P Message Protocol](./docs/specs/p2p-message.md)
 * [Invoice Protocol](./docs/specs/payment-invoice.md)
+
+**We are in a actively developing stage, don't hesitate to [report issues](https://github.com/nervosnetwork/fiber/issues) or ask for help in the [channel of the Nervos dev community](https://discord.gg/c5gntbFd).**
 
 ## Testnet deployment information
 

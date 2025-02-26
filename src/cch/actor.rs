@@ -594,7 +594,7 @@ impl CchActor {
                                     + self.config.ckb_final_tlc_expiry_delta,
                                 hash_algorithm: HashAlgorithm::Sha256,
                                 onion_packet: None,
-                                shared_secret: NO_SHARED_SECRET.clone(),
+                                shared_secret: NO_SHARED_SECRET,
                                 previous_tlc: None,
                             },
                             rpc_reply,

@@ -59,7 +59,7 @@ pub fn gen_rand_node_announcement() -> (Privkey, NodeAnnouncement) {
 
 pub fn gen_node_announcement_from_privkey(sk: &Privkey) -> NodeAnnouncement {
     NodeAnnouncement::new(
-        AnnouncedNodeName::from_str("node1").expect("valid name"),
+        AnnouncedNodeName::from_string("node1").expect("valid name"),
         vec![],
         sk,
         now_timestamp_as_millis_u64(),

@@ -123,7 +123,7 @@ fn test_history_internal_result() {
         .get(&(channel_outpoint.clone(), direction))
         .unwrap();
     assert_eq!(res.amount, 0);
-    assert_eq!(res.success, false);
+    assert!(!res.success);
     assert_ne!(res.time, 0);
 
     let res = internal_result
@@ -131,7 +131,7 @@ fn test_history_internal_result() {
         .get(&(channel_outpoint.clone(), rev_direction))
         .unwrap();
     assert_eq!(res.amount, 0);
-    assert_eq!(res.success, false);
+    assert!(!res.success);
     assert_ne!(res.time, 0);
 
     internal_result.add_fail_pair_balanced(from, target, channel_outpoint.clone(), 100);
@@ -141,7 +141,7 @@ fn test_history_internal_result() {
         .get(&(channel_outpoint, direction))
         .unwrap();
     assert_eq!(res.amount, 100);
-    assert_eq!(res.success, false);
+    assert!(!res.success);
 }
 
 #[test]
@@ -175,14 +175,14 @@ fn test_history_internal_result_fail_pair() {
         .get(&(channel_outpoint.clone(), direction))
         .unwrap();
     assert_eq!(res.amount, 0);
-    assert_eq!(res.success, false);
+    assert!(!res.success);
 
     let res = internal_result
         .pairs
         .get(&(channel_outpoint, rev_direction))
         .unwrap();
     assert_eq!(res.amount, 0);
-    assert_eq!(res.success, false);
+    assert!(!res.success);
 }
 
 #[test]
@@ -221,13 +221,13 @@ fn test_history_internal_result_success_range_pair() {
         .get(&(channel_outpoint1, direction1))
         .unwrap();
     assert_eq!(res.amount, 10);
-    assert_eq!(res.success, true);
+    assert!(res.success);
     let res = internal_result
         .pairs
         .get(&(channel_outpoint2, direction2))
         .unwrap();
     assert_eq!(res.amount, 5);
-    assert_eq!(res.success, true);
+    assert!(res.success);
 }
 
 #[test]
@@ -267,28 +267,27 @@ fn test_history_internal_result_fail_range_pair() {
         .get(&(channel_outpoint1.clone(), direction1))
         .unwrap();
     assert_eq!(res.amount, 0);
-    assert_eq!(res.success, false);
+    assert!(!res.success);
     let res = internal_result
         .pairs
         .get(&(channel_outpoint1.clone(), rev_direction1))
         .unwrap();
     assert_eq!(res.amount, 0);
-    assert_eq!(res.success, false);
+    assert!(!res.success);
     let res = internal_result
         .pairs
         .get(&(channel_outpoint2.clone(), direction2))
         .unwrap();
     assert_eq!(res.amount, 0);
-    assert_eq!(res.success, false);
+    assert!(!res.success);
     let res = internal_result
         .pairs
         .get(&(channel_outpoint2.clone(), rev_direction2))
         .unwrap();
     assert_eq!(res.amount, 0);
-    assert_eq!(res.success, false);
+    assert!(!res.success);
 
-    let mut history =
-        PaymentHistory::new(gen_rand_fiber_public_key().into(), None, generate_store());
+    let mut history = PaymentHistory::new(gen_rand_fiber_public_key(), None, generate_store());
     history.apply_internal_result(internal_result);
 
     assert!(matches!(
@@ -335,8 +334,7 @@ fn test_history_internal_result_fail_range_pair() {
 #[test]
 fn test_history_apply_internal_result_fail_node() {
     let mut internal_result = InternalResult::default();
-    let mut history =
-        PaymentHistory::new(gen_rand_fiber_public_key().into(), None, generate_store());
+    let mut history = PaymentHistory::new(gen_rand_fiber_public_key(), None, generate_store());
     let node1 = gen_rand_fiber_public_key();
     let node2 = gen_rand_fiber_public_key();
     let node3 = gen_rand_fiber_public_key();
@@ -399,6 +397,7 @@ fn test_history_apply_internal_result_fail_node() {
             ..
         })
     ));
+
     assert!(matches!(
         history.get_result(&channel_outpoint1, rev_direction1),
         Some(&TimedResult {
@@ -432,8 +431,7 @@ fn test_history_apply_internal_result_fail_node() {
 #[test]
 fn test_history_fail_node_with_multiple_channels() {
     let mut internal_result = InternalResult::default();
-    let mut history =
-        PaymentHistory::new(gen_rand_fiber_public_key().into(), None, generate_store());
+    let mut history = PaymentHistory::new(gen_rand_fiber_public_key(), None, generate_store());
     let node1 = gen_rand_fiber_public_key();
     let node2 = gen_rand_fiber_public_key();
     let node3 = gen_rand_fiber_public_key();
@@ -526,15 +524,13 @@ fn test_history_fail_node_with_multiple_channels() {
         })
     ));
 
-    assert!(matches!(
-        history.get_result(&channel_outpoint1, rev_direction1),
-        None,
-    ));
+    assert!(history
+        .get_result(&channel_outpoint1, rev_direction1)
+        .is_none());
 
-    assert!(matches!(
-        history.get_result(&channel_outpoint2, rev_direction2),
-        None,
-    ));
+    assert!(history
+        .get_result(&channel_outpoint2, rev_direction2)
+        .is_none());
 
     assert!(matches!(
         history.get_result(&channel_outpoint3, direction1),
@@ -575,8 +571,7 @@ fn test_history_fail_node_with_multiple_channels() {
 
 #[test]
 fn test_history_interal_success_fail() {
-    let mut history =
-        PaymentHistory::new(gen_rand_fiber_public_key().into(), None, generate_store());
+    let mut history = PaymentHistory::new(gen_rand_fiber_public_key(), None, generate_store());
     let from = gen_rand_fiber_public_key();
     let target = gen_rand_fiber_public_key();
     let channel_outpoint = OutPoint::default();
@@ -638,9 +633,102 @@ fn test_history_interal_success_fail() {
 }
 
 #[test]
+fn test_history_interal_fuzz_assertion_crash() {
+    let mut history = PaymentHistory::new(gen_rand_fiber_public_key(), None, generate_store());
+    let from = gen_rand_fiber_public_key();
+    let target = gen_rand_fiber_public_key();
+    let channel_outpoint = OutPoint::default();
+    let (direction, _) = output_direction(from, target);
+
+    let result = TimedResult {
+        fail_time: 1,
+        fail_amount: 2,
+        success_time: 3,
+        success_amount: 4,
+    };
+
+    history.add_result(channel_outpoint.clone(), direction, result);
+
+    let mut now = 0;
+    for _i in 0..10000 {
+        let rand_amount = rand::random::<u64>() % 1000;
+        let rand_succ = rand::random::<bool>();
+        eprintln!("rand_amount: {}, rand_succ: {}", rand_amount, rand_succ);
+        now += 60_001;
+        history.apply_pair_result(
+            channel_outpoint.clone(),
+            direction,
+            rand_amount.into(),
+            rand_succ,
+            now,
+        );
+    }
+}
+
+#[test]
+fn test_history_interal_fail_zero_after_succ() {
+    let mut history = PaymentHistory::new(gen_rand_fiber_public_key(), None, generate_store());
+    let from = gen_rand_fiber_public_key();
+    let target = gen_rand_fiber_public_key();
+    let channel_outpoint = OutPoint::default();
+    let (direction, _) = output_direction(from, target);
+
+    let result = TimedResult {
+        fail_time: 1,
+        fail_amount: 2,
+        success_time: 3,
+        success_amount: 4,
+    };
+
+    history.add_result(channel_outpoint.clone(), direction, result);
+
+    history.apply_pair_result(channel_outpoint.clone(), direction, 0, false, 10);
+    assert_eq!(
+        history.get_result(&channel_outpoint, direction),
+        Some(&TimedResult {
+            fail_time: 10,
+            fail_amount: 0,
+            success_time: 3,
+            success_amount: 0, // set to be zero
+        })
+    );
+}
+
+#[test]
+fn test_history_interal_keep_valid_range() {
+    let mut history = PaymentHistory::new(gen_rand_fiber_public_key(), None, generate_store());
+    let from = gen_rand_fiber_public_key();
+    let target = gen_rand_fiber_public_key();
+    let channel_outpoint = OutPoint::default();
+    let (direction, _) = output_direction(from, target);
+
+    let result = TimedResult {
+        fail_time: 1,
+        fail_amount: 2,
+        success_time: 3,
+        success_amount: 4,
+    };
+
+    history.add_result(channel_outpoint.clone(), direction, result);
+
+    history.apply_pair_result(channel_outpoint.clone(), direction, 100, true, 10);
+    history.apply_pair_result(channel_outpoint.clone(), direction, 102, false, 10 + 6001);
+    history.apply_pair_result(channel_outpoint.clone(), direction, 90, true, 10 + 6001 * 2);
+
+    assert_eq!(
+        history.get_result(&channel_outpoint, direction),
+        Some(&TimedResult {
+            fail_time: 1,
+            fail_amount: 101,
+            success_time: 12012,
+            success_amount: 100
+        })
+    );
+}
+
+#[test]
 fn test_history_probability() {
-    let mut history =
-        PaymentHistory::new(gen_rand_fiber_public_key().into(), None, generate_store());
+    let mut history = PaymentHistory::new(gen_rand_fiber_public_key(), None, generate_store());
     let from = gen_rand_fiber_public_key();
     let target = gen_rand_fiber_public_key();
     let channel_outpoint = OutPoint::default();
@@ -729,8 +817,7 @@ fn test_history_probability() {
 
 #[test]
 fn test_history_direct_probability() {
-    let mut history =
-        PaymentHistory::new(gen_rand_fiber_public_key().into(), None, generate_store());
+    let mut history = PaymentHistory::new(gen_rand_fiber_public_key(), None, generate_store());
     let from = gen_rand_fiber_public_key();
     let target = gen_rand_fiber_public_key();
     let channel_outpoint = OutPoint::default();
@@ -790,8 +877,7 @@ fn test_history_direct_probability() {
 
 #[test]
 fn test_history_small_fail_amount_probability() {
-    let mut history =
-        PaymentHistory::new(gen_rand_fiber_public_key().into(), None, generate_store());
+    let mut history = PaymentHistory::new(gen_rand_fiber_public_key(), None, generate_store());
     let from = gen_rand_fiber_public_key();
     let target = gen_rand_fiber_public_key();
     let channel_outpoint = OutPoint::default();
@@ -815,8 +901,7 @@ fn test_history_small_fail_amount_probability() {
 
 #[test]
 fn test_history_channel_probability_range() {
-    let mut history =
-        PaymentHistory::new(gen_rand_fiber_public_key().into(), None, generate_store());
+    let mut history = PaymentHistory::new(gen_rand_fiber_public_key(), None, generate_store());
     let from = gen_rand_fiber_public_key();
     let target = gen_rand_fiber_public_key();
     let channel_outpoint = OutPoint::default();
@@ -856,8 +941,7 @@ fn test_history_channel_probability_range() {
 
 #[test]
 fn test_history_eval_probability_range() {
-    let mut history =
-        PaymentHistory::new(gen_rand_fiber_public_key().into(), None, generate_store());
+    let mut history = PaymentHistory::new(gen_rand_fiber_public_key(), None, generate_store());
     let from = gen_rand_fiber_public_key();
     let target = gen_rand_fiber_public_key();
     let channel_outpoint = OutPoint::default();
@@ -876,7 +960,7 @@ fn test_history_eval_probability_range() {
 
     history.add_result(channel_outpoint.clone(), direction, result);
     let prob1 = history.eval_probability(from, target, &channel_outpoint, 50000000, 100000000);
-    assert!(0.0 <= prob1 && prob1 < 0.001);
+    assert!((0.0..0.001).contains(&prob1));
     let prob2 = history.eval_probability(from, target, &channel_outpoint, 50000000 - 10, 100000000);
     assert!(0.0 < prob2 && prob2 < 0.001);
     assert!(prob2 > prob1);
@@ -909,7 +993,7 @@ fn test_history_eval_probability_range() {
 
     prev_prob = 0.0;
     let now = now_timestamp_as_millis_u64();
-    for time in (60 * 1000..DEFAULT_BIMODAL_DECAY_TIME * 2).step_by(1 * 60 * 60 * 1000) {
+    for time in (60 * 1000..DEFAULT_BIMODAL_DECAY_TIME * 2).step_by(60 * 60 * 1000) {
         history.reset();
         let result = TimedResult {
             success_time: now,
@@ -930,7 +1014,7 @@ fn test_history_eval_probability_range() {
 fn test_history_load_store() {
     let temp_path = TempDir::new("test-history-store");
     let store = Store::new(temp_path).expect("created store failed");
-    let mut history = PaymentHistory::new(gen_rand_fiber_public_key().into(), None, store.clone());
+    let mut history = PaymentHistory::new(gen_rand_fiber_public_key(), None, store.clone());
     let from = gen_rand_fiber_public_key();
     let target = gen_rand_fiber_public_key();
     let channel_outpoint = OutPoint::default();
@@ -944,10 +1028,7 @@ fn test_history_load_store() {
     };
 
     history.add_result(channel_outpoint.clone(), direction, result);
-    let result = history
-        .get_result(&channel_outpoint, direction)
-        .unwrap()
-        .clone();
+    let result = *history.get_result(&channel_outpoint, direction).unwrap();
     history.reset();
     assert_eq!(history.get_result(&channel_outpoint, direction), None);
     history.load_from_store();
@@ -974,7 +1055,7 @@ fn test_history_load_store() {
 fn test_history_can_send_with_time() {
     use crate::fiber::history::DEFAULT_BIMODAL_DECAY_TIME;
 
-    let history = PaymentHistory::new(gen_rand_fiber_public_key().into(), None, generate_store());
+    let history = PaymentHistory::new(gen_rand_fiber_public_key(), None, generate_store());
     let now = now_timestamp_as_millis_u64();
     let res = history.can_send(100, now);
     assert_eq!(res, 100);
@@ -996,7 +1077,7 @@ fn test_history_can_send_with_time() {
 fn test_history_can_not_send_with_time() {
     use crate::fiber::history::DEFAULT_BIMODAL_DECAY_TIME;
 
-    let history = PaymentHistory::new(gen_rand_fiber_public_key().into(), None, generate_store());
+    let history = PaymentHistory::new(gen_rand_fiber_public_key(), None, generate_store());
     let now = now_timestamp_as_millis_u64();
     let res = history.cannot_send(90, now, 100);
     assert_eq!(res, 90);

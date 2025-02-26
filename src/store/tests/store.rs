@@ -9,10 +9,13 @@ use crate::fiber::history::TimedResult;
 use crate::fiber::network::SendPaymentData;
 use crate::fiber::tests::test_utils::*;
 use crate::fiber::types::*;
+use crate::gen_rand_fiber_private_key;
 use crate::gen_rand_fiber_public_key;
 use crate::gen_rand_sha256_hash;
 use crate::invoice::*;
 use crate::now_timestamp_as_millis_u64;
+use crate::store::store::deserialize_from;
+use crate::store::store::serialize_to_vec;
 use crate::store::Store;
 use crate::watchtower::*;
 use ckb_hash::new_blake2b;
@@ -41,7 +44,7 @@ fn mock_node() -> (Privkey, NodeAnnouncement) {
     (
         sk.clone(),
         NodeAnnouncement::new(
-            AnnouncedNodeName::from_str("node1").expect("invalid name"),
+            AnnouncedNodeName::from_string("node1").expect("invalid name"),
             vec![],
             &sk,
             now_timestamp_as_millis_u64(),
@@ -388,12 +391,12 @@ fn test_channel_actor_state_store() {
 
     let get_state = store.get_channel_actor_state(&state.id);
     assert!(get_state.is_some());
-    assert_eq!(get_state.unwrap().is_tlc_forwarding_enabled(), false);
+    assert!(!get_state.unwrap().is_tlc_forwarding_enabled());
 
     let remote_peer_id = state.get_remote_peer_id();
     assert_eq!(
         store.get_channel_ids_by_peer(&remote_peer_id),
-        vec![state.id.clone()]
+        vec![state.id]
     );
     let channel_point = state.must_get_funding_transaction_outpoint();
     assert!(store
@@ -407,6 +410,91 @@ fn test_channel_actor_state_store() {
     assert!(store
         .get_channel_state_by_outpoint(&channel_point)
         .is_none());
+}
+
+#[test]
+fn test_serde_channel_actor_state_ciborium() {
+    let seed = [0u8; 32];
+    let signer = InMemorySigner::generate_from_seed(&seed);
+
+    let seckey = blake2b_hash_with_salt(
+        signer.musig2_base_nonce.as_ref(),
+        b"channel_announcement".as_slice(),
+    );
+    let sec_nonce = SecNonce::build(seckey).build();
+    let pub_nonce = sec_nonce.public_nonce();
+
+    let state = ChannelActorState {
+        state: ChannelState::NegotiatingFunding(NegotiatingFundingFlags::THEIR_INIT_SENT),
+        public_channel_info: Some(PublicChannelInfo {
+            local_channel_announcement_signature: Some((
+                mock_ecdsa_signature(),
+                MaybeScalar::two(),
+            )),
+            remote_channel_announcement_signature: Some((
+                mock_ecdsa_signature(),
+                MaybeScalar::two(),
+            )),
+            remote_channel_announcement_nonce: Some(pub_nonce.clone()),
+            channel_announcement: None,
+            channel_update: None,
+        }),
+        local_tlc_info: ChannelTlcInfo {
+            enabled: false,
+            timestamp: 0,
+            tlc_fee_proportional_millionths: 123,
+            tlc_expiry_delta: 3,
+            tlc_minimum_value: 10,
+            tlc_maximum_value: 0,
+        },
+        remote_tlc_info: None,
+        local_pubkey: gen_rand_fiber_public_key(),
+        remote_pubkey: gen_rand_fiber_public_key(),
+        funding_tx: Some(Transaction::default()),
+        funding_tx_confirmed_at: Some((H256::default(), 1, 1)),
+        is_acceptor: true,
+        funding_udt_type_script: Some(Script::default()),
+        to_local_amount: 100,
+        to_remote_amount: 100,
+        commitment_fee_rate: 100,
+        commitment_delay_epoch: 100,
+        funding_fee_rate: 100,
+        id: gen_rand_sha256_hash(),
+        tlc_state: Default::default(),
+        local_shutdown_script: Script::default(),
+        local_channel_public_keys: ChannelBasePublicKeys {
+            funding_pubkey: gen_rand_fiber_public_key(),
+            tlc_base_key: gen_rand_fiber_public_key(),
+        },
+        signer,
+        remote_channel_public_keys: Some(ChannelBasePublicKeys {
+            funding_pubkey: gen_rand_fiber_public_key(),
+            tlc_base_key: gen_rand_fiber_public_key(),
+        }),
+        commitment_numbers: Default::default(),
+        remote_shutdown_script: Some(Script::default()),
+        last_committed_remote_nonce: None,
+        last_revoke_and_ack_remote_nonce: None,
+        last_commitment_signed_remote_nonce: None,
+        remote_commitment_points: vec![
+            (0, gen_rand_fiber_public_key()),
+            (1, gen_rand_fiber_public_key()),
+        ],
+        local_shutdown_info: None,
+        remote_shutdown_info: None,
+        local_reserved_ckb_amount: 100,
+        remote_reserved_ckb_amount: 100,
+        latest_commitment_transaction: None,
+        local_constraints: ChannelConstraints::default(),
+        remote_constraints: ChannelConstraints::default(),
+        reestablishing: false,
+        created_at: SystemTime::now(),
+    };
+
+    let mut serialized = Vec::new();
+    ciborium::into_writer(&state, &mut serialized).unwrap();
+    let _new_channel_state: ChannelActorState =
+        ciborium::from_reader(serialized.as_slice()).expect("deserialize to new state");
 }
 
 #[test]
@@ -450,13 +538,13 @@ fn test_store_payment_history() {
     };
     let channel_outpoint = OutPoint::default();
     let direction = Direction::Forward;
-    store.insert_payment_history_result(channel_outpoint.clone(), direction, result.clone());
+    store.insert_payment_history_result(channel_outpoint.clone(), direction, result);
     assert_eq!(
         store.get_payment_history_results(),
         vec![(channel_outpoint.clone(), direction, result)]
     );
 
-    fn sort_results(results: &mut Vec<(OutPoint, Direction, TimedResult)>) {
+    fn sort_results(results: &mut [(OutPoint, Direction, TimedResult)]) {
         results.sort_by(|a, b| match a.0.cmp(&b.0) {
             Ordering::Equal => a.1.cmp(&b.1),
             other => other,
@@ -470,7 +558,7 @@ fn test_store_payment_history() {
         success_amount: 5,
     };
     let direction_2 = Direction::Backward;
-    store.insert_payment_history_result(channel_outpoint.clone(), direction_2, result_2.clone());
+    store.insert_payment_history_result(channel_outpoint.clone(), direction_2, result_2);
     let mut r1 = store.get_payment_history_results();
     sort_results(&mut r1);
     let mut r2: Vec<(OutPoint, Direction, TimedResult)> = vec![
@@ -492,7 +580,7 @@ fn test_store_payment_history() {
         success_amount: 6,
     };
 
-    store.insert_payment_history_result(outpoint_3.clone(), direction_3, result_3.clone());
+    store.insert_payment_history_result(outpoint_3.clone(), direction_3, result_3);
     let mut r1 = store.get_payment_history_results();
     sort_results(&mut r1);
 
@@ -503,4 +591,29 @@ fn test_store_payment_history() {
     ];
     sort_results(&mut r2);
     assert_eq!(r1, r2);
+}
+
+#[test]
+fn test_serde_node_announcement_as_broadcast_message() {
+    let privkey = gen_rand_fiber_private_key();
+    let node_announcement = NodeAnnouncement::new(
+        AnnouncedNodeName::from_string("node1").expect("valid name"),
+        vec![],
+        &privkey,
+        now_timestamp_as_millis_u64(),
+        0,
+    );
+    assert!(
+        node_announcement.verify(),
+        "Node announcement verification failed: {:?}",
+        &node_announcement
+    );
+    let broadcast_message = BroadcastMessage::NodeAnnouncement(node_announcement.clone());
+    let serialized = serialize_to_vec(&broadcast_message, "BroadcastMessage");
+    dbg!("serialized", hex::encode(&serialized));
+    let deserialized: BroadcastMessage = deserialize_from(serialized.as_ref(), "BroadcastMessage");
+    assert_eq!(
+        BroadcastMessage::NodeAnnouncement(node_announcement),
+        deserialized
+    );
 }
