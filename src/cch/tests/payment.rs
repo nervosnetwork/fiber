@@ -15,7 +15,6 @@ use crate::{
         graph::PaymentSessionStatus,
         hash_algorithm::HashAlgorithm,
         network::SendPaymentCommand,
-        serde_utils::serialize_entity_to_hex_string,
         tests::test_utils::{
             establish_udt_channel_between_nodes, init_tracing, NetworkNode,
             NetworkNodeConfigBuilder, HUGE_CKB_AMOUNT,
@@ -49,7 +48,7 @@ async fn do_test_cross_chain_payment_hub_send_btc(udt_script: Script, multiple_h
         let mut builder = NetworkNodeConfigBuilder::new();
         if n == num_nodes - 1 {
             let cch_config = CchConfig {
-                wrapped_btc_type_script: serialize_entity_to_hex_string(&udt_script),
+                wrapped_btc_type_script: udt_script.clone().into(),
                 ..Default::default()
             };
             builder = builder.should_start_lnd(true).cch_config(cch_config);
@@ -237,7 +236,7 @@ async fn do_test_cross_chain_payment_hub_receive_btc(udt_script: Script, multipl
         let mut builder = NetworkNodeConfigBuilder::new();
         if n == num_nodes - 1 {
             let cch_config = CchConfig {
-                wrapped_btc_type_script: serialize_entity_to_hex_string(&udt_script),
+                wrapped_btc_type_script: udt_script.clone().into(),
                 ..Default::default()
             };
             builder = builder.should_start_lnd(true).cch_config(cch_config);
