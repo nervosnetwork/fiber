@@ -6,18 +6,16 @@ use crate::fiber::{NetworkActorCommand, NetworkActorMessage};
 use crate::invoice::{
     add_invoice, CkbInvoice, CkbInvoiceStatus, Currency, InvoiceBuilder, InvoiceStore,
 };
-use crate::FiberConfig;
+use crate::{handle_actor_call, log_and_error, FiberConfig};
 use ckb_jsonrpc_types::Script;
 use jsonrpsee::types::error::CALL_EXECUTION_FAILED_CODE;
 use jsonrpsee::{core::async_trait, proc_macros::rpc, types::ErrorObjectOwned};
-use ractor::{call_t, ActorRef};
+use ractor::{call, ActorRef};
 use secp256k1::{PublicKey, Secp256k1, SecretKey};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use std::time::Duration;
 use tentacle::secio::SecioKeyPair;
-
-const RPC_TIMEOUT_MS: u64 = 3000;
 
 /// The parameter struct for generating a new invoice.
 #[serde_as]
@@ -383,19 +381,6 @@ where
             ))
         };
 
-        match call_t!(network_actor, message, RPC_TIMEOUT_MS).map_err(|ractor_error| {
-            ErrorObjectOwned::owned(
-                CALL_EXECUTION_FAILED_CODE,
-                ractor_error.to_string(),
-                Option::<()>::None,
-            )
-        })? {
-            Ok(_) => Ok(SettleInvoiceResult {}),
-            Err(e) => Err(ErrorObjectOwned::owned(
-                CALL_EXECUTION_FAILED_CODE,
-                e.to_string(),
-                Some(params),
-            )),
-        }
+        handle_actor_call!(network_actor, message, params).map(|_| SettleInvoiceResult {})
     }
 }
