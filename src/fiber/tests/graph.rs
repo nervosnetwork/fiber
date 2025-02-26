@@ -1,3 +1,4 @@
+#![allow(clippy::needless_range_loop)]
 use crate::fiber::config::MAX_PAYMENT_TLC_EXPIRY_LIMIT;
 use crate::fiber::gossip::GossipMessageStore;
 use crate::fiber::graph::{PathFindError, SessionRoute};
@@ -56,12 +57,12 @@ impl MockNetworkGraph {
             now_timestamp_as_millis_u64(),
             0,
         ));
-        for i in 1..keypairs.len() {
-            let (sk, _pk) = keypairs[i];
+        for (i, keypair) in keypairs.iter().enumerate().skip(1) {
+            let (sk, _pk) = keypair;
             store.save_node_announcement(NodeAnnouncement::new(
                 format!("node{i}").as_str().into(),
                 vec![],
-                &sk.into(),
+                &(*sk).into(),
                 now_timestamp_as_millis_u64(),
                 0,
             ));
@@ -91,7 +92,7 @@ impl MockNetworkGraph {
             .iter()
             .find(|(a, b, _)| (*a == node_a && *b == node_b) || (*a == node_b && *b == node_a));
         if let Some((_, _, outpoint)) = outpoint {
-            self.graph.mark_channel_failed(&outpoint);
+            self.graph.mark_channel_failed(outpoint);
         }
     }
 
@@ -101,6 +102,7 @@ impl MockNetworkGraph {
     // is the minimum tlc value that node_b will accept when forwarding tlc for node_a.
     // The udt_type_script is the udt type script of the channel. The other_fee_rate
     // is the fee rate that node_a will charge when forwarding tlc for node_b.
+    #[allow(clippy::too_many_arguments)]
     pub fn add_edge_with_config(
         &mut self,
         node_a: usize,
@@ -260,7 +262,7 @@ impl MockNetworkGraph {
     pub fn build_route_with_possible_expects(
         &self,
         payment_data: &SendPaymentData,
-        expects: &Vec<Vec<usize>>,
+        expects: &[Vec<usize>],
     ) {
         let route = self.graph.build_route(payment_data.clone());
         assert!(route.is_ok());
@@ -814,7 +816,7 @@ fn test_graph_build_route_three_nodes_amount() {
 // TODO: pass randomized input to this function.
 fn do_test_graph_build_route_expiry(n_nodes: usize) {
     let mut network = MockNetworkGraph::new(n_nodes);
-    let ns = (0..n_nodes).into_iter().collect::<Vec<_>>();
+    let ns = (0..n_nodes).collect::<Vec<_>>();
     for window in ns.windows(2) {
         let source = window[0];
         let target = window[1];

@@ -1,14 +1,14 @@
-mod cch;
-mod channel;
-mod config;
+pub mod cch;
+pub mod channel;
+pub mod config;
 #[cfg(debug_assertions)]
-mod dev;
-mod graph;
-mod info;
-mod invoice;
-mod payment;
-mod peer;
-mod utils;
+pub mod dev;
+pub mod graph;
+pub mod info;
+pub mod invoice;
+pub mod payment;
+pub mod peer;
+pub mod utils;
 
 use crate::ckb::CkbConfig;
 use crate::fiber::gossip::GossipMessageStore;
@@ -79,6 +79,8 @@ async fn build_server(addr: &str) -> Server {
     }
 }
 
+#[allow(clippy::type_complexity)]
+#[allow(clippy::too_many_arguments)]
 pub async fn start_rpc<
     S: ChannelActorStateStore
         + InvoiceStore

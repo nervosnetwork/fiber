@@ -1108,7 +1108,7 @@ impl TryFrom<molecule_fiber::AddTlc> for AddTlc {
     fn try_from(add_tlc: molecule_fiber::AddTlc) -> Result<Self, Self::Error> {
         let onion_packet_bytes: Vec<u8> = add_tlc.onion_packet().unpack();
         let onion_packet =
-            (onion_packet_bytes.len() > 0).then(|| PaymentOnionPacket::new(onion_packet_bytes));
+            (!onion_packet_bytes.is_empty()).then(|| PaymentOnionPacket::new(onion_packet_bytes));
         Ok(AddTlc {
             onion_packet,
             channel_id: add_tlc.channel_id().into(),
@@ -1219,14 +1219,14 @@ impl Display for TlcErr {
 impl TlcErr {
     pub fn new(error_code: TlcErrorCode) -> Self {
         TlcErr {
-            error_code: error_code,
+            error_code,
             extra_data: None,
         }
     }
 
     pub fn new_node_fail(error_code: TlcErrorCode, node_id: Pubkey) -> Self {
         TlcErr {
-            error_code: error_code.into(),
+            error_code,
             extra_data: Some(TlcErrData::NodeFailed { node_id }),
         }
     }
@@ -1238,7 +1238,7 @@ impl TlcErr {
         channel_update: Option<ChannelUpdate>,
     ) -> Self {
         TlcErr {
-            error_code: error_code.into(),
+            error_code,
             extra_data: Some(TlcErrData::ChannelFailed {
                 node_id,
                 channel_outpoint,
@@ -1269,7 +1269,7 @@ impl TlcErr {
     }
 
     pub fn error_code_as_str(&self) -> String {
-        let error_code: TlcErrorCode = self.error_code.into();
+        let error_code: TlcErrorCode = self.error_code;
         error_code.as_ref().to_string()
     }
 
@@ -1304,7 +1304,7 @@ impl TryFrom<TlcErrData> for molecule_fiber::TlcErrData {
                 channel_update,
                 node_id,
             } => Ok(molecule_fiber::ChannelFailed::new_builder()
-                .channel_outpoint(channel_outpoint.into())
+                .channel_outpoint(channel_outpoint)
                 .channel_update(
                     ChannelUpdateOpt::new_builder()
                         .set(channel_update.map(|x| x.into()))
@@ -1328,7 +1328,7 @@ impl TryFrom<molecule_fiber::TlcErrData> for TlcErrData {
         match tlc_err_data.to_enum() {
             molecule_fiber::TlcErrDataUnion::ChannelFailed(channel_failed) => {
                 Ok(TlcErrData::ChannelFailed {
-                    channel_outpoint: channel_failed.channel_outpoint().into(),
+                    channel_outpoint: channel_failed.channel_outpoint(),
                     channel_update: channel_failed
                         .channel_update()
                         .to_opt()
@@ -1400,7 +1400,7 @@ impl TlcErrPacket {
         let onion_packet = if shared_secret != &NO_SHARED_SECRET {
             OnionErrorPacket::create(shared_secret, payload)
         } else {
-            OnionErrorPacket::concat(NO_ERROR_PACKET_HMAC.clone(), payload)
+            OnionErrorPacket::concat(NO_ERROR_PACKET_HMAC, payload)
         }
         .into_bytes();
         TlcErrPacket { onion_packet }
@@ -1432,8 +1432,7 @@ impl TlcErrPacket {
             }
         }
 
-        let hops_public_keys: Vec<PublicKey> =
-            hops_public_keys.iter().map(|k| k.0.clone()).collect();
+        let hops_public_keys: Vec<PublicKey> = hops_public_keys.iter().map(|k| k.0).collect();
         let session_key = SecretKey::from_slice(session_key).inspect_err(|err|
             error!(target: "fnn::fiber::types::TlcErrPacket", "decode session_key error={} key={}", err, hex::encode(session_key))
         ).ok()?;
@@ -1543,16 +1542,16 @@ impl TlcErrorCode {
     }
 
     pub fn payment_failed(&self) -> bool {
-        match self {
+        matches!(
+            self,
             TlcErrorCode::IncorrectOrUnknownPaymentDetails
-            | TlcErrorCode::FinalIncorrectExpiryDelta
-            | TlcErrorCode::FinalIncorrectTlcAmount
-            | TlcErrorCode::InvoiceExpired
-            | TlcErrorCode::InvoiceCancelled
-            | TlcErrorCode::ExpiryTooFar
-            | TlcErrorCode::ExpiryTooSoon => true,
-            _ => false,
-        }
+                | TlcErrorCode::FinalIncorrectExpiryDelta
+                | TlcErrorCode::FinalIncorrectTlcAmount
+                | TlcErrorCode::InvoiceExpired
+                | TlcErrorCode::InvoiceCancelled
+                | TlcErrorCode::ExpiryTooFar
+                | TlcErrorCode::ExpiryTooSoon
+        )
     }
 }
 
@@ -1568,7 +1567,9 @@ impl Debug for RemoveTlcReason {
             RemoveTlcReason::RemoveTlcFulfill(_fulfill) => {
                 write!(f, "RemoveTlcFulfill")
             }
-            RemoveTlcReason::RemoveTlcFail(_fail) => write!(f, "RemoveTlcFail"),
+            RemoveTlcReason::RemoveTlcFail(_fail) => {
+                write!(f, "RemoveTlcFail")
+            }
         }
     }
 }
@@ -2383,6 +2384,30 @@ pub enum FiberChannelMessage {
     RemoveTlc(RemoveTlc),
     ReestablishChannel(ReestablishChannel),
     AnnouncementSignatures(AnnouncementSignatures),
+}
+
+impl Display for FiberChannelMessage {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            FiberChannelMessage::AcceptChannel(_) => write!(f, "AcceptChannel"),
+            FiberChannelMessage::CommitmentSigned(_) => write!(f, "CommitmentSigned"),
+            FiberChannelMessage::TxSignatures(_) => write!(f, "TxSignatures"),
+            FiberChannelMessage::ChannelReady(_) => write!(f, "ChannelReady"),
+            FiberChannelMessage::TxUpdate(_) => write!(f, "TxUpdate"),
+            FiberChannelMessage::TxComplete(_) => write!(f, "TxComplete"),
+            FiberChannelMessage::TxAbort(_) => write!(f, "TxAbort"),
+            FiberChannelMessage::TxInitRBF(_) => write!(f, "TxInitRBF"),
+            FiberChannelMessage::TxAckRBF(_) => write!(f, "TxAckRBF"),
+            FiberChannelMessage::Shutdown(_) => write!(f, "Shutdown"),
+            FiberChannelMessage::ClosingSigned(_) => write!(f, "ClosingSigned"),
+            FiberChannelMessage::UpdateTlcInfo(_) => write!(f, "UpdateTlcInfo"),
+            FiberChannelMessage::AddTlc(_) => write!(f, "AddTlc"),
+            FiberChannelMessage::RevokeAndAck(_) => write!(f, "RevokeAndAck"),
+            FiberChannelMessage::RemoveTlc(_) => write!(f, "RemoveTlc"),
+            FiberChannelMessage::ReestablishChannel(_) => write!(f, "ReestablishChannel"),
+            FiberChannelMessage::AnnouncementSignatures(_) => write!(f, "AnnouncementSignatures"),
+        }
+    }
 }
 
 impl FiberChannelMessage {
@@ -3355,7 +3380,7 @@ impl TryFrom<molecule_gossip::QueryBroadcastMessagesResult> for QueryBroadcastMe
             missing_queries: query_broadcast_messages_result
                 .missing_queries()
                 .into_iter()
-                .map(|x| u16::from(x))
+                .map(u16::from)
                 .collect(),
         })
     }
@@ -3562,7 +3587,7 @@ macro_rules! impl_traits {
 impl_traits!(FiberMessage);
 
 pub(crate) fn deterministically_hash<T: Entity>(v: &T) -> [u8; 32] {
-    ckb_hash::blake2b_256(v.as_slice()).into()
+    ckb_hash::blake2b_256(v.as_slice())
 }
 
 #[serde_as]
@@ -3590,7 +3615,7 @@ impl HopData for PaymentHopData {
     const PACKET_DATA_LEN: usize = 6500;
 
     fn next_hop(&self) -> Option<Pubkey> {
-        self.next_hop.clone()
+        self.next_hop
     }
 
     fn assoc_data(&self) -> Option<Vec<u8>> {
@@ -3783,7 +3808,7 @@ impl<T: HopData> PeeledOnionPacket<T> {
             current,
             next,
             // Use all zeros for the sender
-            shared_secret: NO_SHARED_SECRET.clone(),
+            shared_secret: NO_SHARED_SECRET,
         })
     }
 
@@ -3825,7 +3850,7 @@ impl<T: HopData> PeeledOnionPacket<T> {
             .ok_or_else(|| Error::OnionPacket(OnionPacketError::InvalidHopData))?;
 
         // Ensure backward compatibility
-        let mut shared_secret = NO_SHARED_SECRET.clone();
+        let mut shared_secret = NO_SHARED_SECRET;
         if data.len() >= read_bytes + 32 && data.len() != read_bytes + T::PACKET_DATA_LEN {
             shared_secret.copy_from_slice(&data[read_bytes..read_bytes + 32]);
             read_bytes += 32;

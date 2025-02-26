@@ -20,66 +20,66 @@ use tentacle::multiaddr::MultiAddr;
 
 #[serde_as]
 #[derive(Clone, Serialize, Deserialize)]
-pub(crate) struct NodeInfoResult {
+pub struct NodeInfoResult {
     /// The version of the node software.
-    version: String,
+    pub version: String,
 
     /// The commit hash of the node software.
-    commit_hash: String,
+    pub commit_hash: String,
 
     /// The identity public key of the node.
-    node_id: Pubkey,
+    pub node_id: Pubkey,
 
     /// The optional name of the node.
-    node_name: Option<String>,
+    pub node_name: Option<String>,
 
     /// A list of multi-addresses associated with the node.
-    addresses: Vec<MultiAddr>,
+    pub addresses: Vec<MultiAddr>,
 
     /// The hash of the blockchain that the node is connected to.
-    chain_hash: Hash256,
+    pub chain_hash: Hash256,
 
     /// The minimum CKB funding amount for automatically accepting open channel requests, serialized as a hexadecimal string.
     #[serde_as(as = "U64Hex")]
-    open_channel_auto_accept_min_ckb_funding_amount: u64,
+    pub open_channel_auto_accept_min_ckb_funding_amount: u64,
 
     /// The CKB funding amount for automatically accepting channel requests, serialized as a hexadecimal string.
     #[serde_as(as = "U64Hex")]
-    auto_accept_channel_ckb_funding_amount: u64,
+    pub auto_accept_channel_ckb_funding_amount: u64,
 
     /// The default funding lock script for the node.
-    default_funding_lock_script: Script,
+    pub default_funding_lock_script: Script,
 
     /// The locktime expiry delta for Time-Locked Contracts (TLC), serialized as a hexadecimal string.
     #[serde_as(as = "U64Hex")]
-    tlc_expiry_delta: u64,
+    pub tlc_expiry_delta: u64,
 
     /// The minimum value for Time-Locked Contracts (TLC) we can send, serialized as a hexadecimal string.
     #[serde_as(as = "U128Hex")]
-    tlc_min_value: u128,
+    pub tlc_min_value: u128,
 
     /// The maximum value for Time-Locked Contracts (TLC) we can send, serialized as a hexadecimal string, `0` means no maximum value limit.
     #[serde_as(as = "U128Hex")]
-    tlc_max_value: u128,
+    pub tlc_max_value: u128,
 
     /// The fee (to forward payments) proportional to the value of Time-Locked Contracts (TLC), expressed in millionths and serialized as a hexadecimal string.
     #[serde_as(as = "U128Hex")]
-    tlc_fee_proportional_millionths: u128,
+    pub tlc_fee_proportional_millionths: u128,
 
     /// The number of channels associated with the node, serialized as a hexadecimal string.
     #[serde_as(as = "U32Hex")]
-    channel_count: u32,
+    pub channel_count: u32,
 
     /// The number of pending channels associated with the node, serialized as a hexadecimal string.
     #[serde_as(as = "U32Hex")]
-    pending_channel_count: u32,
+    pub pending_channel_count: u32,
 
     /// The number of peers connected to the node, serialized as a hexadecimal string.
     #[serde_as(as = "U32Hex")]
-    peers_count: u32,
+    pub peers_count: u32,
 
     /// Configuration information for User-Defined Tokens (UDT) associated with the node.
-    udt_cfg_infos: UdtCfgInfos,
+    pub udt_cfg_infos: UdtCfgInfos,
 }
 
 pub(crate) struct InfoRpcServerImpl {

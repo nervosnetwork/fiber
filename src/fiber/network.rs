@@ -21,7 +21,6 @@ use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::SystemTime;
-use std::{u128, u64};
 use tentacle::multiaddr::{MultiAddr, Protocol};
 use tentacle::service::SessionType;
 use tentacle::utils::{extract_peer_id, is_reachable, multiaddr_to_socketaddr};
@@ -415,8 +414,7 @@ impl SendPaymentData {
                     .and_then(|i| i.final_tlc_minimum_expiry_delta().copied())
             })
             .unwrap_or(DEFAULT_TLC_EXPIRY_DELTA);
-        if final_tlc_expiry_delta < MIN_TLC_EXPIRY_DELTA
-            || final_tlc_expiry_delta > MAX_PAYMENT_TLC_EXPIRY_LIMIT
+        if !(MIN_TLC_EXPIRY_DELTA..=MAX_PAYMENT_TLC_EXPIRY_LIMIT).contains(&final_tlc_expiry_delta)
         {
             return Err(format!(
                 "invalid final_tlc_expiry_delta, expect between {} and {}",
@@ -1388,8 +1386,8 @@ where
             }
             NetworkActorCommand::NodeInfo(_, rpc) => {
                 let response = NodeInfoResponse {
-                    node_name: state.node_name.clone(),
-                    node_id: state.get_public_key().clone(),
+                    node_name: state.node_name,
+                    node_id: state.get_public_key(),
                     addresses: state.announced_addrs.clone(),
                     chain_hash: get_chain_hash(),
                     open_channel_auto_accept_min_ckb_funding_amount: state
@@ -1451,7 +1449,7 @@ where
                 expiry: info.expiry,
                 hash_algorithm: info.hash_algorithm,
                 onion_packet: peeled_onion_packet.next.clone(),
-                shared_secret: shared_secret.clone(),
+                shared_secret,
                 previous_tlc,
             },
             rpc_reply,
@@ -1525,7 +1523,11 @@ where
                                 &payment_session.session_key,
                                 payment_session.hops_public_keys(),
                             )
-                            .unwrap_or(TlcErr::new(TlcErrorCode::InvalidOnionError));
+                            .unwrap_or_else(|| {
+                                debug_event!(myself, "InvalidOnionError");
+                                TlcErr::new(TlcErrorCode::InvalidOnionError)
+                            });
+
                         self.update_graph_with_tlc_fail(&state.network, &error_detail)
                             .await;
                         let need_to_retry = self
@@ -1673,7 +1675,7 @@ where
                     .network_graph
                     .write()
                     .await
-                    .record_payment_fail(&payment_session, error_detail.clone());
+                    .record_payment_fail(payment_session, error_detail.clone());
                 let err = format!(
                     "Failed to send onion packet with error {}",
                     error_detail.error_code_as_str()
@@ -1775,7 +1777,14 @@ where
         let Some(mut payment_session) = self.store.get_payment_session(payment_hash) else {
             return Err(Error::InvalidParameter(payment_hash.to_string()));
         };
+
         assert!(payment_session.status != PaymentSessionStatus::Failed);
+
+        debug!(
+            "try_payment_session: {:?} times: {:?}",
+            payment_session.payment_hash(),
+            payment_session.retried_times
+        );
 
         let payment_data = payment_session.request.clone();
         if payment_session.can_retry() {
@@ -1786,6 +1795,7 @@ where
             let hops_info = self
                 .build_payment_route(&mut payment_session, &payment_data)
                 .await?;
+
             match self
                 .send_payment_onion_packet(state, &mut payment_session, &payment_data, hops_info)
                 .await
@@ -1961,7 +1971,7 @@ impl PersistentNetworkActorState {
     }
 
     fn get_peer_pubkey(&self, peer_id: &PeerId) -> Option<Pubkey> {
-        self.peer_pubkey_map.get(peer_id).map(|x| *x)
+        self.peer_pubkey_map.get(peer_id).copied()
     }
 
     // Save a single peer pubkey to the peer store. Returns true if the new pubkey is different from the old one,
@@ -3059,8 +3069,8 @@ where
         let fiber_handle = FiberProtocolHandle::from(&handle);
         let (gossip_handle, store_update_subscriber) = GossipProtocolHandle::new(
             Some(format!("gossip actor {:?}", my_peer_id)),
-            Duration::from_millis(config.gossip_network_maintenance_interval_ms()).into(),
-            Duration::from_millis(config.gossip_store_maintenance_interval_ms()).into(),
+            Duration::from_millis(config.gossip_network_maintenance_interval_ms()),
+            Duration::from_millis(config.gossip_store_maintenance_interval_ms()),
             config.announce_private_addr(),
             config.gossip_network_num_targeted_active_syncing_peers,
             config.gossip_network_num_targeted_outbound_passive_syncing_peers,
@@ -3436,6 +3446,7 @@ fn try_send_actor_message(actor: &ActorRef<NetworkActorMessage>, message: Networ
     let _ = actor.send_message(message);
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn start_network<
     S: NetworkActorStateStore
         + ChannelActorStateStore

@@ -7,13 +7,14 @@ use std::sync::Arc;
 use tracing::info;
 
 use crate::util::convert;
+use {fiber_v032 as fiber_old, fiber_v033 as fiber_new};
 
-const MIGRATION_DB_VERSION: &str = "20250120090023";
+const MIGRATION_DB_VERSION: &str = "20250226090023";
 
-pub use fiber_v030::fiber::graph::PaymentSession as OldPaymentSession;
-pub use fiber_v030::fiber::network::SendPaymentData as OldSendPaymentData;
-pub use fiber_v031::fiber::graph::PaymentSession as NewPaymentSession;
-pub use fiber_v031::fiber::network::SendPaymentData as NewSendPaymentData;
+pub use fiber_new::fiber::graph::PaymentSession as NewPaymentSession;
+pub use fiber_new::fiber::network::SendPaymentData as NewSendPaymentData;
+pub use fiber_old::fiber::graph::PaymentSession as OldPaymentSession;
+pub use fiber_old::fiber::network::SendPaymentData as OldSendPaymentData;
 
 pub struct MigrationObj {
     version: String,
