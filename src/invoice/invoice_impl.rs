@@ -1,7 +1,7 @@
 use super::errors::VerificationError;
 use super::utils::*;
-use crate::fiber::gen::invoice::{self as gen_invoice, *};
 use crate::fiber::hash_algorithm::HashAlgorithm;
+use crate::fiber::r#gen::invoice::{self as gen_invoice, *};
 use crate::fiber::serde_utils::EntityHex;
 use crate::fiber::serde_utils::U128Hex;
 use crate::fiber::types::Hash256;
@@ -653,11 +653,14 @@ impl InvoiceBuilder {
                 .copied()
                 .unwrap_or_default();
             algo.hash(preimage.as_ref()).into()
-        } else if let Some(payment_hash) = self.payment_hash {
-            payment_hash
         } else {
-            // generate a random payment hash if not provided
-            gen_rand_sha256_hash()
+            match self.payment_hash {
+                Some(payment_hash) => payment_hash,
+                _ => {
+                    // generate a random payment hash if not provided
+                    gen_rand_sha256_hash()
+                }
+            }
         };
 
         self.check_attrs_valid()?;

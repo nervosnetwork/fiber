@@ -379,41 +379,42 @@ where
         time: u64,
     ) {
         let min_fail_relax_interval = self.min_fail_relax_interval;
-        let result = if let Some(current) = self.get_mut_result(channel.clone(), direction) {
-            if success {
-                current.success_time = time;
-                if amount > current.success_amount {
-                    current.success_amount = amount;
+        let result = match self.get_mut_result(channel.clone(), direction) {
+            Some(current) => {
+                if success {
+                    current.success_time = time;
+                    if amount > current.success_amount {
+                        current.success_amount = amount;
+                    }
+                    if current.fail_time != 0 && amount >= current.fail_amount {
+                        current.fail_amount = amount + 1;
+                    }
+                } else {
+                    if amount > current.fail_amount
+                        && current.fail_time != 0
+                        && time.saturating_sub(current.fail_time) < min_fail_relax_interval
+                    {
+                        return;
+                    }
+                    current.fail_amount = amount;
+                    current.fail_time = time;
+                    if amount == 0 {
+                        current.success_amount = 0;
+                    } else if amount <= current.success_amount {
+                        current.success_amount = amount.saturating_sub(1);
+                    }
                 }
-                if current.fail_time != 0 && amount >= current.fail_amount {
-                    current.fail_amount = amount + 1;
-                }
-            } else {
-                if amount > current.fail_amount
-                    && current.fail_time != 0
-                    && time.saturating_sub(current.fail_time) < min_fail_relax_interval
-                {
-                    return;
-                }
-                current.fail_amount = amount;
-                current.fail_time = time;
-                if amount == 0 {
-                    current.success_amount = 0;
-                } else if amount <= current.success_amount {
-                    current.success_amount = amount.saturating_sub(1);
-                }
+                // make sure success_amount is less than or equal to fail_amount,
+                // so that we can calculate the probability in a amount range.
+                assert!(current.fail_time == 0 || current.success_amount <= current.fail_amount);
+                *current
             }
-            // make sure success_amount is less than or equal to fail_amount,
-            // so that we can calculate the probability in a amount range.
-            assert!(current.fail_time == 0 || current.success_amount <= current.fail_amount);
-            *current
-        } else {
-            TimedResult {
+            _ => TimedResult {
                 fail_time: if success { 0 } else { time },
                 fail_amount: if success { 0 } else { amount },
                 success_time: if success { time } else { 0 },
                 success_amount: if success { amount } else { 0 },
-            }
+            },
         };
         self.add_result(channel, direction, result);
     }

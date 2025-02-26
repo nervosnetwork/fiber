@@ -15,7 +15,7 @@ mod path;
 
 pub use key::KeyPair;
 pub mod channel;
-pub mod gen;
+pub mod r#gen;
 pub mod hash_algorithm;
 pub mod serde_utils;
 pub mod types;

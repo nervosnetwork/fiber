@@ -260,36 +260,36 @@ where
         &self,
         params: SubmitCommitmentTransactionParams,
     ) -> Result<SubmitCommitmentTransactionResult, ErrorObjectOwned> {
-        if let Some(tx) = self
+        match self
             .commitment_txs
             .read()
             .await
             .get(&(params.channel_id, params.commitment_number))
         {
-            if let Err(err) = call_t!(
-                &self.ckb_chain_actor,
-                CkbChainMessage::SendTx,
-                DEFAULT_CHAIN_ACTOR_TIMEOUT,
-                tx.clone()
-            )
-            .unwrap()
-            {
-                Err(ErrorObjectOwned::owned(
-                    CALL_EXECUTION_FAILED_CODE,
-                    err.to_string(),
-                    Some(params),
-                ))
-            } else {
-                Ok(SubmitCommitmentTransactionResult {
-                    tx_hash: tx.hash().into(),
-                })
+            Some(tx) => {
+                match call_t!(
+                    &self.ckb_chain_actor,
+                    CkbChainMessage::SendTx,
+                    DEFAULT_CHAIN_ACTOR_TIMEOUT,
+                    tx.clone()
+                )
+                .unwrap()
+                {
+                    Err(err) => Err(ErrorObjectOwned::owned(
+                        CALL_EXECUTION_FAILED_CODE,
+                        err.to_string(),
+                        Some(params),
+                    )),
+                    _ => Ok(SubmitCommitmentTransactionResult {
+                        tx_hash: tx.hash().into(),
+                    }),
+                }
             }
-        } else {
-            Err(ErrorObjectOwned::owned(
+            _ => Err(ErrorObjectOwned::owned(
                 CALL_EXECUTION_FAILED_CODE,
                 "Commitment transaction not found".to_string(),
                 Some(params),
-            ))
+            )),
         }
     }
 

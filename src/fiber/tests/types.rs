@@ -1,8 +1,8 @@
 use crate::{
     fiber::{
         config::AnnouncedNodeName,
-        gen::{fiber as molecule_fiber, gossip},
         hash_algorithm::HashAlgorithm,
+        r#gen::{fiber as molecule_fiber, gossip},
         types::{
             secp256k1_instance, AddTlc, BroadcastMessage, BroadcastMessageID, Cursor, Hash256,
             NodeAnnouncement, PaymentHopData, PeeledOnionPacket, Privkey, Pubkey, TlcErr,

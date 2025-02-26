@@ -1,13 +1,13 @@
 use super::channel::{ChannelFlags, ChannelTlcInfo, ProcessingChannelError};
 use super::config::AnnouncedNodeName;
-use super::gen::fiber::{
-    self as molecule_fiber, ChannelUpdateOpt, PaymentPreimageOpt, PubNonce as Byte66, PubkeyOpt,
-    TlcErrDataOpt, UdtCellDeps, Uint128Opt,
-};
-use super::gen::gossip::{self as molecule_gossip};
 use super::hash_algorithm::{HashAlgorithm, UnknownHashAlgorithmError};
 use super::network::get_chain_hash;
 use super::r#gen::fiber::PubNonceOpt;
+use super::r#gen::fiber::{
+    self as molecule_fiber, ChannelUpdateOpt, PaymentPreimageOpt, PubNonce as Byte66, PubkeyOpt,
+    TlcErrDataOpt, UdtCellDeps, Uint128Opt,
+};
+use super::r#gen::gossip::{self as molecule_gossip};
 use super::serde_utils::{EntityHex, SliceHex};
 use crate::ckb::config::{UdtArgInfo, UdtCellDep, UdtCfgInfos, UdtScript};
 use crate::ckb::contracts::get_udt_whitelist;
@@ -1974,10 +1974,9 @@ impl From<NodeAnnouncement> for molecule_gossip::NodeAnnouncement {
                     .build(),
             );
 
-        let builder = if let Some(signature) = node_announcement.signature {
-            builder.signature(signature.into())
-        } else {
-            builder
+        let builder = match node_announcement.signature {
+            Some(signature) => builder.signature(signature.into()),
+            _ => builder,
         };
 
         builder.build()
@@ -2099,22 +2098,19 @@ impl From<ChannelAnnouncement> for molecule_gossip::ChannelAnnouncement {
             .udt_type_script(channel_announcement.udt_type_script.pack())
             .ckb_key(channel_announcement.ckb_key.into());
 
-        let builder = if let Some(signature) = channel_announcement.node1_signature {
-            builder.node1_signature(signature.into())
-        } else {
-            builder
+        let builder = match channel_announcement.node1_signature {
+            Some(signature) => builder.node1_signature(signature.into()),
+            _ => builder,
         };
 
-        let builder = if let Some(signature) = channel_announcement.node2_signature {
-            builder.node2_signature(signature.into())
-        } else {
-            builder
+        let builder = match channel_announcement.node2_signature {
+            Some(signature) => builder.node2_signature(signature.into()),
+            _ => builder,
         };
 
-        let builder = if let Some(signature) = channel_announcement.ckb_signature {
-            builder.ckb_signature(signature.into())
-        } else {
-            builder
+        let builder = match channel_announcement.ckb_signature {
+            Some(signature) => builder.ckb_signature(signature.into()),
+            _ => builder,
         };
 
         builder.build()
@@ -2243,10 +2239,9 @@ impl From<ChannelUpdate> for molecule_fiber::ChannelUpdate {
             .tlc_minimum_value(channel_update.tlc_minimum_value.pack())
             .tlc_fee_proportional_millionths(channel_update.tlc_fee_proportional_millionths.pack());
 
-        let builder = if let Some(signature) = channel_update.signature {
-            builder.signature(signature.into())
-        } else {
-            builder
+        let builder = match channel_update.signature {
+            Some(signature) => builder.signature(signature.into()),
+            _ => builder,
         };
 
         builder.build()

@@ -254,7 +254,7 @@ async fn test_sync_channel_announcement_on_startup() {
 
 #[tokio::test]
 async fn test_node1_node2_channel_update() {
-    let channel_context = ChannelTestContext::gen();
+    let channel_context = ChannelTestContext::r#gen();
     let funding_tx = channel_context.funding_tx.clone();
     let out_point = channel_context.channel_outpoint().clone();
     let channel_announcement = channel_context.channel_announcement.clone();
@@ -316,7 +316,7 @@ async fn test_node1_node2_channel_update() {
 
 #[tokio::test]
 async fn test_channel_update_version() {
-    let channel_context = ChannelTestContext::gen();
+    let channel_context = ChannelTestContext::r#gen();
     let funding_tx = channel_context.funding_tx.clone();
     let out_point = channel_context.channel_outpoint().clone();
     let mut node = NetworkNode::new().await;

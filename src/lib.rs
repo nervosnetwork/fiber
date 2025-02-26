@@ -57,7 +57,7 @@ pub fn gen_rand_sha256_hash() -> Hash256 {
 pub mod macros {
     #[macro_export]
     macro_rules! unwrap_or_return {
-        ($expr:expr, $msg:expr) => {
+        ($expr:expr_2021, $msg:expr_2021) => {
             match $expr {
                 Ok(val) => val,
                 Err(err) => {
@@ -66,7 +66,7 @@ pub mod macros {
                 }
             }
         };
-        ($expr:expr) => {
+        ($expr:expr_2021) => {
             match $expr {
                 Ok(val) => val,
                 Err(err) => {

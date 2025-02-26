@@ -536,7 +536,7 @@ pub enum DebugEvent {
 
 #[macro_export]
 macro_rules! debug_event {
-    ($network:expr, $debug_event:expr) => {
+    ($network:expr_2021, $debug_event:expr_2021) => {
         #[cfg(debug_assertions)]
         $network
             .send_message(NetworkActorMessage::new_notification(
@@ -741,14 +741,17 @@ where
                     .await
                 {
                     Ok(()) => {
-                        let auto_accept = if let Some(udt_type_script) =
-                            open_channel.funding_udt_type_script.as_ref()
-                        {
-                            is_udt_type_auto_accept(udt_type_script, open_channel.funding_amount)
-                        } else {
-                            state.auto_accept_channel_ckb_funding_amount > 0
-                                && open_channel.funding_amount
-                                    >= state.open_channel_auto_accept_min_ckb_funding_amount as u128
+                        let auto_accept = match open_channel.funding_udt_type_script.as_ref() {
+                            Some(udt_type_script) => is_udt_type_auto_accept(
+                                udt_type_script,
+                                open_channel.funding_amount,
+                            ),
+                            _ => {
+                                state.auto_accept_channel_ckb_funding_amount > 0
+                                    && open_channel.funding_amount
+                                        >= state.open_channel_auto_accept_min_ckb_funding_amount
+                                            as u128
+                            }
                         };
                         if auto_accept {
                             let accept_channel = AcceptChannelCommand {
@@ -992,18 +995,21 @@ where
                 // TODO: It is more than just dialing a peer. We need to exchange capabilities of the peer,
                 // e.g. whether the peer support some specific feature.
 
-                if let Some(peer_id) = extract_peer_id(&addr) {
-                    if state.is_connected(&peer_id) {
-                        debug!("Peer {:?} already connected, ignoring...", peer_id);
+                match extract_peer_id(&addr) {
+                    Some(peer_id) => {
+                        if state.is_connected(&peer_id) {
+                            debug!("Peer {:?} already connected, ignoring...", peer_id);
+                            return Ok(());
+                        }
+                        if state.peer_id == peer_id {
+                            debug!("Trying to connect to self {:?}, ignoring...", addr);
+                            return Ok(());
+                        }
+                    }
+                    _ => {
+                        error!("Failed to extract peer id from address: {:?}", addr);
                         return Ok(());
                     }
-                    if state.peer_id == peer_id {
-                        debug!("Trying to connect to self {:?}, ignoring...", addr);
-                        return Ok(());
-                    }
-                } else {
-                    error!("Failed to extract peer id from address: {:?}", addr);
-                    return Ok(());
                 }
 
                 state
@@ -2454,13 +2460,14 @@ where
         match command {
             // Need to handle the force shutdown command specially because the ChannelActor may not exist when remote peer is disconnected.
             ChannelCommand::Shutdown(shutdown, rpc_reply) if shutdown.force => {
-                if let Some(actor) = self.channels.get(&channel_id) {
-                    actor.send_message(ChannelActorMessage::Command(ChannelCommand::Shutdown(
-                        shutdown, rpc_reply,
-                    )))?;
-                    Ok(())
-                } else {
-                    match self.store.get_channel_actor_state(&channel_id) {
+                match self.channels.get(&channel_id) {
+                    Some(actor) => {
+                        actor.send_message(ChannelActorMessage::Command(
+                            ChannelCommand::Shutdown(shutdown, rpc_reply),
+                        ))?;
+                        Ok(())
+                    }
+                    _ => match self.store.get_channel_actor_state(&channel_id) {
                         Some(mut state) => {
                             match state.state {
                                 ChannelState::ChannelReady() => {
@@ -2504,7 +2511,7 @@ where
                             Ok(())
                         }
                         None => Err(Error::ChannelNotFound(channel_id)),
-                    }
+                    },
                 }
             }
             _ => match self.channels.get(&channel_id) {

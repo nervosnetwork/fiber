@@ -1533,7 +1533,7 @@ where
         payment_hash: Hash256,
         try_one_time: bool,
     ) {
-        if let Some(RetryableTlcOperation::ForwardTlc(.., ref mut sent)) =
+        if let Some(RetryableTlcOperation::ForwardTlc(.., sent)) =
             state.tlc_state.retryable_tlc_operations.iter_mut().find(
                 |op| matches!(op, RetryableTlcOperation::ForwardTlc(ph,..) if *ph == payment_hash),
             )
@@ -1550,7 +1550,7 @@ where
         let mut pending_tlc_ops = state.tlc_state.get_pending_operations();
         pending_tlc_ops.retain_mut(|retryable_operation| {
             match retryable_operation {
-                RetryableTlcOperation::RemoveTlc(tlc_id, ref reason) => {
+                &mut RetryableTlcOperation::RemoveTlc(ref mut tlc_id, ref reason) => {
                     match self.handle_remove_tlc_command(
                         state,
                         RemoveTlcCommand {
@@ -1563,7 +1563,11 @@ where
                         Err(_err) => false,
                     }
                 }
-                RetryableTlcOperation::RelayRemoveTlc(channel_id, tlc_id, ref reason) => {
+                &mut RetryableTlcOperation::RelayRemoveTlc(
+                    ref mut channel_id,
+                    ref mut tlc_id,
+                    ref reason,
+                ) => {
                     // send relay remove tlc with network actor to previous hop
                     let (send, _recv) = oneshot::channel::<Result<(), ProcessingChannelError>>();
                     let port = RpcReplyPort::from(send);
@@ -1584,12 +1588,12 @@ where
                     // the previous hop will automatically retry if there is Waiting_Ack error
                     false
                 }
-                RetryableTlcOperation::ForwardTlc(
-                    payment_hash,
-                    tlc_id,
+                &mut RetryableTlcOperation::ForwardTlc(
+                    ref mut payment_hash,
+                    ref mut tlc_id,
                     ref peeled_onion_packet,
-                    forward_fee,
-                    try_one_time,
+                    ref mut forward_fee,
+                    ref mut try_one_time,
                 ) => {
                     // there is a potential deadlock for waiting the result from another channel actor
                     // for the scenario these two things happen at the same time:
@@ -1654,33 +1658,36 @@ where
             }
             _ => None,
         }) {
-            if let Some((channel_err, tlc_err)) = result.error_info {
-                match channel_err {
-                    ProcessingChannelError::WaitingTlcAck => {
-                        // if we get WaitingTlcAck error, we will retry it later
-                        self.set_forward_tlc_status(state, result.payment_hash, true);
-                    }
-                    ProcessingChannelError::RepeatedProcessing(_) => {
-                        // ignore repeated processing error, we have already handled it
-                        state.tlc_state.remove_pending_tlc_operation(tlc_op);
-                    }
-                    _ => {
-                        let error = ProcessingChannelError::TlcForwardingError(tlc_err)
-                            .with_shared_secret(peeled_onion.shared_secret);
-                        self.process_add_tlc_error(
-                            myself,
-                            state,
-                            result.payment_hash,
-                            TLCId::Received(result.tlc_id),
-                            error,
-                        )
-                        .await;
-                        state.tlc_state.remove_pending_tlc_operation(tlc_op);
+            match result.error_info {
+                Some((channel_err, tlc_err)) => {
+                    match channel_err {
+                        ProcessingChannelError::WaitingTlcAck => {
+                            // if we get WaitingTlcAck error, we will retry it later
+                            self.set_forward_tlc_status(state, result.payment_hash, true);
+                        }
+                        ProcessingChannelError::RepeatedProcessing(_) => {
+                            // ignore repeated processing error, we have already handled it
+                            state.tlc_state.remove_pending_tlc_operation(tlc_op);
+                        }
+                        _ => {
+                            let error = ProcessingChannelError::TlcForwardingError(tlc_err)
+                                .with_shared_secret(peeled_onion.shared_secret);
+                            self.process_add_tlc_error(
+                                myself,
+                                state,
+                                result.payment_hash,
+                                TLCId::Received(result.tlc_id),
+                                error,
+                            )
+                            .await;
+                            state.tlc_state.remove_pending_tlc_operation(tlc_op);
+                        }
                     }
                 }
-            } else {
-                // if we get success result from AddTlc, we will remove the pending operation
-                state.tlc_state.remove_pending_tlc_operation(tlc_op);
+                _ => {
+                    // if we get success result from AddTlc, we will remove the pending operation
+                    state.tlc_state.remove_pending_tlc_operation(tlc_op);
+                }
             }
         }
     }
@@ -1801,10 +1808,9 @@ where
             ChannelCommand::CommitmentSigned() => self.handle_commitment_signed_command(state),
             ChannelCommand::AddTlc(command, reply) => {
                 let res = self.handle_add_tlc_command(state, command.clone());
-                let error_info = if let Err(ref err) = res {
-                    Some((err.clone(), self.get_tlc_error(state, err).await))
-                } else {
-                    None
+                let error_info = match res {
+                    Err(ref err) => Some((err.clone(), self.get_tlc_error(state, err).await)),
+                    _ => None,
                 };
 
                 self.network
@@ -4418,25 +4424,27 @@ impl ChannelActorState {
                 &self.funding_udt_type_script,
             );
             let lock_script = self.get_remote_shutdown_script();
-            let (output, output_data) = if let Some(udt_type_script) = &self.funding_udt_type_script
-            {
-                let capacity = self.get_total_reserved_ckb_amount() - commitment_tx_fee;
-                let output = CellOutput::new_builder()
-                    .lock(lock_script)
-                    .type_(Some(udt_type_script.clone()).pack())
-                    .capacity(capacity.pack())
-                    .build();
+            let (output, output_data) = match &self.funding_udt_type_script {
+                Some(udt_type_script) => {
+                    let capacity = self.get_total_reserved_ckb_amount() - commitment_tx_fee;
+                    let output = CellOutput::new_builder()
+                        .lock(lock_script)
+                        .type_(Some(udt_type_script.clone()).pack())
+                        .capacity(capacity.pack())
+                        .build();
 
-                let output_data = self.get_total_udt_amount().to_le_bytes().pack();
-                (output, output_data)
-            } else {
-                let capacity = self.get_total_ckb_amount() - commitment_tx_fee;
-                let output = CellOutput::new_builder()
-                    .lock(lock_script.clone())
-                    .capacity(capacity.pack())
-                    .build();
-                let output_data = Bytes::default();
-                (output, output_data)
+                    let output_data = self.get_total_udt_amount().to_le_bytes().pack();
+                    (output, output_data)
+                }
+                _ => {
+                    let capacity = self.get_total_ckb_amount() - commitment_tx_fee;
+                    let output = CellOutput::new_builder()
+                        .lock(lock_script.clone())
+                        .capacity(capacity.pack())
+                        .build();
+                    let output_data = Bytes::default();
+                    (output, output_data)
+                }
             };
 
             let commitment_number = self.get_remote_commitment_number() - 1;
@@ -5150,35 +5158,38 @@ impl ChannelActorState {
         tlc_id: TLCId,
         reason: &RemoveTlcReason,
     ) -> ProcessingChannelResult {
-        if let Some(tlc) = self.tlc_state.get(&tlc_id) {
-            if tlc.removed_reason.is_some() {
-                return Err(ProcessingChannelError::RepeatedProcessing(
-                    "TLC is already removed".to_string(),
-                ));
-            }
-            if (tlc.is_offered() && tlc.outbound_status() != OutboundTlcStatus::Committed)
-                || (tlc.is_received() && tlc.inbound_status() != InboundTlcStatus::Committed)
-            {
-                return Err(ProcessingChannelError::InvalidState(
-                    "TLC is not in Committed status".to_string(),
-                ));
-            }
-            if let RemoveTlcReason::RemoveTlcFulfill(fulfill) = reason {
-                let filled_payment_hash: Hash256 =
-                    tlc.hash_algorithm.hash(fulfill.payment_preimage).into();
-                if tlc.payment_hash != filled_payment_hash {
-                    // actually this branch should never be reached in normal case
-                    // `FinalIncorrectPreimage` will be returned in `apply_add_tlc_operation_with_peeled_onion_packet`
-                    // when the preimage is incorrect
-                    return Err(ProcessingChannelError::FinalIncorrectPreimage);
+        match self.tlc_state.get(&tlc_id) {
+            Some(tlc) => {
+                if tlc.removed_reason.is_some() {
+                    return Err(ProcessingChannelError::RepeatedProcessing(
+                        "TLC is already removed".to_string(),
+                    ));
                 }
+                if (tlc.is_offered() && tlc.outbound_status() != OutboundTlcStatus::Committed)
+                    || (tlc.is_received() && tlc.inbound_status() != InboundTlcStatus::Committed)
+                {
+                    return Err(ProcessingChannelError::InvalidState(
+                        "TLC is not in Committed status".to_string(),
+                    ));
+                }
+                if let RemoveTlcReason::RemoveTlcFulfill(fulfill) = reason {
+                    let filled_payment_hash: Hash256 =
+                        tlc.hash_algorithm.hash(fulfill.payment_preimage).into();
+                    if tlc.payment_hash != filled_payment_hash {
+                        // actually this branch should never be reached in normal case
+                        // `FinalIncorrectPreimage` will be returned in `apply_add_tlc_operation_with_peeled_onion_packet`
+                        // when the preimage is incorrect
+                        return Err(ProcessingChannelError::FinalIncorrectPreimage);
+                    }
+                }
+                Ok(())
             }
-            Ok(())
-        } else {
-            return Err(ProcessingChannelError::InvalidParameter(format!(
-                "Trying to remove non-existing tlc with id {:?}",
-                tlc_id
-            )));
+            _ => {
+                return Err(ProcessingChannelError::InvalidParameter(format!(
+                    "Trying to remove non-existing tlc with id {:?}",
+                    tlc_id
+                )));
+            }
         }
     }
 
@@ -5988,25 +5999,27 @@ impl ChannelActorState {
                 &self.funding_udt_type_script,
             );
             let lock_script = self.get_local_shutdown_script();
-            let (output, output_data) = if let Some(udt_type_script) = &self.funding_udt_type_script
-            {
-                let capacity = self.get_total_reserved_ckb_amount() - commitment_tx_fee;
-                let output = CellOutput::new_builder()
-                    .lock(lock_script.clone())
-                    .type_(Some(udt_type_script.clone()).pack())
-                    .capacity(capacity.pack())
-                    .build();
+            let (output, output_data) = match &self.funding_udt_type_script {
+                Some(udt_type_script) => {
+                    let capacity = self.get_total_reserved_ckb_amount() - commitment_tx_fee;
+                    let output = CellOutput::new_builder()
+                        .lock(lock_script.clone())
+                        .type_(Some(udt_type_script.clone()).pack())
+                        .capacity(capacity.pack())
+                        .build();
 
-                let output_data = self.get_total_udt_amount().to_le_bytes().pack();
-                (output, output_data)
-            } else {
-                let capacity = self.get_total_ckb_amount() - commitment_tx_fee;
-                let output = CellOutput::new_builder()
-                    .lock(lock_script.clone())
-                    .capacity(capacity.pack())
-                    .build();
-                let output_data = Bytes::default();
-                (output, output_data)
+                    let output_data = self.get_total_udt_amount().to_le_bytes().pack();
+                    (output, output_data)
+                }
+                _ => {
+                    let capacity = self.get_total_ckb_amount() - commitment_tx_fee;
+                    let output = CellOutput::new_builder()
+                        .lock(lock_script.clone())
+                        .capacity(capacity.pack())
+                        .build();
+                    let output_data = Bytes::default();
+                    (output, output_data)
+                }
             };
 
             let commitment_number = self.get_local_commitment_number() - 1;
@@ -6625,72 +6638,75 @@ impl ChannelActorState {
                 .build(),
         );
 
-        if let Some(type_script) = &self.funding_udt_type_script {
-            debug!(
-                "shutdown UDT local_amount: {}, remote_amount: {}",
-                self.to_local_amount, self.to_remote_amount
-            );
+        match &self.funding_udt_type_script {
+            Some(type_script) => {
+                debug!(
+                    "shutdown UDT local_amount: {}, remote_amount: {}",
+                    self.to_local_amount, self.to_remote_amount
+                );
 
-            let local_capacity: u64 = self.local_reserved_ckb_amount - local_shutdown_fee;
-            debug!(
-                "shutdown_tx local_capacity: {} - {} = {}",
-                self.local_reserved_ckb_amount, local_shutdown_fee, local_capacity
-            );
-            let to_local_output = CellOutput::new_builder()
-                .lock(local_shutdown_script)
-                .type_(Some(type_script.clone()).pack())
-                .capacity(local_capacity.pack())
-                .build();
-            let to_local_output_data = self.to_local_amount.to_le_bytes().pack();
+                let local_capacity: u64 = self.local_reserved_ckb_amount - local_shutdown_fee;
+                debug!(
+                    "shutdown_tx local_capacity: {} - {} = {}",
+                    self.local_reserved_ckb_amount, local_shutdown_fee, local_capacity
+                );
+                let to_local_output = CellOutput::new_builder()
+                    .lock(local_shutdown_script)
+                    .type_(Some(type_script.clone()).pack())
+                    .capacity(local_capacity.pack())
+                    .build();
+                let to_local_output_data = self.to_local_amount.to_le_bytes().pack();
 
-            let remote_capacity: u64 = self.remote_reserved_ckb_amount - remote_shutdown_fee;
-            debug!(
-                "shutdown_tx remote_capacity: {} - {} = {}",
-                self.remote_reserved_ckb_amount, remote_shutdown_fee, remote_capacity
-            );
-            let to_remote_output = CellOutput::new_builder()
-                .lock(remote_shutdown_script)
-                .type_(Some(type_script.clone()).pack())
-                .capacity(remote_capacity.pack())
-                .build();
-            let to_remote_output_data = self.to_remote_amount.to_le_bytes().pack();
+                let remote_capacity: u64 = self.remote_reserved_ckb_amount - remote_shutdown_fee;
+                debug!(
+                    "shutdown_tx remote_capacity: {} - {} = {}",
+                    self.remote_reserved_ckb_amount, remote_shutdown_fee, remote_capacity
+                );
+                let to_remote_output = CellOutput::new_builder()
+                    .lock(remote_shutdown_script)
+                    .type_(Some(type_script.clone()).pack())
+                    .capacity(remote_capacity.pack())
+                    .build();
+                let to_remote_output_data = self.to_remote_amount.to_le_bytes().pack();
 
-            let outputs = self.order_things_for_musig2(to_local_output, to_remote_output);
-            let outputs_data =
-                self.order_things_for_musig2(to_local_output_data, to_remote_output_data);
-            let tx = tx_builder
-                .set_outputs(outputs.to_vec())
-                .set_outputs_data(outputs_data.to_vec())
-                .build();
-            Ok(tx)
-        } else {
-            debug!(
+                let outputs = self.order_things_for_musig2(to_local_output, to_remote_output);
+                let outputs_data =
+                    self.order_things_for_musig2(to_local_output_data, to_remote_output_data);
+                let tx = tx_builder
+                    .set_outputs(outputs.to_vec())
+                    .set_outputs_data(outputs_data.to_vec())
+                    .build();
+                Ok(tx)
+            }
+            _ => {
+                debug!(
                 "Final balance partition before shutting down: local {} (fee {}), remote {} (fee {})",
                 self.to_local_amount, local_shutdown_fee,
                 self.to_remote_amount, remote_shutdown_fee
             );
-            let local_value =
-                self.to_local_amount as u64 + self.local_reserved_ckb_amount - local_shutdown_fee;
-            let remote_value = self.to_remote_amount as u64 + self.remote_reserved_ckb_amount
-                - remote_shutdown_fee;
-            debug!(
-                "Building shutdown transaction with values: local {}, remote {}",
-                local_value, remote_value
-            );
-            let to_local_output = CellOutput::new_builder()
-                .capacity(local_value.pack())
-                .lock(local_shutdown_script)
-                .build();
-            let to_remote_output = CellOutput::new_builder()
-                .capacity(remote_value.pack())
-                .lock(remote_shutdown_script)
-                .build();
-            let outputs = self.order_things_for_musig2(to_local_output, to_remote_output);
-            let tx = tx_builder
-                .set_outputs(outputs.to_vec())
-                .set_outputs_data(vec![Default::default(), Default::default()])
-                .build();
-            Ok(tx)
+                let local_value = self.to_local_amount as u64 + self.local_reserved_ckb_amount
+                    - local_shutdown_fee;
+                let remote_value = self.to_remote_amount as u64 + self.remote_reserved_ckb_amount
+                    - remote_shutdown_fee;
+                debug!(
+                    "Building shutdown transaction with values: local {}, remote {}",
+                    local_value, remote_value
+                );
+                let to_local_output = CellOutput::new_builder()
+                    .capacity(local_value.pack())
+                    .lock(local_shutdown_script)
+                    .build();
+                let to_remote_output = CellOutput::new_builder()
+                    .capacity(remote_value.pack())
+                    .lock(remote_shutdown_script)
+                    .build();
+                let outputs = self.order_things_for_musig2(to_local_output, to_remote_output);
+                let tx = tx_builder
+                    .set_outputs(outputs.to_vec())
+                    .set_outputs_data(vec![Default::default(), Default::default()])
+                    .build();
+                Ok(tx)
+            }
         }
     }
 
@@ -6768,25 +6784,28 @@ impl ChannelActorState {
         let commitment_tx_fee =
             calculate_commitment_tx_fee(self.commitment_fee_rate, &self.funding_udt_type_script);
 
-        if let Some(udt_type_script) = &self.funding_udt_type_script {
-            let capacity = self.local_reserved_ckb_amount + self.remote_reserved_ckb_amount
-                - commitment_tx_fee;
-            let output = CellOutput::new_builder()
-                .lock(commitment_lock_script)
-                .type_(Some(udt_type_script.clone()).pack())
-                .capacity(capacity.pack())
-                .build();
+        match &self.funding_udt_type_script {
+            Some(udt_type_script) => {
+                let capacity = self.local_reserved_ckb_amount + self.remote_reserved_ckb_amount
+                    - commitment_tx_fee;
+                let output = CellOutput::new_builder()
+                    .lock(commitment_lock_script)
+                    .type_(Some(udt_type_script.clone()).pack())
+                    .capacity(capacity.pack())
+                    .build();
 
-            let output_data = self.get_total_udt_amount().to_le_bytes().pack();
-            (output, output_data)
-        } else {
-            let capacity = self.get_total_ckb_amount() - commitment_tx_fee;
-            let output = CellOutput::new_builder()
-                .lock(commitment_lock_script)
-                .capacity(capacity.pack())
-                .build();
-            let output_data = Bytes::default();
-            (output, output_data)
+                let output_data = self.get_total_udt_amount().to_le_bytes().pack();
+                (output, output_data)
+            }
+            _ => {
+                let capacity = self.get_total_ckb_amount() - commitment_tx_fee;
+                let output = CellOutput::new_builder()
+                    .lock(commitment_lock_script)
+                    .capacity(capacity.pack())
+                    .build();
+                let output_data = Bytes::default();
+                (output, output_data)
+            }
         }
     }
 
@@ -6900,60 +6919,65 @@ impl ChannelActorState {
         let to_remote_output_script = self.get_remote_shutdown_script();
 
         // to simplify the fee calculation, we assume that the fee is double paid by both parties
-        if let Some(udt_type_script) = &self.funding_udt_type_script {
-            let to_local_output = CellOutput::new_builder()
-                .lock(to_local_output_script)
-                .type_(Some(udt_type_script.clone()).pack())
-                .capacity((self.local_reserved_ckb_amount - commitment_tx_fee).pack())
-                .build();
-            let to_local_output_data = to_local_value.to_le_bytes().pack();
+        match &self.funding_udt_type_script {
+            Some(udt_type_script) => {
+                let to_local_output = CellOutput::new_builder()
+                    .lock(to_local_output_script)
+                    .type_(Some(udt_type_script.clone()).pack())
+                    .capacity((self.local_reserved_ckb_amount - commitment_tx_fee).pack())
+                    .build();
+                let to_local_output_data = to_local_value.to_le_bytes().pack();
 
-            let to_remote_output = CellOutput::new_builder()
-                .lock(to_remote_output_script)
-                .type_(Some(udt_type_script.clone()).pack())
-                .capacity((self.remote_reserved_ckb_amount - commitment_tx_fee).pack())
-                .build();
-            let to_remote_output_data = to_remote_value.to_le_bytes().pack();
-            if for_remote {
-                (
-                    [to_local_output, to_remote_output],
-                    [to_local_output_data, to_remote_output_data],
-                )
-            } else {
-                (
-                    [to_remote_output, to_local_output],
-                    [to_remote_output_data, to_local_output_data],
-                )
+                let to_remote_output = CellOutput::new_builder()
+                    .lock(to_remote_output_script)
+                    .type_(Some(udt_type_script.clone()).pack())
+                    .capacity((self.remote_reserved_ckb_amount - commitment_tx_fee).pack())
+                    .build();
+                let to_remote_output_data = to_remote_value.to_le_bytes().pack();
+                if for_remote {
+                    (
+                        [to_local_output, to_remote_output],
+                        [to_local_output_data, to_remote_output_data],
+                    )
+                } else {
+                    (
+                        [to_remote_output, to_local_output],
+                        [to_remote_output_data, to_local_output_data],
+                    )
+                }
             }
-        } else {
-            let to_local_output = CellOutput::new_builder()
-                .lock(to_local_output_script)
-                .capacity(
-                    (to_local_value as u64 + self.local_reserved_ckb_amount - commitment_tx_fee)
-                        .pack(),
-                )
-                .build();
-            let to_local_output_data = Bytes::default();
+            _ => {
+                let to_local_output = CellOutput::new_builder()
+                    .lock(to_local_output_script)
+                    .capacity(
+                        (to_local_value as u64 + self.local_reserved_ckb_amount
+                            - commitment_tx_fee)
+                            .pack(),
+                    )
+                    .build();
+                let to_local_output_data = Bytes::default();
 
-            let to_remote_output = CellOutput::new_builder()
-                .lock(to_remote_output_script)
-                .capacity(
-                    (to_remote_value as u64 + self.remote_reserved_ckb_amount - commitment_tx_fee)
-                        .pack(),
-                )
-                .build();
-            let to_remote_output_data = Bytes::default();
+                let to_remote_output = CellOutput::new_builder()
+                    .lock(to_remote_output_script)
+                    .capacity(
+                        (to_remote_value as u64 + self.remote_reserved_ckb_amount
+                            - commitment_tx_fee)
+                            .pack(),
+                    )
+                    .build();
+                let to_remote_output_data = Bytes::default();
 
-            if for_remote {
-                (
-                    [to_local_output, to_remote_output],
-                    [to_local_output_data, to_remote_output_data],
-                )
-            } else {
-                (
-                    [to_remote_output, to_local_output],
-                    [to_remote_output_data, to_local_output_data],
-                )
+                if for_remote {
+                    (
+                        [to_local_output, to_remote_output],
+                        [to_local_output_data, to_remote_output_data],
+                    )
+                } else {
+                    (
+                        [to_remote_output, to_local_output],
+                        [to_remote_output_data, to_local_output_data],
+                    )
+                }
             }
         }
     }

@@ -160,37 +160,43 @@ where
                                     Ok(Some(tx_with_status)) => {
                                         if tx_with_status.tx_status.status != Status::Committed {
                                             error!("Cannot find the commitment tx: {:?}, status is {:?}, maybe ckb indexer bug?", tx_with_status.tx_status.status, tx.tx_hash);
-                                        } else if let Some(tx) = tx_with_status.transaction {
-                                            match tx.inner {
-                                                Either::Left(tx) => {
-                                                    let tx: Transaction = tx.inner.into();
-                                                    if tx.raw().outputs().len() == 1 {
-                                                        let output = tx
-                                                            .raw()
-                                                            .outputs()
-                                                            .get(0)
-                                                            .expect("get output 0 of tx");
-                                                        let commitment_lock = output.lock();
-                                                        let lock_args =
-                                                            commitment_lock.args().raw_data();
-                                                        let pub_key_hash: [u8; 20] = lock_args
-                                                            [0..20]
-                                                            .try_into()
-                                                            .expect("checked length");
-                                                        let commitment_number = u64::from_be_bytes(
-                                                            lock_args[28..36]
-                                                                .try_into()
-                                                                .expect("u64 from slice"),
-                                                        );
+                                        } else {
+                                            match tx_with_status.transaction {
+                                                Some(tx) => {
+                                                    match tx.inner {
+                                                        Either::Left(tx) => {
+                                                            let tx: Transaction = tx.inner.into();
+                                                            if tx.raw().outputs().len() == 1 {
+                                                                let output = tx
+                                                                    .raw()
+                                                                    .outputs()
+                                                                    .get(0)
+                                                                    .expect("get output 0 of tx");
+                                                                let commitment_lock = output.lock();
+                                                                let lock_args = commitment_lock
+                                                                    .args()
+                                                                    .raw_data();
+                                                                let pub_key_hash: [u8; 20] =
+                                                                    lock_args[0..20]
+                                                                        .try_into()
+                                                                        .expect("checked length");
+                                                                let commitment_number =
+                                                                    u64::from_be_bytes(
+                                                                        lock_args[28..36]
+                                                                            .try_into()
+                                                                            .expect(
+                                                                                "u64 from slice",
+                                                                            ),
+                                                                    );
 
-                                                        if blake160(
-                                                            &channel_data
-                                                                .remote_settlement_data
-                                                                .x_only_aggregated_pubkey,
-                                                        )
-                                                        .0 == pub_key_hash
-                                                        {
-                                                            match channel_data
+                                                                if blake160(
+                                                                    &channel_data
+                                                                        .remote_settlement_data
+                                                                        .x_only_aggregated_pubkey,
+                                                                )
+                                                                .0 == pub_key_hash
+                                                                {
+                                                                    match channel_data
                                                                 .revocation_data
                                                                 .clone()
                                                             {
@@ -262,8 +268,8 @@ where
                                                                     );
                                                                 }
                                                             }
-                                                        } else {
-                                                            try_settle_commitment_tx(
+                                                                } else {
+                                                                    try_settle_commitment_tx(
                                                                 commitment_lock,
                                                                 ckb_client,
                                                                 channel_data
@@ -277,18 +283,21 @@ where
                                                                 &mut cell_collector,
                                                                 &self.store,
                                                             );
+                                                                }
+                                                            } else {
+                                                                // there may be a race condition that PeriodicCheck is triggered before the remove_channel fn is called
+                                                                // it's a close channel tx, ignore
+                                                            }
                                                         }
-                                                    } else {
-                                                        // there may be a race condition that PeriodicCheck is triggered before the remove_channel fn is called
-                                                        // it's a close channel tx, ignore
+                                                        Either::Right(_tx) => {
+                                                            // unreachable, ignore
+                                                        }
                                                     }
                                                 }
-                                                Either::Right(_tx) => {
-                                                    // unreachable, ignore
+                                                _ => {
+                                                    error!("Cannot find the commitment tx: {:?}, transcation is none, maybe ckb indexer bug?", tx.tx_hash);
                                                 }
                                             }
-                                        } else {
-                                            error!("Cannot find the commitment tx: {:?}, transcation is none, maybe ckb indexer bug?", tx.tx_hash);
                                         }
                                     }
                                     Ok(None) => {

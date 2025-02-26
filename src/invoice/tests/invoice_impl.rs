@@ -5,7 +5,7 @@ use secp256k1::{Message, Secp256k1};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::{
-    fiber::{gen::invoice::RawCkbInvoice, types::Hash256},
+    fiber::{r#gen::invoice::RawCkbInvoice, types::Hash256},
     invoice::{
         invoice_impl::{CkbScript, InvoiceData, SIGNATURE_U5_SIZE},
         utils::{ar_decompress, ar_encompress},
