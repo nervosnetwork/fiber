@@ -116,7 +116,10 @@ impl Actor for CkbChainActor {
         let funding_source_lock_script =
             get_script_by_contract(Contract::Secp256k1Lock, &pub_key_hash[0..20]);
         let ckb_tx_tracing_actor = Actor::spawn_linked(
-            Some("ckb-tx-tracing".to_string()),
+            Some(format!(
+                "{}/ckb-tx-tracing",
+                myself.get_name().as_deref().unwrap_or_default()
+            )),
             CkbTxTracingActor::new(),
             CkbTxTracingArguments {
                 rpc_url: config.rpc_url.clone(),

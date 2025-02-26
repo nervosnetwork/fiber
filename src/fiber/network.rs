@@ -2023,6 +2023,15 @@ fn generate_channel_actor_name(local_peer_id: &PeerId, remote_peer_id: &PeerId) 
     )
 }
 
+fn generate_in_flight_tx_actor_name(supervisor: ActorCell, tx_hash: Hash256) -> String {
+    let supervisor_name = supervisor.get_name();
+    format!(
+        "{}/InFlightCkbTx-{}",
+        supervisor_name.as_deref().unwrap_or_default(),
+        tx_hash
+    )
+}
+
 impl<S> NetworkActorState<S>
 where
     S: NetworkActorStateStore
@@ -2269,9 +2278,9 @@ where
             };
 
             let (task, _) = Actor::spawn_linked(
-                Some(format!(
-                    "peer {} in flight tx actor {}",
-                    self.peer_id, tx_hash
+                Some(generate_in_flight_tx_actor_name(
+                    self.network.get_cell(),
+                    tx_hash,
                 )),
                 handler,
                 InFlightCkbTxActorArguments { transaction: None },
@@ -2301,9 +2310,9 @@ where
                 };
 
                 let (task, _) = Actor::spawn_linked(
-                    Some(format!(
-                        "peer {} in flight tx actor {}",
-                        self.peer_id, tx_hash
+                    Some(generate_in_flight_tx_actor_name(
+                        self.network.get_cell(),
+                        tx_hash,
                     )),
                     handler,
                     InFlightCkbTxActorArguments {
