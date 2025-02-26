@@ -341,6 +341,7 @@ impl<S> GossipService<S>
 where
     S: GossipMessageStore + Clone + Send + Sync + 'static,
 {
+    #[allow(clippy::too_many_arguments)]
     pub async fn start(
         name: Option<String>,
         gossip_network_maintenance_interval: Duration,
@@ -1066,7 +1067,7 @@ impl<S: GossipMessageStore> ExtendedGossipMessageStoreState<S> {
     // return the list of saved messages that can be sent to the subscribers.
     async fn prune_messages_to_be_saved(&mut self) -> Vec<BroadcastMessageWithTimestamp> {
         let mut complete_messages = HashSet::new();
-        for (_, messages) in &self.messages_to_be_saved {
+        for messages in self.messages_to_be_saved.values() {
             for message in messages {
                 if self.has_dependencies_available(message) {
                     complete_messages.insert(message.clone());
@@ -1166,7 +1167,7 @@ impl<S: GossipMessageStore> ExtendedGossipMessageStoreState<S> {
             .take(MAX_NUM_CONCURRENT_QUERY_TASKS - self.num_query_tasks_running)
             .cloned()
             .collect::<Vec<_>>();
-        self.num_query_tasks_running = self.num_query_tasks_running + peers_to_query.len();
+        self.num_query_tasks_running += peers_to_query.len();
 
         for peer in peers_to_query {
             // The assumption is that when a peer sends us a message, it should have all the dependencies.
@@ -1270,7 +1271,7 @@ impl<S: GossipMessageStore> ExtendedGossipMessageStoreState<S> {
         message: &BroadcastMessage,
     ) -> Result<(), GossipMessageProcessingError> {
         if let Some(existing_messages) = self.messages_to_be_saved.get(peer_id) {
-            if existing_messages.contains(&message) {
+            if existing_messages.contains(message) {
                 return Ok(());
             }
         }
@@ -1511,7 +1512,7 @@ impl<S: GossipMessageStore + Send + Sync + 'static> Actor for ExtendedGossipMess
                     is_success = is_success,
                     "Querying task done"
                 );
-                state.num_query_tasks_running = state.num_query_tasks_running - 1;
+                state.num_query_tasks_running -= 1;
             }
 
             ExtendedGossipMessageStoreMessage::Tick => {
