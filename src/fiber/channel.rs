@@ -39,7 +39,7 @@ use crate::{
     now_timestamp_as_millis_u64, NetworkServiceEvent,
 };
 use ckb_hash::{blake2b_256, new_blake2b};
-use ckb_sdk::{Since, SinceType};
+use ckb_sdk::{util::blake160, Since, SinceType};
 use ckb_types::{
     core::{
         Capacity, CapacityError, EpochNumberWithFraction, FeeRate, TransactionBuilder,
@@ -1304,9 +1304,18 @@ where
     ) -> ProcessingChannelResult {
         state.check_for_tlc_update(None, true, false)?;
         state.check_remove_tlc_with_reason(TLCId::Received(command.id), &command.reason)?;
-        state
+        let payment_hash = state
             .tlc_state
             .set_received_tlc_removed(command.id, command.reason.clone());
+        if let RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill { payment_preimage }) =
+            command.reason
+        {
+            self.store
+                .insert_payment_preimage(payment_hash, payment_preimage)
+                .map_err(|_| {
+                    ProcessingChannelError::InternalError("insert preimage failed".to_string())
+                })?;
+        }
         let msg = FiberMessageWithPeerId::new(
             state.get_remote_peer_id(),
             FiberMessage::remove_tlc(RemoveTlc {
@@ -2888,12 +2897,12 @@ impl TlcState {
         self.received_tlcs.add_tlc(tlc);
     }
 
-    pub fn set_received_tlc_removed(&mut self, tlc_id: u64, reason: RemoveTlcReason) {
-        if let Some(tlc) = self.get_mut(&TLCId::Received(tlc_id)) {
-            assert_eq!(tlc.inbound_status(), InboundTlcStatus::Committed);
-            tlc.removed_reason = Some(reason);
-            tlc.status = TlcStatus::Inbound(InboundTlcStatus::LocalRemoved);
-        }
+    pub fn set_received_tlc_removed(&mut self, tlc_id: u64, reason: RemoveTlcReason) -> Hash256 {
+        let tlc = self.get_mut(&TLCId::Received(tlc_id)).expect("get tlc");
+        assert_eq!(tlc.inbound_status(), InboundTlcStatus::Committed);
+        tlc.removed_reason = Some(reason);
+        tlc.status = TlcStatus::Inbound(InboundTlcStatus::LocalRemoved);
+        tlc.payment_hash
     }
 
     pub fn set_offered_tlc_removed(&mut self, tlc_id: u64, reason: RemoveTlcReason) -> Hash256 {
@@ -3057,6 +3066,38 @@ pub struct SettlementData {
     pub to_remote_output: CellOutput,
     #[serde_as(as = "EntityHex")]
     pub to_remote_output_data: Bytes,
+    pub tlcs: Vec<SettlementTlc>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct SettlementTlc {
+    pub tlc_id: TLCId,
+    pub hash_algorithm: HashAlgorithm,
+    pub payment_amount: u128,
+    pub payment_hash: Hash256,
+    pub expiry: u64,
+    pub local_key: Privkey,
+    pub remote_key: Pubkey,
+}
+
+impl SettlementTlc {
+    pub fn to_witness(&self, for_remote: bool) -> Vec<u8> {
+        let mut vec = Vec::new();
+        let offered_flag = if self.tlc_id.is_offered() { 0u8 } else { 1u8 };
+        vec.push(((self.hash_algorithm as u8) << 1) + offered_flag);
+        vec.extend_from_slice(&self.payment_amount.to_le_bytes());
+        vec.extend_from_slice(&self.payment_hash.as_ref()[0..20]);
+        if self.tlc_id.is_offered() ^ for_remote {
+            vec.extend_from_slice(blake160(&self.remote_key.serialize()).as_ref());
+            vec.extend_from_slice(blake160(&self.local_key.pubkey().serialize()).as_ref());
+        } else {
+            vec.extend_from_slice(blake160(&self.local_key.pubkey().serialize()).as_ref());
+            vec.extend_from_slice(blake160(&self.remote_key.serialize()).as_ref());
+        }
+        let since = Since::new(SinceType::Timestamp, self.expiry / 1000, false);
+        vec.extend_from_slice(&since.value().to_le_bytes());
+        vec
+    }
 }
 
 #[serde_as]
@@ -4891,15 +4932,10 @@ impl ChannelActorState {
     // will have the second pubkey.
     // This tlc must have valid local_committed_at and remote_committed_at fields.
     pub fn get_tlc_pubkeys(&self, tlc: &TlcInfo) -> (Pubkey, Pubkey) {
-        let is_offered = tlc.is_offered();
         let CommitmentNumbers {
             local: local_commitment_number,
             remote: remote_commitment_number,
         } = tlc.get_commitment_numbers();
-        debug!(
-            "Local commitment number: {}, remote commitment number: {}",
-            local_commitment_number, remote_commitment_number
-        );
         let local_pubkey = derive_tlc_pubkey(
             &self.get_local_channel_public_keys().tlc_base_key,
             &self.get_local_commitment_point(remote_commitment_number),
@@ -4908,58 +4944,42 @@ impl ChannelActorState {
             &self.get_remote_channel_public_keys().tlc_base_key,
             &self.get_remote_commitment_point(local_commitment_number),
         );
-
-        if is_offered {
-            (local_pubkey, remote_pubkey)
-        } else {
-            (remote_pubkey, local_pubkey)
-        }
+        (local_pubkey, remote_pubkey)
     }
 
-    fn get_active_received_tlc_with_pubkeys(
-        &self,
-        for_remote: bool,
-    ) -> Vec<(TlcInfo, Pubkey, Pubkey)> {
-        self.get_active_received_tlcs(for_remote)
-            .into_iter()
-            .map(move |tlc| {
-                let (k1, k2) = self.get_tlc_pubkeys(&tlc);
-                (tlc, k1, k2)
-            })
-            .collect()
+    fn get_tlc_keys(&self, tlc: &TlcInfo) -> (Privkey, Pubkey) {
+        let CommitmentNumbers {
+            local: local_commitment_number,
+            remote: remote_commitment_number,
+        } = tlc.get_commitment_numbers();
+
+        (
+            self.signer.derive_tlc_key(remote_commitment_number),
+            derive_tlc_pubkey(
+                &self.get_remote_channel_public_keys().tlc_base_key,
+                &self.get_remote_commitment_point(local_commitment_number),
+            ),
+        )
     }
 
-    fn get_active_offered_tlc_with_pubkeys(
-        &self,
-        for_remote: bool,
-    ) -> Vec<(TlcInfo, Pubkey, Pubkey)> {
-        self.get_active_offered_tlcs(for_remote)
-            .into_iter()
-            .map(move |tlc| {
-                let (k1, k2) = self.get_tlc_pubkeys(&tlc);
-                (tlc, k1, k2)
-            })
-            .collect()
-    }
-
-    fn get_active_htlcs(&self, for_remote: bool) -> Vec<u8> {
+    fn get_active_tlcs(&self, for_remote: bool) -> Vec<u8> {
         // Build a sorted array of TLC so that both party can generate the same commitment transaction.
         let tlcs = {
             let (mut received_tlcs, mut offered_tlcs) = (
-                self.get_active_received_tlc_with_pubkeys(for_remote),
-                self.get_active_offered_tlc_with_pubkeys(for_remote),
+                self.get_active_received_tlcs(for_remote),
+                self.get_active_offered_tlcs(for_remote),
             );
             let (mut a, mut b) = if for_remote {
                 (received_tlcs, offered_tlcs)
             } else {
-                for (tlc, _, _) in received_tlcs.iter_mut().chain(offered_tlcs.iter_mut()) {
+                for tlc in received_tlcs.iter_mut().chain(offered_tlcs.iter_mut()) {
                     // Need to flip these fields for the counterparty.
                     tlc.flip_mut();
                 }
                 (offered_tlcs, received_tlcs)
             };
-            a.sort_by(|x, y| u64::from(x.0.tlc_id).cmp(&u64::from(y.0.tlc_id)));
-            b.sort_by(|x, y| u64::from(x.0.tlc_id).cmp(&u64::from(y.0.tlc_id)));
+            a.sort_by(|x, y| u64::from(x.tlc_id).cmp(&u64::from(y.tlc_id)));
+            b.sort_by(|x, y| u64::from(x.tlc_id).cmp(&u64::from(y.tlc_id)));
             [a, b].concat()
         };
 
@@ -4967,20 +4987,60 @@ impl ChannelActorState {
             Vec::new()
         } else {
             let mut result = vec![tlcs.len() as u8];
-            for (tlc, local, remote) in tlcs {
+            for tlc in tlcs {
+                let (local_key, remote_key) = self.get_tlc_pubkeys(&tlc);
                 result.extend_from_slice(&tlc.get_htlc_type().to_le_bytes());
                 result.extend_from_slice(&tlc.amount.to_le_bytes());
                 result.extend_from_slice(&tlc.get_hash());
-                result.extend_from_slice(&local.serialize());
-                result.extend_from_slice(&remote.serialize());
+                if tlc.is_offered() ^ for_remote {
+                    result.extend_from_slice(blake160(&remote_key.serialize()).as_ref());
+                    result.extend_from_slice(blake160(&local_key.serialize()).as_ref());
+                } else {
+                    result.extend_from_slice(blake160(&local_key.serialize()).as_ref());
+                    result.extend_from_slice(blake160(&remote_key.serialize()).as_ref());
+                }
                 result.extend_from_slice(
-                    &Since::new(SinceType::Timestamp, tlc.expiry, false)
+                    &Since::new(SinceType::Timestamp, tlc.expiry / 1000, false)
                         .value()
                         .to_le_bytes(),
                 );
             }
             result
         }
+    }
+
+    fn get_active_tlcs_for_settlement(&self, for_remote: bool) -> Vec<SettlementTlc> {
+        let (mut received_tlcs, mut offered_tlcs) = (
+            self.get_active_received_tlcs(for_remote),
+            self.get_active_offered_tlcs(for_remote),
+        );
+        let (mut a, mut b) = if for_remote {
+            (received_tlcs, offered_tlcs)
+        } else {
+            for tlc in received_tlcs.iter_mut().chain(offered_tlcs.iter_mut()) {
+                // Need to flip these fields for the counterparty.
+                tlc.flip_mut();
+            }
+            (offered_tlcs, received_tlcs)
+        };
+        a.sort_by(|x, y| u64::from(x.tlc_id).cmp(&u64::from(y.tlc_id)));
+        b.sort_by(|x, y| u64::from(x.tlc_id).cmp(&u64::from(y.tlc_id)));
+        [a, b]
+            .concat()
+            .into_iter()
+            .map(|tlc| {
+                let (local_key, remote_key) = self.get_tlc_keys(&tlc);
+                SettlementTlc {
+                    tlc_id: tlc.tlc_id,
+                    hash_algorithm: tlc.hash_algorithm,
+                    payment_amount: tlc.amount,
+                    payment_hash: tlc.payment_hash,
+                    expiry: tlc.expiry,
+                    local_key,
+                    remote_key,
+                }
+            })
+            .collect()
     }
 
     fn any_tlc_pending(&self) -> bool {
@@ -5334,6 +5394,7 @@ impl ChannelActorState {
                 to_local_output_data,
                 to_remote_output,
                 to_remote_output_data,
+                tlcs: self.get_active_tlcs_for_settlement(false),
             }
         };
 
@@ -6012,6 +6073,7 @@ impl ChannelActorState {
                 to_local_output_data,
                 to_remote_output,
                 to_remote_output_data,
+                tlcs: self.get_active_tlcs_for_settlement(true),
             }
         };
 
@@ -6349,6 +6411,7 @@ impl ChannelActorState {
                 to_local_output_data,
                 to_remote_output,
                 to_remote_output_data,
+                tlcs: vec![],
             }
         };
         Ok(settlement_data)
@@ -6642,9 +6705,7 @@ impl ChannelActorState {
     // for the remote party (we build this commitment transaction
     // normally because we want to send a partial signature to remote).
     // The function returns a tuple, the first element is the commitment transaction itself,
-    // and the second element is the message to be signed by the each party,
-    // so as to consume the funding cell. The last element is the witnesses for the
-    // commitment transaction.
+    // and the second element is the settlement transaction.
     fn build_commitment_and_settlement_tx(
         &self,
         for_remote: bool,
@@ -6693,7 +6754,7 @@ impl ChannelActorState {
     fn build_commitment_transaction_output(&self, for_remote: bool) -> (CellOutput, Bytes) {
         let x_only_aggregated_pubkey = self.get_commitment_lock_script_xonly(for_remote);
         let version = self.get_current_commitment_number(for_remote);
-        let htlcs = self.get_active_htlcs(for_remote);
+        let tlcs = self.get_active_tlcs(for_remote);
 
         let mut commitment_lock_script_args = [
             &blake2b_256(x_only_aggregated_pubkey)[0..20],
@@ -6701,8 +6762,8 @@ impl ChannelActorState {
             version.to_be_bytes().as_slice(),
         ]
         .concat();
-        if !htlcs.is_empty() {
-            commitment_lock_script_args.extend_from_slice(&blake2b_256(&htlcs)[0..20]);
+        if !tlcs.is_empty() {
+            commitment_lock_script_args.extend_from_slice(&blake2b_256(&tlcs)[0..20]);
         }
 
         let commitment_lock_script =
@@ -7077,16 +7138,16 @@ pub struct PartiallySignedCommitmentTransaction {
     pub commitment_tx_partial_signature: PartialSignature,
 }
 
+/// for xudt compatibility issue,
+/// refer to: https://github.com/nervosnetwork/fiber-scripts/pull/5
+pub const XUDT_COMPATIBLE_WITNESS: [u8; 16] = [16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0];
+
 pub fn create_witness_for_funding_cell(
     lock_key_xonly: [u8; 32],
     signature: CompactSignature,
 ) -> [u8; FUNDING_CELL_WITNESS_LEN] {
     let mut witness = Vec::with_capacity(FUNDING_CELL_WITNESS_LEN);
-
-    // for xudt compatibility issue,
-    // refer to: https://github.com/nervosnetwork/fiber-scripts/pull/5
-    let empty_witness_args = [16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0];
-    witness.extend_from_slice(&empty_witness_args);
+    witness.extend_from_slice(&XUDT_COMPATIBLE_WITNESS);
     witness.extend_from_slice(lock_key_xonly.as_slice());
     witness.extend_from_slice(signature.serialize().as_slice());
     witness
@@ -7099,16 +7160,26 @@ pub fn create_witness_for_commitment_cell(
     signature: CompactSignature,
 ) -> [u8; COMMITMENT_CELL_WITNESS_LEN] {
     let mut witness = Vec::with_capacity(COMMITMENT_CELL_WITNESS_LEN);
-    // for xudt compatibility issue,
-    // refer to: https://github.com/nervosnetwork/fiber-scripts/pull/5
-    let empty_witness_args = [16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0];
-    witness.extend_from_slice(&empty_witness_args);
+    witness.extend_from_slice(&XUDT_COMPATIBLE_WITNESS);
     witness.extend_from_slice(&[0xFE]);
     witness.extend_from_slice(lock_key_xonly.as_slice());
     witness.extend_from_slice(signature.serialize().as_slice());
     witness
         .try_into()
         .expect("Witness length should be correct")
+}
+
+pub fn create_witness_for_commitment_cell_with_pending_tlcs(
+    index: u8,
+    pending_tlcs: &[u8],
+) -> Vec<u8> {
+    let mut witness = Vec::new();
+    witness.extend_from_slice(&XUDT_COMPATIBLE_WITNESS);
+    witness.extend_from_slice(&[index]);
+    witness.extend_from_slice(&[(pending_tlcs.len() / 85) as u8]);
+    witness.extend_from_slice(pending_tlcs);
+    witness.extend_from_slice(&[0u8; 65]);
+    witness
 }
 
 // The common musig2 configuration that is used both by signing and verifying.
