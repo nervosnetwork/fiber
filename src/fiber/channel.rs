@@ -4633,18 +4633,14 @@ impl ChannelActorState {
             let sent_tlc_value = self.get_offered_tlc_balance(false);
             debug_assert!(self.to_local_amount >= sent_tlc_value);
             if sent_tlc_value + tlc.amount > self.to_local_amount {
+                debug!(channel = ?self.get_id(), tlc_id = ?tlc.tlc_id, tlc_amount = tlc.amount, sent_tlc_value = sent_tlc_value, to_local_amount = self.to_local_amount, "Sending tlc exceeds local balance",);
                 return Err(ProcessingChannelError::TlcAmountExceedLimit);
             }
         } else {
             let received_tlc_value = self.get_received_tlc_balance(false);
             debug_assert!(self.to_remote_amount >= received_tlc_value);
             if received_tlc_value + tlc.amount > self.to_remote_amount {
-                debug!(
-                    "Adding tlc {:?} with amount {} exceeds remote balance {}",
-                    tlc.tlc_id,
-                    tlc.amount,
-                    self.to_remote_amount - received_tlc_value
-                );
+                debug!(channel = ?self.get_id(), tlc_id = ?tlc.tlc_id, tlc_amount = tlc.amount, received_tlc_value = received_tlc_value, to_remote_amount = self.to_remote_amount, "Receiving tlc exceeds remote balance",);
                 return Err(ProcessingChannelError::TlcAmountExceedLimit);
             }
         }
@@ -5061,6 +5057,12 @@ impl ChannelActorState {
         if self.local_tlc_info.tlc_maximum_value != 0
             && forward_amount > self.local_tlc_info.tlc_minimum_value
         {
+            debug!(
+                channel = ?self.get_id(),
+                forward_amount,
+                tlc_maximum_value = self.local_tlc_info.tlc_maximum_value,
+                "TLC amount exceeds the maximum value",
+            );
             return Err(ProcessingChannelError::TlcAmountExceedLimit);
         }
         let forward_fee = match forward_fee {
@@ -6802,6 +6804,12 @@ impl ChannelActorState {
         let mut offered_fullfilled = 0;
         let mut received_pending = 0;
         let mut received_fullfilled = 0;
+
+        debug!(
+            pending_tlcs = ?pending_tlcs,
+            "Pending TLCS in settlement transaction outputs"
+        );
+
         for info in pending_tlcs {
             if info.is_offered() {
                 if (info.outbound_status() == OutboundTlcStatus::RemoveWaitAck
@@ -6830,7 +6838,15 @@ impl ChannelActorState {
                 received_pending += info.amount;
             }
         }
-
+        debug!(
+            current_to_local_amount = self.to_local_amount,
+            current_to_remote_amount = self.to_remote_amount,
+            offered_pending,
+            offered_fullfilled,
+            received_pending,
+            received_fullfilled,
+            "Amounts for settlement transaction outputs"
+        );
         let to_local_value =
             self.to_local_amount + received_fullfilled - offered_pending - offered_fullfilled;
         let to_remote_value =
@@ -6838,6 +6854,13 @@ impl ChannelActorState {
 
         let commitment_tx_fee =
             calculate_commitment_tx_fee(self.commitment_fee_rate, &self.funding_udt_type_script);
+
+        debug!(
+            new_to_local_amount = to_local_value,
+            new_to_remote_amount = to_remote_value,
+            commitment_tx_fee,
+            "New amounts for to_local and to_remote"
+        );
 
         let to_local_output_script = self.get_local_shutdown_script();
         let to_remote_output_script = self.get_remote_shutdown_script();
