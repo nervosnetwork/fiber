@@ -22,4 +22,5 @@ pub trait InvoiceStore {
     ) -> Result<(), InvoiceError>;
     /// Search for the stored preimage with the given payment hash prefix, usually the first 20 bytes of the payment hash.
     fn search_payment_preimage(&self, payment_hash_prefix: &[u8]) -> Option<Hash256>;
+    fn remove_payment_preimage(&self, payment_hash: &Hash256) -> Result<(), InvoiceError>;
 }

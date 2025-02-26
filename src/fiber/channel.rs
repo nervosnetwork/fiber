@@ -1107,6 +1107,10 @@ where
                 .map_err(|_| {
                     ProcessingChannelError::InternalError("insert preimage failed".to_string())
                 })?;
+            debug_event!(
+                self.network,
+                &format!("store payment_preimage for: {:?}", payment_hash)
+            );
         }
         Ok(())
     }
@@ -1122,12 +1126,15 @@ where
         state.tlc_state.applied_remove_tlcs.insert(tlc_id);
 
         let (tlc_info, remove_reason) = state.remove_tlc_with_reason(tlc_id)?;
-        if matches!(remove_reason, RemoveTlcReason::RemoveTlcFulfill(_))
-            && self.store.get_invoice(&tlc_info.payment_hash).is_some()
-        {
+        if matches!(remove_reason, RemoveTlcReason::RemoveTlcFulfill(_)) {
+            if self.store.get_invoice(&tlc_info.payment_hash).is_some() {
+                self.store
+                    .update_invoice_status(&tlc_info.payment_hash, CkbInvoiceStatus::Paid)
+                    .expect("update invoice status failed");
+            }
             self.store
-                .update_invoice_status(&tlc_info.payment_hash, CkbInvoiceStatus::Paid)
-                .expect("update invoice status failed");
+                .remove_payment_preimage(&tlc_info.payment_hash)
+                .expect("remove preimage failed");
         }
 
         if let (
