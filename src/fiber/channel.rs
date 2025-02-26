@@ -1061,9 +1061,7 @@ where
             }
             self.store
                 .insert_payment_preimage(payment_hash, preimage)
-                .map_err(|_| {
-                    ProcessingChannelError::InternalError("insert preimage failed".to_string())
-                })?;
+                .map_err(|_| ProcessingChannelError::FinalIncorrectPaymentHash)?;
         } else {
             // here we don't need to check current config is public or enabled, because
             // handle_add_tlc_command will check the channel state before forwarding
