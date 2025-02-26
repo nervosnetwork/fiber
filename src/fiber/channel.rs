@@ -709,11 +709,6 @@ where
     ) -> Result<(), ProcessingChannelError> {
         // build commitment tx and verify signature from remote, if passed send ACK for partner
         state.verify_commitment_signed_and_send_ack(commitment_signed.clone(), &self.network)?;
-        debug!(
-            "handled commitment_signed peer message: {:?}",
-            commitment_signed
-        );
-
         let need_commitment_signed = state.tlc_state.update_for_commitment_signed();
 
         // flush remove tlc for received tlcs after replying ack for peer
@@ -3087,13 +3082,14 @@ impl SettlementTlc {
         vec.push(((self.hash_algorithm as u8) << 1) + offered_flag);
         vec.extend_from_slice(&self.payment_amount.to_le_bytes());
         vec.extend_from_slice(&self.payment_hash.as_ref()[0..20]);
-        if self.tlc_id.is_offered() ^ for_remote {
+        if for_remote {
             vec.extend_from_slice(blake160(&self.remote_key.serialize()).as_ref());
             vec.extend_from_slice(blake160(&self.local_key.pubkey().serialize()).as_ref());
         } else {
             vec.extend_from_slice(blake160(&self.local_key.pubkey().serialize()).as_ref());
             vec.extend_from_slice(blake160(&self.remote_key.serialize()).as_ref());
         }
+
         let since = Since::new(SinceType::Timestamp, self.expiry / 1000, false);
         vec.extend_from_slice(&since.value().to_le_bytes());
         vec
@@ -4992,7 +4988,7 @@ impl ChannelActorState {
                 result.extend_from_slice(&tlc.get_htlc_type().to_le_bytes());
                 result.extend_from_slice(&tlc.amount.to_le_bytes());
                 result.extend_from_slice(&tlc.get_hash());
-                if tlc.is_offered() ^ for_remote {
+                if for_remote {
                     result.extend_from_slice(blake160(&remote_key.serialize()).as_ref());
                     result.extend_from_slice(blake160(&local_key.serialize()).as_ref());
                 } else {

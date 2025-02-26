@@ -450,6 +450,42 @@ fn try_settle_commitment_tx<S: InvoiceStore>(
                 let commitment_tx_out_point =
                     OutPoint::new(cell.out_point.tx_hash.pack(), cell.out_point.index.value());
                 let lock_script_args = cell_output.lock().args().raw_data();
+                let since = u64::from_le_bytes(
+                    lock_script_args[20..28].try_into().expect("u64 from slice"),
+                );
+                let delay_epoch = {
+                    let since = Since::from_raw_value(since);
+                    since
+                        .is_relative()
+                        .then(|| {
+                            since.extract_metric().and_then(|(since_type, value)| {
+                                if since_type == SinceType::EpochNumberWithFraction {
+                                    Some(EpochNumberWithFraction::from_full_value(value))
+                                } else {
+                                    None
+                                }
+                            })
+                        })
+                        .flatten()
+                };
+
+                if delay_epoch.is_none() {
+                    error!("Found an invalid since commitment cell: {:?}", cell);
+                    continue;
+                }
+
+                let cell_header: HeaderView =
+                    match ckb_client.get_header_by_number(cell.block_number) {
+                        Ok(Some(header)) => header.into(),
+                        Ok(None) => {
+                            error!("Cannot find header: {}", cell.block_number);
+                            continue;
+                        }
+                        Err(err) => {
+                            error!("Failed to get header: {:?}", err);
+                            continue;
+                        }
+                    };
                 if lock_script_args.len() > 36 {
                     info!(
                         "Found a force closed commitment tx with pending tlcs: {:#x}",
@@ -501,12 +537,15 @@ fn try_settle_commitment_tx<S: InvoiceStore>(
 
                                         match build_settlement_tx_for_pending_tlcs(
                                             cell,
+                                            cell_header,
+                                            delay_epoch.unwrap(),
                                             settlement_data.clone(),
                                             for_remote,
                                             pending_tlcs,
                                             secret_key,
                                             cell_collector,
                                             current_time,
+                                            current_epoch,
                                             store,
                                         ) {
                                             Ok(Some(tx)) => match ckb_client
@@ -544,27 +583,6 @@ fn try_settle_commitment_tx<S: InvoiceStore>(
                         }
                     }
                 } else {
-                    let since = u64::from_le_bytes(
-                        lock_script_args[20..28].try_into().expect("u64 from slice"),
-                    );
-                    let header: HeaderView =
-                        match ckb_client.get_header_by_number(cell.block_number) {
-                            Ok(Some(header)) => header.into(),
-                            Ok(None) => {
-                                error!("Cannot find header: {}", cell.block_number);
-                                continue;
-                            }
-                            Err(err) => {
-                                error!("Failed to get header: {:?}", err);
-                                continue;
-                            }
-                        };
-                    let since_epoch = EpochNumberWithFraction::from_full_value(since);
-                    if header.epoch().to_rational() + since_epoch.to_rational()
-                        > current_epoch.to_rational()
-                    {
-                        continue;
-                    }
                     info!(
                         "Found a force closed commitment tx without pending tlcs: {:#x}",
                         cell.out_point.tx_hash
@@ -777,12 +795,15 @@ fn sign_tx_with_settlement(
 #[allow(clippy::too_many_arguments)]
 fn build_settlement_tx_for_pending_tlcs<S: InvoiceStore>(
     commitment_tx_cell: Cell,
+    cell_header: HeaderView,
+    delay_epoch: EpochNumberWithFraction,
     settlement_data: SettlementData,
     for_remote: bool,
     pending_tlcs: Option<Vec<u8>>,
     secret_key: SecretKey,
     cell_collector: &mut DefaultCellCollector,
     current_time: u64,
+    current_epoch: EpochNumberWithFraction,
     store: &S,
 ) -> Result<Option<TransactionView>, Box<dyn std::error::Error>> {
     let settlement_tlc: Option<(usize, SettlementTlc, Option<Hash256>)> = match pending_tlcs.clone()
@@ -854,6 +875,16 @@ fn build_settlement_tx_for_pending_tlcs<S: InvoiceStore>(
             }),
     };
     if let Some((index, tlc, preimage)) = settlement_tlc {
+        let delay = if preimage.is_some() {
+            // unlock with preimage should delay 1/3 of the epoch
+            mul(delay_epoch, 1, 3)
+        } else {
+            // unlock with expiry should delay 2/3 of the epoch
+            mul(delay_epoch, 2, 3)
+        };
+        if cell_header.epoch().to_rational() + delay.to_rational() > current_epoch.to_rational() {
+            return Ok(None);
+        }
         let pubkey = PublicKey::from_secret_key(&Secp256k1::new(), &secret_key);
         let args = blake160(pubkey.serialize().as_ref());
         let fee_provider_lock_script =
@@ -964,9 +995,13 @@ fn build_settlement_tx_for_pending_tlcs<S: InvoiceStore>(
             for cell in cells {
                 let input_capacity: u64 = cell.output.capacity().unpack();
                 inputs_capacity += input_capacity;
+                let since =
+                    Since::new(SinceType::EpochNumberWithFraction, delay.full_value(), true)
+                        .value();
                 tx_builder = tx_builder.input(
                     CellInput::new_builder()
                         .previous_output(cell.out_point)
+                        .since(since.pack())
                         .build(),
                 );
                 let fee = fee_calculator
@@ -1065,9 +1100,13 @@ fn build_settlement_tx_for_pending_tlcs<S: InvoiceStore>(
             for cell in cells {
                 let input_capacity: u64 = cell.output.capacity().unpack();
                 inputs_capacity += input_capacity;
+                let since =
+                    Since::new(SinceType::EpochNumberWithFraction, delay.full_value(), true)
+                        .value();
                 tx_builder = tx_builder.input(
                     CellInput::new_builder()
                         .previous_output(cell.out_point)
+                        .since(since.pack())
                         .build(),
                 );
                 let fee = fee_calculator
@@ -1090,8 +1129,29 @@ fn build_settlement_tx_for_pending_tlcs<S: InvoiceStore>(
 
             Err(Box::new(RpcError::Other(anyhow!("Not enough capacity"))))
         }
-    } else {
+    } else if cell_header.epoch().to_rational() + delay_epoch.to_rational()
+        > current_epoch.to_rational()
+    {
         Ok(None)
+    } else {
+        info!(
+            "Try to settle the commitment tx: {:#x} discarding pending tlcs",
+            commitment_tx_cell.out_point.tx_hash
+        );
+        let cell_output: CellOutput = commitment_tx_cell.output.into();
+        let since = u64::from_le_bytes(
+            cell_output.lock().args().raw_data()[20..28]
+                .try_into()
+                .expect("u64 from slice"),
+        );
+        let tx = build_settlement_tx(
+            commitment_tx_cell.out_point.clone().into(),
+            since,
+            settlement_data,
+            secret_key,
+            cell_collector,
+        )?;
+        Ok(Some(tx))
     }
 }
 
@@ -1115,4 +1175,29 @@ impl<'a> Tlc<'a> {
         let expiry = u64::from_le_bytes(self.0[77..85].try_into().unwrap());
         Since::from_raw_value(expiry).extract_metric().unwrap().1
     }
+}
+
+// Calculate the product of delay_epoch and a fraction
+fn mul(
+    delay: EpochNumberWithFraction,
+    numerator: u64,
+    denominator: u64,
+) -> EpochNumberWithFraction {
+    let full_numerator = numerator * (delay.number() * delay.length() + delay.index());
+    let new_denominator = denominator * delay.length();
+    let new_integer = full_numerator / new_denominator;
+    let new_numerator = full_numerator % new_denominator;
+
+    // nomalize the fraction (max epoch length is 1800)
+    let scale_factor = if new_denominator > 1800 {
+        new_denominator / 1800 + 1
+    } else {
+        1
+    };
+
+    EpochNumberWithFraction::new(
+        new_integer,
+        new_numerator / scale_factor,
+        new_denominator / scale_factor,
+    )
 }
