@@ -123,7 +123,7 @@ macro_rules! uint_as_hex {
             pub $name,
             $ty,
             |u: &$ty| format!("0x{:x}", u),
-            |hex: &str| -> Result<$ty, String> {
+            |hex: String| -> Result<$ty, String> {
                 let bytes = hex.as_bytes();
                 if bytes.len() < 3 || &bytes[..2] != b"0x" {
                     return Err(format!("uint hex string does not start with 0x: {}", hex));

@@ -13,90 +13,90 @@ use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 
 #[derive(Serialize, Deserialize)]
-pub(crate) struct SendBtcParams {
+pub struct SendBtcParams {
     /// Bitcoin payment request string
-    btc_pay_req: String,
+    pub btc_pay_req: String,
     /// Request currency
-    currency: Currency,
+    pub currency: Currency,
 }
 
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct SendBTCResponse {
+pub struct SendBTCResponse {
     /// Seconds since epoch when the order is created
     #[serde_as(as = "U64Hex")]
-    timestamp: u64,
+    pub timestamp: u64,
     /// Seconds after timestamp that the order expires
     #[serde_as(as = "U64Hex")]
-    expiry: u64,
+    pub expiry: u64,
     /// The minimal expiry in seconds of the final TLC in the CKB network
     #[serde_as(as = "U64Hex")]
-    ckb_final_tlc_expiry_delta: u64,
+    pub ckb_final_tlc_expiry_delta: u64,
 
     /// Request currency
-    currency: Currency,
+    pub currency: Currency,
     /// Wrapped BTC type script
-    wrapped_btc_type_script: ckb_jsonrpc_types::Script,
+    pub wrapped_btc_type_script: ckb_jsonrpc_types::Script,
 
     /// Payment request for BTC
-    btc_pay_req: String,
+    pub btc_pay_req: String,
     /// Payment request for CKB
-    fiber_pay_req: String,
+    pub fiber_pay_req: String,
     /// Payment hash for the HTLC for both CKB and BTC.
-    payment_hash: String,
+    pub payment_hash: String,
     /// Amount required to pay in Satoshis, including fee
     #[serde_as(as = "U128Hex")]
-    amount_sats: u128,
+    pub amount_sats: u128,
     /// Fee in Satoshis
     #[serde_as(as = "U128Hex")]
-    fee_sats: u128,
+    pub fee_sats: u128,
     /// Order status
-    status: CchOrderStatus,
+    pub status: CchOrderStatus,
 }
 
 #[serde_as]
 #[derive(Serialize, Deserialize)]
-pub(crate) struct ReceiveBtcParams {
+pub struct ReceiveBtcParams {
     /// Fiber payment request string
     pub fiber_pay_req: String,
 }
 
 #[derive(Serialize, Deserialize)]
-pub(crate) struct GetReceiveBtcOrderParams {
+pub struct GetReceiveBtcOrderParams {
     /// Payment hash for the HTLC for both CKB and BTC.
-    payment_hash: String,
+    pub payment_hash: String,
 }
 
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct ReceiveBTCResponse {
+pub struct ReceiveBTCResponse {
     /// Seconds since epoch when the order is created
     #[serde_as(as = "U64Hex")]
-    timestamp: u64,
+    pub timestamp: u64,
     /// Seconds after timestamp that the order expires
     #[serde_as(as = "U64Hex")]
-    expiry: u64,
+    pub expiry: u64,
     /// The minimal expiry in seconds of the final TLC in the CKB network
     #[serde_as(as = "U64Hex")]
-    ckb_final_tlc_expiry_delta: u64,
+    pub ckb_final_tlc_expiry_delta: u64,
 
     /// Wrapped BTC type script
-    wrapped_btc_type_script: ckb_jsonrpc_types::Script,
+    pub wrapped_btc_type_script: ckb_jsonrpc_types::Script,
 
     /// Payment request for BTC
-    btc_pay_req: String,
+    pub btc_pay_req: String,
     /// Payment hash for the HTLC for both CKB and BTC.
-    payment_hash: String,
+    pub payment_hash: String,
 
     /// Amount will be received by the payee
     #[serde_as(as = "U128Hex")]
-    amount_sats: u128,
+    pub amount_sats: u128,
     /// Fee in Satoshis
     #[serde_as(as = "U128Hex")]
-    fee_sats: u128,
+    pub fee_sats: u128,
 
     /// Order status
-    status: CchOrderStatus,
+    pub status: CchOrderStatus,
 }
 
 /// RPC module for cross chain hub demonstration.

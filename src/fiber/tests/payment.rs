@@ -2081,3 +2081,142 @@ async fn test_send_payment_complex_network_payself_amount_exceeded() {
         .count();
     assert!(succ_count > 0);
 }
+
+#[tokio::test]
+async fn test_send_payment_middle_hop_restart_will_be_ok() {
+    async fn inner_run_restart_test(restart_node_index: usize) {
+        init_tracing();
+        let _span = tracing::info_span!("node", node = "test").entered();
+        let funding_amount = MIN_RESERVED_CKB + 1000 * 100_000_000;
+        let (mut nodes, _channels) = create_n_nodes_and_channels_with_index_amounts(
+            &[
+                ((0, 1), (funding_amount, funding_amount)),
+                ((1, 2), (funding_amount, funding_amount)),
+                ((2, 3), (funding_amount, funding_amount)),
+            ],
+            4,
+            true,
+        )
+        .await;
+
+        let payment_amount = 10 * 100_000_000;
+        let res = nodes[0]
+            .send_payment_keysend(&nodes[3], payment_amount, false)
+            .await
+            .unwrap();
+
+        let payment_hash = res.payment_hash;
+
+        nodes[0].wait_until_success(payment_hash).await;
+        let status = nodes[0].get_payment_status(payment_hash).await;
+        assert_eq!(status, PaymentSessionStatus::Success);
+
+        nodes[restart_node_index].restart().await;
+        tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+        let res = nodes[0]
+            .send_payment_keysend(&nodes[3], payment_amount, false)
+            .await
+            .unwrap();
+        let payment_hash = res.payment_hash;
+        eprintln!("res: {:?}", payment_hash);
+
+        nodes[0].wait_until_success(payment_hash).await;
+        let status = nodes[0].get_payment_status(payment_hash).await;
+        assert_eq!(status, PaymentSessionStatus::Success);
+    }
+    for restart_index in 1..=3 {
+        let _ = inner_run_restart_test(restart_index).await;
+    }
+}
+
+#[tokio::test]
+async fn test_send_payment_middle_hop_stop_send_payment_then_start() {
+    async fn inner_run_restart_test(restart_node_index: usize) {
+        init_tracing();
+        let _span = tracing::info_span!("node", node = "test").entered();
+        let funding_amount = MIN_RESERVED_CKB + 1000 * 100_000_000;
+        let (mut nodes, _channels) = create_n_nodes_and_channels_with_index_amounts(
+            &[
+                ((0, 1), (funding_amount, funding_amount)),
+                ((1, 2), (funding_amount, funding_amount)),
+                ((2, 3), (funding_amount, funding_amount)),
+            ],
+            4,
+            true,
+        )
+        .await;
+
+        let payment_amount = 10 * 100_000_000;
+        let res = nodes[0]
+            .send_payment_keysend(&nodes[3], payment_amount, false)
+            .await
+            .unwrap();
+
+        let payment_hash = res.payment_hash;
+
+        nodes[0].wait_until_success(payment_hash).await;
+        let status = nodes[0].get_payment_status(payment_hash).await;
+        assert_eq!(status, PaymentSessionStatus::Success);
+
+        nodes[restart_node_index].stop().await;
+        tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+        let res = nodes[0]
+            .send_payment_keysend(&nodes[3], payment_amount, false)
+            .await
+            .unwrap();
+        let payment_hash = res.payment_hash;
+        eprintln!("res: {:?}", payment_hash);
+
+        nodes[0].wait_until_failed(payment_hash).await;
+        let status = nodes[0].get_payment_status(payment_hash).await;
+        assert_eq!(status, PaymentSessionStatus::Failed);
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(4 * 1000)).await;
+
+        // now we start nodes[2], expect the payment will success
+        nodes[restart_node_index].start().await;
+        tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+        // because the probability of the path is not 100% after the node is restarted
+        // send normal payment amount will fail at the beginning
+        let normal_payment_amount = 100_000_000;
+        let res = nodes[0]
+            .send_payment_keysend(&nodes[3], normal_payment_amount, true)
+            .await;
+        assert!(res.is_err());
+
+        // we can start send payment with small amount
+        let payment_amount = 50000000;
+        let res = nodes[0]
+            .send_payment_keysend(&nodes[3], payment_amount, false)
+            .await
+            .unwrap();
+        let payment_hash = res.payment_hash;
+        eprintln!("res: {:?}", payment_hash);
+
+        nodes[0].wait_until_success(payment_hash).await;
+        let status = nodes[0].get_payment_status(payment_hash).await;
+        assert_eq!(status, PaymentSessionStatus::Success);
+
+        // with time passed, we can send payment with larger amount
+        let mut count = 0;
+        loop {
+            let res = nodes[0]
+                .send_payment_keysend(&nodes[3], normal_payment_amount, true)
+                .await;
+
+            if res.is_ok() {
+                break;
+            } else {
+                count += 1;
+                tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+                eprintln!("retry to wait amount increasing: {:?}", count);
+            }
+        }
+    }
+
+    let _ = inner_run_restart_test(2).await;
+    let _ = inner_run_restart_test(3).await;
+}
