@@ -93,6 +93,10 @@ fn test_store_invoice() {
         .unwrap();
     assert_eq!(store.get_invoice(hash), Some(invoice.clone()));
     assert_eq!(store.get_invoice_preimage(hash), Some(preimage));
+    assert_eq!(
+        store.search_payment_preimage(&hash.as_ref()[0..20]),
+        Some(preimage)
+    );
 
     let invalid_hash = gen_rand_sha256_hash();
     assert_eq!(store.get_invoice_preimage(&invalid_hash), None);
@@ -241,6 +245,7 @@ fn test_store_wacthtower() {
         to_local_output_data: Bytes::default(),
         to_remote_output: CellOutput::default(),
         to_remote_output_data: Bytes::default(),
+        tlcs: vec![],
     };
 
     store.insert_watch_channel(channel_id, funding_tx_lock.clone(), settlement_data.clone());

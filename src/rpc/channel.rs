@@ -31,45 +31,45 @@ use tentacle::secio::PeerId;
 
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug)]
-pub(crate) struct OpenChannelParams {
+pub struct OpenChannelParams {
     /// The peer ID to open a channel with, the peer must be connected through the [connect_peer](#peer-connect_peer) rpc first.
     #[serde_as(as = "DisplayFromStr")]
-    peer_id: PeerId,
+    pub peer_id: PeerId,
 
     /// The amount of CKB or UDT to fund the channel with.
     #[serde_as(as = "U128Hex")]
-    funding_amount: u128,
+    pub funding_amount: u128,
 
     /// Whether this is a public channel (will be broadcasted to network, and can be used to forward TLCs), an optional parameter, default value is true.
-    public: Option<bool>,
+    pub public: Option<bool>,
 
     /// The type script of the UDT to fund the channel with, an optional parameter.
-    funding_udt_type_script: Option<Script>,
+    pub funding_udt_type_script: Option<Script>,
 
     /// The script used to receive the channel balance, an optional parameter, default value is the secp256k1_blake160_sighash_all script corresponding to the configured private key.
-    shutdown_script: Option<Script>,
+    pub shutdown_script: Option<Script>,
 
     /// The delay time for the commitment transaction, must be an [EpochNumberWithFraction](https://github.com/nervosnetwork/rfcs/blob/master/rfcs/0017-tx-valid-since/e-i-l-encoding.png) in u64 format, an optional parameter, default value is 24 hours.
-    commitment_delay_epoch: Option<EpochNumberWithFraction>,
+    pub commitment_delay_epoch: Option<EpochNumberWithFraction>,
 
     /// The fee rate for the commitment transaction, an optional parameter.
     #[serde_as(as = "Option<U64Hex>")]
-    commitment_fee_rate: Option<u64>,
+    pub commitment_fee_rate: Option<u64>,
 
     /// The fee rate for the funding transaction, an optional parameter.
     #[serde_as(as = "Option<U64Hex>")]
-    funding_fee_rate: Option<u64>,
+    pub funding_fee_rate: Option<u64>,
 
     /// The expiry delta to forward a tlc, in milliseconds, default to 1 day, which is 24 * 60 * 60 * 1000 milliseconds
     /// This parameter can be updated with rpc `update_channel` later.
     #[serde_as(as = "Option<U64Hex>")]
-    tlc_expiry_delta: Option<u64>,
+    pub tlc_expiry_delta: Option<u64>,
 
     /// The minimum value for a TLC our side can send,
     /// an optional parameter, default is 0, which means we can send any TLC is larger than 0.
     /// This parameter can be updated with rpc `update_channel` later.
     #[serde_as(as = "Option<U128Hex>")]
-    tlc_min_value: Option<u128>,
+    pub tlc_min_value: Option<u128>,
 
     /// The fee proportional millionths for a TLC, proportional to the amount of the forwarded tlc.
     /// The unit is millionths of the amount. default is 1000 which means 0.1%.
@@ -78,53 +78,53 @@ pub(crate) struct OpenChannelParams {
     /// if we have a path A -> B -> C, then the fee B requires for TLC forwarding, is calculated
     /// the channel configuration of B and C, not A and B.
     #[serde_as(as = "Option<U128Hex>")]
-    tlc_fee_proportional_millionths: Option<u128>,
+    pub tlc_fee_proportional_millionths: Option<u128>,
 
     /// The maximum value in flight for TLCs, an optional parameter.
     /// This parameter can not be updated after channel is opened.
     #[serde_as(as = "Option<U128Hex>")]
-    max_tlc_value_in_flight: Option<u128>,
+    pub max_tlc_value_in_flight: Option<u128>,
 
     /// The maximum number of TLCs that can be accepted, an optional parameter, default is 125
     /// This parameter can not be updated after channel is opened.
     #[serde_as(as = "Option<U64Hex>")]
-    max_tlc_number_in_flight: Option<u64>,
+    pub max_tlc_number_in_flight: Option<u64>,
 }
-#[derive(Clone, Serialize)]
-pub(crate) struct OpenChannelResult {
+#[derive(Clone, Serialize, Deserialize)]
+pub struct OpenChannelResult {
     /// The temporary channel ID of the channel being opened
-    temporary_channel_id: Hash256,
+    pub temporary_channel_id: Hash256,
 }
 
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug)]
-pub(crate) struct AcceptChannelParams {
+pub struct AcceptChannelParams {
     /// The temporary channel ID of the channel to accept
-    temporary_channel_id: Hash256,
+    pub temporary_channel_id: Hash256,
 
     /// The amount of CKB or UDT to fund the channel with
     #[serde_as(as = "U128Hex")]
-    funding_amount: u128,
+    pub funding_amount: u128,
 
     /// The script used to receive the channel balance, an optional parameter,
     /// default value is the secp256k1_blake160_sighash_all script corresponding to the configured private key
-    shutdown_script: Option<Script>,
+    pub shutdown_script: Option<Script>,
 
     /// The max tlc sum value in flight for the channel, default is u128::MAX
     /// This parameter can not be updated after channel is opened.
     #[serde_as(as = "Option<U128Hex>")]
-    max_tlc_value_in_flight: Option<u128>,
+    pub max_tlc_value_in_flight: Option<u128>,
 
     /// The max tlc number in flight send from our side, default is 125
     /// This parameter can not be updated after channel is opened.
     #[serde_as(as = "Option<U64Hex>")]
-    max_tlc_number_in_flight: Option<u64>,
+    pub max_tlc_number_in_flight: Option<u64>,
 
     /// The minimum value for a TLC our side can send,
     /// an optional parameter, default is 0, which means we can send any TLC is larger than 0.
     /// This parameter can be updated with rpc `update_channel` later.
     #[serde_as(as = "Option<U128Hex>")]
-    tlc_min_value: Option<u128>,
+    pub tlc_min_value: Option<u128>,
 
     /// The fee proportional millionths for a TLC, proportional to the amount of the forwarded tlc.
     /// The unit is millionths of the amount. default is 1000 which means 0.1%.
@@ -133,33 +133,33 @@ pub(crate) struct AcceptChannelParams {
     /// if we have a path A -> B -> C, then the fee B requires for TLC forwarding, is calculated
     /// the channel configuration of B and C, not A and B.
     #[serde_as(as = "Option<U128Hex>")]
-    tlc_fee_proportional_millionths: Option<u128>,
+    pub tlc_fee_proportional_millionths: Option<u128>,
 
     /// The expiry delta to forward a tlc, in milliseconds, default to 1 day, which is 24 * 60 * 60 * 1000 milliseconds
     /// This parameter can be updated with rpc `update_channel` later.
-    tlc_expiry_delta: Option<u64>,
+    pub tlc_expiry_delta: Option<u64>,
 }
 
-#[derive(Clone, Serialize)]
-pub(crate) struct AcceptChannelResult {
+#[derive(Clone, Serialize, Deserialize)]
+pub struct AcceptChannelResult {
     /// The final ID of the channel that was accepted, it's different from the temporary channel ID
-    channel_id: Hash256,
+    pub channel_id: Hash256,
 }
 
 #[serde_as]
 #[derive(Serialize, Deserialize)]
-pub(crate) struct ListChannelsParams {
+pub struct ListChannelsParams {
     /// The peer ID to list channels for, an optional parameter, if not provided, all channels will be listed
     #[serde_as(as = "Option<DisplayFromStr>")]
-    peer_id: Option<PeerId>,
+    pub peer_id: Option<PeerId>,
     /// Whether to include closed channels in the list, an optional parameter, default value is false
-    include_closed: Option<bool>,
+    pub include_closed: Option<bool>,
 }
 
-#[derive(Clone, Serialize)]
-pub(crate) struct ListChannelsResult {
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ListChannelsResult {
     /// The list of channels
-    channels: Vec<Channel>,
+    pub channels: Vec<Channel>,
 }
 
 /// The state of a channel
@@ -216,72 +216,86 @@ impl From<RawChannelState> for ChannelState {
 
 /// The channel data structure
 #[serde_as]
-#[derive(Clone, Serialize)]
-pub(crate) struct Channel {
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Channel {
     /// The channel ID
-    channel_id: Hash256,
+    pub channel_id: Hash256,
     /// Whether the channel is public
-    is_public: bool,
+    pub is_public: bool,
     #[serde_as(as = "Option<EntityHex>")]
     /// The outpoint of the channel
-    channel_outpoint: Option<OutPoint>,
+    pub channel_outpoint: Option<OutPoint>,
     /// The peer ID of the channel
     #[serde_as(as = "DisplayFromStr")]
-    peer_id: PeerId,
+    pub peer_id: PeerId,
     /// The UDT type script of the channel
-    funding_udt_type_script: Option<Script>,
+    pub funding_udt_type_script: Option<Script>,
     /// The state of the channel
-    state: ChannelState,
+    pub state: ChannelState,
     /// The local balance of the channel
     #[serde_as(as = "U128Hex")]
-    local_balance: u128,
+    pub local_balance: u128,
     /// The offered balance of the channel
     #[serde_as(as = "U128Hex")]
-    offered_tlc_balance: u128,
+    pub offered_tlc_balance: u128,
     /// The remote balance of the channel
     #[serde_as(as = "U128Hex")]
-    remote_balance: u128,
+    pub remote_balance: u128,
     /// The received balance of the channel
     #[serde_as(as = "U128Hex")]
-    received_tlc_balance: u128,
+    pub received_tlc_balance: u128,
     /// The hash of the latest commitment transaction
-    latest_commitment_transaction_hash: Option<H256>,
+    pub latest_commitment_transaction_hash: Option<H256>,
     /// The time the channel was created at, in milliseconds from UNIX epoch
     #[serde_as(as = "U64Hex")]
-    created_at: u64,
+    pub created_at: u64,
+    /// Whether the channel is enabled
+    pub enabled: bool,
+    /// The expiry delta to forward a tlc, in milliseconds, default to 1 day, which is 24 * 60 * 60 * 1000 milliseconds
+    /// This parameter can be updated with rpc `update_channel` later.
+    #[serde_as(as = "U64Hex")]
+    pub tlc_expiry_delta: u64,
+    /// The fee proportional millionths for a TLC, proportional to the amount of the forwarded tlc.
+    /// The unit is millionths of the amount. default is 1000 which means 0.1%.
+    /// This parameter can be updated with rpc `update_channel` later.
+    /// Not that, we use outbound channel to calculate the fee for TLC forwarding. For example,
+    /// if we have a path A -> B -> C, then the fee B requires for TLC forwarding, is calculated
+    /// the channel configuration of B and C, not A and B.
+    #[serde_as(as = "U128Hex")]
+    pub tlc_fee_proportional_millionths: u128,
 }
 
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub(crate) struct ShutdownChannelParams {
+pub struct ShutdownChannelParams {
     /// The channel ID of the channel to shut down
-    channel_id: Hash256,
+    pub channel_id: Hash256,
     /// The script used to receive the channel balance, only support secp256k1_blake160_sighash_all script for now
-    close_script: Script,
+    pub close_script: Script,
     /// Whether to force the channel to close
-    force: Option<bool>,
+    pub force: Option<bool>,
     /// The fee rate for the closing transaction, the fee will be deducted from the closing initiator's channel balance
     #[serde_as(as = "U64Hex")]
-    fee_rate: u64,
+    pub fee_rate: u64,
 }
 
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct UpdateChannelParams {
     /// The channel ID of the channel to update
-    channel_id: Hash256,
+    pub channel_id: Hash256,
     /// Whether the channel is enabled
-    enabled: Option<bool>,
+    pub enabled: Option<bool>,
     /// The CLTV delta from the current height that should be used to set the timelock for the final hop
     #[serde_as(as = "Option<U64Hex>")]
     /// The expiry delta for the TLC locktime
-    tlc_expiry_delta: Option<u64>,
+    pub tlc_expiry_delta: Option<u64>,
     /// The minimum value for a TLC
     #[serde_as(as = "Option<U128Hex>")]
-    tlc_minimum_value: Option<u128>,
+    pub tlc_minimum_value: Option<u128>,
     /// The fee proportional millionths for a TLC
     #[serde_as(as = "Option<U128Hex>")]
-    tlc_fee_proportional_millionths: Option<u128>,
+    pub tlc_fee_proportional_millionths: Option<u128>,
 }
 
 /// RPC module for channel management.
@@ -426,6 +440,11 @@ where
                             .as_ref()
                             .map(|tx| tx.clone().into_view().hash().unpack()),
                         created_at: state.get_created_at_in_millis(),
+                        enabled: state.local_tlc_info.enabled,
+                        tlc_expiry_delta: state.local_tlc_info.tlc_expiry_delta,
+                        tlc_fee_proportional_millionths: state
+                            .local_tlc_info
+                            .tlc_fee_proportional_millionths,
                     })
             })
             .collect();

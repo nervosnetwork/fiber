@@ -31,6 +31,9 @@ body:json {
 assert {
   res.body.error: isUndefined
   res.body.result.channels: isDefined
+  res.body.result.channels[0].enabled: isDefined
+  res.body.result.channels[0].tlc_expiry_delta: isDefined
+  res.body.result.channels[0].tlc_fee_proportional_millionths: isDefined
 }
 
 script:post-response {

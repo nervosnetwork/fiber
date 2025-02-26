@@ -16,65 +16,65 @@ use tentacle::secio::SecioKeyPair;
 /// The parameter struct for generating a new invoice.
 #[serde_as]
 #[derive(Serialize, Deserialize)]
-pub(crate) struct NewInvoiceParams {
+pub struct NewInvoiceParams {
     /// The amount of the invoice.
     #[serde_as(as = "U128Hex")]
-    amount: u128,
+    pub amount: u128,
     /// The description of the invoice.
-    description: Option<String>,
+    pub description: Option<String>,
     /// The currency of the invoice.
-    currency: Currency,
+    pub currency: Currency,
     /// The payment preimage of the invoice.
-    payment_preimage: Hash256,
+    pub payment_preimage: Hash256,
     /// The expiry time of the invoice.
     #[serde_as(as = "Option<U64Hex>")]
-    expiry: Option<u64>,
+    pub expiry: Option<u64>,
     /// The fallback address of the invoice.
-    fallback_address: Option<String>,
+    pub fallback_address: Option<String>,
     /// The final HTLC timeout of the invoice.
     #[serde_as(as = "Option<U64Hex>")]
-    final_expiry_delta: Option<u64>,
+    pub final_expiry_delta: Option<u64>,
     /// The UDT type script of the invoice.
-    udt_type_script: Option<Script>,
+    pub udt_type_script: Option<Script>,
     /// The hash algorithm of the invoice.
-    hash_algorithm: Option<HashAlgorithm>,
+    pub hash_algorithm: Option<HashAlgorithm>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-pub(crate) struct InvoiceResult {
+pub struct InvoiceResult {
     /// The encoded invoice address.
-    invoice_address: String,
+    pub invoice_address: String,
     /// The invoice.
-    invoice: CkbInvoice,
+    pub invoice: CkbInvoice,
 }
 
 #[derive(Serialize, Deserialize)]
-pub(crate) struct ParseInvoiceParams {
+pub struct ParseInvoiceParams {
     /// The encoded invoice address.
-    invoice: String,
+    pub invoice: String,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-pub(crate) struct ParseInvoiceResult {
+pub struct ParseInvoiceResult {
     /// The invoice.
-    invoice: CkbInvoice,
+    pub invoice: CkbInvoice,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct InvoiceParams {
     /// The payment hash of the invoice.
-    payment_hash: Hash256,
+    pub payment_hash: Hash256,
 }
 
 /// The status of the invoice.
 #[derive(Clone, Serialize, Deserialize)]
-pub(crate) struct GetInvoiceResult {
+pub struct GetInvoiceResult {
     /// The encoded invoice address.
-    invoice_address: String,
+    pub invoice_address: String,
     /// The invoice.
-    invoice: CkbInvoice,
+    pub invoice: CkbInvoice,
     /// The invoice status
-    status: CkbInvoiceStatus,
+    pub status: CkbInvoiceStatus,
 }
 
 /// RPC module for invoice management.

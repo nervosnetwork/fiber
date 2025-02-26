@@ -7,22 +7,22 @@ use jsonrpsee::{
 use ractor::ActorRef;
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
-use tentacle::{multiaddr::MultiAddr, secio::PeerId};
+pub use tentacle::{multiaddr::MultiAddr, secio::PeerId};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub(crate) struct ConnectPeerParams {
+pub struct ConnectPeerParams {
     /// The address of the peer to connect to.
-    address: MultiAddr,
+    pub address: MultiAddr,
     /// Whether to save the peer address to the peer store.
-    save: Option<bool>,
+    pub save: Option<bool>,
 }
 
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug)]
-pub(crate) struct DisconnectPeerParams {
+pub struct DisconnectPeerParams {
     /// The peer ID of the peer to disconnect.
     #[serde_as(as = "DisplayFromStr")]
-    peer_id: PeerId,
+    pub peer_id: PeerId,
 }
 
 /// RPC module for peer management.

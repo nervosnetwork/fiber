@@ -1,5 +1,5 @@
 use super::test_utils::{init_tracing, NetworkNode};
-use crate::fiber::channel::UpdateCommand;
+use crate::fiber::channel::{UpdateCommand, XUDT_COMPATIBLE_WITNESS};
 use crate::fiber::config::MAX_PAYMENT_TLC_EXPIRY_LIMIT;
 use crate::fiber::graph::{ChannelInfo, PaymentSessionStatus};
 use crate::fiber::network::{DebugEvent, SendPaymentCommand};
@@ -4164,9 +4164,8 @@ async fn test_revoke_old_commitment_transaction() {
         .output_data(revocation_data.output_data)
         .build();
 
-    let empty_witness_args = [16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0];
     let witness = [
-        empty_witness_args.to_vec(),
+        XUDT_COMPATIBLE_WITNESS.to_vec(),
         vec![0xFF],
         revocation_data.commitment_number.to_be_bytes().to_vec(),
         revocation_data.x_only_aggregated_pubkey.to_vec(),

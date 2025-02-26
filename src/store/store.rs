@@ -436,6 +436,13 @@ impl InvoiceStore for Store {
         batch.commit();
         Ok(())
     }
+
+    fn search_payment_preimage(&self, payment_hash_prefix: &[u8]) -> Option<Hash256> {
+        let prefix = [&[CKB_INVOICE_PREIMAGE_PREFIX], payment_hash_prefix].concat();
+        let mut iter = self.prefix_iterator(prefix.as_slice());
+        iter.next()
+            .map(|(_key, value)| deserialize_from(value.as_ref(), "Hash256"))
+    }
 }
 
 impl NetworkGraphStateStore for Store {
