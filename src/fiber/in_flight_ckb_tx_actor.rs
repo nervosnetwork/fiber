@@ -229,7 +229,13 @@ impl InFlightCkbTxActor {
         result: CkbTxTracingResult,
     ) -> Result<(), ActorProcessingErr> {
         let message = match (self.tx_kind.clone(), result.tx_status) {
-            (InFlightCkbTxKind::Funding(_), TxStatus::Committed(_, block_hash, tx_index)) => {
+            (
+                InFlightCkbTxKind::Funding(_),
+                TxStatus::Committed(block_number, block_hash, tx_index),
+            ) => {
+                let _ = self
+                    .chain_actor
+                    .send_message(CkbChainMessage::CommitFundingTx(self.tx_hash, block_number));
                 if let Ok(Ok(Some(timestamp))) = ractor::call_t!(
                     self.chain_actor,
                     |tx| CkbChainMessage::GetBlockTimestamp(
