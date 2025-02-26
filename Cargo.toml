@@ -40,7 +40,7 @@ bitflags = { version = "2.5.0", features = ["serde"] }
 ckb-hash = "0.115.0"
 secp256k1 = { version = "0.28.0", features = ["serde", "recovery", "rand-std"] }
 musig2 = { version = "0.0.11", features = ["secp256k1", "serde"] }
-ractor = "0.14.2"
+ractor = { version = "0.14.7", features = ["async-trait"] }
 arcode = "0.2.4"
 nom = "7.1.3"
 regex = "1.10.5"
@@ -69,6 +69,8 @@ num_enum = "0.7.3"
 [features]
 default = []
 portable = ["rocksdb/portable"]
+# Some lnd related unit tests will only run if this feature is enabled.
+lnd-tests = []
 
 [profile.release]
 panic = "abort"
@@ -86,6 +88,7 @@ debug = false
 tempfile = "3.10.1"
 ckb-testtool = "0.13.2"
 ciborium = "0.2.2"
+lnd = "0.1.6"
 
 [lints.clippy]
 needless-return = "allow"

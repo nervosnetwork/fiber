@@ -718,6 +718,7 @@ async fn test_our_own_channel_gossip_message_propagated() {
         None,
         None,
         None,
+        None,
     )
     .await;
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;

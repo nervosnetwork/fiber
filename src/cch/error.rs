@@ -3,6 +3,8 @@ use std::time::SystemTimeError;
 use jsonrpsee::types::{error::CALL_EXECUTION_FAILED_CODE, ErrorObjectOwned};
 use thiserror::Error;
 
+use crate::store::SubscriptionError;
+
 #[derive(Error, Debug)]
 pub enum CchDbError {
     #[error("Inserting duplicated key: {0}")]
@@ -24,6 +26,8 @@ pub enum CchError {
     BTCInvoiceMissingAmount,
     #[error("CKB invoice error: {0}")]
     CKBInvoiceError(#[from] crate::invoice::InvoiceError),
+    #[error("CKB invoice missing amount")]
+    CKBInvoiceMissingAmount,
     #[error("SendBTC order already paid")]
     SendBTCOrderAlreadyPaid,
     #[error("SendBTC received payment amount is too small")]
@@ -48,6 +52,8 @@ pub enum CchError {
     LndChannelError(#[from] lnd_grpc_tonic_client::channel::Error),
     #[error("Lnd RPC error: {0}")]
     LndRpcError(String),
+    #[error("Subscribe fiber updates error: {0}")]
+    SubscribeFiberUpdatesError(#[from] SubscriptionError),
 }
 
 pub type CchResult<T> = std::result::Result<T, CchError>;
