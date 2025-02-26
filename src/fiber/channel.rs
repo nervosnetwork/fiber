@@ -1019,9 +1019,7 @@ where
                                 .ok_or(ProcessingChannelError::FinalIncorrectPaymentHash)?;
                             let is_active = status == CkbInvoiceStatus::Open
                                 || status == CkbInvoiceStatus::Received;
-                            let is_settled =
-                                self.store.get_invoice_preimage(&payment_hash).is_some();
-                            if is_active && !is_settled {
+                            if is_active {
                                 // This TLC is added to applied_add_tlcs in above, but
                                 // TLCs in the list applied_add_tlcs wouldn't be processed again.
                                 // For the unsettled active hold invoice TLCs, we should process them indefinitely
