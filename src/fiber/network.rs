@@ -3062,7 +3062,7 @@ where
         let secio_kp = SecioKeyPair::from(kp);
         let secio_pk = secio_kp.public_key();
         let my_peer_id: PeerId = PeerId::from(secio_pk);
-        let handle = MyServiceHandle::new(myself.clone());
+        let handle = NetworkServiceHandle::new(myself.clone());
         let fiber_handle = FiberProtocolHandle::from(&handle);
         let (gossip_handle, store_update_subscriber) = GossipProtocolHandle::new(
             Some(format!("gossip actor {:?}", my_peer_id)),
@@ -3404,18 +3404,18 @@ impl ServiceProtocol for FiberProtocolHandle {
 }
 
 #[derive(Clone, Debug)]
-struct MyServiceHandle {
+struct NetworkServiceHandle {
     actor: ActorRef<NetworkActorMessage>,
 }
 
-impl MyServiceHandle {
+impl NetworkServiceHandle {
     fn new(actor: ActorRef<NetworkActorMessage>) -> Self {
-        MyServiceHandle { actor }
+        NetworkServiceHandle { actor }
     }
 }
 
-impl From<&MyServiceHandle> for FiberProtocolHandle {
-    fn from(handle: &MyServiceHandle) -> Self {
+impl From<&NetworkServiceHandle> for FiberProtocolHandle {
+    fn from(handle: &NetworkServiceHandle) -> Self {
         FiberProtocolHandle {
             actor: handle.actor.clone(),
         }
@@ -3423,7 +3423,7 @@ impl From<&MyServiceHandle> for FiberProtocolHandle {
 }
 
 #[async_trait]
-impl ServiceHandle for MyServiceHandle {
+impl ServiceHandle for NetworkServiceHandle {
     async fn handle_error(&mut self, _context: &mut ServiceContext, error: ServiceError) {
         trace!("Service error: {:?}", error);
         // TODO
