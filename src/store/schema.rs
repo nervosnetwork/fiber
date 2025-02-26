@@ -1,21 +1,21 @@
-///
-/// +--------------+----------------------+-----------------------------+
-/// | KeyPrefix::  | Key::                | Value::                     |
-/// +--------------+----------------------+-----------------------------+
-/// | 0            | Hash256              | ChannelActorState           |
-/// | 16           | PeerId               | PersistentNetworkActorState |
-/// | 32           | Hash256              | CkbInvoice                  |
-/// | 33           | Payment_hash         | CkbInvoice Preimage         |
-/// | 34           | Payment_hash         | CkbInvoice Status           |
-/// | 64           | PeerId | Hash256     | ChannelState                |
-/// | 65...........| OutPoint             | ChannelId                   |
-/// | 96           | Cursor               | BroadcastMessage            |
-/// | 97           | BroadcastMessageID   | u64                         |
-/// | 192          | Hash256              | PaymentSession              |
-/// | 193          | OutPoint | Direction | TimedResult                 |
-/// | 224          | Hash256              | ChannelData                 |
-/// +--------------+----------------------+-----------------------------+
-///
+//!
+//! +--------------+----------------------+-----------------------------+
+//! | KeyPrefix::  | Key::                | Value::                     |
+//! +--------------+----------------------+-----------------------------+
+//! | 0            | Hash256              | ChannelActorState           |
+//! | 16           | PeerId               | PersistentNetworkActorState |
+//! | 32           | Hash256              | CkbInvoice                  |
+//! | 33           | Payment_hash         | CkbInvoice Preimage         |
+//! | 34           | Payment_hash         | CkbInvoice Status           |
+//! | 64           | PeerId | Hash256     | ChannelState                |
+//! | 65...........| OutPoint             | ChannelId                   |
+//! | 96           | Cursor               | BroadcastMessage            |
+//! | 97           | BroadcastMessageID   | u64                         |
+//! | 192          | Hash256              | PaymentSession              |
+//! | 193          | OutPoint | Direction | TimedResult                 |
+//! | 224          | Hash256              | ChannelData                 |
+//! +--------------+----------------------+-----------------------------+
+//!
 
 pub(crate) const CHANNEL_ACTOR_STATE_PREFIX: u8 = 0;
 pub(crate) const PEER_ID_NETWORK_ACTOR_STATE_PREFIX: u8 = 16;

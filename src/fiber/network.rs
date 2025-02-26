@@ -596,7 +596,6 @@ pub enum NetworkActorEvent {
     GossipMessage(PeerId, GossipMessage),
 
     /// Channel related events.
-
     /// A channel has been accepted.
     /// The two Hash256 are respectively newly agreed channel id and temp channel id,
     /// The two u128 are respectively local and remote funding amount,

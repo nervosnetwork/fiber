@@ -156,7 +156,7 @@ impl<'a, W: WriteBase32> BytesToBase32<'a, W> {
     }
 }
 
-impl<'a, W: WriteBase32> Drop for BytesToBase32<'a, W> {
+impl<W: WriteBase32> Drop for BytesToBase32<'_, W> {
     fn drop(&mut self) {
         self.inner_finalize()
             .expect("Unhandled error when finalizing conversion on drop. User finalize to handle.")

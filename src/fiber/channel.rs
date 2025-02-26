@@ -1549,8 +1549,8 @@ where
     ) {
         let mut pending_tlc_ops = state.tlc_state.get_pending_operations();
         pending_tlc_ops.retain_mut(|retryable_operation| {
-            match retryable_operation {
-                &mut RetryableTlcOperation::RemoveTlc(ref mut tlc_id, ref reason) => {
+            match *retryable_operation {
+                RetryableTlcOperation::RemoveTlc(ref mut tlc_id, ref reason) => {
                     match self.handle_remove_tlc_command(
                         state,
                         RemoveTlcCommand {
@@ -1563,7 +1563,7 @@ where
                         Err(_err) => false,
                     }
                 }
-                &mut RetryableTlcOperation::RelayRemoveTlc(
+                RetryableTlcOperation::RelayRemoveTlc(
                     ref mut channel_id,
                     ref mut tlc_id,
                     ref reason,
@@ -1588,7 +1588,7 @@ where
                     // the previous hop will automatically retry if there is Waiting_Ack error
                     false
                 }
-                &mut RetryableTlcOperation::ForwardTlc(
+                RetryableTlcOperation::ForwardTlc(
                     ref mut payment_hash,
                     ref mut tlc_id,
                     ref peeled_onion_packet,

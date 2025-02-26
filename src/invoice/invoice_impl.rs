@@ -269,7 +269,7 @@ impl CkbInvoice {
     }
 
     pub fn is_expired(&self) -> bool {
-        self.expiry_time().map_or(false, |expiry| {
+        self.expiry_time().is_some_and(|expiry| {
             self.data.timestamp + expiry.as_millis()
                 < std::time::UNIX_EPOCH
                     .elapsed()

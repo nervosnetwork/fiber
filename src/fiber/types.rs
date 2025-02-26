@@ -513,9 +513,7 @@ impl TryFrom<molecule_gossip::SchnorrSignature> for SchnorrSignature {
 
     fn try_from(signature: molecule_gossip::SchnorrSignature) -> Result<Self, Self::Error> {
         let signature = signature.as_slice();
-        SchnorrSignature::from_slice(signature)
-            .map(Into::into)
-            .map_err(Into::into)
+        SchnorrSignature::from_slice(signature).map_err(Into::into)
     }
 }
 
