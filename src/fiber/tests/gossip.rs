@@ -43,7 +43,7 @@ impl GossipTestingContext {
         let chain_actor = create_mock_chain_actor().await;
         let root_actor = get_test_root_actor().await;
 
-        let gossip_service = GossipService::start(
+        let (gossip_service, _) = GossipService::start(
             None,
             Duration::from_millis(50),
             Duration::from_millis(50),

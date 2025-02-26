@@ -3047,7 +3047,7 @@ where
         let my_peer_id: PeerId = PeerId::from(secio_pk);
         let handle = MyServiceHandle::new(myself.clone());
         let fiber_handle = FiberProtocolHandle::from(&handle);
-        let mut gossip_service = GossipService::start(
+        let (gossip_service, gossip_handle) = GossipService::start(
             Some(format!("gossip actor {:?}", my_peer_id)),
             Duration::from_millis(config.gossip_network_maintenance_interval_ms()),
             Duration::from_millis(config.gossip_store_maintenance_interval_ms()),
@@ -3059,7 +3059,6 @@ where
             myself.get_cell(),
         )
         .await;
-        let gossip_handle = gossip_service.create_protocol_handle();
         let mut graph = self.network_graph.write().await;
         let graph_subscribing_cursor = graph
             .get_latest_cursor()

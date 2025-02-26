@@ -334,8 +334,6 @@ pub enum GossipActorMessage {
 }
 
 pub struct GossipService<S> {
-    actor: ActorRef<GossipActorMessage>,
-    network_control_sender: Option<oneshot::Sender<ServiceAsyncControl>>,
     extended_store: ExtendedGossipMessageStore<S>,
 }
 
@@ -353,7 +351,7 @@ where
         store: S,
         chain_actor: ActorRef<CkbChainMessage>,
         supervisor: ActorCell,
-    ) -> Self {
+    ) -> (Self, GossipProtocolHandle) {
         let (network_control_sender, network_control_receiver) = oneshot::channel();
 
         let (store_sender, store_receiver) = oneshot::channel();
@@ -377,19 +375,12 @@ where
         )
         .expect("start gossip actor");
         let store = store_receiver.await.expect("receive store");
-        Self {
-            actor,
-            network_control_sender: Some(network_control_sender),
-            extended_store: store,
-        }
-    }
-
-    pub fn create_protocol_handle(&mut self) -> GossipProtocolHandle {
-        let sender = self
-            .network_control_sender
-            .take()
-            .expect("network control sender");
-        GossipProtocolHandle::new(self.actor.clone(), sender)
+        (
+            Self {
+                extended_store: store,
+            },
+            GossipProtocolHandle::new(actor, network_control_sender),
+        )
     }
 
     #[cfg(test)]
