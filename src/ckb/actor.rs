@@ -12,7 +12,7 @@ use crate::{
 };
 
 use super::{
-    funding::FundingContext,
+    funding::{FundingContext, LiveCellsExclusionMap},
     jsonrpc_types_convert::{transaction_view_from_json, tx_status_from_json},
     tx_tracing_actor::{
         CkbTxTracer, CkbTxTracingActor, CkbTxTracingArguments, CkbTxTracingMessage,
@@ -28,6 +28,7 @@ pub struct CkbChainState {
     ckb_tx_tracing_actor: ActorRef<CkbTxTracingMessage>,
     secret_key: secp256k1::SecretKey,
     funding_source_lock_script: packed::Script,
+    live_cells_exclusion_map: LiveCellsExclusionMap,
 }
 
 #[derive(Debug, Clone)]
@@ -87,6 +88,15 @@ pub enum CkbChainMessage {
         FundingRequest,
         RpcReplyPort<Result<FundingTx, FundingError>>,
     ),
+    /// Add funding tx. This is used to reestablish a channel that is not ready yet.
+    /// Adding a funding tx will add its used input cells to the exclusion list.
+    AddFundingTx(FundingTx),
+    /// Remove a funding tx to release the used live cells.
+    /// RemoveFundingTx(tx_hash)
+    RemoveFundingTx(Hash256),
+    /// Notify that the funding tx has been committed and the used live cells will become dead soon.
+    /// CommitFundingTx(tx_hash, commit_block_number),
+    CommitFundingTx(Hash256, u64),
     Sign(FundingTx, RpcReplyPort<Result<FundingTx, FundingError>>),
     SendTx(TransactionView, RpcReplyPort<Result<(), RpcError>>),
     GetTx(Hash256, RpcReplyPort<Result<GetTxResponse, RpcError>>),
@@ -134,6 +144,7 @@ impl Actor for CkbChainActor {
             secret_key,
             funding_source_lock_script,
             ckb_tx_tracing_actor,
+            live_cells_exclusion_map: Default::default(),
         })
     }
 
@@ -145,16 +156,28 @@ impl Actor for CkbChainActor {
     ) -> Result<(), ActorProcessingErr> {
         match message {
             CkbChainMessage::Fund(tx, request, reply_port) => {
-                let context = state.build_funding_context(&request);
                 if !reply_port.is_closed() {
+                    let context = state.build_funding_context(&request);
+                    let exclusion = &mut state.live_cells_exclusion_map;
                     tokio::task::block_in_place(move || {
-                        let result = tx.fulfill(request, context);
+                        let result = tx.fulfill(request, context, exclusion);
                         if !reply_port.is_closed() {
                             // ignore error
                             let _ = reply_port.send(result);
                         }
                     });
                 }
+            }
+            CkbChainMessage::AddFundingTx(tx) => {
+                state.live_cells_exclusion_map.add_funding_tx(&tx);
+            }
+            CkbChainMessage::RemoveFundingTx(tx_hash) => {
+                state.live_cells_exclusion_map.remove(&tx_hash.into());
+            }
+            CkbChainMessage::CommitFundingTx(tx_hash, commit_block_number) => {
+                state
+                    .live_cells_exclusion_map
+                    .commit(&tx_hash.into(), commit_block_number);
             }
             CkbChainMessage::Sign(tx, reply_port) => {
                 if !reply_port.is_closed() {

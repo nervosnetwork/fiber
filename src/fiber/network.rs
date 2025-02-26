@@ -225,6 +225,7 @@ pub enum NetworkActorCommand {
     ),
     UpdateChannelFunding(Hash256, Transaction, FundingRequest),
     SignFundingTx(PeerId, Hash256, Transaction, Option<Vec<Vec<u8>>>),
+    NotifyFundingTx(Transaction),
     // Process a broadcast message from the network.
     ProcessBroadcastMessage(BroadcastMessage),
     // Query broadcast messages from a peer. Some messages may have been missed
@@ -1222,6 +1223,11 @@ where
                         )),
                     )
                     .await?
+            }
+            NetworkActorCommand::NotifyFundingTx(tx) => {
+                let _ = self
+                    .chain_actor
+                    .send_message(CkbChainMessage::AddFundingTx(tx.into()));
             }
             NetworkActorCommand::SignFundingTx(
                 ref peer_id,
