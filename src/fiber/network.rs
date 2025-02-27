@@ -2691,9 +2691,10 @@ where
         force: bool,
     ) {
         let tx_hash: Byte32 = transaction.hash();
+        let force_flag = if force { "forcefully" } else { "cooperatively" };
         info!(
             "Channel ({:?}) to peer {:?} is closed {:?}. Broadcasting closing transaction ({:?}) now.",
-            &channel_id, &peer_id, &tx_hash, if force { "forcefully" } else { "cooperatively" }
+            &channel_id, &peer_id, &tx_hash, force_flag
         );
         let network: ActorRef<NetworkActorMessage> = self.network.clone();
         self.broadcast_tx_with_callback(transaction, move |result| {
@@ -2706,20 +2707,21 @@ where
                         },
                     ..
                 }) => {
-                    info!("Cloisng transaction {:?} confirmed", &tx_hash);
+                    info!("Cloisng {:?} transaction {:?} confirmed", force_flag, &tx_hash);
                     NetworkActorEvent::ClosingTransactionConfirmed(
                         peer_id, channel_id, tx_hash, force,
                     )
                 }
                 Ok(status) => {
                     error!(
-                        "Closing transaction {:?} failed to be confirmed with final status {:?}",
+                        "Closing {:?} transaction {:?} failed to be confirmed with final status {:?}",
+                        force_flag,
                         &tx_hash, &status
                     );
                     NetworkActorEvent::ClosingTransactionFailed(peer_id, channel_id, tx_hash)
                 }
                 Err(err) => {
-                    error!("Failed to trace transaction {:?}: {:?}", &tx_hash, &err);
+                    error!("Failed to trace {:?} closing transaction {:?}: {:?}", force_flag, &tx_hash, &err);
                     NetworkActorEvent::ClosingTransactionFailed(peer_id, channel_id, tx_hash)
                 }
             };
@@ -2749,12 +2751,14 @@ where
                 set.remove(channel_id);
             }
         }
-        // Notify outside observers.
-        self.network
-            .send_message(NetworkActorMessage::new_notification(
-                NetworkServiceEvent::ChannelClosed(peer_id.clone(), *channel_id, tx_hash),
-            ))
-            .expect(ASSUME_NETWORK_MYSELF_ALIVE);
+        if !force {
+            // Notify outside observers.
+            self.network
+                .send_message(NetworkActorMessage::new_notification(
+                    NetworkServiceEvent::ChannelClosed(peer_id.clone(), *channel_id, tx_hash),
+                ))
+                .expect(ASSUME_NETWORK_MYSELF_ALIVE);
+        }
     }
 
     pub async fn on_open_channel_msg(
