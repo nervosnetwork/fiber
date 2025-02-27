@@ -4630,14 +4630,14 @@ impl ChannelActorState {
             }
         }
         if tlc.is_offered() {
-            let sent_tlc_value = self.get_offered_tlc_balance(false);
+            let sent_tlc_value = self.get_offered_tlc_balance(true);
             debug_assert!(self.to_local_amount >= sent_tlc_value);
             if sent_tlc_value + tlc.amount > self.to_local_amount {
                 debug!(channel = ?self.get_id(), tlc_id = ?tlc.tlc_id, tlc_amount = tlc.amount, sent_tlc_value = sent_tlc_value, to_local_amount = self.to_local_amount, "Sending tlc exceeds local balance",);
                 return Err(ProcessingChannelError::TlcAmountExceedLimit);
             }
         } else {
-            let received_tlc_value = self.get_received_tlc_balance(false);
+            let received_tlc_value = self.get_received_tlc_balance(true);
             debug_assert!(self.to_remote_amount >= received_tlc_value);
             if received_tlc_value + tlc.amount > self.to_remote_amount {
                 debug!(channel = ?self.get_id(), tlc_id = ?tlc.tlc_id, tlc_amount = tlc.amount, received_tlc_value = received_tlc_value, to_remote_amount = self.to_remote_amount, "Receiving tlc exceeds remote balance",);
