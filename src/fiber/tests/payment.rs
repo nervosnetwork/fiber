@@ -2225,7 +2225,8 @@ async fn test_send_payment_with_one_node_stop() {
     }
 
     let mut failed_count = 0;
-    while !all_sent.is_empty() {
+    let mut check_count = 0;
+    while check_count < 100 {
         for payment_hash in all_sent.clone().iter() {
             let res = nodes[0].get_payment_result(*payment_hash).await;
             eprintln!("payment_hash: {:?} status: {:?}", payment_hash, res.status);
@@ -2233,8 +2234,12 @@ async fn test_send_payment_with_one_node_stop() {
                 failed_count += 1;
                 all_sent.remove(payment_hash);
             }
-
             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+        check_count += 1;
+        if all_sent.is_empty() {
+            break;
         }
     }
     assert_eq!(failed_count, 4);
