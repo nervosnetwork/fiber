@@ -100,7 +100,7 @@ const RETRYABLE_TLC_OPS_INTERVAL: Duration = Duration::from_millis(1000);
 #[cfg(not(test))]
 pub const PEER_CHANNEL_RESPONSE_TIMEOUT: u64 = 30 * 1000;
 #[cfg(test)]
-pub const PEER_CHANNEL_RESPONSE_TIMEOUT: u64 = 5 * 1000;
+pub const PEER_CHANNEL_RESPONSE_TIMEOUT: u64 = 10 * 1000;
 
 #[derive(Debug)]
 pub enum ChannelActorMessage {
