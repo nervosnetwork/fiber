@@ -6812,32 +6812,42 @@ impl ChannelActorState {
 
         for info in pending_tlcs {
             if info.is_offered() {
-                if (info.outbound_status() == OutboundTlcStatus::RemoveWaitAck
+                let confirmed_remove_reason = (info.outbound_status()
+                    == OutboundTlcStatus::RemoveWaitAck
                     || info.outbound_status() == OutboundTlcStatus::RemoveAckConfirmed
                     || (info.outbound_status() == OutboundTlcStatus::RemoteRemoved && !for_remote))
-                    && info
-                        .removed_reason
-                        .as_ref()
-                        .map(|r| matches!(r, RemoveTlcReason::RemoveTlcFulfill(_)))
-                        .unwrap_or_default()
-                {
-                    offered_fullfilled += info.amount;
-                } else {
-                    offered_pending += info.amount;
+                    .then(|| info.removed_reason.as_ref().unwrap());
+                match confirmed_remove_reason {
+                    Some(RemoveTlcReason::RemoveTlcFulfill(_)) => {
+                        offered_fullfilled += info.amount;
+                    }
+                    Some(RemoveTlcReason::RemoveTlcFail(_)) => {
+                        // This TLC failed, so it is not counted in the pending amount and the fullfilled amount
+                    }
+                    None => {
+                        offered_pending += info.amount;
+                    }
                 }
-            } else if (info.inbound_status() == InboundTlcStatus::RemoveAckConfirmed
-                || (info.inbound_status() == InboundTlcStatus::LocalRemoved && for_remote))
-                && info
-                    .removed_reason
-                    .as_ref()
-                    .map(|r| matches!(r, RemoveTlcReason::RemoveTlcFulfill(_)))
-                    .unwrap_or_default()
-            {
-                received_fullfilled += info.amount;
-            } else {
-                received_pending += info.amount;
+            }
+            if info.is_received() {
+                let confirmed_remove_reason = (info.inbound_status()
+                    == InboundTlcStatus::RemoveAckConfirmed
+                    || (info.inbound_status() == InboundTlcStatus::LocalRemoved && for_remote))
+                    .then(|| info.removed_reason.as_ref().unwrap());
+                match confirmed_remove_reason {
+                    Some(RemoveTlcReason::RemoveTlcFulfill(_)) => {
+                        received_fullfilled += info.amount;
+                    }
+                    Some(RemoveTlcReason::RemoveTlcFail(_)) => {
+                        // This TLC failed, so it is not counted in the pending amount and the fullfilled amount
+                    }
+                    None => {
+                        received_pending += info.amount;
+                    }
+                }
             }
         }
+
         debug!(
             current_to_local_amount = self.to_local_amount,
             current_to_remote_amount = self.to_remote_amount,
