@@ -1162,8 +1162,8 @@ async fn test_network_send_previous_tlc_error() {
     init_tracing();
 
     let _span = tracing::info_span!("node", node = "test").entered();
-    let node_a_funding_amount = 100000000000;
-    let node_b_funding_amount = 6200000000;
+    let node_a_funding_amount = MIN_RESERVED_CKB + 400000000;
+    let node_b_funding_amount = MIN_RESERVED_CKB;
 
     let (node_a, mut node_b, new_channel_id) =
         create_nodes_with_established_channel(node_a_funding_amount, node_b_funding_amount, true)
@@ -1177,7 +1177,7 @@ async fn test_network_send_previous_tlc_error() {
         .collect();
     let hops_infos = vec![
         PaymentHopData {
-            amount: 2,
+            amount: 300000000,
             expiry: 3,
             next_hop: Some(keys[0].pubkey()),
             funding_tx_hash: Hash256::default(),
@@ -1185,7 +1185,7 @@ async fn test_network_send_previous_tlc_error() {
             payment_preimage: None,
         },
         PaymentHopData {
-            amount: 8,
+            amount: 300300000,
             expiry: 9,
             next_hop: None,
             funding_tx_hash: Hash256::default(),
@@ -1211,7 +1211,7 @@ async fn test_network_send_previous_tlc_error() {
                 channel_id: new_channel_id,
                 command: ChannelCommand::AddTlc(
                     AddTlcCommand {
-                        amount: 10000,
+                        amount: 300300000,
                         payment_hash: generated_payment_hash,
                         expiry: DEFAULT_EXPIRY_DELTA + now_timestamp_as_millis_u64(),
                         hash_algorithm: HashAlgorithm::Sha256,
@@ -1254,7 +1254,7 @@ async fn test_network_send_previous_tlc_error() {
         NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
             SendPaymentCommand {
                 target_pubkey: Some(node_b.pubkey),
-                amount: Some(10000),
+                amount: Some(300000000),
                 payment_hash: None,
                 final_tlc_expiry_delta: None,
                 invoice: None,
