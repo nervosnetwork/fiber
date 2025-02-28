@@ -502,7 +502,24 @@ pub(crate) async fn create_n_nodes_and_channels_with_index_amounts(
         }
     }
     // sleep for a while to make sure network graph is updated
-    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+    for _ in 0..50 {
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        if nodes[0].get_network_graph_channels().await.len() >= amounts.len() {
+            break;
+        }
+    }
+    let graph_channels = nodes[0].get_network_graph_channels().await;
+    if graph_channels.len() < amounts.len() {
+        use tracing::error;
+        error!(
+            "failed to sync all graph channels, expect {} got {}",
+            amounts.len(),
+            graph_channels.len()
+        );
+        for (i, chan) in graph_channels.into_iter().enumerate() {
+            error!(">>> channel {}: {:?}", i, chan);
+        }
+    }
     (nodes, channels)
 }
 

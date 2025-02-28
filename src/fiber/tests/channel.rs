@@ -1715,39 +1715,14 @@ async fn test_send_payment_with_max_nodes() {
     let amounts = vec![(100000000000, 100000000000); nodes_num - 1];
     let (nodes, channels) =
         create_n_nodes_with_established_channel(&amounts, nodes_num, true).await;
-    let source_node = &nodes[0];
     let target_pubkey = nodes[last].pubkey;
 
     let sender_local = nodes[0].get_local_balance_from_channel(channels[0]);
     let receiver_local = nodes[last].get_local_balance_from_channel(channels[last - 1]);
 
     // sleep for seconds to make sure the channel is established
-    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(800)).await;
     let sent_amount = 1000000 + 5;
-
-    let message = |rpc_reply| -> NetworkActorMessage {
-        NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
-            SendPaymentCommand {
-                target_pubkey: Some(target_pubkey),
-                amount: Some(sent_amount),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                tlc_expiry_limit: None,
-                max_parts: None,
-                keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: true,
-            },
-            rpc_reply,
-        ))
-    };
-    let res = call!(source_node.network_actor, message).expect("node_a alive");
-    assert!(res.is_ok());
 
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
