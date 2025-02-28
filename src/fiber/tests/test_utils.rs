@@ -1199,12 +1199,9 @@ impl NetworkNode {
         let config = self.get_node_config();
         // TODO: This is actually different from rerunning the node from scratch.
         // We can't really create a new store from the same directory because some other
-        // services are still using rocksdb store. So we may encounter error like
-        // IO error: lock hold by current process, acquire time 1739265247 acquiring thread 158410: /tmp/test-fnn-node-0-bnbY8P/LOCK: No locks available
-        // let store = self.get_store().clone();
-        // let subscription = self.get_store_update_subscription().clone();
-
-        *self = Self::new_with_config_and_store(config, None).await;
+        // services are still using rocksdb store.
+        let prev_store = Some((self.store.clone(), self.store_update_subscription.clone()));
+        *self = Self::new_with_config_and_store(config, prev_store).await;
     }
 
     pub async fn stop(&mut self) {
