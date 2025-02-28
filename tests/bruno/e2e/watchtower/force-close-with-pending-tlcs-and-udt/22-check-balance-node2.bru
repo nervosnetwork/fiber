@@ -1,0 +1,57 @@
+meta {
+  name: check balance, the difference should be the tlc2 (6000000)
+  type: http
+  seq: 22
+}
+
+post {
+  url: {{CKB_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": 42,
+    "jsonrpc": "2.0",
+    "method": "get_cells",
+    "params": [
+      {
+        "script_type": "lock",
+        "filter": {
+          "script": {
+            "code_hash": "{{UDT_CODE_HASH}}",
+            "hash_type": "data1",
+            "args": "0x32e555f3ff8e135cece1351a6a2971518392c1e30375c1e006ad0ce8eac07947"
+          }
+        }
+      },
+      "asc",
+      "0x64"
+    ]
+  }
+}
+
+script:pre-request {
+  let script = bru.getVar("NODE2_FUNDING_SCRIPT");
+  let body = req.getBody();
+  body.params[0].script = script;
+  req.setBody(body);
+}
+
+script:post-response {
+  let capacity = res.body.result.objects.reduce((acc, cell) => {
+    const hexBytes = cell.output_data.slice(2).match(/../g).reverse().join('');
+    return acc + BigInt(`0x${hexBytes}`);
+  }, BigInt(0));
+  bru.setVar("NODE2_NEW_BALANCE", capacity);
+}
+
+assert {
+  Number(BigInt(bru.getVar("NODE2_NEW_BALANCE")) - BigInt(bru.getVar("NODE2_BALANCE"))): eq 6000000
+}

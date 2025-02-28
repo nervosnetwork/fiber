@@ -1,6 +1,6 @@
 [package]
 name = "fnn"
-version = "0.3.1"
+version = "0.4.0"
 edition = "2021"
 build = "src/build.rs"
 
@@ -76,6 +76,11 @@ overflow-checks = true
 
 [profile.dev]
 panic = "abort"
+
+[profile.quick_test]
+inherits = "test"
+opt-level = 3
+debug = false
 
 [dev-dependencies]
 tempfile = "3.10.1"

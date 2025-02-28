@@ -1,7 +1,7 @@
 meta {
-  name: check balance, 0xba43b7400 - 0x2dc6c0 - 0x1c7 (fee) == 0xba40dab79
+  name: check balance, 0x24e160300 - 0x1c7 (fee) == 0x24e160139
   type: http
-  seq: 13
+  seq: 11
 }
 
 post {
@@ -23,7 +23,7 @@ body:json {
     "params": [
       {
         "script": {
-          "code_hash": "0x2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a",
+          "code_hash": "0x2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e",
           "hash_type": "data",
           "args": "0x42"
         },
@@ -34,7 +34,7 @@ body:json {
 }
 
 assert {
-  res.body.result.capacity: eq "0xba40dab79"
+  res.body.result.capacity: eq "0x24e160139"
 }
 
 script:post-response {

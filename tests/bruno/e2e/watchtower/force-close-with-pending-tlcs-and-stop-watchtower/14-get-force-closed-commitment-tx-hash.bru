@@ -1,7 +1,7 @@
 meta {
-  name: get auto accepted channel id from Node1
+  name: get force closed commitment tx hash
   type: http
-  seq: 3
+  seq: 14
 }
 
 post {
@@ -22,7 +22,8 @@ body:json {
     "method": "list_channels",
     "params": [
       {
-        "peer_id": "{{NODE2_PEERID}}"
+        "peer_id": "{{NODE2_PEERID}}",
+        "include_closed": true
       }
     ]
   }
@@ -34,7 +35,6 @@ assert {
 }
 
 script:post-response {
-  await new Promise(r => setTimeout(r, 2000));
   console.log(res.body.result);
-  bru.setVar("CHANNEL_ID", res.body.result.channels[0].channel_id);
+  bru.setVar("TX_HASH", res.body.result.channels[0].latest_commitment_transaction_hash);
 }

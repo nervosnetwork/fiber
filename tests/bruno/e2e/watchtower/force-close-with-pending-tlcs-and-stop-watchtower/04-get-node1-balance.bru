@@ -1,0 +1,40 @@
+meta {
+  name: get node1 balance
+  type: http
+  seq: 4
+}
+
+post {
+  url: {{CKB_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": 42,
+    "jsonrpc": "2.0",
+    "method": "get_cells_capacity",
+    "params": [
+      {
+        "script_type": "lock"
+      }
+    ]
+  }
+}
+
+script:pre-request {
+  let script = bru.getVar("NODE1_FUNDING_SCRIPT");
+  let body = req.getBody();
+  body.params[0].script = script;
+  req.setBody(body);
+}
+
+script:post-response {
+  bru.setVar("NODE1_BALANCE", res.body.result.capacity);
+}

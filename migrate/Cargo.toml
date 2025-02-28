@@ -1,6 +1,6 @@
 [package]
 name = "fnn-migrate"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 build = "build.rs"
 
@@ -23,7 +23,9 @@ serde_json = "1.0.135"
 
 fiber_v020 = { package = "fnn", git = "https://github.com/nervosnetwork/fiber.git", tag = "v0.2.0" }
 fiber_v021 = { package = "fnn", git = "https://github.com/nervosnetwork/fiber.git", tag = "v0.2.1" }
-fiber_v030 = { package = "fnn", git = "https://github.com/nervosnetwork/fiber.git", tag = "v0.3.0-rc1" }
+fiber_v030 = { package = "fnn", git = "https://github.com/nervosnetwork/fiber.git", tag = "v0.3.0" }
+fiber_v031 = { package = "fnn", git = "https://github.com/nervosnetwork/fiber.git", tag = "v0.3.1" }
+fiber_v040 = { package = "fnn", git = "https://github.com/nervosnetwork/fiber.git", tag = "v0.4.0-rc1" }
 
 [features]
 default = []

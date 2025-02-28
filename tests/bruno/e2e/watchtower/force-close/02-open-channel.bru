@@ -1,5 +1,5 @@
 meta {
-  name: Node1 open a channel to Node2
+  name: Node1 open a channel to Node2 with amount 99 ckb
   type: http
   seq: 2
 }
@@ -23,7 +23,7 @@ body:json {
     "params": [
       {
         "peer_id": "{{NODE2_PEERID}}",
-        "funding_amount": "0xba43b7400",
+        "funding_amount": "0x24e160300",
         "shutdown_script": {
           "code_hash": "0x2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a",
           "hash_type": "data",
@@ -41,4 +41,5 @@ assert {
 
 script:post-response {
   await new Promise(r => setTimeout(r, 2000));
+    bru.setVar("N1N2_TEMP_CHANNEL_ID", res.body.result.temporary_channel_id);
 }
