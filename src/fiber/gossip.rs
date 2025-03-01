@@ -1792,6 +1792,24 @@ async fn get_channel_tx(
     outpoint: &OutPoint,
     chain: &ActorRef<CkbChainMessage>,
 ) -> Result<(TransactionView, Hash256), Error> {
+    // Wait for the tx to be available in test.
+    //
+    // In the payment test, channels are created first, then the funding
+    // transactions are synchronized to all the mock ckb chain actors in all
+    // nodes. Thus there is a time window that when the channel announcement
+    // is broadcasted, the funding transaction is still unknown.
+    #[cfg(test)]
+    let _ = call_t!(
+        chain,
+        |callback| CkbChainMessage::CreateTxTracer(crate::ckb::CkbTxTracer {
+            tx_hash: outpoint.tx_hash().into(),
+            confirmations: 0,
+            mask: crate::ckb::CkbTxTracingMask::all_flags(),
+            callback,
+        }),
+        DEFAULT_CHAIN_ACTOR_TIMEOUT
+    );
+
     match call_t!(
         chain,
         CkbChainMessage::GetTx,
