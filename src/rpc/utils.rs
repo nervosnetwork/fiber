@@ -1,6 +1,6 @@
 #[macro_export]
 macro_rules! log_and_error {
-    ($params:expr, $err:expr) => {{
+    ($params:expr_2021, $err:expr_2021) => {{
         tracing::error!("channel request params {:?} => error: {:?}", $params, $err);
         Err(ErrorObjectOwned::owned(
             CALL_EXECUTION_FAILED_CODE,
@@ -12,7 +12,7 @@ macro_rules! log_and_error {
 
 #[macro_export]
 macro_rules! handle_actor_call {
-    ($actor:expr, $message:expr, $params:expr) => {
+    ($actor:expr_2021, $message:expr_2021, $params:expr_2021) => {
         match call!($actor, $message) {
             Ok(result) => match result {
                 Ok(res) => Ok(res),
@@ -21,7 +21,7 @@ macro_rules! handle_actor_call {
             Err(e) => log_and_error!($params, e.to_string()),
         }
     };
-    ($actor:expr, $message:expr) => {
+    ($actor:expr_2021, $message:expr_2021) => {
         match call!($actor, $message) {
             Ok(result) => match result {
                 Ok(res) => Ok(res),
@@ -40,7 +40,7 @@ macro_rules! handle_actor_call {
 
 #[macro_export]
 macro_rules! handle_actor_cast {
-    ($actor:expr, $message:expr, $params:expr) => {
+    ($actor:expr_2021, $message:expr_2021, $params:expr_2021) => {
         match $actor.cast($message) {
             Ok(_) => Ok(()),
             Err(err) => log_and_error!($params, format!("{}", err)),

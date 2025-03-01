@@ -92,10 +92,13 @@ pub trait GossipMessageStore {
         let mut results = Vec::new();
         let mut missing = Vec::new();
         for (index, query) in queries.into_iter().enumerate() {
-            if let Some(message) = self.query_broadcast_message(query) {
-                results.push(message);
-            } else {
-                missing.push(index as u16);
+            match self.query_broadcast_message(query) {
+                Some(message) => {
+                    results.push(message);
+                }
+                _ => {
+                    missing.push(index as u16);
+                }
             }
         }
         (results, missing)
@@ -470,69 +473,72 @@ where
                     &state.peer_id,
                     result
                 );
-                if let Some(handle) = state.inflight_requests.remove(&result.id) {
-                    // Stop the timeout notification.
-                    handle.abort();
-                    let messages = result.messages;
-                    // If we are receiving an empty response, then the syncing process is finished.
-                    match messages.last() {
-                        Some(last_message) => {
-                            // We need the message timestamp to construct a valid cursor.
-                            match get_message_cursor(
-                                last_message,
-                                &state.store.store,
-                                &state.chain_actor,
-                            )
-                            .await
-                            {
-                                Ok(cursor) => {
-                                    state.cursor = cursor;
-                                }
-                                Err(error) => {
-                                    warn!(
+                match state.inflight_requests.remove(&result.id) {
+                    Some(handle) => {
+                        // Stop the timeout notification.
+                        handle.abort();
+                        let messages = result.messages;
+                        // If we are receiving an empty response, then the syncing process is finished.
+                        match messages.last() {
+                            Some(last_message) => {
+                                // We need the message timestamp to construct a valid cursor.
+                                match get_message_cursor(
+                                    last_message,
+                                    &state.store.store,
+                                    &state.chain_actor,
+                                )
+                                .await
+                                {
+                                    Ok(cursor) => {
+                                        state.cursor = cursor;
+                                    }
+                                    Err(error) => {
+                                        warn!(
                                         "Failed to verify the last message in the response: message {:?}, peer {:?}",
                                         error, &state.peer_id
                                     );
-                                    myself.stop(Some(
-                                        "Failed to verify the last message in the response"
-                                            .to_string(),
-                                    ));
-                                    state
-                                        .gossip_actor
-                                        .send_message(GossipActorMessage::MaliciousPeerFound(
-                                            state.peer_id.clone(),
-                                        ))
-                                        .expect("gossip actor alive");
-                                    return Ok(());
+                                        myself.stop(Some(
+                                            "Failed to verify the last message in the response"
+                                                .to_string(),
+                                        ));
+                                        state
+                                            .gossip_actor
+                                            .send_message(GossipActorMessage::MaliciousPeerFound(
+                                                state.peer_id.clone(),
+                                            ))
+                                            .expect("gossip actor alive");
+                                        return Ok(());
+                                    }
                                 }
                             }
+                            None => {
+                                state
+                                    .gossip_actor
+                                    .send_message(GossipActorMessage::ActiveSyncingFinished(
+                                        state.peer_id.clone(),
+                                        state.cursor.clone(),
+                                    ))
+                                    .expect("gossip actor alive");
+                                myself.stop(Some("Active syncing finished".to_string()));
+                                return Ok(());
+                            }
                         }
-                        None => {
-                            state
-                                .gossip_actor
-                                .send_message(GossipActorMessage::ActiveSyncingFinished(
-                                    state.peer_id.clone(),
-                                    state.cursor.clone(),
-                                ))
-                                .expect("gossip actor alive");
-                            myself.stop(Some("Active syncing finished".to_string()));
-                            return Ok(());
-                        }
-                    }
 
-                    let _ = state
-                        .store
-                        .actor
-                        .send_message(ExtendedGossipMessageStoreMessage::SaveMessages(messages))
-                        .expect("store actor alive");
-                    myself
-                        .send_message(GossipSyncingActorMessage::NewGetRequest())
-                        .expect("gossip syncing actor alive");
-                } else {
-                    warn!(
+                        let _ = state
+                            .store
+                            .actor
+                            .send_message(ExtendedGossipMessageStoreMessage::SaveMessages(messages))
+                            .expect("store actor alive");
+                        myself
+                            .send_message(GossipSyncingActorMessage::NewGetRequest())
+                            .expect("gossip syncing actor alive");
+                    }
+                    _ => {
+                        warn!(
                         "Received GetBroadcastMessages response from peer {:?} with unknown request id: {:?}",
                         state.peer_id, result
                     );
+                    }
                 }
             }
             GossipSyncingActorMessage::NewGetRequest() => {

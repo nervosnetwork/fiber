@@ -95,7 +95,7 @@ pub struct ChannelTestContext {
 }
 
 impl ChannelTestContext {
-    pub fn gen() -> ChannelTestContext {
+    pub fn r#gen() -> ChannelTestContext {
         let funding_tx_sk = gen_rand_fiber_private_key();
         let node1_sk = gen_rand_fiber_private_key();
         let node2_sk = gen_rand_fiber_private_key();

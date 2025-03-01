@@ -1,5 +1,5 @@
 use crate::ckb::config::{UdtArgInfo, UdtCellDep, UdtCfgInfos, UdtScript};
-use crate::fiber::gen::fiber::UdtCfgInfos as MoleculeUdtCfgInfos;
+use crate::fiber::r#gen::fiber::UdtCfgInfos as MoleculeUdtCfgInfos;
 use ckb_types::core::{DepType, ScriptHashType};
 use ckb_types::H256;
 use molecule::prelude::Entity;
