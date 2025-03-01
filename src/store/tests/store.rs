@@ -74,9 +74,7 @@ fn mock_channel() -> ChannelAnnouncement {
 
 #[test]
 fn test_store_invoice() {
-    let path = TempDir::new("invoice_store");
-
-    let store = Store::new(path).expect("created store failed");
+    let (store, _dir) = generate_store();
 
     let preimage = gen_rand_sha256_hash();
     let invoice = InvoiceBuilder::new(Currency::Fibb)
@@ -111,9 +109,7 @@ fn test_store_invoice() {
 
 #[test]
 fn test_store_get_broadcast_messages_iter() {
-    let path = TempDir::new("test-gossip-store");
-    let store = Store::new(path).expect("created store failed");
-
+    let (store, _dir) = generate_store();
     let timestamp = now_timestamp_as_millis_u64();
     let channel_announcement = mock_channel();
     let outpoint = channel_announcement.out_point().clone();
@@ -137,9 +133,7 @@ fn test_store_get_broadcast_messages_iter() {
 
 #[test]
 fn test_store_get_broadcast_messages() {
-    let path = TempDir::new("test-gossip-store");
-    let store = Store::new(path).expect("created store failed");
-
+    let (store, _dir) = generate_store();
     let timestamp = now_timestamp_as_millis_u64();
     let channel_announcement = mock_channel();
     let outpoint = channel_announcement.out_point().clone();
@@ -160,9 +154,7 @@ fn test_store_get_broadcast_messages() {
 
 #[test]
 fn test_store_save_channel_announcement() {
-    let path = TempDir::new("test-gossip-store");
-    let store = Store::new(path).expect("created store failed");
-
+    let (store, _dir) = generate_store();
     let timestamp = now_timestamp_as_millis_u64();
     let channel_announcement = mock_channel();
     store.save_channel_announcement(timestamp, channel_announcement.clone());
@@ -176,9 +168,7 @@ fn test_store_save_channel_announcement() {
 
 #[test]
 fn test_store_save_channel_update() {
-    let path = TempDir::new("test-gossip-store");
-    let store = Store::new(path).expect("created store failed");
-
+    let (store, _dir) = generate_store();
     let flags_for_update_of_node1 = ChannelUpdateMessageFlags::UPDATE_OF_NODE1;
     let channel_update_of_node1 = ChannelUpdate::new_unsigned(
         OutPoint::new_builder()
@@ -220,9 +210,7 @@ fn test_store_save_channel_update() {
 
 #[test]
 fn test_store_save_node_announcement() {
-    let path = TempDir::new("test-gossip-store");
-    let store = Store::new(path).expect("created store failed");
-
+    let (store, _dir) = generate_store();
     let (sk, node_announcement) = mock_node();
     let pk = sk.pubkey();
     store.save_node_announcement(node_announcement.clone());
@@ -504,8 +492,7 @@ fn test_serde_channel_actor_state_ciborium() {
 
 #[test]
 fn test_store_payment_session() {
-    let path = TempDir::new("payment-history-store-test");
-    let store = Store::new(path).expect("created store failed");
+    let (store, _dir) = generate_store();
     let payment_hash = gen_rand_sha256_hash();
     let payment_data = SendPaymentData {
         target_pubkey: gen_rand_fiber_public_key(),
@@ -534,7 +521,7 @@ fn test_store_payment_session() {
 
 #[test]
 fn test_store_payment_history() {
-    let mut store = generate_store();
+    let (mut store, _dir) = generate_store();
     let result = TimedResult {
         fail_amount: 1,
         fail_time: 2,
