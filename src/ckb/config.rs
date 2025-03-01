@@ -52,6 +52,15 @@ pub struct CkbConfig {
         help = "a list of supported UDT scripts"
     )]
     pub udt_whitelist: Option<UdtCfgInfos>,
+
+    #[default(4000)]
+    #[arg(
+        name = "CKB_TX_TRACING_POLLING_INTERVAL_MS",
+        long = "ckb-tx-tracing-polling-interval-ms",
+        env,
+        help = "polling interval for ckb tx tracing actor in milliseconds [default: 4000]"
+    )]
+    pub tx_tracing_polling_interval_ms: u64,
 }
 
 impl CkbConfig {
