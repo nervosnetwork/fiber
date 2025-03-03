@@ -1125,7 +1125,7 @@ impl NetworkNode {
             .await;
     }
 
-    pub async fn submit_tx(&mut self, tx: TransactionView) -> ckb_jsonrpc_types::Status {
+    pub async fn submit_tx(&self, tx: TransactionView) -> ckb_jsonrpc_types::Status {
         submit_tx(self.chain_actor.clone(), tx).await
     }
 
