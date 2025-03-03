@@ -589,7 +589,7 @@ where
         }
     }
 
-    fn process_node_announcement(
+    pub(crate) fn process_node_announcement(
         &mut self,
         mut node_announcement: NodeAnnouncement,
     ) -> Option<Cursor> {

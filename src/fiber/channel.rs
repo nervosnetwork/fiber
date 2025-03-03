@@ -25,13 +25,12 @@ use crate::{
         },
         serde_utils::{CompactSignatureAsBytes, EntityHex, PubNonceAsBytes},
         types::{
-            AcceptChannel, AddTlc, AnnouncementSignatures, BroadcastMessageQuery,
-            BroadcastMessageQueryFlags, ChannelAnnouncement, ChannelReady, ChannelUpdate,
-            ClosingSigned, CommitmentSigned, EcdsaSignature, FiberChannelMessage, FiberMessage,
-            Hash256, OpenChannel, PaymentOnionPacket, PeeledPaymentOnionPacket, Privkey, Pubkey,
-            ReestablishChannel, RemoveTlc, RemoveTlcFulfill, RemoveTlcReason, RevokeAndAck,
-            Shutdown, TlcErr, TlcErrPacket, TlcErrorCode, TxCollaborationMsg, TxComplete, TxUpdate,
-            NO_SHARED_SECRET,
+            AcceptChannel, AddTlc, AnnouncementSignatures, ChannelAnnouncement, ChannelReady,
+            ChannelUpdate, ClosingSigned, CommitmentSigned, EcdsaSignature, FiberChannelMessage,
+            FiberMessage, Hash256, OpenChannel, PaymentOnionPacket, PeeledPaymentOnionPacket,
+            Privkey, Pubkey, ReestablishChannel, RemoveTlc, RemoveTlcFulfill, RemoveTlcReason,
+            RevokeAndAck, Shutdown, TlcErr, TlcErrPacket, TlcErrorCode, TxCollaborationMsg,
+            TxComplete, TxUpdate, NO_SHARED_SECRET,
         },
         NetworkActorCommand, NetworkActorEvent, NetworkActorMessage, ASSUME_NETWORK_ACTOR_ALIVE,
     },
@@ -5864,43 +5863,6 @@ impl ChannelActorState {
                         ),
                         BroadcastMessageWithTimestamp::ChannelUpdate(channel_update),
                     ]),
-                ))
-                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-
-            // Note that there is a racing condition here. The peer may have not finished
-            // generating the channel update message yet. In order to reliably query the
-            // peer for the channel update message, we may to retry the query a few times.
-            let peer_id = self.get_remote_peer_id();
-            let queries = if self.local_is_node1() {
-                vec![
-                    BroadcastMessageQuery {
-                        channel_outpoint: self.must_get_funding_transaction_outpoint(),
-                        flags: BroadcastMessageQueryFlags::ChannelUpdateOfNode2,
-                    },
-                    BroadcastMessageQuery {
-                        channel_outpoint: self.must_get_funding_transaction_outpoint(),
-                        flags: BroadcastMessageQueryFlags::NodeAnnouncementNode2,
-                    },
-                ]
-            } else {
-                vec![
-                    BroadcastMessageQuery {
-                        channel_outpoint: self.must_get_funding_transaction_outpoint(),
-                        flags: BroadcastMessageQueryFlags::ChannelUpdateOfNode1,
-                    },
-                    BroadcastMessageQuery {
-                        channel_outpoint: self.must_get_funding_transaction_outpoint(),
-                        flags: BroadcastMessageQueryFlags::NodeAnnouncementNode1,
-                    },
-                ]
-            };
-            debug!(
-                "Querying for channel update and node announcement messages from {:?}",
-                &peer_id
-            );
-            network
-                .send_message(NetworkActorMessage::new_command(
-                    NetworkActorCommand::QueryBroadcastMessages(peer_id, queries),
                 ))
                 .expect(ASSUME_NETWORK_ACTOR_ALIVE);
         }
