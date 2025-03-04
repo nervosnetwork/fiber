@@ -587,7 +587,7 @@ Sends a payment to a peer.
 * `keysend` - <em>`Option<bool>`</em>, keysend payment
 * `udt_type_script` - <em>`Option<Script>`</em>, udt type script for the payment
 * `allow_self_payment` - <em>`Option<bool>`</em>, allow self payment, default is false
-* `custom_records` - <em>`Option<HashMap<u32::Vec<u8>>>`</em>, Some custom records for the payment which contains a map of u32 to Vec<u8>
+* `custom_records` - <em>Option<[PaymentCustomRecords](#type-paymentcustomrecords)></em>, Some custom records for the payment which contains a map of u32 to Vec<u8>
  The key is the record type, and the value is the serialized data
 * `hop_hints` - <em>Option<Vec<[HopHint](#type-hophint)>></em>, Optional route hints to reach the destination through private channels.
  A hop hint is a hint for a node to use a specific channel, for example
@@ -851,12 +851,22 @@ The Node information.
 <a id="#type-paymentcustomrecords"></a>
 ### Type `PaymentCustomRecords`
 
-The payment custom records, data is a map of pair of key value, `HashMap<u32, Vec<u8>>`
+The custom records to be included in the payment.
+ The key is hex encoded of `u32`, and the value is hex encoded of `Vec<u8>` with `0x` as prefix.
+ For example:
+ ```json
+ "custom_records": {
+    "0x1": "0x01020304",
+    "0x2": "0x05060708",
+    "0x3": "0x090a0b0c",
+    "0x4": "0x0d0e0f10010d090a0b0c"
+  }
+ ```
 
 
 #### Fields
 
-* `data` - <em>`HashMap<`u32::Vec<u8>`>`</em>, custom_records is key value pairs of `u32` and `Vec<u8>`, value usually is serialized data
+* `data` - <em>`HashMap<`u32::Vec<u8>`>`</em>, The custom records to be included in the payment.
 ---
 
 <a id="#type-paymentsessionstatus"></a>

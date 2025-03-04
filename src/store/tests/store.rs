@@ -602,7 +602,6 @@ fn test_store_payment_history() {
 }
 
 #[test]
-
 fn test_store_payment_custom_record() {
     let payment_hash = gen_rand_sha256_hash();
     let mut data = HashMap::new();
@@ -610,7 +609,6 @@ fn test_store_payment_custom_record() {
     data.insert(2, "world".to_string().into_bytes());
 
     let record = PaymentCustomRecords { data };
-    eprintln!("{:?}", record);
     let store = generate_store();
     store.insert_payment_custom_records(&payment_hash, record.clone());
     let res = store.get_payment_custom_records(&payment_hash).unwrap();
