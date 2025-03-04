@@ -455,7 +455,7 @@ async fn test_query_missing_broadcast_message() {
     let node1_channel_info = node1.get_network_graph_channel(&out_point).await.unwrap();
     assert_ne!(node1_channel_info.update_of_node1, None);
 
-    let mut node2 = NetworkNode::new().await;
+    let node2 = NetworkNode::new().await;
     node1.connect_to(&node2).await;
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
     // Verify that node2 still does not have channel info after active syncing done.
