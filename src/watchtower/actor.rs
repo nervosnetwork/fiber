@@ -1,12 +1,12 @@
 use anyhow::anyhow;
-use ckb_hash::new_blake2b;
+use ckb_hash::{blake2b_256, new_blake2b};
 use ckb_jsonrpc_types::{Either, Status};
 use ckb_sdk::{
-    rpc::ckb_indexer::{CellType, Order, ScriptType, SearchKey, SearchMode, Tx},
+    rpc::ckb_indexer::{Cell, CellType, Order, ScriptType, SearchKey, SearchMode, Tx},
     traits::{CellCollector, CellQueryOptions, DefaultCellCollector, ValueRangeOption},
     transaction::builder::FeeCalculator,
     util::blake160,
-    CkbRpcClient, RpcError,
+    CkbRpcClient, RpcError, Since, SinceType,
 };
 use ckb_types::{
     self,
@@ -24,7 +24,15 @@ use crate::{
         contracts::{get_cell_deps, get_script_by_contract, Contract},
         CkbConfig,
     },
-    fiber::channel::{create_witness_for_commitment_cell, RevocationData, SettlementData},
+    fiber::{
+        channel::{
+            create_witness_for_commitment_cell,
+            create_witness_for_commitment_cell_with_pending_tlcs, RevocationData, SettlementData,
+            SettlementTlc, XUDT_COMPATIBLE_WITNESS,
+        },
+        types::Hash256,
+    },
+    invoice::InvoiceStore,
     NetworkServiceEvent,
 };
 
@@ -36,7 +44,7 @@ pub struct WatchtowerActor<S> {
     store: S,
 }
 
-impl<S: WatchtowerStore> WatchtowerActor<S> {
+impl<S: InvoiceStore + WatchtowerStore> WatchtowerActor<S> {
     pub fn new(store: S) -> Self {
         Self { store }
     }
@@ -55,7 +63,7 @@ pub struct WatchtowerState {
 #[ractor::async_trait]
 impl<S> Actor for WatchtowerActor<S>
 where
-    S: WatchtowerStore + Send + Sync + 'static,
+    S: InvoiceStore + WatchtowerStore + Send + Sync + 'static,
 {
     type Msg = WatchtowerMessage;
     type State = WatchtowerState;
@@ -126,7 +134,7 @@ where
 
 impl<S> WatchtowerActor<S>
 where
-    S: WatchtowerStore,
+    S: InvoiceStore + WatchtowerStore,
 {
     fn periodic_check(&self, state: &WatchtowerState) {
         for channel_data in self.store.get_watch_channels() {
@@ -247,8 +255,10 @@ where
                                                                         channel_data
                                                                             .remote_settlement_data
                                                                             .clone(),
+                                                                        true,
                                                                         secret_key,
                                                                         &mut cell_collector,
+                                                                        &self.store,
                                                                     );
                                                                 }
                                                             }
@@ -260,10 +270,12 @@ where
                                                                     .local_settlement_data
                                                                     .clone()
                                                                     .expect(
-                                                                        "remote settlement data",
+                                                                        "local settlement data",
                                                                     ),
+                                                                false,
                                                                 secret_key,
                                                                 &mut cell_collector,
+                                                                &self.store,
                                                             );
                                                         }
                                                     } else {
@@ -304,9 +316,8 @@ fn build_revocation_tx(
     secret_key: SecretKey,
     cell_collector: &mut DefaultCellCollector,
 ) -> Result<TransactionView, Box<dyn std::error::Error>> {
-    let empty_witness_args = [16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0];
     let witness = [
-        empty_witness_args.to_vec(),
+        XUDT_COMPATIBLE_WITNESS.to_vec(),
         vec![0xFF],
         revocation_data.commitment_number.to_be_bytes().to_vec(),
         revocation_data.x_only_aggregated_pubkey.to_vec(),
@@ -384,18 +395,34 @@ fn build_revocation_tx(
     Err(Box::new(RpcError::Other(anyhow!("Not enough capacity"))))
 }
 
-fn try_settle_commitment_tx(
+fn try_settle_commitment_tx<S: InvoiceStore>(
     commitment_lock: Script,
     ckb_client: CkbRpcClient,
     settlement_data: SettlementData,
+    for_remote: bool,
     secret_key: SecretKey,
     cell_collector: &mut DefaultCellCollector,
+    store: &S,
 ) {
-    let current_epoch = match ckb_client.get_tip_header() {
-        Ok(tip_header) => {
-            let tip_header: HeaderView = tip_header.into();
-            tip_header.epoch()
-        }
+    let (current_epoch, current_time) = match ckb_client.get_tip_header() {
+        Ok(tip_header) => match ckb_client.get_block_median_time(tip_header.hash.clone()) {
+            Ok(Some(median_time)) => {
+                let tip_header: HeaderView = tip_header.into();
+                let epoch = tip_header.epoch();
+                (epoch, median_time.value())
+            }
+            Ok(None) => {
+                error!(
+                    "Cannot find median time: {:?}, ckb rpc bug?",
+                    tip_header.hash
+                );
+                return;
+            }
+            Err(err) => {
+                error!("Failed to get median time: {:?}", err);
+                return;
+            }
+        },
         Err(err) => {
             error!("Failed to get tip header: {:?}", err);
             return;
@@ -419,51 +446,165 @@ fn try_settle_commitment_tx(
     match ckb_client.get_cells(search_key, Order::Desc, 100u32.into(), None) {
         Ok(cells) => {
             for cell in cells.objects {
-                let cell_output: CellOutput = cell.output.into();
+                let cell_output: CellOutput = cell.output.clone().into();
                 let commitment_tx_out_point =
                     OutPoint::new(cell.out_point.tx_hash.pack(), cell.out_point.index.value());
                 let lock_script_args = cell_output.lock().args().raw_data();
                 let since = u64::from_le_bytes(
                     lock_script_args[20..28].try_into().expect("u64 from slice"),
                 );
-                let header: HeaderView = match ckb_client.get_header_by_number(cell.block_number) {
-                    Ok(Some(header)) => header.into(),
-                    Ok(None) => {
-                        error!("Cannot find header: {}", cell.block_number);
-                        continue;
-                    }
-                    Err(err) => {
-                        error!("Failed to get header: {:?}", err);
-                        continue;
-                    }
+                let delay_epoch = {
+                    let since = Since::from_raw_value(since);
+                    since
+                        .is_relative()
+                        .then(|| {
+                            since.extract_metric().and_then(|(since_type, value)| {
+                                if since_type == SinceType::EpochNumberWithFraction {
+                                    Some(EpochNumberWithFraction::from_full_value(value))
+                                } else {
+                                    None
+                                }
+                            })
+                        })
+                        .flatten()
                 };
-                let since_epoch = EpochNumberWithFraction::from_full_value(since);
-                if header.epoch().to_rational() + since_epoch.to_rational()
-                    > current_epoch.to_rational()
-                {
+
+                if delay_epoch.is_none() {
+                    error!("Found an invalid since commitment cell: {:?}", cell);
                     continue;
                 }
-                info!(
-                    "Found a force closed commitment tx: {:#x}",
-                    cell.out_point.tx_hash
-                );
-                match build_settlement_tx(
-                    commitment_tx_out_point,
-                    since,
-                    settlement_data.clone(),
-                    secret_key,
-                    cell_collector,
-                ) {
-                    Ok(tx) => match ckb_client.send_transaction(tx.data().into(), None) {
-                        Ok(tx_hash) => {
-                            info!("Settlement tx: {:?} sent, tx_hash: {:#x}", tx, tx_hash);
+
+                let cell_header: HeaderView =
+                    match ckb_client.get_header_by_number(cell.block_number) {
+                        Ok(Some(header)) => header.into(),
+                        Ok(None) => {
+                            error!("Cannot find header: {}", cell.block_number);
+                            continue;
                         }
                         Err(err) => {
-                            error!("Failed to send settlement tx: {:?}, error: {:?}", tx, err);
+                            error!("Failed to get header: {:?}", err);
+                            continue;
                         }
-                    },
-                    Err(err) => {
-                        error!("Failed to build settlement tx: {:?}", err);
+                    };
+                if lock_script_args.len() > 36 {
+                    info!(
+                        "Found a force closed commitment tx with pending tlcs: {:#x}",
+                        cell.out_point.tx_hash
+                    );
+
+                    let commitment_tx_hash = cell.out_point.tx_hash.clone();
+                    match ckb_client.get_transaction(commitment_tx_hash.clone()) {
+                        Ok(Some(tx_with_status)) => {
+                            if tx_with_status.tx_status.status != Status::Committed {
+                                error!("Cannot find the commitment tx: {:?}, status is {:?}, maybe ckb indexer bug?", tx_with_status.tx_status.status, commitment_tx_hash);
+                            } else if let Some(tx) = tx_with_status.transaction {
+                                match tx.inner {
+                                    Either::Left(tx) => {
+                                        let tx: Transaction = tx.inner.into();
+                                        let pending_tlcs =
+                                            tx.witnesses().into_iter().find_map(|witness| {
+                                                let witness = witness.raw_data();
+                                                if witness.len() > 18
+                                                    && witness[0..16] == XUDT_COMPATIBLE_WITNESS
+                                                {
+                                                    let unlock_type = witness[16];
+                                                    let pending_tlc_count = witness[17];
+                                                    if unlock_type < 0xFE
+                                                        && unlock_type < pending_tlc_count
+                                                        && witness.len()
+                                                            > 18 + 85 * pending_tlc_count as usize
+                                                    {
+                                                        let remain = [
+                                                            &witness[18..(18
+                                                                + 85 * unlock_type as usize)],
+                                                            &witness[(18
+                                                                + 85 * (unlock_type + 1) as usize)
+                                                                ..(18
+                                                                    + 85 * pending_tlc_count
+                                                                        as usize)],
+                                                        ]
+                                                        .concat()
+                                                        .to_vec();
+
+                                                        Some(remain)
+                                                    } else {
+                                                        None
+                                                    }
+                                                } else {
+                                                    None
+                                                }
+                                            });
+
+                                        match build_settlement_tx_for_pending_tlcs(
+                                            cell,
+                                            cell_header,
+                                            delay_epoch.unwrap(),
+                                            settlement_data.clone(),
+                                            for_remote,
+                                            pending_tlcs,
+                                            secret_key,
+                                            cell_collector,
+                                            current_time,
+                                            current_epoch,
+                                            store,
+                                        ) {
+                                            Ok(Some(tx)) => match ckb_client
+                                                .send_transaction(tx.data().into(), None)
+                                            {
+                                                Ok(tx_hash) => {
+                                                    info!("Settlement tx for pending tlcs: {:?} sent, tx_hash: {:#x}", tx, tx_hash);
+                                                }
+                                                Err(err) => {
+                                                    error!("Failed to send settlement tx for pending tlcs: {:?}, error: {:?}", tx, err);
+                                                }
+                                            },
+                                            Ok(None) => {
+                                                info!("No need to settle the commitment tx: {:#x} with pending tlcs", commitment_tx_hash);
+                                            }
+                                            Err(err) => {
+                                                error!("Failed to build settlement tx for pending tlcs: {:?}", err);
+                                            }
+                                        }
+                                    }
+                                    Either::Right(_) => {
+                                        // unreachable, ignore
+                                    }
+                                }
+                            }
+                        }
+                        Ok(None) => {
+                            error!(
+                                "Cannot find the commitment tx: {:?}, maybe ckb indexer bug?",
+                                commitment_tx_hash
+                            );
+                        }
+                        Err(err) => {
+                            error!("Failed to get commitment tx: {:?}", err);
+                        }
+                    }
+                } else {
+                    info!(
+                        "Found a force closed commitment tx without pending tlcs: {:#x}",
+                        cell.out_point.tx_hash
+                    );
+                    match build_settlement_tx(
+                        commitment_tx_out_point,
+                        since,
+                        settlement_data.clone(),
+                        secret_key,
+                        cell_collector,
+                    ) {
+                        Ok(tx) => match ckb_client.send_transaction(tx.data().into(), None) {
+                            Ok(tx_hash) => {
+                                info!("Settlement tx: {:?} sent, tx_hash: {:#x}", tx, tx_hash);
+                            }
+                            Err(err) => {
+                                error!("Failed to send settlement tx: {:?}, error: {:?}", tx, err);
+                            }
+                        },
+                        Err(err) => {
+                            error!("Failed to build settlement tx: {:?}", err);
+                        }
                     }
                 }
             }
@@ -481,7 +622,6 @@ fn build_settlement_tx(
     secret_key: SecretKey,
     cell_collector: &mut DefaultCellCollector,
 ) -> Result<TransactionView, Box<dyn std::error::Error>> {
-    // TODO use 0x00 ~ 0xFD to get back the funds
     let pubkey = PublicKey::from_secret_key(&Secp256k1::new(), &secret_key);
     let args = blake160(pubkey.serialize().as_ref());
     let fee_provider_lock_script = get_script_by_contract(Contract::Secp256k1Lock, args.as_bytes());
@@ -504,6 +644,7 @@ fn build_settlement_tx(
         to_local_output_data,
         to_remote_output,
         to_remote_output_data,
+        tlcs: _tlcs,
     } = settlement_data;
 
     let mut tx_builder = Transaction::default()
@@ -594,4 +735,469 @@ fn sign_tx(
     ];
 
     Ok(tx.as_advanced_builder().set_witnesses(witnesses).build())
+}
+
+fn sign_tx_with_settlement(
+    tx: TransactionView,
+    change_secret_key: SecretKey,
+    settlement_secret_key: SecretKey,
+) -> Result<TransactionView, Box<dyn std::error::Error>> {
+    let tx = tx.data();
+
+    let message = tx.calc_tx_hash();
+    let secp256k1_message = Message::from_digest_slice(&message.raw_data())?;
+    let secp256k1 = Secp256k1::new();
+    let signature = secp256k1.sign_ecdsa_recoverable(&secp256k1_message, &settlement_secret_key);
+    let (recov_id, data) = signature.serialize_compact();
+    let mut signature_bytes = [0u8; 65];
+    signature_bytes[0..64].copy_from_slice(&data[0..64]);
+    signature_bytes[64] = recov_id.to_i32() as u8;
+    let mut settlement_witness = tx
+        .witnesses()
+        .get(0)
+        .expect("get witness at index 0")
+        .raw_data()
+        .to_vec();
+    // a trick to avoid the signature place holder offset check
+    let witness_len = settlement_witness.len();
+    let signature_start = witness_len
+        - if settlement_witness[witness_len - 65..witness_len] == vec![0u8; 65] {
+            65
+        } else {
+            65 + 32
+        };
+    settlement_witness.splice(signature_start..signature_start + 65, signature_bytes);
+
+    let witness = tx.witnesses().get(1).expect("get witness at index 1");
+    let mut blake2b = new_blake2b();
+    blake2b.update(tx.calc_tx_hash().as_slice());
+    blake2b.update(&(witness.item_count() as u64).to_le_bytes());
+    blake2b.update(&witness.raw_data());
+    let mut message = vec![0u8; 32];
+    blake2b.finalize(&mut message);
+    let secp256k1_message = Message::from_digest_slice(&message)?;
+    let secp256k1 = Secp256k1::new();
+    let signature = secp256k1.sign_ecdsa_recoverable(&secp256k1_message, &change_secret_key);
+    let (recov_id, data) = signature.serialize_compact();
+    let mut signature_bytes = [0u8; 65];
+    signature_bytes[0..64].copy_from_slice(&data[0..64]);
+    signature_bytes[64] = recov_id.to_i32() as u8;
+    let change_witness = WitnessArgs::new_builder()
+        .lock(Some(ckb_types::bytes::Bytes::from(signature_bytes.to_vec())).pack())
+        .build()
+        .as_bytes();
+
+    let witnesses = vec![settlement_witness.pack(), change_witness.pack()];
+
+    Ok(tx.as_advanced_builder().set_witnesses(witnesses).build())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_settlement_tx_for_pending_tlcs<S: InvoiceStore>(
+    commitment_tx_cell: Cell,
+    cell_header: HeaderView,
+    delay_epoch: EpochNumberWithFraction,
+    settlement_data: SettlementData,
+    for_remote: bool,
+    pending_tlcs: Option<Vec<u8>>,
+    secret_key: SecretKey,
+    cell_collector: &mut DefaultCellCollector,
+    current_time: u64,
+    current_epoch: EpochNumberWithFraction,
+    store: &S,
+) -> Result<Option<TransactionView>, Box<dyn std::error::Error>> {
+    let settlement_tlc: Option<(usize, SettlementTlc, Option<Hash256>)> = match pending_tlcs.clone()
+    {
+        Some(pending_tlcs) => pending_tlcs
+            .chunks(85)
+            .enumerate()
+            .find_map(|(index, tlc)| {
+                let tlc = Tlc(tlc);
+                settlement_data.tlcs.iter().find_map(|settlement_tlc| {
+                    let pubkey_hash = blake2b_256(settlement_tlc.local_key.pubkey().serialize());
+                    if settlement_tlc.tlc_id.is_offered() {
+                        if pubkey_hash.starts_with(tlc.local_pubkey_hash())
+                            && tlc.expiry() < current_time
+                        {
+                            Some((index, settlement_tlc.clone(), None))
+                        } else if pubkey_hash.starts_with(tlc.remote_pubkey_hash()) {
+                            store
+                                .search_payment_preimage(tlc.payment_hash())
+                                .map(|preimage| (index, settlement_tlc.clone(), Some(preimage)))
+                        } else {
+                            None
+                        }
+                    } else if pubkey_hash.starts_with(tlc.remote_pubkey_hash())
+                        && tlc.expiry() < current_time
+                    {
+                        Some((index, settlement_tlc.clone(), None))
+                    } else if pubkey_hash.starts_with(tlc.local_pubkey_hash()) {
+                        store
+                            .search_payment_preimage(tlc.payment_hash())
+                            .map(|preimage| (index, settlement_tlc.clone(), Some(preimage)))
+                    } else {
+                        None
+                    }
+                })
+            }),
+        None => settlement_data
+            .tlcs
+            .iter()
+            .enumerate()
+            .find_map(|(index, settlement_tlc)| {
+                if settlement_tlc.tlc_id.is_offered() {
+                    if settlement_tlc.expiry < current_time {
+                        if for_remote {
+                            Some((index, settlement_tlc.clone(), None))
+                        } else {
+                            None
+                        }
+                    } else if for_remote {
+                        None
+                    } else {
+                        store
+                            .get_invoice_preimage(&settlement_tlc.payment_hash)
+                            .map(|preimage| (index, settlement_tlc.clone(), Some(preimage)))
+                    }
+                } else if settlement_tlc.expiry < current_time {
+                    if for_remote {
+                        None
+                    } else {
+                        Some((index, settlement_tlc.clone(), None))
+                    }
+                } else if for_remote {
+                    store
+                        .get_invoice_preimage(&settlement_tlc.payment_hash)
+                        .map(|preimage| (index, settlement_tlc.clone(), Some(preimage)))
+                } else {
+                    None
+                }
+            }),
+    };
+    if let Some((index, tlc, preimage)) = settlement_tlc {
+        let delay = if preimage.is_some() {
+            // unlock with preimage should delay 1/3 of the epoch
+            mul(delay_epoch, 1, 3)
+        } else {
+            // unlock with expiry should delay 2/3 of the epoch
+            mul(delay_epoch, 2, 3)
+        };
+        if cell_header.epoch().to_rational() + delay.to_rational() > current_epoch.to_rational() {
+            return Ok(None);
+        }
+        let pubkey = PublicKey::from_secret_key(&Secp256k1::new(), &secret_key);
+        let args = blake160(pubkey.serialize().as_ref());
+        let fee_provider_lock_script =
+            get_script_by_contract(Contract::Secp256k1Lock, args.as_bytes());
+
+        let change_output = CellOutput::new_builder()
+            .lock(fee_provider_lock_script.clone())
+            .build();
+        let placeholder_witness_for_change = WitnessArgs::new_builder()
+            .lock(Some(ckb_types::bytes::Bytes::from(vec![0u8; 65])).pack())
+            .build();
+
+        let old_pending_tlcs = pending_tlcs.unwrap_or_else(|| {
+            settlement_data
+                .tlcs
+                .iter()
+                .flat_map(|tlc| tlc.to_witness(for_remote))
+                .collect()
+        });
+        let old_pending_tlcs_size = old_pending_tlcs.len() / 85;
+        let new_pending_tlcs = if old_pending_tlcs_size > 1 {
+            [
+                &[old_pending_tlcs_size as u8 - 1],
+                &old_pending_tlcs[..85 * index],
+                &old_pending_tlcs[85 * (index + 1)..],
+            ]
+            .concat()
+        } else {
+            vec![]
+        };
+        let mut witness_for_commitment_cell = create_witness_for_commitment_cell_with_pending_tlcs(
+            index as u8,
+            old_pending_tlcs.as_slice(),
+        );
+        if let Some(preiamge) = preimage {
+            witness_for_commitment_cell.extend_from_slice(preiamge.as_ref());
+        }
+        let cell_output: CellOutput = commitment_tx_cell.output.clone().into();
+        let mut new_commitment_lock_script_args =
+            cell_output.lock().args().raw_data()[0..36].to_vec();
+        if !new_pending_tlcs.is_empty() {
+            new_commitment_lock_script_args
+                .extend_from_slice(&blake2b_256(&new_pending_tlcs)[0..20]);
+        }
+        if cell_output.type_().is_none() {
+            let capacity: u64 = cell_output.capacity().unpack();
+            let new_capacity = (capacity as u128 - tlc.payment_amount) as u64;
+            let new_commitment_output = cell_output
+                .clone()
+                .as_builder()
+                .lock(
+                    cell_output
+                        .lock()
+                        .as_builder()
+                        .args(new_commitment_lock_script_args.pack())
+                        .build(),
+                )
+                .capacity(new_capacity.pack())
+                .build();
+            let settlement_output = CellOutput::new_builder()
+                .lock(fee_provider_lock_script.clone())
+                .capacity((tlc.payment_amount as u64).pack())
+                .build();
+
+            let input = {
+                if preimage.is_none() {
+                    // TODO: ckb is using seconds as timestamp, we may need to change the expiry unit to seconds in the future
+                    let since = Since::new(SinceType::Timestamp, tlc.expiry / 1000, false).value();
+                    CellInput::new_builder()
+                        .previous_output(commitment_tx_cell.out_point.clone().into())
+                        .since(since.pack())
+                        .build()
+                } else {
+                    CellInput::new_builder()
+                        .previous_output(commitment_tx_cell.out_point.clone().into())
+                        .build()
+                }
+            };
+            let mut tx_builder = Transaction::default()
+                .as_advanced_builder()
+                .cell_deps(get_cell_deps(
+                    vec![Contract::CommitmentLock, Contract::Secp256k1Lock],
+                    &None,
+                ))
+                .input(input)
+                .output(new_commitment_output.clone())
+                .output_data(Bytes::default())
+                .output(settlement_output.clone())
+                .output_data(Bytes::default())
+                .witness(witness_for_commitment_cell.pack())
+                .witness(placeholder_witness_for_change.as_bytes().pack());
+
+            // TODO: move it to config or use https://github.com/nervosnetwork/ckb/pull/4477
+            let fee_calculator = FeeCalculator::new(1000);
+
+            let mut query = CellQueryOptions::new_lock(fee_provider_lock_script);
+            query.script_search_mode = Some(SearchMode::Exact);
+            query.secondary_script_len_range = Some(ValueRangeOption::new_exact(0));
+            query.data_len_range = Some(ValueRangeOption::new_exact(0));
+            let (cells, _total_capacity) = cell_collector.collect_live_cells(&query, true)?;
+
+            let settlement_output_occupied_capacity = settlement_output
+                .occupied_capacity(Capacity::shannons(0))
+                .expect("capacity does not overflow")
+                .as_u64();
+
+            let mut inputs_capacity = capacity;
+            for cell in cells {
+                let input_capacity: u64 = cell.output.capacity().unpack();
+                inputs_capacity += input_capacity;
+                let since =
+                    Since::new(SinceType::EpochNumberWithFraction, delay.full_value(), true)
+                        .value();
+                tx_builder = tx_builder.input(
+                    CellInput::new_builder()
+                        .previous_output(cell.out_point)
+                        .since(since.pack())
+                        .build(),
+                );
+                let fee = fee_calculator
+                    .fee(tx_builder.clone().build().data().serialized_size_in_block() as u64);
+                if inputs_capacity >= new_capacity + settlement_output_occupied_capacity + fee {
+                    let adjusted_settlement_output = change_output
+                        .as_builder()
+                        .capacity((inputs_capacity - new_capacity - fee).pack())
+                        .build();
+                    let outputs = vec![new_commitment_output, adjusted_settlement_output];
+                    let tx = tx_builder.set_outputs(outputs).build();
+                    let tx = sign_tx_with_settlement(tx, secret_key, tlc.local_key.0)?;
+                    return Ok(Some(tx));
+                }
+            }
+
+            Err(Box::new(RpcError::Other(anyhow!("Not enough capacity"))))
+        } else {
+            let amount = u128::from_le_bytes(
+                commitment_tx_cell.output_data.unwrap().as_bytes()[0..16]
+                    .try_into()
+                    .unwrap(),
+            );
+            let new_amount = amount - tlc.payment_amount;
+            let new_commitment_output = cell_output
+                .clone()
+                .as_builder()
+                .lock(
+                    cell_output
+                        .lock()
+                        .as_builder()
+                        .args(new_commitment_lock_script_args.pack())
+                        .build(),
+                )
+                .build();
+            let new_commitment_output_data = new_amount.to_le_bytes().to_vec().pack();
+            let settlement_output = CellOutput::new_builder()
+                .lock(fee_provider_lock_script.clone())
+                .type_(cell_output.type_().clone())
+                .build();
+            let settlement_output_data = tlc.payment_amount.to_le_bytes().to_vec().pack();
+            let settlement_output_occupied_capacity = settlement_output
+                .occupied_capacity(
+                    Capacity::bytes(settlement_output_data.raw_data().len()).unwrap(),
+                )
+                .expect("capacity does not overflow")
+                .as_u64();
+            let settlement_output = settlement_output
+                .as_builder()
+                .capacity(settlement_output_occupied_capacity.pack())
+                .build();
+
+            let input = {
+                if preimage.is_none() {
+                    // TODO: ckb is using seconds as timestamp, we may need to change the expiry unit to seconds in the future
+                    let since = Since::new(SinceType::Timestamp, tlc.expiry / 1000, false).value();
+                    CellInput::new_builder()
+                        .previous_output(commitment_tx_cell.out_point.clone().into())
+                        .since(since.pack())
+                        .build()
+                } else {
+                    CellInput::new_builder()
+                        .previous_output(commitment_tx_cell.out_point.clone().into())
+                        .build()
+                }
+            };
+            let mut tx_builder = Transaction::default()
+                .as_advanced_builder()
+                .cell_deps(get_cell_deps(
+                    vec![Contract::CommitmentLock, Contract::Secp256k1Lock],
+                    &commitment_tx_cell.output.type_.map(|script| script.into()),
+                ))
+                .input(input)
+                .output(new_commitment_output.clone())
+                .output_data(new_commitment_output_data)
+                .output(settlement_output.clone())
+                .output_data(settlement_output_data.clone())
+                .output(change_output.clone())
+                .output_data(Bytes::default())
+                .witness(witness_for_commitment_cell.pack())
+                .witness(placeholder_witness_for_change.as_bytes().pack());
+
+            // TODO: move it to config or use https://github.com/nervosnetwork/ckb/pull/4477
+            let fee_calculator = FeeCalculator::new(1000);
+
+            let mut query = CellQueryOptions::new_lock(fee_provider_lock_script);
+            query.script_search_mode = Some(SearchMode::Exact);
+            query.secondary_script_len_range = Some(ValueRangeOption::new_exact(0));
+            query.data_len_range = Some(ValueRangeOption::new_exact(0));
+            let (cells, _total_capacity) = cell_collector.collect_live_cells(&query, true)?;
+            let mut inputs_capacity = 0u64;
+            let change_output_occupied_capacity = change_output
+                .occupied_capacity(Capacity::shannons(0))
+                .expect("capacity does not overflow")
+                .as_u64();
+            for cell in cells {
+                let input_capacity: u64 = cell.output.capacity().unpack();
+                inputs_capacity += input_capacity;
+                let since =
+                    Since::new(SinceType::EpochNumberWithFraction, delay.full_value(), true)
+                        .value();
+                tx_builder = tx_builder.input(
+                    CellInput::new_builder()
+                        .previous_output(cell.out_point)
+                        .since(since.pack())
+                        .build(),
+                );
+                let fee = fee_calculator
+                    .fee(tx_builder.clone().build().data().serialized_size_in_block() as u64);
+                if inputs_capacity
+                    >= change_output_occupied_capacity + settlement_output_occupied_capacity + fee
+                {
+                    let new_change_output = change_output
+                        .as_builder()
+                        .capacity(
+                            (inputs_capacity - settlement_output_occupied_capacity - fee).pack(),
+                        )
+                        .build();
+                    let outputs = vec![new_commitment_output, settlement_output, new_change_output];
+                    let tx = tx_builder.set_outputs(outputs).build();
+                    let tx = sign_tx_with_settlement(tx, secret_key, tlc.local_key.0)?;
+                    return Ok(Some(tx));
+                }
+            }
+
+            Err(Box::new(RpcError::Other(anyhow!("Not enough capacity"))))
+        }
+    } else if cell_header.epoch().to_rational() + delay_epoch.to_rational()
+        > current_epoch.to_rational()
+    {
+        Ok(None)
+    } else {
+        info!(
+            "Try to settle the commitment tx: {:#x} discarding pending tlcs",
+            commitment_tx_cell.out_point.tx_hash
+        );
+        let cell_output: CellOutput = commitment_tx_cell.output.into();
+        let since = u64::from_le_bytes(
+            cell_output.lock().args().raw_data()[20..28]
+                .try_into()
+                .expect("u64 from slice"),
+        );
+        let tx = build_settlement_tx(
+            commitment_tx_cell.out_point.clone().into(),
+            since,
+            settlement_data,
+            secret_key,
+            cell_collector,
+        )?;
+        Ok(Some(tx))
+    }
+}
+
+#[derive(Debug)]
+struct Tlc<'a>(&'a [u8]);
+
+impl<'a> Tlc<'a> {
+    pub fn payment_hash(&self) -> &'a [u8] {
+        &self.0[17..37]
+    }
+
+    pub fn remote_pubkey_hash(&self) -> &'a [u8] {
+        &self.0[37..57]
+    }
+
+    pub fn local_pubkey_hash(&self) -> &'a [u8] {
+        &self.0[57..77]
+    }
+
+    pub fn expiry(&self) -> u64 {
+        let expiry = u64::from_le_bytes(self.0[77..85].try_into().unwrap());
+        Since::from_raw_value(expiry).extract_metric().unwrap().1
+    }
+}
+
+// Calculate the product of delay_epoch and a fraction
+fn mul(
+    delay: EpochNumberWithFraction,
+    numerator: u64,
+    denominator: u64,
+) -> EpochNumberWithFraction {
+    let full_numerator = numerator * (delay.number() * delay.length() + delay.index());
+    let new_denominator = denominator * delay.length();
+    let new_integer = full_numerator / new_denominator;
+    let new_numerator = full_numerator % new_denominator;
+
+    // nomalize the fraction (max epoch length is 1800)
+    let scale_factor = if new_denominator > 1800 {
+        new_denominator / 1800 + 1
+    } else {
+        1
+    };
+
+    EpochNumberWithFraction::new(
+        new_integer,
+        new_numerator / scale_factor,
+        new_denominator / scale_factor,
+    )
 }

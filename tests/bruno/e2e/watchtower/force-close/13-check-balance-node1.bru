@@ -1,0 +1,42 @@
+meta {
+  name: check balance, 0x24e160300 - 0x2dc6c0 - 0x1c7 (fee) == 0x24de83a79
+  type: http
+  seq: 13
+}
+
+post {
+  url: {{CKB_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": 42,
+    "jsonrpc": "2.0",
+    "method": "get_cells_capacity",
+    "params": [
+      {
+        "script": {
+          "code_hash": "0x2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a",
+          "hash_type": "data",
+          "args": "0x42"
+        },
+        "script_type": "lock"
+      }
+    ]
+  }
+}
+
+assert {
+  res.body.result.capacity: eq "0x24de83a79"
+}
+
+script:post-response {
+  console.log("result: ", res.body);
+}

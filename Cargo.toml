@@ -1,7 +1,8 @@
 [package]
 name = "fnn"
-version = "0.2.0"
+version = "0.4.0"
 edition = "2021"
+build = "src/build.rs"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -39,7 +40,7 @@ bitflags = { version = "2.5.0", features = ["serde"] }
 ckb-hash = "0.115.0"
 secp256k1 = { version = "0.28.0", features = ["serde", "recovery", "rand-std"] }
 musig2 = { version = "0.0.11", features = ["secp256k1", "serde"] }
-ractor = "=0.9.7"
+ractor = "0.14.2"
 arcode = "0.2.4"
 nom = "7.1.3"
 regex = "1.10.5"
@@ -76,9 +77,15 @@ overflow-checks = true
 [profile.dev]
 panic = "abort"
 
+[profile.quick_test]
+inherits = "test"
+opt-level = 3
+debug = false
+
 [dev-dependencies]
 tempfile = "3.10.1"
 ckb-testtool = "0.13.2"
+ciborium = "0.2.2"
 
 [lints.clippy]
 needless-return = "allow"

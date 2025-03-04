@@ -11,7 +11,7 @@ test:
 
 .PHONY: clippy
 clippy:
-	cargo clippy --all --all-targets --all-features
+	cargo clippy --all --all-targets --all-features -- -D warnings -A clippy::module-inception
 
 .PHONY: bless
 bless:
@@ -34,6 +34,7 @@ coverage-run-unittests:
 	RUSTFLAGS="${RUSTFLAGS} -Cinstrument-coverage" \
 		RUST_LOG=off \
 		LLVM_PROFILE_FILE="${COVERAGE_PROFRAW_DIR}/unittests-%p-%m.profraw" \
+		TEST_TEMP_RETAIN=1 \
 			cargo test --all
 
 coverage-collect-data:
@@ -55,8 +56,8 @@ coverage: coverage-run-unittests coverage-collect-data coverage-generate-report
 
 .PHONY: gen-rpc-doc
 gen-rpc-doc:
-	$(if $(shell command -v fiber-rpc-gen),,cargo install fiber-rpc-gen --force)
-	fiber-rpc-gen ./src/rpc
+	$(if $(shell command -v fiber-rpc-gen),,cargo install fiber-rpc-gen --version 0.1.8 --force)
+	fiber-rpc-gen ./src/
 	if grep -q "TODO: add desc" ./src/rpc/README.md; then \
         echo "Warning: There are 'TODO: add desc' in src/rpc/README.md, please add documentation comments to resolve them"; \
 		exit 1; \

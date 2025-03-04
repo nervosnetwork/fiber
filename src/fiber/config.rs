@@ -11,7 +11,7 @@ use std::{fs, path::PathBuf, str::FromStr};
 use tentacle::secio::{PublicKey, SecioKeyPair};
 
 pub const CKB_SHANNONS: u64 = 100_000_000; // 1 CKB = 10 ^ 8 shannons
-pub const DEFAULT_MIN_SHUTDOWN_FEE: u64 = 1 * CKB_SHANNONS; // 1 CKB prepared for shutdown transaction fee
+pub const DEFAULT_MIN_SHUTDOWN_FEE: u64 = CKB_SHANNONS; // 1 CKB prepared for shutdown transaction fee
 
 /// By default, listen to any tcp port allocated by the kernel.
 pub const DEFAULT_LISTENING_ADDR: &str = "/ip4/0.0.0.0/tcp/0";
@@ -102,7 +102,7 @@ pub struct FiberConfig {
     pub(crate) announced_addrs: Vec<String>,
 
     /// bootstrap node addresses to be connected at startup (separated by `,`)
-    #[arg(name = "FIBER_BOOTNODES_ADDRS", long = "fiber-bootnodes-addrs", env, value_parser, num_args = 0.., value_delimiter = ',')]
+    #[arg(name = "FIBER_BOOTNODE_ADDRS", long = "fiber-bootnode-addrs", env, value_parser, num_args = 0.., value_delimiter = ',')]
     pub bootnode_addrs: Vec<String>,
 
     /// node name to be announced to fiber network
@@ -234,6 +234,33 @@ pub struct FiberConfig {
     )]
     pub(crate) gossip_store_maintenance_interval_ms: Option<u64>,
 
+    /// Gossip network num targeted active syncing peers. [default: None]
+    /// This is the number of peers to target for active syncing. This is the number of peers that we will
+    /// send GetBroadcastMessages message to obtain the gossip messages that we missed during the time we
+    /// were offiline. A larger number means more peers to receive updates from, but also more bandwidth usage.
+    /// If None, it will use the default value.
+    #[arg(
+        name = "FIBER_GOSSIP_NETWORK_NUM_TARGETED_ACTIVE_SYNCING_PEERS",
+        long = "fiber-gossip-network-num-targeted-active-syncing-peers",
+        env,
+        help = "Gossip network num targeted active syncing peers. [default: None]"
+    )]
+    pub(crate) gossip_network_num_targeted_active_syncing_peers: Option<usize>,
+
+    /// Gossip network num targeted outbound passive syncing peers. [default: None]
+    /// This is the number of peers to target for outbound passive syncing. This is the number of outbound peers
+    /// that we will send BroadcastMessageFilter to receive updates from them. A larger number means more
+    /// peers to receive updates from, but also more bandwidth usage. We only count the outbound peers here,
+    /// because outbound peers are less likely to be malicious, and we want to receive updates from them.
+    /// If None, it will use the default value.
+    #[arg(
+        name = "FIBER_GOSSIP_NETWORK_NUM_TARGETED_OUTBOUND_PASSIVE_SYNCING_PEERS",
+        long = "fiber-gossip-network-num-targeted-outbound-passive-syncing-peers",
+        env,
+        help = "Gossip network num targeted outbound passive syncing peers. [default: None]"
+    )]
+    pub(crate) gossip_network_num_targeted_outbound_passive_syncing_peers: Option<usize>,
+
     /// Whether to sync the network graph from the network. [default: true]
     #[arg(
         name = "FIBER_SYNC_NETWORK_GRAPH",
@@ -273,7 +300,7 @@ impl AnnouncedNodeName {
         Ok(Self(bytes))
     }
 
-    pub fn from_str(value: &str) -> std::result::Result<Self, String> {
+    pub fn from_string(value: &str) -> std::result::Result<Self, String> {
         let str_bytes = value.as_bytes();
         Self::from_slice(str_bytes)
     }
@@ -301,7 +328,7 @@ impl std::fmt::Debug for AnnouncedNodeName {
 
 impl<'s> From<&'s str> for AnnouncedNodeName {
     fn from(value: &'s str) -> Self {
-        Self::from_str(value).expect("Valid announced node name")
+        Self::from_string(value).expect("Valid announced node name")
     }
 }
 
@@ -320,7 +347,7 @@ impl<'de> serde::Deserialize<'de> for AnnouncedNodeName {
         D: Deserializer<'de>,
     {
         let s = String::deserialize(deserializer)?;
-        Self::from_str(&s).map_err(serde::de::Error::custom)
+        Self::from_string(&s).map_err(serde::de::Error::custom)
     }
 }
 
@@ -356,7 +383,7 @@ impl FiberConfig {
     pub fn read_or_generate_secret_key(&self) -> Result<super::KeyPair> {
         FIBER_SECRET_KEY
             .get_or_try_init(|| self.inner_read_or_generate_secret_key())
-            .map(|key| key.clone())
+            .cloned()
     }
 
     pub fn store_path(&self) -> PathBuf {

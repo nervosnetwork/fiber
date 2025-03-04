@@ -1,8 +1,8 @@
-use std::collections::HashMap;
-
+#[cfg(debug_assertions)]
+use crate::fiber::graph::SessionRoute;
 use crate::fiber::{
     channel::ChannelActorStateStore,
-    graph::PaymentSessionStatus as InnerPaymentSessionStatus,
+    graph::PaymentSessionStatus,
     network::{HopHint as NetworkHopHint, SendPaymentCommand},
     serde_utils::{U128Hex, U64Hex},
     types::{Hash256, Pubkey},
@@ -18,36 +18,13 @@ use jsonrpsee::{
 use ractor::{call, ActorRef};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
+use std::collections::HashMap;
 
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug)]
 pub struct GetPaymentCommandParams {
     /// The payment hash of the payment to retrieve
     pub payment_hash: Hash256,
-}
-
-/// The status of a payment, will update as the payment progresses.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub enum PaymentSessionStatus {
-    /// initial status, payment session is created, no HTLC is sent
-    Created,
-    /// the first hop AddTlc is sent successfully and waiting for the response
-    Inflight,
-    /// related HTLC is successfully settled
-    Success,
-    /// related HTLC is failed
-    Failed,
-}
-
-impl From<InnerPaymentSessionStatus> for PaymentSessionStatus {
-    fn from(status: InnerPaymentSessionStatus) -> Self {
-        match status {
-            InnerPaymentSessionStatus::Created => PaymentSessionStatus::Created,
-            InnerPaymentSessionStatus::Inflight => PaymentSessionStatus::Inflight,
-            InnerPaymentSessionStatus::Success => PaymentSessionStatus::Success,
-            InnerPaymentSessionStatus::Failed => PaymentSessionStatus::Failed,
-        }
-    }
 }
 
 #[serde_as]
@@ -68,54 +45,58 @@ pub struct GetPaymentCommandResult {
     /// fee paid for the payment
     #[serde_as(as = "U128Hex")]
     pub fee: u128,
+
+    #[cfg(debug_assertions)]
+    /// The route information for the payment
+    router: SessionRoute,
 }
 
 #[serde_as]
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub(crate) struct SendPaymentCommandParams {
+pub struct SendPaymentCommandParams {
     /// the identifier of the payment target
-    target_pubkey: Option<Pubkey>,
+    pub target_pubkey: Option<Pubkey>,
 
     /// the amount of the payment
     #[serde_as(as = "Option<U128Hex>")]
-    amount: Option<u128>,
+    pub amount: Option<u128>,
 
     /// the hash to use within the payment's HTLC
-    payment_hash: Option<Hash256>,
+    pub payment_hash: Option<Hash256>,
 
     /// the TLC expiry delta should be used to set the timelock for the final hop, in milliseconds
     #[serde_as(as = "Option<U64Hex>")]
-    final_tlc_expiry_delta: Option<u64>,
+    pub final_tlc_expiry_delta: Option<u64>,
 
     /// the TLC expiry limit for the whole payment, in milliseconds, each hop is with a default tlc delta of 1 day
     /// suppose the payment router is with N hops, the total tlc expiry limit is at least (N-1) days
     /// this is also the default value for the payment if this parameter is not provided
     #[serde_as(as = "Option<U64Hex>")]
-    tlc_expiry_limit: Option<u64>,
+    pub tlc_expiry_limit: Option<u64>,
 
     /// the encoded invoice to send to the recipient
-    invoice: Option<String>,
+    pub invoice: Option<String>,
 
     /// the payment timeout in seconds, if the payment is not completed within this time, it will be cancelled
     #[serde_as(as = "Option<U64Hex>")]
-    timeout: Option<u64>,
+    pub timeout: Option<u64>,
 
     /// the maximum fee amounts in shannons that the sender is willing to pay
     #[serde_as(as = "Option<U128Hex>")]
-    max_fee_amount: Option<u128>,
+    pub max_fee_amount: Option<u128>,
 
     /// max parts for the payment, only used for multi-part payments
     #[serde_as(as = "Option<U64Hex>")]
-    max_parts: Option<u64>,
+    pub max_parts: Option<u64>,
 
     /// keysend payment
-    keysend: Option<bool>,
+    pub keysend: Option<bool>,
 
     /// udt type script for the payment
-    udt_type_script: Option<Script>,
+    pub udt_type_script: Option<Script>,
 
     /// allow self payment, default is false
-    allow_self_payment: Option<bool>,
+    pub allow_self_payment: Option<bool>,
 
     /// Some custom records for the payment which contains a map of u32 to Vec<u8>
     /// The key is the record type, and the value is the serialized data
@@ -128,14 +109,15 @@ pub(crate) struct SendPaymentCommandParams {
     /// inbound is a boolean indicating whether to use the channel to send or receive.
     /// Note: an inproper hint may cause the payment to fail, and hop_hints maybe helpful for self payment scenario
     /// for helping the routing algorithm to find the correct path
-    hop_hints: Option<Vec<HopHint>>,
+    pub hop_hints: Option<Vec<HopHint>>,
 
     /// dry_run for payment, used for check whether we can build valid router and the fee for this payment,
     /// it's useful for the sender to double check the payment before sending it to the network,
     /// default is false
-    dry_run: Option<bool>,
+    pub dry_run: Option<bool>,
 }
 
+/// A hop hint is a hint for a node to use a specific channel.
 #[serde_as]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HopHint {
@@ -222,11 +204,13 @@ where
         };
         handle_actor_call!(self.actor, message, params).map(|response| GetPaymentCommandResult {
             payment_hash: response.payment_hash,
-            status: response.status.into(),
+            status: response.status,
             created_at: response.created_at,
             last_updated_at: response.last_updated_at,
             failed_error: response.failed_error,
             fee: response.fee,
+            #[cfg(debug_assertions)]
+            router: response.router,
         })
     }
 
@@ -242,11 +226,13 @@ where
         };
         handle_actor_call!(self.actor, message, params).map(|response| GetPaymentCommandResult {
             payment_hash: response.payment_hash,
-            status: response.status.into(),
+            status: response.status,
             last_updated_at: response.last_updated_at,
             created_at: response.created_at,
             failed_error: response.failed_error,
             fee: response.fee,
+            #[cfg(debug_assertions)]
+            router: response.router,
         })
     }
 }

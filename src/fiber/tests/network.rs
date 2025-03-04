@@ -1,20 +1,21 @@
 use super::test_utils::{init_tracing, NetworkNode};
 use crate::{
+    ckb::tests::test_utils::set_next_block_timestamp,
     fiber::{
-        channel::{ShutdownInfo, MESSAGE_OF_NODE1_FLAG, MESSAGE_OF_NODE2_FLAG},
+        channel::ShutdownInfo,
         config::DEFAULT_TLC_EXPIRY_DELTA,
-        gossip::GossipMessageStore,
         graph::ChannelUpdateInfo,
         network::{NetworkActorStateStore, SendPaymentCommand, SendPaymentData},
         tests::test_utils::NetworkNodeConfigBuilder,
         types::{
-            BroadcastMessage, ChannelAnnouncement, ChannelUpdate, NodeAnnouncement, Privkey, Pubkey,
+            BroadcastMessage, BroadcastMessageWithTimestamp, ChannelAnnouncement,
+            ChannelUpdateChannelFlags, NodeAnnouncement, Privkey, Pubkey,
         },
         NetworkActorCommand, NetworkActorEvent, NetworkActorMessage,
     },
     gen_rand_fiber_public_key, gen_rand_secp256k1_keypair_tuple, gen_rand_sha256_hash,
     invoice::InvoiceBuilder,
-    now_timestamp_as_millis_u64, NetworkServiceEvent,
+    now_timestamp_as_millis_u64, ChannelTestContext, NetworkServiceEvent,
 };
 use ckb_hash::blake2b_256;
 use ckb_jsonrpc_types::Status;
@@ -90,11 +91,10 @@ fn create_fake_channel_announcement_mesage(
 
 fn create_node_announcement_mesage_with_priv_key(priv_key: &Privkey) -> NodeAnnouncement {
     let node_name = "fake node";
-    let addresses =
-        vec!["/ip4/1.1.1.1/tcp/8346/p2p/QmaFDJb9CkMrXy7nhTWBY5y9mvuykre3EzzRsCJUAVXprZ"]
-            .iter()
-            .map(|x| MultiAddr::from_str(x).expect("valid multiaddr"))
-            .collect();
+    let addresses = ["/ip4/1.1.1.1/tcp/8346/p2p/QmaFDJb9CkMrXy7nhTWBY5y9mvuykre3EzzRsCJUAVXprZ"]
+        .iter()
+        .map(|x| MultiAddr::from_str(x).expect("valid multiaddr"))
+        .collect();
     NodeAnnouncement::new(
         node_name.into(),
         addresses,
@@ -207,7 +207,7 @@ async fn test_sync_channel_announcement_on_startup() {
     init_tracing();
 
     let mut node1 = NetworkNode::new_with_node_name("node1").await;
-    let mut node2 = NetworkNode::new_with_node_name("node2").await;
+    let node2 = NetworkNode::new_with_node_name("node2").await;
 
     let capacity = 42;
     let priv_key: Privkey = get_test_priv_key();
@@ -220,7 +220,7 @@ async fn test_sync_channel_announcement_on_startup() {
                 .lock(ScriptBuilder::default().args(pubkey_hash.pack()).build())
                 .build(),
         )
-        .output_data(vec![0u8; 8].pack())
+        .output_data([0u8; 8].pack())
         .build();
     let outpoint = tx.output_pts()[0].clone();
     let (node_announcement_1, node_announcement_2, channel_announcement) =
@@ -253,87 +253,68 @@ async fn test_sync_channel_announcement_on_startup() {
     assert!(!channels.is_empty());
 }
 
-async fn create_a_channel() -> (NetworkNode, ChannelAnnouncement, Privkey, Privkey) {
-    init_tracing();
-
-    let node_a_funding_amount = 100000000000;
-    let node_b_funding_amount = 6200000000;
-
-    let (node1, mut node2, _, funding_tx) = NetworkNode::new_2_nodes_with_established_channel(
-        node_a_funding_amount,
-        node_b_funding_amount,
-        true,
-    )
-    .await;
-
-    // Wait for the broadcast message to be processed.
-    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-    let outpoint = funding_tx.output_pts_iter().next().unwrap();
-    node2.stop().await;
-
-    let (_, channel_announcement) = node2
-        .store
-        .get_latest_channel_announcement(&outpoint)
-        .expect("get channel");
-
-    let node1_priv_key = node1.get_private_key().clone();
-    let node2_priv_key = node2.get_private_key().clone();
-    if channel_announcement.node1_id == node1_priv_key.pubkey() {
-        (node1, channel_announcement, node1_priv_key, node2_priv_key)
-    } else {
-        (node1, channel_announcement, node2_priv_key, node1_priv_key)
-    }
-}
-
 #[tokio::test]
 async fn test_node1_node2_channel_update() {
-    let (node, channel_announcement, sk1, sk2) = create_a_channel().await;
-
-    let create_channel_update = |timestamp: u64, message_flags: u32, key: Privkey| {
-        let mut channel_update = ChannelUpdate::new_unsigned(
-            channel_announcement.out_point().clone(),
-            timestamp,
-            message_flags,
-            0,
-            42,
-            0,
-            10,
-        );
-
-        channel_update.signature = Some(key.sign(channel_update.message_to_sign()));
-        node.network_actor
-            .send_message(NetworkActorMessage::Event(
-                NetworkActorEvent::GossipMessage(
-                    get_test_peer_id(),
-                    BroadcastMessage::ChannelUpdate(channel_update.clone())
-                        .create_broadcast_messages_filter_result(),
-                ),
-            ))
-            .expect("send message to network actor");
-        channel_update
-    };
-
-    let channel_update_of_node1 =
-        create_channel_update(now_timestamp_as_millis_u64(), MESSAGE_OF_NODE1_FLAG, sk1);
+    let channel_context = ChannelTestContext::gen();
+    let funding_tx = channel_context.funding_tx.clone();
+    let out_point = channel_context.channel_outpoint().clone();
+    let channel_announcement = channel_context.channel_announcement.clone();
+    let node = NetworkNode::new().await;
+    node.submit_tx(funding_tx).await;
+    node.network_actor
+        .send_message(NetworkActorMessage::Event(
+            NetworkActorEvent::GossipMessage(
+                get_test_peer_id(),
+                BroadcastMessage::ChannelAnnouncement(channel_announcement)
+                    .create_broadcast_messages_filter_result(),
+            ),
+        ))
+        .expect("send message to network actor");
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
-    let new_channel_info = node
-        .get_network_graph_channel(channel_announcement.out_point())
-        .await
-        .unwrap();
+    let channel_update_of_node1 = channel_context.create_channel_update_of_node1(
+        ChannelUpdateChannelFlags::empty(),
+        1,
+        1,
+        1,
+        None,
+    );
+    node.network_actor
+        .send_message(NetworkActorMessage::Event(
+            NetworkActorEvent::GossipMessage(
+                get_test_peer_id(),
+                BroadcastMessage::ChannelUpdate(channel_update_of_node1.clone())
+                    .create_broadcast_messages_filter_result(),
+            ),
+        ))
+        .expect("send message to network actor");
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
+    let new_channel_info = node.get_network_graph_channel(&out_point).await.unwrap();
     assert_eq!(
         new_channel_info.update_of_node1,
         Some(ChannelUpdateInfo::from(&channel_update_of_node1))
     );
 
-    let channel_update_of_node2 =
-        create_channel_update(now_timestamp_as_millis_u64(), MESSAGE_OF_NODE2_FLAG, sk2);
+    let channel_update_of_node2 = channel_context.create_channel_update_of_node2(
+        ChannelUpdateChannelFlags::empty(),
+        2,
+        2,
+        2,
+        None,
+    );
+    node.network_actor
+        .send_message(NetworkActorMessage::Event(
+            NetworkActorEvent::GossipMessage(
+                get_test_peer_id(),
+                BroadcastMessage::ChannelUpdate(channel_update_of_node2.clone())
+                    .create_broadcast_messages_filter_result(),
+            ),
+        ))
+        .expect("send message to network actor");
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
-    let new_channel_info = node
-        .get_network_graph_channel(channel_announcement.out_point())
-        .await
-        .unwrap();
+    let new_channel_info = node.get_network_graph_channel(&out_point).await.unwrap();
     assert_eq!(
         new_channel_info.update_of_node1,
         Some(ChannelUpdateInfo::from(&channel_update_of_node1))
@@ -346,40 +327,36 @@ async fn test_node1_node2_channel_update() {
 
 #[tokio::test]
 async fn test_channel_update_version() {
-    let (node, channel_info, sk1, sk2) = create_a_channel().await;
+    let channel_context = ChannelTestContext::gen();
+    let funding_tx = channel_context.funding_tx.clone();
+    let out_point = channel_context.channel_outpoint().clone();
+    let node = NetworkNode::new().await;
+    node.submit_tx(funding_tx).await;
+    node.network_actor
+        .send_message(NetworkActorMessage::Event(
+            NetworkActorEvent::GossipMessage(
+                get_test_peer_id(),
+                BroadcastMessage::ChannelAnnouncement(channel_context.channel_announcement.clone())
+                    .create_broadcast_messages_filter_result(),
+            ),
+        ))
+        .expect("send message to network actor");
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
-    let create_channel_update = |key: &Privkey| {
-        let message_flag = if key == &sk1 {
-            MESSAGE_OF_NODE1_FLAG
-        } else {
-            MESSAGE_OF_NODE2_FLAG
-        };
-        let mut channel_update = ChannelUpdate::new_unsigned(
-            channel_info.out_point().clone(),
-            now_timestamp_as_millis_u64(),
-            message_flag,
-            0,
-            42,
-            0,
-            10,
-        );
-        tracing::debug!(
-            "Signing channel update: {:?} with key (pub {:?}) (pk1 {:?}) (pk2 {:?})",
-            &channel_update,
-            &key.pubkey(),
-            &sk1.pubkey(),
-            &sk2.pubkey()
-        );
-
-        channel_update.signature = Some(key.sign(channel_update.message_to_sign()));
-        channel_update
-    };
-
-    let (channel_update_1, channel_update_2, channel_update_3) = (
-        create_channel_update(&sk1),
-        create_channel_update(&sk1),
-        create_channel_update(&sk1),
-    );
+    let mut channel_updates = vec![];
+    for i in 0u8..3 {
+        // Make sure the timestamp is different.
+        tokio::time::sleep(tokio::time::Duration::from_millis(3)).await;
+        channel_updates.push(channel_context.create_channel_update_of_node1(
+            ChannelUpdateChannelFlags::empty(),
+            i.into(),
+            i.into(),
+            i.into(),
+            None,
+        ))
+    }
+    let [channel_update_1, channel_update_2, channel_update_3] =
+        channel_updates.try_into().expect("3 channel updates");
 
     node.network_actor
         .send_message(NetworkActorMessage::Event(
@@ -391,10 +368,7 @@ async fn test_channel_update_version() {
         ))
         .expect("send message to network actor");
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-    let new_channel_info = node
-        .get_network_graph_channel(channel_info.out_point())
-        .await
-        .unwrap();
+    let new_channel_info = node.get_network_graph_channel(&out_point).await.unwrap();
     assert_eq!(
         new_channel_info.update_of_node1,
         Some(ChannelUpdateInfo::from(&channel_update_2))
@@ -411,10 +385,7 @@ async fn test_channel_update_version() {
         ))
         .expect("send message to network actor");
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-    let new_channel_info = node
-        .get_network_graph_channel(channel_info.out_point())
-        .await
-        .unwrap();
+    let new_channel_info = node.get_network_graph_channel(&out_point).await.unwrap();
     assert_eq!(
         new_channel_info.update_of_node1,
         Some(ChannelUpdateInfo::from(&channel_update_2))
@@ -431,14 +402,78 @@ async fn test_channel_update_version() {
         ))
         .expect("send message to network actor");
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-    let new_channel_info = node
-        .get_network_graph_channel(channel_info.out_point())
-        .await
-        .unwrap();
+    let new_channel_info = node.get_network_graph_channel(&out_point).await.unwrap();
     assert_eq!(
         new_channel_info.update_of_node1,
         Some(ChannelUpdateInfo::from(&channel_update_3))
     );
+}
+
+#[tokio::test]
+async fn test_query_missing_broadcast_message() {
+    let channel_context = ChannelTestContext::gen();
+    let funding_tx = channel_context.funding_tx.clone();
+    let out_point = channel_context.channel_outpoint().clone();
+    let channel_announcement = channel_context.channel_announcement.clone();
+    // A timestamp so large that the other node will unlikely try to send GetBroadcastMessages
+    // with timestamp smaller than this one.
+    let long_long_time_ago = now_timestamp_as_millis_u64() - 30 * 24 * 3600 * 100;
+
+    let mut node1 = NetworkNode::new().await;
+    // Set a small timestamp for the ChannelAnnouncement.
+    // So that node2 will not sync this ChannelAnnouncement with node1.
+    set_next_block_timestamp(long_long_time_ago).await;
+    node1.submit_tx(funding_tx.clone()).await;
+    node1
+        .network_actor
+        .send_message(NetworkActorMessage::Event(
+            NetworkActorEvent::GossipMessage(
+                get_test_peer_id(),
+                BroadcastMessage::ChannelAnnouncement(channel_announcement)
+                    .create_broadcast_messages_filter_result(),
+            ),
+        ))
+        .expect("send message to network actor");
+    let channel_update = channel_context.create_channel_update_of_node1(
+        ChannelUpdateChannelFlags::empty(),
+        1,
+        1,
+        1,
+        Some(long_long_time_ago + 10),
+    );
+    node1
+        .network_actor
+        .send_message(NetworkActorMessage::Event(
+            NetworkActorEvent::GossipMessage(
+                get_test_peer_id(),
+                BroadcastMessage::ChannelUpdate(channel_update.clone())
+                    .create_broadcast_messages_filter_result(),
+            ),
+        ))
+        .expect("send message to network actor");
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    let node1_channel_info = node1.get_network_graph_channel(&out_point).await.unwrap();
+    assert_ne!(node1_channel_info.update_of_node1, None);
+
+    let node2 = NetworkNode::new().await;
+    node1.connect_to(&node2).await;
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    // Verify that node2 still does not have channel info after active syncing done.
+    let node2_channel_info = node2.get_network_graph_channel(&out_point).await;
+    assert_eq!(node2_channel_info, None);
+
+    node1
+        .network_actor
+        .send_message(NetworkActorMessage::Command(
+            NetworkActorCommand::BroadcastMessages(vec![
+                BroadcastMessageWithTimestamp::ChannelUpdate(channel_update.clone()),
+            ]),
+        ))
+        .expect("send message to network actor");
+    node2.submit_tx(funding_tx.clone()).await;
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    let node2_channel_info = node2.get_network_graph_channel(&out_point).await.unwrap();
+    assert_eq!(node1_channel_info, node2_channel_info);
 }
 
 #[tokio::test]
@@ -556,6 +591,20 @@ async fn test_sync_node_announcement_on_startup() {
     assert!(node_info.is_some());
 }
 
+#[tokio::test]
+async fn test_sync_node_announcement_of_connected_nodes() {
+    let [node1, node2] = NetworkNode::new_n_interconnected_nodes().await;
+
+    // Wait for the broadcast message to be processed.
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+    let node_info = node1.get_network_graph_node(&node2.get_public_key()).await;
+    assert!(node_info.is_some());
+
+    let node_info = node2.get_network_graph_node(&node1.get_public_key()).await;
+    assert!(node_info.is_some());
+}
+
 // Test that we can sync the network graph with peers.
 // We will first create a node and announce a fake node announcement to the network.
 // Then we will create another node and connect to the first node.
@@ -650,7 +699,7 @@ async fn test_persisting_announced_nodes() {
     let peers = node
         .with_network_graph(|graph| graph.sample_n_peers_to_connect(1))
         .await;
-    assert!(peers.get(&peer_id).is_some());
+    assert!(peers.contains_key(&peer_id));
 }
 
 #[tokio::test]
@@ -713,7 +762,7 @@ fn test_announcement_message_serialize() {
                 .lock(ScriptBuilder::default().args(pubkey_hash.pack()).build())
                 .build(),
         )
-        .output_data(vec![0u8; 8].pack())
+        .output_data([0u8; 8].pack())
         .build();
     let outpoint = tx.output_pts()[0].clone();
     let (_, _, mut channel_announcement) =
@@ -727,7 +776,7 @@ fn test_announcement_message_serialize() {
 
     let shutdown_info = ShutdownInfo {
         close_script: ScriptBuilder::default().build(),
-        fee_rate: 100 as u64,
+        fee_rate: 100_u64,
         signature: Some(PartialSignature::max()),
     };
     let serialized = bincode::serialize(&shutdown_info).unwrap();

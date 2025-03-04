@@ -99,7 +99,7 @@ macro_rules! uint_as_hex {
             pub $name,
             $ty,
             |u: &$ty| format!("0x{:x}", u),
-            |hex: &str| -> Result<$ty, String> {
+            |hex: String| -> Result<$ty, String> {
                 let bytes = hex.as_bytes();
                 if bytes.len() < 3 || &bytes[..2] != b"0x" {
                     return Err(format!("uint hex string does not start with 0x: {}", hex));
@@ -135,13 +135,11 @@ impl<'de> DeserializeAs<'de, CompactSignature> for CompactSignatureAsBytes {
     where
         D: Deserializer<'de>,
     {
-        let bytes: &[u8] = Deserialize::deserialize(deserializer)?;
+        let bytes: Vec<u8> = Deserialize::deserialize(deserializer)?;
         if bytes.len() != SCHNORR_SIGNATURE_SIZE {
             return Err(serde::de::Error::custom("expected 64 bytes"));
         }
-        let mut array = [0u8; SCHNORR_SIGNATURE_SIZE];
-        array.copy_from_slice(bytes);
-        CompactSignature::from_bytes(&array).map_err(serde::de::Error::custom)
+        CompactSignature::from_bytes(&bytes).map_err(serde::de::Error::custom)
     }
 }
 
@@ -161,12 +159,10 @@ impl<'de> DeserializeAs<'de, PubNonce> for PubNonceAsBytes {
     where
         D: Deserializer<'de>,
     {
-        let bytes: &[u8] = Deserialize::deserialize(deserializer)?;
+        let bytes: Vec<u8> = Deserialize::deserialize(deserializer)?;
         if bytes.len() != 66 {
             return Err(serde::de::Error::custom("expected 66 bytes"));
         }
-        let mut array = [0u8; 66];
-        array.copy_from_slice(bytes);
-        PubNonce::from_bytes(&array).map_err(serde::de::Error::custom)
+        PubNonce::from_bytes(&bytes).map_err(serde::de::Error::custom)
     }
 }

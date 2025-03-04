@@ -8,7 +8,7 @@ use crate::{
         gossip::GossipMessageStore,
         graph::{NetworkGraphStateStore, PaymentSession},
         history::{Direction, TimedResult},
-        network::{NetworkActorStateStore, PaymentCustomRecord, PersistentNetworkActorState},
+        network::{NetworkActorStateStore, PaymentCustomRecords, PersistentNetworkActorState},
         types::{BroadcastMessage, BroadcastMessageID, Cursor, Hash256, CURSOR_SIZE},
     },
     invoice::{CkbInvoice, CkbInvoiceStatus, InvoiceError, InvoiceStore},
@@ -21,15 +21,8 @@ use rocksdb::{
     DB,
 };
 use serde::Serialize;
-use std::io::Write;
-use std::{
-    cmp::Ordering,
-    io::{stdin, stdout},
-    path::Path,
-    sync::Arc,
-};
+use std::{path::Path, sync::Arc};
 use tentacle::secio::PeerId;
-use tracing::{error, info};
 
 #[derive(Clone, Debug)]
 pub struct Store {
@@ -82,14 +75,8 @@ fn update_channel_timestamp(
 impl Store {
     pub fn new<P: AsRef<Path>>(path: P) -> Result<Self, String> {
         let db = Self::open_db(path.as_ref())?;
-        let db = Self::start_migrate(path, db, false)?;
+        let db = Self::check_migrate(path, db)?;
         Ok(Self { db })
-    }
-
-    pub fn run_migrate<P: AsRef<Path>>(path: P) -> Result<(), String> {
-        let db = Self::open_db(path.as_ref())?;
-        Self::start_migrate(path, db, true)?;
-        Ok(())
     }
 
     fn open_db(path: &Path) -> Result<Arc<DB>, String> {
@@ -143,72 +130,9 @@ impl Store {
     }
 
     /// Open or create a rocksdb
-    fn start_migrate<P: AsRef<Path>>(
-        path: P,
-        db: Arc<DB>,
-        run_migrate: bool,
-    ) -> Result<Arc<DB>, String> {
+    fn check_migrate<P: AsRef<Path>>(path: P, db: Arc<DB>) -> Result<Arc<DB>, String> {
         let migrate = DbMigrate::new(db);
-        if !migrate.need_init() {
-            match migrate.check() {
-                Ordering::Greater => {
-                    error!(
-                        "The database was created by a higher version fiber executable binary \n\
-                     and cannot be opened by the current binary.\n\
-                     Please download the latest fiber executable binary."
-                    );
-                    return Err("incompatible database, need to upgrade fiber binary".to_string());
-                }
-                Ordering::Equal => {
-                    info!("no need to migrate, everything is OK ...");
-                    return Ok(migrate.db());
-                }
-                Ordering::Less => {
-                    if !run_migrate {
-                        return Err("Fiber need to run some database migrations, please run `fnn` with option `--migrate` to start migrations.".to_string());
-                    } else {
-                        let path_buf = path.as_ref().to_path_buf();
-                        let input = Self::prompt(format!("\
-                            Once the migration started, the data will be no longer compatible with all older version,\n\
-                            so we strongly recommended you to backup the old data {} before migrating.\n\
-                            \n\
-                            \nIf you want to migrate the data, please input YES, otherwise, the current process will exit.\n\
-                            > ", path_buf.display()).as_str());
-
-                        if input.trim().to_lowercase() != "yes" {
-                            error!("Migration was declined since the user didn't confirm.");
-                            return Err("need to run database migration".to_string());
-                        }
-                        eprintln!("begin to migrate db ...");
-                        let db = migrate.migrate().expect("failed to migrate db");
-                        eprintln!(
-                            "db migrated successfully, now your can restart the fiber node ..."
-                        );
-                        Ok(db)
-                    }
-                }
-            }
-        } else {
-            info!("begin to init db version ...");
-            migrate
-                .init_db_version()
-                .expect("failed to init db version");
-            Ok(migrate.db())
-        }
-    }
-
-    fn prompt(msg: &str) -> String {
-        let stdout = stdout();
-        let mut stdout = stdout.lock();
-        let stdin = stdin();
-
-        write!(stdout, "{msg}").unwrap();
-        stdout.flush().unwrap();
-
-        let mut input = String::new();
-        let _ = stdin.read_line(&mut input);
-
-        input
+        migrate.init_or_check(path)
     }
 }
 
@@ -229,7 +153,7 @@ enum KeyValue {
     WatchtowerChannel(Hash256, ChannelData),
     PaymentSession(Hash256, PaymentSession),
     PaymentHistoryTimedResult((OutPoint, Direction), TimedResult),
-    PaymentCustomRecord(Hash256, PaymentCustomRecord),
+    PaymentCustomRecord(Hash256, PaymentCustomRecords),
     NetworkActorState(PeerId, PersistentNetworkActorState),
 }
 
@@ -238,12 +162,12 @@ pub trait StoreKeyValue {
     fn value(&self) -> Vec<u8>;
 }
 
-fn serialize_to_vec<T: ?Sized + Serialize>(value: &T, field_name: &str) -> Vec<u8> {
+pub(crate) fn serialize_to_vec<T: ?Sized + Serialize>(value: &T, field_name: &str) -> Vec<u8> {
     bincode::serialize(value)
         .unwrap_or_else(|e| panic!("serialization of {} failed: {}", field_name, e))
 }
 
-fn deserialize_from<'a, T>(slice: &'a [u8], field_name: &str) -> T
+pub(crate) fn deserialize_from<'a, T>(slice: &'a [u8], field_name: &str) -> T
 where
     T: serde::Deserialize<'a>,
 {
@@ -457,14 +381,14 @@ impl ChannelActorStateStore for Store {
     fn insert_payment_custom_records(
         &self,
         payment_hash: &Hash256,
-        custom_records: PaymentCustomRecord,
+        custom_records: PaymentCustomRecords,
     ) {
         let mut batch = self.batch();
         batch.put_kv(KeyValue::PaymentCustomRecord(*payment_hash, custom_records));
         batch.commit();
     }
 
-    fn get_payment_custom_records(&self, payment_hash: &Hash256) -> Option<PaymentCustomRecord> {
+    fn get_payment_custom_records(&self, payment_hash: &Hash256) -> Option<PaymentCustomRecords> {
         let key = [&[PAYMENT_CUSTOM_RECORD_PREFIX], payment_hash.as_ref()].concat();
         self.get(key)
             .map(|v| deserialize_from(v.as_ref(), "PaymentCustomRecord"))
@@ -535,6 +459,13 @@ impl InvoiceStore for Store {
         batch.commit();
         Ok(())
     }
+
+    fn search_payment_preimage(&self, payment_hash_prefix: &[u8]) -> Option<Hash256> {
+        let prefix = [&[CKB_INVOICE_PREIMAGE_PREFIX], payment_hash_prefix].concat();
+        let mut iter = self.prefix_iterator(prefix.as_slice());
+        iter.next()
+            .map(|(_key, value)| deserialize_from(value.as_ref(), "Hash256"))
+    }
 }
 
 impl NetworkGraphStateStore for Store {
@@ -568,9 +499,8 @@ impl NetworkGraphStateStore for Store {
         let prefix = vec![PAYMENT_HISTORY_TIMED_RESULT_PREFIX];
         let iter = self.prefix_iterator(&prefix);
         iter.map(|(key, value)| {
-            let channel_outpoint: OutPoint = OutPoint::from_slice(&key[1..=36])
-                .expect("deserialize OutPoint should be OK")
-                .into();
+            let channel_outpoint: OutPoint =
+                OutPoint::from_slice(&key[1..=36]).expect("deserialize OutPoint should be OK");
             let direction = deserialize_from(&key[37..], "Direction");
             let result = deserialize_from(value.as_ref(), "TimedResult");
             (channel_outpoint, direction, result)
@@ -591,7 +521,7 @@ impl GossipMessageStore for Store {
         self.db
             .iterator(mode)
             // We should skip the value with the same cursor (after_cursor is exclusive).
-            .skip_while(move |(key, _)| key.as_ref() == &start)
+            .skip_while(move |(key, _)| key.as_ref() == start)
             .take_while(move |(key, _)| key.starts_with(&prefix))
             .map(|(key, value)| {
                 debug_assert_eq!(key.len(), 1 + CURSOR_SIZE);
@@ -630,7 +560,7 @@ impl GossipMessageStore for Store {
 
     fn get_latest_channel_announcement_timestamp(&self, outpoint: &OutPoint) -> Option<u64> {
         self.get(
-            &[
+            [
                 [BROADCAST_MESSAGE_TIMESTAMP_PREFIX].as_slice(),
                 BroadcastMessageID::ChannelAnnouncement(outpoint.clone())
                     .to_bytes()
@@ -654,7 +584,7 @@ impl GossipMessageStore for Store {
         is_node1: bool,
     ) -> Option<u64> {
         self.get(
-            &[
+            [
                 [BROADCAST_MESSAGE_TIMESTAMP_PREFIX].as_slice(),
                 BroadcastMessageID::ChannelUpdate(outpoint.clone())
                     .to_bytes()
@@ -678,9 +608,9 @@ impl GossipMessageStore for Store {
         pk: &crate::fiber::types::Pubkey,
     ) -> Option<u64> {
         self.get(
-            &[
+            [
                 [BROADCAST_MESSAGE_TIMESTAMP_PREFIX].as_slice(),
-                BroadcastMessageID::NodeAnnouncement(pk.clone())
+                BroadcastMessageID::NodeAnnouncement(*pk)
                     .to_bytes()
                     .as_slice(),
             ]
@@ -769,8 +699,13 @@ impl GossipMessageStore for Store {
     }
 
     fn save_node_announcement(&self, node_announcement: crate::fiber::types::NodeAnnouncement) {
+        debug_assert!(
+            node_announcement.verify(),
+            "Node announcement must be verified: {:?}",
+            node_announcement
+        );
         let mut batch = self.batch();
-        let message_id = BroadcastMessageID::NodeAnnouncement(node_announcement.node_id.clone());
+        let message_id = BroadcastMessageID::NodeAnnouncement(node_announcement.node_id);
 
         if let Some(old_timestamp) =
             self.get_latest_node_announcement_timestamp(&node_announcement.node_id)
@@ -792,7 +727,7 @@ impl GossipMessageStore for Store {
             );
         }
         batch.put_kv(KeyValue::BroadcastMessageTimestamp(
-            BroadcastMessageID::NodeAnnouncement(node_announcement.node_id.clone()),
+            BroadcastMessageID::NodeAnnouncement(node_announcement.node_id),
             node_announcement.timestamp,
         ));
 

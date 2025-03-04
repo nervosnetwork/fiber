@@ -187,6 +187,7 @@ pub struct UdtArgInfo {
     pub cell_deps: Vec<UdtCellDep>,
 }
 
+/// The UDT configurations
 #[derive(Serialize, Deserialize, Clone, Debug, Default, Eq, PartialEq, Hash)]
 pub struct UdtCfgInfos(pub Vec<UdtArgInfo>);
 

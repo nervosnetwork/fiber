@@ -1,14 +1,12 @@
-use super::channel::{
-    ChannelFlags, ProcessingChannelError, CHANNEL_DISABLED_FLAG, MESSAGE_OF_NODE2_FLAG,
-};
+use super::channel::{ChannelFlags, ChannelTlcInfo, ProcessingChannelError};
 use super::config::AnnouncedNodeName;
 use super::gen::fiber::{
-    self as molecule_fiber, ChannelUpdateOpt, PaymentPreimageOpt, PubNonce as Byte66, PubkeyOpt,
-    TlcErrDataOpt, UdtCellDeps, Uint128Opt,
+    self as molecule_fiber, ChannelUpdateOpt, CustomRecordsOpt, PaymentPreimageOpt,
+    PubNonce as Byte66, PubkeyOpt, TlcErrDataOpt, UdtCellDeps, Uint128Opt,
 };
 use super::gen::gossip::{self as molecule_gossip};
 use super::hash_algorithm::{HashAlgorithm, UnknownHashAlgorithmError};
-use super::network::{get_chain_hash, PaymentCustomRecord};
+use super::network::{get_chain_hash, PaymentCustomRecords};
 use super::r#gen::fiber::PubNonceOpt;
 use super::serde_utils::{EntityHex, SliceHex};
 use crate::ckb::config::{UdtArgInfo, UdtCellDep, UdtCfgInfos, UdtScript};
@@ -53,6 +51,20 @@ use tracing::{error, trace};
 pub fn secp256k1_instance() -> &'static Secp256k1<All> {
     static INSTANCE: OnceCell<Secp256k1<All>> = OnceCell::new();
     INSTANCE.get_or_init(Secp256k1::new)
+}
+
+bitflags::bitflags! {
+    #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct ChannelUpdateChannelFlags: u32 {
+        const DISABLED = 1;
+    }
+    #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct ChannelUpdateMessageFlags: u32 {
+        const UPDATE_OF_NODE1 = 0;
+        const UPDATE_OF_NODE2 = 1;
+    }
 }
 
 impl From<&Byte66> for PubNonce {
@@ -135,6 +147,7 @@ impl AsRef<[u8; 32]> for Privkey {
     }
 }
 
+/// A 256-bit hash digest, used as identifier of channnel, payment, transaction hash etc.
 #[serde_as]
 #[derive(Copy, Clone, Serialize, Deserialize, Hash, Eq, PartialEq, Default)]
 pub struct Hash256(#[serde_as(as = "SliceHex")] [u8; 32]);
@@ -267,6 +280,7 @@ impl Privkey {
     }
 }
 
+/// The public key for a Node
 #[derive(Copy, Clone, Debug, PartialOrd, Ord, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Pubkey(pub PublicKey);
 
@@ -1000,6 +1014,64 @@ impl TryFrom<molecule_fiber::ClosingSigned> for ClosingSigned {
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct UpdateTlcInfo {
+    pub channel_id: Hash256,
+    pub timestamp: u64,
+    pub channel_flags: ChannelUpdateChannelFlags,
+    pub tlc_expiry_delta: u64,
+    pub tlc_minimum_value: u128,
+    pub tlc_maximum_value: u128,
+    pub tlc_fee_proportional_millionths: u128,
+}
+
+impl From<UpdateTlcInfo> for molecule_fiber::UpdateTlcInfo {
+    fn from(update_tlc_info: UpdateTlcInfo) -> Self {
+        molecule_fiber::UpdateTlcInfo::new_builder()
+            .channel_id(update_tlc_info.channel_id.into())
+            .timestamp(update_tlc_info.timestamp.pack())
+            .channel_flags(update_tlc_info.channel_flags.bits().pack())
+            .tlc_expiry_delta(update_tlc_info.tlc_expiry_delta.pack())
+            .tlc_minimum_value(update_tlc_info.tlc_minimum_value.pack())
+            .tlc_maximum_value(update_tlc_info.tlc_maximum_value.pack())
+            .tlc_fee_proportional_millionths(update_tlc_info.tlc_fee_proportional_millionths.pack())
+            .build()
+    }
+}
+
+impl From<molecule_fiber::UpdateTlcInfo> for UpdateTlcInfo {
+    fn from(update_tlc_info: molecule_fiber::UpdateTlcInfo) -> Self {
+        UpdateTlcInfo {
+            channel_id: update_tlc_info.channel_id().into(),
+            timestamp: update_tlc_info.timestamp().unpack(),
+            channel_flags: ChannelUpdateChannelFlags::from_bits_truncate(
+                update_tlc_info.channel_flags().unpack(),
+            ),
+            tlc_expiry_delta: update_tlc_info.tlc_expiry_delta().unpack(),
+            tlc_minimum_value: update_tlc_info.tlc_minimum_value().unpack(),
+            tlc_maximum_value: update_tlc_info.tlc_maximum_value().unpack(),
+            tlc_fee_proportional_millionths: update_tlc_info
+                .tlc_fee_proportional_millionths()
+                .unpack(),
+        }
+    }
+}
+
+impl From<UpdateTlcInfo> for ChannelTlcInfo {
+    fn from(update_tlc_info: UpdateTlcInfo) -> Self {
+        ChannelTlcInfo {
+            timestamp: update_tlc_info.timestamp,
+            enabled: !update_tlc_info
+                .channel_flags
+                .contains(ChannelUpdateChannelFlags::DISABLED),
+            tlc_expiry_delta: update_tlc_info.tlc_expiry_delta,
+            tlc_minimum_value: update_tlc_info.tlc_minimum_value,
+            tlc_maximum_value: update_tlc_info.tlc_maximum_value,
+            tlc_fee_proportional_millionths: update_tlc_info.tlc_fee_proportional_millionths,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AddTlc {
     pub channel_id: Hash256,
     pub tlc_id: u64,
@@ -1036,7 +1108,7 @@ impl TryFrom<molecule_fiber::AddTlc> for AddTlc {
     fn try_from(add_tlc: molecule_fiber::AddTlc) -> Result<Self, Self::Error> {
         let onion_packet_bytes: Vec<u8> = add_tlc.onion_packet().unpack();
         let onion_packet =
-            (onion_packet_bytes.len() > 0).then(|| PaymentOnionPacket::new(onion_packet_bytes));
+            (!onion_packet_bytes.is_empty()).then(|| PaymentOnionPacket::new(onion_packet_bytes));
         Ok(AddTlc {
             onion_packet,
             channel_id: add_tlc.channel_id().into(),
@@ -1147,14 +1219,14 @@ impl Display for TlcErr {
 impl TlcErr {
     pub fn new(error_code: TlcErrorCode) -> Self {
         TlcErr {
-            error_code: error_code,
+            error_code,
             extra_data: None,
         }
     }
 
     pub fn new_node_fail(error_code: TlcErrorCode, node_id: Pubkey) -> Self {
         TlcErr {
-            error_code: error_code.into(),
+            error_code,
             extra_data: Some(TlcErrData::NodeFailed { node_id }),
         }
     }
@@ -1166,7 +1238,7 @@ impl TlcErr {
         channel_update: Option<ChannelUpdate>,
     ) -> Self {
         TlcErr {
-            error_code: error_code.into(),
+            error_code,
             extra_data: Some(TlcErrData::ChannelFailed {
                 node_id,
                 channel_outpoint,
@@ -1197,7 +1269,7 @@ impl TlcErr {
     }
 
     pub fn error_code_as_str(&self) -> String {
-        let error_code: TlcErrorCode = self.error_code.into();
+        let error_code: TlcErrorCode = self.error_code;
         error_code.as_ref().to_string()
     }
 
@@ -1232,7 +1304,7 @@ impl TryFrom<TlcErrData> for molecule_fiber::TlcErrData {
                 channel_update,
                 node_id,
             } => Ok(molecule_fiber::ChannelFailed::new_builder()
-                .channel_outpoint(channel_outpoint.into())
+                .channel_outpoint(channel_outpoint)
                 .channel_update(
                     ChannelUpdateOpt::new_builder()
                         .set(channel_update.map(|x| x.into()))
@@ -1256,7 +1328,7 @@ impl TryFrom<molecule_fiber::TlcErrData> for TlcErrData {
         match tlc_err_data.to_enum() {
             molecule_fiber::TlcErrDataUnion::ChannelFailed(channel_failed) => {
                 Ok(TlcErrData::ChannelFailed {
-                    channel_outpoint: channel_failed.channel_outpoint().into(),
+                    channel_outpoint: channel_failed.channel_outpoint(),
                     channel_update: channel_failed
                         .channel_update()
                         .to_opt()
@@ -1328,7 +1400,7 @@ impl TlcErrPacket {
         let onion_packet = if shared_secret != &NO_SHARED_SECRET {
             OnionErrorPacket::create(shared_secret, payload)
         } else {
-            OnionErrorPacket::concat(NO_ERROR_PACKET_HMAC.clone(), payload)
+            OnionErrorPacket::concat(NO_ERROR_PACKET_HMAC, payload)
         }
         .into_bytes();
         TlcErrPacket { onion_packet }
@@ -1360,8 +1432,7 @@ impl TlcErrPacket {
             }
         }
 
-        let hops_public_keys: Vec<PublicKey> =
-            hops_public_keys.iter().map(|k| k.0.clone()).collect();
+        let hops_public_keys: Vec<PublicKey> = hops_public_keys.iter().map(|k| k.0).collect();
         let session_key = SecretKey::from_slice(session_key).inspect_err(|err|
             error!(target: "fnn::fiber::types::TlcErrPacket", "decode session_key error={} key={}", err, hex::encode(session_key))
         ).ok()?;
@@ -1471,16 +1542,16 @@ impl TlcErrorCode {
     }
 
     pub fn payment_failed(&self) -> bool {
-        match self {
+        matches!(
+            self,
             TlcErrorCode::IncorrectOrUnknownPaymentDetails
-            | TlcErrorCode::FinalIncorrectExpiryDelta
-            | TlcErrorCode::FinalIncorrectTlcAmount
-            | TlcErrorCode::InvoiceExpired
-            | TlcErrorCode::InvoiceCancelled
-            | TlcErrorCode::ExpiryTooFar
-            | TlcErrorCode::ExpiryTooSoon => true,
-            _ => false,
-        }
+                | TlcErrorCode::FinalIncorrectExpiryDelta
+                | TlcErrorCode::FinalIncorrectTlcAmount
+                | TlcErrorCode::InvoiceExpired
+                | TlcErrorCode::InvoiceCancelled
+                | TlcErrorCode::ExpiryTooFar
+                | TlcErrorCode::ExpiryTooSoon
+        )
     }
 }
 
@@ -1496,7 +1567,9 @@ impl Debug for RemoveTlcReason {
             RemoveTlcReason::RemoveTlcFulfill(_fulfill) => {
                 write!(f, "RemoveTlcFulfill")
             }
-            RemoveTlcReason::RemoveTlcFail(_fail) => write!(f, "RemoveTlcFail"),
+            RemoveTlcReason::RemoveTlcFail(_fail) => {
+                write!(f, "RemoveTlcFail")
+            }
         }
     }
 }
@@ -1736,7 +1809,7 @@ impl NodeAnnouncement {
             chain_hash: self.chain_hash,
             addresses: self.addresses.clone(),
             auto_accept_min_ckb_funding_amount: self.auto_accept_min_ckb_funding_amount,
-            udt_cfg_infos: get_udt_whitelist(),
+            udt_cfg_infos: self.udt_cfg_infos.clone(),
         };
         deterministically_hash(&molecule_gossip::NodeAnnouncement::from(
             unsigned_announcement,
@@ -1752,6 +1825,14 @@ impl NodeAnnouncement {
             self.timestamp,
             BroadcastMessageID::NodeAnnouncement(self.node_id),
         )
+    }
+
+    pub fn verify(&self) -> bool {
+        let message = self.message_to_sign();
+        match self.signature {
+            Some(ref signature) => signature.verify(&self.node_id, &message),
+            _ => false,
+        }
     }
 }
 
@@ -2074,10 +2155,10 @@ pub struct ChannelUpdate {
     // Currently only the first bit is used to indicate the direction of the channel.
     // If it is 0, it means this channel message is from node 1 (thus applies to tlcs
     // sent from node 2 to node 1). Otherwise, it is from node 2.
-    pub message_flags: u32,
+    pub message_flags: ChannelUpdateMessageFlags,
     // Currently only the first bit is used to indicate if the channel is disabled.
     // If the first bit is set, the channel is disabled.
-    pub channel_flags: u32,
+    pub channel_flags: ChannelUpdateChannelFlags,
     pub tlc_expiry_delta: u64,
     pub tlc_minimum_value: u128,
     pub tlc_fee_proportional_millionths: u128,
@@ -2087,15 +2168,15 @@ impl ChannelUpdate {
     pub fn new_unsigned(
         channel_outpoint: OutPoint,
         timestamp: u64,
-        message_flags: u32,
-        channel_flags: u32,
+        message_flags: ChannelUpdateMessageFlags,
+        channel_flags: ChannelUpdateChannelFlags,
         tlc_expiry_delta: u64,
         tlc_minimum_value: u128,
         tlc_fee_proportional_millionths: u128,
     ) -> Self {
         // To avoid having the same timestamp for both channel updates, we will use an even
         // timestamp number for node1 and an odd timestamp number for node2.
-        let timestamp = if message_flags & MESSAGE_OF_NODE2_FLAG == MESSAGE_OF_NODE2_FLAG {
+        let timestamp = if message_flags.contains(ChannelUpdateMessageFlags::UPDATE_OF_NODE2) {
             timestamp | 1u64
         } else {
             timestamp & !1u64
@@ -2133,11 +2214,13 @@ impl ChannelUpdate {
     }
 
     pub fn is_update_of_node_2(&self) -> bool {
-        self.message_flags & MESSAGE_OF_NODE2_FLAG == MESSAGE_OF_NODE2_FLAG
+        self.message_flags
+            .contains(ChannelUpdateMessageFlags::UPDATE_OF_NODE2)
     }
 
     pub fn is_disabled(&self) -> bool {
-        self.channel_flags & CHANNEL_DISABLED_FLAG == CHANNEL_DISABLED_FLAG
+        self.channel_flags
+            .contains(ChannelUpdateChannelFlags::DISABLED)
     }
 
     pub fn cursor(&self) -> Cursor {
@@ -2154,8 +2237,8 @@ impl From<ChannelUpdate> for molecule_fiber::ChannelUpdate {
             .chain_hash(channel_update.chain_hash.into())
             .channel_outpoint(channel_update.channel_outpoint)
             .timestamp(channel_update.timestamp.pack())
-            .message_flags(channel_update.message_flags.pack())
-            .channel_flags(channel_update.channel_flags.pack())
+            .message_flags(channel_update.message_flags.bits().pack())
+            .channel_flags(channel_update.channel_flags.bits().pack())
             .tlc_expiry_delta(channel_update.tlc_expiry_delta.pack())
             .tlc_minimum_value(channel_update.tlc_minimum_value.pack())
             .tlc_fee_proportional_millionths(channel_update.tlc_fee_proportional_millionths.pack());
@@ -2179,8 +2262,12 @@ impl TryFrom<molecule_fiber::ChannelUpdate> for ChannelUpdate {
             chain_hash: channel_update.chain_hash().into(),
             channel_outpoint: channel_update.channel_outpoint(),
             timestamp: channel_update.timestamp().unpack(),
-            message_flags: channel_update.message_flags().unpack(),
-            channel_flags: channel_update.channel_flags().unpack(),
+            message_flags: ChannelUpdateMessageFlags::from_bits_truncate(
+                channel_update.message_flags().unpack(),
+            ),
+            channel_flags: ChannelUpdateChannelFlags::from_bits_truncate(
+                channel_update.channel_flags().unpack(),
+            ),
             tlc_expiry_delta: channel_update.tlc_expiry_delta().unpack(),
             tlc_minimum_value: channel_update.tlc_minimum_value().unpack(),
             tlc_fee_proportional_millionths: channel_update
@@ -2291,11 +2378,36 @@ pub enum FiberChannelMessage {
     TxAckRBF(TxAckRBF),
     Shutdown(Shutdown),
     ClosingSigned(ClosingSigned),
+    UpdateTlcInfo(UpdateTlcInfo),
     AddTlc(AddTlc),
     RevokeAndAck(RevokeAndAck),
     RemoveTlc(RemoveTlc),
     ReestablishChannel(ReestablishChannel),
     AnnouncementSignatures(AnnouncementSignatures),
+}
+
+impl Display for FiberChannelMessage {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            FiberChannelMessage::AcceptChannel(_) => write!(f, "AcceptChannel"),
+            FiberChannelMessage::CommitmentSigned(_) => write!(f, "CommitmentSigned"),
+            FiberChannelMessage::TxSignatures(_) => write!(f, "TxSignatures"),
+            FiberChannelMessage::ChannelReady(_) => write!(f, "ChannelReady"),
+            FiberChannelMessage::TxUpdate(_) => write!(f, "TxUpdate"),
+            FiberChannelMessage::TxComplete(_) => write!(f, "TxComplete"),
+            FiberChannelMessage::TxAbort(_) => write!(f, "TxAbort"),
+            FiberChannelMessage::TxInitRBF(_) => write!(f, "TxInitRBF"),
+            FiberChannelMessage::TxAckRBF(_) => write!(f, "TxAckRBF"),
+            FiberChannelMessage::Shutdown(_) => write!(f, "Shutdown"),
+            FiberChannelMessage::ClosingSigned(_) => write!(f, "ClosingSigned"),
+            FiberChannelMessage::UpdateTlcInfo(_) => write!(f, "UpdateTlcInfo"),
+            FiberChannelMessage::AddTlc(_) => write!(f, "AddTlc"),
+            FiberChannelMessage::RevokeAndAck(_) => write!(f, "RevokeAndAck"),
+            FiberChannelMessage::RemoveTlc(_) => write!(f, "RemoveTlc"),
+            FiberChannelMessage::ReestablishChannel(_) => write!(f, "ReestablishChannel"),
+            FiberChannelMessage::AnnouncementSignatures(_) => write!(f, "AnnouncementSignatures"),
+        }
+    }
 }
 
 impl FiberChannelMessage {
@@ -2314,6 +2426,7 @@ impl FiberChannelMessage {
             FiberChannelMessage::TxAckRBF(tx_ack_rbf) => tx_ack_rbf.channel_id,
             FiberChannelMessage::Shutdown(shutdown) => shutdown.channel_id,
             FiberChannelMessage::ClosingSigned(closing_signed) => closing_signed.channel_id,
+            FiberChannelMessage::UpdateTlcInfo(update_tlc_info) => update_tlc_info.channel_id,
             FiberChannelMessage::AddTlc(add_tlc) => add_tlc.channel_id,
             FiberChannelMessage::RevokeAndAck(revoke_and_ack) => revoke_and_ack.channel_id,
             FiberChannelMessage::RemoveTlc(remove_tlc) => remove_tlc.channel_id,
@@ -3267,7 +3380,7 @@ impl TryFrom<molecule_gossip::QueryBroadcastMessagesResult> for QueryBroadcastMe
             missing_queries: query_broadcast_messages_result
                 .missing_queries()
                 .into_iter()
-                .map(|x| u16::from(x))
+                .map(u16::from)
                 .collect(),
         })
     }
@@ -3312,6 +3425,9 @@ impl From<FiberMessage> for molecule_fiber::FiberMessageUnion {
                 }
                 FiberChannelMessage::ClosingSigned(closing_signed) => {
                     molecule_fiber::FiberMessageUnion::ClosingSigned(closing_signed.into())
+                }
+                FiberChannelMessage::UpdateTlcInfo(update_tlc_info) => {
+                    molecule_fiber::FiberMessageUnion::UpdateTlcInfo(update_tlc_info.into())
                 }
                 FiberChannelMessage::AddTlc(add_tlc) => {
                     molecule_fiber::FiberMessageUnion::AddTlc(add_tlc.into())
@@ -3400,6 +3516,11 @@ impl TryFrom<molecule_fiber::FiberMessageUnion> for FiberMessage {
                     closing_signed.try_into()?,
                 ))
             }
+            molecule_fiber::FiberMessageUnion::UpdateTlcInfo(update_tlc_info) => {
+                FiberMessage::ChannelNormalOperation(FiberChannelMessage::UpdateTlcInfo(
+                    update_tlc_info.into(),
+                ))
+            }
             molecule_fiber::FiberMessageUnion::AddTlc(add_tlc) => {
                 FiberMessage::ChannelNormalOperation(FiberChannelMessage::AddTlc(
                     add_tlc.try_into()?,
@@ -3466,7 +3587,7 @@ macro_rules! impl_traits {
 impl_traits!(FiberMessage);
 
 pub(crate) fn deterministically_hash<T: Entity>(v: &T) -> [u8; 32] {
-    ckb_hash::blake2b_256(v.as_slice()).into()
+    ckb_hash::blake2b_256(v.as_slice())
 }
 
 #[serde_as]
@@ -3479,7 +3600,7 @@ pub struct PaymentHopData {
     pub hash_algorithm: HashAlgorithm,
     pub funding_tx_hash: Hash256,
     pub next_hop: Option<Pubkey>,
-    pub custom_records: Option<PaymentCustomRecord>,
+    pub custom_records: Option<PaymentCustomRecords>,
 }
 
 /// Trait for hop data
@@ -3495,7 +3616,7 @@ impl HopData for PaymentHopData {
     const PACKET_DATA_LEN: usize = 6500;
 
     fn next_hop(&self) -> Option<Pubkey> {
-        self.next_hop.clone()
+        self.next_hop
     }
 
     fn assoc_data(&self) -> Option<Vec<u8>> {
@@ -3515,6 +3636,37 @@ impl HopData for PaymentHopData {
     }
 }
 
+impl From<PaymentCustomRecords> for molecule_fiber::CustomRecords {
+    fn from(custom_records: PaymentCustomRecords) -> Self {
+        molecule_fiber::CustomRecords::new_builder()
+            .data(
+                custom_records
+                    .data
+                    .into_iter()
+                    .map(|(key, val)| {
+                        molecule_fiber::CustomRecordDataPairBuilder::default()
+                            .key(key.pack())
+                            .value(val.pack())
+                            .build()
+                    })
+                    .collect(),
+            )
+            .build()
+    }
+}
+
+impl From<molecule_fiber::CustomRecords> for PaymentCustomRecords {
+    fn from(custom_records: molecule_fiber::CustomRecords) -> Self {
+        PaymentCustomRecords {
+            data: custom_records
+                .data()
+                .into_iter()
+                .map(|pair| (pair.key().unpack(), pair.value().unpack()))
+                .collect(),
+        }
+    }
+}
+
 impl From<PaymentHopData> for molecule_fiber::PaymentHopData {
     fn from(payment_hop_data: PaymentHopData) -> Self {
         molecule_fiber::PaymentHopData::new_builder()
@@ -3530,6 +3682,15 @@ impl From<PaymentHopData> for molecule_fiber::PaymentHopData {
             .next_hop(
                 PubkeyOpt::new_builder()
                     .set(payment_hop_data.next_hop.map(|x| x.into()))
+                    .build(),
+            )
+            .custom_records(
+                CustomRecordsOpt::new_builder()
+                    .set(
+                        payment_hop_data
+                            .custom_records
+                            .map(|x| x.try_into().expect("valid custom records")),
+                    )
                     .build(),
             )
             .build()
@@ -3554,7 +3715,10 @@ impl From<molecule_fiber::PaymentHopData> for PaymentHopData {
                 .next_hop()
                 .to_opt()
                 .map(|x| x.try_into().expect("invalid pubkey")),
-            custom_records: None,
+            custom_records: payment_hop_data
+                .custom_records()
+                .to_opt()
+                .map(|x| x.try_into().expect("invalid custom records")),
         }
     }
 }
@@ -3689,7 +3853,7 @@ impl<T: HopData> PeeledOnionPacket<T> {
             current,
             next,
             // Use all zeros for the sender
-            shared_secret: NO_SHARED_SECRET.clone(),
+            shared_secret: NO_SHARED_SECRET,
         })
     }
 
@@ -3731,7 +3895,7 @@ impl<T: HopData> PeeledOnionPacket<T> {
             .ok_or_else(|| Error::OnionPacket(OnionPacketError::InvalidHopData))?;
 
         // Ensure backward compatibility
-        let mut shared_secret = NO_SHARED_SECRET.clone();
+        let mut shared_secret = NO_SHARED_SECRET;
         if data.len() >= read_bytes + 32 && data.len() != read_bytes + T::PACKET_DATA_LEN {
             shared_secret.copy_from_slice(&data[read_bytes..read_bytes + 32]);
             read_bytes += 32;
