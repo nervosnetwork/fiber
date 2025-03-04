@@ -15,10 +15,10 @@ pub use fiber_v031::fiber::channel::{
 };
 
 use crate::util::convert;
-pub use fiber_v032::fiber::channel::ChannelActorState as ChannelActorStateV032;
-pub use fiber_v032::fiber::channel::{
-    ChannelTlcInfo as ChannelTlcInfoV032, PendingTlcs as PendingTlcsV032,
-    PublicChannelInfo as PublicChannelInfoV032, TlcInfo as TlcInfoV032, TlcState as TlcStateV032,
+pub use fiber_v040::fiber::channel::ChannelActorState as ChannelActorStateV040;
+pub use fiber_v040::fiber::channel::{
+    ChannelTlcInfo as ChannelTlcInfoV040, PendingTlcs as PendingTlcsV040,
+    PublicChannelInfo as PublicChannelInfoV040, TlcInfo as TlcInfoV040, TlcState as TlcStateV040,
 };
 
 pub struct MigrationObj {
@@ -33,8 +33,8 @@ impl MigrationObj {
     }
 }
 
-fn convert_tlc_info(old: TlcInfoV031) -> TlcInfoV032 {
-    TlcInfoV032 {
+fn convert_tlc_info(old: TlcInfoV031) -> TlcInfoV040 {
+    TlcInfoV040 {
         channel_id: convert(old.channel_id),
         status: convert(old.status),
         tlc_id: convert(old.tlc_id),
@@ -47,13 +47,13 @@ fn convert_tlc_info(old: TlcInfoV031) -> TlcInfoV032 {
         created_at: convert(old.created_at),
         removed_reason: convert(old.removed_reason),
         previous_tlc: convert(old.previous_tlc),
-        // new field in v032
+        // new field in v040
         removed_confirmed_at: None,
     }
 }
 
-fn convert_pending_tlcs(old: PendingTlcsV031) -> PendingTlcsV032 {
-    PendingTlcsV032 {
+fn convert_pending_tlcs(old: PendingTlcsV031) -> PendingTlcsV040 {
+    PendingTlcsV040 {
         tlcs: old
             .tlcs
             .into_iter()
@@ -85,17 +85,17 @@ impl Migration for MigrationObj {
                 bincode::deserialize(&v).expect("deserialize to old channel state");
 
             let old_tlc_state = old_channel_state.tlc_state.clone();
-            let new_tlc_state = TlcStateV032 {
+            let new_tlc_state = TlcStateV040 {
                 offered_tlcs: convert_pending_tlcs(old_tlc_state.offered_tlcs),
                 received_tlcs: convert_pending_tlcs(old_tlc_state.received_tlcs),
                 retryable_tlc_operations: convert(old_tlc_state.retryable_tlc_operations),
                 applied_add_tlcs: convert(old_tlc_state.applied_add_tlcs),
-                // new field in v032
+                // new field in v040
                 applied_remove_tlcs: HashSet::new(),
                 waiting_ack: old_tlc_state.waiting_ack,
             };
 
-            let new_channel_state = ChannelActorStateV032 {
+            let new_channel_state = ChannelActorStateV040 {
                 state: convert(old_channel_state.state),
                 local_pubkey: convert(old_channel_state.local_pubkey),
                 remote_pubkey: convert(old_channel_state.remote_pubkey),

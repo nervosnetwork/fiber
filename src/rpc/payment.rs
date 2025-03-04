@@ -103,7 +103,7 @@ pub struct SendPaymentCommandParams {
     /// (pubkey, funding_txid, inbound) where pubkey is the public key of the node,
     /// funding_txid is the funding transaction hash of the channel outpoint, and
     /// inbound is a boolean indicating whether to use the channel to send or receive.
-    /// Note: an inproper hint may cause the payment to fail, and hop_hints maybe helpful for self payment scenario
+    /// Note: an improper hint may cause the payment to fail, and hop_hints maybe helpful for self payment scenario
     /// for helping the routing algorithm to find the correct path
     pub hop_hints: Option<Vec<HopHint>>,
 

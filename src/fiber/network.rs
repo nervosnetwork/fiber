@@ -60,9 +60,9 @@ use super::gossip::{GossipActorMessage, GossipMessageStore, GossipMessageUpdates
 use super::graph::{NetworkGraph, NetworkGraphStateStore, OwnedChannelUpdateEvent, SessionRoute};
 use super::key::blake2b_hash_with_salt;
 use super::types::{
-    BroadcastMessage, BroadcastMessageQuery, BroadcastMessageWithTimestamp, EcdsaSignature,
-    FiberMessage, ForwardTlcResult, GossipMessage, Hash256, NodeAnnouncement, OpenChannel,
-    PaymentHopData, Privkey, Pubkey, RemoveTlcReason, TlcErr, TlcErrData, TlcErrorCode,
+    BroadcastMessageWithTimestamp, EcdsaSignature, FiberMessage, ForwardTlcResult, GossipMessage,
+    Hash256, NodeAnnouncement, OpenChannel, PaymentHopData, Privkey, Pubkey, RemoveTlcReason,
+    TlcErr, TlcErrData, TlcErrorCode,
 };
 use super::{FiberConfig, ASSUME_NETWORK_ACTOR_ALIVE};
 
@@ -76,7 +76,7 @@ use crate::fiber::channel::{
     AddTlcCommand, AddTlcResponse, TxCollaborationCommand, TxUpdateCommand,
 };
 use crate::fiber::config::{DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT};
-use crate::fiber::gossip::{GossipProtocolHandle, SubscribableGossipMessageStore};
+use crate::fiber::gossip::{GossipService, SubscribableGossipMessageStore};
 use crate::fiber::graph::{PaymentSession, PaymentSessionStatus};
 use crate::fiber::serde_utils::EntityHex;
 use crate::fiber::types::{
@@ -104,6 +104,8 @@ const ASSUME_CHAIN_ACTOR_ALWAYS_ALIVE_FOR_NOW: &str =
     "We currently assume that chain actor is always alive, but it failed. This is a known issue.";
 
 const ASSUME_NETWORK_MYSELF_ALIVE: &str = "network actor myself alive";
+
+const ASSUME_GOSSIP_ACTOR_ALIVE: &str = "gossip actor must be alive";
 
 // The duration for which we will try to maintain the number of peers in connection.
 const MAINTAINING_CONNECTIONS_INTERVAL: Duration = Duration::from_secs(3600);
@@ -227,11 +229,6 @@ pub enum NetworkActorCommand {
     ),
     UpdateChannelFunding(Hash256, Transaction, FundingRequest),
     SignTx(PeerId, Hash256, Transaction, Option<Vec<Vec<u8>>>),
-    // Process a broadcast message from the network.
-    ProcessBroadcastMessage(BroadcastMessage),
-    // Query broadcast messages from a peer. Some messages may have been missed
-    // we use this to query them.
-    QueryBroadcastMessages(PeerId, Vec<BroadcastMessageQuery>),
     // Broadcast our BroadcastMessage to the network.
     BroadcastMessages(Vec<BroadcastMessageWithTimestamp>),
     // Broadcast local information to the network.
@@ -244,9 +241,6 @@ pub enum NetworkActorCommand {
     ),
     // Get Payment Session for query payment status and errors
     GetPayment(Hash256, RpcReplyPort<Result<SendPaymentResponse, String>>),
-
-    // Send a message to the gossip actor.
-    GossipActorMessage(GossipActorMessage),
 
     NodeInfo((), RpcReplyPort<Result<NodeInfoResponse, String>>),
 }
@@ -631,13 +625,13 @@ pub enum NetworkActorEvent {
     /// A funding transaction has failed.
     FundingTransactionFailed(OutPoint),
 
-    /// Channel is going to be closed forcely, and the closing transaction is ready to be broadcasted.
+    /// Channel is going to be closed forcibly, and the closing transaction is ready to be broadcasted.
     CommitmentTransactionPending(Transaction, Hash256),
 
-    /// A commitment transaction is broacasted successfully.
+    /// A commitment transaction is broadcasted successfully.
     CommitmentTransactionConfirmed(Hash256, Hash256),
 
-    /// A commitment transaction is failed to be broacasted.
+    /// A commitment transaction is failed to be broadcasted.
     CommitmentTransactionFailed(Hash256, Byte32),
 
     /// A closing transaction has been confirmed.
@@ -953,11 +947,12 @@ where
             }
             #[cfg(test)]
             NetworkActorEvent::GossipMessage(peer_id, message) => {
-                let _ = state
+                state
                     .gossip_actor
                     .send_message(GossipActorMessage::GossipMessageReceived(
                         GossipMessageWithPeerId { peer_id, message },
-                    ));
+                    ))
+                    .expect(ASSUME_GOSSIP_ACTOR_ALIVE);
             }
             NetworkActorEvent::GossipMessageUpdates(gossip_message_updates) => {
                 let mut graph = self.network_graph.write().await;
@@ -1324,20 +1319,11 @@ where
                     ))
                     .expect("network actor alive");
             }
-            NetworkActorCommand::ProcessBroadcastMessage(message) => {
-                let _ = state
-                    .gossip_actor
-                    .send_message(GossipActorMessage::ProcessBroadcastMessage(message));
-            }
-            NetworkActorCommand::QueryBroadcastMessages(peer, queries) => {
-                let _ = state
-                    .gossip_actor
-                    .send_message(GossipActorMessage::QueryBroadcastMessages(peer, queries));
-            }
             NetworkActorCommand::BroadcastMessages(message) => {
-                let _ = state
+                state
                     .gossip_actor
-                    .send_message(GossipActorMessage::TryBroadcastMessages(message));
+                    .send_message(GossipActorMessage::TryBroadcastMessages(message))
+                    .expect(ASSUME_GOSSIP_ACTOR_ALIVE);
             }
             NetworkActorCommand::SignMessage(message, reply) => {
                 debug!(
@@ -1381,9 +1367,6 @@ where
                         .expect(ASSUME_NETWORK_MYSELF_ALIVE);
                 }
             },
-            NetworkActorCommand::GossipActorMessage(message) => {
-                let _ = state.gossip_actor.send_message(message);
-            }
             NetworkActorCommand::NodeInfo(_, rpc) => {
                 let response = NodeInfoResponse {
                     node_name: state.node_name,
@@ -1911,7 +1894,7 @@ pub struct NetworkActorState<S> {
     chain_actor: ActorRef<CkbChainMessage>,
     // If the other party funding more than this amount, we will automatically accept the channel.
     open_channel_auto_accept_min_ckb_funding_amount: u64,
-    // Tha default amount of CKB to be funded when auto accepting a channel.
+    // The default amount of CKB to be funded when auto accepting a channel.
     auto_accept_channel_ckb_funding_amount: u64,
     // The default expiry delta to forward tlcs.
     tlc_expiry_delta: u64,
@@ -2385,7 +2368,7 @@ where
         let reserved_fee = open_channel.reserved_ckb_amount - occupied_capacity;
         if commitment_fee * 2 > reserved_fee {
             return Err(ProcessingChannelError::InvalidParameter(format!(
-                "Commitment fee {} which caculated by commitment fee rate {} is larger than half of reserved fee {}",
+                "Commitment fee {} which calculated by commitment fee rate {} is larger than half of reserved fee {}",
                 commitment_fee, open_channel.commitment_fee_rate, reserved_fee
             )));
         }
@@ -3065,9 +3048,9 @@ where
         let secio_kp = SecioKeyPair::from(kp);
         let secio_pk = secio_kp.public_key();
         let my_peer_id: PeerId = PeerId::from(secio_pk);
-        let handle = MyServiceHandle::new(myself.clone());
+        let handle = NetworkServiceHandle::new(myself.clone());
         let fiber_handle = FiberProtocolHandle::from(&handle);
-        let (gossip_handle, store_update_subscriber) = GossipProtocolHandle::new(
+        let (gossip_service, gossip_handle) = GossipService::start(
             Some(format!("gossip actor {:?}", my_peer_id)),
             Duration::from_millis(config.gossip_network_maintenance_interval_ms()),
             Duration::from_millis(config.gossip_store_maintenance_interval_ms()),
@@ -3079,12 +3062,13 @@ where
             myself.get_cell(),
         )
         .await;
-        let graph = self.network_graph.read().await;
+        let mut graph = self.network_graph.write().await;
         let graph_subscribing_cursor = graph
             .get_latest_cursor()
             .go_back_for_some_time(MAX_GRAPH_MISSING_BROADCAST_MESSAGE_TIMESTAMP_DRIFT);
 
-        store_update_subscriber
+        gossip_service
+            .get_subscriber()
             .subscribe(graph_subscribing_cursor, myself.clone(), |m| {
                 Some(NetworkActorMessage::new_event(
                     NetworkActorEvent::GossipMessageUpdates(m),
@@ -3210,14 +3194,8 @@ where
             min_outbound_peers: config.min_outbound_peers(),
         };
 
-        // Save our own NodeInfo to the network graph.
         let node_announcement = state.get_or_create_new_node_announcement_message();
-        myself.send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::ProcessBroadcastMessage(BroadcastMessage::NodeAnnouncement(
-                node_announcement.clone(),
-            )),
-        ))?;
-
+        graph.process_node_announcement(node_announcement);
         let announce_node_interval_seconds = config.announce_node_interval_seconds();
         if announce_node_interval_seconds > 0 {
             myself.send_interval(Duration::from_secs(announce_node_interval_seconds), || {
@@ -3407,18 +3385,18 @@ impl ServiceProtocol for FiberProtocolHandle {
 }
 
 #[derive(Clone, Debug)]
-struct MyServiceHandle {
+struct NetworkServiceHandle {
     actor: ActorRef<NetworkActorMessage>,
 }
 
-impl MyServiceHandle {
+impl NetworkServiceHandle {
     fn new(actor: ActorRef<NetworkActorMessage>) -> Self {
-        MyServiceHandle { actor }
+        NetworkServiceHandle { actor }
     }
 }
 
-impl From<&MyServiceHandle> for FiberProtocolHandle {
-    fn from(handle: &MyServiceHandle) -> Self {
+impl From<&NetworkServiceHandle> for FiberProtocolHandle {
+    fn from(handle: &NetworkServiceHandle) -> Self {
         FiberProtocolHandle {
             actor: handle.actor.clone(),
         }
@@ -3426,7 +3404,7 @@ impl From<&MyServiceHandle> for FiberProtocolHandle {
 }
 
 #[async_trait]
-impl ServiceHandle for MyServiceHandle {
+impl ServiceHandle for NetworkServiceHandle {
     async fn handle_error(&mut self, _context: &mut ServiceContext, error: ServiceError) {
         trace!("Service error: {:?}", error);
         // TODO
