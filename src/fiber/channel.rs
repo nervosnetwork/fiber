@@ -4648,39 +4648,32 @@ impl ChannelActorState {
             )));
         }
         let payment_hash = tlc.payment_hash;
-        let mut tlc_infos = self
+
+        // If all the tlcs with the same payment hash are confirmed to be failed,
+        // then it's safe to insert the new tlc, the old tlcs will be removed later.
+        if self
             .tlc_state
             .all_tlcs()
-            .filter(|tlc| tlc.payment_hash == payment_hash)
-            .peekable();
-
-        if tlc_infos.peek().is_some() {
-            if tlc_infos.all(|t| t.is_fail_remove_confirmed()) {
-                // If all the tlcs with the same payment hash are confirmed to be failed,
-                // then it's safe to insert the new tlc, the old tlcs will be removed later.
-            } else {
-                return Err(ProcessingChannelError::RepeatedProcessing(format!(
-                    "Trying to insert tlc with duplicate payment hash {:?}",
-                    payment_hash
-                )));
-            }
+            .any(|tlc| tlc.payment_hash == payment_hash && !tlc.is_fail_remove_confirmed())
+        {
+            return Err(ProcessingChannelError::RepeatedProcessing(format!(
+                "Trying to insert tlc with duplicate payment hash {:?}",
+                payment_hash
+            )));
         }
+
         if tlc.is_offered() {
-            let sent_tlc_value = self.get_offered_tlc_balance(false);
+            let sent_tlc_value = self.get_offered_tlc_balance(true);
             debug_assert!(self.to_local_amount >= sent_tlc_value);
             if sent_tlc_value + tlc.amount > self.to_local_amount {
+                debug!(channel = ?self.get_id(), tlc_id = ?tlc.tlc_id, tlc_amount = tlc.amount, sent_tlc_value = sent_tlc_value, to_local_amount = self.to_local_amount, "Sending tlc exceeds local balance",);
                 return Err(ProcessingChannelError::TlcAmountExceedLimit);
             }
         } else {
-            let received_tlc_value = self.get_received_tlc_balance(false);
+            let received_tlc_value = self.get_received_tlc_balance(true);
             debug_assert!(self.to_remote_amount >= received_tlc_value);
             if received_tlc_value + tlc.amount > self.to_remote_amount {
-                debug!(
-                    "Adding tlc {:?} with amount {} exceeds remote balance {}",
-                    tlc.tlc_id,
-                    tlc.amount,
-                    self.to_remote_amount - received_tlc_value
-                );
+                debug!(channel = ?self.get_id(), tlc_id = ?tlc.tlc_id, tlc_amount = tlc.amount, received_tlc_value = received_tlc_value, to_remote_amount = self.to_remote_amount, "Receiving tlc exceeds remote balance",);
                 return Err(ProcessingChannelError::TlcAmountExceedLimit);
             }
         }
@@ -5116,6 +5109,12 @@ impl ChannelActorState {
         if self.local_tlc_info.tlc_maximum_value != 0
             && forward_amount > self.local_tlc_info.tlc_minimum_value
         {
+            debug!(
+                channel = ?self.get_id(),
+                forward_amount,
+                tlc_maximum_value = self.local_tlc_info.tlc_maximum_value,
+                "TLC amount exceeds the maximum value",
+            );
             return Err(ProcessingChannelError::TlcAmountExceedLimit);
         }
         let forward_fee = match forward_fee {
@@ -6821,35 +6820,58 @@ impl ChannelActorState {
         let mut offered_fulfilled = 0;
         let mut received_pending = 0;
         let mut received_fulfilled = 0;
+
+        debug!(
+            pending_tlcs = ?pending_tlcs,
+            "Pending TLCS in settlement transaction outputs"
+        );
+
         for info in pending_tlcs {
             if info.is_offered() {
-                if (info.outbound_status() == OutboundTlcStatus::RemoveWaitAck
+                let confirmed_remove_reason = (info.outbound_status()
+                    == OutboundTlcStatus::RemoveWaitAck
                     || info.outbound_status() == OutboundTlcStatus::RemoveAckConfirmed
                     || (info.outbound_status() == OutboundTlcStatus::RemoteRemoved && !for_remote))
-                    && info
-                        .removed_reason
-                        .as_ref()
-                        .map(|r| matches!(r, RemoveTlcReason::RemoveTlcFulfill(_)))
-                        .unwrap_or_default()
-                {
-                    offered_fulfilled += info.amount;
-                } else {
-                    offered_pending += info.amount;
+                    .then(|| info.removed_reason.as_ref().unwrap());
+                match confirmed_remove_reason {
+                    Some(RemoveTlcReason::RemoveTlcFulfill(_)) => {
+                        offered_fulfilled += info.amount;
+                    }
+                    Some(RemoveTlcReason::RemoveTlcFail(_)) => {
+                        // This TLC failed, so it is not counted in the pending amount and the fulfilled amount
+                    }
+                    None => {
+                        offered_pending += info.amount;
+                    }
                 }
-            } else if (info.inbound_status() == InboundTlcStatus::RemoveAckConfirmed
-                || (info.inbound_status() == InboundTlcStatus::LocalRemoved && for_remote))
-                && info
-                    .removed_reason
-                    .as_ref()
-                    .map(|r| matches!(r, RemoveTlcReason::RemoveTlcFulfill(_)))
-                    .unwrap_or_default()
-            {
-                received_fulfilled += info.amount;
-            } else {
-                received_pending += info.amount;
+            }
+            if info.is_received() {
+                let confirmed_remove_reason = (info.inbound_status()
+                    == InboundTlcStatus::RemoveAckConfirmed
+                    || (info.inbound_status() == InboundTlcStatus::LocalRemoved && for_remote))
+                    .then(|| info.removed_reason.as_ref().unwrap());
+                match confirmed_remove_reason {
+                    Some(RemoveTlcReason::RemoveTlcFulfill(_)) => {
+                        received_fulfilled += info.amount;
+                    }
+                    Some(RemoveTlcReason::RemoveTlcFail(_)) => {
+                        // This TLC failed, so it is not counted in the pending amount and the fulfilled amount
+                    }
+                    None => {
+                        received_pending += info.amount;
+                    }
+                }
             }
         }
-
+        debug!(
+            current_to_local_amount = self.to_local_amount,
+            current_to_remote_amount = self.to_remote_amount,
+            offered_pending,
+            offered_fulfilled,
+            received_pending,
+            received_fulfilled,
+            "Amounts for settlement transaction outputs"
+        );
         let to_local_value =
             self.to_local_amount + received_fulfilled - offered_pending - offered_fulfilled;
         let to_remote_value =
@@ -6857,6 +6879,13 @@ impl ChannelActorState {
 
         let commitment_tx_fee =
             calculate_commitment_tx_fee(self.commitment_fee_rate, &self.funding_udt_type_script);
+
+        debug!(
+            new_to_local_amount = to_local_value,
+            new_to_remote_amount = to_remote_value,
+            commitment_tx_fee,
+            "New amounts for to_local and to_remote"
+        );
 
         let to_local_output_script = self.get_local_shutdown_script();
         let to_remote_output_script = self.get_remote_shutdown_script();
