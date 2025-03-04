@@ -4,12 +4,14 @@ use crate::{
     fiber::{
         channel::ShutdownInfo,
         config::DEFAULT_TLC_EXPIRY_DELTA,
+        gossip::{GossipActorMessage, GossipMessageStore},
         graph::ChannelUpdateInfo,
         network::{NetworkActorStateStore, SendPaymentCommand, SendPaymentData},
         tests::test_utils::NetworkNodeConfigBuilder,
         types::{
-            BroadcastMessage, BroadcastMessageWithTimestamp, ChannelAnnouncement,
-            ChannelUpdateChannelFlags, NodeAnnouncement, Privkey, Pubkey,
+            BroadcastMessage, BroadcastMessageWithTimestamp, BroadcastMessagesFilterResult,
+            ChannelAnnouncement, ChannelUpdateChannelFlags, Cursor, GossipMessage,
+            NodeAnnouncement, Privkey, Pubkey,
         },
         NetworkActorCommand, NetworkActorMessage,
     },
@@ -431,6 +433,90 @@ async fn test_query_missing_broadcast_message() {
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
     let node2_channel_info = node2.get_network_graph_channel(&out_point).await.unwrap();
     assert_eq!(node1_channel_info, node2_channel_info);
+}
+
+#[tokio::test]
+async fn test_prune_channel_announcement_and_receive_channel_update() {
+    let channel_context = ChannelTestContext::gen();
+    let funding_tx = channel_context.funding_tx.clone();
+    let out_point = channel_context.channel_outpoint().clone();
+    let channel_announcement = channel_context.channel_announcement.clone();
+    let [node1, node2] = NetworkNode::new_n_interconnected_nodes().await;
+    let update_of_node1 = channel_context.create_channel_update_of_node1(
+        ChannelUpdateChannelFlags::empty(),
+        1,
+        1,
+        1,
+        None,
+    );
+    node1.mock_received_gossip_message_from_peer(
+        get_test_peer_id(),
+        GossipMessage::BroadcastMessagesFilterResult(BroadcastMessagesFilterResult {
+            messages: vec![
+                BroadcastMessage::ChannelAnnouncement(channel_announcement.clone()),
+                BroadcastMessage::ChannelUpdate(update_of_node1.clone()),
+            ],
+        }),
+    );
+    node1.submit_tx(funding_tx.clone()).await;
+    node2.submit_tx(funding_tx.clone()).await;
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+    assert_ne!(node1.get_network_graph_channel(&out_point).await, None);
+    assert_ne!(node2.get_network_graph_channel(&out_point).await, None);
+
+    // Prune the channel messages from node2.
+    node2.send_message_to_gossip_actor(GossipActorMessage::PruneStaleGossipMessages(
+        now_timestamp_as_millis_u64() + 1,
+    ));
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+    // Even though node2 has pruned the channel messages from store, it still have
+    // the channel information in the network graph. This information is only expected
+    // to be removed after a restart.
+    assert_ne!(node2.get_network_graph_channel(&out_point).await, None);
+    assert_eq!(
+        node2
+            .get_store()
+            .get_broadcast_messages(&Cursor::default(), None),
+        vec![]
+    );
+
+    let update_of_node2 = channel_context.create_channel_update_of_node2(
+        ChannelUpdateChannelFlags::empty(),
+        2,
+        2,
+        2,
+        None,
+    );
+    // Node1 should still have the channel info.
+    node1.mock_received_gossip_message_from_peer(
+        get_test_peer_id(),
+        BroadcastMessage::ChannelUpdate(update_of_node2.clone())
+            .create_broadcast_messages_filter_result(),
+    );
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+    let channel = node2
+        .get_network_graph_channel(&out_point)
+        .await
+        .expect("channel info");
+    assert_eq!(
+        channel.update_of_node1,
+        Some(ChannelUpdateInfo::from(&update_of_node1))
+    );
+    assert_eq!(
+        channel.update_of_node2,
+        Some(ChannelUpdateInfo::from(&update_of_node2))
+    );
+    assert_eq!(
+        node2
+            .get_store()
+            .get_broadcast_messages(&Cursor::default(), None)
+            .len(),
+        // We have two messages in node2's store, the channel announcement and the update of node 2.
+        2
+    );
 }
 
 #[tokio::test]

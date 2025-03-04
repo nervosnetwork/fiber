@@ -1211,6 +1211,10 @@ impl NetworkNode {
             GossipMessageWithPeerId { peer_id, message },
         ));
     }
+
+    pub fn get_store(&self) -> &Store {
+        &self.store
+    }
 }
 
 #[tokio::test]
