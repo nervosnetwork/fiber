@@ -511,7 +511,7 @@ impl Actor for MockChainActor {
                 };
                 let (status, result) = f();
                 debug!(
-                    "Transaction verfication result: tx {:?}, status: {:?}",
+                    "Transaction verification result: tx {:?}, status: {:?}",
                     &tx, &status
                 );
                 state
