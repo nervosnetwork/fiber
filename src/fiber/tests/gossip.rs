@@ -734,8 +734,8 @@ async fn test_gossip_store_prune_all_messages() {
     let context = GossipTestingContext::new().await;
     let num_messages = 10000usize;
     for _i in 1..=num_messages {
-        let (_sk, node_annoucnement) = gen_rand_node_announcement();
-        context.save_message(BroadcastMessage::NodeAnnouncement(node_annoucnement));
+        let (_sk, node_announcement) = gen_rand_node_announcement();
+        context.save_message(BroadcastMessage::NodeAnnouncement(node_announcement));
     }
     // Wait for the message to be saved
     tokio::time::sleep(Duration::from_millis(2000)).await;
