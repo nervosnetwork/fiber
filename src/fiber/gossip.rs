@@ -1,3 +1,4 @@
+use core::panic;
 use std::{
     cmp::max,
     collections::{HashMap, HashSet},
@@ -327,8 +328,9 @@ pub enum GossipActorMessage {
     // 2. Check if there are any pending broadcast message queries. If so, broadcast them to the network.
     TickNetworkMaintenance,
 
-    // Some channels in the gossip store haven't been updated for a long time. We should prune them.
-    PruneStaleGossipMessages,
+    // Some channels in the gossip store haven't been updated for a long time. We will prune all
+    // messages older than the given u64 milliseconds timestamp.
+    PruneStaleGossipMessages(u64),
 
     // Signify the pruning of stale broadcast messages is done. We can now start a new prune process.
     PruneStaleGossipMessagesDone,
@@ -2371,7 +2373,11 @@ where
             GossipActorMessage::TickNetworkMaintenance
         });
         myself.send_interval(store_prune_interval, || {
-            GossipActorMessage::PruneStaleGossipMessages
+            let prune_duration = HARD_BROADCAST_MESSAGES_CONSIDERED_STALE_DURATION;
+            let stale_timestamp = now_timestamp_as_millis_u64()
+                .checked_sub(prune_duration.as_millis() as u64)
+                .unwrap_or_default();
+            GossipActorMessage::PruneStaleGossipMessages(stale_timestamp)
         });
         let state = Self::State {
             store,
@@ -2486,8 +2492,8 @@ where
                 }
             }
 
-            GossipActorMessage::PruneStaleGossipMessages => {
-                if state.has_active_prune_task {
+            GossipActorMessage::PruneStaleGossipMessages(timestamp) => {
+                if state.has_active_prune_task || timestamp == 0 {
                     return Ok(());
                 }
                 state.has_active_prune_task = true;
@@ -2497,7 +2503,7 @@ where
                 let myself = myself.clone();
                 // Spawning a subtask to avoid blocking normal message processing of the actor.
                 task_tracker.spawn(async move {
-                    prune_stale_gossip_messages(store, cancellation_token).await;
+                    prune_stale_gossip_messages(store, timestamp, cancellation_token).await;
                     myself
                         .send_message(GossipActorMessage::PruneStaleGossipMessagesDone)
                         .expect("send prune done message");
@@ -2687,16 +2693,11 @@ where
 
 pub(crate) async fn prune_stale_gossip_messages<S: GossipMessageStore>(
     store: S,
+    stale_timestamp: u64,
     cancellation_token: CancellationToken,
 ) where
     S: GossipMessageStore,
 {
-    let prune_duration = HARD_BROADCAST_MESSAGES_CONSIDERED_STALE_DURATION;
-    let stale_timestamp =
-        match now_timestamp_as_millis_u64().checked_sub(prune_duration.as_millis() as u64) {
-            None => return,
-            Some(timestamp) => timestamp,
-        };
     let mut cursor = Cursor::default();
     loop {
         if cancellation_token.is_cancelled() {

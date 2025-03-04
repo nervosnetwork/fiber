@@ -12,7 +12,6 @@ use tokio::sync::RwLock;
 use crate::fiber::config::AnnouncedNodeName;
 use crate::fiber::gossip::{
     GossipActorMessage, GossipService, HARD_BROADCAST_MESSAGES_CONSIDERED_STALE_DURATION,
-    SOFT_BROADCAST_MESSAGES_CONSIDERED_STALE_DURATION,
 };
 use crate::fiber::tests::test_utils::{establish_channel_between_nodes, NetworkNode};
 use crate::fiber::types::{ChannelUpdateChannelFlags, NodeAnnouncement};
@@ -734,13 +733,13 @@ async fn test_never_miss_any_message() {
 async fn test_gossip_store_prune_remove_old_messages_node_announcement() {
     let context = GossipTestingContext::new().await;
     let sk = gen_rand_fiber_private_key();
+    let stale_timestamp = now_timestamp_as_millis_u64()
+        - (HARD_BROADCAST_MESSAGES_CONSIDERED_STALE_DURATION.as_millis() as u64);
     let outdate_node_announcement = NodeAnnouncement::new(
         AnnouncedNodeName::from_string("node1").expect("valid name"),
         vec![],
         &sk,
-        now_timestamp_as_millis_u64()
-            - (HARD_BROADCAST_MESSAGES_CONSIDERED_STALE_DURATION.as_millis() as u64)
-            - 1, // Subtracting more time to ensure the message is outdated
+        stale_timestamp - 1,
         0,
     );
 
@@ -758,7 +757,9 @@ async fn test_gossip_store_prune_remove_old_messages_node_announcement() {
 
     context
         .gossip_actor
-        .send_message(GossipActorMessage::PruneStaleGossipMessages)
+        .send_message(GossipActorMessage::PruneStaleGossipMessages(
+            stale_timestamp,
+        ))
         .unwrap();
 
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -774,12 +775,13 @@ async fn test_gossip_store_prune_remove_old_messages_node_announcement() {
 async fn test_gossip_store_prune_keep_new_messages_node_announcement() {
     let context = GossipTestingContext::new().await;
     let sk = gen_rand_fiber_private_key();
+    let stale_timestamp = now_timestamp_as_millis_u64()
+        - (HARD_BROADCAST_MESSAGES_CONSIDERED_STALE_DURATION.as_millis() as u64);
     let outdate_node_announcement = NodeAnnouncement::new(
         AnnouncedNodeName::from_string("node1").expect("valid name"),
         vec![],
         &sk,
-        now_timestamp_as_millis_u64()
-            - (SOFT_BROADCAST_MESSAGES_CONSIDERED_STALE_DURATION.as_millis() as u64),
+        stale_timestamp + 1,
         0,
     );
 
@@ -797,7 +799,9 @@ async fn test_gossip_store_prune_keep_new_messages_node_announcement() {
 
     context
         .gossip_actor
-        .send_message(GossipActorMessage::PruneStaleGossipMessages)
+        .send_message(GossipActorMessage::PruneStaleGossipMessages(
+            stale_timestamp,
+        ))
         .unwrap();
 
     tokio::time::sleep(Duration::from_millis(200)).await;
