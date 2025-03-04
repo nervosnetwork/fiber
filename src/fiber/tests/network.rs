@@ -62,16 +62,16 @@ fn get_fake_peer_id_and_address() -> (PeerId, MultiAddr) {
     (peer_id, address)
 }
 
-fn create_fake_channel_announcement_mesage(
+fn create_fake_channel_announcement_message(
     priv_key: Privkey,
     capacity: u64,
     outpoint: OutPoint,
 ) -> (NodeAnnouncement, NodeAnnouncement, ChannelAnnouncement) {
     let x_only_pub_key = priv_key.x_only_pub_key();
     let sk1 = Privkey::from([1u8; 32]);
-    let node_announcement1 = create_node_announcement_mesage_with_priv_key(&sk1);
+    let node_announcement1 = create_node_announcement_message_with_priv_key(&sk1);
     let sk2 = Privkey::from([2u8; 32]);
-    let node_announcement2 = create_node_announcement_mesage_with_priv_key(&sk2);
+    let node_announcement2 = create_node_announcement_message_with_priv_key(&sk2);
 
     let mut channel_announcement = ChannelAnnouncement::new_unsigned(
         &sk1.pubkey(),
@@ -89,7 +89,7 @@ fn create_fake_channel_announcement_mesage(
     (node_announcement1, node_announcement2, channel_announcement)
 }
 
-fn create_node_announcement_mesage_with_priv_key(priv_key: &Privkey) -> NodeAnnouncement {
+fn create_node_announcement_message_with_priv_key(priv_key: &Privkey) -> NodeAnnouncement {
     let node_name = "fake node";
     let addresses = ["/ip4/1.1.1.1/tcp/8346/p2p/QmaFDJb9CkMrXy7nhTWBY5y9mvuykre3EzzRsCJUAVXprZ"]
         .iter()
@@ -104,9 +104,9 @@ fn create_node_announcement_mesage_with_priv_key(priv_key: &Privkey) -> NodeAnno
     )
 }
 
-fn create_fake_node_announcement_mesage() -> NodeAnnouncement {
+fn create_fake_node_announcement_message() -> NodeAnnouncement {
     let priv_key = get_test_priv_key();
-    create_node_announcement_mesage_with_priv_key(&priv_key)
+    create_node_announcement_message_with_priv_key(&priv_key)
 }
 
 #[tokio::test]
@@ -224,7 +224,7 @@ async fn test_sync_channel_announcement_on_startup() {
         .build();
     let outpoint = tx.output_pts()[0].clone();
     let (node_announcement_1, node_announcement_2, channel_announcement) =
-        create_fake_channel_announcement_mesage(priv_key, capacity, outpoint);
+        create_fake_channel_announcement_message(priv_key, capacity, outpoint);
 
     assert_eq!(node1.submit_tx(tx.clone()).await, Status::Committed);
 
@@ -455,7 +455,7 @@ async fn test_query_missing_broadcast_message() {
     let node1_channel_info = node1.get_network_graph_channel(&out_point).await.unwrap();
     assert_ne!(node1_channel_info.update_of_node1, None);
 
-    let mut node2 = NetworkNode::new().await;
+    let node2 = NetworkNode::new().await;
     node1.connect_to(&node2).await;
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
     // Verify that node2 still does not have channel info after active syncing done.
@@ -485,9 +485,9 @@ async fn test_sync_node_announcement_version() {
     let test_peer_id = get_test_peer_id();
 
     let [node_announcement_message_version1, node_announcement_message_version2, node_announcement_message_version3] = [
-        create_fake_node_announcement_mesage(),
-        create_fake_node_announcement_mesage(),
-        create_fake_node_announcement_mesage(),
+        create_fake_node_announcement_message(),
+        create_fake_node_announcement_message(),
+        create_fake_node_announcement_message(),
     ];
     let timestamp_version2 = node_announcement_message_version2.timestamp;
     let timestamp_version3 = node_announcement_message_version3.timestamp;
@@ -573,7 +573,7 @@ async fn test_sync_node_announcement_on_startup() {
         .send_message(NetworkActorMessage::Event(
             NetworkActorEvent::GossipMessage(
                 test_peer_id.clone(),
-                BroadcastMessage::NodeAnnouncement(create_fake_node_announcement_mesage())
+                BroadcastMessage::NodeAnnouncement(create_fake_node_announcement_message())
                     .create_broadcast_messages_filter_result(),
             ),
         ))
@@ -624,7 +624,7 @@ async fn test_sync_node_announcement_after_restart() {
         .send_message(NetworkActorMessage::Event(
             NetworkActorEvent::GossipMessage(
                 test_peer_id.clone(),
-                BroadcastMessage::NodeAnnouncement(create_fake_node_announcement_mesage())
+                BroadcastMessage::NodeAnnouncement(create_fake_node_announcement_message())
                     .create_broadcast_messages_filter_result(),
             ),
         ))
@@ -678,7 +678,7 @@ async fn test_persisting_announced_nodes() {
 
     let mut node = NetworkNode::new_with_node_name("test").await;
 
-    let announcement = create_fake_node_announcement_mesage();
+    let announcement = create_fake_node_announcement_message();
     let node_pk = announcement.node_id;
     let peer_id = node_pk.tentacle_peer_id();
 
@@ -766,7 +766,7 @@ fn test_announcement_message_serialize() {
         .build();
     let outpoint = tx.output_pts()[0].clone();
     let (_, _, mut channel_announcement) =
-        create_fake_channel_announcement_mesage(priv_key, capacity, outpoint);
+        create_fake_channel_announcement_message(priv_key, capacity, outpoint);
 
     channel_announcement.udt_type_script = Some(ScriptBuilder::default().build());
 

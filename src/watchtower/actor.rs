@@ -288,7 +288,7 @@ where
                                                 }
                                             }
                                         } else {
-                                            error!("Cannot find the commitment tx: {:?}, transcation is none, maybe ckb indexer bug?", tx.tx_hash);
+                                            error!("Cannot find the commitment tx: {:?}, transaction is none, maybe ckb indexer bug?", tx.tx_hash);
                                         }
                                     }
                                     Ok(None) => {
