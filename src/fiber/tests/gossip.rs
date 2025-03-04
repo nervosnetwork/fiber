@@ -730,6 +730,43 @@ async fn test_never_miss_any_message() {
 }
 
 #[tokio::test]
+async fn test_gossip_store_prune_all_messages() {
+    let context = GossipTestingContext::new().await;
+    let num_messages = 10000usize;
+    for _i in 1..=num_messages {
+        let (_sk, node_annoucnement) = gen_rand_node_announcement();
+        context.save_message(BroadcastMessage::NodeAnnouncement(node_annoucnement));
+    }
+    // Wait for the message to be saved
+    tokio::time::sleep(Duration::from_millis(2000)).await;
+    assert_eq!(
+        context
+            .get_store()
+            .get_broadcast_messages_iter(&Cursor::default())
+            .into_iter()
+            .count(),
+        num_messages
+    );
+
+    context
+        .gossip_actor
+        .send_message(GossipActorMessage::PruneStaleGossipMessages(
+            now_timestamp_as_millis_u64() + 1,
+        ))
+        .unwrap();
+
+    tokio::time::sleep(Duration::from_millis(2000)).await;
+    assert_eq!(
+        context
+            .get_store()
+            .get_broadcast_messages_iter(&Cursor::default())
+            .into_iter()
+            .count(),
+        0
+    );
+}
+
+#[tokio::test]
 async fn test_gossip_store_prune_node_announcement() {
     let context = GossipTestingContext::new().await;
     let sk = gen_rand_fiber_private_key();
