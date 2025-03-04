@@ -361,8 +361,12 @@ pub enum GossipActorMessage {
     GossipMessageReceived(GossipMessageWithPeerId),
 }
 
+pub(crate) fn get_gossip_actor_name(peer_id: &PeerId) -> String {
+    format!("gossip actor {}", peer_id)
+}
+
 pub struct GossipConfig {
-    pub(crate) actor_name: Option<String>,
+    pub(crate) peer_id: Option<PeerId>,
     pub(crate) gossip_network_maintenance_interval: Duration,
     pub(crate) gossip_store_maintenance_interval: Duration,
     pub(crate) gossip_store_prune_interval: Duration,
@@ -374,7 +378,7 @@ pub struct GossipConfig {
 impl Default for GossipConfig {
     fn default() -> Self {
         Self {
-            actor_name: None,
+            peer_id: None,
             gossip_network_maintenance_interval: Duration::from_millis(
                 DEFAULT_GOSSIP_NETWORK_MAINTENANCE_INTERVAL_MS,
             ),
@@ -392,7 +396,7 @@ impl Default for GossipConfig {
 impl From<&FiberConfig> for GossipConfig {
     fn from(config: &FiberConfig) -> Self {
         Self {
-            actor_name: None,
+            peer_id: None,
             gossip_network_maintenance_interval: Duration::from_millis(
                 config.gossip_network_maintenance_interval_ms(),
             ),
@@ -426,7 +430,7 @@ where
         supervisor: ActorCell,
     ) -> (Self, GossipProtocolHandle) {
         let GossipConfig {
-            actor_name,
+            peer_id,
             gossip_network_maintenance_interval,
             gossip_store_maintenance_interval,
             gossip_store_prune_interval,
@@ -439,6 +443,7 @@ where
 
         let (store_sender, store_receiver) = oneshot::channel();
 
+        let actor_name = peer_id.as_ref().map(|p| get_gossip_actor_name(p));
         let (actor, _handle) = ActorRuntime::spawn_linked_instant(
             actor_name,
             GossipActor::new(),

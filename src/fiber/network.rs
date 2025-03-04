@@ -3047,8 +3047,10 @@ where
         let my_peer_id: PeerId = PeerId::from(secio_pk);
         let handle = NetworkServiceHandle::new(myself.clone());
         let fiber_handle = FiberProtocolHandle::from(&handle);
+        let mut gossip_config = GossipConfig::from(&config);
+        gossip_config.peer_id = Some(my_peer_id.clone());
         let (gossip_service, gossip_handle) = GossipService::start(
-            GossipConfig::from(&config),
+            gossip_config,
             self.store.clone(),
             self.chain_actor.clone(),
             myself.get_cell(),

@@ -4,6 +4,8 @@ use crate::fiber::channel::ChannelCommand;
 use crate::fiber::channel::ChannelCommandWithId;
 use crate::fiber::channel::ReloadParams;
 use crate::fiber::channel::UpdateCommand;
+use crate::fiber::gossip::get_gossip_actor_name;
+use crate::fiber::gossip::GossipActorMessage;
 use crate::fiber::graph::NetworkGraphStateStore;
 use crate::fiber::graph::PaymentSession;
 use crate::fiber::graph::PaymentSessionStatus;
@@ -178,6 +180,7 @@ pub struct NetworkNode {
     pub network_actor: ActorRef<NetworkActorMessage>,
     pub network_graph: Arc<TokioRwLock<NetworkGraph<Store>>>,
     pub chain_actor: ActorRef<CkbChainMessage>,
+    pub gossip_actor: ActorRef<GossipActorMessage>,
     pub private_key: Privkey,
     pub peer_id: PeerId,
     pub event_emitter: mpsc::Receiver<NetworkServiceEvent>,
@@ -906,6 +909,10 @@ impl NetworkNode {
             base_dir.as_ref()
         );
 
+        let gossip_actor = ractor::registry::where_is(get_gossip_actor_name(&peer_id))
+            .expect("gossip actor should have been started")
+            .into();
+
         Self {
             base_dir,
             node_name,
@@ -916,6 +923,7 @@ impl NetworkNode {
             network_actor,
             network_graph,
             chain_actor,
+            gossip_actor,
             private_key: secret_key,
             peer_id,
             event_emitter: self_event_receiver,
