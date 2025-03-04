@@ -19,7 +19,9 @@ use ckb_jsonrpc_types::Status;
 use ckb_types::packed::OutPoint;
 use ckb_types::{core::TransactionView, packed::Byte32};
 use ractor::{call, Actor, ActorRef};
+use rand::distributions::Alphanumeric;
 use rand::rngs::OsRng;
+use rand::Rng;
 use secp256k1::{Message, Secp256k1};
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -166,10 +168,10 @@ pub fn mock_ecdsa_signature() -> EcdsaSignature {
     EcdsaSignature(signature)
 }
 
-pub fn generate_store() -> Store {
+pub fn generate_store() -> (Store, TempDir) {
     let temp_dir = TempDir::new("test-fnn-node");
     let store = Store::new(temp_dir.as_ref());
-    store.expect("create store")
+    (store.expect("create store"), temp_dir)
 }
 
 #[derive(Debug)]
@@ -257,7 +259,16 @@ impl NetworkNodeConfigBuilder {
             .clone()
             .unwrap_or_else(|| Arc::new(TempDir::new("test-fnn-node")));
         let node_name = self.node_name.clone();
-        let store = generate_store();
+
+        // generate a random string as db name to avoid conflict
+        // when build multiple nodes in the same NetworkNodeConfig
+        let rand_name: String = rand::thread_rng()
+            .sample_iter(&Alphanumeric)
+            .take(5)
+            .map(char::from)
+            .collect();
+        let rand_db_dir = Path::new(base_dir.to_str()).join(rand_name);
+        let store = Store::new(rand_db_dir).expect("create store");
         let fiber_config = get_fiber_config(base_dir.as_ref(), node_name.as_deref());
         let mut config = NetworkNodeConfig {
             base_dir,
