@@ -730,16 +730,16 @@ async fn test_never_miss_any_message() {
 }
 
 #[tokio::test]
-async fn test_gossip_store_prune_remove_old_messages_node_announcement() {
+async fn test_gossip_store_prune_node_announcement() {
     let context = GossipTestingContext::new().await;
     let sk = gen_rand_fiber_private_key();
-    let stale_timestamp = now_timestamp_as_millis_u64()
+    let node_announcement_timestamp = now_timestamp_as_millis_u64()
         - (HARD_BROADCAST_MESSAGES_CONSIDERED_STALE_DURATION.as_millis() as u64);
     let outdate_node_announcement = NodeAnnouncement::new(
         AnnouncedNodeName::from_string("node1").expect("valid name"),
         vec![],
         &sk,
-        stale_timestamp - 1,
+        node_announcement_timestamp,
         0,
     );
 
@@ -758,7 +758,22 @@ async fn test_gossip_store_prune_remove_old_messages_node_announcement() {
     context
         .gossip_actor
         .send_message(GossipActorMessage::PruneStaleGossipMessages(
-            stale_timestamp,
+            node_announcement_timestamp - 1,
+        ))
+        .unwrap();
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_ne!(
+        context
+            .get_store()
+            .get_latest_node_announcement(&sk.pubkey()),
+        None
+    );
+
+    context
+        .gossip_actor
+        .send_message(GossipActorMessage::PruneStaleGossipMessages(
+            node_announcement_timestamp + 1,
         ))
         .unwrap();
 
@@ -772,35 +787,25 @@ async fn test_gossip_store_prune_remove_old_messages_node_announcement() {
 }
 
 #[tokio::test]
-async fn test_gossip_store_prune_keep_new_messages_node_announcement() {
+async fn test_gossip_store_prune_channel_announcement() {
     let context = GossipTestingContext::new().await;
-    let sk = gen_rand_fiber_private_key();
-    let stale_timestamp = now_timestamp_as_millis_u64()
-        - (HARD_BROADCAST_MESSAGES_CONSIDERED_STALE_DURATION.as_millis() as u64);
-    let outdate_node_announcement = NodeAnnouncement::new(
-        AnnouncedNodeName::from_string("node1").expect("valid name"),
-        vec![],
-        &sk,
-        stale_timestamp + 1,
-        0,
-    );
-
-    context.save_message(BroadcastMessage::NodeAnnouncement(
-        outdate_node_announcement,
+    let channel_context = ChannelTestContext::gen();
+    context.save_message(BroadcastMessage::ChannelAnnouncement(
+        channel_context.channel_announcement.clone(),
     ));
-    // Wait for the message to be saved
+    let status = context.submit_tx(channel_context.funding_tx.clone()).await;
+    assert_eq!(status, Status::Committed);
     tokio::time::sleep(Duration::from_millis(200)).await;
-    assert_ne!(
-        context
-            .get_store()
-            .get_latest_node_announcement(&sk.pubkey()),
-        None
-    );
+    let channel_timestamp = context
+        .get_store()
+        .get_latest_channel_announcement(channel_context.channel_outpoint())
+        .expect("channel saved")
+        .0;
 
     context
         .gossip_actor
         .send_message(GossipActorMessage::PruneStaleGossipMessages(
-            stale_timestamp,
+            channel_timestamp - 1,
         ))
         .unwrap();
 
@@ -808,7 +813,182 @@ async fn test_gossip_store_prune_keep_new_messages_node_announcement() {
     assert_ne!(
         context
             .get_store()
-            .get_latest_node_announcement(&sk.pubkey()),
+            .get_latest_channel_announcement(channel_context.channel_outpoint()),
         None
+    );
+
+    context
+        .gossip_actor
+        .send_message(GossipActorMessage::PruneStaleGossipMessages(
+            channel_timestamp + 1,
+        ))
+        .unwrap();
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        context
+            .get_store()
+            .get_latest_channel_announcement(channel_context.channel_outpoint()),
+        None
+    );
+}
+
+#[tokio::test]
+async fn test_gossip_store_prune_channel_update() {
+    let context = GossipTestingContext::new().await;
+    let channel_context = ChannelTestContext::gen();
+    context.save_message(BroadcastMessage::ChannelAnnouncement(
+        channel_context.channel_announcement.clone(),
+    ));
+    let status = context.submit_tx(channel_context.funding_tx.clone()).await;
+    assert_eq!(status, Status::Committed);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let channel_announcement_timestamp = context
+        .get_store()
+        .get_latest_channel_announcement(channel_context.channel_outpoint())
+        .expect("channel saved")
+        .0;
+    // The difference between the timestamp of the channel announcement below is 4.
+    // This value is used because we have a convention of using even/odd to differentiate the timestamps
+    // of the channel updates from different nodes. I didn't bother to look up which one is even/odd.
+    // I just use 4 to make sure they are different.
+    for channel_update in [
+        channel_context.create_channel_update_of_node1(
+            ChannelUpdateChannelFlags::empty(),
+            42,
+            42,
+            42,
+            Some(channel_announcement_timestamp + 4),
+        ),
+        channel_context.create_channel_update_of_node2(
+            ChannelUpdateChannelFlags::empty(),
+            42,
+            42,
+            42,
+            Some(channel_announcement_timestamp + 8),
+        ),
+    ] {
+        context.save_message(BroadcastMessage::ChannelUpdate(channel_update.clone()));
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    assert_ne!(
+        context
+            .get_store()
+            .get_latest_channel_announcement(channel_context.channel_outpoint()),
+        None,
+        "channel announcement should be saved"
+    );
+
+    assert_ne!(
+        context
+            .get_store()
+            .get_latest_channel_update(channel_context.channel_outpoint(), true),
+        None,
+        "channel update of node 1 should be saved"
+    );
+
+    assert_ne!(
+        context
+            .get_store()
+            .get_latest_channel_update(channel_context.channel_outpoint(), false),
+        None,
+        "channel update of node 2 should be saved"
+    );
+
+    context
+        .gossip_actor
+        .send_message(GossipActorMessage::PruneStaleGossipMessages(
+            channel_announcement_timestamp + 2,
+        ))
+        .unwrap();
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_ne!(
+        context
+            .get_store()
+            .get_latest_channel_announcement(channel_context.channel_outpoint()),
+        None,
+        "channel announcement should not be pruned if there are active channel updates"
+    );
+
+    assert_ne!(
+        context
+            .get_store()
+            .get_latest_channel_update(channel_context.channel_outpoint(), true),
+        None,
+        "channel update of node 1 should not be pruned as it is active"
+    );
+
+    assert_ne!(
+        context
+            .get_store()
+            .get_latest_channel_update(channel_context.channel_outpoint(), false),
+        None,
+        "channel update of node 2 should not be pruned as it is active"
+    );
+
+    context
+        .gossip_actor
+        .send_message(GossipActorMessage::PruneStaleGossipMessages(
+            channel_announcement_timestamp + 6,
+        ))
+        .unwrap();
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    assert_ne!(
+        context
+            .get_store()
+            .get_latest_channel_announcement(channel_context.channel_outpoint()),
+        None,
+        "channel announcement should not be pruned if there are active channel updates"
+    );
+
+    assert_eq!(
+        context
+            .get_store()
+            .get_latest_channel_update(channel_context.channel_outpoint(), true),
+        None,
+        "channel update of node 1 should be pruned as it is outdated"
+    );
+    assert_ne!(
+        context
+            .get_store()
+            .get_latest_channel_update(channel_context.channel_outpoint(), false),
+        None,
+        "channel update of node 2 should not be pruned as it is active"
+    );
+
+    context
+        .gossip_actor
+        .send_message(GossipActorMessage::PruneStaleGossipMessages(
+            channel_announcement_timestamp + 10,
+        ))
+        .unwrap();
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    assert_eq!(
+        context
+            .get_store()
+            .get_latest_channel_announcement(channel_context.channel_outpoint()),
+        None,
+        "channel announcement should be pruned because there is no active channel updates"
+    );
+
+    assert_eq!(
+        context
+            .get_store()
+            .get_latest_channel_update(channel_context.channel_outpoint(), true),
+        None,
+        "channel update of node 1 should be pruned as it is outdated"
+    );
+    assert_eq!(
+        context
+            .get_store()
+            .get_latest_channel_update(channel_context.channel_outpoint(), false),
+        None,
+        "channel update of node 2 should not be pruned as it is outdated"
     );
 }
