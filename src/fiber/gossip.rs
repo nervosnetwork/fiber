@@ -2691,7 +2691,7 @@ where
     }
 }
 
-pub(crate) async fn prune_stale_gossip_messages<S: GossipMessageStore>(
+pub(crate) async fn prune_stale_gossip_messages<S>(
     store: S,
     stale_timestamp: u64,
     cancellation_token: CancellationToken,

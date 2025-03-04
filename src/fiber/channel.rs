@@ -397,7 +397,7 @@ where
                     partial_signature,
                 );
                 state
-                    .maybe_public_channel_is_ready(&myself, &self.network)
+                    .maybe_public_channel_is_ready(myself, &self.network)
                     .await;
                 Ok(())
             }
@@ -514,7 +514,7 @@ where
                 };
                 let flags = flags | AwaitingChannelReadyFlags::THEIR_CHANNEL_READY;
                 state.update_state(ChannelState::AwaitingChannelReady(flags));
-                state.maybe_channel_is_ready(&myself, &self.network).await;
+                state.maybe_channel_is_ready(myself, &self.network).await;
                 Ok(())
             }
             FiberChannelMessage::UpdateTlcInfo(update_tlc_info) => {
@@ -1964,7 +1964,7 @@ where
                     .expect(ASSUME_NETWORK_ACTOR_ALIVE);
                 let flags = flags | AwaitingChannelReadyFlags::OUR_CHANNEL_READY;
                 state.update_state(ChannelState::AwaitingChannelReady(flags));
-                state.maybe_channel_is_ready(&myself, &self.network).await;
+                state.maybe_channel_is_ready(myself, &self.network).await;
             }
             ChannelEvent::CommitmentTransactionConfirmed => {
                 match state.state {
@@ -6267,7 +6267,7 @@ impl ChannelActorState {
                     );
                 }
 
-                self.on_ready_channel_reestablished(&myself, network).await;
+                self.on_ready_channel_reestablished(myself, network).await;
 
                 debug_event!(network, "Reestablished channel in ChannelReady");
             }
