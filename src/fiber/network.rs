@@ -310,6 +310,18 @@ pub struct SendPaymentCommand {
     pub dry_run: bool,
 }
 
+/// The custom records to be included in the payment.
+/// The key is hex encoded of `u32`, and the value is hex encoded of `Vec<u8>`.
+/// For example:
+/// ```json
+/// "custom_records": {
+///    "0x1": "01020304",
+///    "0x2": "05060708",
+///    "0x3": "090a0b0c",
+///    "0x4": "0d0e0f10"
+///  }
+/// ```
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Default)]
 pub struct PaymentCustomRecords {
     /// The custom records to be included in the payment.
