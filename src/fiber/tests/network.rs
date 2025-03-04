@@ -11,7 +11,7 @@ use crate::{
             BroadcastMessage, BroadcastMessageWithTimestamp, ChannelAnnouncement,
             ChannelUpdateChannelFlags, NodeAnnouncement, Privkey, Pubkey,
         },
-        NetworkActorCommand, NetworkActorEvent, NetworkActorMessage,
+        NetworkActorCommand, NetworkActorMessage,
     },
     gen_rand_fiber_public_key, gen_rand_secp256k1_keypair_tuple, gen_rand_sha256_hash,
     invoice::InvoiceBuilder,
@@ -233,15 +233,10 @@ async fn test_sync_channel_announcement_on_startup() {
         BroadcastMessage::NodeAnnouncement(node_announcement_2.clone()),
         BroadcastMessage::ChannelAnnouncement(channel_announcement.clone()),
     ] {
-        node1
-            .network_actor
-            .send_message(NetworkActorMessage::Event(
-                NetworkActorEvent::GossipMessage(
-                    get_test_peer_id(),
-                    message.create_broadcast_messages_filter_result(),
-                ),
-            ))
-            .expect("send message to network actor");
+        node1.mock_received_gossip_message_from_peer(
+            get_test_peer_id(),
+            message.create_broadcast_messages_filter_result(),
+        );
     }
 
     node1.connect_to(&node2).await;
@@ -261,15 +256,11 @@ async fn test_node1_node2_channel_update() {
     let channel_announcement = channel_context.channel_announcement.clone();
     let node = NetworkNode::new().await;
     node.submit_tx(funding_tx).await;
-    node.network_actor
-        .send_message(NetworkActorMessage::Event(
-            NetworkActorEvent::GossipMessage(
-                get_test_peer_id(),
-                BroadcastMessage::ChannelAnnouncement(channel_announcement)
-                    .create_broadcast_messages_filter_result(),
-            ),
-        ))
-        .expect("send message to network actor");
+    node.mock_received_gossip_message_from_peer(
+        get_test_peer_id(),
+        BroadcastMessage::ChannelAnnouncement(channel_announcement)
+            .create_broadcast_messages_filter_result(),
+    );
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
     let channel_update_of_node1 = channel_context.create_channel_update_of_node1(
@@ -279,15 +270,11 @@ async fn test_node1_node2_channel_update() {
         1,
         None,
     );
-    node.network_actor
-        .send_message(NetworkActorMessage::Event(
-            NetworkActorEvent::GossipMessage(
-                get_test_peer_id(),
-                BroadcastMessage::ChannelUpdate(channel_update_of_node1.clone())
-                    .create_broadcast_messages_filter_result(),
-            ),
-        ))
-        .expect("send message to network actor");
+    node.mock_received_gossip_message_from_peer(
+        get_test_peer_id(),
+        BroadcastMessage::ChannelUpdate(channel_update_of_node1.clone())
+            .create_broadcast_messages_filter_result(),
+    );
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
     let new_channel_info = node.get_network_graph_channel(&out_point).await.unwrap();
@@ -303,15 +290,11 @@ async fn test_node1_node2_channel_update() {
         2,
         None,
     );
-    node.network_actor
-        .send_message(NetworkActorMessage::Event(
-            NetworkActorEvent::GossipMessage(
-                get_test_peer_id(),
-                BroadcastMessage::ChannelUpdate(channel_update_of_node2.clone())
-                    .create_broadcast_messages_filter_result(),
-            ),
-        ))
-        .expect("send message to network actor");
+    node.mock_received_gossip_message_from_peer(
+        get_test_peer_id(),
+        BroadcastMessage::ChannelUpdate(channel_update_of_node2.clone())
+            .create_broadcast_messages_filter_result(),
+    );
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
     let new_channel_info = node.get_network_graph_channel(&out_point).await.unwrap();
@@ -332,15 +315,11 @@ async fn test_channel_update_version() {
     let out_point = channel_context.channel_outpoint().clone();
     let node = NetworkNode::new().await;
     node.submit_tx(funding_tx).await;
-    node.network_actor
-        .send_message(NetworkActorMessage::Event(
-            NetworkActorEvent::GossipMessage(
-                get_test_peer_id(),
-                BroadcastMessage::ChannelAnnouncement(channel_context.channel_announcement.clone())
-                    .create_broadcast_messages_filter_result(),
-            ),
-        ))
-        .expect("send message to network actor");
+    node.mock_received_gossip_message_from_peer(
+        get_test_peer_id(),
+        BroadcastMessage::ChannelAnnouncement(channel_context.channel_announcement.clone())
+            .create_broadcast_messages_filter_result(),
+    );
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
     let mut channel_updates = vec![];
@@ -358,15 +337,11 @@ async fn test_channel_update_version() {
     let [channel_update_1, channel_update_2, channel_update_3] =
         channel_updates.try_into().expect("3 channel updates");
 
-    node.network_actor
-        .send_message(NetworkActorMessage::Event(
-            NetworkActorEvent::GossipMessage(
-                get_test_peer_id(),
-                BroadcastMessage::ChannelUpdate(channel_update_2.clone())
-                    .create_broadcast_messages_filter_result(),
-            ),
-        ))
-        .expect("send message to network actor");
+    node.mock_received_gossip_message_from_peer(
+        get_test_peer_id(),
+        BroadcastMessage::ChannelUpdate(channel_update_2.clone())
+            .create_broadcast_messages_filter_result(),
+    );
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
     let new_channel_info = node.get_network_graph_channel(&out_point).await.unwrap();
     assert_eq!(
@@ -375,15 +350,11 @@ async fn test_channel_update_version() {
     );
 
     // Old channel update will not replace the new one.
-    node.network_actor
-        .send_message(NetworkActorMessage::Event(
-            NetworkActorEvent::GossipMessage(
-                get_test_peer_id(),
-                BroadcastMessage::ChannelUpdate(channel_update_1.clone())
-                    .create_broadcast_messages_filter_result(),
-            ),
-        ))
-        .expect("send message to network actor");
+    node.mock_received_gossip_message_from_peer(
+        get_test_peer_id(),
+        BroadcastMessage::ChannelUpdate(channel_update_1.clone())
+            .create_broadcast_messages_filter_result(),
+    );
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
     let new_channel_info = node.get_network_graph_channel(&out_point).await.unwrap();
     assert_eq!(
@@ -392,15 +363,11 @@ async fn test_channel_update_version() {
     );
 
     // New channel update will replace the old one.
-    node.network_actor
-        .send_message(NetworkActorMessage::Event(
-            NetworkActorEvent::GossipMessage(
-                get_test_peer_id(),
-                BroadcastMessage::ChannelUpdate(channel_update_3.clone())
-                    .create_broadcast_messages_filter_result(),
-            ),
-        ))
-        .expect("send message to network actor");
+    node.mock_received_gossip_message_from_peer(
+        get_test_peer_id(),
+        BroadcastMessage::ChannelUpdate(channel_update_3.clone())
+            .create_broadcast_messages_filter_result(),
+    );
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
     let new_channel_info = node.get_network_graph_channel(&out_point).await.unwrap();
     assert_eq!(
@@ -424,16 +391,11 @@ async fn test_query_missing_broadcast_message() {
     // So that node2 will not sync this ChannelAnnouncement with node1.
     set_next_block_timestamp(long_long_time_ago).await;
     node1.submit_tx(funding_tx.clone()).await;
-    node1
-        .network_actor
-        .send_message(NetworkActorMessage::Event(
-            NetworkActorEvent::GossipMessage(
-                get_test_peer_id(),
-                BroadcastMessage::ChannelAnnouncement(channel_announcement)
-                    .create_broadcast_messages_filter_result(),
-            ),
-        ))
-        .expect("send message to network actor");
+    node1.mock_received_gossip_message_from_peer(
+        get_test_peer_id(),
+        BroadcastMessage::ChannelAnnouncement(channel_announcement)
+            .create_broadcast_messages_filter_result(),
+    );
     let channel_update = channel_context.create_channel_update_of_node1(
         ChannelUpdateChannelFlags::empty(),
         1,
@@ -441,16 +403,11 @@ async fn test_query_missing_broadcast_message() {
         1,
         Some(long_long_time_ago + 10),
     );
-    node1
-        .network_actor
-        .send_message(NetworkActorMessage::Event(
-            NetworkActorEvent::GossipMessage(
-                get_test_peer_id(),
-                BroadcastMessage::ChannelUpdate(channel_update.clone())
-                    .create_broadcast_messages_filter_result(),
-            ),
-        ))
-        .expect("send message to network actor");
+    node1.mock_received_gossip_message_from_peer(
+        get_test_peer_id(),
+        BroadcastMessage::ChannelUpdate(channel_update.clone())
+            .create_broadcast_messages_filter_result(),
+    );
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
     let node1_channel_info = node1.get_network_graph_channel(&out_point).await.unwrap();
     assert_ne!(node1_channel_info.update_of_node1, None);
@@ -492,16 +449,11 @@ async fn test_sync_node_announcement_version() {
     let timestamp_version2 = node_announcement_message_version2.timestamp;
     let timestamp_version3 = node_announcement_message_version3.timestamp;
 
-    node.network_actor
-        .send_message(NetworkActorMessage::Event(
-            NetworkActorEvent::GossipMessage(
-                test_peer_id.clone(),
-                BroadcastMessage::NodeAnnouncement(node_announcement_message_version2)
-                    .create_broadcast_messages_filter_result(),
-            ),
-        ))
-        .expect("send message to network actor");
-
+    node.mock_received_gossip_message_from_peer(
+        test_peer_id.clone(),
+        BroadcastMessage::NodeAnnouncement(node_announcement_message_version2)
+            .create_broadcast_messages_filter_result(),
+    );
     // Wait for the broadcast message to be processed.
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
     let node_info = node.get_network_graph_node(&test_pub_key).await;
@@ -513,16 +465,11 @@ async fn test_sync_node_announcement_version() {
         ),
     }
 
-    node.network_actor
-        .send_message(NetworkActorMessage::Event(
-            NetworkActorEvent::GossipMessage(
-                test_peer_id.clone(),
-                BroadcastMessage::NodeAnnouncement(node_announcement_message_version1)
-                    .create_broadcast_messages_filter_result(),
-            ),
-        ))
-        .expect("send message to network actor");
-
+    node.mock_received_gossip_message_from_peer(
+        test_peer_id.clone(),
+        BroadcastMessage::NodeAnnouncement(node_announcement_message_version1)
+            .create_broadcast_messages_filter_result(),
+    );
     // Wait for the broadcast message to be processed.
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
     let node_info = node.get_network_graph_node(&test_pub_key).await;
@@ -534,15 +481,11 @@ async fn test_sync_node_announcement_version() {
         ),
     }
 
-    node.network_actor
-        .send_message(NetworkActorMessage::Event(
-            NetworkActorEvent::GossipMessage(
-                test_peer_id.clone(),
-                BroadcastMessage::NodeAnnouncement(node_announcement_message_version3)
-                    .create_broadcast_messages_filter_result(),
-            ),
-        ))
-        .expect("send message to network actor");
+    node.mock_received_gossip_message_from_peer(
+        test_peer_id.clone(),
+        BroadcastMessage::NodeAnnouncement(node_announcement_message_version3)
+            .create_broadcast_messages_filter_result(),
+    );
     // Wait for the broadcast message to be processed.
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
     let node_info = node.get_network_graph_node(&test_pub_key).await;
@@ -568,17 +511,11 @@ async fn test_sync_node_announcement_on_startup() {
     let test_pub_key = get_test_pub_key();
     let test_peer_id = get_test_peer_id();
 
-    node1
-        .network_actor
-        .send_message(NetworkActorMessage::Event(
-            NetworkActorEvent::GossipMessage(
-                test_peer_id.clone(),
-                BroadcastMessage::NodeAnnouncement(create_fake_node_announcement_mesage())
-                    .create_broadcast_messages_filter_result(),
-            ),
-        ))
-        .expect("send message to network actor");
-
+    node1.mock_received_gossip_message_from_peer(
+        test_peer_id.clone(),
+        BroadcastMessage::NodeAnnouncement(create_fake_node_announcement_mesage())
+            .create_broadcast_messages_filter_result(),
+    );
     node1.connect_to(&node2).await;
 
     // Wait for the broadcast message to be processed.
@@ -619,17 +556,11 @@ async fn test_sync_node_announcement_after_restart() {
 
     let test_pub_key = get_test_pub_key();
     let test_peer_id = get_test_peer_id();
-    node1
-        .network_actor
-        .send_message(NetworkActorMessage::Event(
-            NetworkActorEvent::GossipMessage(
-                test_peer_id.clone(),
-                BroadcastMessage::NodeAnnouncement(create_fake_node_announcement_mesage())
-                    .create_broadcast_messages_filter_result(),
-            ),
-        ))
-        .expect("send message to network actor");
-
+    node1.mock_received_gossip_message_from_peer(
+        test_peer_id.clone(),
+        BroadcastMessage::NodeAnnouncement(create_fake_node_announcement_mesage())
+            .create_broadcast_messages_filter_result(),
+    );
     node2.start().await;
     node2.connect_to(&node1).await;
 
@@ -682,16 +613,10 @@ async fn test_persisting_announced_nodes() {
     let node_pk = announcement.node_id;
     let peer_id = node_pk.tentacle_peer_id();
 
-    node.network_actor
-        .send_message(NetworkActorMessage::Event(
-            NetworkActorEvent::GossipMessage(
-                peer_id.clone(),
-                BroadcastMessage::NodeAnnouncement(announcement)
-                    .create_broadcast_messages_filter_result(),
-            ),
-        ))
-        .expect("send message to network actor");
-
+    node.mock_received_gossip_message_from_peer(
+        peer_id.clone(),
+        BroadcastMessage::NodeAnnouncement(announcement).create_broadcast_messages_filter_result(),
+    );
     // Wait for the above message to be processed.
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 

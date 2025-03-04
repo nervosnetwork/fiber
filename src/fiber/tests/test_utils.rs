@@ -9,10 +9,12 @@ use crate::fiber::gossip::GossipActorMessage;
 use crate::fiber::graph::NetworkGraphStateStore;
 use crate::fiber::graph::PaymentSession;
 use crate::fiber::graph::PaymentSessionStatus;
+use crate::fiber::network::GossipMessageWithPeerId;
 use crate::fiber::network::NodeInfoResponse;
 use crate::fiber::network::SendPaymentCommand;
 use crate::fiber::network::SendPaymentResponse;
 use crate::fiber::types::EcdsaSignature;
+use crate::fiber::types::GossipMessage;
 use crate::fiber::types::Pubkey;
 use crate::invoice::CkbInvoice;
 use crate::invoice::CkbInvoiceStatus;
@@ -1196,6 +1198,18 @@ impl NetworkNode {
             graph.get_channel(channel_id).cloned()
         })
         .await
+    }
+
+    pub fn send_message_to_gossip_actor(&self, message: GossipActorMessage) {
+        self.gossip_actor
+            .send_message(message)
+            .expect("send message to gossip actor");
+    }
+
+    pub fn mock_received_gossip_message_from_peer(&self, peer_id: PeerId, message: GossipMessage) {
+        self.send_message_to_gossip_actor(GossipActorMessage::GossipMessageReceived(
+            GossipMessageWithPeerId { peer_id, message },
+        ));
     }
 }
 

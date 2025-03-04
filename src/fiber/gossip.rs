@@ -443,7 +443,7 @@ where
 
         let (store_sender, store_receiver) = oneshot::channel();
 
-        let actor_name = peer_id.as_ref().map(|p| get_gossip_actor_name(p));
+        let actor_name = peer_id.as_ref().map(get_gossip_actor_name);
         let (actor, _handle) = ActorRuntime::spawn_linked_instant(
             actor_name,
             GossipActor::new(),
