@@ -1,4 +1,5 @@
 use std::{
+    cmp::max,
     collections::{HashMap, HashSet},
     marker::PhantomData,
     sync::Arc,
@@ -48,6 +49,11 @@ use super::{
 // The maximum duration drift between the broadcast message timestamp and latest cursor in store.
 pub(crate) const MAX_MISSING_BROADCAST_MESSAGE_TIMESTAMP_DRIFT: Duration =
     Duration::from_secs(60 * 60 * 2);
+
+// The duration to consider a broadcast message as stale. We will start to sync messages no older than
+// this duration. The current value is two weeks.
+pub(crate) const BROADCAST_MESSAGES_CONSIDERED_STALE_DURATION: Duration =
+    Duration::from_secs(60 * 60 * 24 * 14);
 
 const MAX_BROADCAST_MESSAGE_TIMESTAMP_DRIFT: Duration = Duration::from_secs(60);
 const MAX_BROADCAST_MESSAGE_TIMESTAMP_DRIFT_MILLIS: u64 =
@@ -1778,9 +1784,21 @@ where
             .unwrap_or_default()
     }
 
+    // A cursor that is "safe" to start syncing from. By "safe" we mean that
+    // the node is mostly having the messages that are newer than this cursor or the messages
+    // before this cursor are not important for the node to sync with the network.
+    // We will start syncing from this cursor to avoid syncing from the very beginning of the network.
     fn get_safe_cursor_to_start_syncing(&self) -> Cursor {
-        self.get_latest_cursor()
-            .go_back_for_some_time(MAX_MISSING_BROADCAST_MESSAGE_TIMESTAMP_DRIFT)
+        let latest_cursor_timestamp = self.get_latest_cursor().timestamp;
+        let safe_cursor_timestamp = latest_cursor_timestamp
+            .checked_sub(MAX_MISSING_BROADCAST_MESSAGE_TIMESTAMP_DRIFT.as_millis() as u64)
+            .unwrap_or_default();
+        let now = now_timestamp_as_millis_u64();
+        let timestamp_after_considered_stale = now
+            .checked_sub(BROADCAST_MESSAGES_CONSIDERED_STALE_DURATION.as_millis() as u64)
+            .unwrap_or_default();
+        let timestamp = max(safe_cursor_timestamp, timestamp_after_considered_stale);
+        Cursor::new(timestamp, BroadcastMessageID::default())
     }
 
     async fn try_to_verify_and_save_broadcast_messages(

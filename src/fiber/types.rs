@@ -2893,6 +2893,12 @@ pub enum BroadcastMessageID {
     NodeAnnouncement(Pubkey),
 }
 
+impl Default for BroadcastMessageID {
+    fn default() -> Self {
+        BroadcastMessageID::ChannelAnnouncement(OutPoint::default())
+    }
+}
+
 // We need to implement Ord for BroadcastMessageID to make sure that a ChannelUpdate message is always ordered after ChannelAnnouncement,
 // so that we can use it as the sorting key in fn prune_messages_to_be_saved to simplify the logic.
 impl Ord for BroadcastMessageID {
