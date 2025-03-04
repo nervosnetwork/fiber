@@ -1,4 +1,6 @@
+use core::panic;
 use std::{
+    cmp::max,
     collections::{HashMap, HashSet},
     marker::PhantomData,
     sync::Arc,
@@ -26,15 +28,19 @@ use tentacle::{
     SessionId,
 };
 use tokio::sync::oneshot;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, trace, warn};
 
 use crate::{
     ckb::{CkbChainMessage, GetBlockTimestampRequest, TraceTxRequest, TraceTxResponse},
     fiber::{network::DEFAULT_CHAIN_ACTOR_TIMEOUT, types::secp256k1_instance},
-    now_timestamp_as_millis_u64, unwrap_or_return, Error,
+    now_timestamp_as_millis_u64,
+    tasks::{new_tokio_cancellation_token, new_tokio_task_tracker},
+    unwrap_or_return, Error,
 };
 
 use super::{
+    config::DEFAULT_GOSSIP_NETWORK_MAINTENANCE_INTERVAL_MS,
     network::{check_chain_hash, get_chain_hash, GossipMessageWithPeerId, GOSSIP_PROTOCOL_ID},
     types::{
         BroadcastMessage, BroadcastMessageID, BroadcastMessageQuery, BroadcastMessageQueryFlags,
@@ -43,11 +49,24 @@ use super::{
         GetBroadcastMessagesResult, GossipMessage, NodeAnnouncement, Pubkey,
         QueryBroadcastMessages, QueryBroadcastMessagesResult,
     },
+    FiberConfig,
 };
 
 // The maximum duration drift between the broadcast message timestamp and latest cursor in store.
 pub(crate) const MAX_MISSING_BROADCAST_MESSAGE_TIMESTAMP_DRIFT: Duration =
     Duration::from_secs(60 * 60 * 2);
+
+// The duration to consider a broadcast message as stale. We will start to sync messages no older than
+// this duration. The current value is two weeks.
+pub(crate) const SOFT_BROADCAST_MESSAGES_CONSIDERED_STALE_DURATION: Duration =
+    Duration::from_secs(60 * 60 * 24 * 14);
+
+// The duration to delete a broadcast message from the store. The current value is four weeks.
+pub(crate) const HARD_BROADCAST_MESSAGES_CONSIDERED_STALE_DURATION: Duration =
+    Duration::from_secs(60 * 60 * 24 * 28);
+
+// The interval to prune stale broadcast messages. The current value is one day.
+const PRUNE_STALE_BROADCAST_MESSAGES_INTERVAL: Duration = Duration::from_secs(60 * 60 * 24);
 
 const MAX_BROADCAST_MESSAGE_TIMESTAMP_DRIFT: Duration = Duration::from_secs(60);
 const MAX_BROADCAST_MESSAGE_TIMESTAMP_DRIFT_MILLIS: u64 =
@@ -211,6 +230,8 @@ pub trait GossipMessageStore {
         )
     }
 
+    fn delete_broadcast_message(&self, cursor: &Cursor);
+
     fn save_channel_announcement(&self, timestamp: u64, channel_announcement: ChannelAnnouncement);
 
     fn save_channel_update(&self, channel_update: ChannelUpdate);
@@ -309,6 +330,13 @@ pub enum GossipActorMessage {
     // 2. Check if there are any pending broadcast message queries. If so, broadcast them to the network.
     TickNetworkMaintenance,
 
+    // Some channels in the gossip store haven't been updated for a long time. We will prune all
+    // messages older than the given u64 milliseconds timestamp.
+    PruneStaleGossipMessages(u64),
+
+    // Signify the pruning of stale broadcast messages is done. We can now start a new prune process.
+    PruneStaleGossipMessagesDone,
+
     // The active syncing process is finished for a peer.
     ActiveSyncingFinished(PeerId, Cursor),
 
@@ -333,6 +361,60 @@ pub enum GossipActorMessage {
     GossipMessageReceived(GossipMessageWithPeerId),
 }
 
+pub(crate) fn get_gossip_actor_name(peer_id: &PeerId) -> String {
+    format!("gossip actor {}", peer_id)
+}
+
+pub struct GossipConfig {
+    pub(crate) peer_id: Option<PeerId>,
+    pub(crate) gossip_network_maintenance_interval: Duration,
+    pub(crate) gossip_store_maintenance_interval: Duration,
+    pub(crate) gossip_store_prune_interval: Duration,
+    pub(crate) announce_private_addr: bool,
+    pub(crate) num_targeted_active_syncing_peers: usize,
+    pub(crate) num_targeted_outbound_passive_syncing_peers: usize,
+}
+
+impl Default for GossipConfig {
+    fn default() -> Self {
+        Self {
+            peer_id: None,
+            gossip_network_maintenance_interval: Duration::from_millis(
+                DEFAULT_GOSSIP_NETWORK_MAINTENANCE_INTERVAL_MS,
+            ),
+            gossip_store_maintenance_interval: Duration::from_millis(
+                DEFAULT_GOSSIP_NETWORK_MAINTENANCE_INTERVAL_MS,
+            ),
+            gossip_store_prune_interval: PRUNE_STALE_BROADCAST_MESSAGES_INTERVAL,
+            announce_private_addr: true,
+            num_targeted_active_syncing_peers: MAX_NUM_OF_ACTIVE_SYNCING_PEERS,
+            num_targeted_outbound_passive_syncing_peers: MIN_NUM_OF_PASSIVE_SYNCING_PEERS,
+        }
+    }
+}
+
+impl From<&FiberConfig> for GossipConfig {
+    fn from(config: &FiberConfig) -> Self {
+        Self {
+            peer_id: None,
+            gossip_network_maintenance_interval: Duration::from_millis(
+                config.gossip_network_maintenance_interval_ms(),
+            ),
+            gossip_store_maintenance_interval: Duration::from_millis(
+                config.gossip_store_maintenance_interval_ms(),
+            ),
+            gossip_store_prune_interval: PRUNE_STALE_BROADCAST_MESSAGES_INTERVAL,
+            announce_private_addr: config.announce_private_addr(),
+            num_targeted_active_syncing_peers: config
+                .gossip_network_num_targeted_active_syncing_peers
+                .unwrap_or(MAX_NUM_OF_ACTIVE_SYNCING_PEERS),
+            num_targeted_outbound_passive_syncing_peers: config
+                .gossip_network_num_targeted_outbound_passive_syncing_peers
+                .unwrap_or(MIN_NUM_OF_PASSIVE_SYNCING_PEERS),
+        }
+    }
+}
+
 pub struct GossipService<S> {
     extended_store: ExtendedGossipMessageStore<S>,
 }
@@ -341,34 +423,39 @@ impl<S> GossipService<S>
 where
     S: GossipMessageStore + Clone + Send + Sync + 'static,
 {
-    #[allow(clippy::too_many_arguments)]
     pub async fn start(
-        name: Option<String>,
-        gossip_network_maintenance_interval: Duration,
-        gossip_store_maintenance_interval: Duration,
-        announce_private_addr: bool,
-        num_targeted_active_syncing_peers: Option<usize>,
-        num_targeted_outbound_passive_syncing_peers: Option<usize>,
+        gossip_config: GossipConfig,
         store: S,
         chain_actor: ActorRef<CkbChainMessage>,
         supervisor: ActorCell,
     ) -> (Self, GossipProtocolHandle) {
+        let GossipConfig {
+            peer_id,
+            gossip_network_maintenance_interval,
+            gossip_store_maintenance_interval,
+            gossip_store_prune_interval,
+            announce_private_addr,
+            num_targeted_active_syncing_peers,
+            num_targeted_outbound_passive_syncing_peers,
+        } = gossip_config;
+
         let (network_control_sender, network_control_receiver) = oneshot::channel();
 
         let (store_sender, store_receiver) = oneshot::channel();
 
+        let actor_name = peer_id.as_ref().map(get_gossip_actor_name);
         let (actor, _handle) = ActorRuntime::spawn_linked_instant(
-            name,
+            actor_name,
             GossipActor::new(),
             (
                 network_control_receiver,
                 store_sender,
                 gossip_network_maintenance_interval,
                 gossip_store_maintenance_interval,
+                gossip_store_prune_interval,
                 announce_private_addr,
-                num_targeted_active_syncing_peers.unwrap_or(MAX_NUM_OF_ACTIVE_SYNCING_PEERS),
-                num_targeted_outbound_passive_syncing_peers
-                    .unwrap_or(MIN_NUM_OF_PASSIVE_SYNCING_PEERS),
+                num_targeted_active_syncing_peers,
+                num_targeted_outbound_passive_syncing_peers,
                 store,
                 chain_actor,
             ),
@@ -1590,6 +1677,7 @@ pub(crate) struct GossipActorState<S> {
     query_reply_ports:
         HashMap<(PeerId, u64), RpcReplyPort<Result<QueryBroadcastMessagesResult, GossipError>>>,
     peer_states: HashMap<PeerId, PeerState>,
+    has_active_prune_task: bool,
 }
 
 impl<S> GossipActorState<S>
@@ -1778,9 +1866,21 @@ where
             .unwrap_or_default()
     }
 
+    // A cursor that is "safe" to start syncing from. By "safe" we mean that
+    // the node is mostly having the messages that are newer than this cursor or the messages
+    // before this cursor are not important for the node to sync with the network.
+    // We will start syncing from this cursor to avoid syncing from the very beginning of the network.
     fn get_safe_cursor_to_start_syncing(&self) -> Cursor {
-        self.get_latest_cursor()
-            .go_back_for_some_time(MAX_MISSING_BROADCAST_MESSAGE_TIMESTAMP_DRIFT)
+        let latest_cursor_timestamp = self.get_latest_cursor().timestamp;
+        let safe_cursor_timestamp = latest_cursor_timestamp
+            .checked_sub(MAX_MISSING_BROADCAST_MESSAGE_TIMESTAMP_DRIFT.as_millis() as u64)
+            .unwrap_or_default();
+        let now = now_timestamp_as_millis_u64();
+        let timestamp_after_considered_stale = now
+            .checked_sub(SOFT_BROADCAST_MESSAGES_CONSIDERED_STALE_DURATION.as_millis() as u64)
+            .unwrap_or_default();
+        let timestamp = max(safe_cursor_timestamp, timestamp_after_considered_stale);
+        Cursor::new(timestamp, BroadcastMessageID::default())
     }
 
     async fn try_to_verify_and_save_broadcast_messages(
@@ -2273,6 +2373,7 @@ where
         oneshot::Sender<ExtendedGossipMessageStore<S>>,
         Duration,
         Duration,
+        Duration,
         bool,
         usize,
         usize,
@@ -2288,6 +2389,7 @@ where
             tx,
             network_maintenance_interval,
             store_maintenance_interval,
+            store_prune_interval,
             announce_private_addr,
             num_targeted_active_syncing_peers,
             num_targeted_outbound_passive_syncing_peers,
@@ -2330,6 +2432,13 @@ where
         myself.send_interval(network_maintenance_interval, || {
             GossipActorMessage::TickNetworkMaintenance
         });
+        myself.send_interval(store_prune_interval, || {
+            let prune_duration = HARD_BROADCAST_MESSAGES_CONSIDERED_STALE_DURATION;
+            let stale_timestamp = now_timestamp_as_millis_u64()
+                .checked_sub(prune_duration.as_millis() as u64)
+                .unwrap_or_default();
+            GossipActorMessage::PruneStaleGossipMessages(stale_timestamp)
+        });
         let state = Self::State {
             store,
             control: Default::default(),
@@ -2341,6 +2450,7 @@ where
             query_reply_ports: Default::default(),
             num_finished_active_syncing_peers: Default::default(),
             peer_states: Default::default(),
+            has_active_prune_task: false,
         };
         Ok(state)
     }
@@ -2440,6 +2550,28 @@ where
                 for peer in state.peers_to_start_passive_syncing() {
                     state.start_passive_syncer(&peer).await;
                 }
+            }
+
+            GossipActorMessage::PruneStaleGossipMessages(timestamp) => {
+                if state.has_active_prune_task || timestamp == 0 {
+                    return Ok(());
+                }
+                state.has_active_prune_task = true;
+                let task_tracker = new_tokio_task_tracker();
+                let cancellation_token = new_tokio_cancellation_token();
+                let store = state.store.get_store().clone();
+                let myself = myself.clone();
+                // Spawning a subtask to avoid blocking normal message processing of the actor.
+                task_tracker.spawn(async move {
+                    prune_stale_gossip_messages(store, timestamp, cancellation_token).await;
+                    myself
+                        .send_message(GossipActorMessage::PruneStaleGossipMessagesDone)
+                        .expect("send prune done message");
+                });
+            }
+
+            GossipActorMessage::PruneStaleGossipMessagesDone => {
+                state.has_active_prune_task = false;
             }
 
             GossipActorMessage::ActiveSyncingFinished(peer_id, cursor) => {
@@ -2616,6 +2748,56 @@ where
         }
 
         Ok(())
+    }
+}
+
+pub(crate) async fn prune_stale_gossip_messages<S>(
+    store: S,
+    stale_timestamp: u64,
+    cancellation_token: CancellationToken,
+) where
+    S: GossipMessageStore,
+{
+    let mut cursor = Cursor::default();
+    loop {
+        if cancellation_token.is_cancelled() {
+            break;
+        }
+        let messages = store.get_broadcast_messages(&cursor, None);
+        for message in &messages {
+            if message.timestamp() < stale_timestamp {
+                if let BroadcastMessageWithTimestamp::ChannelAnnouncement(_timestamp, message) =
+                    message
+                {
+                    let latest_channel_update_timestamp = [true, false]
+                        .into_iter()
+                        .flat_map(|is_node_1| {
+                            store.get_latest_channel_update_timestamp(
+                                &message.channel_outpoint,
+                                is_node_1,
+                            )
+                        })
+                        .max()
+                        .unwrap_or_default();
+                    // Ignore deleting channel announcement if there is a newer channel update.
+                    if latest_channel_update_timestamp > stale_timestamp {
+                        continue;
+                    }
+                }
+                store.delete_broadcast_message(&message.cursor());
+            }
+        }
+        match messages.last() {
+            Some(last_message) => {
+                cursor = last_message.cursor();
+                if last_message.timestamp() >= stale_timestamp {
+                    break;
+                }
+            }
+            None => {
+                break;
+            }
+        }
     }
 }
 
