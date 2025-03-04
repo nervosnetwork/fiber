@@ -567,8 +567,8 @@ async fn test_gossip_store_updates_saving_multiple_messages() {
     let announcements = (0..10)
         .map(|_| gen_rand_node_announcement().1)
         .collect::<Vec<_>>();
-    for annoncement in &announcements {
-        context.save_message(BroadcastMessage::NodeAnnouncement(annoncement.clone()));
+    for announcement in &announcements {
+        context.save_message(BroadcastMessage::NodeAnnouncement(announcement.clone()));
     }
     tokio::time::sleep(Duration::from_millis(200)).await;
     let messages = messages.read().await;

@@ -36,7 +36,7 @@ table OpenChannel {
     tlc_basepoint:               Pubkey,
     first_per_commitment_point:  Pubkey,
     second_per_commitment_point: Pubkey,
-    channel_annoucement_nonce:   PubNonceOpt,
+    channel_announcement_nonce:   PubNonceOpt,
     next_local_nonce:            PubNonce,
     channel_flags:               byte,
 }
@@ -52,7 +52,7 @@ table AcceptChannel {
     tlc_basepoint:               Pubkey,
     first_per_commitment_point:  Pubkey,
     second_per_commitment_point: Pubkey,
-    channel_annoucement_nonce:   PubNonceOpt,
+    channel_announcement_nonce:   PubNonceOpt,
     next_local_nonce:            PubNonce,
 }
 

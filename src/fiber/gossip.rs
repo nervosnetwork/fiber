@@ -204,7 +204,7 @@ pub trait GossipMessageStore {
             )).map(|message|
                     match message {
                     BroadcastMessageWithTimestamp::NodeAnnouncement(node_announcement) => node_announcement,
-                    _ => panic!("get_lastest_node_announcement returned non-NodeAnnouncement message from db: pk {:?}, message {:?}", pk, message),
+                    _ => panic!("get_latest_node_announcement returned non-NodeAnnouncement message from db: pk {:?}, message {:?}", pk, message),
                     }
                 )
             }
@@ -1442,8 +1442,8 @@ impl<S: GossipMessageStore + Send + Sync + 'static> Actor for ExtendedGossipMess
 
                 match cursor {
                     Some(cursor) => {
-                        if let Some(outpout) = state.output_ports.get_mut(&id) {
-                            outpout.filter = cursor;
+                        if let Some(output) = state.output_ports.get_mut(&id) {
+                            output.filter = cursor;
                         }
                     }
                     _ => {
@@ -1507,7 +1507,7 @@ impl<S: GossipMessageStore + Send + Sync + 'static> Actor for ExtendedGossipMess
                 is_success,
             }) => {
                 trace!(
-                    n_quries = n_queries,
+                    n_queries = n_queries,
                     peer = format!("{:?}", peer),
                     is_success = is_success,
                     "Querying task done"

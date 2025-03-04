@@ -570,7 +570,7 @@ fn test_history_fail_node_with_multiple_channels() {
 }
 
 #[test]
-fn test_history_interal_success_fail() {
+fn test_history_interval_success_fail() {
     let mut history = PaymentHistory::new(gen_rand_fiber_public_key(), None, generate_store());
     let from = gen_rand_fiber_public_key();
     let target = gen_rand_fiber_public_key();
@@ -633,7 +633,7 @@ fn test_history_interal_success_fail() {
 }
 
 #[test]
-fn test_history_interal_fuzz_assertion_crash() {
+fn test_history_interval_fuzz_assertion_crash() {
     let mut history = PaymentHistory::new(gen_rand_fiber_public_key(), None, generate_store());
     let from = gen_rand_fiber_public_key();
     let target = gen_rand_fiber_public_key();
@@ -666,7 +666,7 @@ fn test_history_interal_fuzz_assertion_crash() {
 }
 
 #[test]
-fn test_history_interal_fail_zero_after_succ() {
+fn test_history_interval_fail_zero_after_succ() {
     let mut history = PaymentHistory::new(gen_rand_fiber_public_key(), None, generate_store());
     let from = gen_rand_fiber_public_key();
     let target = gen_rand_fiber_public_key();
@@ -695,7 +695,7 @@ fn test_history_interal_fail_zero_after_succ() {
 }
 
 #[test]
-fn test_history_interal_keep_valid_range() {
+fn test_history_interval_keep_valid_range() {
     let mut history = PaymentHistory::new(gen_rand_fiber_public_key(), None, generate_store());
     let from = gen_rand_fiber_public_key();
     let target = gen_rand_fiber_public_key();

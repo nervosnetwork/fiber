@@ -633,13 +633,13 @@ pub enum NetworkActorEvent {
     /// A funding transaction has failed.
     FundingTransactionFailed(OutPoint),
 
-    /// Channel is going to be closed forcely, and the closing transaction is ready to be broadcasted.
+    /// Channel is going to be closed forcibly, and the closing transaction is ready to be broadcasted.
     CommitmentTransactionPending(Transaction, Hash256),
 
-    /// A commitment transaction is broacasted successfully.
+    /// A commitment transaction is broadcasted successfully.
     CommitmentTransactionConfirmed(Hash256, Hash256),
 
-    /// A commitment transaction is failed to be broacasted.
+    /// A commitment transaction is failed to be broadcasted.
     CommitmentTransactionFailed(Hash256, Byte32),
 
     /// A closing transaction has been confirmed.
@@ -1902,7 +1902,7 @@ pub struct NetworkActorState<S> {
     chain_actor: ActorRef<CkbChainMessage>,
     // If the other party funding more than this amount, we will automatically accept the channel.
     open_channel_auto_accept_min_ckb_funding_amount: u64,
-    // Tha default amount of CKB to be funded when auto accepting a channel.
+    // The default amount of CKB to be funded when auto accepting a channel.
     auto_accept_channel_ckb_funding_amount: u64,
     // The default expiry delta to forward tlcs.
     tlc_expiry_delta: u64,
@@ -2376,7 +2376,7 @@ where
         let reserved_fee = open_channel.reserved_ckb_amount - occupied_capacity;
         if commitment_fee * 2 > reserved_fee {
             return Err(ProcessingChannelError::InvalidParameter(format!(
-                "Commitment fee {} which caculated by commitment fee rate {} is larger than half of reserved fee {}",
+                "Commitment fee {} which calculated by commitment fee rate {} is larger than half of reserved fee {}",
                 commitment_fee, open_channel.commitment_fee_rate, reserved_fee
             )));
         }

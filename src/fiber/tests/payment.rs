@@ -184,7 +184,7 @@ async fn test_send_payment_prefer_channels_with_larger_balance() {
 
     let (nodes, channels) = create_n_nodes_and_channels_with_index_amounts(
         &[
-            // These two channnels have the same overall capacity, but the second channel has more balance for node_0.
+            // These two channels have the same overall capacity, but the second channel has more balance for node_0.
             (
                 (0, 1),
                 (MIN_RESERVED_CKB + 5000000000, MIN_RESERVED_CKB + 5000000000),

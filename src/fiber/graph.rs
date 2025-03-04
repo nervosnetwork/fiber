@@ -366,7 +366,7 @@ where
         &self.latest_cursor
     }
 
-    fn update_lastest_cursor(&mut self, cursor: Cursor) {
+    fn update_latest_cursor(&mut self, cursor: Cursor) {
         if cursor > self.latest_cursor {
             self.latest_cursor = cursor;
         }
@@ -383,7 +383,7 @@ where
         }
         debug!("Updating network graph with {} messages", messages.len());
         for message in messages {
-            self.update_lastest_cursor(message.cursor());
+            self.update_latest_cursor(message.cursor());
             if message.chain_hash() != get_chain_hash() {
                 tracing::warn!(
                     "Chain hash mismatch: having {:?}, expecting {:?}, full message {:?}",
@@ -1245,8 +1245,8 @@ where
         // FIXME: set this to configurable parameters
         let weight = weight as f64;
         let time_pref = 0.5_f64;
-        let default_attemp_cost = 0.1_f64;
-        let penalty = default_attemp_cost * (1.0 / (0.5 - time_pref / 2.0) - 1.0);
+        let default_attempt_cost = 0.1_f64;
+        let penalty = default_attempt_cost * (1.0 / (0.5 - time_pref / 2.0) - 1.0);
         weight as u128 + (penalty / probability) as u128
     }
 }
@@ -1304,7 +1304,7 @@ impl SessionRoute {
     // Create a new route from the source to the target with the given payment hops.
     // The payment hops are the hops that the payment will go through.
     // for a payment route A -> B -> C -> D
-    // the `payment_hops` is [B, C, D], which is a convinent way for onion routing.
+    // the `payment_hops` is [B, C, D], which is a convenient way for onion routing.
     // here we need to create a session route with source, which is A -> B -> C -> D
     pub fn new(source: Pubkey, target: Pubkey, payment_hops: &[PaymentHopData]) -> Self {
         let nodes = std::iter::once(source)
