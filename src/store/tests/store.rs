@@ -383,6 +383,7 @@ fn test_channel_actor_state_store() {
         remote_constraints: ChannelConstraints::default(),
         reestablishing: false,
         created_at: SystemTime::now(),
+        scheduled_channel_update_handle: None,
     };
 
     let bincode_encoded = bincode::serialize(&state).unwrap();
@@ -494,6 +495,7 @@ fn test_serde_channel_actor_state_ciborium() {
         remote_constraints: ChannelConstraints::default(),
         reestablishing: false,
         created_at: SystemTime::now(),
+        scheduled_channel_update_handle: None,
     };
 
     let mut serialized = Vec::new();

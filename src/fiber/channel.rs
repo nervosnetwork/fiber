@@ -57,8 +57,9 @@ use musig2::{
     PubNonce, SecNonce,
 };
 use ractor::{
-    async_trait as rasync_trait, call, concurrency::Duration, Actor, ActorProcessingErr, ActorRef,
-    OutputPort, RpcReplyPort,
+    async_trait as rasync_trait, call,
+    concurrency::{Duration, JoinHandle},
+    Actor, ActorProcessingErr, ActorRef, OutputPort, RpcReplyPort,
 };
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
@@ -1428,6 +1429,7 @@ where
 
     pub async fn handle_update_command(
         &self,
+        myself: &ActorRef<ChannelActorMessage>,
         state: &mut ChannelActorState,
         command: UpdateCommand,
     ) -> ProcessingChannelResult {
@@ -1470,7 +1472,7 @@ where
 
         if updated {
             state
-                .notify_owned_channel_updated(&self.network, true)
+                .on_owned_channel_updated(myself, &self.network, true)
                 .await;
         }
 
@@ -1875,7 +1877,7 @@ where
                 }
             }
             ChannelCommand::Update(command, reply) => {
-                match self.handle_update_command(state, command).await {
+                match self.handle_update_command(myself, state, command).await {
                     Ok(_) => {
                         debug!("Update command processed successfully");
                         let _ = reply.send(Ok(()));
@@ -1922,7 +1924,7 @@ where
                 let ReloadParams { notify_changes } = reload_params;
                 if notify_changes {
                     state
-                        .notify_owned_channel_updated(&self.network, false)
+                        .on_owned_channel_updated(myself, &self.network, false)
                         .await;
                 }
                 Ok(())
@@ -3261,6 +3263,13 @@ pub struct ChannelActorState {
     pub reestablishing: bool,
 
     pub created_at: SystemTime,
+
+    // The handle for scheduled channel update broadcasting.
+    // We will use this handle to cancel the scheduled task when the channel is closed,
+    // create a new handle when we broadcast a new channel update message.
+    // The arc here is only used to implement the clone trait for the ChannelActorState.
+    #[serde(skip)]
+    pub scheduled_channel_update_handle: Option<Arc<JoinHandle<()>>>,
 }
 
 #[serde_as]
@@ -3804,14 +3813,16 @@ impl ChannelActorState {
         .await
     }
 
-    // Notify the network, network graph and channel counterparty about the channel update.
-    // We do this on channel ready, channel reestablishment, user channel parameters update.
+    // Notify the network, network graph and channel counterparty about the channel update,
+    // and update the handle for scheduled channel update broadcasting.
+    // We do this on channel ready, channel reestablishment, user channel parameters updates.
     // Some of the events require us to send an OwnedChannelUpdateEvent::Up to the network actor,
     // (e.g. channel ready and channel reestablishment) and some require us to send a
     // OwnedChannelUpdateEvent::Updated (e.g. user channel parameters update) to the network actor.
     // update_only is used to distinguish between the two cases.
-    async fn notify_owned_channel_updated(
+    async fn on_owned_channel_updated(
         &mut self,
+        myself: &ActorRef<ChannelActorMessage>,
         network: &ActorRef<NetworkActorMessage>,
         update_only: bool,
     ) {
@@ -3829,6 +3840,20 @@ impl ChannelActorState {
                     ]),
                 ))
                 .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+
+            if let Some(handle) = self.scheduled_channel_update_handle.take() {
+                handle.abort();
+            }
+
+            // We need to periodically broadcast the public channel update message to the network,
+            // so that the network can know the channel is still alive. We currently use the interval with
+            // value of BROADCAST_MESSAGES_CONSIDERED_STALE_DURATION / 2 to broadcast the channel update message.
+            // This allows us to have send at least one channel update message in the interval of BROADCAST_MESSAGES_CONSIDERED_STALE_DURATION.
+            let handle = myself.send_interval(
+                SOFT_BROADCAST_MESSAGES_CONSIDERED_STALE_DURATION / 2,
+                || ChannelActorMessage::Command(ChannelCommand::BroadcastChannelUpdate()),
+            );
+            self.scheduled_channel_update_handle = Some(Arc::new(handle));
         }
         self.send_update_tlc_info_message(network);
     }
@@ -4026,6 +4051,7 @@ impl ChannelActorState {
             latest_commitment_transaction: None,
             reestablishing: false,
             created_at: SystemTime::now(),
+            scheduled_channel_update_handle: None,
         };
         if let Some(nonce) = remote_channel_announcement_nonce {
             state.update_remote_channel_announcement_nonce(&nonce);
@@ -4094,6 +4120,7 @@ impl ChannelActorState {
             latest_commitment_transaction: None,
             reestablishing: false,
             created_at: SystemTime::now(),
+            scheduled_channel_update_handle: None,
         }
     }
 
@@ -5936,9 +5963,7 @@ impl ChannelActorState {
         self.increment_local_commitment_number();
         self.increment_remote_commitment_number();
         let peer_id = self.get_remote_peer_id();
-        self.notify_owned_channel_updated(network, false).await;
-        self.maybe_schedule_periodical_rebroadcasting(myself, network)
-            .await;
+        self.on_owned_channel_updated(myself, network, false).await;
         network
             .send_message(NetworkActorMessage::new_event(
                 NetworkActorEvent::ChannelReady(
@@ -5950,31 +5975,12 @@ impl ChannelActorState {
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
     }
 
-    async fn maybe_schedule_periodical_rebroadcasting(
-        &mut self,
-        myself: &ActorRef<ChannelActorMessage>,
-        _network: &ActorRef<NetworkActorMessage>,
-    ) {
-        if self.is_public() {
-            // We need to periodically broadcast the public channel update message to the network,
-            // so that the network can know the channel is still alive. We currently use the interval with
-            // value of BROADCAST_MESSAGES_CONSIDERED_STALE_DURATION / 2 to broadcast the channel update message.
-            // This allows us to have send at least one channel update message in the interval of BROADCAST_MESSAGES_CONSIDERED_STALE_DURATION.
-            myself.send_interval(
-                SOFT_BROADCAST_MESSAGES_CONSIDERED_STALE_DURATION / 2,
-                || ChannelActorMessage::Command(ChannelCommand::BroadcastChannelUpdate()),
-            );
-        }
-    }
-
     async fn on_ready_channel_reestablished(
         &mut self,
         myself: &ActorRef<ChannelActorMessage>,
         network: &ActorRef<NetworkActorMessage>,
     ) {
-        self.notify_owned_channel_updated(network, false).await;
-        self.maybe_schedule_periodical_rebroadcasting(myself, network)
-            .await;
+        self.on_owned_channel_updated(myself, network, false).await;
     }
 
     fn append_remote_commitment_point(&mut self, commitment_point: Pubkey) {
