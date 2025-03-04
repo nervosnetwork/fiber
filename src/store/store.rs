@@ -72,6 +72,101 @@ fn update_channel_timestamp(
     batch.put(timestamp_key, timestamps);
 }
 
+fn delete_latest_channel_announcement_timestamp(batch: &mut Batch, outpoint: &OutPoint) {
+    let message_id = BroadcastMessageID::ChannelAnnouncement(outpoint.clone());
+    batch.delete(
+        [
+            &[BROADCAST_MESSAGE_TIMESTAMP_PREFIX],
+            message_id.to_bytes().as_slice(),
+        ]
+        .concat(),
+    );
+}
+
+// Given a channel update timestamp, we try to find if this is a "latest" channel update timestamp,
+// if it is, we will update latest channel update timestamp with 0u64, otherwise we will do nothing.
+// When the timestamps in both directions of the channel update are zeroized, the KV pair of the channel
+// update timestamp will be deleted as well.
+fn delete_latest_channel_update_timestamp(
+    batch: &mut Batch,
+    outpoint: &OutPoint,
+    old_timestamp: u64,
+) {
+    let message_id = BroadcastMessageID::ChannelUpdate(outpoint.clone());
+    let timestamps = batch.get(
+        [
+            &[BROADCAST_MESSAGE_TIMESTAMP_PREFIX],
+            message_id.to_bytes().as_slice(),
+        ]
+        .concat(),
+    );
+    if let Some(timestamps) = timestamps {
+        let mut timestamps: [u8; 24] = timestamps
+            .try_into()
+            .expect("Invalid timestamp value length");
+        for index in [8, 16] {
+            let current_timestamp = u64::from_be_bytes(
+                timestamps[index..index + 8]
+                    .try_into()
+                    .expect("timestamp length valid, shown above"),
+            );
+            if current_timestamp == old_timestamp {
+                timestamps[index..index + 8].copy_from_slice(&[0; 8]);
+            }
+        }
+        if timestamps == [0; 24] {
+            batch.delete(
+                [
+                    &[BROADCAST_MESSAGE_TIMESTAMP_PREFIX],
+                    message_id.to_bytes().as_slice(),
+                ]
+                .concat(),
+            );
+        } else {
+            batch.put(
+                [
+                    &[BROADCAST_MESSAGE_TIMESTAMP_PREFIX],
+                    message_id.to_bytes().as_slice(),
+                ]
+                .concat(),
+                timestamps,
+            );
+        }
+    }
+}
+
+// Given a node announcement timestamp, we try to find if this is a "latest" node announcement timestamp,
+// if it is, we will delete the KV pair of the latest node announcement timestamp.
+fn delete_latest_node_announcement_timestamp(
+    batch: &mut Batch,
+    pk: &crate::fiber::types::Pubkey,
+    timestamp: u64,
+) {
+    if let Some(old) = batch.get(
+        [
+            &[BROADCAST_MESSAGE_TIMESTAMP_PREFIX],
+            BroadcastMessageID::NodeAnnouncement(*pk)
+                .to_bytes()
+                .as_slice(),
+        ]
+        .concat(),
+    ) {
+        let old_timestamp =
+            u64::from_be_bytes(old.try_into().expect("Invalid timestamp value length"));
+        if old_timestamp == timestamp {
+            batch.delete(
+                [
+                    &[BROADCAST_MESSAGE_TIMESTAMP_PREFIX],
+                    BroadcastMessageID::NodeAnnouncement(*pk)
+                        .to_bytes()
+                        .as_slice(),
+                ]
+                .concat(),
+            );
+        }
+    }
+}
+
 impl Store {
     pub fn new<P: AsRef<Path>>(path: P) -> Result<Self, String> {
         let db = Self::open_db(path.as_ref())?;
@@ -594,6 +689,25 @@ impl GossipMessageStore for Store {
             .concat(),
         )
         .map(|v| u64::from_be_bytes(v.try_into().expect("Invalid timestamp value length")))
+    }
+
+    fn delete_broadcast_message(&self, cursor: &Cursor) {
+        let key = [&[BROADCAST_MESSAGE_PREFIX], cursor.to_bytes().as_slice()].concat();
+        let mut batch = self.batch();
+        batch.delete(key);
+        // Also delete the latest timestamp.
+        match &cursor.message_id {
+            BroadcastMessageID::ChannelAnnouncement(outpoint) => {
+                delete_latest_channel_announcement_timestamp(&mut batch, outpoint);
+            }
+            BroadcastMessageID::ChannelUpdate(outpoint) => {
+                delete_latest_channel_update_timestamp(&mut batch, outpoint, cursor.timestamp);
+            }
+            BroadcastMessageID::NodeAnnouncement(pk) => {
+                delete_latest_node_announcement_timestamp(&mut batch, pk, cursor.timestamp);
+            }
+        }
+        batch.commit();
     }
 
     fn save_channel_announcement(

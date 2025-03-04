@@ -27,12 +27,15 @@ use tentacle::{
     SessionId,
 };
 use tokio::sync::oneshot;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, trace, warn};
 
 use crate::{
     ckb::{CkbChainMessage, GetBlockTimestampRequest, TraceTxRequest, TraceTxResponse},
     fiber::{network::DEFAULT_CHAIN_ACTOR_TIMEOUT, types::secp256k1_instance},
-    now_timestamp_as_millis_u64, unwrap_or_return, Error,
+    now_timestamp_as_millis_u64,
+    tasks::{new_tokio_cancellation_token, new_tokio_task_tracker},
+    unwrap_or_return, Error,
 };
 
 use super::{
@@ -54,6 +57,9 @@ pub(crate) const MAX_MISSING_BROADCAST_MESSAGE_TIMESTAMP_DRIFT: Duration =
 // this duration. The current value is two weeks.
 pub(crate) const BROADCAST_MESSAGES_CONSIDERED_STALE_DURATION: Duration =
     Duration::from_secs(60 * 60 * 24 * 14);
+
+// The interval to prune stale broadcast messages. The current value is one day.
+const PRUNE_STALE_BROADCAST_MESSAGES_INTERVAL: Duration = Duration::from_secs(60 * 60 * 24);
 
 const MAX_BROADCAST_MESSAGE_TIMESTAMP_DRIFT: Duration = Duration::from_secs(60);
 const MAX_BROADCAST_MESSAGE_TIMESTAMP_DRIFT_MILLIS: u64 =
@@ -217,6 +223,8 @@ pub trait GossipMessageStore {
         )
     }
 
+    fn delete_broadcast_message(&self, cursor: &Cursor);
+
     fn save_channel_announcement(&self, timestamp: u64, channel_announcement: ChannelAnnouncement);
 
     fn save_channel_update(&self, channel_update: ChannelUpdate);
@@ -315,6 +323,12 @@ pub enum GossipActorMessage {
     // 2. Check if there are any pending broadcast message queries. If so, broadcast them to the network.
     TickNetworkMaintenance,
 
+    // Some channels in the gossip store haven't been updated for a long time. We should prune them.
+    PruneStaleGossipMessages,
+
+    // Signify the pruning of stale broadcast messages is done. We can now start a new prune process.
+    PruneStaleGossipMessagesDone,
+
     // The active syncing process is finished for a peer.
     ActiveSyncingFinished(PeerId, Cursor),
 
@@ -371,6 +385,7 @@ where
                 store_sender,
                 gossip_network_maintenance_interval,
                 gossip_store_maintenance_interval,
+                PRUNE_STALE_BROADCAST_MESSAGES_INTERVAL,
                 announce_private_addr,
                 num_targeted_active_syncing_peers.unwrap_or(MAX_NUM_OF_ACTIVE_SYNCING_PEERS),
                 num_targeted_outbound_passive_syncing_peers
@@ -1596,6 +1611,7 @@ pub(crate) struct GossipActorState<S> {
     query_reply_ports:
         HashMap<(PeerId, u64), RpcReplyPort<Result<QueryBroadcastMessagesResult, GossipError>>>,
     peer_states: HashMap<PeerId, PeerState>,
+    has_active_prune_task: bool,
 }
 
 impl<S> GossipActorState<S>
@@ -2291,6 +2307,7 @@ where
         oneshot::Sender<ExtendedGossipMessageStore<S>>,
         Duration,
         Duration,
+        Duration,
         bool,
         usize,
         usize,
@@ -2306,6 +2323,7 @@ where
             tx,
             network_maintenance_interval,
             store_maintenance_interval,
+            store_prune_interval,
             announce_private_addr,
             num_targeted_active_syncing_peers,
             num_targeted_outbound_passive_syncing_peers,
@@ -2348,6 +2366,9 @@ where
         myself.send_interval(network_maintenance_interval, || {
             GossipActorMessage::TickNetworkMaintenance
         });
+        myself.send_interval(store_prune_interval, || {
+            GossipActorMessage::PruneStaleGossipMessages
+        });
         let state = Self::State {
             store,
             control: Default::default(),
@@ -2359,6 +2380,7 @@ where
             query_reply_ports: Default::default(),
             num_finished_active_syncing_peers: Default::default(),
             peer_states: Default::default(),
+            has_active_prune_task: false,
         };
         Ok(state)
     }
@@ -2458,6 +2480,28 @@ where
                 for peer in state.peers_to_start_passive_syncing() {
                     state.start_passive_syncer(&peer).await;
                 }
+            }
+
+            GossipActorMessage::PruneStaleGossipMessages => {
+                if state.has_active_prune_task {
+                    return Ok(());
+                }
+                state.has_active_prune_task = true;
+                let task_tracker = new_tokio_task_tracker();
+                let cancellation_token = new_tokio_cancellation_token();
+                let store = state.store.get_store().clone();
+                let myself = myself.clone();
+                // Spawning a subtask to avoid blocking normal message processing of the actor.
+                task_tracker.spawn(async move {
+                    prune_stale_gossip_messages(store, cancellation_token).await;
+                    myself
+                        .send_message(GossipActorMessage::PruneStaleGossipMessagesDone)
+                        .expect("send prune done message");
+                });
+            }
+
+            GossipActorMessage::PruneStaleGossipMessagesDone => {
+                state.has_active_prune_task = false;
             }
 
             GossipActorMessage::ActiveSyncingFinished(peer_id, cursor) => {
@@ -2634,6 +2678,63 @@ where
         }
 
         Ok(())
+    }
+}
+
+pub(crate) async fn prune_stale_gossip_messages<S: GossipMessageStore>(
+    store: S,
+    cancellation_token: CancellationToken,
+) where
+    S: GossipMessageStore,
+{
+    // Although messages are considered stale after BROADCAST_MESSAGES_CONSIDERED_STALE_DURATION,
+    // this function will only delete messages that are slightly older than that duration.
+    let prune_duration = BROADCAST_MESSAGES_CONSIDERED_STALE_DURATION * 2;
+    let stale_timestamp =
+        match now_timestamp_as_millis_u64().checked_sub(prune_duration.as_millis() as u64) {
+            None => return,
+            Some(timestamp) => timestamp,
+        };
+    let mut cursor = Cursor::default();
+    loop {
+        if cancellation_token.is_cancelled() {
+            break;
+        }
+        let messages = store.get_broadcast_messages(&cursor, None);
+        for message in &messages {
+            if message.timestamp() < stale_timestamp {
+                if let BroadcastMessageWithTimestamp::ChannelAnnouncement(_timestamp, message) =
+                    message
+                {
+                    let latest_channel_update_timestamp = [true, false]
+                        .into_iter()
+                        .flat_map(|is_node_1| {
+                            store.get_latest_channel_update_timestamp(
+                                &message.channel_outpoint,
+                                is_node_1,
+                            )
+                        })
+                        .max()
+                        .unwrap_or_default();
+                    // Ignore deleting channel announcement if there is a newer channel update.
+                    if latest_channel_update_timestamp > stale_timestamp {
+                        continue;
+                    }
+                }
+                store.delete_broadcast_message(&message.cursor());
+            }
+        }
+        match messages.last() {
+            Some(last_message) => {
+                cursor = last_message.cursor();
+                if last_message.timestamp() >= stale_timestamp {
+                    break;
+                }
+            }
+            None => {
+                break;
+            }
+        }
     }
 }
 
