@@ -769,6 +769,13 @@ async fn test_gossip_store_prune_node_announcement() {
             .get_latest_node_announcement(&sk.pubkey()),
         None
     );
+    assert_eq!(
+        context
+            .get_store()
+            .get_broadcast_messages(&Cursor::default(), None)
+            .len(),
+        1
+    );
 
     context
         .gossip_actor
@@ -783,6 +790,12 @@ async fn test_gossip_store_prune_node_announcement() {
             .get_store()
             .get_latest_node_announcement(&sk.pubkey()),
         None
+    );
+    assert_eq!(
+        context
+            .get_store()
+            .get_broadcast_messages(&Cursor::default(), None),
+        vec![]
     );
 }
 
@@ -816,6 +829,13 @@ async fn test_gossip_store_prune_channel_announcement() {
             .get_latest_channel_announcement(channel_context.channel_outpoint()),
         None
     );
+    assert_eq!(
+        context
+            .get_store()
+            .get_broadcast_messages(&Cursor::default(), None)
+            .len(),
+        1
+    );
 
     context
         .gossip_actor
@@ -830,6 +850,12 @@ async fn test_gossip_store_prune_channel_announcement() {
             .get_store()
             .get_latest_channel_announcement(channel_context.channel_outpoint()),
         None
+    );
+    assert_eq!(
+        context
+            .get_store()
+            .get_broadcast_messages(&Cursor::default(), None),
+        vec![]
     );
 }
 
@@ -895,6 +921,13 @@ async fn test_gossip_store_prune_channel_update() {
         None,
         "channel update of node 2 should be saved"
     );
+    assert_eq!(
+        context
+            .get_store()
+            .get_broadcast_messages(&Cursor::default(), None)
+            .len(),
+        3
+    );
 
     context
         .gossip_actor
@@ -926,6 +959,13 @@ async fn test_gossip_store_prune_channel_update() {
             .get_latest_channel_update(channel_context.channel_outpoint(), false),
         None,
         "channel update of node 2 should not be pruned as it is active"
+    );
+    assert_eq!(
+        context
+            .get_store()
+            .get_broadcast_messages(&Cursor::default(), None)
+            .len(),
+        3
     );
 
     context
@@ -959,6 +999,13 @@ async fn test_gossip_store_prune_channel_update() {
         None,
         "channel update of node 2 should not be pruned as it is active"
     );
+    assert_eq!(
+        context
+            .get_store()
+            .get_broadcast_messages(&Cursor::default(), None)
+            .len(),
+        2
+    );
 
     context
         .gossip_actor
@@ -990,5 +1037,11 @@ async fn test_gossip_store_prune_channel_update() {
             .get_latest_channel_update(channel_context.channel_outpoint(), false),
         None,
         "channel update of node 2 should not be pruned as it is outdated"
+    );
+    assert_eq!(
+        context
+            .get_store()
+            .get_broadcast_messages(&Cursor::default(), None),
+        vec![]
     );
 }
