@@ -67,7 +67,7 @@ use thiserror::Error;
 use tokio::sync::oneshot;
 
 use super::{
-    gossip::BROADCAST_MESSAGES_CONSIDERED_STALE_DURATION, graph::ChannelUpdateInfo,
+    gossip::SOFT_BROADCAST_MESSAGES_CONSIDERED_STALE_DURATION, graph::ChannelUpdateInfo,
     types::ForwardTlcResult,
 };
 use std::{
@@ -5960,9 +5960,10 @@ impl ChannelActorState {
             // so that the network can know the channel is still alive. We currently use the interval with
             // value of BROADCAST_MESSAGES_CONSIDERED_STALE_DURATION / 2 to broadcast the channel update message.
             // This allows us to have send at least one channel update message in the interval of BROADCAST_MESSAGES_CONSIDERED_STALE_DURATION.
-            myself.send_interval(BROADCAST_MESSAGES_CONSIDERED_STALE_DURATION / 2, || {
-                ChannelActorMessage::Command(ChannelCommand::BroadcastChannelUpdate())
-            });
+            myself.send_interval(
+                SOFT_BROADCAST_MESSAGES_CONSIDERED_STALE_DURATION / 2,
+                || ChannelActorMessage::Command(ChannelCommand::BroadcastChannelUpdate()),
+            );
         }
     }
 

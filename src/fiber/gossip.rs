@@ -55,8 +55,12 @@ pub(crate) const MAX_MISSING_BROADCAST_MESSAGE_TIMESTAMP_DRIFT: Duration =
 
 // The duration to consider a broadcast message as stale. We will start to sync messages no older than
 // this duration. The current value is two weeks.
-pub(crate) const BROADCAST_MESSAGES_CONSIDERED_STALE_DURATION: Duration =
+pub(crate) const SOFT_BROADCAST_MESSAGES_CONSIDERED_STALE_DURATION: Duration =
     Duration::from_secs(60 * 60 * 24 * 14);
+
+// The duration to delete a broadcast message from the store. The current value is four weeks.
+pub(crate) const HARD_BROADCAST_MESSAGES_CONSIDERED_STALE_DURATION: Duration =
+    Duration::from_secs(60 * 60 * 24 * 28);
 
 // The interval to prune stale broadcast messages. The current value is one day.
 const PRUNE_STALE_BROADCAST_MESSAGES_INTERVAL: Duration = Duration::from_secs(60 * 60 * 24);
@@ -1811,7 +1815,7 @@ where
             .unwrap_or_default();
         let now = now_timestamp_as_millis_u64();
         let timestamp_after_considered_stale = now
-            .checked_sub(BROADCAST_MESSAGES_CONSIDERED_STALE_DURATION.as_millis() as u64)
+            .checked_sub(SOFT_BROADCAST_MESSAGES_CONSIDERED_STALE_DURATION.as_millis() as u64)
             .unwrap_or_default();
         let timestamp = max(safe_cursor_timestamp, timestamp_after_considered_stale);
         Cursor::new(timestamp, BroadcastMessageID::default())
@@ -2687,9 +2691,7 @@ pub(crate) async fn prune_stale_gossip_messages<S: GossipMessageStore>(
 ) where
     S: GossipMessageStore,
 {
-    // Although messages are considered stale after BROADCAST_MESSAGES_CONSIDERED_STALE_DURATION,
-    // this function will only delete messages that are slightly older than that duration.
-    let prune_duration = BROADCAST_MESSAGES_CONSIDERED_STALE_DURATION * 2;
+    let prune_duration = HARD_BROADCAST_MESSAGES_CONSIDERED_STALE_DURATION;
     let stale_timestamp =
         match now_timestamp_as_millis_u64().checked_sub(prune_duration.as_millis() as u64) {
             None => return,
