@@ -144,12 +144,6 @@ pub fn get_fiber_config<P: AsRef<Path>>(base_dir: P, node_name: Option<&str>) ->
             .map(Into::into),
         announce_listening_addr: Some(true),
         base_dir: Some(PathBuf::from(base_dir)),
-        // This config is needed for the timely processing of gossip messages.
-        // Without this, some tests may fail due to the delay in processing gossip messages.
-        gossip_network_maintenance_interval_ms: Some(50),
-        // This config is needed for the timely processing of gossip messages.
-        // Without this, some tests may fail due to the delay in processing gossip messages.
-        gossip_store_maintenance_interval_ms: Some(50),
         auto_accept_channel_ckb_funding_amount: Some(0), // Disable auto accept for unit tests
         announce_private_addr: Some(true),               // Announce private address for unit tests
         ..Default::default()

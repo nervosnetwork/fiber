@@ -40,6 +40,7 @@ use crate::{
 };
 
 use super::{
+    config::DEFAULT_GOSSIP_NETWORK_MAINTENANCE_INTERVAL_MS,
     network::{check_chain_hash, get_chain_hash, GossipMessageWithPeerId, GOSSIP_PROTOCOL_ID},
     types::{
         BroadcastMessage, BroadcastMessageID, BroadcastMessageQuery, BroadcastMessageQueryFlags,
@@ -48,6 +49,7 @@ use super::{
         GetBroadcastMessagesResult, GossipMessage, NodeAnnouncement, Pubkey,
         QueryBroadcastMessages, QueryBroadcastMessagesResult,
     },
+    FiberConfig,
 };
 
 // The maximum duration drift between the broadcast message timestamp and latest cursor in store.
@@ -359,6 +361,56 @@ pub enum GossipActorMessage {
     GossipMessageReceived(GossipMessageWithPeerId),
 }
 
+pub struct GossipConfig {
+    pub(crate) actor_name: Option<String>,
+    pub(crate) gossip_network_maintenance_interval: Duration,
+    pub(crate) gossip_store_maintenance_interval: Duration,
+    pub(crate) gossip_store_prune_interval: Duration,
+    pub(crate) announce_private_addr: bool,
+    pub(crate) num_targeted_active_syncing_peers: usize,
+    pub(crate) num_targeted_outbound_passive_syncing_peers: usize,
+}
+
+impl Default for GossipConfig {
+    fn default() -> Self {
+        Self {
+            actor_name: None,
+            gossip_network_maintenance_interval: Duration::from_millis(
+                DEFAULT_GOSSIP_NETWORK_MAINTENANCE_INTERVAL_MS,
+            ),
+            gossip_store_maintenance_interval: Duration::from_millis(
+                DEFAULT_GOSSIP_NETWORK_MAINTENANCE_INTERVAL_MS,
+            ),
+            gossip_store_prune_interval: PRUNE_STALE_BROADCAST_MESSAGES_INTERVAL,
+            announce_private_addr: true,
+            num_targeted_active_syncing_peers: MAX_NUM_OF_ACTIVE_SYNCING_PEERS,
+            num_targeted_outbound_passive_syncing_peers: MIN_NUM_OF_PASSIVE_SYNCING_PEERS,
+        }
+    }
+}
+
+impl From<&FiberConfig> for GossipConfig {
+    fn from(config: &FiberConfig) -> Self {
+        Self {
+            actor_name: None,
+            gossip_network_maintenance_interval: Duration::from_millis(
+                config.gossip_network_maintenance_interval_ms(),
+            ),
+            gossip_store_maintenance_interval: Duration::from_millis(
+                config.gossip_store_maintenance_interval_ms(),
+            ),
+            gossip_store_prune_interval: PRUNE_STALE_BROADCAST_MESSAGES_INTERVAL,
+            announce_private_addr: config.announce_private_addr(),
+            num_targeted_active_syncing_peers: config
+                .gossip_network_num_targeted_active_syncing_peers
+                .unwrap_or(MAX_NUM_OF_ACTIVE_SYNCING_PEERS),
+            num_targeted_outbound_passive_syncing_peers: config
+                .gossip_network_num_targeted_outbound_passive_syncing_peers
+                .unwrap_or(MIN_NUM_OF_PASSIVE_SYNCING_PEERS),
+        }
+    }
+}
+
 pub struct GossipService<S> {
     extended_store: ExtendedGossipMessageStore<S>,
 }
@@ -367,35 +419,38 @@ impl<S> GossipService<S>
 where
     S: GossipMessageStore + Clone + Send + Sync + 'static,
 {
-    #[allow(clippy::too_many_arguments)]
     pub async fn start(
-        name: Option<String>,
-        gossip_network_maintenance_interval: Duration,
-        gossip_store_maintenance_interval: Duration,
-        announce_private_addr: bool,
-        num_targeted_active_syncing_peers: Option<usize>,
-        num_targeted_outbound_passive_syncing_peers: Option<usize>,
+        gossip_config: GossipConfig,
         store: S,
         chain_actor: ActorRef<CkbChainMessage>,
         supervisor: ActorCell,
     ) -> (Self, GossipProtocolHandle) {
+        let GossipConfig {
+            actor_name,
+            gossip_network_maintenance_interval,
+            gossip_store_maintenance_interval,
+            gossip_store_prune_interval,
+            announce_private_addr,
+            num_targeted_active_syncing_peers,
+            num_targeted_outbound_passive_syncing_peers,
+        } = gossip_config;
+
         let (network_control_sender, network_control_receiver) = oneshot::channel();
 
         let (store_sender, store_receiver) = oneshot::channel();
 
         let (actor, _handle) = ActorRuntime::spawn_linked_instant(
-            name,
+            actor_name,
             GossipActor::new(),
             (
                 network_control_receiver,
                 store_sender,
                 gossip_network_maintenance_interval,
                 gossip_store_maintenance_interval,
-                PRUNE_STALE_BROADCAST_MESSAGES_INTERVAL,
+                gossip_store_prune_interval,
                 announce_private_addr,
-                num_targeted_active_syncing_peers.unwrap_or(MAX_NUM_OF_ACTIVE_SYNCING_PEERS),
-                num_targeted_outbound_passive_syncing_peers
-                    .unwrap_or(MIN_NUM_OF_PASSIVE_SYNCING_PEERS),
+                num_targeted_active_syncing_peers,
+                num_targeted_outbound_passive_syncing_peers,
                 store,
                 chain_actor,
             ),

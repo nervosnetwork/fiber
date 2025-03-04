@@ -76,7 +76,7 @@ use crate::fiber::channel::{
     AddTlcCommand, AddTlcResponse, TxCollaborationCommand, TxUpdateCommand,
 };
 use crate::fiber::config::{DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT};
-use crate::fiber::gossip::{GossipService, SubscribableGossipMessageStore};
+use crate::fiber::gossip::{GossipConfig, GossipService, SubscribableGossipMessageStore};
 use crate::fiber::graph::{PaymentSession, PaymentSessionStatus};
 use crate::fiber::serde_utils::EntityHex;
 use crate::fiber::types::{
@@ -3048,12 +3048,7 @@ where
         let handle = NetworkServiceHandle::new(myself.clone());
         let fiber_handle = FiberProtocolHandle::from(&handle);
         let (gossip_service, gossip_handle) = GossipService::start(
-            Some(format!("gossip actor {:?}", my_peer_id)),
-            Duration::from_millis(config.gossip_network_maintenance_interval_ms()),
-            Duration::from_millis(config.gossip_store_maintenance_interval_ms()),
-            config.announce_private_addr(),
-            config.gossip_network_num_targeted_active_syncing_peers,
-            config.gossip_network_num_targeted_outbound_passive_syncing_peers,
+            GossipConfig::from(&config),
             self.store.clone(),
             self.chain_actor.clone(),
             myself.get_cell(),

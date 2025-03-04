@@ -11,7 +11,8 @@ use tokio::sync::RwLock;
 
 use crate::fiber::config::AnnouncedNodeName;
 use crate::fiber::gossip::{
-    GossipActorMessage, GossipService, HARD_BROADCAST_MESSAGES_CONSIDERED_STALE_DURATION,
+    GossipActorMessage, GossipConfig, GossipService,
+    HARD_BROADCAST_MESSAGES_CONSIDERED_STALE_DURATION,
 };
 use crate::fiber::tests::test_utils::{establish_channel_between_nodes, NetworkNode};
 use crate::fiber::types::{ChannelUpdateChannelFlags, NodeAnnouncement};
@@ -51,12 +52,11 @@ impl GossipTestingContext {
         let root_actor = get_test_root_actor().await;
 
         let (gossip_service, gossip_protocol_handle) = GossipService::start(
-            None,
-            Duration::from_millis(50),
-            Duration::from_millis(50),
-            true,
-            None,
-            None,
+            GossipConfig {
+                gossip_network_maintenance_interval: Duration::from_millis(50),
+                gossip_store_maintenance_interval: Duration::from_millis(50),
+                ..Default::default()
+            },
             store.clone(),
             chain_actor.clone(),
             root_actor.get_cell(),
