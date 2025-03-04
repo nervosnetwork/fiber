@@ -46,9 +46,24 @@ pub struct GetPaymentCommandResult {
     #[serde_as(as = "U128Hex")]
     pub fee: u128,
 
+    /// The custom records to be included in the payment.
+    pub custom_records: Option<PaymentCustomRecords>,
+
     #[cfg(debug_assertions)]
     /// The route information for the payment
     router: SessionRoute,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Default)]
+pub struct PaymentCustomRecords {
+    /// custom_records is key value pairs with HashMap<u32, Vec<u8>>,
+    pub data: HashMap<u32, Vec<u8>>,
+}
+
+impl From<super::super::fiber::PaymentCustomRecords> for PaymentCustomRecords {
+    fn from(records: super::super::fiber::PaymentCustomRecords) -> Self {
+        PaymentCustomRecords { data: records.data }
+    }
 }
 
 #[serde_as]
@@ -209,6 +224,7 @@ where
             last_updated_at: response.last_updated_at,
             failed_error: response.failed_error,
             fee: response.fee,
+            custom_records: response.custom_records.map(|records| records.into()),
             #[cfg(debug_assertions)]
             router: response.router,
         })
@@ -231,6 +247,7 @@ where
             created_at: response.created_at,
             failed_error: response.failed_error,
             fee: response.fee,
+            custom_records: response.custom_records.map(|records| records.into()),
             #[cfg(debug_assertions)]
             router: response.router,
         })
