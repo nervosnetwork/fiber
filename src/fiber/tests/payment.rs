@@ -3,6 +3,7 @@ use super::test_utils::init_tracing;
 use crate::fiber::channel::UpdateCommand;
 use crate::fiber::graph::PaymentSessionStatus;
 use crate::fiber::network::HopHint;
+use crate::fiber::network::PaymentCustomRecords;
 use crate::fiber::network::SendPaymentCommand;
 use crate::fiber::tests::test_utils::*;
 use crate::fiber::types::Hash256;
@@ -10,7 +11,72 @@ use crate::fiber::NetworkActorCommand;
 use crate::fiber::NetworkActorMessage;
 use ckb_jsonrpc_types::Status;
 use ractor::call;
+use std::collections::HashMap;
 use std::collections::HashSet;
+
+#[tokio::test]
+async fn test_send_payment_custom_records() {
+    let (nodes, _channels) = create_n_nodes_and_channels_with_index_amounts(
+        &[
+            ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+            ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+        ],
+        2,
+        true,
+    )
+    .await;
+    let [mut node_0, node_1] = nodes.try_into().expect("2 nodes");
+    let source_node = &mut node_0;
+    let target_pubkey = node_1.pubkey;
+
+    // sleep for a while
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
+    let data: HashMap<_, _> = vec![
+        (1, "hello".to_string().into_bytes()),
+        (2, "world".to_string().into_bytes()),
+    ]
+    .into_iter()
+    .collect();
+    let custom_records = PaymentCustomRecords { data };
+    let res = source_node
+        .send_payment(SendPaymentCommand {
+            target_pubkey: Some(target_pubkey),
+            amount: Some(10000000000),
+            payment_hash: None,
+            final_tlc_expiry_delta: None,
+            tlc_expiry_limit: None,
+            invoice: None,
+            timeout: None,
+            max_fee_amount: None,
+            max_parts: None,
+            keysend: Some(true),
+            udt_type_script: None,
+            allow_self_payment: false,
+            hop_hints: None,
+            dry_run: false,
+            custom_records: Some(custom_records.clone()),
+        })
+        .await;
+
+    eprintln!("res: {:?}", res);
+    // sleep for a while
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+    let payment_hash = res.unwrap().payment_hash;
+
+    let message = |rpc_reply| -> NetworkActorMessage {
+        NetworkActorMessage::Command(NetworkActorCommand::GetPayment(payment_hash, rpc_reply))
+    };
+    let res = call!(source_node.network_actor, message)
+        .expect("node_a alive")
+        .unwrap();
+
+    assert_eq!(res.status, PaymentSessionStatus::Success);
+    let got_custom_records = node_1
+        .get_payment_custom_records(&payment_hash)
+        .expect("custom records");
+    assert_eq!(got_custom_records, custom_records);
+}
 
 // This test will send two payments from node_0 to node_1, the first payment will run
 // with dry_run, the second payment will run without dry_run. Both payments will be successful.
@@ -89,6 +155,7 @@ async fn test_send_payment_prefer_newer_channels() {
             allow_self_payment: false,
             hop_hints: None,
             dry_run: false,
+            custom_records: None,
         })
         .await;
 
@@ -148,6 +215,7 @@ async fn test_send_payment_prefer_channels_with_larger_balance() {
             allow_self_payment: false,
             hop_hints: None,
             dry_run: false,
+            custom_records: None,
         })
         .await;
 
@@ -299,6 +367,7 @@ async fn test_send_payment_over_private_channel() {
                 allow_self_payment: false,
                 hop_hints: None,
                 dry_run: false,
+                custom_records: None,
             })
             .await;
 
@@ -598,6 +667,7 @@ async fn test_send_payment_with_route_to_self_with_hop_hints() {
             keysend: Some(true),
             udt_type_script: None,
             allow_self_payment: true,
+            custom_records: None,
             hop_hints: Some(vec![HopHint {
                 pubkey: node_0.pubkey,
                 channel_funding_tx: channel_0_funding_tx,
@@ -710,6 +780,7 @@ async fn test_send_payment_with_route_to_self_with_outbound_hop_hints() {
             keysend: Some(true),
             udt_type_script: None,
             allow_self_payment: true,
+            custom_records: None,
             hop_hints: Some(vec![HopHint {
                 pubkey: node_0.pubkey,
                 channel_funding_tx: channel_0_funding_tx,
@@ -800,6 +871,7 @@ async fn test_send_payment_select_channel_with_hop_hints() {
             keysend: Some(true),
             udt_type_script: None,
             allow_self_payment: true,
+            custom_records: None,
             // at node_1, we must use channel_3 to reach node_2
             hop_hints: Some(vec![HopHint {
                 pubkey: node_2.pubkey,
@@ -847,6 +919,7 @@ async fn test_send_payment_select_channel_with_hop_hints() {
             keysend: Some(true),
             udt_type_script: None,
             allow_self_payment: true,
+            custom_records: None,
             // at node_1, we must use channel_2 to reach node_2
             hop_hints: Some(vec![HopHint {
                 pubkey: node_1.pubkey,
@@ -891,6 +964,7 @@ async fn test_send_payment_select_channel_with_hop_hints() {
             keysend: Some(true),
             udt_type_script: None,
             allow_self_payment: true,
+            custom_records: None,
             // at node_1, we must use channel_3 to reach node_2
             hop_hints: Some(vec![HopHint {
                 pubkey: node_2.pubkey,
@@ -946,6 +1020,7 @@ async fn test_send_payment_two_nodes_with_hop_hints_and_multiple_channels() {
             keysend: Some(true),
             udt_type_script: None,
             allow_self_payment: true,
+            custom_records: None,
             hop_hints: Some(vec![
                 // node1 - channel_1 -> node2
                 HopHint {
@@ -1048,6 +1123,7 @@ async fn test_network_send_payment_randomly_send_each_other() {
                     allow_self_payment: false,
                     hop_hints: None,
                     dry_run: false,
+                    custom_records: None,
                 },
                 rpc_reply,
             ))
@@ -1228,6 +1304,7 @@ async fn test_network_three_nodes_send_each_other() {
                 udt_type_script: None,
                 allow_self_payment: false,
                 hop_hints: None,
+                custom_records: None,
                 dry_run: false,
             },
             rpc_reply,
@@ -1258,6 +1335,7 @@ async fn test_network_three_nodes_send_each_other() {
                 udt_type_script: None,
                 allow_self_payment: false,
                 hop_hints: None,
+                custom_records: None,
                 dry_run: false,
             },
             rpc_reply,

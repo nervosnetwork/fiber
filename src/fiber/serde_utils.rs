@@ -1,7 +1,10 @@
+use crate::fiber::PaymentCustomRecords;
+use hex::FromHex;
 use molecule::prelude::Entity;
 use musig2::{BinaryEncoding, CompactSignature, PubNonce, SCHNORR_SIGNATURE_SIZE};
-use serde::{de::Error, Deserialize, Deserializer, Serializer};
+use serde::{de::Error, Deserialize, Deserializer, Serialize, Serializer};
 use serde_with::{serde_conv, DeserializeAs, SerializeAs};
+use std::collections::HashMap;
 
 pub fn from_hex<'de, D, E>(deserializer: D) -> Result<E, D::Error>
 where
@@ -164,5 +167,39 @@ impl<'de> DeserializeAs<'de, PubNonce> for PubNonceAsBytes {
             return Err(serde::de::Error::custom("expected 66 bytes"));
         }
         PubNonce::from_bytes(&bytes).map_err(serde::de::Error::custom)
+    }
+}
+
+pub struct PaymentCustomRecordsHex;
+
+impl SerializeAs<PaymentCustomRecords> for PaymentCustomRecordsHex {
+    fn serialize_as<S>(source: &PaymentCustomRecords, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut map: HashMap<String, String> = HashMap::new();
+        for (key, value) in &source.data {
+            let key_hex: String = format!("0x{:x}", key);
+            let value_hex: String = hex::encode(value);
+            map.insert(key_hex, value_hex);
+        }
+        map.serialize(serializer)
+    }
+}
+
+impl<'de> DeserializeAs<'de, PaymentCustomRecords> for PaymentCustomRecordsHex {
+    fn deserialize_as<D>(deserializer: D) -> Result<PaymentCustomRecords, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let map: HashMap<String, String> = HashMap::deserialize(deserializer)?;
+        let mut data = HashMap::new();
+        for (key, value) in map {
+            let key = u32::from_str_radix(key.trim_start_matches("0x"), 16)
+                .map_err(serde::de::Error::custom)?;
+            let value = Vec::from_hex(&value).map_err(serde::de::Error::custom)?;
+            data.insert(key, value);
+        }
+        Ok(PaymentCustomRecords { data })
     }
 }

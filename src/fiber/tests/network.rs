@@ -802,6 +802,7 @@ fn test_send_payment_validate_payment_hash() {
         allow_self_payment: false,
         hop_hints: None,
         dry_run: false,
+        custom_records: None,
     };
 
     let result = SendPaymentData::new(send_command);
@@ -827,6 +828,7 @@ fn test_send_payment_validate_amount() {
         allow_self_payment: false,
         hop_hints: None,
         dry_run: false,
+        custom_records: None,
     };
 
     let result = SendPaymentData::new(send_command);
@@ -873,6 +875,7 @@ fn test_send_payment_validate_invoice() {
         allow_self_payment: false,
         hop_hints: None,
         dry_run: false,
+        custom_records: None,
     };
 
     let result = SendPaymentData::new(send_command);
@@ -896,6 +899,7 @@ fn test_send_payment_validate_invoice() {
         allow_self_payment: false,
         hop_hints: None,
         dry_run: false,
+        custom_records: None,
     };
 
     // keysend is set with invoice, should be error
@@ -920,6 +924,7 @@ fn test_send_payment_validate_invoice() {
         allow_self_payment: false,
         hop_hints: None,
         dry_run: false,
+        custom_records: None,
     };
 
     let result = SendPaymentData::new(send_command);
@@ -941,6 +946,7 @@ fn test_send_payment_validate_invoice() {
         allow_self_payment: false,
         hop_hints: None,
         dry_run: false,
+        custom_records: None,
     };
 
     let result = SendPaymentData::new(send_command);
@@ -962,6 +968,7 @@ fn test_send_payment_validate_invoice() {
         allow_self_payment: false,
         hop_hints: None,
         dry_run: false,
+        custom_records: None,
     };
 
     let result = SendPaymentData::new(send_command);
@@ -983,6 +990,7 @@ fn test_send_payment_validate_invoice() {
         allow_self_payment: false,
         hop_hints: None,
         dry_run: false,
+        custom_records: None,
     };
 
     let result = SendPaymentData::new(send_command);
@@ -1019,6 +1027,7 @@ fn test_send_payment_validate_invoice() {
         allow_self_payment: false,
         hop_hints: None,
         dry_run: false,
+        custom_records: None,
     };
 
     let result = SendPaymentData::new(send_command);
@@ -1045,6 +1054,7 @@ fn test_send_payment_validate_htlc_expiry_delta() {
         allow_self_payment: false,
         hop_hints: None,
         dry_run: false,
+        custom_records: None,
     };
 
     let result = SendPaymentData::new(send_command);

@@ -1,10 +1,11 @@
 #[cfg(debug_assertions)]
 use crate::fiber::graph::SessionRoute;
+use crate::fiber::PaymentCustomRecords;
 use crate::fiber::{
     channel::ChannelActorStateStore,
     graph::PaymentSessionStatus,
     network::{HopHint as NetworkHopHint, SendPaymentCommand},
-    serde_utils::{U128Hex, U64Hex},
+    serde_utils::{PaymentCustomRecordsHex, U128Hex, U64Hex},
     types::{Hash256, Pubkey},
     NetworkActorCommand, NetworkActorMessage,
 };
@@ -15,9 +16,10 @@ use jsonrpsee::{
     proc_macros::rpc,
     types::{error::CALL_EXECUTION_FAILED_CODE, ErrorObjectOwned},
 };
+use serde_with::serde_as;
+
 use ractor::{call, ActorRef};
 use serde::{Deserialize, Serialize};
-use serde_with::serde_as;
 
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug)]
@@ -44,6 +46,10 @@ pub struct GetPaymentCommandResult {
     /// fee paid for the payment
     #[serde_as(as = "U128Hex")]
     pub fee: u128,
+
+    /// The custom records to be included in the payment.
+    #[serde_as(as = "Option<PaymentCustomRecordsHex>")]
+    pub custom_records: Option<PaymentCustomRecords>,
 
     #[cfg(debug_assertions)]
     /// The route information for the payment
@@ -96,6 +102,11 @@ pub struct SendPaymentCommandParams {
 
     /// allow self payment, default is false
     pub allow_self_payment: Option<bool>,
+
+    /// Some custom records for the payment which contains a map of u32 to Vec<u8>
+    /// The key is the record type, and the value is the serialized data
+    #[serde_as(as = "Option<PaymentCustomRecordsHex>")]
+    custom_records: Option<PaymentCustomRecords>,
 
     /// Optional route hints to reach the destination through private channels.
     /// A hop hint is a hint for a node to use a specific channel, for example
@@ -187,6 +198,7 @@ where
                     keysend: params.keysend,
                     udt_type_script: params.udt_type_script.clone().map(|s| s.into()),
                     allow_self_payment: params.allow_self_payment.unwrap_or(false),
+                    custom_records: params.custom_records.clone(),
                     hop_hints: params
                         .hop_hints
                         .clone()
@@ -203,6 +215,7 @@ where
             last_updated_at: response.last_updated_at,
             failed_error: response.failed_error,
             fee: response.fee,
+            custom_records: response.custom_records,
             #[cfg(debug_assertions)]
             router: response.router,
         })
@@ -225,6 +238,7 @@ where
             created_at: response.created_at,
             failed_error: response.failed_error,
             fee: response.fee,
+            custom_records: response.custom_records,
             #[cfg(debug_assertions)]
             router: response.router,
         })

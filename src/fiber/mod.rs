@@ -5,6 +5,7 @@ pub mod network;
 pub use network::start_network;
 pub use network::{
     NetworkActor, NetworkActorCommand, NetworkActorEvent, NetworkActorMessage, NetworkServiceEvent,
+    PaymentCustomRecords,
 };
 pub mod graph;
 pub mod history;
