@@ -3686,11 +3686,7 @@ impl From<PaymentHopData> for molecule_fiber::PaymentHopData {
             )
             .custom_records(
                 CustomRecordsOpt::new_builder()
-                    .set(
-                        payment_hop_data
-                            .custom_records
-                            .map(|x| x.try_into().expect("valid custom records")),
-                    )
+                    .set(payment_hop_data.custom_records.map(|x| x.into()))
                     .build(),
             )
             .build()
@@ -3715,10 +3711,7 @@ impl From<molecule_fiber::PaymentHopData> for PaymentHopData {
                 .next_hop()
                 .to_opt()
                 .map(|x| x.try_into().expect("invalid pubkey")),
-            custom_records: payment_hop_data
-                .custom_records()
-                .to_opt()
-                .map(|x| x.try_into().expect("invalid custom records")),
+            custom_records: payment_hop_data.custom_records().to_opt().map(|x| x.into()),
         }
     }
 }

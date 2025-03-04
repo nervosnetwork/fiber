@@ -27,7 +27,7 @@ async fn test_send_payment_custom_records() {
     .await;
     let [mut node_0, node_1] = nodes.try_into().expect("2 nodes");
     let source_node = &mut node_0;
-    let target_pubkey = node_1.pubkey.clone();
+    let target_pubkey = node_1.pubkey;
 
     // sleep for a while
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
@@ -41,7 +41,7 @@ async fn test_send_payment_custom_records() {
     let custom_records = PaymentCustomRecords { data };
     let res = source_node
         .send_payment(SendPaymentCommand {
-            target_pubkey: Some(target_pubkey.clone()),
+            target_pubkey: Some(target_pubkey),
             amount: Some(10000000000),
             payment_hash: None,
             final_tlc_expiry_delta: None,
