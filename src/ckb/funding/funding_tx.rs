@@ -402,13 +402,100 @@ impl FundingTx {
 
     // TODO: verify the transaction
     pub fn update_for_self(&mut self, tx: TransactionView) -> Result<(), FundingError> {
+        if !self.is_incremental_building(&tx) {
+            return Err(FundingError::NotIncrementalBuilding);
+        }
         self.tx = Some(tx);
         Ok(())
     }
 
     // TODO: verify the transaction
     pub fn update_for_peer(&mut self, tx: TransactionView) -> Result<(), FundingError> {
+        if !self.is_incremental_building(&tx) {
+            return Err(FundingError::NotIncrementalBuilding);
+        }
         self.tx = Some(tx);
         Ok(())
+    }
+
+    fn is_incremental_building(&self, new_tx: &TransactionView) -> bool {
+        let old_tx = match self.tx.as_ref() {
+            Some(prev) => prev,
+            None => return true,
+        };
+
+        // Version must be the same
+        if new_tx.version() != old_tx.version() {
+            return false;
+        }
+
+        // New cell_deps
+        if new_tx.cell_deps().len() < old_tx.cell_deps().len() {
+            return false;
+        }
+        if new_tx
+            .cell_deps()
+            .into_iter()
+            .zip(old_tx.cell_deps().into_iter())
+            .any(|(new, old)| new != old)
+        {
+            return false;
+        }
+
+        // New header_deps
+        if new_tx.header_deps().len() < old_tx.header_deps().len() {
+            return false;
+        }
+        if new_tx
+            .header_deps()
+            .into_iter()
+            .zip(old_tx.header_deps().into_iter())
+            .any(|(new, old)| new != old)
+        {
+            return false;
+        }
+
+        // New inputs
+        if new_tx.inputs().len() < old_tx.inputs().len() {
+            return false;
+        }
+        if new_tx
+            .inputs()
+            .into_iter()
+            .zip(old_tx.inputs().into_iter())
+            .any(|(new, old)| new != old)
+        {
+            return false;
+        }
+
+        // New outputs
+        if new_tx.outputs().len() < old_tx.outputs().len() {
+            return false;
+        }
+        if new_tx
+            .outputs()
+            .into_iter()
+            .zip(old_tx.outputs().into_iter())
+            .any(|(new, old)| new != old)
+        {
+            return false;
+        }
+
+        // New outputs_data
+        if new_tx.outputs_data().len() < old_tx.outputs_data().len() {
+            return false;
+        }
+        if new_tx
+            .outputs_data()
+            .into_iter()
+            .zip(old_tx.outputs_data().into_iter())
+            .any(|(new, old)| new != old)
+        {
+            return false;
+        }
+
+        // Ignore witnesses
+
+        true
     }
 }
