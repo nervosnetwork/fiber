@@ -58,6 +58,7 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
     * [Type `HashAlgorithm`](#type-hashalgorithm)
     * [Type `HopHint`](#type-hophint)
     * [Type `NodeInfo`](#type-nodeinfo)
+    * [Type `PaymentCustomRecords`](#type-paymentcustomrecords)
     * [Type `PaymentSessionStatus`](#type-paymentsessionstatus)
     * [Type `Pubkey`](#type-pubkey)
     * [Type `RemoveTlcReason`](#type-removetlcreason)
@@ -586,6 +587,8 @@ Sends a payment to a peer.
 * `keysend` - <em>`Option<bool>`</em>, keysend payment
 * `udt_type_script` - <em>`Option<Script>`</em>, udt type script for the payment
 * `allow_self_payment` - <em>`Option<bool>`</em>, allow self payment, default is false
+* `custom_records` - <em>`Option<HashMap<u32::Vec<u8>>>`</em>, Some custom records for the payment which contains a map of u32 to Vec<u8>
+ The key is the record type, and the value is the serialized data
 * `hop_hints` - <em>Option<Vec<[HopHint](#type-hophint)>></em>, Optional route hints to reach the destination through private channels.
  A hop hint is a hint for a node to use a specific channel, for example
  (pubkey, funding_txid, inbound) where pubkey is the public key of the node,
@@ -605,6 +608,7 @@ Sends a payment to a peer.
 * `last_updated_at` - <em>`u64`</em>, The time the payment was last updated at, in milliseconds from UNIX epoch
 * `failed_error` - <em>`Option<String>`</em>, The error message if the payment failed
 * `fee` - <em>`u128`</em>, fee paid for the payment
+* `custom_records` - <em>Option<[PaymentCustomRecords](#type-paymentcustomrecords)></em>, The custom records to be included in the payment.
 * `router` - <em>[SessionRoute](#type-sessionroute)</em>, The route information for the payment
 
 ---
@@ -628,6 +632,7 @@ Retrieves a payment.
 * `last_updated_at` - <em>`u64`</em>, The time the payment was last updated at, in milliseconds from UNIX epoch
 * `failed_error` - <em>`Option<String>`</em>, The error message if the payment failed
 * `fee` - <em>`u128`</em>, fee paid for the payment
+* `custom_records` - <em>Option<[PaymentCustomRecords](#type-paymentcustomrecords)></em>, The custom records to be included in the payment.
 * `router` - <em>[SessionRoute](#type-sessionroute)</em>, The route information for the payment
 
 ---
@@ -841,6 +846,17 @@ The Node information.
 * `chain_hash` - <em>Hash256</em>, The chain hash of the node.
 * `auto_accept_min_ckb_funding_amount` - <em>u64</em>, The minimum CKB funding amount for automatically accepting open channel requests.
 * `udt_cfg_infos` - <em>UdtCfgInfos</em>, The UDT configuration infos of the node.
+---
+
+<a id="#type-paymentcustomrecords"></a>
+### Type `PaymentCustomRecords`
+
+The payment custom records, data is a map of pair of key value, `HashMap<u32, Vec<u8>>`
+
+
+#### Fields
+
+* `data` - <em>`HashMap<`u32::Vec<u8>`>`</em>, custom_records is key value pairs of `u32` and `Vec<u8>`, value usually is serialized data
 ---
 
 <a id="#type-paymentsessionstatus"></a>

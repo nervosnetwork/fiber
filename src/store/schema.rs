@@ -8,12 +8,12 @@
 /// | 33           | Payment_hash         | CkbInvoice Preimage         |
 /// | 34           | Payment_hash         | CkbInvoice Status           |
 /// | 64           | PeerId | Hash256     | ChannelState                |
-/// | 65...........| OutPoint             | ChannelId                   |
+/// | 65           | OutPoint             | ChannelId                   |
 /// | 96           | Cursor               | BroadcastMessage            |
 /// | 97           | BroadcastMessageID   | u64                         |
 /// | 192          | Hash256              | PaymentSession              |
 /// | 193          | OutPoint | Direction | TimedResult                 |
-/// | 194          | Hash256              | PaymentCustomRecord         |
+/// | 194          | Hash256              | PaymentCustomRecords        |
 /// | 224          | Hash256              | ChannelData                 |
 /// +--------------+----------------------+-----------------------------+
 ///

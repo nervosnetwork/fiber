@@ -54,9 +54,10 @@ pub struct GetPaymentCommandResult {
     router: SessionRoute,
 }
 
+/// The payment custom records, data is a map of pair of key value, `HashMap<u32, Vec<u8>>`
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Default)]
 pub struct PaymentCustomRecords {
-    /// custom_records is key value pairs with HashMap<u32, Vec<u8>>,
+    /// custom_records is key value pairs of `u32` and `Vec<u8>`, value usually is serialized data
     pub data: HashMap<u32, Vec<u8>>,
 }
 
