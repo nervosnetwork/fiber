@@ -61,7 +61,7 @@ if ! [[ -d "$data_dir" ]]; then
     # Transfer some money to the node 1/2/3.
     # The address of node 1 can be seen with the following command:
     # echo | HOME=/tmp ckb-cli account import --local-only --privkey-path "$$nodes_dir/1/ckb/key"
-    for i in {1..3}; do
+    for i in {1..5}; do
         ckb-cli wallet transfer --to-address $(cat "$nodes_dir/1/ckb/wallet") --capacity 1000000000 --fee-rate 2000 --privkey-path "$nodes_dir/deployer/ckb/key"
         sleep 1
         "$script_dir/generate-blocks.sh" 4

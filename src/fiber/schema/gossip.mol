@@ -133,7 +133,7 @@ table GetBroadcastMessagesResult {
 
 // QueryBroadcastMessagesResult is the response to QueryBroadcastMessages requests.
 // The id here corresponds to the id passed by the peer. This is used to track the progress of certain request.
-// The missing_queries here is used to indicate that the results correpsonding to some queries can not be found
+// The missing_queries here is used to indicate that the results corresponding to some queries can not be found
 // by the remote peer. The request initiator should try another remote node for the missing data.
 table QueryBroadcastMessagesResult {
     id: Uint64,

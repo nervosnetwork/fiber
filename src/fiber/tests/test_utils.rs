@@ -472,7 +472,7 @@ pub(crate) async fn create_n_nodes_and_channels_with_index_amounts(
     for &((i, j), (node_a_amount, node_b_amount)) in amounts.iter() {
         let (channel_id, funding_tx) = {
             let (node_a, node_b) = {
-                // avoid borrow nodes as mutbale more than once
+                // avoid borrow nodes as mutable more than once
                 assert_ne!(i, j);
                 if i < j {
                     let (left, right) = nodes.split_at_mut(i + 1);
@@ -568,7 +568,7 @@ impl NetworkNode {
     pub fn cancel_invoice(&mut self, payment_hash: &Hash256) {
         self.store
             .update_invoice_status(payment_hash, CkbInvoiceStatus::Cancelled)
-            .expect("cancell success");
+            .expect("cancel success");
     }
 
     pub async fn send_payment(
@@ -673,7 +673,7 @@ impl NetworkNode {
         payment_result: &SendPaymentResponse,
         channel_id: Hash256,
     ) {
-        let used_channes = payment_result
+        let used_channels = payment_result
             .router
             .nodes
             .iter()
@@ -683,7 +683,7 @@ impl NetworkNode {
             .get_channel_funding_tx(&channel_id)
             .expect("funding tx");
         let channel_outpoint = OutPoint::new(funding_tx.into(), 0);
-        assert!(used_channes.contains(&channel_outpoint));
+        assert!(used_channels.contains(&channel_outpoint));
     }
 
     pub async fn wait_until_success(&self, payment_hash: Hash256) {
@@ -881,7 +881,7 @@ impl NetworkNode {
 
         let mut unexpected_events: HashSet<String> = HashSet::new();
 
-        // Some usual unexpected events that we want to not happended
+        // Some usual unexpected events that we want to not happened
         // use `assert!(node.get_triggered_unexpected_events().await.is_empty())` to check it
         let default_unexpected_events = vec![
             "Musig2VerifyError",
@@ -897,7 +897,7 @@ impl NetworkNode {
         let (self_event_sender, self_event_receiver) = mpsc::channel(10000);
         let unexpected_events_clone = unexpected_events.clone();
         let triggered_unexpected_events_clone = triggered_unexpected_events.clone();
-        // spwan a new thread to collect all the events from event_receiver
+        // spawn a new thread to collect all the events from event_receiver
         tokio::spawn(async move {
             while let Some(event) = event_receiver.recv().await {
                 self_event_sender
@@ -1113,7 +1113,7 @@ impl NetworkNode {
                     match event {
                         None => panic!("Event emitter unexpectedly stopped"),
                         Some(event) => {
-                            println!("Recevied event when waiting for specific event: {:?}", &event);
+                            println!("Received event when waiting for specific event: {:?}", &event);
                             if let Some(r) = event_processor(&event) {
                                 println!("Event ({:?}) matching filter received, exiting waiting for event loop", &event);
                                 return r;
@@ -1136,7 +1136,7 @@ impl NetworkNode {
             .await;
     }
 
-    pub async fn submit_tx(&mut self, tx: TransactionView) -> ckb_jsonrpc_types::Status {
+    pub async fn submit_tx(&self, tx: TransactionView) -> ckb_jsonrpc_types::Status {
         submit_tx(self.chain_actor.clone(), tx).await
     }
 

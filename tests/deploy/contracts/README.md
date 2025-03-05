@@ -1,6 +1,6 @@
 The binaries within this directory are used to verify if the transaction built from our code base can pass ckb-vm verification.
 
-The source code of these binaries are from the following repo [fiber-scripts](https://github.com/nervosnetwork/fiber-scripts) with commit 701d8c8a08790dd61c64f695aaa5fbed22e4b8ad.
+The source code of these binaries are from the following repo [fiber-scripts](https://github.com/nervosnetwork/fiber-scripts) with commit cc6c70dcd1b23fca020dc93a371c2d84e29a9a34.
 
 We copied the following binaries from https://github.com/nervosnetwork/fiber-scripts/tree/main/deps
 

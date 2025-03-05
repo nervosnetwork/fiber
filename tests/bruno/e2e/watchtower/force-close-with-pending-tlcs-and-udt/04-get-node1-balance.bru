@@ -46,6 +46,7 @@ script:pre-request {
 
 script:post-response {
   let capacity = res.body.result.objects.reduce((acc, cell) => {
+    console.log("NODE1_BALANCE: ", cell.output_data);
     const hexBytes = cell.output_data.slice(2).match(/../g).reverse().join('');
     return acc + BigInt(`0x${hexBytes}`);
   }, BigInt(0));

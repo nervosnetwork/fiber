@@ -1,4 +1,4 @@
-use std::{collections::HashSet, str::FromStr, sync::Arc};
+use std::{collections::HashSet, sync::Arc};
 
 use ckb_jsonrpc_types::Status;
 use ckb_types::core::TransactionView;
@@ -6,16 +6,10 @@ use ckb_types::packed::Bytes;
 use ckb_types::prelude::{Builder, Entity};
 use molecule::prelude::Byte;
 use ractor::{async_trait, concurrency::Duration, Actor, ActorProcessingErr, ActorRef};
-use tentacle::{
-    builder::ServiceBuilder,
-    context::ServiceContext,
-    multiaddr::MultiAddr,
-    secio::SecioKeyPair,
-    service::{ServiceError, ServiceEvent},
-    traits::ServiceHandle,
-};
-use tokio::{spawn, sync::RwLock};
+use tentacle::secio::PeerId;
+use tokio::sync::RwLock;
 
+use crate::fiber::gossip::GossipService;
 use crate::fiber::tests::test_utils::{establish_channel_between_nodes, NetworkNode};
 use crate::fiber::types::{ChannelUpdateChannelFlags, NodeAnnouncement};
 use crate::{
@@ -25,8 +19,8 @@ use crate::{
     },
     fiber::{
         gossip::{
-            ExtendedGossipMessageStore, ExtendedGossipMessageStoreMessage, GossipMessageStore,
-            GossipMessageUpdates, GossipProtocolHandle, SubscribableGossipMessageStore,
+            ExtendedGossipMessageStoreMessage, GossipMessageStore, GossipMessageUpdates,
+            SubscribableGossipMessageStore,
         },
         types::{BroadcastMessage, BroadcastMessageWithTimestamp, Cursor},
     },
@@ -37,27 +31,9 @@ use crate::{create_invalid_ecdsa_signature, ChannelTestContext};
 
 use super::test_utils::{get_test_root_actor, TempDir};
 
-struct DummyServiceHandle;
-
-impl DummyServiceHandle {
-    pub fn new() -> Self {
-        DummyServiceHandle
-    }
-}
-
-#[async_trait]
-impl ServiceHandle for DummyServiceHandle {
-    async fn handle_error(&mut self, _context: &mut ServiceContext, error: ServiceError) {
-        println!("Service error: {:?}", error);
-    }
-    async fn handle_event(&mut self, _context: &mut ServiceContext, event: ServiceEvent) {
-        println!("Service event: {:?}", event);
-    }
-}
-
 struct GossipTestingContext {
     chain_actor: ActorRef<CkbChainMessage>,
-    store_update_subscriber: ExtendedGossipMessageStore<Store>,
+    gossip_service: GossipService<Store>,
 }
 
 impl GossipTestingContext {
@@ -66,7 +42,8 @@ impl GossipTestingContext {
         let store = Store::new(dir).expect("created store failed");
         let chain_actor = create_mock_chain_actor().await;
         let root_actor = get_test_root_actor().await;
-        let (gossip_handle, store_update_subscriber) = GossipProtocolHandle::new(
+
+        let (gossip_service, _) = GossipService::start(
             None,
             Duration::from_millis(50),
             Duration::from_millis(50),
@@ -79,11 +56,9 @@ impl GossipTestingContext {
         )
         .await;
 
-        run_dummy_tentacle_service(gossip_handle).await;
-
         Self {
             chain_actor,
-            store_update_subscriber,
+            gossip_service,
         }
     }
 }
@@ -93,16 +68,16 @@ impl GossipTestingContext {
         &self.chain_actor
     }
 
-    fn get_store_update_subscriber(&self) -> &ExtendedGossipMessageStore<Store> {
-        &self.store_update_subscriber
+    fn get_store_update_subscriber(&self) -> impl SubscribableGossipMessageStore {
+        self.gossip_service.get_subscriber()
     }
 
     fn get_store(&self) -> &Store {
-        &self.store_update_subscriber.store
+        self.gossip_service.get_store()
     }
 
-    fn get_store_actor(&self) -> &ActorRef<ExtendedGossipMessageStoreMessage> {
-        &self.store_update_subscriber.actor
+    fn get_extended_actor(&self) -> &ActorRef<ExtendedGossipMessageStoreMessage> {
+        self.gossip_service.get_extended_actor()
     }
 
     async fn subscribe(&self, cursor: Cursor) -> Arc<RwLock<Vec<BroadcastMessageWithTimestamp>>> {
@@ -115,36 +90,17 @@ impl GossipTestingContext {
     }
 
     fn save_message(&self, message: BroadcastMessage) {
-        self.get_store_actor()
-            .send_message(ExtendedGossipMessageStoreMessage::SaveMessages(vec![
-                message,
-            ]))
+        self.get_extended_actor()
+            .send_message(ExtendedGossipMessageStoreMessage::SaveMessages(
+                PeerId::random(),
+                vec![message],
+            ))
             .expect("send message");
     }
 
     async fn submit_tx(&self, tx: TransactionView) -> Status {
         submit_tx(self.get_chain_actor().clone(), tx).await
     }
-}
-
-// The gossip actor expects us to pass a tentacle control. This is a dummy tentacle service that
-// passes the control to the gossip actor. It serves no other purpose.
-async fn run_dummy_tentacle_service(gossip_handle: GossipProtocolHandle) {
-    let secio_kp = SecioKeyPair::secp256k1_generated();
-    let mut service = ServiceBuilder::default()
-        .insert_protocol(gossip_handle.create_meta())
-        .handshake_type(secio_kp.into())
-        .build(DummyServiceHandle::new());
-    let _ = service
-        .listen(
-            MultiAddr::from_str("/ip4/127.0.0.1/tcp/0").expect("valid tentacle listening address"),
-        )
-        .await
-        .expect("listen tentacle");
-
-    spawn(async move {
-        service.run().await;
-    });
 }
 
 // A subscriber which subscribes to the store updates and save all updates to a vector.
@@ -309,12 +265,14 @@ async fn test_saving_channel_update_after_saving_channel_announcement() {
             42,
             42,
             42,
+            None,
         ),
         channel_context.create_channel_update_of_node2(
             ChannelUpdateChannelFlags::empty(),
             42,
             42,
             42,
+            None,
         ),
     ] {
         context.save_message(BroadcastMessage::ChannelUpdate(channel_update.clone()));
@@ -339,12 +297,14 @@ async fn test_saving_channel_update_before_saving_channel_announcement() {
             42,
             42,
             42,
+            None,
         ),
         channel_context.create_channel_update_of_node2(
             ChannelUpdateChannelFlags::empty(),
             42,
             42,
             42,
+            None,
         ),
     ] {
         context.save_message(BroadcastMessage::ChannelUpdate(channel_update.clone()));
@@ -371,7 +331,8 @@ async fn test_saving_channel_update_before_saving_channel_announcement() {
         let channel_update = context
             .get_store()
             .get_latest_channel_update(channel_context.channel_outpoint(), b);
-        assert_ne!(channel_update, None);
+        // The channel update messages are discarded because we thought they are invalid.
+        assert_eq!(channel_update, None);
     }
 }
 
@@ -395,12 +356,14 @@ async fn test_saving_invalid_channel_update() {
             42,
             42,
             42,
+            None,
         ),
         channel_context.create_channel_update_of_node2(
             ChannelUpdateChannelFlags::empty(),
             42,
             42,
             42,
+            None,
         ),
     ] {
         channel_update.signature = Some(create_invalid_ecdsa_signature());
@@ -436,12 +399,14 @@ async fn test_saving_channel_update_independency() {
                 42,
                 42,
                 42,
+                None,
             ),
             channel_context.create_channel_update_of_node2(
                 ChannelUpdateChannelFlags::empty(),
                 42,
                 42,
                 42,
+                None,
             ),
         ] {
             if channel_update.is_update_of_node_1() && node1_has_invalid_signature {
@@ -518,12 +483,14 @@ async fn test_saving_channel_update_with_invalid_channel_announcement() {
             42,
             42,
             42,
+            None,
         ),
         channel_context.create_channel_update_of_node2(
             ChannelUpdateChannelFlags::empty(),
             42,
             42,
             42,
+            None,
         ),
     ] {
         context.save_message(BroadcastMessage::ChannelUpdate(channel_update.clone()));
@@ -600,8 +567,8 @@ async fn test_gossip_store_updates_saving_multiple_messages() {
     let announcements = (0..10)
         .map(|_| gen_rand_node_announcement().1)
         .collect::<Vec<_>>();
-    for annoncement in &announcements {
-        context.save_message(BroadcastMessage::NodeAnnouncement(annoncement.clone()));
+    for announcement in &announcements {
+        context.save_message(BroadcastMessage::NodeAnnouncement(announcement.clone()));
     }
     tokio::time::sleep(Duration::from_millis(200)).await;
     let messages = messages.read().await;

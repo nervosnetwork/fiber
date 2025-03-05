@@ -147,7 +147,7 @@ impl AsRef<[u8; 32]> for Privkey {
     }
 }
 
-/// A 256-bit hash digest, used as identifier of channnel, payment, transaction hash etc.
+/// A 256-bit hash digest, used as identifier of channel, payment, transaction hash etc.
 #[serde_as]
 #[derive(Copy, Clone, Serialize, Deserialize, Hash, Eq, PartialEq, Default)]
 pub struct Hash256(#[serde_as(as = "SliceHex")] [u8; 32]);
@@ -425,7 +425,7 @@ impl From<Pubkey> for molecule_fiber::Pubkey {
                     .map(Into::into)
                     .collect::<Vec<Byte>>()
                     .try_into()
-                    .expect("Public serialized to corrent length"),
+                    .expect("Public serialized to correct length"),
             )
             .build()
     }
@@ -451,7 +451,7 @@ impl From<EcdsaSignature> for molecule_fiber::EcdsaSignature {
                     .map(Into::into)
                     .collect::<Vec<Byte>>()
                     .try_into()
-                    .expect("Signature serialized to corrent length"),
+                    .expect("Signature serialized to correct length"),
             )
             .build()
     }
@@ -477,7 +477,7 @@ impl From<XOnlyPublicKey> for molecule_gossip::SchnorrXOnlyPubkey {
                     .map(Into::into)
                     .collect::<Vec<Byte>>()
                     .try_into()
-                    .expect("Public serialized to corrent length"),
+                    .expect("Public serialized to correct length"),
             )
             .build()
     }
@@ -502,7 +502,7 @@ impl From<SchnorrSignature> for molecule_gossip::SchnorrSignature {
                     .map(Into::into)
                     .collect::<Vec<Byte>>()
                     .try_into()
-                    .expect("Signature serialized to corrent length"),
+                    .expect("Signature serialized to correct length"),
             )
             .build()
     }
@@ -582,7 +582,7 @@ impl From<OpenChannel> for molecule_fiber::OpenChannel {
             .first_per_commitment_point(open_channel.first_per_commitment_point.into())
             .second_per_commitment_point(open_channel.second_per_commitment_point.into())
             .next_local_nonce((&open_channel.next_local_nonce).into())
-            .channel_annoucement_nonce(
+            .channel_announcement_nonce(
                 PubNonceOpt::new_builder()
                     .set(open_channel.channel_announcement_nonce.map(|x| (&x).into()))
                     .build(),
@@ -617,7 +617,7 @@ impl TryFrom<molecule_fiber::OpenChannel> for OpenChannel {
                 .try_into()
                 .map_err(|err| Error::Musig2(format!("{err}")))?,
             channel_announcement_nonce: open_channel
-                .channel_annoucement_nonce()
+                .channel_announcement_nonce()
                 .to_opt()
                 .map(TryInto::try_into)
                 .transpose()
@@ -658,7 +658,7 @@ impl From<AcceptChannel> for molecule_fiber::AcceptChannel {
             .tlc_basepoint(accept_channel.tlc_basepoint.into())
             .first_per_commitment_point(accept_channel.first_per_commitment_point.into())
             .second_per_commitment_point(accept_channel.second_per_commitment_point.into())
-            .channel_annoucement_nonce(
+            .channel_announcement_nonce(
                 PubNonceOpt::new_builder()
                     .set(
                         accept_channel
@@ -688,7 +688,7 @@ impl TryFrom<molecule_fiber::AcceptChannel> for AcceptChannel {
             first_per_commitment_point: accept_channel.first_per_commitment_point().try_into()?,
             second_per_commitment_point: accept_channel.second_per_commitment_point().try_into()?,
             channel_announcement_nonce: accept_channel
-                .channel_annoucement_nonce()
+                .channel_announcement_nonce()
                 .to_opt()
                 .map(TryInto::try_into)
                 .transpose()
@@ -1363,7 +1363,7 @@ impl From<molecule_fiber::TlcErr> for TlcErr {
         TlcErr {
             error_code: {
                 let code: u16 = tlc_err.error_code().into();
-                TlcErrorCode::try_from(code).expect("tlc_errror_code failed")
+                TlcErrorCode::try_from(code).expect("tlc_error_code failed")
             },
             extra_data: tlc_err
                 .extra_data()
@@ -1476,7 +1476,7 @@ impl std::fmt::Display for TlcErrPacket {
 const BADONION: u16 = 0x8000;
 // Permanent errors (otherwise transient)
 const PERM: u16 = 0x4000;
-// Node releated errors (otherwise channels)
+// Node related errors (otherwise channels)
 const NODE: u16 = 0x2000;
 // Channel forwarding parameter was violated
 const UPDATE: u16 = 0x1000;
@@ -2433,8 +2433,8 @@ impl FiberChannelMessage {
             FiberChannelMessage::ReestablishChannel(reestablish_channel) => {
                 reestablish_channel.channel_id
             }
-            FiberChannelMessage::AnnouncementSignatures(annoucement_signatures) => {
-                annoucement_signatures.channel_id
+            FiberChannelMessage::AnnouncementSignatures(announcement_signatures) => {
+                announcement_signatures.channel_id
             }
         }
     }

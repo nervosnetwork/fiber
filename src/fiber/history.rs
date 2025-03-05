@@ -538,7 +538,7 @@ where
 
     // Get the probability of a payment success through a direct channel,
     // suppose we know the accurate balance for direct channels, so we don't need to use `get_channel_probability`
-    // for the direct channel, this function is used disable the direct channel for a time preiod if it's failed
+    // for the direct channel, this function is used disable the direct channel for a time period if it's failed
     // currently we may mark the channel failed on graph level, so this function is not used now.
     // FIXME: reconsider this after we already got the accurate balance of direct channels
     //        related issue: https://github.com/nervosnetwork/fiber/issues/257

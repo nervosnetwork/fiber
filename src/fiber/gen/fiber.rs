@@ -3722,8 +3722,8 @@ impl ::core::fmt::Display for OpenChannel {
         write!(
             f,
             ", {}: {}",
-            "channel_annoucement_nonce",
-            self.channel_annoucement_nonce()
+            "channel_announcement_nonce",
+            self.channel_announcement_nonce()
         )?;
         write!(f, ", {}: {}", "next_local_nonce", self.next_local_nonce())?;
         write!(f, ", {}: {}", "channel_flags", self.channel_flags())?;
@@ -3866,7 +3866,7 @@ impl OpenChannel {
         let end = molecule::unpack_number(&slice[64..]) as usize;
         Pubkey::new_unchecked(self.0.slice(start..end))
     }
-    pub fn channel_annoucement_nonce(&self) -> PubNonceOpt {
+    pub fn channel_announcement_nonce(&self) -> PubNonceOpt {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[64..]) as usize;
         let end = molecule::unpack_number(&slice[68..]) as usize;
@@ -3930,7 +3930,7 @@ impl molecule::prelude::Entity for OpenChannel {
             .tlc_basepoint(self.tlc_basepoint())
             .first_per_commitment_point(self.first_per_commitment_point())
             .second_per_commitment_point(self.second_per_commitment_point())
-            .channel_annoucement_nonce(self.channel_annoucement_nonce())
+            .channel_announcement_nonce(self.channel_announcement_nonce())
             .next_local_nonce(self.next_local_nonce())
             .channel_flags(self.channel_flags())
     }
@@ -4012,8 +4012,8 @@ impl<'r> ::core::fmt::Display for OpenChannelReader<'r> {
         write!(
             f,
             ", {}: {}",
-            "channel_annoucement_nonce",
-            self.channel_annoucement_nonce()
+            "channel_announcement_nonce",
+            self.channel_announcement_nonce()
         )?;
         write!(f, ", {}: {}", "next_local_nonce", self.next_local_nonce())?;
         write!(f, ", {}: {}", "channel_flags", self.channel_flags())?;
@@ -4132,7 +4132,7 @@ impl<'r> OpenChannelReader<'r> {
         let end = molecule::unpack_number(&slice[64..]) as usize;
         PubkeyReader::new_unchecked(&self.as_slice()[start..end])
     }
-    pub fn channel_annoucement_nonce(&self) -> PubNonceOptReader<'r> {
+    pub fn channel_announcement_nonce(&self) -> PubNonceOptReader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[64..]) as usize;
         let end = molecule::unpack_number(&slice[68..]) as usize;
@@ -4239,7 +4239,7 @@ pub struct OpenChannelBuilder {
     pub(crate) tlc_basepoint: Pubkey,
     pub(crate) first_per_commitment_point: Pubkey,
     pub(crate) second_per_commitment_point: Pubkey,
-    pub(crate) channel_annoucement_nonce: PubNonceOpt,
+    pub(crate) channel_announcement_nonce: PubNonceOpt,
     pub(crate) next_local_nonce: PubNonce,
     pub(crate) channel_flags: Byte,
 }
@@ -4305,8 +4305,8 @@ impl OpenChannelBuilder {
         self.second_per_commitment_point = v;
         self
     }
-    pub fn channel_annoucement_nonce(mut self, v: PubNonceOpt) -> Self {
-        self.channel_annoucement_nonce = v;
+    pub fn channel_announcement_nonce(mut self, v: PubNonceOpt) -> Self {
+        self.channel_announcement_nonce = v;
         self
     }
     pub fn next_local_nonce(mut self, v: PubNonce) -> Self {
@@ -4338,7 +4338,7 @@ impl molecule::prelude::Builder for OpenChannelBuilder {
             + self.tlc_basepoint.as_slice().len()
             + self.first_per_commitment_point.as_slice().len()
             + self.second_per_commitment_point.as_slice().len()
-            + self.channel_annoucement_nonce.as_slice().len()
+            + self.channel_announcement_nonce.as_slice().len()
             + self.next_local_nonce.as_slice().len()
             + self.channel_flags.as_slice().len()
     }
@@ -4376,7 +4376,7 @@ impl molecule::prelude::Builder for OpenChannelBuilder {
         offsets.push(total_size);
         total_size += self.second_per_commitment_point.as_slice().len();
         offsets.push(total_size);
-        total_size += self.channel_annoucement_nonce.as_slice().len();
+        total_size += self.channel_announcement_nonce.as_slice().len();
         offsets.push(total_size);
         total_size += self.next_local_nonce.as_slice().len();
         offsets.push(total_size);
@@ -4400,7 +4400,7 @@ impl molecule::prelude::Builder for OpenChannelBuilder {
         writer.write_all(self.tlc_basepoint.as_slice())?;
         writer.write_all(self.first_per_commitment_point.as_slice())?;
         writer.write_all(self.second_per_commitment_point.as_slice())?;
-        writer.write_all(self.channel_annoucement_nonce.as_slice())?;
+        writer.write_all(self.channel_announcement_nonce.as_slice())?;
         writer.write_all(self.next_local_nonce.as_slice())?;
         writer.write_all(self.channel_flags.as_slice())?;
         Ok(())
@@ -4469,8 +4469,8 @@ impl ::core::fmt::Display for AcceptChannel {
         write!(
             f,
             ", {}: {}",
-            "channel_annoucement_nonce",
-            self.channel_annoucement_nonce()
+            "channel_announcement_nonce",
+            self.channel_announcement_nonce()
         )?;
         write!(f, ", {}: {}", "next_local_nonce", self.next_local_nonce())?;
         let extra_count = self.count_extra_fields();
@@ -4580,7 +4580,7 @@ impl AcceptChannel {
         let end = molecule::unpack_number(&slice[44..]) as usize;
         Pubkey::new_unchecked(self.0.slice(start..end))
     }
-    pub fn channel_annoucement_nonce(&self) -> PubNonceOpt {
+    pub fn channel_announcement_nonce(&self) -> PubNonceOpt {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[44..]) as usize;
         let end = molecule::unpack_number(&slice[48..]) as usize;
@@ -4633,7 +4633,7 @@ impl molecule::prelude::Entity for AcceptChannel {
             .tlc_basepoint(self.tlc_basepoint())
             .first_per_commitment_point(self.first_per_commitment_point())
             .second_per_commitment_point(self.second_per_commitment_point())
-            .channel_annoucement_nonce(self.channel_annoucement_nonce())
+            .channel_announcement_nonce(self.channel_announcement_nonce())
             .next_local_nonce(self.next_local_nonce())
     }
 }
@@ -4694,8 +4694,8 @@ impl<'r> ::core::fmt::Display for AcceptChannelReader<'r> {
         write!(
             f,
             ", {}: {}",
-            "channel_annoucement_nonce",
-            self.channel_annoucement_nonce()
+            "channel_announcement_nonce",
+            self.channel_announcement_nonce()
         )?;
         write!(f, ", {}: {}", "next_local_nonce", self.next_local_nonce())?;
         let extra_count = self.count_extra_fields();
@@ -4783,7 +4783,7 @@ impl<'r> AcceptChannelReader<'r> {
         let end = molecule::unpack_number(&slice[44..]) as usize;
         PubkeyReader::new_unchecked(&self.as_slice()[start..end])
     }
-    pub fn channel_annoucement_nonce(&self) -> PubNonceOptReader<'r> {
+    pub fn channel_announcement_nonce(&self) -> PubNonceOptReader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[44..]) as usize;
         let end = molecule::unpack_number(&slice[48..]) as usize;
@@ -4873,7 +4873,7 @@ pub struct AcceptChannelBuilder {
     pub(crate) tlc_basepoint: Pubkey,
     pub(crate) first_per_commitment_point: Pubkey,
     pub(crate) second_per_commitment_point: Pubkey,
-    pub(crate) channel_annoucement_nonce: PubNonceOpt,
+    pub(crate) channel_announcement_nonce: PubNonceOpt,
     pub(crate) next_local_nonce: PubNonce,
 }
 impl AcceptChannelBuilder {
@@ -4918,8 +4918,8 @@ impl AcceptChannelBuilder {
         self.second_per_commitment_point = v;
         self
     }
-    pub fn channel_annoucement_nonce(mut self, v: PubNonceOpt) -> Self {
-        self.channel_annoucement_nonce = v;
+    pub fn channel_announcement_nonce(mut self, v: PubNonceOpt) -> Self {
+        self.channel_announcement_nonce = v;
         self
     }
     pub fn next_local_nonce(mut self, v: PubNonce) -> Self {
@@ -4942,7 +4942,7 @@ impl molecule::prelude::Builder for AcceptChannelBuilder {
             + self.tlc_basepoint.as_slice().len()
             + self.first_per_commitment_point.as_slice().len()
             + self.second_per_commitment_point.as_slice().len()
-            + self.channel_annoucement_nonce.as_slice().len()
+            + self.channel_announcement_nonce.as_slice().len()
             + self.next_local_nonce.as_slice().len()
     }
     fn write<W: molecule::io::Write>(&self, writer: &mut W) -> molecule::io::Result<()> {
@@ -4969,7 +4969,7 @@ impl molecule::prelude::Builder for AcceptChannelBuilder {
         offsets.push(total_size);
         total_size += self.second_per_commitment_point.as_slice().len();
         offsets.push(total_size);
-        total_size += self.channel_annoucement_nonce.as_slice().len();
+        total_size += self.channel_announcement_nonce.as_slice().len();
         offsets.push(total_size);
         total_size += self.next_local_nonce.as_slice().len();
         writer.write_all(&molecule::pack_number(total_size as molecule::Number))?;
@@ -4986,7 +4986,7 @@ impl molecule::prelude::Builder for AcceptChannelBuilder {
         writer.write_all(self.tlc_basepoint.as_slice())?;
         writer.write_all(self.first_per_commitment_point.as_slice())?;
         writer.write_all(self.second_per_commitment_point.as_slice())?;
-        writer.write_all(self.channel_annoucement_nonce.as_slice())?;
+        writer.write_all(self.channel_announcement_nonce.as_slice())?;
         writer.write_all(self.next_local_nonce.as_slice())?;
         Ok(())
     }

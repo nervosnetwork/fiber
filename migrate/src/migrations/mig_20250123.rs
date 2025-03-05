@@ -9,6 +9,7 @@ use tracing::info;
 const MIGRATION_DB_VERSION: &str = "20250123051223";
 
 pub use fiber_v031::fiber::channel::ChannelActorState as ChannelActorStateV031;
+pub use fiber_v031::fiber::channel::RetryableTlcOperation as RetryableTlcOperationV031;
 pub use fiber_v031::fiber::channel::{
     ChannelTlcInfo as ChannelTlcInfoV031, PendingTlcs as PendingTlcsV031, TlcInfo as TlcInfoV031,
     TlcState as TlcStateV031,
@@ -18,7 +19,8 @@ use crate::util::convert;
 pub use fiber_v040::fiber::channel::ChannelActorState as ChannelActorStateV040;
 pub use fiber_v040::fiber::channel::{
     ChannelTlcInfo as ChannelTlcInfoV040, PendingTlcs as PendingTlcsV040,
-    PublicChannelInfo as PublicChannelInfoV040, TlcInfo as TlcInfoV040, TlcState as TlcStateV040,
+    PublicChannelInfo as PublicChannelInfoV040, RetryableTlcOperation as RetryableTlcOperationV040,
+    TlcInfo as TlcInfoV040, TlcState as TlcStateV040,
 };
 
 pub struct MigrationObj {
@@ -63,6 +65,49 @@ fn convert_pending_tlcs(old: PendingTlcsV031) -> PendingTlcsV040 {
     }
 }
 
+fn convert_retryable_tlc_operations(
+    old: Vec<RetryableTlcOperationV031>,
+    old_tlc_state: &TlcStateV031,
+) -> Vec<RetryableTlcOperationV040> {
+    old.into_iter()
+        .map(|op| convert_retryable_op(op, old_tlc_state))
+        .collect()
+}
+
+fn convert_retryable_op(
+    old: RetryableTlcOperationV031,
+    old_tlc_state: &TlcStateV031,
+) -> RetryableTlcOperationV040 {
+    match old {
+        RetryableTlcOperationV031::RemoveTlc(tlc_id, reason) => {
+            RetryableTlcOperationV040::RemoveTlc(convert(tlc_id), convert(reason))
+        }
+        RetryableTlcOperationV031::RelayRemoveTlc(channel_id, tlc_id, reason) => {
+            RetryableTlcOperationV040::RelayRemoveTlc(
+                convert(channel_id),
+                convert(tlc_id),
+                convert(reason),
+            )
+        }
+        RetryableTlcOperationV031::ForwardTlc(channel_id, tlc_id, onion_packet, is_retry) => {
+            let received_amount = old_tlc_state
+                .get(&tlc_id)
+                .expect("tlc info not found")
+                .amount;
+            let forward_amount = onion_packet.current.amount;
+            // Next forwarding channel will get the forward_fee and check if it's enough.
+            let forward_fee = received_amount.saturating_sub(forward_amount);
+            RetryableTlcOperationV040::ForwardTlc(
+                convert(channel_id),
+                convert(tlc_id),
+                convert(onion_packet),
+                forward_fee,
+                is_retry,
+            )
+        }
+    }
+}
+
 impl Migration for MigrationObj {
     fn migrate(
         &self,
@@ -81,6 +126,11 @@ impl Migration for MigrationObj {
             .prefix_iterator(prefix.as_slice())
             .take_while(move |(col_key, _)| col_key.starts_with(prefix.as_slice()))
         {
+            if let Ok(_) = bincode::deserialize::<ChannelActorStateV040>(&v) {
+                // if we can deserialize the data correctly with new version, just skip it.
+                continue;
+            }
+
             let old_channel_state: ChannelActorStateV031 =
                 bincode::deserialize(&v).expect("deserialize to old channel state");
 
@@ -88,7 +138,11 @@ impl Migration for MigrationObj {
             let new_tlc_state = TlcStateV040 {
                 offered_tlcs: convert_pending_tlcs(old_tlc_state.offered_tlcs),
                 received_tlcs: convert_pending_tlcs(old_tlc_state.received_tlcs),
-                retryable_tlc_operations: convert(old_tlc_state.retryable_tlc_operations),
+                // changed field in v040
+                retryable_tlc_operations: convert_retryable_tlc_operations(
+                    old_tlc_state.retryable_tlc_operations,
+                    &old_channel_state.tlc_state,
+                ),
                 applied_add_tlcs: convert(old_tlc_state.applied_add_tlcs),
                 // new field in v040
                 applied_remove_tlcs: HashSet::new(),

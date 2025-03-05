@@ -14,6 +14,7 @@ use crate::ckb::CkbConfig;
 use crate::fiber::gossip::GossipMessageStore;
 use crate::rpc::info::InfoRpcServer;
 use crate::rpc::payment::PaymentRpcServer;
+use crate::watchtower::WatchtowerStore;
 use crate::{
     cch::CchMessage,
     fiber::{
@@ -86,6 +87,7 @@ pub async fn start_rpc<
         + InvoiceStore
         + NetworkGraphStateStore
         + GossipMessageStore
+        + WatchtowerStore
         + Clone
         + Send
         + Sync
@@ -156,6 +158,7 @@ pub async fn start_rpc<
                         network_actor.clone(),
                         rpc_dev_module_commitment_txs
                             .expect("rpc_dev_module_commitment_txs should be set"),
+                        store.clone(),
                     )
                     .into_rpc(),
                 )
