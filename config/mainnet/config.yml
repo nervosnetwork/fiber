@@ -1,0 +1,71 @@
+# This configuration file only contains the necessary configurations for the mainnet deployment.
+# All options' descriptions can be found via `fnn --help` and be overridden by command line arguments or environment variables.
+fiber:
+  listening_addr: "/ip4/0.0.0.0/tcp/8228"
+  bootnode_addrs:
+    - "/ip4/43.199.24.44/tcp/8228/p2p/QmZ2gCTfEF6vKsiYFF2STPeA2rRLRim9nMtzfwiE7uMQ4v"
+    - "/ip4/54.255.71.126/tcp/8228/p2p/QmcMLnWraRyxd7PFRgvn1QeYRQS2DGsP6fPFCQjtfMs5b2"
+  announce_listening_addr: true
+  announced_addrs:
+    # If you want to announce your fiber node public address to the network, you need to add the address here.
+    # Please change the ip to your public ip accordingly, and make sure the port is open and reachable from the internet.
+    # - "/ip4/YOUR-FIBER-NODE-PUBLIC-IP/tcp/8228"
+  chain: mainnet
+  # lock script configurations related to fiber network
+  # https://github.com/nervosnetwork/fiber-scripts/blob/main/deployment/mainnet/migrations/2025-02-28-114908.json
+  scripts:
+    - name: FundingLock
+      script:
+        code_hash: 0xe45b1f8f21bff23137035a3ab751d75b36a981deec3e7820194b9c042967f4f1
+        hash_type: type
+        args: 0x
+      cell_deps:
+        - out_point:
+            tx_hash: 0x22ccb3018ca1aa7acd7b0ef7f5b01048be2525bb7364eafc8af04fd4d7279384
+            index: 0x1
+          dep_type: code
+        - out_point:
+            tx_hash: 0x22ccb3018ca1aa7acd7b0ef7f5b01048be2525bb7364eafc8af04fd4d7279384 # ckb_auth
+            index: 0x0
+          dep_type: code
+    - name: CommitmentLock
+      script:
+        code_hash: 0x2d45c4d3ed3e942f1945386ee82a5d1b7e4bb16d7fe1ab015421174ab747406c
+        hash_type: type
+        args: 0x
+      cell_deps:
+        - out_point:
+            tx_hash: 0x22ccb3018ca1aa7acd7b0ef7f5b01048be2525bb7364eafc8af04fd4d7279384
+            index: 0x2
+          dep_type: code
+        - out_point:
+            tx_hash: 0x22ccb3018ca1aa7acd7b0ef7f5b01048be2525bb7364eafc8af04fd4d7279384 #ckb_auth
+            index: 0x0
+          dep_type: code
+
+rpc:
+  # By default RPC only binds to localhost, thus it only allows accessing from the same machine.
+  # Allowing arbitrary machines to access the JSON-RPC port is dangerous and strongly discouraged.
+  # Please strictly limit the access to only trusted machines.
+  listening_addr: "127.0.0.1:8227"
+
+ckb:
+  # Please use a trusted CKB RPC node, the node should be able to provide the correct data and should be stable.
+  rpc_url: "http://127.0.0.1:8114/"
+  udt_whitelist:
+    ## https://github.com/CKBFansDAO/xudtlogos/blob/f2557839ecde0409ba674516a62ae6752bc0daa9/public/tokens/token_list.json#L548
+    # - name: USDI
+    #  script:
+    #    code_hash: 0xbfa35a9c38a676682b65ade8f02be164d48632281477e36f8dc2f41f79e56bfc
+    #    hash_type: type
+    #    args: 0xd591ebdc69626647e056e13345fd830c8b876bb06aa07ba610479eb77153ea9f
+    #  cell_deps:
+    #    - tx_hash: 0xf6a5eef65101899db9709c8de1cc28f23c1bee90d857ebe176f6647ef109e20d
+    #      index: 0
+    #      dep_type: code
+    #  auto_accept_amount: 10000000
+
+services:
+  - fiber
+  - rpc
+  - ckb
