@@ -6215,3 +6215,40 @@ async fn test_send_payment_will_succeed_with_large_tlc_expiry_limit() {
         .assert_payment_status(payment_hash, PaymentSessionStatus::Success, Some(1))
         .await;
 }
+
+#[tokio::test]
+async fn test_open_channel_failed_without_accept() {
+    let [node_a, node_b] = NetworkNode::new_n_interconnected_nodes().await;
+
+    let message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
+            OpenChannelCommand {
+                peer_id: node_b.peer_id.clone(),
+                public: false,
+                shutdown_script: None,
+                funding_amount: 100000000000,
+                funding_udt_type_script: None,
+                commitment_fee_rate: None,
+                commitment_delay_epoch: None,
+                funding_fee_rate: None,
+                tlc_expiry_delta: None,
+                tlc_min_value: None,
+                tlc_fee_proportional_millionths: None,
+                max_tlc_number_in_flight: None,
+                max_tlc_value_in_flight: None,
+            },
+            rpc_reply,
+        ))
+    };
+    let open_channel_result = call!(node_a.network_actor, message)
+        .expect("node_a alive")
+        .expect("open channel success");
+
+    eprintln!("open_channel_result: {:?}", open_channel_result);
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+    let temp_channel_id = open_channel_result.channel_id;
+    let node_a_channel_actor_state = node_a.get_channel_actor_state(temp_channel_id);
+    assert!(node_a_channel_actor_state.is_none());
+}

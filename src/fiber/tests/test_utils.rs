@@ -538,10 +538,13 @@ impl NetworkNode {
             .to_remote_amount
     }
 
-    pub fn get_channel_actor_state(&self, channel_id: Hash256) -> ChannelActorState {
-        self.store
-            .get_channel_actor_state(&channel_id)
+    pub fn get_channel_actor_state_checked(&self, channel_id: Hash256) -> ChannelActorState {
+        self.get_channel_actor_state(channel_id)
             .expect("get channel")
+    }
+
+    pub fn get_channel_actor_state(&self, channel_id: Hash256) -> Option<ChannelActorState> {
+        self.store.get_channel_actor_state(&channel_id)
     }
 
     pub fn insert_invoice(&mut self, invoice: CkbInvoice, preimage: Option<Hash256>) {
@@ -740,7 +743,7 @@ impl NetworkNode {
         channel_id: Hash256,
         new_to_local_amount: u128,
     ) {
-        let mut channel_actor_state = self.get_channel_actor_state(channel_id);
+        let mut channel_actor_state = self.get_channel_actor_state_checked(channel_id);
         channel_actor_state.to_local_amount = new_to_local_amount;
         self.update_channel_actor_state(channel_actor_state, None)
             .await;
@@ -751,21 +754,21 @@ impl NetworkNode {
         channel_id: Hash256,
         new_to_remote_amount: u128,
     ) {
-        let mut channel_actor_state = self.get_channel_actor_state(channel_id);
+        let mut channel_actor_state = self.get_channel_actor_state_checked(channel_id);
         channel_actor_state.to_remote_amount = new_to_remote_amount;
         self.update_channel_actor_state(channel_actor_state, None)
             .await;
     }
 
     pub async fn disable_channel(&mut self, channel_id: Hash256) {
-        let mut channel_actor_state = self.get_channel_actor_state(channel_id);
+        let mut channel_actor_state = self.get_channel_actor_state_checked(channel_id);
         channel_actor_state.local_tlc_info.enabled = false;
         self.update_channel_actor_state(channel_actor_state, None)
             .await;
     }
 
     pub async fn disable_channel_stealthy(&self, channel_id: Hash256) {
-        let mut channel_actor_state = self.get_channel_actor_state(channel_id);
+        let mut channel_actor_state = self.get_channel_actor_state_checked(channel_id);
         channel_actor_state.local_tlc_info.enabled = false;
         self.update_channel_actor_state(
             channel_actor_state,

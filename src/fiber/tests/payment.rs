@@ -2078,7 +2078,7 @@ async fn test_send_payment_middle_hop_update_fee_should_recovery() {
     }
 
     assert_eq!(succ_count, tx_count);
-    let channel_state = nodes[0].get_channel_actor_state(channels[0]);
+    let channel_state = nodes[0].get_channel_actor_state_checked(channels[0]);
     assert_eq!(channel_state.get_offered_tlc_balance(true), 0);
     assert!(channel_state.get_offered_tlc_balance(false) > 0);
 }

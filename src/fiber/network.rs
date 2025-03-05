@@ -212,6 +212,8 @@ pub enum NetworkActorCommand {
         OpenChannelCommand,
         RpcReplyPort<Result<OpenChannelResponse, String>>,
     ),
+    // Abandon a channel, channel_id maybe temp_channel_id or normal channel_id
+    AbandonChannel(Hash256, RpcReplyPort<Result<(), String>>),
     // Accept a channel to a peer.
     AcceptChannel(
         AcceptChannelCommand,
@@ -1117,7 +1119,6 @@ where
                     }
                 }
             }
-
             NetworkActorCommand::OpenChannel(open_channel, reply) => {
                 match state.create_outbound_channel(open_channel).await {
                     Ok((_, channel_id)) => {
@@ -1139,6 +1140,18 @@ where
                     }
                     Err(err) => {
                         error!("Failed to accept channel: {}", err);
+                        let _ = reply.send(Err(err.to_string()));
+                    }
+                }
+            }
+
+            NetworkActorCommand::AbandonChannel(channel_id, reply) => {
+                match state.abandon_channel(channel_id).await {
+                    Ok(_) => {
+                        let _ = reply.send(Ok(()));
+                    }
+                    Err(err) => {
+                        error!("Failed to abandon channel: {}", err);
                         let _ = reply.send(Err(err.to_string()));
                     }
                 }
@@ -2283,6 +2296,28 @@ where
 
             callback(result);
         });
+    }
+
+    pub async fn abandon_channel(
+        &mut self,
+        channel_id: Hash256,
+    ) -> Result<(), ProcessingChannelError> {
+        if let Some(_channel_actor_state) = self.store.get_channel_actor_state(&channel_id) {
+            return Ok(());
+        } else {
+            // there is no corresponding channel actor state, means the peer does not replied the accept channel message yet
+            // here we only need to stop the channel actor and remove the channel from list
+            if let Some(channel) = self.channels.remove(&channel_id) {
+                for (_peer_id, (session_id, _)) in self.peer_session_map.iter() {
+                    if let Some(session_channels) = self.session_channels_map.get_mut(session_id) {
+                        session_channels.remove(&channel_id);
+                    }
+                }
+                let _ = channel
+                    .send_message(ChannelActorMessage::Event(ChannelEvent::PeerDisconnected));
+            }
+        }
+        return Ok(());
     }
 
     fn get_peer_session(&self, peer_id: &PeerId) -> Option<SessionId> {
