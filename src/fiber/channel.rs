@@ -59,7 +59,7 @@ use musig2::{
 use ractor::{
     async_trait as rasync_trait, call,
     concurrency::{Duration, JoinHandle},
-    Actor, ActorProcessingErr, ActorRef, OutputPort, RpcReplyPort,
+    Actor, ActorProcessingErr, ActorRef, MessagingErr, OutputPort, RpcReplyPort,
 };
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
@@ -1891,23 +1891,7 @@ where
                 }
             }
             ChannelCommand::BroadcastChannelUpdate() => {
-                // Whether a channel is public or not can be determined immediately when the channel is created.
-                // That's why we are using debug_assert here to ensure the channel is public.
-                // But we still need to check if the channel is Ready or not, because the channel may be not
-                // ready or is already closed when the command is processed.
-                // TODO: simply sending BroadcastChannelUpdate periodically when channel is ready and cancel the
-                // task when the channel is closed.
-                debug_assert!(state.is_public());
-                if matches!(state.state, ChannelState::ChannelReady()) {
-                    let channel_update = state.generate_channel_update(&self.network).await;
-                    self.network
-                        .send_message(NetworkActorMessage::new_command(
-                            NetworkActorCommand::BroadcastMessages(vec![
-                                BroadcastMessageWithTimestamp::ChannelUpdate(channel_update),
-                            ]),
-                        ))
-                        .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-                }
+                state.broadcast_channel_update(myself, &self.network).await;
                 Ok(())
             }
             ChannelCommand::ForwardTlcResult(forward_tlc_res) => {
@@ -3269,7 +3253,8 @@ pub struct ChannelActorState {
     // create a new handle when we broadcast a new channel update message.
     // The arc here is only used to implement the clone trait for the ChannelActorState.
     #[serde(skip)]
-    pub scheduled_channel_update_handle: Option<Arc<JoinHandle<()>>>,
+    pub scheduled_channel_update_handle:
+        Option<Arc<JoinHandle<Result<(), MessagingErr<ChannelActorMessage>>>>>,
 }
 
 #[serde_as]
@@ -3831,6 +3816,19 @@ impl ChannelActorState {
         } else {
             self.update_graph_for_local_channel_ready(network);
         }
+        // Cancel the scheduled channel update broadcasting task if it exists.
+        if let Some(handle) = self.scheduled_channel_update_handle.take() {
+            handle.abort();
+        }
+        self.broadcast_channel_update(myself, network).await;
+        self.send_update_tlc_info_message(network);
+    }
+
+    async fn broadcast_channel_update(
+        &mut self,
+        myself: &ActorRef<ChannelActorMessage>,
+        network: &ActorRef<NetworkActorMessage>,
+    ) {
         if self.is_public() {
             let channel_update = self.generate_channel_update(network).await;
             network
@@ -3841,21 +3839,16 @@ impl ChannelActorState {
                 ))
                 .expect(ASSUME_NETWORK_ACTOR_ALIVE);
 
-            if let Some(handle) = self.scheduled_channel_update_handle.take() {
-                handle.abort();
-            }
-
             // We need to periodically broadcast the public channel update message to the network,
             // so that the network can know the channel is still alive. We currently use the interval with
             // value of BROADCAST_MESSAGES_CONSIDERED_STALE_DURATION / 2 to broadcast the channel update message.
             // This allows us to have send at least one channel update message in the interval of BROADCAST_MESSAGES_CONSIDERED_STALE_DURATION.
-            let handle = myself.send_interval(
+            let handle = myself.send_after(
                 SOFT_BROADCAST_MESSAGES_CONSIDERED_STALE_DURATION / 2,
                 || ChannelActorMessage::Command(ChannelCommand::BroadcastChannelUpdate()),
             );
             self.scheduled_channel_update_handle = Some(Arc::new(handle));
         }
-        self.send_update_tlc_info_message(network);
     }
 
     fn update_graph_for_remote_channel_change(&mut self, network: &ActorRef<NetworkActorMessage>) {
