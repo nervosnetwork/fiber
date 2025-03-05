@@ -1,10 +1,7 @@
-use crate::fiber::PaymentCustomRecords;
-use hex::FromHex;
 use molecule::prelude::Entity;
 use musig2::{BinaryEncoding, CompactSignature, PubNonce, SCHNORR_SIGNATURE_SIZE};
-use serde::{de::Error, Deserialize, Deserializer, Serialize, Serializer};
+use serde::{de::Error, Deserialize, Deserializer, Serializer};
 use serde_with::{serde_conv, DeserializeAs, SerializeAs};
-use std::collections::HashMap;
 
 pub fn from_hex<'de, D, E>(deserializer: D) -> Result<E, D::Error>
 where
@@ -167,50 +164,5 @@ impl<'de> DeserializeAs<'de, PubNonce> for PubNonceAsBytes {
             return Err(serde::de::Error::custom("expected 66 bytes"));
         }
         PubNonce::from_bytes(&bytes).map_err(serde::de::Error::custom)
-    }
-}
-
-pub struct PaymentCustomRecordsHex;
-
-impl SerializeAs<PaymentCustomRecords> for PaymentCustomRecordsHex {
-    fn serialize_as<S>(source: &PaymentCustomRecords, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        let mut map: HashMap<String, String> = HashMap::new();
-        for (key, value) in &source.data {
-            let key_hex: String = format!("0x{:x}", key);
-            let value_hex: String = format!("0x{}", hex::encode(value));
-            map.insert(key_hex, value_hex);
-        }
-        map.serialize(serializer)
-    }
-}
-
-impl<'de> DeserializeAs<'de, PaymentCustomRecords> for PaymentCustomRecordsHex {
-    fn deserialize_as<D>(deserializer: D) -> Result<PaymentCustomRecords, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let map: HashMap<String, String> = HashMap::deserialize(deserializer)?;
-        let mut data = HashMap::new();
-        for (key, value) in map {
-            if key.len() < 2 || &key[..2] != "0x" {
-                return Err(Error::custom(format!(
-                    "hex string for key does not start with 0x: {}",
-                    &key
-                )));
-            };
-            let key = u32::from_str_radix(&key[2..], 16).map_err(serde::de::Error::custom)?;
-            if value.len() < 2 || &value[..2].to_lowercase() != "0x" {
-                return Err(Error::custom(format!(
-                    "hex string for value does not start with 0x: {}",
-                    &value
-                )));
-            };
-            let value = Vec::from_hex(&value[2..]).map_err(serde::de::Error::custom)?;
-            data.insert(key, value);
-        }
-        Ok(PaymentCustomRecords { data })
     }
 }

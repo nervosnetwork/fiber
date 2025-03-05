@@ -1,4 +1,3 @@
-use crate::fiber::serde_utils::PaymentCustomRecordsHex;
 use crate::{
     fiber::{
         config::AnnouncedNodeName,
@@ -19,7 +18,6 @@ use secp256k1::{PublicKey, Secp256k1, SecretKey};
 use serde::Deserialize;
 use serde::Serialize;
 
-use serde_with::serde_as;
 use std::str::FromStr;
 
 #[test]
@@ -321,10 +319,8 @@ fn test_verify_hard_coded_node_announcement() {
 
 #[test]
 fn test_custom_records_serialize_deserialize() {
-    #[serde_as]
-    #[derive(Serialize, Deserialize, Clone, Debug)]
+    #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
     pub struct Custom {
-        #[serde_as(as = "Option<PaymentCustomRecordsHex>")]
         pub custom_records: Option<PaymentCustomRecords>,
     }
 
@@ -341,12 +337,12 @@ fn test_custom_records_serialize_deserialize() {
 
     let deserialized: Custom = serde_json::from_str(&json).expect("deserialize");
     eprintln!("deserialized: {:?}", deserialized);
+    assert_eq!(custom, deserialized);
 
-    let invalid = "{\"custom_records\":{\"4\":\"0x0521\",\"0x1\":\"0x0203\"}}";
+    let invalid = "{\"custom_records\":{\"0x4\":\"0x0521\",\"0x1\":\"0x0203\"}}";
     let deserialized = serde_json::from_str::<Custom>(invalid);
     assert!(deserialized.is_err());
 
-    let invalid = "{\"custom_records\":{\"0x4\":\"0x0521\",\"0x1\":\"0203\"}}";
-    let deserialized = serde_json::from_str::<Custom>(invalid);
-    assert!(deserialized.is_err());
+    let bincode_serialize = bincode::serialize(&custom).expect("serialize");
+    let _deserialized: Custom = bincode::deserialize(&bincode_serialize).expect("deserialize");
 }
