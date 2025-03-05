@@ -4218,16 +4218,16 @@ impl ChannelActorState {
         self.to_remote_amount
     }
 
-    pub fn get_offered_tlc_balance(&self, exclude_failed_tls: bool) -> u128 {
+    pub fn get_offered_tlc_balance(&self) -> u128 {
         self.get_all_offer_tlcs()
-            .filter(|tlc| !(exclude_failed_tls && tlc.is_fail_remove_confirmed()))
+            .filter(|tlc| !tlc.is_fail_remove_confirmed())
             .map(|tlc| tlc.amount)
             .sum::<u128>()
     }
 
-    pub fn get_received_tlc_balance(&self, exclude_failed_tls: bool) -> u128 {
+    pub fn get_received_tlc_balance(&self) -> u128 {
         self.get_all_received_tlcs()
-            .filter(|tlc| !(exclude_failed_tls && tlc.is_fail_remove_confirmed()))
+            .filter(|tlc| !tlc.is_fail_remove_confirmed())
             .map(|tlc| tlc.amount)
             .sum::<u128>()
     }
@@ -4663,14 +4663,14 @@ impl ChannelActorState {
         }
 
         if tlc.is_offered() {
-            let sent_tlc_value = self.get_offered_tlc_balance(true);
+            let sent_tlc_value = self.get_offered_tlc_balance();
             debug_assert!(self.to_local_amount >= sent_tlc_value);
             if sent_tlc_value + tlc.amount > self.to_local_amount {
                 debug!(channel = ?self.get_id(), tlc_id = ?tlc.tlc_id, tlc_amount = tlc.amount, sent_tlc_value = sent_tlc_value, to_local_amount = self.to_local_amount, "Sending tlc exceeds local balance",);
                 return Err(ProcessingChannelError::TlcAmountExceedLimit);
             }
         } else {
-            let received_tlc_value = self.get_received_tlc_balance(true);
+            let received_tlc_value = self.get_received_tlc_balance();
             debug_assert!(self.to_remote_amount >= received_tlc_value);
             if received_tlc_value + tlc.amount > self.to_remote_amount {
                 debug!(channel = ?self.get_id(), tlc_id = ?tlc.tlc_id, tlc_amount = tlc.amount, received_tlc_value = received_tlc_value, to_remote_amount = self.to_remote_amount, "Receiving tlc exceeds remote balance",);
