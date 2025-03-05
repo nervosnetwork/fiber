@@ -24,7 +24,7 @@ pub(crate) struct NodeHeapElement {
     // The probability of this node.
     pub probability: f64,
 
-    // The expected aboslute expiry timestamp (in milliseconds) for the incoming HTLC of this Node
+    // The expected absolute expiry timestamp (in milliseconds) for the incoming HTLC of this Node
     pub incoming_tlc_expiry: u64,
 
     // next_hop is the edge this route comes from, we also include the fee rate and tlc expiry delta.

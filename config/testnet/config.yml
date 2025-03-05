@@ -11,7 +11,7 @@ fiber:
     # - "/ip4/YOUR-FIBER-NODE-PUBLIC-IP/tcp/8228"
   chain: testnet
   # lock script configurations related to fiber network
-  # https://github.com/nervosnetwork/fiber-scripts/blob/main/deployment/testnet/migrations/2024-09-14-084742.json
+  # https://github.com/nervosnetwork/fiber-scripts/blob/main/deployment/testnet/migrations/2025-02-28-111246.json
   scripts:
     - name: FundingLock
       script:
@@ -20,11 +20,11 @@ fiber:
         args: 0x
       cell_deps:
         - out_point:
-            tx_hash: 0x89af398edc7ed0054506b33349b031097d94378e11e77bf0690ee69d82623a43
-            index: 0x0
+            tx_hash: 0x5a5288769cecde6451cb5d301416c297a6da43dc3ac2f3253542b4082478b19b
+            index: 0x1
           dep_type: code
         - out_point:
-            tx_hash: 0xbfd6d68b328a02606f1f65ee0f79f8ed5f76dfe86998c7aaa9ee4720d53f4c49 # ckb_auth
+            tx_hash: 0x5a5288769cecde6451cb5d301416c297a6da43dc3ac2f3253542b4082478b19b # ckb_auth
             index: 0x0
           dep_type: code
     - name: CommitmentLock
@@ -34,11 +34,11 @@ fiber:
         args: 0x
       cell_deps:
         - out_point:
-            tx_hash: 0x89af398edc7ed0054506b33349b031097d94378e11e77bf0690ee69d82623a43
-            index: 0x1
+            tx_hash: 0x5a5288769cecde6451cb5d301416c297a6da43dc3ac2f3253542b4082478b19b
+            index: 0x2
           dep_type: code
         - out_point:
-            tx_hash: 0xbfd6d68b328a02606f1f65ee0f79f8ed5f76dfe86998c7aaa9ee4720d53f4c49 #ckb_auth
+            tx_hash: 0x5a5288769cecde6451cb5d301416c297a6da43dc3ac2f3253542b4082478b19b #ckb_auth
             index: 0x0
           dep_type: code
 

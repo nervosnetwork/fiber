@@ -63,7 +63,7 @@ impl Migrations {
         let mpb = Arc::new(MultiProgress::new());
 
         // make sure the latest migration is the last one
-        // this may only happend the fnn-migrate binary is not compiled with
+        // this may only happened the fnn-migrate binary is not compiled with
         // the correct fiber code base
         {
             let migrations = self.migrations.values();
