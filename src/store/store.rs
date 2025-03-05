@@ -47,17 +47,13 @@ fn update_channel_timestamp(
         ChannelTimestamp::ChannelUpdateOfNode1() => 8,
         ChannelTimestamp::ChannelUpdateOfNode2() => 16,
     };
-    let message_id = match channel_timestamp {
-        ChannelTimestamp::ChannelAnnouncement() => {
-            BroadcastMessageID::ChannelAnnouncement(outpoint.clone())
-        }
-        ChannelTimestamp::ChannelUpdateOfNode1() => {
-            BroadcastMessageID::ChannelUpdate(outpoint.clone())
-        }
-        ChannelTimestamp::ChannelUpdateOfNode2() => {
-            BroadcastMessageID::ChannelUpdate(outpoint.clone())
-        }
-    };
+    // All timestamps are saved in a 24-byte array, with BroadcastMessageID::ChannelAnnouncement as the key,
+    // the first 8 bytes for channel announcement, the second 8 bytes for channel update of node 1,
+    // and the last 8 bytes for channel update of node 2.
+    // TODO: previous implementation accidentally used BroadcastMessageID::ChannelUpdate as the key
+    // for the channel updates timestamps. I have fixed it here by using the same key as the channel
+    // announcement. This is a breaking change, we need migration for this.
+    let message_id = BroadcastMessageID::ChannelAnnouncement(outpoint.clone());
 
     let timestamp_key = [
         &[BROADCAST_MESSAGE_TIMESTAMP_PREFIX],
@@ -92,7 +88,7 @@ fn delete_latest_channel_update_timestamp(
     outpoint: &OutPoint,
     old_timestamp: u64,
 ) {
-    let message_id = BroadcastMessageID::ChannelUpdate(outpoint.clone());
+    let message_id = BroadcastMessageID::ChannelAnnouncement(outpoint.clone());
     let timestamps = batch.get(
         [
             &[BROADCAST_MESSAGE_TIMESTAMP_PREFIX],
@@ -658,7 +654,7 @@ impl GossipMessageStore for Store {
         self.get(
             [
                 [BROADCAST_MESSAGE_TIMESTAMP_PREFIX].as_slice(),
-                BroadcastMessageID::ChannelUpdate(outpoint.clone())
+                BroadcastMessageID::ChannelAnnouncement(outpoint.clone())
                     .to_bytes()
                     .as_slice(),
             ]

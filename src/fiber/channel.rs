@@ -3112,6 +3112,9 @@ impl SettlementTlc {
     }
 }
 
+type ScheduledChannelUpdateHandle =
+    Option<Arc<JoinHandle<Result<(), MessagingErr<ChannelActorMessage>>>>>;
+
 #[serde_as]
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ChannelActorState {
@@ -3253,8 +3256,7 @@ pub struct ChannelActorState {
     // create a new handle when we broadcast a new channel update message.
     // The arc here is only used to implement the clone trait for the ChannelActorState.
     #[serde(skip)]
-    pub scheduled_channel_update_handle:
-        Option<Arc<JoinHandle<Result<(), MessagingErr<ChannelActorMessage>>>>>,
+    pub scheduled_channel_update_handle: ScheduledChannelUpdateHandle,
 }
 
 #[serde_as]
