@@ -5669,7 +5669,7 @@ async fn test_send_payment_with_first_hop_all_failed() {
         ))
     };
 
-    // expect send payment to faile
+    // expect send payment to failed
     let res = call!(source_node.network_actor, message).expect("source_node alive");
     assert!(res.is_err());
     assert!(res.unwrap_err().contains("Failed to build route"));

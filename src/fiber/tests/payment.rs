@@ -10,6 +10,7 @@ use crate::fiber::tests::test_utils::*;
 use crate::fiber::types::Hash256;
 use crate::fiber::NetworkActorCommand;
 use crate::fiber::NetworkActorMessage;
+use ckb_jsonrpc_types::Status;
 use ractor::call;
 use std::collections::HashSet;
 
@@ -118,7 +119,7 @@ async fn test_send_payment_prefer_channels_with_larger_balance() {
 
     let (nodes, channels) = create_n_nodes_and_channels_with_index_amounts(
         &[
-            // These two channnels have the same overall capacity, but the second channel has more balance for node_0.
+            // These two channels have the same overall capacity, but the second channel has more balance for node_0.
             (
                 (0, 1),
                 (MIN_RESERVED_CKB + 5000000000, MIN_RESERVED_CKB + 5000000000),
@@ -2619,4 +2620,70 @@ async fn test_send_payment_middle_hop_stop_send_payment_then_start() {
 
     let _ = inner_run_restart_test(2).await;
     let _ = inner_run_restart_test(3).await;
+}
+
+#[tokio::test]
+async fn test_send_payment_sync_up_new_channel_is_added() {
+    init_tracing();
+    let _span = tracing::info_span!("node", node = "test").entered();
+    // create a network with 4 nodes, but only connect with 2 channels
+    // node0 -> node1 -> node2  node3
+    let (nodes, _channels) = create_n_nodes_and_channels_with_index_amounts(
+        &[
+            ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+        ],
+        4,
+        true,
+    )
+    .await;
+    let [mut node_0, mut node_1, mut node_2, mut node_3] = nodes.try_into().expect("4 nodes");
+
+    let payment_amount = 10 * 100_000_000;
+    let res = node_0
+        .send_payment_keysend(&node_3, payment_amount, true)
+        .await;
+
+    assert!(res
+        .unwrap_err()
+        .to_string()
+        .contains("Failed to build route"));
+
+    // now add channel for node_2 and node_3
+    let (channel_id, funding_tx) = {
+        establish_channel_between_nodes(
+            &mut node_2,
+            &mut node_3,
+            true,
+            HUGE_CKB_AMOUNT,
+            HUGE_CKB_AMOUNT,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+    };
+
+    // all the other nodes submit_tx
+    for node in [&mut node_0, &mut node_1, &mut node_2, &mut node_3].into_iter() {
+        let res = node.submit_tx(funding_tx.clone()).await;
+        assert_eq!(res, Status::Committed);
+        node.add_channel_tx(channel_id, funding_tx.clone());
+    }
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
+
+    let res = node_0
+        .send_payment_keysend(&node_3, payment_amount, false)
+        .await;
+
+    let payment_hash = res.unwrap().payment_hash;
+    node_0.wait_until_success(payment_hash).await;
 }
