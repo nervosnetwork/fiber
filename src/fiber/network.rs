@@ -2313,8 +2313,9 @@ where
                         session_channels.remove(&channel_id);
                     }
                 }
-                let _ = channel
-                    .send_message(ChannelActorMessage::Event(ChannelEvent::PeerDisconnected));
+                let _ = channel.send_message(ChannelActorMessage::Event(ChannelEvent::Stop(
+                    "abandon channel".to_string(),
+                )));
             }
         }
         return Ok(());
@@ -2626,7 +2627,7 @@ where
                 for channel_id in channel_ids {
                     if let Some(channel) = self.remove_channel(&channel_id) {
                         let _ = channel.send_message(ChannelActorMessage::Event(
-                            ChannelEvent::PeerDisconnected,
+                            ChannelEvent::Stop("peer disconnected".to_string()),
                         ));
                     }
                 }

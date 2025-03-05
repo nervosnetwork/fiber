@@ -1951,8 +1951,9 @@ where
             ChannelEvent::CheckTlcRetryOperation => {
                 self.apply_retryable_tlc_operations(myself, state).await;
             }
-            ChannelEvent::PeerDisconnected => {
-                myself.stop(Some("PeerDisconnected".to_string()));
+            ChannelEvent::Stop(message) => {
+                debug_event!(self.network, "ChannelActorStopped");
+                myself.stop(Some(message));
             }
             ChannelEvent::ClosingTransactionConfirmed => {
                 // Broadcast the channel update message which disables the channel.
@@ -3317,7 +3318,7 @@ pub struct ClosedChannel {}
 
 #[derive(Debug)]
 pub enum ChannelEvent {
-    PeerDisconnected,
+    Stop(String),
     FundingTransactionConfirmed(H256, u32, u64),
     CommitmentTransactionConfirmed,
     ClosingTransactionConfirmed,

@@ -7,6 +7,7 @@ use crate::fiber::channel::UpdateCommand;
 use crate::fiber::graph::NetworkGraphStateStore;
 use crate::fiber::graph::PaymentSession;
 use crate::fiber::graph::PaymentSessionStatus;
+use crate::fiber::network::DebugEvent;
 use crate::fiber::network::NodeInfoResponse;
 use crate::fiber::network::SendPaymentCommand;
 use crate::fiber::network::SendPaymentResponse;
@@ -576,6 +577,15 @@ impl NetworkNode {
         res
     }
 
+    pub async fn send_abandon_channel(&self, channel_id: Hash256) {
+        let message = |rpc_reply| -> NetworkActorMessage {
+            NetworkActorMessage::Command(NetworkActorCommand::AbandonChannel(channel_id, rpc_reply))
+        };
+        call!(self.network_actor, message)
+            .expect("node_a alive")
+            .expect("abandon channel success");
+    }
+
     pub async fn send_payment_keysend(
         &self,
         recipient: &NetworkNode,
@@ -1126,6 +1136,12 @@ impl NetworkNode {
     {
         self.expect_to_process_event(|event| if event_filter(event) { Some(()) } else { None })
             .await;
+    }
+
+    pub async fn expect_debug_event(&mut self, event_message: &str) {
+        self
+        .expect_event(|event| matches!(event, NetworkServiceEvent::DebugEvent(DebugEvent::Common(message)) if message == event_message))
+        .await;
     }
 
     pub async fn submit_tx(&self, tx: TransactionView) -> ckb_jsonrpc_types::Status {

@@ -4523,23 +4523,12 @@ async fn test_connect_to_peers_with_mutual_channel_on_restart_1() {
     node_a.expect_event(
         |event| matches!(event, NetworkServiceEvent::PeerConnected(id, _addr) if id == &node_b.peer_id),
     ).await;
+
     node_a
-        .expect_event(|event| {
-            matches!(
-                event,
-                NetworkServiceEvent::DebugEvent(DebugEvent::Common(
-                    info
-                )) if "Reestablished channel in ChannelReady" == info)
-        })
+        .expect_debug_event("Reestablished channel in ChannelReady")
         .await;
     node_b
-        .expect_event(|event| {
-            matches!(
-                event,
-                NetworkServiceEvent::DebugEvent(DebugEvent::Common(
-                    info
-                )) if "Reestablished channel in ChannelReady" == info)
-        })
+        .expect_debug_event("Reestablished channel in ChannelReady")
         .await;
 }
 
@@ -4632,15 +4621,7 @@ async fn test_send_payment_with_node_restart_then_resend_add_tlc() {
     )
     .await;
 
-    node_a
-        .expect_event(|event| {
-            matches!(
-            event,
-            NetworkServiceEvent::DebugEvent(DebugEvent::Common(
-                info
-            )) if "resend add tlc" == info)
-        })
-        .await;
+    node_a.expect_debug_event("resend add tlc").await;
 
     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
     let payment_status = node_a.get_payment_status(payment_hash).await;
@@ -4730,16 +4711,7 @@ async fn test_node_reestablish_resend_remove_tlc() {
     assert_eq!(node_b_balance, new_node_b_balance);
 
     node_a.start().await;
-    node_b
-        .expect_event(|event| {
-            matches!(
-        event,
-        NetworkServiceEvent::DebugEvent(DebugEvent::Common(
-            info
-        )) if "resend remove tlc" == info)
-        })
-        .await;
-
+    node_b.expect_debug_event("resend remove tlc").await;
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
     // assert balance changed since remove tlc is processed by node_a after node_b resending remove tlc
@@ -4957,13 +4929,8 @@ async fn test_shutdown_channel_with_different_size_shutdown_script() {
         })
         .await;
 
-    node_a
-        .expect_event(|event| matches!(event, NetworkServiceEvent::DebugEvent(DebugEvent::Common(message)) if message == "ChannelClosed"))
-        .await;
-
-    node_b
-        .expect_event(|event| matches!(event, NetworkServiceEvent::DebugEvent(DebugEvent::Common(message)) if message == "ChannelClosed"))
-        .await;
+    node_a.expect_debug_event("ChannelClosed").await;
+    node_b.expect_debug_event("ChannelClosed").await;
 
     assert_eq!(node_a_shutdown_tx_hash, node_b_shutdown_tx_hash);
 
@@ -6218,7 +6185,7 @@ async fn test_send_payment_will_succeed_with_large_tlc_expiry_limit() {
 
 #[tokio::test]
 async fn test_open_channel_failed_without_accept() {
-    let [node_a, node_b] = NetworkNode::new_n_interconnected_nodes().await;
+    let [mut node_a, node_b] = NetworkNode::new_n_interconnected_nodes().await;
 
     let message = |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
@@ -6251,4 +6218,8 @@ async fn test_open_channel_failed_without_accept() {
     let temp_channel_id = open_channel_result.channel_id;
     let node_a_channel_actor_state = node_a.get_channel_actor_state(temp_channel_id);
     assert!(node_a_channel_actor_state.is_none());
+
+    node_a.send_abandon_channel(temp_channel_id).await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    node_a.expect_debug_event("ChannelActorStopped").await;
 }
