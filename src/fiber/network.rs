@@ -2324,20 +2324,18 @@ where
             }
         }
 
-        if let Some(channel) = self.channels.remove(&channel_id) {
+        if let Some(channel) = self.channels.get(&channel_id) {
             for _i in 0..10 {
-                if let Err(_) = channel.send_message(ChannelActorMessage::Event(
-                    ChannelEvent::Stop("abandon channel".to_string()),
-                )) {
+                if channel
+                    .send_message(ChannelActorMessage::Event(ChannelEvent::Stop(
+                        "abandon channel".to_string(),
+                    )))
+                    .is_err()
+                {
                     // Here we make sure the channel actor may be already stopped
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-            for (_peer_id, (session_id, _)) in self.peer_session_map.iter() {
-                if let Some(session_channels) = self.session_channels_map.get_mut(session_id) {
-                    session_channels.remove(&channel_id);
-                }
             }
         } else {
             return Err(ProcessingChannelError::InvalidParameter(format!(
@@ -2345,6 +2343,24 @@ where
                 channel_id
             )));
         }
+
+        // all check passed, now begin to remove from memory and DB
+        self.channels.remove(&channel_id);
+        for (_peer_id, (session_id, _)) in self.peer_session_map.iter() {
+            if let Some(session_channels) = self.session_channels_map.get_mut(session_id) {
+                session_channels.remove(&channel_id);
+            }
+        }
+
+        self.to_be_accepted_channels.remove(&channel_id);
+        if let Some((outpoint, _)) = self
+            .outpoint_channel_map
+            .iter()
+            .find(|(_, id)| *id == &channel_id)
+        {
+            self.pending_channels.remove(&outpoint);
+        }
+        self.outpoint_channel_map.retain(|_, id| *id != channel_id);
 
         if let Some(channel_actor_state) = self.store.get_channel_actor_state(&channel_id) {
             // remove from transaction track actor

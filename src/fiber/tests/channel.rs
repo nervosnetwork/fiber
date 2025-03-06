@@ -6349,7 +6349,7 @@ async fn test_abandon_failed_channel_without_accept() {
 
 #[tokio::test]
 async fn test_abandon_channel_with_peer_accept() {
-    let [mut node_a, node_b] = NetworkNode::new_n_interconnected_nodes().await;
+    let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
 
     let message = |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
@@ -6421,5 +6421,19 @@ async fn test_abandon_channel_with_peer_accept() {
 
     // make sure the channel is removed from DB
     let channel = node_a.get_channel_actor_state_unchecked(new_channel_id);
+    assert!(channel.is_none());
+
+    // Node_b can also abandon channel
+    let channel_actor_state = node_b.get_channel_actor_state(new_channel_id);
+    eprintln!("channel_actor_state: {:?}", channel_actor_state.state);
+    let res = node_b.send_abandon_channel(new_channel_id).await;
+    assert!(res.is_ok());
+
+    // make sure the channel actor is stopped
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    node_b.expect_debug_event("ChannelActorStopped").await;
+
+    // make sure the channel is removed from DB
+    let channel = node_b.get_channel_actor_state_unchecked(new_channel_id);
     assert!(channel.is_none());
 }
