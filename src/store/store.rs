@@ -804,6 +804,25 @@ impl GossipMessageStore for Store {
         ));
         batch.commit();
     }
+
+    fn get_channel_timestamps_iter(&self) -> impl IntoIterator<Item = (OutPoint, [u64; 3])> {
+        // 0 is used to get timestamps for channels instead of node announcements.
+        const PREFIX: [u8; 2] = [BROADCAST_MESSAGE_TIMESTAMP_PREFIX, 0];
+        self.prefix_iterator(&PREFIX).map(|(key, value)| {
+            let outpoint =
+                OutPoint::from_slice(&key[2..]).expect("deserialize OutPoint should be OK");
+            assert_eq!(value.len(), 24);
+            let mut timestamps = [0u64; 3];
+            for i in 0..3 {
+                timestamps[i] = u64::from_be_bytes(
+                    value[i * 8..(i + 1) * 8]
+                        .try_into()
+                        .expect("timestamp length valid, shown above"),
+                );
+            }
+            (outpoint, timestamps)
+        })
+    }
 }
 
 impl WatchtowerStore for Store {

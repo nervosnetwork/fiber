@@ -237,6 +237,8 @@ pub trait GossipMessageStore {
     fn save_channel_update(&self, channel_update: ChannelUpdate);
 
     fn save_node_announcement(&self, node_announcement: NodeAnnouncement);
+
+    fn get_channel_timestamps_iter(&self) -> impl IntoIterator<Item = (OutPoint, [u64; 3])>;
 }
 
 // A batch of gossip messages has been added to the store since the last time
