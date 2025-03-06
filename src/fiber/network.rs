@@ -49,7 +49,7 @@ use super::channel::{
     ChannelActorMessage, ChannelActorStateStore, ChannelCommand, ChannelCommandWithId,
     ChannelEvent, ChannelInitializationParameter, ChannelState, ChannelSubscribers, ChannelTlcInfo,
     OpenChannelParameter, PrevTlcInfo, ProcessingChannelError, ProcessingChannelResult,
-    PublicChannelInfo, RevocationData, SettlementData, ShuttingDownFlags,
+    PublicChannelInfo, RevocationData, SettlementData, ShuttingDownFlags, StopReason,
     DEFAULT_COMMITMENT_FEE_RATE, DEFAULT_FEE_RATE, DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
     MAX_COMMITMENT_DELAY_EPOCHS, MAX_TLC_NUMBER_IN_FLIGHT, MIN_COMMITMENT_DELAY_EPOCHS,
     SYS_MAX_TLC_NUMBER_IN_FLIGHT,
@@ -668,6 +668,9 @@ pub enum NetworkActorEvent {
 
     // An owned channel is updated.
     OwnedChannelUpdateEvent(OwnedChannelUpdateEvent),
+
+    // A channel actor stopped event.
+    ChannelActorStopped(Hash256, StopReason),
 }
 
 #[derive(Debug)]
@@ -983,6 +986,9 @@ where
                 if is_down {
                     debug!("Owned channel is down");
                 }
+            }
+            NetworkActorEvent::ChannelActorStopped(channel_id, reason) => {
+                state.on_channel_actor_stopped(channel_id, reason).await;
             }
         }
         Ok(())
@@ -2338,24 +2344,16 @@ where
         }
 
         if let Some(channel) = self.channels.get(&channel_id) {
-            let cnt = 5;
-            for i in 0..cnt {
-                if channel
-                    .send_message(ChannelActorMessage::Event(ChannelEvent::Stop(
-                        "abandon channel".to_string(),
-                    )))
-                    .is_err()
-                {
-                    // Here we make sure the channel actor may be already stopped
-                    break;
-                }
-                if i == cnt - 1 {
-                    return Err(ProcessingChannelError::InternalError(format!(
-                        "Failed to stop channel actor {}",
-                        channel_id
-                    )));
-                }
-                tokio::time::sleep(Duration::from_millis(100)).await;
+            if channel
+                .send_message(ChannelActorMessage::Event(ChannelEvent::Stop(
+                    StopReason::Abandon,
+                )))
+                .is_err()
+            {
+                return Err(ProcessingChannelError::InternalError(format!(
+                    "Failed to stop channel actor {}",
+                    channel_id
+                )));
             }
         } else {
             return Err(ProcessingChannelError::InvalidParameter(format!(
@@ -2363,41 +2361,6 @@ where
                 channel_id
             )));
         }
-
-        // all check passed, now begin to remove from memory and DB
-        self.channels.remove(&channel_id);
-        for (_peer_id, (session_id, _)) in self.peer_session_map.iter() {
-            if let Some(session_channels) = self.session_channels_map.get_mut(session_id) {
-                session_channels.remove(&channel_id);
-            }
-        }
-
-        if let Some(channel_actor_state) = self.store.get_channel_actor_state(&channel_id) {
-            // remove from transaction track actor
-            if let Some(_funding_tx) = channel_actor_state.funding_tx.as_ref() {
-                // pending on https://github.com/nervosnetwork/fiber/pull/521
-                // https://github.com/nervosnetwork/fiber/pull/521#issuecomment-2683709653
-            }
-            self.store.delete_channel_actor_state(&channel_id);
-        }
-
-        self.to_be_accepted_channels.remove(&channel_id);
-        if let Some((outpoint, _)) = self
-            .outpoint_channel_map
-            .iter()
-            .find(|(_, id)| *id == &channel_id)
-        {
-            self.pending_channels.remove(outpoint);
-        }
-        self.outpoint_channel_map.retain(|_, id| *id != channel_id);
-
-        // notify event observers, such as remove from watchtower
-        self.network
-            .send_message(NetworkActorMessage::new_notification(
-                NetworkServiceEvent::ChannelAbandon(channel_id),
-            ))
-            .expect(ASSUME_NETWORK_MYSELF_ALIVE);
-
         return Ok(());
     }
 
@@ -2695,19 +2658,13 @@ where
         }
     }
 
-    fn remove_channel(&mut self, channel_id: &Hash256) -> Option<ActorRef<ChannelActorMessage>> {
-        self.channels
-            .remove(channel_id)
-            .inspect(|_| self.outpoint_channel_map.retain(|_, v| v != channel_id))
-    }
-
     fn on_peer_disconnected(&mut self, id: &PeerId) {
         if let Some(session) = self.peer_session_map.remove(id) {
             if let Some(channel_ids) = self.session_channels_map.remove(&session.0) {
                 for channel_id in channel_ids {
-                    if let Some(channel) = self.remove_channel(&channel_id) {
+                    if let Some(channel) = self.channels.get(&channel_id) {
                         let _ = channel.send_message(ChannelActorMessage::Event(
-                            ChannelEvent::Stop("peer disconnected".to_string()),
+                            ChannelEvent::Stop(StopReason::PeerDisConnected),
                         ));
                     }
                 }
@@ -2820,18 +2777,49 @@ where
             ChannelActorMessage::Event(ChannelEvent::ClosingTransactionConfirmed),
         )
         .await;
-        self.remove_channel(channel_id);
-        if let Some(session) = self.get_peer_session(peer_id) {
-            if let Some(set) = self.session_channels_map.get_mut(&session) {
-                set.remove(channel_id);
-            }
-        }
         // Notify outside observers.
         self.network
             .send_message(NetworkActorMessage::new_notification(
                 NetworkServiceEvent::ChannelClosed(peer_id.clone(), *channel_id, tx_hash),
             ))
             .expect(ASSUME_NETWORK_MYSELF_ALIVE);
+    }
+
+    async fn on_channel_actor_stopped(&mut self, channel_id: Hash256, reason: StopReason) {
+        // all check passed, now begin to remove from memory and DB
+        self.channels.remove(&channel_id);
+        for (_peer_id, (session_id, _)) in self.peer_session_map.iter() {
+            if let Some(session_channels) = self.session_channels_map.get_mut(session_id) {
+                session_channels.remove(&channel_id);
+            }
+        }
+
+        if reason == StopReason::Abandon {
+            if let Some(channel_actor_state) = self.store.get_channel_actor_state(&channel_id) {
+                // remove from transaction track actor
+                if let Some(_funding_tx) = channel_actor_state.funding_tx.as_ref() {
+                    // pending on https://github.com/nervosnetwork/fiber/pull/521
+                    // https://github.com/nervosnetwork/fiber/pull/521#issuecomment-2683709653
+                }
+                self.store.delete_channel_actor_state(&channel_id);
+            }
+            // notify event observers, such as remove from watchtower
+            self.network
+                .send_message(NetworkActorMessage::new_notification(
+                    NetworkServiceEvent::ChannelAbandon(channel_id),
+                ))
+                .expect(ASSUME_NETWORK_MYSELF_ALIVE);
+        }
+
+        self.to_be_accepted_channels.remove(&channel_id);
+        if let Some((outpoint, _)) = self
+            .outpoint_channel_map
+            .iter()
+            .find(|(_, id)| *id == &channel_id)
+        {
+            self.pending_channels.remove(outpoint);
+        }
+        self.outpoint_channel_map.retain(|_, id| *id != channel_id);
     }
 
     pub async fn on_open_channel_msg(
@@ -3032,24 +3020,22 @@ where
         timestamp: u64,
     ) {
         debug!("Funding transaction is confirmed: {:?}", &outpoint);
-        let channel_id = match self.pending_channels.remove(&outpoint) {
-            Some(channel_id) => channel_id,
-            None => {
-                warn!(
-                    "Funding transaction confirmed for outpoint {:?} but no channel found",
-                    &outpoint
-                );
-                return;
-            }
-        };
-        self.send_message_to_channel_actor(
-            channel_id,
-            None,
-            ChannelActorMessage::Event(ChannelEvent::FundingTransactionConfirmed(
-                block_hash, tx_index, timestamp,
-            )),
-        )
-        .await;
+        if let Some(&channel_id) = self.pending_channels.get(&outpoint) {
+            self.send_message_to_channel_actor(
+                channel_id,
+                None,
+                ChannelActorMessage::Event(ChannelEvent::FundingTransactionConfirmed(
+                    block_hash, tx_index, timestamp,
+                )),
+            )
+            .await
+        } else {
+            warn!(
+                "Funding transaction confirmed for outpoint {:?} but no channel found",
+                &outpoint
+            );
+            return;
+        }
     }
 
     async fn on_commitment_transaction_confirmed(&mut self, tx_hash: Hash256, channel_id: Hash256) {

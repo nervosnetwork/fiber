@@ -1958,9 +1958,12 @@ where
             ChannelEvent::CheckTlcRetryOperation => {
                 self.apply_retryable_tlc_operations(myself, state).await;
             }
-            ChannelEvent::Stop(message) => {
+            ChannelEvent::Stop(reason) => {
                 debug_event!(self.network, "ChannelActorStopped");
-                myself.stop(Some(message));
+                if reason == StopReason::Abandon {
+                    state.update_state(ChannelState::Closed(CloseFlags::ABANDONED));
+                }
+                myself.stop(None);
             }
             ChannelEvent::ClosingTransactionConfirmed => {
                 // Broadcast the channel update message which disables the channel.
@@ -2387,6 +2390,21 @@ where
                 ))
                 .expect(ASSUME_NETWORK_ACTOR_ALIVE);
         }
+        let stop_reason = match state.state {
+            ChannelState::Closed(flags) => {
+                if flags == CloseFlags::ABANDONED {
+                    StopReason::Abandon
+                } else {
+                    StopReason::Closed
+                }
+            }
+            _ => StopReason::PeerDisConnected,
+        };
+        self.network
+            .send_message(NetworkActorMessage::new_event(
+                NetworkActorEvent::ChannelActorStopped(state.get_id(), stop_reason),
+            ))
+            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
         Ok(())
     }
 }
@@ -3323,9 +3341,16 @@ impl PublicChannelInfo {
 #[derive(PartialEq, Eq, Clone, Debug)]
 pub struct ClosedChannel {}
 
+#[derive(PartialEq, Eq, Clone, Debug)]
+pub enum StopReason {
+    Abandon,
+    Closed,
+    PeerDisConnected,
+}
+
 #[derive(Debug)]
 pub enum ChannelEvent {
-    Stop(String),
+    Stop(StopReason),
     FundingTransactionConfirmed(H256, u32, u64),
     CommitmentTransactionConfirmed,
     ClosingTransactionConfirmed,
@@ -3488,6 +3513,8 @@ bitflags! {
         const COOPERATIVE = 1;
         /// Indicates that channel is closed uncooperatively, initiated by one party forcibly.
         const UNCOOPERATIVE = 1 << 1;
+        /// Indicates that channel is abandoned.
+        const ABANDONED = 1 << 2;
     }
 }
 
