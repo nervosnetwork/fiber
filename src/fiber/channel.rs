@@ -4679,12 +4679,6 @@ impl ChannelActorState {
             let received_tlc_value = self.get_received_tlc_balance();
             debug_assert!(self.to_remote_amount >= received_tlc_value);
             if received_tlc_value + tlc.amount > self.to_remote_amount {
-                debug!(
-                    "Adding tlc {:?} with amount {} exceeds remote balance {}",
-                    tlc.tlc_id,
-                    tlc.amount,
-                    self.to_remote_amount - received_tlc_value
-                );
                 return Err(ProcessingChannelError::TlcAmountExceedLimit);
             }
         }
@@ -6825,6 +6819,7 @@ impl ChannelActorState {
         let mut offered_fulfilled = 0;
         let mut received_pending = 0;
         let mut received_fulfilled = 0;
+
         for info in pending_tlcs {
             if info.is_offered() {
                 let confirmed_remove_reason = (info.outbound_status()
@@ -6862,7 +6857,6 @@ impl ChannelActorState {
                 }
             }
         }
-
         let to_local_value =
             self.to_local_amount + received_fulfilled - offered_pending - offered_fulfilled;
         let to_remote_value =

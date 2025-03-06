@@ -6,12 +6,13 @@ use crate::fiber::{
     channel::ChannelActorStateStore,
     graph::PaymentSessionStatus,
     network::{HopHint as NetworkHopHint, SendPaymentCommand},
-    serde_utils::{U128Hex, U64Hex},
+    serde_utils::{EntityHex, U128Hex, U64Hex},
     types::{Hash256, Pubkey},
     NetworkActorCommand, NetworkActorMessage,
 };
 use crate::{handle_actor_call, log_and_error};
 use ckb_jsonrpc_types::Script;
+use ckb_types::packed::OutPoint;
 use jsonrpsee::{
     core::async_trait,
     proc_macros::rpc,
@@ -164,18 +165,23 @@ pub struct SendPaymentCommandParams {
 pub struct HopHint {
     /// The public key of the node
     pub pubkey: Pubkey,
-    /// The funding transaction hash of the channel outpoint
-    pub channel_funding_tx: Hash256,
-    /// inbound or outbound to use this channel
-    pub inbound: bool,
+    /// The outpoint of the channel
+    #[serde_as(as = "EntityHex")]
+    pub channel_outpoint: OutPoint,
+
+    /// The fee rate to use this hop to forward the payment.
+    pub(crate) fee_rate: u64,
+    /// The TLC expiry delta to use this hop to forward the payment.
+    pub(crate) tlc_expiry_delta: u64,
 }
 
 impl From<HopHint> for NetworkHopHint {
     fn from(hop_hint: HopHint) -> Self {
         NetworkHopHint {
             pubkey: hop_hint.pubkey,
-            channel_funding_tx: hop_hint.channel_funding_tx,
-            inbound: hop_hint.inbound,
+            channel_outpoint: hop_hint.channel_outpoint,
+            fee_rate: hop_hint.fee_rate,
+            tlc_expiry_delta: hop_hint.tlc_expiry_delta,
         }
     }
 }
