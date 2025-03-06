@@ -478,7 +478,13 @@ async fn test_prune_channel_announcement_and_receive_channel_update() {
     assert_eq!(
         node2
             .get_store()
-            .get_broadcast_messages(&Cursor::default(), None),
+            .get_broadcast_messages_iter(&Cursor::default())
+            .into_iter()
+            .filter(|message| !matches!(
+                message,
+                BroadcastMessageWithTimestamp::NodeAnnouncement(_)
+            ))
+            .collect::<Vec<_>>(),
         vec![]
     );
 
@@ -512,8 +518,13 @@ async fn test_prune_channel_announcement_and_receive_channel_update() {
     assert_eq!(
         node2
             .get_store()
-            .get_broadcast_messages(&Cursor::default(), None)
-            .len(),
+            .get_broadcast_messages_iter(&Cursor::default())
+            .into_iter()
+            .filter(|message| !matches!(
+                message,
+                BroadcastMessageWithTimestamp::NodeAnnouncement(_)
+            ))
+            .count(),
         // We have two messages in node2's store, the channel announcement and the update of node 2.
         2
     );

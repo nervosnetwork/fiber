@@ -2552,43 +2552,20 @@ where
                 }
                 let store = state.store.get_store().clone();
 
-                let mut cursor = Cursor::default();
-                loop {
-                    let messages = store.get_broadcast_messages(&cursor, None);
-                    for message in &messages {
-                        if message.timestamp() < stale_timestamp {
-                            if let BroadcastMessageWithTimestamp::ChannelAnnouncement(
-                                _timestamp,
-                                message,
-                            ) = message
-                            {
-                                let latest_channel_update_timestamp = [true, false]
-                                    .into_iter()
-                                    .flat_map(|is_node_1| {
-                                        store.get_latest_channel_update_timestamp(
-                                            &message.channel_outpoint,
-                                            is_node_1,
-                                        )
-                                    })
-                                    .max()
-                                    .unwrap_or_default();
-                                // Ignore deleting channel announcement if there is a newer channel update.
-                                if latest_channel_update_timestamp > stale_timestamp {
-                                    continue;
-                                }
-                            }
-                            store.delete_broadcast_message(&message.cursor());
-                        }
+                for (outpoint, timestamps) in store.get_channel_timestamps_iter() {
+                    let max_timestamp = timestamps.into_iter().max().unwrap_or_default();
+                    if max_timestamp < stale_timestamp {
+                        store.delete_broadcast_message(&Cursor::new(
+                            timestamps[0],
+                            BroadcastMessageID::ChannelAnnouncement(outpoint.clone()),
+                        ));
                     }
-                    match messages.last() {
-                        Some(last_message) => {
-                            cursor = last_message.cursor();
-                            if last_message.timestamp() >= stale_timestamp {
-                                break;
-                            }
-                        }
-                        None => {
-                            break;
+                    for channel_timestamp in &timestamps[1..] {
+                        if *channel_timestamp < stale_timestamp {
+                            store.delete_broadcast_message(&Cursor::new(
+                                *channel_timestamp,
+                                BroadcastMessageID::ChannelUpdate(outpoint.clone()),
+                            ));
                         }
                     }
                 }

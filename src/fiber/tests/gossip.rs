@@ -9,11 +9,7 @@ use ractor::{async_trait, concurrency::Duration, Actor, ActorProcessingErr, Acto
 use tentacle::secio::PeerId;
 use tokio::sync::RwLock;
 
-use crate::fiber::config::AnnouncedNodeName;
-use crate::fiber::gossip::{
-    GossipActorMessage, GossipConfig, GossipService,
-    HARD_BROADCAST_MESSAGES_CONSIDERED_STALE_DURATION,
-};
+use crate::fiber::gossip::{GossipActorMessage, GossipConfig, GossipService};
 use crate::fiber::tests::test_utils::{establish_channel_between_nodes, NetworkNode};
 use crate::fiber::types::{ChannelUpdateChannelFlags, NodeAnnouncement};
 use crate::{
@@ -31,10 +27,7 @@ use crate::{
     gen_node_announcement_from_privkey, gen_rand_node_announcement,
     store::Store,
 };
-use crate::{
-    create_invalid_ecdsa_signature, gen_rand_fiber_private_key, now_timestamp_as_millis_u64,
-    ChannelTestContext,
-};
+use crate::{create_invalid_ecdsa_signature, now_timestamp_as_millis_u64, ChannelTestContext};
 
 use super::test_utils::{get_test_root_actor, TempDir};
 
@@ -732,10 +725,14 @@ async fn test_never_miss_any_message() {
 #[tokio::test]
 async fn test_gossip_store_prune_all_messages() {
     let context = GossipTestingContext::new().await;
-    let num_messages = 10000usize;
+    let num_messages = 1000usize;
     for _i in 1..=num_messages {
-        let (_sk, node_announcement) = gen_rand_node_announcement();
-        context.save_message(BroadcastMessage::NodeAnnouncement(node_announcement));
+        let channel_context = ChannelTestContext::gen();
+        let status = context.submit_tx(channel_context.funding_tx.clone()).await;
+        assert_eq!(status, Status::Committed);
+        context.save_message(BroadcastMessage::ChannelAnnouncement(
+            channel_context.channel_announcement.clone(),
+        ));
     }
     // Wait for the message to be saved
     tokio::time::sleep(Duration::from_millis(2000)).await;
@@ -763,76 +760,6 @@ async fn test_gossip_store_prune_all_messages() {
             .into_iter()
             .count(),
         0
-    );
-}
-
-#[tokio::test]
-async fn test_gossip_store_prune_node_announcement() {
-    let context = GossipTestingContext::new().await;
-    let sk = gen_rand_fiber_private_key();
-    let node_announcement_timestamp = now_timestamp_as_millis_u64()
-        - (HARD_BROADCAST_MESSAGES_CONSIDERED_STALE_DURATION.as_millis() as u64);
-    let outdate_node_announcement = NodeAnnouncement::new(
-        AnnouncedNodeName::from_string("node1").expect("valid name"),
-        vec![],
-        &sk,
-        node_announcement_timestamp,
-        0,
-    );
-
-    context.save_message(BroadcastMessage::NodeAnnouncement(
-        outdate_node_announcement,
-    ));
-    // Wait for the message to be saved
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    assert_ne!(
-        context
-            .get_store()
-            .get_latest_node_announcement(&sk.pubkey()),
-        None
-    );
-
-    context
-        .gossip_actor
-        .send_message(GossipActorMessage::PruneStaleGossipMessages(
-            node_announcement_timestamp - 1,
-        ))
-        .unwrap();
-
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    assert_ne!(
-        context
-            .get_store()
-            .get_latest_node_announcement(&sk.pubkey()),
-        None
-    );
-    assert_eq!(
-        context
-            .get_store()
-            .get_broadcast_messages(&Cursor::default(), None)
-            .len(),
-        1
-    );
-
-    context
-        .gossip_actor
-        .send_message(GossipActorMessage::PruneStaleGossipMessages(
-            node_announcement_timestamp + 1,
-        ))
-        .unwrap();
-
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    assert_eq!(
-        context
-            .get_store()
-            .get_latest_node_announcement(&sk.pubkey()),
-        None
-    );
-    assert_eq!(
-        context
-            .get_store()
-            .get_broadcast_messages(&Cursor::default(), None),
-        vec![]
     );
 }
 
