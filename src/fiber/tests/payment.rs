@@ -775,6 +775,10 @@ async fn test_send_payment_with_private_multiple_channel_hints_fallback() {
     source_node.wait_until_success(payment_hash).await;
 }
 
+// TODO: The meaning of hop hints changed after https://github.com/nervosnetwork/fiber/pull/487/
+// It no longer forces the route to go through the specified node, but only hints the router to consider the specified node.
+// We need to update the test cases accordingly. When RPC like SendToRoute is implemented, we can test this feature more accurately.
+// https://lightning.engineering/api-docs/api/lnd/router/send-to-route-v2/
 // #[tokio::test]
 // async fn test_send_payment_with_route_to_self_with_hop_hints() {
 //     init_tracing();
@@ -889,6 +893,10 @@ async fn test_send_payment_with_private_multiple_channel_hints_fallback() {
 //     assert_eq!(node1_fee + node2_fee, res.fee);
 // }
 
+// TODO: The meaning of hop hints changed after https://github.com/nervosnetwork/fiber/pull/487/
+// It no longer forces the route to go through the specified node, but only hints the router to consider the specified node.
+// We need to update the test cases accordingly. When RPC like SendToRoute is implemented, we can test this feature more accurately.
+// https://lightning.engineering/api-docs/api/lnd/router/send-to-route-v2/
 // #[tokio::test]
 // async fn test_send_payment_with_route_to_self_with_outbound_hop_hints() {
 //     init_tracing();
@@ -1003,6 +1011,10 @@ async fn test_send_payment_with_private_multiple_channel_hints_fallback() {
 //     assert_eq!(node1_fee + node2_fee, res.fee);
 // }
 
+// TODO: The meaning of hop hints changed after https://github.com/nervosnetwork/fiber/pull/487/
+// It no longer forces the route to go through the specified node, but only hints the router to consider the specified node.
+// We need to update the test cases accordingly. When RPC like SendToRoute is implemented, we can test this feature more accurately.
+// https://lightning.engineering/api-docs/api/lnd/router/send-to-route-v2/
 // #[tokio::test]
 // async fn test_send_payment_select_channel_with_hop_hints() {
 //     init_tracing();
@@ -1156,6 +1168,10 @@ async fn test_send_payment_with_private_multiple_channel_hints_fallback() {
 //         .contains("PathFind error: no path found"));
 // }
 
+// TODO: The meaning of hop hints changed after https://github.com/nervosnetwork/fiber/pull/487/
+// It no longer forces the route to go through the specified node, but only hints the router to consider the specified node.
+// We need to update the test cases accordingly. When RPC like SendToRoute is implemented, we can test this feature more accurately.
+// https://lightning.engineering/api-docs/api/lnd/router/send-to-route-v2/
 // #[tokio::test]
 // async fn test_send_payment_two_nodes_with_hop_hints_and_multiple_channels() {
 //     init_tracing();
