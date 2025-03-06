@@ -8,7 +8,7 @@ use crate::{
         gossip::GossipMessageStore,
         graph::{NetworkGraphStateStore, PaymentSession},
         history::{Direction, TimedResult},
-        network::{NetworkActorStateStore, PersistentNetworkActorState},
+        network::{NetworkActorStateStore, PaymentCustomRecords, PersistentNetworkActorState},
         types::{BroadcastMessage, BroadcastMessageID, Cursor, Hash256, CURSOR_SIZE},
     },
     invoice::{CkbInvoice, CkbInvoiceStatus, InvoiceError, InvoiceStore},
@@ -153,6 +153,7 @@ enum KeyValue {
     WatchtowerChannel(Hash256, ChannelData),
     PaymentSession(Hash256, PaymentSession),
     PaymentHistoryTimedResult((OutPoint, Direction), TimedResult),
+    PaymentCustomRecord(Hash256, PaymentCustomRecords),
     NetworkActorState(PeerId, PersistentNetworkActorState),
 }
 
@@ -219,6 +220,9 @@ impl StoreKeyValue for KeyValue {
             KeyValue::BroadcastMessage(cursor, _) => {
                 [&[BROADCAST_MESSAGE_PREFIX], cursor.to_bytes().as_slice()].concat()
             }
+            KeyValue::PaymentCustomRecord(payment_hash, _data) => {
+                [&[PAYMENT_CUSTOM_RECORD_PREFIX], payment_hash.as_ref()].concat()
+            }
         }
     }
 
@@ -246,6 +250,9 @@ impl StoreKeyValue for KeyValue {
             }
             KeyValue::PaymentHistoryTimedResult(_, result) => {
                 serialize_to_vec(result, "TimedResult")
+            }
+            KeyValue::PaymentCustomRecord(_, custom_records) => {
+                serialize_to_vec(custom_records, "PaymentCustomRecord")
             }
         }
     }
@@ -369,6 +376,22 @@ impl ChannelActorStateStore for Store {
         self.get(key)
             .map(|channel_id| deserialize_from(channel_id.as_ref(), "Hash256"))
             .and_then(|channel_id: Hash256| self.get_channel_actor_state(&channel_id))
+    }
+
+    fn insert_payment_custom_records(
+        &self,
+        payment_hash: &Hash256,
+        custom_records: PaymentCustomRecords,
+    ) {
+        let mut batch = self.batch();
+        batch.put_kv(KeyValue::PaymentCustomRecord(*payment_hash, custom_records));
+        batch.commit();
+    }
+
+    fn get_payment_custom_records(&self, payment_hash: &Hash256) -> Option<PaymentCustomRecords> {
+        let key = [&[PAYMENT_CUSTOM_RECORD_PREFIX], payment_hash.as_ref()].concat();
+        self.get(key)
+            .map(|v| deserialize_from(v.as_ref(), "PaymentCustomRecord"))
     }
 }
 
