@@ -74,7 +74,7 @@ FNN is still under development, the protocol and storage format may changed betw
 rm -rf /folder-to/my-fnn/fiber/store
 ```
 
-3. Repalce the fnn binary with the new version and start the node again.
+3. Replace the fnn binary with the new version and start the node again.
 
 
 If you want to keep the channel state, you may try to migrate the storage format manually:
