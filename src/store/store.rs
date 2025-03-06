@@ -636,13 +636,15 @@ impl GossipMessageStore for Store {
             ]
             .concat(),
         )
-        .map(|v| {
+        .and_then(|v| {
             let v: [u8; 24] = v.try_into().expect("Invalid timestamp value length");
-            u64::from_be_bytes(
+            let timestamp = u64::from_be_bytes(
                 v[..8]
                     .try_into()
                     .expect("timestamp length valid, shown above"),
-            )
+            );
+            // The default timestamp value is 0.
+            (timestamp != 0).then(|| timestamp)
         })
     }
 
