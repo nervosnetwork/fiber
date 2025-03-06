@@ -322,13 +322,9 @@ impl ChannelActorStateStore for Store {
                 ]
                 .concat(),
             );
-            batch.delete(
-                [
-                    &[CHANNEL_OUTPOINT_CHANNEL_ID_PREFIX],
-                    state.must_get_funding_transaction_outpoint().as_slice(),
-                ]
-                .concat(),
-            );
+            if let Some(outpoint) = state.get_funding_transaction_outpoint() {
+                batch.delete([&[CHANNEL_OUTPOINT_CHANNEL_ID_PREFIX], outpoint.as_slice()].concat());
+            }
             batch.commit();
         }
     }

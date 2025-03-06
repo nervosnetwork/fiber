@@ -2352,25 +2352,24 @@ where
             }
         }
 
-        self.to_be_accepted_channels.remove(&channel_id);
-        if let Some((outpoint, _)) = self
-            .outpoint_channel_map
-            .iter()
-            .find(|(_, id)| *id == &channel_id)
-        {
-            self.pending_channels.remove(&outpoint);
-        }
-        self.outpoint_channel_map.retain(|_, id| *id != channel_id);
-
         if let Some(channel_actor_state) = self.store.get_channel_actor_state(&channel_id) {
             // remove from transaction track actor
             if let Some(_funding_tx) = channel_actor_state.funding_tx.as_ref() {
                 // pending on https://github.com/nervosnetwork/fiber/pull/521
                 // https://github.com/nervosnetwork/fiber/pull/521#issuecomment-2683709653
             }
-            // remove from DB
             self.store.delete_channel_actor_state(&channel_id);
         }
+
+        self.to_be_accepted_channels.remove(&channel_id);
+        if let Some((outpoint, _)) = self
+            .outpoint_channel_map
+            .iter()
+            .find(|(_, id)| *id == &channel_id)
+        {
+            self.pending_channels.remove(outpoint);
+        }
+        self.outpoint_channel_map.retain(|_, id| *id != channel_id);
 
         // notify event observers, such as remove from watchtower
         self.network
