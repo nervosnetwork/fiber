@@ -45,11 +45,7 @@ impl GossipTestingContext {
         let root_actor = get_test_root_actor().await;
 
         let (gossip_service, gossip_protocol_handle) = GossipService::start(
-            GossipConfig {
-                gossip_network_maintenance_interval: Duration::from_millis(50),
-                gossip_store_maintenance_interval: Duration::from_millis(50),
-                ..Default::default()
-            },
+            GossipConfig::default(),
             store.clone(),
             chain_actor.clone(),
             root_actor.get_cell(),
