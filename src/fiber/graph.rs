@@ -885,6 +885,7 @@ where
                 expiry: now + r.incoming_tlc_expiry,
                 funding_tx_hash: r.channel_outpoint.tx_hash().into(),
                 payment_preimage: None,
+                custom_records: None,
             });
         }
         hops_data.push(PaymentHopData {
@@ -894,6 +895,7 @@ where
             expiry: now + final_tlc_expiry_delta,
             funding_tx_hash: Default::default(),
             payment_preimage: preimage,
+            custom_records: payment_data.custom_records.clone(),
         });
 
         // assert there is no duplicate node in the route
@@ -1413,6 +1415,7 @@ impl From<PaymentSession> for SendPaymentResponse {
             failed_error: session.last_error,
             created_at: session.created_at,
             last_updated_at: session.last_updated_at,
+            custom_records: session.request.custom_records,
             fee,
             #[cfg(debug_assertions)]
             router: session.route,

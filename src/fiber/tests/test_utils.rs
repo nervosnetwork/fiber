@@ -9,6 +9,7 @@ use crate::fiber::graph::PaymentSession;
 use crate::fiber::graph::PaymentSessionStatus;
 use crate::fiber::network::DebugEvent;
 use crate::fiber::network::NodeInfoResponse;
+use crate::fiber::network::PaymentCustomRecords;
 use crate::fiber::network::SendPaymentCommand;
 use crate::fiber::network::SendPaymentResponse;
 use crate::fiber::types::EcdsaSignature;
@@ -183,6 +184,7 @@ pub struct NetworkNode {
     pub fiber_config: FiberConfig,
     pub listening_addrs: Vec<MultiAddr>,
     pub network_actor: ActorRef<NetworkActorMessage>,
+    pub ckb_chain_actor: ActorRef<CkbChainMessage>,
     pub network_graph: Arc<TokioRwLock<NetworkGraph<Store>>>,
     pub chain_actor: ActorRef<CkbChainMessage>,
     pub private_key: Privkey,
@@ -608,6 +610,7 @@ impl NetworkNode {
             allow_self_payment: false,
             dry_run,
             hop_hints: None,
+            custom_records: None,
         })
         .await
     }
@@ -633,6 +636,7 @@ impl NetworkNode {
             allow_self_payment: true,
             dry_run,
             hop_hints: None,
+            custom_records: None,
         })
         .await
     }
@@ -808,6 +812,13 @@ impl NetworkNode {
         self.store.get_payment_session(payment_hash)
     }
 
+    pub fn get_payment_custom_records(
+        &self,
+        payment_hash: &Hash256,
+    ) -> Option<PaymentCustomRecords> {
+        self.store.get_payment_custom_records(payment_hash)
+    }
+
     pub async fn new_with_node_name(node_name: &str) -> Self {
         let config = NetworkNodeConfigBuilder::new()
             .node_name(Some(node_name.to_string()))
@@ -934,6 +945,7 @@ impl NetworkNode {
             channels_tx_map: Default::default(),
             listening_addrs: announced_addrs,
             network_actor,
+            ckb_chain_actor: chain_actor.clone(),
             network_graph,
             chain_actor,
             private_key: secret_key,
@@ -952,6 +964,12 @@ impl NetworkNode {
             store: self.store.clone(),
             fiber_config: self.fiber_config.clone(),
         }
+    }
+
+    pub fn send_ckb_chain_message(&self, message: CkbChainMessage) {
+        self.ckb_chain_actor
+            .send_message(message)
+            .expect("send ckb chain message");
     }
 
     pub async fn add_unexpected_events(&self, events: Vec<String>) {

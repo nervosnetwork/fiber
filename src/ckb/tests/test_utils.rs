@@ -551,6 +551,9 @@ impl Actor for MockChainActor {
 
                 let _ = rpc_reply_port.send(Ok(Some(timestamp)));
             }
+            Stop => {
+                myself.stop(Some("stop received".to_string()));
+            }
         }
         Ok(())
     }

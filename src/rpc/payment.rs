@@ -1,5 +1,7 @@
 #[cfg(debug_assertions)]
 use crate::fiber::graph::SessionRoute;
+use crate::fiber::serde_utils::SliceHex;
+use crate::fiber::serde_utils::U32Hex;
 use crate::fiber::{
     channel::ChannelActorStateStore,
     graph::PaymentSessionStatus,
@@ -15,9 +17,11 @@ use jsonrpsee::{
     proc_macros::rpc,
     types::{error::CALL_EXECUTION_FAILED_CODE, ErrorObjectOwned},
 };
+use serde_with::serde_as;
+use std::collections::HashMap;
+
 use ractor::{call, ActorRef};
 use serde::{Deserialize, Serialize};
-use serde_with::serde_as;
 
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug)]
@@ -45,9 +49,38 @@ pub struct GetPaymentCommandResult {
     #[serde_as(as = "U128Hex")]
     pub fee: u128,
 
+    /// The custom records to be included in the payment.
+    pub custom_records: Option<PaymentCustomRecords>,
+
     #[cfg(debug_assertions)]
     /// The route information for the payment
     router: SessionRoute,
+}
+
+/// The custom records to be included in the payment.
+/// The key is hex encoded of `u32`, and the value is hex encoded of `Vec<u8>` with `0x` as prefix.
+/// For example:
+/// ```json
+/// "custom_records": {
+///    "0x1": "0x01020304",
+///    "0x2": "0x05060708",
+///    "0x3": "0x090a0b0c",
+///    "0x4": "0x0d0e0f10010d090a0b0c"
+///  }
+/// ```
+#[serde_as]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Default)]
+pub struct PaymentCustomRecords {
+    /// The custom records to be included in the payment.
+    #[serde(flatten)]
+    #[serde_as(as = "HashMap<U32Hex, SliceHex>")]
+    pub data: HashMap<u32, Vec<u8>>,
+}
+
+impl From<PaymentCustomRecords> for crate::fiber::PaymentCustomRecords {
+    fn from(records: PaymentCustomRecords) -> Self {
+        crate::fiber::PaymentCustomRecords { data: records.data }
+    }
 }
 
 #[serde_as]
@@ -96,6 +129,19 @@ pub struct SendPaymentCommandParams {
 
     /// allow self payment, default is false
     pub allow_self_payment: Option<bool>,
+
+    /// Some custom records for the payment which contains a map of u32 to Vec<u8>
+    /// The key is the record type, and the value is the serialized data
+    /// For example:
+    /// ```json
+    /// "custom_records": {
+    ///    "0x1": "0x01020304",
+    ///    "0x2": "0x05060708",
+    ///    "0x3": "0x090a0b0c",
+    ///    "0x4": "0x0d0e0f10010d090a0b0c"
+    ///  }
+    /// ```
+    pub custom_records: Option<PaymentCustomRecords>,
 
     /// Optional route hints to reach the destination through private channels.
     /// A hop hint is a hint for a node to use a specific channel, for example
@@ -187,6 +233,7 @@ where
                     keysend: params.keysend,
                     udt_type_script: params.udt_type_script.clone().map(|s| s.into()),
                     allow_self_payment: params.allow_self_payment.unwrap_or(false),
+                    custom_records: params.custom_records.clone().map(|records| records.into()),
                     hop_hints: params
                         .hop_hints
                         .clone()
@@ -203,6 +250,9 @@ where
             last_updated_at: response.last_updated_at,
             failed_error: response.failed_error,
             fee: response.fee,
+            custom_records: response
+                .custom_records
+                .map(|records| PaymentCustomRecords { data: records.data }),
             #[cfg(debug_assertions)]
             router: response.router,
         })
@@ -225,6 +275,9 @@ where
             created_at: response.created_at,
             failed_error: response.failed_error,
             fee: response.fee,
+            custom_records: response
+                .custom_records
+                .map(|records| PaymentCustomRecords { data: records.data }),
             #[cfg(debug_assertions)]
             router: response.router,
         })

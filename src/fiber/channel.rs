@@ -1,6 +1,7 @@
 use crate::debug_event;
 #[cfg(debug_assertions)]
 use crate::fiber::network::DebugEvent;
+use crate::fiber::network::PaymentCustomRecords;
 use crate::fiber::types::BroadcastMessageWithTimestamp;
 use bitflags::bitflags;
 use futures::future::OptionFuture;
@@ -1019,6 +1020,12 @@ where
                         .update_invoice_status(&payment_hash, CkbInvoiceStatus::Received)
                         .expect("update invoice status failed");
                 }
+
+                if let Some(custom_records) = peeled_onion_packet.current.custom_records {
+                    self.store
+                        .insert_payment_custom_records(&payment_hash, custom_records);
+                }
+
                 self.store
                     .insert_payment_preimage(payment_hash, preimage)
                     .map_err(|_| {
@@ -7085,6 +7092,12 @@ pub trait ChannelActorStateStore {
             .collect()
     }
     fn get_channel_state_by_outpoint(&self, id: &OutPoint) -> Option<ChannelActorState>;
+    fn insert_payment_custom_records(
+        &self,
+        payment_hash: &Hash256,
+        custom_records: PaymentCustomRecords,
+    );
+    fn get_payment_custom_records(&self, payment_hash: &Hash256) -> Option<PaymentCustomRecords>;
 }
 
 /// A wrapper on CommitmentTransaction that has a partial signature along with
