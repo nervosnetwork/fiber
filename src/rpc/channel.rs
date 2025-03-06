@@ -186,7 +186,7 @@ pub enum ChannelState {
     AwaitingChannelReady(AwaitingChannelReadyFlags),
     /// Both we and our counterparty consider the funding transaction confirmed and the channel is
     /// now operational.
-    ChannelReady(),
+    ChannelReady,
     /// We've successfully negotiated a `closing_signed` dance. At this point, the `ChannelManager`
     /// is about to drop us, but we store this anyway.
     ShuttingDown(ShuttingDownFlags),
@@ -208,7 +208,7 @@ impl From<RawChannelState> for ChannelState {
             RawChannelState::AwaitingChannelReady(flags) => {
                 ChannelState::AwaitingChannelReady(flags)
             }
-            RawChannelState::ChannelReady() => ChannelState::ChannelReady(),
+            RawChannelState::ChannelReady => ChannelState::ChannelReady,
             RawChannelState::ShuttingDown(flags) => ChannelState::ShuttingDown(flags),
             RawChannelState::Closed(flags) => ChannelState::Closed(flags),
         }

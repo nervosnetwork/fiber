@@ -2482,7 +2482,7 @@ where
                     match self.store.get_channel_actor_state(&channel_id) {
                         Some(mut state) => {
                             match state.state {
-                                ChannelState::ChannelReady() => {
+                                ChannelState::ChannelReady => {
                                     debug!("Handling force shutdown command in ChannelReady state");
                                 }
                                 ChannelState::ShuttingDown(flags) => {

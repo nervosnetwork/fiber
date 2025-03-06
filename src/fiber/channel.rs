@@ -366,7 +366,7 @@ where
                     ));
                 }
                 match state.state {
-                    ChannelState::ChannelReady() => {}
+                    ChannelState::ChannelReady => {}
                     ChannelState::AwaitingChannelReady(flags)
                         if flags.contains(AwaitingChannelReadyFlags::CHANNEL_READY) => {}
                     _ => {
@@ -519,7 +519,7 @@ where
             }
             FiberChannelMessage::Shutdown(shutdown) => {
                 let flags = match state.state {
-                    ChannelState::ChannelReady() => ShuttingDownFlags::empty(),
+                    ChannelState::ChannelReady => ShuttingDownFlags::empty(),
                     ChannelState::ShuttingDown(flags)
                         if flags.contains(ShuttingDownFlags::THEIR_SHUTDOWN_SENT) =>
                     {
@@ -658,7 +658,7 @@ where
                 ChannelState::Closed(_) | ChannelState::ShuttingDown(_) => {
                     TlcErrorCode::PermanentChannelFailure
                 }
-                ChannelState::ChannelReady() => {
+                ChannelState::ChannelReady => {
                     if !state.local_tlc_info.enabled {
                         // channel is disabled
                         TlcErrorCode::TemporaryChannelFailure
@@ -1187,7 +1187,7 @@ where
             ChannelState::SigningCommitment(flags) => {
                 CommitmentSignedFlags::SigningCommitment(flags)
             }
-            ChannelState::ChannelReady() => CommitmentSignedFlags::ChannelReady(),
+            ChannelState::ChannelReady => CommitmentSignedFlags::ChannelReady(),
             ChannelState::ShuttingDown(flags) => {
                 if flags.contains(ShuttingDownFlags::AWAITING_PENDING_TLCS) {
                     CommitmentSignedFlags::PendingShutdown()
@@ -1337,7 +1337,7 @@ where
         debug!("Handling shutdown command: {:?}", &command);
         if command.force {
             match state.state {
-                ChannelState::ChannelReady() => {
+                ChannelState::ChannelReady => {
                     debug!("Handling force shutdown command in ChannelReady state");
                 }
                 ChannelState::ShuttingDown(flags) => {
@@ -1371,7 +1371,7 @@ where
         }
 
         let flags = match state.state {
-            ChannelState::ChannelReady() => {
+            ChannelState::ChannelReady => {
                 debug!("Handling shutdown command in ChannelReady state");
                 ShuttingDownFlags::empty()
             }
@@ -2286,7 +2286,7 @@ where
 
                 // If the channel is already ready, we should notify the network actor.
                 // so that we update the network.outpoint_channel_map
-                if matches!(channel.state, ChannelState::ChannelReady()) {
+                if matches!(channel.state, ChannelState::ChannelReady) {
                     self.network
                         .send_message(NetworkActorMessage::new_event(
                             NetworkActorEvent::ChannelReady(
@@ -3510,7 +3510,7 @@ pub enum ChannelState {
     AwaitingChannelReady(AwaitingChannelReadyFlags),
     /// Both we and our counterparty consider the funding transaction confirmed and the channel is
     /// now operational.
-    ChannelReady(),
+    ChannelReady,
     /// We've successfully negotiated a `closing_signed` dance. At this point, the `ChannelManager`
     /// is about to drop us, but we store this anyway.
     ShuttingDown(ShuttingDownFlags),
@@ -3616,7 +3616,7 @@ impl ChannelActorState {
     }
 
     pub fn is_ready(&self) -> bool {
-        matches!(self.state, ChannelState::ChannelReady())
+        matches!(self.state, ChannelState::ChannelReady)
     }
 
     pub fn is_tlc_forwarding_enabled(&self) -> bool {
@@ -5189,7 +5189,7 @@ impl ChannelActorState {
             return Err(ProcessingChannelError::WaitingTlcAck);
         }
         match self.state {
-            ChannelState::ChannelReady() => {}
+            ChannelState::ChannelReady => {}
             ChannelState::ShuttingDown(_) if add_tlc_amount.is_none() => {}
             _ => {
                 return Err(ProcessingChannelError::InvalidState(format!(
@@ -5675,7 +5675,7 @@ impl ChannelActorState {
             ChannelState::SigningCommitment(flags) => {
                 CommitmentSignedFlags::SigningCommitment(flags)
             }
-            ChannelState::ChannelReady() => CommitmentSignedFlags::ChannelReady(),
+            ChannelState::ChannelReady => CommitmentSignedFlags::ChannelReady(),
             ChannelState::ShuttingDown(flags) => {
                 if flags.contains(ShuttingDownFlags::AWAITING_PENDING_TLCS) {
                     debug!(
@@ -5887,7 +5887,7 @@ impl ChannelActorState {
     }
 
     async fn on_channel_ready(&mut self, network: &ActorRef<NetworkActorMessage>) {
-        self.update_state(ChannelState::ChannelReady());
+        self.update_state(ChannelState::ChannelReady);
         self.increment_local_commitment_number();
         self.increment_remote_commitment_number();
         let peer_id = self.get_remote_peer_id();
@@ -6067,7 +6067,7 @@ impl ChannelActorState {
                 // TODO: in current implementation, we don't store the channel when we are in NegotiatingFunding state.
                 // This is an unreachable state for reestablish channel message. we may need to handle this case in the future.
             }
-            ChannelState::ChannelReady() => {
+            ChannelState::ChannelReady => {
                 let expected_local_commitment_number = self.get_local_commitment_number();
                 let actual_local_commitment_number = reestablish_channel.remote_commitment_number;
                 if actual_local_commitment_number == expected_local_commitment_number {
