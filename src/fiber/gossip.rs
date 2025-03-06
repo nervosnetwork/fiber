@@ -2552,6 +2552,7 @@ where
                 }
                 let store = state.store.get_store().clone();
 
+                // TODO: we will iterate over all the channel timestamps here even if they are not stale.
                 for (outpoint, timestamps) in store.get_channel_timestamps_iter() {
                     let max_timestamp = timestamps.into_iter().max().unwrap_or_default();
                     if max_timestamp < stale_timestamp {
