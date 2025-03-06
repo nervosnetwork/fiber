@@ -2338,7 +2338,8 @@ where
         }
 
         if let Some(channel) = self.channels.get(&channel_id) {
-            for _i in 0..10 {
+            let cnt = 5;
+            for i in 0..cnt {
                 if channel
                     .send_message(ChannelActorMessage::Event(ChannelEvent::Stop(
                         "abandon channel".to_string(),
@@ -2347,6 +2348,12 @@ where
                 {
                     // Here we make sure the channel actor may be already stopped
                     break;
+                }
+                if i == cnt - 1 {
+                    return Err(ProcessingChannelError::InternalError(format!(
+                        "Failed to stop channel actor {}",
+                        channel_id
+                    )));
                 }
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
