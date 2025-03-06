@@ -558,6 +558,7 @@ pub enum NetworkServiceEvent {
     // and both parties sent ChannelReady messages).
     ChannelReady(PeerId, Hash256, OutPoint),
     ChannelClosed(PeerId, Hash256, Byte32),
+    ChannelAbandon(Hash256),
     // A RevokeAndAck is received from the peer. Other data relevant to this
     // RevokeAndAck message are also assembled here. The watch tower may use this.
     RevokeAndAckReceived(
@@ -2302,22 +2303,66 @@ where
         &mut self,
         channel_id: Hash256,
     ) -> Result<(), ProcessingChannelError> {
-        if let Some(_channel_actor_state) = self.store.get_channel_actor_state(&channel_id) {
-            return Ok(());
-        } else {
-            // there is no corresponding channel actor state, means the peer does not replied the accept channel message yet
-            // here we only need to stop the channel actor and remove the channel from list
-            if let Some(channel) = self.channels.remove(&channel_id) {
-                for (_peer_id, (session_id, _)) in self.peer_session_map.iter() {
-                    if let Some(session_channels) = self.session_channels_map.get_mut(session_id) {
-                        session_channels.remove(&channel_id);
+        if let Some(channel_actor_state) = self.store.get_channel_actor_state(&channel_id) {
+            match channel_actor_state.state {
+                ChannelState::ChannelReady
+                | ChannelState::ShuttingDown(_)
+                | ChannelState::Closed(_) => {
+                    return Err(ProcessingChannelError::InvalidParameter(format!(
+                        "Channel {} is in state {:?}, cannot be abandoned, please shutdown the channel instead",
+                        channel_id, channel_actor_state.state
+                    )));
+                }
+                _ => {
+                    if channel_actor_state.funding_tx_confirmed_at.is_some() {
+                        return Err(ProcessingChannelError::InvalidParameter(format!(
+                            "Channel {} funding transaction is already confirmed, please shutdown the channel instead",
+                            channel_id,
+                        )));
                     }
                 }
-                let _ = channel.send_message(ChannelActorMessage::Event(ChannelEvent::Stop(
-                    "abandon channel".to_string(),
-                )));
             }
         }
+
+        if let Some(channel) = self.channels.remove(&channel_id) {
+            for _i in 0..10 {
+                if let Err(_) = channel.send_message(ChannelActorMessage::Event(
+                    ChannelEvent::Stop("abandon channel".to_string()),
+                )) {
+                    // Here we make sure the channel actor may be already stopped
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            for (_peer_id, (session_id, _)) in self.peer_session_map.iter() {
+                if let Some(session_channels) = self.session_channels_map.get_mut(session_id) {
+                    session_channels.remove(&channel_id);
+                }
+            }
+        } else {
+            return Err(ProcessingChannelError::InvalidParameter(format!(
+                "Channel {} not found",
+                channel_id
+            )));
+        }
+
+        if let Some(channel_actor_state) = self.store.get_channel_actor_state(&channel_id) {
+            // remove from transaction track actor
+            if let Some(_funding_tx) = channel_actor_state.funding_tx.as_ref() {
+                // pending on https://github.com/nervosnetwork/fiber/pull/521
+                // https://github.com/nervosnetwork/fiber/pull/521#issuecomment-2683709653
+            }
+            // remove from DB
+            self.store.delete_channel_actor_state(&channel_id);
+        }
+
+        // notify event observers, such as remove from watchtower
+        self.network
+            .send_message(NetworkActorMessage::new_notification(
+                NetworkServiceEvent::ChannelAbandon(channel_id),
+            ))
+            .expect(ASSUME_NETWORK_MYSELF_ALIVE);
+
         return Ok(());
     }
 

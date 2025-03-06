@@ -580,13 +580,11 @@ impl NetworkNode {
         res
     }
 
-    pub async fn send_abandon_channel(&self, channel_id: Hash256) {
+    pub async fn send_abandon_channel(&self, channel_id: Hash256) -> Result<(), String> {
         let message = |rpc_reply| -> NetworkActorMessage {
             NetworkActorMessage::Command(NetworkActorCommand::AbandonChannel(channel_id, rpc_reply))
         };
-        call!(self.network_actor, message)
-            .expect("node_a alive")
-            .expect("abandon channel success");
+        call!(self.network_actor, message).expect("node_a alive")
     }
 
     pub async fn send_payment_keysend(
