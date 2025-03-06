@@ -8,12 +8,16 @@ use crate::{
             NodeAnnouncement, PaymentHopData, PeeledOnionPacket, Privkey, Pubkey, TlcErr,
             TlcErrPacket, TlcErrorCode, NO_SHARED_SECRET,
         },
+        PaymentCustomRecords,
     },
     gen_rand_channel_outpoint, gen_rand_fiber_private_key, gen_rand_fiber_public_key,
     now_timestamp_as_millis_u64,
 };
 use fiber_sphinx::OnionSharedSecretIter;
 use secp256k1::{PublicKey, Secp256k1, SecretKey};
+use serde::Deserialize;
+use serde::Serialize;
+
 use std::str::FromStr;
 
 #[test]
@@ -129,6 +133,7 @@ fn test_peeled_onion_packet() {
             funding_tx_hash: Hash256::default(),
             hash_algorithm: HashAlgorithm::Sha256,
             payment_preimage: None,
+            custom_records: None,
         },
         PaymentHopData {
             amount: 5,
@@ -137,6 +142,7 @@ fn test_peeled_onion_packet() {
             funding_tx_hash: Hash256::default(),
             hash_algorithm: HashAlgorithm::Sha256,
             payment_preimage: None,
+            custom_records: None,
         },
         PaymentHopData {
             amount: 8,
@@ -145,6 +151,7 @@ fn test_peeled_onion_packet() {
             funding_tx_hash: Hash256::default(),
             hash_algorithm: HashAlgorithm::Sha256,
             payment_preimage: None,
+            custom_records: None,
         },
     ];
     let packet = PeeledOnionPacket::create(
@@ -308,4 +315,34 @@ fn test_verify_hard_coded_node_announcement() {
         };
         assert!(node_announcement.verify())
     }
+}
+
+#[test]
+fn test_custom_records_serialize_deserialize() {
+    #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+    pub struct Custom {
+        pub custom_records: Option<PaymentCustomRecords>,
+    }
+
+    let custom = Custom {
+        custom_records: Some(PaymentCustomRecords {
+            data: vec![(1, vec![2, 3]), (4, vec![5, 33])]
+                .into_iter()
+                .collect(),
+        }),
+    };
+
+    let json = serde_json::to_string(&custom).expect("serialize");
+    eprintln!("json: {}", json);
+
+    let deserialized: Custom = serde_json::from_str(&json).expect("deserialize");
+    eprintln!("deserialized: {:?}", deserialized);
+    assert_eq!(custom, deserialized);
+
+    let invalid = "{\"custom_records\":{\"0x4\":\"0x0521\",\"0x1\":\"0x0203\"}}";
+    let deserialized = serde_json::from_str::<Custom>(invalid);
+    assert!(deserialized.is_err());
+
+    let bincode_serialize = bincode::serialize(&custom).expect("serialize");
+    let _deserialized: Custom = bincode::deserialize(&bincode_serialize).expect("deserialize");
 }
