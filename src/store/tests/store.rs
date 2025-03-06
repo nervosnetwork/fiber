@@ -15,6 +15,7 @@ use crate::gen_rand_sha256_hash;
 use crate::invoice::*;
 use crate::now_timestamp_as_millis_u64;
 use crate::store::store::deserialize_from;
+use crate::store::store::get_channel_timestamps_key;
 use crate::store::store::serialize_to_vec;
 use crate::store::Store;
 use crate::watchtower::*;
