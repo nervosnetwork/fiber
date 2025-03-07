@@ -21,6 +21,7 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
     * [Module Channel](#module-channel)
         * [Method `open_channel`](#channel-open_channel)
         * [Method `accept_channel`](#channel-accept_channel)
+        * [Method `abandon_channel`](#channel-abandon_channel)
         * [Method `list_channels`](#channel-list_channels)
         * [Method `shutdown_channel`](#channel-shutdown_channel)
         * [Method `update_channel`](#channel-update_channel)
@@ -231,6 +232,24 @@ Accepts a channel opening request from a peer.
 ##### Returns
 
 * `channel_id` - <em>[Hash256](#type-hash256)</em>, The final ID of the channel that was accepted, it's different from the temporary channel ID
+
+---
+
+
+
+<a id="channel-abandon_channel"></a>
+#### Method `abandon_channel`
+
+Abandon a channel, this will remove the channel from the channel manager and DB.
+ Only channels not in Ready or Closed state can be abandoned.
+
+##### Params
+
+* `channel_id` - <em>[Hash256](#type-hash256)</em>, The temporary channel ID or real channel ID of the channel being abandoned
+
+##### Returns
+
+* None
 
 ---
 

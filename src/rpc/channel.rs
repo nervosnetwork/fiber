@@ -97,6 +97,12 @@ pub struct OpenChannelResult {
     pub temporary_channel_id: Hash256,
 }
 
+#[derive(Serialize, Deserialize, Debug)]
+pub struct AbandonChannelParams {
+    /// The temporary channel ID or real channel ID of the channel being abandoned
+    pub channel_id: Hash256,
+}
+
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug)]
 pub struct AcceptChannelParams {
@@ -187,7 +193,7 @@ pub enum ChannelState {
     AwaitingChannelReady(AwaitingChannelReadyFlags),
     /// Both we and our counterparty consider the funding transaction confirmed and the channel is
     /// now operational.
-    ChannelReady(),
+    ChannelReady,
     /// We've successfully negotiated a `closing_signed` dance. At this point, the `ChannelManager`
     /// is about to drop us, but we store this anyway.
     ShuttingDown(ShuttingDownFlags),
@@ -209,7 +215,7 @@ impl From<RawChannelState> for ChannelState {
             RawChannelState::AwaitingChannelReady(flags) => {
                 ChannelState::AwaitingChannelReady(flags)
             }
-            RawChannelState::ChannelReady() => ChannelState::ChannelReady(),
+            RawChannelState::ChannelReady => ChannelState::ChannelReady,
             RawChannelState::ShuttingDown(flags) => ChannelState::ShuttingDown(flags),
             RawChannelState::Closed(flags) => ChannelState::Closed(flags),
         }
@@ -317,6 +323,11 @@ trait ChannelRpc {
         params: AcceptChannelParams,
     ) -> Result<AcceptChannelResult, ErrorObjectOwned>;
 
+    /// Abandon a channel, this will remove the channel from the channel manager and DB.
+    /// Only channels not in Ready or Closed state can be abandoned.
+    #[method(name = "abandon_channel")]
+    async fn abandon_channel(&self, params: AbandonChannelParams) -> Result<(), ErrorObjectOwned>;
+
     /// Lists all channels.
     #[method(name = "list_channels")]
     async fn list_channels(
@@ -407,6 +418,16 @@ where
         handle_actor_call!(self.actor, message, params).map(|response| AcceptChannelResult {
             channel_id: response.new_channel_id,
         })
+    }
+
+    async fn abandon_channel(&self, params: AbandonChannelParams) -> Result<(), ErrorObjectOwned> {
+        let message = |rpc_reply| {
+            NetworkActorMessage::Command(NetworkActorCommand::AbandonChannel(
+                params.channel_id,
+                rpc_reply,
+            ))
+        };
+        handle_actor_call!(self.actor, message, params)
     }
 
     async fn list_channels(

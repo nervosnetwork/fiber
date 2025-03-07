@@ -103,6 +103,9 @@ where
                     NetworkServiceEvent::ChannelClosed(_peer_id, channel_id, _close_tx_hash) => {
                         self.store.remove_watch_channel(channel_id);
                     }
+                    NetworkServiceEvent::ChannelAbandon(channel_id) => {
+                        self.store.remove_watch_channel(channel_id);
+                    }
                     NetworkServiceEvent::RevokeAndAckReceived(
                         _peer_id,
                         channel_id,

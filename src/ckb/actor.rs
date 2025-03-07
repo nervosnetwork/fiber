@@ -72,6 +72,7 @@ pub enum CkbChainMessage {
         GetBlockTimestampRequest,
         RpcReplyPort<Result<Option<GetBlockTimestampResponse>, RpcError>>,
     ),
+    Stop,
 }
 
 #[ractor::async_trait]
@@ -271,7 +272,11 @@ impl Actor for CkbChainActor {
                     );
                 });
             }
+            CkbChainMessage::Stop => {
+                myself.stop(Some("stop received".to_string()));
+            }
         }
+
         Ok(())
     }
 }
