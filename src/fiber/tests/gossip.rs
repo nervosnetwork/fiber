@@ -945,12 +945,12 @@ async fn test_gossip_store_prune_channel_update() {
         "channel announcement should not be pruned if there are active channel updates"
     );
 
-    assert_eq!(
+    assert_ne!(
         context
             .get_store()
             .get_latest_channel_update(channel_context.channel_outpoint(), true),
         None,
-        "channel update of node 1 should be pruned as it is outdated"
+        "channel update of node 1 should not be pruned as channel update of node 2 is active"
     );
     assert_ne!(
         context
@@ -964,7 +964,7 @@ async fn test_gossip_store_prune_channel_update() {
             .get_store()
             .get_broadcast_messages(&Cursor::default(), None)
             .len(),
-        2
+        3
     );
 
     context
@@ -996,7 +996,7 @@ async fn test_gossip_store_prune_channel_update() {
             .get_store()
             .get_latest_channel_update(channel_context.channel_outpoint(), false),
         None,
-        "channel update of node 2 should not be pruned as it is outdated"
+        "channel update of node 2 should be pruned as it is outdated"
     );
     assert_eq!(
         context

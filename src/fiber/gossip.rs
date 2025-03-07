@@ -236,6 +236,8 @@ pub trait GossipMessageStore {
     fn save_node_announcement(&self, node_announcement: NodeAnnouncement);
 
     fn get_channel_timestamps_iter(&self) -> impl IntoIterator<Item = (OutPoint, [u64; 3])>;
+
+    fn delete_channel_timestamps(&self, outpoint: &OutPoint);
 }
 
 // A batch of gossip messages has been added to the store since the last time
@@ -2557,14 +2559,13 @@ where
                             timestamps[0],
                             BroadcastMessageID::ChannelAnnouncement(outpoint.clone()),
                         ));
-                    }
-                    for channel_timestamp in &timestamps[1..] {
-                        if *channel_timestamp < stale_timestamp {
+                        for channel_timestamp in &timestamps[1..] {
                             store.delete_broadcast_message(&Cursor::new(
                                 *channel_timestamp,
                                 BroadcastMessageID::ChannelUpdate(outpoint.clone()),
                             ));
                         }
+                        store.delete_channel_timestamps(&outpoint);
                     }
                 }
             }
