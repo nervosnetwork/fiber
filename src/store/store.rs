@@ -304,7 +304,7 @@ impl ChannelActorStateStore for Store {
 
     fn insert_channel_actor_state(&self, state: ChannelActorState) {
         let mut batch = self.batch();
-        batch.put_kv(KeyValue::ChannelActorState(state.id, state.clone()));
+
         batch.put_kv(KeyValue::PeerIdChannelId(
             (state.get_remote_peer_id(), state.id),
             state.state,
@@ -312,6 +312,7 @@ impl ChannelActorStateStore for Store {
         if let Some(outpoint) = state.get_funding_transaction_outpoint() {
             batch.put_kv(KeyValue::OutPointChannelId(outpoint, state.id));
         }
+        batch.put_kv(KeyValue::ChannelActorState(state.id, state));
         batch.commit();
     }
 

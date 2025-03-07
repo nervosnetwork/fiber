@@ -385,6 +385,7 @@ fn test_channel_actor_state_store() {
         remote_constraints: ChannelConstraints::default(),
         reestablishing: false,
         created_at: SystemTime::now(),
+        network: None,
         scheduled_channel_update_handle: None,
     };
 
@@ -497,6 +498,7 @@ fn test_serde_channel_actor_state_ciborium() {
         remote_constraints: ChannelConstraints::default(),
         reestablishing: false,
         created_at: SystemTime::now(),
+        network: None,
         scheduled_channel_update_handle: None,
     };
 
