@@ -2272,8 +2272,6 @@ where
                 channel.reestablishing = true;
                 channel.network = Some(self.network.clone());
 
-                eprintln!("finished reestablishing channel ..........");
-
                 let reestablish_channel = ReestablishChannel {
                     channel_id,
                     local_commitment_number: channel.get_current_commitment_number(true),
