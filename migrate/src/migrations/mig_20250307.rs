@@ -45,6 +45,10 @@ impl Migration for MigrationObj {
             .prefix_iterator(prefix.as_slice())
             .take_while(move |(col_key, _)| col_key.starts_with(prefix.as_slice()))
         {
+            if let Ok(_) = bincode::deserialize::<NewSendPaymentData>(&v) {
+                // if we can deserialize the data correctly with new version, just skip it.
+                continue;
+            }
             let old_payment_session: OldPaymentSession =
                 bincode::deserialize(&v).expect("deserialize to old channel state");
 
@@ -65,8 +69,6 @@ impl Migration for MigrationObj {
                 preimage: convert(old_request.preimage),
                 allow_self_payment: old_request.allow_self_payment,
                 dry_run: old_request.dry_run,
-                // TODO: custom records also requires a migration.
-                // Is this the right way to handle this?
                 custom_records: None,
                 // The meaning of hop_hints changed, we are dropping previous hop hints.
                 hop_hints: vec![],
