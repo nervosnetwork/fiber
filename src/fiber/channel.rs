@@ -58,8 +58,9 @@ use musig2::{
     PubNonce, SecNonce,
 };
 use ractor::{
-    async_trait as rasync_trait, call, concurrency::Duration, Actor, ActorProcessingErr, ActorRef,
-    OutputPort, RpcReplyPort,
+    async_trait as rasync_trait, call,
+    concurrency::{Duration, JoinHandle},
+    Actor, ActorProcessingErr, ActorRef, MessagingErr, OutputPort, RpcReplyPort,
 };
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
@@ -67,7 +68,10 @@ use tentacle::secio::PeerId;
 use thiserror::Error;
 use tokio::sync::oneshot;
 
-use super::{graph::ChannelUpdateInfo, types::ForwardTlcResult};
+use super::{
+    gossip::SOFT_BROADCAST_MESSAGES_CONSIDERED_STALE_DURATION, graph::ChannelUpdateInfo,
+    types::ForwardTlcResult,
+};
 use std::{
     collections::HashSet,
     fmt::{self, Debug, Display},
@@ -137,6 +141,7 @@ pub enum ChannelCommand {
         RpcReplyPort<Result<(), ProcessingChannelError>>,
     ),
     Shutdown(ShutdownCommand, RpcReplyPort<Result<(), String>>),
+    BroadcastChannelUpdate(),
     Update(UpdateCommand, RpcReplyPort<Result<(), String>>),
     ForwardTlcResult(ForwardTlcResult),
     #[cfg(test)]
@@ -151,6 +156,7 @@ impl Display for ChannelCommand {
             ChannelCommand::AddTlc(_, _) => write!(f, "AddTlc"),
             ChannelCommand::RemoveTlc(_, _) => write!(f, "RemoveTlc"),
             ChannelCommand::Shutdown(_, _) => write!(f, "Shutdown"),
+            ChannelCommand::BroadcastChannelUpdate() => write!(f, "BroadcastChannelUpdate"),
             ChannelCommand::Update(_, _) => write!(f, "Update"),
             ChannelCommand::ForwardTlcResult(_) => write!(f, "ForwardTlcResult"),
             #[cfg(test)]
@@ -348,7 +354,11 @@ where
             match message {
                 FiberChannelMessage::ReestablishChannel(ref reestablish_channel) => {
                     state
-                        .handle_reestablish_channel_message(reestablish_channel, &self.network)
+                        .handle_reestablish_channel_message(
+                            myself,
+                            reestablish_channel,
+                            &self.network,
+                        )
                         .await?;
                 }
                 _ => {
@@ -388,7 +398,9 @@ where
                     node_signature,
                     partial_signature,
                 );
-                state.maybe_public_channel_is_ready(&self.network).await;
+                state
+                    .maybe_public_channel_is_ready(myself, &self.network)
+                    .await;
                 Ok(())
             }
             FiberChannelMessage::AcceptChannel(accept_channel) => {
@@ -504,7 +516,7 @@ where
                 };
                 let flags = flags | AwaitingChannelReadyFlags::THEIR_CHANNEL_READY;
                 state.update_state(ChannelState::AwaitingChannelReady(flags));
-                state.maybe_channel_is_ready(&self.network).await;
+                state.maybe_channel_is_ready(myself, &self.network).await;
                 Ok(())
             }
             FiberChannelMessage::UpdateTlcInfo(update_tlc_info) => {
@@ -607,7 +619,7 @@ where
             }
             FiberChannelMessage::ReestablishChannel(ref reestablish_channel) => {
                 state
-                    .handle_reestablish_channel_message(reestablish_channel, &self.network)
+                    .handle_reestablish_channel_message(myself, reestablish_channel, &self.network)
                     .await?;
                 Ok(())
             }
@@ -1424,6 +1436,7 @@ where
 
     pub async fn handle_update_command(
         &self,
+        myself: &ActorRef<ChannelActorMessage>,
         state: &mut ChannelActorState,
         command: UpdateCommand,
     ) -> ProcessingChannelResult {
@@ -1466,7 +1479,7 @@ where
 
         if updated {
             state
-                .notify_owned_channel_updated(&self.network, true)
+                .on_owned_channel_updated(myself, &self.network, true)
                 .await;
         }
 
@@ -1871,7 +1884,7 @@ where
                 }
             }
             ChannelCommand::Update(command, reply) => {
-                match self.handle_update_command(state, command).await {
+                match self.handle_update_command(myself, state, command).await {
                     Ok(_) => {
                         debug!("Update command processed successfully");
                         let _ = reply.send(Ok(()));
@@ -1883,6 +1896,10 @@ where
                         Err(err)
                     }
                 }
+            }
+            ChannelCommand::BroadcastChannelUpdate() => {
+                state.broadcast_channel_update(myself, &self.network).await;
+                Ok(())
             }
             ChannelCommand::ForwardTlcResult(forward_tlc_res) => {
                 self.handle_forward_tlc_result(myself, state, forward_tlc_res)
@@ -1898,7 +1915,7 @@ where
                 let ReloadParams { notify_changes } = reload_params;
                 if notify_changes {
                     state
-                        .notify_owned_channel_updated(&self.network, false)
+                        .on_owned_channel_updated(myself, &self.network, false)
                         .await;
                 }
                 Ok(())
@@ -1940,7 +1957,7 @@ where
                     .expect(ASSUME_NETWORK_ACTOR_ALIVE);
                 let flags = flags | AwaitingChannelReadyFlags::OUR_CHANNEL_READY;
                 state.update_state(ChannelState::AwaitingChannelReady(flags));
-                state.maybe_channel_is_ready(&self.network).await;
+                state.maybe_channel_is_ready(myself, &self.network).await;
             }
             ChannelEvent::CommitmentTransactionConfirmed => {
                 match state.state {
@@ -3102,6 +3119,9 @@ impl SettlementTlc {
     }
 }
 
+type ScheduledChannelUpdateHandle =
+    Option<Arc<JoinHandle<Result<(), MessagingErr<ChannelActorMessage>>>>>;
+
 #[serde_as]
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ChannelActorState {
@@ -3237,6 +3257,13 @@ pub struct ChannelActorState {
     pub reestablishing: bool,
 
     pub created_at: SystemTime,
+
+    // The handle for scheduled channel update broadcasting.
+    // We will use this handle to cancel the scheduled task when the channel is closed,
+    // create a new handle when we broadcast a new channel update message.
+    // The arc here is only used to implement the clone trait for the ChannelActorState.
+    #[serde(skip)]
+    pub scheduled_channel_update_handle: ScheduledChannelUpdateHandle,
 }
 
 #[serde_as]
@@ -3780,14 +3807,16 @@ impl ChannelActorState {
         .await
     }
 
-    // Notify the network, network graph and channel counterparty about the channel update.
-    // We do this on channel ready, channel reestablishment, user channel parameters update.
+    // Notify the network, network graph and channel counterparty about the channel update,
+    // and update the handle for scheduled channel update broadcasting.
+    // We do this on channel ready, channel reestablishment, user channel parameters updates.
     // Some of the events require us to send an OwnedChannelUpdateEvent::Up to the network actor,
     // (e.g. channel ready and channel reestablishment) and some require us to send a
     // OwnedChannelUpdateEvent::Updated (e.g. user channel parameters update) to the network actor.
     // update_only is used to distinguish between the two cases.
-    async fn notify_owned_channel_updated(
+    async fn on_owned_channel_updated(
         &mut self,
+        myself: &ActorRef<ChannelActorMessage>,
         network: &ActorRef<NetworkActorMessage>,
         update_only: bool,
     ) {
@@ -3796,6 +3825,19 @@ impl ChannelActorState {
         } else {
             self.update_graph_for_local_channel_ready(network);
         }
+        // Cancel the scheduled channel update broadcasting task if it exists.
+        if let Some(handle) = self.scheduled_channel_update_handle.take() {
+            handle.abort();
+        }
+        self.broadcast_channel_update(myself, network).await;
+        self.send_update_tlc_info_message(network);
+    }
+
+    async fn broadcast_channel_update(
+        &mut self,
+        myself: &ActorRef<ChannelActorMessage>,
+        network: &ActorRef<NetworkActorMessage>,
+    ) {
         if self.is_public() {
             let channel_update = self.generate_channel_update(network).await;
             network
@@ -3805,8 +3847,20 @@ impl ChannelActorState {
                     ]),
                 ))
                 .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+
+            // We need to periodically broadcast the public channel update message to the network,
+            // so that the network can know the channel is still alive. We are currently using
+            // BROADCAST_MESSAGES_CONSIDERED_STALE_DURATION / 2 as interval to broadcast the channel update message.
+            // This allows us to have send at least one channel update message in the interval of BROADCAST_MESSAGES_CONSIDERED_STALE_DURATION.
+            // Note that even though we use send_after to send a message after the timeout, this will
+            // actually send the message periodically, we will send another message while the previous message
+            // is received.
+            let handle = myself.send_after(
+                SOFT_BROADCAST_MESSAGES_CONSIDERED_STALE_DURATION / 2,
+                || ChannelActorMessage::Command(ChannelCommand::BroadcastChannelUpdate()),
+            );
+            self.scheduled_channel_update_handle = Some(Arc::new(handle));
         }
-        self.send_update_tlc_info_message(network);
     }
 
     fn update_graph_for_remote_channel_change(&mut self, network: &ActorRef<NetworkActorMessage>) {
@@ -4002,6 +4056,7 @@ impl ChannelActorState {
             latest_commitment_transaction: None,
             reestablishing: false,
             created_at: SystemTime::now(),
+            scheduled_channel_update_handle: None,
         };
         if let Some(nonce) = remote_channel_announcement_nonce {
             state.update_remote_channel_announcement_nonce(&nonce);
@@ -4070,6 +4125,7 @@ impl ChannelActorState {
             latest_commitment_transaction: None,
             reestablishing: false,
             created_at: SystemTime::now(),
+            scheduled_channel_update_handle: None,
         }
     }
 
@@ -5837,7 +5893,11 @@ impl ChannelActorState {
         Ok(())
     }
 
-    async fn maybe_public_channel_is_ready(&mut self, network: &ActorRef<NetworkActorMessage>) {
+    async fn maybe_public_channel_is_ready(
+        &mut self,
+        myself: &ActorRef<ChannelActorMessage>,
+        network: &ActorRef<NetworkActorMessage>,
+    ) {
         debug!("Trying to create channel announcement message for public channel");
         if let Some((channel_announcement, channel_update)) =
             self.try_create_channel_messages(network).await
@@ -5846,7 +5906,7 @@ impl ChannelActorState {
                 "Channel announcement/update message for {:?} created, public channel is ready",
                 self.get_id(),
             );
-            self.on_channel_ready(network).await;
+            self.on_new_channel_ready(myself, network).await;
 
             debug!(
                 "Broadcasting channel announcement {:?} and channel update {:?}",
@@ -5866,14 +5926,18 @@ impl ChannelActorState {
         }
     }
 
-    async fn maybe_channel_is_ready(&mut self, network: &ActorRef<NetworkActorMessage>) {
+    async fn maybe_channel_is_ready(
+        &mut self,
+        myself: &ActorRef<ChannelActorMessage>,
+        network: &ActorRef<NetworkActorMessage>,
+    ) {
         match self.state {
             ChannelState::AwaitingChannelReady(flags) => {
                 if flags.contains(AwaitingChannelReadyFlags::CHANNEL_READY) {
                     if !self.is_public() {
-                        self.on_channel_ready(network).await;
+                        self.on_new_channel_ready(myself, network).await;
                     } else {
-                        self.maybe_public_channel_is_ready(network).await;
+                        self.maybe_public_channel_is_ready(myself, network).await;
                     }
                 }
             }
@@ -5886,12 +5950,16 @@ impl ChannelActorState {
         }
     }
 
-    async fn on_channel_ready(&mut self, network: &ActorRef<NetworkActorMessage>) {
+    async fn on_new_channel_ready(
+        &mut self,
+        myself: &ActorRef<ChannelActorMessage>,
+        network: &ActorRef<NetworkActorMessage>,
+    ) {
         self.update_state(ChannelState::ChannelReady());
         self.increment_local_commitment_number();
         self.increment_remote_commitment_number();
         let peer_id = self.get_remote_peer_id();
-        self.notify_owned_channel_updated(network, false).await;
+        self.on_owned_channel_updated(myself, network, false).await;
         network
             .send_message(NetworkActorMessage::new_event(
                 NetworkActorEvent::ChannelReady(
@@ -5901,6 +5969,14 @@ impl ChannelActorState {
                 ),
             ))
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+    }
+
+    async fn on_reestablished_channel_ready(
+        &mut self,
+        myself: &ActorRef<ChannelActorMessage>,
+        network: &ActorRef<NetworkActorMessage>,
+    ) {
+        self.on_owned_channel_updated(myself, network, false).await;
     }
 
     fn append_remote_commitment_point(&mut self, commitment_point: Pubkey) {
@@ -6054,6 +6130,7 @@ impl ChannelActorState {
 
     async fn handle_reestablish_channel_message(
         &mut self,
+        myself: &ActorRef<ChannelActorMessage>,
         reestablish_channel: &ReestablishChannel,
         network: &ActorRef<NetworkActorMessage>,
     ) -> ProcessingChannelResult {
@@ -6192,7 +6269,7 @@ impl ChannelActorState {
                     );
                 }
 
-                self.notify_owned_channel_updated(network, false).await;
+                self.on_reestablished_channel_ready(myself, network).await;
 
                 debug_event!(network, "Reestablished channel in ChannelReady");
             }

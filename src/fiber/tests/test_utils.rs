@@ -4,14 +4,18 @@ use crate::fiber::channel::ChannelCommand;
 use crate::fiber::channel::ChannelCommandWithId;
 use crate::fiber::channel::ReloadParams;
 use crate::fiber::channel::UpdateCommand;
+use crate::fiber::gossip::get_gossip_actor_name;
+use crate::fiber::gossip::GossipActorMessage;
 use crate::fiber::graph::NetworkGraphStateStore;
 use crate::fiber::graph::PaymentSession;
 use crate::fiber::graph::PaymentSessionStatus;
+use crate::fiber::network::GossipMessageWithPeerId;
 use crate::fiber::network::NodeInfoResponse;
 use crate::fiber::network::PaymentCustomRecords;
 use crate::fiber::network::SendPaymentCommand;
 use crate::fiber::network::SendPaymentResponse;
 use crate::fiber::types::EcdsaSignature;
+use crate::fiber::types::GossipMessage;
 use crate::fiber::types::Pubkey;
 use crate::invoice::CkbInvoice;
 use crate::invoice::CkbInvoiceStatus;
@@ -145,12 +149,6 @@ pub fn get_fiber_config<P: AsRef<Path>>(base_dir: P, node_name: Option<&str>) ->
             .map(Into::into),
         announce_listening_addr: Some(true),
         base_dir: Some(PathBuf::from(base_dir)),
-        // This config is needed for the timely processing of gossip messages.
-        // Without this, some tests may fail due to the delay in processing gossip messages.
-        gossip_network_maintenance_interval_ms: Some(50),
-        // This config is needed for the timely processing of gossip messages.
-        // Without this, some tests may fail due to the delay in processing gossip messages.
-        gossip_store_maintenance_interval_ms: Some(50),
         auto_accept_channel_ckb_funding_amount: Some(0), // Disable auto accept for unit tests
         announce_private_addr: Some(true),               // Announce private address for unit tests
         ..Default::default()
@@ -185,6 +183,7 @@ pub struct NetworkNode {
     pub network_actor: ActorRef<NetworkActorMessage>,
     pub network_graph: Arc<TokioRwLock<NetworkGraph<Store>>>,
     pub chain_actor: ActorRef<CkbChainMessage>,
+    pub gossip_actor: ActorRef<GossipActorMessage>,
     pub private_key: Privkey,
     pub peer_id: PeerId,
     pub event_emitter: mpsc::Receiver<NetworkServiceEvent>,
@@ -922,6 +921,10 @@ impl NetworkNode {
             base_dir.as_ref()
         );
 
+        let gossip_actor = ractor::registry::where_is(get_gossip_actor_name(&peer_id))
+            .expect("gossip actor should have been started")
+            .into();
+
         Self {
             base_dir,
             node_name,
@@ -932,6 +935,7 @@ impl NetworkNode {
             network_actor,
             network_graph,
             chain_actor,
+            gossip_actor,
             private_key: secret_key,
             peer_id,
             event_emitter: self_event_receiver,
@@ -1204,6 +1208,22 @@ impl NetworkNode {
             graph.get_channel(channel_id).cloned()
         })
         .await
+    }
+
+    pub fn send_message_to_gossip_actor(&self, message: GossipActorMessage) {
+        self.gossip_actor
+            .send_message(message)
+            .expect("send message to gossip actor");
+    }
+
+    pub fn mock_received_gossip_message_from_peer(&self, peer_id: PeerId, message: GossipMessage) {
+        self.send_message_to_gossip_actor(GossipActorMessage::GossipMessageReceived(
+            GossipMessageWithPeerId { peer_id, message },
+        ));
+    }
+
+    pub fn get_store(&self) -> &Store {
+        &self.store
     }
 }
 

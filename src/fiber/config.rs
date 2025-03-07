@@ -50,7 +50,12 @@ pub const DEFAULT_AUTO_ANNOUNCE_NODE: bool = true;
 pub const DEFAULT_ANNOUNCE_NODE_INTERVAL_SECONDS: u64 = 3600;
 
 /// The interval to maintain the gossip network, in milli-seconds.
+#[cfg(not(test))]
 pub const DEFAULT_GOSSIP_NETWORK_MAINTENANCE_INTERVAL_MS: u64 = 1000 * 60;
+#[cfg(test)]
+// This config is needed for the timely processing of gossip messages.
+// Without this, some tests may fail due to the delay in processing gossip messages.
+pub const DEFAULT_GOSSIP_NETWORK_MAINTENANCE_INTERVAL_MS: u64 = 50;
 
 /// Maximal number of inbound connections.
 pub const DEFAULT_MAX_INBOUND_PEERS: usize = 16;
@@ -59,7 +64,12 @@ pub const DEFAULT_MAX_INBOUND_PEERS: usize = 16;
 pub const DEFAULT_MIN_OUTBOUND_PEERS: usize = 8;
 
 /// The interval to maintain the gossip network, in milli-seconds.
+#[cfg(not(test))]
 pub const DEFAULT_GOSSIP_STORE_MAINTENANCE_INTERVAL_MS: u64 = 20 * 1000;
+#[cfg(test)]
+// This config is needed for the timely processing of gossip messages.
+// Without this, some tests may fail due to the delay in processing gossip messages.
+pub const DEFAULT_GOSSIP_STORE_MAINTENANCE_INTERVAL_MS: u64 = 50;
 
 /// Whether to sync the network graph from the network. true means syncing.
 pub const DEFAULT_SYNC_NETWORK_GRAPH: bool = true;

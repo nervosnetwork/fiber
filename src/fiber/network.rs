@@ -76,7 +76,7 @@ use crate::fiber::channel::{
     AddTlcCommand, AddTlcResponse, TxCollaborationCommand, TxUpdateCommand,
 };
 use crate::fiber::config::{DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT};
-use crate::fiber::gossip::{GossipService, SubscribableGossipMessageStore};
+use crate::fiber::gossip::{GossipConfig, GossipService, SubscribableGossipMessageStore};
 use crate::fiber::graph::{PaymentSession, PaymentSessionStatus};
 use crate::fiber::serde_utils::EntityHex;
 use crate::fiber::types::{
@@ -601,9 +601,6 @@ pub enum NetworkActorEvent {
     // Some gossip messages have been updated in the gossip message store.
     // Normally we need to propagate these messages to the network graph.
     GossipMessageUpdates(GossipMessageUpdates),
-    // Mock that a gossip message is received, used for testing.
-    #[cfg(test)]
-    GossipMessage(PeerId, GossipMessage),
 
     /// Channel related events.
 
@@ -957,15 +954,6 @@ where
             NetworkActorEvent::AddTlcResult(payment_hash, error_info, previous_tlc) => {
                 self.on_add_tlc_result_event(myself, state, payment_hash, error_info, previous_tlc)
                     .await;
-            }
-            #[cfg(test)]
-            NetworkActorEvent::GossipMessage(peer_id, message) => {
-                state
-                    .gossip_actor
-                    .send_message(GossipActorMessage::GossipMessageReceived(
-                        GossipMessageWithPeerId { peer_id, message },
-                    ))
-                    .expect(ASSUME_GOSSIP_ACTOR_ALIVE);
             }
             NetworkActorEvent::GossipMessageUpdates(gossip_message_updates) => {
                 let mut graph = self.network_graph.write().await;
@@ -3063,13 +3051,10 @@ where
         let my_peer_id: PeerId = PeerId::from(secio_pk);
         let handle = NetworkServiceHandle::new(myself.clone());
         let fiber_handle = FiberProtocolHandle::from(&handle);
+        let mut gossip_config = GossipConfig::from(&config);
+        gossip_config.peer_id = Some(my_peer_id.clone());
         let (gossip_service, gossip_handle) = GossipService::start(
-            Some(format!("gossip actor {:?}", my_peer_id)),
-            Duration::from_millis(config.gossip_network_maintenance_interval_ms()),
-            Duration::from_millis(config.gossip_store_maintenance_interval_ms()),
-            config.announce_private_addr(),
-            config.gossip_network_num_targeted_active_syncing_peers,
-            config.gossip_network_num_targeted_outbound_passive_syncing_peers,
+            gossip_config,
             self.store.clone(),
             self.chain_actor.clone(),
             myself.get_cell(),
