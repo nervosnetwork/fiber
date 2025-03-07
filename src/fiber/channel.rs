@@ -3842,9 +3842,12 @@ impl ChannelActorState {
                 .expect(ASSUME_NETWORK_ACTOR_ALIVE);
 
             // We need to periodically broadcast the public channel update message to the network,
-            // so that the network can know the channel is still alive. We currently use the interval with
-            // value of BROADCAST_MESSAGES_CONSIDERED_STALE_DURATION / 2 to broadcast the channel update message.
+            // so that the network can know the channel is still alive. We are currently using
+            // BROADCAST_MESSAGES_CONSIDERED_STALE_DURATION / 2 as interval to broadcast the channel update message.
             // This allows us to have send at least one channel update message in the interval of BROADCAST_MESSAGES_CONSIDERED_STALE_DURATION.
+            // Note that even though we use send_after to send a message after the timeout, this will
+            // actually send the message periodically, we will send another message while the previous message
+            // is received.
             let handle = myself.send_after(
                 SOFT_BROADCAST_MESSAGES_CONSIDERED_STALE_DURATION / 2,
                 || ChannelActorMessage::Command(ChannelCommand::BroadcastChannelUpdate()),
