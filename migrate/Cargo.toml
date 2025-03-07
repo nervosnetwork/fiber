@@ -6,7 +6,7 @@ build = "build.rs"
 
 [dependencies]
 rocksdb = { package = "ckb-rocksdb", version = "=0.21.1", features = [
-    "lz4"
+    "lz4",
 ], default-features = false }
 
 tracing = "0.1"
@@ -26,6 +26,7 @@ fiber_v021 = { package = "fnn", git = "https://github.com/nervosnetwork/fiber.gi
 fiber_v030 = { package = "fnn", git = "https://github.com/nervosnetwork/fiber.git", tag = "v0.3.0" }
 fiber_v031 = { package = "fnn", git = "https://github.com/nervosnetwork/fiber.git", tag = "v0.3.1" }
 fiber_v040 = { package = "fnn", git = "https://github.com/nervosnetwork/fiber.git", tag = "v0.4.0-rc1" }
+fiber_v041 = { package = "fnn", git = "https://github.com/nervosnetwork/fiber.git", rev = "2a481d582dcbbb0a9401f48751cd1132cbaed6a6" }
 
 [features]
 default = []
