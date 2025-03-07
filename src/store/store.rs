@@ -812,14 +812,11 @@ impl GossipMessageStore for Store {
             let outpoint =
                 OutPoint::from_slice(&key[2..]).expect("deserialize OutPoint should be OK");
             assert_eq!(value.len(), 24);
-            let mut timestamps = [0u64; 3];
-            for i in 0..3 {
-                timestamps[i] = u64::from_be_bytes(
-                    value[i * 8..(i + 1) * 8]
-                        .try_into()
-                        .expect("timestamp length valid, shown above"),
-                );
-            }
+            let timestamps = [
+                u64::from_be_bytes(value[0..8].try_into().unwrap()),
+                u64::from_be_bytes(value[8..16].try_into().unwrap()),
+                u64::from_be_bytes(value[16..24].try_into().unwrap()),
+            ];
             (outpoint, timestamps)
         })
     }

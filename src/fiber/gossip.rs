@@ -1868,12 +1868,9 @@ where
     fn get_safe_cursor_to_start_syncing(&self) -> Cursor {
         let latest_cursor_timestamp = self.get_latest_cursor().timestamp;
         let safe_cursor_timestamp = latest_cursor_timestamp
-            .checked_sub(MAX_MISSING_BROADCAST_MESSAGE_TIMESTAMP_DRIFT.as_millis() as u64)
-            .unwrap_or_default();
-        let now = now_timestamp_as_millis_u64();
-        let timestamp_after_considered_stale = now
-            .checked_sub(SOFT_BROADCAST_MESSAGES_CONSIDERED_STALE_DURATION.as_millis() as u64)
-            .unwrap_or_default();
+            .saturating_sub(MAX_MISSING_BROADCAST_MESSAGE_TIMESTAMP_DRIFT.as_millis() as u64);
+        let timestamp_after_considered_stale = now_timestamp_as_millis_u64()
+            .saturating_sub(SOFT_BROADCAST_MESSAGES_CONSIDERED_STALE_DURATION.as_millis() as u64);
         let timestamp = max(safe_cursor_timestamp, timestamp_after_considered_stale);
         Cursor::new(timestamp, BroadcastMessageID::default())
     }
