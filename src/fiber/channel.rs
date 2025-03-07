@@ -5970,7 +5970,7 @@ impl ChannelActorState {
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
     }
 
-    async fn on_ready_channel_reestablished(
+    async fn on_reestablished_channel_ready(
         &mut self,
         myself: &ActorRef<ChannelActorMessage>,
         network: &ActorRef<NetworkActorMessage>,
@@ -6268,7 +6268,7 @@ impl ChannelActorState {
                     );
                 }
 
-                self.on_ready_channel_reestablished(myself, network).await;
+                self.on_reestablished_channel_ready(myself, network).await;
 
                 debug_event!(network, "Reestablished channel in ChannelReady");
             }
