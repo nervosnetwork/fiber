@@ -1802,6 +1802,7 @@ async fn test_send_payment_three_nodes_send_each_other_no_wait() {
             );
             node_0_sent_fee += payment1.fee;
             node_0_sent_amount += amount;
+            all_sent.push((0, payment1.payment_hash));
         }
 
         let payment2 = nodes[2]
