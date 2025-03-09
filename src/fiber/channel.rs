@@ -1,8 +1,8 @@
-use crate::debug_event;
 #[cfg(debug_assertions)]
 use crate::fiber::network::DebugEvent;
 use crate::fiber::network::PaymentCustomRecords;
 use crate::fiber::types::BroadcastMessageWithTimestamp;
+use crate::{debug_event, utils::tx::compute_tx_message};
 use bitflags::bitflags;
 use futures::future::OptionFuture;
 use secp256k1::XOnlyPublicKey;
@@ -5365,7 +5365,7 @@ impl ChannelActorState {
         let signature = common_ctx.aggregate_partial_signatures_for_msg(
             our_partial_signature,
             their_partial_signature,
-            compute_tx_message(tx).as_slice(),
+            &compute_tx_message(tx),
         )?;
 
         let witness =
@@ -7229,25 +7229,6 @@ pub fn create_witness_for_commitment_cell_with_pending_tlcs(
     witness.extend_from_slice(pending_tlcs);
     witness.extend_from_slice(&[0u8; 65]);
     witness
-}
-
-/// Compute a transaction's message by hashing its inputs and outputs.
-/// This is used instead of tx hash to maintain signature validity during script upgrades.
-/// https://github.com/nervosnetwork/fiber-scripts/pull/17
-pub fn compute_tx_message(tx: &TransactionView) -> [u8; 32] {
-    let mut hasher = new_blake2b();
-    // iter input and hash outpoint
-    for input in tx.inputs() {
-        hasher.update(input.previous_output().as_slice());
-    }
-    for (output, data) in tx.outputs_with_data_iter() {
-        hasher.update(output.as_slice());
-        hasher.update((data.len() as u32).to_le_bytes().as_slice());
-        hasher.update(&data);
-    }
-    let mut hash_result = [0u8; 32];
-    hasher.finalize(&mut hash_result);
-    hash_result
 }
 
 // The common musig2 configuration that is used both by signing and verifying.
