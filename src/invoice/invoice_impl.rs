@@ -2,8 +2,7 @@ use super::errors::VerificationError;
 use super::utils::*;
 use crate::fiber::gen::invoice::{self as gen_invoice, *};
 use crate::fiber::hash_algorithm::HashAlgorithm;
-use crate::fiber::serde_utils::EntityHex;
-use crate::fiber::serde_utils::U128Hex;
+use crate::fiber::serde_utils::{duration_hex, EntityHex, U128Hex, U64Hex};
 use crate::fiber::types::Hash256;
 use crate::gen_rand_sha256_hash;
 use crate::invoice::InvoiceError;
@@ -20,9 +19,9 @@ use secp256k1::{
     ecdsa::{RecoverableSignature, RecoveryId},
     Message, PublicKey, Secp256k1,
 };
+use serde::{Deserialize, Serialize};
 use std::fmt::Display;
 
-use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use std::{cmp::Ordering, str::FromStr};
 
@@ -109,15 +108,20 @@ pub struct CkbScript(#[serde_as(as = "EntityHex")] pub Script);
 
 #[serde_as]
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Attribute {
+    #[serde(with = "U64Hex")]
     FinalHtlcTimeout(u64),
+    #[serde(with = "U64Hex")]
     FinalHtlcMinimumExpiryDelta(u64),
+    #[serde(with = "duration_hex")]
     ExpiryTime(Duration),
     Description(String),
     FallbackAddr(String),
     UdtScript(CkbScript),
     PayeePublicKey(PublicKey),
     HashAlgorithm(HashAlgorithm),
+    #[serde(with = "U64Hex")]
     Feature(u64),
 }
 
