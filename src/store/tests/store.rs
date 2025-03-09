@@ -6,6 +6,7 @@ use crate::fiber::gossip::GossipMessageStore;
 use crate::fiber::graph::*;
 use crate::fiber::history::Direction;
 use crate::fiber::history::TimedResult;
+use crate::fiber::network::PaymentCustomRecords;
 use crate::fiber::network::SendPaymentData;
 use crate::fiber::tests::test_utils::*;
 use crate::fiber::types::*;
@@ -28,6 +29,7 @@ use musig2::CompactSignature;
 use musig2::SecNonce;
 use secp256k1::SecretKey;
 use secp256k1::{Keypair, Secp256k1};
+use std::collections::HashMap;
 use std::time::SystemTime;
 
 fn gen_rand_key_pair() -> Keypair {
@@ -383,6 +385,8 @@ fn test_channel_actor_state_store() {
         remote_constraints: ChannelConstraints::default(),
         reestablishing: false,
         created_at: SystemTime::now(),
+        network: None,
+        scheduled_channel_update_handle: None,
     };
 
     let bincode_encoded = bincode::serialize(&state).unwrap();
@@ -494,6 +498,8 @@ fn test_serde_channel_actor_state_ciborium() {
         remote_constraints: ChannelConstraints::default(),
         reestablishing: false,
         created_at: SystemTime::now(),
+        network: None,
+        scheduled_channel_update_handle: None,
     };
 
     let mut serialized = Vec::new();
@@ -523,6 +529,7 @@ fn test_store_payment_session() {
         allow_self_payment: false,
         hop_hints: vec![],
         dry_run: false,
+        custom_records: None,
     };
     let payment_session = PaymentSession::new(payment_data.clone(), 10);
     store.insert_payment_session(payment_session.clone());
@@ -599,6 +606,20 @@ fn test_store_payment_history() {
 }
 
 #[test]
+fn test_store_payment_custom_record() {
+    let payment_hash = gen_rand_sha256_hash();
+    let mut data = HashMap::new();
+    data.insert(1, "hello".to_string().into_bytes());
+    data.insert(2, "world".to_string().into_bytes());
+
+    let record = PaymentCustomRecords { data };
+    let store = generate_store();
+    store.insert_payment_custom_records(&payment_hash, record.clone());
+    let res = store.get_payment_custom_records(&payment_hash).unwrap();
+    assert_eq!(res, record);
+}
+
+#[test]
 fn test_serde_node_announcement_as_broadcast_message() {
     let privkey = gen_rand_fiber_private_key();
     let node_announcement = NodeAnnouncement::new(
@@ -620,5 +641,75 @@ fn test_serde_node_announcement_as_broadcast_message() {
     assert_eq!(
         BroadcastMessage::NodeAnnouncement(node_announcement),
         deserialized
+    );
+}
+
+#[test]
+fn test_store_save_channel_announcement_and_get_timestamp() {
+    let path = TempDir::new("test-gossip-store");
+    let store = Store::new(path).expect("created store failed");
+
+    let timestamp = now_timestamp_as_millis_u64();
+    let channel_announcement = mock_channel();
+    let outpoint = channel_announcement.out_point().clone();
+    store.save_channel_announcement(timestamp, channel_announcement.clone());
+    let timestamps = store
+        .get_channel_timestamps_iter()
+        .into_iter()
+        .collect::<Vec<_>>();
+    assert_eq!(timestamps, vec![(outpoint, [timestamp, 0, 0])]);
+}
+
+#[test]
+fn test_store_save_channel_update_and_get_timestamp() {
+    let path = TempDir::new("test-gossip-store");
+    let store = Store::new(path).expect("created store failed");
+
+    let flags_for_update_of_node1 = ChannelUpdateMessageFlags::UPDATE_OF_NODE1;
+    let channel_update_of_node1 = ChannelUpdate::new_unsigned(
+        OutPoint::new_builder()
+            .tx_hash(gen_rand_sha256_hash().into())
+            .index(0u32.pack())
+            .build(),
+        now_timestamp_as_millis_u64(),
+        flags_for_update_of_node1,
+        ChannelUpdateChannelFlags::empty(),
+        0,
+        0,
+        0,
+    );
+    let outpoint = channel_update_of_node1.channel_outpoint.clone();
+    store.save_channel_update(channel_update_of_node1.clone());
+    let timestamps = store
+        .get_channel_timestamps_iter()
+        .into_iter()
+        .collect::<Vec<_>>();
+    assert_eq!(
+        timestamps,
+        vec![(outpoint.clone(), [0, channel_update_of_node1.timestamp, 0])]
+    );
+
+    let mut channel_update_of_node2 = channel_update_of_node1.clone();
+    let flags_for_update_of_node2 = ChannelUpdateMessageFlags::UPDATE_OF_NODE2;
+    channel_update_of_node2.message_flags = flags_for_update_of_node2;
+    // Note that per discussion in Notion, we don't handle the rare case of two channel updates having the same timestamp.
+    // In the current implementation, channel update from one side with the same timestamp will not overwrite the existing one
+    // from the other side. So we have to set the timestamp to be different.
+    channel_update_of_node2.timestamp = 2;
+    store.save_channel_update(channel_update_of_node2.clone());
+    let timestamps = store
+        .get_channel_timestamps_iter()
+        .into_iter()
+        .collect::<Vec<_>>();
+    assert_eq!(
+        timestamps,
+        vec![(
+            outpoint,
+            [
+                0,
+                channel_update_of_node1.timestamp,
+                channel_update_of_node2.timestamp
+            ]
+        )]
     );
 }

@@ -60,9 +60,9 @@ use super::gossip::{GossipActorMessage, GossipMessageStore, GossipMessageUpdates
 use super::graph::{NetworkGraph, NetworkGraphStateStore, OwnedChannelUpdateEvent, SessionRoute};
 use super::key::blake2b_hash_with_salt;
 use super::types::{
-    BroadcastMessage, BroadcastMessageQuery, BroadcastMessageWithTimestamp, EcdsaSignature,
-    FiberMessage, ForwardTlcResult, GossipMessage, Hash256, NodeAnnouncement, OpenChannel,
-    PaymentHopData, Privkey, Pubkey, RemoveTlcReason, TlcErr, TlcErrData, TlcErrorCode,
+    BroadcastMessageWithTimestamp, EcdsaSignature, FiberMessage, ForwardTlcResult, GossipMessage,
+    Hash256, NodeAnnouncement, OpenChannel, PaymentHopData, Privkey, Pubkey, RemoveTlcReason,
+    TlcErr, TlcErrData, TlcErrorCode,
 };
 use super::{FiberConfig, ASSUME_NETWORK_ACTOR_ALIVE};
 
@@ -76,7 +76,7 @@ use crate::fiber::channel::{
     AddTlcCommand, AddTlcResponse, TxCollaborationCommand, TxUpdateCommand,
 };
 use crate::fiber::config::{DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT};
-use crate::fiber::gossip::{GossipProtocolHandle, SubscribableGossipMessageStore};
+use crate::fiber::gossip::{GossipConfig, GossipService, SubscribableGossipMessageStore};
 use crate::fiber::graph::{PaymentSession, PaymentSessionStatus};
 use crate::fiber::serde_utils::EntityHex;
 use crate::fiber::types::{
@@ -104,6 +104,8 @@ const ASSUME_CHAIN_ACTOR_ALWAYS_ALIVE_FOR_NOW: &str =
     "We currently assume that chain actor is always alive, but it failed. This is a known issue.";
 
 const ASSUME_NETWORK_MYSELF_ALIVE: &str = "network actor myself alive";
+
+const ASSUME_GOSSIP_ACTOR_ALIVE: &str = "gossip actor must be alive";
 
 // The duration for which we will try to maintain the number of peers in connection.
 const MAINTAINING_CONNECTIONS_INTERVAL: Duration = Duration::from_secs(3600);
@@ -156,6 +158,7 @@ pub struct SendPaymentResponse {
     pub created_at: u64,
     pub last_updated_at: u64,
     pub failed_error: Option<String>,
+    pub custom_records: Option<PaymentCustomRecords>,
     pub fee: u128,
     #[cfg(debug_assertions)]
     pub router: SessionRoute,
@@ -227,11 +230,6 @@ pub enum NetworkActorCommand {
     ),
     UpdateChannelFunding(Hash256, Transaction, FundingRequest),
     SignTx(PeerId, Hash256, Transaction, Option<Vec<Vec<u8>>>),
-    // Process a broadcast message from the network.
-    ProcessBroadcastMessage(BroadcastMessage),
-    // Query broadcast messages from a peer. Some messages may have been missed
-    // we use this to query them.
-    QueryBroadcastMessages(PeerId, Vec<BroadcastMessageQuery>),
     // Broadcast our BroadcastMessage to the network.
     BroadcastMessages(Vec<BroadcastMessageWithTimestamp>),
     // Broadcast local information to the network.
@@ -244,9 +242,6 @@ pub enum NetworkActorCommand {
     ),
     // Get Payment Session for query payment status and errors
     GetPayment(Hash256, RpcReplyPort<Result<SendPaymentResponse, String>>),
-
-    // Send a message to the gossip actor.
-    GossipActorMessage(GossipActorMessage),
 
     NodeInfo((), RpcReplyPort<Result<NodeInfoResponse, String>>),
 }
@@ -307,21 +302,34 @@ pub struct SendPaymentCommand {
     pub udt_type_script: Option<Script>,
     // allow self payment, default is false
     pub allow_self_payment: bool,
+    // custom records
+    pub custom_records: Option<PaymentCustomRecords>,
     // the hop hint which may help the find path algorithm to find the path
     pub hop_hints: Option<Vec<HopHint>>,
     // dry_run only used for checking, default is false
     pub dry_run: bool,
 }
 
+/// The custom records to be included in the payment.
+/// The key is hex encoded of `u32`, and the value is hex encoded of `Vec<u8>` with `0x` as prefix.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Default)]
+pub struct PaymentCustomRecords {
+    /// The custom records to be included in the payment.
+    pub data: HashMap<u32, Vec<u8>>,
+}
+
 #[serde_as]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HopHint {
     /// The public key of the node
-    pub pubkey: Pubkey,
-    /// The funding transaction hash of the channel outpoint
-    pub channel_funding_tx: Hash256,
-    /// inbound or outbound for the channel
-    pub inbound: bool,
+    pub(crate) pubkey: Pubkey,
+    /// The outpoint for the channel
+    #[serde_as(as = "EntityHex")]
+    pub(crate) channel_outpoint: OutPoint,
+    /// The fee rate to use this hop to forward the payment.
+    pub(crate) fee_rate: u64,
+    /// The TLC expiry delta to use this hop to forward the payment.
+    pub(crate) tlc_expiry_delta: u64,
 }
 
 #[serde_as]
@@ -340,6 +348,7 @@ pub struct SendPaymentData {
     #[serde_as(as = "Option<EntityHex>")]
     pub udt_type_script: Option<Script>,
     pub preimage: Option<Hash256>,
+    pub custom_records: Option<PaymentCustomRecords>,
     pub allow_self_payment: bool,
     pub hop_hints: Vec<HopHint>,
     pub dry_run: bool,
@@ -483,6 +492,7 @@ impl SendPaymentData {
             keysend,
             udt_type_script,
             preimage,
+            custom_records: command.custom_records,
             allow_self_payment: command.allow_self_payment,
             hop_hints,
             dry_run: command.dry_run,
@@ -591,9 +601,6 @@ pub enum NetworkActorEvent {
     // Some gossip messages have been updated in the gossip message store.
     // Normally we need to propagate these messages to the network graph.
     GossipMessageUpdates(GossipMessageUpdates),
-    // Mock that a gossip message is received, used for testing.
-    #[cfg(test)]
-    GossipMessage(PeerId, GossipMessage),
 
     /// Channel related events.
 
@@ -628,13 +635,13 @@ pub enum NetworkActorEvent {
     /// A funding transaction has failed.
     FundingTransactionFailed(OutPoint),
 
-    /// Channel is going to be closed forcely, and the closing transaction is ready to be broadcasted.
+    /// Channel is going to be closed forcibly, and the closing transaction is ready to be broadcasted.
     CommitmentTransactionPending(Transaction, Hash256),
 
-    /// A commitment transaction is broacasted successfully.
+    /// A commitment transaction is broadcasted successfully.
     CommitmentTransactionConfirmed(Hash256, Hash256),
 
-    /// A commitment transaction is failed to be broacasted.
+    /// A commitment transaction is failed to be broadcasted.
     CommitmentTransactionFailed(Hash256, Byte32),
 
     /// A closing transaction has been confirmed.
@@ -947,14 +954,6 @@ where
             NetworkActorEvent::AddTlcResult(payment_hash, error_info, previous_tlc) => {
                 self.on_add_tlc_result_event(myself, state, payment_hash, error_info, previous_tlc)
                     .await;
-            }
-            #[cfg(test)]
-            NetworkActorEvent::GossipMessage(peer_id, message) => {
-                let _ = state
-                    .gossip_actor
-                    .send_message(GossipActorMessage::GossipMessageReceived(
-                        GossipMessageWithPeerId { peer_id, message },
-                    ));
             }
             NetworkActorEvent::GossipMessageUpdates(gossip_message_updates) => {
                 let mut graph = self.network_graph.write().await;
@@ -1321,20 +1320,11 @@ where
                     ))
                     .expect("network actor alive");
             }
-            NetworkActorCommand::ProcessBroadcastMessage(message) => {
-                let _ = state
-                    .gossip_actor
-                    .send_message(GossipActorMessage::ProcessBroadcastMessage(message));
-            }
-            NetworkActorCommand::QueryBroadcastMessages(peer, queries) => {
-                let _ = state
-                    .gossip_actor
-                    .send_message(GossipActorMessage::QueryBroadcastMessages(peer, queries));
-            }
             NetworkActorCommand::BroadcastMessages(message) => {
-                let _ = state
+                state
                     .gossip_actor
-                    .send_message(GossipActorMessage::TryBroadcastMessages(message));
+                    .send_message(GossipActorMessage::TryBroadcastMessages(message))
+                    .expect(ASSUME_GOSSIP_ACTOR_ALIVE);
             }
             NetworkActorCommand::SignMessage(message, reply) => {
                 debug!(
@@ -1378,9 +1368,6 @@ where
                         .expect(ASSUME_NETWORK_MYSELF_ALIVE);
                 }
             },
-            NetworkActorCommand::GossipActorMessage(message) => {
-                let _ = state.gossip_actor.send_message(message);
-            }
             NetworkActorCommand::NodeInfo(_, rpc) => {
                 let response = NodeInfoResponse {
                     node_name: state.node_name,
@@ -1908,7 +1895,7 @@ pub struct NetworkActorState<S> {
     chain_actor: ActorRef<CkbChainMessage>,
     // If the other party funding more than this amount, we will automatically accept the channel.
     open_channel_auto_accept_min_ckb_funding_amount: u64,
-    // Tha default amount of CKB to be funded when auto accepting a channel.
+    // The default amount of CKB to be funded when auto accepting a channel.
     auto_accept_channel_ckb_funding_amount: u64,
     // The default expiry delta to forward tlcs.
     tlc_expiry_delta: u64,
@@ -2382,7 +2369,7 @@ where
         let reserved_fee = open_channel.reserved_ckb_amount - occupied_capacity;
         if commitment_fee * 2 > reserved_fee {
             return Err(ProcessingChannelError::InvalidParameter(format!(
-                "Commitment fee {} which caculated by commitment fee rate {} is larger than half of reserved fee {}",
+                "Commitment fee {} which calculated by commitment fee rate {} is larger than half of reserved fee {}",
                 commitment_fee, open_channel.commitment_fee_rate, reserved_fee
             )));
         }
@@ -3064,24 +3051,22 @@ where
         let my_peer_id: PeerId = PeerId::from(secio_pk);
         let handle = NetworkServiceHandle::new(myself.clone());
         let fiber_handle = FiberProtocolHandle::from(&handle);
-        let (gossip_handle, store_update_subscriber) = GossipProtocolHandle::new(
-            Some(format!("gossip actor {:?}", my_peer_id)),
-            Duration::from_millis(config.gossip_network_maintenance_interval_ms()),
-            Duration::from_millis(config.gossip_store_maintenance_interval_ms()),
-            config.announce_private_addr(),
-            config.gossip_network_num_targeted_active_syncing_peers,
-            config.gossip_network_num_targeted_outbound_passive_syncing_peers,
+        let mut gossip_config = GossipConfig::from(&config);
+        gossip_config.peer_id = Some(my_peer_id.clone());
+        let (gossip_service, gossip_handle) = GossipService::start(
+            gossip_config,
             self.store.clone(),
             self.chain_actor.clone(),
             myself.get_cell(),
         )
         .await;
-        let graph = self.network_graph.read().await;
+        let mut graph = self.network_graph.write().await;
         let graph_subscribing_cursor = graph
             .get_latest_cursor()
             .go_back_for_some_time(MAX_GRAPH_MISSING_BROADCAST_MESSAGE_TIMESTAMP_DRIFT);
 
-        store_update_subscriber
+        gossip_service
+            .get_subscriber()
             .subscribe(graph_subscribing_cursor, myself.clone(), |m| {
                 Some(NetworkActorMessage::new_event(
                     NetworkActorEvent::GossipMessageUpdates(m),
@@ -3207,14 +3192,8 @@ where
             min_outbound_peers: config.min_outbound_peers(),
         };
 
-        // Save our own NodeInfo to the network graph.
         let node_announcement = state.get_or_create_new_node_announcement_message();
-        myself.send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::ProcessBroadcastMessage(BroadcastMessage::NodeAnnouncement(
-                node_announcement.clone(),
-            )),
-        ))?;
-
+        graph.process_node_announcement(node_announcement);
         let announce_node_interval_seconds = config.announce_node_interval_seconds();
         if announce_node_interval_seconds > 0 {
             myself.send_interval(Duration::from_secs(announce_node_interval_seconds), || {

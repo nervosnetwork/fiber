@@ -29,6 +29,7 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
         * [Method `add_tlc`](#dev-add_tlc)
         * [Method `remove_tlc`](#dev-remove_tlc)
         * [Method `submit_commitment_transaction`](#dev-submit_commitment_transaction)
+        * [Method `remove_watch_channel`](#dev-remove_watch_channel)
     * [Module Graph](#module-graph)
         * [Method `graph_nodes`](#graph-graph_nodes)
         * [Method `graph_channels`](#graph-graph_channels)
@@ -57,6 +58,7 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
     * [Type `HashAlgorithm`](#type-hashalgorithm)
     * [Type `HopHint`](#type-hophint)
     * [Type `NodeInfo`](#type-nodeinfo)
+    * [Type `PaymentCustomRecords`](#type-paymentcustomrecords)
     * [Type `PaymentSessionStatus`](#type-paymentsessionstatus)
     * [Type `Pubkey`](#type-pubkey)
     * [Type `RemoveTlcReason`](#type-removetlcreason)
@@ -376,6 +378,23 @@ Submit a commitment transaction to the chain
 
 
 
+<a id="dev-remove_watch_channel"></a>
+#### Method `remove_watch_channel`
+
+Remove a watched channel from the watchtower store
+
+##### Params
+
+* `channel_id` - <em>[Hash256](#type-hash256)</em>, Channel ID
+
+##### Returns
+
+* None
+
+---
+
+
+
 <a id="graph"></a>
 ### Module `Graph`
 RPC module for graph management.
@@ -568,12 +587,23 @@ Sends a payment to a peer.
 * `keysend` - <em>`Option<bool>`</em>, keysend payment
 * `udt_type_script` - <em>`Option<Script>`</em>, udt type script for the payment
 * `allow_self_payment` - <em>`Option<bool>`</em>, allow self payment, default is false
+* `custom_records` - <em>Option<[PaymentCustomRecords](#type-paymentcustomrecords)></em>, Some custom records for the payment which contains a map of u32 to Vec<u8>
+ The key is the record type, and the value is the serialized data
+ For example:
+ ```json
+ "custom_records": {
+    "0x1": "0x01020304",
+    "0x2": "0x05060708",
+    "0x3": "0x090a0b0c",
+    "0x4": "0x0d0e0f10010d090a0b0c"
+  }
+ ```
 * `hop_hints` - <em>Option<Vec<[HopHint](#type-hophint)>></em>, Optional route hints to reach the destination through private channels.
  A hop hint is a hint for a node to use a specific channel, for example
  (pubkey, funding_txid, inbound) where pubkey is the public key of the node,
  funding_txid is the funding transaction hash of the channel outpoint, and
  inbound is a boolean indicating whether to use the channel to send or receive.
- Note: an inproper hint may cause the payment to fail, and hop_hints maybe helpful for self payment scenario
+ Note: an improper hint may cause the payment to fail, and hop_hints maybe helpful for self payment scenario
  for helping the routing algorithm to find the correct path
 * `dry_run` - <em>`Option<bool>`</em>, dry_run for payment, used for check whether we can build valid router and the fee for this payment,
  it's useful for the sender to double check the payment before sending it to the network,
@@ -587,6 +617,7 @@ Sends a payment to a peer.
 * `last_updated_at` - <em>`u64`</em>, The time the payment was last updated at, in milliseconds from UNIX epoch
 * `failed_error` - <em>`Option<String>`</em>, The error message if the payment failed
 * `fee` - <em>`u128`</em>, fee paid for the payment
+* `custom_records` - <em>Option<[PaymentCustomRecords](#type-paymentcustomrecords)></em>, The custom records to be included in the payment.
 * `router` - <em>[SessionRoute](#type-sessionroute)</em>, The route information for the payment
 
 ---
@@ -610,6 +641,7 @@ Retrieves a payment.
 * `last_updated_at` - <em>`u64`</em>, The time the payment was last updated at, in milliseconds from UNIX epoch
 * `failed_error` - <em>`Option<String>`</em>, The error message if the payment failed
 * `fee` - <em>`u128`</em>, fee paid for the payment
+* `custom_records` - <em>Option<[PaymentCustomRecords](#type-paymentcustomrecords)></em>, The custom records to be included in the payment.
 * `router` - <em>[SessionRoute](#type-sessionroute)</em>, The route information for the payment
 
 ---
@@ -777,7 +809,7 @@ The currency of the invoice, can also used to represent the CKB network chain.
 <a id="#type-hash256"></a>
 ### Type `Hash256`
 
-A 256-bit hash digest, used as identifier of channnel, payment, transaction hash etc.
+A 256-bit hash digest, used as identifier of channel, payment, transaction hash etc.
 
 
 
@@ -804,8 +836,9 @@ A hop hint is a hint for a node to use a specific channel.
 #### Fields
 
 * `pubkey` - <em>Pubkey</em>, The public key of the node
-* `channel_funding_tx` - <em>Hash256</em>, The funding transaction hash of the channel outpoint
-* `inbound` - <em>bool</em>, inbound or outbound to use this channel
+* `channel_outpoint` - <em>OutPoint</em>, The outpoint of the channel
+* `fee_rate` - <em>u64</em>, The fee rate to use this hop to forward the payment.
+* `tlc_expiry_delta` - <em>u64</em>, The TLC expiry delta to use this hop to forward the payment.
 ---
 
 <a id="#type-nodeinfo"></a>
@@ -823,6 +856,27 @@ The Node information.
 * `chain_hash` - <em>Hash256</em>, The chain hash of the node.
 * `auto_accept_min_ckb_funding_amount` - <em>u64</em>, The minimum CKB funding amount for automatically accepting open channel requests.
 * `udt_cfg_infos` - <em>UdtCfgInfos</em>, The UDT configuration infos of the node.
+---
+
+<a id="#type-paymentcustomrecords"></a>
+### Type `PaymentCustomRecords`
+
+The custom records to be included in the payment.
+ The key is hex encoded of `u32`, and the value is hex encoded of `Vec<u8>` with `0x` as prefix.
+ For example:
+ ```json
+ "custom_records": {
+    "0x1": "0x01020304",
+    "0x2": "0x05060708",
+    "0x3": "0x090a0b0c",
+    "0x4": "0x0d0e0f10010d090a0b0c"
+  }
+ ```
+
+
+#### Fields
+
+* `data` - <em>`HashMap<`u32::Vec<u8>`>`</em>, The custom records to be included in the payment.
 ---
 
 <a id="#type-paymentsessionstatus"></a>

@@ -7,6 +7,18 @@ option PubNonceOpt (PubNonce);
 array Pubkey [byte; 33];
 option Uint64Opt (Uint64);
 option Uint128Opt (Uint128);
+option CustomRecordsOpt (CustomRecords);
+
+table CustomRecordDataPair {
+    key:    Uint32,
+    value:  Bytes,
+}
+
+vector CustomRecordData <CustomRecordDataPair>;
+
+table CustomRecords {
+    data: CustomRecordData,
+}
 
 table OpenChannel {
     chain_hash:                  Byte32,
@@ -24,7 +36,7 @@ table OpenChannel {
     tlc_basepoint:               Pubkey,
     first_per_commitment_point:  Pubkey,
     second_per_commitment_point: Pubkey,
-    channel_annoucement_nonce:   PubNonceOpt,
+    channel_announcement_nonce:   PubNonceOpt,
     next_local_nonce:            PubNonce,
     channel_flags:               byte,
 }
@@ -40,7 +52,7 @@ table AcceptChannel {
     tlc_basepoint:               Pubkey,
     first_per_commitment_point:  Pubkey,
     second_per_commitment_point: Pubkey,
-    channel_annoucement_nonce:   PubNonceOpt,
+    channel_announcement_nonce:   PubNonceOpt,
     next_local_nonce:            PubNonce,
 }
 
@@ -209,6 +221,7 @@ table PaymentHopData {
     hash_algorithm: byte,
     funding_tx_hash: Byte32,
     next_hop: PubkeyOpt,
+    custom_records: CustomRecordsOpt,
 }
 
 // A ChannelUpdate is a update to the public channel. Newer channel information may be updated with

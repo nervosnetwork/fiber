@@ -4,13 +4,18 @@ use crate::fiber::channel::ChannelCommand;
 use crate::fiber::channel::ChannelCommandWithId;
 use crate::fiber::channel::ReloadParams;
 use crate::fiber::channel::UpdateCommand;
+use crate::fiber::gossip::get_gossip_actor_name;
+use crate::fiber::gossip::GossipActorMessage;
 use crate::fiber::graph::NetworkGraphStateStore;
 use crate::fiber::graph::PaymentSession;
 use crate::fiber::graph::PaymentSessionStatus;
+use crate::fiber::network::GossipMessageWithPeerId;
 use crate::fiber::network::NodeInfoResponse;
+use crate::fiber::network::PaymentCustomRecords;
 use crate::fiber::network::SendPaymentCommand;
 use crate::fiber::network::SendPaymentResponse;
 use crate::fiber::types::EcdsaSignature;
+use crate::fiber::types::GossipMessage;
 use crate::fiber::types::Pubkey;
 use crate::invoice::CkbInvoice;
 use crate::invoice::CkbInvoiceStatus;
@@ -144,12 +149,6 @@ pub fn get_fiber_config<P: AsRef<Path>>(base_dir: P, node_name: Option<&str>) ->
             .map(Into::into),
         announce_listening_addr: Some(true),
         base_dir: Some(PathBuf::from(base_dir)),
-        // This config is needed for the timely processing of gossip messages.
-        // Without this, some tests may fail due to the delay in processing gossip messages.
-        gossip_network_maintenance_interval_ms: Some(50),
-        // This config is needed for the timely processing of gossip messages.
-        // Without this, some tests may fail due to the delay in processing gossip messages.
-        gossip_store_maintenance_interval_ms: Some(50),
         auto_accept_channel_ckb_funding_amount: Some(0), // Disable auto accept for unit tests
         announce_private_addr: Some(true),               // Announce private address for unit tests
         ..Default::default()
@@ -184,6 +183,7 @@ pub struct NetworkNode {
     pub network_actor: ActorRef<NetworkActorMessage>,
     pub network_graph: Arc<TokioRwLock<NetworkGraph<Store>>>,
     pub chain_actor: ActorRef<CkbChainMessage>,
+    pub gossip_actor: ActorRef<GossipActorMessage>,
     pub private_key: Privkey,
     pub peer_id: PeerId,
     pub event_emitter: mpsc::Receiver<NetworkServiceEvent>,
@@ -461,7 +461,7 @@ pub(crate) async fn create_n_nodes_and_channels_with_index_amounts(
     for &((i, j), (node_a_amount, node_b_amount)) in amounts.iter() {
         let (channel_id, funding_tx) = {
             let (node_a, node_b) = {
-                // avoid borrow nodes as mutbale more than once
+                // avoid borrow nodes as mutable more than once
                 assert_ne!(i, j);
                 if i < j {
                     let (left, right) = nodes.split_at_mut(i + 1);
@@ -557,7 +557,7 @@ impl NetworkNode {
     pub fn cancel_invoice(&mut self, payment_hash: &Hash256) {
         self.store
             .update_invoice_status(payment_hash, CkbInvoiceStatus::Cancelled)
-            .expect("cancell success");
+            .expect("cancel success");
     }
 
     pub async fn send_payment(
@@ -594,6 +594,7 @@ impl NetworkNode {
             allow_self_payment: false,
             dry_run,
             hop_hints: None,
+            custom_records: None,
         })
         .await
     }
@@ -619,6 +620,7 @@ impl NetworkNode {
             allow_self_payment: true,
             dry_run,
             hop_hints: None,
+            custom_records: None,
         })
         .await
     }
@@ -662,7 +664,7 @@ impl NetworkNode {
         payment_result: &SendPaymentResponse,
         channel_id: Hash256,
     ) {
-        let used_channes = payment_result
+        let used_channels = payment_result
             .router
             .nodes
             .iter()
@@ -672,7 +674,7 @@ impl NetworkNode {
             .get_channel_funding_tx(&channel_id)
             .expect("funding tx");
         let channel_outpoint = OutPoint::new(funding_tx.into(), 0);
-        assert!(used_channes.contains(&channel_outpoint));
+        assert!(used_channels.contains(&channel_outpoint));
     }
 
     pub async fn wait_until_success(&self, payment_hash: Hash256) {
@@ -794,6 +796,13 @@ impl NetworkNode {
         self.store.get_payment_session(payment_hash)
     }
 
+    pub fn get_payment_custom_records(
+        &self,
+        payment_hash: &Hash256,
+    ) -> Option<PaymentCustomRecords> {
+        self.store.get_payment_custom_records(payment_hash)
+    }
+
     pub async fn new_with_node_name(node_name: &str) -> Self {
         let config = NetworkNodeConfigBuilder::new()
             .node_name(Some(node_name.to_string()))
@@ -870,7 +879,7 @@ impl NetworkNode {
 
         let mut unexpected_events: HashSet<String> = HashSet::new();
 
-        // Some usual unexpected events that we want to not happended
+        // Some usual unexpected events that we want to not happened
         // use `assert!(node.get_triggered_unexpected_events().await.is_empty())` to check it
         let default_unexpected_events = vec![
             "Musig2VerifyError",
@@ -886,7 +895,7 @@ impl NetworkNode {
         let (self_event_sender, self_event_receiver) = mpsc::channel(10000);
         let unexpected_events_clone = unexpected_events.clone();
         let triggered_unexpected_events_clone = triggered_unexpected_events.clone();
-        // spwan a new thread to collect all the events from event_receiver
+        // spawn a new thread to collect all the events from event_receiver
         tokio::spawn(async move {
             while let Some(event) = event_receiver.recv().await {
                 self_event_sender
@@ -912,6 +921,10 @@ impl NetworkNode {
             base_dir.as_ref()
         );
 
+        let gossip_actor = ractor::registry::where_is(get_gossip_actor_name(&peer_id))
+            .expect("gossip actor should have been started")
+            .into();
+
         Self {
             base_dir,
             node_name,
@@ -922,6 +935,7 @@ impl NetworkNode {
             network_actor,
             network_graph,
             chain_actor,
+            gossip_actor,
             private_key: secret_key,
             peer_id,
             event_emitter: self_event_receiver,
@@ -1102,7 +1116,7 @@ impl NetworkNode {
                     match event {
                         None => panic!("Event emitter unexpectedly stopped"),
                         Some(event) => {
-                            println!("Recevied event when waiting for specific event: {:?}", &event);
+                            println!("Received event when waiting for specific event: {:?}", &event);
                             if let Some(r) = event_processor(&event) {
                                 println!("Event ({:?}) matching filter received, exiting waiting for event loop", &event);
                                 return r;
@@ -1125,7 +1139,7 @@ impl NetworkNode {
             .await;
     }
 
-    pub async fn submit_tx(&mut self, tx: TransactionView) -> ckb_jsonrpc_types::Status {
+    pub async fn submit_tx(&self, tx: TransactionView) -> ckb_jsonrpc_types::Status {
         submit_tx(self.chain_actor.clone(), tx).await
     }
 
@@ -1194,6 +1208,22 @@ impl NetworkNode {
             graph.get_channel(channel_id).cloned()
         })
         .await
+    }
+
+    pub fn send_message_to_gossip_actor(&self, message: GossipActorMessage) {
+        self.gossip_actor
+            .send_message(message)
+            .expect("send message to gossip actor");
+    }
+
+    pub fn mock_received_gossip_message_from_peer(&self, peer_id: PeerId, message: GossipMessage) {
+        self.send_message_to_gossip_actor(GossipActorMessage::GossipMessageReceived(
+            GossipMessageWithPeerId { peer_id, message },
+        ));
+    }
+
+    pub fn get_store(&self) -> &Store {
+        &self.store
     }
 }
 
