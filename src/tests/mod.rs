@@ -46,6 +46,19 @@ pub fn gen_rand_secp256k1_keypair_tuple() -> (SecretKey, PublicKey) {
     )
 }
 
+pub fn gen_deterministic_secp256k1_keypair() -> Keypair {
+    let secp = Secp256k1::new();
+    Keypair::from_secret_key(&secp, &SecretKey::from_slice(&[42u8; 32]).unwrap())
+}
+
+pub fn gen_deterministic_secp256k1_keypair_tuple() -> (SecretKey, PublicKey) {
+    let key_pair = gen_deterministic_secp256k1_keypair();
+    (
+        SecretKey::from_keypair(&key_pair),
+        PublicKey::from_keypair(&key_pair),
+    )
+}
+
 pub fn gen_rand_channel_outpoint() -> OutPoint {
     let rand_slice = (0..36).map(|_| rand::random::<u8>()).collect::<Vec<u8>>();
     OutPoint::from_slice(&rand_slice).unwrap()

@@ -61,8 +61,10 @@ script:post-response {
   await new Promise(r => setTimeout(r, 100));
   console.log("generated result: ", res.body.result);
   // assert `UdtScript` is present in the response data
-  let udt_script_attr = res.body.result.invoice.data.attrs.find((attr) => attr.UdtScript);
-  if (udt_script_attr.UdtScript === undefined) {
+  let attrs = res.body.result.invoice.data.attrs;
+  console.log("attrs: ", attrs);
+  let udt_script_attr = res.body.result.invoice.data.attrs.find((attr) => attr.udt_script);
+  if (udt_script_attr.udt_script === undefined) {
     throw new Error("UdtScript is not present in the response data");
   }
   bru.setVar("payment_hash", res.body.result.invoice.data.payment_hash);
