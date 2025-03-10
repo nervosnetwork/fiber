@@ -600,7 +600,7 @@ fn test_store_payment_custom_record() {
     data.insert(2, "world".to_string().into_bytes());
 
     let record = PaymentCustomRecords { data };
-    let store = generate_store();
+    let (store, _temp) = generate_store();
     store.insert_payment_custom_records(&payment_hash, record.clone());
     let res = store.get_payment_custom_records(&payment_hash).unwrap();
     assert_eq!(res, record);
