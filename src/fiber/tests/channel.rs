@@ -4091,6 +4091,8 @@ async fn do_test_channel_with_simple_update_operation(algorithm: HashAlgorithm) 
     .expect("node_b alive")
     .expect("successfully removed tlc");
 
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
     let fee_rate = FeeRate::from_u64(DEFAULT_COMMITMENT_FEE_RATE);
     call!(node_b.network_actor, |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
