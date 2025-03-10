@@ -1365,8 +1365,8 @@ async fn test_network_send_payment_randomly_send_each_other() {
         tokio::time::sleep(tokio::time::Duration::from_millis(rand_wait_time)).await;
 
         let rand_num = rand::random::<u64>() % 2;
-        let amount = rand::random::<u128>() % 10000;
-        eprintln!("generated ampunt: {}", amount);
+        let amount = rand::random::<u128>() % 10000 + 1;
+        eprintln!("generated amount: {}", amount);
         let (source, target) = if rand_num == 0 {
             (&node_a.network_actor, node_b_pubkey)
         } else {
@@ -1802,6 +1802,7 @@ async fn test_send_payment_three_nodes_send_each_other_no_wait() {
             );
             node_0_sent_fee += payment1.fee;
             node_0_sent_amount += amount;
+            all_sent.push((0, payment1.payment_hash));
         }
 
         let payment2 = nodes[2]
