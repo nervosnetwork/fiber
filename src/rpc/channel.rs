@@ -1,3 +1,4 @@
+use crate::fiber::serde_utils::EntityHex;
 use crate::fiber::{
     channel::{
         AwaitingChannelReadyFlags, AwaitingTxSignaturesFlags, ChannelActorStateStore,
@@ -6,7 +7,7 @@ use crate::fiber::{
         SigningCommitmentFlags, UpdateCommand,
     },
     network::{AcceptChannelCommand, OpenChannelCommand},
-    serde_utils::{EntityHex, U128Hex, U64Hex},
+    serde_utils::{U128Hex, U64Hex},
     types::Hash256,
     NetworkActorCommand, NetworkActorMessage,
 };
@@ -434,8 +435,8 @@ where
                         state: state.state.into(),
                         local_balance: state.get_local_balance(),
                         remote_balance: state.get_remote_balance(),
-                        offered_tlc_balance: state.get_offered_tlc_balance(true),
-                        received_tlc_balance: state.get_received_tlc_balance(true),
+                        offered_tlc_balance: state.get_offered_tlc_balance(),
+                        received_tlc_balance: state.get_received_tlc_balance(),
                         latest_commitment_transaction_hash: state
                             .latest_commitment_transaction
                             .as_ref()

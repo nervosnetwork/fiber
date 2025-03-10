@@ -1,12 +1,12 @@
 use super::channel::{ChannelFlags, ChannelTlcInfo, ProcessingChannelError};
 use super::config::AnnouncedNodeName;
 use super::gen::fiber::{
-    self as molecule_fiber, ChannelUpdateOpt, PaymentPreimageOpt, PubNonce as Byte66, PubkeyOpt,
-    TlcErrDataOpt, UdtCellDeps, Uint128Opt,
+    self as molecule_fiber, ChannelUpdateOpt, CustomRecordsOpt, PaymentPreimageOpt,
+    PubNonce as Byte66, PubkeyOpt, TlcErrDataOpt, UdtCellDeps, Uint128Opt,
 };
 use super::gen::gossip::{self as molecule_gossip};
 use super::hash_algorithm::{HashAlgorithm, UnknownHashAlgorithmError};
-use super::network::get_chain_hash;
+use super::network::{get_chain_hash, PaymentCustomRecords};
 use super::r#gen::fiber::PubNonceOpt;
 use super::serde_utils::{EntityHex, SliceHex};
 use crate::ckb::config::{UdtArgInfo, UdtCellDep, UdtCfgInfos, UdtScript};
@@ -2893,6 +2893,12 @@ pub enum BroadcastMessageID {
     NodeAnnouncement(Pubkey),
 }
 
+impl Default for BroadcastMessageID {
+    fn default() -> Self {
+        BroadcastMessageID::ChannelAnnouncement(OutPoint::default())
+    }
+}
+
 // We need to implement Ord for BroadcastMessageID to make sure that a ChannelUpdate message is always ordered after ChannelAnnouncement,
 // so that we can use it as the sorting key in fn prune_messages_to_be_saved to simplify the logic.
 impl Ord for BroadcastMessageID {
@@ -3591,7 +3597,7 @@ pub(crate) fn deterministically_hash<T: Entity>(v: &T) -> [u8; 32] {
 }
 
 #[serde_as]
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaymentHopData {
     pub amount: u128,
     pub expiry: u64,
@@ -3600,6 +3606,7 @@ pub struct PaymentHopData {
     pub hash_algorithm: HashAlgorithm,
     pub funding_tx_hash: Hash256,
     pub next_hop: Option<Pubkey>,
+    pub custom_records: Option<PaymentCustomRecords>,
 }
 
 /// Trait for hop data
@@ -3635,6 +3642,37 @@ impl HopData for PaymentHopData {
     }
 }
 
+impl From<PaymentCustomRecords> for molecule_fiber::CustomRecords {
+    fn from(custom_records: PaymentCustomRecords) -> Self {
+        molecule_fiber::CustomRecords::new_builder()
+            .data(
+                custom_records
+                    .data
+                    .into_iter()
+                    .map(|(key, val)| {
+                        molecule_fiber::CustomRecordDataPairBuilder::default()
+                            .key(key.pack())
+                            .value(val.pack())
+                            .build()
+                    })
+                    .collect(),
+            )
+            .build()
+    }
+}
+
+impl From<molecule_fiber::CustomRecords> for PaymentCustomRecords {
+    fn from(custom_records: molecule_fiber::CustomRecords) -> Self {
+        PaymentCustomRecords {
+            data: custom_records
+                .data()
+                .into_iter()
+                .map(|pair| (pair.key().unpack(), pair.value().unpack()))
+                .collect(),
+        }
+    }
+}
+
 impl From<PaymentHopData> for molecule_fiber::PaymentHopData {
     fn from(payment_hop_data: PaymentHopData) -> Self {
         molecule_fiber::PaymentHopData::new_builder()
@@ -3650,6 +3688,11 @@ impl From<PaymentHopData> for molecule_fiber::PaymentHopData {
             .next_hop(
                 PubkeyOpt::new_builder()
                     .set(payment_hop_data.next_hop.map(|x| x.into()))
+                    .build(),
+            )
+            .custom_records(
+                CustomRecordsOpt::new_builder()
+                    .set(payment_hop_data.custom_records.map(|x| x.into()))
                     .build(),
             )
             .build()
@@ -3674,6 +3717,7 @@ impl From<molecule_fiber::PaymentHopData> for PaymentHopData {
                 .next_hop()
                 .to_opt()
                 .map(|x| x.try_into().expect("invalid pubkey")),
+            custom_records: payment_hop_data.custom_records().to_opt().map(|x| x.into()),
         }
     }
 }

@@ -76,7 +76,7 @@ use crate::fiber::channel::{
     AddTlcCommand, AddTlcResponse, TxCollaborationCommand, TxUpdateCommand,
 };
 use crate::fiber::config::{DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT};
-use crate::fiber::gossip::{GossipService, SubscribableGossipMessageStore};
+use crate::fiber::gossip::{GossipConfig, GossipService, SubscribableGossipMessageStore};
 use crate::fiber::graph::{PaymentSession, PaymentSessionStatus};
 use crate::fiber::serde_utils::EntityHex;
 use crate::fiber::types::{
@@ -158,6 +158,7 @@ pub struct SendPaymentResponse {
     pub created_at: u64,
     pub last_updated_at: u64,
     pub failed_error: Option<String>,
+    pub custom_records: Option<PaymentCustomRecords>,
     pub fee: u128,
     #[cfg(debug_assertions)]
     pub router: SessionRoute,
@@ -301,21 +302,34 @@ pub struct SendPaymentCommand {
     pub udt_type_script: Option<Script>,
     // allow self payment, default is false
     pub allow_self_payment: bool,
+    // custom records
+    pub custom_records: Option<PaymentCustomRecords>,
     // the hop hint which may help the find path algorithm to find the path
     pub hop_hints: Option<Vec<HopHint>>,
     // dry_run only used for checking, default is false
     pub dry_run: bool,
 }
 
+/// The custom records to be included in the payment.
+/// The key is hex encoded of `u32`, and the value is hex encoded of `Vec<u8>` with `0x` as prefix.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Default)]
+pub struct PaymentCustomRecords {
+    /// The custom records to be included in the payment.
+    pub data: HashMap<u32, Vec<u8>>,
+}
+
 #[serde_as]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HopHint {
     /// The public key of the node
-    pub pubkey: Pubkey,
-    /// The funding transaction hash of the channel outpoint
-    pub channel_funding_tx: Hash256,
-    /// inbound or outbound for the channel
-    pub inbound: bool,
+    pub(crate) pubkey: Pubkey,
+    /// The outpoint for the channel
+    #[serde_as(as = "EntityHex")]
+    pub(crate) channel_outpoint: OutPoint,
+    /// The fee rate to use this hop to forward the payment.
+    pub(crate) fee_rate: u64,
+    /// The TLC expiry delta to use this hop to forward the payment.
+    pub(crate) tlc_expiry_delta: u64,
 }
 
 #[serde_as]
@@ -334,6 +348,7 @@ pub struct SendPaymentData {
     #[serde_as(as = "Option<EntityHex>")]
     pub udt_type_script: Option<Script>,
     pub preimage: Option<Hash256>,
+    pub custom_records: Option<PaymentCustomRecords>,
     pub allow_self_payment: bool,
     pub hop_hints: Vec<HopHint>,
     pub dry_run: bool,
@@ -477,6 +492,7 @@ impl SendPaymentData {
             keysend,
             udt_type_script,
             preimage,
+            custom_records: command.custom_records,
             allow_self_payment: command.allow_self_payment,
             hop_hints,
             dry_run: command.dry_run,
@@ -585,9 +601,6 @@ pub enum NetworkActorEvent {
     // Some gossip messages have been updated in the gossip message store.
     // Normally we need to propagate these messages to the network graph.
     GossipMessageUpdates(GossipMessageUpdates),
-    // Mock that a gossip message is received, used for testing.
-    #[cfg(test)]
-    GossipMessage(PeerId, GossipMessage),
 
     /// Channel related events.
 
@@ -941,15 +954,6 @@ where
             NetworkActorEvent::AddTlcResult(payment_hash, error_info, previous_tlc) => {
                 self.on_add_tlc_result_event(myself, state, payment_hash, error_info, previous_tlc)
                     .await;
-            }
-            #[cfg(test)]
-            NetworkActorEvent::GossipMessage(peer_id, message) => {
-                state
-                    .gossip_actor
-                    .send_message(GossipActorMessage::GossipMessageReceived(
-                        GossipMessageWithPeerId { peer_id, message },
-                    ))
-                    .expect(ASSUME_GOSSIP_ACTOR_ALIVE);
             }
             NetworkActorEvent::GossipMessageUpdates(gossip_message_updates) => {
                 let mut graph = self.network_graph.write().await;
@@ -3047,13 +3051,10 @@ where
         let my_peer_id: PeerId = PeerId::from(secio_pk);
         let handle = NetworkServiceHandle::new(myself.clone());
         let fiber_handle = FiberProtocolHandle::from(&handle);
+        let mut gossip_config = GossipConfig::from(&config);
+        gossip_config.peer_id = Some(my_peer_id.clone());
         let (gossip_service, gossip_handle) = GossipService::start(
-            Some(format!("gossip actor {:?}", my_peer_id)),
-            Duration::from_millis(config.gossip_network_maintenance_interval_ms()),
-            Duration::from_millis(config.gossip_store_maintenance_interval_ms()),
-            config.announce_private_addr(),
-            config.gossip_network_num_targeted_active_syncing_peers,
-            config.gossip_network_num_targeted_outbound_passive_syncing_peers,
+            gossip_config,
             self.store.clone(),
             self.chain_actor.clone(),
             myself.get_cell(),

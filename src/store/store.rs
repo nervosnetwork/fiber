@@ -8,7 +8,7 @@ use crate::{
         gossip::GossipMessageStore,
         graph::{NetworkGraphStateStore, PaymentSession},
         history::{Direction, TimedResult},
-        network::{NetworkActorStateStore, PersistentNetworkActorState},
+        network::{NetworkActorStateStore, PaymentCustomRecords, PersistentNetworkActorState},
         types::{BroadcastMessage, BroadcastMessageID, Cursor, Hash256, CURSOR_SIZE},
     },
     invoice::{CkbInvoice, CkbInvoiceStatus, InvoiceError, InvoiceStore},
@@ -36,6 +36,18 @@ enum ChannelTimestamp {
     ChannelUpdateOfNode2(),
 }
 
+// All timestamps are saved in a 24-byte array, with BroadcastMessageID::ChannelAnnouncement(outpoint) as the key.
+// the first 8 bytes in the 24 bytes is the timestamp for channel announcement, the second 8 bytes
+// is the timestamp for channel update of node 1 and the last 8 bytes for channel update of node 2.
+// TODO: previous implementation accidentally used BroadcastMessageID::ChannelUpdate as the key
+// for the channel updates timestamps. I have fixed it here by using the same key as the channel
+// announcement. This is a breaking change, we need migration for this.
+pub(crate) fn get_channel_timestamps_key(outpoint: &OutPoint) -> Vec<u8> {
+    BroadcastMessageID::ChannelAnnouncement(outpoint.clone())
+        .to_bytes()
+        .to_vec()
+}
+
 fn update_channel_timestamp(
     batch: &mut Batch,
     outpoint: &OutPoint,
@@ -47,23 +59,9 @@ fn update_channel_timestamp(
         ChannelTimestamp::ChannelUpdateOfNode1() => 8,
         ChannelTimestamp::ChannelUpdateOfNode2() => 16,
     };
-    let message_id = match channel_timestamp {
-        ChannelTimestamp::ChannelAnnouncement() => {
-            BroadcastMessageID::ChannelAnnouncement(outpoint.clone())
-        }
-        ChannelTimestamp::ChannelUpdateOfNode1() => {
-            BroadcastMessageID::ChannelUpdate(outpoint.clone())
-        }
-        ChannelTimestamp::ChannelUpdateOfNode2() => {
-            BroadcastMessageID::ChannelUpdate(outpoint.clone())
-        }
-    };
+    let message_id = get_channel_timestamps_key(outpoint);
 
-    let timestamp_key = [
-        &[BROADCAST_MESSAGE_TIMESTAMP_PREFIX],
-        message_id.to_bytes().as_slice(),
-    ]
-    .concat();
+    let timestamp_key = [&[BROADCAST_MESSAGE_TIMESTAMP_PREFIX], message_id.as_slice()].concat();
     let mut timestamps = batch
         .get(&timestamp_key)
         .map(|v| v.try_into().expect("Invalid timestamp value length"))
@@ -153,6 +151,7 @@ enum KeyValue {
     WatchtowerChannel(Hash256, ChannelData),
     PaymentSession(Hash256, PaymentSession),
     PaymentHistoryTimedResult((OutPoint, Direction), TimedResult),
+    PaymentCustomRecord(Hash256, PaymentCustomRecords),
     NetworkActorState(PeerId, PersistentNetworkActorState),
 }
 
@@ -219,6 +218,9 @@ impl StoreKeyValue for KeyValue {
             KeyValue::BroadcastMessage(cursor, _) => {
                 [&[BROADCAST_MESSAGE_PREFIX], cursor.to_bytes().as_slice()].concat()
             }
+            KeyValue::PaymentCustomRecord(payment_hash, _data) => {
+                [&[PAYMENT_CUSTOM_RECORD_PREFIX], payment_hash.as_ref()].concat()
+            }
         }
     }
 
@@ -246,6 +248,9 @@ impl StoreKeyValue for KeyValue {
             }
             KeyValue::PaymentHistoryTimedResult(_, result) => {
                 serialize_to_vec(result, "TimedResult")
+            }
+            KeyValue::PaymentCustomRecord(_, custom_records) => {
+                serialize_to_vec(custom_records, "PaymentCustomRecord")
             }
         }
     }
@@ -299,7 +304,7 @@ impl ChannelActorStateStore for Store {
 
     fn insert_channel_actor_state(&self, state: ChannelActorState) {
         let mut batch = self.batch();
-        batch.put_kv(KeyValue::ChannelActorState(state.id, state.clone()));
+
         batch.put_kv(KeyValue::PeerIdChannelId(
             (state.get_remote_peer_id(), state.id),
             state.state,
@@ -307,6 +312,7 @@ impl ChannelActorStateStore for Store {
         if let Some(outpoint) = state.get_funding_transaction_outpoint() {
             batch.put_kv(KeyValue::OutPointChannelId(outpoint, state.id));
         }
+        batch.put_kv(KeyValue::ChannelActorState(state.id, state));
         batch.commit();
     }
 
@@ -369,6 +375,22 @@ impl ChannelActorStateStore for Store {
         self.get(key)
             .map(|channel_id| deserialize_from(channel_id.as_ref(), "Hash256"))
             .and_then(|channel_id: Hash256| self.get_channel_actor_state(&channel_id))
+    }
+
+    fn insert_payment_custom_records(
+        &self,
+        payment_hash: &Hash256,
+        custom_records: PaymentCustomRecords,
+    ) {
+        let mut batch = self.batch();
+        batch.put_kv(KeyValue::PaymentCustomRecord(*payment_hash, custom_records));
+        batch.commit();
+    }
+
+    fn get_payment_custom_records(&self, payment_hash: &Hash256) -> Option<PaymentCustomRecords> {
+        let key = [&[PAYMENT_CUSTOM_RECORD_PREFIX], payment_hash.as_ref()].concat();
+        self.get(key)
+            .map(|v| deserialize_from(v.as_ref(), "PaymentCustomRecord"))
     }
 }
 
@@ -543,22 +565,23 @@ impl GossipMessageStore for Store {
     }
 
     fn get_latest_channel_announcement_timestamp(&self, outpoint: &OutPoint) -> Option<u64> {
+        let key = get_channel_timestamps_key(outpoint);
         self.get(
             [
                 [BROADCAST_MESSAGE_TIMESTAMP_PREFIX].as_slice(),
-                BroadcastMessageID::ChannelAnnouncement(outpoint.clone())
-                    .to_bytes()
-                    .as_slice(),
+                key.as_slice(),
             ]
             .concat(),
         )
-        .map(|v| {
+        .and_then(|v| {
             let v: [u8; 24] = v.try_into().expect("Invalid timestamp value length");
-            u64::from_be_bytes(
+            let timestamp = u64::from_be_bytes(
                 v[..8]
                     .try_into()
                     .expect("timestamp length valid, shown above"),
-            )
+            );
+            // The default timestamp value is 0.
+            (timestamp != 0).then_some(timestamp)
         })
     }
 
@@ -567,12 +590,11 @@ impl GossipMessageStore for Store {
         outpoint: &OutPoint,
         is_node1: bool,
     ) -> Option<u64> {
+        let key = get_channel_timestamps_key(outpoint);
         self.get(
             [
                 [BROADCAST_MESSAGE_TIMESTAMP_PREFIX].as_slice(),
-                BroadcastMessageID::ChannelUpdate(outpoint.clone())
-                    .to_bytes()
-                    .as_slice(),
+                key.as_slice(),
             ]
             .concat(),
         )
@@ -601,6 +623,13 @@ impl GossipMessageStore for Store {
             .concat(),
         )
         .map(|v| u64::from_be_bytes(v.try_into().expect("Invalid timestamp value length")))
+    }
+
+    fn delete_broadcast_message(&self, cursor: &Cursor) {
+        let key = [&[BROADCAST_MESSAGE_PREFIX], cursor.to_bytes().as_slice()].concat();
+        let mut batch = self.batch();
+        batch.delete(key);
+        batch.commit();
     }
 
     fn save_channel_announcement(
@@ -719,6 +748,29 @@ impl GossipMessageStore for Store {
             Cursor::new(node_announcement.timestamp, message_id.clone()),
             BroadcastMessage::NodeAnnouncement(node_announcement.clone()),
         ));
+        batch.commit();
+    }
+
+    fn get_channel_timestamps_iter(&self) -> impl IntoIterator<Item = (OutPoint, [u64; 3])> {
+        // 0 is used to get timestamps for channels instead of node announcements.
+        const PREFIX: [u8; 2] = [BROADCAST_MESSAGE_TIMESTAMP_PREFIX, 0];
+        self.prefix_iterator(&PREFIX).map(|(key, value)| {
+            let outpoint =
+                OutPoint::from_slice(&key[2..]).expect("deserialize OutPoint should be OK");
+            assert_eq!(value.len(), 24);
+            let timestamps = [
+                u64::from_be_bytes(value[0..8].try_into().unwrap()),
+                u64::from_be_bytes(value[8..16].try_into().unwrap()),
+                u64::from_be_bytes(value[16..24].try_into().unwrap()),
+            ];
+            (outpoint, timestamps)
+        })
+    }
+
+    fn delete_channel_timestamps(&self, outpoint: &OutPoint) {
+        let key = get_channel_timestamps_key(outpoint);
+        let mut batch = self.batch();
+        batch.delete([&[BROADCAST_MESSAGE_TIMESTAMP_PREFIX], key.as_slice()].concat());
         batch.commit();
     }
 }
