@@ -1,5 +1,5 @@
 use super::channel::{ChannelActorState, ChannelActorStateStore, ChannelTlcInfo};
-use super::config::AnnouncedNodeName;
+use super::config::{AnnouncedNodeName, CKB_SHANNONS};
 use super::gossip::GossipMessageStore;
 use super::history::{Direction, InternalResult, PaymentHistory, TimedResult};
 use super::network::{get_chain_hash, HopHint, SendPaymentData, SendPaymentResponse};
@@ -297,6 +297,10 @@ pub struct NetworkGraph<S> {
     pub(crate) channels: HashMap<OutPoint, ChannelInfo>,
     // All the nodes in the network.
     nodes: HashMap<Pubkey, NodeInfo>,
+
+    // Channel pending stats map
+    channel_pending_stats: HashMap<OutPoint, usize>,
+
     // The latest cursor we read from the GossipMessageStore. When we need to refresh our view of the
     // the network, we need to load all the messages starting from this cursor.
     latest_cursor: Cursor,
@@ -352,6 +356,7 @@ where
             always_process_gossip_message: false,
             source,
             channels: HashMap::new(),
+            channel_pending_stats: HashMap::new(),
             nodes: HashMap::new(),
             latest_cursor: Cursor::default(),
             store: store.clone(),
@@ -793,6 +798,24 @@ where
         }
     }
 
+    pub(crate) fn track_payment_router(&mut self, payment_session: &PaymentSession) {
+        for channel_outpoint in payment_session.channel_outpoints() {
+            self.channel_pending_stats
+                .entry(channel_outpoint.clone())
+                .and_modify(|e| *e += 1)
+                .or_insert(1);
+        }
+    }
+
+    pub(crate) fn untrack_payment_router(&mut self, payment_session: &PaymentSession) {
+        for channel_outpoint in payment_session.channel_outpoints() {
+            self.channel_pending_stats
+                .entry(channel_outpoint.clone())
+                .and_modify(|e| *e -= 1)
+                .or_insert(0);
+        }
+    }
+
     pub(crate) fn record_payment_success(&mut self, mut payment_session: PaymentSession) {
         let session_route = &payment_session.route.nodes;
         let mut result = InternalResult::default();
@@ -942,6 +965,8 @@ where
         cur_probability: f64,
         // The weight accumulated from the payment path from current target to the final payee.
         cur_weight: u128,
+        // The current adapted channel outpoint
+        adapted_channel_outpoints: &HashSet<OutPoint>,
         // The distances from nodes to the final payee.
         distances: &mut HashMap<Pubkey, NodeHeapElement>,
         // The priority queue of nodes to be visited (sorted by distance and probability).
@@ -964,9 +989,23 @@ where
             debug!("probability is too low: {:?}", probability);
             return;
         }
+        if adapted_channel_outpoints.contains(channel_outpoint) {
+            return;
+        }
+        let agg_pending_count = self
+            .channel_pending_stats
+            .get(channel_outpoint)
+            .copied()
+            .unwrap_or(0)
+            + adapted_channel_outpoints
+                .iter()
+                .map(|x| self.channel_pending_stats.get(x).copied().unwrap_or(0))
+                .sum::<usize>();
+
         let agg_weight = self.edge_weight(amount_to_send, fee, tlc_expiry_delta);
         let weight = cur_weight + agg_weight;
-        let distance = self.calculate_distance_based_probability(probability, weight);
+        let distance =
+            self.calculate_distance_based_probability(probability, weight, agg_pending_count);
 
         if let Some(node) = distances.get(&from) {
             if distance >= node.distance {
@@ -975,6 +1014,11 @@ where
         }
         let total_amount = amount_to_send + fee;
         let total_tlc_expiry = incoming_tlc_expiry + tlc_expiry_delta;
+        let adopted_outpoints = adapted_channel_outpoints
+            .iter()
+            .cloned()
+            .chain(std::iter::once(channel_outpoint.clone()))
+            .collect();
         let node = NodeHeapElement {
             node_id: from,
             weight,
@@ -983,6 +1027,7 @@ where
             incoming_tlc_expiry: total_tlc_expiry,
             fee_charged: fee,
             probability,
+            adopted_outpoints,
             next_hop: Some(PathEdge {
                 target: to,
                 channel_outpoint: channel_outpoint.clone(),
@@ -1085,6 +1130,7 @@ where
                             tlc_expiry_delta,
                             1.0,
                             0,
+                            &HashSet::new(),
                             &mut distances,
                             &mut nodes_heap,
                         );
@@ -1110,6 +1156,7 @@ where
             probability: 1.0,
             next_hop: None,
             incoming_tlc_expiry: expiry,
+            adopted_outpoints: HashSet::new(),
         });
 
         while let Some(cur_hop) = nodes_heap.pop() {
@@ -1209,6 +1256,7 @@ where
                     expiry_delta,
                     cur_hop.probability,
                     cur_hop.weight,
+                    &cur_hop.adopted_outpoints,
                     &mut distances,
                     &mut nodes_heap,
                 );
@@ -1304,18 +1352,28 @@ where
 
     fn edge_weight(&self, amount: u128, fee: u128, htlc_expiry_delta: u64) -> u128 {
         let risk_factor: u128 = 15;
-        let time_lock_penalty = amount * htlc_expiry_delta as u128 * (risk_factor / 1000000000);
+        let time_lock_penalty =
+            amount * htlc_expiry_delta as u128 * (risk_factor / CKB_SHANNONS as u128);
         fee + time_lock_penalty
     }
 
-    fn calculate_distance_based_probability(&self, probability: f64, weight: u128) -> u128 {
+    fn calculate_distance_based_probability(
+        &self,
+        probability: f64,
+        weight: u128,
+        pending_count: usize,
+    ) -> u128 {
         assert!(probability > 0.0);
         // FIXME: set this to configurable parameters
         let weight = weight as f64;
-        let time_pref = 0.5_f64;
-        let default_attempt_cost = 0.1_f64;
+        let time_pref = 0.9_f64;
+        let default_attempt_cost = 100_f64;
         let penalty = default_attempt_cost * (1.0 / (0.5 - time_pref / 2.0) - 1.0);
-        weight as u128 + (penalty / probability) as u128
+
+        // Add a weight for pending payments count
+        let pending_penalty = pending_count as u128 * 100;
+
+        weight as u128 + (penalty / probability) as u128 + pending_penalty
     }
 }
 
@@ -1471,6 +1529,10 @@ impl PaymentSession {
     pub fn hops_public_keys(&self) -> Vec<Pubkey> {
         // Skip the first node, which is the sender.
         self.route.nodes.iter().skip(1).map(|x| x.pubkey).collect()
+    }
+
+    fn channel_outpoints(&self) -> impl Iterator<Item = &OutPoint> {
+        self.route.nodes.iter().map(|x| &x.channel_outpoint)
     }
 }
 

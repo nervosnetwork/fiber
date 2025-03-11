@@ -1493,6 +1493,10 @@ where
         reason: RemoveTlcReason,
     ) {
         if let Some(mut payment_session) = self.store.get_payment_session(payment_hash) {
+            self.network_graph
+                .write()
+                .await
+                .untrack_payment_router(&payment_session);
             if payment_session.status == PaymentSessionStatus::Inflight {
                 match reason {
                     RemoveTlcReason::RemoveTlcFulfill(_) => {
@@ -1716,6 +1720,10 @@ where
             // Change the status from Created into Inflight
             payment_session.set_inflight_status();
             self.store.insert_payment_session(payment_session.clone());
+            self.network_graph
+                .write()
+                .await
+                .track_payment_router(&payment_session);
             return;
         }
 
