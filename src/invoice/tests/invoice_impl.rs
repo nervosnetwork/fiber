@@ -400,11 +400,15 @@ fn test_invoice_builder_both_payment_hash_preimage() {
 
 #[test]
 fn test_invoice_serialize() {
+    let invoice = mock_invoice();
+    let invoice_2 = mock_invoice();
+    assert_ne!(invoice.payment_hash(), invoice_2.payment_hash());
+
     let invoice = mock_determined_invoice();
     let res = serde_json::to_string(&invoice);
     assert!(res.is_ok());
     let res = res.unwrap();
-    assert!(res.contains("\"secs\":\"0x400\",\"nanos\":\"0x0\""));
+    assert!(res.contains("\"expiry_time\":\"0x400\""));
     assert!(res.contains("0x3500000010000000300000003100000000000000000000000000000000000000000000000000000000000000000000000000000000"));
     let decoded = serde_json::from_str::<CkbInvoice>(&res).unwrap();
     assert_eq!(decoded, invoice);
@@ -416,8 +420,8 @@ fn test_invoice_serialize() {
     eprintln!("{:?}", bincode);
     let check_sum = blake2b_256(&bincode);
     let expect_check_sum = [
-        25, 211, 186, 219, 48, 110, 40, 121, 20, 161, 240, 246, 163, 133, 241, 252, 182, 35, 63,
-        21, 17, 188, 119, 130, 19, 104, 201, 169, 52, 95, 61, 168,
+        168, 120, 74, 42, 101, 19, 106, 192, 101, 97, 97, 237, 107, 124, 175, 49, 149, 137, 212,
+        75, 217, 64, 239, 42, 138, 4, 219, 200, 8, 123, 112, 75,
     ];
     assert_eq!(check_sum, &expect_check_sum[..]);
     eprintln!("{:?}", check_sum);

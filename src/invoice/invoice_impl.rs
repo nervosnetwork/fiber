@@ -478,12 +478,10 @@ impl From<Attribute> for InvoiceAttr {
         let a = match attr {
             Attribute::ExpiryTime(x) => {
                 let seconds = x.as_secs();
-                let nanos = x.subsec_nanos() as u64;
-                let value = gen_invoice::Duration::new_builder()
-                    .seconds(seconds.pack())
-                    .nanos(nanos.pack())
+                let value = gen_invoice::ExpiryTime::new_builder()
+                    .value(seconds.pack())
                     .build();
-                InvoiceAttrUnion::ExpiryTime(ExpiryTime::new_builder().value(value).build())
+                InvoiceAttrUnion::ExpiryTime(value)
             }
             Attribute::Description(value) => InvoiceAttrUnion::Description(
                 Description::new_builder().value(value.pack()).build(),
@@ -532,11 +530,8 @@ impl From<InvoiceAttr> for Attribute {
                 )
             }
             InvoiceAttrUnion::ExpiryTime(x) => {
-                let seconds: u64 = x.value().seconds().unpack();
-                let nanos: u64 = x.value().nanos().unpack();
-                Attribute::ExpiryTime(
-                    Duration::from_secs(seconds).saturating_add(Duration::from_nanos(nanos)),
-                )
+                let seconds: u64 = x.value().unpack();
+                Attribute::ExpiryTime(Duration::from_secs(seconds))
             }
             InvoiceAttrUnion::FinalHtlcTimeout(x) => {
                 Attribute::FinalHtlcTimeout(x.value().unpack())

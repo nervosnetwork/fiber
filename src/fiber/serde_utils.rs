@@ -170,30 +170,28 @@ impl<'de> DeserializeAs<'de, PubNonce> for PubNonceAsBytes {
 /// Module for hex serialization of Duration
 pub mod duration_hex {
     use core::time::Duration;
-    use serde::de::Error;
     use serde::{Deserialize, Deserializer, Serializer};
-    use std::collections::HashMap;
 
     pub fn serialize<S>(duration: &Duration, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
-        use serde::ser::SerializeMap;
-        let mut map = serializer.serialize_map(Some(2))?;
-        map.serialize_entry("secs", &format!("0x{:x}", duration.as_secs()))?;
-        map.serialize_entry("nanos", &format!("0x{:x}", duration.subsec_nanos()))?;
-        map.end()
+        let nanos = duration.as_secs();
+        serializer.serialize_str(&format!("0x{:x}", nanos))
     }
 
     pub fn deserialize<'de, D>(deserializer: D) -> Result<Duration, D::Error>
     where
         D: Deserializer<'de>,
     {
-        let map: HashMap<String, String> = HashMap::deserialize(deserializer)?;
-        let secs = u64::from_str_radix(map.get("secs").unwrap().trim_start_matches("0x"), 16)
-            .map_err(Error::custom)?;
-        let nanos = u32::from_str_radix(map.get("nanos").unwrap().trim_start_matches("0x"), 16)
-            .map_err(Error::custom)?;
-        Ok(Duration::new(secs, nanos))
+        let hex_str = String::deserialize(deserializer)?;
+        let seconds = u64::from_str_radix(&hex_str[2..], 16).map_err(|err| {
+            serde::de::Error::custom(format!(
+                "failed to parse duration hex {}: {:?}",
+                hex_str, err
+            ))
+        })?;
+
+        Ok(Duration::from_secs(seconds))
     }
 }
