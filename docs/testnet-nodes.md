@@ -15,7 +15,7 @@ node2
 
 
 
-## Node Deployment
+## Local Node Deployment
 
 1. Download fnn
 
