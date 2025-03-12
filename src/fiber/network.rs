@@ -1765,7 +1765,7 @@ where
         state: &mut NetworkActorState<S>,
     ) -> Result<Vec<PaymentHopData>, Error> {
         let hops_info = self
-            .build_payment_route(payment_session, &payment_data)
+            .build_payment_route(payment_session, payment_data)
             .await?;
 
         payment_session.route = SessionRoute::new(

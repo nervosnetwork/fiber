@@ -227,6 +227,7 @@ pub struct ChannelUpdateInfo {
     pub tlc_expiry_delta: u64,
     /// The minimum value, which must be relayed to the next hop via the channel
     pub tlc_minimum_value: u128,
+    /// The forwarding fee rate for the channel.
     pub fee_rate: u64,
 }
 

@@ -112,7 +112,8 @@ pub struct NodeInfo {
     /// The identity public key of the node.
     pub node_id: Pubkey,
     #[serde_as(as = "U64Hex")]
-    /// The timestamp of the node.
+    /// The latest timestamp set by the owner for the node announcement.
+    /// When a Node is online this timestamp will be updated to the latest value.
     pub timestamp: u64,
     /// The chain hash of the node.
     pub chain_hash: Hash256,
@@ -170,9 +171,11 @@ pub struct ChannelInfo {
     /// that contains the channel funding transaction.
     pub created_timestamp: u64,
     /// The timestamp of the last update to channel by node 1 (e.g. updating fee rate).
+    /// Types of update included https://github.com/nervosnetwork/fiber/tree/develop/src/rpc#params-7
     #[serde_as(as = "Option<U64Hex>")]
     pub last_updated_timestamp_of_node1: Option<u64>,
     /// The timestamp of the last update to channel by node 2 (e.g. updating fee rate).
+    /// Types of update included https://github.com/nervosnetwork/fiber/tree/develop/src/rpc#params-7
     #[serde_as(as = "Option<U64Hex>")]
     pub last_updated_timestamp_of_node2: Option<u64>,
     /// The fee rate set by node 1. This is the fee rate for node 1 to forward tlcs sent from node 2 to node 1.
