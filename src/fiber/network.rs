@@ -1529,9 +1529,6 @@ where
                             .await
                             .record_payment_fail(&payment_session, error_detail.clone());
                         if need_to_retry {
-                            // If this is the first hop error, like the WaitingTlcAck error,
-                            // we will just retry later, return Ok here for letting endpoint user
-                            // know payment session is created successfully
                             self.register_payment_retry(myself, payment_hash);
                         } else {
                             self.set_payment_fail_with_error(
@@ -1630,8 +1627,6 @@ where
         payment_session
             .session_key
             .copy_from_slice(session_key.as_ref());
-        payment_session.route =
-            SessionRoute::new(state.get_public_key(), payment_data.target_pubkey, &hops);
 
         let peeled_onion_packet = match PeeledPaymentOnionPacket::create(
             session_key,
@@ -1763,6 +1758,24 @@ where
         self.store.insert_payment_session(payment_session.clone());
     }
 
+    async fn payment_session_build_route(
+        &self,
+        payment_session: &mut PaymentSession,
+        payment_data: &SendPaymentData,
+        state: &mut NetworkActorState<S>,
+    ) -> Result<Vec<PaymentHopData>, Error> {
+        let hops_info = self
+            .build_payment_route(payment_session, &payment_data)
+            .await?;
+
+        payment_session.route = SessionRoute::new(
+            state.get_public_key(),
+            payment_data.target_pubkey,
+            &hops_info,
+        );
+        Ok(hops_info)
+    }
+
     async fn try_payment_session(
         &self,
         myself: ActorRef<NetworkActorMessage>,
@@ -1786,7 +1799,7 @@ where
             }
 
             let hops_info = self
-                .build_payment_route(payment_session, &payment_data)
+                .payment_session_build_route(payment_session, &payment_data, state)
                 .await?;
 
             match self
@@ -1839,11 +1852,9 @@ where
         // will not store the payment session and send the onion packet
         if payment_data.dry_run {
             let mut payment_session = PaymentSession::new(payment_data.clone(), 0);
-            let hops = self
-                .build_payment_route(&mut payment_session, &payment_data)
+            let _hops = self
+                .payment_session_build_route(&mut payment_session, &payment_data, state)
                 .await?;
-            payment_session.route =
-                SessionRoute::new(state.get_public_key(), payment_data.target_pubkey, &hops);
             return Ok(payment_session.into());
         }
 
