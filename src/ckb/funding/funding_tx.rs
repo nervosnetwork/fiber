@@ -85,8 +85,9 @@ struct FundingTxBuilder {
     context: FundingContext,
 }
 
+#[async_trait::async_trait]
 impl TxBuilder for FundingTxBuilder {
-    fn build_base(
+    async fn build_base_async(
         &self,
         cell_collector: &mut dyn CellCollector,
         _cell_dep_resolver: &dyn CellDepResolver,
