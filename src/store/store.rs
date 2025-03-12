@@ -465,6 +465,13 @@ impl InvoiceStore for Store {
         iter.next()
             .map(|(_key, value)| deserialize_from(value.as_ref(), "Hash256"))
     }
+
+    fn remove_payment_preimage(&self, payment_hash: &Hash256) -> Result<(), InvoiceError> {
+        let mut batch = self.batch();
+        batch.delete([&[CKB_INVOICE_PREIMAGE_PREFIX], payment_hash.as_ref()].concat());
+        batch.commit();
+        Ok(())
+    }
 }
 
 impl NetworkGraphStateStore for Store {
