@@ -1,0 +1,34 @@
+meta {
+  name: remove watched channel from node2 watchtower
+  type: http
+  seq: 13
+}
+
+post {
+  url: {{NODE2_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "remove_watch_channel",
+    "params": [
+      {
+        "channel_id": "{{CHANNEL_ID}}"
+      }
+    ]
+  }
+}
+
+assert {
+  res.body.error: isUndefined
+  res.body.result: isDefined
+}
