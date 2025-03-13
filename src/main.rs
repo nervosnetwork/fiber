@@ -1,13 +1,9 @@
 use ckb_chain_spec::ChainSpec;
-use ckb_hash::blake2b_256;
 use ckb_resource::Resource;
 use core::default::Default;
 use fnn::actors::RootActor;
 use fnn::cch::CchMessage;
-use fnn::ckb::{
-    contracts::{get_script_by_contract, try_init_contracts_context, Contract},
-    CkbChainActor,
-};
+use fnn::ckb::{contracts::try_init_contracts_context, CkbChainActor};
 use fnn::fiber::{channel::ChannelSubscribers, graph::NetworkGraph, network::init_chain_hash};
 use fnn::store::Store;
 use fnn::tasks::{
@@ -20,15 +16,14 @@ use fnn::watchtower::{
 use fnn::NetworkServiceEvent;
 use fnn::{start_cch, start_network, start_rpc, Config};
 use ractor::Actor;
-use secp256k1::Secp256k1;
 #[cfg(debug_assertions)]
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::select;
 use tokio::sync::{mpsc, RwLock};
-use tokio::{select, signal};
 use tracing::{debug, info, info_span, trace};
 use tracing_subscriber::{field::MakeExt, fmt, fmt::format, EnvFilter};
 
@@ -60,21 +55,18 @@ pub async fn main() -> Result<(), ExitMessage> {
         .try_init()
         .map_err(|err| ExitMessage(format!("failed to initialize logger: {}", err)))?;
 
-    info!("Starting node with git version {}", fnn::get_git_versin());
+    info!("Starting node with git version {}", fnn::get_git_version());
 
     let _span = info_span!("node", node = fnn::get_node_prefix()).entered();
 
-    let (config, run_migrate) = Config::parse();
+    let config = Config::parse();
 
     let store_path = config
         .fiber
         .as_ref()
         .ok_or_else(|| ExitMessage("fiber config is required but absent".to_string()))?
         .store_path();
-    if run_migrate {
-        Store::run_migrate(store_path).map_err(|err| ExitMessage(err.to_string()))?;
-        return Ok(());
-    }
+
     let store = Store::new(store_path).map_err(|err| ExitMessage(err.to_string()))?;
 
     let tracker = new_tokio_task_tracker();
@@ -95,7 +87,7 @@ pub async fn main() -> Result<(), ExitMessage> {
         Some(fiber_config) => {
             // TODO: this is not a super user friendly error message which has actionable information
             // for the user to fix the error and start the node.
-            let ckb_config = config.ckb.ok_or_else(|| {
+            let ckb_config = config.ckb.clone().ok_or_else(|| {
                 ExitMessage(
                     "service fiber requires service ckb which is not enabled in the config file"
                         .to_string(),
@@ -138,18 +130,13 @@ pub async fn main() -> Result<(), ExitMessage> {
             let network_graph = Arc::new(RwLock::new(NetworkGraph::new(
                 store.clone(),
                 node_public_key.clone().into(),
+                fiber_config.announce_private_addr(),
             )));
 
-            let secret_key = ckb_config.read_secret_key().map_err(|err| {
-                ExitMessage(format!(
-                    "failed to read the secret key for the ckb signer: {}",
-                    err
-                ))
-            })?;
-            let secp = Secp256k1::new();
-            let pubkey_hash = blake2b_256(secret_key.public_key(&secp).serialize());
-            let default_shutdown_script =
-                get_script_by_contract(Contract::Secp256k1Lock, &pubkey_hash[0..20]);
+            // we use the default funding lock script as the shutdown script for the network actor
+            let default_shutdown_script = ckb_config
+                .get_default_funding_lock_script()
+                .expect("get default funding lock script should be ok");
 
             info!("Starting fiber");
             let network_actor = start_network(
@@ -280,6 +267,7 @@ pub async fn main() -> Result<(), ExitMessage> {
         (Some(rpc_config), Some(network_graph)) => {
             let handle = start_rpc(
                 rpc_config,
+                config.ckb,
                 config.fiber,
                 network_actor,
                 cch_actor,
@@ -298,10 +286,7 @@ pub async fn main() -> Result<(), ExitMessage> {
         _ => None,
     };
 
-    signal::ctrl_c()
-        .await
-        .map_err(|err| ExitMessage(format!("failed to listen for ctrl-c event: {}", err)))?;
-    info!("Received Ctrl-C, shutting down");
+    signal_listener().await;
     if let Some(handle) = rpc_server_handle {
         handle
             .stop()
@@ -323,4 +308,26 @@ impl ExitMessage {
     pub fn err(message: String) -> Result<(), ExitMessage> {
         Err(ExitMessage(message))
     }
+}
+
+#[cfg(target_family = "unix")]
+async fn signal_listener() {
+    use tokio::signal::unix::{signal, SignalKind};
+    // SIGTERM is commonly sent for graceful shutdown of applications, followed by 30 seconds of grace time, then a SIGKILL.
+    let mut sigterm = signal(SignalKind::terminate()).expect("listen for SIGTERM");
+    // SIGINT is usually sent due to ctrl-c in the terminal.
+    let mut sigint = signal(SignalKind::interrupt()).expect("listen for SIGINT");
+
+    tokio::select! {
+        _ = sigterm.recv() => info!("SIGTERM received, shutting down"),
+        _ = sigint.recv() => info!("SIGINT received, shutting down"),
+    };
+}
+
+#[cfg(not(target_family = "unix"))]
+async fn signal_listener() {
+    tokio::signal::ctrl_c()
+        .await
+        .expect("listen for Ctrl-c signal");
+    tracing::info!("Ctrl-c received, shutting down");
 }

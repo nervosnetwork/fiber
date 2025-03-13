@@ -2,12 +2,20 @@ use crate::fiber::channel::ChannelActorState;
 use crate::fiber::channel::ChannelActorStateStore;
 use crate::fiber::channel::ChannelCommand;
 use crate::fiber::channel::ChannelCommandWithId;
+use crate::fiber::channel::ReloadParams;
+use crate::fiber::channel::UpdateCommand;
+use crate::fiber::gossip::get_gossip_actor_name;
+use crate::fiber::gossip::GossipActorMessage;
 use crate::fiber::graph::NetworkGraphStateStore;
 use crate::fiber::graph::PaymentSession;
 use crate::fiber::graph::PaymentSessionStatus;
+use crate::fiber::network::GossipMessageWithPeerId;
+use crate::fiber::network::NodeInfoResponse;
+use crate::fiber::network::PaymentCustomRecords;
 use crate::fiber::network::SendPaymentCommand;
 use crate::fiber::network::SendPaymentResponse;
 use crate::fiber::types::EcdsaSignature;
+use crate::fiber::types::GossipMessage;
 use crate::fiber::types::Pubkey;
 use crate::invoice::CkbInvoice;
 use crate::invoice::CkbInvoiceStatus;
@@ -16,8 +24,12 @@ use ckb_jsonrpc_types::Status;
 use ckb_types::packed::OutPoint;
 use ckb_types::{core::TransactionView, packed::Byte32};
 use ractor::{call, Actor, ActorRef};
+use rand::distributions::Alphanumeric;
 use rand::rngs::OsRng;
+use rand::Rng;
 use secp256k1::{Message, Secp256k1};
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::{
     env,
     ffi::OsStr,
@@ -57,6 +69,7 @@ use crate::{
 
 static RETAIN_VAR: &str = "TEST_TEMP_RETAIN";
 pub(crate) const MIN_RESERVED_CKB: u128 = 4200000000;
+pub(crate) const HUGE_CKB_AMOUNT: u128 = MIN_RESERVED_CKB + 1000000000000_u128;
 
 #[derive(Debug)]
 pub struct TempDir(ManuallyDrop<OldTempDir>);
@@ -138,12 +151,6 @@ pub fn get_fiber_config<P: AsRef<Path>>(base_dir: P, node_name: Option<&str>) ->
             .map(Into::into),
         announce_listening_addr: Some(true),
         base_dir: Some(PathBuf::from(base_dir)),
-        // This config is needed for the timely processing of gossip messages.
-        // Without this, some tests may fail due to the delay in processing gossip messages.
-        gossip_network_maintenance_interval_ms: Some(50),
-        // This config is needed for the timely processing of gossip messages.
-        // Without this, some tests may fail due to the delay in processing gossip messages.
-        gossip_store_maintenance_interval_ms: Some(50),
         auto_accept_channel_ckb_funding_amount: Some(0), // Disable auto accept for unit tests
         announce_private_addr: Some(true),               // Announce private address for unit tests
         ..Default::default()
@@ -153,17 +160,17 @@ pub fn get_fiber_config<P: AsRef<Path>>(base_dir: P, node_name: Option<&str>) ->
 // Mock function to create a dummy EcdsaSignature
 pub fn mock_ecdsa_signature() -> EcdsaSignature {
     let secp = Secp256k1::new();
-    let mut rng = OsRng::default();
+    let mut rng = OsRng;
     let (secret_key, _public_key) = secp.generate_keypair(&mut rng);
     let message = Message::from_digest_slice(&[0u8; 32]).expect("32 bytes");
     let signature = secp.sign_ecdsa(&message, &secret_key);
     EcdsaSignature(signature)
 }
 
-pub fn generate_store() -> Store {
+pub fn generate_store() -> (Store, TempDir) {
     let temp_dir = TempDir::new("test-fnn-node");
     let store = Store::new(temp_dir.as_ref());
-    store.expect("create store")
+    (store.expect("create store"), temp_dir)
 }
 
 #[derive(Debug)]
@@ -172,15 +179,19 @@ pub struct NetworkNode {
     pub base_dir: Arc<TempDir>,
     pub node_name: Option<String>,
     pub store: Store,
+    pub channels_tx_map: HashMap<Hash256, Hash256>,
     pub fiber_config: FiberConfig,
     pub listening_addrs: Vec<MultiAddr>,
     pub network_actor: ActorRef<NetworkActorMessage>,
     pub network_graph: Arc<TokioRwLock<NetworkGraph<Store>>>,
     pub chain_actor: ActorRef<CkbChainMessage>,
+    pub gossip_actor: ActorRef<GossipActorMessage>,
     pub private_key: Privkey,
     pub peer_id: PeerId,
     pub event_emitter: mpsc::Receiver<NetworkServiceEvent>,
     pub pubkey: Pubkey,
+    pub unexpected_events: Arc<TokioRwLock<HashSet<String>>>,
+    pub triggered_unexpected_events: Arc<TokioRwLock<Vec<String>>>,
 }
 
 pub struct NetworkNodeConfig {
@@ -201,7 +212,14 @@ pub struct NetworkNodeConfigBuilder {
     node_name: Option<String>,
     // We may generate a FiberConfig based on the base_dir and node_name,
     // but allow user to override it.
+    #[allow(clippy::type_complexity)]
     fiber_config_updater: Option<Box<dyn FnOnce(&mut FiberConfig) + 'static>>,
+}
+
+impl Default for NetworkNodeConfigBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl NetworkNodeConfigBuilder {
@@ -241,7 +259,16 @@ impl NetworkNodeConfigBuilder {
             .clone()
             .unwrap_or_else(|| Arc::new(TempDir::new("test-fnn-node")));
         let node_name = self.node_name.clone();
-        let store = generate_store();
+
+        // generate a random string as db name to avoid conflict
+        // when build multiple nodes in the same NetworkNodeConfig
+        let rand_name: String = rand::thread_rng()
+            .sample_iter(&Alphanumeric)
+            .take(5)
+            .map(char::from)
+            .collect();
+        let rand_db_dir = Path::new(base_dir.to_str()).join(rand_name);
+        let store = Store::new(rand_db_dir).expect("create store");
         let fiber_config = get_fiber_config(base_dir.as_ref(), node_name.as_deref());
         let mut config = NetworkNodeConfig {
             base_dir,
@@ -256,6 +283,7 @@ impl NetworkNodeConfigBuilder {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn establish_channel_between_nodes(
     node_a: &mut NetworkNode,
     node_b: &mut NetworkNode,
@@ -362,6 +390,9 @@ pub(crate) async fn establish_channel_between_nodes(
         .await
         .expect("tx found");
 
+    node_a.add_channel_tx(new_channel_id, funding_tx.clone());
+    node_b.add_channel_tx(new_channel_id, funding_tx.clone());
+
     (new_channel_id, funding_tx)
 }
 
@@ -425,11 +456,11 @@ pub(crate) async fn create_n_nodes_with_established_channel(
         .map(|i| ((i, i + 1), (amounts[i].0, amounts[i].1)))
         .collect();
 
-    create_n_nodes_with_index_and_amounts_with_established_channel(&nodes_index_map, n, public)
-        .await
+    create_n_nodes_and_channels_with_index_amounts(&nodes_index_map, n, public).await
 }
 
-pub(crate) async fn create_n_nodes_with_index_and_amounts_with_established_channel(
+#[allow(clippy::type_complexity)]
+pub(crate) async fn create_n_nodes_and_channels_with_index_amounts(
     amounts: &[((usize, usize), (u128, u128))],
     n: usize,
     public: bool,
@@ -441,7 +472,7 @@ pub(crate) async fn create_n_nodes_with_index_and_amounts_with_established_chann
     for &((i, j), (node_a_amount, node_b_amount)) in amounts.iter() {
         let (channel_id, funding_tx) = {
             let (node_a, node_b) = {
-                // avoid borrow nodes as mutbale more than once
+                // avoid borrow nodes as mutable more than once
                 assert_ne!(i, j);
                 if i < j {
                     let (left, right) = nodes.split_at_mut(i + 1);
@@ -472,11 +503,14 @@ pub(crate) async fn create_n_nodes_with_index_and_amounts_with_established_chann
         };
         channels.push(channel_id);
         // all the other nodes submit_tx
-        for k in 0..n {
-            let res = nodes[k].submit_tx(funding_tx.clone()).await;
+        for node in nodes.iter_mut() {
+            let res = node.submit_tx(funding_tx.clone()).await;
+            node.add_channel_tx(channel_id, funding_tx.clone());
             assert_eq!(res, Status::Committed);
         }
     }
+    // sleep for a while to make sure network graph is updated
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
     (nodes, channels)
 }
 
@@ -534,11 +568,11 @@ impl NetworkNode {
     pub fn cancel_invoice(&mut self, payment_hash: &Hash256) {
         self.store
             .update_invoice_status(payment_hash, CkbInvoiceStatus::Cancelled)
-            .expect("cancell success");
+            .expect("cancel success");
     }
 
     pub async fn send_payment(
-        &mut self,
+        &self,
         command: SendPaymentCommand,
     ) -> std::result::Result<SendPaymentResponse, String> {
         let message = |rpc_reply| -> NetworkActorMessage {
@@ -546,7 +580,60 @@ impl NetworkNode {
         };
 
         let res = call!(self.network_actor, message).expect("source_node alive");
+        eprintln!("result: {:?}", res);
         res
+    }
+
+    pub async fn send_payment_keysend(
+        &self,
+        recipient: &NetworkNode,
+        amount: u128,
+        dry_run: bool,
+    ) -> std::result::Result<SendPaymentResponse, String> {
+        self.send_payment(SendPaymentCommand {
+            target_pubkey: Some(recipient.pubkey),
+            amount: Some(amount),
+            payment_hash: None,
+            final_tlc_expiry_delta: None,
+            tlc_expiry_limit: None,
+            invoice: None,
+            timeout: None,
+            max_fee_amount: None,
+            max_parts: None,
+            keysend: Some(true),
+            udt_type_script: None,
+            allow_self_payment: false,
+            dry_run,
+            hop_hints: None,
+            custom_records: None,
+        })
+        .await
+    }
+
+    pub async fn send_payment_keysend_to_self(
+        &self,
+        amount: u128,
+        dry_run: bool,
+    ) -> std::result::Result<SendPaymentResponse, String> {
+        let pubkey = self.pubkey;
+        self.send_payment(SendPaymentCommand {
+            target_pubkey: Some(pubkey),
+            amount: Some(amount),
+            payment_hash: None,
+            final_tlc_expiry_delta: None,
+            tlc_expiry_limit: None,
+            invoice: None,
+            timeout: None,
+            max_fee_amount: None,
+            max_parts: None,
+            keysend: Some(true),
+            udt_type_script: None,
+            allow_self_payment: true,
+            dry_run,
+            hop_hints: None,
+            custom_records: None,
+        })
+        .await
     }
 
     pub async fn assert_payment_status(
@@ -565,24 +652,96 @@ impl NetworkNode {
     }
 
     pub async fn get_payment_status(&self, payment_hash: Hash256) -> PaymentSessionStatus {
+        self.get_payment_result(payment_hash).await.status
+    }
+
+    pub async fn get_payment_result(&self, payment_hash: Hash256) -> SendPaymentResponse {
         let message = |rpc_reply| -> NetworkActorMessage {
             NetworkActorMessage::Command(NetworkActorCommand::GetPayment(payment_hash, rpc_reply))
         };
-        let res = call!(self.network_actor, message)
+        call!(self.network_actor, message)
             .expect("node_a alive")
-            .unwrap();
-
-        res.status
+            .unwrap()
     }
 
-    pub async fn update_channel_actor_state(&mut self, state: ChannelActorState) {
-        let channel_id = state.id.clone();
+    pub async fn expect_payment_used_channel(&self, payment_hash: Hash256, channel_id: Hash256) {
+        let payment_result = self.get_payment_result(payment_hash).await;
+        self.expect_router_used_channel(&payment_result, channel_id)
+            .await;
+    }
+
+    pub async fn expect_router_used_channel(
+        &self,
+        payment_result: &SendPaymentResponse,
+        channel_id: Hash256,
+    ) {
+        let used_channels = payment_result
+            .router
+            .nodes
+            .iter()
+            .map(|r| r.channel_outpoint.clone())
+            .collect::<Vec<_>>();
+        let funding_tx = self
+            .get_channel_funding_tx(&channel_id)
+            .expect("funding tx");
+        let channel_outpoint = OutPoint::new(funding_tx.into(), 0);
+        assert!(used_channels.contains(&channel_outpoint));
+    }
+
+    pub async fn wait_until_success(&self, payment_hash: Hash256) {
+        loop {
+            assert!(self.get_triggered_unexpected_events().await.is_empty());
+            let status = self.get_payment_status(payment_hash).await;
+            if status == PaymentSessionStatus::Success {
+                eprintln!("Payment success: {:?}\n\n", payment_hash);
+                break;
+            } else if status == PaymentSessionStatus::Failed {
+                eprintln!("Payment failed: {:?}\n\n", payment_hash);
+                // report error
+                assert_eq!(status, PaymentSessionStatus::Success);
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    }
+
+    pub async fn wait_until_failed(&self, payment_hash: Hash256) {
+        loop {
+            assert!(self.get_triggered_unexpected_events().await.is_empty());
+            let status = self.get_payment_status(payment_hash).await;
+            if status == PaymentSessionStatus::Failed {
+                eprintln!("Payment failed: {:?}\n\n", payment_hash);
+                break;
+            } else if status == PaymentSessionStatus::Success {
+                eprintln!("Payment success: {:?}\n\n", payment_hash);
+                // report error
+                assert_eq!(status, PaymentSessionStatus::Failed);
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    }
+
+    pub async fn node_info(&self) -> NodeInfoResponse {
+        let message =
+            |rpc_reply| NetworkActorMessage::Command(NetworkActorCommand::NodeInfo((), rpc_reply));
+        eprintln!("query node_info ...");
+
+        call!(self.network_actor, message)
+            .expect("node_a alive")
+            .unwrap()
+    }
+
+    pub async fn update_channel_actor_state(
+        &self,
+        state: ChannelActorState,
+        reload_params: Option<ReloadParams>,
+    ) {
+        let channel_id = state.id;
         self.store.insert_channel_actor_state(state);
         self.network_actor
             .send_message(NetworkActorMessage::Command(
                 NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
                     channel_id,
-                    command: ChannelCommand::ReloadState(),
+                    command: ChannelCommand::ReloadState(reload_params.unwrap_or_default()),
                 }),
             ))
             .expect("network actor is live");
@@ -590,35 +749,69 @@ impl NetworkNode {
     }
 
     pub async fn update_channel_local_balance(
-        &mut self,
+        &self,
         channel_id: Hash256,
         new_to_local_amount: u128,
     ) {
         let mut channel_actor_state = self.get_channel_actor_state(channel_id);
         channel_actor_state.to_local_amount = new_to_local_amount;
-        self.update_channel_actor_state(channel_actor_state).await;
+        self.update_channel_actor_state(channel_actor_state, None)
+            .await;
     }
 
     pub async fn update_channel_remote_balance(
-        &mut self,
+        &self,
         channel_id: Hash256,
         new_to_remote_amount: u128,
     ) {
         let mut channel_actor_state = self.get_channel_actor_state(channel_id);
         channel_actor_state.to_remote_amount = new_to_remote_amount;
-        self.update_channel_actor_state(channel_actor_state).await;
+        self.update_channel_actor_state(channel_actor_state, None)
+            .await;
     }
 
     pub async fn disable_channel(&mut self, channel_id: Hash256) {
         let mut channel_actor_state = self.get_channel_actor_state(channel_id);
-        let mut public_info = channel_actor_state.public_channel_info.unwrap();
-        public_info.enabled = false;
-        channel_actor_state.public_channel_info = Some(public_info);
-        self.update_channel_actor_state(channel_actor_state).await;
+        channel_actor_state.local_tlc_info.enabled = false;
+        self.update_channel_actor_state(channel_actor_state, None)
+            .await;
+    }
+
+    pub async fn disable_channel_stealthy(&self, channel_id: Hash256) {
+        let mut channel_actor_state = self.get_channel_actor_state(channel_id);
+        channel_actor_state.local_tlc_info.enabled = false;
+        self.update_channel_actor_state(
+            channel_actor_state,
+            Some(ReloadParams {
+                notify_changes: false,
+            }),
+        )
+        .await;
+    }
+
+    pub async fn update_channel_with_command(&self, channel_id: Hash256, command: UpdateCommand) {
+        let message = |rpc_reply| -> NetworkActorMessage {
+            NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+                ChannelCommandWithId {
+                    channel_id,
+                    command: ChannelCommand::Update(command, rpc_reply),
+                },
+            ))
+        };
+        call!(self.network_actor, message)
+            .expect("node_a alive")
+            .expect("update channel success");
     }
 
     pub fn get_payment_session(&self, payment_hash: Hash256) -> Option<PaymentSession> {
         self.store.get_payment_session(payment_hash)
+    }
+
+    pub fn get_payment_custom_records(
+        &self,
+        payment_hash: &Hash256,
+    ) -> Option<PaymentCustomRecords> {
+        self.store.get_payment_custom_records(payment_hash)
     }
 
     pub async fn new_with_node_name(node_name: &str) -> Self {
@@ -659,7 +852,8 @@ impl NetworkNode {
 
         let network_graph = Arc::new(TokioRwLock::new(NetworkGraph::new(
             store.clone(),
-            public_key.clone(),
+            public_key,
+            true,
         )));
 
         let network_actor = Actor::spawn_linked(
@@ -694,25 +888,71 @@ impl NetworkNode {
             }
         };
 
+        let mut unexpected_events: HashSet<String> = HashSet::new();
+
+        // Some usual unexpected events that we want to not happened
+        // use `assert!(node.get_triggered_unexpected_events().await.is_empty())` to check it
+        let default_unexpected_events = vec![
+            "Musig2VerifyError",
+            "Musig2RoundFinalizeError",
+            "InvalidOnionError",
+        ];
+        for event in default_unexpected_events {
+            unexpected_events.insert(event.to_string());
+        }
+
+        let unexpected_events = Arc::new(TokioRwLock::new(unexpected_events));
+        let triggered_unexpected_events = Arc::new(TokioRwLock::new(Vec::<String>::new()));
+        let (self_event_sender, self_event_receiver) = mpsc::channel(10000);
+        let unexpected_events_clone = unexpected_events.clone();
+        let triggered_unexpected_events_clone = triggered_unexpected_events.clone();
+        // spawn a new thread to collect all the events from event_receiver
+        tokio::spawn(async move {
+            while let Some(event) = event_receiver.recv().await {
+                self_event_sender
+                    .send(event.clone())
+                    .await
+                    .expect("send event");
+                let unexpected_events = unexpected_events_clone.read().await;
+                let event_content = format!("{:?}", event);
+                for unexpected_event in unexpected_events.iter() {
+                    if event_content.contains(unexpected_event) {
+                        triggered_unexpected_events_clone
+                            .write()
+                            .await
+                            .push(unexpected_event.clone());
+                    }
+                }
+            }
+        });
+
         println!(
             "Network node started for peer_id {:?} in directory {:?}",
             &peer_id,
             base_dir.as_ref()
         );
 
+        let gossip_actor = ractor::registry::where_is(get_gossip_actor_name(&peer_id))
+            .expect("gossip actor should have been started")
+            .into();
+
         Self {
             base_dir,
             node_name,
             store,
             fiber_config,
+            channels_tx_map: Default::default(),
             listening_addrs: announced_addrs,
             network_actor,
             network_graph,
             chain_actor,
-            private_key: secret_key.into(),
+            gossip_actor,
+            private_key: secret_key,
             peer_id,
-            event_emitter: event_receiver,
-            pubkey: public_key.into(),
+            event_emitter: self_event_receiver,
+            pubkey: public_key,
+            unexpected_events,
+            triggered_unexpected_events,
         }
     }
 
@@ -723,6 +963,17 @@ impl NetworkNode {
             store: self.store.clone(),
             fiber_config: self.fiber_config.clone(),
         }
+    }
+
+    pub async fn add_unexpected_events(&self, events: Vec<String>) {
+        let mut unexpected_events = self.unexpected_events.write().await;
+        for event in events {
+            unexpected_events.insert(event);
+        }
+    }
+
+    pub async fn get_triggered_unexpected_events(&self) -> Vec<String> {
+        self.triggered_unexpected_events.read().await.clone()
     }
 
     pub async fn get_network_channels(&self) -> Vec<ChannelInfo> {
@@ -789,6 +1040,7 @@ impl NetworkNode {
             }
             nodes.push(new);
         }
+        #[allow(clippy::useless_conversion)]
         match nodes.try_into() {
             Ok(nodes) => nodes,
             Err(_) => unreachable!(),
@@ -875,7 +1127,7 @@ impl NetworkNode {
                     match event {
                         None => panic!("Event emitter unexpectedly stopped"),
                         Some(event) => {
-                            println!("Recevied event when waiting for specific event: {:?}", &event);
+                            println!("Received event when waiting for specific event: {:?}", &event);
                             if let Some(r) = event_processor(&event) {
                                 println!("Event ({:?}) matching filter received, exiting waiting for event loop", &event);
                                 return r;
@@ -898,8 +1150,16 @@ impl NetworkNode {
             .await;
     }
 
-    pub async fn submit_tx(&mut self, tx: TransactionView) -> ckb_jsonrpc_types::Status {
+    pub async fn submit_tx(&self, tx: TransactionView) -> ckb_jsonrpc_types::Status {
         submit_tx(self.chain_actor.clone(), tx).await
+    }
+
+    pub fn add_channel_tx(&mut self, channel_id: Hash256, tx: TransactionView) {
+        self.channels_tx_map.insert(channel_id, tx.hash().into());
+    }
+
+    pub fn get_channel_funding_tx(&self, channel_id: &Hash256) -> Option<Hash256> {
+        self.channels_tx_map.get(channel_id).cloned()
     }
 
     pub async fn trace_tx(&mut self, tx: TransactionView) -> ckb_jsonrpc_types::Status {
@@ -926,11 +1186,19 @@ impl NetworkNode {
         F: FnOnce(&NetworkGraph<Store>) -> T,
     {
         let graph = self.get_network_graph().read().await;
-        f(&*graph)
+        f(&graph)
+    }
+
+    pub async fn with_network_graph_mut<F, T>(&self, f: F) -> T
+    where
+        F: FnOnce(&mut NetworkGraph<Store>) -> T,
+    {
+        let mut graph = self.get_network_graph().write().await;
+        f(&mut graph)
     }
 
     pub async fn get_network_graph_nodes(&self) -> Vec<NodeInfo> {
-        self.with_network_graph(|graph| graph.nodes().into_iter().cloned().collect())
+        self.with_network_graph(|graph| graph.nodes().cloned().collect())
             .await
     }
 
@@ -940,20 +1208,33 @@ impl NetworkNode {
     }
 
     pub async fn get_network_graph_channels(&self) -> Vec<ChannelInfo> {
-        self.with_network_graph(|graph| graph.channels().into_iter().cloned().collect())
+        self.with_network_graph(|graph| graph.channels().cloned().collect())
             .await
     }
 
     pub async fn get_network_graph_channel(&self, channel_id: &OutPoint) -> Option<ChannelInfo> {
         self.with_network_graph(|graph| {
             tracing::debug!("Getting channel info for {:?}", channel_id);
-            tracing::debug!(
-                "Channels: {:?}",
-                graph.channels().into_iter().collect::<Vec<_>>()
-            );
+            tracing::debug!("Channels: {:?}", graph.channels().collect::<Vec<_>>());
             graph.get_channel(channel_id).cloned()
         })
         .await
+    }
+
+    pub fn send_message_to_gossip_actor(&self, message: GossipActorMessage) {
+        self.gossip_actor
+            .send_message(message)
+            .expect("send message to gossip actor");
+    }
+
+    pub fn mock_received_gossip_message_from_peer(&self, peer_id: PeerId, message: GossipMessage) {
+        self.send_message_to_gossip_actor(GossipActorMessage::GossipMessageReceived(
+            GossipMessageWithPeerId { peer_id, message },
+        ));
+    }
+
+    pub fn get_store(&self) -> &Store {
+        &self.store
     }
 }
 

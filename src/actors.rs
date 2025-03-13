@@ -1,6 +1,6 @@
 use ractor::{async_trait as rasync_trait, Actor, ActorProcessingErr, ActorRef, SupervisionEvent};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
-use tracing::{debug, error};
+use tracing::debug;
 
 /// A root actor that listens for cancellation token and stops all sub actors (those who started by spawn_linked).
 pub struct RootActor;
@@ -46,10 +46,14 @@ impl Actor for RootActor {
 
     async fn post_stop(
         &self,
-        _myself: ActorRef<Self::Msg>,
+        myself: ActorRef<Self::Msg>,
         _state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         debug!("Root actor stopped");
+        myself
+            .get_cell()
+            .stop_children_and_wait(Some("Root actor stopped".to_string()), None)
+            .await;
         Ok(())
     }
 
@@ -68,8 +72,8 @@ impl Actor for RootActor {
                     debug!("Actor terminated for unknown reason (id: {:?})", who);
                 }
             },
-            SupervisionEvent::ActorPanicked(who, err) => {
-                error!("Actor unexpectedly panicked (id: {:?}): {:?}", who, err);
+            SupervisionEvent::ActorFailed(who, err) => {
+                panic!("Actor unexpectedly panicked (id: {:?}): {:?}", who, err);
             }
             _ => {}
         }

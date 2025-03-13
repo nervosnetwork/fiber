@@ -12,6 +12,8 @@ use std::sync::Arc;
 use tracing::{debug, error, info};
 
 pub const MIGRATION_VERSION_KEY: &[u8] = b"db-version";
+pub const INIT_DB_VERSION: &str = "20241116135521";
+include!(concat!(env!("OUT_DIR"), "/latest_db_version.rs"));
 
 fn internal_error(reason: String) -> Error {
     Error::DBInternalError(reason)
@@ -49,25 +51,46 @@ impl Migrations {
             }
         };
 
-        debug!("Current database version [{}]", db_version);
-        let migrations = self.migrations.values();
-        let latest_version = migrations
-            .last()
-            .unwrap_or_else(|| panic!("should have at least one version"))
-            .version();
-        debug!("Latest database version [{}]", latest_version);
-
-        db_version.as_str().cmp(latest_version)
+        debug!(
+            "Current database version: [{}], latest db version: [{}]",
+            db_version, LATEST_DB_VERSION
+        );
+        db_version.as_str().cmp(LATEST_DB_VERSION)
     }
 
+    // will only invoked in fnn-migrate binary
     fn run_migrate(&self, mut db: Arc<DB>, v: &str) -> Result<Arc<DB>, Error> {
         let mpb = Arc::new(MultiProgress::new());
+
+        // make sure the latest migration is the last one
+        // this may only happened the fnn-migrate binary is not compiled with
+        // the correct fiber code base
+        {
+            let migrations = self.migrations.values();
+            let latest_version_from_migratons = migrations
+                .last()
+                .unwrap_or_else(|| panic!("should have at least one version"))
+                .version();
+            if latest_version_from_migratons != LATEST_DB_VERSION {
+                error!(
+                    "The latest migration version is not equal to the latest db version, \
+                please check the migration version: {}",
+                    latest_version_from_migratons
+                );
+                return Err(internal_error(
+                    "The latest migration version is not equal to the latest db version"
+                        .to_string(),
+                ));
+            }
+        }
+
         let migrations: BTreeMap<_, _> = self
             .migrations
             .iter()
             .filter(|(mv, _)| mv.as_str() > v)
             .collect();
         let migrations_count = migrations.len();
+
         for (idx, (_, m)) in migrations.iter().enumerate() {
             let mpbc = Arc::clone(&mpb);
             let pb = move |count: u64| -> ProgressBar {
@@ -97,12 +120,9 @@ impl Migrations {
     /// Initial db version
     pub fn init_db_version(&self, db: Arc<DB>) -> Result<(), Error> {
         if self.need_init(&db) {
-            if let Some(m) = self.migrations.values().last() {
-                eprintln!("Init database version {}", m.version());
-                db.put(MIGRATION_VERSION_KEY, m.version()).map_err(|err| {
-                    internal_error(format!("failed to migrate the database: {err}"))
-                })?;
-            }
+            eprintln!("Init database version {}", LATEST_DB_VERSION);
+            db.put(MIGRATION_VERSION_KEY, LATEST_DB_VERSION)
+                .map_err(|err| internal_error(format!("failed to migrate the database: {err}")))?;
         }
         Ok(())
     }
@@ -154,10 +174,14 @@ pub trait Migration: Send + Sync {
     fn version(&self) -> &str;
 }
 
-const INIT_DB_VERSION: &str = "20241116135521";
-
 pub struct DefaultMigration {
     version: String,
+}
+
+impl Default for DefaultMigration {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl DefaultMigration {

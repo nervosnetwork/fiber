@@ -199,7 +199,7 @@ fn test_invoice_builder() {
     assert_eq!(invoice.amount, Some(1280));
     assert_eq!(invoice.payment_hash(), &gen_payment_hash);
     assert_eq!(invoice.data.attrs.len(), 7);
-    assert_eq!(invoice.check_signature().is_ok(), true);
+    assert!(invoice.check_signature().is_ok());
 }
 
 #[test]
@@ -390,6 +390,9 @@ fn test_invoice_timestamp() {
         .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))
         .unwrap();
 
+    // sleep 1 millisecond to make sure the timestamp is different
+    std::thread::sleep(Duration::from_millis(1));
+
     let invoice2 = InvoiceBuilder::new(Currency::Fibb)
         .amount(Some(1280))
         .payment_hash(payment_hash)
@@ -451,7 +454,7 @@ fn test_invoice_check_expired() {
         .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))
         .unwrap();
 
-    assert_eq!(invoice.is_expired(), false);
+    assert!(!invoice.is_expired());
     std::thread::sleep(Duration::from_secs(2));
-    assert_eq!(invoice.is_expired(), true);
+    assert!(invoice.is_expired());
 }

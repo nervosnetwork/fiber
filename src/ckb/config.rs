@@ -1,5 +1,6 @@
+use ckb_hash::blake2b_256;
 use clap_serde_derive::ClapSerde;
-use secp256k1::SecretKey;
+use secp256k1::{Secp256k1, SecretKey};
 use serde_with::serde_as;
 use std::{
     io::{ErrorKind, Read},
@@ -13,11 +14,13 @@ use ckb_types::prelude::Pack;
 use ckb_types::H256;
 use ckb_types::{
     core::DepType,
-    packed::{CellDep, OutPoint},
+    packed::{CellDep, OutPoint, Script},
 };
 use clap_serde_derive::clap::{self};
 use molecule::prelude::Entity;
 use serde::{Deserialize, Serialize};
+
+use super::contracts::{get_script_by_contract, Contract};
 
 pub const DEFAULT_CKB_BASE_DIR_NAME: &str = "ckb";
 const DEFAULT_CKB_NODE_RPC_URL: &str = "http://127.0.0.1:8114";
@@ -101,6 +104,16 @@ impl CkbConfig {
             std::io::Error::new(ErrorKind::InvalidData, "invalid secret key data").into()
         })
     }
+
+    pub fn get_default_funding_lock_script(&self) -> crate::Result<Script> {
+        let secret_key = self.read_secret_key()?;
+        let secp = Secp256k1::new();
+        let pubkey_hash = blake2b_256(secret_key.public_key(&secp).serialize());
+        Ok(get_script_by_contract(
+            Contract::Secp256k1Lock,
+            &pubkey_hash[0..20],
+        ))
+    }
 }
 
 serde_with::serde_conv!(
@@ -174,6 +187,7 @@ pub struct UdtArgInfo {
     pub cell_deps: Vec<UdtCellDep>,
 }
 
+/// The UDT configurations
 #[derive(Serialize, Deserialize, Clone, Debug, Default, Eq, PartialEq, Hash)]
 pub struct UdtCfgInfos(pub Vec<UdtArgInfo>);
 

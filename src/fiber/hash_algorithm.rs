@@ -4,12 +4,15 @@ use ckb_types::packed;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+/// HashAlgorithm is the hash algorithm used in the hash lock.
 #[repr(u8)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum HashAlgorithm {
+    /// The default hash algorithm, CkbHash
     #[default]
     CkbHash = 0,
+    /// The sha256 hash algorithm
     Sha256 = 1,
 }
 
@@ -54,27 +57,4 @@ impl TryFrom<packed::Byte> for HashAlgorithm {
 
 pub fn sha256<T: AsRef<[u8]>>(s: T) -> [u8; 32] {
     Sha256::hash(s.as_ref()).to_byte_array()
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn test_hash_algorithm_serialization_sha256() {
-        let algorithm = super::HashAlgorithm::Sha256;
-        let serialized = serde_json::to_string(&algorithm).expect("hash algorithm to json");
-        assert_eq!(serialized, r#""sha256""#);
-        let deserialized: super::HashAlgorithm =
-            serde_json::from_str(&serialized).expect("hash algorithm from json");
-        assert_eq!(deserialized, algorithm);
-    }
-
-    #[test]
-    fn test_hash_algorithm_serialization_ckb_hash() {
-        let algorithm = super::HashAlgorithm::CkbHash;
-        let serialized = serde_json::to_string(&algorithm).expect("hash algorithm to json");
-        assert_eq!(serialized, r#""ckb_hash""#);
-        let deserialized: super::HashAlgorithm =
-            serde_json::from_str(&serialized).expect("hash algorithm from json");
-        assert_eq!(deserialized, algorithm);
-    }
 }

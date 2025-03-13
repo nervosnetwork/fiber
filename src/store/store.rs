@@ -8,7 +8,7 @@ use crate::{
         gossip::GossipMessageStore,
         graph::{NetworkGraphStateStore, PaymentSession},
         history::{Direction, TimedResult},
-        network::{NetworkActorStateStore, PersistentNetworkActorState},
+        network::{NetworkActorStateStore, PaymentCustomRecords, PersistentNetworkActorState},
         types::{BroadcastMessage, BroadcastMessageID, Cursor, Hash256, CURSOR_SIZE},
     },
     invoice::{CkbInvoice, CkbInvoiceStatus, InvoiceError, InvoiceStore},
@@ -21,15 +21,8 @@ use rocksdb::{
     DB,
 };
 use serde::Serialize;
-use std::io::Write;
-use std::{
-    cmp::Ordering,
-    io::{stdin, stdout},
-    path::Path,
-    sync::Arc,
-};
+use std::{path::Path, sync::Arc};
 use tentacle::secio::PeerId;
-use tracing::{error, info};
 
 #[derive(Clone, Debug)]
 pub struct Store {
@@ -43,6 +36,18 @@ enum ChannelTimestamp {
     ChannelUpdateOfNode2(),
 }
 
+// All timestamps are saved in a 24-byte array, with BroadcastMessageID::ChannelAnnouncement(outpoint) as the key.
+// the first 8 bytes in the 24 bytes is the timestamp for channel announcement, the second 8 bytes
+// is the timestamp for channel update of node 1 and the last 8 bytes for channel update of node 2.
+// TODO: previous implementation accidentally used BroadcastMessageID::ChannelUpdate as the key
+// for the channel updates timestamps. I have fixed it here by using the same key as the channel
+// announcement. This is a breaking change, we need migration for this.
+pub(crate) fn get_channel_timestamps_key(outpoint: &OutPoint) -> Vec<u8> {
+    BroadcastMessageID::ChannelAnnouncement(outpoint.clone())
+        .to_bytes()
+        .to_vec()
+}
+
 fn update_channel_timestamp(
     batch: &mut Batch,
     outpoint: &OutPoint,
@@ -54,23 +59,9 @@ fn update_channel_timestamp(
         ChannelTimestamp::ChannelUpdateOfNode1() => 8,
         ChannelTimestamp::ChannelUpdateOfNode2() => 16,
     };
-    let message_id = match channel_timestamp {
-        ChannelTimestamp::ChannelAnnouncement() => {
-            BroadcastMessageID::ChannelAnnouncement(outpoint.clone())
-        }
-        ChannelTimestamp::ChannelUpdateOfNode1() => {
-            BroadcastMessageID::ChannelUpdate(outpoint.clone())
-        }
-        ChannelTimestamp::ChannelUpdateOfNode2() => {
-            BroadcastMessageID::ChannelUpdate(outpoint.clone())
-        }
-    };
+    let message_id = get_channel_timestamps_key(outpoint);
 
-    let timestamp_key = [
-        &[BROADCAST_MESSAGE_TIMESTAMP_PREFIX],
-        message_id.to_bytes().as_slice(),
-    ]
-    .concat();
+    let timestamp_key = [&[BROADCAST_MESSAGE_TIMESTAMP_PREFIX], message_id.as_slice()].concat();
     let mut timestamps = batch
         .get(&timestamp_key)
         .map(|v| v.try_into().expect("Invalid timestamp value length"))
@@ -82,14 +73,8 @@ fn update_channel_timestamp(
 impl Store {
     pub fn new<P: AsRef<Path>>(path: P) -> Result<Self, String> {
         let db = Self::open_db(path.as_ref())?;
-        let db = Self::start_migrate(path, db, false)?;
+        let db = Self::check_migrate(path, db)?;
         Ok(Self { db })
-    }
-
-    pub fn run_migrate<P: AsRef<Path>>(path: P) -> Result<(), String> {
-        let db = Self::open_db(path.as_ref())?;
-        Self::start_migrate(path, db, true)?;
-        Ok(())
     }
 
     fn open_db(path: &Path) -> Result<Arc<DB>, String> {
@@ -143,72 +128,9 @@ impl Store {
     }
 
     /// Open or create a rocksdb
-    fn start_migrate<P: AsRef<Path>>(
-        path: P,
-        db: Arc<DB>,
-        run_migrate: bool,
-    ) -> Result<Arc<DB>, String> {
+    fn check_migrate<P: AsRef<Path>>(path: P, db: Arc<DB>) -> Result<Arc<DB>, String> {
         let migrate = DbMigrate::new(db);
-        if !migrate.need_init() {
-            match migrate.check() {
-                Ordering::Greater => {
-                    error!(
-                        "The database was created by a higher version fiber executable binary \n\
-                     and cannot be opened by the current binary.\n\
-                     Please download the latest fiber executable binary."
-                    );
-                    return Err("incompatible database, need to upgrade fiber binary".to_string());
-                }
-                Ordering::Equal => {
-                    info!("no need to migrate, everything is OK ...");
-                    return Ok(migrate.db());
-                }
-                Ordering::Less => {
-                    if !run_migrate {
-                        return Err("Fiber need to run some database migrations, please run `fnn` with option `--migrate` to start migrations.".to_string());
-                    } else {
-                        let path_buf = path.as_ref().to_path_buf();
-                        let input = Self::prompt(format!("\
-                            Once the migration started, the data will be no longer compatible with all older version,\n\
-                            so we strongly recommended you to backup the old data {} before migrating.\n\
-                            \n\
-                            \nIf you want to migrate the data, please input YES, otherwise, the current process will exit.\n\
-                            > ", path_buf.display()).as_str());
-
-                        if input.trim().to_lowercase() != "yes" {
-                            error!("Migration was declined since the user didn't confirm.");
-                            return Err("need to run database migration".to_string());
-                        }
-                        eprintln!("begin to migrate db ...");
-                        let db = migrate.migrate().expect("failed to migrate db");
-                        eprintln!(
-                            "db migrated successfully, now your can restart the fiber node ..."
-                        );
-                        Ok(db)
-                    }
-                }
-            }
-        } else {
-            info!("begin to init db version ...");
-            migrate
-                .init_db_version()
-                .expect("failed to init db version");
-            Ok(migrate.db())
-        }
-    }
-
-    fn prompt(msg: &str) -> String {
-        let stdout = stdout();
-        let mut stdout = stdout.lock();
-        let stdin = stdin();
-
-        write!(stdout, "{msg}").unwrap();
-        stdout.flush().unwrap();
-
-        let mut input = String::new();
-        let _ = stdin.read_line(&mut input);
-
-        input
+        migrate.init_or_check(path)
     }
 }
 
@@ -229,6 +151,7 @@ enum KeyValue {
     WatchtowerChannel(Hash256, ChannelData),
     PaymentSession(Hash256, PaymentSession),
     PaymentHistoryTimedResult((OutPoint, Direction), TimedResult),
+    PaymentCustomRecord(Hash256, PaymentCustomRecords),
     NetworkActorState(PeerId, PersistentNetworkActorState),
 }
 
@@ -237,12 +160,12 @@ pub trait StoreKeyValue {
     fn value(&self) -> Vec<u8>;
 }
 
-fn serialize_to_vec<T: ?Sized + Serialize>(value: &T, field_name: &str) -> Vec<u8> {
+pub(crate) fn serialize_to_vec<T: ?Sized + Serialize>(value: &T, field_name: &str) -> Vec<u8> {
     bincode::serialize(value)
         .unwrap_or_else(|e| panic!("serialization of {} failed: {}", field_name, e))
 }
 
-fn deserialize_from<'a, T>(slice: &'a [u8], field_name: &str) -> T
+pub(crate) fn deserialize_from<'a, T>(slice: &'a [u8], field_name: &str) -> T
 where
     T: serde::Deserialize<'a>,
 {
@@ -295,6 +218,9 @@ impl StoreKeyValue for KeyValue {
             KeyValue::BroadcastMessage(cursor, _) => {
                 [&[BROADCAST_MESSAGE_PREFIX], cursor.to_bytes().as_slice()].concat()
             }
+            KeyValue::PaymentCustomRecord(payment_hash, _data) => {
+                [&[PAYMENT_CUSTOM_RECORD_PREFIX], payment_hash.as_ref()].concat()
+            }
         }
     }
 
@@ -322,6 +248,9 @@ impl StoreKeyValue for KeyValue {
             }
             KeyValue::PaymentHistoryTimedResult(_, result) => {
                 serialize_to_vec(result, "TimedResult")
+            }
+            KeyValue::PaymentCustomRecord(_, custom_records) => {
+                serialize_to_vec(custom_records, "PaymentCustomRecord")
             }
         }
     }
@@ -375,7 +304,7 @@ impl ChannelActorStateStore for Store {
 
     fn insert_channel_actor_state(&self, state: ChannelActorState) {
         let mut batch = self.batch();
-        batch.put_kv(KeyValue::ChannelActorState(state.id, state.clone()));
+
         batch.put_kv(KeyValue::PeerIdChannelId(
             (state.get_remote_peer_id(), state.id),
             state.state,
@@ -383,6 +312,7 @@ impl ChannelActorStateStore for Store {
         if let Some(outpoint) = state.get_funding_transaction_outpoint() {
             batch.put_kv(KeyValue::OutPointChannelId(outpoint, state.id));
         }
+        batch.put_kv(KeyValue::ChannelActorState(state.id, state));
         batch.commit();
     }
 
@@ -446,6 +376,22 @@ impl ChannelActorStateStore for Store {
             .map(|channel_id| deserialize_from(channel_id.as_ref(), "Hash256"))
             .and_then(|channel_id: Hash256| self.get_channel_actor_state(&channel_id))
     }
+
+    fn insert_payment_custom_records(
+        &self,
+        payment_hash: &Hash256,
+        custom_records: PaymentCustomRecords,
+    ) {
+        let mut batch = self.batch();
+        batch.put_kv(KeyValue::PaymentCustomRecord(*payment_hash, custom_records));
+        batch.commit();
+    }
+
+    fn get_payment_custom_records(&self, payment_hash: &Hash256) -> Option<PaymentCustomRecords> {
+        let key = [&[PAYMENT_CUSTOM_RECORD_PREFIX], payment_hash.as_ref()].concat();
+        self.get(key)
+            .map(|v| deserialize_from(v.as_ref(), "PaymentCustomRecord"))
+    }
 }
 
 impl InvoiceStore for Store {
@@ -459,14 +405,14 @@ impl InvoiceStore for Store {
         invoice: CkbInvoice,
         preimage: Option<Hash256>,
     ) -> Result<(), InvoiceError> {
-        let hash = invoice.payment_hash();
-        if self.get_invoice(hash).is_some() {
-            return Err(InvoiceError::DuplicatedInvoice(hash.to_string()));
+        let payment_hash = invoice.payment_hash();
+        if self.get_invoice(payment_hash).is_some() {
+            return Err(InvoiceError::DuplicatedInvoice(payment_hash.to_string()));
         }
 
         let mut batch = self.batch();
         if let Some(preimage) = preimage {
-            batch.put_kv(KeyValue::CkbInvoicePreimage(*hash, preimage));
+            batch.put_kv(KeyValue::CkbInvoicePreimage(*payment_hash, preimage));
         }
         let payment_hash = *invoice.payment_hash();
         batch.put_kv(KeyValue::CkbInvoice(payment_hash, invoice));
@@ -501,6 +447,24 @@ impl InvoiceStore for Store {
         self.get(key)
             .map(|v| deserialize_from(v.as_ref(), "CkbInvoiceStatus"))
     }
+
+    fn insert_payment_preimage(
+        &self,
+        payment_hash: Hash256,
+        preimage: Hash256,
+    ) -> Result<(), InvoiceError> {
+        let mut batch = self.batch();
+        batch.put_kv(KeyValue::CkbInvoicePreimage(payment_hash, preimage));
+        batch.commit();
+        Ok(())
+    }
+
+    fn search_payment_preimage(&self, payment_hash_prefix: &[u8]) -> Option<Hash256> {
+        let prefix = [&[CKB_INVOICE_PREIMAGE_PREFIX], payment_hash_prefix].concat();
+        let mut iter = self.prefix_iterator(prefix.as_slice());
+        iter.next()
+            .map(|(_key, value)| deserialize_from(value.as_ref(), "Hash256"))
+    }
 }
 
 impl NetworkGraphStateStore for Store {
@@ -534,9 +498,8 @@ impl NetworkGraphStateStore for Store {
         let prefix = vec![PAYMENT_HISTORY_TIMED_RESULT_PREFIX];
         let iter = self.prefix_iterator(&prefix);
         iter.map(|(key, value)| {
-            let channel_outpoint: OutPoint = OutPoint::from_slice(&key[1..=36])
-                .expect("deserialize OutPoint should be OK")
-                .into();
+            let channel_outpoint: OutPoint =
+                OutPoint::from_slice(&key[1..=36]).expect("deserialize OutPoint should be OK");
             let direction = deserialize_from(&key[37..], "Direction");
             let result = deserialize_from(value.as_ref(), "TimedResult");
             (channel_outpoint, direction, result)
@@ -557,7 +520,7 @@ impl GossipMessageStore for Store {
         self.db
             .iterator(mode)
             // We should skip the value with the same cursor (after_cursor is exclusive).
-            .skip_while(move |(key, _)| key.as_ref() == &start)
+            .skip_while(move |(key, _)| key.as_ref() == start)
             .take_while(move |(key, _)| key.starts_with(&prefix))
             .map(|(key, value)| {
                 debug_assert_eq!(key.len(), 1 + CURSOR_SIZE);
@@ -595,22 +558,23 @@ impl GossipMessageStore for Store {
     }
 
     fn get_latest_channel_announcement_timestamp(&self, outpoint: &OutPoint) -> Option<u64> {
+        let key = get_channel_timestamps_key(outpoint);
         self.get(
-            &[
+            [
                 [BROADCAST_MESSAGE_TIMESTAMP_PREFIX].as_slice(),
-                BroadcastMessageID::ChannelAnnouncement(outpoint.clone())
-                    .to_bytes()
-                    .as_slice(),
+                key.as_slice(),
             ]
             .concat(),
         )
-        .map(|v| {
+        .and_then(|v| {
             let v: [u8; 24] = v.try_into().expect("Invalid timestamp value length");
-            u64::from_be_bytes(
+            let timestamp = u64::from_be_bytes(
                 v[..8]
                     .try_into()
                     .expect("timestamp length valid, shown above"),
-            )
+            );
+            // The default timestamp value is 0.
+            (timestamp != 0).then_some(timestamp)
         })
     }
 
@@ -619,12 +583,11 @@ impl GossipMessageStore for Store {
         outpoint: &OutPoint,
         is_node1: bool,
     ) -> Option<u64> {
+        let key = get_channel_timestamps_key(outpoint);
         self.get(
-            &[
+            [
                 [BROADCAST_MESSAGE_TIMESTAMP_PREFIX].as_slice(),
-                BroadcastMessageID::ChannelUpdate(outpoint.clone())
-                    .to_bytes()
-                    .as_slice(),
+                key.as_slice(),
             ]
             .concat(),
         )
@@ -644,15 +607,22 @@ impl GossipMessageStore for Store {
         pk: &crate::fiber::types::Pubkey,
     ) -> Option<u64> {
         self.get(
-            &[
+            [
                 [BROADCAST_MESSAGE_TIMESTAMP_PREFIX].as_slice(),
-                BroadcastMessageID::NodeAnnouncement(pk.clone())
+                BroadcastMessageID::NodeAnnouncement(*pk)
                     .to_bytes()
                     .as_slice(),
             ]
             .concat(),
         )
         .map(|v| u64::from_be_bytes(v.try_into().expect("Invalid timestamp value length")))
+    }
+
+    fn delete_broadcast_message(&self, cursor: &Cursor) {
+        let key = [&[BROADCAST_MESSAGE_PREFIX], cursor.to_bytes().as_slice()].concat();
+        let mut batch = self.batch();
+        batch.delete(key);
+        batch.commit();
     }
 
     fn save_channel_announcement(
@@ -735,8 +705,13 @@ impl GossipMessageStore for Store {
     }
 
     fn save_node_announcement(&self, node_announcement: crate::fiber::types::NodeAnnouncement) {
+        debug_assert!(
+            node_announcement.verify(),
+            "Node announcement must be verified: {:?}",
+            node_announcement
+        );
         let mut batch = self.batch();
-        let message_id = BroadcastMessageID::NodeAnnouncement(node_announcement.node_id.clone());
+        let message_id = BroadcastMessageID::NodeAnnouncement(node_announcement.node_id);
 
         if let Some(old_timestamp) =
             self.get_latest_node_announcement_timestamp(&node_announcement.node_id)
@@ -758,7 +733,7 @@ impl GossipMessageStore for Store {
             );
         }
         batch.put_kv(KeyValue::BroadcastMessageTimestamp(
-            BroadcastMessageID::NodeAnnouncement(node_announcement.node_id.clone()),
+            BroadcastMessageID::NodeAnnouncement(node_announcement.node_id),
             node_announcement.timestamp,
         ));
 
@@ -766,6 +741,29 @@ impl GossipMessageStore for Store {
             Cursor::new(node_announcement.timestamp, message_id.clone()),
             BroadcastMessage::NodeAnnouncement(node_announcement.clone()),
         ));
+        batch.commit();
+    }
+
+    fn get_channel_timestamps_iter(&self) -> impl IntoIterator<Item = (OutPoint, [u64; 3])> {
+        // 0 is used to get timestamps for channels instead of node announcements.
+        const PREFIX: [u8; 2] = [BROADCAST_MESSAGE_TIMESTAMP_PREFIX, 0];
+        self.prefix_iterator(&PREFIX).map(|(key, value)| {
+            let outpoint =
+                OutPoint::from_slice(&key[2..]).expect("deserialize OutPoint should be OK");
+            assert_eq!(value.len(), 24);
+            let timestamps = [
+                u64::from_be_bytes(value[0..8].try_into().unwrap()),
+                u64::from_be_bytes(value[8..16].try_into().unwrap()),
+                u64::from_be_bytes(value[16..24].try_into().unwrap()),
+            ];
+            (outpoint, timestamps)
+        })
+    }
+
+    fn delete_channel_timestamps(&self, outpoint: &OutPoint) {
+        let key = get_channel_timestamps_key(outpoint);
+        let mut batch = self.batch();
+        batch.delete([&[BROADCAST_MESSAGE_TIMESTAMP_PREFIX], key.as_slice()].concat());
         batch.commit();
     }
 }

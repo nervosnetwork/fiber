@@ -1,7 +1,6 @@
 import blockchain;
 import fiber;
 
-array Uint16 [byte; 2];
 array SchnorrSignature [byte; 64];
 array SchnorrXOnlyPubkey [byte; 32];
 
@@ -34,7 +33,7 @@ struct BroadcastMessageQuery {
 vector BroadcastMessageQueries <BroadcastMessageQuery>;
 
 // A NodeAnnouncement is a broadcast message to the network for the node information.
-// An update to the node information can be broadcasted with a NodeAnnouncement with larger timestamp. 
+// An update to the node information can be broadcasted with a NodeAnnouncement with larger timestamp.
 table NodeAnnouncement {
     // Signature to this message.
     signature: EcdsaSignature,
@@ -46,7 +45,7 @@ table NodeAnnouncement {
     timestamp: Uint64,
     node_id: Pubkey,
     // Must be a valid utf-8 string of length maximal length 32 bytes.
-    alias: Byte32,
+    node_name: Byte32,
     // All the reachable addresses.
     address: BytesVec,
     // Chain hash
@@ -76,22 +75,6 @@ table ChannelAnnouncement {
     ckb_key: SchnorrXOnlyPubkey,
     capacity: Uint128,
     udt_type_script: ScriptOpt,
-}
-
-// A ChannelUpdate is a update to the public channel. Newer channel information may be updated with
-// a ChannelUpdate with a larger timestamp.
-struct ChannelUpdate {
-    // Signature of the node that wants to update the channel information.
-    signature: EcdsaSignature,
-    chain_hash: Byte32,
-    channel_outpoint: OutPoint,
-    timestamp: Uint64,
-    message_flags: Uint32,
-    channel_flags: Uint32,
-    tlc_expiry_delta: Uint64,
-    tlc_minimum_value: Uint128,
-    tlc_maximum_value: Uint128,
-    tlc_fee_proportional_millionths: Uint128,
 }
 
 // All the broadcast messages.
@@ -150,7 +133,7 @@ table GetBroadcastMessagesResult {
 
 // QueryBroadcastMessagesResult is the response to QueryBroadcastMessages requests.
 // The id here corresponds to the id passed by the peer. This is used to track the progress of certain request.
-// The missing_queries here is used to indicate that the results correpsonding to some queries can not be found
+// The missing_queries here is used to indicate that the results corresponding to some queries can not be found
 // by the remote peer. The request initiator should try another remote node for the missing data.
 table QueryBroadcastMessagesResult {
     id: Uint64,

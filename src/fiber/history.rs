@@ -181,7 +181,10 @@ impl InternalResult {
 
         let Some(index) = error_index else {
             error!("Error index not found in the route: {:?}", tlc_err);
-            return need_to_retry;
+            // if the error node is not in the route,
+            // and we can not penalize the source node (which is ourself)
+            // it's better to stop the payment session
+            return false;
         };
 
         let len = nodes.len();
@@ -199,6 +202,9 @@ impl InternalResult {
                 | TlcErrorCode::InvoiceCancelled
                 | TlcErrorCode::ExpiryTooFar => {
                     need_to_retry = false;
+                }
+                TlcErrorCode::TemporaryChannelFailure => {
+                    self.fail_pair_balanced(nodes, index + 1);
                 }
                 _ => {
                     // we can not penalize our own node, the whole payment session need to retry
@@ -251,7 +257,14 @@ impl InternalResult {
                 TlcErrorCode::PermanentChannelFailure => {
                     self.fail_pair(nodes, index + 1);
                 }
-                TlcErrorCode::FeeInsufficient | TlcErrorCode::IncorrectTlcExpiry => {
+                TlcErrorCode::FeeInsufficient => {
+                    need_to_retry = true;
+                    self.fail_pair_balanced(nodes, index + 1);
+                    if index > 1 {
+                        self.succeed_range_pairs(nodes, 0, index);
+                    }
+                }
+                TlcErrorCode::IncorrectTlcExpiry => {
                     need_to_retry = false;
                     if index == 1 {
                         self.fail_node(nodes, 1);
@@ -372,7 +385,7 @@ where
                 if amount > current.success_amount {
                     current.success_amount = amount;
                 }
-                if current.fail_time != 0 {
+                if current.fail_time != 0 && amount >= current.fail_amount {
                     current.fail_amount = amount + 1;
                 }
             } else {
@@ -384,10 +397,14 @@ where
                 }
                 current.fail_amount = amount;
                 current.fail_time = time;
-                if amount <= current.success_amount {
+                if amount == 0 {
+                    current.success_amount = 0;
+                } else if amount <= current.success_amount {
                     current.success_amount = amount.saturating_sub(1);
                 }
             }
+            // make sure success_amount is less than or equal to fail_amount,
+            // so that we can calculate the probability in a amount range.
             assert!(current.fail_time == 0 || current.success_amount <= current.fail_amount);
             *current
         } else {
@@ -484,21 +501,21 @@ where
             return 1.0;
         }
         let ret = self.get_channel_probability(capacity, success_amount, fail_amount, amount);
-        assert!(ret >= 0.0 && ret <= 1.0);
+        assert!((0.0..=1.0).contains(&ret));
         ret
     }
 
     // The factor approaches 0 for success_time a long time in the past,
     // is 1 when the success_time is now.
     fn time_factor(&self, time: u64) -> f64 {
-        let time_ago = (now_timestamp_as_millis_u64() - time).max(0);
+        let time_ago = now_timestamp_as_millis_u64() - time;
         // if time_ago is less than 1 second, we treat it as 0, this makes the factor 1
         // this is to avoid the factor is too small when the time is very close to now,
         // this will make the probability calculation more stable
         let time_ago = if time_ago < 1000 { 0 } else { time_ago };
         let exponent = -(time_ago as f64) / (DEFAULT_BIMODAL_DECAY_TIME as f64);
-        let factor = exponent.exp();
-        factor
+
+        exponent.exp()
     }
 
     pub(crate) fn cannot_send(&self, fail_amount: u128, time: u64, capacity: u128) -> u128 {
@@ -510,19 +527,18 @@ where
 
         let factor = self.time_factor(time);
 
-        let cannot_send = capacity - (factor * (capacity - fail_amount) as f64) as u128;
-        cannot_send
+        capacity - (factor * (capacity - fail_amount) as f64) as u128
     }
 
     pub(crate) fn can_send(&self, amount: u128, time: u64) -> u128 {
         let factor = self.time_factor(time);
-        let can_send = (amount as f64 * factor) as u128;
-        can_send
+
+        (amount as f64 * factor) as u128
     }
 
     // Get the probability of a payment success through a direct channel,
     // suppose we know the accurate balance for direct channels, so we don't need to use `get_channel_probability`
-    // for the direct channel, this function is used disable the direct channel for a time preiod if it's failed
+    // for the direct channel, this function is used disable the direct channel for a time period if it's failed
     // currently we may mark the channel failed on graph level, so this function is not used now.
     // FIXME: reconsider this after we already got the accurate balance of direct channels
     //        related issue: https://github.com/nervosnetwork/fiber/issues/257
@@ -531,7 +547,7 @@ where
         let mut prob = 1.0;
         if let Some(result) = self.get_result(channel, direction) {
             if result.fail_time != 0 {
-                let time_ago = (now_timestamp_as_millis_u64() - result.fail_time).max(0);
+                let time_ago = now_timestamp_as_millis_u64() - result.fail_time;
                 let exponent = -(time_ago as f64) / (DEFAULT_BIMODAL_DECAY_TIME as f64);
                 prob -= exponent.exp();
             }
@@ -592,8 +608,7 @@ where
 
         // f128 is only on nightly, so we use f64 here, we may lose some precision
         // but it's acceptable since all the values are cast to f64
-        let mut prob =
-            self.integral_probability(capacity as f64, amount as f64, fail_amount as f64);
+        let mut prob = self.integral_probability(capacity as f64, amount, fail_amount);
         if prob.is_nan() {
             error!(
                 "probability is NaN: capacity: {} amount: {} fail_amount: {}",
@@ -601,13 +616,12 @@ where
             );
             return 0.0;
         }
-        let re_norm =
-            self.integral_probability(capacity as f64, success_amount as f64, fail_amount as f64);
+        let re_norm = self.integral_probability(capacity as f64, success_amount, fail_amount);
         if re_norm == 0.0 {
             return 0.0;
         }
         prob /= re_norm;
-        prob = prob.max(0.0).min(1.0);
+        prob = prob.clamp(0.0, 1.0);
         return prob;
     }
 

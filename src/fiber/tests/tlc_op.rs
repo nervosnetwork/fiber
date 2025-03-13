@@ -208,12 +208,12 @@ impl Actor for TlcActor {
                     expiry: command.expiry,
                     hash_algorithm: command.hash_algorithm,
                     created_at: CommitmentNumbers::default(),
-                    payment_preimage: None,
                     removed_reason: None,
                     onion_packet: command.onion_packet,
                     shared_secret: command.shared_secret,
                     previous_tlc: None,
                     status: TlcStatus::Outbound(OutboundTlcStatus::LocalAnnounced),
+                    removed_confirmed_at: None,
                 };
                 state.tlc_state.add_offered_tlc(add_tlc.clone());
                 state.tlc_state.increment_offering();
@@ -328,7 +328,9 @@ impl Actor for TlcActor {
                 let hash = sign_tlcs(tlcs);
                 assert_eq!(hash, peer_hash);
 
-                state.tlc_state.update_for_revoke_and_ack();
+                state
+                    .tlc_state
+                    .update_for_revoke_and_ack(CommitmentNumbers::default());
             }
         }
         Ok(())
@@ -339,15 +341,12 @@ impl Actor for TlcActor {
         _myself: ActorRef<Self::Msg>,
         args: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
-        eprintln!("TlcActor pre_start");
-        match args {
-            peer_id => {
-                eprintln!("peer_id: {:?}", peer_id);
-                Ok(TlcActorState {
-                    tlc_state: Default::default(),
-                    peer_id,
-                })
-            }
+        let peer_id = args;
+        {
+            Ok(TlcActorState {
+                tlc_state: Default::default(),
+                peer_id,
+            })
         }
     }
 }
@@ -373,7 +372,7 @@ async fn test_tlc_actor() {
                 expiry: now_timestamp_as_millis_u64() + 1000,
                 hash_algorithm: HashAlgorithm::Sha256,
                 onion_packet: None,
-                shared_secret: NO_SHARED_SECRET.clone(),
+                shared_secret: NO_SHARED_SECRET,
                 previous_tlc: None,
             },
         ))
@@ -389,7 +388,7 @@ async fn test_tlc_actor() {
                 expiry: now_timestamp_as_millis_u64() + 1000,
                 hash_algorithm: HashAlgorithm::Sha256,
                 onion_packet: None,
-                shared_secret: NO_SHARED_SECRET.clone(),
+                shared_secret: NO_SHARED_SECRET,
                 previous_tlc: None,
             },
         ))
@@ -405,7 +404,7 @@ async fn test_tlc_actor() {
                 expiry: now_timestamp_as_millis_u64() + 1000,
                 hash_algorithm: HashAlgorithm::Sha256,
                 onion_packet: None,
-                shared_secret: NO_SHARED_SECRET.clone(),
+                shared_secret: NO_SHARED_SECRET,
                 previous_tlc: None,
             },
         ))
@@ -421,7 +420,7 @@ async fn test_tlc_actor() {
                 expiry: now_timestamp_as_millis_u64() + 1000,
                 hash_algorithm: HashAlgorithm::Sha256,
                 onion_packet: None,
-                shared_secret: NO_SHARED_SECRET.clone(),
+                shared_secret: NO_SHARED_SECRET,
                 previous_tlc: None,
             },
         ))
@@ -463,12 +462,12 @@ fn test_tlc_state_v2() {
         expiry: now_timestamp_as_millis_u64() + 1000,
         hash_algorithm: HashAlgorithm::Sha256,
         onion_packet: None,
-        shared_secret: NO_SHARED_SECRET.clone(),
+        shared_secret: NO_SHARED_SECRET,
         tlc_id: TLCId::Offered(0),
         created_at: CommitmentNumbers::default(),
         removed_reason: None,
-        payment_preimage: None,
         previous_tlc: None,
+        removed_confirmed_at: None,
     };
     let mut add_tlc2 = TlcInfo {
         amount: 20000,
@@ -478,12 +477,12 @@ fn test_tlc_state_v2() {
         expiry: now_timestamp_as_millis_u64() + 2000,
         hash_algorithm: HashAlgorithm::Sha256,
         onion_packet: None,
-        shared_secret: NO_SHARED_SECRET.clone(),
+        shared_secret: NO_SHARED_SECRET,
         tlc_id: TLCId::Offered(1),
         created_at: CommitmentNumbers::default(),
         removed_reason: None,
-        payment_preimage: None,
         previous_tlc: None,
+        removed_confirmed_at: None,
     };
     tlc_state.add_offered_tlc(add_tlc1.clone());
     tlc_state.add_offered_tlc(add_tlc2.clone());

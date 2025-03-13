@@ -1,18 +1,20 @@
-mod cch;
-mod channel;
-mod config;
+pub mod cch;
+pub mod channel;
+pub mod config;
 #[cfg(debug_assertions)]
-mod dev;
-mod graph;
-mod info;
-mod invoice;
-mod payment;
-mod peer;
-mod utils;
+pub mod dev;
+pub mod graph;
+pub mod info;
+pub mod invoice;
+pub mod payment;
+pub mod peer;
+pub mod utils;
 
+use crate::ckb::CkbConfig;
 use crate::fiber::gossip::GossipMessageStore;
 use crate::rpc::info::InfoRpcServer;
 use crate::rpc::payment::PaymentRpcServer;
+use crate::watchtower::WatchtowerStore;
 use crate::{
     cch::CchMessage,
     fiber::{
@@ -78,17 +80,21 @@ async fn build_server(addr: &str) -> Server {
     }
 }
 
+#[allow(clippy::type_complexity)]
+#[allow(clippy::too_many_arguments)]
 pub async fn start_rpc<
     S: ChannelActorStateStore
         + InvoiceStore
         + NetworkGraphStateStore
         + GossipMessageStore
+        + WatchtowerStore
         + Clone
         + Send
         + Sync
         + 'static,
 >(
     config: RpcConfig,
+    ckb_config: Option<CkbConfig>,
     fiber_config: Option<FiberConfig>,
     network_actor: Option<ActorRef<NetworkActorMessage>>,
     cch_actor: Option<ActorRef<CchMessage>>,
@@ -115,7 +121,13 @@ pub async fn start_rpc<
     if let Some(network_actor) = network_actor {
         if config.is_module_enabled("info") {
             modules
-                .merge(InfoRpcServerImpl::new(network_actor.clone(), store.clone()).into_rpc())
+                .merge(
+                    InfoRpcServerImpl::new(
+                        network_actor.clone(),
+                        ckb_config.expect("ckb config should be set"),
+                    )
+                    .into_rpc(),
+                )
                 .unwrap();
         }
 
@@ -146,6 +158,7 @@ pub async fn start_rpc<
                         network_actor.clone(),
                         rpc_dev_module_commitment_txs
                             .expect("rpc_dev_module_commitment_txs should be set"),
+                        store.clone(),
                     )
                     .into_rpc(),
                 )

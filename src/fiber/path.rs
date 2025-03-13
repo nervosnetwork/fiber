@@ -1,5 +1,4 @@
-use ckb_types::packed::OutPoint;
-
+use super::graph::PathEdge;
 use super::types::Pubkey;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
@@ -16,8 +15,8 @@ pub(crate) struct NodeHeapElement {
     // The distance from source node to this node.
     pub distance: u128,
 
-    // The amount received by this node.
-    pub amount_received: u128,
+    // The amount to send to next node.
+    pub amount_to_send: u128,
 
     // The fee charged by this node.
     pub fee_charged: u128,
@@ -25,11 +24,11 @@ pub(crate) struct NodeHeapElement {
     // The probability of this node.
     pub probability: f64,
 
-    // The expected aboslute expiry timestamp (in milliseconds) for the incoming HTLC of this Node
+    // The expected absolute expiry timestamp (in milliseconds) for the incoming HTLC of this Node
     pub incoming_tlc_expiry: u64,
 
-    // next_hop is the edge this route comes from
-    pub next_hop: Option<(Pubkey, OutPoint)>,
+    // next_hop is the edge this route comes from, we also include the fee rate and tlc expiry delta.
+    pub next_hop: Option<PathEdge>,
 }
 
 impl Ord for NodeHeapElement {
@@ -57,7 +56,7 @@ impl PartialEq for NodeHeapElement {
         self.node_id == other.node_id
             && self.weight == other.weight
             && self.distance == other.distance
-            && self.amount_received == other.amount_received
+            && self.amount_to_send == other.amount_to_send
             && self.fee_charged == other.fee_charged
             && self.probability == other.probability
             && self.incoming_tlc_expiry == other.incoming_tlc_expiry
