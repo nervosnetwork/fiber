@@ -9,9 +9,11 @@ use crate::fiber::gossip::GossipActorMessage;
 use crate::fiber::graph::NetworkGraphStateStore;
 use crate::fiber::graph::PaymentSession;
 use crate::fiber::graph::PaymentSessionStatus;
+use crate::fiber::network::BuildRouterCommand;
 use crate::fiber::network::GossipMessageWithPeerId;
 use crate::fiber::network::NodeInfoResponse;
 use crate::fiber::network::PaymentCustomRecords;
+use crate::fiber::network::PaymentRouter;
 use crate::fiber::network::SendPaymentCommand;
 use crate::fiber::network::SendPaymentResponse;
 use crate::fiber::types::EcdsaSignature;
@@ -574,9 +576,21 @@ impl NetworkNode {
     pub async fn send_payment(
         &self,
         command: SendPaymentCommand,
-    ) -> std::result::Result<SendPaymentResponse, String> {
+    ) -> Result<SendPaymentResponse, String> {
         let message = |rpc_reply| -> NetworkActorMessage {
             NetworkActorMessage::Command(NetworkActorCommand::SendPayment(command, rpc_reply))
+        };
+
+        let res = call!(self.network_actor, message).expect("source_node alive");
+        eprintln!("result: {:?}", res);
+        res
+    }
+
+    pub async fn build_router(&self, command: BuildRouterCommand) -> Result<PaymentRouter, String> {
+        let message = |rpc_reply| -> NetworkActorMessage {
+            NetworkActorMessage::Command(NetworkActorCommand::BuildPaymentRouter(
+                command, rpc_reply,
+            ))
         };
 
         let res = call!(self.network_actor, message).expect("source_node alive");

@@ -1033,10 +1033,13 @@ where
         let route_to_self = source == target;
 
         let mut result = vec![];
+
         let mut nodes_visited = 0;
         let mut edges_expanded = 0;
         let mut nodes_heap = NodeHeap::new(nodes_len);
         let mut distances = HashMap::<Pubkey, NodeHeapElement>::new();
+        let mut hop_reqs = hop_reqs.clone();
+        hop_reqs.reverse();
 
         if amount == 0 {
             return Err(PathFindError::Amount(
@@ -1131,9 +1134,9 @@ where
 
             for (from, to, channel_info, channel_update) in self.get_node_inbounds(cur_hop.node_id)
             {
-                let index = cur_hop.adopted_outpoints.len();
+                let index = cur_hop.adopted_outpoints.len() + 1;
                 if let Some(hop_req) = hop_reqs.get(index) {
-                    if hop_req.pubkey != to
+                    if hop_req.pubkey != from
                         || hop_req
                             .channel_outpoint
                             .clone()

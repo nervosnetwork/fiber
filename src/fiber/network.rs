@@ -244,7 +244,7 @@ pub enum NetworkActorCommand {
     GetPayment(Hash256, RpcReplyPort<Result<SendPaymentResponse, String>>),
     // Build a payment router with the given hops
     BuildPaymentRouter(
-        BuildPaymentRouterCommand,
+        BuildRouterCommand,
         RpcReplyPort<Result<PaymentRouter, String>>,
     ),
 
@@ -351,8 +351,13 @@ pub struct HopRequire {
 
 #[serde_as]
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct BuildPaymentRouterCommand {
+pub struct BuildRouterCommand {
+    /// the amount of the payment, the unit is Shannons for non UDT payment
+    pub amount: Option<u128>,
+    #[serde_as(as = "Option<EntityHex>")]
+    pub udt_type_script: Option<Script>,
     pub hops_info: Vec<HopRequire>,
+    pub final_tlc_expiry_delta: Option<u64>,
 }
 
 #[serde_as]
@@ -1902,19 +1907,34 @@ where
 
     async fn on_build_payment_router(
         &self,
-        command: BuildPaymentRouterCommand,
+        command: BuildRouterCommand,
     ) -> Result<PaymentRouter, Error> {
-        let mut send_payment_command: SendPaymentCommand = Default::default();
-        if let Some(hop_require) = command.hops_info.last() {
-            send_payment_command.target_pubkey = Some(hop_require.pubkey);
-            send_payment_command.allow_self_payment = true;
-            send_payment_command.dry_run = true;
-            send_payment_command.keysend = Some(true);
-        }
-        let mut payment_data = SendPaymentData::new(send_payment_command).map_err(|e| {
+        // Only proceed if we have at least one hop requirement
+        let Some(last_hop) = command.hops_info.last() else {
+            return Err(Error::InvalidParameter(
+                "No hop requirements provided".to_string(),
+            ));
+        };
+
+        let source = self.network_graph.read().await.get_source_pubkey();
+
+        // Create payment command with defaults from the last hop
+        let payment_command = SendPaymentCommand {
+            target_pubkey: Some(last_hop.pubkey),
+            allow_self_payment: last_hop.pubkey == source,
+            dry_run: true,
+            amount: Some(command.amount.unwrap_or(1)),
+            keysend: Some(true),
+            udt_type_script: command.udt_type_script.clone(),
+            final_tlc_expiry_delta: command.final_tlc_expiry_delta,
+            ..Default::default()
+        };
+
+        let mut payment_data = SendPaymentData::new(payment_command).map_err(|e| {
             error!("Failed to validate payment request: {:?}", e);
             Error::InvalidParameter(format!("Failed to validate payment request: {:?}", e))
         })?;
+
         payment_data.hop_reqs = command.hops_info.clone();
 
         let mut payment_session = PaymentSession::new(payment_data.clone(), 0);

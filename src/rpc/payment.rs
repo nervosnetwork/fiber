@@ -1,6 +1,6 @@
 #[cfg(debug_assertions)]
 use crate::fiber::graph::SessionRoute;
-use crate::fiber::network::BuildPaymentRouterCommand;
+use crate::fiber::network::BuildRouterCommand;
 use crate::fiber::network::HopRequire;
 use crate::fiber::serde_utils::SliceHex;
 use crate::fiber::serde_utils::U32Hex;
@@ -92,7 +92,7 @@ pub struct SendPaymentCommandParams {
     /// the identifier of the payment target
     pub target_pubkey: Option<Pubkey>,
 
-    /// the amount of the payment
+    /// the amount of the payment, the unit is Shannons for non UDT payment
     #[serde_as(as = "Option<U128Hex>")]
     pub amount: Option<u128>,
 
@@ -164,6 +164,14 @@ pub struct SendPaymentCommandParams {
 #[serde_as]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BuildRouterParams {
+    /// the amount of the payment, the unit is Shannons for non UDT payment
+    /// If not set, the minimum routable amount is used
+    #[serde_as(as = "Option<U128Hex>")]
+    pub amount: Option<u128>,
+
+    /// udt type script for the payment router
+    pub udt_type_script: Option<Script>,
+
     /// A list of hops that defines the route. This does not include the source hop pubkey.
     /// A hop info is a tuple of pubkey and the channel(specified by channel funding tx) will be used.
     /// This is a strong restriction given on payment router, which means these specified hops and channels
@@ -297,8 +305,11 @@ where
     ) -> Result<BuildPaymentRouterResult, ErrorObjectOwned> {
         let message = |rpc_reply| -> NetworkActorMessage {
             NetworkActorMessage::Command(NetworkActorCommand::BuildPaymentRouter(
-                BuildPaymentRouterCommand {
+                BuildRouterCommand {
+                    amount: params.amount,
                     hops_info: params.hops_info.clone(),
+                    udt_type_script: params.udt_type_script.clone().map(|x| x.into()),
+                    final_tlc_expiry_delta: params.final_tlc_expiry_delta,
                 },
                 rpc_reply,
             ))
