@@ -894,12 +894,7 @@ async fn test_send_payment_build_router_basic() {
         .await
         .unwrap();
     eprintln!("result: {:?}", router);
-    let router_nodes: Vec<_> = router
-        .hops_info
-        .iter()
-        .map(|x| x.next_hop)
-        .filter_map(|x| x)
-        .collect();
+    let router_nodes: Vec<_> = router.hops_info.iter().filter_map(|x| x.next_hop).collect();
     eprintln!("router_nodes: {:?}", router_nodes);
     let amounts: Vec<_> = router.hops_info.iter().map(|x| x.amount).collect();
     assert_eq!(router_nodes, vec![node_1.pubkey]);
@@ -924,12 +919,7 @@ async fn test_send_payment_build_router_basic() {
         .await
         .unwrap();
     eprintln!("result: {:?}", router);
-    let router_nodes: Vec<_> = router
-        .hops_info
-        .iter()
-        .map(|x| x.next_hop)
-        .filter_map(|x| x)
-        .collect();
+    let router_nodes: Vec<_> = router.hops_info.iter().filter_map(|x| x.next_hop).collect();
     eprintln!("router_nodes: {:?}", router_nodes);
     let amounts: Vec<_> = router.hops_info.iter().map(|x| x.amount).collect();
     assert_eq!(router_nodes, vec![node_1.pubkey, node_2.pubkey]);

@@ -1639,16 +1639,18 @@ where
     async fn build_payment_route(
         &self,
         payment_session: &mut PaymentSession,
-        payment_data: &SendPaymentData,
     ) -> Result<Vec<PaymentHopData>, Error> {
         let graph = self.network_graph.read().await;
-        match graph.build_route(payment_data.clone()) {
+        let source = graph.get_source_pubkey();
+        match graph.build_route(payment_session.request.clone()) {
             Err(e) => {
                 let error = format!("Failed to build route, {}", e);
                 self.set_payment_fail_with_error(payment_session, &error);
                 return Err(Error::SendPaymentError(error));
             }
             Ok(hops) => {
+                payment_session.route =
+                    SessionRoute::new(source, payment_session.request.target_pubkey, &hops);
                 assert_ne!(hops[0].funding_tx_hash, Hash256::default());
                 return Ok(hops);
             }
@@ -1668,8 +1670,6 @@ where
         payment_session
             .session_key
             .copy_from_slice(session_key.as_ref());
-        payment_session.route =
-            SessionRoute::new(state.get_public_key(), payment_data.target_pubkey, &hops);
 
         let peeled_onion_packet = match PeeledPaymentOnionPacket::create(
             session_key,
@@ -1823,9 +1823,7 @@ where
                 payment_session.retried_times += 1;
             }
 
-            let hops_info = self
-                .build_payment_route(&mut payment_session, &payment_data)
-                .await?;
+            let hops_info = self.build_payment_route(&mut payment_session).await?;
 
             match self
                 .send_payment_onion_packet(state, &mut payment_session, &payment_data, hops_info)
@@ -1876,12 +1874,8 @@ where
         // for dry run, we only build the route and return the hops info,
         // will not store the payment session and send the onion packet
         if payment_data.dry_run {
-            let mut payment_session = PaymentSession::new(payment_data.clone(), 0);
-            let hops = self
-                .build_payment_route(&mut payment_session, &payment_data)
-                .await?;
-            payment_session.route =
-                SessionRoute::new(state.get_public_key(), payment_data.target_pubkey, &hops);
+            let mut payment_session = PaymentSession::new(payment_data, 0);
+            let _hops = self.build_payment_route(&mut payment_session).await?;
             return Ok(payment_session.into());
         }
 
@@ -1937,10 +1931,8 @@ where
 
         payment_data.hop_reqs = command.hops_info.clone();
 
-        let mut payment_session = PaymentSession::new(payment_data.clone(), 0);
-        let hops_info = self
-            .build_payment_route(&mut payment_session, &payment_data)
-            .await?;
+        let mut payment_session = PaymentSession::new(payment_data, 0);
+        let hops_info = self.build_payment_route(&mut payment_session).await?;
 
         Ok(PaymentRouter { hops_info })
     }
