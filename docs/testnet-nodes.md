@@ -27,7 +27,7 @@
    tar xzvf fnn_v0.4.0-x86_64-darwin-portable.tar.gz
    ```
 
-
+   
 
 2. Export the account private key to the fiber node’s ckb directory
 
@@ -52,25 +52,25 @@
    ```bash
    cp config/testnet/config.yml testnet-fnn/nodeA
    ```
+   
+   
+   
+4. Fund nodeA’s address with 10000ckb and 20RUSD via faucet
 
-
-
-4. Fund nodeA’s address with 10000ckb and 100RUSD via faucet
-
-   The RUSD faucet cannot directly fill an address, so you can first claim 100RUSD through a wallet like joyid, then transfer it to nodeA’s address from [the joyid wallet page](https://testnet.joyid.dev/).
+   The RUSD faucet cannot directly fill an address, so you can first claim 20RUSD through a wallet like joyid, then transfer it to nodeA’s address from [the joyid wallet page](https://testnet.joyid.dev/).
 
    - ckb: https://faucet.nervos.org
 
    - RUSD: https://testnet0815.stablepp.xyz/faucet
 
-
-
+     
+   
 5. Start the node A
 
    ```bash
    RUST_LOG=info ./fnn -c testnet-fnn/nodeA/config.yml -d testnet-fnn/nodeA > testnet-fnn/nodeA/a.log 2>&1 &
    ```
-
+   
 
 
 
@@ -81,7 +81,7 @@
 
    ```bash
    curl -s --location 'http://127.0.0.1:8227' --header 'Content-Type: application/json' --data '{
-       "id": 2,
+       "id": 1,
        "jsonrpc": "2.0",
        "method": "connect_peer",
        "params": [
@@ -98,9 +98,9 @@
 
 
 
-2. Establish a channel with 500ckb: nodeA (500ckb) ⟺ node1 (0)
+2. Establish a channel with 500ckb: nodeA (500ckb) ⟺ node1 (250ckb)
 
-   _Node1 has auto_accept_channel_ckb_funding_amount set at 500ckb, so please input 500ckb or more._
+   _Node1 has open_channel_auto_accept_min_ckb_funding_amount set at 438ckb, so please input 500ckb or more._
 
    ```bash
    curl -s --location 'http://127.0.0.1:8227' --header 'Content-Type: application/json' --data '{
@@ -138,17 +138,29 @@
    }'
    ```
 
-   Wait until the state_name changes to CHANNEL_READY.
-
+   Wait until the state_name changes to `CHANNEL_READY`.
+   
    **Note: When the channel has just changed to the CHANNEL_READY state and you attempt to use send_payment, you may still encounter an error: `Failed to build route`. It is advisable to wait for some time before trying again.**
-
+   
    ```json
    {"jsonrpc":"2.0","result":{"channels":[{"channel_id":"0x26ce85d57fb4a1a826cbf4862358862317a83b775090625550d8be12c6ce9569","is_public":true,"channel_outpoint":"0x9bb2a8a4bebaf793a235ba2ec87051ae0018b58736b6741df74009ca8101cb8d00000000","peer_id":"QmXen3eUHhywmutEzydCsW4hXBoeVmdET2FJvMX69XJ1Eo","funding_udt_type_script":null,"state":{"state_name":"CHANNEL_READY","state_flags":[]},"local_balance":"0xa32aef600","offered_tlc_balance":"0x0","remote_balance":"0x460913c00","received_tlc_balance":"0x0","latest_commitment_transaction_hash":"0x18ef541a5a195c0ea4715a7783964b3c4be8fba6bd25542e626f91ef1673e3e4","created_at":"0x195892d237f","enabled":true,"tlc_expiry_delta":"0x5265c00","tlc_fee_proportional_millionths":"0x3e8"}]},"id":3
    ```
 
+   **Why is the local_balance 0xa32aef600 (43,800,000,000) and the remote_balance 0x460913c00 (18,800,000,000)?**
+
+	This channel was established with nodeA contributing 500 ckb and node1 contributing 250 ckb.
+
+	Since each cell requires a minimum of 62 ckb, this amount is reserved to ensure that there are sufficient funds to cover cell occupancy costs during on-chain settlement (when the channel closes). These 62 ckb will be returned to their respective nodes at the time of on-chain settlement.
+
+	Actual available funds in the channel:
+
+	nodeA: 500 ckb - 62 ckb = 438 ckb (local_balance is 0xa32aef600)
+
+	node1: 250 ckb - 62 ckb = 188 ckb (remote_balance is 0x460913c00)
 
 
-4. Call the new_invoice API on node2 to generate an invoice
+
+4. Call the `new_invoice` API on node2 to generate an invoice
 
    Set the amount to 0x5f5e100 (100,000,000 shannon), which is equivalent to 1 CKB. The payment_preimage should be a unique 32-byte hexadecimal number.
 
@@ -157,11 +169,11 @@
    payment_preimage="0x$(openssl rand -hex 32)"
    echo $payment_preimage
    ```
-
+   
    ```bash
    0xbc03e507befb33cfd5953a2e7046428e69cb8f0ade65c05d3661128aa4b4fff9
    ```
-
+   
    ```bash
    curl -s --location 'http://18.163.221.211:8227' --header 'Content-Type: application/json' --data '{
        "id": 4,
@@ -180,23 +192,23 @@
        ]
    }'
    ```
-
+   
    ```json
    {"jsonrpc":"2.0","result":{"invoice_address":"fibt1000000001peseucdphcxgfw0pnm6vk3uftyc36dakyjchs0p0unk9gaug0h36uhafww9pvy38gcesad084rx48xgx9xts49yp9fn87yfchld3l3qu5n0pfzvvy8c9g7dksrcxyrtk3hymspezmvtx4vg5v6uvt6tyxmq5uhrfejpk0j6wue9ef2pa8mzmrgqaz3wucutujtjcmq2x8f36faxuctg62ny73mhaj7rpwqe0ns0wp5wr4tku7qcl9r4a3swluvd2jqqwmsl7wsz4cwvhhe7p8tr7hz5qkqwr3r38hukckqzjtmntd8zrz0ywux4u8df005hl76thzsp9hz7dyefzk4mqhx4x9el98zjzmhcveqpfeur79","invoice":{"currency":"Fibt","amount":"0x5f5e100","signature":"0e1b101f1e0e100215180e0c1717191e01070b031e1702140016000e0311031107171c1618160002120b1b130b0d070203020f040e1c06151c070d090f0f14171f1e1a0b170210010517021e0d0419090216151b001706150605191f05070212021b17180c190001","data":{"timestamp":"0x1958944fa64","payment_hash":"0xafb604f74c28009732ed4c82983cf1efaddf62ee36442f360fb4a8c79b845432","attrs":[{"Description":"test invoice generated by node2"},{"ExpiryTime":{"secs":3600,"nanos":0}},{"HashAlgorithm":"sha256"},{"PayeePublicKey":"0291a6576bd5a94bd74b27080a48340875338fff9f6d6361fe6b8db8d0d1912fcc"}]}}},"id":4}
    ```
-
-   Record the invoice_address from the response.
-
-
-
+   
+   Record the `invoice_address` from the response.
+   
+   
+   
 5. Before nodeA sends the payment, first query the local_balance and remote_balance of each channel
 
    nodeA ⟺ node1
 
    As shown in Step 3, the response included: `{"local_balance":"0xa32aef600","remote_balance":"0x460913c00"}`
-
+   
    node1 ⟺ node2
-
+   
    ```bash
    curl -s --location 'http://18.162.235.225:8227' --header 'Content-Type: application/json' --data '{
        "id": 5,
@@ -245,7 +257,7 @@
    {"jsonrpc":"2.0","result":{"payment_hash":"0xafb604f74c28009732ed4c82983cf1efaddf62ee36442f360fb4a8c79b845432","status":"Created","created_at":"0x1958957cc7d","last_updated_at":"0x1958957cc7d","failed_error":null,"fee":"0x186a0"},"id":6}
    ```
 
-​
+​	
 
 7. Repeat Steps 4 and 6 two more times
 
@@ -265,31 +277,31 @@
 
    All other entries remain unchanged.
 
+   
 
+   This means the channel balances have changed as follows before and after the payments:
 
-This means the channel balances have changed as follows before and after the payments:
+   - Before payments
 
-- Before payments
+     nodeA (43800000000) ⟺ node1 (18800000000)
 
-  nodeA (43800000000) ⟺ node1 (18800000000)
+     node1 (4993800000000) ⟺ node2 (5018800000000)
 
-  node1 (4993800000000) ⟺ node2 (5018800000000)
+   - After payments
 
-- After payments
+     nodeA (43499700000) ⟺ node1 (19100300000)
 
-  nodeA (43499700000) ⟺ node1 (19100300000)
+     node1 (4993500000000) ⟺ node2 (5019100000000)
 
-  node1 (4993500000000) ⟺ node2 (5019100000000)
+   Funds changes:
 
-Funds changes:
-
-​	nodeA: 43499700000 - 43800000000 = -300300000
-
-​	node1: 4993500000000 + 19100300000 - 4993800000000 - 18800000000 = 300000
-
-​	node2: 5019100000000 - 5018800000000 = 300000000
-
-**Conclusion: Three CKB payments of 100,000,000 shannon each from nodeA → node1 → node2 were successfully completed. The intermediate node (node1) earned a total fee of 300,000 shannon.**
+   ​	nodeA: 43499700000 - 43800000000 = -300300000 
+   
+   ​	node1: 4993500000000 + 19100300000 - 4993800000000 - 18800000000 = 300000  
+   
+   ​	node2: 5019100000000 - 5018800000000 = 300000000  
+   
+   **Conclusion: Three CKB payments of 100,000,000 shannon each from nodeA → node1 → node2 were successfully completed. The intermediate node (node1) earned a total fee of 300,000 shannon.**
 
 
 
@@ -322,18 +334,18 @@ Funds changes:
 
    You can see on the CKB explorer that nodeA’s address received a new transaction of +496.99699462 CKB.
    This indicates that multiple off-chain CKB transfers through Fiber nodes are eventually settled on-chain upon channel closure via the shutdown_channel request.
-
-
+   
+   
 
 ## Establishing a UDT Channel with Public Node 1
 
 1. Establish a network connection between nodeA and node1
 
+   
 
+2.  Establish a channel with 20 RUSD: nodeA (20 RUSD) ⟺ node1 (0)
 
-2.  Establish a channel with 100 RUSD: nodeA (100 RUSD) ⟺ node1 (0)
-
-_Please pass in a funding_amount of 100 RUSD or more_
+   _Node1 has auto_accept_amount for RUSD set to 20 RUSD, so please input 20 RUSD or more as the funding_amount._
 
    ```bash
    curl -s --location 'http://127.0.0.1:8227' --header 'Content-Type: application/json' --data '{
@@ -359,7 +371,7 @@ _Please pass in a funding_amount of 100 RUSD or more_
    {"jsonrpc":"2.0","result":{"temporary_channel_id":"0xa3137338377b67ea90c2f2c15b7d60ad27b3e891095f4b093772d7db3aa79344"},"id":2}
    ```
 
-
+   
 
 3. Query the channels between nodeA and node1
 
@@ -383,7 +395,7 @@ _Please pass in a funding_amount of 100 RUSD or more_
 
 
 
-4. Call the new_invoice API on node2 to generate an invoice
+4. Call the `new_invoice` API on node2 to generate an invoice
 
    Set the amount to 0x5f5e100 (100,000,000), which is equivalent to 1 RUSD.
 
@@ -414,16 +426,16 @@ _Please pass in a funding_amount of 100 RUSD or more_
    ```
 
    ```json
-   {"jsonrpc":"2.0","result":{"invoice_address":"fibt1000000001px88ja42xcmczxzat8lhtuq9f29ga8x244qk737nl4r7lq8aw7y7puhjn6jp50xsd2c6ndfxkmn5wnl4z8clk7fej9trwx0gjlmtvnj2wqwlvcu0eekzqvtehlc42t8lpstmgc7ntskh5ef36f8hgvck8c9pescktlx05fpuaceews94kvyrvgf87gvd9wnmh86puzyz2vp6h6jppt8lsq5u8tc87y6szha9587f90dmlmwt5mtetxz9ekukxu6x7s2fyuuy2re0etzzksqnt8rtr5925qypz2224j5xf56nlscnmtvcvywdxg40hsy5w5xt40d5cdest3kvhqswfftfc3qqs7plhlk7m5n9hyzqws9qlxw2huurg7l6c4q9evyg7fljcl3cqh3h3ecpg3fue3cq4slpxapvc2uye6jl77sfcflc8jf8fvr4qwly9wxuyehqf573hu454qy92wqke0hdgrvm7y83sgspn4a29h69s7ucp4cedle","invoice":{"currency":"Fibt","amount":"0x5f5e100","signature":"171117111918010811091c1911180015101f01061d010c180a1c04191a121f1e1e100918091f1807120907090c0315000e1f04050e061c0419170009141e11171c1514150004050a0e0016190f170d08030c1b1e0407111008100113151d0a05171a05101e1c1801","data":{"timestamp":"0x1958986f74e","payment_hash":"0x9d765b2d4cddf925ea9132acf48916144f12cbdb3208908ca0ca7fa53962f3f7","attrs":[{"Description":"test invoice generated by node2"},{"ExpiryTime":{"secs":3600,"nanos":0}},{"UdtScript":"0x550000001000000030000000310000001142755a044bf2ee358cba9f2da187ce928c91cd4dc8692ded0337efa677d21a0120000000878fcc6f1f08d48e87bb1c3b3d5083f23f8a39c5d5c764f253b55b998526439b"},{"HashAlgorithm":"sha256"},{"PayeePublicKey":"0291a6576bd5a94bd74b27080a48340875338fff9f6d6361fe6b8db8d0d1912fcc"}]}}},"id":4}
+   {"jsonrpc":"2.0","result":{"invoice_address":"fibt1000000001px88ja42xcmczxzat8lhtmtdvn00jm73kuaqh9ezmnn7cpjpsxzqe06zdj3z07kuvmfe05qe48llynzllk24r9vfnmc7vm4l5jex7mlrtqmrrc6wte3kccg5qaewuxv7s97t5z3qpnq9l75a5dwllxs2845ftl263y0z3wj3lupp6xph5t0gceeylzg85r8htfxrct2c84zt56dkzf3a5slg6zye2fgs0y63k3kale0z8p8mpawlrkacj4xezzhpzv2fsfq4ke6smjv5u5nzg0ylmth4wh4eth2zykmymnqp50hzxpyqq984ctt7khg04eyz49pn55gd5vjd6pzqq7ec4v7z68kmz8s3ppwduwr0m20t3rtgnne798u7wk6ep0w5lr2lp7svlskm59h0ckm7ufv22p2eyfxum638nyny06zyg9yjjj40mrmh6yyhrpzeap2nhf0lujwefjmdymhsl87mzdh2464jadgaj4ckhudqz4e2cp4ymhnj","invoice":{"currency":"Fibt","amount":"0x5f5e100","signature":"161b1405170f18161b1e1c090c0a0a010a190409061c1b1a1107130413040f1a0204080504121212150f1b031b171a040417030102191d010a1317090f1f1c120e1909121b0d041b17101f071e1b020d170a151a15121d0d081d12151816171c0d000215190a1801","data":{"timestamp":"0x1958e785913","payment_hash":"0x6a356ad088b704a9c53728029bd968e894daf5adab1da838bf06f6755239b005","attrs":[{"Description":"test invoice generated by node2"},{"ExpiryTime":{"secs":3600,"nanos":0}},{"UdtScript":"0x550000001000000030000000310000001142755a044bf2ee358cba9f2da187ce928c91cd4dc8692ded0337efa677d21a0120000000878fcc6f1f08d48e87bb1c3b3d5083f23f8a39c5d5c764f253b55b998526439b"},{"HashAlgorithm":"sha256"},{"PayeePublicKey":"0291a6576bd5a94bd74b27080a48340875338fff9f6d6361fe6b8db8d0d1912fcc"}]}}},"id":4}
    ```
 
-
+   
 
 5. Before nodeA sends the payment, first query the local_balance and remote_balance of each channel
 
    nodeA ⟺ node1
 
-   As shown in Step 3, the response included: `{"local_balance":"0x2540be400","remote_balance":"0x0"}`
+   As shown in Step 3, the response included: `{"local_balance":"0x77359400","remote_balance":"0x0"}`
 
    node1 ⟺ node2
 
@@ -441,13 +453,13 @@ _Please pass in a funding_amount of 100 RUSD or more_
    ```
    Find all entries in the response where `funding_udt_type_script` is not null.
    ```json
-   {"local_balance":"0x173c0e06bb","remote_balance":"0xc68e145"}
+   {"local_balance":"0x172a2c63bb","remote_balance":"0x1e4a8445"}
    {"local_balance":"0x1748630df7","remote_balance":"0x13da09"}
    {"local_balance":"0xa38b9d","remote_balance":"0x1747d35c63"}
    {"local_balance":"0xc505f","remote_balance":"0x17486a97a1"}
    ```
 
-
+   
 
 6. Send a send_payment request to nodeA to pay node2
 
@@ -458,63 +470,63 @@ _Please pass in a funding_amount of 100 RUSD or more_
        "method": "send_payment",
        "params": [
            {
-               "invoice": "fibt1000000001px88ja42xcmczxzat8lhtuq9f29ga8x244qk737nl4r7lq8aw7y7puhjn6jp50xsd2c6ndfxkmn5wnl4z8clk7fej9trwx0gjlmtvnj2wqwlvcu0eekzqvtehlc42t8lpstmgc7ntskh5ef36f8hgvck8c9pescktlx05fpuaceews94kvyrvgf87gvd9wnmh86puzyz2vp6h6jppt8lsq5u8tc87y6szha9587f90dmlmwt5mtetxz9ekukxu6x7s2fyuuy2re0etzzksqnt8rtr5925qypz2224j5xf56nlscnmtvcvywdxg40hsy5w5xt40d5cdest3kvhqswfftfc3qqs7plhlk7m5n9hyzqws9qlxw2huurg7l6c4q9evyg7fljcl3cqh3h3ecpg3fue3cq4slpxapvc2uye6jl77sfcflc8jf8fvr4qwly9wxuyehqf573hu454qy92wqke0hdgrvm7y83sgspn4a29h69s7ucp4cedle"
+               "invoice": "fibt1000000001px88ja42xcmczxzat8lhtmtdvn00jm73kuaqh9ezmnn7cpjpsxzqe06zdj3z07kuvmfe05qe48llynzllk24r9vfnmc7vm4l5jex7mlrtqmrrc6wte3kccg5qaewuxv7s97t5z3qpnq9l75a5dwllxs2845ftl263y0z3wj3lupp6xph5t0gceeylzg85r8htfxrct2c84zt56dkzf3a5slg6zye2fgs0y63k3kale0z8p8mpawlrkacj4xezzhpzv2fsfq4ke6smjv5u5nzg0ylmth4wh4eth2zykmymnqp50hzxpyqq984ctt7khg04eyz49pn55gd5vjd6pzqq7ec4v7z68kmz8s3ppwduwr0m20t3rtgnne798u7wk6ep0w5lr2lp7svlskm59h0ckm7ufv22p2eyfxum638nyny06zyg9yjjj40mrmh6yyhrpzeap2nhf0lujwefjmdymhsl87mzdh2464jadgaj4ckhudqz4e2cp4ymhnj"
            }
        ]
    }'
    ```
 
    ```json
-   {"jsonrpc":"2.0","result":{"payment_hash":"0x9d765b2d4cddf925ea9132acf48916144f12cbdb3208908ca0ca7fa53962f3f7","status":"Created","created_at":"0x195898ec027","last_updated_at":"0x195898ec027","failed_error":null,"fee":"0x186a0"},"id":6}
+   {"jsonrpc":"2.0","result":{"payment_hash":"0x6a356ad088b704a9c53728029bd968e894daf5adab1da838bf06f6755239b005","status":"Created","created_at":"0x1958e7b66b5","last_updated_at":"0x1958e7b66b5","failed_error":null,"fee":"0x186a0"},"id":6}
    ```
 
-
+      
 
 7. Repeat Steps 4 and 6 two more times
 
    Performing two additional `new_invoice` and `send_payment` requests, keeping the amount set to 0x5f5e100.
 
-
+      
 
 8. Query the local_balance and remote_balance of each channel again
 
    nodeA ⟺ node1
 
-   Balances changed from`{"local_balance":"0x2540be400","remote_balance":"0x0"}`to`{"local_balance":"0x24225ad20","remote_balance":"0x11e636e0"}`
+   Balances changed from`{"local_balance":"0x77359400","remote_balance":"0x0"}`to`{"local_balance":"0x654f5d20","remote_balance":"0x11e636e0"}`
 
    node1 ⟺ node2
 
-   Balances changed from`{"local_balance":"0x173c0e06bb","remote_balance":"0xc68e145"}`to`{"local_balance":"0x172a2c63bb","remote_balance":"0x1e4a8445"}`
+   Balances changed from`{"local_balance":"0x172a2c63bb","remote_balance":"0x1e4a8445"}`to`{"local_balance":"0x17184ac0bb","remote_balance":"0x302c2745"}`
 
    All other entries remain unchanged.
 
+   
 
+   This means the channel balances have changed as follows before and after the payments:
 
-This means the channel balances have changed as follows before and after the payments:
+   - Before payments
 
-- Before payments
+     nodeA (2000000000) ⟺ node1 (0)
 
-  nodeA (10000000000) ⟺ node1 (0)
+     node1 (99491799995) ⟺ node2 (508200005)
 
-  node1 (99791799995) ⟺ node2 (208200005)
+   - After payments
 
-- After payments
+     nodeA (1699700000) ⟺ node1 (300300000)
 
-  nodeA (9699700000) ⟺ node1 (300300000)
+     node1 (99191799995) ⟺ node2 (808200005)
 
-  node1 (99491799995) ⟺ node2 (508200005)
+   Funds changes:
 
-Funds changes:
+   ​	nodeA: 1699700000 - 2000000000 = -300300000
 
-​	nodeA: 9699700000 - 10000000000 = -300300000
+   ​	node1: 99191799995 + 300300000 - 99491799995 = 300000
 
-​	node1: 99491799995 + 300300000 - 99791799995 = 300000
+   ​	node2: 808200005 - 508200005 = 300000000
 
-​	node2: 508200005 - 208200005 = 300000000
+   **Conclusion: Three UDT payments of 100,000,000 each from nodeA → node1 → node2 were successfully completed. The intermediate node (node1) earned a total fee of 300,000.**
 
-**Conclusion: Three UDT payments of 100,000,000 each from nodeA → node1 → node2 were successfully completed. The intermediate node (node1) earned a total fee of 300,000.**
-
-
+      
 
 9. Close the channel between nodeA and node1
 
@@ -541,5 +553,5 @@ Funds changes:
    {"jsonrpc":"2.0","result":null,"id":9}
    ```
 
-   You can see on the CKB explorer that nodeA’s address received a new transaction of +96.997 RUSD.
+   You can see on the CKB explorer that nodeA’s address received a new transaction of +16.997 RUSD.
    This indicates that multiple off-chain UDT transfers through Fiber nodes are eventually settled on-chain upon channel closure via the shutdown_channel request.
