@@ -1,7 +1,9 @@
 #[cfg(debug_assertions)]
 use crate::fiber::graph::SessionRoute;
+use crate::fiber::network::BuildPaymentRouterCommand;
 use crate::fiber::serde_utils::SliceHex;
 use crate::fiber::serde_utils::U32Hex;
+use crate::fiber::types::PaymentHopData;
 use crate::fiber::{
     channel::ChannelActorStateStore,
     graph::PaymentSessionStatus,
@@ -186,6 +188,29 @@ impl From<HopHint> for NetworkHopHint {
     }
 }
 
+#[serde_as]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BuildRouterParams {
+    /// A list of hops that defines the route. This does not include the source hop pubkey.
+    /// A hop info is a tuple of pubkey and the channel(specified by channel funding tx) will be used.
+    /// This is a strong restriction given on payment router, which means these specified hops and channels
+    /// must be adapted in the router. This is different from hop hints, which maybe ignored by find path.
+    /// If channel is not specified, find path algorithm will pick a channel within these two peers.
+    ///
+    /// An error will be returned if there is no router could be build from given hops and channels
+    hops_info: Vec<(Pubkey, Option<Hash256>)>,
+
+    /// the TLC expiry delta should be used to set the timelock for the final hop, in milliseconds
+    #[serde_as(as = "Option<U64Hex>")]
+    pub final_tlc_expiry_delta: Option<u64>,
+}
+
+#[serde_as]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct BuildPaymentRouterResult {
+    hops_info: Vec<PaymentHopData>,
+}
+
 /// RPC module for channel management.
 #[rpc(server)]
 trait PaymentRpc {
@@ -202,6 +227,13 @@ trait PaymentRpc {
         &self,
         params: GetPaymentCommandParams,
     ) -> Result<GetPaymentCommandResult, ErrorObjectOwned>;
+
+    /// Builds a router with a list of pubkeys and required channels.
+    #[method(name = "build_router")]
+    async fn build_router(
+        &self,
+        params: BuildRouterParams,
+    ) -> Result<BuildPaymentRouterResult, ErrorObjectOwned>;
 }
 
 pub(crate) struct PaymentRpcServerImpl<S> {
@@ -286,6 +318,24 @@ where
                 .map(|records| PaymentCustomRecords { data: records.data }),
             #[cfg(debug_assertions)]
             router: response.router,
+        })
+    }
+
+    async fn build_router(
+        &self,
+        params: BuildRouterParams,
+    ) -> Result<BuildPaymentRouterResult, ErrorObjectOwned> {
+        let message = |rpc_reply| -> NetworkActorMessage {
+            NetworkActorMessage::Command(NetworkActorCommand::BuildPaymentRouter(
+                BuildPaymentRouterCommand {
+                    hops_info: params.hops_info.clone(),
+                },
+                rpc_reply,
+            ))
+        };
+
+        handle_actor_call!(self.actor, message, params).map(|response| BuildPaymentRouterResult {
+            hops_info: response.hops_info,
         })
     }
 }

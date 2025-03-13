@@ -346,7 +346,7 @@ pub struct BuildPaymentRouterCommand {
 #[serde_as]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PaymentRouter {
-    pub hops_info: Vec<(Pubkey, Hash256)>,
+    pub hops_info: Vec<PaymentHopData>,
 }
 
 #[serde_as]
