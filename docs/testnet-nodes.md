@@ -116,9 +116,10 @@
        ]
    }'
    ```
-      ```json
+   
+   ```json
    {"jsonrpc":"2.0","result":{"temporary_channel_id":"0x30089ec4c8ce1e1d4930220c2bff856eec7ab44550e15b76d62489fd42eaafe8"},"id":2}
-      ```
+   ```
 
 
 
@@ -257,7 +258,7 @@
    {"jsonrpc":"2.0","result":{"payment_hash":"0xafb604f74c28009732ed4c82983cf1efaddf62ee36442f360fb4a8c79b845432","status":"Created","created_at":"0x1958957cc7d","last_updated_at":"0x1958957cc7d","failed_error":null,"fee":"0x186a0"},"id":6}
    ```
 
-​	
+
 
 7. Repeat Steps 4 and 6 two more times
 
@@ -343,7 +344,7 @@
 
    
 
-2.  Establish a channel with 20 RUSD: nodeA (20 RUSD) ⟺ node1 (0)
+2. Establish a channel with 20 RUSD: nodeA (20 RUSD) ⟺ node1 (0)
 
    _Node1 has auto_accept_amount for RUSD set to 20 RUSD, so please input 20 RUSD or more as the funding_amount._
 
