@@ -1,20 +1,20 @@
 #[cfg(debug_assertions)]
 use crate::fiber::graph::SessionRoute;
 use crate::fiber::network::BuildPaymentRouterCommand;
+use crate::fiber::network::HopRequire;
 use crate::fiber::serde_utils::SliceHex;
 use crate::fiber::serde_utils::U32Hex;
 use crate::fiber::types::PaymentHopData;
 use crate::fiber::{
     channel::ChannelActorStateStore,
     graph::PaymentSessionStatus,
-    network::{HopHint as NetworkHopHint, SendPaymentCommand},
-    serde_utils::{EntityHex, U128Hex, U64Hex},
+    network::{HopHint, SendPaymentCommand},
+    serde_utils::{U128Hex, U64Hex},
     types::{Hash256, Pubkey},
     NetworkActorCommand, NetworkActorMessage,
 };
 use crate::{handle_actor_call, log_and_error};
 use ckb_jsonrpc_types::Script;
-use ckb_types::packed::OutPoint;
 use jsonrpsee::{
     core::async_trait,
     proc_macros::rpc,
@@ -161,33 +161,6 @@ pub struct SendPaymentCommandParams {
     pub dry_run: Option<bool>,
 }
 
-/// A hop hint is a hint for a node to use a specific channel.
-#[serde_as]
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct HopHint {
-    /// The public key of the node
-    pub pubkey: Pubkey,
-    /// The outpoint of the channel
-    #[serde_as(as = "EntityHex")]
-    pub channel_outpoint: OutPoint,
-
-    /// The fee rate to use this hop to forward the payment.
-    pub(crate) fee_rate: u64,
-    /// The TLC expiry delta to use this hop to forward the payment.
-    pub(crate) tlc_expiry_delta: u64,
-}
-
-impl From<HopHint> for NetworkHopHint {
-    fn from(hop_hint: HopHint) -> Self {
-        NetworkHopHint {
-            pubkey: hop_hint.pubkey,
-            channel_outpoint: hop_hint.channel_outpoint,
-            fee_rate: hop_hint.fee_rate,
-            tlc_expiry_delta: hop_hint.tlc_expiry_delta,
-        }
-    }
-}
-
 #[serde_as]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BuildRouterParams {
@@ -198,7 +171,7 @@ pub struct BuildRouterParams {
     /// If channel is not specified, find path algorithm will pick a channel within these two peers.
     ///
     /// An error will be returned if there is no router could be build from given hops and channels
-    hops_info: Vec<(Pubkey, Option<Hash256>)>,
+    hops_info: Vec<HopRequire>,
 
     /// the TLC expiry delta should be used to set the timelock for the final hop, in milliseconds
     #[serde_as(as = "Option<U64Hex>")]
@@ -272,10 +245,7 @@ where
                     udt_type_script: params.udt_type_script.clone().map(|s| s.into()),
                     allow_self_payment: params.allow_self_payment.unwrap_or(false),
                     custom_records: params.custom_records.clone().map(|records| records.into()),
-                    hop_hints: params
-                        .hop_hints
-                        .clone()
-                        .map(|hints| hints.into_iter().map(|hint| hint.into()).collect()),
+                    hop_hints: params.hop_hints.clone(),
                     dry_run: params.dry_run.unwrap_or(false),
                 },
                 rpc_reply,

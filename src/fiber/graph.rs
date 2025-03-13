@@ -2,7 +2,7 @@ use super::channel::{ChannelActorState, ChannelActorStateStore, ChannelTlcInfo};
 use super::config::AnnouncedNodeName;
 use super::gossip::GossipMessageStore;
 use super::history::{Direction, InternalResult, PaymentHistory, TimedResult};
-use super::network::{get_chain_hash, HopHint, SendPaymentData, SendPaymentResponse};
+use super::network::{get_chain_hash, HopHint, HopRequire, SendPaymentData, SendPaymentResponse};
 use super::path::NodeHeap;
 use super::types::{
     BroadcastMessageID, BroadcastMessageWithTimestamp, ChannelAnnouncement, ChannelUpdate, Hash256,
@@ -871,6 +871,7 @@ where
             payment_data.tlc_expiry_limit,
             allow_self_payment,
             payment_data.hop_hints,
+            payment_data.hop_reqs,
         )?;
         assert!(!route.is_empty());
 
@@ -920,7 +921,6 @@ where
     #[allow(clippy::too_many_arguments)]
     fn eval_and_update(
         &self,
-
         // The channel outpoint of the edge.
         channel_outpoint: &OutPoint,
         // The capacity of the channel.
@@ -942,11 +942,17 @@ where
         cur_probability: f64,
         // The weight accumulated from the payment path from current target to the final payee.
         cur_weight: u128,
+        // The current adapted channel outpoint
+        adapted_channel_outpoints: &HashSet<OutPoint>,
         // The distances from nodes to the final payee.
         distances: &mut HashMap<Pubkey, NodeHeapElement>,
         // The priority queue of nodes to be visited (sorted by distance and probability).
         nodes_heap: &mut NodeHeap,
     ) {
+        if adapted_channel_outpoints.contains(channel_outpoint) {
+            return;
+        }
+
         let probability = cur_probability
             * self.history.eval_probability(
                 from,
@@ -975,6 +981,11 @@ where
         }
         let total_amount = amount_to_send + fee;
         let total_tlc_expiry = incoming_tlc_expiry + tlc_expiry_delta;
+        let adopted_outpoints = adapted_channel_outpoints
+            .iter()
+            .cloned()
+            .chain(std::iter::once(channel_outpoint.clone()))
+            .collect();
         let node = NodeHeapElement {
             node_id: from,
             weight,
@@ -983,6 +994,7 @@ where
             incoming_tlc_expiry: total_tlc_expiry,
             fee_charged: fee,
             probability,
+            adopted_outpoints,
             next_hop: Some(PathEdge {
                 target: to,
                 channel_outpoint: channel_outpoint.clone(),
@@ -1014,6 +1026,7 @@ where
         tlc_expiry_limit: u64,
         allow_self: bool,
         hop_hints: Vec<HopHint>,
+        hop_reqs: Vec<HopRequire>,
     ) -> Result<Vec<PathEdge>, PathFindError> {
         let started_time = std::time::Instant::now();
         let nodes_len = self.nodes.len();
@@ -1043,14 +1056,13 @@ where
         let mut last_edge = None;
 
         if route_to_self {
-            let (edge, t, e, f) = self.adjust_target_for_route_self(
+            let (edge, new_target, e, f) = self.adjust_target_for_route_self(
                 &hop_hints,
                 amount,
                 final_tlc_expiry_delta,
                 source,
             )?;
-            assert_ne!(target, t);
-            target = t;
+            target = new_target;
             expiry += e;
             amount += f;
             last_edge = Some(edge);
@@ -1085,6 +1097,7 @@ where
                             tlc_expiry_delta,
                             1.0,
                             0,
+                            &HashSet::new(),
                             &mut distances,
                             &mut nodes_heap,
                         );
@@ -1110,6 +1123,7 @@ where
             probability: 1.0,
             next_hop: None,
             incoming_tlc_expiry: expiry,
+            adopted_outpoints: HashSet::new(),
         });
 
         while let Some(cur_hop) = nodes_heap.pop() {
@@ -1117,6 +1131,19 @@ where
 
             for (from, to, channel_info, channel_update) in self.get_node_inbounds(cur_hop.node_id)
             {
+                let index = cur_hop.adopted_outpoints.len();
+                if let Some(hop_req) = hop_reqs.get(index) {
+                    if hop_req.pubkey != to
+                        || hop_req
+                            .channel_outpoint
+                            .clone()
+                            .unwrap_or(channel_info.channel_outpoint.clone())
+                            != channel_info.channel_outpoint
+                    {
+                        continue;
+                    }
+                }
+
                 let is_initial = from == source;
 
                 assert_eq!(to, cur_hop.node_id);
@@ -1209,6 +1236,7 @@ where
                     expiry_delta,
                     cur_hop.probability,
                     cur_hop.weight,
+                    &cur_hop.adopted_outpoints,
                     &mut distances,
                     &mut nodes_heap,
                 );

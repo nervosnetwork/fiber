@@ -221,6 +221,7 @@ impl MockNetworkGraph {
             MAX_PAYMENT_TLC_EXPIRY_LIMIT,
             false,
             vec![],
+            vec![],
         )
     }
 
@@ -243,6 +244,7 @@ impl MockNetworkGraph {
             FINAL_TLC_EXPIRY_DELTA_IN_TESTS,
             MAX_PAYMENT_TLC_EXPIRY_LIMIT,
             false,
+            vec![],
             vec![],
         )
     }
@@ -587,6 +589,7 @@ fn test_graph_build_router_is_ok_with_fee_rate() {
         hop_hints: vec![],
         dry_run: false,
         custom_records: None,
+        hop_reqs: vec![],
     });
     assert!(route.is_ok());
     let route = route.unwrap();
@@ -629,6 +632,7 @@ fn test_graph_build_router_fee_rate_optimize() {
         hop_hints: vec![],
         dry_run: false,
         custom_records: None,
+        hop_reqs: vec![],
     });
     assert!(route.is_ok());
     let route = route.unwrap();
@@ -663,6 +667,7 @@ fn test_graph_build_router_no_fee_with_direct_pay() {
         hop_hints: vec![],
         dry_run: false,
         custom_records: None,
+        hop_reqs: vec![],
     });
     assert!(route.is_ok());
     let route = route.unwrap();
@@ -690,6 +695,7 @@ fn test_graph_find_path_err() {
         MAX_PAYMENT_TLC_EXPIRY_LIMIT,
         false,
         vec![],
+        vec![],
     );
     assert!(route.is_err());
 
@@ -702,6 +708,7 @@ fn test_graph_find_path_err() {
         FINAL_TLC_EXPIRY_DELTA_IN_TESTS,
         MAX_PAYMENT_TLC_EXPIRY_LIMIT,
         false,
+        vec![],
         vec![],
     );
     assert!(route.is_err());
@@ -726,6 +733,7 @@ fn test_graph_find_path_node_order() {
         FINAL_TLC_EXPIRY_DELTA_IN_TESTS,
         MAX_PAYMENT_TLC_EXPIRY_LIMIT,
         false,
+        vec![],
         vec![],
     );
     assert!(route.is_ok());
@@ -753,6 +761,7 @@ fn test_graph_build_route_with_expiry_limit() {
         MAX_PAYMENT_TLC_EXPIRY_LIMIT,
         false,
         vec![],
+        vec![],
     );
     assert!(route.is_ok());
 
@@ -765,6 +774,7 @@ fn test_graph_build_route_with_expiry_limit() {
         FINAL_TLC_EXPIRY_DELTA_IN_TESTS,
         100,
         false,
+        vec![],
         vec![],
     );
     assert!(route.is_err());
@@ -795,6 +805,7 @@ fn test_graph_build_route_three_nodes_amount() {
         hop_hints: vec![],
         dry_run: false,
         custom_records: None,
+        hop_reqs: vec![],
     });
     assert!(route.is_ok());
     let route = route.unwrap();
@@ -846,6 +857,7 @@ fn do_test_graph_build_route_expiry(n_nodes: usize) {
         hop_hints: vec![],
         dry_run: false,
         custom_records: None,
+        hop_reqs: vec![],
     });
     let timestamp_after_building_route = now_timestamp_as_millis_u64();
     assert!(route.is_ok());
@@ -925,6 +937,7 @@ fn test_graph_build_route_below_min_tlc_value() {
         hop_hints: vec![],
         dry_run: false,
         custom_records: None,
+        hop_reqs: vec![],
     });
     assert!(route.is_err());
 }
@@ -956,6 +969,7 @@ fn test_graph_build_route_select_edge_with_latest_timestamp() {
         hop_hints: vec![],
         dry_run: false,
         custom_records: None,
+        hop_reqs: vec![],
     });
     assert!(route.is_ok());
     eprintln!("got route {:?}", route);
@@ -995,6 +1009,7 @@ fn test_graph_build_route_select_edge_with_large_capacity() {
         hop_hints: vec![],
         dry_run: false,
         custom_records: None,
+        hop_reqs: vec![],
     });
     assert!(route.is_ok());
     let route = route.unwrap();
@@ -1051,6 +1066,7 @@ fn test_graph_mark_failed_channel() {
         hop_hints: vec![],
         dry_run: false,
         custom_records: None,
+        hop_reqs: vec![],
     });
     assert!(route.is_err());
 
@@ -1075,6 +1091,7 @@ fn test_graph_mark_failed_channel() {
         hop_hints: vec![],
         dry_run: false,
         custom_records: None,
+        hop_reqs: vec![],
     });
     assert!(route.is_ok());
 }
@@ -1109,6 +1126,7 @@ fn test_graph_session_router() {
         hop_hints: vec![],
         dry_run: false,
         custom_records: None,
+        hop_reqs: vec![],
     });
     assert!(route.is_ok());
 
@@ -1156,6 +1174,7 @@ fn test_graph_mark_failed_node() {
         hop_hints: vec![],
         dry_run: false,
         custom_records: None,
+        hop_reqs: vec![],
     });
     assert!(route.is_ok());
 
@@ -1178,6 +1197,7 @@ fn test_graph_mark_failed_node() {
         hop_hints: vec![],
         dry_run: false,
         custom_records: None,
+        hop_reqs: vec![],
     });
     assert!(route.is_ok());
 
@@ -1202,6 +1222,7 @@ fn test_graph_mark_failed_node() {
         hop_hints: vec![],
         dry_run: false,
         custom_records: None,
+        hop_reqs: vec![],
     });
     assert!(route.is_err());
 
@@ -1223,6 +1244,7 @@ fn test_graph_mark_failed_node() {
         hop_hints: vec![],
         dry_run: false,
         custom_records: None,
+        hop_reqs: vec![],
     });
     assert!(route.is_err());
 }

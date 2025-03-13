@@ -280,7 +280,7 @@ pub struct OpenChannelCommand {
 }
 
 #[serde_as]
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct SendPaymentCommand {
     // the identifier of the payment target
     pub target_pubkey: Option<Pubkey>,
@@ -323,6 +323,7 @@ pub struct PaymentCustomRecords {
     pub data: HashMap<u32, Vec<u8>>,
 }
 
+/// A hop hint is a hint for a node to use a specific channel.
 #[serde_as]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HopHint {
@@ -337,10 +338,21 @@ pub struct HopHint {
     pub(crate) tlc_expiry_delta: u64,
 }
 
+/// A hop requirement need to meet when building router
+#[serde_as]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct HopRequire {
+    /// The public key of the node
+    pub(crate) pubkey: Pubkey,
+    /// The outpoint for the channel
+    #[serde_as(as = "Option<EntityHex>")]
+    pub(crate) channel_outpoint: Option<OutPoint>,
+}
+
 #[serde_as]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BuildPaymentRouterCommand {
-    pub hops_info: Vec<(Pubkey, Option<Hash256>)>,
+    pub hops_info: Vec<HopRequire>,
 }
 
 #[serde_as]
@@ -368,6 +380,7 @@ pub struct SendPaymentData {
     pub custom_records: Option<PaymentCustomRecords>,
     pub allow_self_payment: bool,
     pub hop_hints: Vec<HopHint>,
+    pub hop_reqs: Vec<HopRequire>,
     pub dry_run: bool,
 }
 
@@ -512,6 +525,7 @@ impl SendPaymentData {
             custom_records: command.custom_records,
             allow_self_payment: command.allow_self_payment,
             hop_hints,
+            hop_reqs: vec![],
             dry_run: command.dry_run,
         })
     }
@@ -1888,10 +1902,27 @@ where
 
     async fn on_build_payment_router(
         &self,
-        _build_payment_router: BuildPaymentRouterCommand,
+        command: BuildPaymentRouterCommand,
     ) -> Result<PaymentRouter, Error> {
-        let payment_router = PaymentRouter { hops_info: vec![] };
-        Ok(payment_router)
+        let mut send_payment_command: SendPaymentCommand = Default::default();
+        if let Some(hop_require) = command.hops_info.last() {
+            send_payment_command.target_pubkey = Some(hop_require.pubkey);
+            send_payment_command.allow_self_payment = true;
+            send_payment_command.dry_run = true;
+            send_payment_command.keysend = Some(true);
+        }
+        let mut payment_data = SendPaymentData::new(send_payment_command).map_err(|e| {
+            error!("Failed to validate payment request: {:?}", e);
+            Error::InvalidParameter(format!("Failed to validate payment request: {:?}", e))
+        })?;
+        payment_data.hop_reqs = command.hops_info.clone();
+
+        let mut payment_session = PaymentSession::new(payment_data.clone(), 0);
+        let hops_info = self
+            .build_payment_route(&mut payment_session, &payment_data)
+            .await?;
+
+        Ok(PaymentRouter { hops_info })
     }
 }
 
