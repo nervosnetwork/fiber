@@ -242,6 +242,11 @@ pub enum NetworkActorCommand {
     ),
     // Get Payment Session for query payment status and errors
     GetPayment(Hash256, RpcReplyPort<Result<SendPaymentResponse, String>>),
+    // Build a payment router with the given hops
+    BuildPaymentRouter(
+        BuildRouterCommand,
+        RpcReplyPort<Result<PaymentRouter, String>>,
+    ),
 
     NodeInfo((), RpcReplyPort<Result<NodeInfoResponse, String>>),
 }
@@ -275,7 +280,7 @@ pub struct OpenChannelCommand {
 }
 
 #[serde_as]
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct SendPaymentCommand {
     // the identifier of the payment target
     pub target_pubkey: Option<Pubkey>,
@@ -318,6 +323,7 @@ pub struct PaymentCustomRecords {
     pub data: HashMap<u32, Vec<u8>>,
 }
 
+/// A hop hint is a hint for a node to use a specific channel.
 #[serde_as]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HopHint {
@@ -330,6 +336,34 @@ pub struct HopHint {
     pub(crate) fee_rate: u64,
     /// The TLC expiry delta to use this hop to forward the payment.
     pub(crate) tlc_expiry_delta: u64,
+}
+
+/// A hop requirement need to meet when building router
+#[serde_as]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct HopRequire {
+    /// The public key of the node
+    pub(crate) pubkey: Pubkey,
+    /// The outpoint for the channel
+    #[serde_as(as = "Option<EntityHex>")]
+    pub(crate) channel_outpoint: Option<OutPoint>,
+}
+
+#[serde_as]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BuildRouterCommand {
+    /// the amount of the payment, the unit is Shannons for non UDT payment
+    pub amount: Option<u128>,
+    #[serde_as(as = "Option<EntityHex>")]
+    pub udt_type_script: Option<Script>,
+    pub hops_info: Vec<HopRequire>,
+    pub final_tlc_expiry_delta: Option<u64>,
+}
+
+#[serde_as]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PaymentRouter {
+    pub hops_info: Vec<PaymentHopData>,
 }
 
 #[serde_as]
@@ -351,6 +385,7 @@ pub struct SendPaymentData {
     pub custom_records: Option<PaymentCustomRecords>,
     pub allow_self_payment: bool,
     pub hop_hints: Vec<HopHint>,
+    pub hop_reqs: Vec<HopRequire>,
     pub dry_run: bool,
 }
 
@@ -495,6 +530,7 @@ impl SendPaymentData {
             custom_records: command.custom_records,
             allow_self_payment: command.allow_self_payment,
             hop_hints,
+            hop_reqs: vec![],
             dry_run: command.dry_run,
         })
     }
@@ -1346,6 +1382,17 @@ where
                     }
                 }
             }
+            NetworkActorCommand::BuildPaymentRouter(build_payment_router, reply) => {
+                match self.on_build_payment_router(build_payment_router).await {
+                    Ok(router) => {
+                        let _ = reply.send(Ok(router));
+                    }
+                    Err(e) => {
+                        error!("Failed to build payment router: {:?}", e);
+                        let _ = reply.send(Err(e.to_string()));
+                    }
+                }
+            }
             NetworkActorCommand::GetPayment(payment_hash, reply) => {
                 match self.on_get_payment(&payment_hash) {
                     Ok(payment) => {
@@ -1592,16 +1639,18 @@ where
     async fn build_payment_route(
         &self,
         payment_session: &mut PaymentSession,
-        payment_data: &SendPaymentData,
     ) -> Result<Vec<PaymentHopData>, Error> {
         let graph = self.network_graph.read().await;
-        match graph.build_route(payment_data.clone()) {
+        let source = graph.get_source_pubkey();
+        match graph.build_route(payment_session.request.clone()) {
             Err(e) => {
                 let error = format!("Failed to build route, {}", e);
                 self.set_payment_fail_with_error(payment_session, &error);
                 return Err(Error::SendPaymentError(error));
             }
             Ok(hops) => {
+                payment_session.route =
+                    SessionRoute::new(source, payment_session.request.target_pubkey, &hops);
                 assert_ne!(hops[0].funding_tx_hash, Hash256::default());
                 return Ok(hops);
             }
@@ -1621,8 +1670,6 @@ where
         payment_session
             .session_key
             .copy_from_slice(session_key.as_ref());
-        payment_session.route =
-            SessionRoute::new(state.get_public_key(), payment_data.target_pubkey, &hops);
 
         let peeled_onion_packet = match PeeledPaymentOnionPacket::create(
             session_key,
@@ -1776,9 +1823,7 @@ where
                 payment_session.retried_times += 1;
             }
 
-            let hops_info = self
-                .build_payment_route(&mut payment_session, &payment_data)
-                .await?;
+            let hops_info = self.build_payment_route(&mut payment_session).await?;
 
             match self
                 .send_payment_onion_packet(state, &mut payment_session, &payment_data, hops_info)
@@ -1829,12 +1874,8 @@ where
         // for dry run, we only build the route and return the hops info,
         // will not store the payment session and send the onion packet
         if payment_data.dry_run {
-            let mut payment_session = PaymentSession::new(payment_data.clone(), 0);
-            let hops = self
-                .build_payment_route(&mut payment_session, &payment_data)
-                .await?;
-            payment_session.route =
-                SessionRoute::new(state.get_public_key(), payment_data.target_pubkey, &hops);
+            let mut payment_session = PaymentSession::new(payment_data, 0);
+            let _hops = self.build_payment_route(&mut payment_session).await?;
             return Ok(payment_session.into());
         }
 
@@ -1856,6 +1897,44 @@ where
             .try_payment_session(myself, state, payment_session.payment_hash())
             .await?;
         return Ok(session.into());
+    }
+
+    async fn on_build_payment_router(
+        &self,
+        command: BuildRouterCommand,
+    ) -> Result<PaymentRouter, Error> {
+        // Only proceed if we have at least one hop requirement
+        let Some(last_hop) = command.hops_info.last() else {
+            return Err(Error::InvalidParameter(
+                "No hop requirements provided".to_string(),
+            ));
+        };
+
+        let source = self.network_graph.read().await.get_source_pubkey();
+
+        // Create payment command with defaults from the last hop
+        let payment_command = SendPaymentCommand {
+            target_pubkey: Some(last_hop.pubkey),
+            allow_self_payment: last_hop.pubkey == source,
+            dry_run: true,
+            amount: Some(command.amount.unwrap_or(1)),
+            keysend: Some(true),
+            udt_type_script: command.udt_type_script.clone(),
+            final_tlc_expiry_delta: command.final_tlc_expiry_delta,
+            ..Default::default()
+        };
+
+        let mut payment_data = SendPaymentData::new(payment_command).map_err(|e| {
+            error!("Failed to validate payment request: {:?}", e);
+            Error::InvalidParameter(format!("Failed to validate payment request: {:?}", e))
+        })?;
+
+        payment_data.hop_reqs = command.hops_info.clone();
+
+        let mut payment_session = PaymentSession::new(payment_data, 0);
+        let hops_info = self.build_payment_route(&mut payment_session).await?;
+
+        Ok(PaymentRouter { hops_info })
     }
 }
 

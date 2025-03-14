@@ -811,20 +811,7 @@ fn test_send_payment_validate_payment_hash() {
     let send_command = SendPaymentCommand {
         target_pubkey: Some(gen_rand_fiber_public_key()),
         amount: Some(10000),
-        payment_hash: None,
-        final_tlc_expiry_delta: None,
-        tlc_expiry_limit: None,
-
-        invoice: None,
-        timeout: None,
-        max_fee_amount: None,
-        max_parts: None,
-        keysend: None,
-        udt_type_script: None,
-        allow_self_payment: false,
-        hop_hints: None,
-        dry_run: false,
-        custom_records: None,
+        ..Default::default()
     };
 
     let result = SendPaymentData::new(send_command);
@@ -836,21 +823,7 @@ fn test_send_payment_validate_payment_hash() {
 fn test_send_payment_validate_amount() {
     let send_command = SendPaymentCommand {
         target_pubkey: Some(gen_rand_fiber_public_key()),
-        amount: None,
-        payment_hash: None,
-        final_tlc_expiry_delta: None,
-        tlc_expiry_limit: None,
-
-        invoice: None,
-        timeout: None,
-        max_fee_amount: None,
-        max_parts: None,
-        keysend: None,
-        udt_type_script: None,
-        allow_self_payment: false,
-        hop_hints: None,
-        dry_run: false,
-        custom_records: None,
+        ..Default::default()
     };
 
     let result = SendPaymentData::new(send_command);
@@ -884,20 +857,8 @@ fn test_send_payment_validate_invoice() {
     let invoice_encoded = invoice.to_string();
     let send_command = SendPaymentCommand {
         target_pubkey: Some(gen_rand_fiber_public_key()),
-        amount: None,
-        payment_hash: None,
-        final_tlc_expiry_delta: None,
-        tlc_expiry_limit: None,
         invoice: Some(invoice_encoded.clone()),
-        timeout: None,
-        max_fee_amount: None,
-        max_parts: None,
-        keysend: None,
-        udt_type_script: None,
-        allow_self_payment: false,
-        hop_hints: None,
-        dry_run: false,
-        custom_records: None,
+        ..Default::default()
     };
 
     let result = SendPaymentData::new(send_command);
@@ -907,21 +868,9 @@ fn test_send_payment_validate_invoice() {
         .contains("target_pubkey does not match the invoice"));
 
     let send_command = SendPaymentCommand {
-        target_pubkey: None,
         amount: Some(10),
-        payment_hash: None,
-        final_tlc_expiry_delta: None,
-        tlc_expiry_limit: None,
         invoice: Some(invoice_encoded.clone()),
-        timeout: None,
-        max_fee_amount: None,
-        max_parts: None,
-        keysend: None,
-        udt_type_script: None,
-        allow_self_payment: false,
-        hop_hints: None,
-        dry_run: false,
-        custom_records: None,
+        ..Default::default()
     };
 
     // keysend is set with invoice, should be error
@@ -932,21 +881,9 @@ fn test_send_payment_validate_invoice() {
         .contains("amount does not match the invoice"));
 
     let send_command = SendPaymentCommand {
-        target_pubkey: None,
-        amount: None,
-        payment_hash: None,
-        final_tlc_expiry_delta: None,
-        tlc_expiry_limit: None,
         invoice: Some(invoice_encoded.clone()),
-        timeout: None,
-        max_fee_amount: None,
-        max_parts: None,
         keysend: Some(true),
-        udt_type_script: None,
-        allow_self_payment: false,
-        hop_hints: None,
-        dry_run: false,
-        custom_records: None,
+        ..Default::default()
     };
 
     let result = SendPaymentData::new(send_command);
@@ -954,21 +891,8 @@ fn test_send_payment_validate_invoice() {
 
     // normal invoice send payment
     let send_command = SendPaymentCommand {
-        target_pubkey: None,
-        amount: None,
-        payment_hash: None,
-        final_tlc_expiry_delta: None,
-        tlc_expiry_limit: None,
         invoice: Some(invoice_encoded.clone()),
-        timeout: None,
-        max_fee_amount: None,
-        max_parts: None,
-        keysend: None,
-        udt_type_script: None,
-        allow_self_payment: false,
-        hop_hints: None,
-        dry_run: false,
-        custom_records: None,
+        ..Default::default()
     };
 
     let result = SendPaymentData::new(send_command);
@@ -978,19 +902,8 @@ fn test_send_payment_validate_invoice() {
     let send_command = SendPaymentCommand {
         target_pubkey: Some(gen_rand_fiber_public_key()),
         amount: Some(10),
-        payment_hash: None,
-        final_tlc_expiry_delta: None,
-        tlc_expiry_limit: None,
-        invoice: None,
-        timeout: None,
-        max_fee_amount: None,
-        max_parts: None,
         keysend: Some(true),
-        udt_type_script: None,
-        allow_self_payment: false,
-        hop_hints: None,
-        dry_run: false,
-        custom_records: None,
+        ..Default::default()
     };
 
     let result = SendPaymentData::new(send_command);
@@ -998,21 +911,9 @@ fn test_send_payment_validate_invoice() {
 
     // invoice with invalid final_tlc_expiry_delta
     let send_command = SendPaymentCommand {
-        target_pubkey: None,
-        amount: None,
-        payment_hash: None,
         final_tlc_expiry_delta: Some(11),
-        tlc_expiry_limit: None,
         invoice: Some(invoice_encoded.clone()),
-        timeout: None,
-        max_fee_amount: None,
-        max_parts: None,
-        keysend: None,
-        udt_type_script: None,
-        allow_self_payment: false,
-        hop_hints: None,
-        dry_run: false,
-        custom_records: None,
+        ..Default::default()
     };
 
     let result = SendPaymentData::new(send_command);
@@ -1035,21 +936,8 @@ fn test_send_payment_validate_invoice() {
         .unwrap();
     let invoice_encoded = invoice.to_string();
     let send_command = SendPaymentCommand {
-        target_pubkey: None,
-        amount: None,
-        payment_hash: None,
-        final_tlc_expiry_delta: None,
-        tlc_expiry_limit: None,
         invoice: Some(invoice_encoded.clone()),
-        timeout: None,
-        max_fee_amount: None,
-        max_parts: None,
-        keysend: None,
-        udt_type_script: None,
-        allow_self_payment: false,
-        hop_hints: None,
-        dry_run: false,
-        custom_records: None,
+        ..Default::default()
     };
 
     let result = SendPaymentData::new(send_command);
@@ -1066,17 +954,7 @@ fn test_send_payment_validate_htlc_expiry_delta() {
         amount: Some(1000),
         payment_hash: Some(gen_rand_sha256_hash()),
         final_tlc_expiry_delta: Some(100),
-        tlc_expiry_limit: None,
-        invoice: None,
-        timeout: None,
-        max_fee_amount: None,
-        max_parts: None,
-        keysend: None,
-        udt_type_script: None,
-        allow_self_payment: false,
-        hop_hints: None,
-        dry_run: false,
-        custom_records: None,
+        ..Default::default()
     };
 
     let result = SendPaymentData::new(send_command);

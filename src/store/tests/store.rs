@@ -517,6 +517,7 @@ fn test_store_payment_session() {
         hop_hints: vec![],
         dry_run: false,
         custom_records: None,
+        hop_reqs: vec![],
     };
     let payment_session = PaymentSession::new(payment_data.clone(), 10);
     store.insert_payment_session(payment_session.clone());

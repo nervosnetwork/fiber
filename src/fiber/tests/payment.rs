@@ -4,13 +4,16 @@ use crate::fiber::channel::UpdateCommand;
 use crate::fiber::config::DEFAULT_TLC_EXPIRY_DELTA;
 use crate::fiber::config::DEFAULT_TLC_FEE_PROPORTIONAL_MILLIONTHS;
 use crate::fiber::graph::PaymentSessionStatus;
+use crate::fiber::network::BuildRouterCommand;
 use crate::fiber::network::HopHint;
+use crate::fiber::network::HopRequire;
 use crate::fiber::network::PaymentCustomRecords;
 use crate::fiber::network::SendPaymentCommand;
 use crate::fiber::tests::test_utils::*;
 use crate::fiber::types::Hash256;
 use crate::fiber::NetworkActorCommand;
 use crate::fiber::NetworkActorMessage;
+use crate::gen_rand_fiber_public_key;
 use ckb_jsonrpc_types::Status;
 use ckb_types::packed::OutPoint;
 use ractor::call;
@@ -146,19 +149,8 @@ async fn test_send_payment_prefer_newer_channels() {
         .send_payment(SendPaymentCommand {
             target_pubkey: Some(target_pubkey),
             amount: Some(10000000000),
-            payment_hash: None,
-            final_tlc_expiry_delta: None,
-            tlc_expiry_limit: None,
-            invoice: None,
-            timeout: None,
-            max_fee_amount: None,
-            max_parts: None,
             keysend: Some(true),
-            udt_type_script: None,
-            allow_self_payment: false,
-            hop_hints: None,
-            dry_run: false,
-            custom_records: None,
+            ..Default::default()
         })
         .await;
 
@@ -206,19 +198,8 @@ async fn test_send_payment_prefer_channels_with_larger_balance() {
         .send_payment(SendPaymentCommand {
             target_pubkey: Some(target_pubkey),
             amount: Some(5000000000),
-            payment_hash: None,
-            final_tlc_expiry_delta: None,
-            tlc_expiry_limit: None,
-            invoice: None,
-            timeout: None,
-            max_fee_amount: None,
-            max_parts: None,
             keysend: Some(true),
-            udt_type_script: None,
-            allow_self_payment: false,
-            hop_hints: None,
-            dry_run: false,
-            custom_records: None,
+            ..Default::default()
         })
         .await;
 
@@ -358,19 +339,8 @@ async fn test_send_payment_over_private_channel() {
             .send_payment(SendPaymentCommand {
                 target_pubkey: Some(target_pubkey),
                 amount: Some(amount_to_send),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                tlc_expiry_limit: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-                custom_records: None,
+                ..Default::default()
             })
             .await;
 
@@ -729,15 +699,7 @@ async fn test_send_payment_with_private_channel_hints_fallback() {
         .send_payment(SendPaymentCommand {
             target_pubkey: Some(target_pubkey),
             amount: Some(30000000000),
-            payment_hash: None,
-            final_tlc_expiry_delta: None,
-            tlc_expiry_limit: None,
-            invoice: None,
-            timeout: None,
-            max_fee_amount: None,
-            max_parts: None,
             keysend: Some(true),
-            udt_type_script: None,
             allow_self_payment: true,
             custom_records: None,
             hop_hints: Some(vec![HopHint {
@@ -746,7 +708,7 @@ async fn test_send_payment_with_private_channel_hints_fallback() {
                 fee_rate: DEFAULT_TLC_FEE_PROPORTIONAL_MILLIONTHS as u64,
                 tlc_expiry_delta: DEFAULT_TLC_EXPIRY_DELTA,
             }]),
-            dry_run: false,
+            ..Default::default()
         })
         .await;
 
@@ -845,6 +807,214 @@ async fn test_send_payment_with_private_multiple_channel_hints_fallback() {
     let res = res.unwrap();
     let payment_hash = res.payment_hash;
     source_node.wait_until_success(payment_hash).await;
+}
+
+#[tokio::test]
+async fn test_send_payment_build_router_basic() {
+    init_tracing();
+    let _span = tracing::info_span!("node", node = "test").entered();
+
+    let (nodes, _channels) = create_n_nodes_and_channels_with_index_amounts(
+        &[
+            (
+                (0, 1),
+                (
+                    MIN_RESERVED_CKB + 10000000000,
+                    MIN_RESERVED_CKB + 10000000000,
+                ),
+            ),
+            (
+                (1, 2),
+                (
+                    MIN_RESERVED_CKB + 10000000000,
+                    MIN_RESERVED_CKB + 10000000000,
+                ),
+            ),
+        ],
+        3,
+        true,
+    )
+    .await;
+    let [node_0, node_1, node_2] = nodes.try_into().expect("3 nodes");
+    eprintln!("node_0: {:?}", node_0.pubkey);
+    eprintln!("node_1: {:?}", node_1.pubkey);
+    eprintln!("node_2: {:?}", node_2.pubkey);
+
+    let router = node_0
+        .build_router(BuildRouterCommand {
+            amount: None,
+            hops_info: vec![HopRequire {
+                pubkey: node_1.pubkey,
+                channel_outpoint: None,
+            }],
+            udt_type_script: None,
+            final_tlc_expiry_delta: None,
+        })
+        .await
+        .unwrap();
+    eprintln!("result: {:?}", router);
+    let router_nodes: Vec<_> = router.hops_info.iter().filter_map(|x| x.next_hop).collect();
+    eprintln!("router_nodes: {:?}", router_nodes);
+    let amounts: Vec<_> = router.hops_info.iter().map(|x| x.amount).collect();
+    assert_eq!(router_nodes, vec![node_1.pubkey]);
+    assert_eq!(amounts, vec![1, 1]);
+
+    let router = node_0
+        .build_router(BuildRouterCommand {
+            amount: None,
+            hops_info: vec![
+                HopRequire {
+                    pubkey: node_1.pubkey,
+                    channel_outpoint: None,
+                },
+                HopRequire {
+                    pubkey: node_2.pubkey,
+                    channel_outpoint: None,
+                },
+            ],
+            udt_type_script: None,
+            final_tlc_expiry_delta: None,
+        })
+        .await
+        .unwrap();
+    eprintln!("result: {:?}", router);
+    let router_nodes: Vec<_> = router.hops_info.iter().filter_map(|x| x.next_hop).collect();
+    eprintln!("router_nodes: {:?}", router_nodes);
+    let amounts: Vec<_> = router.hops_info.iter().map(|x| x.amount).collect();
+    assert_eq!(router_nodes, vec![node_1.pubkey, node_2.pubkey]);
+    assert_eq!(amounts, vec![2, 1, 1]);
+
+    let router = node_0
+        .build_router(BuildRouterCommand {
+            amount: None,
+            hops_info: vec![
+                HopRequire {
+                    pubkey: node_1.pubkey,
+                    channel_outpoint: None,
+                },
+                HopRequire {
+                    pubkey: node_2.pubkey,
+                    channel_outpoint: None,
+                },
+                HopRequire {
+                    pubkey: gen_rand_fiber_public_key(),
+                    channel_outpoint: None,
+                },
+            ],
+            udt_type_script: None,
+            final_tlc_expiry_delta: None,
+        })
+        .await;
+    assert!(router.is_err());
+
+    let router = node_0
+        .build_router(BuildRouterCommand {
+            amount: None,
+            hops_info: vec![
+                HopRequire {
+                    pubkey: gen_rand_fiber_public_key(),
+                    channel_outpoint: None,
+                },
+                HopRequire {
+                    pubkey: node_2.pubkey,
+                    channel_outpoint: None,
+                },
+            ],
+            udt_type_script: None,
+            final_tlc_expiry_delta: None,
+        })
+        .await;
+    assert!(router.is_err());
+}
+
+#[tokio::test]
+async fn test_send_payment_build_router_multiple_channels() {
+    init_tracing();
+    let _span = tracing::info_span!("node", node = "test").entered();
+
+    let (nodes, channels) = create_n_nodes_and_channels_with_index_amounts(
+        &[
+            (
+                (0, 1),
+                (
+                    MIN_RESERVED_CKB + 10000000000,
+                    MIN_RESERVED_CKB + 10000000000,
+                ),
+            ),
+            (
+                (1, 2),
+                (
+                    MIN_RESERVED_CKB + 10000000000,
+                    MIN_RESERVED_CKB + 10000000000,
+                ),
+            ),
+            (
+                (1, 2),
+                (
+                    MIN_RESERVED_CKB + 10000000000,
+                    MIN_RESERVED_CKB + 10000000000,
+                ),
+            ),
+        ],
+        3,
+        true,
+    )
+    .await;
+    let [node_0, node_1, node_2] = nodes.try_into().expect("3 nodes");
+    eprintln!("node_0: {:?}", node_0.pubkey);
+    eprintln!("node_1: {:?}", node_1.pubkey);
+    eprintln!("node_2: {:?}", node_2.pubkey);
+
+    let router = node_0
+        .build_router(BuildRouterCommand {
+            amount: None,
+            hops_info: vec![
+                HopRequire {
+                    pubkey: node_1.pubkey,
+                    channel_outpoint: None,
+                },
+                HopRequire {
+                    pubkey: node_2.pubkey,
+                    channel_outpoint: None,
+                },
+            ],
+            udt_type_script: None,
+            final_tlc_expiry_delta: None,
+        })
+        .await
+        .unwrap();
+    eprintln!("result: {:?}", router);
+    let amounts: Vec<_> = router.hops_info.iter().map(|x| x.amount).collect();
+    assert_eq!(amounts, vec![2, 1, 1]);
+
+    let channel_2_funding_tx = node_0.get_channel_funding_tx(&channels[2]).unwrap();
+    assert_eq!(router.hops_info[1].funding_tx_hash, channel_2_funding_tx);
+
+    let channel_1_funding_tx = node_0.get_channel_funding_tx(&channels[1]).unwrap();
+    let channel_1_outpoint = OutPoint::new(channel_1_funding_tx.into(), 0);
+    let router = node_0
+        .build_router(BuildRouterCommand {
+            amount: None,
+            hops_info: vec![
+                HopRequire {
+                    pubkey: node_1.pubkey,
+                    channel_outpoint: Some(channel_1_outpoint),
+                },
+                HopRequire {
+                    pubkey: node_2.pubkey,
+                    channel_outpoint: None,
+                },
+            ],
+            udt_type_script: None,
+            final_tlc_expiry_delta: None,
+        })
+        .await
+        .unwrap();
+    eprintln!("result: {:?}", router);
+    let amounts: Vec<_> = router.hops_info.iter().map(|x| x.amount).collect();
+    assert_eq!(amounts, vec![2, 1, 1]);
+
+    assert_eq!(router.hops_info[1].funding_tx_hash, channel_1_funding_tx);
 }
 
 // TODO: The meaning of hop hints changed after https://github.com/nervosnetwork/fiber/pull/487/
@@ -1377,19 +1547,8 @@ async fn test_network_send_payment_randomly_send_each_other() {
                 SendPaymentCommand {
                     target_pubkey: Some(target),
                     amount: Some(amount),
-                    payment_hash: None,
-                    final_tlc_expiry_delta: None,
-                    tlc_expiry_limit: None,
-                    invoice: None,
-                    timeout: None,
-                    max_fee_amount: None,
-                    max_parts: None,
                     keysend: Some(true),
-                    udt_type_script: None,
-                    allow_self_payment: false,
-                    hop_hints: None,
-                    dry_run: false,
-                    custom_records: None,
+                    ..Default::default()
                 },
                 rpc_reply,
             ))
@@ -1559,19 +1718,8 @@ async fn test_network_three_nodes_send_each_other() {
             SendPaymentCommand {
                 target_pubkey: Some(node_c_pubkey),
                 amount: Some(amount_a_to_c),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                tlc_expiry_limit: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                custom_records: None,
-                dry_run: false,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -1590,19 +1738,8 @@ async fn test_network_three_nodes_send_each_other() {
             SendPaymentCommand {
                 target_pubkey: Some(node_a_pubkey),
                 amount: Some(amount_c_to_a),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                tlc_expiry_limit: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                custom_records: None,
-                dry_run: false,
+                ..Default::default()
             },
             rpc_reply,
         ))

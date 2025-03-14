@@ -1,7 +1,9 @@
+use ckb_types::packed::OutPoint;
+
 use super::graph::PathEdge;
 use super::types::Pubkey;
 use std::cmp::Ordering;
-use std::collections::BinaryHeap;
+use std::collections::{BinaryHeap, HashSet};
 
 #[derive(Clone, Debug)]
 pub(crate) struct NodeHeapElement {
@@ -29,6 +31,9 @@ pub(crate) struct NodeHeapElement {
 
     // next_hop is the edge this route comes from, we also include the fee rate and tlc expiry delta.
     pub next_hop: Option<PathEdge>,
+
+    // adopted channels outpoint
+    pub adopted_outpoints: HashSet<OutPoint>,
 }
 
 impl Ord for NodeHeapElement {
