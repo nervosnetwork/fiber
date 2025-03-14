@@ -166,3 +166,32 @@ impl<'de> DeserializeAs<'de, PubNonce> for PubNonceAsBytes {
         PubNonce::from_bytes(&bytes).map_err(serde::de::Error::custom)
     }
 }
+
+/// Module for hex serialization of Duration
+pub mod duration_hex {
+    use core::time::Duration;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(duration: &Duration, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let nanos = duration.as_secs();
+        serializer.serialize_str(&format!("0x{:x}", nanos))
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Duration, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let hex_str = String::deserialize(deserializer)?;
+        let seconds = u64::from_str_radix(&hex_str[2..], 16).map_err(|err| {
+            serde::de::Error::custom(format!(
+                "failed to parse duration hex {}: {:?}",
+                hex_str, err
+            ))
+        })?;
+
+        Ok(Duration::from_secs(seconds))
+    }
+}
