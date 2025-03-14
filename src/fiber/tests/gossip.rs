@@ -1,9 +1,10 @@
 use std::{collections::HashSet, sync::Arc};
 
-use ckb_jsonrpc_types::Status;
-use ckb_types::core::TransactionView;
-use ckb_types::packed::Bytes;
-use ckb_types::prelude::{Builder, Entity};
+use ckb_types::{
+    core::{tx_pool::TxStatus, TransactionView},
+    packed::Bytes,
+    prelude::{Builder, Entity},
+};
 use molecule::prelude::Byte;
 use ractor::{async_trait, concurrency::Duration, Actor, ActorProcessingErr, ActorRef};
 use tentacle::secio::PeerId;
@@ -95,7 +96,7 @@ impl GossipTestingContext {
             .expect("send message");
     }
 
-    async fn submit_tx(&self, tx: TransactionView) -> Status {
+    async fn submit_tx(&self, tx: TransactionView) -> TxStatus {
         submit_tx(self.get_chain_actor().clone(), tx).await
     }
 }
@@ -202,7 +203,7 @@ async fn test_saving_confirmed_channel_announcement() {
         channel_context.channel_announcement.clone(),
     ));
     let status = context.submit_tx(channel_context.funding_tx.clone()).await;
-    assert_eq!(status, Status::Committed);
+    assert!(matches!(status, TxStatus::Committed(..)));
     tokio::time::sleep(Duration::from_millis(200)).await;
     let new_announcement = context
         .get_store()
@@ -234,7 +235,7 @@ async fn test_saving_invalid_channel_announcement() {
         .set_outputs(vec![invalid_output])
         .build();
     let status = context.submit_tx(invalid_tx).await;
-    assert_eq!(status, Status::Committed);
+    assert!(matches!(status, TxStatus::Committed(..)));
     tokio::time::sleep(Duration::from_millis(200)).await;
     let new_announcement = context
         .get_store()
@@ -250,7 +251,7 @@ async fn test_saving_channel_update_after_saving_channel_announcement() {
         channel_context.channel_announcement.clone(),
     ));
     let status = context.submit_tx(channel_context.funding_tx.clone()).await;
-    assert_eq!(status, Status::Committed);
+    assert!(matches!(status, TxStatus::Committed(..)));
     tokio::time::sleep(Duration::from_millis(200)).await;
     let new_announcement = context
         .get_store()
@@ -318,7 +319,7 @@ async fn test_saving_channel_update_before_saving_channel_announcement() {
         channel_context.channel_announcement.clone(),
     ));
     let status = context.submit_tx(channel_context.funding_tx.clone()).await;
-    assert_eq!(status, Status::Committed);
+    assert!(matches!(status, TxStatus::Committed(..)));
     tokio::time::sleep(Duration::from_millis(200)).await;
     let new_announcement = context
         .get_store()
@@ -341,7 +342,7 @@ async fn test_saving_invalid_channel_update() {
         channel_context.channel_announcement.clone(),
     ));
     let status = context.submit_tx(channel_context.funding_tx.clone()).await;
-    assert_eq!(status, Status::Committed);
+    assert!(matches!(status, TxStatus::Committed(..)));
     tokio::time::sleep(Duration::from_millis(200)).await;
     let new_announcement = context
         .get_store()
@@ -384,7 +385,7 @@ async fn test_saving_channel_update_independency() {
             channel_context.channel_announcement.clone(),
         ));
         let status = context.submit_tx(channel_context.funding_tx.clone()).await;
-        assert_eq!(status, Status::Committed);
+        assert!(matches!(status, TxStatus::Committed(..)));
         tokio::time::sleep(Duration::from_millis(200)).await;
         let new_announcement = context
             .get_store()
@@ -468,7 +469,7 @@ async fn test_saving_channel_update_with_invalid_channel_announcement() {
         .set_outputs(vec![invalid_output])
         .build();
     let status = context.submit_tx(invalid_tx).await;
-    assert_eq!(status, Status::Committed);
+    assert!(matches!(status, TxStatus::Committed(..)));
     tokio::time::sleep(Duration::from_millis(200)).await;
     let new_announcement = context
         .get_store()
@@ -666,7 +667,7 @@ async fn test_our_own_channel_gossip_message_propagated() {
 
     let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
 
-    let (_new_channel_id, _funding_tx) = establish_channel_between_nodes(
+    let (_new_channel_id, _funding_tx_hash) = establish_channel_between_nodes(
         &mut node_a,
         &mut node_b,
         true,
@@ -725,7 +726,7 @@ async fn test_gossip_store_prune_all_messages() {
     for _i in 1..=num_messages {
         let channel_context = ChannelTestContext::gen();
         let status = context.submit_tx(channel_context.funding_tx.clone()).await;
-        assert_eq!(status, Status::Committed);
+        assert!(matches!(status, TxStatus::Committed(..)));
         context.save_message(BroadcastMessage::ChannelAnnouncement(
             channel_context.channel_announcement.clone(),
         ));
@@ -767,7 +768,7 @@ async fn test_gossip_store_prune_channel_announcement() {
         channel_context.channel_announcement.clone(),
     ));
     let status = context.submit_tx(channel_context.funding_tx.clone()).await;
-    assert_eq!(status, Status::Committed);
+    assert!(matches!(status, TxStatus::Committed(..)));
     tokio::time::sleep(Duration::from_millis(200)).await;
     let channel_timestamp = context
         .get_store()
@@ -827,7 +828,7 @@ async fn test_gossip_store_prune_channel_update() {
         channel_context.channel_announcement.clone(),
     ));
     let status = context.submit_tx(channel_context.funding_tx.clone()).await;
-    assert_eq!(status, Status::Committed);
+    assert!(matches!(status, TxStatus::Committed(..)));
     tokio::time::sleep(Duration::from_millis(200)).await;
     let channel_announcement_timestamp = context
         .get_store()
