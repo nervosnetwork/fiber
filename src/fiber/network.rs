@@ -1109,12 +1109,11 @@ where
                             channel_id,
                             channel_actor_state.get_remote_peer_id()
                         );
-                        if let Some(channel) = state.remove_channel(&channel_id) {
-                            // notify the channel actor to stop
-                            let _ = channel.send_message(ChannelActorMessage::Event(
-                                ChannelEvent::PeerDisconnected,
-                            ));
-                        }
+                        myself.send_message(NetworkActorMessage::new_command(
+                            NetworkActorCommand::DisconnectPeer(
+                                channel_actor_state.get_remote_peer_id(),
+                            ),
+                        ))?;
                     }
                 }
             }
