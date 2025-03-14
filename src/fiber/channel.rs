@@ -1980,6 +1980,9 @@ where
                 self.apply_retryable_tlc_operations(myself, state).await;
             }
             ChannelEvent::PeerDisconnected => {
+                // peer disconnected, we don't want the later CheckActiveChannel task check failed
+                // so we clear the flag here.
+                state.set_waiting_ack(false);
                 myself.stop(Some("PeerDisconnected".to_string()));
             }
             ChannelEvent::ClosingTransactionConfirmed(force) => {
