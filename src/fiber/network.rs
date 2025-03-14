@@ -204,8 +204,6 @@ pub enum NetworkActorCommand {
     SavePeerAddress(Multiaddr),
     // We need to maintain a certain number of peers connections to keep the network running.
     MaintainConnections,
-    // Check active channel connections and disconnect inactive peers
-    CheckActiveChannel(Hash256),
     // For internal use and debugging only. Most of the messages requires some
     // changes to local state. Even if we can send a message to a peer, some
     // part of the local state is not changed.
@@ -1095,25 +1093,6 @@ where
                                 NetworkActorCommand::ConnectPeer(addr.clone()),
                             ))
                             .expect(ASSUME_NETWORK_MYSELF_ALIVE);
-                    }
-                }
-            }
-
-            NetworkActorCommand::CheckActiveChannel(channel_id) => {
-                if let Some(channel_actor_state) = self.store.get_channel_actor_state(&channel_id) {
-                    if channel_actor_state.should_disconnect_peer_awaiting_response()
-                        && !channel_actor_state.is_closed()
-                    {
-                        debug!(
-                            "Channel {} from peer {:?} is inactive for a time, closing it",
-                            channel_id,
-                            channel_actor_state.get_remote_peer_id()
-                        );
-                        myself.send_message(NetworkActorMessage::new_command(
-                            NetworkActorCommand::DisconnectPeer(
-                                channel_actor_state.get_remote_peer_id(),
-                            ),
-                        ))?;
                     }
                 }
             }

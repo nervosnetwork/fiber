@@ -432,7 +432,7 @@ where
                 state.handle_tx_collaboration_msg(TxCollaborationMsg::TxComplete(tx))?;
                 if let ChannelState::CollaboratingFundingTx(flags) = state.state {
                     if flags.contains(CollaboratingFundingTxFlags::COLLABORATION_COMPLETED) {
-                        self.handle_commitment_signed_command(state)?;
+                        self.handle_commitment_signed_command(myself, state)?;
                     }
                 }
                 Ok(())
@@ -485,10 +485,10 @@ where
             }
             FiberChannelMessage::RevokeAndAck(revoke_and_ack) => {
                 let need_commitment_signed =
-                    state.handle_revoke_and_ack_peer_message(revoke_and_ack)?;
+                    state.handle_revoke_and_ack_peer_message(myself, revoke_and_ack)?;
                 self.update_tlc_status_on_ack(myself, state).await;
                 if need_commitment_signed {
-                    self.handle_commitment_signed_command(state)?;
+                    self.handle_commitment_signed_command(myself, state)?;
                 }
                 Ok(())
             }
@@ -666,7 +666,7 @@ where
         self.apply_settled_remove_tlcs(myself, state, true).await;
 
         if need_commitment_signed && !state.tlc_state.waiting_ack {
-            self.handle_commitment_signed_command(state)?;
+            self.handle_commitment_signed_command(myself, state)?;
         }
 
         Ok(())
@@ -1130,7 +1130,7 @@ where
         // if there are still some TLCs are waiting for ACK, they will never be acked
         // so we need to remove them from the channel and setting WaitingTlcAck to false
         if !pending_ack_tlcs.is_empty() {
-            state.set_waiting_ack(false);
+            state.set_waiting_ack(myself, false);
             for tlc in pending_ack_tlcs.iter() {
                 let reason = RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
                     TlcErr::new(TlcErrorCode::TemporaryChannelFailure),
@@ -1202,6 +1202,7 @@ where
 
     pub fn handle_commitment_signed_command(
         &self,
+        myself: &ActorRef<ChannelActorMessage>,
         state: &mut ChannelActorState,
     ) -> ProcessingChannelResult {
         let flags = match state.state {
@@ -1271,10 +1272,10 @@ where
                 state.maybe_transition_to_tx_signatures(flags)?;
             }
             CommitmentSignedFlags::ChannelReady() => {
-                state.set_waiting_ack(true);
+                state.set_waiting_ack(myself, true);
             }
             CommitmentSignedFlags::PendingShutdown() => {
-                state.set_waiting_ack(true);
+                state.set_waiting_ack(myself, true);
                 state.maybe_transition_to_shutdown()?;
             }
         }
@@ -1284,6 +1285,7 @@ where
 
     pub fn handle_add_tlc_command(
         &self,
+        myself: &ActorRef<ChannelActorMessage>,
         state: &mut ChannelActorState,
         command: AddTlcCommand,
     ) -> Result<u64, ProcessingChannelError> {
@@ -1320,12 +1322,13 @@ where
             ))
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
 
-        self.handle_commitment_signed_command(state)?;
+        self.handle_commitment_signed_command(myself, state)?;
         Ok(tlc.tlc_id.into())
     }
 
     pub fn handle_remove_tlc_command(
         &self,
+        myself: &ActorRef<ChannelActorMessage>,
         state: &mut ChannelActorState,
         command: RemoveTlcCommand,
     ) -> ProcessingChannelResult {
@@ -1358,7 +1361,7 @@ where
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
 
         state.maybe_transition_to_shutdown()?;
-        self.handle_commitment_signed_command(state)?;
+        self.handle_commitment_signed_command(myself, state)?;
         Ok(())
     }
 
@@ -1589,6 +1592,7 @@ where
             match retryable_operation {
                 RetryableTlcOperation::RemoveTlc(tlc_id, ref reason) => {
                     match self.handle_remove_tlc_command(
+                        myself,
                         state,
                         RemoveTlcCommand {
                             id: u64::from(*tlc_id),
@@ -1835,9 +1839,11 @@ where
             ChannelCommand::TxCollaborationCommand(tx_collaboration_command) => {
                 self.handle_tx_collaboration_command(state, tx_collaboration_command)
             }
-            ChannelCommand::CommitmentSigned() => self.handle_commitment_signed_command(state),
+            ChannelCommand::CommitmentSigned() => {
+                self.handle_commitment_signed_command(myself, state)
+            }
             ChannelCommand::AddTlc(command, reply) => {
-                let res = self.handle_add_tlc_command(state, command.clone());
+                let res = self.handle_add_tlc_command(myself, state, command.clone());
                 let error_info = if let Err(ref err) = res {
                     Some((err.clone(), self.get_tlc_error(state, err).await))
                 } else {
@@ -1867,7 +1873,7 @@ where
                 }
             }
             ChannelCommand::RemoveTlc(command, reply) => {
-                match self.handle_remove_tlc_command(state, command.clone()) {
+                match self.handle_remove_tlc_command(myself, state, command.clone()) {
                     Ok(_) => {
                         let _ = reply.send(Ok(()));
                         Ok(())
@@ -1980,9 +1986,6 @@ where
                 self.apply_retryable_tlc_operations(myself, state).await;
             }
             ChannelEvent::PeerDisconnected => {
-                // peer disconnected, we don't want the later CheckActiveChannel task check failed
-                // so we clear the flag here.
-                state.set_waiting_ack(false);
                 myself.stop(Some("PeerDisconnected".to_string()));
             }
             ChannelEvent::ClosingTransactionConfirmed(force) => {
@@ -2019,6 +2022,21 @@ where
                 }
                 debug_event!(self.network, "ChannelClosed");
                 myself.stop(Some("ChannelClosed".to_string()));
+            }
+            ChannelEvent::CheckActiveChannel => {
+                if state.should_disconnect_peer_awaiting_response() && !state.is_closed() {
+                    debug!(
+                        "Channel {} from peer {:?} is inactive for a time, closing it",
+                        state.get_id(),
+                        state.get_remote_peer_id()
+                    );
+                    state
+                        .network()
+                        .send_message(NetworkActorMessage::new_command(
+                            NetworkActorCommand::DisconnectPeer(state.get_remote_peer_id()),
+                        ))
+                        .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                }
             }
         }
         Ok(())
@@ -3289,7 +3307,9 @@ pub struct ChannelActorState {
     // the time stamp we last sent an message to the peer, used to check if the peer is still alive
     // we will disconnect the peer if we haven't sent any message to the peer for a long time
     // currently we only have set commitment_signed as the heartbeat message,
+    #[serde(skip)]
     pub waiting_peer_response: Option<u64>,
+
     #[serde(skip)]
     pub network: Option<ActorRef<NetworkActorMessage>>,
 
@@ -3390,6 +3410,7 @@ pub enum ChannelEvent {
     FundingTransactionConfirmed(H256, u32, u64),
     ClosingTransactionConfirmed(bool),
     CheckTlcRetryOperation,
+    CheckActiveChannel,
 }
 
 pub type ProcessingChannelResult = Result<(), ProcessingChannelError>;
@@ -3722,19 +3743,13 @@ impl ChannelActorState {
         }
     }
 
-    pub fn set_waiting_ack(&mut self, waiting_ack: bool) {
+    pub fn set_waiting_ack(&mut self, myself: &ActorRef<ChannelActorMessage>, waiting_ack: bool) {
         self.tlc_state.set_waiting_ack(waiting_ack);
         if waiting_ack {
             self.set_waiting_peer_response();
-            let channel_id = self.get_id();
-            self.network().send_after(
-                Duration::from_millis(PEER_CHANNEL_RESPONSE_TIMEOUT),
-                move || {
-                    NetworkActorMessage::Command(NetworkActorCommand::CheckActiveChannel(
-                        channel_id,
-                    ))
-                },
-            );
+            myself.send_after(Duration::from_millis(PEER_CHANNEL_RESPONSE_TIMEOUT), || {
+                ChannelActorMessage::Event(ChannelEvent::CheckActiveChannel)
+            });
         } else {
             self.clear_waiting_peer_response();
         }
@@ -6063,6 +6078,7 @@ impl ChannelActorState {
 
     fn handle_revoke_and_ack_peer_message(
         &mut self,
+        myself: &ActorRef<ChannelActorMessage>,
         revoke_and_ack: RevokeAndAck,
     ) -> Result<bool, ProcessingChannelError> {
         if !self.tlc_state.waiting_ack {
@@ -6177,7 +6193,7 @@ impl ChannelActorState {
         let need_commitment_signed = self
             .tlc_state
             .update_for_revoke_and_ack(self.commitment_numbers);
-        self.set_waiting_ack(false);
+        self.set_waiting_ack(myself, false);
 
         self.network()
             .send_message(NetworkActorMessage::new_notification(
@@ -6266,7 +6282,7 @@ impl ChannelActorState {
                     }
                     // previous waiting_ack maybe true, reset it after reestablish the channel
                     // if we need to resend CommitmentSigned message, it will be set to proper status again
-                    self.set_waiting_ack(false);
+                    self.set_waiting_ack(myself, false);
                     debug!(
                         "Resend AddTlc and RemoveTlc messages if needed: {}",
                         need_resend_commitment_signed
