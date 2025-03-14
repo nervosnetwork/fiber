@@ -276,7 +276,6 @@ fn reply_trace_tx(
         reason: None,
     };
     let response = TraceTxResponse { tx, status };
-
     if let Err(e) = reply_port.send(response) {
         error!(
             "Sending trace tx result of {:?} failed: {:?}",
