@@ -440,6 +440,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "bitmask-enum"
+version = "2.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e6cbbb8f56245b5a479b30a62cdc86d26e2f35c2b9f594bc4671654b03851380"
+dependencies = [
+ "quote",
+ "syn 2.0.96",
+]
+
+[[package]]
 name = "blake2b-ref"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1668,6 +1678,7 @@ dependencies = [
  "bincode",
  "bitcoin",
  "bitflags 2.7.0",
+ "bitmask-enum",
  "ckb-chain-spec",
  "ckb-gen-types",
  "ckb-hash",

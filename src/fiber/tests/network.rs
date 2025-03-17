@@ -20,13 +20,9 @@ use crate::{
     now_timestamp_as_millis_u64, ChannelTestContext, NetworkServiceEvent,
 };
 use ckb_hash::blake2b_256;
-use ckb_jsonrpc_types::Status;
 use ckb_types::{
-    core::TransactionView,
-    packed::{CellOutput, ScriptBuilder},
-};
-use ckb_types::{
-    packed::OutPoint,
+    core::{tx_pool::TxStatus, TransactionView},
+    packed::{CellOutput, OutPoint, ScriptBuilder},
     prelude::{Builder, Entity, Pack},
 };
 use musig2::PartialSignature;
@@ -228,7 +224,10 @@ async fn test_sync_channel_announcement_on_startup() {
     let (node_announcement_1, node_announcement_2, channel_announcement) =
         create_fake_channel_announcement_message(priv_key, capacity, outpoint);
 
-    assert_eq!(node1.submit_tx(tx.clone()).await, Status::Committed);
+    assert!(matches!(
+        node1.submit_tx(tx.clone()).await,
+        TxStatus::Committed(..)
+    ));
 
     for message in [
         BroadcastMessage::NodeAnnouncement(node_announcement_1.clone()),
@@ -243,7 +242,10 @@ async fn test_sync_channel_announcement_on_startup() {
 
     node1.connect_to(&node2).await;
 
-    assert_eq!(node2.submit_tx(tx.clone()).await, Status::Committed);
+    assert!(matches!(
+        node2.submit_tx(tx.clone()).await,
+        TxStatus::Committed(..)
+    ));
 
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
     let channels = node2.get_network_graph_channels().await;
