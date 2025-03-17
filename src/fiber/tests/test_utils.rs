@@ -600,6 +600,10 @@ impl NetworkNode {
             .expect("cancel success");
     }
 
+    pub fn get_payment_preimage(&self, payment_hash: &Hash256) -> Option<Hash256> {
+        self.store.get_invoice_preimage(payment_hash)
+    }
+
     pub async fn send_payment(
         &self,
         command: SendPaymentCommand,
@@ -1238,9 +1242,10 @@ impl NetworkNode {
             .await;
     }
 
-    pub async fn expect_debug_event(&mut self, event_message: &str) {
-        self
-        .expect_event(|event| matches!(event, NetworkServiceEvent::DebugEvent(DebugEvent::Common(message)) if message == event_message))
+    pub async fn expect_debug_event(&mut self, message: &str) {
+        self.expect_event(|event| {
+            matches!(event, NetworkServiceEvent::DebugEvent(DebugEvent::Common(msg)) if msg == message)
+        })
         .await;
     }
 

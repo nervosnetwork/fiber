@@ -816,16 +816,11 @@ async fn test_network_send_payment_normal_keysend_workflow() {
     assert_eq!(res.status, PaymentSessionStatus::Created);
     let payment_hash = res.payment_hash;
 
-    tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
-    let message = |rpc_reply| -> NetworkActorMessage {
-        NetworkActorMessage::Command(NetworkActorCommand::GetPayment(payment_hash, rpc_reply))
-    };
-    let res = call!(node_a.network_actor, message)
-        .expect("node_a alive")
-        .unwrap();
-
-    assert_eq!(res.status, PaymentSessionStatus::Success);
     assert_eq!(res.failed_error, None);
+    node_a.wait_until_success(payment_hash).await;
+
+    let payment_preimage = node_a.get_payment_preimage(&payment_hash);
+    assert!(payment_preimage.is_none());
 }
 
 #[tokio::test]
@@ -1708,12 +1703,13 @@ async fn test_network_send_payment_with_dry_run() {
 async fn test_send_payment_with_3_nodes() {
     init_tracing();
     let _span = tracing::info_span!("node", node = "test").entered();
-    let (node_a, node_b, node_c, channel_1, channel_2) = create_3_nodes_with_established_channel(
-        (100000000000, 100000000000),
-        (100000000000, 100000000000),
-        true,
-    )
-    .await;
+    let (node_a, mut node_b, node_c, channel_1, channel_2) =
+        create_3_nodes_with_established_channel(
+            (100000000000, 100000000000),
+            (100000000000, 100000000000),
+            true,
+        )
+        .await;
     let node_a_local = node_a.get_local_balance_from_channel(channel_1);
     let node_b_local_left = node_b.get_local_balance_from_channel(channel_1);
     let node_b_local_right = node_b.get_local_balance_from_channel(channel_2);
@@ -1750,16 +1746,17 @@ async fn test_send_payment_with_3_nodes() {
     let res = res.unwrap();
     assert_eq!(res.status, PaymentSessionStatus::Created);
     assert!(res.fee > 0);
-    // sleep for 2 seconds to make sure the payment is sent
-    tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
-    let message = |rpc_reply| -> NetworkActorMessage {
-        NetworkActorMessage::Command(NetworkActorCommand::GetPayment(res.payment_hash, rpc_reply))
-    };
-    let res = call!(node_a.network_actor, message)
-        .expect("node_a alive")
-        .unwrap();
-    assert_eq!(res.status, PaymentSessionStatus::Success);
-    assert_eq!(res.failed_error, None);
+
+    node_b
+        .expect_debug_event(&format!(
+            "store payment_preimage for: {:?}",
+            res.payment_hash
+        ))
+        .await;
+    assert!(node_b.get_payment_preimage(&res.payment_hash).is_some());
+
+    node_a.wait_until_success(res.payment_hash).await;
+    assert!(node_b.get_payment_preimage(&res.payment_hash).is_none());
 
     let new_node_a_local = node_a.get_local_balance_from_channel(channel_1);
     let new_node_b_left = node_b.get_local_balance_from_channel(channel_1);
@@ -6153,6 +6150,9 @@ async fn test_send_payment_will_succeed_with_valid_invoice() {
         node_3.get_invoice_status(ckb_invoice.payment_hash()),
         Some(CkbInvoiceStatus::Paid)
     );
+    assert!(node_3
+        .get_payment_preimage(ckb_invoice.payment_hash())
+        .is_none());
 }
 
 #[tokio::test]
@@ -6296,6 +6296,9 @@ async fn test_send_payment_will_fail_with_cancelled_invoice() {
         node_3.get_invoice_status(ckb_invoice.payment_hash()),
         Some(CkbInvoiceStatus::Cancelled)
     );
+    assert!(node_3
+        .get_payment_preimage(ckb_invoice.payment_hash())
+        .is_some());
 }
 
 #[tokio::test]
