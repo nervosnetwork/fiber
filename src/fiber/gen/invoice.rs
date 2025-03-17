@@ -2327,175 +2327,6 @@ impl<'a> From<&'a SignatureReader<'a>> for &'a [u8; 104usize] {
     }
 }
 #[derive(Clone)]
-pub struct ExpiryTimeOpt(molecule::bytes::Bytes);
-impl ::core::fmt::LowerHex for ExpiryTimeOpt {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        use molecule::hex_string;
-        if f.alternate() {
-            write!(f, "0x")?;
-        }
-        write!(f, "{}", hex_string(self.as_slice()))
-    }
-}
-impl ::core::fmt::Debug for ExpiryTimeOpt {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        write!(f, "{}({:#x})", Self::NAME, self)
-    }
-}
-impl ::core::fmt::Display for ExpiryTimeOpt {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        if let Some(v) = self.to_opt() {
-            write!(f, "{}(Some({}))", Self::NAME, v)
-        } else {
-            write!(f, "{}(None)", Self::NAME)
-        }
-    }
-}
-impl ::core::default::Default for ExpiryTimeOpt {
-    fn default() -> Self {
-        let v = molecule::bytes::Bytes::from_static(&Self::DEFAULT_VALUE);
-        ExpiryTimeOpt::new_unchecked(v)
-    }
-}
-impl ExpiryTimeOpt {
-    const DEFAULT_VALUE: [u8; 0] = [];
-    pub fn is_none(&self) -> bool {
-        self.0.is_empty()
-    }
-    pub fn is_some(&self) -> bool {
-        !self.0.is_empty()
-    }
-    pub fn to_opt(&self) -> Option<Duration> {
-        if self.is_none() {
-            None
-        } else {
-            Some(Duration::new_unchecked(self.0.clone()))
-        }
-    }
-    pub fn as_reader<'r>(&'r self) -> ExpiryTimeOptReader<'r> {
-        ExpiryTimeOptReader::new_unchecked(self.as_slice())
-    }
-}
-impl molecule::prelude::Entity for ExpiryTimeOpt {
-    type Builder = ExpiryTimeOptBuilder;
-    const NAME: &'static str = "ExpiryTimeOpt";
-    fn new_unchecked(data: molecule::bytes::Bytes) -> Self {
-        ExpiryTimeOpt(data)
-    }
-    fn as_bytes(&self) -> molecule::bytes::Bytes {
-        self.0.clone()
-    }
-    fn as_slice(&self) -> &[u8] {
-        &self.0[..]
-    }
-    fn from_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
-        ExpiryTimeOptReader::from_slice(slice).map(|reader| reader.to_entity())
-    }
-    fn from_compatible_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
-        ExpiryTimeOptReader::from_compatible_slice(slice).map(|reader| reader.to_entity())
-    }
-    fn new_builder() -> Self::Builder {
-        ::core::default::Default::default()
-    }
-    fn as_builder(self) -> Self::Builder {
-        Self::new_builder().set(self.to_opt())
-    }
-}
-#[derive(Clone, Copy)]
-pub struct ExpiryTimeOptReader<'r>(&'r [u8]);
-impl<'r> ::core::fmt::LowerHex for ExpiryTimeOptReader<'r> {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        use molecule::hex_string;
-        if f.alternate() {
-            write!(f, "0x")?;
-        }
-        write!(f, "{}", hex_string(self.as_slice()))
-    }
-}
-impl<'r> ::core::fmt::Debug for ExpiryTimeOptReader<'r> {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        write!(f, "{}({:#x})", Self::NAME, self)
-    }
-}
-impl<'r> ::core::fmt::Display for ExpiryTimeOptReader<'r> {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        if let Some(v) = self.to_opt() {
-            write!(f, "{}(Some({}))", Self::NAME, v)
-        } else {
-            write!(f, "{}(None)", Self::NAME)
-        }
-    }
-}
-impl<'r> ExpiryTimeOptReader<'r> {
-    pub fn is_none(&self) -> bool {
-        self.0.is_empty()
-    }
-    pub fn is_some(&self) -> bool {
-        !self.0.is_empty()
-    }
-    pub fn to_opt(&self) -> Option<DurationReader<'r>> {
-        if self.is_none() {
-            None
-        } else {
-            Some(DurationReader::new_unchecked(self.as_slice()))
-        }
-    }
-}
-impl<'r> molecule::prelude::Reader<'r> for ExpiryTimeOptReader<'r> {
-    type Entity = ExpiryTimeOpt;
-    const NAME: &'static str = "ExpiryTimeOptReader";
-    fn to_entity(&self) -> Self::Entity {
-        Self::Entity::new_unchecked(self.as_slice().to_owned().into())
-    }
-    fn new_unchecked(slice: &'r [u8]) -> Self {
-        ExpiryTimeOptReader(slice)
-    }
-    fn as_slice(&self) -> &'r [u8] {
-        self.0
-    }
-    fn verify(slice: &[u8], compatible: bool) -> molecule::error::VerificationResult<()> {
-        if !slice.is_empty() {
-            DurationReader::verify(&slice[..], compatible)?;
-        }
-        Ok(())
-    }
-}
-#[derive(Clone, Debug, Default)]
-pub struct ExpiryTimeOptBuilder(pub(crate) Option<Duration>);
-impl ExpiryTimeOptBuilder {
-    pub fn set(mut self, v: Option<Duration>) -> Self {
-        self.0 = v;
-        self
-    }
-}
-impl molecule::prelude::Builder for ExpiryTimeOptBuilder {
-    type Entity = ExpiryTimeOpt;
-    const NAME: &'static str = "ExpiryTimeOptBuilder";
-    fn expected_length(&self) -> usize {
-        self.0
-            .as_ref()
-            .map(|ref inner| inner.as_slice().len())
-            .unwrap_or(0)
-    }
-    fn write<W: molecule::io::Write>(&self, writer: &mut W) -> molecule::io::Result<()> {
-        self.0
-            .as_ref()
-            .map(|ref inner| writer.write_all(inner.as_slice()))
-            .unwrap_or(Ok(()))
-    }
-    fn build(&self) -> Self::Entity {
-        let mut inner = Vec::with_capacity(self.expected_length());
-        self.write(&mut inner)
-            .unwrap_or_else(|_| panic!("{} build should be ok", Self::NAME));
-        ExpiryTimeOpt::new_unchecked(inner.into())
-    }
-}
-impl From<Duration> for ExpiryTimeOpt {
-    fn from(value: Duration) -> Self {
-        Self::new_builder().set(Some(value)).build()
-    }
-}
-#[derive(Clone)]
 pub struct SignatureOpt(molecule::bytes::Bytes);
 impl ::core::fmt::LowerHex for SignatureOpt {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
@@ -3003,170 +2834,6 @@ impl From<Uint32> for FeatureOpt {
     }
 }
 #[derive(Clone)]
-pub struct Duration(molecule::bytes::Bytes);
-impl ::core::fmt::LowerHex for Duration {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        use molecule::hex_string;
-        if f.alternate() {
-            write!(f, "0x")?;
-        }
-        write!(f, "{}", hex_string(self.as_slice()))
-    }
-}
-impl ::core::fmt::Debug for Duration {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        write!(f, "{}({:#x})", Self::NAME, self)
-    }
-}
-impl ::core::fmt::Display for Duration {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        write!(f, "{} {{ ", Self::NAME)?;
-        write!(f, "{}: {}", "seconds", self.seconds())?;
-        write!(f, ", {}: {}", "nanos", self.nanos())?;
-        write!(f, " }}")
-    }
-}
-impl ::core::default::Default for Duration {
-    fn default() -> Self {
-        let v = molecule::bytes::Bytes::from_static(&Self::DEFAULT_VALUE);
-        Duration::new_unchecked(v)
-    }
-}
-impl Duration {
-    const DEFAULT_VALUE: [u8; 16] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-    pub const TOTAL_SIZE: usize = 16;
-    pub const FIELD_SIZES: [usize; 2] = [8, 8];
-    pub const FIELD_COUNT: usize = 2;
-    pub fn seconds(&self) -> Uint64 {
-        Uint64::new_unchecked(self.0.slice(0..8))
-    }
-    pub fn nanos(&self) -> Uint64 {
-        Uint64::new_unchecked(self.0.slice(8..16))
-    }
-    pub fn as_reader<'r>(&'r self) -> DurationReader<'r> {
-        DurationReader::new_unchecked(self.as_slice())
-    }
-}
-impl molecule::prelude::Entity for Duration {
-    type Builder = DurationBuilder;
-    const NAME: &'static str = "Duration";
-    fn new_unchecked(data: molecule::bytes::Bytes) -> Self {
-        Duration(data)
-    }
-    fn as_bytes(&self) -> molecule::bytes::Bytes {
-        self.0.clone()
-    }
-    fn as_slice(&self) -> &[u8] {
-        &self.0[..]
-    }
-    fn from_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
-        DurationReader::from_slice(slice).map(|reader| reader.to_entity())
-    }
-    fn from_compatible_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
-        DurationReader::from_compatible_slice(slice).map(|reader| reader.to_entity())
-    }
-    fn new_builder() -> Self::Builder {
-        ::core::default::Default::default()
-    }
-    fn as_builder(self) -> Self::Builder {
-        Self::new_builder()
-            .seconds(self.seconds())
-            .nanos(self.nanos())
-    }
-}
-#[derive(Clone, Copy)]
-pub struct DurationReader<'r>(&'r [u8]);
-impl<'r> ::core::fmt::LowerHex for DurationReader<'r> {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        use molecule::hex_string;
-        if f.alternate() {
-            write!(f, "0x")?;
-        }
-        write!(f, "{}", hex_string(self.as_slice()))
-    }
-}
-impl<'r> ::core::fmt::Debug for DurationReader<'r> {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        write!(f, "{}({:#x})", Self::NAME, self)
-    }
-}
-impl<'r> ::core::fmt::Display for DurationReader<'r> {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        write!(f, "{} {{ ", Self::NAME)?;
-        write!(f, "{}: {}", "seconds", self.seconds())?;
-        write!(f, ", {}: {}", "nanos", self.nanos())?;
-        write!(f, " }}")
-    }
-}
-impl<'r> DurationReader<'r> {
-    pub const TOTAL_SIZE: usize = 16;
-    pub const FIELD_SIZES: [usize; 2] = [8, 8];
-    pub const FIELD_COUNT: usize = 2;
-    pub fn seconds(&self) -> Uint64Reader<'r> {
-        Uint64Reader::new_unchecked(&self.as_slice()[0..8])
-    }
-    pub fn nanos(&self) -> Uint64Reader<'r> {
-        Uint64Reader::new_unchecked(&self.as_slice()[8..16])
-    }
-}
-impl<'r> molecule::prelude::Reader<'r> for DurationReader<'r> {
-    type Entity = Duration;
-    const NAME: &'static str = "DurationReader";
-    fn to_entity(&self) -> Self::Entity {
-        Self::Entity::new_unchecked(self.as_slice().to_owned().into())
-    }
-    fn new_unchecked(slice: &'r [u8]) -> Self {
-        DurationReader(slice)
-    }
-    fn as_slice(&self) -> &'r [u8] {
-        self.0
-    }
-    fn verify(slice: &[u8], _compatible: bool) -> molecule::error::VerificationResult<()> {
-        use molecule::verification_error as ve;
-        let slice_len = slice.len();
-        if slice_len != Self::TOTAL_SIZE {
-            return ve!(Self, TotalSizeNotMatch, Self::TOTAL_SIZE, slice_len);
-        }
-        Ok(())
-    }
-}
-#[derive(Clone, Debug, Default)]
-pub struct DurationBuilder {
-    pub(crate) seconds: Uint64,
-    pub(crate) nanos: Uint64,
-}
-impl DurationBuilder {
-    pub const TOTAL_SIZE: usize = 16;
-    pub const FIELD_SIZES: [usize; 2] = [8, 8];
-    pub const FIELD_COUNT: usize = 2;
-    pub fn seconds(mut self, v: Uint64) -> Self {
-        self.seconds = v;
-        self
-    }
-    pub fn nanos(mut self, v: Uint64) -> Self {
-        self.nanos = v;
-        self
-    }
-}
-impl molecule::prelude::Builder for DurationBuilder {
-    type Entity = Duration;
-    const NAME: &'static str = "DurationBuilder";
-    fn expected_length(&self) -> usize {
-        Self::TOTAL_SIZE
-    }
-    fn write<W: molecule::io::Write>(&self, writer: &mut W) -> molecule::io::Result<()> {
-        writer.write_all(self.seconds.as_slice())?;
-        writer.write_all(self.nanos.as_slice())?;
-        Ok(())
-    }
-    fn build(&self) -> Self::Entity {
-        let mut inner = Vec::with_capacity(self.expected_length());
-        self.write(&mut inner)
-            .unwrap_or_else(|_| panic!("{} build should be ok", Self::NAME));
-        Duration::new_unchecked(inner.into())
-    }
-}
-#[derive(Clone)]
 pub struct FinalHtlcTimeout(molecule::bytes::Bytes);
 impl ::core::fmt::LowerHex for FinalHtlcTimeout {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
@@ -3493,12 +3160,12 @@ impl ::core::default::Default for ExpiryTime {
     }
 }
 impl ExpiryTime {
-    const DEFAULT_VALUE: [u8; 16] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-    pub const TOTAL_SIZE: usize = 16;
-    pub const FIELD_SIZES: [usize; 1] = [16];
+    const DEFAULT_VALUE: [u8; 8] = [0, 0, 0, 0, 0, 0, 0, 0];
+    pub const TOTAL_SIZE: usize = 8;
+    pub const FIELD_SIZES: [usize; 1] = [8];
     pub const FIELD_COUNT: usize = 1;
-    pub fn value(&self) -> Duration {
-        Duration::new_unchecked(self.0.slice(0..16))
+    pub fn value(&self) -> Uint64 {
+        Uint64::new_unchecked(self.0.slice(0..8))
     }
     pub fn as_reader<'r>(&'r self) -> ExpiryTimeReader<'r> {
         ExpiryTimeReader::new_unchecked(self.as_slice())
@@ -3553,11 +3220,11 @@ impl<'r> ::core::fmt::Display for ExpiryTimeReader<'r> {
     }
 }
 impl<'r> ExpiryTimeReader<'r> {
-    pub const TOTAL_SIZE: usize = 16;
-    pub const FIELD_SIZES: [usize; 1] = [16];
+    pub const TOTAL_SIZE: usize = 8;
+    pub const FIELD_SIZES: [usize; 1] = [8];
     pub const FIELD_COUNT: usize = 1;
-    pub fn value(&self) -> DurationReader<'r> {
-        DurationReader::new_unchecked(&self.as_slice()[0..16])
+    pub fn value(&self) -> Uint64Reader<'r> {
+        Uint64Reader::new_unchecked(&self.as_slice()[0..8])
     }
 }
 impl<'r> molecule::prelude::Reader<'r> for ExpiryTimeReader<'r> {
@@ -3583,13 +3250,13 @@ impl<'r> molecule::prelude::Reader<'r> for ExpiryTimeReader<'r> {
 }
 #[derive(Clone, Debug, Default)]
 pub struct ExpiryTimeBuilder {
-    pub(crate) value: Duration,
+    pub(crate) value: Uint64,
 }
 impl ExpiryTimeBuilder {
-    pub const TOTAL_SIZE: usize = 16;
-    pub const FIELD_SIZES: [usize; 1] = [16];
+    pub const TOTAL_SIZE: usize = 8;
+    pub const FIELD_SIZES: [usize; 1] = [8];
     pub const FIELD_COUNT: usize = 1;
-    pub fn value(mut self, v: Duration) -> Self {
+    pub fn value(mut self, v: Uint64) -> Self {
         self.value = v;
         self
     }
@@ -4873,7 +4540,7 @@ impl ::core::default::Default for InvoiceAttr {
     }
 }
 impl InvoiceAttr {
-    const DEFAULT_VALUE: [u8; 20] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    const DEFAULT_VALUE: [u8; 12] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
     pub const ITEMS_COUNT: usize = 9;
     pub fn item_id(&self) -> molecule::Number {
         molecule::unpack_number(self.as_slice())

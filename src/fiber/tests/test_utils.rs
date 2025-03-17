@@ -21,10 +21,14 @@ use crate::invoice::CkbInvoice;
 use crate::invoice::CkbInvoiceStatus;
 use crate::invoice::InvoiceStore;
 use ckb_jsonrpc_types::Status;
+use ckb_sdk::core::TransactionBuilder;
 use ckb_types::packed::OutPoint;
+use ckb_types::packed::Script;
 use ckb_types::{core::TransactionView, packed::Byte32};
 use ractor::{call, Actor, ActorRef};
+use rand::distributions::Alphanumeric;
 use rand::rngs::OsRng;
+use rand::Rng;
 use secp256k1::{Message, Secp256k1};
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -165,10 +169,10 @@ pub fn mock_ecdsa_signature() -> EcdsaSignature {
     EcdsaSignature(signature)
 }
 
-pub fn generate_store() -> Store {
+pub fn generate_store() -> (Store, TempDir) {
     let temp_dir = TempDir::new("test-fnn-node");
     let store = Store::new(temp_dir.as_ref());
-    store.expect("create store")
+    (store.expect("create store"), temp_dir)
 }
 
 #[derive(Debug)]
@@ -257,7 +261,16 @@ impl NetworkNodeConfigBuilder {
             .clone()
             .unwrap_or_else(|| Arc::new(TempDir::new("test-fnn-node")));
         let node_name = self.node_name.clone();
-        let store = generate_store();
+
+        // generate a random string as db name to avoid conflict
+        // when build multiple nodes in the same NetworkNodeConfig
+        let rand_name: String = rand::thread_rng()
+            .sample_iter(&Alphanumeric)
+            .take(5)
+            .map(char::from)
+            .collect();
+        let rand_db_dir = Path::new(base_dir.to_str()).join(rand_name);
+        let store = Store::new(rand_db_dir).expect("create store");
         let fiber_config = get_fiber_config(base_dir.as_ref(), node_name.as_deref());
         let mut config = NetworkNodeConfig {
             base_dir,
@@ -571,6 +584,47 @@ impl NetworkNode {
         let res = call!(self.network_actor, message).expect("source_node alive");
         eprintln!("result: {:?}", res);
         res
+    }
+
+    pub async fn send_shutdown(
+        &self,
+        channel_id: Hash256,
+        force: bool,
+    ) -> std::result::Result<(), String> {
+        use crate::fiber::channel::ShutdownCommand;
+        use ckb_types::core::FeeRate;
+        let message = |rpc_reply| -> NetworkActorMessage {
+            NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+                ChannelCommandWithId {
+                    channel_id,
+                    command: ChannelCommand::Shutdown(
+                        ShutdownCommand {
+                            close_script: Script::default(),
+                            fee_rate: FeeRate::from_u64(1000000000),
+                            force,
+                        },
+                        rpc_reply,
+                    ),
+                },
+            ))
+        };
+
+        call!(self.network_actor, message).expect("source_node alive")
+    }
+
+    pub async fn send_channel_shutdown_tx_confirmed_event(
+        &self,
+        peer_id: PeerId,
+        channel_id: Hash256,
+        force: bool,
+    ) {
+        use crate::fiber::NetworkActorEvent::ClosingTransactionConfirmed;
+
+        let tx_hash = TransactionBuilder::default().build().hash();
+        let event = ClosingTransactionConfirmed(peer_id, channel_id, tx_hash, force);
+        self.network_actor
+            .send_message(NetworkActorMessage::Event(event))
+            .expect("network actor alive");
     }
 
     pub async fn send_payment_keysend(

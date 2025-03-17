@@ -1,0 +1,54 @@
+meta {
+  name: get channels from node1
+  type: http
+  seq: 23
+}
+
+post {
+  url: {{NODE3_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": 42,
+    "jsonrpc": "2.0",
+    "method": "list_channels",
+    "params": [
+      {
+        "peer_id": "{{NODE1_PEERID}}",
+        "include_closed": true
+      }
+    ]
+  }
+}
+
+script:pre-request {
+  await new Promise(r => setTimeout(r, 2000));
+}
+
+assert {
+  res.status: eq 200
+}
+
+script:post-response {
+  await new Promise(r => setTimeout(r, 1000));
+  console.log("step 23 list channels: ", res.body.result.channels);
+  // should list all channels including the closed one
+  let channel = res.body.result.channels[0];
+  console.log("channel: ", channel);
+  let expect_channel_id = bru.getVar("CHANNEL_ID");
+  console.log("expect_channel_id: ", expect_channel_id);
+  if (!channel || channel.channel_id != expect_channel_id) {
+    throw new Error("channel not found");
+  }
+  if (channel.state.state_name != "CLOSED" && channel.state.state_flags != "COOPERATIVE") {
+    throw new Error("channel state is not right");
+  }
+}

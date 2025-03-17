@@ -860,7 +860,7 @@ fn build_settlement_tx_for_pending_tlcs<S: InvoiceStore>(
                     let pubkey_hash = blake2b_256(settlement_tlc.local_key.pubkey().serialize());
                     if settlement_tlc.tlc_id.is_offered() {
                         if pubkey_hash.starts_with(tlc.local_pubkey_hash())
-                            && tlc.expiry() < current_time
+                            && settlement_tlc.expiry < current_time
                         {
                             Some((index, settlement_tlc.clone(), None))
                         } else if pubkey_hash.starts_with(tlc.remote_pubkey_hash()) {
@@ -871,7 +871,7 @@ fn build_settlement_tx_for_pending_tlcs<S: InvoiceStore>(
                             None
                         }
                     } else if pubkey_hash.starts_with(tlc.remote_pubkey_hash())
-                        && tlc.expiry() < current_time
+                        && settlement_tlc.expiry < current_time
                     {
                         Some((index, settlement_tlc.clone(), None))
                     } else if pubkey_hash.starts_with(tlc.local_pubkey_hash()) {
@@ -1246,11 +1246,6 @@ impl<'a> Tlc<'a> {
 
     pub fn local_pubkey_hash(&self) -> &'a [u8] {
         &self.0[57..77]
-    }
-
-    pub fn expiry(&self) -> u64 {
-        let expiry = u64::from_le_bytes(self.0[77..85].try_into().unwrap());
-        Since::from_raw_value(expiry).extract_metric().unwrap().1
     }
 }
 
