@@ -170,21 +170,11 @@ pub struct ChannelInfo {
     /// The created timestamp of the channel, which is the block header timestamp of the block
     /// that contains the channel funding transaction.
     pub created_timestamp: u64,
-    /// The timestamp of the last update to channel by node 1 (e.g. updating fee rate).
-    /// Types of update included https://github.com/nervosnetwork/fiber/tree/develop/src/rpc#params-7
-    #[serde_as(as = "Option<U64Hex>")]
-    pub last_updated_timestamp_of_node1: Option<u64>,
-    /// The timestamp of the last update to channel by node 2 (e.g. updating fee rate).
-    /// Types of update included https://github.com/nervosnetwork/fiber/tree/develop/src/rpc#params-7
-    #[serde_as(as = "Option<U64Hex>")]
-    pub last_updated_timestamp_of_node2: Option<u64>,
 
-    /// The update info from node1 to node2,
-    /// eg the fee_rate from node1 to node2
+    /// The update info from node1 to node2, e.g. timestamp, fee_rate, tlc_expiry_delta, tlc_minimum_value
     pub update_info_of_node1: Option<ChannelUpdateInfo>,
 
-    /// The update info from node2 to node1,
-    /// eg the fee_rate from node2 to node1
+    /// The update info from node2 to node1, e.g. timestamp, fee_rate, tlc_expiry_delta, tlc_minimum_value
     pub update_info_of_node2: Option<ChannelUpdateInfo>,
 
     /// The capacity of the channel.
@@ -203,14 +193,6 @@ impl From<super::super::fiber::graph::ChannelInfo> for ChannelInfo {
             node1: channel_info.node1(),
             node2: channel_info.node2(),
             created_timestamp: channel_info.timestamp,
-            last_updated_timestamp_of_node1: channel_info
-                .update_of_node1
-                .as_ref()
-                .map(|cu| cu.timestamp),
-            last_updated_timestamp_of_node2: channel_info
-                .update_of_node2
-                .as_ref()
-                .map(|cu| cu.timestamp),
             update_info_of_node1: channel_info.update_of_node1,
             update_info_of_node2: channel_info.update_of_node2,
             capacity: channel_info.capacity(),

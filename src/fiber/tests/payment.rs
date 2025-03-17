@@ -2689,10 +2689,7 @@ async fn test_send_payment_shutdown_with_force() {
         "node_2_channel_actor_state: {:?}",
         node_2_channel_actor_state.state
     );
-    assert_eq!(
-        node_2_channel_actor_state.state,
-        ChannelState::ChannelReady()
-    );
+    assert_eq!(node_2_channel_actor_state.state, ChannelState::ChannelReady);
 }
 
 #[tokio::test]
