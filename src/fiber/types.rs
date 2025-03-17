@@ -12,6 +12,7 @@ use super::serde_utils::{EntityHex, SliceHex};
 use crate::ckb::config::{UdtArgInfo, UdtCellDep, UdtCfgInfos, UdtScript};
 use crate::ckb::contracts::get_udt_whitelist;
 use ckb_jsonrpc_types::CellOutput;
+use ckb_types::H256;
 use num_enum::IntoPrimitive;
 use num_enum::TryFromPrimitive;
 use std::convert::TryFrom;
@@ -185,6 +186,18 @@ impl From<&MByte32> for Hash256 {
 impl From<MByte32> for Hash256 {
     fn from(value: MByte32) -> Self {
         (&value).into()
+    }
+}
+
+impl From<Hash256> for H256 {
+    fn from(value: Hash256) -> Self {
+        H256(value.0)
+    }
+}
+
+impl From<H256> for Hash256 {
+    fn from(value: H256) -> Self {
+        Hash256(value.0)
     }
 }
 
