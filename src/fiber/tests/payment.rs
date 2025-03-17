@@ -1,5 +1,7 @@
 #![allow(clippy::needless_range_loop)]
 use super::test_utils::init_tracing;
+use crate::fiber::channel::ChannelState;
+use crate::fiber::channel::CloseFlags;
 use crate::fiber::channel::UpdateCommand;
 use crate::fiber::config::DEFAULT_TLC_EXPIRY_DELTA;
 use crate::fiber::config::DEFAULT_TLC_FEE_PROPORTIONAL_MILLIONTHS;
@@ -2533,6 +2535,296 @@ async fn test_send_payment_complex_network_payself_amount_exceeded() {
         .filter(|(_, status)| *status == PaymentSessionStatus::Success)
         .count();
     assert!(succ_count > 0);
+}
+
+#[tokio::test]
+async fn test_send_payment_with_one_node_stop() {
+    // make sure part of the payments will fail, since the node is stopped
+    // TLC forwarding will fail and proper error will be returned
+    init_tracing();
+    let _span = tracing::info_span!("node", node = "test").entered();
+    let (mut nodes, _channels) = create_n_nodes_and_channels_with_index_amounts(
+        &[
+            ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((2, 3), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+        ],
+        4,
+        true,
+    )
+    .await;
+
+    let mut all_sent = HashSet::new();
+    for i in 0..10 {
+        let res = nodes[0].send_payment_keysend(&nodes[3], 1000, false).await;
+        if let Ok(send_payment_res) = res {
+            if i > 5 {
+                all_sent.insert(send_payment_res.payment_hash);
+            }
+        }
+
+        if i == 5 {
+            let _ = nodes[3].stop().await;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+    }
+
+    let mut failed_count = 0;
+    let mut check_count = 0;
+    while check_count < 100 {
+        for payment_hash in all_sent.clone().iter() {
+            let res = nodes[0].get_payment_result(*payment_hash).await;
+            eprintln!("payment_hash: {:?} status: {:?}", payment_hash, res.status);
+            if res.status == PaymentSessionStatus::Failed {
+                failed_count += 1;
+                all_sent.remove(payment_hash);
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+        check_count += 1;
+        if all_sent.is_empty() {
+            break;
+        }
+    }
+    assert_eq!(failed_count, 4);
+}
+
+#[tokio::test]
+async fn test_send_payment_shutdown_with_force() {
+    init_tracing();
+    let _span = tracing::info_span!("node", node = "test").entered();
+    let (nodes, channels) = create_n_nodes_and_channels_with_index_amounts(
+        &[
+            ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((2, 3), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+        ],
+        4,
+        true,
+    )
+    .await;
+
+    let mut all_sent = HashSet::new();
+    for i in 0..10 {
+        let res = nodes[0].send_payment_keysend(&nodes[3], 1000, false).await;
+        if let Ok(send_payment_res) = res {
+            if i > 5 {
+                all_sent.insert(send_payment_res.payment_hash);
+            }
+        }
+
+        if i == 5 {
+            let _ = nodes[3].send_shutdown(channels[2], true).await;
+
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+            nodes[3]
+                .send_channel_shutdown_tx_confirmed_event(
+                    nodes[2].peer_id.clone(),
+                    channels[2],
+                    true,
+                )
+                .await;
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        }
+    }
+
+    // make sure the later payments will fail
+    // because network actor will find out the inactive channels and disconnect peers
+    // which send shutdown force message
+    let mut failed_count = 0;
+    let expect_failed_count = all_sent.len();
+    while !all_sent.is_empty() {
+        for payment_hash in all_sent.clone().iter() {
+            let res = nodes[0].get_payment_result(*payment_hash).await;
+            eprintln!(
+                "payment_hash: {:?} status: {:?} failed_count: {:?}",
+                payment_hash, res.status, failed_count
+            );
+            if res.status == PaymentSessionStatus::Failed {
+                failed_count += 1;
+                all_sent.remove(payment_hash);
+            }
+
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        }
+    }
+    assert!(failed_count >= expect_failed_count);
+
+    let node_3_channel_actor_state = nodes[3].get_channel_actor_state(channels[2]);
+    eprintln!(
+        "node_3_channel_actor_state: {:?}",
+        node_3_channel_actor_state.state
+    );
+    assert_eq!(
+        node_3_channel_actor_state.state,
+        ChannelState::Closed(CloseFlags::UNCOOPERATIVE)
+    );
+
+    // because node2 didn't receive the shutdown message,
+    // so it will still think the channel is ready
+    let node_2_channel_actor_state = nodes[2].get_channel_actor_state(channels[2]);
+    eprintln!(
+        "node_2_channel_actor_state: {:?}",
+        node_2_channel_actor_state.state
+    );
+    assert_eq!(
+        node_2_channel_actor_state.state,
+        ChannelState::ChannelReady()
+    );
+}
+
+#[tokio::test]
+async fn test_send_payment_shutdown_cooperative() {
+    init_tracing();
+    let _span = tracing::info_span!("node", node = "test").entered();
+    let (nodes, channels) = create_n_nodes_and_channels_with_index_amounts(
+        &[
+            ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((2, 3), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+        ],
+        4,
+        true,
+    )
+    .await;
+
+    let mut all_sent = HashSet::new();
+    for i in 0..10 {
+        let res = nodes[0].send_payment_keysend(&nodes[3], 1000, false).await;
+        if let Ok(send_payment_res) = res {
+            if i > 5 {
+                all_sent.insert(send_payment_res.payment_hash);
+            }
+        }
+
+        if i == 5 {
+            let _ = nodes[3].send_shutdown(channels[2], false).await;
+        }
+    }
+
+    let mut failed_count = 0;
+    let all_tx_count = all_sent.len();
+    while !all_sent.is_empty() {
+        for payment_hash in all_sent.clone().iter() {
+            let res = nodes[0].get_payment_result(*payment_hash).await;
+            eprintln!(
+                "payment_hash: {:?} status: {:?} failed_count: {:?}",
+                payment_hash, res.status, failed_count
+            );
+            if res.status == PaymentSessionStatus::Failed
+                || res.status == PaymentSessionStatus::Success
+            {
+                failed_count += 1;
+                all_sent.remove(payment_hash);
+            }
+
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        }
+    }
+    assert_eq!(failed_count, all_tx_count);
+
+    loop {
+        let node_3_channel_actor_state = nodes[3].get_channel_actor_state(channels[2]);
+        eprintln!(
+            "node_3_channel_actor_state: {:?}",
+            node_3_channel_actor_state.state
+        );
+        let node_2_channel_actor_state = nodes[2].get_channel_actor_state(channels[2]);
+        eprintln!(
+            "node_2_channel_actor_state: {:?}",
+            node_2_channel_actor_state.state
+        );
+        tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+        if !node_2_channel_actor_state.any_tlc_pending()
+            && !node_3_channel_actor_state.any_tlc_pending()
+        {
+            break;
+        }
+    }
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+    let node_3_channel_actor_state = nodes[3].get_channel_actor_state(channels[2]);
+    assert_eq!(
+        node_3_channel_actor_state.state,
+        ChannelState::Closed(CloseFlags::COOPERATIVE)
+    );
+    let node_2_channel_actor_state = nodes[2].get_channel_actor_state(channels[2]);
+    assert_eq!(
+        node_2_channel_actor_state.state,
+        ChannelState::Closed(CloseFlags::COOPERATIVE)
+    );
+}
+
+#[tokio::test]
+async fn test_send_payment_shutdown_under_send_each_other() {
+    init_tracing();
+    let _span = tracing::info_span!("node", node = "test").entered();
+    let (nodes, channels) = create_n_nodes_and_channels_with_index_amounts(
+        &[
+            ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((2, 3), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+        ],
+        4,
+        true,
+    )
+    .await;
+
+    let mut all_sent = HashSet::new();
+    let mut node0_sent_payments = HashSet::new();
+    let mut node3_sent_payments = HashSet::new();
+    for _i in 0..5 {
+        let res = nodes[0].send_payment_keysend(&nodes[3], 1000, false).await;
+        if let Ok(send_payment_res) = res {
+            all_sent.insert(send_payment_res.payment_hash);
+            node0_sent_payments.insert(send_payment_res.payment_hash);
+        }
+        let res = nodes[3].send_payment_keysend(&nodes[0], 1000, false).await;
+        if let Ok(send_payment_res) = res {
+            all_sent.insert(send_payment_res.payment_hash);
+            node3_sent_payments.insert(send_payment_res.payment_hash);
+        }
+    }
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+    let _ = nodes[3].send_shutdown(channels[2], false).await;
+
+    for i in 0..100 {
+        let node_2_channel_actor_state = nodes[2].get_channel_actor_state(channels[2]);
+        eprintln!(
+            "checking {}: node_2_channel_actor_state: {:?} tlc_pending:\n",
+            i, node_2_channel_actor_state.state,
+        );
+        node_2_channel_actor_state.tlc_state.debug();
+
+        let node_3_channel_actor_state = nodes[3].get_channel_actor_state(channels[2]);
+        eprintln!(
+            "checking { }: node_3_channel_actor_state: {:?} tlc_pending:\n",
+            i, node_3_channel_actor_state.state,
+        );
+        node_3_channel_actor_state.tlc_state.debug();
+        tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+        if !node_2_channel_actor_state.any_tlc_pending()
+            && !node_3_channel_actor_state.any_tlc_pending()
+        {
+            break;
+        }
+    }
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+    let node_3_channel_actor_state = nodes[3].get_channel_actor_state(channels[2]);
+    assert_eq!(
+        node_3_channel_actor_state.state,
+        ChannelState::Closed(CloseFlags::COOPERATIVE)
+    );
+    let node_2_channel_actor_state = nodes[2].get_channel_actor_state(channels[2]);
+    assert_eq!(
+        node_2_channel_actor_state.state,
+        ChannelState::Closed(CloseFlags::COOPERATIVE)
+    );
 }
 
 #[tokio::test]
