@@ -13,6 +13,7 @@ jobs:
       - run: |
           cargo check
           make check-dirty-rpc-doc
+          cd migrate && cargo check
 
   cargo-shear:
     name: Cargo Shear
@@ -22,7 +23,7 @@ jobs:
       - uses: dsherret/rust-toolchain-file@v1
       - uses: cargo-bins/cargo-binstall@main
       - run: |
-          cargo binstall --no-confirm cargo-shear --force --locked
+          cargo binstall --no-confirm cargo-shear --force --locked --version 1.1.9
           cargo shear
 
   test:
@@ -36,7 +37,7 @@ jobs:
         with:
           tool: nextest
       - run: |
-          TEST_TEMP_RETAIN=1 RUST_BACKTRACE=full RUST_LOG=trace cargo nextest run --no-fail-fast
+          RUST_BACKTRACE=full RUST_LOG=trace cargo nextest run --no-fail-fast
 
   fmt:
     name: Rustfmt
@@ -56,6 +57,22 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: |
           make clippy
+
+  typos:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check for typos
+        uses: crate-ci/typos@v1.30.0
+      - name: Typos info
+        if: failure()
+        run: |
+          echo 'To fix typos, please run `cargo install typos && typos -w`'
+          echo 'To check for a diff, run `typos`'
+          echo 'You can find typos here: https://crates.io/crates/typos'
+          echo 'if you use VSCode, you can also install `Typos Spell Checker'
+          echo 'You can find the extension here: https://marketplace.visualstudio.com/items?itemName=tekumara.typos-vscode'
 
   coverage:
     name: Code Coverage

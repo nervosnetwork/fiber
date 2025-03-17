@@ -1,3 +1,4 @@
+use crate::fiber::serde_utils::EntityHex;
 use crate::fiber::{
     channel::{
         AwaitingChannelReadyFlags, AwaitingTxSignaturesFlags, ChannelActorStateStore,
@@ -6,7 +7,7 @@ use crate::fiber::{
         SigningCommitmentFlags, UpdateCommand,
     },
     network::{AcceptChannelCommand, OpenChannelCommand},
-    serde_utils::{EntityHex, U128Hex, U64Hex},
+    serde_utils::{U128Hex, U64Hex},
     types::Hash256,
     NetworkActorCommand, NetworkActorMessage,
 };
@@ -94,6 +95,12 @@ pub struct OpenChannelParams {
 pub struct OpenChannelResult {
     /// The temporary channel ID of the channel being opened
     pub temporary_channel_id: Hash256,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct AbandonChannelParams {
+    /// The temporary channel ID or real channel ID of the channel being abandoned
+    pub channel_id: Hash256,
 }
 
 #[serde_as]
@@ -186,9 +193,8 @@ pub enum ChannelState {
     AwaitingChannelReady(AwaitingChannelReadyFlags),
     /// Both we and our counterparty consider the funding transaction confirmed and the channel is
     /// now operational.
-    ChannelReady(),
+    ChannelReady,
     /// We've successfully negotiated a `closing_signed` dance. At this point, the `ChannelManager`
-    /// is about to drop us, but we store this anyway.
     ShuttingDown(ShuttingDownFlags),
     /// This channel is closed.
     Closed(CloseFlags),
@@ -208,7 +214,7 @@ impl From<RawChannelState> for ChannelState {
             RawChannelState::AwaitingChannelReady(flags) => {
                 ChannelState::AwaitingChannelReady(flags)
             }
-            RawChannelState::ChannelReady() => ChannelState::ChannelReady(),
+            RawChannelState::ChannelReady => ChannelState::ChannelReady,
             RawChannelState::ShuttingDown(flags) => ChannelState::ShuttingDown(flags),
             RawChannelState::Closed(flags) => ChannelState::Closed(flags),
         }
@@ -316,6 +322,11 @@ trait ChannelRpc {
         params: AcceptChannelParams,
     ) -> Result<AcceptChannelResult, ErrorObjectOwned>;
 
+    /// Abandon a channel, this will remove the channel from the channel manager and DB.
+    /// Only channels not in Ready or Closed state can be abandoned.
+    #[method(name = "abandon_channel")]
+    async fn abandon_channel(&self, params: AbandonChannelParams) -> Result<(), ErrorObjectOwned>;
+
     /// Lists all channels.
     #[method(name = "list_channels")]
     async fn list_channels(
@@ -408,6 +419,16 @@ where
         })
     }
 
+    async fn abandon_channel(&self, params: AbandonChannelParams) -> Result<(), ErrorObjectOwned> {
+        let message = |rpc_reply| {
+            NetworkActorMessage::Command(NetworkActorCommand::AbandonChannel(
+                params.channel_id,
+                rpc_reply,
+            ))
+        };
+        handle_actor_call!(self.actor, message, params)
+    }
+
     async fn list_channels(
         &self,
         params: ListChannelsParams,
@@ -434,8 +455,8 @@ where
                         state: state.state.into(),
                         local_balance: state.get_local_balance(),
                         remote_balance: state.get_remote_balance(),
-                        offered_tlc_balance: state.get_offered_tlc_balance(true),
-                        received_tlc_balance: state.get_received_tlc_balance(true),
+                        offered_tlc_balance: state.get_offered_tlc_balance(),
+                        received_tlc_balance: state.get_received_tlc_balance(),
                         latest_commitment_transaction_hash: state
                             .latest_commitment_transaction
                             .as_ref()

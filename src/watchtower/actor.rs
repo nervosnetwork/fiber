@@ -17,7 +17,7 @@ use ckb_types::{
 use molecule::prelude::Entity;
 use ractor::{Actor, ActorProcessingErr, ActorRef};
 use secp256k1::{Message, PublicKey, Secp256k1, SecretKey};
-use tracing::{error, info, trace, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use crate::{
     ckb::{
@@ -103,6 +103,9 @@ where
                     NetworkServiceEvent::ChannelClosed(_peer_id, channel_id, _close_tx_hash) => {
                         self.store.remove_watch_channel(channel_id);
                     }
+                    NetworkServiceEvent::ChannelAbandon(channel_id) => {
+                        self.store.remove_watch_channel(channel_id);
+                    }
                     NetworkServiceEvent::RevokeAndAckReceived(
                         _peer_id,
                         channel_id,
@@ -137,12 +140,13 @@ where
     S: InvoiceStore + WatchtowerStore,
 {
     fn periodic_check(&self, state: &WatchtowerState) {
-        for channel_data in self.store.get_watch_channels() {
-            let secret_key = state.secret_key;
-            let rpc_url = state.config.rpc_url.clone();
-            tokio::task::block_in_place(move || {
+        let secret_key = state.secret_key;
+        let rpc_url = state.config.rpc_url.clone();
+        tokio::task::block_in_place(move || {
+            let mut cell_collector = DefaultCellCollector::new(&rpc_url);
+
+            for channel_data in self.store.get_watch_channels() {
                 let ckb_client = CkbRpcClient::new(&rpc_url);
-                let mut cell_collector = DefaultCellCollector::new(&rpc_url);
                 let search_key = SearchKey {
                     script: channel_data.funding_tx_lock.clone().into(),
                     script_type: ScriptType::Lock,
@@ -288,7 +292,7 @@ where
                                                 }
                                             }
                                         } else {
-                                            error!("Cannot find the commitment tx: {:?}, transcation is none, maybe ckb indexer bug?", tx.tx_hash);
+                                            error!("Cannot find the commitment tx: {:?}, transaction is none, maybe ckb indexer bug?", tx.tx_hash);
                                         }
                                     }
                                     Ok(None) => {
@@ -305,8 +309,8 @@ where
                         error!("Failed to get transactions: {:?}", err);
                     }
                 }
-            });
-        }
+            }
+        });
     }
 }
 
@@ -360,12 +364,23 @@ fn build_revocation_tx(
 
     // TODO: move it to config or use https://github.com/nervosnetwork/ckb/pull/4477
     let fee_calculator = FeeCalculator::new(1000);
-
+    // use two inputs as the maximum fee provider cell inputs
+    let fee = fee_calculator.fee(
+        tx_builder.clone().build().data().serialized_size_in_block() as u64
+            + CellInput::TOTAL_SIZE as u64 * 2,
+    );
+    let min_total_capacity = change_output_occupied_capacity + fee;
     let mut query = CellQueryOptions::new_lock(fee_provider_lock_script);
     query.script_search_mode = Some(SearchMode::Exact);
     query.secondary_script_len_range = Some(ValueRangeOption::new_exact(0));
     query.data_len_range = Some(ValueRangeOption::new_exact(0));
-    let (cells, _total_capacity) = cell_collector.collect_live_cells(&query, true)?;
+    query.min_total_capacity = min_total_capacity;
+    let (cells, total_capacity) = cell_collector.collect_live_cells(&query, false)?;
+    debug!(
+        "cells len: {}, total_capacity: {}",
+        cells.len(),
+        total_capacity
+    );
 
     let mut inputs_capacity = 0u64;
     for cell in cells {
@@ -378,6 +393,10 @@ fn build_revocation_tx(
         );
         let fee =
             fee_calculator.fee(tx_builder.clone().build().data().serialized_size_in_block() as u64);
+        debug!(
+            "inputs_capacity: {}, change_output_occupied_capacity: {}, fee: {}",
+            inputs_capacity, change_output_occupied_capacity, fee
+        );
         if inputs_capacity >= change_output_occupied_capacity + fee {
             let new_change_output = change_output
                 .as_builder()
@@ -587,23 +606,35 @@ fn try_settle_commitment_tx<S: InvoiceStore>(
                         "Found a force closed commitment tx without pending tlcs: {:#x}",
                         cell.out_point.tx_hash
                     );
-                    match build_settlement_tx(
-                        commitment_tx_out_point,
-                        since,
-                        settlement_data.clone(),
-                        secret_key,
-                        cell_collector,
-                    ) {
-                        Ok(tx) => match ckb_client.send_transaction(tx.data().into(), None) {
-                            Ok(tx_hash) => {
-                                info!("Settlement tx: {:?} sent, tx_hash: {:#x}", tx, tx_hash);
-                            }
+                    if cell_header.epoch().to_rational() + delay_epoch.unwrap().to_rational()
+                        > current_epoch.to_rational()
+                    {
+                        debug!(
+                            "Commitment tx: {:#x} is not ready to settle",
+                            cell.out_point.tx_hash
+                        );
+                    } else {
+                        match build_settlement_tx(
+                            commitment_tx_out_point,
+                            since,
+                            settlement_data.clone(),
+                            secret_key,
+                            cell_collector,
+                        ) {
+                            Ok(tx) => match ckb_client.send_transaction(tx.data().into(), None) {
+                                Ok(tx_hash) => {
+                                    info!("Settlement tx: {:?} sent, tx_hash: {:#x}", tx, tx_hash);
+                                }
+                                Err(err) => {
+                                    error!(
+                                        "Failed to send settlement tx: {:?}, error: {:?}",
+                                        tx, err
+                                    );
+                                }
+                            },
                             Err(err) => {
-                                error!("Failed to send settlement tx: {:?}, error: {:?}", tx, err);
+                                error!("Failed to build settlement tx: {:?}", err);
                             }
-                        },
-                        Err(err) => {
-                            error!("Failed to build settlement tx: {:?}", err);
                         }
                     }
                 }
@@ -673,12 +704,23 @@ fn build_settlement_tx(
 
     // TODO: move it to config or use https://github.com/nervosnetwork/ckb/pull/4477
     let fee_calculator = FeeCalculator::new(1000);
-
+    // use two inputs as the maximum fee provider cell inputs
+    let fee = fee_calculator.fee(
+        tx_builder.clone().build().data().serialized_size_in_block() as u64
+            + CellInput::TOTAL_SIZE as u64 * 2,
+    );
+    let min_total_capacity = change_output_occupied_capacity + fee;
     let mut query = CellQueryOptions::new_lock(fee_provider_lock_script);
     query.script_search_mode = Some(SearchMode::Exact);
     query.secondary_script_len_range = Some(ValueRangeOption::new_exact(0));
     query.data_len_range = Some(ValueRangeOption::new_exact(0));
-    let (cells, _total_capacity) = cell_collector.collect_live_cells(&query, true)?;
+    query.min_total_capacity = min_total_capacity;
+    let (cells, total_capacity) = cell_collector.collect_live_cells(&query, true)?;
+    debug!(
+        "cells len: {}, total_capacity: {}",
+        cells.len(),
+        total_capacity
+    );
 
     let mut inputs_capacity = 0u64;
     for cell in cells {
@@ -691,6 +733,10 @@ fn build_settlement_tx(
         );
         let fee =
             fee_calculator.fee(tx_builder.clone().build().data().serialized_size_in_block() as u64);
+        debug!(
+            "inputs_capacity: {}, change_output_occupied_capacity: {}, fee: {}",
+            inputs_capacity, change_output_occupied_capacity, fee
+        );
         if inputs_capacity >= change_output_occupied_capacity + fee {
             let new_change_output = change_output
                 .as_builder()
@@ -817,7 +863,7 @@ fn build_settlement_tx_for_pending_tlcs<S: InvoiceStore>(
                     let pubkey_hash = blake2b_256(settlement_tlc.local_key.pubkey().serialize());
                     if settlement_tlc.tlc_id.is_offered() {
                         if pubkey_hash.starts_with(tlc.local_pubkey_hash())
-                            && tlc.expiry() < current_time
+                            && settlement_tlc.expiry < current_time
                         {
                             Some((index, settlement_tlc.clone(), None))
                         } else if pubkey_hash.starts_with(tlc.remote_pubkey_hash()) {
@@ -828,7 +874,7 @@ fn build_settlement_tx_for_pending_tlcs<S: InvoiceStore>(
                             None
                         }
                     } else if pubkey_hash.starts_with(tlc.remote_pubkey_hash())
-                        && tlc.expiry() < current_time
+                        && settlement_tlc.expiry < current_time
                     {
                         Some((index, settlement_tlc.clone(), None))
                     } else if pubkey_hash.starts_with(tlc.local_pubkey_hash()) {
@@ -979,17 +1025,30 @@ fn build_settlement_tx_for_pending_tlcs<S: InvoiceStore>(
 
             // TODO: move it to config or use https://github.com/nervosnetwork/ckb/pull/4477
             let fee_calculator = FeeCalculator::new(1000);
-
-            let mut query = CellQueryOptions::new_lock(fee_provider_lock_script);
-            query.script_search_mode = Some(SearchMode::Exact);
-            query.secondary_script_len_range = Some(ValueRangeOption::new_exact(0));
-            query.data_len_range = Some(ValueRangeOption::new_exact(0));
-            let (cells, _total_capacity) = cell_collector.collect_live_cells(&query, true)?;
-
+            // use two inputs as the maximum fee provider cell inputs
+            let fee = fee_calculator.fee(
+                tx_builder.clone().build().data().serialized_size_in_block() as u64
+                    + CellInput::TOTAL_SIZE as u64 * 2,
+            );
             let settlement_output_occupied_capacity = settlement_output
                 .occupied_capacity(Capacity::shannons(0))
                 .expect("capacity does not overflow")
                 .as_u64();
+            let min_total_capacity =
+                capacity.saturating_sub(new_capacity + settlement_output_occupied_capacity + fee);
+            let mut query = CellQueryOptions::new_lock(fee_provider_lock_script);
+            query.script_search_mode = Some(SearchMode::Exact);
+            query.secondary_script_len_range = Some(ValueRangeOption::new_exact(0));
+            query.data_len_range = Some(ValueRangeOption::new_exact(0));
+            if min_total_capacity > 0 {
+                query.min_total_capacity = min_total_capacity;
+            }
+            let (cells, total_capacity) = cell_collector.collect_live_cells(&query, false)?;
+            debug!(
+                "cells len: {}, total_capacity: {}",
+                cells.len(),
+                total_capacity
+            );
 
             let mut inputs_capacity = capacity;
             for cell in cells {
@@ -1006,6 +1065,10 @@ fn build_settlement_tx_for_pending_tlcs<S: InvoiceStore>(
                 );
                 let fee = fee_calculator
                     .fee(tx_builder.clone().build().data().serialized_size_in_block() as u64);
+                debug!(
+                    "inputs_capacity: {}, new_capacity:  {}, settlement_output_occupied_capacity: {}, fee: {}",
+                    inputs_capacity, new_capacity, settlement_output_occupied_capacity, fee
+                );
                 if inputs_capacity >= new_capacity + settlement_output_occupied_capacity + fee {
                     let adjusted_settlement_output = change_output
                         .as_builder()
@@ -1086,17 +1149,29 @@ fn build_settlement_tx_for_pending_tlcs<S: InvoiceStore>(
 
             // TODO: move it to config or use https://github.com/nervosnetwork/ckb/pull/4477
             let fee_calculator = FeeCalculator::new(1000);
-
-            let mut query = CellQueryOptions::new_lock(fee_provider_lock_script);
-            query.script_search_mode = Some(SearchMode::Exact);
-            query.secondary_script_len_range = Some(ValueRangeOption::new_exact(0));
-            query.data_len_range = Some(ValueRangeOption::new_exact(0));
-            let (cells, _total_capacity) = cell_collector.collect_live_cells(&query, true)?;
-            let mut inputs_capacity = 0u64;
+            // use two inputs as the maximum fee provider cell inputs
+            let fee = fee_calculator.fee(
+                tx_builder.clone().build().data().serialized_size_in_block() as u64
+                    + CellInput::TOTAL_SIZE as u64 * 2,
+            );
             let change_output_occupied_capacity = change_output
                 .occupied_capacity(Capacity::shannons(0))
                 .expect("capacity does not overflow")
                 .as_u64();
+            let min_total_capacity =
+                change_output_occupied_capacity + settlement_output_occupied_capacity + fee;
+            let mut query = CellQueryOptions::new_lock(fee_provider_lock_script);
+            query.script_search_mode = Some(SearchMode::Exact);
+            query.secondary_script_len_range = Some(ValueRangeOption::new_exact(0));
+            query.data_len_range = Some(ValueRangeOption::new_exact(0));
+            query.min_total_capacity = min_total_capacity;
+            let (cells, total_capacity) = cell_collector.collect_live_cells(&query, false)?;
+            debug!(
+                "cells len: {}, total_capacity: {}",
+                cells.len(),
+                total_capacity
+            );
+            let mut inputs_capacity = 0u64;
             for cell in cells {
                 let input_capacity: u64 = cell.output.capacity().unpack();
                 inputs_capacity += input_capacity;
@@ -1111,6 +1186,7 @@ fn build_settlement_tx_for_pending_tlcs<S: InvoiceStore>(
                 );
                 let fee = fee_calculator
                     .fee(tx_builder.clone().build().data().serialized_size_in_block() as u64);
+                debug!("inputs_capacity: {}, change_output_occupied_capacity: {}, settlement_output_occupied_capacity: {}, fee: {}", inputs_capacity, change_output_occupied_capacity, settlement_output_occupied_capacity, fee);
                 if inputs_capacity
                     >= change_output_occupied_capacity + settlement_output_occupied_capacity + fee
                 {
@@ -1132,6 +1208,10 @@ fn build_settlement_tx_for_pending_tlcs<S: InvoiceStore>(
     } else if cell_header.epoch().to_rational() + delay_epoch.to_rational()
         > current_epoch.to_rational()
     {
+        debug!(
+            "Commitment tx: {:#x} is not ready to settle",
+            commitment_tx_cell.out_point.tx_hash
+        );
         Ok(None)
     } else {
         info!(
@@ -1169,11 +1249,6 @@ impl<'a> Tlc<'a> {
 
     pub fn local_pubkey_hash(&self) -> &'a [u8] {
         &self.0[57..77]
-    }
-
-    pub fn expiry(&self) -> u64 {
-        let expiry = u64::from_le_bytes(self.0[77..85].try_into().unwrap());
-        Since::from_raw_value(expiry).extract_metric().unwrap().1
     }
 }
 

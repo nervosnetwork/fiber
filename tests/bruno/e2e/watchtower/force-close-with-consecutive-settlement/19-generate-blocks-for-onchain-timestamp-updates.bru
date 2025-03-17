@@ -1,0 +1,34 @@
+meta {
+  name: generate a few blocks for onchain timestamp updates
+  type: http
+  seq: 19
+}
+
+post {
+  url: {{CKB_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": 42,
+    "jsonrpc": "2.0",
+    "method": "generate_epochs",
+    "params": ["0x4"]
+  }
+}
+
+assert {
+  res.status: eq 200
+}
+
+script:post-response {
+  // Wait for the settlement tlc3 to be generated
+  await new Promise(r => setTimeout(r, 5000));
+}

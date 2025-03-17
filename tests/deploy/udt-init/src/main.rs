@@ -228,7 +228,7 @@ fn generate_ports(num_ports: usize) -> Vec<u16> {
     ports.into_iter().collect()
 }
 
-fn genrate_nodes_config() {
+fn generate_nodes_config() {
     let node_dir_env = std::env::var("NODES_DIR").expect("env var");
     let nodes_dir = Path::new(&node_dir_env);
     let yaml_file_path = nodes_dir.join("deployer/config.yml");
@@ -371,8 +371,9 @@ fn build_gensis_block() -> BlockView {
     genesis_block
 }
 
-fn main() -> Result<(), Box<dyn StdErr>> {
-    genrate_nodes_config();
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn StdErr>> {
+    generate_nodes_config();
     init_udt_accounts()?;
     Ok(())
 }

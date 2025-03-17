@@ -9,7 +9,7 @@ use crate::{
         channel::{ChannelActorMessage, ProcessingChannelError},
         graph::PathFindError,
         types::Hash256,
-        NetworkActorMessage,
+        InFlightCkbTxActorMessage, NetworkActorMessage,
     },
 };
 
@@ -31,6 +31,8 @@ pub enum Error {
     ChannelMessagingErr(#[from] MessagingErr<ChannelActorMessage>),
     #[error("Failed to send network actor message: {0}")]
     NetworkMessagingErr(#[from] MessagingErr<NetworkActorMessage>),
+    #[error("Failed to in-flight tx actor message: {0}")]
+    InFlightCkbTxActorMessagingErr(#[from] MessagingErr<InFlightCkbTxActorMessage>),
     #[error("Failed to processing channel: {0}")]
     ChannelError(#[from] ProcessingChannelError),
     #[error("Invoice error: {0:?}")]

@@ -7,7 +7,7 @@ GRCOV_EXCL_LINE = ^\s*(\})*(\))*(;)*$$|\s*((log::|tracing::)?(trace|debug|info|w
 
 .PHONY: test
 test:
-	TEST_TEMP_RETAIN=1 RUST_LOG=off cargo nextest run --no-fail-fast
+	RUST_LOG=off cargo nextest run --no-fail-fast
 
 .PHONY: clippy
 clippy:
@@ -34,7 +34,6 @@ coverage-run-unittests:
 	RUSTFLAGS="${RUSTFLAGS} -Cinstrument-coverage" \
 		RUST_LOG=off \
 		LLVM_PROFILE_FILE="${COVERAGE_PROFRAW_DIR}/unittests-%p-%m.profraw" \
-		TEST_TEMP_RETAIN=1 \
 			cargo test --all
 
 coverage-collect-data:

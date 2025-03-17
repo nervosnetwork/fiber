@@ -1,62 +1,85 @@
-use ckb_sdk::{rpc::ResponseFormatGetter, CkbRpcClient, RpcError};
-use ckb_types::{core::TransactionView, packed, prelude::*, H256};
-use ractor::{
-    concurrency::{sleep, Duration},
-    Actor, ActorProcessingErr, ActorRef, RpcReplyPort,
+use ckb_sdk::{CkbRpcClient, RpcError};
+use ckb_types::{
+    core::{tx_pool::TxStatus, TransactionView},
+    packed,
 };
+use ractor::{concurrency::Duration, Actor, ActorProcessingErr, ActorRef, RpcReplyPort};
 use tracing::debug;
 
-use crate::ckb::contracts::{get_script_by_contract, Contract};
+use crate::{
+    ckb::contracts::{get_script_by_contract, Contract},
+    fiber::types::Hash256,
+};
 
-use super::{funding::FundingContext, CkbConfig, FundingError, FundingRequest, FundingTx};
+use super::{
+    funding::{FundingContext, LiveCellsExclusionMap},
+    jsonrpc_types_convert::{transaction_view_from_json, tx_status_from_json},
+    tx_tracing_actor::{
+        CkbTxTracer, CkbTxTracingActor, CkbTxTracingArguments, CkbTxTracingMessage,
+    },
+    CkbConfig, FundingError, FundingRequest, FundingTx,
+};
 
 pub struct CkbChainActor {}
 
 #[derive(Clone, Debug)]
 pub struct CkbChainState {
     config: CkbConfig,
+    ckb_tx_tracing_actor: ActorRef<CkbTxTracingMessage>,
     secret_key: secp256k1::SecretKey,
     funding_source_lock_script: packed::Script,
-}
-
-#[derive(Debug, Clone)]
-pub struct TraceTxRequest {
-    pub tx_hash: packed::Byte32,
-    // How many confirmations required to consider the transaction committed.
-    pub confirmations: u64,
-}
-
-#[derive(Debug)]
-pub struct TraceTxResponse {
-    pub tx: Option<ckb_jsonrpc_types::TransactionView>,
-    pub status: ckb_jsonrpc_types::TxStatus,
-}
-
-impl TraceTxResponse {
-    pub fn new(
-        tx: Option<ckb_jsonrpc_types::TransactionView>,
-        status: ckb_jsonrpc_types::TxStatus,
-    ) -> Self {
-        Self { tx, status }
-    }
+    live_cells_exclusion_map: LiveCellsExclusionMap,
 }
 
 #[derive(Debug, Clone)]
 pub struct GetBlockTimestampRequest {
-    block_hash: H256,
+    block_hash: Hash256,
 }
 
 impl GetBlockTimestampRequest {
-    pub fn from_block_hash(block_hash: H256) -> Self {
+    pub fn from_block_hash(block_hash: Hash256) -> Self {
         Self { block_hash }
     }
 
-    pub fn block_hash(&self) -> H256 {
-        self.block_hash.clone()
+    pub fn block_hash(&self) -> Hash256 {
+        self.block_hash
     }
 }
 
 pub type GetBlockTimestampResponse = u64;
+
+#[derive(Debug, Clone)]
+pub struct GetTxResponse {
+    /// The transaction.
+    pub transaction: Option<TransactionView>,
+    pub tx_status: TxStatus,
+}
+
+impl Default for GetTxResponse {
+    fn default() -> Self {
+        Self {
+            transaction: None,
+            tx_status: TxStatus::Unknown,
+        }
+    }
+}
+
+impl From<Option<ckb_jsonrpc_types::TransactionWithStatusResponse>> for GetTxResponse {
+    fn from(value: Option<ckb_jsonrpc_types::TransactionWithStatusResponse>) -> Self {
+        match value {
+            Some(response) => Self {
+                transaction: response.transaction.map(|tx| match tx.inner {
+                    ckb_jsonrpc_types::Either::Left(json) => transaction_view_from_json(json),
+                    ckb_jsonrpc_types::Either::Right(_) => {
+                        panic!("bytes response format not used");
+                    }
+                }),
+                tx_status: tx_status_from_json(response.tx_status),
+            },
+            None => Self::default(),
+        }
+    }
+}
 
 #[derive(Debug)]
 pub enum CkbChainMessage {
@@ -65,13 +88,25 @@ pub enum CkbChainMessage {
         FundingRequest,
         RpcReplyPort<Result<FundingTx, FundingError>>,
     ),
+    /// Add funding tx. This is used to reestablish a channel that is not ready yet.
+    /// Adding a funding tx will add its used input cells to the exclusion list.
+    AddFundingTx(FundingTx),
+    /// Remove a funding tx to release the used live cells.
+    /// RemoveFundingTx(tx_hash)
+    RemoveFundingTx(Hash256),
+    /// Notify that the funding tx has been committed and the used live cells will become dead soon.
+    /// CommitFundingTx(tx_hash, commit_block_number),
+    CommitFundingTx(Hash256, u64),
     Sign(FundingTx, RpcReplyPort<Result<FundingTx, FundingError>>),
     SendTx(TransactionView, RpcReplyPort<Result<(), RpcError>>),
-    TraceTx(TraceTxRequest, RpcReplyPort<TraceTxResponse>),
+    GetTx(Hash256, RpcReplyPort<Result<GetTxResponse, RpcError>>),
+    CreateTxTracer(CkbTxTracer),
+    RemoveTxTracers(Hash256),
     GetBlockTimestamp(
         GetBlockTimestampRequest,
         RpcReplyPort<Result<Option<GetBlockTimestampResponse>, RpcError>>,
     ),
+    Stop,
 }
 
 #[ractor::async_trait]
@@ -82,7 +117,7 @@ impl Actor for CkbChainActor {
 
     async fn pre_start(
         &self,
-        _myself: ActorRef<Self::Msg>,
+        myself: ActorRef<Self::Msg>,
         config: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
         let secret_key = config.read_secret_key()?;
@@ -91,10 +126,26 @@ impl Actor for CkbChainActor {
         let pub_key_hash = ckb_hash::blake2b_256(pub_key.serialize());
         let funding_source_lock_script =
             get_script_by_contract(Contract::Secp256k1Lock, &pub_key_hash[0..20]);
+        let ckb_tx_tracing_actor = Actor::spawn_linked(
+            Some(format!(
+                "{}/ckb-tx-tracing",
+                myself.get_name().as_deref().unwrap_or_default()
+            )),
+            CkbTxTracingActor::new(),
+            CkbTxTracingArguments {
+                rpc_url: config.rpc_url.clone(),
+                polling_interval: Duration::from_millis(config.tx_tracing_polling_interval_ms),
+            },
+            myself.into(),
+        )
+        .await?
+        .0;
         Ok(CkbChainState {
             config,
             secret_key,
             funding_source_lock_script,
+            ckb_tx_tracing_actor,
+            live_cells_exclusion_map: Default::default(),
         })
     }
 
@@ -104,13 +155,13 @@ impl Actor for CkbChainActor {
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        use CkbChainMessage::{Fund, SendTx, Sign, TraceTx};
         match message {
-            Fund(tx, request, reply_port) => {
-                let context = state.build_funding_context(&request);
+            CkbChainMessage::Fund(tx, request, reply_port) => {
                 if !reply_port.is_closed() {
+                    let context = state.build_funding_context(&request);
+                    let exclusion = &mut state.live_cells_exclusion_map;
                     tokio::task::block_in_place(move || {
-                        let result = tx.fulfill(request, context);
+                        let result = tx.fulfill(request, context, exclusion);
                         if !reply_port.is_closed() {
                             // ignore error
                             let _ = reply_port.send(result);
@@ -118,7 +169,18 @@ impl Actor for CkbChainActor {
                     });
                 }
             }
-            Sign(tx, reply_port) => {
+            CkbChainMessage::AddFundingTx(tx) => {
+                state.live_cells_exclusion_map.add_funding_tx(&tx);
+            }
+            CkbChainMessage::RemoveFundingTx(tx_hash) => {
+                state.live_cells_exclusion_map.remove(&tx_hash.into());
+            }
+            CkbChainMessage::CommitFundingTx(tx_hash, commit_block_number) => {
+                state
+                    .live_cells_exclusion_map
+                    .commit(&tx_hash.into(), commit_block_number);
+            }
+            CkbChainMessage::Sign(tx, reply_port) => {
                 if !reply_port.is_closed() {
                     let secret_key = state.secret_key;
                     let rpc_url = state.config.rpc_url.clone();
@@ -131,7 +193,7 @@ impl Actor for CkbChainActor {
                     });
                 }
             }
-            SendTx(tx, reply_port) => {
+            CkbChainMessage::SendTx(tx, reply_port) => {
                 let rpc_url = state.config.rpc_url.clone();
                 tokio::task::block_in_place(move || {
                     let ckb_client = CkbRpcClient::new(&rpc_url);
@@ -168,94 +230,32 @@ impl Actor for CkbChainActor {
                     }
                 });
             }
-            TraceTx(
-                TraceTxRequest {
-                    tx_hash,
-                    confirmations,
-                },
-                reply_port,
-            ) => {
+            CkbChainMessage::GetTx(tx_hash, reply_port) => {
+                let rpc_url = state.config.rpc_url.clone();
+                tokio::task::block_in_place(move || {
+                    let ckb_client = CkbRpcClient::new(&rpc_url);
+                    let result = ckb_client.get_transaction(tx_hash.into());
+                    if !reply_port.is_closed() {
+                        // ignore error
+                        let _ = reply_port.send(result.map(Into::into));
+                    }
+                });
+            }
+            CkbChainMessage::CreateTxTracer(tracer) => {
                 debug!(
                     "[{}] trace transaction {} with {} confs",
                     myself.get_name().unwrap_or_default(),
-                    tx_hash,
-                    confirmations
+                    tracer.tx_hash,
+                    tracer.confirmations
                 );
-                // TODO: Need a better way to trace the transaction.
-                while !reply_port.is_closed() {
-                    let actor_name = myself.get_name().unwrap_or_default();
-                    let rpc_url = state.config.rpc_url.clone();
-                    let tx_hash = tx_hash.clone();
-                    let status = tokio::task::block_in_place(move || {
-                        let ckb_client = CkbRpcClient::new(&rpc_url);
-                        // FIXME: `get_transaction_status` is only called with verbosity = 1 in sdk now
-                        match ckb_client.get_only_committed_transaction(tx_hash.unpack()) {
-                            Ok(resp) => match resp.tx_status.status {
-                                ckb_jsonrpc_types::Status::Committed => {
-                                    match ckb_client.get_tip_block_number() {
-                                        Ok(tip_number) => {
-                                            let tip_number: u64 = tip_number.into();
-                                            let commit_number: u64 = resp
-                                                .tx_status
-                                                .block_number
-                                                .unwrap_or_default()
-                                                .into();
-                                            let transaction = match resp
-                                                .transaction
-                                                .map(|x| x.get_value())
-                                                .transpose()
-                                            {
-                                                Ok(Some(tx)) => Some(tx),
-                                                Ok(None) => None,
-                                                Err(err) => {
-                                                    tracing::error!(
-                                                        "[{}] get transaction failed: {:?}",
-                                                        actor_name,
-                                                        err
-                                                    );
-                                                    None
-                                                }
-                                            };
-                                            (tip_number >= commit_number + confirmations).then_some(
-                                                TraceTxResponse::new(transaction, resp.tx_status),
-                                            )
-                                        }
-                                        Err(err) => {
-                                            tracing::error!(
-                                                "[{}] get tip block number failed: {:?}",
-                                                actor_name,
-                                                err
-                                            );
-                                            None
-                                        }
-                                    }
-                                }
-                                ckb_jsonrpc_types::Status::Rejected => {
-                                    Some(TraceTxResponse::new(None, resp.tx_status))
-                                }
-                                _ => None,
-                            },
-                            Err(err) => {
-                                tracing::error!(
-                                    "[{}] get transaction status failed: {:?}",
-                                    actor_name,
-                                    err
-                                );
-                                None
-                            }
-                        }
-                    });
-                    match status {
-                        Some(status) => {
-                            if !reply_port.is_closed() {
-                                // ignore error
-                                let _ = reply_port.send(status);
-                            }
-                            return Ok(());
-                        }
-                        None => sleep(Duration::from_secs(5)).await,
-                    }
-                }
+                state
+                    .ckb_tx_tracing_actor
+                    .send_message(CkbTxTracingMessage::CreateTracer(tracer))?;
+            }
+            CkbChainMessage::RemoveTxTracers(tx_hash) => {
+                state
+                    .ckb_tx_tracing_actor
+                    .send_message(CkbTxTracingMessage::RemoveTracers(tx_hash))?;
             }
             CkbChainMessage::GetBlockTimestamp(
                 GetBlockTimestampRequest { block_hash },
@@ -266,12 +266,16 @@ impl Actor for CkbChainActor {
                     let ckb_client = CkbRpcClient::new(&rpc_url);
                     let _ = reply_port.send(
                         ckb_client
-                            .get_header(block_hash)
+                            .get_header(block_hash.into())
                             .map(|x| x.map(|x| x.inner.timestamp.into())),
                     );
                 });
             }
+            CkbChainMessage::Stop => {
+                myself.stop(Some("stop received".to_string()));
+            }
         }
+
         Ok(())
     }
 }

@@ -89,7 +89,7 @@ If you want to keep the channel state, you may try to migrate the storage format
 fnn-migrate -p /folder-to/my-fnn/fiber/store
 ```
 
-4. Repalce the fnn binary with the new version and start the node again.
+4. Replace the fnn binary with the new version and start the node again.
 
 ## Documentation
 
@@ -102,6 +102,6 @@ fnn-migrate -p /folder-to/my-fnn/fiber/store
 
 ## Testnet deployment information
 
-* TODO: Add testnet deployed nodes information *
+* [Testnet Public Nodes User Manual](./docs/testnet-nodes.md)
 
 [fiber-scripts]: https://github.com/nervosnetwork/fiber-scripts

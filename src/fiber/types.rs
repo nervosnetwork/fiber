@@ -1,17 +1,18 @@
 use super::channel::{ChannelFlags, ChannelTlcInfo, ProcessingChannelError};
 use super::config::AnnouncedNodeName;
 use super::gen::fiber::{
-    self as molecule_fiber, ChannelUpdateOpt, PaymentPreimageOpt, PubNonce as Byte66, PubkeyOpt,
-    TlcErrDataOpt, UdtCellDeps, Uint128Opt,
+    self as molecule_fiber, ChannelUpdateOpt, CustomRecordsOpt, PaymentPreimageOpt,
+    PubNonce as Byte66, PubkeyOpt, TlcErrDataOpt, UdtCellDeps, Uint128Opt,
 };
 use super::gen::gossip::{self as molecule_gossip};
 use super::hash_algorithm::{HashAlgorithm, UnknownHashAlgorithmError};
-use super::network::get_chain_hash;
+use super::network::{get_chain_hash, PaymentCustomRecords};
 use super::r#gen::fiber::PubNonceOpt;
 use super::serde_utils::{EntityHex, SliceHex};
 use crate::ckb::config::{UdtArgInfo, UdtCellDep, UdtCfgInfos, UdtScript};
 use crate::ckb::contracts::get_udt_whitelist;
 use ckb_jsonrpc_types::CellOutput;
+use ckb_types::H256;
 use num_enum::IntoPrimitive;
 use num_enum::TryFromPrimitive;
 use std::convert::TryFrom;
@@ -147,7 +148,7 @@ impl AsRef<[u8; 32]> for Privkey {
     }
 }
 
-/// A 256-bit hash digest, used as identifier of channnel, payment, transaction hash etc.
+/// A 256-bit hash digest, used as identifier of channel, payment, transaction hash etc.
 #[serde_as]
 #[derive(Copy, Clone, Serialize, Deserialize, Hash, Eq, PartialEq, Default)]
 pub struct Hash256(#[serde_as(as = "SliceHex")] [u8; 32]);
@@ -185,6 +186,18 @@ impl From<&MByte32> for Hash256 {
 impl From<MByte32> for Hash256 {
     fn from(value: MByte32) -> Self {
         (&value).into()
+    }
+}
+
+impl From<Hash256> for H256 {
+    fn from(value: Hash256) -> Self {
+        H256(value.0)
+    }
+}
+
+impl From<H256> for Hash256 {
+    fn from(value: H256) -> Self {
+        Hash256(value.0)
     }
 }
 
@@ -425,7 +438,7 @@ impl From<Pubkey> for molecule_fiber::Pubkey {
                     .map(Into::into)
                     .collect::<Vec<Byte>>()
                     .try_into()
-                    .expect("Public serialized to corrent length"),
+                    .expect("Public serialized to correct length"),
             )
             .build()
     }
@@ -451,7 +464,7 @@ impl From<EcdsaSignature> for molecule_fiber::EcdsaSignature {
                     .map(Into::into)
                     .collect::<Vec<Byte>>()
                     .try_into()
-                    .expect("Signature serialized to corrent length"),
+                    .expect("Signature serialized to correct length"),
             )
             .build()
     }
@@ -477,7 +490,7 @@ impl From<XOnlyPublicKey> for molecule_gossip::SchnorrXOnlyPubkey {
                     .map(Into::into)
                     .collect::<Vec<Byte>>()
                     .try_into()
-                    .expect("Public serialized to corrent length"),
+                    .expect("Public serialized to correct length"),
             )
             .build()
     }
@@ -502,7 +515,7 @@ impl From<SchnorrSignature> for molecule_gossip::SchnorrSignature {
                     .map(Into::into)
                     .collect::<Vec<Byte>>()
                     .try_into()
-                    .expect("Signature serialized to corrent length"),
+                    .expect("Signature serialized to correct length"),
             )
             .build()
     }
@@ -582,7 +595,7 @@ impl From<OpenChannel> for molecule_fiber::OpenChannel {
             .first_per_commitment_point(open_channel.first_per_commitment_point.into())
             .second_per_commitment_point(open_channel.second_per_commitment_point.into())
             .next_local_nonce((&open_channel.next_local_nonce).into())
-            .channel_annoucement_nonce(
+            .channel_announcement_nonce(
                 PubNonceOpt::new_builder()
                     .set(open_channel.channel_announcement_nonce.map(|x| (&x).into()))
                     .build(),
@@ -617,7 +630,7 @@ impl TryFrom<molecule_fiber::OpenChannel> for OpenChannel {
                 .try_into()
                 .map_err(|err| Error::Musig2(format!("{err}")))?,
             channel_announcement_nonce: open_channel
-                .channel_annoucement_nonce()
+                .channel_announcement_nonce()
                 .to_opt()
                 .map(TryInto::try_into)
                 .transpose()
@@ -658,7 +671,7 @@ impl From<AcceptChannel> for molecule_fiber::AcceptChannel {
             .tlc_basepoint(accept_channel.tlc_basepoint.into())
             .first_per_commitment_point(accept_channel.first_per_commitment_point.into())
             .second_per_commitment_point(accept_channel.second_per_commitment_point.into())
-            .channel_annoucement_nonce(
+            .channel_announcement_nonce(
                 PubNonceOpt::new_builder()
                     .set(
                         accept_channel
@@ -688,7 +701,7 @@ impl TryFrom<molecule_fiber::AcceptChannel> for AcceptChannel {
             first_per_commitment_point: accept_channel.first_per_commitment_point().try_into()?,
             second_per_commitment_point: accept_channel.second_per_commitment_point().try_into()?,
             channel_announcement_nonce: accept_channel
-                .channel_annoucement_nonce()
+                .channel_announcement_nonce()
                 .to_opt()
                 .map(TryInto::try_into)
                 .transpose()
@@ -1363,7 +1376,7 @@ impl From<molecule_fiber::TlcErr> for TlcErr {
         TlcErr {
             error_code: {
                 let code: u16 = tlc_err.error_code().into();
-                TlcErrorCode::try_from(code).expect("tlc_errror_code failed")
+                TlcErrorCode::try_from(code).expect("tlc_error_code failed")
             },
             extra_data: tlc_err
                 .extra_data()
@@ -1476,7 +1489,7 @@ impl std::fmt::Display for TlcErrPacket {
 const BADONION: u16 = 0x8000;
 // Permanent errors (otherwise transient)
 const PERM: u16 = 0x4000;
-// Node releated errors (otherwise channels)
+// Node related errors (otherwise channels)
 const NODE: u16 = 0x2000;
 // Channel forwarding parameter was violated
 const UPDATE: u16 = 0x1000;
@@ -2433,8 +2446,8 @@ impl FiberChannelMessage {
             FiberChannelMessage::ReestablishChannel(reestablish_channel) => {
                 reestablish_channel.channel_id
             }
-            FiberChannelMessage::AnnouncementSignatures(annoucement_signatures) => {
-                annoucement_signatures.channel_id
+            FiberChannelMessage::AnnouncementSignatures(announcement_signatures) => {
+                announcement_signatures.channel_id
             }
         }
     }
@@ -2891,6 +2904,12 @@ pub enum BroadcastMessageID {
     ChannelAnnouncement(OutPoint),
     ChannelUpdate(OutPoint),
     NodeAnnouncement(Pubkey),
+}
+
+impl Default for BroadcastMessageID {
+    fn default() -> Self {
+        BroadcastMessageID::ChannelAnnouncement(OutPoint::default())
+    }
 }
 
 // We need to implement Ord for BroadcastMessageID to make sure that a ChannelUpdate message is always ordered after ChannelAnnouncement,
@@ -3591,7 +3610,7 @@ pub(crate) fn deterministically_hash<T: Entity>(v: &T) -> [u8; 32] {
 }
 
 #[serde_as]
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaymentHopData {
     pub amount: u128,
     pub expiry: u64,
@@ -3600,6 +3619,7 @@ pub struct PaymentHopData {
     pub hash_algorithm: HashAlgorithm,
     pub funding_tx_hash: Hash256,
     pub next_hop: Option<Pubkey>,
+    pub custom_records: Option<PaymentCustomRecords>,
 }
 
 /// Trait for hop data
@@ -3635,6 +3655,37 @@ impl HopData for PaymentHopData {
     }
 }
 
+impl From<PaymentCustomRecords> for molecule_fiber::CustomRecords {
+    fn from(custom_records: PaymentCustomRecords) -> Self {
+        molecule_fiber::CustomRecords::new_builder()
+            .data(
+                custom_records
+                    .data
+                    .into_iter()
+                    .map(|(key, val)| {
+                        molecule_fiber::CustomRecordDataPairBuilder::default()
+                            .key(key.pack())
+                            .value(val.pack())
+                            .build()
+                    })
+                    .collect(),
+            )
+            .build()
+    }
+}
+
+impl From<molecule_fiber::CustomRecords> for PaymentCustomRecords {
+    fn from(custom_records: molecule_fiber::CustomRecords) -> Self {
+        PaymentCustomRecords {
+            data: custom_records
+                .data()
+                .into_iter()
+                .map(|pair| (pair.key().unpack(), pair.value().unpack()))
+                .collect(),
+        }
+    }
+}
+
 impl From<PaymentHopData> for molecule_fiber::PaymentHopData {
     fn from(payment_hop_data: PaymentHopData) -> Self {
         molecule_fiber::PaymentHopData::new_builder()
@@ -3650,6 +3701,11 @@ impl From<PaymentHopData> for molecule_fiber::PaymentHopData {
             .next_hop(
                 PubkeyOpt::new_builder()
                     .set(payment_hop_data.next_hop.map(|x| x.into()))
+                    .build(),
+            )
+            .custom_records(
+                CustomRecordsOpt::new_builder()
+                    .set(payment_hop_data.custom_records.map(|x| x.into()))
                     .build(),
             )
             .build()
@@ -3674,6 +3730,7 @@ impl From<molecule_fiber::PaymentHopData> for PaymentHopData {
                 .next_hop()
                 .to_opt()
                 .map(|x| x.try_into().expect("invalid pubkey")),
+            custom_records: payment_hop_data.custom_records().to_opt().map(|x| x.into()),
         }
     }
 }

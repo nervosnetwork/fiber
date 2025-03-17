@@ -41,6 +41,11 @@ script:post-response {
   // Sleep for sometime to make sure current operation finishes before next request starts.
   await new Promise(r => setTimeout(r, 500));
   console.log("get result: ", res.body.result);
+  let custom_records = res.body.result.custom_records;
+
+  if (custom_records["0x7"] != "0x191a1b1c191a1b1c") {
+    throw new Error("Assertion failed: custom record is not right");
+  }
   if (res.body.result.status != "Success") {
     throw new Error("Assertion failed: payment session status expected to be Success");
   }
