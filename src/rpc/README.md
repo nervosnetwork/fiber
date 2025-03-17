@@ -771,7 +771,9 @@ The Channel information.
 * `created_timestamp` - <em>u64</em>, The created timestamp of the channel, which is the block header timestamp of the block
  that contains the channel funding transaction.
 * `last_updated_timestamp_of_node1` - <em>`Option<u64>`</em>, The timestamp of the last update to channel by node 1 (e.g. updating fee rate).
+ Types of update included https://github.com/nervosnetwork/fiber/tree/develop/src/rpc#params-7
 * `last_updated_timestamp_of_node2` - <em>`Option<u64>`</em>, The timestamp of the last update to channel by node 2 (e.g. updating fee rate).
+ Types of update included https://github.com/nervosnetwork/fiber/tree/develop/src/rpc#params-7
 * `fee_rate_of_node1` - <em>`Option<u64>`</em>, The fee rate set by node 1. This is the fee rate for node 1 to forward tlcs sent from node 2 to node 1.
 * `fee_rate_of_node2` - <em>`Option<u64>`</em>, The fee rate set by node 2. This is the fee rate for node 2 to forward tlcs sent from node 1 to node 2.
 * `capacity` - <em>u128</em>, The capacity of the channel.
@@ -855,8 +857,9 @@ A hop hint is a hint for a node to use a specific channel.
 #### Fields
 
 * `pubkey` - <em>Pubkey</em>, The public key of the node
-* `channel_funding_tx` - <em>Hash256</em>, The funding transaction hash of the channel outpoint
-* `inbound` - <em>bool</em>, inbound or outbound to use this channel
+* `channel_outpoint` - <em>OutPoint</em>, The outpoint of the channel
+* `fee_rate` - <em>u64</em>, The fee rate to use this hop to forward the payment.
+* `tlc_expiry_delta` - <em>u64</em>, The TLC expiry delta to use this hop to forward the payment.
 ---
 
 <a id="#type-nodeinfo"></a>
@@ -870,7 +873,8 @@ The Node information.
 * `node_name` - <em>String</em>, The name of the node.
 * `addresses` - <em>`Vec<MultiAddr>`</em>, The addresses of the node.
 * `node_id` - <em>Pubkey</em>, The identity public key of the node.
-* `timestamp` - <em>u64</em>, The timestamp of the node.
+* `timestamp` - <em>u64</em>, The latest timestamp set by the owner for the node announcement.
+ When a Node is online this timestamp will be updated to the latest value.
 * `chain_hash` - <em>Hash256</em>, The chain hash of the node.
 * `auto_accept_min_ckb_funding_amount` - <em>u64</em>, The minimum CKB funding amount for automatically accepting open channel requests.
 * `udt_cfg_infos` - <em>UdtCfgInfos</em>, The UDT configuration infos of the node.

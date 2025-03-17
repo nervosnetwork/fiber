@@ -195,7 +195,6 @@ pub enum ChannelState {
     /// now operational.
     ChannelReady,
     /// We've successfully negotiated a `closing_signed` dance. At this point, the `ChannelManager`
-    /// is about to drop us, but we store this anyway.
     ShuttingDown(ShuttingDownFlags),
     /// This channel is closed.
     Closed(CloseFlags),

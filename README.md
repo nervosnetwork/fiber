@@ -102,6 +102,6 @@ fnn-migrate -p /folder-to/my-fnn/fiber/store
 
 ## Testnet deployment information
 
-* TODO: Add testnet deployed nodes information *
+* [Testnet Public Nodes User Manual](./docs/testnet-nodes.md)
 
 [fiber-scripts]: https://github.com/nervosnetwork/fiber-scripts

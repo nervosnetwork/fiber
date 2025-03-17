@@ -1,27 +1,37 @@
+use crate::ckb::tests::test_utils::get_tx_from_hash;
+use crate::ckb::GetTxResponse;
 use crate::fiber::channel::ChannelActorState;
 use crate::fiber::channel::ChannelActorStateStore;
 use crate::fiber::channel::ChannelCommand;
 use crate::fiber::channel::ChannelCommandWithId;
 use crate::fiber::channel::ReloadParams;
 use crate::fiber::channel::UpdateCommand;
+use crate::fiber::gossip::get_gossip_actor_name;
+use crate::fiber::gossip::GossipActorMessage;
 use crate::fiber::graph::NetworkGraphStateStore;
 use crate::fiber::graph::PaymentSession;
 use crate::fiber::graph::PaymentSessionStatus;
 use crate::fiber::network::DebugEvent;
+use crate::fiber::network::GossipMessageWithPeerId;
 use crate::fiber::network::NodeInfoResponse;
 use crate::fiber::network::PaymentCustomRecords;
 use crate::fiber::network::SendPaymentCommand;
 use crate::fiber::network::SendPaymentResponse;
 use crate::fiber::types::EcdsaSignature;
+use crate::fiber::types::GossipMessage;
 use crate::fiber::types::Pubkey;
 use crate::invoice::CkbInvoice;
 use crate::invoice::CkbInvoiceStatus;
 use crate::invoice::InvoiceStore;
-use ckb_jsonrpc_types::Status;
-use ckb_types::packed::OutPoint;
-use ckb_types::{core::TransactionView, packed::Byte32};
+use ckb_sdk::core::TransactionBuilder;
+use ckb_types::{
+    core::{tx_pool::TxStatus, TransactionView},
+    packed::{OutPoint, Script},
+};
 use ractor::{call, Actor, ActorRef};
+use rand::distributions::Alphanumeric;
 use rand::rngs::OsRng;
+use rand::Rng;
 use secp256k1::{Message, Secp256k1};
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -49,9 +59,7 @@ use crate::fiber::types::Privkey;
 use crate::store::Store;
 use crate::{
     actors::{RootActor, RootActorMessage},
-    ckb::tests::test_utils::{
-        get_tx_from_hash, submit_tx, trace_tx, trace_tx_hash, MockChainActor,
-    },
+    ckb::tests::test_utils::{submit_tx, trace_tx, MockChainActor},
     ckb::CkbChainMessage,
     fiber::graph::NetworkGraph,
     fiber::network::{
@@ -146,12 +154,6 @@ pub fn get_fiber_config<P: AsRef<Path>>(base_dir: P, node_name: Option<&str>) ->
             .map(Into::into),
         announce_listening_addr: Some(true),
         base_dir: Some(PathBuf::from(base_dir)),
-        // This config is needed for the timely processing of gossip messages.
-        // Without this, some tests may fail due to the delay in processing gossip messages.
-        gossip_network_maintenance_interval_ms: Some(50),
-        // This config is needed for the timely processing of gossip messages.
-        // Without this, some tests may fail due to the delay in processing gossip messages.
-        gossip_store_maintenance_interval_ms: Some(50),
         auto_accept_channel_ckb_funding_amount: Some(0), // Disable auto accept for unit tests
         announce_private_addr: Some(true),               // Announce private address for unit tests
         ..Default::default()
@@ -168,10 +170,10 @@ pub fn mock_ecdsa_signature() -> EcdsaSignature {
     EcdsaSignature(signature)
 }
 
-pub fn generate_store() -> Store {
+pub fn generate_store() -> (Store, TempDir) {
     let temp_dir = TempDir::new("test-fnn-node");
     let store = Store::new(temp_dir.as_ref());
-    store.expect("create store")
+    (store.expect("create store"), temp_dir)
 }
 
 #[derive(Debug)]
@@ -187,6 +189,7 @@ pub struct NetworkNode {
     pub ckb_chain_actor: ActorRef<CkbChainMessage>,
     pub network_graph: Arc<TokioRwLock<NetworkGraph<Store>>>,
     pub chain_actor: ActorRef<CkbChainMessage>,
+    pub gossip_actor: ActorRef<GossipActorMessage>,
     pub private_key: Privkey,
     pub peer_id: PeerId,
     pub event_emitter: mpsc::Receiver<NetworkServiceEvent>,
@@ -260,7 +263,16 @@ impl NetworkNodeConfigBuilder {
             .clone()
             .unwrap_or_else(|| Arc::new(TempDir::new("test-fnn-node")));
         let node_name = self.node_name.clone();
-        let store = generate_store();
+
+        // generate a random string as db name to avoid conflict
+        // when build multiple nodes in the same NetworkNodeConfig
+        let rand_name: String = rand::thread_rng()
+            .sample_iter(&Alphanumeric)
+            .take(5)
+            .map(char::from)
+            .collect();
+        let rand_db_dir = Path::new(base_dir.to_str()).join(rand_name);
+        let store = Store::new(rand_db_dir).expect("create store");
         let fiber_config = get_fiber_config(base_dir.as_ref(), node_name.as_deref());
         let mut config = NetworkNodeConfig {
             base_dir,
@@ -292,7 +304,7 @@ pub(crate) async fn establish_channel_between_nodes(
     b_tlc_expiry_delta: Option<u64>,
     b_tlc_min_value: Option<u128>,
     b_tlc_fee_proportional_millionths: Option<u128>,
-) -> (Hash256, TransactionView) {
+) -> (Hash256, Hash256) {
     let message = |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
             OpenChannelCommand {
@@ -377,15 +389,11 @@ pub(crate) async fn establish_channel_between_nodes(
         })
         .await;
 
-    let funding_tx = node_a
-        .get_tx_from_hash(funding_tx_outpoint.tx_hash())
-        .await
-        .expect("tx found");
+    let funding_tx_hash = funding_tx_outpoint.tx_hash().into();
+    node_a.add_channel_tx(new_channel_id, funding_tx_hash);
+    node_b.add_channel_tx(new_channel_id, funding_tx_hash);
 
-    node_a.add_channel_tx(new_channel_id, funding_tx.clone());
-    node_b.add_channel_tx(new_channel_id, funding_tx.clone());
-
-    (new_channel_id, funding_tx)
+    (new_channel_id, funding_tx_hash)
 }
 
 pub(crate) async fn create_nodes_with_established_channel(
@@ -395,7 +403,7 @@ pub(crate) async fn create_nodes_with_established_channel(
 ) -> (NetworkNode, NetworkNode, Hash256) {
     let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
 
-    let (channel_id, _funding_tx) = establish_channel_between_nodes(
+    let (channel_id, _funding_tx_hash) = establish_channel_between_nodes(
         &mut node_a,
         &mut node_b,
         public,
@@ -474,7 +482,7 @@ pub(crate) async fn create_n_nodes_and_channels_with_index_amounts(
                     (&mut right[i - j - 1], &mut left[j])
                 }
             };
-            establish_channel_between_nodes(
+            let (channel_id, funding_tx_hash) = establish_channel_between_nodes(
                 node_a,
                 node_b,
                 public,
@@ -491,18 +499,41 @@ pub(crate) async fn create_n_nodes_and_channels_with_index_amounts(
                 None,
                 None,
             )
-            .await
+            .await;
+            let funding_tx = node_a
+                .get_transaction_view_from_hash(funding_tx_hash)
+                .await
+                .expect("get funding tx");
+
+            (channel_id, funding_tx)
         };
         channels.push(channel_id);
         // all the other nodes submit_tx
         for node in nodes.iter_mut() {
             let res = node.submit_tx(funding_tx.clone()).await;
-            node.add_channel_tx(channel_id, funding_tx.clone());
-            assert_eq!(res, Status::Committed);
+            node.add_channel_tx(channel_id, funding_tx.hash().into());
+            assert!(matches!(res, TxStatus::Committed(..)));
         }
     }
     // sleep for a while to make sure network graph is updated
-    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+    for _ in 0..50 {
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        if nodes[0].get_network_graph_channels().await.len() >= amounts.len() {
+            break;
+        }
+    }
+    let graph_channels = nodes[0].get_network_graph_channels().await;
+    if graph_channels.len() < amounts.len() {
+        use tracing::error;
+        error!(
+            "failed to sync all graph channels, expect {} got {}",
+            amounts.len(),
+            graph_channels.len()
+        );
+        for (i, chan) in graph_channels.into_iter().enumerate() {
+            error!(">>> channel {}: {:?}", i, chan);
+        }
+    }
     (nodes, channels)
 }
 
@@ -587,6 +618,47 @@ impl NetworkNode {
             NetworkActorMessage::Command(NetworkActorCommand::AbandonChannel(channel_id, rpc_reply))
         };
         call!(self.network_actor, message).expect("node_a alive")
+    }
+
+    pub async fn send_shutdown(
+        &self,
+        channel_id: Hash256,
+        force: bool,
+    ) -> std::result::Result<(), String> {
+        use crate::fiber::channel::ShutdownCommand;
+        use ckb_types::core::FeeRate;
+        let message = |rpc_reply| -> NetworkActorMessage {
+            NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+                ChannelCommandWithId {
+                    channel_id,
+                    command: ChannelCommand::Shutdown(
+                        ShutdownCommand {
+                            close_script: Script::default(),
+                            fee_rate: FeeRate::from_u64(1000000000),
+                            force,
+                        },
+                        rpc_reply,
+                    ),
+                },
+            ))
+        };
+
+        call!(self.network_actor, message).expect("source_node alive")
+    }
+
+    pub async fn send_channel_shutdown_tx_confirmed_event(
+        &self,
+        peer_id: PeerId,
+        channel_id: Hash256,
+        force: bool,
+    ) {
+        use crate::fiber::NetworkActorEvent::ClosingTransactionConfirmed;
+
+        let tx_hash = TransactionBuilder::default().build().hash();
+        let event = ClosingTransactionConfirmed(peer_id, channel_id, tx_hash, force);
+        self.network_actor
+            .send_message(NetworkActorMessage::Event(event))
+            .expect("network actor alive");
     }
 
     pub async fn send_payment_keysend(
@@ -937,6 +1009,10 @@ impl NetworkNode {
             base_dir.as_ref()
         );
 
+        let gossip_actor = ractor::registry::where_is(get_gossip_actor_name(&peer_id))
+            .expect("gossip actor should have been started")
+            .into();
+
         Self {
             base_dir,
             node_name,
@@ -948,6 +1024,7 @@ impl NetworkNode {
             ckb_chain_actor: chain_actor.clone(),
             network_graph,
             chain_actor,
+            gossip_actor,
             private_key: secret_key,
             peer_id,
             event_emitter: self_event_receiver,
@@ -1061,7 +1138,7 @@ impl NetworkNode {
     ) -> (NetworkNode, NetworkNode, Hash256, TransactionView) {
         let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
 
-        let (channel_id, funding_tx) = establish_channel_between_nodes(
+        let (channel_id, funding_tx_hash) = establish_channel_between_nodes(
             &mut node_a,
             &mut node_b,
             public,
@@ -1079,6 +1156,10 @@ impl NetworkNode {
             None,
         )
         .await;
+        let funding_tx = node_a
+            .get_transaction_view_from_hash(funding_tx_hash)
+            .await
+            .expect("get funding tx");
 
         (node_a, node_b, channel_id, funding_tx)
     }
@@ -1163,31 +1244,39 @@ impl NetworkNode {
         .await;
     }
 
-    pub async fn submit_tx(&self, tx: TransactionView) -> ckb_jsonrpc_types::Status {
+    pub async fn submit_tx(&self, tx: TransactionView) -> TxStatus {
         submit_tx(self.chain_actor.clone(), tx).await
     }
 
-    pub fn add_channel_tx(&mut self, channel_id: Hash256, tx: TransactionView) {
-        self.channels_tx_map.insert(channel_id, tx.hash().into());
+    pub fn add_channel_tx(&mut self, channel_id: Hash256, tx_hash: Hash256) {
+        self.channels_tx_map.insert(channel_id, tx_hash);
     }
 
     pub fn get_channel_funding_tx(&self, channel_id: &Hash256) -> Option<Hash256> {
         self.channels_tx_map.get(channel_id).cloned()
     }
 
-    pub async fn trace_tx(&mut self, tx: TransactionView) -> ckb_jsonrpc_types::Status {
-        trace_tx(self.chain_actor.clone(), tx).await
-    }
-
-    pub async fn trace_tx_hash(&mut self, tx_hash: Byte32) -> ckb_jsonrpc_types::Status {
-        trace_tx_hash(self.chain_actor.clone(), tx_hash).await
+    pub async fn trace_tx(&mut self, tx_hash: Hash256) -> TxStatus {
+        trace_tx(self.chain_actor.clone(), tx_hash).await
     }
 
     pub async fn get_tx_from_hash(
         &mut self,
-        tx_hash: Byte32,
-    ) -> Result<TransactionView, anyhow::Error> {
-        get_tx_from_hash(self.chain_actor.clone(), tx_hash).await
+        tx_hash: Hash256,
+    ) -> Result<GetTxResponse, anyhow::Error> {
+        get_tx_from_hash(self.chain_actor.clone(), tx_hash)
+            .await
+            .map_err(Into::into)
+    }
+
+    pub async fn get_transaction_view_from_hash(
+        &mut self,
+        tx_hash: Hash256,
+    ) -> Option<TransactionView> {
+        self.get_tx_from_hash(tx_hash)
+            .await
+            .ok()
+            .and_then(|response| response.transaction)
     }
 
     pub fn get_network_graph(&self) -> &Arc<TokioRwLock<NetworkGraph<Store>>> {
@@ -1232,6 +1321,22 @@ impl NetworkNode {
             graph.get_channel(channel_id).cloned()
         })
         .await
+    }
+
+    pub fn send_message_to_gossip_actor(&self, message: GossipActorMessage) {
+        self.gossip_actor
+            .send_message(message)
+            .expect("send message to gossip actor");
+    }
+
+    pub fn mock_received_gossip_message_from_peer(&self, peer_id: PeerId, message: GossipMessage) {
+        self.send_message_to_gossip_actor(GossipActorMessage::GossipMessageReceived(
+            GossipMessageWithPeerId { peer_id, message },
+        ));
+    }
+
+    pub fn get_store(&self) -> &Store {
+        &self.store
     }
 }
 
