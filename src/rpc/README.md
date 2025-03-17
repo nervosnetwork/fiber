@@ -672,7 +672,7 @@ Builds a router with a list of pubkeys and required channels.
 
 ##### Returns
 
-* `hops_info` - <em>Vec<[PaymentHopData](#type-paymenthopdata)></em>, TODO: add desc
+* `hops_info` - <em>Vec<[PaymentHopData](#type-paymenthopdata)></em>, The hops information for router
 
 ---
 
@@ -927,18 +927,18 @@ The custom records to be included in the payment.
 <a id="#type-paymenthopdata"></a>
 ### Type `PaymentHopData`
 
-TODO: add desc
+Hop data from a router
 
 
 #### Fields
 
-* `amount` - <em>u128</em>, TODO: add desc
-* `expiry` - <em>u64</em>, TODO: add desc
-* `payment_preimage` - <em>`Option<Hash256>`</em>, TODO: add desc
-* `hash_algorithm` - <em>HashAlgorithm</em>, TODO: add desc
-* `funding_tx_hash` - <em>Hash256</em>, TODO: add desc
-* `next_hop` - <em>`Option<Pubkey>`</em>, TODO: add desc
-* `custom_records` - <em>`Option<PaymentCustomRecords>`</em>, TODO: add desc
+* `amount` - <em>u128</em>, the amount received by this hop
+* `expiry` - <em>u64</em>, the expiry time in seconds
+* `payment_preimage` - <em>`Option<Hash256>`</em>, this is only specified in the last hop in the keysend mode
+* `hash_algorithm` - <em>HashAlgorithm</em>, the payment hash_algorithm
+* `funding_tx_hash` - <em>Hash256</em>, the funding transaction hash
+* `next_hop` - <em>`Option<Pubkey>`</em>, the next hop
+* `custom_records` - <em>`Option<PaymentCustomRecords>`</em>, the custom_records for a payment
 ---
 
 <a id="#type-paymentsessionstatus"></a>

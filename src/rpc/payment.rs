@@ -186,9 +186,11 @@ pub struct BuildRouterParams {
     pub final_tlc_expiry_delta: Option<u64>,
 }
 
+/// The router returned by build_router
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct BuildPaymentRouterResult {
+    /// The hops information for router
     hops_info: Vec<PaymentHopData>,
 }
 

@@ -12,6 +12,7 @@ use crate::fiber::graph::NetworkGraphStateStore;
 use crate::fiber::graph::PaymentSession;
 use crate::fiber::graph::PaymentSessionStatus;
 use crate::fiber::network::BuildRouterCommand;
+use crate::fiber::network::DebugEvent;
 use crate::fiber::network::GossipMessageWithPeerId;
 use crate::fiber::network::NodeInfoResponse;
 use crate::fiber::network::PaymentCustomRecords;
@@ -592,6 +593,10 @@ impl NetworkNode {
         self.store
             .update_invoice_status(payment_hash, CkbInvoiceStatus::Cancelled)
             .expect("cancel success");
+    }
+
+    pub fn get_payment_preimage(&self, payment_hash: &Hash256) -> Option<Hash256> {
+        self.store.get_invoice_preimage(payment_hash)
     }
 
     pub async fn send_payment(
@@ -1210,6 +1215,13 @@ impl NetworkNode {
     {
         self.expect_to_process_event(|event| if event_filter(event) { Some(()) } else { None })
             .await;
+    }
+
+    pub async fn expect_debug_event(&mut self, message: &str) {
+        self.expect_event(|event| {
+            matches!(event, NetworkServiceEvent::DebugEvent(DebugEvent::Common(msg)) if msg == message)
+        })
+        .await;
     }
 
     pub async fn submit_tx(&self, tx: TransactionView) -> TxStatus {
