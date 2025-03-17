@@ -27,12 +27,84 @@ use serde_with::serde_as;
 use std::collections::{HashMap, HashSet};
 use tracing::debug;
 
+// Number of blocks to keep the committed funding tx in the exclusion map.
+// It is the same with the value used in the CKB SDK.
+const KEEP_BLOCK_PERIOD: u64 = 13;
+
 /// Funding transaction wrapper.
 ///
 /// It includes extra fields to verify the transaction.
 #[derive(Clone, Debug, Default)]
 pub struct FundingTx {
     tx: Option<TransactionView>,
+}
+
+#[derive(Debug, Clone)]
+struct LiveCellsExclusion {
+    input_out_points: Vec<packed::OutPoint>,
+    committed_block_number: Option<u64>,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct LiveCellsExclusionMap {
+    map: HashMap<packed::Byte32, LiveCellsExclusion>,
+}
+
+impl LiveCellsExclusionMap {
+    pub fn new() -> Self {
+        Self {
+            map: HashMap::default(),
+        }
+    }
+
+    /// Remove the committed funding txs that has been committed KEEP_BLOCK_PERIOD blocks ago.
+    pub fn truncate(&mut self, tip_block_number: u64) {
+        self.map.retain(|_, exclusion| {
+            if let Some(committed_block_number) = exclusion.committed_block_number {
+                committed_block_number + KEEP_BLOCK_PERIOD > tip_block_number
+            } else {
+                true
+            }
+        });
+    }
+
+    pub fn add_transaction_view(&mut self, tx: &TransactionView) {
+        let tx_hash = tx.hash();
+        let exclusion = LiveCellsExclusion {
+            input_out_points: tx.input_pts_iter().collect(),
+            committed_block_number: None,
+        };
+        self.map.insert(tx_hash, exclusion);
+    }
+
+    pub fn add_funding_tx(&mut self, tx: &FundingTx) {
+        if let Some(tx) = tx.tx.as_ref() {
+            self.add_transaction_view(tx);
+        }
+    }
+
+    pub fn commit(&mut self, tx_hash: &packed::Byte32, block_number: u64) {
+        if let Some(exclusion) = self.map.get_mut(tx_hash) {
+            exclusion.committed_block_number = Some(block_number);
+        }
+    }
+
+    pub fn remove(&mut self, tx_hash: &packed::Byte32) {
+        self.map.remove(tx_hash);
+    }
+
+    pub fn apply(
+        &self,
+        collector: &mut dyn CellCollector,
+    ) -> Result<(), ckb_sdk::traits::CellCollectorError> {
+        for exclusion in self.map.values() {
+            for out_point in exclusion.input_out_points.iter() {
+                // Cell collector does not need to clean up the locked cells for us
+                collector.lock_cell(out_point.clone(), u64::MAX)?;
+            }
+        }
+        Ok(())
+    }
 }
 
 impl From<TransactionView> for FundingTx {
@@ -281,7 +353,10 @@ impl FundingTxBuilder {
         )));
     }
 
-    fn build(self) -> Result<FundingTx, FundingError> {
+    fn build(
+        self,
+        live_cells_exclusion_map: &mut LiveCellsExclusionMap,
+    ) -> Result<FundingTx, FundingError> {
         // Build ScriptUnlocker
         let signer = SecpCkbRawKeySigner::new_with_secret_keys(vec![]);
         let sighash_unlocker = SecpSighashUnlocker::from(Box::new(signer) as Box<_>);
@@ -319,6 +394,12 @@ impl FundingTxBuilder {
         let mut cell_collector = DefaultCellCollector::new(&self.context.rpc_url);
         let tx_dep_provider = DefaultTransactionDependencyProvider::new(&self.context.rpc_url, 10);
 
+        let tip_block_number: u64 = ckb_client.get_tip_block_number()?.into();
+        live_cells_exclusion_map.truncate(tip_block_number);
+        live_cells_exclusion_map
+            .apply(&mut cell_collector)
+            .map_err(|err| FundingError::CkbTxBuilderError(TxBuilderError::Other(err.into())))?;
+
         let (tx, _) = self.build_unlocked(
             &mut cell_collector,
             &cell_dep_resolver,
@@ -328,10 +409,19 @@ impl FundingTxBuilder {
             &unlockers,
         )?;
 
+        let old_tx_hash = self.funding_tx.tx.as_ref().map(|tx| tx.hash());
         let mut funding_tx = self.funding_tx;
         let tx_builder = tx.as_advanced_builder();
         debug!("final tx_builder: {:?}", tx_builder);
+
         funding_tx.update_for_self(tx)?;
+
+        // Replace the old tx with the new one in the exclusion map
+        if let Some(tx_hash) = old_tx_hash {
+            live_cells_exclusion_map.remove(&tx_hash);
+        }
+        live_cells_exclusion_map.add_funding_tx(&funding_tx);
+
         Ok(funding_tx)
     }
 }
@@ -357,13 +447,14 @@ impl FundingTx {
         self,
         request: FundingRequest,
         context: FundingContext,
+        live_cells_exclusion_map: &mut LiveCellsExclusionMap,
     ) -> Result<Self, FundingError> {
         let builder = FundingTxBuilder {
             funding_tx: self,
             request,
             context,
         };
-        builder.build()
+        builder.build(live_cells_exclusion_map)
     }
 
     pub fn sign(

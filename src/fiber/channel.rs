@@ -6219,6 +6219,7 @@ impl ChannelActorState {
         );
         self.reestablishing = false;
         let network = self.network();
+        self.notify_funding_tx(&network).await;
         match self.state {
             ChannelState::NegotiatingFunding(_flags) => {
                 // TODO: in current implementation, we don't store the channel when we are in NegotiatingFunding state.
@@ -7240,6 +7241,31 @@ impl ChannelActorState {
             true,
         );
         since.value().to_le_bytes()
+    }
+
+    async fn notify_funding_tx(&self, network: &ActorRef<NetworkActorMessage>) {
+        let tx = if let Some(ref tx) = self.funding_tx {
+            tx
+        } else {
+            return;
+        };
+
+        let should_notify = match self.state {
+            ChannelState::CollaboratingFundingTx(_)
+            | ChannelState::SigningCommitment(_)
+            | ChannelState::AwaitingTxSignatures(_) => true,
+            ChannelState::AwaitingChannelReady(flags)
+                if !flags.contains(AwaitingChannelReadyFlags::OUR_CHANNEL_READY) =>
+            {
+                true
+            }
+            _ => false,
+        };
+        if should_notify {
+            let _ = network.send_message(NetworkActorMessage::new_command(
+                NetworkActorCommand::NotifyFundingTx(tx.clone()),
+            ));
+        }
     }
 }
 
