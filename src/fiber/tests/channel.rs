@@ -26,9 +26,8 @@ use crate::{
     gen_rand_fiber_private_key, gen_rand_fiber_public_key, gen_rand_sha256_hash,
     now_timestamp_as_millis_u64, NetworkServiceEvent,
 };
-use ckb_jsonrpc_types::Status;
 use ckb_types::{
-    core::FeeRate,
+    core::{tx_pool::TxStatus, FeeRate},
     packed::{CellInput, Script, Transaction},
     prelude::{AsTransactionBuilder, Builder, Entity, IntoTransactionView, Pack, Unpack},
 };
@@ -631,7 +630,7 @@ async fn test_public_channel_saved_to_the_other_nodes_graph() {
     let node2_funding_amount = 6200000000;
 
     let [mut node1, mut node2, mut node3] = NetworkNode::new_n_interconnected_nodes().await;
-    let (_channel_id, funding_tx) = establish_channel_between_nodes(
+    let (_channel_id, funding_tx_hash) = establish_channel_between_nodes(
         &mut node1,
         &mut node2,
         true,
@@ -649,8 +648,14 @@ async fn test_public_channel_saved_to_the_other_nodes_graph() {
         None,
     )
     .await;
-    let status = node3.submit_tx(funding_tx).await;
-    assert_eq!(status, Status::Committed);
+    let funding_tx = node1
+        .get_transaction_view_from_hash(funding_tx_hash)
+        .await
+        .expect("get funding tx");
+    assert!(matches!(
+        node3.submit_tx(funding_tx).await,
+        TxStatus::Committed(..)
+    ));
 
     // Wait for the channel announcement to be broadcasted
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
@@ -681,7 +686,7 @@ async fn test_public_channel_with_unconfirmed_funding_tx() {
     let node2_funding_amount = 6200000000;
 
     let [mut node1, mut node2, mut node3] = NetworkNode::new_n_interconnected_nodes().await;
-    let (_channel_id, _funding_tx) = establish_channel_between_nodes(
+    let (_channel_id, _funding_tx_hash) = establish_channel_between_nodes(
         &mut node1,
         &mut node2,
         true,
@@ -1855,40 +1860,14 @@ async fn test_send_payment_with_max_nodes() {
     let amounts = vec![(100000000000, 100000000000); nodes_num - 1];
     let (nodes, channels) =
         create_n_nodes_with_established_channel(&amounts, nodes_num, true).await;
-    let source_node = &nodes[0];
     let target_pubkey = nodes[last].pubkey;
 
     let sender_local = nodes[0].get_local_balance_from_channel(channels[0]);
     let receiver_local = nodes[last].get_local_balance_from_channel(channels[last - 1]);
 
     // sleep for seconds to make sure the channel is established
-    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(800)).await;
     let sent_amount = 1000000 + 5;
-
-    let message = |rpc_reply| -> NetworkActorMessage {
-        NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
-            SendPaymentCommand {
-                target_pubkey: Some(target_pubkey),
-                amount: Some(sent_amount),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                tlc_expiry_limit: None,
-                max_parts: None,
-                keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: true,
-                custom_records: None,
-            },
-            rpc_reply,
-        ))
-    };
-    let res = call!(source_node.network_actor, message).expect("node_a alive");
-    assert!(res.is_ok());
 
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
@@ -2625,15 +2604,15 @@ async fn do_test_channel_commitment_tx_after_add_tlc(algorithm: HashAlgorithm) {
         })
         .await;
 
-    assert_eq!(
+    assert!(matches!(
         node_a.submit_tx(node_a_commitment_tx.clone()).await,
-        Status::Committed
-    );
+        TxStatus::Committed(..)
+    ));
 
-    assert_eq!(
+    assert!(matches!(
         node_b.submit_tx(node_b_commitment_tx.clone()).await,
-        Status::Committed
-    );
+        TxStatus::Committed(..)
+    ));
 }
 
 #[tokio::test]
@@ -2774,7 +2753,7 @@ async fn do_test_channel_remote_commitment_error() {
     let tlc_number_in_flight_limit = 5;
     let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
 
-    let (new_channel_id, _funding_tx) = establish_channel_between_nodes(
+    let (new_channel_id, _funding_tx_hash) = establish_channel_between_nodes(
         &mut node_a,
         &mut node_b,
         false,
@@ -3208,7 +3187,7 @@ async fn do_test_add_tlc_with_number_limit() {
     let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
 
     let node_a_max_tlc_number = 2;
-    let (new_channel_id, _funding_tx) = establish_channel_between_nodes(
+    let (new_channel_id, _funding_tx_hash) = establish_channel_between_nodes(
         &mut node_a,
         &mut node_b,
         true,
@@ -3294,7 +3273,7 @@ async fn do_test_add_tlc_number_limit_reverse() {
     let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
 
     let node_b_max_tlc_number = 2;
-    let (new_channel_id, _funding_tx) = establish_channel_between_nodes(
+    let (new_channel_id, _funding_tx_hash) = establish_channel_between_nodes(
         &mut node_a,
         &mut node_b,
         true,
@@ -3379,7 +3358,7 @@ async fn do_test_add_tlc_value_limit() {
     let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
 
     let max_tlc_number = 3;
-    let (new_channel_id, _funding_tx) = establish_channel_between_nodes(
+    let (new_channel_id, _funding_tx_hash) = establish_channel_between_nodes(
         &mut node_a,
         &mut node_b,
         true,
@@ -3465,7 +3444,7 @@ async fn do_test_add_tlc_min_tlc_value_limit() {
 
     let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
 
-    let (new_channel_id, _funding_tx) = establish_channel_between_nodes(
+    let (new_channel_id, _funding_tx_hash) = establish_channel_between_nodes(
         &mut node_a,
         &mut node_b,
         true,
@@ -3564,7 +3543,7 @@ async fn test_channel_update_tlc_expiry() {
 
     let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
 
-    let (new_channel_id, _funding_tx) = establish_channel_between_nodes(
+    let (new_channel_id, _funding_tx_hash) = establish_channel_between_nodes(
         &mut node_a,
         &mut node_b,
         true,
@@ -4145,14 +4124,18 @@ async fn do_test_channel_with_simple_update_operation(algorithm: HashAlgorithm) 
 
     assert_eq!(node_a_shutdown_tx_hash, node_b_shutdown_tx_hash);
 
-    assert_eq!(
-        node_a.trace_tx_hash(node_a_shutdown_tx_hash.clone()).await,
-        Status::Committed
-    );
-    assert_eq!(
-        node_b.trace_tx_hash(node_b_shutdown_tx_hash.clone()).await,
-        Status::Committed
-    );
+    assert!(matches!(
+        node_a
+            .trace_tx(node_a_shutdown_tx_hash.clone().into())
+            .await,
+        TxStatus::Committed(..)
+    ));
+    assert!(matches!(
+        node_b
+            .trace_tx(node_b_shutdown_tx_hash.clone().into())
+            .await,
+        TxStatus::Committed(..)
+    ));
 
     // TODO: maybe also check shutdown tx outputs and output balances here.
 }
@@ -4321,10 +4304,10 @@ async fn test_revoke_old_commitment_transaction() {
         })
         .await;
 
-    assert_eq!(
+    assert!(matches!(
         node_a.submit_tx(commitment_tx.clone()).await,
-        Status::Committed
-    );
+        TxStatus::Committed(..)
+    ));
 
     println!("commitment_tx: {:?}", commitment_tx);
 
@@ -4351,10 +4334,10 @@ async fn test_revoke_old_commitment_transaction() {
 
     let revocation_tx = tx.as_advanced_builder().witness(witness.pack()).build();
 
-    assert_eq!(
+    assert!(matches!(
         node_a.submit_tx(revocation_tx.clone()).await,
-        Status::Committed
-    );
+        TxStatus::Committed(..)
+    ));
 }
 
 #[tokio::test]
@@ -4484,14 +4467,14 @@ async fn test_create_channel() {
         .await;
 
     // We can submit the commitment txs to the chain now.
-    assert_eq!(
+    assert!(matches!(
         node_a.submit_tx(node_a_commitment_tx.clone()).await,
-        Status::Committed
-    );
-    assert_eq!(
+        TxStatus::Committed(..)
+    ));
+    assert!(matches!(
         node_b.submit_tx(node_b_commitment_tx.clone()).await,
-        Status::Committed
-    );
+        TxStatus::Committed(..)
+    ));
 }
 
 #[tokio::test]
@@ -5141,14 +5124,18 @@ async fn test_shutdown_channel_with_different_size_shutdown_script() {
 
     assert_eq!(node_a_shutdown_tx_hash, node_b_shutdown_tx_hash);
 
-    assert_eq!(
-        node_a.trace_tx_hash(node_a_shutdown_tx_hash.clone()).await,
-        Status::Committed
-    );
-    assert_eq!(
-        node_b.trace_tx_hash(node_b_shutdown_tx_hash.clone()).await,
-        Status::Committed
-    );
+    assert!(matches!(
+        node_a
+            .trace_tx(node_a_shutdown_tx_hash.clone().into())
+            .await,
+        TxStatus::Committed(..)
+    ));
+    assert!(matches!(
+        node_b
+            .trace_tx(node_b_shutdown_tx_hash.clone().into())
+            .await,
+        TxStatus::Committed(..)
+    ));
 }
 
 #[tokio::test]

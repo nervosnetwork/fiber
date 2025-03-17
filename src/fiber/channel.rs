@@ -5980,7 +5980,7 @@ impl ChannelActorState {
 
         self.network()
             .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::SignTx(
+                NetworkActorCommand::SignFundingTx(
                     self.get_remote_peer_id(),
                     self.get_id(),
                     funding_tx,
@@ -6226,10 +6226,40 @@ impl ChannelActorState {
         );
         self.reestablishing = false;
         let network = self.network();
+        self.notify_funding_tx(&network).await;
         match self.state {
             ChannelState::NegotiatingFunding(_flags) => {
                 // TODO: in current implementation, we don't store the channel when we are in NegotiatingFunding state.
                 // This is an unreachable state for reestablish channel message. we may need to handle this case in the future.
+            }
+            ChannelState::AwaitingChannelReady(flags) => {
+                // It's turn to send the funding tx to chain and waiting for confirmations
+                if flags.contains(AwaitingChannelReadyFlags::CHANNEL_READY) {
+                    self.maybe_channel_is_ready(myself).await;
+                } else if flags.contains(AwaitingChannelReadyFlags::OUR_CHANNEL_READY) {
+                    // If we are ready, just resend the ChannelReady message
+                    network
+                        .send_message(NetworkActorMessage::new_command(
+                            NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
+                                self.get_remote_peer_id(),
+                                FiberMessage::channel_ready(ChannelReady {
+                                    channel_id: self.get_id(),
+                                }),
+                            )),
+                        ))
+                        .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                } else {
+                    // Otherwise, trace the funding tx again
+                    network
+                        .send_message(NetworkActorMessage::new_event(
+                            NetworkActorEvent::FundingTransactionPending(
+                                self.must_get_funding_transaction().clone(),
+                                self.must_get_funding_transaction_outpoint(),
+                                self.get_id(),
+                            ),
+                        ))
+                        .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                }
             }
             ChannelState::ChannelReady() => {
                 let expected_local_commitment_number = self.get_local_commitment_number();
@@ -7218,6 +7248,31 @@ impl ChannelActorState {
             true,
         );
         since.value().to_le_bytes()
+    }
+
+    async fn notify_funding_tx(&self, network: &ActorRef<NetworkActorMessage>) {
+        let tx = if let Some(ref tx) = self.funding_tx {
+            tx
+        } else {
+            return;
+        };
+
+        let should_notify = match self.state {
+            ChannelState::CollaboratingFundingTx(_)
+            | ChannelState::SigningCommitment(_)
+            | ChannelState::AwaitingTxSignatures(_) => true,
+            ChannelState::AwaitingChannelReady(flags)
+                if !flags.contains(AwaitingChannelReadyFlags::OUR_CHANNEL_READY) =>
+            {
+                true
+            }
+            _ => false,
+        };
+        if should_notify {
+            let _ = network.send_message(NetworkActorMessage::new_command(
+                NetworkActorCommand::NotifyFundingTx(tx.clone()),
+            ));
+        }
     }
 }
 

@@ -1,5 +1,4 @@
 use ckb_hash::blake2b_256;
-use ckb_jsonrpc_types::{Status, TxStatus};
 use ckb_types::core::{EpochNumberWithFraction, TransactionView};
 use ckb_types::packed::{Byte32, OutPoint, Script, Transaction};
 use ckb_types::prelude::{IntoTransactionView, Pack, Unpack};
@@ -64,14 +63,14 @@ use super::types::{
     Hash256, NodeAnnouncement, OpenChannel, PaymentHopData, Privkey, Pubkey, RemoveTlcReason,
     TlcErr, TlcErrData, TlcErrorCode,
 };
-use super::{FiberConfig, ASSUME_NETWORK_ACTOR_ALIVE};
+use super::{
+    FiberConfig, InFlightCkbTxActor, InFlightCkbTxActorArguments, InFlightCkbTxActorMessage,
+    InFlightCkbTxKind, ASSUME_NETWORK_ACTOR_ALIVE,
+};
 
 use crate::ckb::config::UdtCfgInfos;
 use crate::ckb::contracts::{check_udt_script, get_udt_whitelist, is_udt_type_auto_accept};
-use crate::ckb::{
-    CkbChainMessage, FundingRequest, FundingTx, GetBlockTimestampRequest, TraceTxRequest,
-    TraceTxResponse,
-};
+use crate::ckb::{CkbChainMessage, FundingRequest, FundingTx};
 use crate::fiber::channel::{
     AddTlcCommand, AddTlcResponse, TxCollaborationCommand, TxUpdateCommand,
 };
@@ -92,9 +91,8 @@ pub const GOSSIP_PROTOCOL_ID: ProtocolId = ProtocolId::new(43);
 
 pub const DEFAULT_CHAIN_ACTOR_TIMEOUT: u64 = 300000;
 
-// tx index is not returned on older ckb version, using dummy tx index instead.
-// Waiting for https://github.com/nervosnetwork/ckb/pull/4583/ to be released.
-const DUMMY_FUNDING_TX_INDEX: u32 = 0;
+// TODO: make it configurable
+pub const CKB_TX_TRACING_CONFIRMATIONS: u64 = 4;
 
 // This is a temporary way to document that we assume the chain actor is always alive.
 // We may later relax this assumption. At the moment, if the chain actor fails, we
@@ -229,7 +227,8 @@ pub enum NetworkActorCommand {
         RpcReplyPort<Result<PeeledPaymentOnionPacket, String>>,
     ),
     UpdateChannelFunding(Hash256, Transaction, FundingRequest),
-    SignTx(PeerId, Hash256, Transaction, Option<Vec<Vec<u8>>>),
+    SignFundingTx(PeerId, Hash256, Transaction, Option<Vec<Vec<u8>>>),
+    NotifyFundingTx(Transaction),
     // Broadcast our BroadcastMessage to the network.
     BroadcastMessages(Vec<BroadcastMessageWithTimestamp>),
     // Broadcast local information to the network.
@@ -901,6 +900,7 @@ where
             }
             NetworkActorEvent::FundingTransactionFailed(outpoint) => {
                 error!("Funding transaction failed: {:?}", outpoint);
+                state.remove_in_flight_tx(outpoint.tx_hash().into());
             }
             NetworkActorEvent::ClosingTransactionPending(channel_id, peer_id, tx, force) => {
                 state
@@ -917,6 +917,7 @@ where
                     "Closing transaction failed for channel {:?}, tx hash: {:?}, peer id: {:?}",
                     &channel_id, &tx_hash, &peer_id
                 );
+                state.remove_in_flight_tx(tx_hash);
             }
             NetworkActorEvent::TlcRemoveReceived(payment_hash, remove_tlc_reason) => {
                 // When a node is restarted, RemoveTLC will also be resent if necessary
@@ -1196,16 +1197,22 @@ where
                     )
                     .await?
             }
-            NetworkActorCommand::SignTx(
+            NetworkActorCommand::NotifyFundingTx(tx) => {
+                let _ = self
+                    .chain_actor
+                    .send_message(CkbChainMessage::AddFundingTx(tx.into()));
+            }
+            NetworkActorCommand::SignFundingTx(
                 ref peer_id,
                 ref channel_id,
                 funding_tx,
                 partial_witnesses,
             ) => {
+                let tx_hash: Hash256 = funding_tx.calc_tx_hash().into();
                 let msg = match partial_witnesses {
                     Some(partial_witnesses) => {
                         debug!(
-                            "Received SignTx request with for transaction {:?} and partial witnesses {:?}",
+                            "Received SignFudningTx request with for transaction {:?} and partial witnesses {:?}",
                             &funding_tx,
                             partial_witnesses
                                 .iter()
@@ -1263,7 +1270,7 @@ where
                     }
                     None => {
                         debug!(
-                            "Received SignTx request with for transaction {:?} without partial witnesses, so start signing it now",
+                            "Received SignFundingTx request with for transaction {:?} without partial witnesses, so start signing it now",
                             &funding_tx,
                         );
                         let mut funding_tx = call_t!(
@@ -1289,6 +1296,14 @@ where
                         }
                     }
                 };
+
+                state
+                    .trace_tx(tx_hash, InFlightCkbTxKind::Funding(*channel_id))
+                    .await?;
+
+                // TODO: before sending the signatures to the peer, start tracing the tx
+                // It should be the first time to trace the tx
+
                 myself
                     .send_message(NetworkActorMessage::new_command(
                         NetworkActorCommand::SendFiberMessage(msg),
@@ -1862,6 +1877,7 @@ pub struct NetworkActorState<S> {
     peer_session_map: HashMap<PeerId, (SessionId, SessionType)>,
     session_channels_map: HashMap<SessionId, HashSet<Hash256>>,
     channels: HashMap<Hash256, ActorRef<ChannelActorMessage>>,
+    ckb_txs_in_flight: HashMap<Hash256, ActorRef<InFlightCkbTxActorMessage>>,
     // Outpoint to channel id mapping, only contains channels with state of Ready.
     // We need to remove the channel from this map when the channel is closed or peer disconnected.
     outpoint_channel_map: HashMap<OutPoint, Hash256>,
@@ -1975,6 +1991,15 @@ fn generate_channel_actor_name(local_peer_id: &PeerId, remote_peer_id: &PeerId) 
         CHANNEL_ACTOR_NAME_PREFIX.fetch_add(1, Ordering::AcqRel),
         local_peer_id,
         remote_peer_id
+    )
+}
+
+fn generate_in_flight_tx_actor_name(supervisor: ActorCell, tx_hash: Hash256) -> String {
+    let supervisor_name = supervisor.get_name();
+    format!(
+        "{}/InFlightCkbTx-{}",
+        supervisor_name.as_deref().unwrap_or_default(),
+        tx_hash
     )
 }
 
@@ -2209,63 +2234,80 @@ where
         Ok((channel, temp_channel_id, new_id))
     }
 
-    // This function send the transaction to the network and then trace the transaction status.
-    // Either the sending or the tracing may fail, in which case the callback will be called with
-    // the error.
-    async fn broadcast_tx_with_callback<F>(&self, transaction: TransactionView, callback: F)
-    where
-        F: Send + 'static + FnOnce(Result<TraceTxResponse, RactorErr<CkbChainMessage>>),
-    {
-        let chain = self.chain_actor.clone();
-        // Spawn a new task to avoid blocking current actor message processing.
-        ractor::concurrency::tokio_primitives::spawn(async move {
-            debug!("Trying to broadcast transaction {:?}", &transaction);
-            let result = match call_t!(
-                &chain,
-                CkbChainMessage::SendTx,
-                DEFAULT_CHAIN_ACTOR_TIMEOUT,
-                transaction.clone()
-            )
-            .expect(ASSUME_CHAIN_ACTOR_ALWAYS_ALIVE_FOR_NOW)
-            {
-                Err(err) => {
-                    error!("Failed to send transaction to the network: {:?}", &err);
-                    // TODO: the caller of this function will deem the failure returned here as permanent.
-                    // But SendTx may only fail temporarily. We need to handle this case.
-                    Ok(TraceTxResponse {
-                        tx: None,
-                        status: TxStatus {
-                            status: Status::Rejected,
-                            block_number: None,
-                            block_hash: None,
-                            tx_index: None,
-                            reason: Some(format!("Sending transaction failed: {:?}", &err)),
-                        },
-                    })
-                }
-                Ok(_) => {
-                    let tx_hash = transaction.hash();
-                    // TODO: make number of confirmation to transaction configurable.
-                    const NUM_CONFIRMATIONS: u64 = 4;
-                    let request = TraceTxRequest {
-                        tx_hash: tx_hash.clone(),
-                        confirmations: NUM_CONFIRMATIONS,
-                    };
-                    debug!(
-                        "Transaction sent to the network, waiting for it to be confirmed: {:?}",
-                        &request.tx_hash
-                    );
-                    call_t!(
-                        chain,
-                        CkbChainMessage::TraceTx,
-                        DEFAULT_CHAIN_ACTOR_TIMEOUT,
-                        request.clone()
-                    )
-                }
+    pub async fn trace_tx(
+        &mut self,
+        tx_hash: Hash256,
+        tx_kind: InFlightCkbTxKind,
+    ) -> crate::Result<()> {
+        if let Entry::Vacant(entry) = self.ckb_txs_in_flight.entry(tx_hash) {
+            let handler = InFlightCkbTxActor {
+                chain_actor: self.chain_actor.clone(),
+                network_actor: self.network.clone(),
+                tx_hash,
+                tx_kind,
+                confirmations: CKB_TX_TRACING_CONFIRMATIONS,
             };
 
-            callback(result);
-        });
+            let (task, _) = Actor::spawn_linked(
+                Some(generate_in_flight_tx_actor_name(
+                    self.network.get_cell(),
+                    tx_hash,
+                )),
+                handler,
+                InFlightCkbTxActorArguments { transaction: None },
+                self.network.get_cell(),
+            )
+            .await?;
+
+            entry.insert(task);
+        }
+        Ok(())
+    }
+
+    pub async fn send_tx(
+        &mut self,
+        tx: TransactionView,
+        tx_kind: InFlightCkbTxKind,
+    ) -> crate::Result<()> {
+        let tx_hash: Hash256 = tx.hash().into();
+        match self.ckb_txs_in_flight.entry(tx_hash) {
+            Entry::Vacant(vacant) => {
+                let handler = InFlightCkbTxActor {
+                    chain_actor: self.chain_actor.clone(),
+                    network_actor: self.network.clone(),
+                    tx_hash,
+                    tx_kind,
+                    confirmations: CKB_TX_TRACING_CONFIRMATIONS,
+                };
+
+                let (task, _) = Actor::spawn_linked(
+                    Some(generate_in_flight_tx_actor_name(
+                        self.network.get_cell(),
+                        tx_hash,
+                    )),
+                    handler,
+                    InFlightCkbTxActorArguments {
+                        transaction: Some(tx),
+                    },
+                    self.network.get_cell(),
+                )
+                .await?;
+
+                vacant.insert(task);
+            }
+            Entry::Occupied(occupied) => {
+                occupied
+                    .get()
+                    .send_message(InFlightCkbTxActorMessage::SendTx(tx))?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn remove_in_flight_tx(&mut self, tx_hash: Hash256) {
+        if let Some(task) = self.ckb_txs_in_flight.remove(&tx_hash) {
+            task.stop(Some("cleanup in flight tx".to_string()));
+        }
     }
 
     fn get_peer_session(&self, peer_id: &PeerId) -> Option<SessionId> {
@@ -2536,6 +2578,7 @@ where
         .await?;
         info!("channel {:x} reestablished successfully", &channel_id);
         self.on_channel_created(channel_id, peer_id, channel.clone());
+
         Ok(channel)
     }
 
@@ -2662,40 +2705,15 @@ where
             "Channel ({:?}) to peer {:?} is closed {:?}. Broadcasting closing transaction ({:?}) now.",
             &channel_id, &peer_id, &tx_hash, force_flag
         );
-        let network: ActorRef<NetworkActorMessage> = self.network.clone();
-        self.broadcast_tx_with_callback(transaction, move |result| {
-            let message = match result {
-                Ok(TraceTxResponse {
-                    status:
-                        TxStatus {
-                            status: Status::Committed,
-                            ..
-                        },
-                    ..
-                }) => {
-                    info!("Cloisng {:?} transaction {:?} confirmed", force_flag, &tx_hash);
-                    NetworkActorEvent::ClosingTransactionConfirmed(
-                        peer_id, channel_id, tx_hash, force,
-                    )
-                }
-                Ok(status) => {
-                    error!(
-                        "Closing {:?} transaction {:?} failed to be confirmed with final status {:?}",
-                        force_flag,
-                        &tx_hash, &status
-                    );
-                    NetworkActorEvent::ClosingTransactionFailed(peer_id, channel_id, tx_hash)
-                }
-                Err(err) => {
-                    error!("Failed to trace {:?} closing transaction {:?}: {:?}", force_flag, &tx_hash, &err);
-                    NetworkActorEvent::ClosingTransactionFailed(peer_id, channel_id, tx_hash)
-                }
-            };
-            network
-                .send_message(NetworkActorMessage::new_event(message))
-                .expect(ASSUME_NETWORK_MYSELF_ALIVE);
-        })
-        .await;
+        if let Err(err) = self
+            .send_tx(
+                transaction,
+                InFlightCkbTxKind::Closing(peer_id, channel_id, force),
+            )
+            .await
+        {
+            error!("failed to send closing tx: {}", err);
+        }
     }
 
     async fn on_closing_transaction_confirmed(
@@ -2721,10 +2739,16 @@ where
             // Notify outside observers.
             self.network
                 .send_message(NetworkActorMessage::new_notification(
-                    NetworkServiceEvent::ChannelClosed(peer_id.clone(), *channel_id, tx_hash),
+                    NetworkServiceEvent::ChannelClosed(
+                        peer_id.clone(),
+                        *channel_id,
+                        tx_hash.clone(),
+                    ),
                 ))
                 .expect(ASSUME_NETWORK_MYSELF_ALIVE);
         }
+
+        self.remove_in_flight_tx(tx_hash.into());
     }
 
     pub async fn on_open_channel_msg(
@@ -2783,90 +2807,19 @@ where
             }
         }
         self.pending_channels.insert(outpoint.clone(), channel_id);
-        // TODO: try to broadcast the transaction to the network.
         let transaction = transaction.into_view();
         let tx_hash: Byte32 = transaction.hash();
         debug!(
             "Funding transaction (outpoint {:?}) for channel {:?} is now ready. Broadcast it {:?} now.",
             &outpoint, &channel_id, &tx_hash
         );
-        let network = self.network.clone();
-        let chain = self.chain_actor.clone();
-        self.broadcast_tx_with_callback(transaction, move |result| {
-            match result {
-                Ok(TraceTxResponse {
-                    status:
-                        TxStatus {
-                            status: Status::Committed,
-                            block_hash: Some(block_hash),
-                            ..
-                        },
-                    ..
-                }) => {
-                    tokio::spawn( async move  {
-                        match call!(
-                            chain,
-                            |reply| CkbChainMessage::GetBlockTimestamp(
-                                GetBlockTimestampRequest::from_block_hash(block_hash.clone()), reply
-                            )
-                        ) {
-                            Ok(Ok(Some(timestamp))) => {
-                                info!("Funding transaction {:?} confirmed", &tx_hash);
-                                // Notify outside observers.
-                                network.send_message(NetworkActorMessage::new_event(
-                                    NetworkActorEvent::FundingTransactionConfirmed(
-                                        outpoint.clone(),
-                                        block_hash.clone(),
-                                        DUMMY_FUNDING_TX_INDEX,
-                                        timestamp,
-                                    )
-                                ))
-                                .expect(ASSUME_NETWORK_MYSELF_ALIVE);
-                                return;
-                            },
-                            Ok(Ok(None)) => {
-                                error!(
-                                    "Failed to get block timestamp for block hash {:?}: block not found",
-                                    &block_hash
-                                );
-                            }
-                            Ok(Err(err)) => {
-                                error!(
-                                    "Failed to get block timestamp for block hash {:?}: {:?}",
-                                    &block_hash, &err
-                                );
-                            }
-                            Err(err) => {
-                                error!(
-                                    "Failed to get block timestamp for block hash {:?}: {:?}",
-                                    &block_hash, &err
-                                );
-                            }
-                        }
-                    });
-                }
-                Ok(status) => {
-                    error!(
-                        "Funding transaction {:?} failed to be confirmed with final status {:?}",
-                        &tx_hash, &status
-                    );
-                    // Notify outside observers.
-                    network
-                        .send_message(NetworkActorMessage::new_event(NetworkActorEvent::FundingTransactionFailed(outpoint)
-                    ))
-                        .expect(ASSUME_NETWORK_MYSELF_ALIVE);
-                }
-                Err(err) => {
-                    error!("Failed to trace transaction {:?}: {:?}", &tx_hash, &err);
-                    // Notify outside observers.
-                    network
-                        .send_message(NetworkActorMessage::new_event(NetworkActorEvent::FundingTransactionFailed(outpoint)
-                    ))
-                        .expect(ASSUME_NETWORK_MYSELF_ALIVE);
-                }
-            };
-        })
-        .await;
+
+        if let Err(err) = self
+            .send_tx(transaction, InFlightCkbTxKind::Funding(channel_id))
+            .await
+        {
+            error!("failed to send funding tx: {}", err);
+        }
     }
 
     async fn on_funding_transaction_confirmed(
@@ -2895,6 +2848,7 @@ where
             )),
         )
         .await;
+        self.remove_in_flight_tx(outpoint.tx_hash().into());
     }
 
     async fn send_message_to_channel_actor(
@@ -3118,6 +3072,7 @@ where
             peer_session_map: Default::default(),
             session_channels_map: Default::default(),
             channels: Default::default(),
+            ckb_txs_in_flight: Default::default(),
             outpoint_channel_map: Default::default(),
             to_be_accepted_channels: Default::default(),
             pending_channels: Default::default(),
