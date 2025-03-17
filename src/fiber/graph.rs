@@ -128,17 +128,6 @@ impl ChannelInfo {
         &self.udt_type_script
     }
 
-    // Whether this channel is explicitly disabled in either direction.
-    // TODO: we currently deem a channel as disabled if one direction is disabled.
-    // Is it possible that one direction is disabled while the other is not?
-    pub fn is_explicitly_disabled(&self) -> bool {
-        match (&self.update_of_node2, &self.update_of_node1) {
-            (Some(update1), _) if !update1.enabled => true,
-            (_, Some(update2)) if !update2.enabled => true,
-            _ => false,
-        }
-    }
-
     pub fn channel_last_update_time(&self) -> Option<u64> {
         self.update_of_node2
             .as_ref()
@@ -697,11 +686,7 @@ where
                 ) => {
                     let mut channel_info = ChannelInfo::from((timestamp, channel_announcement));
                     self.load_channel_updates_from_store(&mut channel_info);
-                    if channel_info.is_explicitly_disabled() {
-                        None
-                    } else {
-                        Some(channel_info)
-                    }
+                    Some(channel_info)
                 }
                 _ => None,
             })
