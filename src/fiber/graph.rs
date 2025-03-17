@@ -13,6 +13,7 @@ use crate::ckb::config::UdtCfgInfos;
 use crate::fiber::fee::calculate_tlc_forward_fee;
 use crate::fiber::path::NodeHeapElement;
 use crate::fiber::serde_utils::EntityHex;
+use crate::fiber::serde_utils::{U128Hex, U64Hex};
 use crate::fiber::types::PaymentHopData;
 use crate::invoice::CkbInvoice;
 use crate::now_timestamp_as_millis_u64;
@@ -215,19 +216,26 @@ impl From<(u64, ChannelAnnouncement)> for ChannelInfo {
     }
 }
 
+/// The channel update info with a single direction of channel
+#[serde_as]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ChannelUpdateInfo {
     // The timestamp is the time when the channel update was received by the node.
+    #[serde_as(as = "U64Hex")]
     pub timestamp: u64,
     /// Whether the channel can be currently used for payments (in this one direction).
     pub enabled: bool,
     /// The exact amount of balance that we can send to the other party via the channel.
+    #[serde_as(as = "Option<U128Hex>")]
     pub outbound_liquidity: Option<u128>,
     /// The difference in htlc expiry values that you must have when routing through this channel (in milliseconds).
+    #[serde_as(as = "U64Hex")]
     pub tlc_expiry_delta: u64,
     /// The minimum value, which must be relayed to the next hop via the channel
+    #[serde_as(as = "U128Hex")]
     pub tlc_minimum_value: u128,
     /// The forwarding fee rate for the channel.
+    #[serde_as(as = "U64Hex")]
     pub fee_rate: u64,
 }
 

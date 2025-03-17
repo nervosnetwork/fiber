@@ -755,8 +755,10 @@ The Channel information.
  Types of update included https://github.com/nervosnetwork/fiber/tree/develop/src/rpc#params-7
 * `last_updated_timestamp_of_node2` - <em>`Option<u64>`</em>, The timestamp of the last update to channel by node 2 (e.g. updating fee rate).
  Types of update included https://github.com/nervosnetwork/fiber/tree/develop/src/rpc#params-7
-* `fee_rate_of_node1` - <em>`Option<u64>`</em>, The fee rate set by node 1. This is the fee rate for node 1 to forward tlcs sent from node 2 to node 1.
-* `fee_rate_of_node2` - <em>`Option<u64>`</em>, The fee rate set by node 2. This is the fee rate for node 2 to forward tlcs sent from node 1 to node 2.
+* `update_info_of_node1` - <em>`Option<ChannelUpdateInfo>`</em>, The update info from node1 to node2,
+ eg the fee_rate from node1 to node2
+* `update_info_of_node2` - <em>`Option<ChannelUpdateInfo>`</em>, The update info from node2 to node1,
+ eg the fee_rate from node2 to node1
 * `capacity` - <em>u128</em>, The capacity of the channel.
 * `chain_hash` - <em>Hash256</em>, The chain hash of the channel.
 * `udt_type_script` - <em>`Option<Script>`</em>, The UDT type script of the channel.
