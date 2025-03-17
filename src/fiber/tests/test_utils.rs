@@ -186,6 +186,7 @@ pub struct NetworkNode {
     pub fiber_config: FiberConfig,
     pub listening_addrs: Vec<MultiAddr>,
     pub network_actor: ActorRef<NetworkActorMessage>,
+    pub ckb_chain_actor: ActorRef<CkbChainMessage>,
     pub network_graph: Arc<TokioRwLock<NetworkGraph<Store>>>,
     pub chain_actor: ActorRef<CkbChainMessage>,
     pub gossip_actor: ActorRef<GossipActorMessage>,
@@ -572,9 +573,15 @@ impl NetworkNode {
     }
 
     pub fn get_channel_actor_state(&self, channel_id: Hash256) -> ChannelActorState {
-        self.store
-            .get_channel_actor_state(&channel_id)
+        self.get_channel_actor_state_unchecked(channel_id)
             .expect("get channel")
+    }
+
+    pub fn get_channel_actor_state_unchecked(
+        &self,
+        channel_id: Hash256,
+    ) -> Option<ChannelActorState> {
+        self.store.get_channel_actor_state(&channel_id)
     }
 
     pub fn insert_invoice(&mut self, invoice: CkbInvoice, preimage: Option<Hash256>) {
@@ -608,6 +615,13 @@ impl NetworkNode {
         let res = call!(self.network_actor, message).expect("source_node alive");
         eprintln!("result: {:?}", res);
         res
+    }
+
+    pub async fn send_abandon_channel(&self, channel_id: Hash256) -> Result<(), String> {
+        let message = |rpc_reply| -> NetworkActorMessage {
+            NetworkActorMessage::Command(NetworkActorCommand::AbandonChannel(channel_id, rpc_reply))
+        };
+        call!(self.network_actor, message).expect("node_a alive")
     }
 
     pub async fn send_shutdown(
@@ -1011,6 +1025,7 @@ impl NetworkNode {
             channels_tx_map: Default::default(),
             listening_addrs: announced_addrs,
             network_actor,
+            ckb_chain_actor: chain_actor.clone(),
             network_graph,
             chain_actor,
             gossip_actor,
@@ -1030,6 +1045,12 @@ impl NetworkNode {
             store: self.store.clone(),
             fiber_config: self.fiber_config.clone(),
         }
+    }
+
+    pub fn send_ckb_chain_message(&self, message: CkbChainMessage) {
+        self.ckb_chain_actor
+            .send_message(message)
+            .expect("send ckb chain message");
     }
 
     pub async fn add_unexpected_events(&self, events: Vec<String>) {

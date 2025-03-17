@@ -536,6 +536,9 @@ impl Actor for MockChainActor {
                 let timestamp = get_block_timestamp(request.block_hash().into()).await;
                 let _ = rpc_reply_port.send(Ok(Some(timestamp)));
             }
+            Stop => {
+                myself.stop(Some("stop received".to_string()));
+            }
         }
         Ok(())
     }

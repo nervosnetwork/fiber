@@ -379,7 +379,7 @@ where
                     ));
                 }
                 match state.state {
-                    ChannelState::ChannelReady() => {}
+                    ChannelState::ChannelReady => {}
                     ChannelState::AwaitingChannelReady(flags)
                         if flags.contains(AwaitingChannelReadyFlags::CHANNEL_READY) => {}
                     _ => {
@@ -610,7 +610,7 @@ where
                 ChannelState::Closed(_) | ChannelState::ShuttingDown(_) => {
                     TlcErrorCode::PermanentChannelFailure
                 }
-                ChannelState::ChannelReady() => {
+                ChannelState::ChannelReady => {
                     if !state.local_tlc_info.enabled {
                         // channel is disabled
                         TlcErrorCode::TemporaryChannelFailure
@@ -1074,7 +1074,7 @@ where
         shutdown: Shutdown,
     ) -> Result<(), ProcessingChannelError> {
         let flags = match state.state {
-            ChannelState::ChannelReady() => ShuttingDownFlags::empty(),
+            ChannelState::ChannelReady => ShuttingDownFlags::empty(),
             ChannelState::ShuttingDown(flags)
                 if flags.contains(ShuttingDownFlags::THEIR_SHUTDOWN_SENT) =>
             {
@@ -1235,7 +1235,7 @@ where
             ChannelState::SigningCommitment(flags) => {
                 CommitmentSignedFlags::SigningCommitment(flags)
             }
-            ChannelState::ChannelReady() => CommitmentSignedFlags::ChannelReady(),
+            ChannelState::ChannelReady => CommitmentSignedFlags::ChannelReady(),
             ChannelState::ShuttingDown(flags) => {
                 if flags.contains(ShuttingDownFlags::AWAITING_PENDING_TLCS) {
                     CommitmentSignedFlags::PendingShutdown()
@@ -1380,7 +1380,7 @@ where
         debug!("Handling shutdown command: {:?}", &command);
         if command.force {
             match state.state {
-                ChannelState::ChannelReady() => {
+                ChannelState::ChannelReady => {
                     debug!("Handling force shutdown command in ChannelReady state");
                 }
                 ChannelState::ShuttingDown(flags) => {
@@ -1420,7 +1420,7 @@ where
             return Ok(());
         } else {
             let flags = match state.state {
-                ChannelState::ChannelReady() => {
+                ChannelState::ChannelReady => {
                     debug!("Handling shutdown command in ChannelReady state");
                     ShuttingDownFlags::empty()
                 }
@@ -1992,8 +1992,12 @@ where
             ChannelEvent::CheckTlcRetryOperation => {
                 self.apply_retryable_tlc_operations(myself, state).await;
             }
-            ChannelEvent::PeerDisconnected => {
-                myself.stop(Some("PeerDisconnected".to_string()));
+            ChannelEvent::Stop(reason) => {
+                debug_event!(self.network, "ChannelActorStopped");
+                if reason == StopReason::Abandon {
+                    state.update_state(ChannelState::Closed(CloseFlags::ABANDONED));
+                }
+                myself.stop(None);
             }
             ChannelEvent::ClosingTransactionConfirmed(force) => {
                 match state.state {
@@ -2014,7 +2018,6 @@ where
                     ChannelState::Closed(CloseFlags::COOPERATIVE)
                 };
                 state.update_state(closed_state);
-
                 // Broadcast the channel update message which disables the channel.
                 if state.is_public() {
                     let update = state.generate_disabled_channel_update().await;
@@ -2363,7 +2366,7 @@ where
 
                 // If the channel is already ready, we should notify the network actor.
                 // so that we update the network.outpoint_channel_map
-                if matches!(channel.state, ChannelState::ChannelReady()) {
+                if matches!(channel.state, ChannelState::ChannelReady) {
                     self.network
                         .send_message(NetworkActorMessage::new_event(
                             NetworkActorEvent::ChannelReady(
@@ -2457,6 +2460,21 @@ where
                 ))
                 .expect(ASSUME_NETWORK_ACTOR_ALIVE);
         }
+        let stop_reason = match state.state {
+            ChannelState::Closed(flags) => {
+                if flags == CloseFlags::ABANDONED {
+                    StopReason::Abandon
+                } else {
+                    StopReason::Closed
+                }
+            }
+            _ => StopReason::PeerDisConnected,
+        };
+        self.network
+            .send_message(NetworkActorMessage::new_event(
+                NetworkActorEvent::ChannelActorStopped(state.get_id(), stop_reason),
+            ))
+            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
         Ok(())
     }
 }
@@ -3411,9 +3429,16 @@ impl PublicChannelInfo {
 #[derive(PartialEq, Eq, Clone, Debug)]
 pub struct ClosedChannel {}
 
+#[derive(PartialEq, Eq, Clone, Debug)]
+pub enum StopReason {
+    Abandon,
+    Closed,
+    PeerDisConnected,
+}
+
 #[derive(Debug)]
 pub enum ChannelEvent {
-    PeerDisconnected,
+    Stop(StopReason),
     FundingTransactionConfirmed(H256, u32, u64),
     ClosingTransactionConfirmed(bool),
     CheckTlcRetryOperation,
@@ -3576,6 +3601,8 @@ bitflags! {
         const COOPERATIVE = 1;
         /// Indicates that channel is closed uncooperatively, initiated by one party forcibly.
         const UNCOOPERATIVE = 1 << 1;
+        /// Indicates that channel is abandoned.
+        const ABANDONED = 1 << 2;
     }
 }
 
@@ -3605,7 +3632,7 @@ pub enum ChannelState {
     AwaitingChannelReady(AwaitingChannelReadyFlags),
     /// Both we and our counterparty consider the funding transaction confirmed and the channel is
     /// now operational.
-    ChannelReady(),
+    ChannelReady,
     /// We've successfully negotiated a `closing_signed` dance, the channel is now in the process of being shutdown.
     ShuttingDown(ShuttingDownFlags),
     /// This channel is closed.
@@ -3721,7 +3748,7 @@ impl ChannelActorState {
     }
 
     pub fn is_ready(&self) -> bool {
-        matches!(self.state, ChannelState::ChannelReady())
+        matches!(self.state, ChannelState::ChannelReady)
     }
 
     pub fn is_tlc_forwarding_enabled(&self) -> bool {
@@ -5340,7 +5367,7 @@ impl ChannelActorState {
         is_sent: bool,
     ) -> ProcessingChannelResult {
         match self.state {
-            ChannelState::ChannelReady() => {}
+            ChannelState::ChannelReady => {}
             ChannelState::ShuttingDown(_) if add_tlc_amount.is_none() => {}
             _ => {
                 return Err(ProcessingChannelError::InvalidState(format!(
@@ -5834,7 +5861,7 @@ impl ChannelActorState {
             ChannelState::SigningCommitment(flags) => {
                 CommitmentSignedFlags::SigningCommitment(flags)
             }
-            ChannelState::ChannelReady() => CommitmentSignedFlags::ChannelReady(),
+            ChannelState::ChannelReady => CommitmentSignedFlags::ChannelReady(),
             ChannelState::ShuttingDown(flags) => {
                 if flags.contains(ShuttingDownFlags::AWAITING_PENDING_TLCS) {
                     debug!(
@@ -6044,7 +6071,7 @@ impl ChannelActorState {
     }
 
     async fn on_new_channel_ready(&mut self, myself: &ActorRef<ChannelActorMessage>) {
-        self.update_state(ChannelState::ChannelReady());
+        self.update_state(ChannelState::ChannelReady);
         self.increment_local_commitment_number();
         self.increment_remote_commitment_number();
         let peer_id = self.get_remote_peer_id();
@@ -6261,7 +6288,7 @@ impl ChannelActorState {
                         .expect(ASSUME_NETWORK_ACTOR_ALIVE);
                 }
             }
-            ChannelState::ChannelReady() => {
+            ChannelState::ChannelReady => {
                 let expected_local_commitment_number = self.get_local_commitment_number();
                 let actual_local_commitment_number = reestablish_channel.remote_commitment_number;
                 if actual_local_commitment_number == expected_local_commitment_number {
