@@ -2822,9 +2822,12 @@ where
         if reason == StopReason::Abandon {
             if let Some(channel_actor_state) = self.store.get_channel_actor_state(&channel_id) {
                 // remove from transaction track actor
-                if let Some(_funding_tx) = channel_actor_state.funding_tx.as_ref() {
-                    // pending on https://github.com/nervosnetwork/fiber/pull/521
-                    // https://github.com/nervosnetwork/fiber/pull/521#issuecomment-2683709653
+                if let Some(funding_tx) = channel_actor_state.funding_tx.as_ref() {
+                    self.chain_actor
+                        .send_message(CkbChainMessage::RemoveFundingTx(
+                            funding_tx.calc_tx_hash().into(),
+                        ))
+                        .expect(ASSUME_CHAIN_ACTOR_ALWAYS_ALIVE_FOR_NOW);
                 }
                 self.store.delete_channel_actor_state(&channel_id);
             }
