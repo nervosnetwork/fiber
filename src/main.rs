@@ -3,6 +3,7 @@ use ckb_resource::Resource;
 use core::default::Default;
 use fnn::actors::RootActor;
 use fnn::cch::CchMessage;
+use fnn::ckb::contracts::TypeIDResolver;
 use fnn::ckb::{contracts::try_init_contracts_context, CkbChainActor};
 use fnn::fiber::{channel::ChannelSubscribers, graph::NetworkGraph, network::init_chain_hash};
 use fnn::store::Store;
@@ -108,10 +109,12 @@ pub async fn main() -> Result<(), ExitMessage> {
             })?;
 
             init_chain_hash(genesis_block.hash().into());
+            let type_id_resolver = TypeIDResolver::new(ckb_config.rpc_url.clone());
             try_init_contracts_context(
                 genesis_block,
                 fiber_config.scripts.clone(),
                 ckb_config.udt_whitelist.clone().unwrap_or_default(),
+                Some(type_id_resolver),
             )
             .map_err(|err| ExitMessage(format!("failed to init contracts context: {}", err)))?;
 

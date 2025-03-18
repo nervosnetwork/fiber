@@ -20,28 +20,34 @@ fiber:
         hash_type: type
         args: 0x
       cell_deps:
-        - out_point:
-            tx_hash: 0x22ccb3018ca1aa7acd7b0ef7f5b01048be2525bb7364eafc8af04fd4d7279384
-            index: 0x1
-          dep_type: code
-        - out_point:
-            tx_hash: 0x22ccb3018ca1aa7acd7b0ef7f5b01048be2525bb7364eafc8af04fd4d7279384 # ckb_auth
-            index: 0x0
-          dep_type: code
+        - type: TypeID
+          dep:
+            code_hash: 0x00000000000000000000000000000000000000000000000000545950455f4944
+            hash_type: type
+            args: 0x64818d82a372312fb007c480391e1b9759d21b2c7f7959b9c177d72cdc243394
+        - type: CellDep
+          dep:
+            out_point:
+              tx_hash: 0x22ccb3018ca1aa7acd7b0ef7f5b01048be2525bb7364eafc8af04fd4d7279384 # ckb_auth
+              index: 0x0
+            dep_type: code
     - name: CommitmentLock
       script:
         code_hash: 0x2d45c4d3ed3e942f1945386ee82a5d1b7e4bb16d7fe1ab015421174ab747406c
         hash_type: type
         args: 0x
       cell_deps:
-        - out_point:
-            tx_hash: 0x22ccb3018ca1aa7acd7b0ef7f5b01048be2525bb7364eafc8af04fd4d7279384
-            index: 0x2
-          dep_type: code
-        - out_point:
-            tx_hash: 0x22ccb3018ca1aa7acd7b0ef7f5b01048be2525bb7364eafc8af04fd4d7279384 #ckb_auth
-            index: 0x0
-          dep_type: code
+        - type: TypeID
+          dep:
+            code_hash: 0x00000000000000000000000000000000000000000000000000545950455f4944
+            hash_type: type
+            args: 0xdb16e6dcb17f670e5fb7c556d81e522ec5edb069ad2fa3e898e7ccea6c26a39f
+        - type: CellDep
+          dep:
+            out_point:
+              tx_hash: 0x22ccb3018ca1aa7acd7b0ef7f5b01048be2525bb7364eafc8af04fd4d7279384 #ckb_auth
+              index: 0x0
+            dep_type: code
 
 rpc:
   # By default RPC only binds to localhost, thus it only allows accessing from the same machine.

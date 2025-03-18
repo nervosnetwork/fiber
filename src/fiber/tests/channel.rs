@@ -4303,7 +4303,7 @@ async fn test_revoke_old_commitment_transaction() {
 
     let tx = Transaction::default()
         .as_advanced_builder()
-        .cell_deps(get_cell_deps(vec![Contract::CommitmentLock], &None))
+        .cell_deps(get_cell_deps(vec![Contract::CommitmentLock], &None).expect("get cell deps"))
         .input(
             CellInput::new_builder()
                 .previous_output(commitment_tx.output_pts().first().unwrap().clone())
