@@ -1,3 +1,7 @@
+use ckb_sdk::{
+    rpc::ckb_indexer::{Order, ScriptType, SearchKey, SearchMode},
+    CkbRpcClient,
+};
 use ckb_types::{
     core::{BlockView, DepType, ScriptHashType},
     packed::{CellDep, CellDepVec, CellDepVecBuilder, CellOutput, OutPoint, Script},
@@ -24,15 +28,79 @@ pub enum Contract {
 }
 
 #[derive(Clone, Debug)]
+pub enum ScriptCellDep {
+    CellDep(CellDep),
+    TypeID(Script),
+}
+
+impl From<crate::fiber::config::ScriptCellDep> for ScriptCellDep {
+    fn from(script_cell_dep: crate::fiber::config::ScriptCellDep) -> Self {
+        match script_cell_dep {
+            crate::fiber::config::ScriptCellDep::CellDep(cell_dep) => {
+                ScriptCellDep::CellDep(cell_dep.into())
+            }
+            crate::fiber::config::ScriptCellDep::TypeID(type_id) => {
+                ScriptCellDep::TypeID(type_id.into())
+            }
+        }
+    }
+}
+
+impl From<CellDep> for ScriptCellDep {
+    fn from(cell_dep: CellDep) -> Self {
+        ScriptCellDep::CellDep(cell_dep)
+    }
+}
+
+impl From<Script> for ScriptCellDep {
+    fn from(type_id: Script) -> Self {
+        ScriptCellDep::TypeID(type_id)
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct ContractsInfo {
     pub contract_default_scripts: HashMap<Contract, Script>,
-    pub script_cell_deps: HashMap<Contract, Vec<CellDep>>,
+    pub script_cell_deps: HashMap<Contract, Vec<ScriptCellDep>>,
     pub udt_whitelist: UdtCfgInfos,
+}
+
+#[derive(Clone, Debug)]
+pub struct TypeIDResolver {
+    ckb_url: String,
+}
+
+impl TypeIDResolver {
+    pub fn new(ckb_url: String) -> Self {
+        Self { ckb_url }
+    }
+
+    pub fn resolve(&self, type_id: Script) -> Option<CellDep> {
+        let ckb_client = CkbRpcClient::new(&self.ckb_url);
+        let search_key = SearchKey {
+            script: type_id.into(),
+            script_type: ScriptType::Type,
+            script_search_mode: Some(SearchMode::Exact),
+            filter: None,
+            with_data: Some(false),
+            group_by_transaction: Some(false),
+        };
+        let cells = ckb_client
+            .get_cells(search_key, Order::Desc, 1u32.into(), None)
+            .ok()?;
+        let cell = cells.objects.first()?;
+        let cell_dep = CellDep::new_builder()
+            .out_point(cell.out_point.clone().into())
+            .dep_type(DepType::Code.into())
+            .build();
+        Some(cell_dep)
+    }
 }
 
 #[derive(Clone, Debug)]
 pub struct ContractsContext {
     pub contracts: ContractsInfo,
+    pub type_id_resolver: Option<TypeIDResolver>,
 }
 
 #[derive(Debug, Error)]
@@ -48,6 +116,9 @@ pub enum ContractsContextError {
 
     #[error("Genesis block secp256k1 binary cell type script should exist")]
     GenesisBlockSecp256k1BinaryCellTypeScriptNotFound,
+
+    #[error("Cannot resolve cell dep for type id {0}")]
+    CannotResolveCellDep(Script),
 }
 
 impl ContractsContext {
@@ -55,9 +126,10 @@ impl ContractsContext {
         genesis_block: BlockView,
         fiber_scripts: Vec<FiberScript>,
         udt_whitelist: UdtCfgInfos,
+        type_id_resolver: Option<TypeIDResolver>,
     ) -> Result<Self, ContractsContextError> {
         let mut contract_default_scripts: HashMap<Contract, Script> = HashMap::new();
-        let mut script_cell_deps: HashMap<Contract, Vec<CellDep>> = HashMap::new();
+        let mut script_cell_deps: HashMap<Contract, Vec<ScriptCellDep>> = HashMap::new();
 
         let genesis_tx = genesis_block
             .transaction(0)
@@ -92,7 +164,8 @@ impl ContractsContext {
             vec![CellDep::new_builder()
                 .out_point(secp256k1_dep_group_out_point)
                 .dep_type(DepType::DepGroup.into())
-                .build()],
+                .build()
+                .into()],
         );
 
         let genesis_hash = genesis_block.hash();
@@ -115,7 +188,7 @@ impl ContractsContext {
                     )
                     .dep_type(DepType::Code.into())
                     .build();
-                script_cell_deps.insert(Contract::CkbAuth, vec![ckb_auth_cell_dep.clone()]);
+                script_cell_deps.insert(Contract::CkbAuth, vec![ckb_auth_cell_dep.clone().into()]);
 
                 let contract_map = [
                     (Contract::FundingLock, 6u32),
@@ -143,9 +216,9 @@ impl ContractsContext {
                         .raw_data();
                     let cell_deps =
                         if matches!(contract, Contract::FundingLock | Contract::CommitmentLock) {
-                            vec![cell_dep, ckb_auth_cell_dep.clone()]
+                            vec![cell_dep.into(), ckb_auth_cell_dep.clone().into()]
                         } else {
-                            vec![cell_dep]
+                            vec![cell_dep.into()]
                         };
                     script_cell_deps.insert(contract, cell_deps);
                     contract_default_scripts.insert(
@@ -167,7 +240,19 @@ impl ContractsContext {
                 cell_deps,
             } = fiber_script;
             contract_default_scripts.insert(name, script.into());
-            script_cell_deps.insert(name, cell_deps.into_iter().map(CellDep::from).collect());
+            script_cell_deps.insert(
+                name,
+                cell_deps.into_iter().map(ScriptCellDep::from).collect(),
+            );
+        }
+
+        // ensure all type id cell deps are resolvable
+        for cell_dep in script_cell_deps.values().flatten() {
+            if let ScriptCellDep::TypeID(type_id) = cell_dep {
+                let err = || ContractsContextError::CannotResolveCellDep(type_id.clone());
+                let resolver = type_id_resolver.as_ref().ok_or_else(err)?;
+                resolver.resolve(type_id.clone()).ok_or_else(err)?;
+            }
         }
 
         Ok(Self {
@@ -176,6 +261,7 @@ impl ContractsContext {
                 script_cell_deps,
                 udt_whitelist,
             },
+            type_id_resolver,
         })
     }
 
@@ -183,14 +269,30 @@ impl ContractsContext {
         &self.contracts.contract_default_scripts
     }
 
-    pub(crate) fn get_cell_deps(&self, contracts: Vec<Contract>) -> CellDepVec {
+    pub(crate) fn get_cell_deps(
+        &self,
+        contracts: Vec<Contract>,
+    ) -> Result<CellDepVec, ContractsContextError> {
         let mut builder: CellDepVecBuilder = CellDepVec::new_builder();
         for contract in contracts {
             if let Some(cell_deps) = self.contracts.script_cell_deps.get(&contract) {
-                builder = builder.extend(cell_deps.clone());
+                for cell_dep in cell_deps {
+                    match cell_dep {
+                        ScriptCellDep::CellDep(cell_dep) => {
+                            builder = builder.push(cell_dep.clone());
+                        }
+                        ScriptCellDep::TypeID(type_id) => {
+                            let err =
+                                || ContractsContextError::CannotResolveCellDep(type_id.clone());
+                            let resolver = self.type_id_resolver.as_ref().ok_or_else(err)?;
+                            let cell_dep = resolver.resolve(type_id.clone()).ok_or_else(err)?;
+                            builder = builder.push(cell_dep);
+                        }
+                    }
+                }
             }
         }
-        builder.build()
+        Ok(builder.build())
     }
 
     pub fn get_udt_whitelist(&self) -> &UdtCfgInfos {
@@ -231,12 +333,14 @@ pub fn try_init_contracts_context(
     genesis_block: BlockView,
     fiber_scripts: Vec<FiberScript>,
     udt_whitelist: UdtCfgInfos,
+    type_id_resolver: Option<TypeIDResolver>,
 ) -> Result<(), ContractsContextError> {
     CONTRACTS_CONTEXT_INSTANCE
         .set(ContractsContext::try_new(
             genesis_block,
             fiber_scripts,
             udt_whitelist,
+            type_id_resolver,
         )?)
         .map_err(|_| ContractsContextError::ContextAlreadyInitialized)
 }
@@ -261,7 +365,9 @@ pub fn get_script_by_contract(contract: Contract, args: &[u8]) -> Script {
     get_contracts_context().get_script(contract, args)
 }
 
-pub fn get_cell_deps_by_contracts(contracts: Vec<Contract>) -> CellDepVec {
+pub fn get_cell_deps_by_contracts(
+    contracts: Vec<Contract>,
+) -> Result<CellDepVec, ContractsContextError> {
     get_contracts_context().get_cell_deps(contracts)
 }
 
@@ -296,16 +402,19 @@ pub fn is_udt_type_auto_accept(script: &Script, amount: u128) -> bool {
     false
 }
 
-pub fn get_cell_deps(contracts: Vec<Contract>, udt_script: &Option<Script>) -> CellDepVec {
-    let cell_deps = get_cell_deps_by_contracts(contracts);
+pub fn get_cell_deps(
+    contracts: Vec<Contract>,
+    udt_script: &Option<Script>,
+) -> Result<CellDepVec, ContractsContextError> {
+    let cell_deps = get_cell_deps_by_contracts(contracts)?;
     if let Some(udt_script) = udt_script {
         if let Some(udt_cell_deps) = get_udt_cell_deps(udt_script) {
             let res = cell_deps
                 .into_iter()
                 .chain(udt_cell_deps)
                 .collect::<Vec<CellDep>>();
-            return res.pack();
+            return Ok(res.pack());
         }
     }
-    cell_deps
+    Ok(cell_deps)
 }

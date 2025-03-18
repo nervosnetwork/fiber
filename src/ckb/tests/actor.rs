@@ -62,7 +62,9 @@ async fn test_submit_mocked_secp256k1_tx() {
     ));
     let out_point = tx.output_pts_iter().next().unwrap();
     let tx = TransactionView::new_advanced_builder()
-        .cell_deps(get_cell_deps_by_contracts(vec![Contract::Secp256k1Lock]))
+        .cell_deps(
+            get_cell_deps_by_contracts(vec![Contract::Secp256k1Lock]).expect("get cell deps"),
+        )
         .input(
             CellInput::new_builder()
                 .previous_output(out_point.clone())
@@ -106,7 +108,9 @@ async fn test_repeatedly_consume_the_same_cell() {
     ));
     let out_point = tx.output_pts_iter().next().unwrap();
     let tx = TransactionView::new_advanced_builder()
-        .cell_deps(get_cell_deps_by_contracts(vec![Contract::Secp256k1Lock]))
+        .cell_deps(
+            get_cell_deps_by_contracts(vec![Contract::Secp256k1Lock]).expect("get cell deps"),
+        )
         .input(
             CellInput::new_builder()
                 .previous_output(out_point.clone())
@@ -128,7 +132,9 @@ async fn test_repeatedly_consume_the_same_cell() {
         TxStatus::Committed(..)
     ));
     let tx = TransactionView::new_advanced_builder()
-        .cell_deps(get_cell_deps_by_contracts(vec![Contract::Secp256k1Lock]))
+        .cell_deps(
+            get_cell_deps_by_contracts(vec![Contract::Secp256k1Lock]).expect("get cell deps"),
+        )
         .input(
             CellInput::new_builder()
                 .previous_output(out_point.clone())
@@ -169,7 +175,7 @@ async fn test_submit_malformed_commitment_tx() {
     ));
     let out_point = tx.output_pts_iter().next().unwrap();
     let tx = TransactionView::new_advanced_builder()
-        .cell_deps(get_cell_deps_by_contracts(vec![Contract::FundingLock]))
+        .cell_deps(get_cell_deps_by_contracts(vec![Contract::FundingLock]).expect("get cell deps"))
         .input(
             CellInput::new_builder()
                 .previous_output(out_point.clone())

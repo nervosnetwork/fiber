@@ -14,7 +14,8 @@ fn commitment_tx_size(udt_type_script: &Option<Script>) -> usize {
     // when there is pending tlcs, the commitment lock args will be 56 bytes, otherwise 46 bytes.
     // to simplify the calculation, we use hardcoded 56 bytes here.
     let commitment_lock_script = get_script_by_contract(Contract::CommitmentLock, &[0u8; 56]);
-    let cell_deps = get_cell_deps(vec![Contract::FundingLock], udt_type_script);
+    let cell_deps =
+        get_cell_deps(vec![Contract::FundingLock], udt_type_script).expect("get cell deps");
 
     let (output, output_data) = if let Some(type_script) = udt_type_script {
         let output = CellOutput::new_builder()
@@ -47,7 +48,8 @@ pub(crate) fn shutdown_tx_size(
     shutdown_scripts: (Script, Script),
 ) -> usize {
     let (script_a, script_b) = shutdown_scripts;
-    let cell_deps = get_cell_deps(vec![Contract::FundingLock], udt_type_script);
+    let cell_deps =
+        get_cell_deps(vec![Contract::FundingLock], udt_type_script).expect("get cell deps");
 
     let (outputs, outputs_data) = if let Some(type_script) = udt_type_script {
         let output_a = CellOutput::new_builder()

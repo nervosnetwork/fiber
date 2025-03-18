@@ -6795,7 +6795,8 @@ impl ChannelActorState {
             local_shutdown_fee, remote_shutdown_fee
         );
 
-        let cell_deps = get_cell_deps(vec![Contract::FundingLock], &self.funding_udt_type_script);
+        let cell_deps = get_cell_deps(vec![Contract::FundingLock], &self.funding_udt_type_script)
+            .map_err(|e| ProcessingChannelError::InternalError(e.to_string()))?;
         let tx_builder = TransactionBuilder::default().cell_deps(cell_deps).input(
             CellInput::new_builder()
                 .previous_output(self.must_get_funding_transaction_outpoint())
@@ -6882,11 +6883,12 @@ impl ChannelActorState {
     fn build_commitment_and_settlement_tx(
         &self,
         for_remote: bool,
-    ) -> (TransactionView, TransactionView) {
+    ) -> Result<(TransactionView, TransactionView), ProcessingChannelError> {
         let commitment_tx = {
             let funding_out_point = self.must_get_funding_transaction_outpoint();
             let cell_deps =
-                get_cell_deps(vec![Contract::FundingLock], &self.funding_udt_type_script);
+                get_cell_deps(vec![Contract::FundingLock], &self.funding_udt_type_script)
+                    .map_err(|e| ProcessingChannelError::InternalError(e.to_string()))?;
             let (output, output_data) = self.build_commitment_transaction_output(for_remote);
 
             TransactionBuilder::default()
@@ -6906,7 +6908,8 @@ impl ChannelActorState {
             let cell_deps = get_cell_deps(
                 vec![Contract::CommitmentLock],
                 &self.funding_udt_type_script,
-            );
+            )
+            .map_err(|e| ProcessingChannelError::InternalError(e.to_string()))?;
             let (outputs, outputs_data) = self.build_settlement_transaction_outputs(for_remote);
 
             TransactionBuilder::default()
@@ -6921,7 +6924,7 @@ impl ChannelActorState {
                 .build()
         };
 
-        (commitment_tx, settlement_tx)
+        Ok((commitment_tx, settlement_tx))
     }
 
     fn build_commitment_transaction_output(&self, for_remote: bool) -> (CellOutput, Bytes) {
@@ -7149,7 +7152,7 @@ impl ChannelActorState {
         funding_tx_partial_signature: PartialSignature,
         commitment_tx_partial_signature: PartialSignature,
     ) -> Result<PartiallySignedCommitmentTransaction, ProcessingChannelError> {
-        let (commitment_tx, settlement_tx) = self.build_commitment_and_settlement_tx(false);
+        let (commitment_tx, settlement_tx) = self.build_commitment_and_settlement_tx(false)?;
 
         let deterministic_verify_ctx = self.get_deterministic_verify_context();
         deterministic_verify_ctx.verify(
@@ -7205,7 +7208,7 @@ impl ChannelActorState {
     fn build_and_sign_commitment_tx(
         &self,
     ) -> Result<(PartialSignature, PartialSignature), ProcessingChannelError> {
-        let (commitment_tx, settlement_tx) = self.build_commitment_and_settlement_tx(true);
+        let (commitment_tx, settlement_tx) = self.build_commitment_and_settlement_tx(true)?;
 
         let deterministic_sign_ctx = self.get_deterministic_sign_context();
         let funding_tx_partial_signature =

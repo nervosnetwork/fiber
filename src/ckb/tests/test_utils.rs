@@ -16,7 +16,7 @@ use crate::{
     ckb::{
         actor::GetTxResponse,
         config::UdtCfgInfos,
-        contracts::{Contract, ContractsContext, ContractsInfo},
+        contracts::{Contract, ContractsContext, ContractsInfo, ScriptCellDep},
         CkbTxTracer, CkbTxTracingMask, CkbTxTracingResult,
     },
     fiber::types::Hash256,
@@ -136,7 +136,7 @@ impl MockContext {
         ];
         let mut context = Context::new_with_deterministic_rng();
         let mut contract_default_scripts: HashMap<Contract, Script> = HashMap::new();
-        let mut script_cell_deps: HashMap<Contract, Vec<CellDep>> = HashMap::new();
+        let mut script_cell_deps: HashMap<Contract, Vec<ScriptCellDep>> = HashMap::new();
 
         for (contract, binary) in binaries.into_iter() {
             let out_point = context.deploy_cell(binary);
@@ -154,7 +154,7 @@ impl MockContext {
             {
                 // FundingLock and CommitmentLock depend on CkbAuth
                 vec![
-                    cell_dep,
+                    cell_dep.into(),
                     script_cell_deps
                         .get(&Contract::CkbAuth)
                         .unwrap()
@@ -164,7 +164,7 @@ impl MockContext {
                         .clone(),
                 ]
             } else {
-                vec![cell_dep]
+                vec![cell_dep.into()]
             };
             script_cell_deps.insert(contract, cell_deps);
         }
@@ -174,7 +174,10 @@ impl MockContext {
             script_cell_deps,
             udt_whitelist: UdtCfgInfos::default(),
         };
-        let contracts_context = ContractsContext { contracts };
+        let contracts_context = ContractsContext {
+            contracts,
+            type_id_resolver: None,
+        };
         MockContext {
             context,
             contracts_context,
