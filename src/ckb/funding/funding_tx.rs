@@ -41,7 +41,7 @@ pub struct FundingTx {
 
 #[derive(Debug, Clone)]
 struct LiveCellsExclusion {
-    input_out_points: Vec<packed::OutPoint>,
+    tx: Transaction,
     committed_block_number: Option<u64>,
 }
 
@@ -71,7 +71,7 @@ impl LiveCellsExclusionMap {
     pub fn add_transaction_view(&mut self, tx: &TransactionView) {
         let tx_hash = tx.hash();
         let exclusion = LiveCellsExclusion {
-            input_out_points: tx.input_pts_iter().collect(),
+            tx: tx.data(),
             committed_block_number: None,
         };
         self.map.insert(tx_hash, exclusion);
@@ -98,10 +98,7 @@ impl LiveCellsExclusionMap {
         collector: &mut dyn CellCollector,
     ) -> Result<(), ckb_sdk::traits::CellCollectorError> {
         for exclusion in self.map.values() {
-            for out_point in exclusion.input_out_points.iter() {
-                // Cell collector does not need to clean up the locked cells for us
-                collector.lock_cell(out_point.clone(), u64::MAX)?;
-            }
+            collector.apply_tx(exclusion.tx.clone(), u64::MAX)?;
         }
         Ok(())
     }
