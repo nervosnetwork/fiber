@@ -217,7 +217,7 @@ impl From<(u64, ChannelAnnouncement)> for ChannelInfo {
 #[serde_as]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ChannelUpdateInfo {
-    // The timestamp is the time when the channel update was received by the node.
+    /// The timestamp is the time when the channel update was received by the node.
     #[serde_as(as = "U64Hex")]
     pub timestamp: u64,
     /// Whether the channel can be currently used for payments (in this one direction).

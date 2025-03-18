@@ -53,9 +53,13 @@ coverage-generate-report:
 
 coverage: coverage-run-unittests coverage-collect-data coverage-generate-report
 
+RPC_GEN_VERSION = 0.1.10
 .PHONY: gen-rpc-doc
 gen-rpc-doc:
-	$(if $(shell command -v fiber-rpc-gen),,cargo install fiber-rpc-gen --version 0.1.8 --force)
+	@if ! command -v fiber-rpc-gen >/dev/null 2>&1 || [ "$$(fiber-rpc-gen --version | awk '{print $$2}')" != "$(RPC_GEN_VERSION)" ]; then \
+        echo "Installing fiber-rpc-gen $(RPC_GEN_VERSION)..."; \
+        cargo install fiber-rpc-gen --version $(RPC_GEN_VERSION) --force; \
+	fi
 	fiber-rpc-gen ./src/
 	if grep -q "TODO: add desc" ./src/rpc/README.md; then \
         echo "Warning: There are 'TODO: add desc' in src/rpc/README.md, please add documentation comments to resolve them"; \
