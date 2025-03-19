@@ -1833,7 +1833,8 @@ dependencies = [
 
 [[package]]
 name = "fnn"
-version = "0.4.1"
+version = "0.4.0"
+source = "git+https://github.com/nervosnetwork/fiber.git?tag=v0.4.1-rc1#e979f8f90e80e01f0db7cc65a47030134496a735"
 dependencies = [
  "anyhow",
  "arcode",
@@ -1842,7 +1843,6 @@ dependencies = [
  "bincode",
  "bitcoin",
  "bitflags 2.7.0",
- "bitmask-enum",
  "ckb-chain-spec",
  "ckb-gen-types",
  "ckb-hash",
@@ -1888,8 +1888,7 @@ dependencies = [
 
 [[package]]
 name = "fnn"
-version = "0.4.0"
-source = "git+https://github.com/nervosnetwork/fiber.git?tag=v0.4.1-rc1#e979f8f90e80e01f0db7cc65a47030134496a735"
+version = "0.4.1"
 dependencies = [
  "anyhow",
  "arcode",
@@ -1898,6 +1897,7 @@ dependencies = [
  "bincode",
  "bitcoin",
  "bitflags 2.7.0",
+ "bitmask-enum",
  "ckb-chain-spec",
  "ckb-gen-types",
  "ckb-hash",
@@ -1954,6 +1954,7 @@ dependencies = [
  "fnn 0.3.0",
  "fnn 0.3.1 (git+https://github.com/nervosnetwork/fiber.git?tag=v0.3.1-p1)",
  "fnn 0.3.1 (git+https://github.com/nervosnetwork/fiber.git?tag=v0.4.0-rc1-p1)",
+ "fnn 0.4.0",
  "fnn 0.4.1",
  "hex",
  "indicatif",
