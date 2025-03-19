@@ -11,8 +11,8 @@ jobs:
       - uses: dsherret/rust-toolchain-file@v1
       - uses: Swatinem/rust-cache@v2
       - run: |
-          make check-migrate
           cargo check
+          make check-migrate
           make check-dirty-rpc-doc
           cd migrate && cargo check
 
