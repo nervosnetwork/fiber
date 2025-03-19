@@ -26,12 +26,12 @@ pub struct NewInvoiceParams {
     pub currency: Currency,
     /// The payment preimage of the invoice.
     pub payment_preimage: Hash256,
-    /// The expiry time of the invoice.
+    /// The expiry time of the invoice, in seconds.
     #[serde_as(as = "Option<U64Hex>")]
     pub expiry: Option<u64>,
     /// The fallback address of the invoice.
     pub fallback_address: Option<String>,
-    /// The final HTLC timeout of the invoice.
+    /// The final HTLC timeout of the invoice, in milliseconds.
     #[serde_as(as = "Option<U64Hex>")]
     pub final_expiry_delta: Option<u64>,
     /// The UDT type script of the invoice.

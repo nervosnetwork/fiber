@@ -106,31 +106,45 @@ impl FromStr for Currency {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct CkbScript(#[serde_as(as = "EntityHex")] pub Script);
 
+/// The attributes of the invoice
 #[serde_as]
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Attribute {
     #[serde(with = "U64Hex")]
+    /// The final tlc time out, in milliseconds
     FinalHtlcTimeout(u64),
     #[serde(with = "U64Hex")]
+    /// The final tlc minimum expiry delta, in milliseconds, default is 1 day
     FinalHtlcMinimumExpiryDelta(u64),
     #[serde(with = "duration_hex")]
+    /// The expiry time of the invoice, in seconds
     ExpiryTime(Duration),
+    /// The description of the invoice
     Description(String),
+    /// The fallback address of the invoice
     FallbackAddr(String),
+    /// The udt type script of the invoice
     UdtScript(CkbScript),
+    /// The payee public key of the invoice
     PayeePublicKey(PublicKey),
+    /// The hash algorithm of the invoice
     HashAlgorithm(HashAlgorithm),
     #[serde(with = "U64Hex")]
+    /// The feature flags of the invoice
     Feature(u64),
 }
 
+/// The metadata of the invoice
 #[serde_as]
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct InvoiceData {
+    /// The timestamp of the invoice
     #[serde_as(as = "U128Hex")]
     pub timestamp: u128,
+    /// The payment hash of the invoice
     pub payment_hash: Hash256,
+    /// The attributes of the invoice, e.g. description, expiry time, etc.
     pub attrs: Vec<Attribute>,
 }
 
