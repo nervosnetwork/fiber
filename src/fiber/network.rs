@@ -48,7 +48,7 @@ use super::channel::{
     ChannelActorMessage, ChannelActorStateStore, ChannelCommand, ChannelCommandWithId,
     ChannelEvent, ChannelInitializationParameter, ChannelState, ChannelSubscribers, ChannelTlcInfo,
     OpenChannelParameter, PrevTlcInfo, ProcessingChannelError, ProcessingChannelResult,
-    PublicChannelInfo, RevocationData, SettlementData, ShuttingDownFlags,
+    PublicChannelInfo, RevocationData, SettlementData, ShuttingDownFlags, StopReason,
     DEFAULT_COMMITMENT_FEE_RATE, DEFAULT_FEE_RATE, DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
     MAX_COMMITMENT_DELAY_EPOCHS, MAX_TLC_NUMBER_IN_FLIGHT, MIN_COMMITMENT_DELAY_EPOCHS,
     SYS_MAX_TLC_NUMBER_IN_FLIGHT,
@@ -211,6 +211,8 @@ pub enum NetworkActorCommand {
         OpenChannelCommand,
         RpcReplyPort<Result<OpenChannelResponse, String>>,
     ),
+    // Abandon a channel, channel_id maybe temp_channel_id or normal channel_id
+    AbandonChannel(Hash256, RpcReplyPort<Result<(), String>>),
     // Accept a channel to a peer.
     AcceptChannel(
         AcceptChannelCommand,
@@ -607,6 +609,7 @@ pub enum NetworkServiceEvent {
     // and both parties sent ChannelReady messages).
     ChannelReady(PeerId, Hash256, OutPoint),
     ChannelClosed(PeerId, Hash256, Byte32),
+    ChannelAbandon(Hash256),
     // A RevokeAndAck is received from the peer. Other data relevant to this
     // RevokeAndAck message are also assembled here. The watch tower may use this.
     RevokeAndAckReceived(
@@ -691,6 +694,9 @@ pub enum NetworkActorEvent {
 
     // An owned channel is updated.
     OwnedChannelUpdateEvent(OwnedChannelUpdateEvent),
+
+    // A channel actor stopped event.
+    ChannelActorStopped(Hash256, StopReason),
 }
 
 #[derive(Debug)]
@@ -984,6 +990,9 @@ where
                     debug!("Owned channel is down");
                 }
             }
+            NetworkActorEvent::ChannelActorStopped(channel_id, reason) => {
+                state.on_channel_actor_stopped(channel_id, reason).await;
+            }
         }
         Ok(())
     }
@@ -1133,7 +1142,6 @@ where
                     }
                 }
             }
-
             NetworkActorCommand::OpenChannel(open_channel, reply) => {
                 match state.create_outbound_channel(open_channel).await {
                     Ok((_, channel_id)) => {
@@ -1155,6 +1163,18 @@ where
                     }
                     Err(err) => {
                         error!("Failed to accept channel: {}", err);
+                        let _ = reply.send(Err(err.to_string()));
+                    }
+                }
+            }
+
+            NetworkActorCommand::AbandonChannel(channel_id, reply) => {
+                match state.abandon_channel(channel_id).await {
+                    Ok(_) => {
+                        let _ = reply.send(Ok(()));
+                    }
+                    Err(err) => {
+                        error!("Failed to abandon channel: {}", err);
                         let _ = reply.send(Err(err.to_string()));
                     }
                 }
@@ -2389,6 +2409,52 @@ where
         }
     }
 
+    pub async fn abandon_channel(
+        &mut self,
+        channel_id: Hash256,
+    ) -> Result<(), ProcessingChannelError> {
+        if let Some(channel_actor_state) = self.store.get_channel_actor_state(&channel_id) {
+            match channel_actor_state.state {
+                ChannelState::ChannelReady
+                | ChannelState::ShuttingDown(_)
+                | ChannelState::Closed(_) => {
+                    return Err(ProcessingChannelError::InvalidParameter(format!(
+                        "Channel {} is in state {:?}, cannot be abandoned, please shutdown the channel instead",
+                        channel_id, channel_actor_state.state
+                    )));
+                }
+                _ => {
+                    if channel_actor_state.funding_tx_confirmed_at.is_some() {
+                        return Err(ProcessingChannelError::InvalidParameter(format!(
+                            "Channel {} funding transaction is already confirmed, please shutdown the channel instead",
+                            channel_id,
+                        )));
+                    }
+                }
+            }
+        }
+
+        if let Some(channel) = self.channels.get(&channel_id) {
+            if channel
+                .send_message(ChannelActorMessage::Event(ChannelEvent::Stop(
+                    StopReason::Abandon,
+                )))
+                .is_err()
+            {
+                return Err(ProcessingChannelError::InternalError(format!(
+                    "Failed to stop channel actor {}",
+                    channel_id
+                )));
+            }
+        } else {
+            return Err(ProcessingChannelError::InvalidParameter(format!(
+                "Channel {} not found",
+                channel_id
+            )));
+        }
+        return Ok(());
+    }
+
     fn get_peer_session(&self, peer_id: &PeerId) -> Option<SessionId> {
         self.peer_session_map.get(peer_id).map(|s| s.0)
     }
@@ -2550,7 +2616,7 @@ where
                     match self.store.get_channel_actor_state(&channel_id) {
                         Some(mut state) => {
                             match state.state {
-                                ChannelState::ChannelReady() => {
+                                ChannelState::ChannelReady => {
                                     debug!("Handling force shutdown command in ChannelReady state");
                                 }
                                 ChannelState::ShuttingDown(flags) => {
@@ -2702,19 +2768,13 @@ where
         }
     }
 
-    fn remove_channel(&mut self, channel_id: &Hash256) -> Option<ActorRef<ChannelActorMessage>> {
-        self.channels
-            .remove(channel_id)
-            .inspect(|_| self.outpoint_channel_map.retain(|_, v| v != channel_id))
-    }
-
     fn on_peer_disconnected(&mut self, id: &PeerId) {
         if let Some(session) = self.peer_session_map.remove(id) {
             if let Some(channel_ids) = self.session_channels_map.remove(&session.0) {
                 for channel_id in channel_ids {
-                    if let Some(channel) = self.remove_channel(&channel_id) {
+                    if let Some(channel) = self.channels.get(&channel_id) {
                         let _ = channel.send_message(ChannelActorMessage::Event(
-                            ChannelEvent::PeerDisconnected,
+                            ChannelEvent::Stop(StopReason::PeerDisConnected),
                         ));
                     }
                 }
@@ -2808,7 +2868,6 @@ where
             ChannelActorMessage::Event(ChannelEvent::ClosingTransactionConfirmed(force)),
         )
         .await;
-        self.remove_channel(channel_id);
         if let Some(session) = self.get_peer_session(peer_id) {
             if let Some(set) = self.session_channels_map.get_mut(&session) {
                 set.remove(channel_id);
@@ -2828,6 +2887,46 @@ where
         }
 
         self.remove_in_flight_tx(tx_hash.into());
+    }
+
+    async fn on_channel_actor_stopped(&mut self, channel_id: Hash256, reason: StopReason) {
+        // all check passed, now begin to remove from memory and DB
+        self.channels.remove(&channel_id);
+        for (_peer_id, (session_id, _)) in self.peer_session_map.iter() {
+            if let Some(session_channels) = self.session_channels_map.get_mut(session_id) {
+                session_channels.remove(&channel_id);
+            }
+        }
+
+        if reason == StopReason::Abandon {
+            if let Some(channel_actor_state) = self.store.get_channel_actor_state(&channel_id) {
+                // remove from transaction track actor
+                if let Some(funding_tx) = channel_actor_state.funding_tx.as_ref() {
+                    self.chain_actor
+                        .send_message(CkbChainMessage::RemoveFundingTx(
+                            funding_tx.calc_tx_hash().into(),
+                        ))
+                        .expect(ASSUME_CHAIN_ACTOR_ALWAYS_ALIVE_FOR_NOW);
+                }
+                self.store.delete_channel_actor_state(&channel_id);
+            }
+            // notify event observers, such as remove from watchtower
+            self.network
+                .send_message(NetworkActorMessage::new_notification(
+                    NetworkServiceEvent::ChannelAbandon(channel_id),
+                ))
+                .expect(ASSUME_NETWORK_MYSELF_ALIVE);
+        }
+
+        self.to_be_accepted_channels.remove(&channel_id);
+        if let Some((outpoint, _)) = self
+            .outpoint_channel_map
+            .iter()
+            .find(|(_, id)| *id == &channel_id)
+        {
+            self.pending_channels.remove(outpoint);
+        }
+        self.outpoint_channel_map.retain(|_, id| *id != channel_id);
     }
 
     pub async fn on_open_channel_msg(

@@ -4684,23 +4684,12 @@ async fn test_connect_to_peers_with_mutual_channel_on_restart_1() {
     node_a.expect_event(
         |event| matches!(event, NetworkServiceEvent::PeerConnected(id, _addr) if id == &node_b.peer_id),
     ).await;
+
     node_a
-        .expect_event(|event| {
-            matches!(
-                event,
-                NetworkServiceEvent::DebugEvent(DebugEvent::Common(
-                    info
-                )) if "Reestablished channel in ChannelReady" == info)
-        })
+        .expect_debug_event("Reestablished channel in ChannelReady")
         .await;
     node_b
-        .expect_event(|event| {
-            matches!(
-                event,
-                NetworkServiceEvent::DebugEvent(DebugEvent::Common(
-                    info
-                )) if "Reestablished channel in ChannelReady" == info)
-        })
+        .expect_debug_event("Reestablished channel in ChannelReady")
         .await;
 }
 
@@ -4794,15 +4783,7 @@ async fn test_send_payment_with_node_restart_then_resend_add_tlc() {
     )
     .await;
 
-    node_a
-        .expect_event(|event| {
-            matches!(
-            event,
-            NetworkServiceEvent::DebugEvent(DebugEvent::Common(
-                info
-            )) if "resend add tlc" == info)
-        })
-        .await;
+    node_a.expect_debug_event("resend add tlc").await;
 
     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
     let payment_status = node_a.get_payment_status(payment_hash).await;
@@ -4892,16 +4873,7 @@ async fn test_node_reestablish_resend_remove_tlc() {
     assert_eq!(node_b_balance, new_node_b_balance);
 
     node_a.start().await;
-    node_b
-        .expect_event(|event| {
-            matches!(
-        event,
-        NetworkServiceEvent::DebugEvent(DebugEvent::Common(
-            info
-        )) if "resend remove tlc" == info)
-        })
-        .await;
-
+    node_b.expect_debug_event("resend remove tlc").await;
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
     // assert balance changed since remove tlc is processed by node_a after node_b resending remove tlc
@@ -6401,4 +6373,145 @@ async fn test_send_payment_will_succeed_with_large_tlc_expiry_limit() {
     source_node
         .assert_payment_status(payment_hash, PaymentSessionStatus::Success, Some(1))
         .await;
+}
+
+#[tokio::test]
+async fn test_abandon_failed_channel_without_accept() {
+    let [mut node_a, node_b] = NetworkNode::new_n_interconnected_nodes().await;
+
+    let message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
+            OpenChannelCommand {
+                peer_id: node_b.peer_id.clone(),
+                public: false,
+                shutdown_script: None,
+                funding_amount: 100000000000,
+                funding_udt_type_script: None,
+                commitment_fee_rate: None,
+                commitment_delay_epoch: None,
+                funding_fee_rate: None,
+                tlc_expiry_delta: None,
+                tlc_min_value: None,
+                tlc_fee_proportional_millionths: None,
+                max_tlc_number_in_flight: None,
+                max_tlc_value_in_flight: None,
+            },
+            rpc_reply,
+        ))
+    };
+    let open_channel_result = call!(node_a.network_actor, message)
+        .expect("node_a alive")
+        .expect("open channel success");
+
+    eprintln!("open_channel_result: {:?}", open_channel_result);
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+    let temp_channel_id = open_channel_result.channel_id;
+    let node_a_channel_actor_state = node_a.get_channel_actor_state_unchecked(temp_channel_id);
+    assert!(node_a_channel_actor_state.is_none());
+
+    let res = node_a.send_abandon_channel(temp_channel_id).await;
+    assert!(res.is_ok());
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    node_a.expect_debug_event("ChannelActorStopped").await;
+}
+
+#[tokio::test]
+async fn test_abandon_channel_with_peer_accept() {
+    let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
+
+    let message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
+            OpenChannelCommand {
+                peer_id: node_b.peer_id.clone(),
+                public: false,
+                shutdown_script: None,
+                funding_amount: 100000000000,
+                funding_udt_type_script: None,
+                commitment_fee_rate: None,
+                commitment_delay_epoch: None,
+                funding_fee_rate: None,
+                tlc_expiry_delta: None,
+                tlc_min_value: None,
+                tlc_fee_proportional_millionths: None,
+                max_tlc_number_in_flight: None,
+                max_tlc_value_in_flight: None,
+            },
+            rpc_reply,
+        ))
+    };
+    let open_channel_result = call!(node_a.network_actor, message)
+        .expect("node_a alive")
+        .expect("open channel success");
+
+    eprintln!("open_channel_result: {:?}", open_channel_result);
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+    let temp_channel_id = open_channel_result.channel_id;
+    let node_a_channel_actor_state = node_a.get_channel_actor_state_unchecked(temp_channel_id);
+    assert!(node_a_channel_actor_state.is_none());
+
+    // stop ckb chain actor to make sure funding tx is not sent
+    node_a.send_ckb_chain_message(crate::ckb::CkbChainMessage::Stop);
+
+    let message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::AcceptChannel(
+            AcceptChannelCommand {
+                temp_channel_id: open_channel_result.channel_id,
+                funding_amount: DEFAULT_AUTO_ACCEPT_CHANNEL_CKB_FUNDING_AMOUNT as u128,
+                shutdown_script: None,
+                max_tlc_number_in_flight: None,
+                max_tlc_value_in_flight: None,
+                min_tlc_value: None,
+                tlc_fee_proportional_millionths: None,
+                tlc_expiry_delta: None,
+            },
+            rpc_reply,
+        ))
+    };
+
+    let accept_channel_result = call!(node_b.network_actor, message)
+        .expect("node_b alive")
+        .expect("accept channel success");
+
+    let new_channel_id = accept_channel_result.new_channel_id;
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+    // temp_channel_id will not work now, since it has been replaced by the real channel_id
+    let res = node_a.send_abandon_channel(temp_channel_id).await;
+    assert!(res.is_err());
+
+    let channel_actor_state = node_a
+        .get_channel_actor_state_unchecked(new_channel_id)
+        .expect("channel actor state");
+    eprintln!("channel_actor_state: {:?}", channel_actor_state.state);
+    let res = node_a.send_abandon_channel(new_channel_id).await;
+    eprintln!("res: {:?}", res);
+    assert!(res.is_ok());
+
+    // make sure the channel actor is stopped
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    node_a.expect_debug_event("ChannelActorStopped").await;
+
+    // make sure the channel is removed from DB
+    let channel = node_a.get_channel_actor_state_unchecked(new_channel_id);
+    assert!(channel.is_none());
+
+    // ----------------------------------------------------------------------------
+
+    // Node_b can also abandon channel, node_a's CKB chain actor is stopped,
+    // so node_b will not received `TxCollaborationCommand::TxUpdate` message
+    // the channel_actor_state haven't been inserted into DB
+    let channel_actor_state = node_b.get_channel_actor_state_unchecked(new_channel_id);
+    assert!(channel_actor_state.is_none());
+
+    let res = node_b.send_abandon_channel(new_channel_id).await;
+    eprintln!("res: {:?}", res);
+    assert!(res.is_ok());
+
+    // make sure the channel actor is stopped
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    node_b.expect_debug_event("ChannelActorStopped").await;
 }
