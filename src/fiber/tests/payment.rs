@@ -1049,6 +1049,102 @@ async fn test_send_payment_build_router_multiple_channels() {
     );
 }
 
+#[tokio::test]
+async fn test_send_payment_build_router_pay_self() {
+    init_tracing();
+    let _span = tracing::info_span!("node", node = "test").entered();
+
+    let (nodes, channels) = create_n_nodes_and_channels_with_index_amounts(
+        &[
+            (
+                (0, 1),
+                (
+                    MIN_RESERVED_CKB + 10000000000,
+                    MIN_RESERVED_CKB + 10000000000,
+                ),
+            ),
+            (
+                (1, 2),
+                (
+                    MIN_RESERVED_CKB + 10000000000,
+                    MIN_RESERVED_CKB + 10000000000,
+                ),
+            ),
+            (
+                (1, 2),
+                (
+                    MIN_RESERVED_CKB + 10000000000,
+                    MIN_RESERVED_CKB + 10000000000,
+                ),
+            ),
+            (
+                (2, 0),
+                (
+                    MIN_RESERVED_CKB + 10000000000,
+                    MIN_RESERVED_CKB + 10000000000,
+                ),
+            ),
+        ],
+        3,
+        true,
+    )
+    .await;
+    let [node_0, node_1, node_2] = nodes.try_into().expect("3 nodes");
+    eprintln!("node_0: {:?}", node_0.pubkey);
+    eprintln!("node_1: {:?}", node_1.pubkey);
+    eprintln!("node_2: {:?}", node_2.pubkey);
+
+    let router = node_0
+        .build_router(BuildRouterCommand {
+            amount: None,
+            hops_info: vec![
+                HopRequire {
+                    pubkey: node_1.pubkey,
+                    channel_outpoint: None,
+                },
+                HopRequire {
+                    pubkey: node_2.pubkey,
+                    channel_outpoint: None,
+                },
+                HopRequire {
+                    pubkey: node_0.pubkey,
+                    channel_outpoint: None,
+                },
+            ],
+            udt_type_script: None,
+            final_tlc_expiry_delta: None,
+        })
+        .await
+        .unwrap();
+    eprintln!("result: {:?}", router);
+    let amounts: Vec<_> = router.hops_info.iter().map(|x| x.amount_received).collect();
+    eprintln!("amounts: {:?}", amounts);
+    assert_eq!(amounts, vec![4, 2, 1]);
+
+    let router_nodes: Vec<_> = router.hops_info.iter().map(|x| x.target).collect();
+    eprintln!("router_nodes: {:?}", router_nodes);
+    assert_eq!(
+        router_nodes,
+        vec![node_1.pubkey, node_2.pubkey, node_0.pubkey]
+    );
+
+    let channel_1_funding_tx = node_0.get_channel_funding_tx(&channels[0]).unwrap();
+    let channel_2_funding_tx = node_0.get_channel_funding_tx(&channels[2]).unwrap();
+    let channel_3_funding_tx = node_0.get_channel_funding_tx(&channels[3]).unwrap();
+    assert_eq!(
+        vec![
+            channel_1_funding_tx,
+            channel_2_funding_tx,
+            channel_3_funding_tx
+        ],
+        router
+            .hops_info
+            .iter()
+            .map(|x| x.channel_outpoint.tx_hash().into())
+            .collect::<Vec<_>>()
+    );
+}
+
 // TODO: The meaning of hop hints changed after https://github.com/nervosnetwork/fiber/pull/487/
 // It no longer forces the route to go through the specified node, but only hints the router to consider the specified node.
 // We need to update the test cases accordingly. When RPC like SendToRoute is implemented, we can test this feature more accurately.

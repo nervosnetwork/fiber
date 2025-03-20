@@ -1387,10 +1387,8 @@ where
     ) -> Result<Vec<PathEdge>, PathFindError> {
         let mut router_hops = command.hops_info.clone();
         router_hops.reverse();
-        eprintln!("now router_hops: {:?}", router_hops);
 
         let mut path = vec![];
-
         let mut agg_amount = command.amount.unwrap_or(1);
         let mut agg_tlc_expiry = command
             .final_tlc_expiry_delta
@@ -1405,6 +1403,10 @@ where
                 if from != prev_hop_pubkey {
                     continue;
                 }
+                if &command.udt_type_script != channel_info.udt_type_script() {
+                    continue;
+                }
+
                 let channel_outpoint = channel_info.out_point().clone();
                 if prev_hop_channel_outpoint
                     .clone()
