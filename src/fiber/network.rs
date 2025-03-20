@@ -243,6 +243,11 @@ pub enum NetworkActorCommand {
         SendPaymentCommand,
         RpcReplyPort<Result<SendPaymentResponse, String>>,
     ),
+    // Send payment with router
+    SendPaymentWithRouter(
+        SendPaymentWithRouterCommand,
+        RpcReplyPort<Result<SendPaymentResponse, String>>,
+    ),
     // Get Payment Session for query payment status and errors
     GetPayment(Hash256, RpcReplyPort<Result<SendPaymentResponse, String>>),
     // Build a payment router with the given hops
@@ -318,6 +323,44 @@ pub struct SendPaymentCommand {
     pub dry_run: bool,
 }
 
+#[serde_as]
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct SendPaymentWithRouterCommand {
+    /// the hash to use within the payment's HTLC
+    pub payment_hash: Option<Hash256>,
+
+    /// The router to use for the payment
+    pub router: Vec<PathEdge>,
+
+    /// the encoded invoice to send to the recipient
+    pub invoice: Option<String>,
+
+    /// Some custom records for the payment which contains a map of u32 to Vec<u8>
+    /// The key is the record type, and the value is the serialized data
+    /// For example:
+    /// ```json
+    /// "custom_records": {
+    ///    "0x1": "0x01020304",
+    ///    "0x2": "0x05060708",
+    ///    "0x3": "0x090a0b0c",
+    ///    "0x4": "0x0d0e0f10010d090a0b0c"
+    ///  }
+    /// ```
+    pub custom_records: Option<PaymentCustomRecords>,
+
+    /// keysend payment
+    pub keysend: Option<bool>,
+
+    /// udt type script for the payment
+    #[serde_as(as = "Option<EntityHex>")]
+    pub udt_type_script: Option<Script>,
+
+    /// dry_run for payment, used for check whether we can build valid router and the fee for this payment,
+    /// it's useful for the sender to double check the payment before sending it to the network,
+    /// default is false
+    pub dry_run: bool,
+}
+
 /// The custom records to be included in the payment.
 /// The key is hex encoded of `u32`, and the value is hex encoded of `Vec<u8>` with `0x` as prefix.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Default)]
@@ -389,7 +432,7 @@ pub struct SendPaymentData {
     pub custom_records: Option<PaymentCustomRecords>,
     pub allow_self_payment: bool,
     pub hop_hints: Vec<HopHint>,
-    pub hop_reqs: Vec<HopRequire>,
+    pub router: Vec<PathEdge>,
     pub dry_run: bool,
 }
 
@@ -534,7 +577,7 @@ impl SendPaymentData {
             custom_records: command.custom_records,
             allow_self_payment: command.allow_self_payment,
             hop_hints,
-            hop_reqs: vec![],
+            router: vec![],
             dry_run: command.dry_run,
         })
     }
@@ -1395,6 +1438,20 @@ where
                     }
                 }
             }
+            NetworkActorCommand::SendPaymentWithRouter(payment_request, reply) => {
+                match self
+                    .on_send_payment_with_router(myself, state, payment_request)
+                    .await
+                {
+                    Ok(payment) => {
+                        let _ = reply.send(Ok(payment));
+                    }
+                    Err(e) => {
+                        error!("Failed to send payment: {:?}", e);
+                        let _ = reply.send(Err(e.to_string()));
+                    }
+                }
+            }
             NetworkActorCommand::BuildPaymentRouter(build_payment_router, reply) => {
                 match self.on_build_payment_router(build_payment_router).await {
                     Ok(router) => {
@@ -1888,6 +1945,57 @@ where
             Error::InvalidParameter(format!("Failed to validate payment request: {:?}", e))
         })?;
 
+        self.send_payment_with_payment_data(myself, state, payment_data)
+            .await
+    }
+
+    async fn on_send_payment_with_router(
+        &self,
+        myself: ActorRef<NetworkActorMessage>,
+        state: &mut NetworkActorState<S>,
+        command: SendPaymentWithRouterCommand,
+    ) -> Result<SendPaymentResponse, Error> {
+        // Only proceed if we have at least one hop requirement
+        let Some(last_edge) = command.router.last() else {
+            return Err(Error::InvalidParameter(
+                "No hop requirements provided".to_string(),
+            ));
+        };
+
+        let source = self.network_graph.read().await.get_source_pubkey();
+        let target = last_edge.target;
+        let amount = last_edge.amount_received;
+
+        // Create payment command with defaults from the last hop
+        let payment_command = SendPaymentCommand {
+            target_pubkey: Some(target),
+            payment_hash: command.payment_hash,
+            invoice: command.invoice,
+            allow_self_payment: target == source,
+            dry_run: command.dry_run,
+            amount: Some(amount),
+            keysend: command.keysend,
+            udt_type_script: command.udt_type_script.clone(),
+            ..Default::default()
+        };
+
+        let mut payment_data = SendPaymentData::new(payment_command).map_err(|e| {
+            error!("Failed to validate payment request: {:?}", e);
+            Error::InvalidParameter(format!("Failed to validate payment request: {:?}", e))
+        })?;
+
+        // specify the router to be used
+        payment_data.router = command.router.clone();
+        self.send_payment_with_payment_data(myself, state, payment_data)
+            .await
+    }
+
+    async fn send_payment_with_payment_data(
+        &self,
+        myself: ActorRef<NetworkActorMessage>,
+        state: &mut NetworkActorState<S>,
+        payment_data: SendPaymentData,
+    ) -> Result<SendPaymentResponse, Error> {
         // for dry run, we only build the route and return the hops info,
         // will not store the payment session and send the onion packet
         if payment_data.dry_run {

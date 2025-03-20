@@ -45,6 +45,7 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
         * [Method `send_payment`](#payment-send_payment)
         * [Method `get_payment`](#payment-get_payment)
         * [Method `build_router`](#payment-build_router)
+        * [Method `send_payment_with_router`](#payment-send_payment_with_router)
     * [Module Peer](#module-peer)
         * [Method `connect_peer`](#peer-connect_peer)
         * [Method `disconnect_peer`](#peer-disconnect_peer)
@@ -692,6 +693,50 @@ Builds a router with a list of pubkeys and required channels.
 ##### Returns
 
 * `hops_info` - <em>Vec<[PathEdge](#type-pathedge)></em>, The hops information for router
+
+---
+
+
+
+<a id="payment-send_payment_with_router"></a>
+#### Method `send_payment_with_router`
+
+Sends a payment to a peer with specified router
+ This method differs from SendPayment in that it allows users to specify a full route manually.
+ This can be used for things like rebalancing.
+
+##### Params
+
+* `payment_hash` - <em>Option<[Hash256](#type-hash256)></em>, the hash to use within the payment's HTLC
+* `router` - <em>Vec<[PathEdge](#type-pathedge)></em>, The router to use for the payment
+* `invoice` - <em>`Option<String>`</em>, the encoded invoice to send to the recipient
+* `custom_records` - <em>Option<[PaymentCustomRecords](#type-paymentcustomrecords)></em>, Some custom records for the payment which contains a map of u32 to Vec<u8>
+ The key is the record type, and the value is the serialized data
+ For example:
+ ```json
+ "custom_records": {
+    "0x1": "0x01020304",
+    "0x2": "0x05060708",
+    "0x3": "0x090a0b0c",
+    "0x4": "0x0d0e0f10010d090a0b0c"
+  }
+ ```
+* `keysend` - <em>`Option<bool>`</em>, keysend payment
+* `udt_type_script` - <em>`Option<Script>`</em>, udt type script for the payment
+* `dry_run` - <em>`Option<bool>`</em>, dry_run for payment, used for check whether we can build valid router and the fee for this payment,
+ it's useful for the sender to double check the payment before sending it to the network,
+ default is false
+
+##### Returns
+
+* `payment_hash` - <em>[Hash256](#type-hash256)</em>, The payment hash of the payment
+* `status` - <em>[PaymentSessionStatus](#type-paymentsessionstatus)</em>, The status of the payment
+* `created_at` - <em>`u64`</em>, The time the payment was created at, in milliseconds from UNIX epoch
+* `last_updated_at` - <em>`u64`</em>, The time the payment was last updated at, in milliseconds from UNIX epoch
+* `failed_error` - <em>`Option<String>`</em>, The error message if the payment failed
+* `fee` - <em>`u128`</em>, fee paid for the payment
+* `custom_records` - <em>Option<[PaymentCustomRecords](#type-paymentcustomrecords)></em>, The custom records to be included in the payment.
+* `router` - <em>[SessionRoute](#type-sessionroute)</em>, The route information for the payment
 
 ---
 

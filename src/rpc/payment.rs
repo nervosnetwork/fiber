@@ -3,6 +3,7 @@ use crate::fiber::graph::PathEdge;
 use crate::fiber::graph::SessionRoute;
 use crate::fiber::network::BuildRouterCommand;
 use crate::fiber::network::HopRequire;
+use crate::fiber::network::SendPaymentWithRouterCommand;
 use crate::fiber::serde_utils::SliceHex;
 use crate::fiber::serde_utils::U32Hex;
 use crate::fiber::{
@@ -194,6 +195,43 @@ pub struct BuildPaymentRouterResult {
     hops_info: Vec<PathEdge>,
 }
 
+#[serde_as]
+#[derive(Serialize, Deserialize, Debug)]
+pub struct SendPaymentWithRouterParams {
+    /// the hash to use within the payment's HTLC
+    pub payment_hash: Option<Hash256>,
+
+    /// The router to use for the payment
+    pub router: Vec<PathEdge>,
+
+    /// the encoded invoice to send to the recipient
+    pub invoice: Option<String>,
+
+    /// Some custom records for the payment which contains a map of u32 to Vec<u8>
+    /// The key is the record type, and the value is the serialized data
+    /// For example:
+    /// ```json
+    /// "custom_records": {
+    ///    "0x1": "0x01020304",
+    ///    "0x2": "0x05060708",
+    ///    "0x3": "0x090a0b0c",
+    ///    "0x4": "0x0d0e0f10010d090a0b0c"
+    ///  }
+    /// ```
+    pub custom_records: Option<PaymentCustomRecords>,
+
+    /// keysend payment
+    pub keysend: Option<bool>,
+
+    /// udt type script for the payment
+    pub udt_type_script: Option<Script>,
+
+    /// dry_run for payment, used for check whether we can build valid router and the fee for this payment,
+    /// it's useful for the sender to double check the payment before sending it to the network,
+    /// default is false
+    pub dry_run: Option<bool>,
+}
+
 /// RPC module for channel management.
 #[rpc(server)]
 trait PaymentRpc {
@@ -217,6 +255,15 @@ trait PaymentRpc {
         &self,
         params: BuildRouterParams,
     ) -> Result<BuildPaymentRouterResult, ErrorObjectOwned>;
+
+    /// Sends a payment to a peer with specified router
+    /// This method differs from SendPayment in that it allows users to specify a full route manually.
+    /// This can be used for things like rebalancing.
+    #[method(name = "send_payment_with_router")]
+    async fn send_payment_with_router(
+        &self,
+        params: SendPaymentWithRouterParams,
+    ) -> Result<GetPaymentCommandResult, ErrorObjectOwned>;
 }
 
 pub(crate) struct PaymentRpcServerImpl<S> {
@@ -319,6 +366,39 @@ where
 
         handle_actor_call!(self.actor, message, params).map(|response| BuildPaymentRouterResult {
             hops_info: response.hops_info,
+        })
+    }
+
+    async fn send_payment_with_router(
+        &self,
+        params: SendPaymentWithRouterParams,
+    ) -> Result<GetPaymentCommandResult, ErrorObjectOwned> {
+        let message = |rpc_reply| -> NetworkActorMessage {
+            NetworkActorMessage::Command(NetworkActorCommand::SendPaymentWithRouter(
+                SendPaymentWithRouterCommand {
+                    payment_hash: params.payment_hash,
+                    router: params.router.clone(),
+                    invoice: params.invoice.clone(),
+                    keysend: params.keysend,
+                    udt_type_script: params.udt_type_script.clone().map(|s| s.into()),
+                    custom_records: params.custom_records.clone().map(|records| records.into()),
+                    dry_run: params.dry_run.unwrap_or(false),
+                },
+                rpc_reply,
+            ))
+        };
+        handle_actor_call!(self.actor, message, params).map(|response| GetPaymentCommandResult {
+            payment_hash: response.payment_hash,
+            status: response.status,
+            created_at: response.created_at,
+            last_updated_at: response.last_updated_at,
+            failed_error: response.failed_error,
+            fee: response.fee,
+            custom_records: response
+                .custom_records
+                .map(|records| PaymentCustomRecords { data: records.data }),
+            #[cfg(debug_assertions)]
+            router: response.router,
         })
     }
 }
