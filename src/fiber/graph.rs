@@ -1371,7 +1371,7 @@ where
             let cur_hop = &router_hops[current];
             let prev_hop = &router_hops.get(current + 1);
             let prev_hop_pubkey = prev_hop.map(|x| x.pubkey).unwrap_or(source);
-            let prev_hop_channel_outpoint = prev_hop.map(|x| x.channel_outpoint.clone()).flatten();
+            let prev_hop_channel_outpoint = cur_hop.channel_outpoint.clone();
             let mut found = None;
             for (from, to, channel_info, channel_update) in self.get_node_inbounds(cur_hop.pubkey) {
                 if from != prev_hop_pubkey {

@@ -385,13 +385,13 @@ pub struct HopHint {
 }
 
 /// A hop requirement need to meet when building router, do not including the source node,
-/// the last hop is the receivedr node, and it's channel outpoint should be None.
+/// the last hop is the target node.
 #[serde_as]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HopRequire {
     /// The public key of the node
     pub(crate) pubkey: Pubkey,
-    /// The outpoint for the channel
+    /// The outpoint for the channel, which means use channel with `channel_outpoint` to reach this node
     #[serde_as(as = "Option<EntityHex>")]
     pub(crate) channel_outpoint: Option<OutPoint>,
 }
