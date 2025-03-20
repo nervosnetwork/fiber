@@ -365,7 +365,7 @@ where
         };
 
         handle_actor_call!(self.actor, message, params).map(|response| BuildPaymentRouterResult {
-            hops_info: response.hops_info,
+            hops_info: response.path_edges,
         })
     }
 

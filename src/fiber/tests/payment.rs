@@ -905,9 +905,13 @@ async fn test_send_payment_build_router_basic() {
         .await
         .unwrap();
     eprintln!("result: {:?}", router);
-    let router_nodes: Vec<_> = router.hops_info.iter().map(|x| x.target).collect();
+    let router_nodes: Vec<_> = router.path_edges.iter().map(|x| x.target).collect();
     eprintln!("router_nodes: {:?}", router_nodes);
-    let amounts: Vec<_> = router.hops_info.iter().map(|x| x.amount_received).collect();
+    let amounts: Vec<_> = router
+        .path_edges
+        .iter()
+        .map(|x| x.amount_received)
+        .collect();
     assert_eq!(router_nodes, vec![node_1.pubkey, node_2.pubkey]);
     assert_eq!(amounts, vec![2, 1]);
 
@@ -1011,13 +1015,17 @@ async fn test_send_payment_build_router_multiple_channels() {
         .await
         .unwrap();
     eprintln!("result: {:?}", router);
-    let amounts: Vec<_> = router.hops_info.iter().map(|x| x.amount_received).collect();
+    let amounts: Vec<_> = router
+        .path_edges
+        .iter()
+        .map(|x| x.amount_received)
+        .collect();
     assert_eq!(amounts, vec![2, 1]);
 
     let channel_2_funding_tx = node_0.get_channel_funding_tx(&channels[2]).unwrap();
     assert_eq!(
         channel_2_funding_tx,
-        router.hops_info[1].channel_outpoint.tx_hash().into(),
+        router.path_edges[1].channel_outpoint.tx_hash().into(),
     );
 
     let channel_1_funding_tx = node_0.get_channel_funding_tx(&channels[1]).unwrap();
@@ -1041,12 +1049,16 @@ async fn test_send_payment_build_router_multiple_channels() {
         .await
         .unwrap();
     eprintln!("result: {:?}", router);
-    let amounts: Vec<_> = router.hops_info.iter().map(|x| x.amount_received).collect();
+    let amounts: Vec<_> = router
+        .path_edges
+        .iter()
+        .map(|x| x.amount_received)
+        .collect();
     assert_eq!(amounts, vec![2, 1]);
 
     assert_eq!(
         channel_1_funding_tx,
-        router.hops_info[1].channel_outpoint.tx_hash().into(),
+        router.path_edges[1].channel_outpoint.tx_hash().into(),
     );
 }
 
@@ -1118,11 +1130,15 @@ async fn test_send_payment_build_router_pay_self() {
         .await
         .unwrap();
     eprintln!("result: {:?}", router);
-    let amounts: Vec<_> = router.hops_info.iter().map(|x| x.amount_received).collect();
+    let amounts: Vec<_> = router
+        .path_edges
+        .iter()
+        .map(|x| x.amount_received)
+        .collect();
     eprintln!("amounts: {:?}", amounts);
     assert_eq!(amounts, vec![4, 2, 1]);
 
-    let router_nodes: Vec<_> = router.hops_info.iter().map(|x| x.target).collect();
+    let router_nodes: Vec<_> = router.path_edges.iter().map(|x| x.target).collect();
     eprintln!("router_nodes: {:?}", router_nodes);
     assert_eq!(
         router_nodes,
@@ -1139,7 +1155,7 @@ async fn test_send_payment_build_router_pay_self() {
             channel_3_funding_tx
         ],
         router
-            .hops_info
+            .path_edges
             .iter()
             .map(|x| x.channel_outpoint.tx_hash().into())
             .collect::<Vec<_>>()
@@ -1217,7 +1233,7 @@ async fn test_send_payment_with_route_to_self_with_specified_router() {
     // pay to self with router will be OK
     let res = node_0
         .send_payment_with_router(SendPaymentWithRouterCommand {
-            router: router.hops_info,
+            router: router.path_edges,
             keysend: Some(true),
             ..Default::default()
         })
@@ -1318,7 +1334,7 @@ async fn test_send_payment_with_router_with_multiple_channels() {
     // pay to self with router will be OK
     let res = node_0
         .send_payment_with_router(SendPaymentWithRouterCommand {
-            router: router.hops_info,
+            router: router.path_edges,
             keysend: Some(true),
             ..Default::default()
         })
@@ -1375,7 +1391,7 @@ async fn test_send_payment_with_router_with_multiple_channels() {
     // pay to self with router will be OK
     let res = node_0
         .send_payment_with_router(SendPaymentWithRouterCommand {
-            router: router.hops_info,
+            router: router.path_edges,
             keysend: Some(true),
             ..Default::default()
         })
@@ -1446,22 +1462,12 @@ async fn test_send_payment_two_nodes_with_router_and_multiple_channels() {
     )
     .await;
     let [node_0, node_1] = nodes.try_into().expect("2 nodes");
-    eprintln!("node_0: {:?}", node_0.pubkey);
-    eprintln!("node_1: {:?}", node_1.pubkey);
 
     let channel_1_funding_tx = node_0.get_channel_funding_tx(&channels[1]).unwrap();
     let channel_3_funding_tx = node_0.get_channel_funding_tx(&channels[3]).unwrap();
     let old_balance = node_0.get_local_balance_from_channel(channels[1]);
     let old_node1_balance = node_1.get_local_balance_from_channel(channels[3]);
-    eprintln!("channel_1_funding_tx: {:?}", channel_1_funding_tx);
-    eprintln!(
-        "channel 1 outpoint: {:?}",
-        OutPoint::new(channel_1_funding_tx.into(), 0)
-    );
-    eprintln!(
-        "channel_3 outpoint: {:?}",
-        OutPoint::new(channel_3_funding_tx.into(), 0)
-    );
+
     let router = node_0
         .build_router(BuildRouterCommand {
             amount: Some(60000000),
@@ -1481,12 +1487,10 @@ async fn test_send_payment_two_nodes_with_router_and_multiple_channels() {
         .await
         .unwrap();
 
-    eprintln!("result: {:?}", router);
-
     // pay to self with router will be OK
     let res = node_0
         .send_payment_with_router(SendPaymentWithRouterCommand {
-            router: router.hops_info,
+            router: router.path_edges,
             keysend: Some(true),
             ..Default::default()
         })
@@ -1494,18 +1498,17 @@ async fn test_send_payment_two_nodes_with_router_and_multiple_channels() {
         .unwrap();
 
     let payment_hash = res.payment_hash;
-    eprintln!("payment_hash: {:?}", payment_hash);
     let payment_session = node_0
         .get_payment_session(payment_hash)
         .expect("get payment");
-    eprintln!("payment_session: {:?}", payment_session);
+
     let used_channels: Vec<Hash256> = payment_session
         .route
         .nodes
         .iter()
         .map(|x| x.channel_outpoint.tx_hash().into())
         .collect();
-    eprintln!("used_channels: {:?}", used_channels);
+
     assert_eq!(used_channels.len(), 3);
     assert_eq!(used_channels[0], channel_1_funding_tx);
     assert_eq!(used_channels[1], channel_3_funding_tx);

@@ -410,7 +410,7 @@ pub struct BuildRouterCommand {
 #[serde_as]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PaymentRouter {
-    pub hops_info: Vec<PathEdge>,
+    pub path_edges: Vec<PathEdge>,
 }
 
 #[serde_as]
@@ -2036,13 +2036,13 @@ where
         };
 
         let source = self.network_graph.read().await.get_source_pubkey();
-        let hops_info = self
+        let path_edges = self
             .network_graph
             .read()
             .await
             .build_path(source, command)?;
 
-        Ok(PaymentRouter { hops_info })
+        Ok(PaymentRouter { path_edges })
     }
 }
 

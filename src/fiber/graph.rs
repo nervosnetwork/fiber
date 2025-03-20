@@ -1,7 +1,6 @@
 use super::channel::{ChannelActorState, ChannelActorStateStore, ChannelTlcInfo};
 use super::config::AnnouncedNodeName;
 use super::gossip::GossipMessageStore;
-use super::hash_algorithm::HashAlgorithm;
 use super::history::{Direction, InternalResult, PaymentHistory, TimedResult};
 use super::network::{
     get_chain_hash, BuildRouterCommand, HopHint, SendPaymentData, SendPaymentResponse,
@@ -12,7 +11,6 @@ use super::types::{
     NodeAnnouncement,
 };
 use super::types::{Cursor, Pubkey, TlcErr};
-use super::PaymentCustomRecords;
 use crate::ckb::config::UdtCfgInfos;
 use crate::fiber::config::DEFAULT_TLC_EXPIRY_DELTA;
 use crate::fiber::fee::calculate_tlc_forward_fee;
@@ -847,22 +845,7 @@ where
         let source = self.get_source_pubkey();
         let target = payment_data.target_pubkey;
         let amount = payment_data.amount;
-        let preimage = payment_data.preimage;
-        let payment_hash = payment_data.payment_hash;
-        let udt_type_script = payment_data.udt_type_script;
         let final_tlc_expiry_delta = payment_data.final_tlc_expiry_delta;
-        let invoice = payment_data
-            .invoice
-            .map(|x| x.parse::<CkbInvoice>().expect("parse CKB invoice"));
-        let hash_algorithm = invoice
-            .as_ref()
-            .and_then(|x| x.hash_algorithm().copied())
-            .unwrap_or_default();
-
-        info!(
-            "build_route source: {:?} target: {:?} amount: {:?}, payment_hash: {:?}",
-            source, target, amount, payment_hash
-        );
 
         let allow_self_payment = payment_data.allow_self_payment;
         if source == target && !allow_self_payment {
@@ -879,35 +862,32 @@ where
                 target,
                 amount,
                 payment_data.max_fee_amount,
-                udt_type_script,
+                payment_data.udt_type_script.clone(),
                 final_tlc_expiry_delta,
                 payment_data.tlc_expiry_limit,
                 allow_self_payment,
-                payment_data.hop_hints,
+                payment_data.hop_hints.clone(),
             )?
         };
 
         assert!(!route.is_empty());
 
-        Ok(self.build_router_from_path(
-            &route,
-            preimage,
-            hash_algorithm,
-            amount,
-            final_tlc_expiry_delta,
-            payment_data.custom_records,
-        ))
+        Ok(self.build_router_from_path(&route, payment_data))
     }
 
     fn build_router_from_path(
         &self,
         route: &Vec<PathEdge>,
-        preimage: Option<Hash256>,
-        hash_algorithm: HashAlgorithm,
-        amount: u128,
-        final_tlc_expiry_delta: u64,
-        custom_records: Option<PaymentCustomRecords>,
+        payment_data: SendPaymentData,
     ) -> Vec<PaymentHopData> {
+        let invoice = payment_data
+            .invoice
+            .map(|x| x.parse::<CkbInvoice>().expect("parse CKB invoice"));
+        let hash_algorithm = invoice
+            .as_ref()
+            .and_then(|x| x.hash_algorithm().copied())
+            .unwrap_or_default();
+
         let route_len = route.len();
         let now = now_timestamp_as_millis_u64();
         let mut hops_data = Vec::with_capacity(route.len() + 1);
@@ -924,13 +904,13 @@ where
             });
         }
         hops_data.push(PaymentHopData {
-            amount,
+            amount: payment_data.amount,
             next_hop: None,
             hash_algorithm,
-            expiry: now + final_tlc_expiry_delta,
+            expiry: now + payment_data.final_tlc_expiry_delta,
             funding_tx_hash: Default::default(),
-            payment_preimage: preimage,
-            custom_records: custom_records.clone(),
+            payment_preimage: payment_data.preimage,
+            custom_records: payment_data.custom_records.clone(),
         });
         // assert there is no duplicate node in the route
         assert_eq!(
@@ -1272,9 +1252,6 @@ where
             started_time.elapsed(),
             result
         );
-        for edge in &result {
-            eprintln!("edge: {:?}", edge);
-        }
         Ok(result)
     }
 
@@ -1354,6 +1331,12 @@ where
         weight as u128 + (penalty / probability) as u128
     }
 
+    // This function is used to build the path from the specified path
+    // if there are multiple channels between the same two nodes and channel is not specified,
+    // we still try to select the best channel based on the channel's capacity and fee rate,
+    // there difference is that we don't need to use a aggregated distance which is used
+    // in the path finding algorithm, because we assume all the nodes in the path are
+    // already selected, and we only need to find the best channel for each hop.
     pub(crate) fn build_path(
         &self,
         source: Pubkey,
@@ -1371,7 +1354,6 @@ where
             let cur_hop = &router_hops[current];
             let prev_hop = &router_hops.get(current + 1);
             let prev_hop_pubkey = prev_hop.map(|x| x.pubkey).unwrap_or(source);
-            let prev_hop_channel_outpoint = cur_hop.channel_outpoint.clone();
             let mut found = None;
             for (from, to, channel_info, channel_update) in self.get_node_inbounds(cur_hop.pubkey) {
                 if from != prev_hop_pubkey {
@@ -1381,8 +1363,10 @@ where
                     continue;
                 }
 
+                // if specified channel outpoint is not empty, we will only use the specified channel
                 let channel_outpoint = channel_info.out_point().clone();
-                if prev_hop_channel_outpoint
+                if cur_hop
+                    .channel_outpoint
                     .clone()
                     .unwrap_or(channel_outpoint.clone())
                     != channel_outpoint
@@ -1393,7 +1377,7 @@ where
                 let mut current_amount = agg_amount;
                 if current_amount > channel_info.capacity() {
                     debug!(
-                        "next_hop_received_amount: {} > channel_info.capacity {}",
+                        "current_amount: {} > channel_info.capacity {}",
                         current_amount,
                         channel_info.capacity()
                     );
@@ -1412,10 +1396,6 @@ where
                             ))
                         })?
                 };
-                eprintln!(
-                    "next_hop_received_amount: {:?} fee: {:?}",
-                    current_amount, fee
-                );
                 current_amount += fee;
 
                 let expiry_delta = if is_initial {

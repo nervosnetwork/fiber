@@ -941,13 +941,13 @@ A hop hint is a hint for a node to use a specific channel.
 ### Type `HopRequire`
 
 A hop requirement need to meet when building router, do not including the source node,
- the last hop is the receivedr node, and it's channel outpoint should be None.
+ the last hop is the target node.
 
 
 #### Fields
 
 * `pubkey` - <em>Pubkey</em>, The public key of the node
-* `channel_outpoint` - <em>`Option<OutPoint>`</em>, The outpoint for the channel
+* `channel_outpoint` - <em>`Option<OutPoint>`</em>, The outpoint for the channel, which means use channel with `channel_outpoint` to reach this node
 ---
 
 <a id="#type-nodeinfo"></a>
