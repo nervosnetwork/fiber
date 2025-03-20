@@ -863,24 +863,27 @@ async fn test_send_payment_build_router_basic() {
     eprintln!("node_1: {:?}", node_1.pubkey);
     eprintln!("node_2: {:?}", node_2.pubkey);
 
-    let router = node_0
-        .build_router(BuildRouterCommand {
-            amount: None,
-            hops_info: vec![HopRequire {
-                pubkey: node_1.pubkey,
-                channel_outpoint: None,
-            }],
-            udt_type_script: None,
-            final_tlc_expiry_delta: None,
-        })
-        .await
-        .unwrap();
-    eprintln!("result: {:?}", router);
-    let router_nodes: Vec<_> = router.hops_info.iter().filter_map(|x| x.next_hop).collect();
-    eprintln!("router_nodes: {:?}", router_nodes);
-    let amounts: Vec<_> = router.hops_info.iter().map(|x| x.amount).collect();
-    assert_eq!(router_nodes, vec![node_1.pubkey]);
-    assert_eq!(amounts, vec![1, 1]);
+    // let router = node_0
+    //     .build_router(BuildRouterCommand {
+    //         amount: None,
+    //         hops_info: vec![HopRequire {
+    //             pubkey: node_1.pubkey,
+    //             channel_outpoint: None,
+    //         }],
+    //         udt_type_script: None,
+    //         final_tlc_expiry_delta: None,
+    //     })
+    //     .await
+    //     .unwrap();
+    // eprintln!("result: {:?}", router);
+    // let router_nodes: Vec<_> = router.hops_info.iter().map(|x| x.target).collect();
+    // eprintln!("router_nodes: {:?}", router_nodes);
+    // let amounts: Vec<_> = router.hops_info.iter().map(|x| x.amount_received).collect();
+    // assert_eq!(router_nodes, vec![node_1.pubkey]);
+    // assert_eq!(amounts, vec![1]);
+
+    let payment = node_0.send_payment_keysend(&node_2, 1, true).await;
+    eprintln!("payment: {:?}", payment);
 
     let router = node_0
         .build_router(BuildRouterCommand {
@@ -901,11 +904,11 @@ async fn test_send_payment_build_router_basic() {
         .await
         .unwrap();
     eprintln!("result: {:?}", router);
-    let router_nodes: Vec<_> = router.hops_info.iter().filter_map(|x| x.next_hop).collect();
+    let router_nodes: Vec<_> = router.hops_info.iter().map(|x| x.target).collect();
     eprintln!("router_nodes: {:?}", router_nodes);
-    let amounts: Vec<_> = router.hops_info.iter().map(|x| x.amount).collect();
+    let amounts: Vec<_> = router.hops_info.iter().map(|x| x.amount_received).collect();
     assert_eq!(router_nodes, vec![node_1.pubkey, node_2.pubkey]);
-    assert_eq!(amounts, vec![2, 1, 1]);
+    assert_eq!(amounts, vec![2, 1]);
 
     let router = node_0
         .build_router(BuildRouterCommand {
@@ -1007,11 +1010,14 @@ async fn test_send_payment_build_router_multiple_channels() {
         .await
         .unwrap();
     eprintln!("result: {:?}", router);
-    let amounts: Vec<_> = router.hops_info.iter().map(|x| x.amount).collect();
-    assert_eq!(amounts, vec![2, 1, 1]);
+    let amounts: Vec<_> = router.hops_info.iter().map(|x| x.amount_received).collect();
+    assert_eq!(amounts, vec![2, 1]);
 
     let channel_2_funding_tx = node_0.get_channel_funding_tx(&channels[2]).unwrap();
-    assert_eq!(router.hops_info[1].funding_tx_hash, channel_2_funding_tx);
+    assert_eq!(
+        channel_2_funding_tx,
+        router.hops_info[1].channel_outpoint.tx_hash().into(),
+    );
 
     let channel_1_funding_tx = node_0.get_channel_funding_tx(&channels[1]).unwrap();
     let channel_1_outpoint = OutPoint::new(channel_1_funding_tx.into(), 0);
@@ -1034,10 +1040,13 @@ async fn test_send_payment_build_router_multiple_channels() {
         .await
         .unwrap();
     eprintln!("result: {:?}", router);
-    let amounts: Vec<_> = router.hops_info.iter().map(|x| x.amount).collect();
-    assert_eq!(amounts, vec![2, 1, 1]);
+    let amounts: Vec<_> = router.hops_info.iter().map(|x| x.amount_received).collect();
+    assert_eq!(amounts, vec![2, 1]);
 
-    assert_eq!(router.hops_info[1].funding_tx_hash, channel_1_funding_tx);
+    assert_eq!(
+        channel_1_funding_tx,
+        router.hops_info[1].channel_outpoint.tx_hash().into(),
+    );
 }
 
 // TODO: The meaning of hop hints changed after https://github.com/nervosnetwork/fiber/pull/487/

@@ -1,10 +1,10 @@
+use crate::fiber::graph::PathEdge;
 #[cfg(debug_assertions)]
 use crate::fiber::graph::SessionRoute;
 use crate::fiber::network::BuildRouterCommand;
 use crate::fiber::network::HopRequire;
 use crate::fiber::serde_utils::SliceHex;
 use crate::fiber::serde_utils::U32Hex;
-use crate::fiber::types::PaymentHopData;
 use crate::fiber::{
     channel::ChannelActorStateStore,
     graph::PaymentSessionStatus,
@@ -191,7 +191,7 @@ pub struct BuildRouterParams {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct BuildPaymentRouterResult {
     /// The hops information for router
-    hops_info: Vec<PaymentHopData>,
+    hops_info: Vec<PathEdge>,
 }
 
 /// RPC module for channel management.

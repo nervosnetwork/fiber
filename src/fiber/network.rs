@@ -56,7 +56,9 @@ use super::channel::{
 use super::config::{AnnouncedNodeName, MIN_TLC_EXPIRY_DELTA};
 use super::fee::calculate_commitment_tx_fee;
 use super::gossip::{GossipActorMessage, GossipMessageStore, GossipMessageUpdates};
-use super::graph::{NetworkGraph, NetworkGraphStateStore, OwnedChannelUpdateEvent, SessionRoute};
+use super::graph::{
+    NetworkGraph, NetworkGraphStateStore, OwnedChannelUpdateEvent, PathEdge, SessionRoute,
+};
 use super::key::blake2b_hash_with_salt;
 use super::types::{
     BroadcastMessageWithTimestamp, EcdsaSignature, FiberMessage, ForwardTlcResult, GossipMessage,
@@ -339,7 +341,8 @@ pub struct HopHint {
     pub(crate) tlc_expiry_delta: u64,
 }
 
-/// A hop requirement need to meet when building router
+/// A hop requirement need to meet when building router, do not including the source node,
+/// the last hop is the receivedr node, and it's channel outpoint should be None.
 #[serde_as]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HopRequire {
@@ -364,7 +367,7 @@ pub struct BuildRouterCommand {
 #[serde_as]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PaymentRouter {
-    pub hops_info: Vec<PaymentHopData>,
+    pub hops_info: Vec<PathEdge>,
 }
 
 #[serde_as]
@@ -1918,35 +1921,18 @@ where
         command: BuildRouterCommand,
     ) -> Result<PaymentRouter, Error> {
         // Only proceed if we have at least one hop requirement
-        let Some(last_hop) = command.hops_info.last() else {
+        let Some(_last_hop) = command.hops_info.last() else {
             return Err(Error::InvalidParameter(
                 "No hop requirements provided".to_string(),
             ));
         };
 
         let source = self.network_graph.read().await.get_source_pubkey();
-
-        // Create payment command with defaults from the last hop
-        let payment_command = SendPaymentCommand {
-            target_pubkey: Some(last_hop.pubkey),
-            allow_self_payment: last_hop.pubkey == source,
-            dry_run: true,
-            amount: Some(command.amount.unwrap_or(1)),
-            keysend: Some(true),
-            udt_type_script: command.udt_type_script.clone(),
-            final_tlc_expiry_delta: command.final_tlc_expiry_delta,
-            ..Default::default()
-        };
-
-        let mut payment_data = SendPaymentData::new(payment_command).map_err(|e| {
-            error!("Failed to validate payment request: {:?}", e);
-            Error::InvalidParameter(format!("Failed to validate payment request: {:?}", e))
-        })?;
-
-        payment_data.hop_reqs = command.hops_info.clone();
-
-        let mut payment_session = PaymentSession::new(payment_data, 0);
-        let hops_info = self.build_payment_route(&mut payment_session).await?;
+        let hops_info = self
+            .network_graph
+            .read()
+            .await
+            .build_path(source, command)?;
 
         Ok(PaymentRouter { hops_info })
     }

@@ -1,15 +1,20 @@
 use super::channel::{ChannelActorState, ChannelActorStateStore, ChannelTlcInfo};
 use super::config::AnnouncedNodeName;
 use super::gossip::GossipMessageStore;
+use super::hash_algorithm::HashAlgorithm;
 use super::history::{Direction, InternalResult, PaymentHistory, TimedResult};
-use super::network::{get_chain_hash, HopHint, HopRequire, SendPaymentData, SendPaymentResponse};
+use super::network::{
+    get_chain_hash, BuildRouterCommand, HopHint, HopRequire, SendPaymentData, SendPaymentResponse,
+};
 use super::path::NodeHeap;
 use super::types::{
     BroadcastMessageID, BroadcastMessageWithTimestamp, ChannelAnnouncement, ChannelUpdate, Hash256,
     NodeAnnouncement,
 };
 use super::types::{Cursor, Pubkey, TlcErr};
+use super::PaymentCustomRecords;
 use crate::ckb::config::UdtCfgInfos;
+use crate::fiber::config::DEFAULT_TLC_EXPIRY_DELTA;
 use crate::fiber::fee::calculate_tlc_forward_fee;
 use crate::fiber::path::NodeHeapElement;
 use crate::fiber::serde_utils::EntityHex;
@@ -322,18 +327,23 @@ pub enum PathFindError {
     Other(String),
 }
 
-// An edge along the payment path from the source to the target.
-// This represents a TLC transfer from one node to another.
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// An edge along the payment path from the source to the target.
+/// This represents a TLC transfer from one node to another.
+#[serde_as]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct PathEdge {
+    /// The node that is sending the TLC to the next node.
     pub(crate) target: Pubkey,
+    /// The channel that is used to send the TLC to the next node.
+    /// If it's all zero bytes, it means this hop is payment receiver.
+    #[serde_as(as = "EntityHex")]
     pub(crate) channel_outpoint: OutPoint,
-    // The amount that the source node will transfer to the target node.
-    // We have already added up all the fees along the path, so this amount can be used directly for the TLC.
+    /// The amount that the source node will transfer to the target node.
+    /// We have already added up all the fees along the path, so this amount can be used directly for the TLC.
     pub(crate) amount_received: u128,
-    // The expiry for the TLC that the source node sends to the target node.
-    // We have already added up all the expiry deltas along the path,
-    // the only thing missing is current time. So the expiry is the current time plus the expiry delta.
+    /// The expiry for the TLC that the source node sends to the target node.
+    /// We have already added up all the expiry deltas along the path,
+    /// the only thing missing is current time. So the expiry is the current time plus the expiry delta.
     pub(crate) incoming_tlc_expiry: u64,
 }
 
@@ -875,6 +885,25 @@ where
         )?;
         assert!(!route.is_empty());
 
+        Ok(self.build_router_from_path(
+            &route,
+            preimage,
+            hash_algorithm,
+            amount,
+            final_tlc_expiry_delta,
+            payment_data.custom_records,
+        ))
+    }
+
+    fn build_router_from_path(
+        &self,
+        route: &Vec<PathEdge>,
+        preimage: Option<Hash256>,
+        hash_algorithm: HashAlgorithm,
+        amount: u128,
+        final_tlc_expiry_delta: u64,
+        custom_records: Option<PaymentCustomRecords>,
+    ) -> Vec<PaymentHopData> {
         let route_len = route.len();
         let now = now_timestamp_as_millis_u64();
         let mut hops_data = Vec::with_capacity(route.len() + 1);
@@ -897,7 +926,7 @@ where
             expiry: now + final_tlc_expiry_delta,
             funding_tx_hash: Default::default(),
             payment_preimage: preimage,
-            custom_records: payment_data.custom_records.clone(),
+            custom_records: custom_records.clone(),
         });
         // assert there is no duplicate node in the route
         assert_eq!(
@@ -908,8 +937,7 @@ where
                 .len(),
             route_len
         );
-
-        Ok(hops_data)
+        hops_data
     }
 
     // A helper function to evaluate whether an edge should be added to the heap of nodes to visit.
@@ -1270,6 +1298,9 @@ where
             started_time.elapsed(),
             result
         );
+        for edge in &result {
+            eprintln!("edge: {:?}", edge);
+        }
         Ok(result)
     }
 
@@ -1347,6 +1378,113 @@ where
         let default_attempt_cost = 0.1_f64;
         let penalty = default_attempt_cost * (1.0 / (0.5 - time_pref / 2.0) - 1.0);
         weight as u128 + (penalty / probability) as u128
+    }
+
+    pub(crate) fn build_path(
+        &self,
+        source: Pubkey,
+        command: BuildRouterCommand,
+    ) -> Result<Vec<PathEdge>, PathFindError> {
+        let mut router_hops = command.hops_info.clone();
+        router_hops.reverse();
+        eprintln!("now router_hops: {:?}", router_hops);
+
+        let mut path = vec![];
+
+        let mut agg_amount = command.amount.unwrap_or(1);
+        let mut agg_tlc_expiry = command
+            .final_tlc_expiry_delta
+            .unwrap_or(DEFAULT_TLC_EXPIRY_DELTA);
+        for current in 0..router_hops.len() {
+            let cur_hop = &router_hops[current];
+            let prev_hop = &router_hops.get(current + 1);
+            let prev_hop_pubkey = prev_hop.map(|x| x.pubkey).unwrap_or(source);
+            let prev_hop_channel_outpoint = prev_hop.map(|x| x.channel_outpoint.clone()).flatten();
+            let mut found = None;
+            for (from, to, channel_info, channel_update) in self.get_node_inbounds(cur_hop.pubkey) {
+                if from != prev_hop_pubkey {
+                    continue;
+                }
+                let channel_outpoint = channel_info.out_point().clone();
+                if prev_hop_channel_outpoint
+                    .clone()
+                    .unwrap_or(channel_outpoint.clone())
+                    != channel_outpoint
+                {
+                    continue;
+                }
+
+                let mut current_amount = agg_amount;
+                if current_amount > channel_info.capacity() {
+                    debug!(
+                        "next_hop_received_amount: {} > channel_info.capacity {}",
+                        current_amount,
+                        channel_info.capacity()
+                    );
+                    continue;
+                }
+
+                let is_initial = from == source;
+                let fee = if is_initial {
+                    0
+                } else {
+                    calculate_tlc_forward_fee(current_amount, channel_update.fee_rate as u128)
+                        .map_err(|err| {
+                            PathFindError::PathFind(format!(
+                                "calculate_tlc_forward_fee error: {:?}",
+                                err
+                            ))
+                        })?
+                };
+                eprintln!(
+                    "next_hop_received_amount: {:?} fee: {:?}",
+                    current_amount, fee
+                );
+                current_amount += fee;
+
+                let expiry_delta = if is_initial {
+                    0
+                } else {
+                    channel_update.tlc_expiry_delta
+                };
+
+                let current_incoming_tlc_expiry = agg_tlc_expiry + expiry_delta;
+
+                let probability = self.history.eval_probability(
+                    from,
+                    to,
+                    &channel_outpoint,
+                    current_amount,
+                    channel_info.capacity(),
+                );
+                let weight = self.edge_weight(current_amount, fee, current_incoming_tlc_expiry);
+                let distance = self.calculate_distance_based_probability(probability, weight);
+
+                if let Some((old_distance, _edge)) = &found {
+                    if distance >= *old_distance {
+                        continue;
+                    }
+                }
+                found = Some((
+                    distance,
+                    PathEdge {
+                        target: to,
+                        channel_outpoint: channel_outpoint.clone(),
+                        amount_received: agg_amount,
+                        incoming_tlc_expiry: agg_tlc_expiry,
+                    },
+                ));
+            }
+            if let Some((_, edge)) = found {
+                agg_tlc_expiry += edge.incoming_tlc_expiry;
+                agg_amount += edge.amount_received;
+                path.push(edge.clone());
+            } else {
+                return Err(PathFindError::PathFind("no path found".to_string()));
+            }
+        }
+        path.reverse();
+        Ok(path)
     }
 }
 
