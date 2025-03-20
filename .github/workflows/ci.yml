@@ -12,6 +12,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: |
           cargo check
+          make check-migrate
           make check-dirty-rpc-doc
           cd migrate && cargo check
 

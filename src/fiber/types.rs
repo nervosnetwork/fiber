@@ -3929,7 +3929,7 @@ impl<T: HopData> PeeledOnionPacket<T> {
 const HOP_DATA_HEAD_LEN: usize = std::mem::size_of::<u64>();
 
 /// TODO: when JSON is replaced, this function may return `data` directly.
-fn pack_hop_data<T: HopData>(hop_data: &T) -> Vec<u8> {
+pub(crate) fn pack_hop_data<T: HopData>(hop_data: &T) -> Vec<u8> {
     let mut serialized = hop_data.serialize();
     // A temporary solution to prepend the length as the header
     let mut packed = (serialized.len() as u64).to_be_bytes().to_vec();
@@ -3938,7 +3938,7 @@ fn pack_hop_data<T: HopData>(hop_data: &T) -> Vec<u8> {
 }
 
 /// TODO: when JSON is replaced, this function may return `data` directly.
-fn unpack_hop_data<T: HopData>(buf: &[u8]) -> Option<T> {
+pub(crate) fn unpack_hop_data<T: HopData>(buf: &[u8]) -> Option<T> {
     let len = get_hop_data_len(buf)?;
     if buf.len() < len {
         return None;
