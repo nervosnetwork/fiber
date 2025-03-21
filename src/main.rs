@@ -287,7 +287,7 @@ pub async fn main() -> Result<(), ExitMessage> {
     };
 
     signal_listener().await;
-    if let Some(handle) = rpc_server_handle {
+    if let Some((handle, _)) = rpc_server_handle {
         handle
             .stop()
             .map_err(|err| ExitMessage(format!("failed to stop rpc server: {}", err)))?;
