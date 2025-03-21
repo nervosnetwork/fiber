@@ -14,7 +14,10 @@ use std::{collections::HashMap, vec};
 use thiserror::Error;
 use tracing::info;
 
-use crate::fiber::config::FiberScript;
+use crate::fiber::{
+    config::FiberScript,
+    gen::fiber::{UdtDep, UdtDepUnion, UdtScript},
+};
 
 use super::config::{UdtArgInfo, UdtCfgInfos};
 
@@ -119,6 +122,12 @@ pub enum ContractsContextError {
 
     #[error("Cannot resolve cell dep for type id {0}")]
     CannotResolveCellDep(Script),
+
+    #[error("Cannot resolve udt cell dep for {0}")]
+    CannotResolveUdtCellDep(UdtScript),
+
+    #[error("Cannot resolve udt info for {0}")]
+    CannotResolveUdtInfo(Script),
 }
 
 impl ContractsContext {
@@ -295,6 +304,41 @@ impl ContractsContext {
         Ok(builder.build())
     }
 
+    pub(crate) fn get_udt_cell_deps(
+        &self,
+        udt_deps: Vec<UdtDep>,
+    ) -> Result<CellDepVec, ContractsContextError> {
+        let mut builder: CellDepVecBuilder = CellDepVec::new_builder();
+        for udt_dep in &udt_deps {
+            match udt_dep.to_enum() {
+                UdtDepUnion::UdtCellDep(cell_dep) => {
+                    let cell_dep = CellDep::new_builder()
+                        .out_point(
+                            OutPoint::new_builder()
+                                .tx_hash(cell_dep.tx_hash())
+                                .index(cell_dep.index())
+                                .build(),
+                        )
+                        .dep_type(cell_dep.dep_type())
+                        .build();
+                    builder = builder.push(cell_dep);
+                }
+                UdtDepUnion::UdtScript(type_id) => {
+                    let err = || ContractsContextError::CannotResolveUdtCellDep(type_id.clone());
+                    let resolver = self.type_id_resolver.as_ref().ok_or_else(err)?;
+                    let type_id = Script::new_builder()
+                        .code_hash(type_id.code_hash())
+                        .hash_type(type_id.hash_type())
+                        .args(type_id.args())
+                        .build();
+                    let cell_dep = resolver.resolve(type_id).ok_or_else(err)?;
+                    builder = builder.push(cell_dep);
+                }
+            }
+        }
+        Ok(builder.build())
+    }
+
     pub fn get_udt_whitelist(&self) -> &UdtCfgInfos {
         &self.contracts.udt_whitelist
     }
@@ -379,14 +423,15 @@ pub fn check_udt_script(script: &Script) -> bool {
     get_udt_info(script).is_some()
 }
 
-pub fn get_udt_cell_deps(script: &Script) -> Option<CellDepVec> {
-    get_udt_info(script).map(|udt| {
-        udt.cell_deps
-            .iter()
-            .map(CellDep::from)
-            .collect::<Vec<_>>()
-            .pack()
-    })
+pub fn resolve_udt_cell_deps(udt: &UdtArgInfo) -> Result<CellDepVec, ContractsContextError> {
+    get_contracts_context()
+        .get_udt_cell_deps(udt.cell_deps.iter().cloned().map(Into::into).collect())
+}
+
+pub fn get_udt_cell_deps(script: &Script) -> Result<CellDepVec, ContractsContextError> {
+    let udt = get_udt_info(script)
+        .ok_or_else(|| ContractsContextError::CannotResolveUdtInfo(script.clone()))?;
+    resolve_udt_cell_deps(&udt)
 }
 
 pub fn get_udt_whitelist() -> UdtCfgInfos {
@@ -408,7 +453,7 @@ pub fn get_cell_deps(
 ) -> Result<CellDepVec, ContractsContextError> {
     let cell_deps = get_cell_deps_by_contracts(contracts)?;
     if let Some(udt_script) = udt_script {
-        if let Some(udt_cell_deps) = get_udt_cell_deps(udt_script) {
+        if let Ok(udt_cell_deps) = get_udt_cell_deps(udt_script) {
             let res = cell_deps
                 .into_iter()
                 .chain(udt_cell_deps)

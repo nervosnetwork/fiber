@@ -25,8 +25,16 @@ pub fn gen_rand_fiber_private_key() -> Privkey {
     gen_rand_secp256k1_private_key().into()
 }
 
+pub fn gen_deterministic_fiber_private_key() -> Privkey {
+    gen_deterministic_secp256k1_private_key().into()
+}
+
 pub fn gen_rand_secp256k1_private_key() -> SecretKey {
     gen_rand_secp256k1_keypair_tuple().0
+}
+
+pub fn gen_deterministic_secp256k1_private_key() -> SecretKey {
+    gen_deterministic_secp256k1_keypair_tuple().0
 }
 
 pub fn gen_rand_secp256k1_public_key() -> PublicKey {

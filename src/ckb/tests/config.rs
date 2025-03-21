@@ -1,4 +1,4 @@
-use crate::ckb::config::{UdtArgInfo, UdtCellDep, UdtCfgInfos, UdtScript};
+use crate::ckb::config::{UdtArgInfo, UdtCellDep, UdtCfgInfos, UdtDep, UdtScript};
 use crate::fiber::gen::fiber::UdtCfgInfos as MoleculeUdtCfgInfos;
 use ckb_types::core::{DepType, ScriptHashType};
 use ckb_types::H256;
@@ -14,11 +14,11 @@ fn test_udt_whitelist() {
             args: "0x00".to_string(),
         },
         auto_accept_amount: Some(100),
-        cell_deps: vec![UdtCellDep {
+        cell_deps: vec![UdtDep::CellDep(UdtCellDep {
             dep_type: DepType::Code,
             tx_hash: H256::from([0u8; 32]),
             index: 0,
-        }],
+        })],
     }]);
 
     let serialized = MoleculeUdtCfgInfos::from(udt_whitelist.clone()).as_bytes();

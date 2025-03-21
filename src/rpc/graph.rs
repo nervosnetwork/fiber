@@ -1,4 +1,5 @@
 use crate::ckb::config::UdtCfgInfos as ConfigUdtCfgInfos;
+use crate::ckb::contracts::resolve_udt_cell_deps;
 use crate::fiber::channel::ChannelActorStateStore;
 use crate::fiber::gossip::GossipMessageStore;
 use crate::fiber::graph::{ChannelUpdateInfo, NetworkGraph, NetworkGraphStateStore};
@@ -6,7 +7,7 @@ use crate::fiber::network::get_chain_hash;
 use crate::fiber::serde_utils::EntityHex;
 use crate::fiber::serde_utils::{U128Hex, U32Hex, U64Hex};
 use crate::fiber::types::{Cursor, Hash256, Pubkey};
-use ckb_jsonrpc_types::{DepType, JsonBytes, Script, ScriptHashType};
+use ckb_jsonrpc_types::{CellDep, DepType, JsonBytes, Script, ScriptHashType};
 use ckb_types::packed::OutPoint;
 use ckb_types::H256;
 use jsonrpsee::types::error::INVALID_PARAMS_CODE;
@@ -78,23 +79,29 @@ impl From<ConfigUdtCfgInfos> for UdtCfgInfos {
         UdtCfgInfos(
             cfg.0
                 .into_iter()
-                .map(|info| UdtArgInfo {
-                    name: info.name,
-                    script: UdtScript {
-                        code_hash: info.script.code_hash,
-                        hash_type: info.script.hash_type.into(),
-                        args: info.script.args,
-                    },
-                    cell_deps: info
-                        .cell_deps
-                        .into_iter()
-                        .map(|cell_dep| UdtCellDep {
-                            dep_type: cell_dep.dep_type.into(),
-                            tx_hash: cell_dep.tx_hash,
-                            index: cell_dep.index,
-                        })
-                        .collect(),
-                    auto_accept_amount: info.auto_accept_amount,
+                .map(|info| {
+                    let cell_deps = resolve_udt_cell_deps(&info);
+                    UdtArgInfo {
+                        name: info.name,
+                        script: UdtScript {
+                            code_hash: info.script.code_hash,
+                            hash_type: info.script.hash_type.into(),
+                            args: info.script.args,
+                        },
+                        cell_deps: cell_deps
+                            .unwrap_or_default()
+                            .into_iter()
+                            .map(|cell_dep| {
+                                let cell_dep: CellDep = cell_dep.into();
+                                UdtCellDep {
+                                    dep_type: cell_dep.dep_type,
+                                    tx_hash: cell_dep.out_point.tx_hash,
+                                    index: cell_dep.out_point.index.value(),
+                                }
+                            })
+                            .collect(),
+                        auto_accept_amount: info.auto_accept_amount,
+                    }
                 })
                 .collect::<Vec<UdtArgInfo>>(),
         )

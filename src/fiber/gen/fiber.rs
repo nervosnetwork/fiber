@@ -10794,6 +10794,314 @@ impl molecule::prelude::Builder for AnnouncementSignaturesBuilder {
     }
 }
 #[derive(Clone)]
+pub struct UdtDep(molecule::bytes::Bytes);
+impl ::core::fmt::LowerHex for UdtDep {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        use molecule::hex_string;
+        if f.alternate() {
+            write!(f, "0x")?;
+        }
+        write!(f, "{}", hex_string(self.as_slice()))
+    }
+}
+impl ::core::fmt::Debug for UdtDep {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{}({:#x})", Self::NAME, self)
+    }
+}
+impl ::core::fmt::Display for UdtDep {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{}(", Self::NAME)?;
+        self.to_enum().display_inner(f)?;
+        write!(f, ")")
+    }
+}
+impl ::core::default::Default for UdtDep {
+    fn default() -> Self {
+        let v = molecule::bytes::Bytes::from_static(&Self::DEFAULT_VALUE);
+        UdtDep::new_unchecked(v)
+    }
+}
+impl UdtDep {
+    const DEFAULT_VALUE: [u8; 57] = [
+        0, 0, 0, 0, 53, 0, 0, 0, 16, 0, 0, 0, 17, 0, 0, 0, 49, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ];
+    pub const ITEMS_COUNT: usize = 2;
+    pub fn item_id(&self) -> molecule::Number {
+        molecule::unpack_number(self.as_slice())
+    }
+    pub fn to_enum(&self) -> UdtDepUnion {
+        let inner = self.0.slice(molecule::NUMBER_SIZE..);
+        match self.item_id() {
+            0 => UdtCellDep::new_unchecked(inner).into(),
+            1 => UdtScript::new_unchecked(inner).into(),
+            _ => panic!("{}: invalid data", Self::NAME),
+        }
+    }
+    pub fn as_reader<'r>(&'r self) -> UdtDepReader<'r> {
+        UdtDepReader::new_unchecked(self.as_slice())
+    }
+}
+impl molecule::prelude::Entity for UdtDep {
+    type Builder = UdtDepBuilder;
+    const NAME: &'static str = "UdtDep";
+    fn new_unchecked(data: molecule::bytes::Bytes) -> Self {
+        UdtDep(data)
+    }
+    fn as_bytes(&self) -> molecule::bytes::Bytes {
+        self.0.clone()
+    }
+    fn as_slice(&self) -> &[u8] {
+        &self.0[..]
+    }
+    fn from_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
+        UdtDepReader::from_slice(slice).map(|reader| reader.to_entity())
+    }
+    fn from_compatible_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
+        UdtDepReader::from_compatible_slice(slice).map(|reader| reader.to_entity())
+    }
+    fn new_builder() -> Self::Builder {
+        ::core::default::Default::default()
+    }
+    fn as_builder(self) -> Self::Builder {
+        Self::new_builder().set(self.to_enum())
+    }
+}
+#[derive(Clone, Copy)]
+pub struct UdtDepReader<'r>(&'r [u8]);
+impl<'r> ::core::fmt::LowerHex for UdtDepReader<'r> {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        use molecule::hex_string;
+        if f.alternate() {
+            write!(f, "0x")?;
+        }
+        write!(f, "{}", hex_string(self.as_slice()))
+    }
+}
+impl<'r> ::core::fmt::Debug for UdtDepReader<'r> {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{}({:#x})", Self::NAME, self)
+    }
+}
+impl<'r> ::core::fmt::Display for UdtDepReader<'r> {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{}(", Self::NAME)?;
+        self.to_enum().display_inner(f)?;
+        write!(f, ")")
+    }
+}
+impl<'r> UdtDepReader<'r> {
+    pub const ITEMS_COUNT: usize = 2;
+    pub fn item_id(&self) -> molecule::Number {
+        molecule::unpack_number(self.as_slice())
+    }
+    pub fn to_enum(&self) -> UdtDepUnionReader<'r> {
+        let inner = &self.as_slice()[molecule::NUMBER_SIZE..];
+        match self.item_id() {
+            0 => UdtCellDepReader::new_unchecked(inner).into(),
+            1 => UdtScriptReader::new_unchecked(inner).into(),
+            _ => panic!("{}: invalid data", Self::NAME),
+        }
+    }
+}
+impl<'r> molecule::prelude::Reader<'r> for UdtDepReader<'r> {
+    type Entity = UdtDep;
+    const NAME: &'static str = "UdtDepReader";
+    fn to_entity(&self) -> Self::Entity {
+        Self::Entity::new_unchecked(self.as_slice().to_owned().into())
+    }
+    fn new_unchecked(slice: &'r [u8]) -> Self {
+        UdtDepReader(slice)
+    }
+    fn as_slice(&self) -> &'r [u8] {
+        self.0
+    }
+    fn verify(slice: &[u8], compatible: bool) -> molecule::error::VerificationResult<()> {
+        use molecule::verification_error as ve;
+        let slice_len = slice.len();
+        if slice_len < molecule::NUMBER_SIZE {
+            return ve!(Self, HeaderIsBroken, molecule::NUMBER_SIZE, slice_len);
+        }
+        let item_id = molecule::unpack_number(slice);
+        let inner_slice = &slice[molecule::NUMBER_SIZE..];
+        match item_id {
+            0 => UdtCellDepReader::verify(inner_slice, compatible),
+            1 => UdtScriptReader::verify(inner_slice, compatible),
+            _ => ve!(Self, UnknownItem, Self::ITEMS_COUNT, item_id),
+        }?;
+        Ok(())
+    }
+}
+#[derive(Clone, Debug, Default)]
+pub struct UdtDepBuilder(pub(crate) UdtDepUnion);
+impl UdtDepBuilder {
+    pub const ITEMS_COUNT: usize = 2;
+    pub fn set<I>(mut self, v: I) -> Self
+    where
+        I: ::core::convert::Into<UdtDepUnion>,
+    {
+        self.0 = v.into();
+        self
+    }
+}
+impl molecule::prelude::Builder for UdtDepBuilder {
+    type Entity = UdtDep;
+    const NAME: &'static str = "UdtDepBuilder";
+    fn expected_length(&self) -> usize {
+        molecule::NUMBER_SIZE + self.0.as_slice().len()
+    }
+    fn write<W: molecule::io::Write>(&self, writer: &mut W) -> molecule::io::Result<()> {
+        writer.write_all(&molecule::pack_number(self.0.item_id()))?;
+        writer.write_all(self.0.as_slice())
+    }
+    fn build(&self) -> Self::Entity {
+        let mut inner = Vec::with_capacity(self.expected_length());
+        self.write(&mut inner)
+            .unwrap_or_else(|_| panic!("{} build should be ok", Self::NAME));
+        UdtDep::new_unchecked(inner.into())
+    }
+}
+#[derive(Debug, Clone)]
+pub enum UdtDepUnion {
+    UdtCellDep(UdtCellDep),
+    UdtScript(UdtScript),
+}
+#[derive(Debug, Clone, Copy)]
+pub enum UdtDepUnionReader<'r> {
+    UdtCellDep(UdtCellDepReader<'r>),
+    UdtScript(UdtScriptReader<'r>),
+}
+impl ::core::default::Default for UdtDepUnion {
+    fn default() -> Self {
+        UdtDepUnion::UdtCellDep(::core::default::Default::default())
+    }
+}
+impl ::core::fmt::Display for UdtDepUnion {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        match self {
+            UdtDepUnion::UdtCellDep(ref item) => {
+                write!(f, "{}::{}({})", Self::NAME, UdtCellDep::NAME, item)
+            }
+            UdtDepUnion::UdtScript(ref item) => {
+                write!(f, "{}::{}({})", Self::NAME, UdtScript::NAME, item)
+            }
+        }
+    }
+}
+impl<'r> ::core::fmt::Display for UdtDepUnionReader<'r> {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        match self {
+            UdtDepUnionReader::UdtCellDep(ref item) => {
+                write!(f, "{}::{}({})", Self::NAME, UdtCellDep::NAME, item)
+            }
+            UdtDepUnionReader::UdtScript(ref item) => {
+                write!(f, "{}::{}({})", Self::NAME, UdtScript::NAME, item)
+            }
+        }
+    }
+}
+impl UdtDepUnion {
+    pub(crate) fn display_inner(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        match self {
+            UdtDepUnion::UdtCellDep(ref item) => write!(f, "{}", item),
+            UdtDepUnion::UdtScript(ref item) => write!(f, "{}", item),
+        }
+    }
+}
+impl<'r> UdtDepUnionReader<'r> {
+    pub(crate) fn display_inner(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        match self {
+            UdtDepUnionReader::UdtCellDep(ref item) => write!(f, "{}", item),
+            UdtDepUnionReader::UdtScript(ref item) => write!(f, "{}", item),
+        }
+    }
+}
+impl ::core::convert::From<UdtCellDep> for UdtDepUnion {
+    fn from(item: UdtCellDep) -> Self {
+        UdtDepUnion::UdtCellDep(item)
+    }
+}
+impl ::core::convert::From<UdtScript> for UdtDepUnion {
+    fn from(item: UdtScript) -> Self {
+        UdtDepUnion::UdtScript(item)
+    }
+}
+impl<'r> ::core::convert::From<UdtCellDepReader<'r>> for UdtDepUnionReader<'r> {
+    fn from(item: UdtCellDepReader<'r>) -> Self {
+        UdtDepUnionReader::UdtCellDep(item)
+    }
+}
+impl<'r> ::core::convert::From<UdtScriptReader<'r>> for UdtDepUnionReader<'r> {
+    fn from(item: UdtScriptReader<'r>) -> Self {
+        UdtDepUnionReader::UdtScript(item)
+    }
+}
+impl UdtDepUnion {
+    pub const NAME: &'static str = "UdtDepUnion";
+    pub fn as_bytes(&self) -> molecule::bytes::Bytes {
+        match self {
+            UdtDepUnion::UdtCellDep(item) => item.as_bytes(),
+            UdtDepUnion::UdtScript(item) => item.as_bytes(),
+        }
+    }
+    pub fn as_slice(&self) -> &[u8] {
+        match self {
+            UdtDepUnion::UdtCellDep(item) => item.as_slice(),
+            UdtDepUnion::UdtScript(item) => item.as_slice(),
+        }
+    }
+    pub fn item_id(&self) -> molecule::Number {
+        match self {
+            UdtDepUnion::UdtCellDep(_) => 0,
+            UdtDepUnion::UdtScript(_) => 1,
+        }
+    }
+    pub fn item_name(&self) -> &str {
+        match self {
+            UdtDepUnion::UdtCellDep(_) => "UdtCellDep",
+            UdtDepUnion::UdtScript(_) => "UdtScript",
+        }
+    }
+    pub fn as_reader<'r>(&'r self) -> UdtDepUnionReader<'r> {
+        match self {
+            UdtDepUnion::UdtCellDep(item) => item.as_reader().into(),
+            UdtDepUnion::UdtScript(item) => item.as_reader().into(),
+        }
+    }
+}
+impl<'r> UdtDepUnionReader<'r> {
+    pub const NAME: &'r str = "UdtDepUnionReader";
+    pub fn as_slice(&self) -> &'r [u8] {
+        match self {
+            UdtDepUnionReader::UdtCellDep(item) => item.as_slice(),
+            UdtDepUnionReader::UdtScript(item) => item.as_slice(),
+        }
+    }
+    pub fn item_id(&self) -> molecule::Number {
+        match self {
+            UdtDepUnionReader::UdtCellDep(_) => 0,
+            UdtDepUnionReader::UdtScript(_) => 1,
+        }
+    }
+    pub fn item_name(&self) -> &str {
+        match self {
+            UdtDepUnionReader::UdtCellDep(_) => "UdtCellDep",
+            UdtDepUnionReader::UdtScript(_) => "UdtScript",
+        }
+    }
+}
+impl From<UdtCellDep> for UdtDep {
+    fn from(value: UdtCellDep) -> Self {
+        Self::new_builder().set(value).build()
+    }
+}
+impl From<UdtScript> for UdtDep {
+    fn from(value: UdtScript) -> Self {
+        Self::new_builder().set(value).build()
+    }
+}
+#[derive(Clone)]
 pub struct UdtCellDep(molecule::bytes::Bytes);
 impl ::core::fmt::LowerHex for UdtCellDep {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
@@ -11422,23 +11730,23 @@ impl UdtCellDeps {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
-    pub fn get(&self, idx: usize) -> Option<UdtCellDep> {
+    pub fn get(&self, idx: usize) -> Option<UdtDep> {
         if idx >= self.len() {
             None
         } else {
             Some(self.get_unchecked(idx))
         }
     }
-    pub fn get_unchecked(&self, idx: usize) -> UdtCellDep {
+    pub fn get_unchecked(&self, idx: usize) -> UdtDep {
         let slice = self.as_slice();
         let start_idx = molecule::NUMBER_SIZE * (1 + idx);
         let start = molecule::unpack_number(&slice[start_idx..]) as usize;
         if idx == self.len() - 1 {
-            UdtCellDep::new_unchecked(self.0.slice(start..))
+            UdtDep::new_unchecked(self.0.slice(start..))
         } else {
             let end_idx = start_idx + molecule::NUMBER_SIZE;
             let end = molecule::unpack_number(&slice[end_idx..]) as usize;
-            UdtCellDep::new_unchecked(self.0.slice(start..end))
+            UdtDep::new_unchecked(self.0.slice(start..end))
         }
     }
     pub fn as_reader<'r>(&'r self) -> UdtCellDepsReader<'r> {
@@ -11516,23 +11824,23 @@ impl<'r> UdtCellDepsReader<'r> {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
-    pub fn get(&self, idx: usize) -> Option<UdtCellDepReader<'r>> {
+    pub fn get(&self, idx: usize) -> Option<UdtDepReader<'r>> {
         if idx >= self.len() {
             None
         } else {
             Some(self.get_unchecked(idx))
         }
     }
-    pub fn get_unchecked(&self, idx: usize) -> UdtCellDepReader<'r> {
+    pub fn get_unchecked(&self, idx: usize) -> UdtDepReader<'r> {
         let slice = self.as_slice();
         let start_idx = molecule::NUMBER_SIZE * (1 + idx);
         let start = molecule::unpack_number(&slice[start_idx..]) as usize;
         if idx == self.len() - 1 {
-            UdtCellDepReader::new_unchecked(&self.as_slice()[start..])
+            UdtDepReader::new_unchecked(&self.as_slice()[start..])
         } else {
             let end_idx = start_idx + molecule::NUMBER_SIZE;
             let end = molecule::unpack_number(&slice[end_idx..]) as usize;
-            UdtCellDepReader::new_unchecked(&self.as_slice()[start..end])
+            UdtDepReader::new_unchecked(&self.as_slice()[start..end])
         }
     }
 }
@@ -11587,29 +11895,29 @@ impl<'r> molecule::prelude::Reader<'r> for UdtCellDepsReader<'r> {
         for pair in offsets.windows(2) {
             let start = pair[0];
             let end = pair[1];
-            UdtCellDepReader::verify(&slice[start..end], compatible)?;
+            UdtDepReader::verify(&slice[start..end], compatible)?;
         }
         Ok(())
     }
 }
 #[derive(Clone, Debug, Default)]
-pub struct UdtCellDepsBuilder(pub(crate) Vec<UdtCellDep>);
+pub struct UdtCellDepsBuilder(pub(crate) Vec<UdtDep>);
 impl UdtCellDepsBuilder {
-    pub fn set(mut self, v: Vec<UdtCellDep>) -> Self {
+    pub fn set(mut self, v: Vec<UdtDep>) -> Self {
         self.0 = v;
         self
     }
-    pub fn push(mut self, v: UdtCellDep) -> Self {
+    pub fn push(mut self, v: UdtDep) -> Self {
         self.0.push(v);
         self
     }
-    pub fn extend<T: ::core::iter::IntoIterator<Item = UdtCellDep>>(mut self, iter: T) -> Self {
+    pub fn extend<T: ::core::iter::IntoIterator<Item = UdtDep>>(mut self, iter: T) -> Self {
         for elem in iter {
             self.0.push(elem);
         }
         self
     }
-    pub fn replace(&mut self, index: usize, v: UdtCellDep) -> Option<UdtCellDep> {
+    pub fn replace(&mut self, index: usize, v: UdtDep) -> Option<UdtDep> {
         self.0
             .get_mut(index)
             .map(|item| ::core::mem::replace(item, v))
@@ -11662,7 +11970,7 @@ impl molecule::prelude::Builder for UdtCellDepsBuilder {
 }
 pub struct UdtCellDepsIterator(UdtCellDeps, usize, usize);
 impl ::core::iter::Iterator for UdtCellDepsIterator {
-    type Item = UdtCellDep;
+    type Item = UdtDep;
     fn next(&mut self) -> Option<Self::Item> {
         if self.1 >= self.2 {
             None
@@ -11679,7 +11987,7 @@ impl ::core::iter::ExactSizeIterator for UdtCellDepsIterator {
     }
 }
 impl ::core::iter::IntoIterator for UdtCellDeps {
-    type Item = UdtCellDep;
+    type Item = UdtDep;
     type IntoIter = UdtCellDepsIterator;
     fn into_iter(self) -> Self::IntoIter {
         let len = self.len();
@@ -11693,7 +12001,7 @@ impl<'r> UdtCellDepsReader<'r> {
 }
 pub struct UdtCellDepsReaderIterator<'t, 'r>(&'t UdtCellDepsReader<'r>, usize, usize);
 impl<'t: 'r, 'r> ::core::iter::Iterator for UdtCellDepsReaderIterator<'t, 'r> {
-    type Item = UdtCellDepReader<'t>;
+    type Item = UdtDepReader<'t>;
     fn next(&mut self) -> Option<Self::Item> {
         if self.1 >= self.2 {
             None
@@ -11709,8 +12017,8 @@ impl<'t: 'r, 'r> ::core::iter::ExactSizeIterator for UdtCellDepsReaderIterator<'
         self.2 - self.1
     }
 }
-impl ::core::iter::FromIterator<UdtCellDep> for UdtCellDeps {
-    fn from_iter<T: IntoIterator<Item = UdtCellDep>>(iter: T) -> Self {
+impl ::core::iter::FromIterator<UdtDep> for UdtCellDeps {
+    fn from_iter<T: IntoIterator<Item = UdtDep>>(iter: T) -> Self {
         Self::new_builder().extend(iter).build()
     }
 }
