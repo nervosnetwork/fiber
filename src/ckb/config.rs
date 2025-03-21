@@ -179,6 +179,13 @@ pub struct UdtScript {
     pub args: String,
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug, Eq, PartialEq, Hash)]
+#[serde(tag = "type", content = "dep")]
+pub enum UdtDep {
+    CellDep(UdtCellDep),
+    TypeID(UdtScript),
+}
+
 #[serde_as]
 #[derive(Serialize, Deserialize, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct UdtCellDep {
@@ -193,7 +200,7 @@ pub struct UdtArgInfo {
     pub name: String,
     pub script: UdtScript,
     pub auto_accept_amount: Option<u128>,
-    pub cell_deps: Vec<UdtCellDep>,
+    pub cell_deps: Vec<UdtDep>,
 }
 
 /// The UDT configurations
