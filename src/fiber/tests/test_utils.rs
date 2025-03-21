@@ -40,6 +40,7 @@ use rand::distributions::Alphanumeric;
 use rand::rngs::OsRng;
 use rand::Rng;
 use secp256k1::{Message, Secp256k1};
+use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -733,7 +734,7 @@ impl NetworkNode {
         .await
     }
 
-    pub async fn send_rpc_request<P: Serialize>(
+    pub async fn send_rpc_request_raw<P: Serialize>(
         &self,
         method: &str,
         params: P,
@@ -752,6 +753,17 @@ impl NetworkNode {
         } else {
             Err("RPC server not started".to_string())
         }
+    }
+
+    pub async fn send_rpc_request<P: Serialize, R: DeserializeOwned>(
+        &self,
+        method: &str,
+        params: P,
+    ) -> Result<R, String> {
+        let response = self.send_rpc_request_raw(method, params).await?;
+        let result = serde_json::from_value::<R>(response.clone())
+            .map_err(|e| format!("failed to deserialize response: {}", e))?;
+        Ok(result)
     }
 
     // verify serde_json::Value do not contains any Number,
