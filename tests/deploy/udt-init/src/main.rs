@@ -184,6 +184,13 @@ struct UdtScript {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(tag = "type", content = "dep")]
+enum UdtDep {
+    CellDep(UdtCellDep),
+    TypeID(UdtScript),
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
 struct UdtCellDep {
     dep_type: String,
     tx_hash: H256,
@@ -195,7 +202,7 @@ struct UdtInfo {
     name: String,
     script: UdtScript,
     auto_accept_amount: Option<u128>,
-    cell_deps: Vec<UdtCellDep>,
+    cell_deps: Vec<UdtDep>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -245,11 +252,11 @@ fn generate_nodes_config() {
                 hash_type: "Data1".to_string(),
                 args: "0x.*".to_string(),
             },
-            cell_deps: vec![UdtCellDep {
+            cell_deps: vec![UdtDep::CellDep(UdtCellDep {
                 dep_type: "code".to_string(),
                 tx_hash: genesis_tx,
                 index: index as u32,
-            }],
+            })],
         };
         udt_infos.push(udt_info);
     }
