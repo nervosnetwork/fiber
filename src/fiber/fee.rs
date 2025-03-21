@@ -1,8 +1,8 @@
 use super::channel::FUNDING_CELL_WITNESS_LEN;
-use crate::ckb::contracts::{get_cell_deps, get_script_by_contract, Contract};
+use crate::ckb::contracts::{get_cell_deps_count, get_script_by_contract, Contract};
 use ckb_types::core::TransactionBuilder;
-use ckb_types::packed::{Bytes, Script};
-use ckb_types::prelude::Builder;
+use ckb_types::packed::{Bytes, CellDep, Script};
+use ckb_types::prelude::{Builder, PackVec};
 use ckb_types::{
     core::FeeRate,
     packed::{CellInput, CellOutput},
@@ -14,8 +14,8 @@ fn commitment_tx_size(udt_type_script: &Option<Script>) -> usize {
     // when there is pending tlcs, the commitment lock args will be 56 bytes, otherwise 46 bytes.
     // to simplify the calculation, we use hardcoded 56 bytes here.
     let commitment_lock_script = get_script_by_contract(Contract::CommitmentLock, &[0u8; 56]);
-    let cell_deps =
-        get_cell_deps(vec![Contract::FundingLock], udt_type_script).expect("get cell deps");
+    let cell_deps_count = get_cell_deps_count(vec![Contract::FundingLock], udt_type_script);
+    let cell_deps = vec![CellDep::default(); cell_deps_count].pack();
 
     let (output, output_data) = if let Some(type_script) = udt_type_script {
         let output = CellOutput::new_builder()
@@ -48,8 +48,8 @@ pub(crate) fn shutdown_tx_size(
     shutdown_scripts: (Script, Script),
 ) -> usize {
     let (script_a, script_b) = shutdown_scripts;
-    let cell_deps =
-        get_cell_deps(vec![Contract::FundingLock], udt_type_script).expect("get cell deps");
+    let cell_deps_count = get_cell_deps_count(vec![Contract::FundingLock], udt_type_script);
+    let cell_deps = vec![CellDep::default(); cell_deps_count].pack();
 
     let (outputs, outputs_data) = if let Some(type_script) = udt_type_script {
         let output_a = CellOutput::new_builder()
