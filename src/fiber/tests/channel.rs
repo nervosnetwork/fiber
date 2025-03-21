@@ -1707,7 +1707,6 @@ async fn test_send_payment_with_3_nodes() {
         create_3_nodes_with_established_channel(
             (100000000000, 100000000000),
             (100000000000, 100000000000),
-            true,
         )
         .await;
     let node_a_local = node_a.get_local_balance_from_channel(channel_1);
@@ -1777,14 +1776,13 @@ async fn test_send_payment_with_3_nodes() {
 async fn test_send_payment_with_rev_3_nodes() {
     init_tracing();
     let _span = tracing::info_span!("node", node = "test").entered();
-    let (nodes, channels) = create_n_nodes_and_channels_with_index_amounts(
+    let (nodes, channels) = create_n_nodes_network(
         vec![
             ((2, 1), (100000000000, 100000000000)),
             ((1, 0), (100000000000, 100000000000)),
         ]
         .as_slice(),
         3,
-        true,
     )
     .await;
 
@@ -1858,8 +1856,7 @@ async fn test_send_payment_with_max_nodes() {
     let nodes_num = 15;
     let last = nodes_num - 1;
     let amounts = vec![(100000000000, 100000000000); nodes_num - 1];
-    let (nodes, channels) =
-        create_n_nodes_with_established_channel(&amounts, nodes_num, true).await;
+    let (nodes, channels) = create_n_nodes_with_established_channel(&amounts, nodes_num).await;
     let target_pubkey = nodes[last].pubkey;
 
     let sender_local = nodes[0].get_local_balance_from_channel(channels[0]);
@@ -1930,7 +1927,6 @@ async fn test_send_payment_with_3_nodes_overflow() {
     let (node_a, _node_b, node_c, ..) = create_3_nodes_with_established_channel(
         (1000000000 * 100000000, 1000000000 * 100000000),
         (1000000000 * 100000000, 1000000000 * 100000000),
-        true,
     )
     .await;
 
@@ -1976,7 +1972,6 @@ async fn test_send_payment_fail_with_3_nodes_invalid_hash() {
     let (node_a, node_b, node_c, channel_1, channel_2) = create_3_nodes_with_established_channel(
         (100000000000, 100000000000),
         (100000000000, 100000000000),
-        true,
     )
     .await;
 
@@ -2054,7 +2049,6 @@ async fn test_send_payment_fail_with_3_nodes_final_tlc_expiry_delta() {
     let (node_a, _node_b, node_c, ..) = create_3_nodes_with_established_channel(
         (100000000000, 100000000000),
         (100000000000, 100000000000),
-        true,
     )
     .await;
 
@@ -2153,7 +2147,6 @@ async fn test_send_payment_fail_with_3_nodes_dry_run_fee() {
     let (node_a, _node_b, node_c, ..) = create_3_nodes_with_established_channel(
         (100000000000, 100000000000),
         (100000000000, 100000000000),
-        true,
     )
     .await;
 
@@ -3609,13 +3602,12 @@ async fn test_channel_update_tlc_expiry() {
 
 #[tokio::test]
 async fn test_forward_payment_channel_disabled() {
-    let (nodes, channels) = create_n_nodes_and_channels_with_index_amounts(
+    let (nodes, channels) = create_n_nodes_network(
         &[
             ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
             ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
         ],
         3,
-        true,
     )
     .await;
     let [node_a, node_b, node_c] = nodes.try_into().expect("3 nodes");
@@ -3705,13 +3697,12 @@ async fn test_forward_payment_channel_disabled() {
 
 #[tokio::test]
 async fn test_forward_payment_tlc_minimum_value() {
-    let (nodes, channels) = create_n_nodes_and_channels_with_index_amounts(
+    let (nodes, channels) = create_n_nodes_network(
         &[
             ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
             ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
         ],
         3,
-        true,
     )
     .await;
     let [node_a, node_b, node_c] = nodes.try_into().expect("3 nodes");
@@ -3923,13 +3914,12 @@ async fn test_forward_payment_tlc_minimum_value() {
 #[tokio::test]
 async fn test_send_payment_with_outdated_fee_rate() {
     init_tracing();
-    let (nodes, _) = create_n_nodes_and_channels_with_index_amounts(
+    let (nodes, _) = create_n_nodes_network(
         &[
             ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
             ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
         ],
         3,
-        true,
     )
     .await;
     let [node_a, node_b, node_c] = nodes.try_into().expect("3 nodes");
@@ -5200,8 +5190,7 @@ async fn test_send_payment_with_channel_balance_error() {
     let _span = tracing::info_span!("node", node = "test").entered();
     let nodes_num = 4;
     let amounts = vec![(100000000000, 100000000000); nodes_num - 1];
-    let (nodes, channels) =
-        create_n_nodes_with_established_channel(&amounts, nodes_num, true).await;
+    let (nodes, channels) = create_n_nodes_with_established_channel(&amounts, nodes_num).await;
     let [node_0, _node_1, node_2, node_3] = nodes.try_into().expect("4 nodes");
     let source_node = &node_0;
     let target_pubkey = node_3.pubkey;
@@ -5286,8 +5275,7 @@ async fn test_send_payment_with_disable_channel() {
     let _span = tracing::info_span!("node", node = "test").entered();
     let nodes_num = 4;
     let amounts = vec![(100000000000, 100000000000); nodes_num - 1];
-    let (nodes, channels) =
-        create_n_nodes_with_established_channel(&amounts, nodes_num, true).await;
+    let (nodes, channels) = create_n_nodes_with_established_channel(&amounts, nodes_num).await;
     let [node_0, _node_1, node_2, node_3] = nodes.try_into().expect("4 nodes");
 
     // begin to set channel disable, but do not notify the network
@@ -5324,7 +5312,7 @@ async fn test_send_payment_with_multiple_edges_in_middle_hops() {
     // we have two chaneels between node_1 and node_2, they are all with the same meta information except the later one has more capacity
     // path finding will try the channel with larger capacity first, so we assert the payment retry times is 1
     // the send payment should be succeed
-    let (nodes, _channels) = create_n_nodes_and_channels_with_index_amounts(
+    let (nodes, _channels) = create_n_nodes_network(
         &[
             ((0, 1), (100000000000, 100000000000)),
             ((1, 2), (MIN_RESERVED_CKB + 900, 5200000000)),
@@ -5332,7 +5320,6 @@ async fn test_send_payment_with_multiple_edges_in_middle_hops() {
             ((2, 3), (100000000000, 100000000000)),
         ],
         4,
-        true,
     )
     .await;
     let [node_0, _node_1, _node_2, node_3] = nodes.try_into().expect("4 nodes");
@@ -5381,7 +5368,7 @@ async fn test_send_payment_with_all_failed_middle_hops() {
     // we have two chaneels between node_1 and node_2
     // they liquid capacity is enough for send payment, but actual balance are both not enough
     // path finding will all try them but all failed, so we assert the payment retry times is 3
-    let (nodes, _channels) = create_n_nodes_and_channels_with_index_amounts(
+    let (nodes, _channels) = create_n_nodes_network(
         &[
             ((0, 1), (100000000000, 100000000000)),
             ((1, 2), (MIN_RESERVED_CKB + 900, MIN_RESERVED_CKB + 1000)),
@@ -5389,7 +5376,6 @@ async fn test_send_payment_with_all_failed_middle_hops() {
             ((2, 3), (100000000000, 100000000000)),
         ],
         4,
-        true,
     )
     .await;
     let [node_0, _node_1, _node_2, node_3] = nodes.try_into().expect("4 nodes");
@@ -5440,7 +5426,7 @@ async fn test_send_payment_with_multiple_edges_can_succeed_in_retry() {
     // but even channel_2's capacity is larger, the to_local_amount is not enough for the payment
     // path finding will retry the first channel and the send payment should be succeed
     // the payment retry times should be 2
-    let (nodes, _channels) = create_n_nodes_and_channels_with_index_amounts(
+    let (nodes, _channels) = create_n_nodes_network(
         &[
             ((0, 1), (100000000000, 100000000000)),
             ((1, 2), (MIN_RESERVED_CKB + 1000, 5200000000)),
@@ -5448,7 +5434,6 @@ async fn test_send_payment_with_multiple_edges_can_succeed_in_retry() {
             ((2, 3), (100000000000, 100000000000)),
         ],
         4,
-        true,
     )
     .await;
     let [node_0, _node_1, _node_2, node_3] = nodes.try_into().expect("4 nodes");
@@ -5497,7 +5482,7 @@ async fn test_send_payment_with_final_hop_multiple_edges_in_middle_hops() {
     // we have two chaneels between node_2 and node_3, they are all with the same meta information except the later one has more capacity
     // path finding will try the channel with larger capacity first, so we assert the payment retry times is 1
     // the send payment should be succeed
-    let (nodes, _channels) = create_n_nodes_and_channels_with_index_amounts(
+    let (nodes, _channels) = create_n_nodes_network(
         &[
             ((0, 1), (100000000000, 100000000000)),
             ((1, 2), (100000000000, 100000000000)),
@@ -5505,7 +5490,6 @@ async fn test_send_payment_with_final_hop_multiple_edges_in_middle_hops() {
             ((2, 3), (MIN_RESERVED_CKB + 1000, 5200000000)),
         ],
         4,
-        true,
     )
     .await;
     let [node_0, _node_1, _node_2, node_3] = nodes.try_into().expect("4 nodes");
@@ -5554,7 +5538,7 @@ async fn test_send_payment_with_final_all_failed_middle_hops() {
     // we have two chaneels between node_2 and node_3
     // they liquid capacity is enough for send payment, but actual balance are both not enough
     // path finding will all try them but all failed, so we assert the payment retry times is 3
-    let (nodes, _channels) = create_n_nodes_and_channels_with_index_amounts(
+    let (nodes, _channels) = create_n_nodes_network(
         &[
             ((0, 1), (100000000000, 100000000000)),
             ((1, 2), (100000000000, 100000000000)),
@@ -5562,7 +5546,6 @@ async fn test_send_payment_with_final_all_failed_middle_hops() {
             ((2, 3), (MIN_RESERVED_CKB + 910, MIN_RESERVED_CKB + 1000)),
         ],
         4,
-        true,
     )
     .await;
     let [node_0, _node_1, _node_2, node_3] = nodes.try_into().expect("4 nodes");
@@ -5611,7 +5594,7 @@ async fn test_send_payment_with_final_multiple_edges_can_succeed_in_retry() {
     // but even channel_2's capacity is larger, the to_local_amount is not enough for the payment
     // path finding will retry the first channel and the send payment should be succeed
     // the payment retry times should be 2
-    let (nodes, _channels) = create_n_nodes_and_channels_with_index_amounts(
+    let (nodes, _channels) = create_n_nodes_network(
         &[
             ((0, 1), (100000000000, 100000000000)),
             ((1, 2), (100000000000, 100000000000)),
@@ -5619,7 +5602,6 @@ async fn test_send_payment_with_final_multiple_edges_can_succeed_in_retry() {
             ((2, 3), (MIN_RESERVED_CKB + 900, 6200000000)),
         ],
         4,
-        true,
     )
     .await;
     let [node_0, _node_1, _node_2, node_3] = nodes.try_into().expect("4 nodes");
@@ -5664,7 +5646,7 @@ async fn test_send_payment_with_final_multiple_edges_can_succeed_in_retry() {
 async fn test_send_payment_with_first_hop_failed_with_fee() {
     init_tracing();
     let _span = tracing::info_span!("node", node = "test").entered();
-    let (nodes, _channels) = create_n_nodes_and_channels_with_index_amounts(
+    let (nodes, _channels) = create_n_nodes_network(
         &[
             // even 1000 > 999, but it's not enough for fee, and this is the direct channel
             // so we can check the actual balance of channel
@@ -5674,7 +5656,6 @@ async fn test_send_payment_with_first_hop_failed_with_fee() {
             ((2, 3), (100000000000, 100000000000)),
         ],
         4,
-        true,
     )
     .await;
     let [node_0, _node_1, _node_2, node_3] = nodes.try_into().expect("4 nodes");
@@ -5717,7 +5698,7 @@ async fn test_send_payment_succeed_with_multiple_edges_in_first_hop() {
     // we have two chaneels between node_0 and node_1, they are all with the same meta information except the later one has more capacity
     // path finding will try the channel with larger capacity first, so we assert the payment retry times is 1
     // the send payment should be succeed
-    let (nodes, _channels) = create_n_nodes_and_channels_with_index_amounts(
+    let (nodes, _channels) = create_n_nodes_network(
         &[
             ((0, 1), (MIN_RESERVED_CKB + 900, 5200000000)),
             ((0, 1), (MIN_RESERVED_CKB + 1001, 5200000000)),
@@ -5725,7 +5706,6 @@ async fn test_send_payment_succeed_with_multiple_edges_in_first_hop() {
             ((2, 3), (100000000000, 100000000000)),
         ],
         4,
-        true,
     )
     .await;
     let [node_0, _node_1, _node_2, node_3] = nodes.try_into().expect("4 nodes");
@@ -5773,7 +5753,7 @@ async fn test_send_payment_with_first_hop_all_failed() {
     // we have two chaneels between node_0 and node_1
     // they liquid capacity is enough for send payment, but actual balance are both not enough
     // path finding will fail in the first time of send payment
-    let (nodes, _channels) = create_n_nodes_and_channels_with_index_amounts(
+    let (nodes, _channels) = create_n_nodes_network(
         &[
             ((0, 1), (MIN_RESERVED_CKB + 900, MIN_RESERVED_CKB + 1000)),
             ((0, 1), (MIN_RESERVED_CKB + 910, MIN_RESERVED_CKB + 1000)),
@@ -5781,7 +5761,6 @@ async fn test_send_payment_with_first_hop_all_failed() {
             ((2, 3), (100000000000, 100000000000)),
         ],
         4,
-        true,
     )
     .await;
     let [node_0, _node_1, _node_2, node_3] = nodes.try_into().expect("4 nodes");
@@ -5826,7 +5805,7 @@ async fn test_send_payment_will_succeed_with_direct_channel_info_first_hop() {
     // but we manually set the to_local_amount to smaller value for testing
     // path finding will get the direct channel info with actual balance of channel,
     // so it will try the channel with smaller capacity and the payment will succeed
-    let (nodes, channels) = create_n_nodes_and_channels_with_index_amounts(
+    let (nodes, channels) = create_n_nodes_network(
         &[
             ((0, 1), (MIN_RESERVED_CKB + 2000, MIN_RESERVED_CKB + 1000)),
             ((0, 1), (MIN_RESERVED_CKB + 1005, MIN_RESERVED_CKB + 1000)),
@@ -5834,7 +5813,6 @@ async fn test_send_payment_will_succeed_with_direct_channel_info_first_hop() {
             ((2, 3), (100000000000, 100000000000)),
         ],
         4,
-        true,
     )
     .await;
     let [mut node_0, _node_1, _node_2, node_3] = nodes.try_into().expect("4 nodes");
@@ -5890,7 +5868,7 @@ async fn test_send_payment_will_succeed_with_retry_in_middle_hops() {
     // but we manually set the to_local_amount to smaller value for testing
     // path finding will get a temporary failure in the first try and retry the second channel
     // so it will try the channel with smaller capacity and the payment will succeed
-    let (nodes, channels) = create_n_nodes_and_channels_with_index_amounts(
+    let (nodes, channels) = create_n_nodes_network(
         &[
             ((0, 1), (100000000000, 100000000000)),
             ((1, 2), (100000000000, 100000000000)),
@@ -5898,7 +5876,6 @@ async fn test_send_payment_will_succeed_with_retry_in_middle_hops() {
             ((2, 3), (MIN_RESERVED_CKB + 1005, MIN_RESERVED_CKB + 1000)),
         ],
         4,
-        true,
     )
     .await;
     let [mut node_0, _node_1, node_2, node_3] = nodes.try_into().expect("4 nodes");
@@ -5961,7 +5938,7 @@ async fn test_send_payment_will_fail_with_last_hop_info_in_add_tlc_peer() {
     // but we manually set the to_remote_amount for node_3 to a larger amount,
     // this will make node3 trigger error in add_tlc_peer and got an Musig2VerifyError(BadSignature)
     // the send_payment will failed with retry times of 1
-    let (nodes, channels) = create_n_nodes_and_channels_with_index_amounts(
+    let (nodes, channels) = create_n_nodes_network(
         &[
             ((0, 1), (100000000000, 100000000000)),
             ((1, 2), (100000000000, 100000000000)),
@@ -5969,7 +5946,6 @@ async fn test_send_payment_will_fail_with_last_hop_info_in_add_tlc_peer() {
             ((2, 3), (MIN_RESERVED_CKB + 1005, MIN_RESERVED_CKB + 1000)),
         ],
         4,
-        true,
     )
     .await;
     let [mut node_0, _node_1, _node_2, mut node_3] = nodes.try_into().expect("4 nodes");
@@ -6028,7 +6004,7 @@ async fn test_send_payment_will_fail_with_invoice_not_generated_by_target() {
     init_tracing();
     let _span = tracing::info_span!("node", node = "test").entered();
 
-    let (nodes, _channels) = create_n_nodes_and_channels_with_index_amounts(
+    let (nodes, _channels) = create_n_nodes_network(
         &[
             ((0, 1), (100000000000, 100000000000)),
             ((1, 2), (100000000000, 100000000000)),
@@ -6036,7 +6012,6 @@ async fn test_send_payment_will_fail_with_invoice_not_generated_by_target() {
             ((2, 3), (MIN_RESERVED_CKB + 1005, MIN_RESERVED_CKB + 1000)),
         ],
         4,
-        true,
     )
     .await;
     let [mut node_0, _node_1, _node_2, node_3] = nodes.try_into().expect("4 nodes");
@@ -6087,7 +6062,7 @@ async fn test_send_payment_will_succeed_with_valid_invoice() {
     init_tracing();
     let _span = tracing::info_span!("node", node = "test").entered();
 
-    let (nodes, channels) = create_n_nodes_and_channels_with_index_amounts(
+    let (nodes, channels) = create_n_nodes_network(
         &[
             ((0, 1), (100000000000, 100000000000)),
             ((1, 2), (100000000000, 100000000000)),
@@ -6095,7 +6070,6 @@ async fn test_send_payment_will_succeed_with_valid_invoice() {
             ((2, 3), (MIN_RESERVED_CKB + 1005, MIN_RESERVED_CKB + 1000)),
         ],
         4,
-        true,
     )
     .await;
     let [mut node_0, _node_1, _node_2, mut node_3] = nodes.try_into().expect("4 nodes");
@@ -6159,7 +6133,7 @@ async fn test_send_payment_will_succeed_with_valid_invoice() {
 async fn test_send_payment_will_fail_with_no_invoice_preimage() {
     init_tracing();
     let _span = tracing::info_span!("node", node = "test").entered();
-    let (nodes, channels) = create_n_nodes_and_channels_with_index_amounts(
+    let (nodes, channels) = create_n_nodes_network(
         &[
             ((0, 1), (100000000000, 100000000000)),
             ((1, 2), (100000000000, 100000000000)),
@@ -6167,7 +6141,6 @@ async fn test_send_payment_will_fail_with_no_invoice_preimage() {
             ((2, 3), (MIN_RESERVED_CKB + 1005, MIN_RESERVED_CKB + 1000)),
         ],
         4,
-        true,
     )
     .await;
     let [mut node_0, _node_1, _node_2, mut node_3] = nodes.try_into().expect("4 nodes");
@@ -6232,7 +6205,7 @@ async fn test_send_payment_will_fail_with_cancelled_invoice() {
     init_tracing();
     let _span = tracing::info_span!("node", node = "test").entered();
 
-    let (nodes, channels) = create_n_nodes_and_channels_with_index_amounts(
+    let (nodes, channels) = create_n_nodes_network(
         &[
             ((0, 1), (100000000000, 100000000000)),
             ((1, 2), (100000000000, 100000000000)),
@@ -6240,7 +6213,6 @@ async fn test_send_payment_will_fail_with_cancelled_invoice() {
             ((2, 3), (MIN_RESERVED_CKB + 1005, MIN_RESERVED_CKB + 1000)),
         ],
         4,
-        true,
     )
     .await;
     let [mut node_0, _node_1, _node_2, mut node_3] = nodes.try_into().expect("4 nodes");
@@ -6307,14 +6279,13 @@ async fn test_send_payment_will_succeed_with_large_tlc_expiry_limit() {
     let _span = tracing::info_span!("node", node = "test").entered();
     // from https://github.com/nervosnetwork/fiber/issues/367
 
-    let (nodes, _channels) = create_n_nodes_and_channels_with_index_amounts(
+    let (nodes, _channels) = create_n_nodes_network(
         &[
             ((0, 1), (MIN_RESERVED_CKB + 2000, MIN_RESERVED_CKB + 1000)),
             ((1, 2), (100000000000, 100000000000)),
             ((2, 3), (100000000000, 100000000000)),
         ],
         4,
-        true,
     )
     .await;
     let [mut node_0, _node_1, _node_2, node_3] = nodes.try_into().expect("4 nodes");

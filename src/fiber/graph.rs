@@ -13,6 +13,7 @@ use crate::ckb::config::UdtCfgInfos;
 use crate::fiber::fee::calculate_tlc_forward_fee;
 use crate::fiber::path::NodeHeapElement;
 use crate::fiber::serde_utils::EntityHex;
+use crate::fiber::serde_utils::U128Hex;
 use crate::fiber::types::PaymentHopData;
 use crate::invoice::CkbInvoice;
 use crate::now_timestamp_as_millis_u64;
@@ -1352,6 +1353,7 @@ pub struct SessionRouteNode {
     /// the public key of the node
     pub pubkey: Pubkey,
     /// the amount for this hop
+    #[serde_as(as = "U128Hex")]
     pub amount: u128,
     /// the channel outpoint for this hop
     #[serde_as(as = "EntityHex")]
