@@ -488,11 +488,19 @@ impl FiberConfig {
     }
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug, Eq, PartialEq, Hash)]
+#[serde(tag = "type", content = "dep")]
+pub enum ScriptCellDep {
+    CellDep(CellDep),
+    TypeID(Script),
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct FiberScript {
     pub name: Contract,
     pub script: Script,
-    pub cell_deps: Vec<CellDep>,
+    /// Type ID of the cell deps
+    pub cell_deps: Vec<ScriptCellDep>,
 }
 
 impl FromStr for FiberScript {

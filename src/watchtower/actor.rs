@@ -349,7 +349,7 @@ fn build_revocation_tx(
         .cell_deps(get_cell_deps(
             vec![Contract::CommitmentLock, Contract::Secp256k1Lock],
             &revocation_data.output.type_().to_opt(),
-        ))
+        )?)
         .input(
             CellInput::new_builder()
                 .previous_output(commitment_tx_out_point)
@@ -683,7 +683,7 @@ fn build_settlement_tx(
         .cell_deps(get_cell_deps(
             vec![Contract::CommitmentLock, Contract::Secp256k1Lock],
             &to_local_output.type_().to_opt(),
-        ))
+        )?)
         .input(
             CellInput::new_builder()
                 .previous_output(commitment_tx_out_point)
@@ -1014,7 +1014,7 @@ fn build_settlement_tx_for_pending_tlcs<S: InvoiceStore>(
                 .cell_deps(get_cell_deps(
                     vec![Contract::CommitmentLock, Contract::Secp256k1Lock],
                     &None,
-                ))
+                )?)
                 .input(input)
                 .output(new_commitment_output.clone())
                 .output_data(Bytes::default())
@@ -1136,7 +1136,7 @@ fn build_settlement_tx_for_pending_tlcs<S: InvoiceStore>(
                 .cell_deps(get_cell_deps(
                     vec![Contract::CommitmentLock, Contract::Secp256k1Lock],
                     &commitment_tx_cell.output.type_.map(|script| script.into()),
-                ))
+                )?)
                 .input(input)
                 .output(new_commitment_output.clone())
                 .output_data(new_commitment_output_data)
