@@ -186,6 +186,21 @@ pub struct NodeInfoResponse {
     pub udt_cfg_infos: UdtCfgInfos,
 }
 
+/// The information about a peer connected to the node.
+#[serde_as]
+#[derive(Clone, Serialize, Deserialize, Debug)]
+pub struct PeerInfo {
+    /// The identity public key of the peer.
+    pub pubkey: Pubkey,
+
+    /// The peer ID of the peer
+    #[serde_as(as = "DisplayFromStr")]
+    pub peer_id: PeerId,
+
+    /// A list of multi-addresses associated with the peer.
+    pub addresses: Vec<MultiAddr>,
+}
+
 /// The struct here is used both internally and as an API to the outside world.
 /// If we want to send a reply to the caller, we need to wrap the message with
 /// a RpcReplyPort. Since outsider users have no knowledge of RpcReplyPort, we
@@ -245,6 +260,7 @@ pub enum NetworkActorCommand {
     GetPayment(Hash256, RpcReplyPort<Result<SendPaymentResponse, String>>),
 
     NodeInfo((), RpcReplyPort<Result<NodeInfoResponse, String>>),
+    ListPeers((), RpcReplyPort<Result<Vec<PeerInfo>, String>>),
 }
 
 pub async fn sign_network_message(
@@ -1398,6 +1414,19 @@ where
                     udt_cfg_infos: get_udt_whitelist(),
                 };
                 let _ = rpc.send(Ok(response));
+            }
+            NetworkActorCommand::ListPeers(_, rpc) => {
+                let peers = state
+                    .state_to_be_persisted
+                    .peer_pubkey_map
+                    .iter()
+                    .map(|(peer_id, pubkey)| PeerInfo {
+                        peer_id: peer_id.clone(),
+                        pubkey: *pubkey,
+                        addresses: state.state_to_be_persisted.get_peer_addresses(peer_id),
+                    })
+                    .collect::<Vec<_>>();
+                let _ = rpc.send(Ok(peers));
             }
         };
         Ok(())

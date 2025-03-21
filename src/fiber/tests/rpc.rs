@@ -9,6 +9,7 @@ use crate::{
         channel::{ListChannelsParams, ListChannelsResult},
         invoice::{InvoiceParams, InvoiceResult, NewInvoiceParams},
         payment::{GetPaymentCommandParams, GetPaymentCommandResult},
+        peer::ListPeersResult,
     },
 };
 
@@ -24,6 +25,10 @@ async fn test_rpc_basic() {
     )
     .await;
     let [node_0, node_1] = nodes.try_into().expect("2 nodes");
+
+    let list_peers: ListPeersResult = node_0.send_rpc_request("list_peers", ()).await.unwrap();
+    assert_eq!(list_peers.peers.len(), 1);
+    assert_eq!(list_peers.peers[0].pubkey, node_1.pubkey);
 
     let res: ListChannelsResult = node_0
         .send_rpc_request(
