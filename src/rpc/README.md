@@ -44,6 +44,8 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
     * [Module Payment](#module-payment)
         * [Method `send_payment`](#payment-send_payment)
         * [Method `get_payment`](#payment-get_payment)
+        * [Method `build_router`](#payment-build_router)
+        * [Method `send_payment_with_router`](#payment-send_payment_with_router)
     * [Module Peer](#module-peer)
         * [Method `connect_peer`](#peer-connect_peer)
         * [Method `disconnect_peer`](#peer-disconnect_peer)
@@ -58,7 +60,9 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
     * [Type `Hash256`](#type-hash256)
     * [Type `HashAlgorithm`](#type-hashalgorithm)
     * [Type `HopHint`](#type-hophint)
+    * [Type `HopRequire`](#type-hoprequire)
     * [Type `NodeInfo`](#type-nodeinfo)
+    * [Type `PathEdge`](#type-pathedge)
     * [Type `PaymentCustomRecords`](#type-paymentcustomrecords)
     * [Type `PaymentSessionStatus`](#type-paymentsessionstatus)
     * [Type `Pubkey`](#type-pubkey)
@@ -593,7 +597,7 @@ Sends a payment to a peer.
 ##### Params
 
 * `target_pubkey` - <em>Option<[Pubkey](#type-pubkey)></em>, the identifier of the payment target
-* `amount` - <em>`Option<u128>`</em>, the amount of the payment
+* `amount` - <em>`Option<u128>`</em>, the amount of the payment, the unit is Shannons for non UDT payment
 * `payment_hash` - <em>Option<[Hash256](#type-hash256)></em>, the hash to use within the payment's HTLC
 * `final_tlc_expiry_delta` - <em>`Option<u64>`</em>, the TLC expiry delta should be used to set the timelock for the final hop, in milliseconds
 * `tlc_expiry_limit` - <em>`Option<u64>`</em>, the TLC expiry limit for the whole payment, in milliseconds, each hop is with a default tlc delta of 1 day
@@ -651,6 +655,77 @@ Retrieves a payment.
 ##### Params
 
 * `payment_hash` - <em>[Hash256](#type-hash256)</em>, The payment hash of the payment to retrieve
+
+##### Returns
+
+* `payment_hash` - <em>[Hash256](#type-hash256)</em>, The payment hash of the payment
+* `status` - <em>[PaymentSessionStatus](#type-paymentsessionstatus)</em>, The status of the payment
+* `created_at` - <em>`u64`</em>, The time the payment was created at, in milliseconds from UNIX epoch
+* `last_updated_at` - <em>`u64`</em>, The time the payment was last updated at, in milliseconds from UNIX epoch
+* `failed_error` - <em>`Option<String>`</em>, The error message if the payment failed
+* `fee` - <em>`u128`</em>, fee paid for the payment
+* `custom_records` - <em>Option<[PaymentCustomRecords](#type-paymentcustomrecords)></em>, The custom records to be included in the payment.
+* `router` - <em>[SessionRoute](#type-sessionroute)</em>, The route information for the payment
+
+---
+
+
+
+<a id="payment-build_router"></a>
+#### Method `build_router`
+
+Builds a router with a list of pubkeys and required channels.
+
+##### Params
+
+* `amount` - <em>`Option<u128>`</em>, the amount of the payment, the unit is Shannons for non UDT payment
+ If not set, the minimum routable amount is used
+* `udt_type_script` - <em>`Option<Script>`</em>, udt type script for the payment router
+* `hops_info` - <em>Vec<[HopRequire](#type-hoprequire)></em>, A list of hops that defines the route. This does not include the source hop pubkey.
+ A hop info is a tuple of pubkey and the channel(specified by channel funding tx) will be used.
+ This is a strong restriction given on payment router, which means these specified hops and channels
+ must be adapted in the router. This is different from hop hints, which maybe ignored by find path.
+ If channel is not specified, find path algorithm will pick a channel within these two peers.
+
+ An error will be returned if there is no router could be build from given hops and channels
+* `final_tlc_expiry_delta` - <em>`Option<u64>`</em>, the TLC expiry delta should be used to set the timelock for the final hop, in milliseconds
+
+##### Returns
+
+* `hops_info` - <em>Vec<[PathEdge](#type-pathedge)></em>, The hops information for router
+
+---
+
+
+
+<a id="payment-send_payment_with_router"></a>
+#### Method `send_payment_with_router`
+
+Sends a payment to a peer with specified router
+ This method differs from SendPayment in that it allows users to specify a full route manually.
+ This can be used for things like rebalancing.
+
+##### Params
+
+* `payment_hash` - <em>Option<[Hash256](#type-hash256)></em>, the hash to use within the payment's HTLC
+* `router` - <em>Vec<[PathEdge](#type-pathedge)></em>, The router to use for the payment
+* `invoice` - <em>`Option<String>`</em>, the encoded invoice to send to the recipient
+* `custom_records` - <em>Option<[PaymentCustomRecords](#type-paymentcustomrecords)></em>, Some custom records for the payment which contains a map of u32 to Vec<u8>
+ The key is the record type, and the value is the serialized data
+ For example:
+ ```json
+ "custom_records": {
+    "0x1": "0x01020304",
+    "0x2": "0x05060708",
+    "0x3": "0x090a0b0c",
+    "0x4": "0x0d0e0f10010d090a0b0c"
+  }
+ ```
+* `keysend` - <em>`Option<bool>`</em>, keysend payment
+* `udt_type_script` - <em>`Option<Script>`</em>, udt type script for the payment
+* `dry_run` - <em>`Option<bool>`</em>, dry_run for payment, used for check whether we can build valid router and the fee for this payment,
+ it's useful for the sender to double check the payment before sending it to the network,
+ default is false
 
 ##### Returns
 
@@ -857,9 +932,22 @@ A hop hint is a hint for a node to use a specific channel.
 #### Fields
 
 * `pubkey` - <em>Pubkey</em>, The public key of the node
-* `channel_outpoint` - <em>OutPoint</em>, The outpoint of the channel
+* `channel_outpoint` - <em>OutPoint</em>, The outpoint for the channel
 * `fee_rate` - <em>u64</em>, The fee rate to use this hop to forward the payment.
 * `tlc_expiry_delta` - <em>u64</em>, The TLC expiry delta to use this hop to forward the payment.
+---
+
+<a id="#type-hoprequire"></a>
+### Type `HopRequire`
+
+A hop requirement need to meet when building router, do not including the source node,
+ the last hop is the target node.
+
+
+#### Fields
+
+* `pubkey` - <em>Pubkey</em>, The public key of the node
+* `channel_outpoint` - <em>`Option<OutPoint>`</em>, The outpoint for the channel, which means use channel with `channel_outpoint` to reach this node
 ---
 
 <a id="#type-nodeinfo"></a>
@@ -878,6 +966,25 @@ The Node information.
 * `chain_hash` - <em>Hash256</em>, The chain hash of the node.
 * `auto_accept_min_ckb_funding_amount` - <em>u64</em>, The minimum CKB funding amount for automatically accepting open channel requests.
 * `udt_cfg_infos` - <em>UdtCfgInfos</em>, The UDT configuration infos of the node.
+---
+
+<a id="#type-pathedge"></a>
+### Type `PathEdge`
+
+An edge along the payment path from the source to the target.
+ This represents a TLC transfer from one node to another.
+
+
+#### Fields
+
+* `target` - <em>Pubkey</em>, The node that is sending the TLC to the next node.
+* `channel_outpoint` - <em>OutPoint</em>, The channel that is used to send the TLC to the next node.
+ If it's all zero bytes, it means this hop is payment receiver.
+* `amount_received` - <em>u128</em>, The amount that the source node will transfer to the target node.
+ We have already added up all the fees along the path, so this amount can be used directly for the TLC.
+* `incoming_tlc_expiry` - <em>u64</em>, The expiry for the TLC that the source node sends to the target node.
+ We have already added up all the expiry deltas along the path,
+ the only thing missing is current time. So the expiry is the current time plus the expiry delta.
 ---
 
 <a id="#type-paymentcustomrecords"></a>

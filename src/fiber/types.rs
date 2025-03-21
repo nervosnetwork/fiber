@@ -3609,16 +3609,23 @@ pub(crate) fn deterministically_hash<T: Entity>(v: &T) -> [u8; 32] {
     ckb_hash::blake2b_256(v.as_slice())
 }
 
+/// Hop data from a router
 #[serde_as]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaymentHopData {
+    /// the amount received by this hop
     pub amount: u128,
+    /// the expiry time in seconds
     pub expiry: u64,
-    // this is only specified in the last hop in the keysend mode
+    /// this is only specified in the last hop in the keysend mode
     pub payment_preimage: Option<Hash256>,
+    /// the payment hash_algorithm
     pub hash_algorithm: HashAlgorithm,
+    /// the funding transaction hash
     pub funding_tx_hash: Hash256,
+    /// the next hop
     pub next_hop: Option<Pubkey>,
+    /// the custom_records for a payment
     pub custom_records: Option<PaymentCustomRecords>,
 }
 
@@ -3929,7 +3936,7 @@ impl<T: HopData> PeeledOnionPacket<T> {
 const HOP_DATA_HEAD_LEN: usize = std::mem::size_of::<u64>();
 
 /// TODO: when JSON is replaced, this function may return `data` directly.
-fn pack_hop_data<T: HopData>(hop_data: &T) -> Vec<u8> {
+pub fn pack_hop_data<T: HopData>(hop_data: &T) -> Vec<u8> {
     let mut serialized = hop_data.serialize();
     // A temporary solution to prepend the length as the header
     let mut packed = (serialized.len() as u64).to_be_bytes().to_vec();
@@ -3938,7 +3945,7 @@ fn pack_hop_data<T: HopData>(hop_data: &T) -> Vec<u8> {
 }
 
 /// TODO: when JSON is replaced, this function may return `data` directly.
-fn unpack_hop_data<T: HopData>(buf: &[u8]) -> Option<T> {
+pub fn unpack_hop_data<T: HopData>(buf: &[u8]) -> Option<T> {
     let len = get_hop_data_len(buf)?;
     if buf.len() < len {
         return None;
