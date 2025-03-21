@@ -304,6 +304,17 @@ impl ContractsContext {
         Ok(builder.build())
     }
 
+    /// Used to calculate the transaction size and fee.
+    pub(crate) fn get_cell_deps_count(&self, contracts: Vec<Contract>) -> usize {
+        let mut count = 0;
+        for contract in contracts {
+            if let Some(cell_deps) = self.contracts.script_cell_deps.get(&contract) {
+                count += cell_deps.len();
+            }
+        }
+        count
+    }
+
     pub(crate) fn get_udt_cell_deps(
         &self,
         udt_deps: Vec<UdtDep>,
@@ -415,6 +426,10 @@ pub fn get_cell_deps_by_contracts(
     get_contracts_context().get_cell_deps(contracts)
 }
 
+pub fn get_cell_deps_count_by_contracts(contracts: Vec<Contract>) -> usize {
+    get_contracts_context().get_cell_deps_count(contracts)
+}
+
 fn get_udt_info(script: &Script) -> Option<UdtArgInfo> {
     get_contracts_context().get_udt_info(script).cloned()
 }
@@ -462,4 +477,14 @@ pub fn get_cell_deps(
         }
     }
     Ok(cell_deps)
+}
+
+pub fn get_cell_deps_count(contracts: Vec<Contract>, udt_script: &Option<Script>) -> usize {
+    let mut count = get_cell_deps_count_by_contracts(contracts);
+    if let Some(udt_script) = udt_script {
+        if let Some(udt) = get_udt_info(udt_script) {
+            count += udt.cell_deps.len();
+        }
+    }
+    count
 }
