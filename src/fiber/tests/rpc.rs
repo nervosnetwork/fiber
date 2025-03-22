@@ -26,10 +26,6 @@ async fn test_rpc_basic() {
     .await;
     let [node_0, node_1] = nodes.try_into().expect("2 nodes");
 
-    let list_peers: ListPeersResult = node_0.send_rpc_request("list_peers", ()).await.unwrap();
-    assert_eq!(list_peers.peers.len(), 1);
-    assert_eq!(list_peers.peers[0].pubkey, node_1.pubkey);
-
     let res: ListChannelsResult = node_0
         .send_rpc_request(
             "list_channels",
@@ -88,4 +84,59 @@ async fn test_rpc_basic() {
         .unwrap();
 
     assert_eq!(get_invoice_res.invoice.payment_hash(), invoice_payment_hash);
+}
+
+#[tokio::test]
+async fn test_rpc_list_peers() {
+    let (nodes, _channels) = create_n_nodes_network_with_rpc_option(
+        &[
+            ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+            ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+        ],
+        2,
+        true,
+    )
+    .await;
+    let [mut node_0, node_1] = nodes.try_into().expect("2 nodes");
+
+    let list_peers: ListPeersResult = node_0.send_rpc_request("list_peers", ()).await.unwrap();
+    assert_eq!(list_peers.peers.len(), 1);
+    assert_eq!(list_peers.peers[0].pubkey, node_1.pubkey);
+    let node_1_peer_id = list_peers.peers[0].peer_id.clone();
+
+    let _res: () = node_0
+        .send_rpc_request(
+            "disconnect_peer",
+            crate::rpc::peer::DisconnectPeerParams {
+                peer_id: node_1_peer_id,
+            },
+        )
+        .await
+        .unwrap();
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+    let list_peers: ListPeersResult = node_0.send_rpc_request("list_peers", ()).await.unwrap();
+    assert_eq!(list_peers.peers.len(), 0);
+
+    let node_3 = NetworkNode::new_with_config(
+        NetworkNodeConfigBuilder::new()
+            .node_name(Some(format!("node-{}", 3)))
+            .base_dir_prefix(&format!("test-fnn-node-{}-", 3))
+            .enable_rpc_server(true)
+            .build(),
+    )
+    .await;
+
+    let list_peers: ListPeersResult = node_3.send_rpc_request("list_peers", ()).await.unwrap();
+    assert_eq!(list_peers.peers.len(), 0);
+
+    node_0.connect_to(&node_3).await;
+    let list_peers: ListPeersResult = node_3.send_rpc_request("list_peers", ()).await.unwrap();
+    assert_eq!(list_peers.peers.len(), 1);
+    assert_eq!(list_peers.peers[0].pubkey, node_0.pubkey);
+
+    node_0.connect_to(&node_1).await;
+    let list_peers: ListPeersResult = node_0.send_rpc_request("list_peers", ()).await.unwrap();
+    assert_eq!(list_peers.peers.len(), 2);
 }

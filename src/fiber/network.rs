@@ -1417,12 +1417,14 @@ where
             }
             NetworkActorCommand::ListPeers(_, rpc) => {
                 let peers = state
-                    .state_to_be_persisted
-                    .peer_pubkey_map
-                    .iter()
-                    .map(|(peer_id, pubkey)| PeerInfo {
+                    .peer_session_map
+                    .keys()
+                    .map(|peer_id| PeerInfo {
                         peer_id: peer_id.clone(),
-                        pubkey: *pubkey,
+                        pubkey: state
+                            .state_to_be_persisted
+                            .get_peer_pubkey(peer_id)
+                            .expect("pubkey not found"),
                         addresses: state.state_to_be_persisted.get_peer_addresses(peer_id),
                     })
                     .collect::<Vec<_>>();
