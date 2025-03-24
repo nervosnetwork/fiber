@@ -180,7 +180,6 @@ pub struct UdtScript {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Eq, PartialEq, Hash)]
-#[serde(tag = "type", content = "dep")]
 pub enum UdtDep {
     CellDep(UdtCellDep),
     TypeID(UdtScript),

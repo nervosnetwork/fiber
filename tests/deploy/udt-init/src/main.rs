@@ -184,7 +184,6 @@ struct UdtScript {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
-#[serde(tag = "type", content = "dep")]
 enum UdtDep {
     CellDep(UdtCellDep),
     TypeID(UdtScript),
