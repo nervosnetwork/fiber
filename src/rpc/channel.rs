@@ -144,6 +144,7 @@ pub struct AcceptChannelParams {
 
     /// The expiry delta to forward a tlc, in milliseconds, default to 1 day, which is 24 * 60 * 60 * 1000 milliseconds
     /// This parameter can be updated with rpc `update_channel` later.
+    #[serde_as(as = "Option<U64Hex>")]
     pub tlc_expiry_delta: Option<u64>,
 }
 
@@ -293,9 +294,8 @@ pub struct UpdateChannelParams {
     pub channel_id: Hash256,
     /// Whether the channel is enabled
     pub enabled: Option<bool>,
-    /// The CLTV delta from the current height that should be used to set the timelock for the final hop
-    #[serde_as(as = "Option<U64Hex>")]
     /// The expiry delta for the TLC locktime
+    #[serde_as(as = "Option<U64Hex>")]
     pub tlc_expiry_delta: Option<u64>,
     /// The minimum value for a TLC
     #[serde_as(as = "Option<U128Hex>")]
