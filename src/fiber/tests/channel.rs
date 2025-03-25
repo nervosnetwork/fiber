@@ -4066,7 +4066,7 @@ async fn do_test_channel_with_simple_update_operation(algorithm: HashAlgorithm) 
                 channel_id: new_channel_id,
                 command: ChannelCommand::Shutdown(
                     ShutdownCommand {
-                        close_script: Script::default().as_builder().build(),
+                        close_script: Script::default(),
                         fee_rate,
                         force: false,
                     },

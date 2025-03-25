@@ -1,5 +1,5 @@
 use ckb_hash::blake2b_256;
-use ckb_types::core::{EpochNumberWithFraction, TransactionView};
+use ckb_types::core::{EpochNumberWithFraction, FeeRate, TransactionView};
 use ckb_types::packed::{Byte32, OutPoint, Script, Transaction};
 use ckb_types::prelude::{IntoTransactionView, Pack, Unpack};
 use ckb_types::H256;
@@ -72,7 +72,7 @@ use crate::ckb::config::UdtCfgInfos;
 use crate::ckb::contracts::{check_udt_script, get_udt_whitelist, is_udt_type_auto_accept};
 use crate::ckb::{CkbChainMessage, FundingRequest, FundingTx};
 use crate::fiber::channel::{
-    AddTlcCommand, AddTlcResponse, TxCollaborationCommand, TxUpdateCommand,
+    AddTlcCommand, AddTlcResponse, ShutdownCommand, TxCollaborationCommand, TxUpdateCommand,
 };
 use crate::fiber::config::{DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT};
 use crate::fiber::gossip::{GossipConfig, GossipService, SubscribableGossipMessageStore};
@@ -107,6 +107,9 @@ const ASSUME_GOSSIP_ACTOR_ALIVE: &str = "gossip actor must be alive";
 
 // The duration for which we will try to maintain the number of peers in connection.
 const MAINTAINING_CONNECTIONS_INTERVAL: Duration = Duration::from_secs(3600);
+
+// The duration for which we will check if we should force close a channel.
+const CHECK_FORCE_CLOSE_INTERVAL: Duration = Duration::from_secs(60);
 
 // While creating a network graph from the gossip messages, we will load current gossip messages
 // in the store and process them. We will load all current messages and get the latest cursor.
@@ -217,6 +220,8 @@ pub enum NetworkActorCommand {
     SavePeerAddress(Multiaddr),
     // We need to maintain a certain number of peers connections to keep the network running.
     MaintainConnections,
+    // Check if we should force close a channel.
+    CheckForceClose,
     // For internal use and debugging only. Most of the messages requires some
     // changes to local state. Even if we can send a message to a peer, some
     // part of the local state is not changed.
@@ -1119,6 +1124,42 @@ where
                                 NetworkActorCommand::ConnectPeer(addr.clone()),
                             ))
                             .expect(ASSUME_NETWORK_MYSELF_ALIVE);
+                    }
+                }
+            }
+            NetworkActorCommand::CheckForceClose => {
+                let now = now_timestamp_as_millis_u64();
+                for (_peer_id, channel_id, channel_state) in self.store.get_channel_states(None) {
+                    if matches!(channel_state, ChannelState::ChannelReady) {
+                        if let Some(actor_state) = self.store.get_channel_actor_state(&channel_id) {
+                            if actor_state
+                                .tlc_state
+                                .offered_tlcs
+                                .get_committed_tlcs()
+                                .iter()
+                                .any(|tlc| tlc.expiry < now)
+                            {
+                                debug!(
+                                    "Force closing channel {:?} due to expired offered tlc",
+                                    channel_id
+                                );
+                                let (send, _recv) = oneshot::channel::<Result<(), String>>();
+                                let rpc_reply = RpcReplyPort::from(send);
+                                state
+                                    .send_command_to_channel(
+                                        channel_id,
+                                        ChannelCommand::Shutdown(
+                                            ShutdownCommand {
+                                                close_script: Script::default(),
+                                                fee_rate: FeeRate::default(),
+                                                force: false,
+                                            },
+                                            rpc_reply,
+                                        ),
+                                    )
+                                    .await?;
+                            }
+                        }
                     }
                 }
             }
@@ -3266,6 +3307,9 @@ where
             .expect(ASSUME_NETWORK_MYSELF_ALIVE);
         myself.send_interval(MAINTAINING_CONNECTIONS_INTERVAL, || {
             NetworkActorMessage::new_command(NetworkActorCommand::MaintainConnections)
+        });
+        myself.send_interval(CHECK_FORCE_CLOSE_INTERVAL, || {
+            NetworkActorMessage::new_command(NetworkActorCommand::CheckForceClose)
         });
         Ok(())
     }
