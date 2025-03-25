@@ -3609,23 +3609,15 @@ pub(crate) fn deterministically_hash<T: Entity>(v: &T) -> [u8; 32] {
     ckb_hash::blake2b_256(v.as_slice())
 }
 
-/// Hop data from a router
 #[serde_as]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaymentHopData {
-    /// the amount received by this hop
     pub amount: u128,
-    /// the expiry time in seconds
     pub expiry: u64,
-    /// this is only specified in the last hop in the keysend mode
     pub payment_preimage: Option<Hash256>,
-    /// the payment hash_algorithm
     pub hash_algorithm: HashAlgorithm,
-    /// the funding transaction hash
     pub funding_tx_hash: Hash256,
-    /// the next hop
     pub next_hop: Option<Pubkey>,
-    /// the custom_records for a payment
     pub custom_records: Option<PaymentCustomRecords>,
 }
 
