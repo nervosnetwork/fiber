@@ -78,6 +78,7 @@ pub struct SessionRouteNode {
     pub channel_outpoint: OutPoint,
 }
 
+#[cfg(debug_assertions)]
 impl From<InternalSessionRouteNode> for SessionRouteNode {
     fn from(node: InternalSessionRouteNode) -> Self {
         SessionRouteNode {
