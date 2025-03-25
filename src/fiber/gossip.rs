@@ -319,6 +319,7 @@ pub trait SubscribableGossipMessageStore {
     async fn unsubscribe(&self, subscription: &Self::Subscription) -> Result<(), Self::Error>;
 }
 
+#[derive(Debug)]
 pub enum GossipActorMessage {
     // The control for the service async control is received.
     ReceivedControl(ServiceAsyncControl),

@@ -1,5 +1,8 @@
-use super::db_migrate::DbMigrate;
+use super::hook::{NoopStoreUpdateHook, PaymentUpdateHook};
 use super::schema::*;
+use super::subscription_impl::{new_subscription_impl, SubscriptionImpl};
+use super::{db_migrate::DbMigrate, hook::InvoiceUpdateHook};
+use crate::invoice::InvoiceChannelInfo;
 use crate::{
     fiber::{
         channel::{
@@ -24,10 +27,19 @@ use serde::Serialize;
 use std::{path::Path, sync::Arc};
 use tentacle::secio::PeerId;
 
+/// A generic store that allows for different types of hooks to be called when some data are updated.
+/// An example of a hook is the [SubscriptionImpl] which is used to notify subscribers of updates of
+/// invoices and payments. Another example is the [NoopStoreUpdateHook] which does nothing.
 #[derive(Clone, Debug)]
-pub struct Store {
+pub struct GenericStore<IH: InvoiceUpdateHook, PH: PaymentUpdateHook> {
     pub(crate) db: Arc<DB>,
+    pub(crate) invoice_hook: IH,
+    pub(crate) payment_hook: PH,
 }
+
+pub type Store = GenericStore<NoopStoreUpdateHook, NoopStoreUpdateHook>;
+
+pub type StoreWithHooks = GenericStore<SubscriptionImpl, SubscriptionImpl>;
 
 #[derive(Copy, Clone)]
 enum ChannelTimestamp {
@@ -72,17 +84,45 @@ fn update_channel_timestamp(
 
 impl Store {
     pub fn new<P: AsRef<Path>>(path: P) -> Result<Self, String> {
-        let db = Self::open_db(path.as_ref())?;
-        let db = Self::check_migrate(path, db)?;
-        Ok(Self { db })
+        let db = Self::open_db_and_migrate(path.as_ref())?;
+        Ok(Self {
+            db,
+            payment_hook: NoopStoreUpdateHook::default(),
+            invoice_hook: NoopStoreUpdateHook::default(),
+        })
+    }
+}
+
+impl StoreWithHooks {
+    pub async fn new<P: AsRef<Path>>(path: P) -> Result<(Self, SubscriptionImpl), String> {
+        let store = Store::new(path.as_ref())?;
+        Ok(Self::new_from_vanilla_store(store).await)
     }
 
+    pub async fn new_from_vanilla_store(store: Store) -> (Self, SubscriptionImpl) {
+        let subscription_impl = new_subscription_impl(store.clone()).await;
+        let store = Self {
+            db: store.db,
+            payment_hook: subscription_impl.clone(),
+            invoice_hook: subscription_impl.clone(),
+        };
+        (store, subscription_impl)
+    }
+}
+
+impl<IH: InvoiceUpdateHook, PH: PaymentUpdateHook> GenericStore<IH, PH> {
     fn open_db(path: &Path) -> Result<Arc<DB>, String> {
         // add more migrations here
         let mut options = Options::default();
         options.create_if_missing(true);
         options.set_compression_type(DBCompressionType::Lz4);
         let db = Arc::new(DB::open(&options, path).map_err(|e| e.to_string())?);
+        Ok(db)
+    }
+
+    fn open_db_and_migrate(path: &Path) -> Result<Arc<DB>, String> {
+        let db = Self::open_db(path)?;
+        let db = Self::check_migrate(path, db)?;
         Ok(db)
     }
 
@@ -144,6 +184,7 @@ enum KeyValue {
     CkbInvoice(Hash256, CkbInvoice),
     CkbInvoicePreimage(Hash256, Hash256),
     CkbInvoiceStatus(Hash256, CkbInvoiceStatus),
+    CkbInvoiceChannels(Hash256, Vec<InvoiceChannelInfo>),
     PeerIdChannelId((PeerId, Hash256), ChannelState),
     OutPointChannelId(OutPoint, Hash256),
     BroadcastMessageTimestamp(BroadcastMessageID, u64),
@@ -185,6 +226,9 @@ impl StoreKeyValue for KeyValue {
             }
             KeyValue::CkbInvoiceStatus(id, _) => {
                 [&[CKB_INVOICE_STATUS_PREFIX], id.as_ref()].concat()
+            }
+            KeyValue::CkbInvoiceChannels(id, _) => {
+                [&[CKB_INVOICE_CHANNELS_PREFIX], id.as_ref()].concat()
             }
             KeyValue::PeerIdChannelId((peer_id, channel_id), _) => [
                 &[PEER_ID_CHANNEL_ID_PREFIX],
@@ -230,6 +274,9 @@ impl StoreKeyValue for KeyValue {
             KeyValue::CkbInvoice(_, invoice) => serialize_to_vec(invoice, "CkbInvoice"),
             KeyValue::CkbInvoicePreimage(_, preimage) => serialize_to_vec(preimage, "Hash256"),
             KeyValue::CkbInvoiceStatus(_, status) => serialize_to_vec(status, "CkbInvoiceStatus"),
+            KeyValue::CkbInvoiceChannels(_, channel) => {
+                serialize_to_vec(channel, "CkbInvoiceChannels")
+            }
             KeyValue::PeerIdChannelId(_, state) => serialize_to_vec(state, "ChannelState"),
             KeyValue::OutPointChannelId(_, channel_id) => serialize_to_vec(channel_id, "ChannelId"),
             KeyValue::PaymentSession(_, payment_session) => {
@@ -281,7 +328,7 @@ impl Batch {
     }
 }
 
-impl NetworkActorStateStore for Store {
+impl<IH: InvoiceUpdateHook, PH: PaymentUpdateHook> NetworkActorStateStore for GenericStore<IH, PH> {
     fn get_network_actor_state(&self, id: &PeerId) -> Option<PersistentNetworkActorState> {
         let key = [&[PEER_ID_NETWORK_ACTOR_STATE_PREFIX], id.as_bytes()].concat();
         self.get(key)
@@ -295,7 +342,7 @@ impl NetworkActorStateStore for Store {
     }
 }
 
-impl ChannelActorStateStore for Store {
+impl<IH: InvoiceUpdateHook, PH: PaymentUpdateHook> ChannelActorStateStore for GenericStore<IH, PH> {
     fn get_channel_actor_state(&self, id: &Hash256) -> Option<ChannelActorState> {
         let key = [&[CHANNEL_ACTOR_STATE_PREFIX], id.as_ref()].concat();
         self.get(key)
@@ -390,7 +437,7 @@ impl ChannelActorStateStore for Store {
     }
 }
 
-impl InvoiceStore for Store {
+impl<IH: InvoiceUpdateHook, PH: PaymentUpdateHook> InvoiceStore for GenericStore<IH, PH> {
     fn get_invoice(&self, id: &Hash256) -> Option<CkbInvoice> {
         let key = [&[CKB_INVOICE_PREFIX], id.as_ref()].concat();
         self.get(key).map(|v| deserialize_from(&v, "CkbInvoice"))
@@ -417,6 +464,8 @@ impl InvoiceStore for Store {
             CkbInvoiceStatus::Open,
         ));
         batch.commit();
+        self.invoice_hook
+            .on_invoice_updated(payment_hash, CkbInvoiceStatus::Open);
         return Ok(());
     }
 
@@ -435,6 +484,7 @@ impl InvoiceStore for Store {
         let mut batch = self.batch();
         batch.put_kv(KeyValue::CkbInvoiceStatus(*id, status));
         batch.commit();
+        self.invoice_hook.on_invoice_updated(*id, status);
         Ok(())
     }
 
@@ -468,9 +518,43 @@ impl InvoiceStore for Store {
         batch.commit();
         Ok(())
     }
+
+    fn get_invoice_channel_info(&self, payment_hash: &Hash256) -> Vec<InvoiceChannelInfo> {
+        let key = [&[CKB_INVOICE_CHANNELS_PREFIX], payment_hash.as_ref()].concat();
+        self.get(key)
+            .map(|v| deserialize_from(&v, "CkbInvoiceChannels"))
+            .unwrap_or_default()
+    }
+
+    fn add_invoice_channel_info(
+        &self,
+        id: &Hash256,
+        channel_info: InvoiceChannelInfo,
+    ) -> Result<Vec<InvoiceChannelInfo>, InvoiceError> {
+        let mut batch = self.batch();
+        let key = [&[CKB_INVOICE_CHANNELS_PREFIX], id.as_ref()].concat();
+        let mut channels: Vec<InvoiceChannelInfo> = batch
+            .get(&key)
+            .map(|v| deserialize_from(&v, "CkbInvoiceChannels"))
+            .unwrap_or_default();
+        match channels
+            .iter_mut()
+            .find(|info| info.channel_id == channel_info.channel_id)
+        {
+            Some(info) => {
+                info.amount += channel_info.amount;
+            }
+            None => {
+                channels.push(channel_info);
+            }
+        }
+        batch.put_kv(KeyValue::CkbInvoiceChannels(*id, channels.clone()));
+        batch.commit();
+        Ok(channels)
+    }
 }
 
-impl NetworkGraphStateStore for Store {
+impl<IH: InvoiceUpdateHook, PH: PaymentUpdateHook> NetworkGraphStateStore for GenericStore<IH, PH> {
     fn get_payment_session(&self, payment_hash: Hash256) -> Option<PaymentSession> {
         let prefix = [&[PAYMENT_SESSION_PREFIX], payment_hash.as_ref()].concat();
         self.get(prefix)
@@ -478,9 +562,12 @@ impl NetworkGraphStateStore for Store {
     }
 
     fn insert_payment_session(&self, session: PaymentSession) {
+        let hash = session.payment_hash();
+        let status = session.status;
         let mut batch = self.batch();
-        batch.put_kv(KeyValue::PaymentSession(session.payment_hash(), session));
+        batch.put_kv(KeyValue::PaymentSession(hash, session));
         batch.commit();
+        self.payment_hook.on_payment_updated(hash, status);
     }
 
     fn insert_payment_history_result(
@@ -511,7 +598,7 @@ impl NetworkGraphStateStore for Store {
     }
 }
 
-impl GossipMessageStore for Store {
+impl<IH: InvoiceUpdateHook, PH: PaymentUpdateHook> GossipMessageStore for GenericStore<IH, PH> {
     fn get_broadcast_messages_iter(
         &self,
         after_cursor: &Cursor,
@@ -771,7 +858,7 @@ impl GossipMessageStore for Store {
     }
 }
 
-impl WatchtowerStore for Store {
+impl<IH: InvoiceUpdateHook, PH: PaymentUpdateHook> WatchtowerStore for GenericStore<IH, PH> {
     fn get_watch_channels(&self) -> Vec<ChannelData> {
         let prefix = vec![WATCHTOWER_CHANNEL_PREFIX];
         self.prefix_iterator(&prefix)

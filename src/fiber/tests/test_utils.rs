@@ -1,3 +1,5 @@
+use crate::cch::tests::lnd::LndNode;
+use crate::cch::CchMessage;
 use crate::ckb::tests::test_utils::get_tx_from_hash;
 use crate::ckb::GetTxResponse;
 use crate::fiber::channel::ChannelActorState;
@@ -23,7 +25,12 @@ use crate::fiber::types::Pubkey;
 use crate::invoice::CkbInvoice;
 use crate::invoice::CkbInvoiceStatus;
 use crate::invoice::InvoiceStore;
+use crate::invoice::SettleInvoiceError;
+use crate::start_cch;
 use crate::start_rpc;
+use crate::store::store::StoreWithHooks;
+use crate::store::subscription_impl::SubscriptionImpl;
+use crate::CchConfig;
 use crate::RpcConfig;
 use ckb_sdk::core::TransactionBuilder;
 use ckb_types::{
@@ -35,6 +42,7 @@ use jsonrpsee::http_client::transport::HttpBackend;
 use jsonrpsee::http_client::HttpClient;
 use jsonrpsee::rpc_params;
 use jsonrpsee::server::ServerHandle;
+use lnd::bitcoind::BitcoinD;
 use ractor::{call, Actor, ActorRef};
 use rand::distributions::Alphanumeric;
 use rand::rngs::OsRng;
@@ -191,16 +199,18 @@ pub struct NetworkNode {
     /// The base directory of the node, will be deleted after this struct dropped.
     pub base_dir: Arc<TempDir>,
     pub node_name: Option<String>,
-    pub store: Store,
-    pub channels_tx_map: HashMap<Hash256, Hash256>,
     pub fiber_config: FiberConfig,
     pub rpc_config: Option<RpcConfig>,
+    pub store: StoreWithHooks,
+    pub store_update_subscription: SubscriptionImpl,
+    pub channels_tx_map: HashMap<Hash256, Hash256>,
     pub listening_addrs: Vec<MultiAddr>,
     pub network_actor: ActorRef<NetworkActorMessage>,
     pub ckb_chain_actor: ActorRef<CkbChainMessage>,
-    pub network_graph: Arc<TokioRwLock<NetworkGraph<Store>>>,
+    pub network_graph: Arc<TokioRwLock<NetworkGraph<StoreWithHooks>>>,
     pub chain_actor: ActorRef<CkbChainMessage>,
     pub gossip_actor: ActorRef<GossipActorMessage>,
+    pub cch: Option<Cch>,
     pub private_key: Privkey,
     pub peer_id: PeerId,
     pub event_emitter: mpsc::Receiver<NetworkServiceEvent>,
@@ -210,12 +220,71 @@ pub struct NetworkNode {
     pub rpc_server: Option<(ServerHandle, SocketAddr)>,
 }
 
+pub struct Cch {
+    pub actor: ActorRef<CchMessage>,
+    pub config: CchConfig,
+    pub lnd_node: Option<LndNode>,
+}
+
+impl Cch {
+    pub async fn start(
+        config: CchConfig,
+        should_start_lnd: bool,
+        network_actor: ActorRef<NetworkActorMessage>,
+        pubkey: Pubkey,
+        store_update_subscription: SubscriptionImpl,
+    ) -> Self {
+        let (config, lnd_node) = if should_start_lnd {
+            let lnd_node = LndNode::new(Default::default(), Default::default()).await;
+            let mut config = config;
+            // Override the lnd config with the lnd node we just created.
+            config.lnd_rpc_url = lnd_node.lnd.grpc_url.clone();
+            config.lnd_cert_hex = Some(lnd_node.lnd.tls_cert.clone());
+            config.lnd_macaroon_hex = Some(lnd_node.lnd.admin_macaroon.clone());
+            (config, Some(lnd_node))
+        } else {
+            (config, None)
+        };
+        let actor = start_cch(
+            config.clone(),
+            new_tokio_task_tracker(),
+            new_tokio_cancellation_token(),
+            network_actor.get_cell(),
+            network_actor,
+            pubkey,
+            store_update_subscription.clone(),
+        )
+        .await
+        .expect("start cch actor");
+
+        Cch {
+            actor,
+            config,
+            lnd_node,
+        }
+    }
+
+    fn stop_actor(&self) {
+        self.actor.stop(Some("stop cch actor".to_string()));
+    }
+}
+
+impl std::fmt::Debug for Cch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Cch")
+            .field("actor", &self.actor)
+            .field("config", &self.config)
+            .finish()
+    }
+}
+
 pub struct NetworkNodeConfig {
     base_dir: Arc<TempDir>,
     node_name: Option<String>,
-    store: Store,
     fiber_config: FiberConfig,
     rpc_config: Option<RpcConfig>,
+    should_start_lnd: bool,
+    cch_config: Option<CchConfig>,
 }
 
 impl NetworkNodeConfig {
@@ -224,30 +293,22 @@ impl NetworkNodeConfig {
     }
 }
 
+#[derive(Default)]
 pub struct NetworkNodeConfigBuilder {
     base_dir: Option<Arc<TempDir>>,
     node_name: Option<String>,
     enable_rpc_server: bool,
+    should_start_lnd: Option<bool>,
+    cch_config: Option<CchConfig>,
     // We may generate a FiberConfig based on the base_dir and node_name,
     // but allow user to override it.
     #[allow(clippy::type_complexity)]
     fiber_config_updater: Option<Box<dyn FnOnce(&mut FiberConfig) + 'static>>,
 }
 
-impl Default for NetworkNodeConfigBuilder {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl NetworkNodeConfigBuilder {
     pub fn new() -> Self {
-        Self {
-            base_dir: None,
-            node_name: None,
-            enable_rpc_server: false,
-            fiber_config_updater: None,
-        }
+        Self::default()
     }
 
     pub fn base_dir(mut self, base_dir: Arc<TempDir>) -> Self {
@@ -274,6 +335,16 @@ impl NetworkNodeConfigBuilder {
         updater: impl FnOnce(&mut FiberConfig) + 'static,
     ) -> Self {
         self.fiber_config_updater = Some(Box::new(updater));
+        self
+    }
+
+    pub fn should_start_lnd(mut self, should_start_lnd: bool) -> Self {
+        self.should_start_lnd = Some(should_start_lnd);
+        self
+    }
+
+    pub fn cch_config(mut self, cch_config: CchConfig) -> Self {
+        self.cch_config = Some(cch_config);
         self
     }
 
@@ -311,8 +382,9 @@ impl NetworkNodeConfigBuilder {
         let mut config = NetworkNodeConfig {
             base_dir,
             node_name,
-            store,
             fiber_config,
+            should_start_lnd: self.should_start_lnd.unwrap_or(false),
+            cch_config: self.cch_config,
             rpc_config,
         };
 
@@ -340,6 +412,7 @@ pub(crate) async fn establish_channel_between_nodes(
     b_tlc_expiry_delta: Option<u64>,
     b_tlc_min_value: Option<u128>,
     b_tlc_fee_proportional_millionths: Option<u128>,
+    udt_script: Option<Script>,
 ) -> (Hash256, Hash256) {
     let message = |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
@@ -348,7 +421,7 @@ pub(crate) async fn establish_channel_between_nodes(
                 public,
                 shutdown_script: None,
                 funding_amount: node_a_funding_amount,
-                funding_udt_type_script: None,
+                funding_udt_type_script: udt_script,
                 commitment_fee_rate: None,
                 commitment_delay_epoch: None,
                 funding_fee_rate: None,
@@ -455,6 +528,7 @@ pub(crate) async fn create_nodes_with_established_channel(
         None,
         None,
         None,
+        None,
     )
     .await;
 
@@ -522,6 +596,7 @@ pub(crate) async fn create_n_nodes_network_with_rpc_option(
                 true,
                 node_a_amount,
                 node_b_amount,
+                None,
                 None,
                 None,
                 None,
@@ -602,21 +677,22 @@ impl NetworkNode {
     }
 
     pub fn get_local_balance_from_channel(&self, channel_id: Hash256) -> u128 {
-        self.store
+        self.get_store()
             .get_channel_actor_state(&channel_id)
             .expect("get channel")
             .to_local_amount
     }
 
     pub fn get_remote_balance_from_channel(&self, channel_id: Hash256) -> u128 {
-        self.store
+        self.get_store()
             .get_channel_actor_state(&channel_id)
             .expect("get channel")
             .to_remote_amount
     }
 
     pub fn get_channel_actor_state(&self, channel_id: Hash256) -> ChannelActorState {
-        self.get_channel_actor_state_unchecked(channel_id)
+        self.get_store()
+            .get_channel_actor_state(&channel_id)
             .expect("get channel")
     }
 
@@ -628,23 +704,55 @@ impl NetworkNode {
     }
 
     pub fn insert_invoice(&mut self, invoice: CkbInvoice, preimage: Option<Hash256>) {
-        self.store
+        self.get_store()
             .insert_invoice(invoice, preimage)
             .expect("insert success");
     }
 
     pub fn get_invoice_status(&mut self, payment_hash: &Hash256) -> Option<CkbInvoiceStatus> {
-        self.store.get_invoice_status(payment_hash)
+        self.get_store().get_invoice_status(payment_hash)
     }
 
     pub fn cancel_invoice(&mut self, payment_hash: &Hash256) {
-        self.store
+        self.get_store()
             .update_invoice_status(payment_hash, CkbInvoiceStatus::Cancelled)
             .expect("cancel success");
     }
 
     pub fn get_payment_preimage(&self, payment_hash: &Hash256) -> Option<Hash256> {
         self.store.get_invoice_preimage(payment_hash)
+    }
+
+    #[allow(private_interfaces)]
+    pub async fn settle_invoice(
+        &self,
+        payment_hash: &Hash256,
+        preimage: &Hash256,
+    ) -> Result<(), SettleInvoiceError> {
+        let message = move |rpc_reply| -> NetworkActorMessage {
+            NetworkActorMessage::Command(NetworkActorCommand::SettleInvoice(
+                *payment_hash,
+                *preimage,
+                rpc_reply,
+            ))
+        };
+        call!(&self.network_actor, message).expect("call network actor")
+    }
+
+    #[allow(private_interfaces)]
+    pub async fn settle_invoice(
+        &self,
+        payment_hash: &Hash256,
+        preimage: &Hash256,
+    ) -> Result<(), SettleInvoiceError> {
+        let message = move |rpc_reply| -> NetworkActorMessage {
+            NetworkActorMessage::Command(NetworkActorCommand::SettleInvoice(
+                *payment_hash,
+                *preimage,
+                rpc_reply,
+            ))
+        };
+        call!(&self.network_actor, message).expect("call network actor")
     }
 
     pub async fn send_payment(
@@ -717,19 +825,10 @@ impl NetworkNode {
         self.send_payment(SendPaymentCommand {
             target_pubkey: Some(recipient.pubkey),
             amount: Some(amount),
-            payment_hash: None,
-            final_tlc_expiry_delta: None,
-            tlc_expiry_limit: None,
-            invoice: None,
-            timeout: None,
-            max_fee_amount: None,
-            max_parts: None,
             keysend: Some(true),
-            udt_type_script: None,
             allow_self_payment: false,
             dry_run,
-            hop_hints: None,
-            custom_records: None,
+            ..Default::default()
         })
         .await
     }
@@ -801,19 +900,10 @@ impl NetworkNode {
         self.send_payment(SendPaymentCommand {
             target_pubkey: Some(pubkey),
             amount: Some(amount),
-            payment_hash: None,
-            final_tlc_expiry_delta: None,
-            tlc_expiry_limit: None,
-            invoice: None,
-            timeout: None,
-            max_fee_amount: None,
-            max_parts: None,
             keysend: Some(true),
-            udt_type_script: None,
             allow_self_payment: true,
             dry_run,
-            hop_hints: None,
-            custom_records: None,
+            ..Default::default()
         })
         .await
     }
@@ -986,7 +1076,7 @@ impl NetworkNode {
     }
 
     pub fn get_payment_session(&self, payment_hash: Hash256) -> Option<PaymentSession> {
-        self.store.get_payment_session(payment_hash)
+        self.get_store().get_payment_session(payment_hash)
     }
 
     pub fn get_payment_custom_records(
@@ -1009,23 +1099,39 @@ impl NetworkNode {
     }
 
     pub async fn new_with_config(config: NetworkNodeConfig) -> Self {
+        Self::new_with_config_and_store(config, None).await
+    }
+
+    pub async fn new_with_config_and_store(
+        config: NetworkNodeConfig,
+        store: Option<(StoreWithHooks, SubscriptionImpl)>,
+    ) -> Self {
         let NetworkNodeConfig {
             base_dir,
             node_name,
-            store,
             fiber_config,
             rpc_config,
+            should_start_lnd,
+            cch_config: config,
         } = config;
 
         let _span = tracing::info_span!("NetworkNode", node_name = &node_name).entered();
 
-        let root = get_test_root_actor().await;
+        let (store, store_update_subscription) = match store {
+            Some((store, subscription)) => (store, subscription),
+            None => StoreWithHooks::new(base_dir.as_ref())
+                .await
+                .expect("create store"),
+        };
+
+        let root_actor = get_test_root_actor().await;
         let (event_sender, mut event_receiver) = mpsc::channel(10000);
 
-        let chain_actor = Actor::spawn_linked(None, MockChainActor::new(), (), root.get_cell())
-            .await
-            .expect("start mock chain actor")
-            .0;
+        let chain_actor =
+            Actor::spawn_linked(None, MockChainActor::new(), (), root_actor.get_cell())
+                .await
+                .expect("start mock chain actor")
+                .0;
 
         let secret_key: Privkey = fiber_config
             .read_or_generate_secret_key()
@@ -1050,10 +1156,9 @@ impl NetworkNode {
             NetworkActorStartArguments {
                 config: fiber_config.clone(),
                 tracker: new_tokio_task_tracker(),
-                channel_subscribers: Default::default(),
                 default_shutdown_script: Default::default(),
             },
-            root.get_cell(),
+            root_actor.get_cell(),
         )
         .await
         .expect("start network actor")
@@ -1138,10 +1243,25 @@ impl NetworkNode {
             None
         };
 
+        let cch = match config {
+            Some(config) => Some(
+                Cch::start(
+                    config,
+                    should_start_lnd,
+                    network_actor.clone(),
+                    public_key,
+                    store_update_subscription.clone(),
+                )
+                .await,
+            ),
+            None => None,
+        };
+
         Self {
             base_dir,
             node_name,
             store,
+            store_update_subscription,
             fiber_config,
             rpc_config,
             channels_tx_map: Default::default(),
@@ -1151,6 +1271,7 @@ impl NetworkNode {
             network_graph,
             chain_actor,
             gossip_actor,
+            cch,
             private_key: secret_key,
             peer_id,
             event_emitter: self_event_receiver,
@@ -1165,9 +1286,10 @@ impl NetworkNode {
         NetworkNodeConfig {
             base_dir: self.base_dir.clone(),
             node_name: self.node_name.clone(),
-            store: self.store.clone(),
             fiber_config: self.fiber_config.clone(),
             rpc_config: self.rpc_config.clone(),
+            should_start_lnd: false,
+            cch_config: self.cch.as_ref().map(|cch| cch.config.clone()),
         }
     }
 
@@ -1175,6 +1297,14 @@ impl NetworkNode {
         self.ckb_chain_actor
             .send_message(message)
             .expect("send ckb chain message");
+    }
+
+    pub fn get_store(&self) -> &StoreWithHooks {
+        &self.store
+    }
+
+    pub fn get_store_update_subscription(&self) -> &SubscriptionImpl {
+        &self.store_update_subscription
     }
 
     pub async fn add_unexpected_events(&self, events: Vec<String>) {
@@ -1204,8 +1334,13 @@ impl NetworkNode {
 
     pub async fn start(&mut self) {
         let config = self.get_node_config();
-        let new = Self::new_with_config(config).await;
-        *self = new;
+        // TODO: This is actually different from rerunning the node from scratch.
+        // We can't really create a new store from the same directory because some other
+        // services are still using rocksdb store. So we may encounter error like
+        // IO error: lock hold by current process, acquire time 1739265247 acquiring thread 158410: /tmp/test-fnn-node-0-bnbY8P/LOCK: No locks available
+        let store = self.get_store().clone();
+        let subscription = self.get_store_update_subscription().clone();
+        *self = Self::new_with_config_and_store(config, Some((store, subscription))).await;
     }
 
     pub async fn stop(&mut self) {
@@ -1216,6 +1351,9 @@ impl NetworkNode {
             |event| matches!(event, NetworkServiceEvent::NetworkStopped(id) if id == &my_peer_id),
         )
         .await;
+        if let Some(cch) = self.cch.as_ref() {
+            cch.stop_actor();
+        }
     }
 
     pub async fn restart(&mut self) {
@@ -1273,6 +1411,7 @@ impl NetworkNode {
             public,
             node_a_funding_amount,
             node_b_funding_amount,
+            None,
             None,
             None,
             None,
@@ -1409,13 +1548,13 @@ impl NetworkNode {
             .and_then(|response| response.transaction)
     }
 
-    pub fn get_network_graph(&self) -> &Arc<TokioRwLock<NetworkGraph<Store>>> {
+    pub fn get_network_graph(&self) -> &Arc<TokioRwLock<NetworkGraph<StoreWithHooks>>> {
         &self.network_graph
     }
 
     pub async fn with_network_graph<F, T>(&self, f: F) -> T
     where
-        F: FnOnce(&NetworkGraph<Store>) -> T,
+        F: FnOnce(&NetworkGraph<StoreWithHooks>) -> T,
     {
         let graph = self.get_network_graph().read().await;
         f(&graph)
@@ -1423,7 +1562,7 @@ impl NetworkNode {
 
     pub async fn with_network_graph_mut<F, T>(&self, f: F) -> T
     where
-        F: FnOnce(&mut NetworkGraph<Store>) -> T,
+        F: FnOnce(&mut NetworkGraph<StoreWithHooks>) -> T,
     {
         let mut graph = self.get_network_graph().write().await;
         f(&mut graph)
@@ -1468,6 +1607,30 @@ impl NetworkNode {
     pub fn get_store(&self) -> &Store {
         &self.store
     }
+
+    pub fn get_cch_actor(&self) -> &ActorRef<CchMessage> {
+        &self.cch.as_ref().expect("cch started").actor
+    }
+
+    pub fn get_bitcoind(&self) -> Arc<BitcoinD> {
+        self.cch
+            .as_ref()
+            .expect("cch started")
+            .lnd_node
+            .as_ref()
+            .expect("lnd started")
+            .bitcoind
+            .clone()
+    }
+
+    pub fn get_lnd_node_mut(&mut self) -> &mut LndNode {
+        self.cch
+            .as_mut()
+            .expect("cch started")
+            .lnd_node
+            .as_mut()
+            .expect("lnd started")
+    }
 }
 
 #[tokio::test]
@@ -1481,4 +1644,37 @@ async fn test_connect_to_other_node() {
 async fn test_restart_network_node() {
     let mut node = NetworkNode::new().await;
     node.restart().await;
+}
+
+#[cfg_attr(not(feature = "lnd-tests"), ignore)]
+#[tokio::test]
+async fn test_start_node_with_cch_connected_to_internal_lnd_node() {
+    let mut node = NetworkNode::new_with_config(
+        NetworkNodeConfigBuilder::new()
+            .cch_config(CchConfig::default())
+            .should_start_lnd(true)
+            .build(),
+    )
+    .await;
+    let cch = node.cch.as_mut().expect("cch started");
+    let lnd_node = cch.lnd_node.as_mut().expect("lnd node started");
+    println!("lnd_node: {:?}", lnd_node.get_info().await);
+}
+
+#[tokio::test]
+async fn test_start_node_with_cch_connected_to_external_lnd_node() {
+    let cch_config = CchConfig {
+        // The default lnd_rpc_url may actually work, so we need to set it to an invalid value.
+        // Let's assume that the following URL is not a valid lnd RPC URL.
+        lnd_rpc_url: "http://1.1.1.1:1".to_string(),
+        ..Default::default()
+    };
+    let mut node = NetworkNode::new_with_config(
+        NetworkNodeConfigBuilder::new()
+            .cch_config(cch_config)
+            .build(),
+    )
+    .await;
+    let cch = node.cch.as_mut().expect("cch started");
+    assert!(cch.lnd_node.is_none());
 }

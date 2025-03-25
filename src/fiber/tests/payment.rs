@@ -1,5 +1,5 @@
 #![allow(clippy::needless_range_loop)]
-use super::test_utils::init_tracing;
+use super::test_utils::{create_n_nodes_and_channels_with_index_amounts, init_tracing};
 use crate::fiber::channel::ChannelState;
 use crate::fiber::channel::CloseFlags;
 use crate::fiber::channel::UpdateCommand;
@@ -144,19 +144,8 @@ async fn test_send_payment_prefer_newer_channels() {
         .send_payment(SendPaymentCommand {
             target_pubkey: Some(target_pubkey),
             amount: Some(10000000000),
-            payment_hash: None,
-            final_tlc_expiry_delta: None,
-            tlc_expiry_limit: None,
-            invoice: None,
-            timeout: None,
-            max_fee_amount: None,
-            max_parts: None,
             keysend: Some(true),
-            udt_type_script: None,
-            allow_self_payment: false,
-            hop_hints: None,
-            dry_run: false,
-            custom_records: None,
+            ..Default::default()
         })
         .await;
 
@@ -203,19 +192,8 @@ async fn test_send_payment_prefer_channels_with_larger_balance() {
         .send_payment(SendPaymentCommand {
             target_pubkey: Some(target_pubkey),
             amount: Some(5000000000),
-            payment_hash: None,
-            final_tlc_expiry_delta: None,
-            tlc_expiry_limit: None,
-            invoice: None,
-            timeout: None,
-            max_fee_amount: None,
-            max_parts: None,
             keysend: Some(true),
-            udt_type_script: None,
-            allow_self_payment: false,
-            hop_hints: None,
-            dry_run: false,
-            custom_records: None,
+            ..Default::default()
         })
         .await;
 
@@ -258,6 +236,7 @@ async fn test_send_payment_fee_rate() {
         None,
         None,
         Some(2_000_000),
+        None,
     )
     .await;
     let funding_tx_0 = node_0
@@ -282,6 +261,7 @@ async fn test_send_payment_fee_rate() {
         None,
         None,
         Some(4_000_000),
+        None,
     )
     .await;
     let funding_tx_1 = node_1
@@ -349,6 +329,7 @@ async fn test_send_payment_over_private_channel() {
             None,
             None,
             None,
+            None,
         )
         .await;
 
@@ -362,19 +343,8 @@ async fn test_send_payment_over_private_channel() {
             .send_payment(SendPaymentCommand {
                 target_pubkey: Some(target_pubkey),
                 amount: Some(amount_to_send),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                tlc_expiry_limit: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-                custom_records: None,
+                ..Default::default()
             })
             .await;
 
@@ -610,6 +580,110 @@ async fn test_send_payment_with_more_capacity_for_payself() {
 }
 
 #[tokio::test]
+async fn test_send_payment_with_route_to_self_with_hop_hints() {
+    init_tracing();
+    let _span = tracing::info_span!("node", node = "test").entered();
+
+    let (nodes, channels) = create_n_nodes_and_channels_with_index_amounts(
+        &[
+            (
+                (0, 1),
+                (
+                    MIN_RESERVED_CKB + 10000000000,
+                    MIN_RESERVED_CKB + 10000000000,
+                ),
+            ),
+            (
+                (1, 2),
+                (
+                    MIN_RESERVED_CKB + 10000000000,
+                    MIN_RESERVED_CKB + 10000000000,
+                ),
+            ),
+            (
+                (2, 0),
+                (
+                    MIN_RESERVED_CKB + 10000000000,
+                    MIN_RESERVED_CKB + 10000000000,
+                ),
+            ),
+        ],
+        3,
+        true,
+    )
+    .await;
+    let [node_0, node_1, node_2] = nodes.try_into().expect("3 nodes");
+    eprintln!("node_0: {:?}", node_0.pubkey);
+    eprintln!("node_1: {:?}", node_1.pubkey);
+    eprintln!("node_2: {:?}", node_2.pubkey);
+
+    let node_1_channel0_balance = node_1.get_local_balance_from_channel(channels[0]);
+    let node_1_channel1_balance = node_1.get_local_balance_from_channel(channels[1]);
+    let node_2_channel1_balance = node_2.get_local_balance_from_channel(channels[1]);
+    let node_2_channel2_balance = node_2.get_local_balance_from_channel(channels[2]);
+
+    let channel_0_funding_tx = node_0.get_channel_funding_tx(&channels[0]).unwrap();
+
+    // node_0 -> node_0 will be ok if `allow_self_payment` is true
+    // use hop hints to help find_path use node1 -> node0,
+    // then the only valid route will be node0 -> node2 -> node1 -> node0
+    let res = node_0
+        .send_payment(SendPaymentCommand {
+            target_pubkey: Some(node_0.pubkey),
+            amount: Some(60000000),
+            keysend: Some(true),
+            allow_self_payment: true,
+            hop_hints: Some(vec![HopHint {
+                pubkey: node_0.pubkey,
+                channel_funding_tx: channel_0_funding_tx,
+                inbound: true,
+            }]),
+            ..Default::default()
+        })
+        .await;
+
+    eprintln!("res: {:?}", res);
+    assert!(res.is_ok());
+
+    let res = res.unwrap();
+    let payment_hash = res.payment_hash;
+    node_0.wait_until_success(payment_hash).await;
+    node_0
+        .assert_payment_status(payment_hash, PaymentSessionStatus::Success, Some(1))
+        .await;
+
+    let node_0_balance1 = node_0.get_local_balance_from_channel(channels[0]);
+    let node_0_balance2 = node_0.get_local_balance_from_channel(channels[2]);
+
+    eprintln!("fee: {:?}", res.fee);
+    // for node0 pay to self, only the fee will be deducted
+    assert!(node_0_balance1 + node_0_balance2 == 10000000000 + 10000000000 - res.fee);
+
+    eprintln!(
+        "node1 left: {:?}, right: {:?}",
+        node_1.get_local_balance_from_channel(channels[0]),
+        node_1.get_local_balance_from_channel(channels[1])
+    );
+
+    let node_1_new_channel0_balance = node_1.get_local_balance_from_channel(channels[0]);
+    let node_1_new_channel1_balance = node_1.get_local_balance_from_channel(channels[1]);
+    let node_2_new_channel1_balance = node_2.get_local_balance_from_channel(channels[1]);
+    let node_2_new_channel2_balance = node_2.get_local_balance_from_channel(channels[2]);
+
+    // node0 can only route to self from
+    // node0 -> node2 -> node1 -> node0
+    let node1_fee = (node_1_new_channel1_balance - node_1_channel1_balance)
+        - (node_1_channel0_balance - node_1_new_channel0_balance);
+
+    assert!(node1_fee > 0);
+
+    let node2_fee = (node_2_new_channel2_balance - node_2_channel2_balance)
+        - (node_2_channel1_balance - node_2_new_channel1_balance);
+
+    assert_eq!(node1_fee + node2_fee, res.fee);
+}
+
+#[tokio::test]
 async fn test_send_payment_with_private_channel_hints() {
     async fn test(amount_to_send: u128, is_payment_ok: bool) {
         let (nodes, _channels) = create_n_nodes_network(
@@ -669,8 +743,7 @@ async fn test_send_payment_with_private_channel_hints() {
                     fee_rate: DEFAULT_TLC_FEE_PROPORTIONAL_MILLIONTHS as u64,
                     tlc_expiry_delta: DEFAULT_TLC_EXPIRY_DELTA,
                 }]),
-                dry_run: false,
-                custom_records: None,
+                ..Default::default()
             })
             .await;
 
@@ -734,8 +807,8 @@ async fn test_send_payment_with_private_channel_hints_fallback() {
 
     let res = source_node
         .send_payment(SendPaymentCommand {
-            target_pubkey: Some(target_pubkey),
-            amount: Some(30000000000),
+            target_pubkey: Some(node_0.pubkey),
+            amount: Some(60000000),
             payment_hash: None,
             final_tlc_expiry_delta: None,
             tlc_expiry_limit: None,
@@ -744,7 +817,6 @@ async fn test_send_payment_with_private_channel_hints_fallback() {
             max_fee_amount: None,
             max_parts: None,
             keysend: Some(true),
-            udt_type_script: None,
             allow_self_payment: true,
             custom_records: None,
             hop_hints: Some(vec![HopHint {
@@ -753,7 +825,7 @@ async fn test_send_payment_with_private_channel_hints_fallback() {
                 fee_rate: DEFAULT_TLC_FEE_PROPORTIONAL_MILLIONTHS as u64,
                 tlc_expiry_delta: DEFAULT_TLC_EXPIRY_DELTA,
             }]),
-            dry_run: false,
+            ..Default::default()
         })
         .await;
 
@@ -777,53 +849,57 @@ async fn test_send_payment_with_private_multiple_channel_hints_fallback() {
         3,
     )
     .await;
-    let [mut node1, mut node2, mut node3] = nodes.try_into().expect("3 nodes");
+    let [node_0, node_1, node_2, node_3] = nodes.try_into().expect("4 nodes");
+    eprintln!("node_0: {:?}", node_0.pubkey);
+    eprintln!("node_1: {:?}", node_1.pubkey);
+    eprintln!("node_2: {:?}", node_2.pubkey);
+    eprintln!("node_3: {:?}", node_3.pubkey);
 
-    async fn create_channel(
-        node2: &mut NetworkNode,
-        node3: &mut NetworkNode,
-        amount: u128,
-    ) -> OutPoint {
-        let (_new_channel_id, funding_tx_hash) = establish_channel_between_nodes(
-            node2,
-            node3,
-            false,
-            MIN_RESERVED_CKB + amount,
-            MIN_RESERVED_CKB,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
-        .await;
-        node2
-            .get_transaction_view_from_hash(funding_tx_hash)
-            .await
-            .expect("get funding tx")
-            .output_pts_iter()
-            .next()
-            .unwrap()
-    }
-
-    let outpoint1 = create_channel(&mut node2, &mut node3, 20000000000).await;
-    let outpoint2 = create_channel(&mut node2, &mut node3, 40000000000).await;
-
-    // sleep for a while
-    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-
-    let source_node = &mut node1;
-    let target_pubkey = node3.pubkey;
-
-    let res = source_node
+    let channel_3_funding_tx = node_0.get_channel_funding_tx(&channels[3]).unwrap();
+    eprintln!("channel_3_funding_tx: {:?}", channel_3_funding_tx);
+    let res = node_0
         .send_payment(SendPaymentCommand {
-            target_pubkey: Some(target_pubkey),
-            amount: Some(30000000000),
+            target_pubkey: Some(node_3.pubkey),
+            amount: Some(60000000),
+            keysend: Some(true),
+            allow_self_payment: true,
+            // at node_1, we must use channel_3 to reach node_2
+            hop_hints: Some(vec![HopHint {
+                pubkey: node_2.pubkey,
+                channel_funding_tx: channel_3_funding_tx,
+                inbound: true,
+            }]),
+            ..Default::default()
+        })
+        .await;
+
+    eprintln!("res: {:?}", res);
+    assert!(res.is_ok());
+    let payment_hash = res.unwrap().payment_hash;
+    eprintln!("payment_hash: {:?}", payment_hash);
+    let payment_session = node_0
+        .get_payment_session(payment_hash)
+        .expect("get payment");
+    eprintln!("payment_session: {:?}", payment_session);
+    let used_channels: Vec<Hash256> = payment_session
+        .route
+        .nodes
+        .iter()
+        .map(|x| x.channel_outpoint.tx_hash().into())
+        .collect();
+    eprintln!("used_channels: {:?}", used_channels);
+    assert_eq!(used_channels.len(), 4);
+    assert_eq!(used_channels[1], channel_3_funding_tx);
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(2500)).await;
+
+    // try channel_2 with outbound hop hints
+    let channel_2_funding_tx = node_0.get_channel_funding_tx(&channels[2]).unwrap();
+    eprintln!("channel_2_funding_tx: {:?}", channel_2_funding_tx);
+    let res = node_0
+        .send_payment(SendPaymentCommand {
+            target_pubkey: Some(node_3.pubkey),
+            amount: Some(60000000),
             payment_hash: None,
             final_tlc_expiry_delta: None,
             tlc_expiry_limit: None,
@@ -833,7 +909,88 @@ async fn test_send_payment_with_private_multiple_channel_hints_fallback() {
             max_parts: None,
             keysend: Some(true),
             udt_type_script: None,
-            allow_self_payment: false,
+            allow_self_payment: true,
+            // at node_1, we must use channel_2 to reach node_2
+            hop_hints: Some(vec![HopHint {
+                pubkey: node_1.pubkey,
+                channel_funding_tx: channel_2_funding_tx,
+                inbound: false,
+            }]),
+            dry_run: false,
+        })
+        .await;
+
+    eprintln!("res: {:?}", res);
+    assert!(res.is_ok());
+    let payment_hash = res.unwrap().payment_hash;
+    eprintln!("payment_hash: {:?}", payment_hash);
+    let payment_session = node_0
+        .get_payment_session(payment_hash)
+        .expect("get payment");
+    eprintln!("payment_session: {:?}", payment_session);
+    let used_channels: Vec<Hash256> = payment_session
+        .route
+        .nodes
+        .iter()
+        .map(|x| x.channel_outpoint.tx_hash().into())
+        .collect();
+    eprintln!("used_channels: {:?}", used_channels);
+    assert_eq!(used_channels.len(), 4);
+    assert_eq!(used_channels[1], channel_2_funding_tx);
+
+    let res = source_node
+        .send_payment(SendPaymentCommand {
+            target_pubkey: Some(node_3.pubkey),
+            amount: Some(60000000),
+            keysend: Some(true),
+            allow_self_payment: true,
+            // at node_1, we must use channel_3 to reach node_2
+            hop_hints: Some(vec![HopHint {
+                pubkey: node_2.pubkey,
+                channel_funding_tx: wrong_channel_hash,
+                inbound: true,
+            }]),
+            ..Default::default()
+        })
+        .await;
+    eprintln!("res: {:?}", res);
+    assert!(res
+        .unwrap_err()
+        .to_string()
+        .contains("PathFind error: no path found"));
+}
+
+#[tokio::test]
+async fn test_send_payment_two_nodes_with_hop_hints_and_multiple_channels() {
+    init_tracing();
+    let _span = tracing::info_span!("node", node = "test").entered();
+
+    let (nodes, channels) = create_n_nodes_and_channels_with_index_amounts(
+        &[
+            ((0, 1), (HUGE_CKB_AMOUNT, MIN_RESERVED_CKB)),
+            ((0, 1), (HUGE_CKB_AMOUNT, MIN_RESERVED_CKB)),
+            ((1, 0), (HUGE_CKB_AMOUNT, MIN_RESERVED_CKB)),
+            ((1, 0), (HUGE_CKB_AMOUNT, MIN_RESERVED_CKB)),
+        ],
+        2,
+        true,
+    )
+    .await;
+    let [node_0, node_1] = nodes.try_into().expect("2 nodes");
+    eprintln!("node_0: {:?}", node_0.pubkey);
+    eprintln!("node_1: {:?}", node_1.pubkey);
+
+    let channel_1_funding_tx = node_0.get_channel_funding_tx(&channels[1]).unwrap();
+    let channel_3_funding_tx = node_0.get_channel_funding_tx(&channels[3]).unwrap();
+    let old_balance = node_0.get_local_balance_from_channel(channels[1]);
+    let old_node1_balance = node_1.get_local_balance_from_channel(channels[3]);
+    eprintln!("channel_1_funding_tx: {:?}", channel_1_funding_tx);
+    let res = node_0
+        .send_payment(SendPaymentCommand {
+            target_pubkey: Some(node_0.pubkey),
+            amount: Some(60000000),
+            keysend: Some(true),
+            allow_self_payment: true,
             hop_hints: Some(vec![
                 HopHint {
                     pubkey: node2.pubkey,
@@ -848,8 +1005,7 @@ async fn test_send_payment_with_private_multiple_channel_hints_fallback() {
                     tlc_expiry_delta: DEFAULT_TLC_EXPIRY_DELTA,
                 },
             ]),
-            dry_run: false,
-            custom_records: None,
+            ..Default::default()
         })
         .await;
 
@@ -1389,19 +1545,8 @@ async fn test_network_send_payment_randomly_send_each_other() {
                 SendPaymentCommand {
                     target_pubkey: Some(target),
                     amount: Some(amount),
-                    payment_hash: None,
-                    final_tlc_expiry_delta: None,
-                    tlc_expiry_limit: None,
-                    invoice: None,
-                    timeout: None,
-                    max_fee_amount: None,
-                    max_parts: None,
                     keysend: Some(true),
-                    udt_type_script: None,
-                    allow_self_payment: false,
-                    hop_hints: None,
-                    dry_run: false,
-                    custom_records: None,
+                    ..Default::default()
                 },
                 rpc_reply,
             ))
@@ -1569,19 +1714,8 @@ async fn test_network_three_nodes_send_each_other() {
             SendPaymentCommand {
                 target_pubkey: Some(node_c_pubkey),
                 amount: Some(amount_a_to_c),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                tlc_expiry_limit: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                custom_records: None,
-                dry_run: false,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -1600,19 +1734,8 @@ async fn test_network_three_nodes_send_each_other() {
             SendPaymentCommand {
                 target_pubkey: Some(node_a_pubkey),
                 amount: Some(amount_c_to_a),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                tlc_expiry_limit: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                custom_records: None,
-                dry_run: false,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -2117,6 +2240,7 @@ async fn test_send_payment_max_value_in_flight_in_first_hop() {
             None,
             None,
             None,
+            None,
         )
         .await
     };
@@ -2152,6 +2276,7 @@ async fn test_send_payment_max_value_in_flight_in_first_hop() {
             HUGE_CKB_AMOUNT,
             None,
             Some(100000000 + 2),
+            None,
             None,
             None,
             None,
