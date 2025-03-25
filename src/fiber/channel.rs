@@ -713,7 +713,7 @@ where
         &self,
         myself: &ActorRef<ChannelActorMessage>,
         state: &mut ChannelActorState,
-        payment_hash: Hash256,
+        #[allow(unused_variables)] payment_hash: Hash256,
         tlc_id: TLCId,
         error: ProcessingChannelErrorWithSharedSecret,
     ) {
