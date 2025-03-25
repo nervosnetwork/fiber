@@ -63,7 +63,7 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
     * [Type `PaymentSessionStatus`](#type-paymentsessionstatus)
     * [Type `Pubkey`](#type-pubkey)
     * [Type `RemoveTlcReason`](#type-removetlcreason)
-    * [Type `SessionRoute`](#type-sessionroute)
+    * [Type `SessionRouteNode`](#type-sessionroutenode)
     * [Type `UdtCfgInfos`](#type-udtcfginfos)
 
 ## RPC Modules
@@ -302,9 +302,7 @@ Updates a channel.
 
 * `channel_id` - <em>[Hash256](#type-hash256)</em>, The channel ID of the channel to update
 * `enabled` - <em>`Option<bool>`</em>, Whether the channel is enabled
-* `tlc_expiry_delta` - <em>`Option<u64>`</em>, The CLTV delta from the current height that should be used to set the timelock for the final hop
-
- The expiry delta for the TLC locktime
+* `tlc_expiry_delta` - <em>`Option<u64>`</em>, The expiry delta for the TLC locktime
 * `tlc_minimum_value` - <em>`Option<u128>`</em>, The minimum value for a TLC
 * `tlc_fee_proportional_millionths` - <em>`Option<u128>`</em>, The fee proportional millionths for a TLC
 
@@ -637,7 +635,12 @@ Sends a payment to a peer.
 * `failed_error` - <em>`Option<String>`</em>, The error message if the payment failed
 * `fee` - <em>`u128`</em>, fee paid for the payment
 * `custom_records` - <em>Option<[PaymentCustomRecords](#type-paymentcustomrecords)></em>, The custom records to be included in the payment.
-* `router` - <em>[SessionRoute](#type-sessionroute)</em>, The route information for the payment
+* `router` - <em>Vec<[SessionRouteNode](#type-sessionroutenode)></em>, The router is a list of nodes that the payment will go through.
+ We store in the payment session and then will use it to track the payment history.
+ The router is a list of nodes that the payment will go through.
+ For example:
+    `A(amount, channel) -> B -> C -> D`
+ means A will send `amount` with `channel` to B.
 
 ---
 
@@ -661,7 +664,12 @@ Retrieves a payment.
 * `failed_error` - <em>`Option<String>`</em>, The error message if the payment failed
 * `fee` - <em>`u128`</em>, fee paid for the payment
 * `custom_records` - <em>Option<[PaymentCustomRecords](#type-paymentcustomrecords)></em>, The custom records to be included in the payment.
-* `router` - <em>[SessionRoute](#type-sessionroute)</em>, The route information for the payment
+* `router` - <em>Vec<[SessionRouteNode](#type-sessionroutenode)></em>, The router is a list of nodes that the payment will go through.
+ We store in the payment session and then will use it to track the payment history.
+ The router is a list of nodes that the payment will go through.
+ For example:
+    `A(amount, channel) -> B -> C -> D`
+ means A will send `amount` with `channel` to B.
 
 ---
 
@@ -936,19 +944,17 @@ The reason for removing a TLC
 * `RemoveTlcFail` - The reason for removing the TLC is that it failed
 ---
 
-<a id="#type-sessionroute"></a>
-### Type `SessionRoute`
+<a id="#type-sessionroutenode"></a>
+### Type `SessionRouteNode`
 
-The router is a list of nodes that the payment will go through.
- We store in the payment session and then will use it to track the payment history.
- The router is a list of nodes that the payment will go through.
- For example:
-    A(amount, channel) -> B -> C -> D means A will send `amount` with `channel` to B.
+The node and channel information in a payment route hop
 
 
 #### Fields
 
-* `nodes` - <em>`Vec<SessionRouteNode>`</em>, the nodes in the route
+* `pubkey` - <em>Pubkey</em>, the public key of the node
+* `amount` - <em>u128</em>, the amount for this hop
+* `channel_outpoint` - <em>OutPoint</em>, the channel outpoint for this hop
 ---
 
 <a id="#type-udtcfginfos"></a>
