@@ -169,6 +169,7 @@ pub struct ChannelInfo {
     pub node2: Pubkey,
     /// The created timestamp of the channel, which is the block header timestamp of the block
     /// that contains the channel funding transaction.
+    #[serde_as(as = "U64Hex")]
     pub created_timestamp: u64,
     /// The timestamp of the last update to channel by node 1 (e.g. updating fee rate).
     /// Types of update included https://github.com/nervosnetwork/fiber/tree/develop/src/rpc#params-7

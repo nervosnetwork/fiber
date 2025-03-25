@@ -83,6 +83,7 @@ pub async fn main() -> Result<(), ExitMessage> {
         }
     });
 
+    #[allow(unused_variables)]
     let (network_actor, ckb_chain_actor, network_graph) = match config.fiber.clone() {
         Some(fiber_config) => {
             // TODO: this is not a super user friendly error message which has actionable information
@@ -287,7 +288,7 @@ pub async fn main() -> Result<(), ExitMessage> {
     };
 
     signal_listener().await;
-    if let Some(handle) = rpc_server_handle {
+    if let Some((handle, _)) = rpc_server_handle {
         handle
             .stop()
             .map_err(|err| ExitMessage(format!("failed to stop rpc server: {}", err)))?;

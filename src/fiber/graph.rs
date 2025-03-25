@@ -1486,7 +1486,8 @@ pub struct SessionRouteNode {
 /// We store in the payment session and then will use it to track the payment history.
 /// The router is a list of nodes that the payment will go through.
 /// For example:
-///    A(amount, channel) -> B -> C -> D means A will send `amount` with `channel` to B.
+///    `A(amount, channel) -> B -> C -> D`
+/// means A will send `amount` with `channel` to B.
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct SessionRoute {
     /// the nodes in the route

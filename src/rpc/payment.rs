@@ -1,6 +1,6 @@
 use crate::fiber::graph::PathEdge;
 #[cfg(debug_assertions)]
-use crate::fiber::graph::SessionRoute;
+use crate::fiber::graph::SessionRouteNode as InternalSessionRouteNode;
 use crate::fiber::network::BuildRouterCommand;
 use crate::fiber::network::HopRequire;
 use crate::fiber::network::SendPaymentWithRouterCommand;
@@ -9,13 +9,14 @@ use crate::fiber::serde_utils::U32Hex;
 use crate::fiber::{
     channel::ChannelActorStateStore,
     graph::PaymentSessionStatus,
-    network::{HopHint, SendPaymentCommand},
-    serde_utils::{U128Hex, U64Hex},
+    network::{HopHint as NetworkHopHint, SendPaymentCommand},
+    serde_utils::{EntityHex, U128Hex, U64Hex},
     types::{Hash256, Pubkey},
     NetworkActorCommand, NetworkActorMessage,
 };
 use crate::{handle_actor_call, log_and_error};
 use ckb_jsonrpc_types::Script;
+use ckb_types::packed::OutPoint;
 use jsonrpsee::{
     core::async_trait,
     proc_macros::rpc,
@@ -57,8 +58,39 @@ pub struct GetPaymentCommandResult {
     pub custom_records: Option<PaymentCustomRecords>,
 
     #[cfg(debug_assertions)]
-    /// The route information for the payment
-    router: SessionRoute,
+    /// The router is a list of nodes that the payment will go through.
+    /// We store in the payment session and then will use it to track the payment history.
+    /// The router is a list of nodes that the payment will go through.
+    /// For example:
+    ///    `A(amount, channel) -> B -> C -> D`
+    /// means A will send `amount` with `channel` to B.
+    router: Vec<SessionRouteNode>,
+}
+
+/// The node and channel information in a payment route hop
+#[cfg(debug_assertions)]
+#[serde_as]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SessionRouteNode {
+    /// the public key of the node
+    pub pubkey: Pubkey,
+    /// the amount for this hop
+    #[serde_as(as = "U128Hex")]
+    pub amount: u128,
+    /// the channel outpoint for this hop
+    #[serde_as(as = "EntityHex")]
+    pub channel_outpoint: OutPoint,
+}
+
+#[cfg(debug_assertions)]
+impl From<InternalSessionRouteNode> for SessionRouteNode {
+    fn from(node: InternalSessionRouteNode) -> Self {
+        SessionRouteNode {
+            pubkey: node.pubkey,
+            amount: node.amount,
+            channel_outpoint: node.channel_outpoint,
+        }
+    }
 }
 
 /// The custom records to be included in the payment.
@@ -161,6 +193,34 @@ pub struct SendPaymentCommandParams {
     /// default is false
     pub dry_run: Option<bool>,
 }
+/// A hop hint is a hint for a node to use a specific channel.
+#[serde_as]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct HopHint {
+    /// The public key of the node
+    pub pubkey: Pubkey,
+    /// The outpoint of the channel
+    #[serde_as(as = "EntityHex")]
+    pub channel_outpoint: OutPoint,
+
+    /// The fee rate to use this hop to forward the payment.
+    #[serde_as(as = "U64Hex")]
+    pub(crate) fee_rate: u64,
+    /// The TLC expiry delta to use this hop to forward the payment.
+    #[serde_as(as = "U64Hex")]
+    pub(crate) tlc_expiry_delta: u64,
+}
+
+impl From<HopHint> for NetworkHopHint {
+    fn from(hop_hint: HopHint) -> Self {
+        NetworkHopHint {
+            pubkey: hop_hint.pubkey,
+            channel_outpoint: hop_hint.channel_outpoint,
+            fee_rate: hop_hint.fee_rate,
+            tlc_expiry_delta: hop_hint.tlc_expiry_delta,
+        }
+    }
+}
 
 #[serde_as]
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -180,7 +240,7 @@ pub struct BuildRouterParams {
     /// If channel is not specified, find path algorithm will pick a channel within these two peers.
     ///
     /// An error will be returned if there is no router could be build from given hops and channels
-    hops_info: Vec<HopRequire>,
+    pub hops_info: Vec<HopRequire>,
 
     /// the TLC expiry delta should be used to set the timelock for the final hop, in milliseconds
     #[serde_as(as = "Option<U64Hex>")]
@@ -302,7 +362,10 @@ where
                     udt_type_script: params.udt_type_script.clone().map(|s| s.into()),
                     allow_self_payment: params.allow_self_payment.unwrap_or(false),
                     custom_records: params.custom_records.clone().map(|records| records.into()),
-                    hop_hints: params.hop_hints.clone(),
+                    hop_hints: params
+                        .hop_hints
+                        .clone()
+                        .map(|hints| hints.into_iter().map(|hint| hint.into()).collect()),
                     dry_run: params.dry_run.unwrap_or(false),
                 },
                 rpc_reply,
@@ -319,7 +382,7 @@ where
                 .custom_records
                 .map(|records| PaymentCustomRecords { data: records.data }),
             #[cfg(debug_assertions)]
-            router: response.router,
+            router: response.router.nodes.into_iter().map(Into::into).collect(),
         })
     }
 
@@ -344,7 +407,7 @@ where
                 .custom_records
                 .map(|records| PaymentCustomRecords { data: records.data }),
             #[cfg(debug_assertions)]
-            router: response.router,
+            router: response.router.nodes.into_iter().map(Into::into).collect(),
         })
     }
 
@@ -398,7 +461,7 @@ where
                 .custom_records
                 .map(|records| PaymentCustomRecords { data: records.data }),
             #[cfg(debug_assertions)]
-            router: response.router,
+            router: response.router.nodes.into_iter().map(Into::into).collect(),
         })
     }
 }
