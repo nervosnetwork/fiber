@@ -1,6 +1,6 @@
 [package]
 name = "fnn"
-version = "0.4.1"
+version = "0.4.2"
 edition = "2021"
 build = "src/build.rs"
 
@@ -88,6 +88,8 @@ debug = false
 tempfile = "3.10.1"
 ckb-testtool = "0.15.1"
 ciborium = "0.2.2"
+jsonrpsee = { version = "0.22", features = ["server", "macros", "http-client"] }
+
 
 [lints.clippy]
 needless-return = "allow"

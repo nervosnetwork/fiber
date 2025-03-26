@@ -169,6 +169,7 @@ pub struct ChannelInfo {
     pub node2: Pubkey,
     /// The created timestamp of the channel, which is the block header timestamp of the block
     /// that contains the channel funding transaction.
+    #[serde_as(as = "U64Hex")]
     pub created_timestamp: u64,
 
     /// The update info from node1 to node2, e.g. timestamp, fee_rate, tlc_expiry_delta, tlc_minimum_value

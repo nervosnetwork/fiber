@@ -128,14 +128,6 @@ impl ChannelInfo {
         &self.udt_type_script
     }
 
-    pub fn is_explicitly_disabled(&self) -> bool {
-        match (&self.update_of_node2, &self.update_of_node1) {
-            (Some(update1), _) if update1.enabled => false,
-            (_, Some(update2)) if update2.enabled => false,
-            _ => true,
-        }
-    }
-
     pub fn channel_last_update_time(&self) -> Option<u64> {
         self.update_of_node2
             .as_ref()
@@ -694,11 +686,7 @@ where
                 ) => {
                     let mut channel_info = ChannelInfo::from((timestamp, channel_announcement));
                     self.load_channel_updates_from_store(&mut channel_info);
-                    if channel_info.is_explicitly_disabled() {
-                        None
-                    } else {
-                        Some(channel_info)
-                    }
+                    Some(channel_info)
                 }
                 _ => None,
             })
@@ -1367,7 +1355,8 @@ pub struct SessionRouteNode {
 /// We store in the payment session and then will use it to track the payment history.
 /// The router is a list of nodes that the payment will go through.
 /// For example:
-///    A(amount, channel) -> B -> C -> D means A will send `amount` with `channel` to B.
+///    `A(amount, channel) -> B -> C -> D`
+/// means A will send `amount` with `channel` to B.
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct SessionRoute {
     /// the nodes in the route
