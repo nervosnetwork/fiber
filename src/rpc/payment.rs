@@ -1,5 +1,5 @@
 #[cfg(debug_assertions)]
-use crate::fiber::graph::SessionRoute;
+use crate::fiber::graph::SessionRouteNode as InternalSessionRouteNode;
 use crate::fiber::serde_utils::SliceHex;
 use crate::fiber::serde_utils::U32Hex;
 use crate::fiber::{
@@ -54,8 +54,39 @@ pub struct GetPaymentCommandResult {
     pub custom_records: Option<PaymentCustomRecords>,
 
     #[cfg(debug_assertions)]
-    /// The route information for the payment
-    router: SessionRoute,
+    /// The router is a list of nodes that the payment will go through.
+    /// We store in the payment session and then will use it to track the payment history.
+    /// The router is a list of nodes that the payment will go through.
+    /// For example:
+    ///    `A(amount, channel) -> B -> C -> D`
+    /// means A will send `amount` with `channel` to B.
+    router: Vec<SessionRouteNode>,
+}
+
+/// The node and channel information in a payment route hop
+#[cfg(debug_assertions)]
+#[serde_as]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SessionRouteNode {
+    /// the public key of the node
+    pub pubkey: Pubkey,
+    /// the amount for this hop
+    #[serde_as(as = "U128Hex")]
+    pub amount: u128,
+    /// the channel outpoint for this hop
+    #[serde_as(as = "EntityHex")]
+    pub channel_outpoint: OutPoint,
+}
+
+#[cfg(debug_assertions)]
+impl From<InternalSessionRouteNode> for SessionRouteNode {
+    fn from(node: InternalSessionRouteNode) -> Self {
+        SessionRouteNode {
+            pubkey: node.pubkey,
+            amount: node.amount,
+            channel_outpoint: node.channel_outpoint,
+        }
+    }
 }
 
 /// The custom records to be included in the payment.
@@ -170,8 +201,10 @@ pub struct HopHint {
     pub channel_outpoint: OutPoint,
 
     /// The fee rate to use this hop to forward the payment.
+    #[serde_as(as = "U64Hex")]
     pub(crate) fee_rate: u64,
     /// The TLC expiry delta to use this hop to forward the payment.
+    #[serde_as(as = "U64Hex")]
     pub(crate) tlc_expiry_delta: u64,
 }
 
@@ -260,7 +293,7 @@ where
                 .custom_records
                 .map(|records| PaymentCustomRecords { data: records.data }),
             #[cfg(debug_assertions)]
-            router: response.router,
+            router: response.router.nodes.into_iter().map(Into::into).collect(),
         })
     }
 
@@ -285,7 +318,7 @@ where
                 .custom_records
                 .map(|records| PaymentCustomRecords { data: records.data }),
             #[cfg(debug_assertions)]
-            router: response.router,
+            router: response.router.nodes.into_iter().map(Into::into).collect(),
         })
     }
 }

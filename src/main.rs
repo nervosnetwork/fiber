@@ -83,6 +83,7 @@ pub async fn main() -> Result<(), ExitMessage> {
         }
     });
 
+    #[allow(unused_variables)]
     let (network_actor, ckb_chain_actor, network_graph) = match config.fiber.clone() {
         Some(fiber_config) => {
             // TODO: this is not a super user friendly error message which has actionable information

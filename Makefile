@@ -65,3 +65,19 @@ gen-rpc-doc:
 .PHONY: check-dirty-rpc-doc
 check-dirty-rpc-doc: gen-rpc-doc
 	git diff --exit-code ./src/rpc/README.md
+
+MIGRATION_CHECK_VERSION := 0.2.3
+install-migration-check:
+	@if ! command -v migration-check >/dev/null 2>&1 || [ "$$(migration-check --version | awk '{print $$2}')" != "$(MIGRATION_CHECK_VERSION)" ]; then \
+		echo "Installing migration-check $(MIGRATION_CHECK_VERSION)..."; \
+		cargo install migration-check --version $(MIGRATION_CHECK_VERSION) --force; \
+	fi
+
+.PHONY: check-migrate
+check-migrate: install-migration-check
+	migration-check -s ./src -o ./src/store/.schema.json
+
+.PHONY: update-migrate-check
+update-migrate-check: install-migration-check
+	migration-check -s ./src -o ./src/store/.schema.json -u
+

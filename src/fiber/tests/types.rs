@@ -4,20 +4,21 @@ use crate::{
         gen::{fiber as molecule_fiber, gossip},
         hash_algorithm::HashAlgorithm,
         types::{
-            secp256k1_instance, AddTlc, BroadcastMessage, BroadcastMessageID, Cursor, Hash256,
-            NodeAnnouncement, PaymentHopData, PeeledOnionPacket, Privkey, Pubkey, TlcErr,
-            TlcErrPacket, TlcErrorCode, NO_SHARED_SECRET,
+            pack_hop_data, secp256k1_instance, unpack_hop_data, AddTlc, BroadcastMessage,
+            BroadcastMessageID, Cursor, Hash256, NodeAnnouncement, PaymentHopData,
+            PeeledOnionPacket, Privkey, Pubkey, TlcErr, TlcErrPacket, TlcErrorCode,
+            NO_SHARED_SECRET,
         },
         PaymentCustomRecords,
     },
     gen_rand_channel_outpoint, gen_rand_fiber_private_key, gen_rand_fiber_public_key,
     now_timestamp_as_millis_u64,
 };
+use ckb_hash::blake2b_256;
 use fiber_sphinx::OnionSharedSecretIter;
 use secp256k1::{PublicKey, Secp256k1, SecretKey};
 use serde::Deserialize;
 use serde::Serialize;
-
 use std::str::FromStr;
 
 #[test]
@@ -345,4 +346,36 @@ fn test_custom_records_serialize_deserialize() {
 
     let bincode_serialize = bincode::serialize(&custom).expect("serialize");
     let _deserialized: Custom = bincode::deserialize(&bincode_serialize).expect("deserialize");
+}
+
+#[test]
+fn test_verify_payment_hop_data() {
+    let hop_data = PaymentHopData {
+        amount: 1000,
+        expiry: 1000,
+        next_hop: None,
+        funding_tx_hash: Hash256::default(),
+        hash_algorithm: HashAlgorithm::Sha256,
+        payment_preimage: Some([1; 32].into()),
+        custom_records: Some(PaymentCustomRecords {
+            data: vec![(1, vec![2, 3])].into_iter().collect(),
+        }),
+    };
+
+    let data = pack_hop_data(&hop_data);
+    let unpacked: PaymentHopData = unpack_hop_data(&data).expect("unpack error");
+    assert_eq!(hop_data, unpacked);
+
+    let check_sum = hex::encode(blake2b_256(&data));
+
+    // make sure we don't change PaymentHopData format since it's stored in db with encrypted format
+    // do migration with old data version is not workable
+    let expected_check_sum =
+        "1ea2a67b30c7d2cedab21c6e5f4a3b860fc8b1ccc525f42dd1bdd4a7d6dfe489".to_string();
+    if check_sum != expected_check_sum {
+        panic!(
+            "PaymentHopData check sum mismatch, you need compatible with old data version when deserializing, \
+            migration will not work with PaymentHopData"
+        );
+    }
 }
