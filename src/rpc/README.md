@@ -1031,9 +1031,9 @@ The information about a peer connected to the node.
 
 #### Fields
 
-* `pubkey` - <em>Pubkey</em>, The identity public key of the peer.
+* `pubkey` - <em>[Pubkey](#type-pubkey)</em>, The identity public key of the peer.
 * `peer_id` - <em>PeerId</em>, The peer ID of the peer
-* `addresses` - <em>`Vec<MultiAddr>`</em>, A list of multi-addresses associated with the peer.
+* `addresses` - <em>Vec<MultiAddr></em>, A list of multi-addresses associated with the peer.
 ---
 
 <a id="#type-pubkey"></a>
