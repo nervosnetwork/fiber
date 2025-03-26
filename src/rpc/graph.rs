@@ -1,7 +1,7 @@
 use crate::ckb::config::UdtCfgInfos as ConfigUdtCfgInfos;
 use crate::fiber::channel::ChannelActorStateStore;
 use crate::fiber::gossip::GossipMessageStore;
-use crate::fiber::graph::{NetworkGraph, NetworkGraphStateStore};
+use crate::fiber::graph::{ChannelUpdateInfo, NetworkGraph, NetworkGraphStateStore};
 use crate::fiber::network::get_chain_hash;
 use crate::fiber::serde_utils::EntityHex;
 use crate::fiber::serde_utils::{U128Hex, U32Hex, U64Hex};
@@ -171,20 +171,13 @@ pub struct ChannelInfo {
     /// that contains the channel funding transaction.
     #[serde_as(as = "U64Hex")]
     pub created_timestamp: u64,
-    /// The timestamp of the last update to channel by node 1 (e.g. updating fee rate).
-    /// Types of update included https://github.com/nervosnetwork/fiber/tree/develop/src/rpc#params-7
-    #[serde_as(as = "Option<U64Hex>")]
-    pub last_updated_timestamp_of_node1: Option<u64>,
-    /// The timestamp of the last update to channel by node 2 (e.g. updating fee rate).
-    /// Types of update included https://github.com/nervosnetwork/fiber/tree/develop/src/rpc#params-7
-    #[serde_as(as = "Option<U64Hex>")]
-    pub last_updated_timestamp_of_node2: Option<u64>,
-    /// The fee rate set by node 1. This is the fee rate for node 1 to forward tlcs sent from node 2 to node 1.
-    #[serde_as(as = "Option<U64Hex>")]
-    pub fee_rate_of_node1: Option<u64>,
-    #[serde_as(as = "Option<U64Hex>")]
-    /// The fee rate set by node 2. This is the fee rate for node 2 to forward tlcs sent from node 1 to node 2.
-    pub fee_rate_of_node2: Option<u64>,
+
+    /// The update info from node1 to node2, e.g. timestamp, fee_rate, tlc_expiry_delta, tlc_minimum_value
+    pub update_info_of_node1: Option<ChannelUpdateInfo>,
+
+    /// The update info from node2 to node1, e.g. timestamp, fee_rate, tlc_expiry_delta, tlc_minimum_value
+    pub update_info_of_node2: Option<ChannelUpdateInfo>,
+
     /// The capacity of the channel.
     #[serde_as(as = "U128Hex")]
     pub capacity: u128,
@@ -201,16 +194,8 @@ impl From<super::super::fiber::graph::ChannelInfo> for ChannelInfo {
             node1: channel_info.node1(),
             node2: channel_info.node2(),
             created_timestamp: channel_info.timestamp,
-            last_updated_timestamp_of_node1: channel_info
-                .update_of_node1
-                .as_ref()
-                .map(|cu| cu.timestamp),
-            last_updated_timestamp_of_node2: channel_info
-                .update_of_node2
-                .as_ref()
-                .map(|cu| cu.timestamp),
-            fee_rate_of_node1: channel_info.update_of_node1.as_ref().map(|cu| cu.fee_rate),
-            fee_rate_of_node2: channel_info.update_of_node2.as_ref().map(|cu| cu.fee_rate),
+            update_info_of_node1: channel_info.update_of_node1,
+            update_info_of_node2: channel_info.update_of_node2,
             capacity: channel_info.capacity(),
             chain_hash: get_chain_hash(),
             udt_type_script: channel_info.udt_type_script().clone().map(|s| s.into()),
