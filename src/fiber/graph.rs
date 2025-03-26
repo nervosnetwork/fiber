@@ -13,6 +13,7 @@ use crate::ckb::config::UdtCfgInfos;
 use crate::fiber::fee::calculate_tlc_forward_fee;
 use crate::fiber::path::NodeHeapElement;
 use crate::fiber::serde_utils::EntityHex;
+use crate::fiber::serde_utils::{U128Hex, U64Hex};
 use crate::fiber::types::PaymentHopData;
 use crate::invoice::CkbInvoice;
 use crate::now_timestamp_as_millis_u64;
@@ -127,17 +128,6 @@ impl ChannelInfo {
         &self.udt_type_script
     }
 
-    // Whether this channel is explicitly disabled in either direction.
-    // TODO: we currently deem a channel as disabled if one direction is disabled.
-    // Is it possible that one direction is disabled while the other is not?
-    pub fn is_explicitly_disabled(&self) -> bool {
-        match (&self.update_of_node2, &self.update_of_node1) {
-            (Some(update1), _) if !update1.enabled => true,
-            (_, Some(update2)) if !update2.enabled => true,
-            _ => false,
-        }
-    }
-
     pub fn channel_last_update_time(&self) -> Option<u64> {
         self.update_of_node2
             .as_ref()
@@ -215,19 +205,26 @@ impl From<(u64, ChannelAnnouncement)> for ChannelInfo {
     }
 }
 
+/// The channel update info with a single direction of channel
+#[serde_as]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ChannelUpdateInfo {
-    // The timestamp is the time when the channel update was received by the node.
+    /// The timestamp is the time when the channel update was received by the node.
+    #[serde_as(as = "U64Hex")]
     pub timestamp: u64,
     /// Whether the channel can be currently used for payments (in this one direction).
     pub enabled: bool,
     /// The exact amount of balance that we can send to the other party via the channel.
+    #[serde_as(as = "Option<U128Hex>")]
     pub outbound_liquidity: Option<u128>,
     /// The difference in htlc expiry values that you must have when routing through this channel (in milliseconds).
+    #[serde_as(as = "U64Hex")]
     pub tlc_expiry_delta: u64,
     /// The minimum value, which must be relayed to the next hop via the channel
+    #[serde_as(as = "U128Hex")]
     pub tlc_minimum_value: u128,
     /// The forwarding fee rate for the channel.
+    #[serde_as(as = "U64Hex")]
     pub fee_rate: u64,
 }
 
@@ -689,11 +686,7 @@ where
                 ) => {
                     let mut channel_info = ChannelInfo::from((timestamp, channel_announcement));
                     self.load_channel_updates_from_store(&mut channel_info);
-                    if channel_info.is_explicitly_disabled() {
-                        None
-                    } else {
-                        Some(channel_info)
-                    }
+                    Some(channel_info)
                 }
                 _ => None,
             })
