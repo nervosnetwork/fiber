@@ -3299,7 +3299,7 @@ where
                     .expect(ASSUME_NETWORK_MYSELF_ALIVE);
             }
         }
-
+        // MAINTAINING_CONNECTIONS_INTERVAL is long, we need to trigger when start
         myself
             .send_message(NetworkActorMessage::new_command(
                 NetworkActorCommand::MaintainConnections,

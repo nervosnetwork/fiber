@@ -291,9 +291,10 @@ Shuts down a channel.
 ##### Params
 
 * `channel_id` - <em>[Hash256](#type-hash256)</em>, The channel ID of the channel to shut down
-* `close_script` - <em>`Script`</em>, The script used to receive the channel balance, only support secp256k1_blake160_sighash_all script for now
-* `force` - <em>`Option<bool>`</em>, Whether to force the channel to close
-* `fee_rate` - <em>`u64`</em>, The fee rate for the closing transaction, the fee will be deducted from the closing initiator's channel balance
+* `close_script` - <em>`Option<Script>`</em>, The script used to receive the channel balance, only support secp256k1_blake160_sighash_all script for now
+* `fee_rate` - <em>`Option<u64>`</em>, The fee rate for the closing transaction, the fee will be deducted from the closing initiator's channel balance
+* `force` - <em>`Option<bool>`</em>, Whether to force the channel to close, when set to false, `close_script` and `fee_rate` should be set, default is false.
+ When set to true, `close_script` and `fee_rate` will be ignored and will use the default value when opening the channel.
 
 ##### Returns
 
