@@ -488,14 +488,12 @@ where
                     Some(params),
                 ));
             }
-        } else {
-            if params.close_script.is_none() || params.fee_rate.is_none() {
-                return Err(ErrorObjectOwned::owned(
-                    CALL_EXECUTION_FAILED_CODE,
-                    "close_script and fee_rate should be set when force is false",
-                    Some(params),
-                ));
-            }
+        } else if params.close_script.is_none() || params.fee_rate.is_none() {
+            return Err(ErrorObjectOwned::owned(
+                CALL_EXECUTION_FAILED_CODE,
+                "close_script and fee_rate should be set when force is false",
+                Some(params),
+            ));
         }
 
         let message = |rpc_reply| -> NetworkActorMessage {

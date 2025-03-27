@@ -109,6 +109,9 @@ const ASSUME_GOSSIP_ACTOR_ALIVE: &str = "gossip actor must be alive";
 const MAINTAINING_CONNECTIONS_INTERVAL: Duration = Duration::from_secs(3600);
 
 // The duration for which we will check if we should force close a channel.
+#[cfg(debug_assertions)]
+const CHECK_FORCE_CLOSE_INTERVAL: Duration = Duration::from_secs(3); // use a short interval for debugging build
+#[cfg(not(debug_assertions))]
 const CHECK_FORCE_CLOSE_INTERVAL: Duration = Duration::from_secs(60);
 
 // While creating a network graph from the gossip messages, we will load current gossip messages
@@ -1152,7 +1155,7 @@ where
                                             ShutdownCommand {
                                                 close_script: Script::default(),
                                                 fee_rate: FeeRate::default(),
-                                                force: false,
+                                                force: true,
                                             },
                                             rpc_reply,
                                         ),
