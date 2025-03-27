@@ -624,10 +624,11 @@ Sends a payment to a peer.
   }
  ```
 * `hop_hints` - <em>Option<Vec<[HopHint](#type-hophint)>></em>, Optional route hints to reach the destination through private channels.
+ Note: this is only used for the private channels with the last hop.
  A hop hint is a hint for a node to use a specific channel, for example
- (pubkey, funding_txid, inbound) where pubkey is the public key of the node,
- funding_txid is the funding transaction hash of the channel outpoint, and
- inbound is a boolean indicating whether to use the channel to send or receive.
+ `(pubkey, channel_outpoint, fee_rate, tlc_expiry_delta)` suggest path router to use
+ the channel of `channel_outpoint` at hop with `pubkey` to forward the payment
+ and the fee rate is `fee_rate` and tlc_expiry_delta is `tlc_expiry_delta`
  Note: an improper hint may cause the payment to fail, and hop_hints maybe helpful for self payment scenario
  for helping the routing algorithm to find the correct path
 * `dry_run` - <em>`Option<bool>`</em>, dry_run for payment, used for check whether we can build valid router and the fee for this payment,
