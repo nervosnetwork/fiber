@@ -74,6 +74,7 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
     * [Type `UdtArgInfo`](#type-udtarginfo)
     * [Type `UdtCellDep`](#type-udtcelldep)
     * [Type `UdtCfgInfos`](#type-udtcfginfos)
+    * [Type `UdtDep`](#type-udtdep)
     * [Type `UdtScript`](#type-udtscript)
 
 ## RPC Modules
@@ -1105,6 +1106,18 @@ A list of UDT configuration infos.
 
 
 
+---
+
+<a id="#type-udtdep"></a>
+### Type `UdtDep`
+
+Udt script on-chain dependencies.
+
+
+#### Enum with values of
+
+* `CellDep` - <em>[UdtCellDep](#type-udtcelldep)</em>, cell dep described by out_point.
+* `TypeID` - <em>[UdtScript](#type-udtscript)</em>, cell dep described by type ID.
 ---
 
 <a id="#type-udtscript"></a>
