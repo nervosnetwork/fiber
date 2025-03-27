@@ -47,6 +47,7 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
     * [Module Peer](#module-peer)
         * [Method `connect_peer`](#peer-connect_peer)
         * [Method `disconnect_peer`](#peer-disconnect_peer)
+        * [Method `list_peers`](#peer-list_peers)
 * [RPC Types](#rpc-types)
 
     * [Type `Attribute`](#type-attribute)
@@ -66,6 +67,7 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
     * [Type `NodeInfo`](#type-nodeinfo)
     * [Type `PaymentCustomRecords`](#type-paymentcustomrecords)
     * [Type `PaymentSessionStatus`](#type-paymentsessionstatus)
+    * [Type `PeerInfo`](#type-peerinfo)
     * [Type `Pubkey`](#type-pubkey)
     * [Type `RemoveTlcReason`](#type-removetlcreason)
     * [Type `SessionRouteNode`](#type-sessionroutenode)
@@ -724,6 +726,22 @@ Disconnect from a peer.
 
 
 
+<a id="peer-list_peers"></a>
+#### Method `list_peers`
+
+List connected peers
+
+##### Params
+* None
+
+##### Returns
+
+* `peers` - <em>Vec<[PeerInfo](#type-peerinfo)></em>, A list of connected peers.
+
+---
+
+
+
 
 ## RPC Types
 
@@ -1004,6 +1022,19 @@ The status of a payment, will update as the payment progresses.
 * `Inflight` - the first hop AddTlc is sent successfully and waiting for the response
 * `Success` - related HTLC is successfully settled
 * `Failed` - related HTLC is failed
+---
+
+<a id="#type-peerinfo"></a>
+### Type `PeerInfo`
+
+The information about a peer connected to the node.
+
+
+#### Fields
+
+* `pubkey` - <em>[Pubkey](#type-pubkey)</em>, The identity public key of the peer.
+* `peer_id` - <em>PeerId</em>, The peer ID of the peer
+* `addresses` - <em>Vec<MultiAddr></em>, A list of multi-addresses associated with the peer.
 ---
 
 <a id="#type-pubkey"></a>
