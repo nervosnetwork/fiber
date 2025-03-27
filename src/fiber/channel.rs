@@ -1398,10 +1398,8 @@ where
             };
 
             let transaction = state
-                .latest_commitment_transaction
-                .clone()
-                .expect("latest_commitment_transaction should exist when channel is in ChannelReady of ShuttingDown state")
-                .into_view();
+                .get_latest_commitment_transaction()
+                .expect("latest_commitment_transaction should exist when channel is in ChannelReady of ShuttingDown state");
 
             self.network
                 .send_message(NetworkActorMessage::new_event(
@@ -7255,6 +7253,21 @@ impl ChannelActorState {
             funding_tx_partial_signature,
             commitment_tx_partial_signature,
         ))
+    }
+
+    /// Get the latest commitment transaction with updated cell deps
+    pub fn get_latest_commitment_transaction(
+        &self,
+    ) -> Result<TransactionView, ProcessingChannelError> {
+        let tx = self
+            .latest_commitment_transaction
+            .clone()
+            .expect("latest_commitment_transaction should exist");
+        let cell_deps = get_cell_deps(vec![Contract::FundingLock], &self.funding_udt_type_script)
+            .map_err(|e| ProcessingChannelError::InternalError(e.to_string()))?;
+        let raw_tx = tx.raw().as_builder().cell_deps(cell_deps).build();
+        let tx = tx.as_builder().raw(raw_tx).build();
+        Ok(tx.into_view())
     }
 
     /// Verify the partial signature from the peer and create a complete transaction

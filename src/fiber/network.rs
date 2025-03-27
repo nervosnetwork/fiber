@@ -2588,10 +2588,8 @@ where
                             };
 
                             let transaction = state
-                                .latest_commitment_transaction
-                                .clone()
-                                .expect("latest_commitment_transaction should exist when channel is in ChannelReady of ShuttingDown state")
-                                .into_view();
+                                .get_latest_commitment_transaction()
+                                .expect("latest_commitment_transaction should exist when channel is in ChannelReady of ShuttingDown state");
 
                             self.network
                                 .send_message(NetworkActorMessage::new_event(

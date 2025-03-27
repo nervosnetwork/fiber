@@ -29,7 +29,7 @@ use crate::{
 use ckb_types::{
     core::{tx_pool::TxStatus, FeeRate},
     packed::{CellInput, Script, Transaction},
-    prelude::{AsTransactionBuilder, Builder, Entity, IntoTransactionView, Pack, Unpack},
+    prelude::{AsTransactionBuilder, Builder, Entity, Pack, Unpack},
 };
 use ractor::call;
 use secp256k1::Secp256k1;
@@ -4640,7 +4640,7 @@ async fn test_commitment_tx_capacity() {
         NetworkNode::new_2_nodes_with_established_channel(amount_a, amount_b, true).await;
 
     let state = node_a.store.get_channel_actor_state(&channel_id).unwrap();
-    let commitment_tx = state.latest_commitment_transaction.unwrap().into_view();
+    let commitment_tx = state.get_latest_commitment_transaction().unwrap();
     let output_capacity: u64 = commitment_tx.output(0).unwrap().capacity().unpack();
 
     // default fee rate is 1000 shannons per kb, and there is a gap of 20 bytes between the mock commitment tx and the real one
