@@ -181,7 +181,6 @@ pub struct UdtScript {
 
 #[derive(Serialize, Deserialize, Clone, Debug, Eq, PartialEq, Hash)]
 /// Udt script on-chain dependencies.
-#[serde(untagged)]
 pub enum UdtDep {
     /// cell dep described by out_point.
     CellDep(UdtCellDep),

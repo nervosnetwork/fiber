@@ -19,26 +19,30 @@ fiber:
         hash_type: type
         args: 0x
       cell_deps:
-        - code_hash: "0x00000000000000000000000000000000000000000000000000545950455f4944"
-          hash_type: "type"
-          args: "0x3cb7c0304fe53f75bb5727e2484d0beae4bd99d979813c6fc97c3cca569f10f6"
-        - out_point:
-            tx_hash: "0x5a5288769cecde6451cb5d301416c297a6da43dc3ac2f3253542b4082478b19b" # ckb_auth
-            index: "0x0"
-          dep_type: "code"
+        - !TypeID
+            code_hash: 0x00000000000000000000000000000000000000000000000000545950455f4944
+            hash_type: type
+            args: 0x3cb7c0304fe53f75bb5727e2484d0beae4bd99d979813c6fc97c3cca569f10f6
+        - !CellDep
+            out_point:
+              tx_hash: 0x5a5288769cecde6451cb5d301416c297a6da43dc3ac2f3253542b4082478b19b # ckb_auth
+              index: 0x0
+            dep_type: code
     - name: CommitmentLock
       script:
         code_hash: 0x740dee83f87c6f309824d8fd3fbdd3c8380ee6fc9acc90b1a748438afcdf81d8
         hash_type: type
         args: 0x
       cell_deps:
-        - code_hash: "0x00000000000000000000000000000000000000000000000000545950455f4944"
-          hash_type: "type"
-          args: "0xf7e458887495cf70dd30d1543cad47dc1dfe9d874177bf19291e4db478d5751b"
-        - out_point:
-            tx_hash: "0x5a5288769cecde6451cb5d301416c297a6da43dc3ac2f3253542b4082478b19b" #ckb_auth
-            index: "0x0"
-          dep_type: "code"
+        - !TypeID
+            code_hash: 0x00000000000000000000000000000000000000000000000000545950455f4944
+            hash_type: type
+            args: 0xf7e458887495cf70dd30d1543cad47dc1dfe9d874177bf19291e4db478d5751b
+        - !CellDep
+            out_point:
+              tx_hash: 0x5a5288769cecde6451cb5d301416c297a6da43dc3ac2f3253542b4082478b19b #ckb_auth
+              index: 0x0
+            dep_type: code
 
 rpc:
   # By default RPC only binds to localhost, thus it only allows accessing from the same machine.
@@ -55,9 +59,10 @@ ckb:
         hash_type: type
         args: 0x878fcc6f1f08d48e87bb1c3b3d5083f23f8a39c5d5c764f253b55b998526439b
       cell_deps:
-        - code_hash: "0x00000000000000000000000000000000000000000000000000545950455f4944"
-          hash_type: "type"
-          args: "0x97d30b723c0b2c66e9cb8d4d0df4ab5d7222cbb00d4a9a2055ce2e5d7f0d8b0f"
+        - !TypeID
+            code_hash: 0x00000000000000000000000000000000000000000000000000545950455f4944
+            hash_type: type
+            args: 0x97d30b723c0b2c66e9cb8d4d0df4ab5d7222cbb00d4a9a2055ce2e5d7f0d8b0f
       auto_accept_amount: 1000000000
 
 services:
