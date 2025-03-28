@@ -489,6 +489,7 @@ impl FiberConfig {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Eq, PartialEq, Hash)]
+#[serde(untagged)]
 pub enum ScriptCellDep {
     CellDep(CellDep),
     TypeID(Script),
