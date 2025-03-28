@@ -1397,9 +1397,7 @@ where
                 }
             };
 
-            let transaction = state
-                .get_latest_commitment_transaction()
-                .expect("latest_commitment_transaction should exist when channel is in ChannelReady of ShuttingDown state");
+            let transaction = state.get_latest_commitment_transaction()?;
 
             self.network
                 .send_message(NetworkActorMessage::new_event(
