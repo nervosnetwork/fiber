@@ -10835,7 +10835,7 @@ impl UdtDep {
         let inner = self.0.slice(molecule::NUMBER_SIZE..);
         match self.item_id() {
             0 => UdtCellDep::new_unchecked(inner).into(),
-            1 => UdtScript::new_unchecked(inner).into(),
+            1 => Script::new_unchecked(inner).into(),
             _ => panic!("{}: invalid data", Self::NAME),
         }
     }
@@ -10900,7 +10900,7 @@ impl<'r> UdtDepReader<'r> {
         let inner = &self.as_slice()[molecule::NUMBER_SIZE..];
         match self.item_id() {
             0 => UdtCellDepReader::new_unchecked(inner).into(),
-            1 => UdtScriptReader::new_unchecked(inner).into(),
+            1 => ScriptReader::new_unchecked(inner).into(),
             _ => panic!("{}: invalid data", Self::NAME),
         }
     }
@@ -10927,7 +10927,7 @@ impl<'r> molecule::prelude::Reader<'r> for UdtDepReader<'r> {
         let inner_slice = &slice[molecule::NUMBER_SIZE..];
         match item_id {
             0 => UdtCellDepReader::verify(inner_slice, compatible),
-            1 => UdtScriptReader::verify(inner_slice, compatible),
+            1 => ScriptReader::verify(inner_slice, compatible),
             _ => ve!(Self, UnknownItem, Self::ITEMS_COUNT, item_id),
         }?;
         Ok(())
@@ -10965,12 +10965,12 @@ impl molecule::prelude::Builder for UdtDepBuilder {
 #[derive(Debug, Clone)]
 pub enum UdtDepUnion {
     UdtCellDep(UdtCellDep),
-    UdtScript(UdtScript),
+    Script(Script),
 }
 #[derive(Debug, Clone, Copy)]
 pub enum UdtDepUnionReader<'r> {
     UdtCellDep(UdtCellDepReader<'r>),
-    UdtScript(UdtScriptReader<'r>),
+    Script(ScriptReader<'r>),
 }
 impl ::core::default::Default for UdtDepUnion {
     fn default() -> Self {
@@ -10983,8 +10983,8 @@ impl ::core::fmt::Display for UdtDepUnion {
             UdtDepUnion::UdtCellDep(ref item) => {
                 write!(f, "{}::{}({})", Self::NAME, UdtCellDep::NAME, item)
             }
-            UdtDepUnion::UdtScript(ref item) => {
-                write!(f, "{}::{}({})", Self::NAME, UdtScript::NAME, item)
+            UdtDepUnion::Script(ref item) => {
+                write!(f, "{}::{}({})", Self::NAME, Script::NAME, item)
             }
         }
     }
@@ -10995,8 +10995,8 @@ impl<'r> ::core::fmt::Display for UdtDepUnionReader<'r> {
             UdtDepUnionReader::UdtCellDep(ref item) => {
                 write!(f, "{}::{}({})", Self::NAME, UdtCellDep::NAME, item)
             }
-            UdtDepUnionReader::UdtScript(ref item) => {
-                write!(f, "{}::{}({})", Self::NAME, UdtScript::NAME, item)
+            UdtDepUnionReader::Script(ref item) => {
+                write!(f, "{}::{}({})", Self::NAME, Script::NAME, item)
             }
         }
     }
@@ -11005,7 +11005,7 @@ impl UdtDepUnion {
     pub(crate) fn display_inner(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         match self {
             UdtDepUnion::UdtCellDep(ref item) => write!(f, "{}", item),
-            UdtDepUnion::UdtScript(ref item) => write!(f, "{}", item),
+            UdtDepUnion::Script(ref item) => write!(f, "{}", item),
         }
     }
 }
@@ -11013,7 +11013,7 @@ impl<'r> UdtDepUnionReader<'r> {
     pub(crate) fn display_inner(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         match self {
             UdtDepUnionReader::UdtCellDep(ref item) => write!(f, "{}", item),
-            UdtDepUnionReader::UdtScript(ref item) => write!(f, "{}", item),
+            UdtDepUnionReader::Script(ref item) => write!(f, "{}", item),
         }
     }
 }
@@ -11022,9 +11022,9 @@ impl ::core::convert::From<UdtCellDep> for UdtDepUnion {
         UdtDepUnion::UdtCellDep(item)
     }
 }
-impl ::core::convert::From<UdtScript> for UdtDepUnion {
-    fn from(item: UdtScript) -> Self {
-        UdtDepUnion::UdtScript(item)
+impl ::core::convert::From<Script> for UdtDepUnion {
+    fn from(item: Script) -> Self {
+        UdtDepUnion::Script(item)
     }
 }
 impl<'r> ::core::convert::From<UdtCellDepReader<'r>> for UdtDepUnionReader<'r> {
@@ -11032,9 +11032,9 @@ impl<'r> ::core::convert::From<UdtCellDepReader<'r>> for UdtDepUnionReader<'r> {
         UdtDepUnionReader::UdtCellDep(item)
     }
 }
-impl<'r> ::core::convert::From<UdtScriptReader<'r>> for UdtDepUnionReader<'r> {
-    fn from(item: UdtScriptReader<'r>) -> Self {
-        UdtDepUnionReader::UdtScript(item)
+impl<'r> ::core::convert::From<ScriptReader<'r>> for UdtDepUnionReader<'r> {
+    fn from(item: ScriptReader<'r>) -> Self {
+        UdtDepUnionReader::Script(item)
     }
 }
 impl UdtDepUnion {
@@ -11042,31 +11042,31 @@ impl UdtDepUnion {
     pub fn as_bytes(&self) -> molecule::bytes::Bytes {
         match self {
             UdtDepUnion::UdtCellDep(item) => item.as_bytes(),
-            UdtDepUnion::UdtScript(item) => item.as_bytes(),
+            UdtDepUnion::Script(item) => item.as_bytes(),
         }
     }
     pub fn as_slice(&self) -> &[u8] {
         match self {
             UdtDepUnion::UdtCellDep(item) => item.as_slice(),
-            UdtDepUnion::UdtScript(item) => item.as_slice(),
+            UdtDepUnion::Script(item) => item.as_slice(),
         }
     }
     pub fn item_id(&self) -> molecule::Number {
         match self {
             UdtDepUnion::UdtCellDep(_) => 0,
-            UdtDepUnion::UdtScript(_) => 1,
+            UdtDepUnion::Script(_) => 1,
         }
     }
     pub fn item_name(&self) -> &str {
         match self {
             UdtDepUnion::UdtCellDep(_) => "UdtCellDep",
-            UdtDepUnion::UdtScript(_) => "UdtScript",
+            UdtDepUnion::Script(_) => "Script",
         }
     }
     pub fn as_reader<'r>(&'r self) -> UdtDepUnionReader<'r> {
         match self {
             UdtDepUnion::UdtCellDep(item) => item.as_reader().into(),
-            UdtDepUnion::UdtScript(item) => item.as_reader().into(),
+            UdtDepUnion::Script(item) => item.as_reader().into(),
         }
     }
 }
@@ -11075,19 +11075,19 @@ impl<'r> UdtDepUnionReader<'r> {
     pub fn as_slice(&self) -> &'r [u8] {
         match self {
             UdtDepUnionReader::UdtCellDep(item) => item.as_slice(),
-            UdtDepUnionReader::UdtScript(item) => item.as_slice(),
+            UdtDepUnionReader::Script(item) => item.as_slice(),
         }
     }
     pub fn item_id(&self) -> molecule::Number {
         match self {
             UdtDepUnionReader::UdtCellDep(_) => 0,
-            UdtDepUnionReader::UdtScript(_) => 1,
+            UdtDepUnionReader::Script(_) => 1,
         }
     }
     pub fn item_name(&self) -> &str {
         match self {
             UdtDepUnionReader::UdtCellDep(_) => "UdtCellDep",
-            UdtDepUnionReader::UdtScript(_) => "UdtScript",
+            UdtDepUnionReader::Script(_) => "Script",
         }
     }
 }
@@ -11096,8 +11096,8 @@ impl From<UdtCellDep> for UdtDep {
         Self::new_builder().set(value).build()
     }
 }
-impl From<UdtScript> for UdtDep {
-    fn from(value: UdtScript) -> Self {
+impl From<Script> for UdtDep {
+    fn from(value: Script) -> Self {
         Self::new_builder().set(value).build()
     }
 }

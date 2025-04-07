@@ -57,14 +57,14 @@ pub enum UdtDep {
     /// cell dep described by out_point.
     CellDep(UdtCellDep),
     /// cell dep described by type ID.
-    TypeID(UdtScript),
+    TypeID(Script),
 }
 
 impl From<ConfigUdtDep> for UdtDep {
     fn from(cfg: ConfigUdtDep) -> Self {
         match cfg {
             ConfigUdtDep::CellDep(cell_dep) => UdtDep::CellDep(cell_dep.into()),
-            ConfigUdtDep::TypeID(script) => UdtDep::TypeID(script.into()),
+            ConfigUdtDep::TypeID(script) => UdtDep::TypeID(script),
         }
     }
 }

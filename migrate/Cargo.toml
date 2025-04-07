@@ -27,7 +27,6 @@ fiber_v030 = { package = "fnn", git = "https://github.com/nervosnetwork/fiber.gi
 fiber_v031 = { package = "fnn", git = "https://github.com/nervosnetwork/fiber.git", tag = "v0.3.1-p1" }
 fiber_v040 = { package = "fnn", git = "https://github.com/nervosnetwork/fiber.git", tag = "v0.4.0-rc1-p1" }
 fiber_v041 = { package = "fnn", git = "https://github.com/nervosnetwork/fiber.git", tag = "v0.4.1-rc1" }
-fiber_v042 = { package = "fnn", git = "https://github.com/nervosnetwork/fiber.git", rev = "688639bafc3fe974a2aa6f89e6e31ca156ae5d22" }
 
 [features]
 default = []

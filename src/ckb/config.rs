@@ -8,7 +8,7 @@ use std::{
     str::FromStr,
 };
 
-use ckb_jsonrpc_types::OutPoint;
+use ckb_jsonrpc_types::{OutPoint as OutPointWrapper, Script as ScriptWrapper};
 use ckb_types::core::ScriptHashType;
 use ckb_types::prelude::Builder;
 use ckb_types::H256;
@@ -185,13 +185,13 @@ pub enum UdtDep {
     /// cell dep described by out_point.
     CellDep(UdtCellDep),
     /// cell dep described by type ID.
-    TypeID(UdtScript),
+    TypeID(ScriptWrapper),
 }
 
 #[serde_as]
 #[derive(Serialize, Deserialize, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct UdtCellDep {
-    pub out_point: OutPoint,
+    pub out_point: OutPointWrapper,
     #[serde_as(as = "DepTypeWrapper")]
     pub dep_type: DepType,
 }

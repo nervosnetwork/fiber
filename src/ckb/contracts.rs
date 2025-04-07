@@ -16,10 +16,10 @@ use tracing::info;
 
 use crate::fiber::{
     config::FiberScript,
-    gen::fiber::{UdtDep, UdtDepUnion, UdtScript},
+    gen::fiber::{UdtDep, UdtDepUnion},
 };
 
-use super::config::{UdtArgInfo, UdtCfgInfos};
+use super::config::{UdtArgInfo, UdtCfgInfos, UdtDep as ConfigUdtDep};
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Clone, Copy, Hash)]
 pub enum Contract {
@@ -122,9 +122,6 @@ pub enum ContractsContextError {
 
     #[error("Cannot resolve cell dep for type id {0}")]
     CannotResolveCellDep(Script),
-
-    #[error("Cannot resolve udt cell dep for {0}")]
-    CannotResolveUdtCellDep(UdtScript),
 
     #[error("Cannot resolve udt info for {0}")]
     CannotResolveUdtInfo(Script),
@@ -264,6 +261,18 @@ impl ContractsContext {
             }
         }
 
+        for cell_dep in udt_whitelist
+            .0
+            .iter()
+            .flat_map(|info| info.cell_deps.clone())
+        {
+            if let ConfigUdtDep::TypeID(type_id) = cell_dep {
+                let err = || ContractsContextError::CannotResolveCellDep(type_id.clone().into());
+                let resolver = type_id_resolver.as_ref().ok_or_else(err)?;
+                resolver.resolve(type_id.clone().into()).ok_or_else(err)?;
+            }
+        }
+
         Ok(Self {
             contracts: ContractsInfo {
                 contract_default_scripts,
@@ -329,8 +338,8 @@ impl ContractsContext {
                         .build();
                     builder = builder.push(cell_dep);
                 }
-                UdtDepUnion::UdtScript(type_id) => {
-                    let err = || ContractsContextError::CannotResolveUdtCellDep(type_id.clone());
+                UdtDepUnion::Script(type_id) => {
+                    let err = || ContractsContextError::CannotResolveCellDep(type_id.clone());
                     let resolver = self.type_id_resolver.as_ref().ok_or_else(err)?;
                     let type_id = Script::new_builder()
                         .code_hash(type_id.code_hash())

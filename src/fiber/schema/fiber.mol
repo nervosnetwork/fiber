@@ -170,7 +170,7 @@ table AnnouncementSignatures {
 
 union UdtDep {
     UdtCellDep,
-    UdtScript,
+    Script,
 }
 
 table UdtCellDep {

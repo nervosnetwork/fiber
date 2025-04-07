@@ -1942,62 +1942,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fnn"
-version = "0.4.2"
-source = "git+https://github.com/nervosnetwork/fiber.git?rev=688639bafc3fe974a2aa6f89e6e31ca156ae5d22#688639bafc3fe974a2aa6f89e6e31ca156ae5d22"
-dependencies = [
- "anyhow",
- "arcode",
- "async-trait",
- "bech32 0.8.1",
- "bincode",
- "bitcoin",
- "bitflags 2.7.0",
- "bitmask-enum",
- "ckb-chain-spec",
- "ckb-gen-types",
- "ckb-hash",
- "ckb-jsonrpc-types",
- "ckb-resource",
- "ckb-rocksdb",
- "ckb-sdk",
- "ckb-types",
- "clap",
- "clap-serde-derive",
- "console",
- "fiber-sphinx",
- "futures",
- "git-version",
- "hex",
- "home",
- "indicatif",
- "jsonrpsee",
- "lightning-invoice",
- "lnd-grpc-tonic-client",
- "molecule",
- "musig2",
- "nom",
- "num_enum",
- "once_cell",
- "ractor 0.14.2",
- "rand 0.8.5",
- "regex",
- "secp256k1 0.28.2",
- "serde",
- "serde_json",
- "serde_with",
- "serde_yaml",
- "socket2",
- "strum",
- "tentacle",
- "thiserror 1.0.69",
- "tokio",
- "tokio-util",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "fnn-migrate"
 version = "0.4.2"
 dependencies = [
@@ -2012,7 +1956,6 @@ dependencies = [
  "fnn 0.3.1 (git+https://github.com/nervosnetwork/fiber.git?tag=v0.4.0-rc1-p1)",
  "fnn 0.4.0",
  "fnn 0.4.2",
- "fnn 0.4.2 (git+https://github.com/nervosnetwork/fiber.git?rev=688639bafc3fe974a2aa6f89e6e31ca156ae5d22)",
  "hex",
  "indicatif",
  "serde",

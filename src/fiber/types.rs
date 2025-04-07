@@ -1900,7 +1900,7 @@ impl From<UdtDep> for molecule_fiber::UdtDep {
                 .set(molecule_fiber::UdtDepUnion::UdtCellDep(cell_dep.into()))
                 .build(),
             UdtDep::TypeID(type_id) => molecule_fiber::UdtDep::new_builder()
-                .set(molecule_fiber::UdtDepUnion::UdtScript(type_id.into()))
+                .set(molecule_fiber::UdtDepUnion::Script(type_id.into()))
                 .build(),
         }
     }
@@ -1910,7 +1910,7 @@ impl From<molecule_fiber::UdtDep> for UdtDep {
     fn from(udt_dep: molecule_fiber::UdtDep) -> Self {
         match udt_dep.to_enum() {
             molecule_fiber::UdtDepUnion::UdtCellDep(cell_dep) => UdtDep::CellDep(cell_dep.into()),
-            molecule_fiber::UdtDepUnion::UdtScript(type_id) => UdtDep::TypeID(type_id.into()),
+            molecule_fiber::UdtDepUnion::Script(type_id) => UdtDep::TypeID(type_id.into()),
         }
     }
 }
