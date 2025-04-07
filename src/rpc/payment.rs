@@ -1,4 +1,4 @@
-use crate::fiber::graph::PathEdge;
+use crate::fiber::graph::RouterHop;
 #[cfg(debug_assertions)]
 use crate::fiber::graph::SessionRouteNode as InternalSessionRouteNode;
 use crate::fiber::network::BuildRouterCommand;
@@ -180,12 +180,15 @@ pub struct SendPaymentCommandParams {
     pub custom_records: Option<PaymentCustomRecords>,
 
     /// Optional route hints to reach the destination through private channels.
-    /// A hop hint is a hint for a node to use a specific channel, for example
-    /// (pubkey, funding_txid, inbound) where pubkey is the public key of the node,
-    /// funding_txid is the funding transaction hash of the channel outpoint, and
-    /// inbound is a boolean indicating whether to use the channel to send or receive.
-    /// Note: an improper hint may cause the payment to fail, and hop_hints maybe helpful for self payment scenario
-    /// for helping the routing algorithm to find the correct path
+    /// Note:
+    ///    1. this is only used for the private channels with the last hop.
+    ///    2. `hop_hints` is only a `hint` for routing algorithm,
+    ///       it is not a guarantee that the payment will be routed through the specified channels,
+    ///       it is up to the routing algorithm to decide whether to use the hints or not.
+    ///
+    /// For example `(pubkey, channel_outpoint, fee_rate, tlc_expiry_delta)` suggest path router
+    /// to use the channel of `channel_outpoint` at hop with `pubkey` to forward the payment
+    /// and the fee rate is `fee_rate` and tlc_expiry_delta is `tlc_expiry_delta`.
     pub hop_hints: Option<Vec<HopHint>>,
 
     /// dry_run for payment, used for check whether we can build valid router and the fee for this payment,
@@ -252,7 +255,7 @@ pub struct BuildRouterParams {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct BuildPaymentRouterResult {
     /// The hops information for router
-    hops_info: Vec<PathEdge>,
+    router_hops: Vec<RouterHop>,
 }
 
 #[serde_as]
@@ -262,7 +265,7 @@ pub struct SendPaymentWithRouterParams {
     pub payment_hash: Option<Hash256>,
 
     /// The router to use for the payment
-    pub router: Vec<PathEdge>,
+    pub router: Vec<RouterHop>,
 
     /// the encoded invoice to send to the recipient
     pub invoice: Option<String>,
@@ -428,7 +431,7 @@ where
         };
 
         handle_actor_call!(self.actor, message, params).map(|response| BuildPaymentRouterResult {
-            hops_info: response.path_edges,
+            router_hops: response.router_hops,
         })
     }
 

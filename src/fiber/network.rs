@@ -44,20 +44,20 @@ use tokio_util::task::TaskTracker;
 use tracing::{debug, error, info, trace, warn};
 
 use super::channel::{
-    get_funding_and_reserved_amount, occupied_capacity, AcceptChannelParameter, ChannelActor,
-    ChannelActorMessage, ChannelActorStateStore, ChannelCommand, ChannelCommandWithId,
-    ChannelEvent, ChannelInitializationParameter, ChannelState, ChannelSubscribers, ChannelTlcInfo,
-    OpenChannelParameter, PrevTlcInfo, ProcessingChannelError, ProcessingChannelResult,
-    PublicChannelInfo, RevocationData, SettlementData, ShuttingDownFlags, StopReason,
-    DEFAULT_COMMITMENT_FEE_RATE, DEFAULT_FEE_RATE, DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
-    MAX_COMMITMENT_DELAY_EPOCHS, MAX_TLC_NUMBER_IN_FLIGHT, MIN_COMMITMENT_DELAY_EPOCHS,
-    SYS_MAX_TLC_NUMBER_IN_FLIGHT,
+    get_funding_and_reserved_amount, occupied_capacity, AcceptChannelParameter,
+    AwaitingTxSignaturesFlags, ChannelActor, ChannelActorMessage, ChannelActorStateStore,
+    ChannelCommand, ChannelCommandWithId, ChannelEvent, ChannelInitializationParameter,
+    ChannelState, ChannelSubscribers, ChannelTlcInfo, OpenChannelParameter, PrevTlcInfo,
+    ProcessingChannelError, ProcessingChannelResult, PublicChannelInfo, RevocationData,
+    SettlementData, ShuttingDownFlags, StopReason, DEFAULT_COMMITMENT_FEE_RATE, DEFAULT_FEE_RATE,
+    DEFAULT_MAX_TLC_VALUE_IN_FLIGHT, MAX_COMMITMENT_DELAY_EPOCHS, MAX_TLC_NUMBER_IN_FLIGHT,
+    MIN_COMMITMENT_DELAY_EPOCHS, SYS_MAX_TLC_NUMBER_IN_FLIGHT,
 };
 use super::config::{AnnouncedNodeName, MIN_TLC_EXPIRY_DELTA};
 use super::fee::calculate_commitment_tx_fee;
 use super::gossip::{GossipActorMessage, GossipMessageStore, GossipMessageUpdates};
 use super::graph::{
-    NetworkGraph, NetworkGraphStateStore, OwnedChannelUpdateEvent, PathEdge, SessionRoute,
+    NetworkGraph, NetworkGraphStateStore, OwnedChannelUpdateEvent, RouterHop, SessionRoute,
 };
 use super::key::blake2b_hash_with_salt;
 use super::types::{
@@ -188,6 +188,21 @@ pub struct NodeInfoResponse {
     pub udt_cfg_infos: UdtCfgInfos,
 }
 
+/// The information about a peer connected to the node.
+#[serde_as]
+#[derive(Clone, Serialize, Deserialize, Debug)]
+pub struct PeerInfo {
+    /// The identity public key of the peer.
+    pub pubkey: Pubkey,
+
+    /// The peer ID of the peer
+    #[serde_as(as = "DisplayFromStr")]
+    pub peer_id: PeerId,
+
+    /// A list of multi-addresses associated with the peer.
+    pub addresses: Vec<MultiAddr>,
+}
+
 /// The struct here is used both internally and as an API to the outside world.
 /// If we want to send a reply to the caller, we need to wrap the message with
 /// a RpcReplyPort. Since outsider users have no knowledge of RpcReplyPort, we
@@ -257,6 +272,7 @@ pub enum NetworkActorCommand {
     ),
 
     NodeInfo((), RpcReplyPort<Result<NodeInfoResponse, String>>),
+    ListPeers((), RpcReplyPort<Result<Vec<PeerInfo>, String>>),
 }
 
 pub async fn sign_network_message(
@@ -330,7 +346,7 @@ pub struct SendPaymentWithRouterCommand {
     pub payment_hash: Option<Hash256>,
 
     /// The router to use for the payment
-    pub router: Vec<PathEdge>,
+    pub router: Vec<RouterHop>,
 
     /// the encoded invoice to send to the recipient
     pub invoice: Option<String>,
@@ -410,7 +426,7 @@ pub struct BuildRouterCommand {
 #[serde_as]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PaymentRouter {
-    pub path_edges: Vec<PathEdge>,
+    pub router_hops: Vec<RouterHop>,
 }
 
 #[serde_as]
@@ -432,7 +448,7 @@ pub struct SendPaymentData {
     pub custom_records: Option<PaymentCustomRecords>,
     pub allow_self_payment: bool,
     pub hop_hints: Vec<HopHint>,
-    pub router: Vec<PathEdge>,
+    pub router: Vec<RouterHop>,
     pub dry_run: bool,
 }
 
@@ -1506,6 +1522,21 @@ where
                 };
                 let _ = rpc.send(Ok(response));
             }
+            NetworkActorCommand::ListPeers(_, rpc) => {
+                let peers = state
+                    .peer_session_map
+                    .keys()
+                    .map(|peer_id| PeerInfo {
+                        peer_id: peer_id.clone(),
+                        pubkey: state
+                            .state_to_be_persisted
+                            .get_peer_pubkey(peer_id)
+                            .expect("pubkey not found"),
+                        addresses: state.state_to_be_persisted.get_peer_addresses(peer_id),
+                    })
+                    .collect::<Vec<_>>();
+                let _ = rpc.send(Ok(peers));
+            }
         };
         Ok(())
     }
@@ -2036,13 +2067,13 @@ where
         };
 
         let source = self.network_graph.read().await.get_source_pubkey();
-        let path_edges = self
+        let router_hops = self
             .network_graph
             .read()
             .await
             .build_path(source, command)?;
 
-        Ok(PaymentRouter { path_edges })
+        Ok(PaymentRouter { router_hops })
     }
 }
 
@@ -2511,9 +2542,18 @@ where
             match channel_actor_state.state {
                 ChannelState::ChannelReady
                 | ChannelState::ShuttingDown(_)
-                | ChannelState::Closed(_) => {
+                | ChannelState::Closed(_)
+                | ChannelState::AwaitingChannelReady(_) => {
                     return Err(ProcessingChannelError::InvalidParameter(format!(
                         "Channel {} is in state {:?}, cannot be abandoned, please shutdown the channel instead",
+                        channel_id, channel_actor_state.state
+                    )));
+                }
+                ChannelState::AwaitingTxSignatures(flags)
+                    if flags.contains(AwaitingTxSignaturesFlags::OUR_TX_SIGNATURES_SENT) =>
+                {
+                    return Err(ProcessingChannelError::InvalidParameter(format!(
+                        "Channel {} is in state {:?} and our signature has been sent. It cannot be abandoned. please wait for chain commitment.",
                         channel_id, channel_actor_state.state
                     )));
                 }

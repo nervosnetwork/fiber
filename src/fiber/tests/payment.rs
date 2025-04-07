@@ -893,10 +893,10 @@ async fn test_send_payment_build_router_basic() {
         .await
         .unwrap();
     eprintln!("result: {:?}", router);
-    let router_nodes: Vec<_> = router.path_edges.iter().map(|x| x.target).collect();
+    let router_nodes: Vec<_> = router.router_hops.iter().map(|x| x.target).collect();
     eprintln!("router_nodes: {:?}", router_nodes);
     let amounts: Vec<_> = router
-        .path_edges
+        .router_hops
         .iter()
         .map(|x| x.amount_received)
         .collect();
@@ -1003,7 +1003,7 @@ async fn test_send_payment_build_router_multiple_channels() {
         .unwrap();
     eprintln!("result: {:?}", router);
     let amounts: Vec<_> = router
-        .path_edges
+        .router_hops
         .iter()
         .map(|x| x.amount_received)
         .collect();
@@ -1012,7 +1012,7 @@ async fn test_send_payment_build_router_multiple_channels() {
     let channel_2_funding_tx = node_0.get_channel_funding_tx(&channels[2]).unwrap();
     assert_eq!(
         channel_2_funding_tx,
-        router.path_edges[1].channel_outpoint.tx_hash().into(),
+        router.router_hops[1].channel_outpoint.tx_hash().into(),
     );
 
     let channel_1_funding_tx = node_0.get_channel_funding_tx(&channels[1]).unwrap();
@@ -1037,7 +1037,7 @@ async fn test_send_payment_build_router_multiple_channels() {
         .unwrap();
     eprintln!("result: {:?}", router);
     let amounts: Vec<_> = router
-        .path_edges
+        .router_hops
         .iter()
         .map(|x| x.amount_received)
         .collect();
@@ -1045,7 +1045,7 @@ async fn test_send_payment_build_router_multiple_channels() {
 
     assert_eq!(
         channel_1_funding_tx,
-        router.path_edges[1].channel_outpoint.tx_hash().into(),
+        router.router_hops[1].channel_outpoint.tx_hash().into(),
     );
 }
 
@@ -1117,14 +1117,14 @@ async fn test_send_payment_build_router_pay_self() {
         .unwrap();
     eprintln!("result: {:?}", router);
     let amounts: Vec<_> = router
-        .path_edges
+        .router_hops
         .iter()
         .map(|x| x.amount_received)
         .collect();
     eprintln!("amounts: {:?}", amounts);
     assert_eq!(amounts, vec![4, 2, 1]);
 
-    let router_nodes: Vec<_> = router.path_edges.iter().map(|x| x.target).collect();
+    let router_nodes: Vec<_> = router.router_hops.iter().map(|x| x.target).collect();
     eprintln!("router_nodes: {:?}", router_nodes);
     assert_eq!(
         router_nodes,
@@ -1141,7 +1141,7 @@ async fn test_send_payment_build_router_pay_self() {
             channel_3_funding_tx
         ],
         router
-            .path_edges
+            .router_hops
             .iter()
             .map(|x| x.channel_outpoint.tx_hash().into())
             .collect::<Vec<_>>()
@@ -1218,7 +1218,7 @@ async fn test_send_payment_with_route_to_self_with_specified_router() {
     // pay to self with router will be OK
     let res = node_0
         .send_payment_with_router(SendPaymentWithRouterCommand {
-            router: router.path_edges,
+            router: router.router_hops,
             keysend: Some(true),
             ..Default::default()
         })
@@ -1318,7 +1318,7 @@ async fn test_send_payment_with_router_with_multiple_channels() {
     // pay to self with router will be OK
     let res = node_0
         .send_payment_with_router(SendPaymentWithRouterCommand {
-            router: router.path_edges,
+            router: router.router_hops,
             keysend: Some(true),
             ..Default::default()
         })
@@ -1375,7 +1375,7 @@ async fn test_send_payment_with_router_with_multiple_channels() {
     // pay to self with router will be OK
     let res = node_0
         .send_payment_with_router(SendPaymentWithRouterCommand {
-            router: router.path_edges,
+            router: router.router_hops,
             keysend: Some(true),
             ..Default::default()
         })
@@ -1473,7 +1473,7 @@ async fn test_send_payment_two_nodes_with_router_and_multiple_channels() {
     // pay to self with router will be OK
     let res = node_0
         .send_payment_with_router(SendPaymentWithRouterCommand {
-            router: router.path_edges,
+            router: router.router_hops,
             keysend: Some(true),
             ..Default::default()
         })

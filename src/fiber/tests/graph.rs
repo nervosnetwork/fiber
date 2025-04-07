@@ -6,7 +6,7 @@ use crate::fiber::types::{ChannelUpdateChannelFlags, ChannelUpdateMessageFlags, 
 use crate::now_timestamp_as_millis_u64;
 use crate::{
     fiber::{
-        graph::{NetworkGraph, PathEdge},
+        graph::{NetworkGraph, RouterHop},
         network::{get_chain_hash, SendPaymentCommand, SendPaymentData},
         types::{ChannelAnnouncement, ChannelUpdate, Hash256, NodeAnnouncement},
     },
@@ -208,7 +208,7 @@ impl MockNetworkGraph {
         target: usize,
         amount: u128,
         max_fee: u128,
-    ) -> Result<Vec<PathEdge>, PathFindError> {
+    ) -> Result<Vec<RouterHop>, PathFindError> {
         let source = self.keys[source].into();
         let target = self.keys[target].into();
         self.graph.find_path(
@@ -231,7 +231,7 @@ impl MockNetworkGraph {
         amount: u128,
         max_fee: u128,
         udt_type_script: Script,
-    ) -> Result<Vec<PathEdge>, PathFindError> {
+    ) -> Result<Vec<RouterHop>, PathFindError> {
         let source = self.keys[source].into();
         let target = self.keys[target].into();
         self.graph.find_path(

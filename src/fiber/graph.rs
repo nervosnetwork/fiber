@@ -16,6 +16,7 @@ use crate::fiber::config::DEFAULT_TLC_EXPIRY_DELTA;
 use crate::fiber::fee::calculate_tlc_forward_fee;
 use crate::fiber::path::NodeHeapElement;
 use crate::fiber::serde_utils::EntityHex;
+use crate::fiber::serde_utils::{U128Hex, U64Hex};
 use crate::fiber::types::PaymentHopData;
 use crate::invoice::CkbInvoice;
 use crate::now_timestamp_as_millis_u64;
@@ -130,17 +131,6 @@ impl ChannelInfo {
         &self.udt_type_script
     }
 
-    // Whether this channel is explicitly disabled in either direction.
-    // TODO: we currently deem a channel as disabled if one direction is disabled.
-    // Is it possible that one direction is disabled while the other is not?
-    pub fn is_explicitly_disabled(&self) -> bool {
-        match (&self.update_of_node2, &self.update_of_node1) {
-            (Some(update1), _) if !update1.enabled => true,
-            (_, Some(update2)) if !update2.enabled => true,
-            _ => false,
-        }
-    }
-
     pub fn channel_last_update_time(&self) -> Option<u64> {
         self.update_of_node2
             .as_ref()
@@ -218,19 +208,26 @@ impl From<(u64, ChannelAnnouncement)> for ChannelInfo {
     }
 }
 
+/// The channel update info with a single direction of channel
+#[serde_as]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ChannelUpdateInfo {
-    // The timestamp is the time when the channel update was received by the node.
+    /// The timestamp is the time when the channel update was received by the node.
+    #[serde_as(as = "U64Hex")]
     pub timestamp: u64,
     /// Whether the channel can be currently used for payments (in this one direction).
     pub enabled: bool,
     /// The exact amount of balance that we can send to the other party via the channel.
+    #[serde_as(as = "Option<U128Hex>")]
     pub outbound_liquidity: Option<u128>,
     /// The difference in htlc expiry values that you must have when routing through this channel (in milliseconds).
+    #[serde_as(as = "U64Hex")]
     pub tlc_expiry_delta: u64,
     /// The minimum value, which must be relayed to the next hop via the channel
+    #[serde_as(as = "U128Hex")]
     pub tlc_minimum_value: u128,
     /// The forwarding fee rate for the channel.
+    #[serde_as(as = "U64Hex")]
     pub fee_rate: u64,
 }
 
@@ -329,7 +326,7 @@ pub enum PathFindError {
 /// This represents a TLC transfer from one node to another.
 #[serde_as]
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct PathEdge {
+pub struct RouterHop {
     /// The node that is sending the TLC to the next node.
     pub(crate) target: Pubkey,
     /// The channel that is used to send the TLC to the next node.
@@ -697,11 +694,7 @@ where
                 ) => {
                     let mut channel_info = ChannelInfo::from((timestamp, channel_announcement));
                     self.load_channel_updates_from_store(&mut channel_info);
-                    if channel_info.is_explicitly_disabled() {
-                        None
-                    } else {
-                        Some(channel_info)
-                    }
+                    Some(channel_info)
                 }
                 _ => None,
             })
@@ -877,7 +870,7 @@ where
 
     fn build_router_from_path(
         &self,
-        route: &Vec<PathEdge>,
+        route: &Vec<RouterHop>,
         payment_data: SendPaymentData,
     ) -> Vec<PaymentHopData> {
         let invoice = payment_data
@@ -996,7 +989,7 @@ where
             incoming_tlc_expiry: total_tlc_expiry,
             fee_charged: fee,
             probability,
-            next_hop: Some(PathEdge {
+            next_hop: Some(RouterHop {
                 target: to,
                 channel_outpoint: channel_outpoint.clone(),
                 // Here we need to use the amount accumulated so far (i.e. with the fees in current hop)
@@ -1027,7 +1020,7 @@ where
         tlc_expiry_limit: u64,
         allow_self: bool,
         hop_hints: Vec<HopHint>,
-    ) -> Result<Vec<PathEdge>, PathFindError> {
+    ) -> Result<Vec<RouterHop>, PathFindError> {
         let started_time = std::time::Instant::now();
         let nodes_len = self.nodes.len();
         let route_to_self = source == target;
@@ -1261,7 +1254,7 @@ where
         amount: u128,
         expiry: u64,
         node: Pubkey,
-    ) -> Result<(PathEdge, Pubkey, u64, u128), PathFindError> {
+    ) -> Result<(RouterHop, Pubkey, u64, u128), PathFindError> {
         let mut channels: Vec<(Pubkey, OutPoint, u64, u64)> = hop_hints
             .iter()
             .map(|hint| {
@@ -1301,7 +1294,7 @@ where
             let fee = calculate_tlc_forward_fee(amount, *fee_rate as u128).map_err(|err| {
                 PathFindError::PathFind(format!("calculate_tlc_forward_fee error: {:?}", err))
             })?;
-            let last_edge = PathEdge {
+            let last_edge = RouterHop {
                 target: node,
                 channel_outpoint: outpoint.clone(),
                 amount_received: amount,
@@ -1341,7 +1334,7 @@ where
         &self,
         source: Pubkey,
         command: BuildRouterCommand,
-    ) -> Result<Vec<PathEdge>, PathFindError> {
+    ) -> Result<Vec<RouterHop>, PathFindError> {
         let mut router_hops = command.hops_info.clone();
         router_hops.reverse();
 
@@ -1423,7 +1416,7 @@ where
                 }
                 found = Some((
                     distance,
-                    PathEdge {
+                    RouterHop {
                         target: to,
                         channel_outpoint: channel_outpoint.clone(),
                         amount_received: agg_amount,
