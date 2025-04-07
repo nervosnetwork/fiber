@@ -44,14 +44,14 @@ use tokio_util::task::TaskTracker;
 use tracing::{debug, error, info, trace, warn};
 
 use super::channel::{
-    get_funding_and_reserved_amount, occupied_capacity, AcceptChannelParameter, ChannelActor,
-    ChannelActorMessage, ChannelActorStateStore, ChannelCommand, ChannelCommandWithId,
-    ChannelEvent, ChannelInitializationParameter, ChannelState, ChannelSubscribers, ChannelTlcInfo,
-    OpenChannelParameter, PrevTlcInfo, ProcessingChannelError, ProcessingChannelResult,
-    PublicChannelInfo, RevocationData, SettlementData, ShuttingDownFlags, StopReason,
-    DEFAULT_COMMITMENT_FEE_RATE, DEFAULT_FEE_RATE, DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
-    MAX_COMMITMENT_DELAY_EPOCHS, MAX_TLC_NUMBER_IN_FLIGHT, MIN_COMMITMENT_DELAY_EPOCHS,
-    SYS_MAX_TLC_NUMBER_IN_FLIGHT,
+    get_funding_and_reserved_amount, occupied_capacity, AcceptChannelParameter,
+    AwaitingTxSignaturesFlags, ChannelActor, ChannelActorMessage, ChannelActorStateStore,
+    ChannelCommand, ChannelCommandWithId, ChannelEvent, ChannelInitializationParameter,
+    ChannelState, ChannelSubscribers, ChannelTlcInfo, OpenChannelParameter, PrevTlcInfo,
+    ProcessingChannelError, ProcessingChannelResult, PublicChannelInfo, RevocationData,
+    SettlementData, ShuttingDownFlags, StopReason, DEFAULT_COMMITMENT_FEE_RATE, DEFAULT_FEE_RATE,
+    DEFAULT_MAX_TLC_VALUE_IN_FLIGHT, MAX_COMMITMENT_DELAY_EPOCHS, MAX_TLC_NUMBER_IN_FLIGHT,
+    MIN_COMMITMENT_DELAY_EPOCHS, SYS_MAX_TLC_NUMBER_IN_FLIGHT,
 };
 use super::config::{AnnouncedNodeName, MIN_TLC_EXPIRY_DELTA};
 use super::fee::calculate_commitment_tx_fee;
@@ -2369,9 +2369,18 @@ where
             match channel_actor_state.state {
                 ChannelState::ChannelReady
                 | ChannelState::ShuttingDown(_)
-                | ChannelState::Closed(_) => {
+                | ChannelState::Closed(_)
+                | ChannelState::AwaitingChannelReady(_) => {
                     return Err(ProcessingChannelError::InvalidParameter(format!(
                         "Channel {} is in state {:?}, cannot be abandoned, please shutdown the channel instead",
+                        channel_id, channel_actor_state.state
+                    )));
+                }
+                ChannelState::AwaitingTxSignatures(flags)
+                    if flags.contains(AwaitingTxSignaturesFlags::OUR_TX_SIGNATURES_SENT) =>
+                {
+                    return Err(ProcessingChannelError::InvalidParameter(format!(
+                        "Channel {} is in state {:?} and our signature has been sent. It cannot be abandoned. please wait for chain commitment.",
                         channel_id, channel_actor_state.state
                     )));
                 }
