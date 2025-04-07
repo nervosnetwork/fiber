@@ -174,9 +174,8 @@ union UdtDep {
 }
 
 table UdtCellDep {
+    out_point: OutPoint,
     dep_type: byte,
-    tx_hash: Byte32,
-    index: Uint32,
 }
 
 table UdtScript {

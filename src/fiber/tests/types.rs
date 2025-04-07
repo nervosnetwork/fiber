@@ -15,6 +15,7 @@ use crate::{
     gen_rand_fiber_public_key, now_timestamp_as_millis_u64,
 };
 use ckb_hash::blake2b_256;
+use ckb_jsonrpc_types::OutPoint;
 use ckb_types::{
     core::{DepType, ScriptHashType},
     H256,
@@ -343,11 +344,13 @@ fn test_verify_hard_coded_node_announcement() {
                     auto_accept_amount: Some(1000),
                     cell_deps: vec![UdtDep::CellDep(UdtCellDep {
                         dep_type: DepType::Code,
-                        tx_hash: H256::from_str(
-                            "f897bfc51766ee9cdb2b9279e63c8abdba4b35b6ee7dde5fed9b0a5a41c95dc4",
-                        )
-                        .expect("valid hash"),
-                        index: 8,
+                        out_point: OutPoint {
+                            tx_hash: H256::from_str(
+                                "f897bfc51766ee9cdb2b9279e63c8abdba4b35b6ee7dde5fed9b0a5a41c95dc4",
+                            )
+                            .expect("valid hash"),
+                            index: 8.into(),
+                        },
                     })],
                 },
                 UdtArgInfo {
@@ -363,11 +366,13 @@ fn test_verify_hard_coded_node_announcement() {
                     auto_accept_amount: Some(1000),
                     cell_deps: vec![UdtDep::CellDep(UdtCellDep {
                         dep_type: DepType::Code,
-                        tx_hash: H256::from_str(
-                            "f897bfc51766ee9cdb2b9279e63c8abdba4b35b6ee7dde5fed9b0a5a41c95dc4",
-                        )
-                        .expect("valid hash"),
-                        index: 9,
+                        out_point: OutPoint {
+                            tx_hash: H256::from_str(
+                                "f897bfc51766ee9cdb2b9279e63c8abdba4b35b6ee7dde5fed9b0a5a41c95dc4",
+                            )
+                            .expect("valid hash"),
+                            index: 9.into(),
+                        },
                     })],
                 },
             ]),
@@ -409,11 +414,13 @@ fn test_verify_hard_coded_node_announcement() {
                 auto_accept_amount: Some(1000000000),
                 cell_deps: vec![UdtDep::CellDep(UdtCellDep {
                     dep_type: DepType::Code,
-                    tx_hash: H256::from_str(
-                        "ed7d65b9ad3d99657e37c4285d585fea8a5fcaf58165d54dacf90243f911548b",
-                    )
-                    .unwrap(),
-                    index: 0,
+                    out_point: OutPoint {
+                        tx_hash: H256::from_str(
+                            "ed7d65b9ad3d99657e37c4285d585fea8a5fcaf58165d54dacf90243f911548b",
+                        )
+                        .unwrap(),
+                        index: 0.into(),
+                    },
                 })],
             }]),
         };

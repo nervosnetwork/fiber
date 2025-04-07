@@ -8,13 +8,13 @@ use std::{
     str::FromStr,
 };
 
+use ckb_jsonrpc_types::OutPoint;
 use ckb_types::core::ScriptHashType;
 use ckb_types::prelude::Builder;
-use ckb_types::prelude::Pack;
 use ckb_types::H256;
 use ckb_types::{
     core::DepType,
-    packed::{CellDep, OutPoint, Script},
+    packed::{CellDep, Script},
 };
 use clap_serde_derive::clap::{self};
 use molecule::prelude::Entity;
@@ -191,10 +191,9 @@ pub enum UdtDep {
 #[serde_as]
 #[derive(Serialize, Deserialize, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct UdtCellDep {
+    pub out_point: OutPoint,
     #[serde_as(as = "DepTypeWrapper")]
     pub dep_type: DepType,
-    pub tx_hash: H256,
-    pub index: u32,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, Eq, PartialEq, Hash)]
@@ -221,12 +220,7 @@ impl From<&UdtCellDep> for CellDep {
     fn from(cell_dep: &UdtCellDep) -> Self {
         CellDep::new_builder()
             .dep_type(cell_dep.dep_type.into())
-            .out_point(
-                OutPoint::new_builder()
-                    .tx_hash(cell_dep.tx_hash.pack())
-                    .index(cell_dep.index.pack())
-                    .build(),
-            )
+            .out_point(cell_dep.out_point.clone().into())
             .build()
     }
 }

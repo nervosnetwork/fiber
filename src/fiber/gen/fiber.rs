@@ -10823,9 +10823,9 @@ impl ::core::default::Default for UdtDep {
     }
 }
 impl UdtDep {
-    const DEFAULT_VALUE: [u8; 57] = [
-        0, 0, 0, 0, 53, 0, 0, 0, 16, 0, 0, 0, 17, 0, 0, 0, 49, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    const DEFAULT_VALUE: [u8; 53] = [
+        0, 0, 0, 0, 49, 0, 0, 0, 12, 0, 0, 0, 48, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     ];
     pub const ITEMS_COUNT: usize = 2;
     pub fn item_id(&self) -> molecule::Number {
@@ -11120,9 +11120,8 @@ impl ::core::fmt::Debug for UdtCellDep {
 impl ::core::fmt::Display for UdtCellDep {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         write!(f, "{} {{ ", Self::NAME)?;
-        write!(f, "{}: {}", "dep_type", self.dep_type())?;
-        write!(f, ", {}: {}", "tx_hash", self.tx_hash())?;
-        write!(f, ", {}: {}", "index", self.index())?;
+        write!(f, "{}: {}", "out_point", self.out_point())?;
+        write!(f, ", {}: {}", "dep_type", self.dep_type())?;
         let extra_count = self.count_extra_fields();
         if extra_count != 0 {
             write!(f, ", .. ({} fields)", extra_count)?;
@@ -11137,11 +11136,11 @@ impl ::core::default::Default for UdtCellDep {
     }
 }
 impl UdtCellDep {
-    const DEFAULT_VALUE: [u8; 53] = [
-        53, 0, 0, 0, 16, 0, 0, 0, 17, 0, 0, 0, 49, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    const DEFAULT_VALUE: [u8; 49] = [
+        49, 0, 0, 0, 12, 0, 0, 0, 48, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     ];
-    pub const FIELD_COUNT: usize = 3;
+    pub const FIELD_COUNT: usize = 2;
     pub fn total_size(&self) -> usize {
         molecule::unpack_number(self.as_slice()) as usize
     }
@@ -11158,26 +11157,20 @@ impl UdtCellDep {
     pub fn has_extra_fields(&self) -> bool {
         Self::FIELD_COUNT != self.field_count()
     }
-    pub fn dep_type(&self) -> Byte {
+    pub fn out_point(&self) -> OutPoint {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[4..]) as usize;
         let end = molecule::unpack_number(&slice[8..]) as usize;
-        Byte::new_unchecked(self.0.slice(start..end))
+        OutPoint::new_unchecked(self.0.slice(start..end))
     }
-    pub fn tx_hash(&self) -> Byte32 {
+    pub fn dep_type(&self) -> Byte {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[8..]) as usize;
-        let end = molecule::unpack_number(&slice[12..]) as usize;
-        Byte32::new_unchecked(self.0.slice(start..end))
-    }
-    pub fn index(&self) -> Uint32 {
-        let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[12..]) as usize;
         if self.has_extra_fields() {
-            let end = molecule::unpack_number(&slice[16..]) as usize;
-            Uint32::new_unchecked(self.0.slice(start..end))
+            let end = molecule::unpack_number(&slice[12..]) as usize;
+            Byte::new_unchecked(self.0.slice(start..end))
         } else {
-            Uint32::new_unchecked(self.0.slice(start..))
+            Byte::new_unchecked(self.0.slice(start..))
         }
     }
     pub fn as_reader<'r>(&'r self) -> UdtCellDepReader<'r> {
@@ -11207,9 +11200,8 @@ impl molecule::prelude::Entity for UdtCellDep {
     }
     fn as_builder(self) -> Self::Builder {
         Self::new_builder()
+            .out_point(self.out_point())
             .dep_type(self.dep_type())
-            .tx_hash(self.tx_hash())
-            .index(self.index())
     }
 }
 #[derive(Clone, Copy)]
@@ -11231,9 +11223,8 @@ impl<'r> ::core::fmt::Debug for UdtCellDepReader<'r> {
 impl<'r> ::core::fmt::Display for UdtCellDepReader<'r> {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         write!(f, "{} {{ ", Self::NAME)?;
-        write!(f, "{}: {}", "dep_type", self.dep_type())?;
-        write!(f, ", {}: {}", "tx_hash", self.tx_hash())?;
-        write!(f, ", {}: {}", "index", self.index())?;
+        write!(f, "{}: {}", "out_point", self.out_point())?;
+        write!(f, ", {}: {}", "dep_type", self.dep_type())?;
         let extra_count = self.count_extra_fields();
         if extra_count != 0 {
             write!(f, ", .. ({} fields)", extra_count)?;
@@ -11242,7 +11233,7 @@ impl<'r> ::core::fmt::Display for UdtCellDepReader<'r> {
     }
 }
 impl<'r> UdtCellDepReader<'r> {
-    pub const FIELD_COUNT: usize = 3;
+    pub const FIELD_COUNT: usize = 2;
     pub fn total_size(&self) -> usize {
         molecule::unpack_number(self.as_slice()) as usize
     }
@@ -11259,26 +11250,20 @@ impl<'r> UdtCellDepReader<'r> {
     pub fn has_extra_fields(&self) -> bool {
         Self::FIELD_COUNT != self.field_count()
     }
-    pub fn dep_type(&self) -> ByteReader<'r> {
+    pub fn out_point(&self) -> OutPointReader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[4..]) as usize;
         let end = molecule::unpack_number(&slice[8..]) as usize;
-        ByteReader::new_unchecked(&self.as_slice()[start..end])
+        OutPointReader::new_unchecked(&self.as_slice()[start..end])
     }
-    pub fn tx_hash(&self) -> Byte32Reader<'r> {
+    pub fn dep_type(&self) -> ByteReader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[8..]) as usize;
-        let end = molecule::unpack_number(&slice[12..]) as usize;
-        Byte32Reader::new_unchecked(&self.as_slice()[start..end])
-    }
-    pub fn index(&self) -> Uint32Reader<'r> {
-        let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[12..]) as usize;
         if self.has_extra_fields() {
-            let end = molecule::unpack_number(&slice[16..]) as usize;
-            Uint32Reader::new_unchecked(&self.as_slice()[start..end])
+            let end = molecule::unpack_number(&slice[12..]) as usize;
+            ByteReader::new_unchecked(&self.as_slice()[start..end])
         } else {
-            Uint32Reader::new_unchecked(&self.as_slice()[start..])
+            ByteReader::new_unchecked(&self.as_slice()[start..])
         }
     }
 }
@@ -11328,30 +11313,24 @@ impl<'r> molecule::prelude::Reader<'r> for UdtCellDepReader<'r> {
         if offsets.windows(2).any(|i| i[0] > i[1]) {
             return ve!(Self, OffsetsNotMatch);
         }
-        ByteReader::verify(&slice[offsets[0]..offsets[1]], compatible)?;
-        Byte32Reader::verify(&slice[offsets[1]..offsets[2]], compatible)?;
-        Uint32Reader::verify(&slice[offsets[2]..offsets[3]], compatible)?;
+        OutPointReader::verify(&slice[offsets[0]..offsets[1]], compatible)?;
+        ByteReader::verify(&slice[offsets[1]..offsets[2]], compatible)?;
         Ok(())
     }
 }
 #[derive(Clone, Debug, Default)]
 pub struct UdtCellDepBuilder {
+    pub(crate) out_point: OutPoint,
     pub(crate) dep_type: Byte,
-    pub(crate) tx_hash: Byte32,
-    pub(crate) index: Uint32,
 }
 impl UdtCellDepBuilder {
-    pub const FIELD_COUNT: usize = 3;
+    pub const FIELD_COUNT: usize = 2;
+    pub fn out_point(mut self, v: OutPoint) -> Self {
+        self.out_point = v;
+        self
+    }
     pub fn dep_type(mut self, v: Byte) -> Self {
         self.dep_type = v;
-        self
-    }
-    pub fn tx_hash(mut self, v: Byte32) -> Self {
-        self.tx_hash = v;
-        self
-    }
-    pub fn index(mut self, v: Uint32) -> Self {
-        self.index = v;
         self
     }
 }
@@ -11360,26 +11339,22 @@ impl molecule::prelude::Builder for UdtCellDepBuilder {
     const NAME: &'static str = "UdtCellDepBuilder";
     fn expected_length(&self) -> usize {
         molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1)
+            + self.out_point.as_slice().len()
             + self.dep_type.as_slice().len()
-            + self.tx_hash.as_slice().len()
-            + self.index.as_slice().len()
     }
     fn write<W: molecule::io::Write>(&self, writer: &mut W) -> molecule::io::Result<()> {
         let mut total_size = molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1);
         let mut offsets = Vec::with_capacity(Self::FIELD_COUNT);
         offsets.push(total_size);
+        total_size += self.out_point.as_slice().len();
+        offsets.push(total_size);
         total_size += self.dep_type.as_slice().len();
-        offsets.push(total_size);
-        total_size += self.tx_hash.as_slice().len();
-        offsets.push(total_size);
-        total_size += self.index.as_slice().len();
         writer.write_all(&molecule::pack_number(total_size as molecule::Number))?;
         for offset in offsets.into_iter() {
             writer.write_all(&molecule::pack_number(offset as molecule::Number))?;
         }
+        writer.write_all(self.out_point.as_slice())?;
         writer.write_all(self.dep_type.as_slice())?;
-        writer.write_all(self.tx_hash.as_slice())?;
-        writer.write_all(self.index.as_slice())?;
         Ok(())
     }
     fn build(&self) -> Self::Entity {

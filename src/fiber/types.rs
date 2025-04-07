@@ -1853,8 +1853,7 @@ impl From<UdtCellDep> for molecule_fiber::UdtCellDep {
     fn from(udt_cell_dep: UdtCellDep) -> Self {
         molecule_fiber::UdtCellDep::new_builder()
             .dep_type(udt_cell_dep.dep_type.into())
-            .tx_hash(udt_cell_dep.tx_hash.pack())
-            .index(udt_cell_dep.index.pack())
+            .out_point(udt_cell_dep.out_point.into())
             .build()
     }
 }
@@ -1862,12 +1861,11 @@ impl From<UdtCellDep> for molecule_fiber::UdtCellDep {
 impl From<molecule_fiber::UdtCellDep> for UdtCellDep {
     fn from(udt_cell_dep: molecule_fiber::UdtCellDep) -> Self {
         UdtCellDep {
+            out_point: udt_cell_dep.out_point().into(),
             dep_type: udt_cell_dep
                 .dep_type()
                 .try_into()
                 .expect("invalid dep type"),
-            tx_hash: udt_cell_dep.tx_hash().unpack(),
-            index: udt_cell_dep.index().unpack(),
         }
     }
 }

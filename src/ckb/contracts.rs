@@ -324,12 +324,7 @@ impl ContractsContext {
             match udt_dep.to_enum() {
                 UdtDepUnion::UdtCellDep(cell_dep) => {
                     let cell_dep = CellDep::new_builder()
-                        .out_point(
-                            OutPoint::new_builder()
-                                .tx_hash(cell_dep.tx_hash())
-                                .index(cell_dep.index())
-                                .build(),
-                        )
+                        .out_point(cell_dep.out_point())
                         .dep_type(cell_dep.dep_type())
                         .build();
                     builder = builder.push(cell_dep);
