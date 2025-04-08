@@ -14,4 +14,4 @@ ckb-resource = "0.200.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_yaml = "0.9.34"
 rand = "0.8.5"
-tokio = "1.44.1"
+tokio = "1.44.2"
