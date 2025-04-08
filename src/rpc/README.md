@@ -606,7 +606,11 @@ Sends a payment to a peer.
 
 * `target_pubkey` - <em>Option<[Pubkey](#type-pubkey)></em>, the identifier of the payment target
 * `amount` - <em>`Option<u128>`</em>, the amount of the payment, the unit is Shannons for non UDT payment
-* `payment_hash` - <em>Option<[Hash256](#type-hash256)></em>, the hash to use within the payment's HTLC
+ If not set and there is a invoice, the amount will be set to the invoice amount
+* `payment_hash` - <em>Option<[Hash256](#type-hash256)></em>, the hash to use within the payment's HTLC.
+ If not set and `keysend` is set to true, a random hash will be generated.
+ If not set and there is a `payment_hash` in the invoice, it will be used.
+ Otherwise, `payment_hash` need to be set.
 * `final_tlc_expiry_delta` - <em>`Option<u64>`</em>, the TLC expiry delta should be used to set the timelock for the final hop, in milliseconds
 * `tlc_expiry_limit` - <em>`Option<u64>`</em>, the TLC expiry limit for the whole payment, in milliseconds, each hop is with a default tlc delta of 1 day
  suppose the payment router is with N hops, the total tlc expiry limit is at least (N-1) days
@@ -728,7 +732,10 @@ Sends a payment to a peer with specified router
 
 ##### Params
 
-* `payment_hash` - <em>Option<[Hash256](#type-hash256)></em>, the hash to use within the payment's HTLC
+* `payment_hash` - <em>Option<[Hash256](#type-hash256)></em>, the hash to use within the payment's HTLC.
+ If not set and `keysend` is set to true, a random hash will be generated.
+ If not set and there is a `payment_hash` in the invoice, it will be used.
+ Otherwise, `payment_hash` need to be set.
 * `router` - <em>Vec<[RouterHop](#type-routerhop)></em>, The router to use for the payment
 * `invoice` - <em>`Option<String>`</em>, the encoded invoice to send to the recipient
 * `custom_records` - <em>Option<[PaymentCustomRecords](#type-paymentcustomrecords)></em>, Some custom records for the payment which contains a map of u32 to Vec<u8>

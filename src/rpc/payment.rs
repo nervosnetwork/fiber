@@ -126,10 +126,14 @@ pub struct SendPaymentCommandParams {
     pub target_pubkey: Option<Pubkey>,
 
     /// the amount of the payment, the unit is Shannons for non UDT payment
+    /// If not set and there is a invoice, the amount will be set to the invoice amount
     #[serde_as(as = "Option<U128Hex>")]
     pub amount: Option<u128>,
 
-    /// the hash to use within the payment's HTLC
+    /// the hash to use within the payment's HTLC.
+    /// If not set and `keysend` is set to true, a random hash will be generated.
+    /// If not set and there is a `payment_hash` in the invoice, it will be used.
+    /// Otherwise, `payment_hash` need to be set.
     pub payment_hash: Option<Hash256>,
 
     /// the TLC expiry delta should be used to set the timelock for the final hop, in milliseconds
@@ -261,7 +265,10 @@ pub struct BuildPaymentRouterResult {
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug)]
 pub struct SendPaymentWithRouterParams {
-    /// the hash to use within the payment's HTLC
+    /// the hash to use within the payment's HTLC.
+    /// If not set and `keysend` is set to true, a random hash will be generated.
+    /// If not set and there is a `payment_hash` in the invoice, it will be used.
+    /// Otherwise, `payment_hash` need to be set.
     pub payment_hash: Option<Hash256>,
 
     /// The router to use for the payment
