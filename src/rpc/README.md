@@ -700,7 +700,7 @@ Builds a router with a list of pubkeys and required channels.
 ##### Params
 
 * `amount` - <em>`Option<u128>`</em>, the amount of the payment, the unit is Shannons for non UDT payment
- If not set, the minimum routable amount is used
+ If not set, the minimum routable amount `1` is used
 * `udt_type_script` - <em>`Option<Script>`</em>, udt type script for the payment router
 * `hops_info` - <em>Vec<[HopRequire](#type-hoprequire)></em>, A list of hops that defines the route. This does not include the source hop pubkey.
  A hop info is a tuple of pubkey and the channel(specified by channel funding tx) will be used.

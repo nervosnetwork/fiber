@@ -1339,6 +1339,7 @@ where
         router_hops.reverse();
 
         let mut path = vec![];
+        // If not set, the minimum routable amount `1` is used
         let mut agg_amount = command.amount.unwrap_or(1);
         let mut agg_tlc_expiry = command
             .final_tlc_expiry_delta

@@ -229,7 +229,7 @@ impl From<HopHint> for NetworkHopHint {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BuildRouterParams {
     /// the amount of the payment, the unit is Shannons for non UDT payment
-    /// If not set, the minimum routable amount is used
+    /// If not set, the minimum routable amount `1` is used
     #[serde_as(as = "Option<U128Hex>")]
     pub amount: Option<u128>,
 
