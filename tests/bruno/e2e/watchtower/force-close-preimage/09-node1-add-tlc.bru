@@ -1,0 +1,49 @@
+meta {
+  name: Node1 add tlc, 0x266cec97cbede2cfbce73666f08deed9560bdf7841a7a5a51b3a3f09da249e21 is the hash of 32 bytes zeroes
+  type: http
+  seq: 9
+}
+
+post {
+  url: {{NODE1_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "add_tlc",
+    "params": [
+      {
+        "channel_id": "{{N1N2_CHANNEL_ID}}",
+        "amount": "0x5f5e100",
+        "payment_hash": "0x266cec97cbede2cfbce73666f08deed9560bdf7841a7a5a51b3a3f09da249e21",
+        "expiry": "{{expiry}}"
+      }
+    ]
+  }
+}
+
+assert {
+  res.body.error: isUndefined
+  res.body.result.tlc_id: isDefined
+}
+
+script:pre-request {
+  // Set expiry to 2 hours from now.
+  let expiry = "0x" + (Date.now() + 1000 * 60 * 60 * 2).toString(16);
+  bru.setVar("expiry", expiry);
+}
+
+script:post-response {
+  // Sleep for sometime to make sure current operation finishes before next request starts.
+  await new Promise(r => setTimeout(r, 1000));
+  bru.setVar("N1N2_TLC_ID1", res.body.result.tlc_id);
+}

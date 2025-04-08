@@ -30,6 +30,7 @@ use crate::{
             create_witness_for_commitment_cell_with_pending_tlcs, RevocationData, SettlementData,
             SettlementTlc, XUDT_COMPATIBLE_WITNESS,
         },
+        hash_algorithm::HashAlgorithm,
         types::Hash256,
     },
     invoice::InvoiceStore,
@@ -505,13 +506,12 @@ fn try_settle_commitment_tx<S: InvoiceStore>(
                             continue;
                         }
                     };
+                let commitment_tx_hash = cell.out_point.tx_hash.clone();
                 if lock_script_args.len() > 36 {
                     info!(
                         "Found a force closed commitment tx with pending tlcs: {:#x}",
-                        cell.out_point.tx_hash
+                        commitment_tx_hash
                     );
-
-                    let commitment_tx_hash = cell.out_point.tx_hash.clone();
                     match ckb_client.get_transaction(commitment_tx_hash.clone()) {
                         Ok(Some(tx_with_status)) => {
                             if tx_with_status.tx_status.status != Status::Committed {
@@ -533,6 +533,22 @@ fn try_settle_commitment_tx<S: InvoiceStore>(
                                                         && witness.len()
                                                             > 18 + 85 * pending_tlc_count as usize
                                                     {
+                                                        // store the payment preimage if needed
+                                                        let tlc = Tlc(
+                                                            &witness[(18 + 85 * unlock_type as usize)..(18 + 85 * (unlock_type + 1) as usize)]
+                                                        );
+                                                        let preimage: [u8; 32] = witness[witness.len() - 32..].try_into().expect("checked length");
+                                                        let payment_hash = tlc.hash_algorithm().hash(preimage);
+                                                        if payment_hash.starts_with(tlc.payment_hash()) {
+                                                            info!("Found a preimage for payment hash: {:?}", payment_hash);
+                                                            store.insert_payment_preimage(
+                                                                payment_hash.into(),
+                                                                preimage.into(),
+                                                            ).expect("insert payment preimage should be ok");
+                                                        } else {
+                                                            warn!("Found a preimage for payment hash: {:?}, but not match the tlc", payment_hash);
+                                                        }
+                                                        // use remaining tlcs as new pending tlcs
                                                         let remain = [
                                                             &witness[18..(18
                                                                 + 85 * unlock_type as usize)],
@@ -604,8 +620,63 @@ fn try_settle_commitment_tx<S: InvoiceStore>(
                 } else {
                     info!(
                         "Found a force closed commitment tx without pending tlcs: {:#x}",
-                        cell.out_point.tx_hash
+                        commitment_tx_hash
                     );
+                    // we need to find and store the payment preimage if needed
+                    match ckb_client.get_transaction(commitment_tx_hash.clone()) {
+                        Ok(Some(tx_with_status)) => {
+                            if tx_with_status.tx_status.status != Status::Committed {
+                                error!("Cannot find the commitment tx: {:?}, status is {:?}, maybe ckb indexer bug?", tx_with_status.tx_status.status, commitment_tx_hash);
+                            } else if let Some(tx) = tx_with_status.transaction {
+                                match tx.inner {
+                                    Either::Left(tx) => {
+                                        let tx: Transaction = tx.inner.into();
+                                        tx.witnesses().into_iter().for_each(|witness| {
+                                            let witness = witness.raw_data();
+                                            if witness.len() > 18
+                                                && witness[0..16] == XUDT_COMPATIBLE_WITNESS
+                                            {
+                                                let unlock_type = witness[16];
+                                                let pending_tlc_count = witness[17];
+                                                if unlock_type < 0xFE
+                                                    && unlock_type < pending_tlc_count
+                                                    && witness.len()
+                                                        > 18 + 85 * pending_tlc_count as usize
+                                                {
+                                                    let tlc = Tlc(
+                                                        &witness[(18 + 85 * unlock_type as usize)..(18 + 85 * (unlock_type + 1) as usize)]
+                                                    );
+                                                    let preimage: [u8; 32] = witness[witness.len() - 32..].try_into().expect("checked length");
+                                                    let payment_hash = tlc.hash_algorithm().hash(preimage);
+                                                    if payment_hash.starts_with(tlc.payment_hash()) {
+                                                        info!("Found a preimage for payment hash: {:?}", payment_hash);
+                                                        store.insert_payment_preimage(
+                                                            payment_hash.into(),
+                                                            preimage.into(),
+                                                        ).expect("insert payment preimage should be ok");
+                                                    } else {
+                                                        warn!("Found a preimage for payment hash: {:?}, but not match the tlc", payment_hash);
+                                                    }
+                                                }
+                                            }
+                                        })
+                                    }
+                                    Either::Right(_) => {
+                                        // unreachable, ignore
+                                    }
+                                }
+                            }
+                        }
+                        Ok(None) => {
+                            error!(
+                                "Cannot find the commitment tx: {:?}, maybe ckb indexer bug?",
+                                commitment_tx_hash
+                            );
+                        }
+                        Err(err) => {
+                            error!("Failed to get commitment tx: {:?}", err);
+                        }
+                    }
                     if cell_header.epoch().to_rational() + delay_epoch.unwrap().to_rational()
                         > current_epoch.to_rational()
                     {
@@ -804,14 +875,8 @@ fn sign_tx_with_settlement(
         .expect("get witness at index 0")
         .raw_data()
         .to_vec();
-    // a trick to avoid the signature place holder offset check
-    let witness_len = settlement_witness.len();
-    let signature_start = witness_len
-        - if settlement_witness[witness_len - 65..witness_len] == vec![0u8; 65] {
-            65
-        } else {
-            65 + 32
-        };
+    let pending_tlc_count = settlement_witness[17] as usize;
+    let signature_start = 18 + 85 * pending_tlc_count;
     settlement_witness.splice(signature_start..signature_start + 65, signature_bytes);
 
     let witness = tx.witnesses().get(1).expect("get witness at index 1");
@@ -1239,6 +1304,14 @@ fn build_settlement_tx_for_pending_tlcs<S: InvoiceStore>(
 struct Tlc<'a>(&'a [u8]);
 
 impl<'a> Tlc<'a> {
+    pub fn hash_algorithm(&self) -> HashAlgorithm {
+        if (self.0[0] >> 1) & 0b0000001 == 0 {
+            HashAlgorithm::CkbHash
+        } else {
+            HashAlgorithm::Sha256
+        }
+    }
+
     pub fn payment_hash(&self) -> &'a [u8] {
         &self.0[17..37]
     }
