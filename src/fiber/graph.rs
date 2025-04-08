@@ -335,10 +335,12 @@ pub struct RouterHop {
     pub(crate) channel_outpoint: OutPoint,
     /// The amount that the source node will transfer to the target node.
     /// We have already added up all the fees along the path, so this amount can be used directly for the TLC.
+    #[serde_as(as = "U128Hex")]
     pub(crate) amount_received: u128,
     /// The expiry for the TLC that the source node sends to the target node.
     /// We have already added up all the expiry deltas along the path,
     /// the only thing missing is current time. So the expiry is the current time plus the expiry delta.
+    #[serde_as(as = "U64Hex")]
     pub(crate) incoming_tlc_expiry: u64,
 }
 
