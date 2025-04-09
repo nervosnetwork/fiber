@@ -35,6 +35,14 @@ pub fn get_git_version() -> &'static str {
     GIT_VERSION
 }
 
+pub fn get_git_commit_info() -> String {
+    format!(
+        "{} {}",
+        option_env!("GIT_COMMIT_HASH").unwrap_or("unknown"),
+        option_env!("GIT_COMMIT_DATE").unwrap_or("unknown")
+    )
+}
+
 pub fn get_node_prefix() -> &'static str {
     static INSTANCE: once_cell::sync::OnceCell<String> = once_cell::sync::OnceCell::new();
     INSTANCE.get_or_init(|| std::env::var("LOG_PREFIX").unwrap_or_else(|_| "".to_string()))
