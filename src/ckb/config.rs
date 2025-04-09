@@ -181,11 +181,29 @@ pub struct UdtScript {
 
 #[derive(Serialize, Deserialize, Clone, Debug, Eq, PartialEq, Hash)]
 /// Udt script on-chain dependencies.
-pub enum UdtDep {
+pub struct UdtDep {
     /// cell dep described by out_point.
-    CellDep(UdtCellDep),
+    #[serde(default)]
+    pub cell_dep: Option<UdtCellDep>,
     /// cell dep described by type ID.
-    TypeID(ScriptWrapper),
+    #[serde(default)]
+    pub type_id: Option<ScriptWrapper>,
+}
+
+impl UdtDep {
+    pub fn with_cell_dep(cell_dep: UdtCellDep) -> Self {
+        Self {
+            cell_dep: Some(cell_dep),
+            type_id: None,
+        }
+    }
+
+    pub fn with_type_id(type_id: ScriptWrapper) -> Self {
+        Self {
+            cell_dep: None,
+            type_id: Some(type_id),
+        }
+    }
 }
 
 #[serde_as]

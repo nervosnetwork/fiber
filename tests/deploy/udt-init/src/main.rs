@@ -184,9 +184,9 @@ struct UdtScript {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
-enum UdtDep {
-    CellDep(UdtCellDep),
-    TypeID(ckb_jsonrpc_types::Script),
+struct UdtDep {
+    cell_dep: Option<UdtCellDep>,
+    type_id: Option<ckb_jsonrpc_types::Script>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -250,13 +250,16 @@ fn generate_nodes_config() {
                 hash_type: "Data1".to_string(),
                 args: "0x.*".to_string(),
             },
-            cell_deps: vec![UdtDep::CellDep(UdtCellDep {
-                dep_type: "code".to_string(),
-                out_point: ckb_jsonrpc_types::OutPoint {
-                    tx_hash: genesis_tx,
-                    index: (index as u32).into(),
-                },
-            })],
+            cell_deps: vec![UdtDep {
+                cell_dep: Some(UdtCellDep {
+                    dep_type: "code".to_string(),
+                    out_point: ckb_jsonrpc_types::OutPoint {
+                        tx_hash: genesis_tx,
+                        index: (index as u32).into(),
+                    },
+                }),
+                type_id: None,
+            }],
         };
         udt_infos.push(udt_info);
     }

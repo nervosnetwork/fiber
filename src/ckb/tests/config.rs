@@ -15,7 +15,7 @@ fn test_udt_whitelist() {
             args: "0x00".to_string(),
         },
         auto_accept_amount: Some(100),
-        cell_deps: vec![UdtDep::CellDep(UdtCellDep {
+        cell_deps: vec![UdtDep::with_cell_dep(UdtCellDep {
             dep_type: DepType::Code,
             out_point: OutPoint {
                 tx_hash: H256::from([0u8; 32]),

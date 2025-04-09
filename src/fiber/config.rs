@@ -489,9 +489,27 @@ impl FiberConfig {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Eq, PartialEq, Hash)]
-pub enum ScriptCellDep {
-    CellDep(CellDep),
-    TypeID(Script),
+pub struct ScriptCellDep {
+    #[serde(default)]
+    pub cell_dep: Option<CellDep>,
+    #[serde(default)]
+    pub type_id: Option<Script>,
+}
+
+impl ScriptCellDep {
+    pub fn with_cell_dep(cell_dep: CellDep) -> Self {
+        Self {
+            cell_dep: Some(cell_dep),
+            type_id: None,
+        }
+    }
+
+    pub fn with_type_id(type_id: Script) -> Self {
+        Self {
+            cell_dep: None,
+            type_id: Some(type_id),
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

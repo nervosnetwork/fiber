@@ -19,7 +19,7 @@ use crate::fiber::{
     gen::fiber::{UdtDep, UdtDepUnion},
 };
 
-use super::config::{UdtArgInfo, UdtCfgInfos, UdtDep as ConfigUdtDep};
+use super::config::{UdtArgInfo, UdtCfgInfos};
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Clone, Copy, Hash)]
 pub enum Contract {
@@ -39,12 +39,15 @@ pub enum ScriptCellDep {
 impl From<crate::fiber::config::ScriptCellDep> for ScriptCellDep {
     fn from(script_cell_dep: crate::fiber::config::ScriptCellDep) -> Self {
         match script_cell_dep {
-            crate::fiber::config::ScriptCellDep::CellDep(cell_dep) => {
-                ScriptCellDep::CellDep(cell_dep.into())
-            }
-            crate::fiber::config::ScriptCellDep::TypeID(type_id) => {
-                ScriptCellDep::TypeID(type_id.into())
-            }
+            crate::fiber::config::ScriptCellDep {
+                cell_dep: Some(cell_dep),
+                type_id: None,
+            } => ScriptCellDep::CellDep(cell_dep.into()),
+            crate::fiber::config::ScriptCellDep {
+                cell_dep: None,
+                type_id: Some(type_id),
+            } => ScriptCellDep::TypeID(type_id.into()),
+            _ => panic!("Invalid ScriptCellDep"),
         }
     }
 }
@@ -266,7 +269,7 @@ impl ContractsContext {
             .iter()
             .flat_map(|info| info.cell_deps.clone())
         {
-            if let ConfigUdtDep::TypeID(type_id) = cell_dep {
+            if let Some(type_id) = cell_dep.type_id {
                 let err = || ContractsContextError::CannotResolveCellDep(type_id.clone().into());
                 let resolver = type_id_resolver.as_ref().ok_or_else(err)?;
                 resolver.resolve(type_id.clone().into()).ok_or_else(err)?;

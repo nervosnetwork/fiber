@@ -1896,12 +1896,19 @@ impl From<molecule_fiber::UdtScript> for UdtScript {
 impl From<UdtDep> for molecule_fiber::UdtDep {
     fn from(udt_dep: UdtDep) -> Self {
         match udt_dep {
-            UdtDep::CellDep(cell_dep) => molecule_fiber::UdtDep::new_builder()
+            UdtDep {
+                cell_dep: Some(cell_dep),
+                type_id: None,
+            } => molecule_fiber::UdtDep::new_builder()
                 .set(molecule_fiber::UdtDepUnion::UdtCellDep(cell_dep.into()))
                 .build(),
-            UdtDep::TypeID(type_id) => molecule_fiber::UdtDep::new_builder()
+            UdtDep {
+                cell_dep: None,
+                type_id: Some(type_id),
+            } => molecule_fiber::UdtDep::new_builder()
                 .set(molecule_fiber::UdtDepUnion::Script(type_id.into()))
                 .build(),
+            _ => panic!("invalid udt dep"),
         }
     }
 }
@@ -1909,14 +1916,21 @@ impl From<UdtDep> for molecule_fiber::UdtDep {
 impl From<molecule_fiber::UdtDep> for UdtDep {
     fn from(udt_dep: molecule_fiber::UdtDep) -> Self {
         match udt_dep.to_enum() {
-            molecule_fiber::UdtDepUnion::UdtCellDep(cell_dep) => UdtDep::CellDep(cell_dep.into()),
-            molecule_fiber::UdtDepUnion::Script(type_id) => UdtDep::TypeID(type_id.into()),
+            molecule_fiber::UdtDepUnion::UdtCellDep(cell_dep) => UdtDep {
+                cell_dep: Some(cell_dep.into()),
+                type_id: None,
+            },
+            molecule_fiber::UdtDepUnion::Script(type_id) => UdtDep {
+                cell_dep: None,
+                type_id: Some(type_id.into()),
+            },
         }
     }
 }
 
 impl From<UdtArgInfo> for molecule_fiber::UdtArgInfo {
     fn from(udt_arg_info: UdtArgInfo) -> Self {
+        tracing::info!("udt_arg_info: {:?}", udt_arg_info);
         molecule_fiber::UdtArgInfo::new_builder()
             .name(udt_arg_info.name.pack())
             .script(udt_arg_info.script.into())

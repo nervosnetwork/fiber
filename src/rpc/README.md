@@ -72,6 +72,7 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
     * [Type `RemoveTlcReason`](#type-removetlcreason)
     * [Type `SessionRouteNode`](#type-sessionroutenode)
     * [Type `UdtArgInfo`](#type-udtarginfo)
+    * [Type `UdtCellDep`](#type-udtcelldep)
     * [Type `UdtCfgInfos`](#type-udtcfginfos)
     * [Type `UdtDep`](#type-udtdep)
     * [Type `UdtScript`](#type-udtscript)
@@ -1085,6 +1086,18 @@ The UDT argument info which is used to identify the UDT configuration
 * `cell_deps` - <em>Vec<[UdtDep](#type-udtdep)></em>, The cell deps of the UDT.
 ---
 
+<a id="#type-udtcelldep"></a>
+### Type `UdtCellDep`
+
+The UDT cell dep which is used to identify the UDT configuration for a Fiber Node
+
+
+#### Fields
+
+* `out_point` - <em>OutPointWrapper</em>, The out point of the cell dep.
+* `dep_type` - <em>DepType</em>, The type of the cell dep.
+---
+
 <a id="#type-udtcfginfos"></a>
 ### Type `UdtCfgInfos`
 
@@ -1100,10 +1113,10 @@ A list of UDT configuration infos.
 Udt script on-chain dependencies.
 
 
-#### Enum with values of
+#### Fields
 
-* `CellDep` - <em>[UdtCellDep](#type-udtcelldep)</em>, cell dep described by out_point.
-* `TypeID` - <em>Script</em>, cell dep described by type ID.
+* `cell_dep` - <em>Option<[UdtCellDep](#type-udtcelldep)></em>, cell dep described by out_point.
+* `type_id` - <em>Option<Script></em>, cell dep described by type ID.
 ---
 
 <a id="#type-udtscript"></a>

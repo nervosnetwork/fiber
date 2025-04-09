@@ -342,7 +342,7 @@ fn test_verify_hard_coded_node_announcement() {
                         args: "0x.*".to_string(),
                     },
                     auto_accept_amount: Some(1000),
-                    cell_deps: vec![UdtDep::CellDep(UdtCellDep {
+                    cell_deps: vec![UdtDep::with_cell_dep(UdtCellDep {
                         dep_type: DepType::Code,
                         out_point: OutPoint {
                             tx_hash: H256::from_str(
@@ -364,7 +364,7 @@ fn test_verify_hard_coded_node_announcement() {
                         args: "0x.*".to_string(),
                     },
                     auto_accept_amount: Some(1000),
-                    cell_deps: vec![UdtDep::CellDep(UdtCellDep {
+                    cell_deps: vec![UdtDep::with_cell_dep(UdtCellDep {
                         dep_type: DepType::Code,
                         out_point: OutPoint {
                             tx_hash: H256::from_str(
@@ -412,7 +412,7 @@ fn test_verify_hard_coded_node_announcement() {
                         .to_string(),
                 },
                 auto_accept_amount: Some(1000000000),
-                cell_deps: vec![UdtDep::CellDep(UdtCellDep {
+                cell_deps: vec![UdtDep::with_cell_dep(UdtCellDep {
                     dep_type: DepType::Code,
                     out_point: OutPoint {
                         tx_hash: H256::from_str(

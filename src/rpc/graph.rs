@@ -53,18 +53,20 @@ impl From<ConfigUdtScript> for UdtScript {
 
 /// Udt script on-chain dependencies.
 #[derive(Serialize, Deserialize, Clone, Debug)]
-pub enum UdtDep {
+pub struct UdtDep {
     /// cell dep described by out_point.
-    CellDep(UdtCellDep),
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cell_dep: Option<UdtCellDep>,
     /// cell dep described by type ID.
-    TypeID(Script),
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub type_id: Option<Script>,
 }
 
 impl From<ConfigUdtDep> for UdtDep {
     fn from(cfg: ConfigUdtDep) -> Self {
-        match cfg {
-            ConfigUdtDep::CellDep(cell_dep) => UdtDep::CellDep(cell_dep.into()),
-            ConfigUdtDep::TypeID(script) => UdtDep::TypeID(script),
+        UdtDep {
+            cell_dep: cfg.cell_dep.map(Into::into),
+            type_id: cfg.type_id,
         }
     }
 }
