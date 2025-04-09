@@ -2689,6 +2689,13 @@ impl TlcInfo {
         )
     }
 
+    pub fn id(&self) -> u64 {
+        match self.tlc_id {
+            TLCId::Offered(id) => id,
+            TLCId::Received(id) => id,
+        }
+    }
+
     pub fn is_offered(&self) -> bool {
         self.tlc_id.is_offered()
     }
