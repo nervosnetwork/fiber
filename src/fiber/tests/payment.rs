@@ -91,7 +91,7 @@ async fn test_send_payment_custom_records() {
 #[tokio::test]
 async fn test_send_payment_for_direct_channel_and_dry_run() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
+
     // from https://github.com/nervosnetwork/fiber/issues/359
 
     let (nodes, channels) = create_n_nodes_network(
@@ -130,7 +130,6 @@ async fn test_send_payment_for_direct_channel_and_dry_run() {
 #[tokio::test]
 async fn test_send_payment_prefer_newer_channels() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
 
     let (nodes, channels) = create_n_nodes_network(
         &[
@@ -174,7 +173,6 @@ async fn test_send_payment_prefer_newer_channels() {
 #[tokio::test]
 async fn test_send_payment_prefer_channels_with_larger_balance() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
 
     let (nodes, channels) = create_n_nodes_network(
         &[
@@ -367,7 +365,7 @@ async fn test_send_payment_over_private_channel() {
 #[tokio::test]
 async fn test_send_payment_for_pay_self() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
+
     // from https://github.com/nervosnetwork/fiber/issues/362
 
     let (nodes, channels) = create_n_nodes_network(
@@ -441,7 +439,7 @@ async fn test_send_payment_for_pay_self() {
 #[tokio::test]
 async fn test_send_payment_for_pay_self_with_two_nodes() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
+
     // from https://github.com/nervosnetwork/fiber/issues/355
 
     let (nodes, channels) = create_n_nodes_network(
@@ -488,7 +486,7 @@ async fn test_send_payment_for_pay_self_with_two_nodes() {
 #[tokio::test]
 async fn test_send_payment_with_more_capacity_for_payself() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
+
     // from https://github.com/nervosnetwork/fiber/issues/362
 
     let (nodes, channels) = create_n_nodes_network(
@@ -825,7 +823,6 @@ async fn test_send_payment_with_private_multiple_channel_hints_fallback() {
 #[tokio::test]
 async fn test_send_payment_build_router_basic() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
 
     let (nodes, _channels) = create_n_nodes_network(
         &[
@@ -953,7 +950,6 @@ async fn test_send_payment_build_router_basic() {
 #[tokio::test]
 async fn test_send_payment_build_router_multiple_channels() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
 
     let (nodes, channels) = create_n_nodes_network(
         &[
@@ -1056,7 +1052,6 @@ async fn test_send_payment_build_router_multiple_channels() {
 #[tokio::test]
 async fn test_send_payment_build_router_pay_self() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
 
     let (nodes, channels) = create_n_nodes_network(
         &[
@@ -1155,7 +1150,6 @@ async fn test_send_payment_build_router_pay_self() {
 #[tokio::test]
 async fn test_send_payment_with_route_to_self_with_specified_router() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
 
     let (nodes, channels) = create_n_nodes_network(
         &[
@@ -1270,9 +1264,122 @@ async fn test_send_payment_with_route_to_self_with_specified_router() {
 }
 
 #[tokio::test]
+async fn test_send_payment_with_route_with_invalid_parameters() {
+    init_tracing();
+
+    let (nodes, _channels) = create_n_nodes_network(
+        &[
+            (
+                (0, 1),
+                (
+                    MIN_RESERVED_CKB + 10000000000,
+                    MIN_RESERVED_CKB + 10000000000,
+                ),
+            ),
+            (
+                (1, 2),
+                (
+                    MIN_RESERVED_CKB + 10000000000,
+                    MIN_RESERVED_CKB + 10000000000,
+                ),
+            ),
+            (
+                (2, 3),
+                (
+                    MIN_RESERVED_CKB + 10000000000,
+                    MIN_RESERVED_CKB + 10000000000,
+                ),
+            ),
+        ],
+        4,
+    )
+    .await;
+    let [node_0, node_1, node_2, node_3] = nodes.try_into().expect("3 nodes");
+
+    let router = node_0
+        .build_router(BuildRouterCommand {
+            amount: Some(60000000),
+            hops_info: vec![
+                HopRequire {
+                    pubkey: node_1.pubkey,
+                    channel_outpoint: None,
+                },
+                HopRequire {
+                    pubkey: node_2.pubkey,
+                    channel_outpoint: None,
+                },
+                HopRequire {
+                    pubkey: node_3.pubkey,
+                    channel_outpoint: None,
+                },
+            ],
+            udt_type_script: None,
+            final_tlc_expiry_delta: None,
+        })
+        .await
+        .unwrap()
+        .router_hops;
+
+    // pay to node_3 with router will be OK
+    let res = node_0
+        .send_payment_with_router(SendPaymentWithRouterCommand {
+            router: router.clone(),
+            keysend: Some(true),
+            ..Default::default()
+        })
+        .await;
+
+    assert!(res.is_ok());
+    node_0.wait_until_success(res.unwrap().payment_hash).await;
+
+    // now we change the fee of the first channel
+    let mut copy_router = router.clone();
+    copy_router[1].amount_received = copy_router[0].amount_received;
+    // pay to node_3 with router will be failed
+    let res = node_0
+        .send_payment_with_router(SendPaymentWithRouterCommand {
+            router: copy_router,
+            keysend: Some(true),
+            ..Default::default()
+        })
+        .await;
+
+    assert!(res.is_ok());
+
+    let payment_hash = res.unwrap().payment_hash;
+    node_0.wait_until_failed(payment_hash).await;
+    let result = node_0
+        .get_payment_session(payment_hash)
+        .expect("get payment");
+    assert_eq!(result.retried_times, 1);
+
+    // ================================================================
+    // now we change the expiry delta in the middle hop
+    let mut copy_router = router.clone();
+    copy_router[1].incoming_tlc_expiry = copy_router[0].incoming_tlc_expiry;
+    // pay to node_3 with router will be failed
+    let res = node_0
+        .send_payment_with_router(SendPaymentWithRouterCommand {
+            router: copy_router,
+            keysend: Some(true),
+            ..Default::default()
+        })
+        .await;
+
+    assert!(res.is_ok());
+
+    let payment_hash = res.unwrap().payment_hash;
+    node_0.wait_until_failed(payment_hash).await;
+    let result = node_0
+        .get_payment_session(payment_hash)
+        .expect("get payment");
+    eprintln!("result: {:?}", result);
+    assert_eq!(result.retried_times, 1);
+}
+
+#[tokio::test]
 async fn test_send_payment_with_router_with_multiple_channels() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
 
     let (nodes, channels) = create_n_nodes_network(
         &[
@@ -1432,7 +1539,6 @@ async fn test_send_payment_with_router_with_multiple_channels() {
 #[tokio::test]
 async fn test_send_payment_two_nodes_with_router_and_multiple_channels() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
 
     let (nodes, channels) = create_n_nodes_network(
         &[
@@ -1514,7 +1620,6 @@ async fn test_send_payment_two_nodes_with_router_and_multiple_channels() {
 #[tokio::test]
 async fn test_send_payment_send_with_wrong_hop() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
 
     let (nodes, channels) = create_n_nodes_network(
         &[
@@ -1615,7 +1720,6 @@ async fn test_send_payment_send_with_wrong_hop() {
 async fn test_network_send_payment_randomly_send_each_other() {
     init_tracing();
 
-    let _span = tracing::info_span!("node", node = "test").entered();
     let node_a_funding_amount = 100000000000;
     let node_b_funding_amount = 100000000000;
 
@@ -1728,7 +1832,6 @@ async fn test_network_send_payment_randomly_send_each_other() {
 async fn test_network_three_nodes_two_channels_send_each_other() {
     init_tracing();
 
-    let _span = tracing::info_span!("node", node = "test").entered();
     let (nodes, channels) = create_n_nodes_network(
         &[
             ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
@@ -1782,7 +1885,6 @@ async fn test_network_three_nodes_two_channels_send_each_other() {
 async fn test_network_three_nodes_send_each_other() {
     init_tracing();
 
-    let _span = tracing::info_span!("node", node = "test").entered();
     let (nodes, channels) = create_n_nodes_network(
         &[
             ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
@@ -1878,7 +1980,7 @@ async fn test_network_three_nodes_send_each_other() {
 #[tokio::test]
 async fn test_send_payment_bench_test() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
+
     let (nodes, _channels) = create_n_nodes_network(
         &[
             ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
@@ -1931,7 +2033,7 @@ async fn test_send_payment_bench_test() {
 #[tokio::test]
 async fn test_send_payment_three_nodes_wait_succ_bench_test() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
+
     let (nodes, _channels) = create_n_nodes_network(
         &[
             ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
@@ -1966,7 +2068,7 @@ async fn test_send_payment_three_nodes_wait_succ_bench_test() {
 #[tokio::test]
 async fn test_send_payment_three_nodes_send_each_other_bench_test() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
+
     let (nodes, _channels) = create_n_nodes_network(
         &[
             ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
@@ -2005,7 +2107,7 @@ async fn test_send_payment_three_nodes_send_each_other_bench_test() {
 #[tokio::test]
 async fn test_send_payment_three_nodes_send_each_other_no_wait() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
+
     let (nodes, channels) = create_n_nodes_network(
         &[
             ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
@@ -2086,7 +2188,7 @@ async fn test_send_payment_three_nodes_send_each_other_no_wait() {
 #[tokio::test]
 async fn test_send_payment_three_nodes_bench_test() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
+
     let (nodes, channels) = create_n_nodes_network(
         &[
             ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
@@ -2209,7 +2311,7 @@ async fn test_send_payment_three_nodes_bench_test() {
 #[tokio::test]
 async fn test_send_payment_middle_hop_stopped() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
+
     let (nodes, _channels) = create_n_nodes_network(
         &[
             ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
@@ -2250,7 +2352,7 @@ async fn test_send_payment_middle_hop_stopped() {
 #[tokio::test]
 async fn test_send_payment_middle_hop_stopped_retry_longer_path() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
+
     let (nodes, channels) = create_n_nodes_network(
         &[
             ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
@@ -2325,7 +2427,7 @@ async fn test_send_payment_max_value_in_flight_in_first_hop() {
     // https://github.com/nervosnetwork/fiber/issues/450
 
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
+
     let nodes = NetworkNode::new_interconnected_nodes(2, false).await;
     let [mut node_0, mut node_1] = nodes.try_into().expect("2 nodes");
     let (_channel_id, _funding_tx_hash) = {
@@ -2409,7 +2511,7 @@ async fn test_send_payment_max_value_in_flight_in_first_hop() {
 #[tokio::test]
 async fn test_send_payment_target_hop_stopped() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
+
     let (nodes, _channels) = create_n_nodes_network(
         &[
             ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
@@ -2450,7 +2552,7 @@ async fn test_send_payment_target_hop_stopped() {
 async fn test_send_payment_middle_hop_balance_is_not_enough() {
     // https://github.com/nervosnetwork/fiber/issues/286
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
+
     let (nodes, _channels) = create_n_nodes_network(
         &[
             ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
@@ -2482,7 +2584,7 @@ async fn test_send_payment_middle_hop_balance_is_not_enough() {
 #[tokio::test]
 async fn test_send_payment_middle_hop_update_fee_send_payment_failed() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
+
     let (nodes, channels) = create_n_nodes_network(
         &[
             ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
@@ -2521,7 +2623,7 @@ async fn test_send_payment_middle_hop_update_fee_send_payment_failed() {
 async fn test_send_payment_middle_hop_update_fee_multiple_payments() {
     // https://github.com/nervosnetwork/fiber/issues/480
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
+
     let (nodes, channels) = create_n_nodes_network(
         &[
             ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
@@ -2588,7 +2690,7 @@ async fn test_send_payment_middle_hop_update_fee_should_recovery() {
     // so the payment will fail, but after the payment failed, the path finding should pick the channels[1] in the next try
     // in the end, all the payments should success
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
+
     let (nodes, channels) = create_n_nodes_network(
         &[
             ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
@@ -2658,7 +2760,7 @@ async fn run_complex_network_with_params(
     payment_amount_gen: impl Fn() -> u128,
 ) -> Vec<(Hash256, PaymentSessionStatus)> {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
+
     let (nodes, _channels) = create_n_nodes_network(
         &[
             ((0, 1), (funding_amount, funding_amount)),
@@ -2765,7 +2867,7 @@ async fn test_send_payment_with_one_node_stop() {
     // make sure part of the payments will fail, since the node is stopped
     // TLC forwarding will fail and proper error will be returned
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
+
     let (mut nodes, _channels) = create_n_nodes_network(
         &[
             ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
@@ -2815,7 +2917,7 @@ async fn test_send_payment_with_one_node_stop() {
 #[tokio::test]
 async fn test_send_payment_shutdown_with_force() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
+
     let (nodes, channels) = create_n_nodes_network(
         &[
             ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
@@ -2895,7 +2997,7 @@ async fn test_send_payment_shutdown_with_force() {
 #[tokio::test]
 async fn test_send_payment_shutdown_cooperative() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
+
     let (nodes, channels) = create_n_nodes_network(
         &[
             ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
@@ -2977,7 +3079,7 @@ async fn test_send_payment_shutdown_cooperative() {
 #[tokio::test]
 async fn test_send_payment_shutdown_under_send_each_other() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
+
     let (nodes, channels) = create_n_nodes_network(
         &[
             ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
@@ -3047,7 +3149,7 @@ async fn test_send_payment_shutdown_under_send_each_other() {
 async fn test_send_payment_middle_hop_restart_will_be_ok() {
     async fn inner_run_restart_test(restart_node_index: usize) {
         init_tracing();
-        let _span = tracing::info_span!("node", node = "test").entered();
+
         let funding_amount = MIN_RESERVED_CKB + 1000 * 100_000_000;
         let (mut nodes, _channels) = create_n_nodes_network(
             &[
@@ -3094,7 +3196,7 @@ async fn test_send_payment_middle_hop_restart_will_be_ok() {
 async fn test_send_payment_middle_hop_stop_send_payment_then_start() {
     async fn inner_run_restart_test(restart_node_index: usize) {
         init_tracing();
-        let _span = tracing::info_span!("node", node = "test").entered();
+
         let funding_amount = MIN_RESERVED_CKB + 1000 * 100_000_000;
         let (mut nodes, _channels) = create_n_nodes_network(
             &[
@@ -3183,7 +3285,7 @@ async fn test_send_payment_middle_hop_stop_send_payment_then_start() {
 #[tokio::test]
 async fn test_send_payment_sync_up_new_channel_is_added() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
+
     // create a network with 4 nodes, but only connect with 2 channels
     // node0 -> node1 -> node2  node3
     let (nodes, _channels) = create_n_nodes_network(

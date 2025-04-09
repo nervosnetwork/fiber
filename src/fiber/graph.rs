@@ -815,7 +815,9 @@ where
         let nodes = &payment_session.route.nodes;
         let need_to_retry = internal_result.record_payment_fail(nodes, tlc_err);
         self.history.apply_internal_result(internal_result);
-        return need_to_retry && payment_session.can_retry();
+        return need_to_retry
+            && !payment_session.is_send_payment_with_router()
+            && payment_session.can_retry();
     }
 
     #[cfg(test)]
@@ -1561,6 +1563,10 @@ impl PaymentSession {
 
     pub fn payment_hash(&self) -> Hash256 {
         self.request.payment_hash
+    }
+
+    pub fn is_send_payment_with_router(&self) -> bool {
+        !self.request.router.is_empty()
     }
 
     fn set_status(&mut self, status: PaymentSessionStatus) {
