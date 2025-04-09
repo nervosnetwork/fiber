@@ -1287,13 +1287,9 @@ async fn test_send_payment_with_router_with_multiple_channels() {
     )
     .await;
     let [node_0, node_1, node_2, node_3] = nodes.try_into().expect("4 nodes");
-    eprintln!("node_0: {:?}", node_0.pubkey);
-    eprintln!("node_1: {:?}", node_1.pubkey);
-    eprintln!("node_2: {:?}", node_2.pubkey);
-    eprintln!("node_3: {:?}", node_3.pubkey);
 
     let channel_3_funding_tx = node_0.get_channel_funding_tx(&channels[3]).unwrap();
-    eprintln!("channel_3_funding_tx: {:?}", channel_3_funding_tx);
+
     let router = node_0
         .build_router(BuildRouterCommand {
             amount: Some(60000000),
@@ -1513,6 +1509,106 @@ async fn test_send_payment_two_nodes_with_router_and_multiple_channels() {
 
     let node_1_balance = node_1.get_local_balance_from_channel(channels[3]);
     assert_eq!(node_1_balance, old_node1_balance - 60000000);
+}
+
+#[tokio::test]
+async fn test_send_payment_send_with_wrong_hop() {
+    init_tracing();
+    let _span = tracing::info_span!("node", node = "test").entered();
+
+    let (nodes, channels) = create_n_nodes_network(
+        &[
+            (
+                (0, 1),
+                (
+                    MIN_RESERVED_CKB + 10000000000,
+                    MIN_RESERVED_CKB + 10000000000,
+                ),
+            ),
+            (
+                (1, 2),
+                (
+                    MIN_RESERVED_CKB + 10000000000,
+                    MIN_RESERVED_CKB + 10000000000,
+                ),
+            ),
+            (
+                (2, 3),
+                (
+                    MIN_RESERVED_CKB + 10000000000,
+                    MIN_RESERVED_CKB + 10000000000,
+                ),
+            ),
+            (
+                (3, 0),
+                (
+                    MIN_RESERVED_CKB + 10000000000,
+                    MIN_RESERVED_CKB + 10000000000,
+                ),
+            ),
+        ],
+        4,
+    )
+    .await;
+    let [node_0, node_1, _node_2, node_3] = nodes.try_into().expect("3 nodes");
+
+    let channel_3_funding_tx = node_3.get_channel_funding_tx(&channels[3]).unwrap();
+
+    // can not build a invalid router from node3 -> node_1
+    let router = node_3
+        .build_router(BuildRouterCommand {
+            amount: Some(60000000),
+            hops_info: vec![HopRequire {
+                pubkey: node_1.pubkey,
+                channel_outpoint: Some(OutPoint::new(channel_3_funding_tx.into(), 0)),
+            }],
+            udt_type_script: None,
+            final_tlc_expiry_delta: None,
+        })
+        .await;
+
+    assert!(router.is_err());
+
+    // build a router from node3 -> node_0
+    let router = node_3
+        .build_router(BuildRouterCommand {
+            amount: Some(60000000),
+            hops_info: vec![HopRequire {
+                pubkey: node_0.pubkey,
+                channel_outpoint: Some(OutPoint::new(channel_3_funding_tx.into(), 0)),
+            }],
+            udt_type_script: None,
+            final_tlc_expiry_delta: None,
+        })
+        .await
+        .unwrap();
+
+    // pay the above router with node_3 will be ok
+    let res = node_3
+        .send_payment_with_router(SendPaymentWithRouterCommand {
+            router: router.router_hops.clone(),
+            keysend: Some(true),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    node_3.wait_until_success(res.payment_hash).await;
+
+    // pay the above router with node_1 will failed
+    let res = node_1
+        .send_payment_with_router(SendPaymentWithRouterCommand {
+            router: router.router_hops,
+            keysend: Some(true),
+            ..Default::default()
+        })
+        .await;
+
+    assert!(res.is_err());
+    assert!(res
+        .unwrap_err()
+        .to_string()
+        .contains("Failed to send onion packet with error UnknownNextPeer"));
 }
 
 #[tokio::test]

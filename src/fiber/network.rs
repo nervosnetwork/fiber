@@ -1856,6 +1856,10 @@ where
                     "Failed to send onion packet with error {}",
                     error_detail.error_code_as_str()
                 );
+                eprintln!(
+                    "send onion packet failed: {:?} need_to_retry: {:?}",
+                    err, need_to_retry
+                );
                 if !need_to_retry {
                     // only update the payment session status when we don't need to retry
                     // otherwise the endpoint user may get confused in the internal state changes
