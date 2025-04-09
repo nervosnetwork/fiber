@@ -852,24 +852,28 @@ async fn test_send_payment_build_router_basic() {
     eprintln!("node_1: {:?}", node_1.pubkey);
     eprintln!("node_2: {:?}", node_2.pubkey);
 
-    // let router = node_0
-    //     .build_router(BuildRouterCommand {
-    //         amount: None,
-    //         hops_info: vec![HopRequire {
-    //             pubkey: node_1.pubkey,
-    //             channel_outpoint: None,
-    //         }],
-    //         udt_type_script: None,
-    //         final_tlc_expiry_delta: None,
-    //     })
-    //     .await
-    //     .unwrap();
-    // eprintln!("result: {:?}", router);
-    // let router_nodes: Vec<_> = router.hops_info.iter().map(|x| x.target).collect();
-    // eprintln!("router_nodes: {:?}", router_nodes);
-    // let amounts: Vec<_> = router.hops_info.iter().map(|x| x.amount_received).collect();
-    // assert_eq!(router_nodes, vec![node_1.pubkey]);
-    // assert_eq!(amounts, vec![1]);
+    let router = node_0
+        .build_router(BuildRouterCommand {
+            amount: None,
+            hops_info: vec![HopRequire {
+                pubkey: node_1.pubkey,
+                channel_outpoint: None,
+            }],
+            udt_type_script: None,
+            final_tlc_expiry_delta: None,
+        })
+        .await
+        .unwrap();
+    eprintln!("result: {:?}", router);
+    let router_nodes: Vec<_> = router.router_hops.iter().map(|x| x.target).collect();
+    eprintln!("router_nodes: {:?}", router_nodes);
+    let amounts: Vec<_> = router
+        .router_hops
+        .iter()
+        .map(|x| x.amount_received)
+        .collect();
+    assert_eq!(router_nodes, vec![node_1.pubkey]);
+    assert_eq!(amounts, vec![1]);
 
     let payment = node_0.send_payment_keysend(&node_2, 1, true).await;
     eprintln!("payment: {:?}", payment);
