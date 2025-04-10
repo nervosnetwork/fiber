@@ -381,8 +381,7 @@ fn build_gensis_block() -> BlockView {
     genesis_block
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn StdErr>> {
+fn main() -> Result<(), Box<dyn StdErr>> {
     generate_nodes_config();
     init_udt_accounts()?;
     Ok(())
