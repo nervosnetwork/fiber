@@ -49,5 +49,4 @@ script:post-response {
   if (!(res.body.error.message.includes("Trying to remove non-existing tlc with id"))) {
     throw new Error("Assertion failed: error message is not right");
   }
-
 }
