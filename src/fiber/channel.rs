@@ -2685,6 +2685,10 @@ impl TlcInfo {
         )
     }
 
+    pub fn id(&self) -> u64 {
+        self.tlc_id.into()
+    }
+
     pub fn is_offered(&self) -> bool {
         self.tlc_id.is_offered()
     }
