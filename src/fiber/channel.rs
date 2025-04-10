@@ -1160,12 +1160,18 @@ where
         state.tlc_state.applied_remove_tlcs.insert(tlc_id);
 
         let (tlc_info, remove_reason) = state.remove_tlc_with_reason(tlc_id)?;
-        if matches!(remove_reason, RemoveTlcReason::RemoveTlcFulfill(_))
-            && self.store.get_invoice(&tlc_info.payment_hash).is_some()
-        {
-            self.store
-                .update_invoice_status(&tlc_info.payment_hash, CkbInvoiceStatus::Paid)
-                .expect("update invoice status failed");
+
+        if matches!(remove_reason, RemoveTlcReason::RemoveTlcFulfill(_)) {
+            if self.store.get_invoice(&tlc_info.payment_hash).is_some() {
+                self.store
+                    .update_invoice_status(&tlc_info.payment_hash, CkbInvoiceStatus::Paid)
+                    .expect("update invoice status failed");
+            }
+            if tlc_info.previous_tlc.is_none() {
+                self.store
+                    .remove_payment_preimage(&tlc_info.payment_hash)
+                    .expect("remove preimage failed");
+            }
         }
 
         if let (

@@ -819,8 +819,7 @@ async fn test_network_send_payment_normal_keysend_workflow() {
     assert_eq!(res.failed_error, None);
     node_a.wait_until_success(payment_hash).await;
 
-    // TODO: we keep all the payment preimages in the database, but we should find a proper way to clean them up, should re-enable this assert after that
-    // assert!(node_a.get_payment_preimage(&payment_hash).is_none());
+    assert!(node_a.get_payment_preimage(&payment_hash).is_none());
 }
 
 #[tokio::test]
@@ -1755,8 +1754,10 @@ async fn test_send_payment_with_3_nodes() {
     assert!(node_b.get_payment_preimage(&res.payment_hash).is_some());
 
     node_a.wait_until_success(res.payment_hash).await;
-    // TODO: we keep all the payment preimages in the database, but we should find a proper way to clean them up, should re-enable this assert after that
-    // assert!(node_b.get_payment_preimage(&res.payment_hash).is_none());
+
+    assert!(node_a.get_payment_preimage(&res.payment_hash).is_none());
+    assert!(node_b.get_payment_preimage(&res.payment_hash).is_none());
+    assert!(node_c.get_payment_preimage(&res.payment_hash).is_none());
 
     let new_node_a_local = node_a.get_local_balance_from_channel(channel_1);
     let new_node_b_left = node_b.get_local_balance_from_channel(channel_1);
@@ -6128,8 +6129,9 @@ async fn test_send_payment_will_succeed_with_valid_invoice() {
         node_3.get_invoice_status(ckb_invoice.payment_hash()),
         Some(CkbInvoiceStatus::Paid)
     );
-    // TODO: we keep all the payment preimages in the database, but we should find a proper way to clean them up, should re-enable this assert after that
-    // assert!(node_3.get_payment_preimage(ckb_invoice.payment_hash()).is_none());
+    assert!(node_3
+        .get_payment_preimage(ckb_invoice.payment_hash())
+        .is_none());
 }
 
 #[tokio::test]
