@@ -56,7 +56,11 @@ pub async fn main() -> Result<(), ExitMessage> {
         .try_init()
         .map_err(|err| ExitMessage(format!("failed to initialize logger: {}", err)))?;
 
-    info!("Starting node with git version {}", fnn::get_git_version());
+    info!(
+        "Starting node with git version {} ({})",
+        fnn::get_git_version(),
+        fnn::get_git_commit_info()
+    );
 
     let _span = info_span!("node", node = fnn::get_node_prefix()).entered();
 

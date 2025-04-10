@@ -112,7 +112,7 @@ trait InfoRpc {
 impl InfoRpcServer for InfoRpcServerImpl {
     async fn node_info(&self) -> Result<NodeInfoResult, ErrorObjectOwned> {
         let version = env!("CARGO_PKG_VERSION").to_string();
-        let commit_hash = crate::get_git_version().to_string();
+        let commit_hash = crate::get_git_commit_info();
 
         let message =
             |rpc_reply| NetworkActorMessage::Command(NetworkActorCommand::NodeInfo((), rpc_reply));
