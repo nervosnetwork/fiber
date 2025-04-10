@@ -9,7 +9,7 @@ use super::hash_algorithm::{HashAlgorithm, UnknownHashAlgorithmError};
 use super::network::{get_chain_hash, PaymentCustomRecords};
 use super::r#gen::fiber::PubNonceOpt;
 use super::serde_utils::{EntityHex, SliceHex};
-use crate::ckb::config::{UdtArgInfo, UdtCellDep, UdtCfgInfos, UdtScript};
+use crate::ckb::config::{UdtArgInfo, UdtCellDep, UdtCfgInfos, UdtDep, UdtScript};
 use crate::ckb::contracts::get_udt_whitelist;
 use ckb_jsonrpc_types::CellOutput;
 use ckb_types::H256;
@@ -1853,8 +1853,7 @@ impl From<UdtCellDep> for molecule_fiber::UdtCellDep {
     fn from(udt_cell_dep: UdtCellDep) -> Self {
         molecule_fiber::UdtCellDep::new_builder()
             .dep_type(udt_cell_dep.dep_type.into())
-            .tx_hash(udt_cell_dep.tx_hash.pack())
-            .index(udt_cell_dep.index.pack())
+            .out_point(udt_cell_dep.out_point.into())
             .build()
     }
 }
@@ -1862,12 +1861,11 @@ impl From<UdtCellDep> for molecule_fiber::UdtCellDep {
 impl From<molecule_fiber::UdtCellDep> for UdtCellDep {
     fn from(udt_cell_dep: molecule_fiber::UdtCellDep) -> Self {
         UdtCellDep {
+            out_point: udt_cell_dep.out_point().into(),
             dep_type: udt_cell_dep
                 .dep_type()
                 .try_into()
                 .expect("invalid dep type"),
-            tx_hash: udt_cell_dep.tx_hash().unpack(),
-            index: udt_cell_dep.index().unpack(),
         }
     }
 }
@@ -1895,8 +1893,44 @@ impl From<molecule_fiber::UdtScript> for UdtScript {
     }
 }
 
+impl From<UdtDep> for molecule_fiber::UdtDep {
+    fn from(udt_dep: UdtDep) -> Self {
+        match udt_dep {
+            UdtDep {
+                cell_dep: Some(cell_dep),
+                type_id: None,
+            } => molecule_fiber::UdtDep::new_builder()
+                .set(molecule_fiber::UdtDepUnion::UdtCellDep(cell_dep.into()))
+                .build(),
+            UdtDep {
+                cell_dep: None,
+                type_id: Some(type_id),
+            } => molecule_fiber::UdtDep::new_builder()
+                .set(molecule_fiber::UdtDepUnion::Script(type_id.into()))
+                .build(),
+            _ => panic!("invalid udt dep"),
+        }
+    }
+}
+
+impl From<molecule_fiber::UdtDep> for UdtDep {
+    fn from(udt_dep: molecule_fiber::UdtDep) -> Self {
+        match udt_dep.to_enum() {
+            molecule_fiber::UdtDepUnion::UdtCellDep(cell_dep) => UdtDep {
+                cell_dep: Some(cell_dep.into()),
+                type_id: None,
+            },
+            molecule_fiber::UdtDepUnion::Script(type_id) => UdtDep {
+                cell_dep: None,
+                type_id: Some(type_id.into()),
+            },
+        }
+    }
+}
+
 impl From<UdtArgInfo> for molecule_fiber::UdtArgInfo {
     fn from(udt_arg_info: UdtArgInfo) -> Self {
+        tracing::info!("udt_arg_info: {:?}", udt_arg_info);
         molecule_fiber::UdtArgInfo::new_builder()
             .name(udt_arg_info.name.pack())
             .script(udt_arg_info.script.into())
@@ -1911,8 +1945,8 @@ impl From<UdtArgInfo> for molecule_fiber::UdtArgInfo {
                         udt_arg_info
                             .cell_deps
                             .into_iter()
-                            .map(|cell_dep| cell_dep.into())
-                            .collect(),
+                            .map(Into::into)
+                            .collect::<Vec<_>>(),
                     )
                     .build(),
             )
@@ -1932,7 +1966,7 @@ impl From<molecule_fiber::UdtArgInfo> for UdtArgInfo {
             cell_deps: udt_arg_info
                 .cell_deps()
                 .into_iter()
-                .map(|cell_dep| cell_dep.into())
+                .map(Into::into)
                 .collect(),
         }
     }

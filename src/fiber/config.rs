@@ -488,11 +488,36 @@ impl FiberConfig {
     }
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug, Eq, PartialEq, Hash)]
+pub struct ScriptCellDep {
+    #[serde(default)]
+    pub cell_dep: Option<CellDep>,
+    #[serde(default)]
+    pub type_id: Option<Script>,
+}
+
+impl ScriptCellDep {
+    pub fn with_cell_dep(cell_dep: CellDep) -> Self {
+        Self {
+            cell_dep: Some(cell_dep),
+            type_id: None,
+        }
+    }
+
+    pub fn with_type_id(type_id: Script) -> Self {
+        Self {
+            cell_dep: None,
+            type_id: Some(type_id),
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct FiberScript {
     pub name: Contract,
     pub script: Script,
-    pub cell_deps: Vec<CellDep>,
+    /// Type ID of the cell deps
+    pub cell_deps: Vec<ScriptCellDep>,
 }
 
 impl FromStr for FiberScript {

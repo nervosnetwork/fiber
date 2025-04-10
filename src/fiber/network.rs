@@ -2640,11 +2640,14 @@ where
                                 }
                             };
 
-                            let transaction = state
-                                .latest_commitment_transaction
-                                .clone()
-                                .expect("latest_commitment_transaction should exist when channel is in ChannelReady of ShuttingDown state")
-                                .into_view();
+                            let transaction = match state.get_latest_commitment_transaction() {
+                                Ok(tx) => tx,
+                                Err(e) => {
+                                    let error = Error::ChannelError(e);
+                                    let _ = rpc_reply.send(Err(error.to_string()));
+                                    return Err(error);
+                                }
+                            };
 
                             self.network
                                 .send_message(NetworkActorMessage::new_event(
