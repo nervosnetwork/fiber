@@ -1135,33 +1135,6 @@ where
                 for (_peer_id, channel_id, channel_state) in self.store.get_channel_states(None) {
                     if matches!(channel_state, ChannelState::ChannelReady) {
                         if let Some(actor_state) = self.store.get_channel_actor_state(&channel_id) {
-                            if actor_state
-                                .tlc_state
-                                .offered_tlcs
-                                .get_committed_tlcs()
-                                .iter()
-                                .any(|tlc| tlc.expiry < now)
-                            {
-                                debug!(
-                                    "Force closing channel {:?} due to expired offered tlc",
-                                    channel_id
-                                );
-                                let (send, _recv) = oneshot::channel();
-                                let rpc_reply = RpcReplyPort::from(send);
-                                state
-                                    .send_command_to_channel(
-                                        channel_id,
-                                        ChannelCommand::Shutdown(
-                                            ShutdownCommand {
-                                                close_script: Script::default(),
-                                                fee_rate: FeeRate::default(),
-                                                force: true,
-                                            },
-                                            rpc_reply,
-                                        ),
-                                    )
-                                    .await?;
-                            }
                             for tlc in actor_state.tlc_state.received_tlcs.get_committed_tlcs() {
                                 if let Some(payment_preimage) =
                                     self.store.get_invoice_preimage(&tlc.payment_hash)
@@ -1188,6 +1161,34 @@ where
                                         )
                                         .await?;
                                 }
+                            }
+
+                            if actor_state
+                                .tlc_state
+                                .offered_tlcs
+                                .get_committed_tlcs()
+                                .iter()
+                                .any(|tlc| tlc.expiry < now)
+                            {
+                                debug!(
+                                    "Force closing channel {:?} due to expired offered tlc",
+                                    channel_id
+                                );
+                                let (send, _recv) = oneshot::channel();
+                                let rpc_reply = RpcReplyPort::from(send);
+                                state
+                                    .send_command_to_channel(
+                                        channel_id,
+                                        ChannelCommand::Shutdown(
+                                            ShutdownCommand {
+                                                close_script: Script::default(),
+                                                fee_rate: FeeRate::default(),
+                                                force: true,
+                                            },
+                                            rpc_reply,
+                                        ),
+                                    )
+                                    .await?;
                             }
                         }
                     }
