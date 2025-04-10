@@ -902,6 +902,17 @@ impl NetworkNode {
         }
     }
 
+    pub async fn wait_until_created(&self, payment_hash: Hash256) {
+        loop {
+            assert!(self.get_triggered_unexpected_events().await.is_empty());
+            let status = self.get_payment_status(payment_hash).await;
+            if status != PaymentSessionStatus::Created {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    }
+
     pub async fn node_info(&self) -> NodeInfoResponse {
         let message =
             |rpc_reply| NetworkActorMessage::Command(NetworkActorCommand::NodeInfo((), rpc_reply));

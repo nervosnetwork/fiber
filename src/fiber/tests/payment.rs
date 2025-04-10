@@ -13,6 +13,7 @@ use crate::fiber::tests::test_utils::*;
 use crate::fiber::types::Hash256;
 use crate::fiber::NetworkActorCommand;
 use crate::fiber::NetworkActorMessage;
+use crate::NetworkServiceEvent;
 use ckb_types::{core::tx_pool::TxStatus, packed::OutPoint};
 use ractor::call;
 use std::collections::HashMap;
@@ -3019,4 +3020,71 @@ async fn test_send_payment_sync_up_new_channel_is_added() {
 
     let payment_hash = res.unwrap().payment_hash;
     node_0.wait_until_success(payment_hash).await;
+}
+
+#[tokio::test]
+async fn test_send_payment_remove_tlc_with_preimage_will_retry() {
+    init_tracing();
+    let _span = tracing::info_span!("node", node = "test").entered();
+    let (nodes, _channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((2, 3), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+        ],
+        4,
+    )
+    .await;
+    let [mut node_0, mut node_1, _node_2, node_3] = nodes.try_into().expect("4 nodes");
+
+    let mut payments = HashSet::new();
+
+    for _i in 0..5 {
+        let res = node_0
+            .send_payment_keysend(&node_3, 1000, false)
+            .await
+            .unwrap();
+        payments.insert(res.payment_hash);
+        node_0.wait_until_created(res.payment_hash).await;
+    }
+
+    let node1_id = node_1.peer_id.clone();
+    let node0_id = node_0.peer_id.clone();
+    node_0
+        .network_actor
+        .send_message(NetworkActorMessage::new_command(
+            NetworkActorCommand::DisconnectPeer(node1_id.clone()),
+        ))
+        .expect("node_a alive");
+
+    node_1
+        .expect_event(|event| match event {
+            NetworkServiceEvent::PeerDisConnected(peer_id, _) => {
+                assert_eq!(peer_id, &node0_id);
+                true
+            }
+            _ => false,
+        })
+        .await;
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+    // reconnect node_0 and node_1
+    node_0.connect_to_nonblocking(&node_1).await;
+
+    // the CheckChannels in network actor will continue to retry RemoveTlc for tlc already with preimage
+    // so all the payments should be succeeded after all
+    loop {
+        for payment_hash in payments.clone().iter() {
+            let status = node_0.get_payment_status(*payment_hash).await;
+            eprintln!("payment_hash: {:?} got status : {:?}", payment_hash, status);
+            if status == PaymentSessionStatus::Success {
+                payments.remove(payment_hash);
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        }
+        if payments.is_empty() {
+            break;
+        }
+    }
 }
