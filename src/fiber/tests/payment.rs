@@ -14,6 +14,7 @@ use crate::fiber::types::Hash256;
 use crate::fiber::NetworkActorCommand;
 use crate::fiber::NetworkActorMessage;
 use crate::gen_rand_sha256_hash;
+use crate::invoice::CkbInvoice;
 use crate::invoice::Currency;
 use crate::invoice::InvoiceBuilder;
 use crate::NetworkServiceEvent;
@@ -21,7 +22,6 @@ use ckb_types::{core::tx_pool::TxStatus, packed::OutPoint};
 use ractor::call;
 use std::collections::HashMap;
 use std::collections::HashSet;
-use std::time::Duration;
 
 #[tokio::test]
 async fn test_send_payment_custom_records() {
@@ -3112,24 +3112,28 @@ async fn test_send_payment_invoice_cancel_multiple_ops() {
     let [mut node_0, _node_1, _node_2] = nodes.try_into().expect("4 nodes");
 
     let mut payments = HashSet::new();
-    let mut invoices = vec![];
+    let mut invoices: Vec<CkbInvoice> = vec![];
 
-    let node_0_pubkey = node_0.pubkey;
-    for _i in 0..5 {
+    let target_pubkey = node_0.pubkey;
+    let count = 30;
+    for _i in 0..count {
         let preimage = gen_rand_sha256_hash();
         let ckb_invoice = InvoiceBuilder::new(Currency::Fibd)
             .amount(Some(100))
             .payment_preimage(preimage)
-            .payee_pub_key(node_0_pubkey.into())
-            .expiry_time(Duration::from_secs(100))
+            .payee_pub_key(target_pubkey.into())
             .build()
             .expect("build invoice success");
 
         node_0.insert_invoice(ckb_invoice.clone(), Some(preimage));
+        assert!(invoices
+            .iter()
+            .find(|i| i.payment_hash() == ckb_invoice.payment_hash())
+            .is_none());
         invoices.push(ckb_invoice);
     }
 
-    for i in 0..5 {
+    for i in 0..count {
         let invoice = &invoices[i];
 
         node_0.cancel_invoice(invoice.payment_hash());
