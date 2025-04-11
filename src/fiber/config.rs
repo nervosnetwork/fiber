@@ -165,14 +165,6 @@ pub struct FiberConfig {
         help = "The minimal value of a tlc. [default: 0 (no minimal value)]"
     )]
     pub tlc_min_value: Option<u128>,
-    /// The maximal value of a tlc. [default: 0 (no maximal value)]
-    #[arg(
-        name = "FIBER_TLC_MAX_VALUE",
-        long = "fiber-tlc-max-value",
-        env,
-        help = "The maximal value of a tlc. [default: 0 (no maximal value)]"
-    )]
-    pub tlc_max_value: Option<u128>,
 
     /// The fee for forwarding peer tlcs. Proportional to the amount of the forwarded tlc. The unit is millionths of the amount. [default: 1000 (0.1%)]
     #[arg(
@@ -434,10 +426,6 @@ impl FiberConfig {
 
     pub fn tlc_min_value(&self) -> u128 {
         self.tlc_min_value.unwrap_or(DEFAULT_TLC_MIN_VALUE)
-    }
-
-    pub fn tlc_max_value(&self) -> u128 {
-        self.tlc_max_value.unwrap_or(DEFAULT_TLC_MAX_VALUE)
     }
 
     pub fn tlc_fee_proportional_millionths(&self) -> u128 {
