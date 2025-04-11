@@ -3775,7 +3775,8 @@ impl ChannelActorState {
             return false;
         }
         if let Some(timestamp) = self.waiting_peer_response {
-            let elapsed = now_timestamp_as_millis_u64() - timestamp;
+            // depends on the system's clock source, not all system clocks are monotonic, using saturating_sub to avoid potential underflow
+            let elapsed = now_timestamp_as_millis_u64().saturating_sub(timestamp);
             elapsed > PEER_CHANNEL_RESPONSE_TIMEOUT
         } else {
             false
