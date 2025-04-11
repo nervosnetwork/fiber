@@ -34,6 +34,7 @@ use crate::{
         types::Hash256,
     },
     invoice::InvoiceStore,
+    utils::tx::compute_tx_message,
     NetworkServiceEvent,
 };
 
@@ -894,10 +895,10 @@ fn sign_tx_with_settlement(
     change_secret_key: SecretKey,
     settlement_secret_key: SecretKey,
 ) -> Result<TransactionView, Box<dyn std::error::Error>> {
-    let tx = tx.data();
+    let tx = tx.data().into_view();
 
-    let message = tx.calc_tx_hash();
-    let secp256k1_message = Message::from_digest_slice(&message.raw_data())?;
+    let message = compute_tx_message(&tx);
+    let secp256k1_message = Message::from_digest_slice(&message)?;
     let secp256k1 = Secp256k1::new();
     let signature = secp256k1.sign_ecdsa_recoverable(&secp256k1_message, &settlement_secret_key);
     let (recov_id, data) = signature.serialize_compact();
@@ -916,7 +917,7 @@ fn sign_tx_with_settlement(
 
     let witness = tx.witnesses().get(1).expect("get witness at index 1");
     let mut blake2b = new_blake2b();
-    blake2b.update(tx.calc_tx_hash().as_slice());
+    blake2b.update(tx.hash().as_slice());
     blake2b.update(&(witness.item_count() as u64).to_le_bytes());
     blake2b.update(&witness.raw_data());
     let mut message = vec![0u8; 32];

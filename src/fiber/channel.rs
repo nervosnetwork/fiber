@@ -1,8 +1,8 @@
-use crate::debug_event;
 #[cfg(debug_assertions)]
 use crate::fiber::network::DebugEvent;
 use crate::fiber::network::PaymentCustomRecords;
 use crate::fiber::types::BroadcastMessageWithTimestamp;
+use crate::{debug_event, utils::tx::compute_tx_message};
 use bitflags::bitflags;
 use futures::future::OptionFuture;
 use secp256k1::XOnlyPublicKey;
@@ -5495,7 +5495,7 @@ impl ChannelActorState {
         let signature = common_ctx.aggregate_partial_signatures_for_msg(
             our_partial_signature,
             their_partial_signature,
-            tx.hash().as_slice(),
+            &compute_tx_message(tx),
         )?;
 
         let witness =
@@ -5514,7 +5514,7 @@ impl ChannelActorState {
             let deterministic_sign_ctx = self.get_deterministic_sign_context();
 
             let our_funding_tx_partial_signature =
-                deterministic_sign_ctx.sign(psct.commitment_tx.hash().as_slice())?;
+                deterministic_sign_ctx.sign(&compute_tx_message(&psct.commitment_tx))?;
 
             self.aggregate_partial_signatures_to_consume_funding_cell(
                 &deterministic_sign_ctx.common_ctx,
@@ -5623,7 +5623,8 @@ impl ChannelActorState {
             let local_shutdown_signature = match local_shutdown_info.signature {
                 Some(signature) => signature,
                 None => {
-                    let signature = deterministic_sign_ctx.sign(shutdown_tx.hash().as_slice())?;
+                    let signature =
+                        deterministic_sign_ctx.sign(&compute_tx_message(&shutdown_tx))?;
                     local_shutdown_info.signature = Some(signature);
 
                     self.network()
@@ -7154,7 +7155,7 @@ impl ChannelActorState {
         let deterministic_verify_ctx = self.get_deterministic_verify_context();
         deterministic_verify_ctx.verify(
             funding_tx_partial_signature,
-            commitment_tx.hash().as_slice(),
+            &compute_tx_message(&commitment_tx),
         )?;
 
         let to_local_output = settlement_tx
@@ -7209,7 +7210,7 @@ impl ChannelActorState {
 
         let deterministic_sign_ctx = self.get_deterministic_sign_context();
         let funding_tx_partial_signature =
-            deterministic_sign_ctx.sign(commitment_tx.hash().as_slice())?;
+            deterministic_sign_ctx.sign(&compute_tx_message(&commitment_tx))?;
 
         let to_local_output = settlement_tx
             .outputs()
