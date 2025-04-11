@@ -493,7 +493,6 @@ pub(crate) async fn create_n_nodes_with_established_channel(
 }
 
 #[allow(clippy::type_complexity)]
-
 pub(crate) async fn create_n_nodes_network_with_rpc_option(
     amounts: &[((usize, usize), (u128, u128))],
     n: usize,
@@ -572,7 +571,6 @@ pub(crate) async fn create_n_nodes_network_with_rpc_option(
 }
 
 #[allow(clippy::type_complexity)]
-
 pub(crate) async fn create_n_nodes_network(
     amounts: &[((usize, usize), (u128, u128))],
     n: usize,

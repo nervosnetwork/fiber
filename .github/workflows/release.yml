@@ -5,7 +5,7 @@ on:
     tags: [ '*' ]
 env:
   CARGO_TERM_COLOR: always
-  RUST_TOOLCHAIN: 1.81.0
+  RUST_TOOLCHAIN: 1.84.0
 permissions:
   contents: write
 jobs:
