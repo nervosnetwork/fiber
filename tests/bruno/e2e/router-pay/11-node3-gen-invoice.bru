@@ -61,6 +61,10 @@ script:post-response {
   // Sleep for sometime to make sure current operation finishes before next request starts.
   await new Promise(r => setTimeout(r, 100));
   console.log("generated result: ", res.body.result);
+  let attrs = res.body.result.invoice.data.attrs;
+  if (attrs[2]['final_htlc_minimum_expiry_delta'] != "0xdffa0") {
+    throw new Error("final_htlc_minimum_expiry_delta is not right");
+  }
   bru.setVar("payment_hash", res.body.result.invoice.data.payment_hash);
   bru.setVar("payment_amount", res.body.result.invoice.amount);
 }

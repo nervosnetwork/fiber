@@ -2,17 +2,11 @@ import blockchain;
 
 array PaymentHash [byte; 32];
 array Signature [byte; 104];
-option ExpiryTimeOpt (Duration);
 option SignatureOpt (Signature);
 
 option AmountOpt (Uint128);
 
 option FeatureOpt (Uint32);
-
-struct Duration {
-    seconds: Uint64,
-    nanos: Uint64,
-}
 
 struct FinalHtlcTimeout {
     value: Uint64,
@@ -23,7 +17,7 @@ struct FinalHtlcMinimumExpiryDelta {
 }
 
 struct ExpiryTime {
-    value: Duration,
+    value: Uint64,
 }
 
 table Description {

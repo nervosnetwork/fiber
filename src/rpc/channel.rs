@@ -97,6 +97,12 @@ pub struct OpenChannelResult {
     pub temporary_channel_id: Hash256,
 }
 
+#[derive(Serialize, Deserialize, Debug)]
+pub struct AbandonChannelParams {
+    /// The temporary channel ID or real channel ID of the channel being abandoned
+    pub channel_id: Hash256,
+}
+
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug)]
 pub struct AcceptChannelParams {
@@ -138,6 +144,7 @@ pub struct AcceptChannelParams {
 
     /// The expiry delta to forward a tlc, in milliseconds, default to 1 day, which is 24 * 60 * 60 * 1000 milliseconds
     /// This parameter can be updated with rpc `update_channel` later.
+    #[serde_as(as = "Option<U64Hex>")]
     pub tlc_expiry_delta: Option<u64>,
 }
 
@@ -187,9 +194,8 @@ pub enum ChannelState {
     AwaitingChannelReady(AwaitingChannelReadyFlags),
     /// Both we and our counterparty consider the funding transaction confirmed and the channel is
     /// now operational.
-    ChannelReady(),
+    ChannelReady,
     /// We've successfully negotiated a `closing_signed` dance. At this point, the `ChannelManager`
-    /// is about to drop us, but we store this anyway.
     ShuttingDown(ShuttingDownFlags),
     /// This channel is closed.
     Closed(CloseFlags),
@@ -209,7 +215,7 @@ impl From<RawChannelState> for ChannelState {
             RawChannelState::AwaitingChannelReady(flags) => {
                 ChannelState::AwaitingChannelReady(flags)
             }
-            RawChannelState::ChannelReady() => ChannelState::ChannelReady(),
+            RawChannelState::ChannelReady => ChannelState::ChannelReady,
             RawChannelState::ShuttingDown(flags) => ChannelState::ShuttingDown(flags),
             RawChannelState::Closed(flags) => ChannelState::Closed(flags),
         }
@@ -273,12 +279,13 @@ pub struct ShutdownChannelParams {
     /// The channel ID of the channel to shut down
     pub channel_id: Hash256,
     /// The script used to receive the channel balance, only support secp256k1_blake160_sighash_all script for now
-    pub close_script: Script,
-    /// Whether to force the channel to close
-    pub force: Option<bool>,
+    pub close_script: Option<Script>,
     /// The fee rate for the closing transaction, the fee will be deducted from the closing initiator's channel balance
-    #[serde_as(as = "U64Hex")]
-    pub fee_rate: u64,
+    #[serde_as(as = "Option<U64Hex>")]
+    pub fee_rate: Option<u64>,
+    /// Whether to force the channel to close, when set to false, `close_script` and `fee_rate` should be set, default is false.
+    /// When set to true, `close_script` and `fee_rate` will be ignored and will use the default value when opening the channel.
+    pub force: Option<bool>,
 }
 
 #[serde_as]
@@ -288,9 +295,8 @@ pub struct UpdateChannelParams {
     pub channel_id: Hash256,
     /// Whether the channel is enabled
     pub enabled: Option<bool>,
-    /// The CLTV delta from the current height that should be used to set the timelock for the final hop
-    #[serde_as(as = "Option<U64Hex>")]
     /// The expiry delta for the TLC locktime
+    #[serde_as(as = "Option<U64Hex>")]
     pub tlc_expiry_delta: Option<u64>,
     /// The minimum value for a TLC
     #[serde_as(as = "Option<U128Hex>")]
@@ -316,6 +322,11 @@ trait ChannelRpc {
         &self,
         params: AcceptChannelParams,
     ) -> Result<AcceptChannelResult, ErrorObjectOwned>;
+
+    /// Abandon a channel, this will remove the channel from the channel manager and DB.
+    /// Only channels not in Ready or Closed state can be abandoned.
+    #[method(name = "abandon_channel")]
+    async fn abandon_channel(&self, params: AbandonChannelParams) -> Result<(), ErrorObjectOwned>;
 
     /// Lists all channels.
     #[method(name = "list_channels")]
@@ -409,6 +420,16 @@ where
         })
     }
 
+    async fn abandon_channel(&self, params: AbandonChannelParams) -> Result<(), ErrorObjectOwned> {
+        let message = |rpc_reply| {
+            NetworkActorMessage::Command(NetworkActorCommand::AbandonChannel(
+                params.channel_id,
+                rpc_reply,
+            ))
+        };
+        handle_actor_call!(self.actor, message, params)
+    }
+
     async fn list_channels(
         &self,
         params: ListChannelsParams,
@@ -459,15 +480,35 @@ where
         &self,
         params: ShutdownChannelParams,
     ) -> Result<(), ErrorObjectOwned> {
+        if params.force.unwrap_or_default() {
+            if params.close_script.is_some() || params.fee_rate.is_some() {
+                return Err(ErrorObjectOwned::owned(
+                    CALL_EXECUTION_FAILED_CODE,
+                    "close_script and fee_rate should not be set when force is true",
+                    Some(params),
+                ));
+            }
+        } else if params.close_script.is_none() || params.fee_rate.is_none() {
+            return Err(ErrorObjectOwned::owned(
+                CALL_EXECUTION_FAILED_CODE,
+                "close_script and fee_rate should be set when force is false",
+                Some(params),
+            ));
+        }
+
         let message = |rpc_reply| -> NetworkActorMessage {
             NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
                 ChannelCommandWithId {
                     channel_id: params.channel_id,
                     command: ChannelCommand::Shutdown(
                         ShutdownCommand {
-                            close_script: params.close_script.clone().into(),
-                            fee_rate: FeeRate::from_u64(params.fee_rate),
-                            force: params.force.unwrap_or(false),
+                            close_script: params
+                                .close_script
+                                .clone()
+                                .map(Into::into)
+                                .unwrap_or_default(),
+                            fee_rate: params.fee_rate.map(FeeRate::from_u64).unwrap_or_default(),
+                            force: params.force.unwrap_or_default(),
                         },
                         rpc_reply,
                     ),

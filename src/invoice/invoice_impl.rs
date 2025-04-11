@@ -2,8 +2,7 @@ use super::errors::VerificationError;
 use super::utils::*;
 use crate::fiber::gen::invoice::{self as gen_invoice, *};
 use crate::fiber::hash_algorithm::HashAlgorithm;
-use crate::fiber::serde_utils::EntityHex;
-use crate::fiber::serde_utils::U128Hex;
+use crate::fiber::serde_utils::{duration_hex, EntityHex, U128Hex, U64Hex};
 use crate::fiber::types::Hash256;
 use crate::gen_rand_sha256_hash;
 use crate::invoice::InvoiceError;
@@ -20,9 +19,9 @@ use secp256k1::{
     ecdsa::{RecoverableSignature, RecoveryId},
     Message, PublicKey, Secp256k1,
 };
+use serde::{Deserialize, Serialize};
 use std::fmt::Display;
 
-use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use std::{cmp::Ordering, str::FromStr};
 
@@ -107,26 +106,45 @@ impl FromStr for Currency {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct CkbScript(#[serde_as(as = "EntityHex")] pub Script);
 
+/// The attributes of the invoice
 #[serde_as]
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Attribute {
+    #[serde(with = "U64Hex")]
+    /// The final tlc time out, in milliseconds
     FinalHtlcTimeout(u64),
+    #[serde(with = "U64Hex")]
+    /// The final tlc minimum expiry delta, in milliseconds, default is 1 day
     FinalHtlcMinimumExpiryDelta(u64),
+    #[serde(with = "duration_hex")]
+    /// The expiry time of the invoice, in seconds
     ExpiryTime(Duration),
+    /// The description of the invoice
     Description(String),
+    /// The fallback address of the invoice
     FallbackAddr(String),
+    /// The udt type script of the invoice
     UdtScript(CkbScript),
+    /// The payee public key of the invoice
     PayeePublicKey(PublicKey),
+    /// The hash algorithm of the invoice
     HashAlgorithm(HashAlgorithm),
+    #[serde(with = "U64Hex")]
+    /// The feature flags of the invoice
     Feature(u64),
 }
 
+/// The metadata of the invoice
 #[serde_as]
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct InvoiceData {
+    /// The timestamp of the invoice
     #[serde_as(as = "U128Hex")]
     pub timestamp: u128,
+    /// The payment hash of the invoice
     pub payment_hash: Hash256,
+    /// The attributes of the invoice, e.g. description, expiry time, etc.
     pub attrs: Vec<Attribute>,
 }
 
@@ -474,12 +492,10 @@ impl From<Attribute> for InvoiceAttr {
         let a = match attr {
             Attribute::ExpiryTime(x) => {
                 let seconds = x.as_secs();
-                let nanos = x.subsec_nanos() as u64;
-                let value = gen_invoice::Duration::new_builder()
-                    .seconds(seconds.pack())
-                    .nanos(nanos.pack())
+                let value = gen_invoice::ExpiryTime::new_builder()
+                    .value(seconds.pack())
                     .build();
-                InvoiceAttrUnion::ExpiryTime(ExpiryTime::new_builder().value(value).build())
+                InvoiceAttrUnion::ExpiryTime(value)
             }
             Attribute::Description(value) => InvoiceAttrUnion::Description(
                 Description::new_builder().value(value.pack()).build(),
@@ -528,11 +544,8 @@ impl From<InvoiceAttr> for Attribute {
                 )
             }
             InvoiceAttrUnion::ExpiryTime(x) => {
-                let seconds: u64 = x.value().seconds().unpack();
-                let nanos: u64 = x.value().nanos().unpack();
-                Attribute::ExpiryTime(
-                    Duration::from_secs(seconds).saturating_add(Duration::from_nanos(nanos)),
-                )
+                let seconds: u64 = x.value().unpack();
+                Attribute::ExpiryTime(Duration::from_secs(seconds))
             }
             InvoiceAttrUnion::FinalHtlcTimeout(x) => {
                 Attribute::FinalHtlcTimeout(x.value().unpack())

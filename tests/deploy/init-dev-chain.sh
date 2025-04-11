@@ -12,7 +12,7 @@ check_deps() {
     done
 }
 
-check_deps ckb ckb-cli perl
+check_deps ckb ckb-cli
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
 data_dir="$script_dir/node-data"

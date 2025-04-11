@@ -328,13 +328,9 @@ impl ChannelActorStateStore for Store {
                 ]
                 .concat(),
             );
-            batch.delete(
-                [
-                    &[CHANNEL_OUTPOINT_CHANNEL_ID_PREFIX],
-                    state.must_get_funding_transaction_outpoint().as_slice(),
-                ]
-                .concat(),
-            );
+            if let Some(outpoint) = state.get_funding_transaction_outpoint() {
+                batch.delete([&[CHANNEL_OUTPOINT_CHANNEL_ID_PREFIX], outpoint.as_slice()].concat());
+            }
             batch.commit();
         }
     }
@@ -464,6 +460,13 @@ impl InvoiceStore for Store {
         let mut iter = self.prefix_iterator(prefix.as_slice());
         iter.next()
             .map(|(_key, value)| deserialize_from(value.as_ref(), "Hash256"))
+    }
+
+    fn remove_payment_preimage(&self, payment_hash: &Hash256) -> Result<(), InvoiceError> {
+        let mut batch = self.batch();
+        batch.delete([&[CKB_INVOICE_PREIMAGE_PREFIX], payment_hash.as_ref()].concat());
+        batch.commit();
+        Ok(())
     }
 }
 

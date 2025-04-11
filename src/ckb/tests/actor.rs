@@ -1,4 +1,4 @@
-use ckb_jsonrpc_types::Status;
+use ckb_types::core::tx_pool::TxStatus;
 use ckb_types::core::TransactionView;
 use ckb_types::packed::{CellInput, CellOutput};
 use ckb_types::prelude::{Builder, Pack};
@@ -19,16 +19,16 @@ pub async fn create_mock_chain_actor() -> ActorRef<CkbChainMessage> {
 #[tokio::test]
 async fn test_submit_empty_tx() {
     let actor = create_mock_chain_actor().await;
-    assert_eq!(
+    assert!(matches!(
         submit_tx(actor, TransactionView::new_advanced_builder().build()).await,
-        Status::Committed
-    );
+        TxStatus::Committed(..)
+    ));
 }
 
 #[tokio::test]
 async fn test_submit_one_output_tx() {
     let actor = create_mock_chain_actor().await;
-    assert_eq!(
+    assert!(matches!(
         submit_tx(
             actor,
             TransactionView::new_advanced_builder()
@@ -37,8 +37,8 @@ async fn test_submit_one_output_tx() {
                 .build()
         )
         .await,
-        Status::Committed
-    );
+        TxStatus::Committed(..),
+    ));
 }
 
 #[tokio::test]
@@ -56,13 +56,15 @@ async fn test_submit_mocked_secp256k1_tx() {
         .output(output)
         .output_data(Default::default())
         .build();
-    assert_eq!(
+    assert!(matches!(
         submit_tx(actor.clone(), tx.clone()).await,
-        Status::Committed
-    );
+        TxStatus::Committed(..)
+    ));
     let out_point = tx.output_pts_iter().next().unwrap();
     let tx = TransactionView::new_advanced_builder()
-        .cell_deps(get_cell_deps_by_contracts(vec![Contract::Secp256k1Lock]))
+        .cell_deps(
+            get_cell_deps_by_contracts(vec![Contract::Secp256k1Lock]).expect("get cell deps"),
+        )
         .input(
             CellInput::new_builder()
                 .previous_output(out_point.clone())
@@ -79,7 +81,10 @@ async fn test_submit_mocked_secp256k1_tx() {
         )
         .output_data(Default::default())
         .build();
-    assert_eq!(submit_tx(actor, tx).await, Status::Committed);
+    assert!(matches!(
+        submit_tx(actor, tx).await,
+        TxStatus::Committed(..)
+    ));
 }
 
 #[tokio::test]
@@ -97,13 +102,15 @@ async fn test_repeatedly_consume_the_same_cell() {
         .output(output)
         .output_data(Default::default())
         .build();
-    assert_eq!(
+    assert!(matches!(
         submit_tx(actor.clone(), tx.clone()).await,
-        Status::Committed
-    );
+        TxStatus::Committed(..)
+    ));
     let out_point = tx.output_pts_iter().next().unwrap();
     let tx = TransactionView::new_advanced_builder()
-        .cell_deps(get_cell_deps_by_contracts(vec![Contract::Secp256k1Lock]))
+        .cell_deps(
+            get_cell_deps_by_contracts(vec![Contract::Secp256k1Lock]).expect("get cell deps"),
+        )
         .input(
             CellInput::new_builder()
                 .previous_output(out_point.clone())
@@ -120,9 +127,14 @@ async fn test_repeatedly_consume_the_same_cell() {
         )
         .output_data(Default::default())
         .build();
-    assert_eq!(submit_tx(actor.clone(), tx).await, Status::Committed);
+    assert!(matches!(
+        submit_tx(actor.clone(), tx).await,
+        TxStatus::Committed(..)
+    ));
     let tx = TransactionView::new_advanced_builder()
-        .cell_deps(get_cell_deps_by_contracts(vec![Contract::Secp256k1Lock]))
+        .cell_deps(
+            get_cell_deps_by_contracts(vec![Contract::Secp256k1Lock]).expect("get cell deps"),
+        )
         .input(
             CellInput::new_builder()
                 .previous_output(out_point.clone())
@@ -139,7 +151,7 @@ async fn test_repeatedly_consume_the_same_cell() {
         )
         .output_data(Default::default())
         .build();
-    assert_eq!(submit_tx(actor, tx).await, Status::Rejected);
+    assert!(matches!(submit_tx(actor, tx).await, TxStatus::Rejected(_)));
 }
 
 #[tokio::test]
@@ -157,13 +169,13 @@ async fn test_submit_malformed_commitment_tx() {
         .output(output)
         .output_data(Default::default())
         .build();
-    assert_eq!(
+    assert!(matches!(
         submit_tx(actor.clone(), tx.clone()).await,
-        Status::Committed
-    );
+        TxStatus::Committed(..)
+    ));
     let out_point = tx.output_pts_iter().next().unwrap();
     let tx = TransactionView::new_advanced_builder()
-        .cell_deps(get_cell_deps_by_contracts(vec![Contract::FundingLock]))
+        .cell_deps(get_cell_deps_by_contracts(vec![Contract::FundingLock]).expect("get cell deps"))
         .input(
             CellInput::new_builder()
                 .previous_output(out_point.clone())
@@ -180,5 +192,5 @@ async fn test_submit_malformed_commitment_tx() {
         )
         .output_data(Default::default())
         .build();
-    assert_eq!(submit_tx(actor, tx).await, Status::Rejected);
+    assert!(matches!(submit_tx(actor, tx).await, TxStatus::Rejected(_)));
 }

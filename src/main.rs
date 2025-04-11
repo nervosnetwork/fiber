@@ -3,6 +3,7 @@ use ckb_resource::Resource;
 use core::default::Default;
 use fnn::actors::RootActor;
 use fnn::cch::CchMessage;
+use fnn::ckb::contracts::TypeIDResolver;
 use fnn::ckb::{contracts::try_init_contracts_context, CkbChainActor};
 use fnn::fiber::{channel::ChannelSubscribers, graph::NetworkGraph, network::init_chain_hash};
 use fnn::store::Store;
@@ -55,7 +56,11 @@ pub async fn main() -> Result<(), ExitMessage> {
         .try_init()
         .map_err(|err| ExitMessage(format!("failed to initialize logger: {}", err)))?;
 
-    info!("Starting node with git version {}", fnn::get_git_version());
+    info!(
+        "Starting node with git version {} ({})",
+        fnn::get_git_version(),
+        fnn::get_git_commit_info()
+    );
 
     let _span = info_span!("node", node = fnn::get_node_prefix()).entered();
 
@@ -83,6 +88,7 @@ pub async fn main() -> Result<(), ExitMessage> {
         }
     });
 
+    #[allow(unused_variables)]
     let (network_actor, ckb_chain_actor, network_graph) = match config.fiber.clone() {
         Some(fiber_config) => {
             // TODO: this is not a super user friendly error message which has actionable information
@@ -107,10 +113,12 @@ pub async fn main() -> Result<(), ExitMessage> {
             })?;
 
             init_chain_hash(genesis_block.hash().into());
+            let type_id_resolver = TypeIDResolver::new(ckb_config.rpc_url.clone());
             try_init_contracts_context(
                 genesis_block,
                 fiber_config.scripts.clone(),
                 ckb_config.udt_whitelist.clone().unwrap_or_default(),
+                Some(type_id_resolver),
             )
             .map_err(|err| ExitMessage(format!("failed to init contracts context: {}", err)))?;
 
@@ -287,7 +295,7 @@ pub async fn main() -> Result<(), ExitMessage> {
     };
 
     signal_listener().await;
-    if let Some(handle) = rpc_server_handle {
+    if let Some((handle, _)) = rpc_server_handle {
         handle
             .stop()
             .map_err(|err| ExitMessage(format!("failed to stop rpc server: {}", err)))?;

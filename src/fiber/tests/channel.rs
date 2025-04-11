@@ -26,11 +26,10 @@ use crate::{
     gen_rand_fiber_private_key, gen_rand_fiber_public_key, gen_rand_sha256_hash,
     now_timestamp_as_millis_u64, NetworkServiceEvent,
 };
-use ckb_jsonrpc_types::Status;
 use ckb_types::{
-    core::FeeRate,
+    core::{tx_pool::TxStatus, FeeRate},
     packed::{CellInput, Script, Transaction},
-    prelude::{AsTransactionBuilder, Builder, Entity, IntoTransactionView, Pack, Unpack},
+    prelude::{AsTransactionBuilder, Builder, Entity, Pack, Unpack},
 };
 use ractor::call;
 use secp256k1::Secp256k1;
@@ -631,7 +630,7 @@ async fn test_public_channel_saved_to_the_other_nodes_graph() {
     let node2_funding_amount = 6200000000;
 
     let [mut node1, mut node2, mut node3] = NetworkNode::new_n_interconnected_nodes().await;
-    let (_channel_id, funding_tx) = establish_channel_between_nodes(
+    let (_channel_id, funding_tx_hash) = establish_channel_between_nodes(
         &mut node1,
         &mut node2,
         true,
@@ -649,8 +648,14 @@ async fn test_public_channel_saved_to_the_other_nodes_graph() {
         None,
     )
     .await;
-    let status = node3.submit_tx(funding_tx).await;
-    assert_eq!(status, Status::Committed);
+    let funding_tx = node1
+        .get_transaction_view_from_hash(funding_tx_hash)
+        .await
+        .expect("get funding tx");
+    assert!(matches!(
+        node3.submit_tx(funding_tx).await,
+        TxStatus::Committed(..)
+    ));
 
     // Wait for the channel announcement to be broadcasted
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
@@ -681,7 +686,7 @@ async fn test_public_channel_with_unconfirmed_funding_tx() {
     let node2_funding_amount = 6200000000;
 
     let [mut node1, mut node2, mut node3] = NetworkNode::new_n_interconnected_nodes().await;
-    let (_channel_id, _funding_tx) = establish_channel_between_nodes(
+    let (_channel_id, _funding_tx_hash) = establish_channel_between_nodes(
         &mut node1,
         &mut node2,
         true,
@@ -811,16 +816,10 @@ async fn test_network_send_payment_normal_keysend_workflow() {
     assert_eq!(res.status, PaymentSessionStatus::Created);
     let payment_hash = res.payment_hash;
 
-    tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
-    let message = |rpc_reply| -> NetworkActorMessage {
-        NetworkActorMessage::Command(NetworkActorCommand::GetPayment(payment_hash, rpc_reply))
-    };
-    let res = call!(node_a.network_actor, message)
-        .expect("node_a alive")
-        .unwrap();
-
-    assert_eq!(res.status, PaymentSessionStatus::Success);
     assert_eq!(res.failed_error, None);
+    node_a.wait_until_success(payment_hash).await;
+
+    assert!(node_a.get_payment_preimage(&payment_hash).is_none());
 }
 
 #[tokio::test]
@@ -1703,12 +1702,12 @@ async fn test_network_send_payment_with_dry_run() {
 async fn test_send_payment_with_3_nodes() {
     init_tracing();
     let _span = tracing::info_span!("node", node = "test").entered();
-    let (node_a, node_b, node_c, channel_1, channel_2) = create_3_nodes_with_established_channel(
-        (100000000000, 100000000000),
-        (100000000000, 100000000000),
-        true,
-    )
-    .await;
+    let (node_a, mut node_b, node_c, channel_1, channel_2) =
+        create_3_nodes_with_established_channel(
+            (100000000000, 100000000000),
+            (100000000000, 100000000000),
+        )
+        .await;
     let node_a_local = node_a.get_local_balance_from_channel(channel_1);
     let node_b_local_left = node_b.get_local_balance_from_channel(channel_1);
     let node_b_local_right = node_b.get_local_balance_from_channel(channel_2);
@@ -1745,16 +1744,20 @@ async fn test_send_payment_with_3_nodes() {
     let res = res.unwrap();
     assert_eq!(res.status, PaymentSessionStatus::Created);
     assert!(res.fee > 0);
-    // sleep for 2 seconds to make sure the payment is sent
-    tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
-    let message = |rpc_reply| -> NetworkActorMessage {
-        NetworkActorMessage::Command(NetworkActorCommand::GetPayment(res.payment_hash, rpc_reply))
-    };
-    let res = call!(node_a.network_actor, message)
-        .expect("node_a alive")
-        .unwrap();
-    assert_eq!(res.status, PaymentSessionStatus::Success);
-    assert_eq!(res.failed_error, None);
+
+    node_b
+        .expect_debug_event(&format!(
+            "store payment_preimage for: {:?}",
+            res.payment_hash
+        ))
+        .await;
+    assert!(node_b.get_payment_preimage(&res.payment_hash).is_some());
+
+    node_a.wait_until_success(res.payment_hash).await;
+
+    assert!(node_a.get_payment_preimage(&res.payment_hash).is_none());
+    assert!(node_b.get_payment_preimage(&res.payment_hash).is_none());
+    assert!(node_c.get_payment_preimage(&res.payment_hash).is_none());
 
     let new_node_a_local = node_a.get_local_balance_from_channel(channel_1);
     let new_node_b_left = node_b.get_local_balance_from_channel(channel_1);
@@ -1775,14 +1778,13 @@ async fn test_send_payment_with_3_nodes() {
 async fn test_send_payment_with_rev_3_nodes() {
     init_tracing();
     let _span = tracing::info_span!("node", node = "test").entered();
-    let (nodes, channels) = create_n_nodes_and_channels_with_index_amounts(
+    let (nodes, channels) = create_n_nodes_network(
         vec![
             ((2, 1), (100000000000, 100000000000)),
             ((1, 0), (100000000000, 100000000000)),
         ]
         .as_slice(),
         3,
-        true,
     )
     .await;
 
@@ -1856,42 +1858,15 @@ async fn test_send_payment_with_max_nodes() {
     let nodes_num = 15;
     let last = nodes_num - 1;
     let amounts = vec![(100000000000, 100000000000); nodes_num - 1];
-    let (nodes, channels) =
-        create_n_nodes_with_established_channel(&amounts, nodes_num, true).await;
-    let source_node = &nodes[0];
+    let (nodes, channels) = create_n_nodes_with_established_channel(&amounts, nodes_num).await;
     let target_pubkey = nodes[last].pubkey;
 
     let sender_local = nodes[0].get_local_balance_from_channel(channels[0]);
     let receiver_local = nodes[last].get_local_balance_from_channel(channels[last - 1]);
 
     // sleep for seconds to make sure the channel is established
-    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(800)).await;
     let sent_amount = 1000000 + 5;
-
-    let message = |rpc_reply| -> NetworkActorMessage {
-        NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
-            SendPaymentCommand {
-                target_pubkey: Some(target_pubkey),
-                amount: Some(sent_amount),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                tlc_expiry_limit: None,
-                max_parts: None,
-                keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: true,
-                custom_records: None,
-            },
-            rpc_reply,
-        ))
-    };
-    let res = call!(source_node.network_actor, message).expect("node_a alive");
-    assert!(res.is_ok());
 
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
@@ -1954,7 +1929,6 @@ async fn test_send_payment_with_3_nodes_overflow() {
     let (node_a, _node_b, node_c, ..) = create_3_nodes_with_established_channel(
         (1000000000 * 100000000, 1000000000 * 100000000),
         (1000000000 * 100000000, 1000000000 * 100000000),
-        true,
     )
     .await;
 
@@ -2000,7 +1974,6 @@ async fn test_send_payment_fail_with_3_nodes_invalid_hash() {
     let (node_a, node_b, node_c, channel_1, channel_2) = create_3_nodes_with_established_channel(
         (100000000000, 100000000000),
         (100000000000, 100000000000),
-        true,
     )
     .await;
 
@@ -2078,7 +2051,6 @@ async fn test_send_payment_fail_with_3_nodes_final_tlc_expiry_delta() {
     let (node_a, _node_b, node_c, ..) = create_3_nodes_with_established_channel(
         (100000000000, 100000000000),
         (100000000000, 100000000000),
-        true,
     )
     .await;
 
@@ -2177,7 +2149,6 @@ async fn test_send_payment_fail_with_3_nodes_dry_run_fee() {
     let (node_a, _node_b, node_c, ..) = create_3_nodes_with_established_channel(
         (100000000000, 100000000000),
         (100000000000, 100000000000),
-        true,
     )
     .await;
 
@@ -2628,15 +2599,15 @@ async fn do_test_channel_commitment_tx_after_add_tlc(algorithm: HashAlgorithm) {
         })
         .await;
 
-    assert_eq!(
+    assert!(matches!(
         node_a.submit_tx(node_a_commitment_tx.clone()).await,
-        Status::Committed
-    );
+        TxStatus::Committed(..)
+    ));
 
-    assert_eq!(
+    assert!(matches!(
         node_b.submit_tx(node_b_commitment_tx.clone()).await,
-        Status::Committed
-    );
+        TxStatus::Committed(..)
+    ));
 }
 
 #[tokio::test]
@@ -2777,7 +2748,7 @@ async fn do_test_channel_remote_commitment_error() {
     let tlc_number_in_flight_limit = 5;
     let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
 
-    let (new_channel_id, _funding_tx) = establish_channel_between_nodes(
+    let (new_channel_id, _funding_tx_hash) = establish_channel_between_nodes(
         &mut node_a,
         &mut node_b,
         false,
@@ -3211,7 +3182,7 @@ async fn do_test_add_tlc_with_number_limit() {
     let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
 
     let node_a_max_tlc_number = 2;
-    let (new_channel_id, _funding_tx) = establish_channel_between_nodes(
+    let (new_channel_id, _funding_tx_hash) = establish_channel_between_nodes(
         &mut node_a,
         &mut node_b,
         true,
@@ -3297,7 +3268,7 @@ async fn do_test_add_tlc_number_limit_reverse() {
     let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
 
     let node_b_max_tlc_number = 2;
-    let (new_channel_id, _funding_tx) = establish_channel_between_nodes(
+    let (new_channel_id, _funding_tx_hash) = establish_channel_between_nodes(
         &mut node_a,
         &mut node_b,
         true,
@@ -3382,7 +3353,7 @@ async fn do_test_add_tlc_value_limit() {
     let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
 
     let max_tlc_number = 3;
-    let (new_channel_id, _funding_tx) = establish_channel_between_nodes(
+    let (new_channel_id, _funding_tx_hash) = establish_channel_between_nodes(
         &mut node_a,
         &mut node_b,
         true,
@@ -3468,7 +3439,7 @@ async fn do_test_add_tlc_min_tlc_value_limit() {
 
     let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
 
-    let (new_channel_id, _funding_tx) = establish_channel_between_nodes(
+    let (new_channel_id, _funding_tx_hash) = establish_channel_between_nodes(
         &mut node_a,
         &mut node_b,
         true,
@@ -3567,7 +3538,7 @@ async fn test_channel_update_tlc_expiry() {
 
     let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
 
-    let (new_channel_id, _funding_tx) = establish_channel_between_nodes(
+    let (new_channel_id, _funding_tx_hash) = establish_channel_between_nodes(
         &mut node_a,
         &mut node_b,
         true,
@@ -3633,13 +3604,12 @@ async fn test_channel_update_tlc_expiry() {
 
 #[tokio::test]
 async fn test_forward_payment_channel_disabled() {
-    let (nodes, channels) = create_n_nodes_and_channels_with_index_amounts(
+    let (nodes, channels) = create_n_nodes_network(
         &[
             ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
             ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
         ],
         3,
-        true,
     )
     .await;
     let [node_a, node_b, node_c] = nodes.try_into().expect("3 nodes");
@@ -3729,13 +3699,12 @@ async fn test_forward_payment_channel_disabled() {
 
 #[tokio::test]
 async fn test_forward_payment_tlc_minimum_value() {
-    let (nodes, channels) = create_n_nodes_and_channels_with_index_amounts(
+    let (nodes, channels) = create_n_nodes_network(
         &[
             ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
             ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
         ],
         3,
-        true,
     )
     .await;
     let [node_a, node_b, node_c] = nodes.try_into().expect("3 nodes");
@@ -3947,13 +3916,12 @@ async fn test_forward_payment_tlc_minimum_value() {
 #[tokio::test]
 async fn test_send_payment_with_outdated_fee_rate() {
     init_tracing();
-    let (nodes, _) = create_n_nodes_and_channels_with_index_amounts(
+    let (nodes, _) = create_n_nodes_network(
         &[
             ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
             ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
         ],
         3,
-        true,
     )
     .await;
     let [node_a, node_b, node_c] = nodes.try_into().expect("3 nodes");
@@ -4091,6 +4059,8 @@ async fn do_test_channel_with_simple_update_operation(algorithm: HashAlgorithm) 
     .expect("node_b alive")
     .expect("successfully removed tlc");
 
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
     let fee_rate = FeeRate::from_u64(DEFAULT_COMMITMENT_FEE_RATE);
     call!(node_b.network_actor, |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
@@ -4098,7 +4068,7 @@ async fn do_test_channel_with_simple_update_operation(algorithm: HashAlgorithm) 
                 channel_id: new_channel_id,
                 command: ChannelCommand::Shutdown(
                     ShutdownCommand {
-                        close_script: Script::default().as_builder().build(),
+                        close_script: Script::default(),
                         fee_rate,
                         force: false,
                     },
@@ -4146,14 +4116,18 @@ async fn do_test_channel_with_simple_update_operation(algorithm: HashAlgorithm) 
 
     assert_eq!(node_a_shutdown_tx_hash, node_b_shutdown_tx_hash);
 
-    assert_eq!(
-        node_a.trace_tx_hash(node_a_shutdown_tx_hash.clone()).await,
-        Status::Committed
-    );
-    assert_eq!(
-        node_b.trace_tx_hash(node_b_shutdown_tx_hash.clone()).await,
-        Status::Committed
-    );
+    assert!(matches!(
+        node_a
+            .trace_tx(node_a_shutdown_tx_hash.clone().into())
+            .await,
+        TxStatus::Committed(..)
+    ));
+    assert!(matches!(
+        node_b
+            .trace_tx(node_b_shutdown_tx_hash.clone().into())
+            .await,
+        TxStatus::Committed(..)
+    ));
 
     // TODO: maybe also check shutdown tx outputs and output balances here.
 }
@@ -4322,16 +4296,16 @@ async fn test_revoke_old_commitment_transaction() {
         })
         .await;
 
-    assert_eq!(
+    assert!(matches!(
         node_a.submit_tx(commitment_tx.clone()).await,
-        Status::Committed
-    );
+        TxStatus::Committed(..)
+    ));
 
     println!("commitment_tx: {:?}", commitment_tx);
 
     let tx = Transaction::default()
         .as_advanced_builder()
-        .cell_deps(get_cell_deps(vec![Contract::CommitmentLock], &None))
+        .cell_deps(get_cell_deps(vec![Contract::CommitmentLock], &None).expect("get cell deps"))
         .input(
             CellInput::new_builder()
                 .previous_output(commitment_tx.output_pts().first().unwrap().clone())
@@ -4352,10 +4326,10 @@ async fn test_revoke_old_commitment_transaction() {
 
     let revocation_tx = tx.as_advanced_builder().witness(witness.pack()).build();
 
-    assert_eq!(
+    assert!(matches!(
         node_a.submit_tx(revocation_tx.clone()).await,
-        Status::Committed
-    );
+        TxStatus::Committed(..)
+    ));
 }
 
 #[tokio::test]
@@ -4485,14 +4459,14 @@ async fn test_create_channel() {
         .await;
 
     // We can submit the commitment txs to the chain now.
-    assert_eq!(
+    assert!(matches!(
         node_a.submit_tx(node_a_commitment_tx.clone()).await,
-        Status::Committed
-    );
-    assert_eq!(
+        TxStatus::Committed(..)
+    ));
+    assert!(matches!(
         node_b.submit_tx(node_b_commitment_tx.clone()).await,
-        Status::Committed
-    );
+        TxStatus::Committed(..)
+    ));
 }
 
 #[tokio::test]
@@ -4668,7 +4642,7 @@ async fn test_commitment_tx_capacity() {
         NetworkNode::new_2_nodes_with_established_channel(amount_a, amount_b, true).await;
 
     let state = node_a.store.get_channel_actor_state(&channel_id).unwrap();
-    let commitment_tx = state.latest_commitment_transaction.unwrap().into_view();
+    let commitment_tx = state.get_latest_commitment_transaction().unwrap();
     let output_capacity: u64 = commitment_tx.output(0).unwrap().capacity().unpack();
 
     // default fee rate is 1000 shannons per kb, and there is a gap of 20 bytes between the mock commitment tx and the real one
@@ -4702,23 +4676,12 @@ async fn test_connect_to_peers_with_mutual_channel_on_restart_1() {
     node_a.expect_event(
         |event| matches!(event, NetworkServiceEvent::PeerConnected(id, _addr) if id == &node_b.peer_id),
     ).await;
+
     node_a
-        .expect_event(|event| {
-            matches!(
-                event,
-                NetworkServiceEvent::DebugEvent(DebugEvent::Common(
-                    info
-                )) if "Reestablished channel in ChannelReady" == info)
-        })
+        .expect_debug_event("Reestablished channel in ChannelReady")
         .await;
     node_b
-        .expect_event(|event| {
-            matches!(
-                event,
-                NetworkServiceEvent::DebugEvent(DebugEvent::Common(
-                    info
-                )) if "Reestablished channel in ChannelReady" == info)
-        })
+        .expect_debug_event("Reestablished channel in ChannelReady")
         .await;
 }
 
@@ -4812,15 +4775,7 @@ async fn test_send_payment_with_node_restart_then_resend_add_tlc() {
     )
     .await;
 
-    node_a
-        .expect_event(|event| {
-            matches!(
-            event,
-            NetworkServiceEvent::DebugEvent(DebugEvent::Common(
-                info
-            )) if "resend add tlc" == info)
-        })
-        .await;
+    node_a.expect_debug_event("resend add tlc").await;
 
     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
     let payment_status = node_a.get_payment_status(payment_hash).await;
@@ -4910,16 +4865,7 @@ async fn test_node_reestablish_resend_remove_tlc() {
     assert_eq!(node_b_balance, new_node_b_balance);
 
     node_a.start().await;
-    node_b
-        .expect_event(|event| {
-            matches!(
-        event,
-        NetworkServiceEvent::DebugEvent(DebugEvent::Common(
-            info
-        )) if "resend remove tlc" == info)
-        })
-        .await;
-
+    node_b.expect_debug_event("resend remove tlc").await;
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
     // assert balance changed since remove tlc is processed by node_a after node_b resending remove tlc
@@ -5137,24 +5083,23 @@ async fn test_shutdown_channel_with_different_size_shutdown_script() {
         })
         .await;
 
-    node_a
-        .expect_event(|event| matches!(event, NetworkServiceEvent::DebugEvent(DebugEvent::Common(message)) if message == "ChannelClosed"))
-        .await;
-
-    node_b
-        .expect_event(|event| matches!(event, NetworkServiceEvent::DebugEvent(DebugEvent::Common(message)) if message == "ChannelClosed"))
-        .await;
+    node_a.expect_debug_event("ChannelClosed").await;
+    node_b.expect_debug_event("ChannelClosed").await;
 
     assert_eq!(node_a_shutdown_tx_hash, node_b_shutdown_tx_hash);
 
-    assert_eq!(
-        node_a.trace_tx_hash(node_a_shutdown_tx_hash.clone()).await,
-        Status::Committed
-    );
-    assert_eq!(
-        node_b.trace_tx_hash(node_b_shutdown_tx_hash.clone()).await,
-        Status::Committed
-    );
+    assert!(matches!(
+        node_a
+            .trace_tx(node_a_shutdown_tx_hash.clone().into())
+            .await,
+        TxStatus::Committed(..)
+    ));
+    assert!(matches!(
+        node_b
+            .trace_tx(node_b_shutdown_tx_hash.clone().into())
+            .await,
+        TxStatus::Committed(..)
+    ));
 }
 
 #[tokio::test]
@@ -5235,10 +5180,13 @@ async fn test_shutdown_channel_network_graph_with_sync_up() {
     assert_eq!(network_nodes.len(), 2);
 
     let network_channels = node_a.get_network_channels().await;
-    assert_eq!(network_channels.len(), 0);
+    assert!(!network_channels[0].update_of_node1.unwrap().enabled);
+    assert!(!network_channels[0].update_of_node2.unwrap().enabled);
 
     let network_channels = node_b.get_network_channels().await;
-    assert_eq!(network_channels.len(), 0);
+    assert_eq!(network_channels.len(), 1);
+    assert!(!network_channels[0].update_of_node1.unwrap().enabled);
+    assert!(!network_channels[0].update_of_node2.unwrap().enabled);
 }
 
 #[tokio::test]
@@ -5247,8 +5195,7 @@ async fn test_send_payment_with_channel_balance_error() {
     let _span = tracing::info_span!("node", node = "test").entered();
     let nodes_num = 4;
     let amounts = vec![(100000000000, 100000000000); nodes_num - 1];
-    let (nodes, channels) =
-        create_n_nodes_with_established_channel(&amounts, nodes_num, true).await;
+    let (nodes, channels) = create_n_nodes_with_established_channel(&amounts, nodes_num).await;
     let [node_0, _node_1, node_2, node_3] = nodes.try_into().expect("4 nodes");
     let source_node = &node_0;
     let target_pubkey = node_3.pubkey;
@@ -5333,8 +5280,7 @@ async fn test_send_payment_with_disable_channel() {
     let _span = tracing::info_span!("node", node = "test").entered();
     let nodes_num = 4;
     let amounts = vec![(100000000000, 100000000000); nodes_num - 1];
-    let (nodes, channels) =
-        create_n_nodes_with_established_channel(&amounts, nodes_num, true).await;
+    let (nodes, channels) = create_n_nodes_with_established_channel(&amounts, nodes_num).await;
     let [node_0, _node_1, node_2, node_3] = nodes.try_into().expect("4 nodes");
 
     // begin to set channel disable, but do not notify the network
@@ -5371,7 +5317,7 @@ async fn test_send_payment_with_multiple_edges_in_middle_hops() {
     // we have two chaneels between node_1 and node_2, they are all with the same meta information except the later one has more capacity
     // path finding will try the channel with larger capacity first, so we assert the payment retry times is 1
     // the send payment should be succeed
-    let (nodes, _channels) = create_n_nodes_and_channels_with_index_amounts(
+    let (nodes, _channels) = create_n_nodes_network(
         &[
             ((0, 1), (100000000000, 100000000000)),
             ((1, 2), (MIN_RESERVED_CKB + 900, 5200000000)),
@@ -5379,7 +5325,6 @@ async fn test_send_payment_with_multiple_edges_in_middle_hops() {
             ((2, 3), (100000000000, 100000000000)),
         ],
         4,
-        true,
     )
     .await;
     let [node_0, _node_1, _node_2, node_3] = nodes.try_into().expect("4 nodes");
@@ -5428,7 +5373,7 @@ async fn test_send_payment_with_all_failed_middle_hops() {
     // we have two chaneels between node_1 and node_2
     // they liquid capacity is enough for send payment, but actual balance are both not enough
     // path finding will all try them but all failed, so we assert the payment retry times is 3
-    let (nodes, _channels) = create_n_nodes_and_channels_with_index_amounts(
+    let (nodes, _channels) = create_n_nodes_network(
         &[
             ((0, 1), (100000000000, 100000000000)),
             ((1, 2), (MIN_RESERVED_CKB + 900, MIN_RESERVED_CKB + 1000)),
@@ -5436,7 +5381,6 @@ async fn test_send_payment_with_all_failed_middle_hops() {
             ((2, 3), (100000000000, 100000000000)),
         ],
         4,
-        true,
     )
     .await;
     let [node_0, _node_1, _node_2, node_3] = nodes.try_into().expect("4 nodes");
@@ -5487,7 +5431,7 @@ async fn test_send_payment_with_multiple_edges_can_succeed_in_retry() {
     // but even channel_2's capacity is larger, the to_local_amount is not enough for the payment
     // path finding will retry the first channel and the send payment should be succeed
     // the payment retry times should be 2
-    let (nodes, _channels) = create_n_nodes_and_channels_with_index_amounts(
+    let (nodes, _channels) = create_n_nodes_network(
         &[
             ((0, 1), (100000000000, 100000000000)),
             ((1, 2), (MIN_RESERVED_CKB + 1000, 5200000000)),
@@ -5495,7 +5439,6 @@ async fn test_send_payment_with_multiple_edges_can_succeed_in_retry() {
             ((2, 3), (100000000000, 100000000000)),
         ],
         4,
-        true,
     )
     .await;
     let [node_0, _node_1, _node_2, node_3] = nodes.try_into().expect("4 nodes");
@@ -5544,7 +5487,7 @@ async fn test_send_payment_with_final_hop_multiple_edges_in_middle_hops() {
     // we have two chaneels between node_2 and node_3, they are all with the same meta information except the later one has more capacity
     // path finding will try the channel with larger capacity first, so we assert the payment retry times is 1
     // the send payment should be succeed
-    let (nodes, _channels) = create_n_nodes_and_channels_with_index_amounts(
+    let (nodes, _channels) = create_n_nodes_network(
         &[
             ((0, 1), (100000000000, 100000000000)),
             ((1, 2), (100000000000, 100000000000)),
@@ -5552,7 +5495,6 @@ async fn test_send_payment_with_final_hop_multiple_edges_in_middle_hops() {
             ((2, 3), (MIN_RESERVED_CKB + 1000, 5200000000)),
         ],
         4,
-        true,
     )
     .await;
     let [node_0, _node_1, _node_2, node_3] = nodes.try_into().expect("4 nodes");
@@ -5601,7 +5543,7 @@ async fn test_send_payment_with_final_all_failed_middle_hops() {
     // we have two chaneels between node_2 and node_3
     // they liquid capacity is enough for send payment, but actual balance are both not enough
     // path finding will all try them but all failed, so we assert the payment retry times is 3
-    let (nodes, _channels) = create_n_nodes_and_channels_with_index_amounts(
+    let (nodes, _channels) = create_n_nodes_network(
         &[
             ((0, 1), (100000000000, 100000000000)),
             ((1, 2), (100000000000, 100000000000)),
@@ -5609,7 +5551,6 @@ async fn test_send_payment_with_final_all_failed_middle_hops() {
             ((2, 3), (MIN_RESERVED_CKB + 910, MIN_RESERVED_CKB + 1000)),
         ],
         4,
-        true,
     )
     .await;
     let [node_0, _node_1, _node_2, node_3] = nodes.try_into().expect("4 nodes");
@@ -5658,7 +5599,7 @@ async fn test_send_payment_with_final_multiple_edges_can_succeed_in_retry() {
     // but even channel_2's capacity is larger, the to_local_amount is not enough for the payment
     // path finding will retry the first channel and the send payment should be succeed
     // the payment retry times should be 2
-    let (nodes, _channels) = create_n_nodes_and_channels_with_index_amounts(
+    let (nodes, _channels) = create_n_nodes_network(
         &[
             ((0, 1), (100000000000, 100000000000)),
             ((1, 2), (100000000000, 100000000000)),
@@ -5666,7 +5607,6 @@ async fn test_send_payment_with_final_multiple_edges_can_succeed_in_retry() {
             ((2, 3), (MIN_RESERVED_CKB + 900, 6200000000)),
         ],
         4,
-        true,
     )
     .await;
     let [node_0, _node_1, _node_2, node_3] = nodes.try_into().expect("4 nodes");
@@ -5711,7 +5651,7 @@ async fn test_send_payment_with_final_multiple_edges_can_succeed_in_retry() {
 async fn test_send_payment_with_first_hop_failed_with_fee() {
     init_tracing();
     let _span = tracing::info_span!("node", node = "test").entered();
-    let (nodes, _channels) = create_n_nodes_and_channels_with_index_amounts(
+    let (nodes, _channels) = create_n_nodes_network(
         &[
             // even 1000 > 999, but it's not enough for fee, and this is the direct channel
             // so we can check the actual balance of channel
@@ -5721,7 +5661,6 @@ async fn test_send_payment_with_first_hop_failed_with_fee() {
             ((2, 3), (100000000000, 100000000000)),
         ],
         4,
-        true,
     )
     .await;
     let [node_0, _node_1, _node_2, node_3] = nodes.try_into().expect("4 nodes");
@@ -5764,7 +5703,7 @@ async fn test_send_payment_succeed_with_multiple_edges_in_first_hop() {
     // we have two chaneels between node_0 and node_1, they are all with the same meta information except the later one has more capacity
     // path finding will try the channel with larger capacity first, so we assert the payment retry times is 1
     // the send payment should be succeed
-    let (nodes, _channels) = create_n_nodes_and_channels_with_index_amounts(
+    let (nodes, _channels) = create_n_nodes_network(
         &[
             ((0, 1), (MIN_RESERVED_CKB + 900, 5200000000)),
             ((0, 1), (MIN_RESERVED_CKB + 1001, 5200000000)),
@@ -5772,7 +5711,6 @@ async fn test_send_payment_succeed_with_multiple_edges_in_first_hop() {
             ((2, 3), (100000000000, 100000000000)),
         ],
         4,
-        true,
     )
     .await;
     let [node_0, _node_1, _node_2, node_3] = nodes.try_into().expect("4 nodes");
@@ -5820,7 +5758,7 @@ async fn test_send_payment_with_first_hop_all_failed() {
     // we have two chaneels between node_0 and node_1
     // they liquid capacity is enough for send payment, but actual balance are both not enough
     // path finding will fail in the first time of send payment
-    let (nodes, _channels) = create_n_nodes_and_channels_with_index_amounts(
+    let (nodes, _channels) = create_n_nodes_network(
         &[
             ((0, 1), (MIN_RESERVED_CKB + 900, MIN_RESERVED_CKB + 1000)),
             ((0, 1), (MIN_RESERVED_CKB + 910, MIN_RESERVED_CKB + 1000)),
@@ -5828,7 +5766,6 @@ async fn test_send_payment_with_first_hop_all_failed() {
             ((2, 3), (100000000000, 100000000000)),
         ],
         4,
-        true,
     )
     .await;
     let [node_0, _node_1, _node_2, node_3] = nodes.try_into().expect("4 nodes");
@@ -5873,7 +5810,7 @@ async fn test_send_payment_will_succeed_with_direct_channel_info_first_hop() {
     // but we manually set the to_local_amount to smaller value for testing
     // path finding will get the direct channel info with actual balance of channel,
     // so it will try the channel with smaller capacity and the payment will succeed
-    let (nodes, channels) = create_n_nodes_and_channels_with_index_amounts(
+    let (nodes, channels) = create_n_nodes_network(
         &[
             ((0, 1), (MIN_RESERVED_CKB + 2000, MIN_RESERVED_CKB + 1000)),
             ((0, 1), (MIN_RESERVED_CKB + 1005, MIN_RESERVED_CKB + 1000)),
@@ -5881,7 +5818,6 @@ async fn test_send_payment_will_succeed_with_direct_channel_info_first_hop() {
             ((2, 3), (100000000000, 100000000000)),
         ],
         4,
-        true,
     )
     .await;
     let [mut node_0, _node_1, _node_2, node_3] = nodes.try_into().expect("4 nodes");
@@ -5937,7 +5873,7 @@ async fn test_send_payment_will_succeed_with_retry_in_middle_hops() {
     // but we manually set the to_local_amount to smaller value for testing
     // path finding will get a temporary failure in the first try and retry the second channel
     // so it will try the channel with smaller capacity and the payment will succeed
-    let (nodes, channels) = create_n_nodes_and_channels_with_index_amounts(
+    let (nodes, channels) = create_n_nodes_network(
         &[
             ((0, 1), (100000000000, 100000000000)),
             ((1, 2), (100000000000, 100000000000)),
@@ -5945,7 +5881,6 @@ async fn test_send_payment_will_succeed_with_retry_in_middle_hops() {
             ((2, 3), (MIN_RESERVED_CKB + 1005, MIN_RESERVED_CKB + 1000)),
         ],
         4,
-        true,
     )
     .await;
     let [mut node_0, _node_1, node_2, node_3] = nodes.try_into().expect("4 nodes");
@@ -6008,7 +5943,7 @@ async fn test_send_payment_will_fail_with_last_hop_info_in_add_tlc_peer() {
     // but we manually set the to_remote_amount for node_3 to a larger amount,
     // this will make node3 trigger error in add_tlc_peer and got an Musig2VerifyError(BadSignature)
     // the send_payment will failed with retry times of 1
-    let (nodes, channels) = create_n_nodes_and_channels_with_index_amounts(
+    let (nodes, channels) = create_n_nodes_network(
         &[
             ((0, 1), (100000000000, 100000000000)),
             ((1, 2), (100000000000, 100000000000)),
@@ -6016,7 +5951,6 @@ async fn test_send_payment_will_fail_with_last_hop_info_in_add_tlc_peer() {
             ((2, 3), (MIN_RESERVED_CKB + 1005, MIN_RESERVED_CKB + 1000)),
         ],
         4,
-        true,
     )
     .await;
     let [mut node_0, _node_1, _node_2, mut node_3] = nodes.try_into().expect("4 nodes");
@@ -6075,7 +6009,7 @@ async fn test_send_payment_will_fail_with_invoice_not_generated_by_target() {
     init_tracing();
     let _span = tracing::info_span!("node", node = "test").entered();
 
-    let (nodes, _channels) = create_n_nodes_and_channels_with_index_amounts(
+    let (nodes, _channels) = create_n_nodes_network(
         &[
             ((0, 1), (100000000000, 100000000000)),
             ((1, 2), (100000000000, 100000000000)),
@@ -6083,7 +6017,6 @@ async fn test_send_payment_will_fail_with_invoice_not_generated_by_target() {
             ((2, 3), (MIN_RESERVED_CKB + 1005, MIN_RESERVED_CKB + 1000)),
         ],
         4,
-        true,
     )
     .await;
     let [mut node_0, _node_1, _node_2, node_3] = nodes.try_into().expect("4 nodes");
@@ -6134,7 +6067,7 @@ async fn test_send_payment_will_succeed_with_valid_invoice() {
     init_tracing();
     let _span = tracing::info_span!("node", node = "test").entered();
 
-    let (nodes, channels) = create_n_nodes_and_channels_with_index_amounts(
+    let (nodes, channels) = create_n_nodes_network(
         &[
             ((0, 1), (100000000000, 100000000000)),
             ((1, 2), (100000000000, 100000000000)),
@@ -6142,7 +6075,6 @@ async fn test_send_payment_will_succeed_with_valid_invoice() {
             ((2, 3), (MIN_RESERVED_CKB + 1005, MIN_RESERVED_CKB + 1000)),
         ],
         4,
-        true,
     )
     .await;
     let [mut node_0, _node_1, _node_2, mut node_3] = nodes.try_into().expect("4 nodes");
@@ -6197,13 +6129,16 @@ async fn test_send_payment_will_succeed_with_valid_invoice() {
         node_3.get_invoice_status(ckb_invoice.payment_hash()),
         Some(CkbInvoiceStatus::Paid)
     );
+    assert!(node_3
+        .get_payment_preimage(ckb_invoice.payment_hash())
+        .is_none());
 }
 
 #[tokio::test]
 async fn test_send_payment_will_fail_with_no_invoice_preimage() {
     init_tracing();
     let _span = tracing::info_span!("node", node = "test").entered();
-    let (nodes, channels) = create_n_nodes_and_channels_with_index_amounts(
+    let (nodes, channels) = create_n_nodes_network(
         &[
             ((0, 1), (100000000000, 100000000000)),
             ((1, 2), (100000000000, 100000000000)),
@@ -6211,7 +6146,6 @@ async fn test_send_payment_will_fail_with_no_invoice_preimage() {
             ((2, 3), (MIN_RESERVED_CKB + 1005, MIN_RESERVED_CKB + 1000)),
         ],
         4,
-        true,
     )
     .await;
     let [mut node_0, _node_1, _node_2, mut node_3] = nodes.try_into().expect("4 nodes");
@@ -6276,7 +6210,7 @@ async fn test_send_payment_will_fail_with_cancelled_invoice() {
     init_tracing();
     let _span = tracing::info_span!("node", node = "test").entered();
 
-    let (nodes, channels) = create_n_nodes_and_channels_with_index_amounts(
+    let (nodes, channels) = create_n_nodes_network(
         &[
             ((0, 1), (100000000000, 100000000000)),
             ((1, 2), (100000000000, 100000000000)),
@@ -6284,7 +6218,6 @@ async fn test_send_payment_will_fail_with_cancelled_invoice() {
             ((2, 3), (MIN_RESERVED_CKB + 1005, MIN_RESERVED_CKB + 1000)),
         ],
         4,
-        true,
     )
     .await;
     let [mut node_0, _node_1, _node_2, mut node_3] = nodes.try_into().expect("4 nodes");
@@ -6340,6 +6273,9 @@ async fn test_send_payment_will_fail_with_cancelled_invoice() {
         node_3.get_invoice_status(ckb_invoice.payment_hash()),
         Some(CkbInvoiceStatus::Cancelled)
     );
+    assert!(node_3
+        .get_payment_preimage(ckb_invoice.payment_hash())
+        .is_some());
 }
 
 #[tokio::test]
@@ -6348,14 +6284,13 @@ async fn test_send_payment_will_succeed_with_large_tlc_expiry_limit() {
     let _span = tracing::info_span!("node", node = "test").entered();
     // from https://github.com/nervosnetwork/fiber/issues/367
 
-    let (nodes, _channels) = create_n_nodes_and_channels_with_index_amounts(
+    let (nodes, _channels) = create_n_nodes_network(
         &[
             ((0, 1), (MIN_RESERVED_CKB + 2000, MIN_RESERVED_CKB + 1000)),
             ((1, 2), (100000000000, 100000000000)),
             ((2, 3), (100000000000, 100000000000)),
         ],
         4,
-        true,
     )
     .await;
     let [mut node_0, _node_1, _node_2, node_3] = nodes.try_into().expect("4 nodes");
@@ -6414,4 +6349,145 @@ async fn test_send_payment_will_succeed_with_large_tlc_expiry_limit() {
     source_node
         .assert_payment_status(payment_hash, PaymentSessionStatus::Success, Some(1))
         .await;
+}
+
+#[tokio::test]
+async fn test_abandon_failed_channel_without_accept() {
+    let [mut node_a, node_b] = NetworkNode::new_n_interconnected_nodes().await;
+
+    let message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
+            OpenChannelCommand {
+                peer_id: node_b.peer_id.clone(),
+                public: false,
+                shutdown_script: None,
+                funding_amount: 100000000000,
+                funding_udt_type_script: None,
+                commitment_fee_rate: None,
+                commitment_delay_epoch: None,
+                funding_fee_rate: None,
+                tlc_expiry_delta: None,
+                tlc_min_value: None,
+                tlc_fee_proportional_millionths: None,
+                max_tlc_number_in_flight: None,
+                max_tlc_value_in_flight: None,
+            },
+            rpc_reply,
+        ))
+    };
+    let open_channel_result = call!(node_a.network_actor, message)
+        .expect("node_a alive")
+        .expect("open channel success");
+
+    eprintln!("open_channel_result: {:?}", open_channel_result);
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+    let temp_channel_id = open_channel_result.channel_id;
+    let node_a_channel_actor_state = node_a.get_channel_actor_state_unchecked(temp_channel_id);
+    assert!(node_a_channel_actor_state.is_none());
+
+    let res = node_a.send_abandon_channel(temp_channel_id).await;
+    assert!(res.is_ok());
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    node_a.expect_debug_event("ChannelActorStopped").await;
+}
+
+#[tokio::test]
+async fn test_abandon_channel_with_peer_accept() {
+    let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
+
+    let message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
+            OpenChannelCommand {
+                peer_id: node_b.peer_id.clone(),
+                public: false,
+                shutdown_script: None,
+                funding_amount: 100000000000,
+                funding_udt_type_script: None,
+                commitment_fee_rate: None,
+                commitment_delay_epoch: None,
+                funding_fee_rate: None,
+                tlc_expiry_delta: None,
+                tlc_min_value: None,
+                tlc_fee_proportional_millionths: None,
+                max_tlc_number_in_flight: None,
+                max_tlc_value_in_flight: None,
+            },
+            rpc_reply,
+        ))
+    };
+    let open_channel_result = call!(node_a.network_actor, message)
+        .expect("node_a alive")
+        .expect("open channel success");
+
+    eprintln!("open_channel_result: {:?}", open_channel_result);
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+    let temp_channel_id = open_channel_result.channel_id;
+    let node_a_channel_actor_state = node_a.get_channel_actor_state_unchecked(temp_channel_id);
+    assert!(node_a_channel_actor_state.is_none());
+
+    // stop ckb chain actor to make sure funding tx is not sent
+    node_a.send_ckb_chain_message(crate::ckb::CkbChainMessage::Stop);
+
+    let message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::AcceptChannel(
+            AcceptChannelCommand {
+                temp_channel_id: open_channel_result.channel_id,
+                funding_amount: DEFAULT_AUTO_ACCEPT_CHANNEL_CKB_FUNDING_AMOUNT as u128,
+                shutdown_script: None,
+                max_tlc_number_in_flight: None,
+                max_tlc_value_in_flight: None,
+                min_tlc_value: None,
+                tlc_fee_proportional_millionths: None,
+                tlc_expiry_delta: None,
+            },
+            rpc_reply,
+        ))
+    };
+
+    let accept_channel_result = call!(node_b.network_actor, message)
+        .expect("node_b alive")
+        .expect("accept channel success");
+
+    let new_channel_id = accept_channel_result.new_channel_id;
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+    // temp_channel_id will not work now, since it has been replaced by the real channel_id
+    let res = node_a.send_abandon_channel(temp_channel_id).await;
+    assert!(res.is_err());
+
+    let channel_actor_state = node_a
+        .get_channel_actor_state_unchecked(new_channel_id)
+        .expect("channel actor state");
+    eprintln!("channel_actor_state: {:?}", channel_actor_state.state);
+    let res = node_a.send_abandon_channel(new_channel_id).await;
+    eprintln!("res: {:?}", res);
+    assert!(res.is_ok());
+
+    // make sure the channel actor is stopped
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    node_a.expect_debug_event("ChannelActorStopped").await;
+
+    // make sure the channel is removed from DB
+    let channel = node_a.get_channel_actor_state_unchecked(new_channel_id);
+    assert!(channel.is_none());
+
+    // ----------------------------------------------------------------------------
+
+    // Node_b can also abandon channel, node_a's CKB chain actor is stopped,
+    // so node_b will not received `TxCollaborationCommand::TxUpdate` message
+    // the channel_actor_state haven't been inserted into DB
+    let channel_actor_state = node_b.get_channel_actor_state_unchecked(new_channel_id);
+    assert!(channel_actor_state.is_none());
+
+    let res = node_b.send_abandon_channel(new_channel_id).await;
+    eprintln!("res: {:?}", res);
+    assert!(res.is_ok());
+
+    // make sure the channel actor is stopped
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    node_b.expect_debug_event("ChannelActorStopped").await;
 }

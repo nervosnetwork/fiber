@@ -1,8 +1,8 @@
-use crate::debug_event;
 #[cfg(debug_assertions)]
 use crate::fiber::network::DebugEvent;
 use crate::fiber::network::PaymentCustomRecords;
 use crate::fiber::types::BroadcastMessageWithTimestamp;
+use crate::{debug_event, utils::tx::compute_tx_message};
 use bitflags::bitflags;
 use futures::future::OptionFuture;
 use secp256k1::XOnlyPublicKey;
@@ -100,6 +100,12 @@ pub const INITIAL_COMMITMENT_NUMBER: u64 = 0;
 
 const RETRYABLE_TLC_OPS_INTERVAL: Duration = Duration::from_millis(1000);
 
+// if a important TLC operation is not acked in 30 seconds, we will try to disconnect the peer.
+#[cfg(not(test))]
+pub const PEER_CHANNEL_RESPONSE_TIMEOUT: u64 = 30 * 1000;
+#[cfg(test)]
+pub const PEER_CHANNEL_RESPONSE_TIMEOUT: u64 = 10 * 1000;
+
 #[derive(Debug)]
 pub enum ChannelActorMessage {
     /// Command are the messages that are sent to the channel actor to perform some action.
@@ -158,7 +164,7 @@ impl Display for ChannelCommand {
             ChannelCommand::Shutdown(_, _) => write!(f, "Shutdown"),
             ChannelCommand::BroadcastChannelUpdate() => write!(f, "BroadcastChannelUpdate"),
             ChannelCommand::Update(_, _) => write!(f, "Update"),
-            ChannelCommand::ForwardTlcResult(_) => write!(f, "ForwardTlcResult"),
+            ChannelCommand::ForwardTlcResult(res) => write!(f, "ForwardTlcResult [{:?}]", res),
             #[cfg(test)]
             ChannelCommand::ReloadState(_) => write!(f, "ReloadState"),
         }
@@ -373,7 +379,7 @@ where
                     ));
                 }
                 match state.state {
-                    ChannelState::ChannelReady() => {}
+                    ChannelState::ChannelReady => {}
                     ChannelState::AwaitingChannelReady(flags)
                         if flags.contains(AwaitingChannelReadyFlags::CHANNEL_READY) => {}
                     _ => {
@@ -426,7 +432,7 @@ where
                 state.handle_tx_collaboration_msg(TxCollaborationMsg::TxComplete(tx))?;
                 if let ChannelState::CollaboratingFundingTx(flags) = state.state {
                     if flags.contains(CollaboratingFundingTxFlags::COLLABORATION_COMPLETED) {
-                        self.handle_commitment_signed_command(state)?;
+                        self.handle_commitment_signed_command(myself, state)?;
                     }
                 }
                 Ok(())
@@ -479,10 +485,10 @@ where
             }
             FiberChannelMessage::RevokeAndAck(revoke_and_ack) => {
                 let need_commitment_signed =
-                    state.handle_revoke_and_ack_peer_message(revoke_and_ack)?;
+                    state.handle_revoke_and_ack_peer_message(myself, revoke_and_ack)?;
                 self.update_tlc_status_on_ack(myself, state).await;
                 if need_commitment_signed {
-                    self.handle_commitment_signed_command(state)?;
+                    self.handle_commitment_signed_command(myself, state)?;
                 }
                 Ok(())
             }
@@ -522,66 +528,8 @@ where
                 self.handle_remove_tlc_peer_message(state, remove_tlc)
             }
             FiberChannelMessage::Shutdown(shutdown) => {
-                let flags = match state.state {
-                    ChannelState::ChannelReady() => ShuttingDownFlags::empty(),
-                    ChannelState::ShuttingDown(flags)
-                        if flags.contains(ShuttingDownFlags::THEIR_SHUTDOWN_SENT) =>
-                    {
-                        return Err(ProcessingChannelError::InvalidParameter(
-                            "Received Shutdown message, but we're already in ShuttingDown state"
-                                .to_string(),
-                        ));
-                    }
-                    ChannelState::ShuttingDown(flags) => flags,
-                    _ => {
-                        return Err(ProcessingChannelError::InvalidState(format!(
-                            "received Shutdown message, but we're not ready for Shutdown, state is currently {:?}",
-                            state.state
-                        )));
-                    }
-                };
-                let shutdown_info = ShutdownInfo {
-                    close_script: shutdown.close_script,
-                    fee_rate: shutdown.fee_rate.as_u64(),
-                    signature: None,
-                };
-                state.remote_shutdown_info = Some(shutdown_info);
-
-                let mut flags = flags | ShuttingDownFlags::THEIR_SHUTDOWN_SENT;
-
-                // Only automatically reply shutdown if only their shutdown message is sent.
-                // If we are in a state other than only their shutdown is sent,
-                // e.g. our shutdown message is also sent, or we are trying to force shutdown,
-                // we should not reply.
-                let should_we_reply_shutdown =
-                    matches!(flags, ShuttingDownFlags::THEIR_SHUTDOWN_SENT);
-
-                if state.check_valid_to_auto_accept_shutdown() && should_we_reply_shutdown {
-                    let close_script = state.get_local_shutdown_script();
-                    self.network
-                        .send_message(NetworkActorMessage::new_command(
-                            NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
-                                state.get_remote_peer_id(),
-                                FiberMessage::shutdown(Shutdown {
-                                    channel_id: state.get_id(),
-                                    close_script: close_script.clone(),
-                                    fee_rate: FeeRate::from_u64(0),
-                                }),
-                            )),
-                        ))
-                        .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-                    let shutdown_info = ShutdownInfo {
-                        close_script,
-                        fee_rate: 0,
-                        signature: None,
-                    };
-                    state.local_shutdown_info = Some(shutdown_info);
-                    flags |= ShuttingDownFlags::OUR_SHUTDOWN_SENT;
-                    debug!("Auto accept shutdown ...");
-                }
-                state.update_state(ChannelState::ShuttingDown(flags));
-                state.maybe_transition_to_shutdown()?;
-                Ok(())
+                self.handle_shutdown_peer_message(myself, state, shutdown)
+                    .await
             }
             FiberChannelMessage::ClosingSigned(closing) => {
                 let ClosingSigned {
@@ -662,7 +610,7 @@ where
                 ChannelState::Closed(_) | ChannelState::ShuttingDown(_) => {
                     TlcErrorCode::PermanentChannelFailure
                 }
-                ChannelState::ChannelReady() => {
+                ChannelState::ChannelReady => {
                     if !state.local_tlc_info.enabled {
                         // channel is disabled
                         TlcErrorCode::TemporaryChannelFailure
@@ -718,7 +666,7 @@ where
         self.apply_settled_remove_tlcs(myself, state, true).await;
 
         if need_commitment_signed && !state.tlc_state.waiting_ack {
-            self.handle_commitment_signed_command(state)?;
+            self.handle_commitment_signed_command(myself, state)?;
         }
 
         Ok(())
@@ -765,7 +713,7 @@ where
         &self,
         myself: &ActorRef<ChannelActorMessage>,
         state: &mut ChannelActorState,
-        payment_hash: Hash256,
+        #[allow(unused_variables)] payment_hash: Hash256,
         tlc_id: TLCId,
         error: ProcessingChannelErrorWithSharedSecret,
     ) {
@@ -1111,7 +1059,93 @@ where
                 .map_err(|_| {
                     ProcessingChannelError::InternalError("insert preimage failed".to_string())
                 })?;
+            debug_event!(
+                self.network,
+                &format!("store payment_preimage for: {:?}", payment_hash)
+            );
         }
+        Ok(())
+    }
+
+    async fn handle_shutdown_peer_message(
+        &self,
+        myself: &ActorRef<ChannelActorMessage>,
+        state: &mut ChannelActorState,
+        shutdown: Shutdown,
+    ) -> Result<(), ProcessingChannelError> {
+        let flags = match state.state {
+            ChannelState::ChannelReady => ShuttingDownFlags::empty(),
+            ChannelState::ShuttingDown(flags)
+                if flags.contains(ShuttingDownFlags::THEIR_SHUTDOWN_SENT) =>
+            {
+                return Err(ProcessingChannelError::InvalidParameter(
+                    "Received Shutdown message, but we're already in ShuttingDown state"
+                        .to_string(),
+                ));
+            }
+            ChannelState::ShuttingDown(flags) => flags,
+            _ => {
+                return Err(ProcessingChannelError::InvalidState(format!(
+                    "received Shutdown message, but we're not ready for Shutdown, state is currently {:?}",
+                    state.state
+                )));
+            }
+        };
+        state.remote_shutdown_info = Some(ShutdownInfo {
+            close_script: shutdown.close_script,
+            fee_rate: shutdown.fee_rate.as_u64(),
+            signature: None,
+        });
+
+        let mut flags = flags | ShuttingDownFlags::THEIR_SHUTDOWN_SENT;
+
+        // Only automatically reply shutdown if only their shutdown message is sent.
+        // If we are in a state other than only their shutdown is sent,
+        // e.g. our shutdown message is also sent, or we are trying to force shutdown,
+        // we should not reply.
+        let should_we_reply_shutdown = matches!(flags, ShuttingDownFlags::THEIR_SHUTDOWN_SENT);
+
+        if state.check_valid_to_auto_accept_shutdown() && should_we_reply_shutdown {
+            let close_script = state.get_local_shutdown_script();
+            self.network
+                .send_message(NetworkActorMessage::new_command(
+                    NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
+                        state.get_remote_peer_id(),
+                        FiberMessage::shutdown(Shutdown {
+                            channel_id: state.get_id(),
+                            close_script: close_script.clone(),
+                            fee_rate: FeeRate::from_u64(0),
+                        }),
+                    )),
+                ))
+                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+            state.local_shutdown_info = Some(ShutdownInfo {
+                close_script,
+                fee_rate: 0,
+                signature: None,
+            });
+            flags |= ShuttingDownFlags::OUR_SHUTDOWN_SENT;
+            debug!("Auto accept shutdown ...");
+        }
+
+        state.update_state(ChannelState::ShuttingDown(flags));
+
+        let pending_ack_tlcs = state.get_ack_pending_tlcs();
+        // if there are still some TLCs are waiting for ACK, they will never be acked
+        // so we need to remove them from the channel and setting WaitingTlcAck to false
+        if !pending_ack_tlcs.is_empty() {
+            state.set_waiting_ack(myself, false);
+            for tlc in pending_ack_tlcs.iter() {
+                let reason = RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
+                    TlcErr::new(TlcErrorCode::TemporaryChannelFailure),
+                    &tlc.shared_secret,
+                ));
+                self.register_retryable_tlc_remove(myself, state, tlc.tlc_id, reason)
+                    .await;
+            }
+        }
+        state.maybe_transition_to_shutdown()?;
+
         Ok(())
     }
 
@@ -1126,12 +1160,20 @@ where
         state.tlc_state.applied_remove_tlcs.insert(tlc_id);
 
         let (tlc_info, remove_reason) = state.remove_tlc_with_reason(tlc_id)?;
-        if matches!(remove_reason, RemoveTlcReason::RemoveTlcFulfill(_))
-            && self.store.get_invoice(&tlc_info.payment_hash).is_some()
-        {
-            self.store
-                .update_invoice_status(&tlc_info.payment_hash, CkbInvoiceStatus::Paid)
-                .expect("update invoice status failed");
+
+        if matches!(remove_reason, RemoveTlcReason::RemoveTlcFulfill(_)) {
+            if self.store.get_invoice(&tlc_info.payment_hash).is_some() {
+                self.store
+                    .update_invoice_status(&tlc_info.payment_hash, CkbInvoiceStatus::Paid)
+                    .expect("update invoice status failed");
+            }
+            // when a hop is a forwarding hop, we need to keep preimage after relay RemoveTlc finished
+            // incase watchtower may need preimage to settledown
+            if tlc_info.previous_tlc.is_none() {
+                self.store
+                    .remove_payment_preimage(&tlc_info.payment_hash)
+                    .expect("remove preimage failed");
+            }
         }
 
         if let (
@@ -1172,6 +1214,7 @@ where
 
     pub fn handle_commitment_signed_command(
         &self,
+        myself: &ActorRef<ChannelActorMessage>,
         state: &mut ChannelActorState,
     ) -> ProcessingChannelResult {
         let flags = match state.state {
@@ -1197,7 +1240,7 @@ where
             ChannelState::SigningCommitment(flags) => {
                 CommitmentSignedFlags::SigningCommitment(flags)
             }
-            ChannelState::ChannelReady() => CommitmentSignedFlags::ChannelReady(),
+            ChannelState::ChannelReady => CommitmentSignedFlags::ChannelReady(),
             ChannelState::ShuttingDown(flags) => {
                 if flags.contains(ShuttingDownFlags::AWAITING_PENDING_TLCS) {
                     CommitmentSignedFlags::PendingShutdown()
@@ -1241,10 +1284,10 @@ where
                 state.maybe_transition_to_tx_signatures(flags)?;
             }
             CommitmentSignedFlags::ChannelReady() => {
-                state.tlc_state.set_waiting_ack(true);
+                state.set_waiting_ack(myself, true);
             }
             CommitmentSignedFlags::PendingShutdown() => {
-                state.tlc_state.set_waiting_ack(true);
+                state.set_waiting_ack(myself, true);
                 state.maybe_transition_to_shutdown()?;
             }
         }
@@ -1254,16 +1297,10 @@ where
 
     pub fn handle_add_tlc_command(
         &self,
+        myself: &ActorRef<ChannelActorMessage>,
         state: &mut ChannelActorState,
         command: AddTlcCommand,
     ) -> Result<u64, ProcessingChannelError> {
-        if !state.local_tlc_info.enabled {
-            return Err(ProcessingChannelError::InvalidState(format!(
-                "TLC forwarding is not enabled for channel {}",
-                state.get_id()
-            )));
-        }
-
         state.check_for_tlc_update(Some(command.amount), true, true)?;
         state.check_tlc_expiry(command.expiry)?;
         state.check_tlc_forward_amount(
@@ -1297,12 +1334,13 @@ where
             ))
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
 
-        self.handle_commitment_signed_command(state)?;
+        self.handle_commitment_signed_command(myself, state)?;
         Ok(tlc.tlc_id.into())
     }
 
     pub fn handle_remove_tlc_command(
         &self,
+        myself: &ActorRef<ChannelActorMessage>,
         state: &mut ChannelActorState,
         command: RemoveTlcCommand,
     ) -> ProcessingChannelResult {
@@ -1335,7 +1373,7 @@ where
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
 
         state.maybe_transition_to_shutdown()?;
-        self.handle_commitment_signed_command(state)?;
+        self.handle_commitment_signed_command(myself, state)?;
         Ok(())
     }
 
@@ -1347,7 +1385,7 @@ where
         debug!("Handling shutdown command: {:?}", &command);
         if command.force {
             match state.state {
-                ChannelState::ChannelReady() => {
+                ChannelState::ChannelReady => {
                     debug!("Handling force shutdown command in ChannelReady state");
                 }
                 ChannelState::ShuttingDown(flags) => {
@@ -1364,13 +1402,16 @@ where
                 }
             };
 
-            let transaction = state
-                .latest_commitment_transaction
-                .clone()
-                .expect("latest_commitment_transaction should exist when channel is in ChannelReady of ShuttingDown state");
+            let transaction = state.get_latest_commitment_transaction()?;
+
             self.network
                 .send_message(NetworkActorMessage::new_event(
-                    NetworkActorEvent::CommitmentTransactionPending(transaction, state.get_id()),
+                    NetworkActorEvent::ClosingTransactionPending(
+                        state.get_id(),
+                        self.get_remote_peer_id(),
+                        transaction,
+                        true,
+                    ),
                 ))
                 .expect(ASSUME_NETWORK_ACTOR_ALIVE);
 
@@ -1378,51 +1419,50 @@ where
                 ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION,
             ));
             return Ok(());
+        } else {
+            let flags = match state.state {
+                ChannelState::ChannelReady => {
+                    debug!("Handling shutdown command in ChannelReady state");
+                    ShuttingDownFlags::empty()
+                }
+                _ => {
+                    debug!("Handling shutdown command in state {:?}", &state.state);
+                    return Err(ProcessingChannelError::InvalidState(format!(
+                        "Trying to send shutdown message while in invalid state {:?}",
+                        &state.state
+                    )));
+                }
+            };
+
+            state.check_shutdown_fee_rate(command.fee_rate, &command.close_script)?;
+            self.network
+                .send_message(NetworkActorMessage::new_command(
+                    NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
+                        self.get_remote_peer_id(),
+                        FiberMessage::shutdown(Shutdown {
+                            channel_id: state.get_id(),
+                            close_script: command.close_script.clone(),
+                            fee_rate: command.fee_rate,
+                        }),
+                    )),
+                ))
+                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+
+            state.local_shutdown_info = Some(ShutdownInfo {
+                close_script: command.close_script,
+                fee_rate: command.fee_rate.as_u64(),
+                signature: None,
+            });
+            state.update_state(ChannelState::ShuttingDown(
+                flags | ShuttingDownFlags::OUR_SHUTDOWN_SENT,
+            ));
+
+            debug!(
+                "Channel state updated to {:?} after processing shutdown command",
+                &state.state
+            );
+            state.maybe_transition_to_shutdown()
         }
-
-        let flags = match state.state {
-            ChannelState::ChannelReady() => {
-                debug!("Handling shutdown command in ChannelReady state");
-                ShuttingDownFlags::empty()
-            }
-            _ => {
-                debug!("Handling shutdown command in state {:?}", &state.state);
-                return Err(ProcessingChannelError::InvalidState(format!(
-                    "Trying to send shutdown message while in invalid state {:?}",
-                    &state.state
-                )));
-            }
-        };
-
-        state.check_shutdown_fee_rate(command.fee_rate, &command.close_script)?;
-        self.network
-            .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
-                    self.get_remote_peer_id(),
-                    FiberMessage::shutdown(Shutdown {
-                        channel_id: state.get_id(),
-                        close_script: command.close_script.clone(),
-                        fee_rate: command.fee_rate,
-                    }),
-                )),
-            ))
-            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-
-        let shutdown_info = ShutdownInfo {
-            close_script: command.close_script,
-            fee_rate: command.fee_rate.as_u64(),
-            signature: None,
-        };
-        state.local_shutdown_info = Some(shutdown_info);
-        state.update_state(ChannelState::ShuttingDown(
-            flags | ShuttingDownFlags::OUR_SHUTDOWN_SENT,
-        ));
-        debug!(
-            "Channel state updated to {:?} after processing shutdown command",
-            &state.state
-        );
-
-        state.maybe_transition_to_shutdown()
     }
 
     pub async fn handle_update_command(
@@ -1560,6 +1600,7 @@ where
             match retryable_operation {
                 RetryableTlcOperation::RemoveTlc(tlc_id, ref reason) => {
                     match self.handle_remove_tlc_command(
+                        myself,
                         state,
                         RemoveTlcCommand {
                             id: u64::from(*tlc_id),
@@ -1806,9 +1847,11 @@ where
             ChannelCommand::TxCollaborationCommand(tx_collaboration_command) => {
                 self.handle_tx_collaboration_command(state, tx_collaboration_command)
             }
-            ChannelCommand::CommitmentSigned() => self.handle_commitment_signed_command(state),
+            ChannelCommand::CommitmentSigned() => {
+                self.handle_commitment_signed_command(myself, state)
+            }
             ChannelCommand::AddTlc(command, reply) => {
-                let res = self.handle_add_tlc_command(state, command.clone());
+                let res = self.handle_add_tlc_command(myself, state, command.clone());
                 let error_info = if let Err(ref err) = res {
                     Some((err.clone(), self.get_tlc_error(state, err).await))
                 } else {
@@ -1838,7 +1881,7 @@ where
                 }
             }
             ChannelCommand::RemoveTlc(command, reply) => {
-                match self.handle_remove_tlc_command(state, command.clone()) {
+                match self.handle_remove_tlc_command(myself, state, command.clone()) {
                     Ok(_) => {
                         let _ = reply.send(Ok(()));
                         Ok(())
@@ -1947,7 +1990,17 @@ where
                 state.update_state(ChannelState::AwaitingChannelReady(flags));
                 state.maybe_channel_is_ready(myself).await;
             }
-            ChannelEvent::CommitmentTransactionConfirmed => {
+            ChannelEvent::CheckTlcRetryOperation => {
+                self.apply_retryable_tlc_operations(myself, state).await;
+            }
+            ChannelEvent::Stop(reason) => {
+                debug_event!(self.network, "ChannelActorStopped");
+                if reason == StopReason::Abandon {
+                    state.update_state(ChannelState::Closed(CloseFlags::ABANDONED));
+                }
+                myself.stop(None);
+            }
+            ChannelEvent::ClosingTransactionConfirmed(force) => {
                 match state.state {
                     ChannelState::ShuttingDown(flags)
                         if flags.contains(ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION) => {}
@@ -1957,16 +2010,15 @@ where
                         ));
                     }
                 };
-                state.update_state(ChannelState::Closed(CloseFlags::UNCOOPERATIVE));
-                debug!("Channel closed with uncooperative close");
-            }
-            ChannelEvent::CheckTlcRetryOperation => {
-                self.apply_retryable_tlc_operations(myself, state).await;
-            }
-            ChannelEvent::PeerDisconnected => {
-                myself.stop(Some("PeerDisconnected".to_string()));
-            }
-            ChannelEvent::ClosingTransactionConfirmed => {
+
+                let closed_state = if force {
+                    debug!("Channel closed with uncooperative close");
+                    ChannelState::Closed(CloseFlags::UNCOOPERATIVE)
+                } else {
+                    debug!("Channel closed with cooperative close");
+                    ChannelState::Closed(CloseFlags::COOPERATIVE)
+                };
+                state.update_state(closed_state);
                 // Broadcast the channel update message which disables the channel.
                 if state.is_public() {
                     let update = state.generate_disabled_channel_update().await;
@@ -1981,6 +2033,21 @@ where
                 }
                 debug_event!(self.network, "ChannelClosed");
                 myself.stop(Some("ChannelClosed".to_string()));
+            }
+            ChannelEvent::CheckActiveChannel => {
+                if state.should_disconnect_peer_awaiting_response() && !state.is_closed() {
+                    debug!(
+                        "Channel {} from peer {:?} is inactive for a time, closing it",
+                        state.get_id(),
+                        state.get_remote_peer_id()
+                    );
+                    state
+                        .network()
+                        .send_message(NetworkActorMessage::new_command(
+                            NetworkActorCommand::DisconnectPeer(state.get_remote_peer_id()),
+                        ))
+                        .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                }
             }
         }
         Ok(())
@@ -2300,7 +2367,7 @@ where
 
                 // If the channel is already ready, we should notify the network actor.
                 // so that we update the network.outpoint_channel_map
-                if matches!(channel.state, ChannelState::ChannelReady()) {
+                if matches!(channel.state, ChannelState::ChannelReady) {
                     self.network
                         .send_message(NetworkActorMessage::new_event(
                             NetworkActorEvent::ChannelReady(
@@ -2349,7 +2416,7 @@ where
                     error!(
                         "{:?} Error while processing channel command: {:?}",
                         state.get_local_peer_id(),
-                        err
+                        err,
                     );
                 }
             }
@@ -2394,6 +2461,21 @@ where
                 ))
                 .expect(ASSUME_NETWORK_ACTOR_ALIVE);
         }
+        let stop_reason = match state.state {
+            ChannelState::Closed(flags) => {
+                if flags == CloseFlags::ABANDONED {
+                    StopReason::Abandon
+                } else {
+                    StopReason::Closed
+                }
+            }
+            _ => StopReason::PeerDisConnected,
+        };
+        self.network
+            .send_message(NetworkActorMessage::new_event(
+                NetworkActorEvent::ChannelActorStopped(state.get_id(), stop_reason),
+            ))
+            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
         Ok(())
     }
 }
@@ -2606,6 +2688,10 @@ impl TlcInfo {
             "id: {:?} status: {:?} amount: {:?}",
             &self.tlc_id, self.status, self.amount
         )
+    }
+
+    pub fn id(&self) -> u64 {
+        self.tlc_id.into()
     }
 
     pub fn is_offered(&self) -> bool {
@@ -2974,7 +3060,6 @@ impl TlcState {
     }
 
     pub fn update_for_revoke_and_ack(&mut self, commitment_number: CommitmentNumbers) -> bool {
-        self.set_waiting_ack(false);
         for tlc in self.offered_tlcs.tlcs.iter_mut() {
             match tlc.outbound_status() {
                 OutboundTlcStatus::LocalAnnounced => {
@@ -3249,6 +3334,12 @@ pub struct ChannelActorState {
 
     pub created_at: SystemTime,
 
+    // the time stamp we last sent an message to the peer, used to check if the peer is still alive
+    // we will disconnect the peer if we haven't sent any message to the peer for a long time
+    // currently we only have set commitment_signed as the heartbeat message,
+    #[serde(skip)]
+    pub waiting_peer_response: Option<u64>,
+
     #[serde(skip)]
     pub network: Option<ActorRef<NetworkActorMessage>>,
 
@@ -3343,13 +3434,20 @@ impl PublicChannelInfo {
 #[derive(PartialEq, Eq, Clone, Debug)]
 pub struct ClosedChannel {}
 
+#[derive(PartialEq, Eq, Clone, Debug)]
+pub enum StopReason {
+    Abandon,
+    Closed,
+    PeerDisConnected,
+}
+
 #[derive(Debug)]
 pub enum ChannelEvent {
-    PeerDisconnected,
+    Stop(StopReason),
     FundingTransactionConfirmed(H256, u32, u64),
-    CommitmentTransactionConfirmed,
-    ClosingTransactionConfirmed,
+    ClosingTransactionConfirmed(bool),
     CheckTlcRetryOperation,
+    CheckActiveChannel,
 }
 
 pub type ProcessingChannelResult = Result<(), ProcessingChannelError>;
@@ -3508,6 +3606,8 @@ bitflags! {
         const COOPERATIVE = 1;
         /// Indicates that channel is closed uncooperatively, initiated by one party forcibly.
         const UNCOOPERATIVE = 1 << 1;
+        /// Indicates that channel is abandoned.
+        const ABANDONED = 1 << 2;
     }
 }
 
@@ -3537,9 +3637,8 @@ pub enum ChannelState {
     AwaitingChannelReady(AwaitingChannelReadyFlags),
     /// Both we and our counterparty consider the funding transaction confirmed and the channel is
     /// now operational.
-    ChannelReady(),
-    /// We've successfully negotiated a `closing_signed` dance. At this point, the `ChannelManager`
-    /// is about to drop us, but we store this anyway.
+    ChannelReady,
+    /// We've successfully negotiated a `closing_signed` dance, the channel is now in the process of being shutdown.
     ShuttingDown(ShuttingDownFlags),
     /// This channel is closed.
     Closed(CloseFlags),
@@ -3547,7 +3646,11 @@ pub enum ChannelState {
 
 impl ChannelState {
     fn is_closed(&self) -> bool {
-        matches!(self, ChannelState::Closed(_))
+        matches!(
+            self,
+            ChannelState::Closed(_)
+                | ChannelState::ShuttingDown(ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION)
+        )
     }
 }
 
@@ -3650,11 +3753,45 @@ impl ChannelActorState {
     }
 
     pub fn is_ready(&self) -> bool {
-        matches!(self.state, ChannelState::ChannelReady())
+        matches!(self.state, ChannelState::ChannelReady)
     }
 
     pub fn is_tlc_forwarding_enabled(&self) -> bool {
         self.local_tlc_info.enabled
+    }
+
+    pub fn set_waiting_peer_response(&mut self) {
+        self.waiting_peer_response = Some(now_timestamp_as_millis_u64());
+    }
+
+    pub fn clear_waiting_peer_response(&mut self) {
+        self.waiting_peer_response = None;
+    }
+
+    pub fn should_disconnect_peer_awaiting_response(&self) -> bool {
+        // this check only needed when other peer already shutdown force and we don't know it
+        // if we are already got in ShuttingDown, means we already in normal shutdown process
+        if matches!(self.state, ChannelState::ShuttingDown(_)) {
+            return false;
+        }
+        if let Some(timestamp) = self.waiting_peer_response {
+            let elapsed = now_timestamp_as_millis_u64() - timestamp;
+            elapsed > PEER_CHANNEL_RESPONSE_TIMEOUT
+        } else {
+            false
+        }
+    }
+
+    pub fn set_waiting_ack(&mut self, myself: &ActorRef<ChannelActorMessage>, waiting_ack: bool) {
+        self.tlc_state.set_waiting_ack(waiting_ack);
+        if waiting_ack {
+            self.set_waiting_peer_response();
+            myself.send_after(Duration::from_millis(PEER_CHANNEL_RESPONSE_TIMEOUT), || {
+                ChannelActorMessage::Event(ChannelEvent::CheckActiveChannel)
+            });
+        } else {
+            self.clear_waiting_peer_response();
+        }
     }
 
     pub async fn try_create_channel_messages(
@@ -4032,6 +4169,7 @@ impl ChannelActorState {
             latest_commitment_transaction: None,
             reestablishing: false,
             created_at: SystemTime::now(),
+            waiting_peer_response: None,
             network: Some(network),
             scheduled_channel_update_handle: None,
         };
@@ -4103,6 +4241,7 @@ impl ChannelActorState {
             latest_commitment_transaction: None,
             reestablishing: false,
             created_at: SystemTime::now(),
+            waiting_peer_response: None,
             network: Some(network),
             scheduled_channel_update_handle: None,
         }
@@ -5067,10 +5206,26 @@ impl ChannelActorState {
             .collect()
     }
 
-    fn any_tlc_pending(&self) -> bool {
+    pub fn any_tlc_pending(&self) -> bool {
         self.tlc_state
             .all_tlcs()
             .any(|tlc| tlc.removed_reason.is_none())
+    }
+
+    pub fn get_ack_pending_tlcs(&self) -> Vec<TlcInfo> {
+        self.tlc_state
+            .all_tlcs()
+            .filter(|tlc| {
+                tlc.is_received()
+                    && matches!(
+                        tlc.status.as_inbound_status(),
+                        InboundTlcStatus::RemoteAnnounced
+                            | InboundTlcStatus::AnnounceWaitPrevAck
+                            | InboundTlcStatus::AnnounceWaitAck
+                    )
+            })
+            .cloned()
+            .collect()
     }
 
     pub fn get_local_funding_pubkey(&self) -> &Pubkey {
@@ -5216,11 +5371,8 @@ impl ChannelActorState {
         is_tlc_command_message: bool,
         is_sent: bool,
     ) -> ProcessingChannelResult {
-        if is_tlc_command_message && self.tlc_state.waiting_ack {
-            return Err(ProcessingChannelError::WaitingTlcAck);
-        }
         match self.state {
-            ChannelState::ChannelReady() => {}
+            ChannelState::ChannelReady => {}
             ChannelState::ShuttingDown(_) if add_tlc_amount.is_none() => {}
             _ => {
                 return Err(ProcessingChannelError::InvalidState(format!(
@@ -5236,8 +5388,19 @@ impl ChannelActorState {
         }
 
         if let Some(add_amount) = add_tlc_amount {
+            if is_tlc_command_message && !self.local_tlc_info.enabled {
+                return Err(ProcessingChannelError::InvalidState(format!(
+                    "TLC forwarding is not enabled for channel {}",
+                    self.get_id()
+                )));
+            }
             self.check_tlc_limits(add_amount, is_sent)?;
         }
+
+        if is_tlc_command_message && self.tlc_state.waiting_ack {
+            return Err(ProcessingChannelError::WaitingTlcAck);
+        }
+
         Ok(())
     }
 
@@ -5340,7 +5503,7 @@ impl ChannelActorState {
         let signature = common_ctx.aggregate_partial_signatures_for_msg(
             our_partial_signature,
             their_partial_signature,
-            tx.hash().as_slice(),
+            &compute_tx_message(tx),
         )?;
 
         let witness =
@@ -5359,7 +5522,7 @@ impl ChannelActorState {
             let deterministic_sign_ctx = self.get_deterministic_sign_context();
 
             let our_funding_tx_partial_signature =
-                deterministic_sign_ctx.sign(psct.commitment_tx.hash().as_slice())?;
+                deterministic_sign_ctx.sign(&compute_tx_message(&psct.commitment_tx))?;
 
             self.aggregate_partial_signatures_to_consume_funding_cell(
                 &deterministic_sign_ctx.common_ctx,
@@ -5468,7 +5631,8 @@ impl ChannelActorState {
             let local_shutdown_signature = match local_shutdown_info.signature {
                 Some(signature) => signature,
                 None => {
-                    let signature = deterministic_sign_ctx.sign(shutdown_tx.hash().as_slice())?;
+                    let signature =
+                        deterministic_sign_ctx.sign(&compute_tx_message(&shutdown_tx))?;
                     local_shutdown_info.signature = Some(signature);
 
                     self.network()
@@ -5499,7 +5663,9 @@ impl ChannelActorState {
                     shutdown_tx_size(&self.funding_udt_type_script, shutdown_scripts)
                 );
 
-                self.update_state(ChannelState::Closed(CloseFlags::COOPERATIVE));
+                self.update_state(ChannelState::ShuttingDown(
+                    ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION,
+                ));
 
                 self.network()
                     .send_message(NetworkActorMessage::new_event(
@@ -5507,6 +5673,7 @@ impl ChannelActorState {
                             self.get_id(),
                             self.get_remote_peer_id(),
                             tx,
+                            false,
                         ),
                     ))
                     .expect(ASSUME_NETWORK_ACTOR_ALIVE);
@@ -5700,7 +5867,7 @@ impl ChannelActorState {
             ChannelState::SigningCommitment(flags) => {
                 CommitmentSignedFlags::SigningCommitment(flags)
             }
-            ChannelState::ChannelReady() => CommitmentSignedFlags::ChannelReady(),
+            ChannelState::ChannelReady => CommitmentSignedFlags::ChannelReady(),
             ChannelState::ShuttingDown(flags) => {
                 if flags.contains(ShuttingDownFlags::AWAITING_PENDING_TLCS) {
                     debug!(
@@ -5846,7 +6013,7 @@ impl ChannelActorState {
 
         self.network()
             .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::SignTx(
+                NetworkActorCommand::SignFundingTx(
                     self.get_remote_peer_id(),
                     self.get_id(),
                     funding_tx,
@@ -5910,7 +6077,7 @@ impl ChannelActorState {
     }
 
     async fn on_new_channel_ready(&mut self, myself: &ActorRef<ChannelActorMessage>) {
-        self.update_state(ChannelState::ChannelReady());
+        self.update_state(ChannelState::ChannelReady);
         self.increment_local_commitment_number();
         self.increment_remote_commitment_number();
         let peer_id = self.get_remote_peer_id();
@@ -5951,6 +6118,7 @@ impl ChannelActorState {
 
     fn handle_revoke_and_ack_peer_message(
         &mut self,
+        myself: &ActorRef<ChannelActorMessage>,
         revoke_and_ack: RevokeAndAck,
     ) -> Result<bool, ProcessingChannelError> {
         if !self.tlc_state.waiting_ack {
@@ -6065,6 +6233,8 @@ impl ChannelActorState {
         let need_commitment_signed = self
             .tlc_state
             .update_for_revoke_and_ack(self.commitment_numbers);
+        self.set_waiting_ack(myself, false);
+
         self.network()
             .send_message(NetworkActorMessage::new_notification(
                 NetworkServiceEvent::RevokeAndAckReceived(
@@ -6089,12 +6259,42 @@ impl ChannelActorState {
         );
         self.reestablishing = false;
         let network = self.network();
+        self.notify_funding_tx(&network).await;
         match self.state {
             ChannelState::NegotiatingFunding(_flags) => {
                 // TODO: in current implementation, we don't store the channel when we are in NegotiatingFunding state.
                 // This is an unreachable state for reestablish channel message. we may need to handle this case in the future.
             }
-            ChannelState::ChannelReady() => {
+            ChannelState::AwaitingChannelReady(flags) => {
+                // It's turn to send the funding tx to chain and waiting for confirmations
+                if flags.contains(AwaitingChannelReadyFlags::CHANNEL_READY) {
+                    self.maybe_channel_is_ready(myself).await;
+                } else if flags.contains(AwaitingChannelReadyFlags::OUR_CHANNEL_READY) {
+                    // If we are ready, just resend the ChannelReady message
+                    network
+                        .send_message(NetworkActorMessage::new_command(
+                            NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
+                                self.get_remote_peer_id(),
+                                FiberMessage::channel_ready(ChannelReady {
+                                    channel_id: self.get_id(),
+                                }),
+                            )),
+                        ))
+                        .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                } else {
+                    // Otherwise, trace the funding tx again
+                    network
+                        .send_message(NetworkActorMessage::new_event(
+                            NetworkActorEvent::FundingTransactionPending(
+                                self.must_get_funding_transaction().clone(),
+                                self.must_get_funding_transaction_outpoint(),
+                                self.get_id(),
+                            ),
+                        ))
+                        .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                }
+            }
+            ChannelState::ChannelReady => {
                 let expected_local_commitment_number = self.get_local_commitment_number();
                 let actual_local_commitment_number = reestablish_channel.remote_commitment_number;
                 if actual_local_commitment_number == expected_local_commitment_number {
@@ -6152,7 +6352,7 @@ impl ChannelActorState {
                     }
                     // previous waiting_ack maybe true, reset it after reestablish the channel
                     // if we need to resend CommitmentSigned message, it will be set to proper status again
-                    self.tlc_state.set_waiting_ack(false);
+                    self.set_waiting_ack(myself, false);
                     debug!(
                         "Resend AddTlc and RemoveTlc messages if needed: {}",
                         need_resend_commitment_signed
@@ -6601,7 +6801,8 @@ impl ChannelActorState {
             local_shutdown_fee, remote_shutdown_fee
         );
 
-        let cell_deps = get_cell_deps(vec![Contract::FundingLock], &self.funding_udt_type_script);
+        let cell_deps = get_cell_deps(vec![Contract::FundingLock], &self.funding_udt_type_script)
+            .map_err(|e| ProcessingChannelError::InternalError(e.to_string()))?;
         let tx_builder = TransactionBuilder::default().cell_deps(cell_deps).input(
             CellInput::new_builder()
                 .previous_output(self.must_get_funding_transaction_outpoint())
@@ -6688,11 +6889,12 @@ impl ChannelActorState {
     fn build_commitment_and_settlement_tx(
         &self,
         for_remote: bool,
-    ) -> (TransactionView, TransactionView) {
+    ) -> Result<(TransactionView, TransactionView), ProcessingChannelError> {
         let commitment_tx = {
             let funding_out_point = self.must_get_funding_transaction_outpoint();
             let cell_deps =
-                get_cell_deps(vec![Contract::FundingLock], &self.funding_udt_type_script);
+                get_cell_deps(vec![Contract::FundingLock], &self.funding_udt_type_script)
+                    .map_err(|e| ProcessingChannelError::InternalError(e.to_string()))?;
             let (output, output_data) = self.build_commitment_transaction_output(for_remote);
 
             TransactionBuilder::default()
@@ -6712,7 +6914,8 @@ impl ChannelActorState {
             let cell_deps = get_cell_deps(
                 vec![Contract::CommitmentLock],
                 &self.funding_udt_type_script,
-            );
+            )
+            .map_err(|e| ProcessingChannelError::InternalError(e.to_string()))?;
             let (outputs, outputs_data) = self.build_settlement_transaction_outputs(for_remote);
 
             TransactionBuilder::default()
@@ -6727,7 +6930,7 @@ impl ChannelActorState {
                 .build()
         };
 
-        (commitment_tx, settlement_tx)
+        Ok((commitment_tx, settlement_tx))
     }
 
     fn build_commitment_transaction_output(&self, for_remote: bool) -> (CellOutput, Bytes) {
@@ -6955,12 +7158,12 @@ impl ChannelActorState {
         funding_tx_partial_signature: PartialSignature,
         commitment_tx_partial_signature: PartialSignature,
     ) -> Result<PartiallySignedCommitmentTransaction, ProcessingChannelError> {
-        let (commitment_tx, settlement_tx) = self.build_commitment_and_settlement_tx(false);
+        let (commitment_tx, settlement_tx) = self.build_commitment_and_settlement_tx(false)?;
 
         let deterministic_verify_ctx = self.get_deterministic_verify_context();
         deterministic_verify_ctx.verify(
             funding_tx_partial_signature,
-            commitment_tx.hash().as_slice(),
+            &compute_tx_message(&commitment_tx),
         )?;
 
         let to_local_output = settlement_tx
@@ -7011,11 +7214,11 @@ impl ChannelActorState {
     fn build_and_sign_commitment_tx(
         &self,
     ) -> Result<(PartialSignature, PartialSignature), ProcessingChannelError> {
-        let (commitment_tx, settlement_tx) = self.build_commitment_and_settlement_tx(true);
+        let (commitment_tx, settlement_tx) = self.build_commitment_and_settlement_tx(true)?;
 
         let deterministic_sign_ctx = self.get_deterministic_sign_context();
         let funding_tx_partial_signature =
-            deterministic_sign_ctx.sign(commitment_tx.hash().as_slice())?;
+            deterministic_sign_ctx.sign(&compute_tx_message(&commitment_tx))?;
 
         let to_local_output = settlement_tx
             .outputs()
@@ -7060,6 +7263,21 @@ impl ChannelActorState {
         ))
     }
 
+    /// Get the latest commitment transaction with updated cell deps
+    pub fn get_latest_commitment_transaction(
+        &self,
+    ) -> Result<TransactionView, ProcessingChannelError> {
+        let tx = self
+            .latest_commitment_transaction
+            .clone()
+            .expect("latest_commitment_transaction should exist");
+        let cell_deps = get_cell_deps(vec![Contract::FundingLock], &self.funding_udt_type_script)
+            .map_err(|e| ProcessingChannelError::InternalError(e.to_string()))?;
+        let raw_tx = tx.raw().as_builder().cell_deps(cell_deps).build();
+        let tx = tx.as_builder().raw(raw_tx).build();
+        Ok(tx.into_view())
+    }
+
     /// Verify the partial signature from the peer and create a complete transaction
     /// with valid witnesses.
     fn verify_and_complete_tx(
@@ -7081,6 +7299,31 @@ impl ChannelActorState {
             true,
         );
         since.value().to_le_bytes()
+    }
+
+    async fn notify_funding_tx(&self, network: &ActorRef<NetworkActorMessage>) {
+        let tx = if let Some(ref tx) = self.funding_tx {
+            tx
+        } else {
+            return;
+        };
+
+        let should_notify = match self.state {
+            ChannelState::CollaboratingFundingTx(_)
+            | ChannelState::SigningCommitment(_)
+            | ChannelState::AwaitingTxSignatures(_) => true,
+            ChannelState::AwaitingChannelReady(flags)
+                if !flags.contains(AwaitingChannelReadyFlags::OUR_CHANNEL_READY) =>
+            {
+                true
+            }
+            _ => false,
+        };
+        if should_notify {
+            let _ = network.send_message(NetworkActorMessage::new_command(
+                NetworkActorCommand::NotifyFundingTx(tx.clone()),
+            ));
+        }
     }
 }
 

@@ -1,0 +1,38 @@
+meta {
+  name: get channels of node1 <=> node2
+  type: http
+  seq: 12
+}
+
+post {
+  url: {{NODE1_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": 42,
+    "jsonrpc": "2.0",
+    "method": "list_channels",
+    "params": [
+      {
+        "peer_id": "{{NODE2_PEERID}}"
+      }
+    ]
+  }
+}
+
+script:pre-request {
+  // Wait for 20 seconds to make sure the periodic checkin is done.
+  await new Promise(r => setTimeout(r, 20000));
+}
+
+assert {
+  res.body.result.channels.length: eq 0
+}
