@@ -133,8 +133,6 @@ fn main() {
             get_commit_date().unwrap_or_default()
         );
 
-        println!("cargo:rerun-if-changed=build.rs");
-
         let git_head = std::process::Command::new("git")
             .args(["rev-parse", "--git-dir"])
             .output()
