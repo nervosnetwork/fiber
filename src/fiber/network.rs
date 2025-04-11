@@ -1146,7 +1146,7 @@ where
                                     );
                                     let (send, _recv) = oneshot::channel();
                                     let rpc_reply = RpcReplyPort::from(send);
-                                    state
+                                    if let Err(err) = state
                                         .send_command_to_channel(
                                             channel_id,
                                             ChannelCommand::RemoveTlc(
@@ -1159,7 +1159,15 @@ where
                                                 rpc_reply,
                                             ),
                                         )
-                                        .await?;
+                                        .await
+                                    {
+                                        error!(
+                                            "Failed to remove tlc {:?} for channel {:?}: {}",
+                                            tlc.id(),
+                                            channel_id,
+                                            err
+                                        );
+                                    }
                                 }
                             }
 
@@ -1176,7 +1184,7 @@ where
                                 );
                                 let (send, _recv) = oneshot::channel();
                                 let rpc_reply = RpcReplyPort::from(send);
-                                state
+                                if let Err(err) = state
                                     .send_command_to_channel(
                                         channel_id,
                                         ChannelCommand::Shutdown(
@@ -1188,7 +1196,13 @@ where
                                             rpc_reply,
                                         ),
                                     )
-                                    .await?;
+                                    .await
+                                {
+                                    error!(
+                                        "Failed to force close channel {:?}: {}",
+                                        channel_id, err
+                                    );
+                                }
                             }
                         }
                     }
