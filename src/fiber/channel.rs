@@ -1167,6 +1167,8 @@ where
                     .update_invoice_status(&tlc_info.payment_hash, CkbInvoiceStatus::Paid)
                     .expect("update invoice status failed");
             }
+            // when a hop is a forwarding hop, we need to keep preimage after relay RemoveTlc finished
+            // incase watchtower may need preimage to settledown
             if tlc_info.previous_tlc.is_none() {
                 self.store
                     .remove_payment_preimage(&tlc_info.payment_hash)
