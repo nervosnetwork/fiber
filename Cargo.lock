@@ -1704,7 +1704,7 @@ dependencies = [
  "num_enum",
  "once_cell",
  "ractor",
- "rand 0.9.0",
+ "rand 0.8.5",
  "regex",
  "secp256k1 0.28.2",
  "serde",
