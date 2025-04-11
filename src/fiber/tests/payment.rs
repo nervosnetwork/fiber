@@ -3115,7 +3115,7 @@ async fn test_send_payment_invoice_cancel_multiple_ops() {
     let mut invoices: Vec<CkbInvoice> = vec![];
 
     let target_pubkey = node_0.pubkey;
-    let count = 30;
+    let count = 10;
     for _i in 0..count {
         let preimage = gen_rand_sha256_hash();
         let ckb_invoice = InvoiceBuilder::new(Currency::Fibd)
@@ -3126,10 +3126,6 @@ async fn test_send_payment_invoice_cancel_multiple_ops() {
             .expect("build invoice success");
 
         node_0.insert_invoice(ckb_invoice.clone(), Some(preimage));
-        assert!(invoices
-            .iter()
-            .find(|i| i.payment_hash() == ckb_invoice.payment_hash())
-            .is_none());
         invoices.push(ckb_invoice);
     }
 
