@@ -184,7 +184,6 @@ pub struct NodeInfoResponse {
     pub auto_accept_channel_ckb_funding_amount: u64,
     pub tlc_expiry_delta: u64,
     pub tlc_min_value: u128,
-    pub tlc_max_value: u128,
     pub tlc_fee_proportional_millionths: u128,
     pub channel_count: u32,
     pub pending_channel_count: u32,
@@ -1492,7 +1491,6 @@ where
                         .auto_accept_channel_ckb_funding_amount,
                     tlc_expiry_delta: state.tlc_expiry_delta,
                     tlc_min_value: state.tlc_min_value,
-                    tlc_max_value: state.tlc_max_value,
                     tlc_fee_proportional_millionths: state.tlc_fee_proportional_millionths,
                     channel_count: state.channels.len() as u32,
                     pending_channel_count: state.pending_channels.len() as u32,
@@ -2033,7 +2031,6 @@ pub struct NetworkActorState<S> {
     tlc_expiry_delta: u64,
     // The default tlc min and max value of tlcs to be accepted.
     tlc_min_value: u128,
-    tlc_max_value: u128,
     // The default tlc fee proportional millionths to be used when auto accepting a channel.
     tlc_fee_proportional_millionths: u128,
     // The gossip messages actor to process and send gossip messages.
@@ -3310,7 +3307,6 @@ where
             auto_accept_channel_ckb_funding_amount: config.auto_accept_channel_ckb_funding_amount(),
             tlc_expiry_delta: config.tlc_expiry_delta(),
             tlc_min_value: config.tlc_min_value(),
-            tlc_max_value: config.tlc_max_value(),
             tlc_fee_proportional_millionths: config.tlc_fee_proportional_millionths(),
             gossip_actor,
             channel_subscribers,
