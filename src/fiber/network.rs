@@ -82,7 +82,7 @@ use crate::fiber::types::{
     FiberChannelMessage, PaymentOnionPacket, PeeledPaymentOnionPacket, TxSignatures,
 };
 use crate::fiber::KeyPair;
-use crate::invoice::{CkbInvoice, InvoiceStore};
+use crate::invoice::{CkbInvoice, CkbInvoiceStatus, InvoiceStore};
 use crate::{now_timestamp_as_millis_u64, unwrap_or_return, Error};
 
 pub const FIBER_PROTOCOL_ID: ProtocolId = ProtocolId::new(42);
@@ -1142,6 +1142,18 @@ where
                                         channel_id,
                                         tlc.id()
                                     );
+                                    if self
+                                        .store
+                                        .get_invoice_status(&tlc.payment_hash)
+                                        .is_some_and(|s| {
+                                            !matches!(
+                                                s,
+                                                CkbInvoiceStatus::Open | CkbInvoiceStatus::Received
+                                            )
+                                        })
+                                    {
+                                        continue;
+                                    }
                                     let (send, _recv) = oneshot::channel();
                                     let rpc_reply = RpcReplyPort::from(send);
                                     if let Err(err) = state

@@ -13,6 +13,10 @@ use crate::fiber::tests::test_utils::*;
 use crate::fiber::types::Hash256;
 use crate::fiber::NetworkActorCommand;
 use crate::fiber::NetworkActorMessage;
+use crate::gen_rand_sha256_hash;
+use crate::invoice::CkbInvoice;
+use crate::invoice::Currency;
+use crate::invoice::InvoiceBuilder;
 use crate::NetworkServiceEvent;
 use ckb_types::{core::tx_pool::TxStatus, packed::OutPoint};
 use ractor::call;
@@ -3084,6 +3088,85 @@ async fn test_send_payment_remove_tlc_with_preimage_will_retry() {
             if status == PaymentSessionStatus::Success {
                 payments.remove(payment_hash);
             }
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        }
+        if payments.is_empty() {
+            break;
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_send_payment_invoice_cancel_multiple_ops() {
+    init_tracing();
+    let _span = tracing::info_span!("node", node = "test").entered();
+    let (nodes, _channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((2, 0), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+        ],
+        3,
+    )
+    .await;
+    let [mut node_0, _node_1, _node_2] = nodes.try_into().expect("4 nodes");
+
+    let mut payments = HashSet::new();
+    let mut invoices: Vec<CkbInvoice> = vec![];
+
+    let target_pubkey = node_0.pubkey;
+    let count = 10;
+    for _i in 0..count {
+        let preimage = gen_rand_sha256_hash();
+        let ckb_invoice = InvoiceBuilder::new(Currency::Fibd)
+            .amount(Some(100))
+            .payment_preimage(preimage)
+            .payee_pub_key(target_pubkey.into())
+            .build()
+            .expect("build invoice success");
+
+        node_0.insert_invoice(ckb_invoice.clone(), Some(preimage));
+        invoices.push(ckb_invoice);
+    }
+
+    for i in 0..count {
+        let invoice = &invoices[i];
+
+        node_0.cancel_invoice(invoice.payment_hash());
+        let res = node_0
+            .send_payment(SendPaymentCommand {
+                invoice: Some(invoice.to_string()),
+                amount: invoice.amount,
+                target_pubkey: None,
+                allow_self_payment: true,
+                payment_hash: None,
+                final_tlc_expiry_delta: None,
+                tlc_expiry_limit: None,
+                timeout: None,
+                max_fee_amount: None,
+                max_parts: None,
+                keysend: None,
+                udt_type_script: None,
+                dry_run: false,
+                hop_hints: None,
+                custom_records: None,
+            })
+            .await
+            .unwrap();
+        payments.insert(res.payment_hash);
+        node_0.wait_until_created(res.payment_hash).await;
+    }
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+    loop {
+        for payment_hash in payments.clone().iter() {
+            let status = node_0.get_payment_status(*payment_hash).await;
+            eprintln!("payment_hash: {:?} got status : {:?}", payment_hash, status);
+            if status == PaymentSessionStatus::Failed {
+                payments.remove(payment_hash);
+            }
+            assert_ne!(status, PaymentSessionStatus::Success);
             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         }
         if payments.is_empty() {
