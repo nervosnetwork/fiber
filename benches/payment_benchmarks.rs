@@ -79,7 +79,8 @@ fn bench_payment_path_finding(c: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = Criterion::default()
-        .warm_up_time(std::time::Duration::from_millis(100))
+        .warm_up_time(std::time::Duration::from_millis(500))
+        .measurement_time(std::time::Duration::from_secs(25)) // Increased from default 5s to 25s
         .sample_size(10);
     targets = bench_payment_path_finding
 }
