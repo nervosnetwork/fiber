@@ -493,7 +493,6 @@ Get the node information.
 * `default_funding_lock_script` - <em>`Script`</em>, The default funding lock script for the node.
 * `tlc_expiry_delta` - <em>`u64`</em>, The locktime expiry delta for Time-Locked Contracts (TLC), serialized as a hexadecimal string.
 * `tlc_min_value` - <em>`u128`</em>, The minimum value for Time-Locked Contracts (TLC) we can send, serialized as a hexadecimal string.
-* `tlc_max_value` - <em>`u128`</em>, The maximum value for Time-Locked Contracts (TLC) we can send, serialized as a hexadecimal string, `0` means no maximum value limit.
 * `tlc_fee_proportional_millionths` - <em>`u128`</em>, The fee (to forward payments) proportional to the value of Time-Locked Contracts (TLC), expressed in millionths and serialized as a hexadecimal string.
 * `channel_count` - <em>`u32`</em>, The number of channels associated with the node, serialized as a hexadecimal string.
 * `pending_channel_count` - <em>`u32`</em>, The number of pending channels associated with the node, serialized as a hexadecimal string.

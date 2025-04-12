@@ -58,10 +58,6 @@ pub struct NodeInfoResult {
     #[serde_as(as = "U128Hex")]
     pub tlc_min_value: u128,
 
-    /// The maximum value for Time-Locked Contracts (TLC) we can send, serialized as a hexadecimal string, `0` means no maximum value limit.
-    #[serde_as(as = "U128Hex")]
-    pub tlc_max_value: u128,
-
     /// The fee (to forward payments) proportional to the value of Time-Locked Contracts (TLC), expressed in millionths and serialized as a hexadecimal string.
     #[serde_as(as = "U128Hex")]
     pub tlc_fee_proportional_millionths: u128,
@@ -130,7 +126,6 @@ impl InfoRpcServer for InfoRpcServerImpl {
             default_funding_lock_script: self.default_funding_lock_script.clone(),
             tlc_expiry_delta: response.tlc_expiry_delta,
             tlc_min_value: response.tlc_min_value,
-            tlc_max_value: response.tlc_max_value,
             tlc_fee_proportional_millionths: response.tlc_fee_proportional_millionths,
             channel_count: response.channel_count,
             pending_channel_count: response.pending_channel_count,

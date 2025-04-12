@@ -62,6 +62,7 @@ use tokio::{
     sync::{mpsc, OnceCell},
     time::sleep,
 };
+use tracing::error;
 use tracing::info;
 use tracing::warn;
 
@@ -401,10 +402,10 @@ pub(crate) async fn establish_channel_between_nodes(
     let funding_tx_outpoint = node_a
         .expect_to_process_event(|event| match event {
             NetworkServiceEvent::ChannelReady(peer_id, channel_id, funding_tx_outpoint) => {
-                // println!(
-                //     "A channel ({:?}) to {:?} is now ready",
-                //     &channel_id, &peer_id
-                // );
+                info!(
+                    "A channel ({:?}) to {:?} is now ready",
+                    &channel_id, &peer_id
+                );
                 assert_eq!(peer_id, &node_b.peer_id);
                 assert_eq!(channel_id, &new_channel_id);
                 Some(funding_tx_outpoint.clone())
@@ -416,10 +417,10 @@ pub(crate) async fn establish_channel_between_nodes(
     node_b
         .expect_event(|event| match event {
             NetworkServiceEvent::ChannelReady(peer_id, channel_id, _funding_tx_hash) => {
-                // println!(
-                //     "A channel ({:?}) to {:?} is now ready",
-                //     &channel_id, &peer_id
-                // );
+                info!(
+                    "A channel ({:?}) to {:?} is now ready",
+                    &channel_id, &peer_id
+                );
                 assert_eq!(peer_id, &node_a.peer_id);
                 assert_eq!(channel_id, &new_channel_id);
                 true
@@ -499,7 +500,6 @@ pub(crate) async fn create_n_nodes_with_established_channel(
 }
 
 #[allow(clippy::type_complexity)]
-
 pub(crate) async fn create_n_nodes_network_with_rpc_option(
     amounts: &[((usize, usize), (u128, u128))],
     n: usize,
@@ -660,8 +660,7 @@ impl NetworkNode {
             NetworkActorMessage::Command(NetworkActorCommand::SendPayment(command, rpc_reply))
         };
 
-        let res = call!(self.network_actor, message).expect("source_node alive");
-        res
+        call!(self.network_actor, message).expect("source_node alive")
     }
 
     pub async fn send_abandon_channel(&self, channel_id: Hash256) -> Result<(), String> {
@@ -879,10 +878,10 @@ impl NetworkNode {
             assert!(self.get_triggered_unexpected_events().await.is_empty());
             let status = self.get_payment_status(payment_hash).await;
             if status == PaymentSessionStatus::Success {
-                //eprintln!("Payment success: {:?}\n\n", payment_hash);
+                error!("Payment success: {:?}\n\n", payment_hash);
                 break;
             } else if status == PaymentSessionStatus::Failed {
-                //eprintln!("Payment failed: {:?}\n\n", payment_hash);
+                error!("Payment failed: {:?}\n\n", payment_hash);
                 // report error
                 assert_eq!(status, PaymentSessionStatus::Success);
             }
@@ -895,10 +894,10 @@ impl NetworkNode {
             assert!(self.get_triggered_unexpected_events().await.is_empty());
             let status = self.get_payment_status(payment_hash).await;
             if status == PaymentSessionStatus::Failed {
-                eprintln!("Payment failed: {:?}\n\n", payment_hash);
+                error!("Payment failed: {:?}\n\n", payment_hash);
                 break;
             } else if status == PaymentSessionStatus::Success {
-                eprintln!("Payment success: {:?}\n\n", payment_hash);
+                error!("Payment success: {:?}\n\n", payment_hash);
                 // report error
                 assert_eq!(status, PaymentSessionStatus::Failed);
             }
@@ -920,7 +919,6 @@ impl NetworkNode {
     pub async fn node_info(&self) -> NodeInfoResponse {
         let message =
             |rpc_reply| NetworkActorMessage::Command(NetworkActorCommand::NodeInfo((), rpc_reply));
-        eprintln!("query node_info ...");
 
         call!(self.network_actor, message)
             .expect("node_a alive")
@@ -1361,9 +1359,9 @@ impl NetworkNode {
                     match event {
                         None => panic!("Event emitter unexpectedly stopped"),
                         Some(event) => {
-                            //println!("Received event when waiting for specific event: {:?}", &event);
+                            info!("Received event when waiting for specific event: {:?}", &event);
                             if let Some(r) = event_processor(&event) {
-                                //println!("Event ({:?}) matching filter received, exiting waiting for event loop", &event);
+                                info!("Event ({:?}) matching filter received, exiting waiting for event loop", &event);
                                 return r;
                             }
                         }

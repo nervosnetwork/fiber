@@ -82,7 +82,7 @@ use crate::fiber::types::{
     FiberChannelMessage, PaymentOnionPacket, PeeledPaymentOnionPacket, TxSignatures,
 };
 use crate::fiber::KeyPair;
-use crate::invoice::{CkbInvoice, InvoiceStore};
+use crate::invoice::{CkbInvoice, CkbInvoiceStatus, InvoiceStore};
 use crate::{now_timestamp_as_millis_u64, unwrap_or_return, Error};
 
 pub const FIBER_PROTOCOL_ID: ProtocolId = ProtocolId::new(42);
@@ -184,7 +184,6 @@ pub struct NodeInfoResponse {
     pub auto_accept_channel_ckb_funding_amount: u64,
     pub tlc_expiry_delta: u64,
     pub tlc_min_value: u128,
-    pub tlc_max_value: u128,
     pub tlc_fee_proportional_millionths: u128,
     pub channel_count: u32,
     pub pending_channel_count: u32,
@@ -629,7 +628,6 @@ pub enum NetworkActorEvent {
     GossipMessageUpdates(GossipMessageUpdates),
 
     /// Channel related events.
-
     /// A channel has been accepted.
     /// The two Hash256 are respectively newly agreed channel id and temp channel id,
     /// The two u128 are respectively local and remote funding amount,
@@ -1149,6 +1147,18 @@ where
                                         channel_id,
                                         tlc.id()
                                     );
+                                    if self
+                                        .store
+                                        .get_invoice_status(&tlc.payment_hash)
+                                        .is_some_and(|s| {
+                                            !matches!(
+                                                s,
+                                                CkbInvoiceStatus::Open | CkbInvoiceStatus::Received
+                                            )
+                                        })
+                                    {
+                                        continue;
+                                    }
                                     let (send, _recv) = oneshot::channel();
                                     let rpc_reply = RpcReplyPort::from(send);
                                     if let Err(err) = state
@@ -1497,7 +1507,6 @@ where
                         .auto_accept_channel_ckb_funding_amount,
                     tlc_expiry_delta: state.tlc_expiry_delta,
                     tlc_min_value: state.tlc_min_value,
-                    tlc_max_value: state.tlc_max_value,
                     tlc_fee_proportional_millionths: state.tlc_fee_proportional_millionths,
                     channel_count: state.channels.len() as u32,
                     pending_channel_count: state.pending_channels.len() as u32,
@@ -2049,7 +2058,6 @@ pub struct NetworkActorState<S> {
     tlc_expiry_delta: u64,
     // The default tlc min and max value of tlcs to be accepted.
     tlc_min_value: u128,
-    tlc_max_value: u128,
     // The default tlc fee proportional millionths to be used when auto accepting a channel.
     tlc_fee_proportional_millionths: u128,
     // The gossip messages actor to process and send gossip messages.
@@ -3326,7 +3334,6 @@ where
             auto_accept_channel_ckb_funding_amount: config.auto_accept_channel_ckb_funding_amount(),
             tlc_expiry_delta: config.tlc_expiry_delta(),
             tlc_min_value: config.tlc_min_value(),
-            tlc_max_value: config.tlc_max_value(),
             tlc_fee_proportional_millionths: config.tlc_fee_proportional_millionths(),
             gossip_actor,
             channel_subscribers,
