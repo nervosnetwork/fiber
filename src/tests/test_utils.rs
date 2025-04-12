@@ -62,6 +62,8 @@ use tokio::{
     sync::{mpsc, OnceCell},
     time::sleep,
 };
+use tracing::info;
+use tracing::warn;
 
 use crate::fiber::graph::ChannelInfo;
 use crate::fiber::graph::NodeInfo;
@@ -110,12 +112,12 @@ impl Drop for TempDir {
     fn drop(&mut self) {
         let retain = env::var(RETAIN_VAR);
         if retain.is_ok() {
-            println!(
+            warn!(
                 "Keeping temp directory {:?}, as environment variable {RETAIN_VAR} set",
                 self.as_ref()
             );
         } else {
-            println!(
+            warn!(
                 "Deleting temp directory {:?}. To keep this directory, set environment variable {RETAIN_VAR} to anything",
                 self.as_ref()
             );
@@ -369,7 +371,7 @@ pub(crate) async fn establish_channel_between_nodes(
     node_b
         .expect_event(|event| match event {
             NetworkServiceEvent::ChannelPendingToBeAccepted(peer_id, channel_id) => {
-                println!("A channel ({:?}) to {:?} create", &channel_id, peer_id);
+                info!("A channel ({:?}) to {:?} create", &channel_id, peer_id);
                 assert_eq!(peer_id, &node_a.peer_id);
                 true
             }
@@ -414,10 +416,10 @@ pub(crate) async fn establish_channel_between_nodes(
     node_b
         .expect_event(|event| match event {
             NetworkServiceEvent::ChannelReady(peer_id, channel_id, _funding_tx_hash) => {
-                println!(
-                    "A channel ({:?}) to {:?} is now ready",
-                    &channel_id, &peer_id
-                );
+                // println!(
+                //     "A channel ({:?}) to {:?} is now ready",
+                //     &channel_id, &peer_id
+                // );
                 assert_eq!(peer_id, &node_a.peer_id);
                 assert_eq!(channel_id, &new_channel_id);
                 true
@@ -659,7 +661,6 @@ impl NetworkNode {
         };
 
         let res = call!(self.network_actor, message).expect("source_node alive");
-        eprintln!("result: {:?}", res);
         res
     }
 
@@ -878,10 +879,10 @@ impl NetworkNode {
             assert!(self.get_triggered_unexpected_events().await.is_empty());
             let status = self.get_payment_status(payment_hash).await;
             if status == PaymentSessionStatus::Success {
-                eprintln!("Payment success: {:?}\n\n", payment_hash);
+                //eprintln!("Payment success: {:?}\n\n", payment_hash);
                 break;
             } else if status == PaymentSessionStatus::Failed {
-                eprintln!("Payment failed: {:?}\n\n", payment_hash);
+                //eprintln!("Payment failed: {:?}\n\n", payment_hash);
                 // report error
                 assert_eq!(status, PaymentSessionStatus::Success);
             }
@@ -1123,7 +1124,7 @@ impl NetworkNode {
             }
         });
 
-        println!(
+        info!(
             "Network node started for peer_id {:?} in directory {:?}",
             &peer_id,
             base_dir.as_ref()
@@ -1329,7 +1330,7 @@ impl NetworkNode {
 
     pub async fn connect_to_nonblocking(&mut self, other: &Self) {
         let peer_addr = other.listening_addrs[0].clone();
-        println!(
+        info!(
             "Trying to connect to {:?} from {:?}",
             other.listening_addrs, &self.listening_addrs
         );
