@@ -1,4 +1,4 @@
-use super::test_utils::{init_tracing, NetworkNode};
+use crate::test_utils::*;
 use crate::{
     ckb::tests::test_utils::set_next_block_timestamp,
     fiber::{
@@ -7,7 +7,6 @@ use crate::{
         gossip::{GossipActorMessage, GossipMessageStore},
         graph::ChannelUpdateInfo,
         network::{NetworkActorStateStore, SendPaymentCommand, SendPaymentData},
-        tests::test_utils::NetworkNodeConfigBuilder,
         types::{
             BroadcastMessage, BroadcastMessageWithTimestamp, BroadcastMessagesFilterResult,
             ChannelAnnouncement, ChannelUpdateChannelFlags, Cursor, GossipMessage,

@@ -11,13 +11,11 @@ use tentacle::secio::PeerId;
 use tokio::sync::RwLock;
 
 use crate::fiber::gossip::{GossipActorMessage, GossipConfig, GossipService};
-use crate::fiber::tests::test_utils::{establish_channel_between_nodes, NetworkNode};
 use crate::fiber::types::{ChannelUpdateChannelFlags, NodeAnnouncement};
+use crate::tests::test_utils::create_mock_chain_actor;
+use crate::tests::test_utils::{establish_channel_between_nodes, NetworkNode};
 use crate::{
-    ckb::{
-        tests::{actor::create_mock_chain_actor, test_utils::submit_tx},
-        CkbChainMessage,
-    },
+    ckb::{tests::test_utils::submit_tx, CkbChainMessage},
     fiber::{
         gossip::{
             ExtendedGossipMessageStoreMessage, GossipMessageStore, GossipMessageUpdates,
@@ -30,7 +28,7 @@ use crate::{
 };
 use crate::{create_invalid_ecdsa_signature, now_timestamp_as_millis_u64, ChannelTestContext};
 
-use super::test_utils::{get_test_root_actor, TempDir};
+use crate::test_utils::{get_test_root_actor, TempDir};
 
 struct GossipTestingContext {
     chain_actor: ActorRef<CkbChainMessage>,
@@ -661,7 +659,7 @@ async fn test_gossip_store_updates_saving_invalid_message_3() {
 
 #[tokio::test]
 async fn test_our_own_channel_gossip_message_propagated() {
-    crate::fiber::tests::test_utils::init_tracing();
+    crate::tests::test_utils::init_tracing();
     let node_a_funding_amount = 100000000000;
     let node_b_funding_amount = 6200000000;
 

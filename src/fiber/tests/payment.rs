@@ -1,5 +1,4 @@
 #![allow(clippy::needless_range_loop)]
-use super::test_utils::init_tracing;
 use crate::fiber::channel::ChannelState;
 use crate::fiber::channel::CloseFlags;
 use crate::fiber::channel::UpdateCommand;
@@ -9,10 +8,10 @@ use crate::fiber::graph::PaymentSessionStatus;
 use crate::fiber::network::HopHint;
 use crate::fiber::network::PaymentCustomRecords;
 use crate::fiber::network::SendPaymentCommand;
-use crate::fiber::tests::test_utils::*;
 use crate::fiber::types::Hash256;
 use crate::fiber::NetworkActorCommand;
 use crate::fiber::NetworkActorMessage;
+use crate::tests::test_utils::*;
 use crate::NetworkServiceEvent;
 use ckb_types::{core::tx_pool::TxStatus, packed::OutPoint};
 use ractor::call;

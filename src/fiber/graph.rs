@@ -135,7 +135,7 @@ impl ChannelInfo {
             .max(self.update_of_node1.as_ref().map(|n| n.timestamp))
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "bench"))]
     pub fn get_channel_update_of(&self, node: Pubkey) -> Option<&ChannelUpdateInfo> {
         if self.node1() == node {
             self.update_of_node1.as_ref()
@@ -287,7 +287,7 @@ pub struct NetworkGraph<S> {
     // See comments in should_process_gossip_message_for_channel for why we need this.
     // TLDR: Most of the tests do not need this. Only tests in src/fiber/tests/graph.rs need this.
     // We will only set this to true for tests in src/fiber/tests/graph.rs.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "bench"))]
     pub always_process_gossip_message: bool,
     // The pubkey of the node that is running this instance of the network graph.
     source: Pubkey,
@@ -350,7 +350,7 @@ where
 {
     pub fn new(store: S, source: Pubkey, announce_private_addr: bool) -> Self {
         let mut network_graph = Self {
-            #[cfg(test)]
+            #[cfg(any(test, feature = "bench"))]
             always_process_gossip_message: false,
             source,
             channels: HashMap::new(),
@@ -497,7 +497,7 @@ where
     // to update the network graph. Many of the tests are messages from the graph.source.
     // If we ignore these messages, the graph won't be updated. And many tests will fail.
     fn should_process_gossip_message_for_nodes(&self, node1: &Pubkey, node2: &Pubkey) -> bool {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "bench"))]
         if self.always_process_gossip_message {
             return true;
         }
@@ -831,7 +831,7 @@ where
         return need_to_retry && payment_session.can_retry();
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "bench"))]
     pub fn reset(&mut self) {
         self.latest_cursor = Cursor::default();
         self.channels.clear();
@@ -839,7 +839,7 @@ where
         self.history.reset();
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "bench"))]
     pub fn set_source(&mut self, source: Pubkey) {
         self.source = source;
     }
@@ -1542,7 +1542,7 @@ impl From<PaymentSession> for SendPaymentResponse {
             last_updated_at: session.last_updated_at,
             custom_records: session.request.custom_records,
             fee,
-            #[cfg(debug_assertions)]
+            #[cfg(any(debug_assertions, feature = "bench"))]
             router: session.route,
         }
     }

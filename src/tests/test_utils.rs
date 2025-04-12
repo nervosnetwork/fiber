@@ -11,6 +11,7 @@ use crate::fiber::gossip::GossipActorMessage;
 use crate::fiber::graph::NetworkGraphStateStore;
 use crate::fiber::graph::PaymentSession;
 use crate::fiber::graph::PaymentSessionStatus;
+#[cfg(any(test, feature = "bench"))]
 use crate::fiber::network::DebugEvent;
 use crate::fiber::network::GossipMessageWithPeerId;
 use crate::fiber::network::NodeInfoResponse;
@@ -81,8 +82,8 @@ use crate::{
 };
 
 static RETAIN_VAR: &str = "TEST_TEMP_RETAIN";
-pub(crate) const MIN_RESERVED_CKB: u128 = 4200000000;
-pub(crate) const HUGE_CKB_AMOUNT: u128 = MIN_RESERVED_CKB + 1000000000000_u128;
+pub const MIN_RESERVED_CKB: u128 = 4200000000;
+pub const HUGE_CKB_AMOUNT: u128 = MIN_RESERVED_CKB + 1000000000000_u128;
 
 #[derive(Debug)]
 pub struct TempDir(ManuallyDrop<OldTempDir>);
@@ -398,10 +399,10 @@ pub(crate) async fn establish_channel_between_nodes(
     let funding_tx_outpoint = node_a
         .expect_to_process_event(|event| match event {
             NetworkServiceEvent::ChannelReady(peer_id, channel_id, funding_tx_outpoint) => {
-                println!(
-                    "A channel ({:?}) to {:?} is now ready",
-                    &channel_id, &peer_id
-                );
+                // println!(
+                //     "A channel ({:?}) to {:?} is now ready",
+                //     &channel_id, &peer_id
+                // );
                 assert_eq!(peer_id, &node_b.peer_id);
                 assert_eq!(channel_id, &new_channel_id);
                 Some(funding_tx_outpoint.clone())
@@ -432,6 +433,7 @@ pub(crate) async fn establish_channel_between_nodes(
     (new_channel_id, funding_tx_hash)
 }
 
+#[cfg(test)]
 pub(crate) async fn create_nodes_with_established_channel(
     node_a_funding_amount: u128,
     node_b_funding_amount: u128,
@@ -461,6 +463,7 @@ pub(crate) async fn create_nodes_with_established_channel(
     (node_a, node_b, channel_id)
 }
 
+#[cfg(test)]
 pub(crate) async fn create_3_nodes_with_established_channel(
     (channel_1_amount_a, channel_1_amount_b): (u128, u128),
     (channel_2_amount_b, channel_2_amount_c): (u128, u128),
@@ -477,6 +480,7 @@ pub(crate) async fn create_3_nodes_with_established_channel(
     (node_a, node_b, node_c, channels[0], channels[1])
 }
 
+#[cfg(test)]
 // make a network like A -> B -> C -> D
 pub(crate) async fn create_n_nodes_with_established_channel(
     amounts: &[(u128, u128)],
@@ -572,8 +576,7 @@ pub(crate) async fn create_n_nodes_network_with_rpc_option(
 }
 
 #[allow(clippy::type_complexity)]
-
-pub(crate) async fn create_n_nodes_network(
+pub async fn create_n_nodes_network(
     amounts: &[((usize, usize), (u128, u128))],
     n: usize,
 ) -> (Vec<NetworkNode>, Vec<Hash256>) {
@@ -1140,7 +1143,9 @@ impl NetworkNode {
                     None,
                     store.clone(),
                     network_graph.clone(),
+                    #[cfg(debug_assertions)]
                     None,
+                    #[cfg(debug_assertions)]
                     None,
                 )
                 .await,
@@ -1355,9 +1360,9 @@ impl NetworkNode {
                     match event {
                         None => panic!("Event emitter unexpectedly stopped"),
                         Some(event) => {
-                            println!("Received event when waiting for specific event: {:?}", &event);
+                            //println!("Received event when waiting for specific event: {:?}", &event);
                             if let Some(r) = event_processor(&event) {
-                                println!("Event ({:?}) matching filter received, exiting waiting for event loop", &event);
+                                //println!("Event ({:?}) matching filter received, exiting waiting for event loop", &event);
                                 return r;
                             }
                         }
@@ -1481,15 +1486,9 @@ impl NetworkNode {
     }
 }
 
-#[tokio::test]
-async fn test_connect_to_other_node() {
-    let mut node_a = NetworkNode::new().await;
-    let node_b = NetworkNode::new().await;
-    node_a.connect_to(&node_b).await;
-}
-
-#[tokio::test]
-async fn test_restart_network_node() {
-    let mut node = NetworkNode::new().await;
-    node.restart().await;
+pub async fn create_mock_chain_actor() -> ActorRef<CkbChainMessage> {
+    Actor::spawn(None, MockChainActor::new(), ())
+        .await
+        .expect("start mock chain actor")
+        .0
 }

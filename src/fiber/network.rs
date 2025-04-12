@@ -164,7 +164,7 @@ pub struct SendPaymentResponse {
     pub failed_error: Option<String>,
     pub custom_records: Option<PaymentCustomRecords>,
     pub fee: u128,
-    #[cfg(debug_assertions)]
+    #[cfg(any(debug_assertions, feature = "bench"))]
     pub router: SessionRoute,
 }
 
@@ -560,7 +560,7 @@ impl NetworkActorMessage {
     }
 }
 
-#[cfg(debug_assertions)]
+#[cfg(any(debug_assertions, feature = "bench"))]
 #[derive(Clone, Debug)]
 pub enum DebugEvent {
     // A AddTlc peer message processed with failure
@@ -572,7 +572,7 @@ pub enum DebugEvent {
 #[macro_export]
 macro_rules! debug_event {
     ($network:expr, $debug_event:expr) => {
-        #[cfg(debug_assertions)]
+        #[cfg(any(debug_assertions, feature = "bench"))]
         $network
             .send_message(NetworkActorMessage::new_notification(
                 NetworkServiceEvent::DebugEvent(DebugEvent::Common($debug_event.to_string())),
@@ -611,7 +611,7 @@ pub enum NetworkServiceEvent {
     // to create a complete commitment transaction and a settlement transaction.
     RemoteCommitmentSigned(PeerId, Hash256, TransactionView, SettlementData),
     // Some other debug event for assertion.
-    #[cfg(debug_assertions)]
+    #[cfg(any(debug_assertions, feature = "bench"))]
     DebugEvent(DebugEvent),
 }
 

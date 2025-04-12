@@ -67,10 +67,14 @@ console = "0.15.8"
 bincode = "1.3.3"
 num_enum = "0.7.3"
 bitmask-enum = "2.2.5"
+tempfile = { version = "3.10.1", optional = true }
+ckb-testtool = { version = "0.15.1", optional = true }
 
 [features]
 default = []
 portable = ["rocksdb/portable"]
+bench-tests = []
+bench = ["tempfile", "ckb-testtool"]
 
 [profile.release]
 panic = "abort"
@@ -85,11 +89,11 @@ opt-level = 3
 debug = false
 
 [dev-dependencies]
+ciborium = "0.2.2"
 tempfile = "3.10.1"
 ckb-testtool = "0.15.1"
-ciborium = "0.2.2"
 jsonrpsee = { version = "0.22", features = ["server", "macros", "http-client"] }
-
+criterion = { version = "0.5", features = ["html_reports"] }
 
 [lints.clippy]
 needless-return = "allow"
@@ -98,3 +102,7 @@ upper-case-acronyms = "allow"
 fallible-impl-from = "allow"
 expect-fun-call = "allow"
 large-enum-variant = "allow"
+
+[[bench]]
+name = "payment_benchmarks"
+harness = false
