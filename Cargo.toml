@@ -1,6 +1,6 @@
 [package]
 name = "fnn"
-version = "0.4.2"
+version = "0.5.0"
 edition = "2021"
 build = "src/build.rs"
 
@@ -13,7 +13,7 @@ serde = { version = "1.0.197", features = ["derive"] }
 serde_yaml = "0.9.32"
 lightning-invoice = { version = "0.29.0" }
 bitcoin = { version = "0.30.2", features = ["serde", "rand"] }
-bech32 = "0.8"
+bech32 = "0.9.1"
 rand = "0.8.5"
 serde_json = { version = "1.0" }
 home = "0.5.9"
@@ -88,6 +88,8 @@ debug = false
 tempfile = "3.10.1"
 ckb-testtool = "0.15.1"
 ciborium = "0.2.2"
+jsonrpsee = { version = "0.22", features = ["server", "macros", "http-client"] }
+
 
 [lints.clippy]
 needless-return = "allow"

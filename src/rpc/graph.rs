@@ -1,12 +1,15 @@
-use crate::ckb::config::UdtCfgInfos as ConfigUdtCfgInfos;
+use crate::ckb::config::{
+    UdtArgInfo as ConfigUdtArgInfo, UdtCellDep as ConfigUdtCellDep,
+    UdtCfgInfos as ConfigUdtCfgInfos, UdtDep as ConfigUdtDep, UdtScript as ConfigUdtScript,
+};
 use crate::fiber::channel::ChannelActorStateStore;
 use crate::fiber::gossip::GossipMessageStore;
-use crate::fiber::graph::{NetworkGraph, NetworkGraphStateStore};
+use crate::fiber::graph::{ChannelUpdateInfo, NetworkGraph, NetworkGraphStateStore};
 use crate::fiber::network::get_chain_hash;
 use crate::fiber::serde_utils::EntityHex;
-use crate::fiber::serde_utils::{U128Hex, U32Hex, U64Hex};
+use crate::fiber::serde_utils::{U128Hex, U64Hex};
 use crate::fiber::types::{Cursor, Hash256, Pubkey};
-use ckb_jsonrpc_types::{DepType, JsonBytes, Script, ScriptHashType};
+use ckb_jsonrpc_types::{DepType, JsonBytes, OutPoint as OutPointWrapper, Script, ScriptHashType};
 use ckb_types::packed::OutPoint;
 use ckb_types::H256;
 use jsonrpsee::types::error::INVALID_PARAMS_CODE;
@@ -38,17 +41,51 @@ pub struct UdtScript {
     pub args: String,
 }
 
+impl From<ConfigUdtScript> for UdtScript {
+    fn from(cfg: ConfigUdtScript) -> Self {
+        UdtScript {
+            code_hash: cfg.code_hash,
+            hash_type: cfg.hash_type.into(),
+            args: cfg.args,
+        }
+    }
+}
+
+/// Udt script on-chain dependencies.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct UdtDep {
+    /// cell dep described by out_point.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cell_dep: Option<UdtCellDep>,
+    /// cell dep described by type ID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub type_id: Option<Script>,
+}
+
+impl From<ConfigUdtDep> for UdtDep {
+    fn from(cfg: ConfigUdtDep) -> Self {
+        UdtDep {
+            cell_dep: cfg.cell_dep.map(Into::into),
+            type_id: cfg.type_id,
+        }
+    }
+}
 /// The UDT cell dep which is used to identify the UDT configuration for a Fiber Node
-#[serde_as]
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct UdtCellDep {
+    /// The out point of the cell dep.
+    pub out_point: OutPointWrapper,
     /// The type of the cell dep.
     pub dep_type: DepType,
-    /// The transaction hash of the cell dep.
-    pub tx_hash: H256,
-    /// The index of the cell dep.
-    #[serde_as(as = "U32Hex")]
-    pub index: u32,
+}
+
+impl From<ConfigUdtCellDep> for UdtCellDep {
+    fn from(cfg: ConfigUdtCellDep) -> Self {
+        UdtCellDep {
+            dep_type: cfg.dep_type.into(),
+            out_point: cfg.out_point,
+        }
+    }
 }
 
 /// The UDT argument info which is used to identify the UDT configuration
@@ -63,7 +100,22 @@ pub struct UdtArgInfo {
     /// The minimum amount of the UDT that can be automatically accepted.
     pub auto_accept_amount: Option<u128>,
     /// The cell deps of the UDT.
-    pub cell_deps: Vec<UdtCellDep>,
+    pub cell_deps: Vec<UdtDep>,
+}
+
+impl From<ConfigUdtArgInfo> for UdtArgInfo {
+    fn from(cfg: ConfigUdtArgInfo) -> Self {
+        UdtArgInfo {
+            name: cfg.name,
+            script: UdtScript {
+                code_hash: cfg.script.code_hash,
+                hash_type: cfg.script.hash_type.into(),
+                args: cfg.script.args,
+            },
+            cell_deps: cfg.cell_deps.into_iter().map(Into::into).collect(),
+            auto_accept_amount: cfg.auto_accept_amount,
+        }
+    }
 }
 
 /// A list of UDT configuration infos.
@@ -75,29 +127,7 @@ pub struct UdtCfgInfos(
 
 impl From<ConfigUdtCfgInfos> for UdtCfgInfos {
     fn from(cfg: ConfigUdtCfgInfos) -> Self {
-        UdtCfgInfos(
-            cfg.0
-                .into_iter()
-                .map(|info| UdtArgInfo {
-                    name: info.name,
-                    script: UdtScript {
-                        code_hash: info.script.code_hash,
-                        hash_type: info.script.hash_type.into(),
-                        args: info.script.args,
-                    },
-                    cell_deps: info
-                        .cell_deps
-                        .into_iter()
-                        .map(|cell_dep| UdtCellDep {
-                            dep_type: cell_dep.dep_type.into(),
-                            tx_hash: cell_dep.tx_hash,
-                            index: cell_dep.index,
-                        })
-                        .collect(),
-                    auto_accept_amount: info.auto_accept_amount,
-                })
-                .collect::<Vec<UdtArgInfo>>(),
-        )
+        UdtCfgInfos(cfg.0.into_iter().map(Into::into).collect())
     }
 }
 
@@ -169,21 +199,15 @@ pub struct ChannelInfo {
     pub node2: Pubkey,
     /// The created timestamp of the channel, which is the block header timestamp of the block
     /// that contains the channel funding transaction.
+    #[serde_as(as = "U64Hex")]
     pub created_timestamp: u64,
-    /// The timestamp of the last update to channel by node 1 (e.g. updating fee rate).
-    /// Types of update included https://github.com/nervosnetwork/fiber/tree/develop/src/rpc#params-7
-    #[serde_as(as = "Option<U64Hex>")]
-    pub last_updated_timestamp_of_node1: Option<u64>,
-    /// The timestamp of the last update to channel by node 2 (e.g. updating fee rate).
-    /// Types of update included https://github.com/nervosnetwork/fiber/tree/develop/src/rpc#params-7
-    #[serde_as(as = "Option<U64Hex>")]
-    pub last_updated_timestamp_of_node2: Option<u64>,
-    /// The fee rate set by node 1. This is the fee rate for node 1 to forward tlcs sent from node 2 to node 1.
-    #[serde_as(as = "Option<U64Hex>")]
-    pub fee_rate_of_node1: Option<u64>,
-    #[serde_as(as = "Option<U64Hex>")]
-    /// The fee rate set by node 2. This is the fee rate for node 2 to forward tlcs sent from node 1 to node 2.
-    pub fee_rate_of_node2: Option<u64>,
+
+    /// The update info from node1 to node2, e.g. timestamp, fee_rate, tlc_expiry_delta, tlc_minimum_value
+    pub update_info_of_node1: Option<ChannelUpdateInfo>,
+
+    /// The update info from node2 to node1, e.g. timestamp, fee_rate, tlc_expiry_delta, tlc_minimum_value
+    pub update_info_of_node2: Option<ChannelUpdateInfo>,
+
     /// The capacity of the channel.
     #[serde_as(as = "U128Hex")]
     pub capacity: u128,
@@ -200,16 +224,8 @@ impl From<super::super::fiber::graph::ChannelInfo> for ChannelInfo {
             node1: channel_info.node1(),
             node2: channel_info.node2(),
             created_timestamp: channel_info.timestamp,
-            last_updated_timestamp_of_node1: channel_info
-                .update_of_node1
-                .as_ref()
-                .map(|cu| cu.timestamp),
-            last_updated_timestamp_of_node2: channel_info
-                .update_of_node2
-                .as_ref()
-                .map(|cu| cu.timestamp),
-            fee_rate_of_node1: channel_info.update_of_node1.as_ref().map(|cu| cu.fee_rate),
-            fee_rate_of_node2: channel_info.update_of_node2.as_ref().map(|cu| cu.fee_rate),
+            update_info_of_node1: channel_info.update_of_node1,
+            update_info_of_node2: channel_info.update_of_node2,
             capacity: channel_info.capacity(),
             chain_hash: get_chain_hash(),
             udt_type_script: channel_info.udt_type_script().clone().map(|s| s.into()),

@@ -44,6 +44,7 @@ use peer::{PeerRpcServer, PeerRpcServerImpl};
 use ractor::ActorRef;
 #[cfg(debug_assertions)]
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -104,9 +105,11 @@ pub async fn start_rpc<
     #[cfg(debug_assertions)] rpc_dev_module_commitment_txs: Option<
         Arc<RwLock<HashMap<(Hash256, u64), TransactionView>>>,
     >,
-) -> ServerHandle {
+) -> (ServerHandle, SocketAddr) {
     let listening_addr = config.listening_addr.as_deref().unwrap_or("[::]:0");
     let server = build_server(listening_addr).await;
+    let sockaddr = server.local_addr().expect("local addr");
+
     let mut modules = RpcModule::new(());
     if config.is_module_enabled("invoice") {
         modules
@@ -172,5 +175,5 @@ pub async fn start_rpc<
                 .unwrap();
         }
     }
-    server.start(modules)
+    (server.start(modules), sockaddr)
 }
