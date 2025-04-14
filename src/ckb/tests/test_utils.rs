@@ -16,7 +16,7 @@ use crate::{
     ckb::{
         actor::GetTxResponse,
         config::UdtCfgInfos,
-        contracts::{Contract, ContractsContext, ContractsInfo, ScriptCellDep},
+        contracts::{get_cell_deps, Contract, ContractsContext, ContractsInfo, ScriptCellDep},
         CkbTxTracer, CkbTxTracingMask, CkbTxTracingResult,
     },
     fiber::types::Hash256,
@@ -589,6 +589,18 @@ pub async fn get_tx_from_hash(
 ) -> Result<GetTxResponse, RpcError> {
     pub const TIMEOUT: u64 = 1000;
     call_t!(mock_actor, CkbChainMessage::GetTx, TIMEOUT, tx_hash).expect("chain actor alive")
+}
+
+pub fn complete_commitment_tx(commitment_tx: &TransactionView) -> TransactionView {
+    let cell_deps = get_cell_deps(
+        vec![Contract::FundingLock],
+        &commitment_tx.outputs().get(0).unwrap().type_().to_opt(),
+    )
+    .expect("get cell deps should be ok");
+    commitment_tx
+        .as_advanced_builder()
+        .cell_deps(cell_deps)
+        .build()
 }
 
 #[tokio::test]
