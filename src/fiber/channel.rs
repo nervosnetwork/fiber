@@ -6892,13 +6892,9 @@ impl ChannelActorState {
     ) -> Result<(TransactionView, TransactionView), ProcessingChannelError> {
         let commitment_tx = {
             let funding_out_point = self.must_get_funding_transaction_outpoint();
-            let cell_deps =
-                get_cell_deps(vec![Contract::FundingLock], &self.funding_udt_type_script)
-                    .map_err(|e| ProcessingChannelError::InternalError(e.to_string()))?;
             let (output, output_data) = self.build_commitment_transaction_output(for_remote);
 
             TransactionBuilder::default()
-                .cell_deps(cell_deps)
                 .input(
                     CellInput::new_builder()
                         .previous_output(funding_out_point.clone())
@@ -6911,15 +6907,9 @@ impl ChannelActorState {
 
         let settlement_tx = {
             let commtimtent_out_point = OutPoint::new(commitment_tx.hash(), 0);
-            let cell_deps = get_cell_deps(
-                vec![Contract::CommitmentLock],
-                &self.funding_udt_type_script,
-            )
-            .map_err(|e| ProcessingChannelError::InternalError(e.to_string()))?;
             let (outputs, outputs_data) = self.build_settlement_transaction_outputs(for_remote);
 
             TransactionBuilder::default()
-                .cell_deps(cell_deps)
                 .input(
                     CellInput::new_builder()
                         .previous_output(commtimtent_out_point.clone())
