@@ -1,4 +1,5 @@
 use super::test_utils::{init_tracing, NetworkNode};
+use crate::ckb::tests::test_utils::complete_commitment_tx;
 use crate::fiber::channel::{UpdateCommand, XUDT_COMPATIBLE_WITNESS};
 use crate::fiber::config::MAX_PAYMENT_TLC_EXPIRY_LIMIT;
 use crate::fiber::graph::{ChannelInfo, PaymentSessionStatus};
@@ -2554,7 +2555,7 @@ async fn do_test_channel_commitment_tx_after_add_tlc(algorithm: HashAlgorithm) {
                 );
                 assert_eq!(peer_id, &node_a.peer_id);
                 assert_eq!(channel_id, &new_channel_id);
-                Some(tx.clone())
+                Some(complete_commitment_tx(tx))
             }
             _ => None,
         })
@@ -2593,7 +2594,7 @@ async fn do_test_channel_commitment_tx_after_add_tlc(algorithm: HashAlgorithm) {
                 );
                 assert_eq!(peer_id, &node_b.peer_id);
                 assert_eq!(channel_id, &new_channel_id);
-                Some(tx.clone())
+                Some(complete_commitment_tx(tx))
             }
             _ => None,
         })
@@ -4233,7 +4234,7 @@ async fn test_revoke_old_commitment_transaction() {
                 );
                 assert_eq!(peer_id, &node_a.peer_id);
                 assert_eq!(channel_id, &new_channel_id);
-                Some(tx.clone())
+                Some(complete_commitment_tx(tx))
             }
             _ => None,
         })
@@ -4407,7 +4408,7 @@ async fn test_create_channel() {
                 );
                 assert_eq!(peer_id, &node_b.peer_id);
                 assert_eq!(channel_id, &new_channel_id);
-                Some(tx.clone())
+                Some(complete_commitment_tx(tx))
             }
             _ => None,
         })
@@ -4422,7 +4423,7 @@ async fn test_create_channel() {
                 );
                 assert_eq!(peer_id, &node_a.peer_id);
                 assert_eq!(channel_id, &new_channel_id);
-                Some(tx.clone())
+                Some(complete_commitment_tx(tx))
             }
             _ => None,
         })
