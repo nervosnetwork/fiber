@@ -498,7 +498,6 @@ pub(crate) async fn create_n_nodes_with_established_channel(
 }
 
 #[allow(clippy::type_complexity)]
-
 pub(crate) async fn create_n_nodes_network_with_rpc_option(
     amounts: &[((usize, usize), (u128, u128))],
     n: usize,
@@ -577,7 +576,6 @@ pub(crate) async fn create_n_nodes_network_with_rpc_option(
 }
 
 #[allow(clippy::type_complexity)]
-
 pub(crate) async fn create_n_nodes_network(
     amounts: &[((usize, usize), (u128, u128))],
     n: usize,
@@ -909,6 +907,17 @@ impl NetworkNode {
                 eprintln!("Payment success: {:?}\n\n", payment_hash);
                 // report error
                 assert_eq!(status, PaymentSessionStatus::Failed);
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    }
+
+    pub async fn wait_until_created(&self, payment_hash: Hash256) {
+        loop {
+            assert!(self.get_triggered_unexpected_events().await.is_empty());
+            let status = self.get_payment_status(payment_hash).await;
+            if status != PaymentSessionStatus::Created {
+                break;
             }
             tokio::time::sleep(Duration::from_millis(500)).await;
         }

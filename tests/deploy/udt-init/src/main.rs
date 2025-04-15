@@ -184,10 +184,15 @@ struct UdtScript {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
+struct UdtDep {
+    cell_dep: Option<UdtCellDep>,
+    type_id: Option<ckb_jsonrpc_types::Script>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
 struct UdtCellDep {
+    out_point: ckb_jsonrpc_types::OutPoint,
     dep_type: String,
-    tx_hash: H256,
-    index: u32,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -195,7 +200,7 @@ struct UdtInfo {
     name: String,
     script: UdtScript,
     auto_accept_amount: Option<u128>,
-    cell_deps: Vec<UdtCellDep>,
+    cell_deps: Vec<UdtDep>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -245,10 +250,15 @@ fn generate_nodes_config() {
                 hash_type: "Data1".to_string(),
                 args: "0x.*".to_string(),
             },
-            cell_deps: vec![UdtCellDep {
-                dep_type: "code".to_string(),
-                tx_hash: genesis_tx,
-                index: index as u32,
+            cell_deps: vec![UdtDep {
+                cell_dep: Some(UdtCellDep {
+                    dep_type: "code".to_string(),
+                    out_point: ckb_jsonrpc_types::OutPoint {
+                        tx_hash: genesis_tx,
+                        index: (index as u32).into(),
+                    },
+                }),
+                type_id: None,
             }],
         };
         udt_infos.push(udt_info);
@@ -371,8 +381,7 @@ fn build_gensis_block() -> BlockView {
     genesis_block
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn StdErr>> {
+fn main() -> Result<(), Box<dyn StdErr>> {
     generate_nodes_config();
     init_udt_accounts()?;
     Ok(())

@@ -78,6 +78,7 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
     * [Type `UdtArgInfo`](#type-udtarginfo)
     * [Type `UdtCellDep`](#type-udtcelldep)
     * [Type `UdtCfgInfos`](#type-udtcfginfos)
+    * [Type `UdtDep`](#type-udtdep)
     * [Type `UdtScript`](#type-udtscript)
 
 ## RPC Modules
@@ -496,7 +497,6 @@ Get the node information.
 * `default_funding_lock_script` - <em>`Script`</em>, The default funding lock script for the node.
 * `tlc_expiry_delta` - <em>`u64`</em>, The locktime expiry delta for Time-Locked Contracts (TLC), serialized as a hexadecimal string.
 * `tlc_min_value` - <em>`u128`</em>, The minimum value for Time-Locked Contracts (TLC) we can send, serialized as a hexadecimal string.
-* `tlc_max_value` - <em>`u128`</em>, The maximum value for Time-Locked Contracts (TLC) we can send, serialized as a hexadecimal string, `0` means no maximum value limit.
 * `tlc_fee_proportional_millionths` - <em>`u128`</em>, The fee (to forward payments) proportional to the value of Time-Locked Contracts (TLC), expressed in millionths and serialized as a hexadecimal string.
 * `channel_count` - <em>`u32`</em>, The number of channels associated with the node, serialized as a hexadecimal string.
 * `pending_channel_count` - <em>`u32`</em>, The number of pending channels associated with the node, serialized as a hexadecimal string.
@@ -1204,7 +1204,7 @@ The UDT argument info which is used to identify the UDT configuration
 * `name` - <em>String</em>, The name of the UDT.
 * `script` - <em>[UdtScript](#type-udtscript)</em>, The script of the UDT.
 * `auto_accept_amount` - <em>Option<u128></em>, The minimum amount of the UDT that can be automatically accepted.
-* `cell_deps` - <em>Vec<[UdtCellDep](#type-udtcelldep)></em>, The cell deps of the UDT.
+* `cell_deps` - <em>Vec<[UdtDep](#type-udtdep)></em>, The cell deps of the UDT.
 ---
 
 <a id="#type-udtcelldep"></a>
@@ -1215,9 +1215,8 @@ The UDT cell dep which is used to identify the UDT configuration for a Fiber Nod
 
 #### Fields
 
+* `out_point` - <em>OutPointWrapper</em>, The out point of the cell dep.
 * `dep_type` - <em>DepType</em>, The type of the cell dep.
-* `tx_hash` - <em>H256</em>, The transaction hash of the cell dep.
-* `index` - <em>u32</em>, The index of the cell dep.
 ---
 
 <a id="#type-udtcfginfos"></a>
@@ -1227,6 +1226,18 @@ A list of UDT configuration infos.
 
 
 
+---
+
+<a id="#type-udtdep"></a>
+### Type `UdtDep`
+
+Udt script on-chain dependencies.
+
+
+#### Fields
+
+* `cell_dep` - <em>Option<[UdtCellDep](#type-udtcelldep)></em>, cell dep described by out_point.
+* `type_id` - <em>Option<Script></em>, cell dep described by type ID.
 ---
 
 <a id="#type-udtscript"></a>

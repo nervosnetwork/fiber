@@ -6,7 +6,7 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-ckb-sdk = { version = "3.6" }
+ckb-sdk = { version = "3.7" }
 ckb-types = "0.200.0"
 ckb-jsonrpc-types = "0.200.0"
 ckb-chain-spec = "0.200.0"
@@ -14,4 +14,4 @@ ckb-resource = "0.200.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_yaml = "0.9.34"
 rand = "0.8.5"
-tokio = "1.44.1"
+tokio = "1.44.2"

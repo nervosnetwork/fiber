@@ -1,4 +1,5 @@
 use super::test_utils::{init_tracing, NetworkNode};
+use crate::ckb::tests::test_utils::complete_commitment_tx;
 use crate::fiber::channel::{UpdateCommand, XUDT_COMPATIBLE_WITNESS};
 use crate::fiber::config::MAX_PAYMENT_TLC_EXPIRY_LIMIT;
 use crate::fiber::graph::{ChannelInfo, PaymentSessionStatus};
@@ -29,7 +30,7 @@ use crate::{
 use ckb_types::{
     core::{tx_pool::TxStatus, FeeRate},
     packed::{CellInput, Script, Transaction},
-    prelude::{AsTransactionBuilder, Builder, Entity, IntoTransactionView, Pack, Unpack},
+    prelude::{AsTransactionBuilder, Builder, Entity, Pack, Unpack},
 };
 use ractor::call;
 use secp256k1::Secp256k1;
@@ -817,8 +818,7 @@ async fn test_network_send_payment_normal_keysend_workflow() {
     assert_eq!(res.failed_error, None);
     node_a.wait_until_success(payment_hash).await;
 
-    let payment_preimage = node_a.get_payment_preimage(&payment_hash);
-    assert!(payment_preimage.is_none());
+    assert!(node_a.get_payment_preimage(&payment_hash).is_none());
 }
 
 #[tokio::test]
@@ -1743,7 +1743,10 @@ async fn test_send_payment_with_3_nodes() {
     assert!(node_b.get_payment_preimage(&res.payment_hash).is_some());
 
     node_a.wait_until_success(res.payment_hash).await;
+
+    assert!(node_a.get_payment_preimage(&res.payment_hash).is_none());
     assert!(node_b.get_payment_preimage(&res.payment_hash).is_none());
+    assert!(node_c.get_payment_preimage(&res.payment_hash).is_none());
 
     let new_node_a_local = node_a.get_local_balance_from_channel(channel_1);
     let new_node_b_left = node_b.get_local_balance_from_channel(channel_1);
@@ -2533,7 +2536,7 @@ async fn do_test_channel_commitment_tx_after_add_tlc(algorithm: HashAlgorithm) {
                 );
                 assert_eq!(peer_id, &node_a.peer_id);
                 assert_eq!(channel_id, &new_channel_id);
-                Some(tx.clone())
+                Some(complete_commitment_tx(tx))
             }
             _ => None,
         })
@@ -2572,7 +2575,7 @@ async fn do_test_channel_commitment_tx_after_add_tlc(algorithm: HashAlgorithm) {
                 );
                 assert_eq!(peer_id, &node_b.peer_id);
                 assert_eq!(channel_id, &new_channel_id);
-                Some(tx.clone())
+                Some(complete_commitment_tx(tx))
             }
             _ => None,
         })
@@ -4211,7 +4214,7 @@ async fn test_revoke_old_commitment_transaction() {
                 );
                 assert_eq!(peer_id, &node_a.peer_id);
                 assert_eq!(channel_id, &new_channel_id);
-                Some(tx.clone())
+                Some(complete_commitment_tx(tx))
             }
             _ => None,
         })
@@ -4283,7 +4286,7 @@ async fn test_revoke_old_commitment_transaction() {
 
     let tx = Transaction::default()
         .as_advanced_builder()
-        .cell_deps(get_cell_deps(vec![Contract::CommitmentLock], &None))
+        .cell_deps(get_cell_deps(vec![Contract::CommitmentLock], &None).expect("get cell deps"))
         .input(
             CellInput::new_builder()
                 .previous_output(commitment_tx.output_pts().first().unwrap().clone())
@@ -4385,7 +4388,7 @@ async fn test_create_channel() {
                 );
                 assert_eq!(peer_id, &node_b.peer_id);
                 assert_eq!(channel_id, &new_channel_id);
-                Some(tx.clone())
+                Some(complete_commitment_tx(tx))
             }
             _ => None,
         })
@@ -4400,7 +4403,7 @@ async fn test_create_channel() {
                 );
                 assert_eq!(peer_id, &node_a.peer_id);
                 assert_eq!(channel_id, &new_channel_id);
-                Some(tx.clone())
+                Some(complete_commitment_tx(tx))
             }
             _ => None,
         })
@@ -4620,7 +4623,7 @@ async fn test_commitment_tx_capacity() {
         NetworkNode::new_2_nodes_with_established_channel(amount_a, amount_b, true).await;
 
     let state = node_a.store.get_channel_actor_state(&channel_id).unwrap();
-    let commitment_tx = state.latest_commitment_transaction.unwrap().into_view();
+    let commitment_tx = state.get_latest_commitment_transaction().unwrap();
     let output_capacity: u64 = commitment_tx.output(0).unwrap().capacity().unpack();
 
     // default fee rate is 1000 shannons per kb, and there is a gap of 20 bytes between the mock commitment tx and the real one

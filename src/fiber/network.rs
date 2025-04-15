@@ -48,10 +48,10 @@ use super::channel::{
     AwaitingTxSignaturesFlags, ChannelActor, ChannelActorMessage, ChannelActorStateStore,
     ChannelCommand, ChannelCommandWithId, ChannelEvent, ChannelInitializationParameter,
     ChannelState, ChannelSubscribers, ChannelTlcInfo, OpenChannelParameter, PrevTlcInfo,
-    ProcessingChannelError, ProcessingChannelResult, PublicChannelInfo, RevocationData,
-    SettlementData, ShuttingDownFlags, StopReason, DEFAULT_COMMITMENT_FEE_RATE, DEFAULT_FEE_RATE,
-    DEFAULT_MAX_TLC_VALUE_IN_FLIGHT, MAX_COMMITMENT_DELAY_EPOCHS, MAX_TLC_NUMBER_IN_FLIGHT,
-    MIN_COMMITMENT_DELAY_EPOCHS, SYS_MAX_TLC_NUMBER_IN_FLIGHT,
+    ProcessingChannelError, ProcessingChannelResult, PublicChannelInfo, RemoveTlcCommand,
+    RevocationData, SettlementData, ShuttingDownFlags, StopReason, DEFAULT_COMMITMENT_FEE_RATE,
+    DEFAULT_FEE_RATE, DEFAULT_MAX_TLC_VALUE_IN_FLIGHT, MAX_COMMITMENT_DELAY_EPOCHS,
+    MAX_TLC_NUMBER_IN_FLIGHT, MIN_COMMITMENT_DELAY_EPOCHS, SYS_MAX_TLC_NUMBER_IN_FLIGHT,
 };
 use super::config::{AnnouncedNodeName, MIN_TLC_EXPIRY_DELTA};
 use super::fee::calculate_commitment_tx_fee;
@@ -62,8 +62,8 @@ use super::graph::{
 use super::key::blake2b_hash_with_salt;
 use super::types::{
     BroadcastMessageWithTimestamp, EcdsaSignature, FiberMessage, ForwardTlcResult, GossipMessage,
-    Hash256, NodeAnnouncement, OpenChannel, PaymentHopData, Privkey, Pubkey, RemoveTlcReason,
-    TlcErr, TlcErrData, TlcErrorCode,
+    Hash256, NodeAnnouncement, OpenChannel, PaymentHopData, Privkey, Pubkey, RemoveTlcFulfill,
+    RemoveTlcReason, TlcErr, TlcErrData, TlcErrorCode,
 };
 use super::{
     FiberConfig, InFlightCkbTxActor, InFlightCkbTxActorArguments, InFlightCkbTxActorMessage,
@@ -84,7 +84,7 @@ use crate::fiber::types::{
     FiberChannelMessage, PaymentOnionPacket, PeeledPaymentOnionPacket, TxSignatures,
 };
 use crate::fiber::KeyPair;
-use crate::invoice::{CkbInvoice, InvoiceStore};
+use crate::invoice::{CkbInvoice, CkbInvoiceStatus, InvoiceStore};
 use crate::{now_timestamp_as_millis_u64, unwrap_or_return, Error};
 
 pub const FIBER_PROTOCOL_ID: ProtocolId = ProtocolId::new(42);
@@ -110,11 +110,11 @@ const ASSUME_GOSSIP_ACTOR_ALIVE: &str = "gossip actor must be alive";
 // The duration for which we will try to maintain the number of peers in connection.
 const MAINTAINING_CONNECTIONS_INTERVAL: Duration = Duration::from_secs(3600);
 
-// The duration for which we will check if we should force close a channel.
+// The duration for which we will check all channels.
 #[cfg(debug_assertions)]
-const CHECK_FORCE_CLOSE_INTERVAL: Duration = Duration::from_secs(3); // use a short interval for debugging build
+const CHECK_CHANNELS_INTERVAL: Duration = Duration::from_secs(3); // use a short interval for debugging build
 #[cfg(not(debug_assertions))]
-const CHECK_FORCE_CLOSE_INTERVAL: Duration = Duration::from_secs(60);
+const CHECK_CHANNELS_INTERVAL: Duration = Duration::from_secs(60);
 
 // While creating a network graph from the gossip messages, we will load current gossip messages
 // in the store and process them. We will load all current messages and get the latest cursor.
@@ -186,7 +186,6 @@ pub struct NodeInfoResponse {
     pub auto_accept_channel_ckb_funding_amount: u64,
     pub tlc_expiry_delta: u64,
     pub tlc_min_value: u128,
-    pub tlc_max_value: u128,
     pub tlc_fee_proportional_millionths: u128,
     pub channel_count: u32,
     pub pending_channel_count: u32,
@@ -225,8 +224,8 @@ pub enum NetworkActorCommand {
     SavePeerAddress(Multiaddr),
     // We need to maintain a certain number of peers connections to keep the network running.
     MaintainConnections,
-    // Check if we should force close a channel.
-    CheckForceClose,
+    // Check all channels and see if we need to force close any of them or settle down tlc with preimage.
+    CheckChannels,
     // For internal use and debugging only. Most of the messages requires some
     // changes to local state. Even if we can send a message to a peer, some
     // part of the local state is not changed.
@@ -711,7 +710,6 @@ pub enum NetworkActorEvent {
     GossipMessageUpdates(GossipMessageUpdates),
 
     /// Channel related events.
-
     /// A channel has been accepted.
     /// The two Hash256 are respectively newly agreed channel id and temp channel id,
     /// The two u128 are respectively local and remote funding amount,
@@ -1212,11 +1210,59 @@ where
                     }
                 }
             }
-            NetworkActorCommand::CheckForceClose => {
+            NetworkActorCommand::CheckChannels => {
                 let now = now_timestamp_as_millis_u64();
                 for (_peer_id, channel_id, channel_state) in self.store.get_channel_states(None) {
                     if matches!(channel_state, ChannelState::ChannelReady) {
                         if let Some(actor_state) = self.store.get_channel_actor_state(&channel_id) {
+                            for tlc in actor_state.tlc_state.received_tlcs.get_committed_tlcs() {
+                                if let Some(payment_preimage) =
+                                    self.store.get_invoice_preimage(&tlc.payment_hash)
+                                {
+                                    debug!(
+                                        "Found payment preimage for channel {:?} tlc {:?}",
+                                        channel_id,
+                                        tlc.id()
+                                    );
+                                    if self
+                                        .store
+                                        .get_invoice_status(&tlc.payment_hash)
+                                        .is_some_and(|s| {
+                                            !matches!(
+                                                s,
+                                                CkbInvoiceStatus::Open | CkbInvoiceStatus::Received
+                                            )
+                                        })
+                                    {
+                                        continue;
+                                    }
+                                    let (send, _recv) = oneshot::channel();
+                                    let rpc_reply = RpcReplyPort::from(send);
+                                    if let Err(err) = state
+                                        .send_command_to_channel(
+                                            channel_id,
+                                            ChannelCommand::RemoveTlc(
+                                                RemoveTlcCommand {
+                                                    id: tlc.id(),
+                                                    reason: RemoveTlcReason::RemoveTlcFulfill(
+                                                        RemoveTlcFulfill { payment_preimage },
+                                                    ),
+                                                },
+                                                rpc_reply,
+                                            ),
+                                        )
+                                        .await
+                                    {
+                                        error!(
+                                            "Failed to remove tlc {:?} for channel {:?}: {}",
+                                            tlc.id(),
+                                            channel_id,
+                                            err
+                                        );
+                                    }
+                                }
+                            }
+
                             if actor_state
                                 .tlc_state
                                 .offered_tlcs
@@ -1228,9 +1274,9 @@ where
                                     "Force closing channel {:?} due to expired offered tlc",
                                     channel_id
                                 );
-                                let (send, _recv) = oneshot::channel::<Result<(), String>>();
+                                let (send, _recv) = oneshot::channel();
                                 let rpc_reply = RpcReplyPort::from(send);
-                                state
+                                if let Err(err) = state
                                     .send_command_to_channel(
                                         channel_id,
                                         ChannelCommand::Shutdown(
@@ -1242,7 +1288,13 @@ where
                                             rpc_reply,
                                         ),
                                     )
-                                    .await?;
+                                    .await
+                                {
+                                    error!(
+                                        "Failed to force close channel {:?}: {}",
+                                        channel_id, err
+                                    );
+                                }
                             }
                         }
                     }
@@ -1557,7 +1609,6 @@ where
                         .auto_accept_channel_ckb_funding_amount,
                     tlc_expiry_delta: state.tlc_expiry_delta,
                     tlc_min_value: state.tlc_min_value,
-                    tlc_max_value: state.tlc_max_value,
                     tlc_fee_proportional_millionths: state.tlc_fee_proportional_millionths,
                     channel_count: state.channels.len() as u32,
                     pending_channel_count: state.pending_channels.len() as u32,
@@ -2168,7 +2219,6 @@ pub struct NetworkActorState<S> {
     tlc_expiry_delta: u64,
     // The default tlc min and max value of tlcs to be accepted.
     tlc_min_value: u128,
-    tlc_max_value: u128,
     // The default tlc fee proportional millionths to be used when auto accepting a channel.
     tlc_fee_proportional_millionths: u128,
     // The gossip messages actor to process and send gossip messages.
@@ -2817,11 +2867,14 @@ where
                                 }
                             };
 
-                            let transaction = state
-                                .latest_commitment_transaction
-                                .clone()
-                                .expect("latest_commitment_transaction should exist when channel is in ChannelReady of ShuttingDown state")
-                                .into_view();
+                            let transaction = match state.get_latest_commitment_transaction() {
+                                Ok(tx) => tx,
+                                Err(e) => {
+                                    let error = Error::ChannelError(e);
+                                    let _ = rpc_reply.send(Err(error.to_string()));
+                                    return Err(error);
+                                }
+                            };
 
                             self.network
                                 .send_message(NetworkActorMessage::new_event(
@@ -3442,7 +3495,6 @@ where
             auto_accept_channel_ckb_funding_amount: config.auto_accept_channel_ckb_funding_amount(),
             tlc_expiry_delta: config.tlc_expiry_delta(),
             tlc_min_value: config.tlc_min_value(),
-            tlc_max_value: config.tlc_max_value(),
             tlc_fee_proportional_millionths: config.tlc_fee_proportional_millionths(),
             gossip_actor,
             channel_subscribers,
@@ -3497,8 +3549,8 @@ where
         myself.send_interval(MAINTAINING_CONNECTIONS_INTERVAL, || {
             NetworkActorMessage::new_command(NetworkActorCommand::MaintainConnections)
         });
-        myself.send_interval(CHECK_FORCE_CLOSE_INTERVAL, || {
-            NetworkActorMessage::new_command(NetworkActorCommand::CheckForceClose)
+        myself.send_interval(CHECK_CHANNELS_INTERVAL, || {
+            NetworkActorMessage::new_command(NetworkActorCommand::CheckChannels)
         });
         Ok(())
     }

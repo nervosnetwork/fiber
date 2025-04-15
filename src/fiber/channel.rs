@@ -1,8 +1,8 @@
-use crate::debug_event;
 #[cfg(debug_assertions)]
 use crate::fiber::network::DebugEvent;
 use crate::fiber::network::PaymentCustomRecords;
 use crate::fiber::types::BroadcastMessageWithTimestamp;
+use crate::{debug_event, utils::tx::compute_tx_message};
 use bitflags::bitflags;
 use futures::future::OptionFuture;
 use secp256k1::XOnlyPublicKey;
@@ -1160,15 +1160,20 @@ where
         state.tlc_state.applied_remove_tlcs.insert(tlc_id);
 
         let (tlc_info, remove_reason) = state.remove_tlc_with_reason(tlc_id)?;
+
         if matches!(remove_reason, RemoveTlcReason::RemoveTlcFulfill(_)) {
             if self.store.get_invoice(&tlc_info.payment_hash).is_some() {
                 self.store
                     .update_invoice_status(&tlc_info.payment_hash, CkbInvoiceStatus::Paid)
                     .expect("update invoice status failed");
             }
-            self.store
-                .remove_payment_preimage(&tlc_info.payment_hash)
-                .expect("remove preimage failed");
+            // when a hop is a forwarding hop, we need to keep preimage after relay RemoveTlc finished
+            // incase watchtower may need preimage to settledown
+            if tlc_info.previous_tlc.is_none() {
+                self.store
+                    .remove_payment_preimage(&tlc_info.payment_hash)
+                    .expect("remove preimage failed");
+            }
         }
 
         if let (
@@ -1397,11 +1402,7 @@ where
                 }
             };
 
-            let transaction = state
-                .latest_commitment_transaction
-                .clone()
-                .expect("latest_commitment_transaction should exist when channel is in ChannelReady of ShuttingDown state")
-                .into_view();
+            let transaction = state.get_latest_commitment_transaction()?;
 
             self.network
                 .send_message(NetworkActorMessage::new_event(
@@ -2689,6 +2690,10 @@ impl TlcInfo {
         )
     }
 
+    pub fn id(&self) -> u64 {
+        self.tlc_id.into()
+    }
+
     pub fn is_offered(&self) -> bool {
         self.tlc_id.is_offered()
     }
@@ -3770,7 +3775,8 @@ impl ChannelActorState {
             return false;
         }
         if let Some(timestamp) = self.waiting_peer_response {
-            let elapsed = now_timestamp_as_millis_u64() - timestamp;
+            // depends on the system's clock source, not all system clocks are monotonic, using saturating_sub to avoid potential underflow
+            let elapsed = now_timestamp_as_millis_u64().saturating_sub(timestamp);
             elapsed > PEER_CHANNEL_RESPONSE_TIMEOUT
         } else {
             false
@@ -5498,7 +5504,7 @@ impl ChannelActorState {
         let signature = common_ctx.aggregate_partial_signatures_for_msg(
             our_partial_signature,
             their_partial_signature,
-            tx.hash().as_slice(),
+            &compute_tx_message(tx),
         )?;
 
         let witness =
@@ -5517,7 +5523,7 @@ impl ChannelActorState {
             let deterministic_sign_ctx = self.get_deterministic_sign_context();
 
             let our_funding_tx_partial_signature =
-                deterministic_sign_ctx.sign(psct.commitment_tx.hash().as_slice())?;
+                deterministic_sign_ctx.sign(&compute_tx_message(&psct.commitment_tx))?;
 
             self.aggregate_partial_signatures_to_consume_funding_cell(
                 &deterministic_sign_ctx.common_ctx,
@@ -5626,7 +5632,8 @@ impl ChannelActorState {
             let local_shutdown_signature = match local_shutdown_info.signature {
                 Some(signature) => signature,
                 None => {
-                    let signature = deterministic_sign_ctx.sign(shutdown_tx.hash().as_slice())?;
+                    let signature =
+                        deterministic_sign_ctx.sign(&compute_tx_message(&shutdown_tx))?;
                     local_shutdown_info.signature = Some(signature);
 
                     self.network()
@@ -6795,7 +6802,8 @@ impl ChannelActorState {
             local_shutdown_fee, remote_shutdown_fee
         );
 
-        let cell_deps = get_cell_deps(vec![Contract::FundingLock], &self.funding_udt_type_script);
+        let cell_deps = get_cell_deps(vec![Contract::FundingLock], &self.funding_udt_type_script)
+            .map_err(|e| ProcessingChannelError::InternalError(e.to_string()))?;
         let tx_builder = TransactionBuilder::default().cell_deps(cell_deps).input(
             CellInput::new_builder()
                 .previous_output(self.must_get_funding_transaction_outpoint())
@@ -6882,15 +6890,12 @@ impl ChannelActorState {
     fn build_commitment_and_settlement_tx(
         &self,
         for_remote: bool,
-    ) -> (TransactionView, TransactionView) {
+    ) -> Result<(TransactionView, TransactionView), ProcessingChannelError> {
         let commitment_tx = {
             let funding_out_point = self.must_get_funding_transaction_outpoint();
-            let cell_deps =
-                get_cell_deps(vec![Contract::FundingLock], &self.funding_udt_type_script);
             let (output, output_data) = self.build_commitment_transaction_output(for_remote);
 
             TransactionBuilder::default()
-                .cell_deps(cell_deps)
                 .input(
                     CellInput::new_builder()
                         .previous_output(funding_out_point.clone())
@@ -6903,14 +6908,9 @@ impl ChannelActorState {
 
         let settlement_tx = {
             let commtimtent_out_point = OutPoint::new(commitment_tx.hash(), 0);
-            let cell_deps = get_cell_deps(
-                vec![Contract::CommitmentLock],
-                &self.funding_udt_type_script,
-            );
             let (outputs, outputs_data) = self.build_settlement_transaction_outputs(for_remote);
 
             TransactionBuilder::default()
-                .cell_deps(cell_deps)
                 .input(
                     CellInput::new_builder()
                         .previous_output(commtimtent_out_point.clone())
@@ -6921,7 +6921,7 @@ impl ChannelActorState {
                 .build()
         };
 
-        (commitment_tx, settlement_tx)
+        Ok((commitment_tx, settlement_tx))
     }
 
     fn build_commitment_transaction_output(&self, for_remote: bool) -> (CellOutput, Bytes) {
@@ -7149,12 +7149,12 @@ impl ChannelActorState {
         funding_tx_partial_signature: PartialSignature,
         commitment_tx_partial_signature: PartialSignature,
     ) -> Result<PartiallySignedCommitmentTransaction, ProcessingChannelError> {
-        let (commitment_tx, settlement_tx) = self.build_commitment_and_settlement_tx(false);
+        let (commitment_tx, settlement_tx) = self.build_commitment_and_settlement_tx(false)?;
 
         let deterministic_verify_ctx = self.get_deterministic_verify_context();
         deterministic_verify_ctx.verify(
             funding_tx_partial_signature,
-            commitment_tx.hash().as_slice(),
+            &compute_tx_message(&commitment_tx),
         )?;
 
         let to_local_output = settlement_tx
@@ -7205,11 +7205,11 @@ impl ChannelActorState {
     fn build_and_sign_commitment_tx(
         &self,
     ) -> Result<(PartialSignature, PartialSignature), ProcessingChannelError> {
-        let (commitment_tx, settlement_tx) = self.build_commitment_and_settlement_tx(true);
+        let (commitment_tx, settlement_tx) = self.build_commitment_and_settlement_tx(true)?;
 
         let deterministic_sign_ctx = self.get_deterministic_sign_context();
         let funding_tx_partial_signature =
-            deterministic_sign_ctx.sign(commitment_tx.hash().as_slice())?;
+            deterministic_sign_ctx.sign(&compute_tx_message(&commitment_tx))?;
 
         let to_local_output = settlement_tx
             .outputs()
@@ -7252,6 +7252,21 @@ impl ChannelActorState {
             funding_tx_partial_signature,
             commitment_tx_partial_signature,
         ))
+    }
+
+    /// Get the latest commitment transaction with updated cell deps
+    pub fn get_latest_commitment_transaction(
+        &self,
+    ) -> Result<TransactionView, ProcessingChannelError> {
+        let tx = self
+            .latest_commitment_transaction
+            .clone()
+            .expect("latest_commitment_transaction should exist");
+        let cell_deps = get_cell_deps(vec![Contract::FundingLock], &self.funding_udt_type_script)
+            .map_err(|e| ProcessingChannelError::InternalError(e.to_string()))?;
+        let raw_tx = tx.raw().as_builder().cell_deps(cell_deps).build();
+        let tx = tx.as_builder().raw(raw_tx).build();
+        Ok(tx.into_view())
     }
 
     /// Verify the partial signature from the peer and create a complete transaction
