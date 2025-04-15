@@ -939,7 +939,7 @@ where
         // The target node of the edge.
         to: Pubkey,
         // The amount that the source node will send to the target node.
-        amount_to_send: u128,
+        next_hop_received_amount: u128,
         // The amount that the source node will receive from forwarding `amount_to_send` to the target.
         fee: u128,
         // The TLC expiry for the TLC that the target node will receive.
@@ -961,7 +961,7 @@ where
                 from,
                 to,
                 channel_outpoint,
-                amount_to_send,
+                next_hop_received_amount,
                 channel_capacity,
             );
 
@@ -973,7 +973,7 @@ where
             debug!("probability is too low: {:?}", probability);
             return;
         }
-        let agg_weight = self.edge_weight(amount_to_send, fee, tlc_expiry_delta);
+        let agg_weight = self.edge_weight(next_hop_received_amount, fee, tlc_expiry_delta);
         let weight = cur_weight + agg_weight;
         let distance = self.calculate_distance_based_probability(probability, weight);
 
@@ -982,7 +982,7 @@ where
                 return;
             }
         }
-        let total_amount = amount_to_send + fee;
+        let total_amount = next_hop_received_amount + fee;
         let total_tlc_expiry = incoming_tlc_expiry + tlc_expiry_delta;
 
         let node = NodeHeapElement {
@@ -999,7 +999,7 @@ where
                 // Here we need to use the amount accumulated so far (i.e. with the fees in current hop)
                 // because the fee here is for the receiving node to forward the amount to the next node.
                 // So the total amount in AddTlc packet should include the fee.
-                amount_received: amount_to_send,
+                amount_received: next_hop_received_amount,
                 // We need to use cur_hop.incoming_tlc_expiry instead of incoming_tlc_expiry here
                 // because we need the expiry for the AddTlc packet sent from source to target.
                 // cur_hop.incoming_tlc_expiry is the expiry time for the TLC that is going to be received by the target,
@@ -1143,15 +1143,6 @@ where
                 edges_expanded += 1;
 
                 let next_hop_received_amount = cur_hop.amount_to_send;
-                if next_hop_received_amount > channel_info.capacity() {
-                    debug!(
-                        "next_hop_received_amount: {} > channel_info.capacity {}",
-                        next_hop_received_amount,
-                        channel_info.capacity()
-                    );
-                    continue;
-                }
-
                 let fee = if is_initial {
                     0
                 } else {
@@ -1167,6 +1158,14 @@ where
                     })?
                 };
                 let amount_to_send = next_hop_received_amount + fee;
+                if amount_to_send > channel_info.capacity() {
+                    debug!(
+                        "amount_to_send: {} > channel_info.capacity {}",
+                        amount_to_send,
+                        channel_info.capacity()
+                    );
+                    continue;
+                }
 
                 // if the amount to send is greater than the amount we have, skip this edge
                 if let Some(max_fee_amount) = max_fee_amount {
@@ -1184,9 +1183,8 @@ where
                 if amount_to_send > channel_info.capacity() {
                     continue;
                 }
-                // We should use next_hop_received_amount because that is the amount to be
-                // sent over the channel.
-                if next_hop_received_amount < channel_update.tlc_minimum_value {
+                // We should use amount_to_send because that is the amount to be sent over the channel.
+                if amount_to_send < channel_update.tlc_minimum_value {
                     continue;
                 }
 
