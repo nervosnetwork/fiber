@@ -1348,6 +1348,12 @@ where
         let mut path = vec![];
         // If not set, the minimum routable amount `1` is used
         let mut agg_amount = amount.unwrap_or(1);
+        if agg_amount == 0 {
+            return Err(PathFindError::Amount(
+                "amount must be greater than 0".to_string(),
+            ));
+        }
+
         let mut agg_tlc_expiry = final_tlc_expiry_delta.unwrap_or(DEFAULT_TLC_EXPIRY_DELTA);
         for (idx, cur_hop) in router_hops.iter().enumerate() {
             let prev_hop_pubkey = router_hops.get(idx + 1).map(|h| h.pubkey).unwrap_or(source);
@@ -1372,12 +1378,12 @@ where
                     continue;
                 }
 
-                let mut current_amount = agg_amount;
+                let mut amount_to_send = agg_amount;
                 let is_initial = from == source;
                 let fee = if is_initial {
                     0
                 } else {
-                    calculate_tlc_forward_fee(current_amount, channel_update.fee_rate as u128)
+                    calculate_tlc_forward_fee(amount_to_send, channel_update.fee_rate as u128)
                         .map_err(|err| {
                             PathFindError::PathFind(format!(
                                 "calculate_tlc_forward_fee error: {:?}",
@@ -1385,14 +1391,19 @@ where
                             ))
                         })?
                 };
-                current_amount += fee;
-                if current_amount > channel_info.capacity() {
+                amount_to_send += fee;
+                if amount_to_send > channel_info.capacity() {
                     debug!(
                         "current_amount: {} > channel_info.capacity {}",
-                        current_amount,
+                        amount_to_send,
                         channel_info.capacity()
                     );
                     continue;
+                }
+                if let Some(balance) = channel_update.outbound_liquidity {
+                    if amount_to_send > balance {
+                        continue;
+                    }
                 }
 
                 let expiry_delta = if is_initial {
@@ -1402,24 +1413,24 @@ where
                 };
 
                 let current_incoming_tlc_expiry = agg_tlc_expiry + expiry_delta;
-
                 let probability = self.history.eval_probability(
                     from,
                     to,
                     &channel_outpoint,
-                    current_amount,
+                    amount_to_send,
                     channel_info.capacity(),
                 );
-                let weight = self.edge_weight(current_amount, fee, current_incoming_tlc_expiry);
+                let weight = self.edge_weight(amount_to_send, fee, current_incoming_tlc_expiry);
                 let distance = self.calculate_distance_based_probability(probability, weight);
 
-                if let Some((old_distance, _edge)) = &found {
+                if let Some((old_distance, _fee, _edge)) = &found {
                     if distance >= *old_distance {
                         continue;
                     }
                 }
                 found = Some((
                     distance,
+                    fee,
                     RouterHop {
                         target: to,
                         channel_outpoint: channel_outpoint.clone(),
@@ -1428,9 +1439,9 @@ where
                     },
                 ));
             }
-            if let Some((_, edge)) = found {
+            if let Some((_, fee, edge)) = found {
                 agg_tlc_expiry += edge.incoming_tlc_expiry;
-                agg_amount += edge.amount_received;
+                agg_amount = edge.amount_received + fee;
                 path.push(edge.clone());
             } else {
                 return Err(PathFindError::PathFind("no path found".to_string()));

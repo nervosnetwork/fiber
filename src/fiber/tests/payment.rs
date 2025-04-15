@@ -1126,7 +1126,7 @@ async fn test_send_payment_build_router_pay_self() {
         .map(|x| x.amount_received)
         .collect();
     eprintln!("amounts: {:?}", amounts);
-    assert_eq!(amounts, vec![4, 2, 1]);
+    assert_eq!(amounts, vec![3, 2, 1]);
 
     let router_nodes: Vec<_> = router.router_hops.iter().map(|x| x.target).collect();
     eprintln!("router_nodes: {:?}", router_nodes);
@@ -1150,6 +1150,98 @@ async fn test_send_payment_build_router_pay_self() {
             .map(|x| x.channel_outpoint.tx_hash().into())
             .collect::<Vec<_>>()
     );
+}
+
+#[tokio::test]
+async fn test_send_payment_build_router_amount_range() {
+    init_tracing();
+
+    let (nodes, _channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (MIN_RESERVED_CKB + 1000, MIN_RESERVED_CKB + 1000)),
+            ((1, 2), (MIN_RESERVED_CKB + 1000, MIN_RESERVED_CKB + 1000)),
+            ((2, 3), (MIN_RESERVED_CKB + 1000, MIN_RESERVED_CKB + 1000)),
+        ],
+        4,
+    )
+    .await;
+    let [node_0, node_1, node_2, _] = nodes.try_into().expect("3 nodes");
+
+    let router = node_0
+        .build_router(BuildRouterCommand {
+            amount: Some(0), // too small
+            hops_info: vec![HopRequire {
+                pubkey: node_1.pubkey,
+                channel_outpoint: None,
+            }],
+            udt_type_script: None,
+            final_tlc_expiry_delta: None,
+        })
+        .await;
+
+    assert!(router.is_err());
+
+    let router = node_0
+        .build_router(BuildRouterCommand {
+            amount: Some(1001), // too large
+            hops_info: vec![HopRequire {
+                pubkey: node_1.pubkey,
+                channel_outpoint: None,
+            }],
+            udt_type_script: None,
+            final_tlc_expiry_delta: None,
+        })
+        .await;
+
+    assert!(router.is_err());
+
+    let router = node_0
+        .build_router(BuildRouterCommand {
+            amount: Some(1000), // add 1 as fee is too large for channel balance
+            hops_info: vec![
+                HopRequire {
+                    pubkey: node_1.pubkey,
+                    channel_outpoint: None,
+                },
+                HopRequire {
+                    pubkey: node_2.pubkey,
+                    channel_outpoint: None,
+                },
+            ],
+            udt_type_script: None,
+            final_tlc_expiry_delta: None,
+        })
+        .await;
+
+    assert!(router.is_err());
+
+    let router = node_0
+        .build_router(BuildRouterCommand {
+            amount: Some(999), // add 1 as fee is ok for channel balance
+            hops_info: vec![
+                HopRequire {
+                    pubkey: node_1.pubkey,
+                    channel_outpoint: None,
+                },
+                HopRequire {
+                    pubkey: node_2.pubkey,
+                    channel_outpoint: None,
+                },
+            ],
+            udt_type_script: None,
+            final_tlc_expiry_delta: None,
+        })
+        .await;
+
+    assert!(router.is_ok());
+    let amounts: Vec<_> = router
+        .unwrap()
+        .router_hops
+        .iter()
+        .map(|x| x.amount_received)
+        .collect();
+
+    assert_eq!(amounts, vec![1000, 999]);
 }
 
 #[tokio::test]
