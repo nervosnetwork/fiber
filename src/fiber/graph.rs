@@ -1339,25 +1339,27 @@ where
         source: Pubkey,
         command: BuildRouterCommand,
     ) -> Result<Vec<RouterHop>, PathFindError> {
-        let mut router_hops = command.hops_info.clone();
+        let BuildRouterCommand {
+            hops_info: mut router_hops,
+            amount,
+            final_tlc_expiry_delta,
+            udt_type_script,
+        } = command;
         router_hops.reverse();
 
         let mut path = vec![];
         // If not set, the minimum routable amount `1` is used
-        let mut agg_amount = command.amount.unwrap_or(1);
-        let mut agg_tlc_expiry = command
-            .final_tlc_expiry_delta
-            .unwrap_or(DEFAULT_TLC_EXPIRY_DELTA);
-        for current in 0..router_hops.len() {
-            let cur_hop = &router_hops[current];
-            let prev_hop = &router_hops.get(current + 1);
-            let prev_hop_pubkey = prev_hop.map(|x| x.pubkey).unwrap_or(source);
+        let mut agg_amount = amount.unwrap_or(1);
+        let mut agg_tlc_expiry = final_tlc_expiry_delta.unwrap_or(DEFAULT_TLC_EXPIRY_DELTA);
+        for (idx, cur_hop) in router_hops.iter().enumerate() {
+            let prev_hop_pubkey = router_hops.get(idx + 1).map(|h| h.pubkey).unwrap_or(source);
+
             let mut found = None;
             for (from, to, channel_info, channel_update) in self.get_node_inbounds(cur_hop.pubkey) {
                 if from != prev_hop_pubkey {
                     continue;
                 }
-                if &command.udt_type_script != channel_info.udt_type_script() {
+                if &udt_type_script != channel_info.udt_type_script() {
                     continue;
                 }
 
@@ -1373,15 +1375,6 @@ where
                 }
 
                 let mut current_amount = agg_amount;
-                if current_amount > channel_info.capacity() {
-                    debug!(
-                        "current_amount: {} > channel_info.capacity {}",
-                        current_amount,
-                        channel_info.capacity()
-                    );
-                    continue;
-                }
-
                 let is_initial = from == source;
                 let fee = if is_initial {
                     0
@@ -1395,6 +1388,14 @@ where
                         })?
                 };
                 current_amount += fee;
+                if current_amount > channel_info.capacity() {
+                    debug!(
+                        "current_amount: {} > channel_info.capacity {}",
+                        current_amount,
+                        channel_info.capacity()
+                    );
+                    continue;
+                }
 
                 let expiry_delta = if is_initial {
                     0
