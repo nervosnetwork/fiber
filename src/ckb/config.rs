@@ -80,13 +80,18 @@ impl CkbConfig {
     pub fn read_secret_key(&self) -> crate::Result<SecretKey> {
         self.create_base_dir()?;
         let path = self.base_dir().join("key");
-        let mut file = std::fs::File::open(&path)?;
+        let mut file = std::fs::File::open(&path).map_err(|e| {
+            std::io::Error::new(
+                e.kind(),
+                format!("Failed to open secret key file: {:?}, reason: {}", path, e),
+            )
+        })?;
 
         let warn = |m: bool, d: &str| {
             if m {
                 tracing::warn!(
                     "Your secret file's permission is not {}, path: {:?}. \
-                Please fix it as soon as possible",
+                    Please fix it as soon as possible",
                     d,
                     path
                 )
