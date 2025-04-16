@@ -3084,6 +3084,8 @@ async fn test_send_payment_remove_tlc_with_preimage_will_retry() {
     loop {
         for payment_hash in payments.clone().iter() {
             let status = node_0.get_payment_status(*payment_hash).await;
+            assert!(node_0.get_triggered_unexpected_events().await.is_empty());
+            assert!(node_1.get_triggered_unexpected_events().await.is_empty());
             eprintln!("payment_hash: {:?} got status : {:?}", payment_hash, status);
             if status == PaymentSessionStatus::Success {
                 payments.remove(payment_hash);
