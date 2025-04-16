@@ -1595,6 +1595,10 @@ where
         myself: &ActorRef<ChannelActorMessage>,
         state: &mut ChannelActorState,
     ) {
+        if state.reestablishing {
+            // retry all the pending operations after reestablishing finished
+            return state.trigger_retryable_operations_later(myself);
+        }
         let mut pending_tlc_ops = state.tlc_state.get_pending_operations();
         pending_tlc_ops.retain_mut(|retryable_operation| {
             match retryable_operation {
@@ -1681,11 +1685,7 @@ where
         });
 
         state.tlc_state.retryable_tlc_operations = pending_tlc_ops;
-        if state.tlc_state.has_pending_operations() {
-            myself.send_after(RETRYABLE_TLC_OPS_INTERVAL, || {
-                ChannelActorMessage::Event(ChannelEvent::CheckTlcRetryOperation)
-            });
-        }
+        state.trigger_retryable_operations_later(myself);
     }
 
     async fn handle_forward_tlc_result(
@@ -7314,6 +7314,14 @@ impl ChannelActorState {
             let _ = network.send_message(NetworkActorMessage::new_command(
                 NetworkActorCommand::NotifyFundingTx(tx.clone()),
             ));
+        }
+    }
+
+    fn trigger_retryable_operations_later(&self, myself: &ActorRef<ChannelActorMessage>) {
+        if self.tlc_state.has_pending_operations() {
+            myself.send_after(RETRYABLE_TLC_OPS_INTERVAL, || {
+                ChannelActorMessage::Event(ChannelEvent::CheckTlcRetryOperation)
+            });
         }
     }
 }
