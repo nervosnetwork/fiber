@@ -6795,7 +6795,9 @@ impl ChannelActorState {
     fn get_verify_context(&self) -> Musig2VerifyContext {
         // We are always verifying a commitment transaction that is broadcast by us,
         // so we can always pass false to get_musig2_common_ctx.
-        let common_ctx = self.get_musig2_common_ctx(false);
+        let common_ctx = self
+            .get_musig2_common_ctx(false, false)
+            .expect("get_musig2_common_ctx error");
 
         Musig2VerifyContext {
             common_ctx,
@@ -6829,7 +6831,9 @@ impl ChannelActorState {
     // we need a `for_remote` parameter. It serves the same function as `for_remote` in functions
     // like `build_commitment_and_settlement_tx`.
     fn get_sign_context(&self, for_remote: bool) -> Musig2SignContext {
-        let common_ctx = self.get_musig2_common_ctx(for_remote);
+        let common_ctx = self
+            .get_musig2_common_ctx(for_remote, false)
+            .expect("get_musig2_common_ctx error");
 
         Musig2SignContext {
             common_ctx,
@@ -6844,25 +6848,7 @@ impl ChannelActorState {
     fn get_sign_context_for_revoke_and_ack_message(
         &self,
     ) -> Result<Musig2SignContext, ProcessingChannelError> {
-        let common_ctx = {
-            let local_pubkey = self.get_local_channel_public_keys().funding_pubkey;
-            let remote_pubkey = self.get_remote_channel_public_keys().funding_pubkey;
-            let pubkeys = [local_pubkey, remote_pubkey];
-            let key_agg_ctx = KeyAggContext::new(pubkeys).expect("Valid pubkeys");
-            let remote_nonce =
-                self.get_last_commitment_signed_remote_nonce()
-                    .ok_or(ProcessingChannelError::InvalidState(
-                        "No last used remote nonce found, has the peer sent a RevokeAndAck without us sending CommitmentSigned"
-                            .to_string(),
-                    ))?;
-            let local_nonce = self.get_local_musig2_pubnonce();
-            let agg_nonce = AggNonce::sum([local_nonce, remote_nonce]);
-            Musig2CommonContext {
-                local_first: true,
-                key_agg_ctx,
-                agg_nonce,
-            }
-        };
+        let common_ctx = self.get_musig2_common_ctx(true, true)?;
 
         Ok(Musig2SignContext {
             common_ctx,
@@ -7089,7 +7075,11 @@ impl ChannelActorState {
     // That is to say, `for_remote` is equivalent to this function's parameter `local_first`.
     // But, the name local_first is more descriptive in the context of ordering musig2-related
     // stuff.
-    fn get_musig2_common_ctx(&self, local_first: bool) -> Musig2CommonContext {
+    fn get_musig2_common_ctx(
+        &self,
+        local_first: bool,
+        signed_commit_nonce: bool,
+    ) -> Result<Musig2CommonContext, ProcessingChannelError> {
         let local_pubkey = self.get_local_channel_public_keys().funding_pubkey;
         let remote_pubkey = self.get_remote_channel_public_keys().funding_pubkey;
         let pubkeys = if local_first {
@@ -7098,23 +7088,31 @@ impl ChannelActorState {
             [remote_pubkey, local_pubkey]
         };
         let key_agg_ctx = KeyAggContext::new(pubkeys).expect("Valid pubkeys");
-        let remote_nonce = self.get_last_committed_remote_nonce();
+        let remote_nonce = if signed_commit_nonce {
+            self.get_last_commitment_signed_remote_nonce()
+            .ok_or(ProcessingChannelError::InvalidState(
+                "No last used remote nonce found, has the peer sent a RevokeAndAck without us sending CommitmentSigned"
+                    .to_string(),
+            ))?
+        } else {
+            self.get_last_committed_remote_nonce()
+        };
         let local_nonce = self.get_local_musig2_pubnonce();
-
         let agg_nonce = AggNonce::sum(if local_first {
             [local_nonce, remote_nonce]
         } else {
             [remote_nonce, local_nonce]
         });
-        Musig2CommonContext {
+        Ok(Musig2CommonContext {
             local_first,
             key_agg_ctx,
             agg_nonce,
-        }
+        })
     }
 
     fn get_commitment_lock_script_xonly(&self, for_remote: bool) -> [u8; 32] {
-        self.get_musig2_common_ctx(for_remote)
+        self.get_musig2_common_ctx(for_remote, false)
+            .expect("Valid musig2 common context")
             .key_agg_ctx
             .aggregated_pubkey::<Point>()
             .serialize_xonly()
