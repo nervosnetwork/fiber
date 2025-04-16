@@ -484,10 +484,9 @@ where
                 Ok(())
             }
             FiberChannelMessage::RevokeAndAck(revoke_and_ack) => {
-                let need_commitment_signed =
-                    state.handle_revoke_and_ack_peer_message(myself, revoke_and_ack)?;
+                state.handle_revoke_and_ack_peer_message(myself, revoke_and_ack)?;
                 self.update_tlc_status_on_ack(myself, state).await;
-                if need_commitment_signed {
+                if state.tlc_state.need_another_commitment_signed() {
                     self.handle_commitment_signed_command(myself, state)?;
                 }
                 Ok(())
@@ -3059,7 +3058,7 @@ impl TlcState {
         self.need_another_commitment_signed()
     }
 
-    pub fn update_for_revoke_and_ack(&mut self, commitment_number: CommitmentNumbers) -> bool {
+    pub fn update_for_revoke_and_ack(&mut self, commitment_number: CommitmentNumbers) {
         for tlc in self.offered_tlcs.tlcs.iter_mut() {
             match tlc.outbound_status() {
                 OutboundTlcStatus::LocalAnnounced => {
@@ -3091,7 +3090,6 @@ impl TlcState {
                 _ => {}
             }
         }
-        self.need_another_commitment_signed()
     }
 
     pub fn need_another_commitment_signed(&self) -> bool {
@@ -6121,7 +6119,7 @@ impl ChannelActorState {
         &mut self,
         myself: &ActorRef<ChannelActorMessage>,
         revoke_and_ack: RevokeAndAck,
-    ) -> Result<bool, ProcessingChannelError> {
+    ) -> Result<(), ProcessingChannelError> {
         if !self.tlc_state.waiting_ack {
             return Err(ProcessingChannelError::InvalidState(
                 "unexpected RevokeAndAck message".to_string(),
@@ -6231,8 +6229,7 @@ impl ChannelActorState {
         self.increment_local_commitment_number();
         self.append_remote_commitment_point(next_per_commitment_point);
 
-        let need_commitment_signed = self
-            .tlc_state
+        self.tlc_state
             .update_for_revoke_and_ack(self.commitment_numbers);
         self.set_waiting_ack(myself, false);
 
@@ -6246,7 +6243,7 @@ impl ChannelActorState {
                 ),
             ))
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-        Ok(need_commitment_signed)
+        Ok(())
     }
 
     async fn handle_reestablish_channel_message(
