@@ -1,5 +1,5 @@
 use anyhow::anyhow;
-use ckb_sdk::RpcError;
+use ckb_sdk::{tx_builder::TxBuilderError, RpcError};
 use ckb_testtool::context::Context;
 use ckb_types::{
     bytes::Bytes,
@@ -17,7 +17,7 @@ use crate::{
         actor::GetTxResponse,
         config::UdtCfgInfos,
         contracts::{get_cell_deps, Contract, ContractsContext, ContractsInfo, ScriptCellDep},
-        CkbTxTracer, CkbTxTracingMask, CkbTxTracingResult,
+        CkbTxTracer, CkbTxTracingMask, CkbTxTracingResult, FundingError,
     },
     fiber::types::Hash256,
     now_timestamp_as_millis_u64,
@@ -330,6 +330,15 @@ impl Actor for MockChainActor {
                     .as_ref()
                     .map(|x| x.outputs())
                     .unwrap_or_default();
+                let mut capacity =
+                    request.local_amount + (request.local_reserved_ckb_amount as u128);
+                if capacity > u64::MAX as u128 {
+                    let _ = reply_port.send(Err(FundingError::CkbTxBuilderError(
+                        TxBuilderError::Other(anyhow!("capacity overflow")),
+                    )));
+                    return Ok(());
+                }
+
                 let outputs = match outputs.get(0) {
                     Some(output) => {
                         if output.lock() != request.script {
@@ -339,13 +348,22 @@ impl Actor for MockChainActor {
                             return Ok(());
                         }
                         let current_capacity: u64 = output.capacity().unpack();
-                        let capacity = request.local_amount as u64
-                            + request.local_reserved_ckb_amount
-                            + current_capacity;
-                        let mut outputs_builder = outputs.as_builder();
+                        capacity += current_capacity as u128;
+                        if capacity > u64::MAX as u128 {
+                            let _ = reply_port.send(Err(FundingError::CkbTxBuilderError(
+                                TxBuilderError::Other(anyhow!("capacity overflow")),
+                            )));
+                            return Ok(());
+                        }
 
-                        outputs_builder
-                            .replace(0, output.as_builder().capacity(capacity.pack()).build());
+                        let mut outputs_builder = outputs.as_builder();
+                        outputs_builder.replace(
+                            0,
+                            output
+                                .as_builder()
+                                .capacity((capacity as u64).pack())
+                                .build(),
+                        );
                         outputs_builder.build()
                     }
                     None => [CellOutput::new_builder()

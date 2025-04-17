@@ -3,6 +3,7 @@ use ckb_types::core::{EpochNumberWithFraction, FeeRate, TransactionView};
 use ckb_types::packed::{Byte32, OutPoint, Script, Transaction};
 use ckb_types::prelude::{IntoTransactionView, Pack, Unpack};
 use ckb_types::H256;
+use either::Either;
 use once_cell::sync::OnceCell;
 use ractor::concurrency::Duration;
 use ractor::{
@@ -597,6 +598,7 @@ pub enum NetworkServiceEvent {
     ChannelReady(PeerId, Hash256, OutPoint),
     ChannelClosed(PeerId, Hash256, Byte32),
     ChannelAbandon(Hash256),
+    ChannelFundingAborted(Hash256),
     // A RevokeAndAck is received from the peer. Other data relevant to this
     // RevokeAndAck message are also assembled here. The watch tower may use this.
     RevokeAndAckReceived(
@@ -913,7 +915,7 @@ where
             }
             NetworkActorEvent::FundingTransactionPending(transaction, outpoint, channel_id) => {
                 state
-                    .on_funding_transaction_pending(transaction, outpoint.clone(), channel_id)
+                    .on_funding_transaction_pending(channel_id, transaction, outpoint)
                     .await;
             }
             NetworkActorEvent::FundingTransactionConfirmed(
@@ -928,7 +930,7 @@ where
             }
             NetworkActorEvent::FundingTransactionFailed(outpoint) => {
                 error!("Funding transaction failed: {:?}", outpoint);
-                state.remove_in_flight_tx(outpoint.tx_hash().into());
+                state.abort_funding(Either::Right(outpoint)).await;
             }
             NetworkActorEvent::ClosingTransactionPending(channel_id, peer_id, tx, force) => {
                 state
@@ -1308,8 +1310,8 @@ where
                         }
                     },
                     Ok(Err(err)) => {
-                        // FIXME(yukang): we need to handle this error properly
                         error!("Failed to fund channel: {}", err);
+                        state.abort_funding(Either::Left(channel_id)).await;
                         return Ok(());
                     }
                     Err(err) => {
@@ -2455,6 +2457,32 @@ where
         }
     }
 
+    pub async fn abort_funding(&mut self, channel_id_or_outpoint: Either<Hash256, OutPoint>) {
+        let channel_id = match channel_id_or_outpoint {
+            Either::Left(channel_id) => channel_id,
+            Either::Right(outpoint) => {
+                self.remove_in_flight_tx(outpoint.tx_hash().into());
+                match self.pending_channels.remove(&outpoint) {
+                    Some(channel_id) => channel_id,
+                    None => {
+                        warn!(
+                            "Funding transaction failed for outpoint {:?} but no channel found",
+                            &outpoint
+                        );
+                        return;
+                    }
+                }
+            }
+        };
+
+        self.send_message_to_channel_actor(
+            channel_id,
+            None,
+            ChannelActorMessage::Event(ChannelEvent::Stop(StopReason::AbortFunding)),
+        )
+        .await;
+    }
+
     pub async fn abandon_channel(
         &mut self,
         channel_id: Hash256,
@@ -2956,7 +2984,7 @@ where
             }
         }
 
-        if reason == StopReason::Abandon {
+        if reason == StopReason::Abandon || reason == StopReason::AbortFunding {
             if let Some(channel_actor_state) = self.store.get_channel_actor_state(&channel_id) {
                 // remove from transaction track actor
                 if let Some(funding_tx) = channel_actor_state.funding_tx.as_ref() {
@@ -2971,7 +2999,11 @@ where
             // notify event observers, such as remove from watchtower
             self.network
                 .send_message(NetworkActorMessage::new_notification(
-                    NetworkServiceEvent::ChannelAbandon(channel_id),
+                    if reason == StopReason::Abandon {
+                        NetworkServiceEvent::ChannelAbandon(channel_id)
+                    } else {
+                        NetworkServiceEvent::ChannelFundingAborted(channel_id)
+                    },
                 ))
                 .expect(ASSUME_NETWORK_MYSELF_ALIVE);
         }
@@ -3032,9 +3064,9 @@ where
 
     async fn on_funding_transaction_pending(
         &mut self,
+        channel_id: Hash256,
         transaction: Transaction,
         outpoint: OutPoint,
-        channel_id: Hash256,
     ) {
         // Just a sanity check to ensure that no two channels are associated with the same outpoint.
         if let Some(old) = self.pending_channels.remove(&outpoint) {
