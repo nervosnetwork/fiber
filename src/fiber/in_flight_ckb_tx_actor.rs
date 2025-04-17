@@ -230,7 +230,7 @@ impl InFlightCkbTxActor {
     ) -> Result<(), ActorProcessingErr> {
         let message = match (self.tx_kind.clone(), result.tx_status) {
             (
-                InFlightCkbTxKind::Funding(_),
+                InFlightCkbTxKind::Funding(..),
                 TxStatus::Committed(block_number, block_hash, tx_index),
             ) => {
                 let _ = self
@@ -255,7 +255,7 @@ impl InFlightCkbTxActor {
                     return Ok(());
                 }
             }
-            (InFlightCkbTxKind::Funding(_), status) => {
+            (InFlightCkbTxKind::Funding(_channel_id), status) => {
                 tracing::error!(
                     "Funding transaction {:?} failed to be confirmed with final status {:?}",
                     self.tx_hash,

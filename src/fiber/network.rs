@@ -907,7 +907,7 @@ where
             }
             NetworkActorEvent::FundingTransactionPending(transaction, outpoint, channel_id) => {
                 state
-                    .on_funding_transaction_pending(transaction, outpoint.clone(), channel_id)
+                    .on_funding_transaction_pending(channel_id, transaction, outpoint)
                     .await;
             }
             NetworkActorEvent::FundingTransactionConfirmed(
@@ -922,7 +922,7 @@ where
             }
             NetworkActorEvent::FundingTransactionFailed(outpoint) => {
                 error!("Funding transaction failed: {:?}", outpoint);
-                state.remove_in_flight_tx(outpoint.tx_hash().into());
+                state.abort_funding(outpoint).await;
             }
             NetworkActorEvent::ClosingTransactionPending(channel_id, peer_id, tx, force) => {
                 state
@@ -2361,6 +2361,27 @@ where
         }
     }
 
+    pub async fn abort_funding(&mut self, outpoint: OutPoint) {
+        let channel_id = match self.pending_channels.remove(&outpoint) {
+            Some(channel_id) => channel_id,
+            None => {
+                warn!(
+                    "Funding transaction failed for outpoint {:?} but no channel found",
+                    &outpoint
+                );
+                return;
+            }
+        };
+        self.send_message_to_channel_actor(
+            channel_id,
+            None,
+            ChannelActorMessage::Event(ChannelEvent::Stop(StopReason::AbortFunding)),
+        )
+        .await;
+
+        self.remove_in_flight_tx(outpoint.tx_hash().into());
+    }
+
     pub async fn abandon_channel(
         &mut self,
         channel_id: Hash256,
@@ -2850,7 +2871,7 @@ where
             }
         }
 
-        if reason == StopReason::Abandon {
+        if reason == StopReason::Abandon || reason == StopReason::AbortFunding {
             if let Some(channel_actor_state) = self.store.get_channel_actor_state(&channel_id) {
                 // remove from transaction track actor
                 if let Some(funding_tx) = channel_actor_state.funding_tx.as_ref() {
@@ -2926,9 +2947,9 @@ where
 
     async fn on_funding_transaction_pending(
         &mut self,
+        channel_id: Hash256,
         transaction: Transaction,
         outpoint: OutPoint,
-        channel_id: Hash256,
     ) {
         // Just a sanity check to ensure that no two channels are associated with the same outpoint.
         if let Some(old) = self.pending_channels.remove(&outpoint) {
