@@ -3029,7 +3029,6 @@ async fn test_send_payment_sync_up_new_channel_is_added() {
 #[tokio::test]
 // This test implies a bug when reconnecting a peer under the condition of multiple TLC operation
 // skip temporarily until the bug is fixed
-#[ignore]
 async fn test_send_payment_remove_tlc_with_preimage_will_retry() {
     init_tracing();
     let _span = tracing::info_span!("node", node = "test").entered();
@@ -3037,18 +3036,18 @@ async fn test_send_payment_remove_tlc_with_preimage_will_retry() {
         &[
             ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
             ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
-            ((2, 3), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
         ],
-        4,
+        3,
     )
     .await;
-    let [mut node_0, mut node_1, _node_2, node_3] = nodes.try_into().expect("4 nodes");
+    let [mut node_0, mut node_1, node_2] = nodes.try_into().expect("4 nodes");
 
     let mut payments = HashSet::new();
 
     for _i in 0..5 {
+        let amount = rand::random::<u128>() % 1000 + 1;
         let res = node_0
-            .send_payment_keysend(&node_3, 1000, false)
+            .send_payment_keysend(&node_2, amount, false)
             .await
             .unwrap();
         payments.insert(res.payment_hash);
@@ -3083,6 +3082,9 @@ async fn test_send_payment_remove_tlc_with_preimage_will_retry() {
     // so all the payments should be succeeded after all
     loop {
         for payment_hash in payments.clone().iter() {
+            assert!(node_0.get_triggered_unexpected_events().await.is_empty());
+            assert!(node_1.get_triggered_unexpected_events().await.is_empty());
+            assert!(node_2.get_triggered_unexpected_events().await.is_empty());
             let status = node_0.get_payment_status(*payment_hash).await;
             eprintln!("payment_hash: {:?} got status : {:?}", payment_hash, status);
             if status == PaymentSessionStatus::Success {

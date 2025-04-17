@@ -1133,6 +1133,9 @@ where
                 for (_peer_id, channel_id, channel_state) in self.store.get_channel_states(None) {
                     if matches!(channel_state, ChannelState::ChannelReady) {
                         if let Some(actor_state) = self.store.get_channel_actor_state(&channel_id) {
+                            if actor_state.reestablishing {
+                                continue;
+                            }
                             for tlc in actor_state.tlc_state.received_tlcs.get_committed_tlcs() {
                                 if let Some(payment_preimage) =
                                     self.store.get_invoice_preimage(&tlc.payment_hash)

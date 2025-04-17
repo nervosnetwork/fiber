@@ -61,6 +61,7 @@ use tokio::{
     sync::{mpsc, OnceCell},
     time::sleep,
 };
+use tracing::debug;
 
 use crate::fiber::graph::ChannelInfo;
 use crate::fiber::graph::NodeInfo;
@@ -1353,9 +1354,9 @@ impl NetworkNode {
                     match event {
                         None => panic!("Event emitter unexpectedly stopped"),
                         Some(event) => {
-                            println!("Received event when waiting for specific event: {:?}", &event);
+                            debug!("Received event when waiting for specific event: {:?}", &event);
                             if let Some(r) = event_processor(&event) {
-                                println!("Event ({:?}) matching filter received, exiting waiting for event loop", &event);
+                                debug!("Event ({:?}) matching filter received, exiting waiting for event loop", &event);
                                 return r;
                             }
                         }
