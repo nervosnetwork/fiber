@@ -3093,7 +3093,7 @@ async fn test_send_payment_remove_tlc_with_preimage_will_retry() {
             if status == PaymentSessionStatus::Success {
                 payments.remove(payment_hash);
             }
-            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
         }
         if payments.is_empty() {
             break;
@@ -3102,13 +3102,13 @@ async fn test_send_payment_remove_tlc_with_preimage_will_retry() {
             .duration_since(started)
             .expect("time passed")
             .as_secs();
-        if escaped > 120 {
+        if escaped > 100 {
             let node0_state = node_0.get_channel_actor_state(channels[0]);
             eprintln!("peer {:?} node_0_state:", node_0.get_peer_id());
             node0_state.tlc_state.debug();
 
             let node1_state = node_1.get_channel_actor_state(channels[0]);
-            eprintln!("peer {:?} node_1_left_actor_state:", node_1.get_peer_id());
+            eprintln!("peer {:?} node1_left_actor_state:", node_1.get_peer_id());
             node1_state.tlc_state.debug();
 
             let node1_right_state = node_1.get_channel_actor_state(channels[1]);

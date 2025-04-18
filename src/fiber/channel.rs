@@ -6352,104 +6352,34 @@ impl ChannelActorState {
                     // resend AddTlc, RemoveTlc and CommitmentSigned messages if needed
                     self.set_waiting_ack(myself, false);
 
-                    for info in self.tlc_state.all_tlcs() {
-                        if info.is_offered()
-                            && matches!(info.outbound_status(), OutboundTlcStatus::LocalAnnounced)
-                        {
-                            // resend AddTlc message
-                            network
-                                .send_message(NetworkActorMessage::new_command(
-                                    NetworkActorCommand::SendFiberMessage(
-                                        FiberMessageWithPeerId::new(
-                                            self.get_remote_peer_id(),
-                                            FiberMessage::add_tlc(AddTlc {
-                                                channel_id: self.get_id(),
-                                                tlc_id: info.tlc_id.into(),
-                                                amount: info.amount,
-                                                payment_hash: info.payment_hash,
-                                                expiry: info.expiry,
-                                                hash_algorithm: info.hash_algorithm,
-                                                onion_packet: info.onion_packet.clone(),
-                                            }),
-                                        ),
-                                    ),
-                                ))
-                                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-                            need_resend_commitment_signed = true;
-                            debug_event!(network, "resend add tlc");
-                        } else if let Some(remove_reason) = &info.removed_reason {
-                            if info.is_received()
-                                && matches!(info.inbound_status(), InboundTlcStatus::LocalRemoved)
-                            {
-                                // resend RemoveTlc message
-                                network
-                                    .send_message(NetworkActorMessage::new_command(
-                                        NetworkActorCommand::SendFiberMessage(
-                                            FiberMessageWithPeerId::new(
-                                                self.get_remote_peer_id(),
-                                                FiberMessage::remove_tlc(RemoveTlc {
-                                                    channel_id: self.get_id(),
-                                                    tlc_id: info.tlc_id.into(),
-                                                    reason: remove_reason.clone(),
-                                                }),
-                                            ),
-                                        ),
-                                    ))
-                                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-
-                                need_resend_commitment_signed = true;
-                                debug_event!(network, "resend remove tlc");
-                            }
-                        }
-                    }
-                } else if expected_remote_commitment_number == actual_remote_commitment_number + 1
-                    && expected_local_commitment_number == actual_local_commitment_number
-                {
+                    self.resync_channel_tlcs()?;
+                } else if expected_local_commitment_number == actual_local_commitment_number {
                     // Resetting our remote commitment number to the actual remote commitment number
                     // and resend the RevokeAndAck message.
                     self.set_waiting_ack(myself, false);
 
-                    for info in self.tlc_state.all_tlcs() {
-                        if let Some(remove_reason) = &info.removed_reason {
-                            if info.is_received()
-                                && matches!(info.inbound_status(), InboundTlcStatus::LocalRemoved)
-                            {
-                                // resend RemoveTlc message
-                                network
-                                    .send_message(NetworkActorMessage::new_command(
-                                        NetworkActorCommand::SendFiberMessage(
-                                            FiberMessageWithPeerId::new(
-                                                self.get_remote_peer_id(),
-                                                FiberMessage::remove_tlc(RemoveTlc {
-                                                    channel_id: self.get_id(),
-                                                    tlc_id: info.tlc_id.into(),
-                                                    reason: remove_reason.clone(),
-                                                }),
-                                            ),
+                    if expected_remote_commitment_number == actual_remote_commitment_number + 1 {
+                        self.resync_channel_tlcs()?;
+                        if let Some(last_revoke_ack_msg) = self.last_revoke_ack_msg.clone() {
+                            self.network()
+                                .send_message(NetworkActorMessage::new_command(
+                                    NetworkActorCommand::SendFiberMessage(
+                                        FiberMessageWithPeerId::new(
+                                            self.get_remote_peer_id(),
+                                            FiberMessage::revoke_and_ack(last_revoke_ack_msg),
                                         ),
-                                    ))
-                                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-
-                                debug_event!(network, "resend remove tlc");
-                            }
+                                    ),
+                                ))
+                                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
                         }
+                    } else if actual_local_commitment_number == expected_remote_commitment_number {
+                        need_resend_commitment_signed = true;
                     }
-
-                    if let Some(last_revoke_ack_msg) = self.last_revoke_ack_msg.clone() {
-                        self.network()
-                            .send_message(NetworkActorMessage::new_command(
-                                NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
-                                    self.get_remote_peer_id(),
-                                    FiberMessage::revoke_and_ack(last_revoke_ack_msg),
-                                )),
-                            ))
-                            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-                    }
-                } else if actual_local_commitment_number == expected_remote_commitment_number
-                    && expected_local_commitment_number == actual_local_commitment_number
-                {
-                    self.set_waiting_ack(myself, false);
-                    need_resend_commitment_signed = true;
+                } else {
+                    error!("Unexpected reestablish channel message, \
+                        expected_local_number: {}, expected_remote_number: {}, actual_local_number: {}, actual_remote_number: {}",
+                        expected_local_commitment_number, expected_remote_commitment_number,
+                        actual_local_commitment_number, actual_remote_commitment_number);
                 }
 
                 // previous waiting_ack maybe true, reset it after reestablish the channel
@@ -6475,6 +6405,55 @@ impl ChannelActorState {
                     "Unhandled reestablish channel message in state {:?}",
                     &self.state
                 );
+            }
+        }
+        Ok(())
+    }
+
+    fn resync_channel_tlcs(&self) -> ProcessingChannelResult {
+        let network = self.network();
+        for info in self.tlc_state.all_tlcs() {
+            if info.is_offered()
+                && matches!(info.outbound_status(), OutboundTlcStatus::LocalAnnounced)
+            {
+                // resend AddTlc message
+                network
+                    .send_message(NetworkActorMessage::new_command(
+                        NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
+                            self.get_remote_peer_id(),
+                            FiberMessage::add_tlc(AddTlc {
+                                channel_id: self.get_id(),
+                                tlc_id: info.tlc_id.into(),
+                                amount: info.amount,
+                                payment_hash: info.payment_hash,
+                                expiry: info.expiry,
+                                hash_algorithm: info.hash_algorithm,
+                                onion_packet: info.onion_packet.clone(),
+                            }),
+                        )),
+                    ))
+                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                debug_event!(network, "resend add tlc");
+            } else if let Some(remove_reason) = &info.removed_reason {
+                if info.is_received()
+                    && matches!(info.inbound_status(), InboundTlcStatus::LocalRemoved)
+                {
+                    // resend RemoveTlc message
+                    network
+                        .send_message(NetworkActorMessage::new_command(
+                            NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
+                                self.get_remote_peer_id(),
+                                FiberMessage::remove_tlc(RemoveTlc {
+                                    channel_id: self.get_id(),
+                                    tlc_id: info.tlc_id.into(),
+                                    reason: remove_reason.clone(),
+                                }),
+                            )),
+                        ))
+                        .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+
+                    debug_event!(network, "resend remove tlc");
+                }
             }
         }
         Ok(())
