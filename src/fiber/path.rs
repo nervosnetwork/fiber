@@ -1,4 +1,4 @@
-use super::graph::PathEdge;
+use super::graph::RouterHop;
 use super::types::Pubkey;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
@@ -28,7 +28,7 @@ pub(crate) struct NodeHeapElement {
     pub incoming_tlc_expiry: u64,
 
     // next_hop is the edge this route comes from, we also include the fee rate and tlc expiry delta.
-    pub next_hop: Option<PathEdge>,
+    pub next_hop: Option<RouterHop>,
 }
 
 impl Ord for NodeHeapElement {
