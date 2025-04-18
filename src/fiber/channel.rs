@@ -484,10 +484,9 @@ where
                 Ok(())
             }
             FiberChannelMessage::RevokeAndAck(revoke_and_ack) => {
-                let need_commitment_signed =
-                    state.handle_revoke_and_ack_peer_message(myself, revoke_and_ack)?;
+                state.handle_revoke_and_ack_peer_message(myself, revoke_and_ack)?;
                 self.update_tlc_status_on_ack(myself, state).await;
-                if need_commitment_signed {
+                if state.tlc_state.need_another_commitment_signed() {
                     self.handle_commitment_signed_command(myself, state)?;
                 }
                 Ok(())
@@ -1595,6 +1594,10 @@ where
         myself: &ActorRef<ChannelActorMessage>,
         state: &mut ChannelActorState,
     ) {
+        if state.reestablishing {
+            // retry all the pending operations after reestablishing finished
+            return state.trigger_retryable_operations_later(myself);
+        }
         let mut pending_tlc_ops = state.tlc_state.get_pending_operations();
         pending_tlc_ops.retain_mut(|retryable_operation| {
             match retryable_operation {
@@ -1681,11 +1684,7 @@ where
         });
 
         state.tlc_state.retryable_tlc_operations = pending_tlc_ops;
-        if state.tlc_state.has_pending_operations() {
-            myself.send_after(RETRYABLE_TLC_OPS_INTERVAL, || {
-                ChannelActorMessage::Event(ChannelEvent::CheckTlcRetryOperation)
-            });
-        }
+        state.trigger_retryable_operations_later(myself);
     }
 
     async fn handle_forward_tlc_result(
@@ -3059,7 +3058,7 @@ impl TlcState {
         self.need_another_commitment_signed()
     }
 
-    pub fn update_for_revoke_and_ack(&mut self, commitment_number: CommitmentNumbers) -> bool {
+    pub fn update_for_revoke_and_ack(&mut self, commitment_number: CommitmentNumbers) {
         for tlc in self.offered_tlcs.tlcs.iter_mut() {
             match tlc.outbound_status() {
                 OutboundTlcStatus::LocalAnnounced => {
@@ -3091,7 +3090,6 @@ impl TlcState {
                 _ => {}
             }
         }
-        self.need_another_commitment_signed()
     }
 
     pub fn need_another_commitment_signed(&self) -> bool {
@@ -3777,7 +3775,7 @@ impl ChannelActorState {
         if let Some(timestamp) = self.waiting_peer_response {
             // depends on the system's clock source, not all system clocks are monotonic, using saturating_sub to avoid potential underflow
             let elapsed = now_timestamp_as_millis_u64().saturating_sub(timestamp);
-            elapsed > PEER_CHANNEL_RESPONSE_TIMEOUT
+            elapsed > PEER_CHANNEL_RESPONSE_TIMEOUT && !self.reestablishing
         } else {
             false
         }
@@ -6121,7 +6119,7 @@ impl ChannelActorState {
         &mut self,
         myself: &ActorRef<ChannelActorMessage>,
         revoke_and_ack: RevokeAndAck,
-    ) -> Result<bool, ProcessingChannelError> {
+    ) -> Result<(), ProcessingChannelError> {
         if !self.tlc_state.waiting_ack {
             return Err(ProcessingChannelError::InvalidState(
                 "unexpected RevokeAndAck message".to_string(),
@@ -6231,8 +6229,7 @@ impl ChannelActorState {
         self.increment_local_commitment_number();
         self.append_remote_commitment_point(next_per_commitment_point);
 
-        let need_commitment_signed = self
-            .tlc_state
+        self.tlc_state
             .update_for_revoke_and_ack(self.commitment_numbers);
         self.set_waiting_ack(myself, false);
 
@@ -6246,7 +6243,7 @@ impl ChannelActorState {
                 ),
             ))
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-        Ok(need_commitment_signed)
+        Ok(())
     }
 
     async fn handle_reestablish_channel_message(
@@ -6679,7 +6676,9 @@ impl ChannelActorState {
     fn get_verify_context(&self) -> Musig2VerifyContext {
         // We are always verifying a commitment transaction that is broadcast by us,
         // so we can always pass false to get_musig2_common_ctx.
-        let common_ctx = self.get_musig2_common_ctx(false);
+        let common_ctx = self
+            .get_musig2_common_ctx(false, false)
+            .expect("get_musig2_common_ctx error");
 
         Musig2VerifyContext {
             common_ctx,
@@ -6713,7 +6712,9 @@ impl ChannelActorState {
     // we need a `for_remote` parameter. It serves the same function as `for_remote` in functions
     // like `build_commitment_and_settlement_tx`.
     fn get_sign_context(&self, for_remote: bool) -> Musig2SignContext {
-        let common_ctx = self.get_musig2_common_ctx(for_remote);
+        let common_ctx = self
+            .get_musig2_common_ctx(for_remote, false)
+            .expect("get_musig2_common_ctx error");
 
         Musig2SignContext {
             common_ctx,
@@ -6728,25 +6729,7 @@ impl ChannelActorState {
     fn get_sign_context_for_revoke_and_ack_message(
         &self,
     ) -> Result<Musig2SignContext, ProcessingChannelError> {
-        let common_ctx = {
-            let local_pubkey = self.get_local_channel_public_keys().funding_pubkey;
-            let remote_pubkey = self.get_remote_channel_public_keys().funding_pubkey;
-            let pubkeys = [local_pubkey, remote_pubkey];
-            let key_agg_ctx = KeyAggContext::new(pubkeys).expect("Valid pubkeys");
-            let remote_nonce =
-                self.get_last_commitment_signed_remote_nonce()
-                    .ok_or(ProcessingChannelError::InvalidState(
-                        "No last used remote nonce found, has the peer sent a RevokeAndAck without us sending CommitmentSigned"
-                            .to_string(),
-                    ))?;
-            let local_nonce = self.get_local_musig2_pubnonce();
-            let agg_nonce = AggNonce::sum([local_nonce, remote_nonce]);
-            Musig2CommonContext {
-                local_first: true,
-                key_agg_ctx,
-                agg_nonce,
-            }
-        };
+        let common_ctx = self.get_musig2_common_ctx(true, true)?;
 
         Ok(Musig2SignContext {
             common_ctx,
@@ -6973,7 +6956,11 @@ impl ChannelActorState {
     // That is to say, `for_remote` is equivalent to this function's parameter `local_first`.
     // But, the name local_first is more descriptive in the context of ordering musig2-related
     // stuff.
-    fn get_musig2_common_ctx(&self, local_first: bool) -> Musig2CommonContext {
+    fn get_musig2_common_ctx(
+        &self,
+        local_first: bool,
+        signed_commit_nonce: bool,
+    ) -> Result<Musig2CommonContext, ProcessingChannelError> {
         let local_pubkey = self.get_local_channel_public_keys().funding_pubkey;
         let remote_pubkey = self.get_remote_channel_public_keys().funding_pubkey;
         let pubkeys = if local_first {
@@ -6982,23 +6969,31 @@ impl ChannelActorState {
             [remote_pubkey, local_pubkey]
         };
         let key_agg_ctx = KeyAggContext::new(pubkeys).expect("Valid pubkeys");
-        let remote_nonce = self.get_last_committed_remote_nonce();
+        let remote_nonce = if signed_commit_nonce {
+            self.get_last_commitment_signed_remote_nonce()
+            .ok_or(ProcessingChannelError::InvalidState(
+                "No last used remote nonce found, has the peer sent a RevokeAndAck without us sending CommitmentSigned"
+                    .to_string(),
+            ))?
+        } else {
+            self.get_last_committed_remote_nonce()
+        };
         let local_nonce = self.get_local_musig2_pubnonce();
-
         let agg_nonce = AggNonce::sum(if local_first {
             [local_nonce, remote_nonce]
         } else {
             [remote_nonce, local_nonce]
         });
-        Musig2CommonContext {
+        Ok(Musig2CommonContext {
             local_first,
             key_agg_ctx,
             agg_nonce,
-        }
+        })
     }
 
     fn get_commitment_lock_script_xonly(&self, for_remote: bool) -> [u8; 32] {
-        self.get_musig2_common_ctx(for_remote)
+        self.get_musig2_common_ctx(for_remote, false)
+            .expect("Valid musig2 common context")
             .key_agg_ctx
             .aggregated_pubkey::<Point>()
             .serialize_xonly()
@@ -7314,6 +7309,14 @@ impl ChannelActorState {
             let _ = network.send_message(NetworkActorMessage::new_command(
                 NetworkActorCommand::NotifyFundingTx(tx.clone()),
             ));
+        }
+    }
+
+    fn trigger_retryable_operations_later(&self, myself: &ActorRef<ChannelActorMessage>) {
+        if self.tlc_state.has_pending_operations() {
+            myself.send_after(RETRYABLE_TLC_OPS_INTERVAL, || {
+                ChannelActorMessage::Event(ChannelEvent::CheckTlcRetryOperation)
+            });
         }
     }
 }
