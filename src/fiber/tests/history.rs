@@ -3,12 +3,12 @@ use crate::fiber::history::output_direction;
 use crate::fiber::history::{Direction, DEFAULT_BIMODAL_DECAY_TIME};
 use crate::fiber::history::{InternalPairResult, InternalResult};
 use crate::fiber::history::{PaymentHistory, TimedResult};
-use crate::fiber::tests::test_utils::TempDir;
 use crate::store::Store;
+use crate::tests::test_utils::TempDir;
 use crate::{gen_rand_channel_outpoint, gen_rand_fiber_public_key, now_timestamp_as_millis_u64};
 use ckb_types::packed::OutPoint;
 
-use super::test_utils::generate_store;
+use crate::test_utils::generate_store;
 
 trait Round {
     fn round_to_2(self) -> f64;

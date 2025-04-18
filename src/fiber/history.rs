@@ -335,7 +335,7 @@ where
         s
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "bench"))]
     pub(crate) fn reset(&mut self) {
         self.inner.clear();
         self.nodes_to_channel_map.clear();

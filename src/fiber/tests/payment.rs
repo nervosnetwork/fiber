@@ -1,5 +1,4 @@
 #![allow(clippy::needless_range_loop)]
-use super::test_utils::init_tracing;
 use crate::fiber::channel::ChannelState;
 use crate::fiber::channel::CloseFlags;
 use crate::fiber::channel::UpdateCommand;
@@ -9,7 +8,6 @@ use crate::fiber::graph::PaymentSessionStatus;
 use crate::fiber::network::HopHint;
 use crate::fiber::network::PaymentCustomRecords;
 use crate::fiber::network::SendPaymentCommand;
-use crate::fiber::tests::test_utils::*;
 use crate::fiber::types::Hash256;
 use crate::fiber::NetworkActorCommand;
 use crate::fiber::NetworkActorMessage;
@@ -17,6 +15,7 @@ use crate::gen_rand_sha256_hash;
 use crate::invoice::CkbInvoice;
 use crate::invoice::Currency;
 use crate::invoice::InvoiceBuilder;
+use crate::tests::test_utils::*;
 use crate::NetworkServiceEvent;
 use ckb_types::{core::tx_pool::TxStatus, packed::OutPoint};
 use ractor::call;
@@ -3024,6 +3023,60 @@ async fn test_send_payment_sync_up_new_channel_is_added() {
 
     let payment_hash = res.unwrap().payment_hash;
     node_0.wait_until_success(payment_hash).await;
+}
+
+#[tokio::test]
+async fn test_send_payment_pending_count_on_find_path() {
+    init_tracing();
+    let _span = tracing::info_span!("node", node = "test").entered();
+    let funding_amount = HUGE_CKB_AMOUNT;
+    let (nodes, channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (funding_amount, funding_amount)),
+            // we build multiple channels between node_1 and node_2
+            ((1, 2), (funding_amount, funding_amount)),
+            ((1, 2), (funding_amount, funding_amount)),
+            ((1, 2), (funding_amount, funding_amount)),
+            ((1, 2), (funding_amount, funding_amount)),
+            // node_2 -> node_3
+            ((2, 3), (funding_amount, funding_amount)),
+        ],
+        4,
+    )
+    .await;
+
+    let mut payments = HashSet::new();
+    let mut channel_stats_map = HashMap::new();
+    for i in 0..20 {
+        let payment_amount = 10;
+        let res = nodes[0]
+            .send_payment_keysend(&nodes[3], payment_amount, false)
+            .await
+            .unwrap();
+
+        let payment_hash = res.payment_hash;
+        let second_hop_channel = res.router.nodes[1].channel_outpoint.clone();
+        channel_stats_map
+            .entry(second_hop_channel)
+            .and_modify(|e| *e += 1)
+            .or_insert(1);
+
+        eprintln!("i: {:?} payment_hash: {:?}", i, payment_hash);
+        payments.insert(payment_hash);
+    }
+
+    // assert that the path finding tried all the channels
+    for channel in &channels[1..channels.len() - 1] {
+        let funding_tx = nodes[0].get_channel_funding_tx(channel).unwrap();
+        let channel_outpoint = OutPoint::new(funding_tx.into(), 0);
+
+        let tried_count = channel_stats_map.get(&channel_outpoint).unwrap_or(&0);
+        eprintln!(
+            "check channel_outpoint: {:?}, count: {:?}",
+            channel_outpoint, tried_count
+        );
+        assert!(*tried_count > 0);
+    }
 }
 
 #[tokio::test]

@@ -1,11 +1,12 @@
 mod config;
 pub use config::Config;
 
-#[cfg(test)]
-mod tests;
+#[cfg(any(test, feature = "bench"))]
+pub mod tests;
+
 use fiber::types::Hash256;
 use rand::Rng;
-#[cfg(test)]
+#[cfg(any(test, feature = "bench"))]
 pub use tests::*;
 
 pub mod ckb;
