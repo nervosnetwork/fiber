@@ -6402,22 +6402,6 @@ impl ChannelActorState {
                             }
                         }
                     }
-
-                    // previous waiting_ack maybe true, reset it after reestablish the channel
-                    // if we need to resend CommitmentSigned message, it will be set to proper status again
-
-                    if self.tlc_state.need_another_commitment_signed()
-                        || need_resend_commitment_signed
-                    {
-                        network
-                            .send_message(NetworkActorMessage::new_command(
-                                NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
-                                    channel_id: self.get_id(),
-                                    command: ChannelCommand::CommitmentSigned(),
-                                }),
-                            ))
-                            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-                    }
                 } else if expected_remote_commitment_number == actual_remote_commitment_number + 1
                     && expected_local_commitment_number == actual_local_commitment_number
                 {
@@ -6465,6 +6449,21 @@ impl ChannelActorState {
                     && expected_local_commitment_number == actual_local_commitment_number
                 {
                     self.set_waiting_ack(myself, false);
+                    need_resend_commitment_signed = true;
+                }
+
+                // previous waiting_ack maybe true, reset it after reestablish the channel
+                // if we need to resend CommitmentSigned message, it will be set to proper status again
+                if need_resend_commitment_signed || self.tlc_state.need_another_commitment_signed()
+                {
+                    network
+                        .send_message(NetworkActorMessage::new_command(
+                            NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
+                                channel_id: self.get_id(),
+                                command: ChannelCommand::CommitmentSigned(),
+                            }),
+                        ))
+                        .expect(ASSUME_NETWORK_ACTOR_ALIVE);
                 }
 
                 self.on_reestablished_channel_ready(myself).await;
