@@ -2510,10 +2510,20 @@ impl CommitmentNumbers {
 
     pub fn increment_local(&mut self) {
         self.local += 1;
+        // assert!(
+        //     self.local + 1 == self.remote
+        //         || self.local == self.remote + 1
+        //         || self.local == self.remote
+        // );
     }
 
     pub fn increment_remote(&mut self) {
         self.remote += 1;
+        // assert!(
+        //     self.local + 1 == self.remote
+        //         || self.local == self.remote + 1
+        //         || self.local == self.remote
+        // );
     }
 
     pub fn flip(&self) -> Self {
