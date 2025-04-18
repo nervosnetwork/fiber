@@ -6461,6 +6461,10 @@ impl ChannelActorState {
                             ))
                             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
                     }
+                } else if actual_local_commitment_number == expected_remote_commitment_number
+                    && expected_local_commitment_number == actual_local_commitment_number
+                {
+                    self.set_waiting_ack(myself, false);
                 }
 
                 self.on_reestablished_channel_ready(myself).await;

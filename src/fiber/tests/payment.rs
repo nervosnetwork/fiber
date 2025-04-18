@@ -22,6 +22,7 @@ use ckb_types::{core::tx_pool::TxStatus, packed::OutPoint};
 use ractor::call;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::time::SystemTime;
 
 #[tokio::test]
 async fn test_send_payment_custom_records() {
@@ -3032,7 +3033,7 @@ async fn test_send_payment_sync_up_new_channel_is_added() {
 async fn test_send_payment_remove_tlc_with_preimage_will_retry() {
     init_tracing();
     let _span = tracing::info_span!("node", node = "test").entered();
-    let (nodes, _channels) = create_n_nodes_network(
+    let (nodes, channels) = create_n_nodes_network(
         &[
             ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
             ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
@@ -3080,6 +3081,8 @@ async fn test_send_payment_remove_tlc_with_preimage_will_retry() {
 
     // the CheckChannels in network actor will continue to retry RemoveTlc for tlc already with preimage
     // so all the payments should be succeeded after all
+    let started = SystemTime::now();
+
     loop {
         for payment_hash in payments.clone().iter() {
             assert!(node_0.get_triggered_unexpected_events().await.is_empty());
@@ -3094,6 +3097,29 @@ async fn test_send_payment_remove_tlc_with_preimage_will_retry() {
         }
         if payments.is_empty() {
             break;
+        }
+        let escaped = SystemTime::now()
+            .duration_since(started)
+            .expect("time passed")
+            .as_secs();
+        if escaped > 120 {
+            let node0_state = node_0.get_channel_actor_state(channels[0]);
+            eprintln!("peer {:?} node_0_state:", node_0.get_peer_id());
+            node0_state.tlc_state.debug();
+
+            let node1_state = node_1.get_channel_actor_state(channels[0]);
+            eprintln!("peer {:?} node_1_left_actor_state:", node_1.get_peer_id());
+            node1_state.tlc_state.debug();
+
+            let node1_right_state = node_1.get_channel_actor_state(channels[1]);
+            eprintln!("peer {:?} node1_right_actor_state:", node_1.get_peer_id());
+            node1_right_state.tlc_state.debug();
+
+            let node2_state = node_2.get_channel_actor_state(channels[1]);
+            eprintln!("peer {:?} node_2_state:", node_2.get_peer_id());
+            node2_state.tlc_state.debug();
+
+            panic!("timeout");
         }
     }
 }
