@@ -6377,14 +6377,29 @@ impl ChannelActorState {
                 {
                     // commitments are the same, sync up the tlcs
                     self.set_waiting_ack(myself, false);
-                    self.resync_channel_tlcs(true)?;
+                    self.resend_tlcs_on_reestablish(false)?;
+
+                    // there is a scenario that two peers are both in WaitingAck state
+                    // and if two parties send CommitmentSigned message to each other there maybe be a Musig2VerifyError
+                    // eventually, we need to keep the linearity of the signing and verification operation
+                    // so here we pick a order that the acceptor will send the CommitmentSigned message first
+                    if self.is_acceptor {
+                        network
+                            .send_message(NetworkActorMessage::new_command(
+                                NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
+                                    channel_id: self.get_id(),
+                                    command: ChannelCommand::CommitmentSigned(),
+                                }),
+                            ))
+                            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                    }
                 } else if my_remote_commitment_number == peer_local_commitment_number + 1
                     && peer_waiting_ack
                 {
                     // peer need ACK, I need to send my revoke_and_ack message
                     // don't clear my waiting_ack flag here, since if i'm waiting for peer ack,
                     // peer will resend commitment_signed message
-                    self.resync_channel_tlcs(false)?;
+                    self.resend_tlcs_on_reestablish(false)?;
                     if let Some(last_revoke_ack_msg) = self.last_revoke_ack_msg.clone() {
                         self.network()
                             .send_message(NetworkActorMessage::new_command(
@@ -6398,8 +6413,8 @@ impl ChannelActorState {
                         // this check make sure the two parties make symmetric commitment numbers
                         // after the peer process the revoke_and_ack message and increased his local number
                         // otherwise this CommitmentSigned peer message will be verified as invalid
-                        if my_local_commitment_number == peer_remote_commitment_number
-                            && self.tlc_state.need_another_commitment_signed()
+                        if my_waiting_ack
+                            && my_local_commitment_number == peer_remote_commitment_number
                         {
                             self.network()
                                 .send_message(NetworkActorMessage::new_command(
@@ -6417,7 +6432,7 @@ impl ChannelActorState {
                     && my_local_commitment_number == peer_remote_commitment_number
                 {
                     // I need to resend my commitment_signed message, don't clear my WaitingTlcAck flag
-                    self.resync_channel_tlcs(true)?;
+                    self.resend_tlcs_on_reestablish(true)?;
                 } else {
                     error!(
                         "peer: {:?} unexpected_commitnumbers",
@@ -6439,7 +6454,7 @@ impl ChannelActorState {
         Ok(())
     }
 
-    fn resync_channel_tlcs(&self, send_commitment_signed: bool) -> ProcessingChannelResult {
+    fn resend_tlcs_on_reestablish(&self, send_commitment_signed: bool) -> ProcessingChannelResult {
         let network = self.network();
         let mut need_commitment_signed = false;
         for info in self.tlc_state.all_tlcs() {
