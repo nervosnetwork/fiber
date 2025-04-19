@@ -1,6 +1,5 @@
 [workspace]
 members = ["fiber-lib", "fiber-bin"]
-
 resolver = "2"
 
 [profile.release]
