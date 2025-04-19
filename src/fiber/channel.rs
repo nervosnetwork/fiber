@@ -6136,21 +6136,21 @@ impl ChannelActorState {
 
     async fn on_reestablished_channel_ready(&mut self, myself: &ActorRef<ChannelActorMessage>) {
         self.reestablishing = false;
-        self.mark_retry_ops_for_reestablish();
+
+        // TODO: we may use the solution of checking ChannelActorState to determine if we have
+        // forwarded tlcs or not, so we don't need to reset these status any more,
+        // the ForwardTlcResult could be removed totally
+        for op in self.tlc_state.retryable_tlc_operations.iter_mut() {
+            if let RetryableTlcOperation::ForwardTlc(_, _, _, _, try_one_time) = op {
+                *try_one_time = true;
+            }
+        }
         if self.tlc_state.has_pending_operations() {
             myself.send_after(4 * RETRYABLE_TLC_OPS_INTERVAL, || {
                 ChannelActorMessage::Event(ChannelEvent::CheckTlcRetryOperation)
             });
         }
         self.on_owned_channel_updated(myself, false).await;
-    }
-
-    fn mark_retry_ops_for_reestablish(&mut self) {
-        for op in self.tlc_state.retryable_tlc_operations.iter_mut() {
-            if let RetryableTlcOperation::ForwardTlc(_, _, _, _, try_one_time) = op {
-                *try_one_time = true;
-            }
-        }
     }
 
     fn append_remote_commitment_point(&mut self, commitment_point: Pubkey) {
