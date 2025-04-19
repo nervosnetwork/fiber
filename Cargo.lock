@@ -1636,6 +1636,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "28dea519a9695b9977216879a3ebfddf92f1c08c05d984f8996aecd6ecdc811d"
 
 [[package]]
+name = "fiber-bin"
+version = "0.1.0"
+
+[[package]]
 name = "fiber-sphinx"
 version = "2.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
