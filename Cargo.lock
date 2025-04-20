@@ -1637,7 +1637,16 @@ checksum = "28dea519a9695b9977216879a3ebfddf92f1c08c05d984f8996aecd6ecdc811d"
 
 [[package]]
 name = "fiber-bin"
-version = "0.1.0"
+version = "0.4.2"
+dependencies = [
+ "ckb-chain-spec",
+ "ckb-resource",
+ "fnn",
+ "ractor",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
 
 [[package]]
 name = "fiber-sphinx"

@@ -1,4 +1,8 @@
-use super::db_migrate::DbMigrate;
+mod native;
+
+pub use native::Batch;
+pub use native::Store;
+
 use super::schema::*;
 use crate::{
     fiber::{
@@ -16,18 +20,9 @@ use crate::{
 };
 use ckb_types::packed::{OutPoint, Script};
 use ckb_types::prelude::Entity;
-use rocksdb::{
-    prelude::*, DBCompressionType, DBIterator, Direction as DbDirection, IteratorMode, WriteBatch,
-    DB,
-};
+use rocksdb::{prelude::*, Direction as DbDirection, IteratorMode};
 use serde::Serialize;
-use std::{path::Path, sync::Arc};
 use tentacle::secio::PeerId;
-
-#[derive(Clone, Debug)]
-pub struct Store {
-    pub(crate) db: Arc<DB>,
-}
 
 #[derive(Copy, Clone)]
 enum ChannelTimestamp {
@@ -70,73 +65,17 @@ fn update_channel_timestamp(
     batch.put(timestamp_key, timestamps);
 }
 
-impl Store {
-    pub fn new<P: AsRef<Path>>(path: P) -> Result<Self, String> {
-        let db = Self::open_db(path.as_ref())?;
-        let db = Self::check_migrate(path, db)?;
-        Ok(Self { db })
-    }
-
-    fn open_db(path: &Path) -> Result<Arc<DB>, String> {
-        // add more migrations here
-        let mut options = Options::default();
-        options.create_if_missing(true);
-        options.set_compression_type(DBCompressionType::Lz4);
-        let db = Arc::new(DB::open(&options, path).map_err(|e| e.to_string())?);
-        Ok(db)
-    }
-
-    fn get<K: AsRef<[u8]>>(&self, key: K) -> Option<Vec<u8>> {
-        self.db
-            .get(key.as_ref())
-            .map(|v| v.map(|vi| vi.to_vec()))
-            .expect("get should be OK")
-    }
-
-    #[allow(dead_code)]
-    fn get_range<K: AsRef<[u8]>>(
-        &self,
-        lower_bound: Option<K>,
-        upper_bound: Option<K>,
-    ) -> DBIterator {
-        assert!(lower_bound.is_some() || upper_bound.is_some());
-        let mut read_options = ReadOptions::default();
-        if let Some(lower_bound) = lower_bound {
-            read_options.set_iterate_lower_bound(lower_bound.as_ref());
-        }
-        if let Some(upper_bound) = upper_bound {
-            read_options.set_iterate_upper_bound(upper_bound.as_ref());
-        }
-        let mode = IteratorMode::Start;
-        self.db.get_iter(&read_options, mode)
-    }
-
-    fn batch(&self) -> Batch {
-        Batch {
-            db: Arc::clone(&self.db),
-            wb: WriteBatch::default(),
-        }
-    }
-
-    fn prefix_iterator<'a>(
-        &'a self,
-        prefix: &'a [u8],
-    ) -> impl Iterator<Item = (Box<[u8]>, Box<[u8]>)> + 'a {
-        self.db
-            .prefix_iterator(prefix)
-            .take_while(move |(col_key, _)| col_key.starts_with(prefix))
-    }
-
-    /// Open or create a rocksdb
-    fn check_migrate<P: AsRef<Path>>(path: P, db: Arc<DB>) -> Result<Arc<DB>, String> {
-        let migrate = DbMigrate::new(db);
-        migrate.init_or_check(path)
-    }
+pub(crate) fn serialize_to_vec<T: ?Sized + Serialize>(value: &T, field_name: &str) -> Vec<u8> {
+    bincode::serialize(value)
+        .unwrap_or_else(|e| panic!("serialization of {} failed: {}", field_name, e))
 }
 
-pub struct Batch {
-    db: Arc<DB>,
-    wb: WriteBatch,
+pub(crate) fn deserialize_from<'a, T>(slice: &'a [u8], field_name: &str) -> T
+where
+    T: serde::Deserialize<'a>,
+{
+    bincode::deserialize(slice)
+        .unwrap_or_else(|e| panic!("deserialization of {} failed: {}", field_name, e))
 }
 
 enum KeyValue {
@@ -158,19 +97,6 @@ enum KeyValue {
 pub trait StoreKeyValue {
     fn key(&self) -> Vec<u8>;
     fn value(&self) -> Vec<u8>;
-}
-
-pub(crate) fn serialize_to_vec<T: ?Sized + Serialize>(value: &T, field_name: &str) -> Vec<u8> {
-    bincode::serialize(value)
-        .unwrap_or_else(|e| panic!("serialization of {} failed: {}", field_name, e))
-}
-
-pub(crate) fn deserialize_from<'a, T>(slice: &'a [u8], field_name: &str) -> T
-where
-    T: serde::Deserialize<'a>,
-{
-    bincode::deserialize(slice)
-        .unwrap_or_else(|e| panic!("deserialization of {} failed: {}", field_name, e))
 }
 
 impl StoreKeyValue for KeyValue {
@@ -253,31 +179,6 @@ impl StoreKeyValue for KeyValue {
                 serialize_to_vec(custom_records, "PaymentCustomRecord")
             }
         }
-    }
-}
-
-impl Batch {
-    fn get<K: AsRef<[u8]>>(&self, key: K) -> Option<Vec<u8>> {
-        self.db
-            .get(key.as_ref())
-            .map(|v| v.map(|vi| vi.to_vec()))
-            .expect("get should be OK")
-    }
-
-    fn put_kv(&mut self, key_value: KeyValue) {
-        self.put(key_value.key(), key_value.value());
-    }
-
-    fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&mut self, key: K, value: V) {
-        self.wb.put(key, value).expect("put should be OK")
-    }
-
-    fn delete<K: AsRef<[u8]>>(&mut self, key: K) {
-        self.wb.delete(key.as_ref()).expect("delete should be OK")
-    }
-
-    fn commit(self) {
-        self.db.write(&self.wb).expect("commit should be OK")
     }
 }
 
