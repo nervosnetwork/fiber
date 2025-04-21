@@ -1,6 +1,9 @@
-use super::{super::db_migrate::DbMigrate, KeyValue, StoreKeyValue};
+use super::check_migrate;
+use super::{KeyValue, StoreKeyValue};
 
-use rocksdb::{prelude::*, DBCompressionType, DBIterator, IteratorMode, WriteBatch, DB};
+pub use rocksdb::Direction as DbDirection;
+pub use rocksdb::IteratorMode;
+use rocksdb::{prelude::*, DBCompressionType, DBIterator, WriteBatch, DB};
 use std::{path::Path, sync::Arc};
 
 #[derive(Clone, Debug)]
@@ -9,13 +12,16 @@ pub struct Store {
 }
 
 impl Store {
+    /// Open a store, with migration check
     pub fn new<P: AsRef<Path>>(path: P) -> Result<Self, String> {
-        let db = Self::open_db(path.as_ref())?;
-        let db = Self::check_migrate(path, db)?;
-        Ok(Self { db })
+        let store = Self {
+            db: Self::open_db(path.as_ref())?,
+        };
+        let store = check_migrate(path, store)?;
+        Ok(store)
     }
-
-    fn open_db(path: &Path) -> Result<Arc<DB>, String> {
+    /// Open a store, without migration check
+    pub(crate) fn open_db(path: &Path) -> Result<Arc<DB>, String> {
         // add more migrations here
         let mut options = Options::default();
         options.create_if_missing(true);
@@ -29,6 +35,14 @@ impl Store {
             .get(key.as_ref())
             .map(|v| v.map(|vi| vi.to_vec()))
             .expect("get should be OK")
+    }
+
+    pub(crate) fn delete<K: AsRef<[u8]>>(&self, key: K) {
+        self.db.delete(key).expect("Unexpected error from get");
+    }
+
+    pub(crate) fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&self, key: K, value: V) {
+        self.db.put(key, value).expect("put should be ok");
     }
 
     #[allow(dead_code)]
@@ -55,20 +69,35 @@ impl Store {
             wb: WriteBatch::default(),
         }
     }
+    /// Returns a prefix iterator, using iterator mode `mode`, skipping items until `skip_while` returns false, iterating over items prefixed with `prefix`
+    pub(crate) fn prefix_iterator_with_skip_while_and_start<'a>(
+        &'a self,
+        prefix: &'a [u8],
+        mode: IteratorMode<'a>,
+        skip_while: Box<dyn Fn(&[u8]) -> bool + 'static>,
+    ) -> impl Iterator<Item = (Box<[u8]>, Box<[u8]>)> + 'a {
+        self.db
+            .get_iter(
+                &{
+                    let mut opts = ReadOptions::default();
+                    opts.set_prefix_same_as_start(true);
+                    opts
+                },
+                mode,
+            )
+            .skip_while(move |(key, _)| skip_while(key))
+            .take_while(move |(col_key, _)| col_key.starts_with(prefix))
+    }
 
     pub(crate) fn prefix_iterator<'a>(
         &'a self,
         prefix: &'a [u8],
     ) -> impl Iterator<Item = (Box<[u8]>, Box<[u8]>)> + 'a {
-        self.db
-            .prefix_iterator(prefix)
-            .take_while(move |(col_key, _)| col_key.starts_with(prefix))
-    }
-
-    /// Open or create a rocksdb
-    fn check_migrate<P: AsRef<Path>>(path: P, db: Arc<DB>) -> Result<Arc<DB>, String> {
-        let migrate = DbMigrate::new(db);
-        migrate.init_or_check(path)
+        self.prefix_iterator_with_skip_while_and_start(
+            prefix,
+            IteratorMode::From(prefix, DbDirection::Forward),
+            Box::new(|_| false),
+        )
     }
 }
 

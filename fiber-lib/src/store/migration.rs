@@ -3,13 +3,12 @@ use console::Term;
 use indicatif::MultiProgress;
 use indicatif::ProgressBar;
 use indicatif::ProgressDrawTarget;
-use rocksdb::ops::Get;
-use rocksdb::ops::Put;
-use rocksdb::DB;
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use tracing::{debug, error, info};
+
+use super::Store;
 
 pub const MIGRATION_VERSION_KEY: &[u8] = b"db-version";
 pub const INIT_DB_VERSION: &str = "20241116135521";
@@ -38,11 +37,8 @@ impl Migrations {
     /// - Equal: The database version is matched with the executable binary version.
     /// - Greater: The database version is greater than the matched version of the executable binary.
     ///   Requires upgrade the executable binary.
-    pub fn check(&self, db: Arc<DB>) -> Ordering {
-        let db_version = match db
-            .get(MIGRATION_VERSION_KEY)
-            .expect("get the version of database")
-        {
+    pub fn check(&self, db: &Store) -> Ordering {
+        let db_version = match db.get(MIGRATION_VERSION_KEY) {
             Some(version_bytes) => {
                 String::from_utf8(version_bytes.to_vec()).expect("version bytes to utf8")
             }
@@ -59,7 +55,7 @@ impl Migrations {
     }
 
     // will only invoked in fnn-migrate binary
-    fn run_migrate(&self, mut db: Arc<DB>, v: &str) -> Result<Arc<DB>, Error> {
+    fn run_migrate<'a>(&self, mut db: &'a Store, v: &str) -> Result<&'a Store, Error> {
         let mpb = Arc::new(MultiProgress::new());
 
         // make sure the latest migration is the last one
@@ -100,17 +96,14 @@ impl Migrations {
                 pb
             };
             db = m.migrate(db, Arc::new(pb))?;
-            db.put(MIGRATION_VERSION_KEY, m.version())
-                .map_err(|err| internal_error(format!("failed to migrate the database: {err}")))?;
+            db.put(MIGRATION_VERSION_KEY, m.version());
         }
         mpb.join_and_clear().expect("MultiProgress join");
         Ok(db)
     }
 
-    fn get_migration_version(&self, db: &Arc<DB>) -> Result<Option<String>, Error> {
-        let raw = db.get(MIGRATION_VERSION_KEY).map_err(|err| {
-            internal_error(format!("failed to get the version of database: {err}"))
-        })?;
+    fn get_migration_version(&self, db: &Store) -> Result<Option<String>, Error> {
+        let raw = db.get(MIGRATION_VERSION_KEY);
 
         Ok(raw.map(|version_bytes| {
             String::from_utf8(version_bytes.to_vec()).expect("version bytes to utf8")
@@ -118,22 +111,21 @@ impl Migrations {
     }
 
     /// Initial db version
-    pub fn init_db_version(&self, db: Arc<DB>) -> Result<(), Error> {
+    pub fn init_db_version(&self, db: &Store) -> Result<(), Error> {
         if self.need_init(&db) {
             eprintln!("Init database version {}", LATEST_DB_VERSION);
-            db.put(MIGRATION_VERSION_KEY, LATEST_DB_VERSION)
-                .map_err(|err| internal_error(format!("failed to migrate the database: {err}")))?;
+            db.put(MIGRATION_VERSION_KEY, LATEST_DB_VERSION);
         }
         Ok(())
     }
 
-    pub fn need_init(&self, db: &Arc<DB>) -> bool {
+    pub fn need_init(&self, db: &Store) -> bool {
         self.get_migration_version(db)
             .expect("get migration failed")
             .is_none()
     }
 
-    pub fn migrate(&self, db: Arc<DB>) -> Result<Arc<DB>, Error> {
+    pub fn migrate<'a>(&self, db: &'a Store) -> Result<&'a Store, Error> {
         let db_version = self.get_migration_version(&db)?;
         match db_version {
             Some(ref v) => {
@@ -164,11 +156,11 @@ impl Migrations {
 }
 
 pub trait Migration: Send + Sync {
-    fn migrate(
+    fn migrate<'a>(
         &self,
-        _db: Arc<DB>,
+        _db: &'a Store,
         _pb: Arc<dyn Fn(u64) -> ProgressBar + Send + Sync>,
-    ) -> Result<Arc<DB>, Error>;
+    ) -> Result<&'a Store, Error>;
 
     /// returns migration version, use `date +'%Y%m%d%H%M%S'` timestamp format
     fn version(&self) -> &str;
@@ -193,11 +185,11 @@ impl DefaultMigration {
 }
 
 impl Migration for DefaultMigration {
-    fn migrate(
+    fn migrate<'a>(
         &self,
-        db: Arc<DB>,
+        db: &'a Store,
         _pb: Arc<dyn Fn(u64) -> ProgressBar + Send + Sync>,
-    ) -> Result<Arc<DB>, Error> {
+    ) -> Result<&'a Store, Error> {
         Ok(db)
     }
 

@@ -1,19 +1,19 @@
 use super::migration::{DefaultMigration, Migration, Migrations};
+use super::Store;
 use crate::Error;
-use rocksdb::DB;
 use std::{cmp::Ordering, path::Path, sync::Arc};
 use tracing::warn;
 use tracing::{error, info};
 
 /// migrate helper
-pub struct DbMigrate {
+pub struct DbMigrate<'a> {
     migrations: Migrations,
-    db: Arc<DB>,
+    db: &'a Store,
 }
 
-impl DbMigrate {
+impl<'a> DbMigrate<'a> {
     /// Construct new migrate
-    pub fn new(db: Arc<DB>) -> Self {
+    pub fn new(db: &'a Store) -> Self {
         let mut migrations = Migrations::default();
         migrations.add_migration(Arc::new(DefaultMigration::new()));
         DbMigrate { migrations, db }
@@ -32,28 +32,28 @@ impl DbMigrate {
     /// - Greater: The database version is greater than the matched version of the executable binary.
     ///   Requires upgrade the executable binary.
     pub fn check(&self) -> Ordering {
-        self.migrations.check(self.db.clone())
+        self.migrations.check(self.db)
     }
 
     /// Perform migrate.
-    pub fn migrate(&self) -> Result<Arc<DB>, Error> {
-        self.migrations.migrate(self.db.clone())
+    pub fn migrate(&self) -> Result<&Store, Error> {
+        self.migrations.migrate(self.db)
     }
 
     /// Perform init_db_version.
     pub fn init_db_version(&self) -> Result<(), Error> {
-        self.migrations.init_db_version(self.db.clone())
+        self.migrations.init_db_version(self.db)
     }
 
-    pub fn db(&self) -> Arc<DB> {
-        self.db.clone()
+    pub fn db(&self) -> &Store {
+        self.db
     }
 
     pub fn need_init(&self) -> bool {
         self.migrations.need_init(&self.db)
     }
 
-    pub fn init_or_check<P: AsRef<Path>>(&self, path: P) -> Result<Arc<DB>, String> {
+    pub fn init_or_check<P: AsRef<Path>>(&self, path: P) -> Result<&Store, String> {
         if self.need_init() {
             info!("begin to init db version ...");
             self.init_db_version().expect("failed to init db version");

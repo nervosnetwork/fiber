@@ -4,16 +4,13 @@ use crate::store::migration::Migration;
 use crate::store::migration::Migrations;
 use crate::store::migration::LATEST_DB_VERSION;
 use crate::store::migration::MIGRATION_VERSION_KEY;
+use crate::store::Store;
 use crate::Error;
 use indicatif::ProgressBar;
-use rocksdb::ops::Open;
-use rocksdb::ops::Put;
-use rocksdb::DBCompressionType;
-use rocksdb::Options;
-use rocksdb::DB;
+use ouroboros::self_referencing;
 use std::cmp::Ordering;
+use std::path::Path;
 use std::sync::{Arc, RwLock};
-
 fn gen_path() -> std::path::PathBuf {
     let tmp_dir = tempfile::Builder::new()
         .prefix("test-store")
@@ -21,24 +18,39 @@ fn gen_path() -> std::path::PathBuf {
         .unwrap();
     tmp_dir.as_ref().to_path_buf()
 }
+#[self_referencing]
+struct StoreAndMigrate {
+    store: Store,
+    #[borrows(store)]
+    #[covariant]
+    migrate: DbMigrate<'this>,
+}
 
-fn gen_migrate() -> DbMigrate {
+impl StoreAndMigrate {
+    fn new_with_path(path: impl AsRef<Path>) -> Self {
+        StoreAndMigrateBuilder {
+            store: Store {
+                db: Store::open_db(path.as_ref()).unwrap(),
+            },
+            migrate_builder: |store: &Store| DbMigrate::new(store),
+        }
+        .build()
+    }
+}
+
+fn gen_migrate() -> StoreAndMigrate {
     let path = gen_path();
-    let mut options = Options::default();
-    options.create_if_missing(true);
-    options.set_compression_type(DBCompressionType::Lz4);
-    let db = Arc::new(DB::open(&options, path).unwrap());
-    DbMigrate::new(db)
+    StoreAndMigrate::new_with_path(path)
 }
 
 #[test]
 fn test_default_migration() {
     let migrate = gen_migrate();
-    assert!(migrate.need_init());
-    assert_eq!(migrate.check(), Ordering::Less);
-    migrate.init_db_version().unwrap();
-    assert!(!migrate.need_init());
-    assert_eq!(migrate.check(), Ordering::Equal);
+    assert!(migrate.borrow_migrate().need_init());
+    assert_eq!(migrate.borrow_migrate().check(), Ordering::Less);
+    migrate.borrow_migrate().init_db_version().unwrap();
+    assert!(!migrate.borrow_migrate().need_init());
+    assert_eq!(migrate.borrow_migrate().check(), Ordering::Equal);
 }
 
 #[test]
@@ -60,11 +72,11 @@ fn test_run_migration() {
     }
 
     impl Migration for DummyMigration {
-        fn migrate(
+        fn migrate<'a>(
             &self,
-            db: Arc<DB>,
+            db: &'a Store,
             _pb: Arc<dyn Fn(u64) -> ProgressBar + Send + Sync>,
-        ) -> Result<Arc<DB>, Error> {
+        ) -> Result<&'a Store, Error> {
             eprintln!("DummyMigration::migrate {} ... ", self.version);
             let mut count = self.run_count.write().unwrap();
             *count += 1;
@@ -77,8 +89,8 @@ fn test_run_migration() {
     }
 
     let migrate = gen_migrate();
-    migrate.init_db_version().unwrap();
-    let db = migrate.db();
+    migrate.borrow_migrate().init_db_version().unwrap();
+    let db = migrate.borrow_store();
 
     let mut migrations = Migrations::default();
     // a smaller version
@@ -99,16 +111,15 @@ fn test_run_migration() {
         LATEST_DB_VERSION,
         run_count.clone(),
     )));
-    assert_eq!(migrations.check(db.clone()), Ordering::Equal);
+    assert_eq!(migrations.check(db), Ordering::Equal);
 
     // now manually set db version to a lower one
-    db.put(MIGRATION_VERSION_KEY, "20221116135521")
-        .expect("failed to set db version");
-    assert_eq!(migrations.check(db.clone()), Ordering::Less);
+    db.put(MIGRATION_VERSION_KEY, "20221116135521");
+    assert_eq!(migrations.check(db), Ordering::Less);
 
-    migrations.migrate(db.clone()).unwrap();
+    migrations.migrate(db).unwrap();
     assert_eq!(*run_count.read().unwrap(), 3);
-    assert_eq!(migrations.check(db.clone()), Ordering::Equal);
+    assert_eq!(migrations.check(db), Ordering::Equal);
 
     let mut migrations = Migrations::default();
     migrations.add_migration(Arc::new(DefaultMigration::new()));

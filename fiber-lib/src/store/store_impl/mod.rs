@@ -1,26 +1,29 @@
 mod native;
 
-pub use native::Batch;
-pub use native::Store;
+use std::path::Path;
 
+pub use native::{Batch, DbDirection, IteratorMode, Store};
+
+use super::db_migrate::DbMigrate;
 use super::schema::*;
+use crate::fiber::gossip::GossipMessageStore;
+use crate::fiber::types::CURSOR_SIZE;
 use crate::{
     fiber::{
         channel::{
             ChannelActorState, ChannelActorStateStore, ChannelState, RevocationData, SettlementData,
         },
-        gossip::GossipMessageStore,
         graph::{NetworkGraphStateStore, PaymentSession},
         history::{Direction, TimedResult},
         network::{NetworkActorStateStore, PaymentCustomRecords, PersistentNetworkActorState},
-        types::{BroadcastMessage, BroadcastMessageID, Cursor, Hash256, CURSOR_SIZE},
+        types::{BroadcastMessage, BroadcastMessageID, Cursor, Hash256},
     },
     invoice::{CkbInvoice, CkbInvoiceStatus, InvoiceError, InvoiceStore},
     watchtower::{ChannelData, WatchtowerStore},
 };
 use ckb_types::packed::{OutPoint, Script};
 use ckb_types::prelude::Entity;
-use rocksdb::{prelude::*, Direction as DbDirection, IteratorMode};
+
 use serde::Serialize;
 use tentacle::secio::PeerId;
 
@@ -29,40 +32,6 @@ enum ChannelTimestamp {
     ChannelAnnouncement(),
     ChannelUpdateOfNode1(),
     ChannelUpdateOfNode2(),
-}
-
-// All timestamps are saved in a 24-byte array, with BroadcastMessageID::ChannelAnnouncement(outpoint) as the key.
-// the first 8 bytes in the 24 bytes is the timestamp for channel announcement, the second 8 bytes
-// is the timestamp for channel update of node 1 and the last 8 bytes for channel update of node 2.
-// TODO: previous implementation accidentally used BroadcastMessageID::ChannelUpdate as the key
-// for the channel updates timestamps. I have fixed it here by using the same key as the channel
-// announcement. This is a breaking change, we need migration for this.
-pub(crate) fn get_channel_timestamps_key(outpoint: &OutPoint) -> Vec<u8> {
-    BroadcastMessageID::ChannelAnnouncement(outpoint.clone())
-        .to_bytes()
-        .to_vec()
-}
-
-fn update_channel_timestamp(
-    batch: &mut Batch,
-    outpoint: &OutPoint,
-    timestamp: u64,
-    channel_timestamp: ChannelTimestamp,
-) {
-    let offset = match channel_timestamp {
-        ChannelTimestamp::ChannelAnnouncement() => 0,
-        ChannelTimestamp::ChannelUpdateOfNode1() => 8,
-        ChannelTimestamp::ChannelUpdateOfNode2() => 16,
-    };
-    let message_id = get_channel_timestamps_key(outpoint);
-
-    let timestamp_key = [&[BROADCAST_MESSAGE_TIMESTAMP_PREFIX], message_id.as_slice()].concat();
-    let mut timestamps = batch
-        .get(&timestamp_key)
-        .map(|v| v.try_into().expect("Invalid timestamp value length"))
-        .unwrap_or([0u8; 24]);
-    timestamps[offset..offset + 8].copy_from_slice(&timestamp.to_be_bytes());
-    batch.put(timestamp_key, timestamps);
 }
 
 pub(crate) fn serialize_to_vec<T: ?Sized + Serialize>(value: &T, field_name: &str) -> Vec<u8> {
@@ -412,6 +381,74 @@ impl NetworkGraphStateStore for Store {
     }
 }
 
+impl WatchtowerStore for Store {
+    fn get_watch_channels(&self) -> Vec<ChannelData> {
+        let prefix = vec![WATCHTOWER_CHANNEL_PREFIX];
+        self.prefix_iterator(&prefix)
+            .map(|(_key, value)| deserialize_from(value.as_ref(), "ChannelData"))
+            .collect()
+    }
+
+    fn insert_watch_channel(
+        &self,
+        channel_id: Hash256,
+        funding_tx_lock: Script,
+        remote_settlement_data: SettlementData,
+    ) {
+        let key = [&[WATCHTOWER_CHANNEL_PREFIX], channel_id.as_ref()].concat();
+        let value = serialize_to_vec(
+            &ChannelData {
+                channel_id,
+                funding_tx_lock,
+                remote_settlement_data,
+                local_settlement_data: None,
+                revocation_data: None,
+            },
+            "ChannelData",
+        );
+        let mut batch = self.batch();
+        batch.put(key, value);
+        batch.commit();
+    }
+
+    fn remove_watch_channel(&self, channel_id: Hash256) {
+        let key = [&[WATCHTOWER_CHANNEL_PREFIX], channel_id.as_ref()].concat();
+        self.delete(key);
+    }
+
+    fn update_revocation(
+        &self,
+        channel_id: Hash256,
+        revocation_data: RevocationData,
+        remote_settlement_data: SettlementData,
+    ) {
+        let key = [&[WATCHTOWER_CHANNEL_PREFIX], channel_id.as_ref()].concat();
+        if let Some(mut channel_data) = self
+            .get(key)
+            .map(|v| deserialize_from::<ChannelData>(v.as_ref(), "ChannelData"))
+        {
+            channel_data.remote_settlement_data = remote_settlement_data;
+            channel_data.revocation_data = Some(revocation_data);
+            let mut batch = self.batch();
+            batch.put_kv(KeyValue::WatchtowerChannel(channel_id, channel_data));
+            batch.commit();
+        }
+    }
+
+    fn update_local_settlement(&self, channel_id: Hash256, local_settlement_data: SettlementData) {
+        let key = [&[WATCHTOWER_CHANNEL_PREFIX], channel_id.as_ref()].concat();
+        if let Some(mut channel_data) = self
+            .get(key)
+            .map(|v| deserialize_from::<ChannelData>(v.as_ref(), "ChannelData"))
+        {
+            channel_data.local_settlement_data = Some(local_settlement_data);
+            let mut batch = self.batch();
+            batch.put_kv(KeyValue::WatchtowerChannel(channel_id, channel_data));
+            batch.commit();
+        }
+    }
+}
+
 impl GossipMessageStore for Store {
     fn get_broadcast_messages_iter(
         &self,
@@ -420,21 +457,22 @@ impl GossipMessageStore for Store {
         let cursor = after_cursor.to_bytes();
         let prefix = [BROADCAST_MESSAGE_PREFIX];
         let start = [&prefix, cursor.as_slice()].concat();
-        let mode = IteratorMode::From(&start, DbDirection::Forward);
-        self.db
-            .iterator(mode)
-            // We should skip the value with the same cursor (after_cursor is exclusive).
-            .skip_while(move |(key, _)| key.as_ref() == start)
-            .take_while(move |(key, _)| key.starts_with(&prefix))
-            .map(|(key, value)| {
-                debug_assert_eq!(key.len(), 1 + CURSOR_SIZE);
-                let mut timestamp_bytes = [0u8; 8];
-                timestamp_bytes.copy_from_slice(&key[1..9]);
-                let timestamp = u64::from_be_bytes(timestamp_bytes);
-                let message: BroadcastMessage =
-                    deserialize_from(value.as_ref(), "BroadcastMessage");
-                (message, timestamp).into()
-            })
+        let start_cloned = start.clone();
+        // We should skip the value with the same cursor (after_cursor is exclusive).
+        self.prefix_iterator_with_skip_while_and_start(
+            &prefix,
+            IteratorMode::From(&start, DbDirection::Forward),
+            Box::new(move |key: &[u8]| key == start_cloned),
+        )
+        .map(|(key, value)| {
+            debug_assert_eq!(key.len(), 1 + CURSOR_SIZE);
+            let mut timestamp_bytes = [0u8; 8];
+            timestamp_bytes.copy_from_slice(&key[1..9]);
+            let timestamp = u64::from_be_bytes(timestamp_bytes);
+            let message: BroadcastMessage = deserialize_from(value.as_ref(), "BroadcastMessage");
+            (message, timestamp).into()
+        })
+        .collect::<Vec<_>>()
     }
 
     fn get_broadcast_message_with_cursor(
@@ -450,15 +488,16 @@ impl GossipMessageStore for Store {
 
     fn get_latest_broadcast_message_cursor(&self) -> Option<Cursor> {
         let prefix = vec![BROADCAST_MESSAGE_PREFIX];
-        let mode = IteratorMode::End;
-        self.db
-            .iterator(mode)
-            .take_while(|(key, _)| key.starts_with(&prefix))
-            .last()
-            .map(|(key, _)| {
-                let last_key = key.to_vec();
-                Cursor::from_bytes(&last_key[1..]).expect("deserialize Cursor should be OK")
-            })
+        self.prefix_iterator_with_skip_while_and_start(
+            &prefix,
+            IteratorMode::End,
+            Box::new(|_| false),
+        )
+        .last()
+        .map(|(key, _)| {
+            let last_key = key.to_vec();
+            Cursor::from_bytes(&last_key[1..]).expect("deserialize Cursor should be OK")
+        })
     }
 
     fn get_latest_channel_announcement_timestamp(&self, outpoint: &OutPoint) -> Option<u64> {
@@ -672,70 +711,43 @@ impl GossipMessageStore for Store {
     }
 }
 
-impl WatchtowerStore for Store {
-    fn get_watch_channels(&self) -> Vec<ChannelData> {
-        let prefix = vec![WATCHTOWER_CHANNEL_PREFIX];
-        self.prefix_iterator(&prefix)
-            .map(|(_key, value)| deserialize_from(value.as_ref(), "ChannelData"))
-            .collect()
-    }
+// All timestamps are saved in a 24-byte array, with BroadcastMessageID::ChannelAnnouncement(outpoint) as the key.
+// the first 8 bytes in the 24 bytes is the timestamp for channel announcement, the second 8 bytes
+// is the timestamp for channel update of node 1 and the last 8 bytes for channel update of node 2.
+// TODO: previous implementation accidentally used BroadcastMessageID::ChannelUpdate as the key
+// for the channel updates timestamps. I have fixed it here by using the same key as the channel
+// announcement. This is a breaking change, we need migration for this.
+pub(crate) fn get_channel_timestamps_key(outpoint: &OutPoint) -> Vec<u8> {
+    BroadcastMessageID::ChannelAnnouncement(outpoint.clone())
+        .to_bytes()
+        .to_vec()
+}
 
-    fn insert_watch_channel(
-        &self,
-        channel_id: Hash256,
-        funding_tx_lock: Script,
-        remote_settlement_data: SettlementData,
-    ) {
-        let key = [&[WATCHTOWER_CHANNEL_PREFIX], channel_id.as_ref()].concat();
-        let value = serialize_to_vec(
-            &ChannelData {
-                channel_id,
-                funding_tx_lock,
-                remote_settlement_data,
-                local_settlement_data: None,
-                revocation_data: None,
-            },
-            "ChannelData",
-        );
-        let mut batch = self.batch();
-        batch.put(key, value);
-        batch.commit();
-    }
+fn update_channel_timestamp(
+    batch: &mut Batch,
+    outpoint: &OutPoint,
+    timestamp: u64,
+    channel_timestamp: ChannelTimestamp,
+) {
+    let offset = match channel_timestamp {
+        ChannelTimestamp::ChannelAnnouncement() => 0,
+        ChannelTimestamp::ChannelUpdateOfNode1() => 8,
+        ChannelTimestamp::ChannelUpdateOfNode2() => 16,
+    };
+    let message_id = get_channel_timestamps_key(outpoint);
 
-    fn remove_watch_channel(&self, channel_id: Hash256) {
-        let key = [&[WATCHTOWER_CHANNEL_PREFIX], channel_id.as_ref()].concat();
-        self.db.delete(key).expect("delete should be OK");
-    }
+    let timestamp_key = [&[BROADCAST_MESSAGE_TIMESTAMP_PREFIX], message_id.as_slice()].concat();
+    let mut timestamps = batch
+        .get(&timestamp_key)
+        .map(|v| v.try_into().expect("Invalid timestamp value length"))
+        .unwrap_or([0u8; 24]);
+    timestamps[offset..offset + 8].copy_from_slice(&timestamp.to_be_bytes());
+    batch.put(timestamp_key, timestamps);
+}
 
-    fn update_revocation(
-        &self,
-        channel_id: Hash256,
-        revocation_data: RevocationData,
-        remote_settlement_data: SettlementData,
-    ) {
-        let key = [&[WATCHTOWER_CHANNEL_PREFIX], channel_id.as_ref()].concat();
-        if let Some(mut channel_data) = self
-            .get(key)
-            .map(|v| deserialize_from::<ChannelData>(v.as_ref(), "ChannelData"))
-        {
-            channel_data.remote_settlement_data = remote_settlement_data;
-            channel_data.revocation_data = Some(revocation_data);
-            let mut batch = self.batch();
-            batch.put_kv(KeyValue::WatchtowerChannel(channel_id, channel_data));
-            batch.commit();
-        }
-    }
-
-    fn update_local_settlement(&self, channel_id: Hash256, local_settlement_data: SettlementData) {
-        let key = [&[WATCHTOWER_CHANNEL_PREFIX], channel_id.as_ref()].concat();
-        if let Some(mut channel_data) = self
-            .get(key)
-            .map(|v| deserialize_from::<ChannelData>(v.as_ref(), "ChannelData"))
-        {
-            channel_data.local_settlement_data = Some(local_settlement_data);
-            let mut batch = self.batch();
-            batch.put_kv(KeyValue::WatchtowerChannel(channel_id, channel_data));
-            batch.commit();
-        }
-    }
+/// Check if the database needs to be migrated
+pub fn check_migrate<P: AsRef<Path>>(path: P, db: Store) -> Result<Store, String> {
+    let migrate = DbMigrate::new(&db);
+    migrate.init_or_check(path)?;
+    Ok(db)
 }

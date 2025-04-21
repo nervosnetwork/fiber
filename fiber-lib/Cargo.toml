@@ -77,7 +77,7 @@ tempfile = "3.10.1"
 ckb-testtool = "0.15.1"
 ciborium = "0.2.2"
 jsonrpsee = { version = "0.22", features = ["server", "macros", "http-client"] }
-
+ouroboros = "0.18.5"
 
 [lints.clippy]
 needless-return = "allow"
