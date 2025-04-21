@@ -5,7 +5,7 @@ use ckb_types::packed::Script;
 use crate::{
     fiber::{tests::test_utils::*, types::Hash256},
     invoice::Currency,
-    rpc::{
+    rpc_types::{
         channel::{ListChannelsParams, ListChannelsResult},
         invoice::{InvoiceParams, InvoiceResult, NewInvoiceParams},
         payment::{GetPaymentCommandParams, GetPaymentCommandResult},
@@ -107,7 +107,7 @@ async fn test_rpc_list_peers() {
     let _res: () = node_0
         .send_rpc_request(
             "disconnect_peer",
-            crate::rpc::peer::DisconnectPeerParams {
+            crate::rpc_types::peer::DisconnectPeerParams {
                 peer_id: node_1_peer_id,
             },
         )

@@ -3539,9 +3539,9 @@ dependencies = [
 
 [[package]]
 name = "ractor"
-version = "0.14.2"
+version = "0.15.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aeb2472c961aec135028ae83b64491243ef36402c4f93f04b4f29f9f5d8805a8"
+checksum = "7baf572559ad14ac3793c7c2fc3110f93d097d4d9b45aa626832933c78cb2445"
 dependencies = [
  "async-trait",
  "bon",
@@ -3550,7 +3550,9 @@ dependencies = [
  "once_cell",
  "strum",
  "tokio",
+ "tokio_with_wasm",
  "tracing",
+ "web-time",
 ]
 
 [[package]]
@@ -4752,6 +4754,30 @@ dependencies = [
  "tokio",
  "tokio-util",
  "web-time",
+]
+
+[[package]]
+name = "tokio_with_wasm"
+version = "0.8.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e42d20f41cbfe26740d0c2fb320d44ce7dfa716be135cb663e99a48248a0e897"
+dependencies = [
+ "js-sys",
+ "tokio",
+ "tokio_with_wasm_proc",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+]
+
+[[package]]
+name = "tokio_with_wasm_proc"
+version = "0.8.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ee80eb7e23abaa636caa9afe6042c6d8a8c0686165b8165f4fbf2988f0dd347f"
+dependencies = [
+ "quote",
+ "syn 2.0.90",
 ]
 
 [[package]]

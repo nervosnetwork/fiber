@@ -27,6 +27,8 @@ use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, info, info_span, trace};
 use tracing_subscriber::{field::MakeExt, fmt, fmt::format, EnvFilter};
 
+
+mod rpc;
 pub struct ExitMessage(String);
 
 #[tokio::main]

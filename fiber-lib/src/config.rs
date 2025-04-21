@@ -9,7 +9,7 @@ use home::home_dir;
 use serde::{Deserialize, Serialize};
 use tracing::error;
 
-use crate::{ckb::CkbConfig, CchConfig, FiberConfig, RpcConfig};
+use crate::{ckb::CkbConfig, CchConfig, FiberConfig};
 
 const DEFAULT_CONFIG_FILE_NAME: &str = "config.yml";
 const DEFAULT_FIBER_DIR_NAME: &str = "fiber";

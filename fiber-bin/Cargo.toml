@@ -5,9 +5,9 @@ edition = "2021"
 
 [dependencies]
 fnn = { path = "../fiber-lib" }
-ckb-chain-spec    = "0.200.0"
-ckb-resource      = "0.200.0"
-ractor = "0.14.2"
+ckb-chain-spec = "0.200.0"
+ckb-resource = "0.200.0"
+ractor = { version = "0.15.3", features = ["async-trait"] }
 tokio = { version = "1", features = [
     "io-util",
     "macros",
