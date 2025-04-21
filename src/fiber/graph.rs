@@ -390,7 +390,9 @@ where
             return false;
         }
         debug!("Updating network graph with {} messages", messages.len());
+        debug!("Latest cursor: {:?}", self.latest_cursor);
         for message in messages {
+            debug!("Processing message: {:?}", &message);
             self.update_latest_cursor(message.cursor());
             if message.chain_hash() != get_chain_hash() {
                 tracing::warn!(

@@ -68,6 +68,8 @@ bincode = "1.3.3"
 num_enum = "0.7.3"
 bitmask-enum = "2.2.5"
 either = "1.15.0"
+aes-gcm = "0.10"
+scrypt = "0.11"
 
 [features]
 default = []

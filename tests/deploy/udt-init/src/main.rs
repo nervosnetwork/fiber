@@ -171,7 +171,7 @@ fn get_nodes_info(node: &str) -> (String, H256) {
     let nodes_dir = std::env::var("NODES_DIR").expect("env var");
     let node_dir = format!("{}/{}", nodes_dir, node);
     let wallet = std::fs::read_to_string(format!("{}/ckb/wallet", node_dir)).expect("read failed");
-    let key = std::fs::read_to_string(format!("{}/ckb/key", node_dir)).expect("read failed");
+    let key = std::fs::read_to_string(format!("{}/ckb/plain_key", node_dir)).expect("read failed");
     (wallet, H256::from_str(key.trim()).expect("parse hex"))
 }
 
