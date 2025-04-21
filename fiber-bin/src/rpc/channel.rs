@@ -1,34 +1,27 @@
-use crate::fiber::serde_utils::EntityHex;
-use crate::fiber::{
-    channel::{
-        AwaitingChannelReadyFlags, AwaitingTxSignaturesFlags, ChannelActorStateStore,
-        ChannelCommand, ChannelCommandWithId, ChannelState as RawChannelState, CloseFlags,
-        CollaboratingFundingTxFlags, NegotiatingFundingFlags, ShutdownCommand, ShuttingDownFlags,
-        SigningCommitmentFlags, UpdateCommand,
-    },
-    network::{AcceptChannelCommand, OpenChannelCommand},
-    serde_utils::{U128Hex, U64Hex},
-    types::Hash256,
-    NetworkActorCommand, NetworkActorMessage,
-};
 use crate::{handle_actor_call, log_and_error};
-use ckb_jsonrpc_types::{EpochNumberWithFraction, Script};
 use ckb_types::{
     core::{EpochNumberWithFraction as EpochNumberWithFractionCore, FeeRate},
-    packed::OutPoint,
     prelude::{IntoTransactionView, Unpack},
-    H256,
 };
+use fnn::fiber::{
+    channel::{
+        ChannelActorStateStore, ChannelCommand, ChannelCommandWithId, ShutdownCommand, UpdateCommand
+    },
+    network::{AcceptChannelCommand, OpenChannelCommand},
+    NetworkActorCommand, NetworkActorMessage,
+};
+use fnn::rpc_types::channel::{
+    AbandonChannelParams, AcceptChannelParams, AcceptChannelResult, ListChannelsParams,
+    ListChannelsResult, OpenChannelParams, OpenChannelResult, UpdateChannelParams,
+};
+use fnn::rpc_types::channel::{Channel, ShutdownChannelParams};
 use jsonrpsee::{
     core::async_trait,
     proc_macros::rpc,
     types::{error::CALL_EXECUTION_FAILED_CODE, ErrorObjectOwned},
 };
 use ractor::{call, ActorRef};
-use serde::{Deserialize, Serialize};
-use serde_with::{serde_as, DisplayFromStr};
 use std::cmp::Reverse;
-use tentacle::secio::PeerId;
 
 /// RPC module for channel management.
 #[rpc(server)]

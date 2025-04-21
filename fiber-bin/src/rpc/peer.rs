@@ -1,5 +1,5 @@
-use crate::fiber::network::PeerInfo;
-use crate::fiber::{NetworkActorCommand, NetworkActorMessage};
+use fnn::fiber::{NetworkActorCommand, NetworkActorMessage};
+use fnn::rpc_types::peer::{ConnectPeerParams, DisconnectPeerParams, ListPeersResult};
 use crate::log_and_error;
 use jsonrpsee::{
     core::async_trait, proc_macros::rpc, types::error::CALL_EXECUTION_FAILED_CODE,
@@ -7,9 +7,6 @@ use jsonrpsee::{
 };
 use ractor::call;
 use ractor::ActorRef;
-use serde::{Deserialize, Serialize};
-use serde_with::{serde_as, DisplayFromStr};
-pub use tentacle::{multiaddr::MultiAddr, secio::PeerId};
 
 /// RPC module for peer management.
 #[rpc(server)]

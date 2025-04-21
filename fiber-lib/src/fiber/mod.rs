@@ -8,7 +8,7 @@ pub mod network;
 pub mod serde_utils;
 pub mod types;
 
-pub(crate) mod gossip;
+pub mod gossip;
 
 mod fee;
 mod in_flight_ckb_tx_actor;

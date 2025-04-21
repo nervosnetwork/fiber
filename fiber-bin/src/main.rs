@@ -1,5 +1,6 @@
 use ckb_chain_spec::ChainSpec;
 use ckb_resource::Resource;
+use rpc::start_rpc;
 use core::default::Default;
 use fnn::actors::RootActor;
 use fnn::cch::CchMessage;
@@ -14,7 +15,7 @@ use fnn::watchtower::{
 };
 #[cfg(debug_assertions)]
 use fnn::NetworkServiceEvent;
-use fnn::{start_cch, start_network, start_rpc, Config};
+use fnn::{start_cch, start_network, Config};
 use ractor::Actor;
 #[cfg(debug_assertions)]
 use std::collections::HashMap;

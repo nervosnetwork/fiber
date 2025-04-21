@@ -1,20 +1,14 @@
-use crate::ckb::config::UdtCfgInfos as ConfigUdtCfgInfos;
-use crate::fiber::channel::ChannelActorStateStore;
-use crate::fiber::gossip::GossipMessageStore;
-use crate::fiber::graph::{ChannelUpdateInfo, NetworkGraph, NetworkGraphStateStore};
-use crate::fiber::network::get_chain_hash;
-use crate::fiber::serde_utils::EntityHex;
-use crate::fiber::serde_utils::{U128Hex, U32Hex, U64Hex};
-use crate::fiber::types::{Cursor, Hash256, Pubkey};
-use ckb_jsonrpc_types::{DepType, JsonBytes, Script, ScriptHashType};
-use ckb_types::packed::OutPoint;
-use ckb_types::H256;
+use ckb_jsonrpc_types::JsonBytes;
+use fnn::fiber::channel::ChannelActorStateStore;
+use fnn::fiber::gossip::GossipMessageStore;
+use fnn::fiber::graph::{NetworkGraph, NetworkGraphStateStore};
+use fnn::fiber::types::Cursor;
+use fnn::rpc_types::graph::{
+    GraphChannelsParams, GraphChannelsResult, GraphNodesParams, GraphNodesResult,
+};
 use jsonrpsee::types::error::INVALID_PARAMS_CODE;
 use jsonrpsee::{core::async_trait, proc_macros::rpc, types::ErrorObjectOwned};
-use serde::{Deserialize, Serialize};
-use serde_with::serde_as;
 use std::sync::Arc;
-use tentacle::multiaddr::MultiAddr;
 use tokio::sync::RwLock;
 
 /// RPC module for graph management.

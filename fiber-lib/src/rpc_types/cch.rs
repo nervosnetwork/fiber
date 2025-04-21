@@ -1,17 +1,12 @@
 use crate::{
-    cch::{CchMessage, CchOrderStatus, ReceiveBTCOrder},
+    cch::{CchOrderStatus, ReceiveBTCOrder},
     fiber::{
         serde_utils::{U128Hex, U64Hex},
         types::Hash256,
     },
     invoice::Currency,
 };
-use jsonrpsee::{
-    core::async_trait,
-    proc_macros::rpc,
-    types::{error::CALL_EXECUTION_FAILED_CODE, ErrorObjectOwned},
-};
-use ractor::{call_t, ActorRef};
+
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 
@@ -114,30 +109,6 @@ pub struct ReceiveBTCResponse {
     /// Order status
     pub status: CchOrderStatus,
 }
-
-/// RPC module for cross chain hub demonstration.
-#[rpc(server)]
-trait CchRpc {
-    /// Send BTC to a address.
-    #[method(name = "send_btc")]
-    async fn send_btc(&self, params: SendBtcParams) -> Result<SendBTCResponse, ErrorObjectOwned>;
-
-    /// Receive BTC from a payment hash.
-    #[method(name = "receive_btc")]
-    async fn receive_btc(
-        &self,
-        params: ReceiveBtcParams,
-    ) -> Result<ReceiveBTCResponse, ErrorObjectOwned>;
-
-    /// Get receive BTC order by payment hash.
-    #[method(name = "get_receive_btc_order")]
-    async fn get_receive_btc_order(
-        &self,
-        params: GetReceiveBtcOrderParams,
-    ) -> Result<ReceiveBTCResponse, ErrorObjectOwned>;
-}
-
-const TIMEOUT: u64 = 1000;
 
 impl From<ReceiveBTCOrder> for ReceiveBTCResponse {
     fn from(value: ReceiveBTCOrder) -> Self {

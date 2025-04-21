@@ -23,8 +23,7 @@ use crate::fiber::types::Pubkey;
 use crate::invoice::CkbInvoice;
 use crate::invoice::CkbInvoiceStatus;
 use crate::invoice::InvoiceStore;
-use crate::start_rpc;
-use crate::RpcConfig;
+use crate::rpc_types::config::RpcConfig;
 use ckb_sdk::core::TransactionBuilder;
 use ckb_types::{
     core::{tx_pool::TxStatus, TransactionView},

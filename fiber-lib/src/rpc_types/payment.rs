@@ -40,7 +40,7 @@ pub struct GetPaymentCommandResult {
     pub status: PaymentSessionStatus,
     #[serde_as(as = "U64Hex")]
     /// The time the payment was created at, in milliseconds from UNIX epoch
-    created_at: u64,
+    pub created_at: u64,
     #[serde_as(as = "U64Hex")]
     /// The time the payment was last updated at, in milliseconds from UNIX epoch
     pub last_updated_at: u64,
@@ -60,7 +60,7 @@ pub struct GetPaymentCommandResult {
     /// For example:
     ///    `A(amount, channel) -> B -> C -> D`
     /// means A will send `amount` with `channel` to B.
-    router: Vec<SessionRouteNode>,
+    pub router: Vec<SessionRouteNode>,
 }
 
 /// The node and channel information in a payment route hop

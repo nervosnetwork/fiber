@@ -1,28 +1,20 @@
-#[cfg(debug_assertions)]
-use crate::fiber::graph::SessionRouteNode as InternalSessionRouteNode;
-use crate::fiber::serde_utils::SliceHex;
-use crate::fiber::serde_utils::U32Hex;
-use crate::fiber::{
+use fnn::fiber::{
     channel::ChannelActorStateStore,
-    graph::PaymentSessionStatus,
-    network::{HopHint as NetworkHopHint, SendPaymentCommand},
-    serde_utils::{EntityHex, U128Hex, U64Hex},
-    types::{Hash256, Pubkey},
+    network::SendPaymentCommand,
     NetworkActorCommand, NetworkActorMessage,
 };
+use fnn::rpc_types::payment::GetPaymentCommandParams;
+use fnn::rpc_types::payment::GetPaymentCommandResult;
+use fnn::rpc_types::payment::PaymentCustomRecords;
+use fnn::rpc_types::payment::SendPaymentCommandParams;
 use crate::{handle_actor_call, log_and_error};
-use ckb_jsonrpc_types::Script;
-use ckb_types::packed::OutPoint;
 use jsonrpsee::{
     core::async_trait,
     proc_macros::rpc,
     types::{error::CALL_EXECUTION_FAILED_CODE, ErrorObjectOwned},
 };
-use serde_with::serde_as;
-use std::collections::HashMap;
 
 use ractor::{call, ActorRef};
-use serde::{Deserialize, Serialize};
 
 /// RPC module for channel management.
 #[rpc(server)]

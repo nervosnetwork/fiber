@@ -1,13 +1,9 @@
-use crate::{
+use fnn::{
     fiber::{
         channel::{AddTlcCommand, ChannelCommand, ChannelCommandWithId, RemoveTlcCommand},
-        hash_algorithm::HashAlgorithm,
-        serde_utils::{U128Hex, U64Hex},
         types::{Hash256, RemoveTlcFulfill, TlcErr, TlcErrPacket, TlcErrorCode, NO_SHARED_SECRET},
         NetworkActorCommand, NetworkActorMessage,
-    },
-    handle_actor_cast,
-    watchtower::WatchtowerStore,
+    }, handle_actor_cast, rpc_types::dev::{AddTlcParams, AddTlcResult, CommitmentSignedParams, RemoveTlcParams, RemoveTlcReason, RemoveWatchChannelParams, SubmitCommitmentTransactionParams, SubmitCommitmentTransactionResult}, watchtower::WatchtowerStore
 };
 use ckb_types::core::TransactionView;
 use jsonrpsee::{
@@ -20,11 +16,9 @@ use std::str::FromStr;
 use std::{collections::HashMap, sync::Arc};
 
 use ractor::{call_t, ActorRef};
-use serde::{Deserialize, Serialize};
-use serde_with::serde_as;
 use tokio::sync::RwLock;
 
-use crate::{
+use fnn::{
     ckb::CkbChainMessage, fiber::network::DEFAULT_CHAIN_ACTOR_TIMEOUT, handle_actor_call,
     log_and_error,
 };
@@ -148,7 +142,7 @@ where
                             id: params.tlc_id,
                             reason: match &params.reason {
                                 RemoveTlcReason::RemoveTlcFulfill { payment_preimage } => {
-                                    crate::fiber::types::RemoveTlcReason::RemoveTlcFulfill(
+                                    fnn::fiber::types::RemoveTlcReason::RemoveTlcFulfill(
                                         RemoveTlcFulfill {
                                             payment_preimage: *payment_preimage,
                                         },
@@ -156,7 +150,7 @@ where
                                 }
                                 RemoveTlcReason::RemoveTlcFail { .. } => {
                                     // TODO: maybe we should remove this PRC or move add_tlc and remove_tlc to `test` module?
-                                    crate::fiber::types::RemoveTlcReason::RemoveTlcFail(
+                                    fnn::fiber::types::RemoveTlcReason::RemoveTlcFail(
                                         TlcErrPacket::new(
                                             TlcErr::new(err_code.expect("expect error code")),
                                             // Do not encrypt the error message when removing the TLC via RPC.

@@ -1,6 +1,5 @@
 pub mod cch;
 pub mod channel;
-pub mod config;
 #[cfg(debug_assertions)]
 pub mod dev;
 pub mod graph;
@@ -10,12 +9,17 @@ pub mod payment;
 pub mod peer;
 pub mod utils;
 
-use crate::ckb::CkbConfig;
-use crate::fiber::gossip::GossipMessageStore;
-use crate::rpc::info::InfoRpcServer;
-use crate::rpc::payment::PaymentRpcServer;
-use crate::watchtower::WatchtowerStore;
-use crate::{
+use cch::{CchRpcServer, CchRpcServerImpl};
+use channel::{ChannelRpcServer, ChannelRpcServerImpl};
+#[cfg(debug_assertions)]
+use ckb_types::core::TransactionView;
+#[cfg(debug_assertions)]
+use dev::{DevRpcServer, DevRpcServerImpl};
+use fnn::ckb::CkbConfig;
+use fnn::fiber::gossip::GossipMessageStore;
+pub use fnn::rpc_types::config::RpcConfig;
+use fnn::watchtower::WatchtowerStore;
+use fnn::{
     cch::CchMessage,
     fiber::{
         channel::ChannelActorStateStore,
@@ -26,20 +30,13 @@ use crate::{
     FiberConfig,
 };
 #[cfg(debug_assertions)]
-use crate::{ckb::CkbChainMessage, fiber::types::Hash256};
-use cch::{CchRpcServer, CchRpcServerImpl};
-use channel::{ChannelRpcServer, ChannelRpcServerImpl};
-#[cfg(debug_assertions)]
-use ckb_types::core::TransactionView;
-pub use config::RpcConfig;
-#[cfg(debug_assertions)]
-use dev::{DevRpcServer, DevRpcServerImpl};
+use fnn::{ckb::CkbChainMessage, fiber::types::Hash256};
 use graph::{GraphRpcServer, GraphRpcServerImpl};
-use info::InfoRpcServerImpl;
+use info::{InfoRpcServer, InfoRpcServerImpl};
 use invoice::{InvoiceRpcServer, InvoiceRpcServerImpl};
 use jsonrpsee::server::{Server, ServerHandle};
 use jsonrpsee::RpcModule;
-use payment::PaymentRpcServerImpl;
+use payment::{PaymentRpcServer, PaymentRpcServerImpl};
 use peer::{PeerRpcServer, PeerRpcServerImpl};
 use ractor::ActorRef;
 #[cfg(debug_assertions)]

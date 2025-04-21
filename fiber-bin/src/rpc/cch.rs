@@ -1,10 +1,9 @@
-use crate::{
-    cch::{CchMessage, CchOrderStatus, ReceiveBTCOrder},
-    fiber::{
-        serde_utils::{U128Hex, U64Hex},
-        types::Hash256,
+use fnn::{
+    cch::CchMessage,
+    rpc_types::cch::{
+        GetReceiveBtcOrderParams, ReceiveBTCResponse, ReceiveBtcParams,
+        SendBTCResponse, SendBtcParams,
     },
-    invoice::Currency,
 };
 use jsonrpsee::{
     core::async_trait,
@@ -12,8 +11,6 @@ use jsonrpsee::{
     types::{error::CALL_EXECUTION_FAILED_CODE, ErrorObjectOwned},
 };
 use ractor::{call_t, ActorRef};
-use serde::{Deserialize, Serialize};
-use serde_with::serde_as;
 
 /// RPC module for cross chain hub demonstration.
 #[rpc(server)]
@@ -56,7 +53,7 @@ impl CchRpcServer for CchRpcServerImpl {
             self.cch_actor,
             CchMessage::SendBTC,
             TIMEOUT,
-            crate::cch::SendBTC {
+            fnn::cch::SendBTC {
                 btc_pay_req: params.btc_pay_req,
                 currency: params.currency,
             }
@@ -94,7 +91,7 @@ impl CchRpcServer for CchRpcServerImpl {
             self.cch_actor,
             CchMessage::ReceiveBTC,
             TIMEOUT,
-            crate::cch::ReceiveBTC {
+            fnn::cch::ReceiveBTC {
                 payment_hash: params.payment_hash,
                 channel_id: params.channel_id,
                 amount_sats: params.amount_sats,
@@ -134,20 +131,3 @@ impl CchRpcServer for CchRpcServerImpl {
     }
 }
 
-impl From<ReceiveBTCOrder> for ReceiveBTCResponse {
-    fn from(value: ReceiveBTCOrder) -> Self {
-        Self {
-            timestamp: value.created_at,
-            expiry: value.expires_after,
-            ckb_final_tlc_expiry_delta: value.ckb_final_tlc_expiry_delta,
-            wrapped_btc_type_script: value.wrapped_btc_type_script,
-            btc_pay_req: value.btc_pay_req,
-            payment_hash: value.payment_hash,
-            channel_id: value.channel_id,
-            tlc_id: value.tlc_id,
-            amount_sats: value.amount_sats,
-            fee_sats: value.fee_sats,
-            status: value.status,
-        }
-    }
-}

@@ -1,11 +1,8 @@
-use super::graph::UdtCfgInfos;
-use crate::ckb::CkbConfig;
-use crate::fiber::serde_utils::U32Hex;
-use crate::fiber::{
-    serde_utils::{U128Hex, U64Hex},
-    types::{Hash256, Pubkey},
+use fnn::ckb::CkbConfig;
+use fnn::fiber::{
     NetworkActorCommand, NetworkActorMessage,
 };
+use fnn::rpc_types::info::NodeInfoResult;
 use crate::{handle_actor_call, log_and_error};
 use ckb_jsonrpc_types::Script;
 use jsonrpsee::{
@@ -14,9 +11,6 @@ use jsonrpsee::{
     types::{error::CALL_EXECUTION_FAILED_CODE, ErrorObjectOwned},
 };
 use ractor::{call, ActorRef};
-use serde::{Deserialize, Serialize};
-use serde_with::serde_as;
-use tentacle::multiaddr::MultiAddr;
 
 /// The RPC module for node information.
 #[rpc(server)]
@@ -48,7 +42,7 @@ impl InfoRpcServerImpl {
 impl InfoRpcServer for InfoRpcServerImpl {
     async fn node_info(&self) -> Result<NodeInfoResult, ErrorObjectOwned> {
         let version = env!("CARGO_PKG_VERSION").to_string();
-        let commit_hash = crate::get_git_version().to_string();
+        let commit_hash = fnn::get_git_version().to_string();
 
         let message =
             |rpc_reply| NetworkActorMessage::Command(NetworkActorCommand::NodeInfo((), rpc_reply));

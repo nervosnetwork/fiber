@@ -1646,9 +1646,16 @@ name = "fiber-bin"
 version = "0.4.2"
 dependencies = [
  "ckb-chain-spec",
+ "ckb-jsonrpc-types",
  "ckb-resource",
+ "ckb-types",
+ "clap-serde-derive",
  "fnn",
+ "jsonrpsee",
  "ractor",
+ "secp256k1 0.28.2",
+ "socket2",
+ "tentacle",
  "tokio",
  "tracing",
  "tracing-subscriber",

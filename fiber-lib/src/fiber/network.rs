@@ -132,7 +132,7 @@ pub fn init_chain_hash(chain_hash: Hash256) {
         .expect("init_chain_hash should only be called once");
 }
 
-pub(crate) fn get_chain_hash() -> Hash256 {
+pub fn get_chain_hash() -> Hash256 {
     CHAIN_HASH_INSTANCE.get().cloned().unwrap_or_default()
 }
 
