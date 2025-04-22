@@ -10,6 +10,7 @@ use crate::{
     watchtower::WatchtowerStore,
 };
 use ckb_types::core::TransactionView;
+#[cfg(not(target_arch = "wasm32"))]
 use jsonrpsee::{
     core::async_trait,
     proc_macros::rpc,

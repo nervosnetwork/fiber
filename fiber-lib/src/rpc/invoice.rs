@@ -5,8 +5,11 @@ use crate::fiber::types::{Hash256, Privkey};
 use crate::invoice::{CkbInvoice, CkbInvoiceStatus, Currency, InvoiceBuilder, InvoiceStore};
 use crate::FiberConfig;
 use ckb_jsonrpc_types::Script;
-use jsonrpsee::types::error::CALL_EXECUTION_FAILED_CODE;
-use jsonrpsee::{core::async_trait, proc_macros::rpc, types::ErrorObjectOwned};
+#[cfg(not(target_arch = "wasm32"))]
+use jsonrpsee::{
+    core::async_trait, proc_macros::rpc, types::error::CALL_EXECUTION_FAILED_CODE,
+    types::ErrorObjectOwned,
+};
 use secp256k1::{PublicKey, Secp256k1, SecretKey};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
@@ -26,12 +29,12 @@ pub struct NewInvoiceParams {
     pub currency: Currency,
     /// The payment preimage of the invoice.
     pub payment_preimage: Hash256,
-    /// The expiry time of the invoice.
+    /// The expiry time of the invoice, in seconds.
     #[serde_as(as = "Option<U64Hex>")]
     pub expiry: Option<u64>,
     /// The fallback address of the invoice.
     pub fallback_address: Option<String>,
-    /// The final HTLC timeout of the invoice.
+    /// The final HTLC timeout of the invoice, in milliseconds.
     #[serde_as(as = "Option<U64Hex>")]
     pub final_expiry_delta: Option<u64>,
     /// The UDT type script of the invoice.

@@ -13,3 +13,6 @@ panic = "abort"
 inherits = "test"
 opt-level = 3
 debug = false
+
+[patch.crates-io]
+blake2b-rs = { git = "https://github.com/Officeyutong/blake2b-rs", rev = "f018d62" }

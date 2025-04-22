@@ -11,11 +11,13 @@ pub use tests::*;
 pub mod ckb;
 pub mod fiber;
 pub use fiber::{start_network, FiberConfig, NetworkServiceEvent};
+#[cfg(not(target_arch = "wasm32"))]
 pub mod cch;
+#[cfg(not(target_arch = "wasm32"))]
 pub use cch::{start_cch, CchActor, CchConfig};
 
-pub mod rpc;
 pub mod invoice;
+pub mod rpc;
 pub mod store;
 pub mod watchtower;
 

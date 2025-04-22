@@ -8,6 +8,7 @@ use crate::fiber::{
 };
 use crate::{handle_actor_call, log_and_error};
 use ckb_jsonrpc_types::Script;
+#[cfg(not(target_arch = "wasm32"))]
 use jsonrpsee::{
     core::async_trait,
     proc_macros::rpc,

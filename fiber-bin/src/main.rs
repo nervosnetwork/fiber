@@ -1,6 +1,5 @@
 use ckb_chain_spec::ChainSpec;
 use ckb_resource::Resource;
-use fnn::rpc::server::start_rpc;
 use core::default::Default;
 use fnn::actors::RootActor;
 use fnn::cch::CchMessage;
@@ -9,6 +8,7 @@ use fnn::ckb::contracts::TypeIDResolver;
 use fnn::ckb::contracts::{get_cell_deps, Contract};
 use fnn::ckb::{contracts::try_init_contracts_context, CkbChainActor};
 use fnn::fiber::{channel::ChannelSubscribers, graph::NetworkGraph, network::init_chain_hash};
+use fnn::rpc::server::start_rpc;
 use fnn::store::Store;
 use fnn::tasks::{
     cancel_tasks_and_wait_for_completion, new_tokio_cancellation_token, new_tokio_task_tracker,
@@ -315,7 +315,7 @@ pub async fn main() -> Result<(), ExitMessage> {
     };
 
     signal_listener().await;
-    if let Some(handle) = rpc_server_handle {
+    if let Some((handle, _)) = rpc_server_handle {
         handle
             .stop()
             .map_err(|err| ExitMessage(format!("failed to stop rpc server: {}", err)))?;

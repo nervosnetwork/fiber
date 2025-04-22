@@ -1,8 +1,15 @@
+#[cfg(not(target_arch = "wasm32"))]
 mod native;
+#[cfg(not(target_arch = "wasm32"))]
+pub use native::{Batch, DbDirection, IteratorMode, Store};
+
+#[cfg(target_arch = "wasm32")]
+mod browser;
+#[cfg(target_arch = "wasm32")]
+pub use browser::{Batch, DbDirection, IteratorMode, Store};
+
 
 use std::path::Path;
-
-pub use native::{Batch, DbDirection, IteratorMode, Store};
 
 use super::db_migrate::DbMigrate;
 use super::schema::*;

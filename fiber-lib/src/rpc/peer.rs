@@ -1,9 +1,12 @@
+use crate::fiber::network::PeerInfo;
 use crate::fiber::{NetworkActorCommand, NetworkActorMessage};
 use crate::log_and_error;
+#[cfg(not(target_arch = "wasm32"))]
 use jsonrpsee::{
     core::async_trait, proc_macros::rpc, types::error::CALL_EXECUTION_FAILED_CODE,
     types::ErrorObjectOwned,
 };
+use ractor::call;
 use ractor::ActorRef;
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
@@ -25,6 +28,13 @@ pub struct DisconnectPeerParams {
     pub peer_id: PeerId,
 }
 
+/// The result of the `list_peers` RPC method.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ListPeersResult {
+    /// A list of connected peers.
+    pub peers: Vec<PeerInfo>,
+}
+
 /// RPC module for peer management.
 #[rpc(server)]
 trait PeerRpc {
@@ -35,6 +45,10 @@ trait PeerRpc {
     /// Disconnect from a peer.
     #[method(name = "disconnect_peer")]
     async fn disconnect_peer(&self, params: DisconnectPeerParams) -> Result<(), ErrorObjectOwned>;
+
+    /// List connected peers
+    #[method(name = "list_peers")]
+    async fn list_peers(&self) -> Result<ListPeersResult, ErrorObjectOwned>;
 }
 
 pub struct PeerRpcServerImpl {
@@ -69,5 +83,14 @@ impl PeerRpcServer for PeerRpcServerImpl {
             params.peer_id.clone(),
         ));
         crate::handle_actor_cast!(self.actor, message, params)
+    }
+
+    async fn list_peers(&self) -> Result<ListPeersResult, ErrorObjectOwned> {
+        let message =
+            |rpc_reply| NetworkActorMessage::Command(NetworkActorCommand::ListPeers((), rpc_reply));
+
+        crate::handle_actor_call!(self.actor, message, ()).map(|response| ListPeersResult {
+            peers: response.clone(),
+        })
     }
 }
