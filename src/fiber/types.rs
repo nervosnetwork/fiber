@@ -1084,7 +1084,7 @@ impl From<UpdateTlcInfo> for ChannelTlcInfo {
     }
 }
 
-#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AddTlc {
     pub channel_id: Hash256,
     pub tlc_id: u64,
@@ -1093,6 +1093,19 @@ pub struct AddTlc {
     pub expiry: u64,
     pub hash_algorithm: HashAlgorithm,
     pub onion_packet: Option<PaymentOnionPacket>,
+}
+
+impl Debug for AddTlc {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AddTlc")
+            .field("channel_id", &self.channel_id)
+            .field("tlc_id", &self.tlc_id)
+            .field("amount", &self.amount)
+            .field("payment_hash", &self.payment_hash)
+            .field("expiry", &self.expiry)
+            .field("hash_algorithm", &self.hash_algorithm)
+            .finish()
+    }
 }
 
 impl From<AddTlc> for molecule_fiber::AddTlc {

@@ -22,6 +22,7 @@ use ckb_types::{core::tx_pool::TxStatus, packed::OutPoint};
 use ractor::call;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use tracing::error;
 
 #[tokio::test]
 async fn test_send_payment_custom_records() {
@@ -2766,25 +2767,30 @@ async fn test_send_payment_shutdown_under_send_each_other() {
     .await;
 
     let mut all_sent = HashSet::new();
-    let mut node0_sent_payments = HashSet::new();
-    let mut node3_sent_payments = HashSet::new();
     for _i in 0..5 {
-        let res = nodes[0].send_payment_keysend(&nodes[3], 1000, false).await;
+        let rand_amount = 1 + (rand::random::<u64>() % 1000) as u128;
+        let res = nodes[0]
+            .send_payment_keysend(&nodes[3], rand_amount, false)
+            .await;
         if let Ok(send_payment_res) = res {
             all_sent.insert(send_payment_res.payment_hash);
-            node0_sent_payments.insert(send_payment_res.payment_hash);
         }
-        let res = nodes[3].send_payment_keysend(&nodes[0], 1000, false).await;
+        let rand_amount = 1 + (rand::random::<u64>() % 1000) as u128;
+        let res = nodes[3]
+            .send_payment_keysend(&nodes[0], rand_amount, false)
+            .await;
         if let Ok(send_payment_res) = res {
             all_sent.insert(send_payment_res.payment_hash);
-            node3_sent_payments.insert(send_payment_res.payment_hash);
         }
     }
 
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
     let _ = nodes[3].send_shutdown(channels[2], false).await;
 
-    for i in 0..100 {
+    for i in 0..10 {
+        assert!(nodes[2].get_triggered_unexpected_events().await.is_empty());
+        assert!(nodes[3].get_triggered_unexpected_events().await.is_empty());
+
         let node_2_channel_actor_state = nodes[2].get_channel_actor_state(channels[2]);
         eprintln!(
             "checking {}: node_2_channel_actor_state: {:?} tlc_pending:\n",
@@ -2809,15 +2815,91 @@ async fn test_send_payment_shutdown_under_send_each_other() {
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
     let node_3_channel_actor_state = nodes[3].get_channel_actor_state(channels[2]);
+    error!("node_3 state: {:?}", node_3_channel_actor_state.state);
+
     assert_eq!(
         node_3_channel_actor_state.state,
         ChannelState::Closed(CloseFlags::COOPERATIVE)
     );
     let node_2_channel_actor_state = nodes[2].get_channel_actor_state(channels[2]);
+    error!("node_2 state: {:?}", node_2_channel_actor_state.state);
     assert_eq!(
         node_2_channel_actor_state.state,
         ChannelState::Closed(CloseFlags::COOPERATIVE)
     );
+}
+
+async fn run_shutdown_with_payment_send(sender: usize, receiver: usize) {
+    init_tracing();
+    let _span = tracing::info_span!("node", node = "test").entered();
+    let (nodes, channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+        ],
+        3,
+    )
+    .await;
+
+    let mut node0_sent_payments = HashSet::new();
+    for _i in 0..5 {
+        let rand_amount = 1 + (rand::random::<u64>() % 1000) as u128;
+        let res = nodes[sender]
+            .send_payment_keysend(&nodes[receiver], rand_amount, false)
+            .await;
+        if let Ok(send_payment_res) = res {
+            node0_sent_payments.insert(send_payment_res.payment_hash);
+        }
+    }
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+    let _ = nodes[2].send_shutdown(channels[1], false).await;
+
+    // there will be no pending tlcs
+    for i in 0..10 {
+        assert!(nodes[1].get_triggered_unexpected_events().await.is_empty());
+        assert!(nodes[2].get_triggered_unexpected_events().await.is_empty());
+
+        let node_1_channel_actor_state = nodes[1].get_channel_actor_state(channels[1]);
+        eprintln!(
+            "checking {}: node_1_channel_actor_state: {:?} tlc_pending:\n",
+            i, node_1_channel_actor_state.state,
+        );
+        node_1_channel_actor_state.tlc_state.debug();
+
+        let node_2_channel_actor_state = nodes[2].get_channel_actor_state(channels[1]);
+        eprintln!(
+            "checking { }: node_2_channel_actor_state: {:?} tlc_pending:\n",
+            i, node_2_channel_actor_state.state,
+        );
+        node_2_channel_actor_state.tlc_state.debug();
+        tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+        if !node_1_channel_actor_state.any_tlc_pending()
+            && !node_2_channel_actor_state.any_tlc_pending()
+        {
+            break;
+        }
+    }
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+    let node_1_channel_actor_state = nodes[1].get_channel_actor_state(channels[1]);
+    error!("node_1 state: {:?}", node_1_channel_actor_state.state);
+    assert_eq!(
+        node_1_channel_actor_state.state,
+        ChannelState::Closed(CloseFlags::COOPERATIVE)
+    );
+    let node_2_channel_actor_state = nodes[2].get_channel_actor_state(channels[1]);
+    error!("node_2 state: {:?}", node_2_channel_actor_state.state);
+    assert_eq!(
+        node_2_channel_actor_state.state,
+        ChannelState::Closed(CloseFlags::COOPERATIVE)
+    );
+}
+
+#[tokio::test]
+async fn test_send_payment_shutdown_under_single_direction_send() {
+    run_shutdown_with_payment_send(2, 1).await;
 }
 
 #[tokio::test]
