@@ -14,7 +14,7 @@ pub use fiber::{start_network, FiberConfig, NetworkServiceEvent};
 pub mod cch;
 pub use cch::{start_cch, CchActor, CchConfig};
 
-pub mod rpc_types;
+pub mod rpc;
 pub mod invoice;
 pub mod store;
 pub mod watchtower;

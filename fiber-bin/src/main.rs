@@ -1,6 +1,6 @@
 use ckb_chain_spec::ChainSpec;
 use ckb_resource::Resource;
-use rpc::start_rpc;
+use fnn::rpc::server::start_rpc;
 use core::default::Default;
 use fnn::actors::RootActor;
 use fnn::cch::CchMessage;
@@ -28,8 +28,6 @@ use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, info, info_span, trace};
 use tracing_subscriber::{field::MakeExt, fmt, fmt::format, EnvFilter};
 
-
-mod rpc;
 pub struct ExitMessage(String);
 
 #[tokio::main]
@@ -291,7 +289,7 @@ pub async fn main() -> Result<(), ExitMessage> {
     };
 
     signal_listener().await;
-    if let Some((handle, _)) = rpc_server_handle {
+    if let Some(handle) = rpc_server_handle {
         handle
             .stop()
             .map_err(|err| ExitMessage(format!("failed to stop rpc server: {}", err)))?;

@@ -6,7 +6,6 @@ mod history;
 mod network;
 mod path;
 mod payment;
-mod rpc;
 mod serde_utils;
 pub mod test_utils;
 mod tlc_op;

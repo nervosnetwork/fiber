@@ -423,7 +423,7 @@ impl<S> GossipService<S>
 where
     S: GossipMessageStore + Clone + Send + Sync + 'static,
 {
-    pub async fn start(
+    pub(crate) async fn start(
         gossip_config: GossipConfig,
         store: S,
         chain_actor: ActorRef<CkbChainMessage>,
