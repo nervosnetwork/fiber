@@ -1,5 +1,5 @@
 use anyhow::anyhow;
-use ckb_sdk::RpcError;
+use ckb_sdk::{tx_builder::TxBuilderError, RpcError};
 use ckb_testtool::context::Context;
 use ckb_types::{
     bytes::Bytes,
@@ -16,8 +16,8 @@ use crate::{
     ckb::{
         actor::GetTxResponse,
         config::UdtCfgInfos,
-        contracts::{Contract, ContractsContext, ContractsInfo},
-        CkbTxTracer, CkbTxTracingMask, CkbTxTracingResult,
+        contracts::{get_cell_deps, Contract, ContractsContext, ContractsInfo, ScriptCellDep},
+        CkbTxTracer, CkbTxTracingMask, CkbTxTracingResult, FundingError,
     },
     fiber::types::Hash256,
     now_timestamp_as_millis_u64,
@@ -136,7 +136,7 @@ impl MockContext {
         ];
         let mut context = Context::new_with_deterministic_rng();
         let mut contract_default_scripts: HashMap<Contract, Script> = HashMap::new();
-        let mut script_cell_deps: HashMap<Contract, Vec<CellDep>> = HashMap::new();
+        let mut script_cell_deps: HashMap<Contract, Vec<ScriptCellDep>> = HashMap::new();
 
         for (contract, binary) in binaries.into_iter() {
             let out_point = context.deploy_cell(binary);
@@ -154,7 +154,7 @@ impl MockContext {
             {
                 // FundingLock and CommitmentLock depend on CkbAuth
                 vec![
-                    cell_dep,
+                    cell_dep.into(),
                     script_cell_deps
                         .get(&Contract::CkbAuth)
                         .unwrap()
@@ -164,7 +164,7 @@ impl MockContext {
                         .clone(),
                 ]
             } else {
-                vec![cell_dep]
+                vec![cell_dep.into()]
             };
             script_cell_deps.insert(contract, cell_deps);
         }
@@ -174,7 +174,10 @@ impl MockContext {
             script_cell_deps,
             udt_whitelist: UdtCfgInfos::default(),
         };
-        let contracts_context = ContractsContext { contracts };
+        let contracts_context = ContractsContext {
+            contracts,
+            type_id_resolver: None,
+        };
         MockContext {
             context,
             contracts_context,
@@ -327,6 +330,15 @@ impl Actor for MockChainActor {
                     .as_ref()
                     .map(|x| x.outputs())
                     .unwrap_or_default();
+                let mut capacity =
+                    request.local_amount + (request.local_reserved_ckb_amount as u128);
+                if capacity > u64::MAX as u128 {
+                    let _ = reply_port.send(Err(FundingError::CkbTxBuilderError(
+                        TxBuilderError::Other(anyhow!("capacity overflow")),
+                    )));
+                    return Ok(());
+                }
+
                 let outputs = match outputs.get(0) {
                     Some(output) => {
                         if output.lock() != request.script {
@@ -336,13 +348,22 @@ impl Actor for MockChainActor {
                             return Ok(());
                         }
                         let current_capacity: u64 = output.capacity().unpack();
-                        let capacity = request.local_amount as u64
-                            + request.local_reserved_ckb_amount
-                            + current_capacity;
-                        let mut outputs_builder = outputs.as_builder();
+                        capacity += current_capacity as u128;
+                        if capacity > u64::MAX as u128 {
+                            let _ = reply_port.send(Err(FundingError::CkbTxBuilderError(
+                                TxBuilderError::Other(anyhow!("capacity overflow")),
+                            )));
+                            return Ok(());
+                        }
 
-                        outputs_builder
-                            .replace(0, output.as_builder().capacity(capacity.pack()).build());
+                        let mut outputs_builder = outputs.as_builder();
+                        outputs_builder.replace(
+                            0,
+                            output
+                                .as_builder()
+                                .capacity((capacity as u64).pack())
+                                .build(),
+                        );
                         outputs_builder.build()
                     }
                     None => [CellOutput::new_builder()
@@ -586,6 +607,18 @@ pub async fn get_tx_from_hash(
 ) -> Result<GetTxResponse, RpcError> {
     pub const TIMEOUT: u64 = 1000;
     call_t!(mock_actor, CkbChainMessage::GetTx, TIMEOUT, tx_hash).expect("chain actor alive")
+}
+
+pub fn complete_commitment_tx(commitment_tx: &TransactionView) -> TransactionView {
+    let cell_deps = get_cell_deps(
+        vec![Contract::FundingLock],
+        &commitment_tx.outputs().get(0).unwrap().type_().to_opt(),
+    )
+    .expect("get cell deps should be ok");
+    commitment_tx
+        .as_advanced_builder()
+        .cell_deps(cell_deps)
+        .build()
 }
 
 #[tokio::test]

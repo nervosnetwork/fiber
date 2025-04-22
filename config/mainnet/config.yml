@@ -20,28 +20,30 @@ fiber:
         hash_type: type
         args: 0x
       cell_deps:
-        - out_point:
-            tx_hash: 0x22ccb3018ca1aa7acd7b0ef7f5b01048be2525bb7364eafc8af04fd4d7279384
-            index: 0x1
-          dep_type: code
-        - out_point:
-            tx_hash: 0x22ccb3018ca1aa7acd7b0ef7f5b01048be2525bb7364eafc8af04fd4d7279384 # ckb_auth
-            index: 0x0
-          dep_type: code
+        - type_id:
+            code_hash: 0x00000000000000000000000000000000000000000000000000545950455f4944
+            hash_type: type
+            args: 0x64818d82a372312fb007c480391e1b9759d21b2c7f7959b9c177d72cdc243394
+        - cell_dep:
+            out_point:
+              tx_hash: 0x22ccb3018ca1aa7acd7b0ef7f5b01048be2525bb7364eafc8af04fd4d7279384 # ckb_auth
+              index: 0x0
+            dep_type: code
     - name: CommitmentLock
       script:
         code_hash: 0x2d45c4d3ed3e942f1945386ee82a5d1b7e4bb16d7fe1ab015421174ab747406c
         hash_type: type
         args: 0x
       cell_deps:
-        - out_point:
-            tx_hash: 0x22ccb3018ca1aa7acd7b0ef7f5b01048be2525bb7364eafc8af04fd4d7279384
-            index: 0x2
-          dep_type: code
-        - out_point:
-            tx_hash: 0x22ccb3018ca1aa7acd7b0ef7f5b01048be2525bb7364eafc8af04fd4d7279384 #ckb_auth
-            index: 0x0
-          dep_type: code
+        - type_id:
+            code_hash: 0x00000000000000000000000000000000000000000000000000545950455f4944
+            hash_type: type
+            args: 0xdb16e6dcb17f670e5fb7c556d81e522ec5edb069ad2fa3e898e7ccea6c26a39f
+        - cell_dep:
+            out_point:
+              tx_hash: 0x22ccb3018ca1aa7acd7b0ef7f5b01048be2525bb7364eafc8af04fd4d7279384 #ckb_auth
+              index: 0x0
+            dep_type: code
 
 rpc:
   # By default RPC only binds to localhost, thus it only allows accessing from the same machine.
@@ -60,9 +62,10 @@ ckb:
     #    hash_type: type
     #    args: 0xd591ebdc69626647e056e13345fd830c8b876bb06aa07ba610479eb77153ea9f
     #  cell_deps:
-    #    - tx_hash: 0xf6a5eef65101899db9709c8de1cc28f23c1bee90d857ebe176f6647ef109e20d
-    #      index: 0
-    #      dep_type: code
+    #    - type_id:
+    #        code_hash: 0x00000000000000000000000000000000000000000000000000545950455f4944
+    #        hash_type: type
+    #        args: 0x9105ea69838511ca609518d27855c53fed1b5ffaff4cfb334f58b40627d211c4
     #  auto_accept_amount: 10000000
 
 services:

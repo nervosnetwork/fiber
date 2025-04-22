@@ -25,8 +25,16 @@ pub fn gen_rand_fiber_private_key() -> Privkey {
     gen_rand_secp256k1_private_key().into()
 }
 
+pub fn gen_deterministic_fiber_private_key() -> Privkey {
+    gen_deterministic_secp256k1_private_key().into()
+}
+
 pub fn gen_rand_secp256k1_private_key() -> SecretKey {
     gen_rand_secp256k1_keypair_tuple().0
+}
+
+pub fn gen_deterministic_secp256k1_private_key() -> SecretKey {
+    gen_deterministic_secp256k1_keypair_tuple().0
 }
 
 pub fn gen_rand_secp256k1_public_key() -> PublicKey {
@@ -85,7 +93,9 @@ pub fn create_funding_tx(x_only: &XOnlyPublicKey) -> TransactionView {
     let commitment_lock_script_args = [&blake2b_256(x_only.serialize())[0..20]].concat();
 
     TransactionView::new_advanced_builder()
-        .cell_deps(get_cell_deps_by_contracts(vec![Contract::Secp256k1Lock]))
+        .cell_deps(
+            get_cell_deps_by_contracts(vec![Contract::Secp256k1Lock]).expect("get cell deps"),
+        )
         .output(
             CellOutput::new_builder()
                 .capacity(capacity.pack())

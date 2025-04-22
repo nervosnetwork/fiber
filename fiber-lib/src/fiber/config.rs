@@ -165,14 +165,6 @@ pub struct FiberConfig {
         help = "The minimal value of a tlc. [default: 0 (no minimal value)]"
     )]
     pub tlc_min_value: Option<u128>,
-    /// The maximal value of a tlc. [default: 0 (no maximal value)]
-    #[arg(
-        name = "FIBER_TLC_MAX_VALUE",
-        long = "fiber-tlc-max-value",
-        env,
-        help = "The maximal value of a tlc. [default: 0 (no maximal value)]"
-    )]
-    pub tlc_max_value: Option<u128>,
 
     /// The fee for forwarding peer tlcs. Proportional to the amount of the forwarded tlc. The unit is millionths of the amount. [default: 1000 (0.1%)]
     #[arg(
@@ -436,10 +428,6 @@ impl FiberConfig {
         self.tlc_min_value.unwrap_or(DEFAULT_TLC_MIN_VALUE)
     }
 
-    pub fn tlc_max_value(&self) -> u128 {
-        self.tlc_max_value.unwrap_or(DEFAULT_TLC_MAX_VALUE)
-    }
-
     pub fn tlc_fee_proportional_millionths(&self) -> u128 {
         self.tlc_fee_proportional_millionths
             .unwrap_or(DEFAULT_TLC_FEE_PROPORTIONAL_MILLIONTHS)
@@ -488,11 +476,36 @@ impl FiberConfig {
     }
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug, Eq, PartialEq, Hash)]
+pub struct ScriptCellDep {
+    #[serde(default)]
+    pub cell_dep: Option<CellDep>,
+    #[serde(default)]
+    pub type_id: Option<Script>,
+}
+
+impl ScriptCellDep {
+    pub fn with_cell_dep(cell_dep: CellDep) -> Self {
+        Self {
+            cell_dep: Some(cell_dep),
+            type_id: None,
+        }
+    }
+
+    pub fn with_type_id(type_id: Script) -> Self {
+        Self {
+            cell_dep: None,
+            type_id: Some(type_id),
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct FiberScript {
     pub name: Contract,
     pub script: Script,
-    pub cell_deps: Vec<CellDep>,
+    /// Type ID of the cell deps
+    pub cell_deps: Vec<ScriptCellDep>,
 }
 
 impl FromStr for FiberScript {

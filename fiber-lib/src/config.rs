@@ -53,7 +53,12 @@ impl FromStr for Service {
 }
 
 #[derive(Parser)]
-#[command(author, version, about)]
+#[command(author,
+    version = format!("Fiber v{} ({} {})",
+        env!("CARGO_PKG_VERSION"),
+        option_env!("GIT_COMMIT_HASH").unwrap_or("unknown"),
+        option_env!("GIT_COMMIT_DATE").unwrap_or("unknown")),
+    about)]
 struct Args {
     // We want to differentiate between when it is a user-set value or it is the default value.
     // If the user has not set default value but set `base_dir` instead then we will use `config.yml`,

@@ -340,7 +340,7 @@ impl FundingTxBuilder {
                     debug!("find proper UDT owner cells: {:?}", inputs);
                     // we need to filter the cell deps by the contracts_context
                     let udt_cell_deps = get_udt_cell_deps(&udt_type_script)
-                        .ok_or_else(|| TxBuilderError::ResolveCellDepFailed(udt_type_script))?;
+                        .map_err(|_| TxBuilderError::ResolveCellDepFailed(udt_type_script))?;
                     for cell_dep in udt_cell_deps {
                         cell_deps.insert(cell_dep);
                     }

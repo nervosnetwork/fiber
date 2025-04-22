@@ -26,12 +26,22 @@ pub mod actors;
 
 pub mod tasks;
 
+pub mod utils;
+
 use git_version::git_version;
 
 const GIT_VERSION: &str = git_version!(fallback = "unknown");
 
 pub fn get_git_version() -> &'static str {
     GIT_VERSION
+}
+
+pub fn get_git_commit_info() -> String {
+    format!(
+        "{} {}",
+        option_env!("GIT_COMMIT_HASH").unwrap_or("unknown"),
+        option_env!("GIT_COMMIT_DATE").unwrap_or("unknown")
+    )
 }
 
 pub fn get_node_prefix() -> &'static str {

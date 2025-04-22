@@ -4,6 +4,9 @@ use fnn::rpc::server::start_rpc;
 use core::default::Default;
 use fnn::actors::RootActor;
 use fnn::cch::CchMessage;
+use fnn::ckb::contracts::TypeIDResolver;
+#[cfg(debug_assertions)]
+use fnn::ckb::contracts::{get_cell_deps, Contract};
 use fnn::ckb::{contracts::try_init_contracts_context, CkbChainActor};
 use fnn::fiber::{channel::ChannelSubscribers, graph::NetworkGraph, network::init_chain_hash};
 use fnn::store::Store;
@@ -25,6 +28,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::select;
 use tokio::sync::{mpsc, RwLock};
+#[cfg(debug_assertions)]
+use tracing::error;
 use tracing::{debug, info, info_span, trace};
 use tracing_subscriber::{field::MakeExt, fmt, fmt::format, EnvFilter};
 
@@ -56,7 +61,11 @@ pub async fn main() -> Result<(), ExitMessage> {
         .try_init()
         .map_err(|err| ExitMessage(format!("failed to initialize logger: {}", err)))?;
 
-    info!("Starting node with git version {}", fnn::get_git_version());
+    info!(
+        "Starting node with git version {} ({})",
+        fnn::get_git_version(),
+        fnn::get_git_commit_info()
+    );
 
     let _span = info_span!("node", node = fnn::get_node_prefix()).entered();
 
@@ -109,10 +118,12 @@ pub async fn main() -> Result<(), ExitMessage> {
             })?;
 
             init_chain_hash(genesis_block.hash().into());
+            let type_id_resolver = TypeIDResolver::new(ckb_config.rpc_url.clone());
             try_init_contracts_context(
                 genesis_block,
                 fiber_config.scripts.clone(),
                 ckb_config.udt_whitelist.clone().unwrap_or_default(),
+                Some(type_id_resolver),
             )
             .map_err(|err| ExitMessage(format!("failed to init contracts context: {}", err)))?;
 
@@ -191,9 +202,24 @@ pub async fn main() -> Result<(), ExitMessage> {
                                     #[cfg(debug_assertions)]
                                     if let Some(rpc_dev_module_commitment_txs) = rpc_dev_module_commitment_txs_clone.as_ref() {
                                         if let NetworkServiceEvent::RemoteCommitmentSigned(_, channel_id, commitment_tx, _) = event.clone() {
-                                            let lock_args = commitment_tx.outputs().get(0).unwrap().lock().args().raw_data();
-                                            let version = u64::from_be_bytes(lock_args[28..36].try_into().unwrap());
-                                            rpc_dev_module_commitment_txs.write().await.insert((channel_id, version), commitment_tx);
+                                            match get_cell_deps(
+                                                vec![Contract::FundingLock],
+                                                &commitment_tx.outputs().get(0).unwrap().type_().to_opt(),
+                                            ) {
+                                                Ok(cell_deps) => {
+                                                    let commitment_tx = commitment_tx
+                                                    .as_advanced_builder()
+                                                    .cell_deps(cell_deps)
+                                                    .build();
+
+                                                let lock_args = commitment_tx.outputs().get(0).unwrap().lock().args().raw_data();
+                                                let version = u64::from_be_bytes(lock_args[28..36].try_into().unwrap());
+                                                rpc_dev_module_commitment_txs.write().await.insert((channel_id, version), commitment_tx);
+                                                },
+                                                Err(err) => {
+                                                    error!("Failed to get cell deps for commitment tx: {}", err);
+                                                }
+                                            }
                                         }
                                     }
                                     // forward the event to the watchtower actor

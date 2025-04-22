@@ -168,10 +168,14 @@ table AnnouncementSignatures {
     partial_signature: Byte32,
 }
 
+union UdtDep {
+    UdtCellDep,
+    Script,
+}
+
 table UdtCellDep {
+    out_point: OutPoint,
     dep_type: byte,
-    tx_hash: Byte32,
-    index: Uint32,
 }
 
 table UdtScript {
@@ -180,7 +184,7 @@ table UdtScript {
     args: Bytes,
 }
 
-vector UdtCellDeps <UdtCellDep>;
+vector UdtCellDeps <UdtDep>;
 
 table UdtArgInfo {
     name: Bytes,

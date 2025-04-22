@@ -8,13 +8,13 @@ use std::{
     str::FromStr,
 };
 
+use ckb_jsonrpc_types::{OutPoint as OutPointWrapper, Script as ScriptWrapper};
 use ckb_types::core::ScriptHashType;
 use ckb_types::prelude::Builder;
-use ckb_types::prelude::Pack;
 use ckb_types::H256;
 use ckb_types::{
     core::DepType,
-    packed::{CellDep, OutPoint, Script},
+    packed::{CellDep, Script},
 };
 use clap_serde_derive::clap::{self};
 use molecule::prelude::Entity;
@@ -80,13 +80,18 @@ impl CkbConfig {
     pub fn read_secret_key(&self) -> crate::Result<SecretKey> {
         self.create_base_dir()?;
         let path = self.base_dir().join("key");
-        let mut file = std::fs::File::open(&path)?;
+        let mut file = std::fs::File::open(&path).map_err(|e| {
+            std::io::Error::new(
+                e.kind(),
+                format!("Failed to open secret key file: {:?}, reason: {}", path, e),
+            )
+        })?;
 
         let warn = |m: bool, d: &str| {
             if m {
                 tracing::warn!(
                     "Your secret file's permission is not {}, path: {:?}. \
-                Please fix it as soon as possible",
+                    Please fix it as soon as possible",
                     d,
                     path
                 )
@@ -179,13 +184,39 @@ pub struct UdtScript {
     pub args: String,
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug, Eq, PartialEq, Hash)]
+/// Udt script on-chain dependencies.
+pub struct UdtDep {
+    /// cell dep described by out_point.
+    #[serde(default)]
+    pub cell_dep: Option<UdtCellDep>,
+    /// cell dep described by type ID.
+    #[serde(default)]
+    pub type_id: Option<ScriptWrapper>,
+}
+
+impl UdtDep {
+    pub fn with_cell_dep(cell_dep: UdtCellDep) -> Self {
+        Self {
+            cell_dep: Some(cell_dep),
+            type_id: None,
+        }
+    }
+
+    pub fn with_type_id(type_id: ScriptWrapper) -> Self {
+        Self {
+            cell_dep: None,
+            type_id: Some(type_id),
+        }
+    }
+}
+
 #[serde_as]
 #[derive(Serialize, Deserialize, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct UdtCellDep {
+    pub out_point: OutPointWrapper,
     #[serde_as(as = "DepTypeWrapper")]
     pub dep_type: DepType,
-    pub tx_hash: H256,
-    pub index: u32,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, Eq, PartialEq, Hash)]
@@ -193,7 +224,7 @@ pub struct UdtArgInfo {
     pub name: String,
     pub script: UdtScript,
     pub auto_accept_amount: Option<u128>,
-    pub cell_deps: Vec<UdtCellDep>,
+    pub cell_deps: Vec<UdtDep>,
 }
 
 /// The UDT configurations
@@ -212,12 +243,7 @@ impl From<&UdtCellDep> for CellDep {
     fn from(cell_dep: &UdtCellDep) -> Self {
         CellDep::new_builder()
             .dep_type(cell_dep.dep_type.into())
-            .out_point(
-                OutPoint::new_builder()
-                    .tx_hash(cell_dep.tx_hash.pack())
-                    .index(cell_dep.index.pack())
-                    .build(),
-            )
+            .out_point(cell_dep.out_point.clone().into())
             .build()
     }
 }
