@@ -1,4 +1,5 @@
 use crate::ckb::tests::test_utils::get_tx_from_hash;
+use crate::ckb::tests::test_utils::MockChainActorMiddleware;
 use crate::ckb::GetTxResponse;
 use crate::fiber::channel::ChannelActorState;
 use crate::fiber::channel::ChannelActorStateStore;
@@ -200,6 +201,7 @@ pub struct NetworkNode {
     pub ckb_chain_actor: ActorRef<CkbChainMessage>,
     pub network_graph: Arc<TokioRwLock<NetworkGraph<Store>>>,
     pub chain_actor: ActorRef<CkbChainMessage>,
+    pub mock_chain_actor_middleware: Option<Box<dyn MockChainActorMiddleware>>,
     pub gossip_actor: ActorRef<GossipActorMessage>,
     pub private_key: Privkey,
     pub peer_id: PeerId,
@@ -216,6 +218,7 @@ pub struct NetworkNodeConfig {
     store: Store,
     fiber_config: FiberConfig,
     rpc_config: Option<RpcConfig>,
+    mock_chain_actor_middleware: Option<Box<dyn MockChainActorMiddleware>>,
 }
 
 impl NetworkNodeConfig {
@@ -232,6 +235,7 @@ pub struct NetworkNodeConfigBuilder {
     // but allow user to override it.
     #[allow(clippy::type_complexity)]
     fiber_config_updater: Option<Box<dyn FnOnce(&mut FiberConfig) + 'static>>,
+    mock_chain_actor_middleware: Option<Box<dyn MockChainActorMiddleware>>,
 }
 
 impl Default for NetworkNodeConfigBuilder {
@@ -247,6 +251,7 @@ impl NetworkNodeConfigBuilder {
             node_name: None,
             enable_rpc_server: false,
             fiber_config_updater: None,
+            mock_chain_actor_middleware: None,
         }
     }
 
@@ -274,6 +279,14 @@ impl NetworkNodeConfigBuilder {
         updater: impl FnOnce(&mut FiberConfig) + 'static,
     ) -> Self {
         self.fiber_config_updater = Some(Box::new(updater));
+        self
+    }
+
+    pub fn mock_chain_actor_middleware(
+        mut self,
+        middleware: Box<dyn MockChainActorMiddleware>,
+    ) -> Self {
+        self.mock_chain_actor_middleware = Some(middleware);
         self
     }
 
@@ -314,6 +327,7 @@ impl NetworkNodeConfigBuilder {
             store,
             fiber_config,
             rpc_config,
+            mock_chain_actor_middleware: self.mock_chain_actor_middleware,
         };
 
         if let Some(updater) = self.fiber_config_updater {
@@ -1024,6 +1038,7 @@ impl NetworkNode {
             store,
             fiber_config,
             rpc_config,
+            mock_chain_actor_middleware,
         } = config;
 
         let _span = tracing::info_span!("NetworkNode", node_name = &node_name).entered();
@@ -1031,10 +1046,15 @@ impl NetworkNode {
         let root = get_test_root_actor().await;
         let (event_sender, mut event_receiver) = mpsc::channel(10000);
 
-        let chain_actor = Actor::spawn_linked(None, MockChainActor::new(), (), root.get_cell())
-            .await
-            .expect("start mock chain actor")
-            .0;
+        let chain_actor = Actor::spawn_linked(
+            None,
+            MockChainActor::new(),
+            mock_chain_actor_middleware.clone(),
+            root.get_cell(),
+        )
+        .await
+        .expect("start mock chain actor")
+        .0;
 
         let secret_key: Privkey = fiber_config
             .read_or_generate_secret_key()
@@ -1157,6 +1177,7 @@ impl NetworkNode {
             listening_addrs: announced_addrs,
             network_actor,
             ckb_chain_actor: chain_actor.clone(),
+            mock_chain_actor_middleware,
             network_graph,
             chain_actor,
             gossip_actor,
@@ -1177,6 +1198,7 @@ impl NetworkNode {
             store: self.store.clone(),
             fiber_config: self.fiber_config.clone(),
             rpc_config: self.rpc_config.clone(),
+            mock_chain_actor_middleware: self.mock_chain_actor_middleware.clone(),
         }
     }
 
