@@ -1,8 +1,8 @@
 use fnn::{
     cch::CchMessage,
     rpc_types::cch::{
-        GetReceiveBtcOrderParams, ReceiveBTCResponse, ReceiveBtcParams,
-        SendBTCResponse, SendBtcParams,
+        GetReceiveBtcOrderParams, ReceiveBTCResponse, ReceiveBtcParams, SendBTCResponse,
+        SendBtcParams,
     },
 };
 use jsonrpsee::{
@@ -130,4 +130,3 @@ impl CchRpcServer for CchRpcServerImpl {
         result.map(Into::into).map_err(Into::into)
     }
 }
-
