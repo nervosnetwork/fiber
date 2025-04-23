@@ -3216,6 +3216,7 @@ async fn test_send_payment_no_preimage_invoice_will_make_payment_failed() {
 
     let count = 2;
     let target_pubkey = node_1.pubkey;
+    // Note: the preimages are not stored in db
     for _i in 0..count {
         let preimage = gen_rand_sha256_hash();
         let ckb_invoice = InvoiceBuilder::new(Currency::Fibd)
