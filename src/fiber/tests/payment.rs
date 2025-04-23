@@ -1,22 +1,32 @@
 #![allow(clippy::needless_range_loop)]
 use super::test_utils::init_tracing;
+use crate::fiber::channel::AddTlcCommand;
+use crate::fiber::channel::ChannelCommand;
+use crate::fiber::channel::ChannelCommandWithId;
 use crate::fiber::channel::ChannelState;
 use crate::fiber::channel::CloseFlags;
+use crate::fiber::channel::RemoveTlcCommand;
+use crate::fiber::channel::ShuttingDownFlags;
 use crate::fiber::channel::UpdateCommand;
 use crate::fiber::config::DEFAULT_TLC_EXPIRY_DELTA;
 use crate::fiber::config::DEFAULT_TLC_FEE_PROPORTIONAL_MILLIONTHS;
 use crate::fiber::graph::PaymentSessionStatus;
+use crate::fiber::hash_algorithm::HashAlgorithm;
 use crate::fiber::network::HopHint;
 use crate::fiber::network::PaymentCustomRecords;
 use crate::fiber::network::SendPaymentCommand;
 use crate::fiber::tests::test_utils::*;
 use crate::fiber::types::Hash256;
+use crate::fiber::types::RemoveTlcFulfill;
+use crate::fiber::types::RemoveTlcReason;
+use crate::fiber::types::NO_SHARED_SECRET;
 use crate::fiber::NetworkActorCommand;
 use crate::fiber::NetworkActorMessage;
 use crate::gen_rand_sha256_hash;
 use crate::invoice::CkbInvoice;
 use crate::invoice::Currency;
 use crate::invoice::InvoiceBuilder;
+use crate::now_timestamp_as_millis_u64;
 use crate::NetworkServiceEvent;
 use ckb_types::{core::tx_pool::TxStatus, packed::OutPoint};
 use ractor::call;
@@ -2907,6 +2917,93 @@ async fn run_shutdown_with_payment_send(sender: usize, receiver: usize) {
 #[tokio::test]
 async fn test_send_payment_shutdown_under_single_direction_send() {
     run_shutdown_with_payment_send(1, 2).await;
+}
+
+#[tokio::test]
+async fn test_shutdown_with_pending_tlc() {
+    init_tracing();
+
+    let (nodes, channels) =
+        create_n_nodes_network(&[((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT))], 2).await;
+
+    // create a new payment hash
+    let preimage: [u8; 32] = gen_rand_sha256_hash().as_ref().try_into().unwrap();
+
+    let hash_algorithm = HashAlgorithm::Sha256;
+    let digest = hash_algorithm.hash(preimage);
+    let add_tlc_result = call!(nodes[0].network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id: channels[0],
+                command: ChannelCommand::AddTlc(
+                    AddTlcCommand {
+                        amount: 1000,
+                        hash_algorithm,
+                        payment_hash: digest.into(),
+                        expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+                        onion_packet: None,
+                        shared_secret: NO_SHARED_SECRET,
+                        previous_tlc: None,
+                    },
+                    rpc_reply,
+                ),
+            },
+        ))
+    })
+    .expect("node alive");
+    assert!(add_tlc_result.is_ok());
+    let res = nodes[0].send_shutdown(channels[0], false).await;
+    assert!(res.is_err());
+
+    let res = nodes[1].send_shutdown(channels[0], false).await;
+    assert!(res.is_ok());
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+    let node_0_channel_actor_state = nodes[0].get_channel_actor_state(channels[0]);
+    assert!(node_0_channel_actor_state.any_tlc_pending());
+
+    assert!(matches!(
+        node_0_channel_actor_state.state,
+        ChannelState::ShuttingDown(ShuttingDownFlags::AWAITING_PENDING_TLCS)
+    ));
+    let node_1_channel_actor_state = nodes[1].get_channel_actor_state(channels[0]);
+    assert!(node_1_channel_actor_state.any_tlc_pending());
+    assert!(matches!(
+        node_1_channel_actor_state.state,
+        ChannelState::ShuttingDown(ShuttingDownFlags::AWAITING_PENDING_TLCS)
+    ));
+
+    let remove_tlc_result = call!(nodes[1].network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id: channels[0],
+                command: ChannelCommand::RemoveTlc(
+                    RemoveTlcCommand {
+                        id: add_tlc_result.unwrap().tlc_id,
+                        reason: RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+                            payment_preimage: preimage.into(),
+                        }),
+                    },
+                    rpc_reply,
+                ),
+            },
+        ))
+    })
+    .expect("node_b alive");
+    assert!(remove_tlc_result.is_ok());
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+    let node_0_channel_actor_state = nodes[0].get_channel_actor_state(channels[0]);
+    assert_eq!(
+        node_0_channel_actor_state.state,
+        ChannelState::Closed(CloseFlags::COOPERATIVE)
+    );
+    let node_1_channel_actor_state = nodes[1].get_channel_actor_state(channels[0]);
+    assert_eq!(
+        node_1_channel_actor_state.state,
+        ChannelState::Closed(CloseFlags::COOPERATIVE)
+    );
 }
 
 #[tokio::test]

@@ -6,7 +6,7 @@ use crate::{debug_event, utils::tx::compute_tx_message};
 use bitflags::bitflags;
 use futures::future::OptionFuture;
 use secp256k1::XOnlyPublicKey;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use crate::{
     ckb::{
@@ -1155,6 +1155,9 @@ where
             debug!("Auto accept shutdown ...");
         }
 
+        // TODO: there maybe some tlcs still not settled when shutdown,
+        // we need to check if we need to trigger remove tlc for previous channel
+        // maybe could be done in cron task from network actor.
         state.update_state(ChannelState::ShuttingDown(flags));
         state.maybe_transition_to_shutdown()?;
 
@@ -1283,14 +1286,13 @@ where
             commitment_tx_partial_signature,
             next_local_nonce: state.get_next_local_nonce(),
         };
+
         #[cfg(debug_assertions)]
-        {
-            debug!(
-                "send commitment signed: {:?} at commitment_numbers: {:?}",
-                commitment_signed,
-                state.get_current_commitment_numbers()
-            );
-        }
+        debug!(
+            "send commitment signed: {:?} at commitment_numbers: {:?}",
+            commitment_signed,
+            state.get_current_commitment_numbers()
+        );
 
         self.network
             .send_message(NetworkActorMessage::new_command(
@@ -2426,7 +2428,7 @@ where
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        debug!(
+        trace!(
             "Channel actor processing message: id: {:?}, state: {:?}, message: {:?}",
             &state.get_id(),
             &state.state,
@@ -4715,12 +4717,11 @@ impl ChannelActorState {
         let point = self.get_current_local_commitment_point();
 
         #[cfg(debug_assertions)]
-        {
-            debug!(
-                "Sending RevokeAndAck message with commitment tx partial signature {:?}",
-                commitment_tx_partial_signature
-            );
-        }
+        debug!(
+            "Sending RevokeAndAck message with commitment tx partial signature {:?}",
+            commitment_tx_partial_signature
+        );
+
         self.network()
             .send_message(NetworkActorMessage::new_command(
                 NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
