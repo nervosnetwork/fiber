@@ -3098,7 +3098,7 @@ async fn test_send_payment_remove_tlc_with_preimage_will_retry() {
         if payments.is_empty() {
             break;
         }
-        let escaped = SystemTime::now()
+        let elapsed = SystemTime::now()
             .duration_since(started)
             .expect("time passed")
             .as_secs();
