@@ -3647,7 +3647,6 @@ pub(crate) fn deterministically_hash<T: Entity>(v: &T) -> [u8; 32] {
 pub struct PaymentHopData {
     pub amount: u128,
     pub expiry: u64,
-    // this is only specified in the last hop in the keysend mode
     pub payment_preimage: Option<Hash256>,
     pub hash_algorithm: HashAlgorithm,
     pub funding_tx_hash: Hash256,
