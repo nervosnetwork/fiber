@@ -1258,7 +1258,7 @@ where
                     "Received commitment_signed command in ShuttingDown state: {:?}",
                     flags
                 );
-                if !flags.contains(ShuttingDownFlags::DROPPING_PENDING) {
+                if !flags.contains(ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION) {
                     CommitmentSignedFlags::PendingShutdown()
                 } else {
                     return Err(ProcessingChannelError::InvalidState(format!(
@@ -5914,7 +5914,7 @@ impl ChannelActorState {
             }
             ChannelState::ChannelReady => CommitmentSignedFlags::ChannelReady(),
             ChannelState::ShuttingDown(flags) => {
-                if !flags.contains(ShuttingDownFlags::DROPPING_PENDING) {
+                if !flags.contains(ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION) {
                     debug!(
                         "Verify commitment_signed message while shutdown is pending, current state {:?}",
                         &self.state

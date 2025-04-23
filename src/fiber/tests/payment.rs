@@ -22,6 +22,7 @@ use ckb_types::{core::tx_pool::TxStatus, packed::OutPoint};
 use ractor::call;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use tracing::debug;
 use tracing::error;
 
 #[tokio::test]
@@ -2785,7 +2786,16 @@ async fn test_send_payment_shutdown_under_send_each_other() {
     }
 
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
-    let _ = nodes[3].send_shutdown(channels[2], false).await;
+
+    for _i in 0..20 {
+        let res = nodes[3].send_shutdown(channels[2], false).await;
+        if res.is_ok() {
+            debug!("send shutdown successfully");
+            break;
+        }
+        debug!("shutdown res: {:?}", res);
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    }
 
     for i in 0..10 {
         assert!(nodes[2].get_triggered_unexpected_events().await.is_empty());
@@ -2815,10 +2825,15 @@ async fn test_send_payment_shutdown_under_send_each_other() {
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
     let node_3_channel_actor_state = nodes[3].get_channel_actor_state(channels[2]);
-
-    assert_eq!(node_3_channel_actor_state.state, ChannelState::ChannelReady);
+    assert_eq!(
+        node_3_channel_actor_state.state,
+        ChannelState::Closed(CloseFlags::COOPERATIVE)
+    );
     let node_2_channel_actor_state = nodes[2].get_channel_actor_state(channels[2]);
-    assert_eq!(node_2_channel_actor_state.state, ChannelState::ChannelReady);
+    assert_eq!(
+        node_2_channel_actor_state.state,
+        ChannelState::Closed(CloseFlags::COOPERATIVE)
+    );
 }
 
 async fn run_shutdown_with_payment_send(sender: usize, receiver: usize) {
