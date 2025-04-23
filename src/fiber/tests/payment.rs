@@ -6,13 +6,17 @@ use crate::fiber::channel::UpdateCommand;
 use crate::fiber::config::DEFAULT_TLC_EXPIRY_DELTA;
 use crate::fiber::config::DEFAULT_TLC_FEE_PROPORTIONAL_MILLIONTHS;
 use crate::fiber::graph::PaymentSessionStatus;
+use crate::fiber::network::BuildRouterCommand;
 use crate::fiber::network::HopHint;
+use crate::fiber::network::HopRequire;
 use crate::fiber::network::PaymentCustomRecords;
 use crate::fiber::network::SendPaymentCommand;
+use crate::fiber::network::SendPaymentWithRouterCommand;
 use crate::fiber::tests::test_utils::*;
 use crate::fiber::types::Hash256;
 use crate::fiber::NetworkActorCommand;
 use crate::fiber::NetworkActorMessage;
+use crate::gen_rand_fiber_public_key;
 use crate::gen_rand_sha256_hash;
 use crate::invoice::CkbInvoice;
 use crate::invoice::Currency;
@@ -93,7 +97,7 @@ async fn test_send_payment_custom_records() {
 #[tokio::test]
 async fn test_send_payment_for_direct_channel_and_dry_run() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
+
     // from https://github.com/nervosnetwork/fiber/issues/359
 
     let (nodes, channels) = create_n_nodes_network(
@@ -132,7 +136,6 @@ async fn test_send_payment_for_direct_channel_and_dry_run() {
 #[tokio::test]
 async fn test_send_payment_prefer_newer_channels() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
 
     let (nodes, channels) = create_n_nodes_network(
         &[
@@ -150,19 +153,8 @@ async fn test_send_payment_prefer_newer_channels() {
         .send_payment(SendPaymentCommand {
             target_pubkey: Some(target_pubkey),
             amount: Some(10000000000),
-            payment_hash: None,
-            final_tlc_expiry_delta: None,
-            tlc_expiry_limit: None,
-            invoice: None,
-            timeout: None,
-            max_fee_amount: None,
-            max_parts: None,
             keysend: Some(true),
-            udt_type_script: None,
-            allow_self_payment: false,
-            hop_hints: None,
-            dry_run: false,
-            custom_records: None,
+            ..Default::default()
         })
         .await;
 
@@ -187,7 +179,6 @@ async fn test_send_payment_prefer_newer_channels() {
 #[tokio::test]
 async fn test_send_payment_prefer_channels_with_larger_balance() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
 
     let (nodes, channels) = create_n_nodes_network(
         &[
@@ -209,19 +200,8 @@ async fn test_send_payment_prefer_channels_with_larger_balance() {
         .send_payment(SendPaymentCommand {
             target_pubkey: Some(target_pubkey),
             amount: Some(5000000000),
-            payment_hash: None,
-            final_tlc_expiry_delta: None,
-            tlc_expiry_limit: None,
-            invoice: None,
-            timeout: None,
-            max_fee_amount: None,
-            max_parts: None,
             keysend: Some(true),
-            udt_type_script: None,
-            allow_self_payment: false,
-            hop_hints: None,
-            dry_run: false,
-            custom_records: None,
+            ..Default::default()
         })
         .await;
 
@@ -368,19 +348,8 @@ async fn test_send_payment_over_private_channel() {
             .send_payment(SendPaymentCommand {
                 target_pubkey: Some(target_pubkey),
                 amount: Some(amount_to_send),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                tlc_expiry_limit: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-                custom_records: None,
+                ..Default::default()
             })
             .await;
 
@@ -402,7 +371,7 @@ async fn test_send_payment_over_private_channel() {
 #[tokio::test]
 async fn test_send_payment_for_pay_self() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
+
     // from https://github.com/nervosnetwork/fiber/issues/362
 
     let (nodes, channels) = create_n_nodes_network(
@@ -476,7 +445,7 @@ async fn test_send_payment_for_pay_self() {
 #[tokio::test]
 async fn test_send_payment_for_pay_self_with_two_nodes() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
+
     // from https://github.com/nervosnetwork/fiber/issues/355
 
     let (nodes, channels) = create_n_nodes_network(
@@ -523,7 +492,7 @@ async fn test_send_payment_for_pay_self_with_two_nodes() {
 #[tokio::test]
 async fn test_send_payment_with_more_capacity_for_payself() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
+
     // from https://github.com/nervosnetwork/fiber/issues/362
 
     let (nodes, channels) = create_n_nodes_network(
@@ -742,15 +711,7 @@ async fn test_send_payment_with_private_channel_hints_fallback() {
         .send_payment(SendPaymentCommand {
             target_pubkey: Some(target_pubkey),
             amount: Some(30000000000),
-            payment_hash: None,
-            final_tlc_expiry_delta: None,
-            tlc_expiry_limit: None,
-            invoice: None,
-            timeout: None,
-            max_fee_amount: None,
-            max_parts: None,
             keysend: Some(true),
-            udt_type_script: None,
             allow_self_payment: true,
             custom_records: None,
             hop_hints: Some(vec![HopHint {
@@ -759,7 +720,7 @@ async fn test_send_payment_with_private_channel_hints_fallback() {
                 fee_rate: DEFAULT_TLC_FEE_PROPORTIONAL_MILLIONTHS as u64,
                 tlc_expiry_delta: DEFAULT_TLC_EXPIRY_DELTA,
             }]),
-            dry_run: false,
+            ..Default::default()
         })
         .await;
 
@@ -865,502 +826,998 @@ async fn test_send_payment_with_private_multiple_channel_hints_fallback() {
     source_node.wait_until_success(payment_hash).await;
 }
 
-// TODO: The meaning of hop hints changed after https://github.com/nervosnetwork/fiber/pull/487/
-// It no longer forces the route to go through the specified node, but only hints the router to consider the specified node.
-// We need to update the test cases accordingly. When RPC like SendToRoute is implemented, we can test this feature more accurately.
-// https://lightning.engineering/api-docs/api/lnd/router/send-to-route-v2/
-// #[tokio::test]
-// async fn test_send_payment_with_route_to_self_with_hop_hints() {
-//     init_tracing();
-//     let _span = tracing::info_span!("node", node = "test").entered();
+#[tokio::test]
+async fn test_send_payment_build_router_basic() {
+    init_tracing();
 
-//     let (nodes, channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
-//         &[
-//             (
-//                 (0, 1),
-//                 (
-//                     MIN_RESERVED_CKB + 10000000000,
-//                     MIN_RESERVED_CKB + 10000000000,
-//                 ),
-//             ),
-//             (
-//                 (1, 2),
-//                 (
-//                     MIN_RESERVED_CKB + 10000000000,
-//                     MIN_RESERVED_CKB + 10000000000,
-//                 ),
-//             ),
-//             (
-//                 (2, 0),
-//                 (
-//                     MIN_RESERVED_CKB + 10000000000,
-//                     MIN_RESERVED_CKB + 10000000000,
-//                 ),
-//             ),
-//         ],
-//         3,
-//         true,
-//     )
-//     .await;
-//     let [mut node_0, node_1, node_2] = nodes.try_into().expect("3 nodes");
-//     eprintln!("node_0: {:?}", node_0.pubkey);
-//     eprintln!("node_1: {:?}", node_1.pubkey);
-//     eprintln!("node_2: {:?}", node_2.pubkey);
+    let (nodes, _channels) = create_n_nodes_network(
+        &[
+            (
+                (0, 1),
+                (
+                    MIN_RESERVED_CKB + 10000000000,
+                    MIN_RESERVED_CKB + 10000000000,
+                ),
+            ),
+            (
+                (1, 2),
+                (
+                    MIN_RESERVED_CKB + 10000000000,
+                    MIN_RESERVED_CKB + 10000000000,
+                ),
+            ),
+        ],
+        3,
+    )
+    .await;
+    let [node_0, node_1, node_2] = nodes.try_into().expect("3 nodes");
+    eprintln!("node_0: {:?}", node_0.pubkey);
+    eprintln!("node_1: {:?}", node_1.pubkey);
+    eprintln!("node_2: {:?}", node_2.pubkey);
 
-//     let node_1_channel0_balance = node_1.get_local_balance_from_channel(channels[0]);
-//     let node_1_channel1_balance = node_1.get_local_balance_from_channel(channels[1]);
-//     let node_2_channel1_balance = node_2.get_local_balance_from_channel(channels[1]);
-//     let node_2_channel2_balance = node_2.get_local_balance_from_channel(channels[2]);
+    let router = node_0
+        .build_router(BuildRouterCommand {
+            amount: None,
+            hops_info: vec![HopRequire {
+                pubkey: node_1.pubkey,
+                channel_outpoint: None,
+            }],
+            udt_type_script: None,
+            final_tlc_expiry_delta: None,
+        })
+        .await
+        .unwrap();
+    eprintln!("result: {:?}", router);
+    let router_nodes: Vec<_> = router.router_hops.iter().map(|x| x.target).collect();
+    eprintln!("router_nodes: {:?}", router_nodes);
+    let amounts: Vec<_> = router
+        .router_hops
+        .iter()
+        .map(|x| x.amount_received)
+        .collect();
+    assert_eq!(router_nodes, vec![node_1.pubkey]);
+    assert_eq!(amounts, vec![1]);
 
-//     let channel_0_funding_tx = node_0.get_channel_funding_tx(&channels[0]).unwrap();
+    let payment = node_0.send_payment_keysend(&node_2, 1, true).await;
+    eprintln!("payment: {:?}", payment);
 
-//     // node_0 -> node_0 will be ok if `allow_self_payment` is true
-//     // use hop hints to help find_path use node1 -> node0,
-//     // then the only valid route will be node0 -> node2 -> node1 -> node0
-//     let res = node_0
-//         .send_payment(SendPaymentCommand {
-//             target_pubkey: Some(node_0.pubkey.clone()),
-//             amount: Some(60000000),
-//             payment_hash: None,
-//             final_tlc_expiry_delta: None,
-//             tlc_expiry_limit: None,
-//             invoice: None,
-//             timeout: None,
-//             max_fee_amount: None,
-//             max_parts: None,
-//             keysend: Some(true),
-//             udt_type_script: None,
-//             allow_self_payment: true,
-//             hop_hints: Some(vec![HopHint {
-//                 pubkey: node_0.pubkey.clone(),
-//                 channel_funding_tx: channel_0_funding_tx,
-//                 inbound: true,
-//                 fee_rate: None,
-//                 tlc_expiry_delta: None,
-//             }]),
-//             dry_run: false,
-//         })
-//         .await;
+    let router = node_0
+        .build_router(BuildRouterCommand {
+            amount: None,
+            hops_info: vec![
+                HopRequire {
+                    pubkey: node_1.pubkey,
+                    channel_outpoint: None,
+                },
+                HopRequire {
+                    pubkey: node_2.pubkey,
+                    channel_outpoint: None,
+                },
+            ],
+            udt_type_script: None,
+            final_tlc_expiry_delta: None,
+        })
+        .await
+        .unwrap();
+    eprintln!("result: {:?}", router);
+    let router_nodes: Vec<_> = router.router_hops.iter().map(|x| x.target).collect();
+    eprintln!("router_nodes: {:?}", router_nodes);
+    let amounts: Vec<_> = router
+        .router_hops
+        .iter()
+        .map(|x| x.amount_received)
+        .collect();
+    assert_eq!(router_nodes, vec![node_1.pubkey, node_2.pubkey]);
+    assert_eq!(amounts, vec![2, 1]);
 
-//     eprintln!("res: {:?}", res);
-//     assert!(res.is_ok());
+    let router = node_0
+        .build_router(BuildRouterCommand {
+            amount: None,
+            hops_info: vec![
+                HopRequire {
+                    pubkey: node_1.pubkey,
+                    channel_outpoint: None,
+                },
+                HopRequire {
+                    pubkey: node_2.pubkey,
+                    channel_outpoint: None,
+                },
+                HopRequire {
+                    pubkey: gen_rand_fiber_public_key(),
+                    channel_outpoint: None,
+                },
+            ],
+            udt_type_script: None,
+            final_tlc_expiry_delta: None,
+        })
+        .await;
+    assert!(router.is_err());
 
-//     let res = res.unwrap();
-//     let payment_hash = res.payment_hash;
-//     node_0.wait_until_success(payment_hash).await;
-//     node_0
-//         .assert_payment_status(payment_hash, PaymentSessionStatus::Success, Some(1))
-//         .await;
+    let router = node_0
+        .build_router(BuildRouterCommand {
+            amount: None,
+            hops_info: vec![
+                HopRequire {
+                    pubkey: gen_rand_fiber_public_key(),
+                    channel_outpoint: None,
+                },
+                HopRequire {
+                    pubkey: node_2.pubkey,
+                    channel_outpoint: None,
+                },
+            ],
+            udt_type_script: None,
+            final_tlc_expiry_delta: None,
+        })
+        .await;
+    assert!(router.is_err());
+}
 
-//     let node_0_balance1 = node_0.get_local_balance_from_channel(channels[0]);
-//     let node_0_balance2 = node_0.get_local_balance_from_channel(channels[2]);
+#[tokio::test]
+async fn test_send_payment_build_router_multiple_channels() {
+    init_tracing();
 
-//     eprintln!("fee: {:?}", res.fee);
-//     // for node0 pay to self, only the fee will be deducted
-//     assert!(node_0_balance1 + node_0_balance2 == 10000000000 + 10000000000 - res.fee);
+    let (nodes, channels) = create_n_nodes_network(
+        &[
+            (
+                (0, 1),
+                (
+                    MIN_RESERVED_CKB + 10000000000,
+                    MIN_RESERVED_CKB + 10000000000,
+                ),
+            ),
+            (
+                (1, 2),
+                (
+                    MIN_RESERVED_CKB + 10000000000,
+                    MIN_RESERVED_CKB + 10000000000,
+                ),
+            ),
+            (
+                (1, 2),
+                (
+                    MIN_RESERVED_CKB + 10000000000,
+                    MIN_RESERVED_CKB + 10000000000,
+                ),
+            ),
+        ],
+        3,
+    )
+    .await;
+    let [node_0, node_1, node_2] = nodes.try_into().expect("3 nodes");
+    eprintln!("node_0: {:?}", node_0.pubkey);
+    eprintln!("node_1: {:?}", node_1.pubkey);
+    eprintln!("node_2: {:?}", node_2.pubkey);
 
-//     eprintln!(
-//         "node1 left: {:?}, right: {:?}",
-//         node_1.get_local_balance_from_channel(channels[0]),
-//         node_1.get_local_balance_from_channel(channels[1])
-//     );
+    let router = node_0
+        .build_router(BuildRouterCommand {
+            amount: None,
+            hops_info: vec![
+                HopRequire {
+                    pubkey: node_1.pubkey,
+                    channel_outpoint: None,
+                },
+                HopRequire {
+                    pubkey: node_2.pubkey,
+                    channel_outpoint: None,
+                },
+            ],
+            udt_type_script: None,
+            final_tlc_expiry_delta: None,
+        })
+        .await
+        .unwrap();
+    eprintln!("result: {:?}", router);
+    let amounts: Vec<_> = router
+        .router_hops
+        .iter()
+        .map(|x| x.amount_received)
+        .collect();
+    assert_eq!(amounts, vec![2, 1]);
 
-//     let node_1_new_channel0_balance = node_1.get_local_balance_from_channel(channels[0]);
-//     let node_1_new_channel1_balance = node_1.get_local_balance_from_channel(channels[1]);
-//     let node_2_new_channel1_balance = node_2.get_local_balance_from_channel(channels[1]);
-//     let node_2_new_channel2_balance = node_2.get_local_balance_from_channel(channels[2]);
+    let channel_2_funding_tx = node_0.get_channel_funding_tx(&channels[2]).unwrap();
+    assert_eq!(
+        channel_2_funding_tx,
+        router.router_hops[1].channel_outpoint.tx_hash().into(),
+    );
 
-//     // node0 can only route to self from
-//     // node0 -> node2 -> node1 -> node0
-//     let node1_fee = (node_1_new_channel1_balance - node_1_channel1_balance)
-//         - (node_1_channel0_balance - node_1_new_channel0_balance);
+    let channel_1_funding_tx = node_0.get_channel_funding_tx(&channels[1]).unwrap();
+    let channel_1_outpoint = OutPoint::new(channel_1_funding_tx.into(), 0);
+    let router = node_0
+        .build_router(BuildRouterCommand {
+            amount: None,
+            hops_info: vec![
+                HopRequire {
+                    pubkey: node_1.pubkey,
+                    channel_outpoint: None,
+                },
+                HopRequire {
+                    pubkey: node_2.pubkey,
+                    channel_outpoint: Some(channel_1_outpoint),
+                },
+            ],
+            udt_type_script: None,
+            final_tlc_expiry_delta: None,
+        })
+        .await
+        .unwrap();
+    eprintln!("result: {:?}", router);
+    let amounts: Vec<_> = router
+        .router_hops
+        .iter()
+        .map(|x| x.amount_received)
+        .collect();
+    assert_eq!(amounts, vec![2, 1]);
 
-//     assert!(node1_fee > 0);
+    assert_eq!(
+        channel_1_funding_tx,
+        router.router_hops[1].channel_outpoint.tx_hash().into(),
+    );
+}
 
-//     let node2_fee = (node_2_new_channel2_balance - node_2_channel2_balance)
-//         - (node_2_channel1_balance - node_2_new_channel1_balance);
+#[tokio::test]
+async fn test_send_payment_build_router_pay_self() {
+    init_tracing();
 
-//     assert_eq!(node1_fee + node2_fee, res.fee);
-// }
+    let (nodes, channels) = create_n_nodes_network(
+        &[
+            (
+                (0, 1),
+                (
+                    MIN_RESERVED_CKB + 10000000000,
+                    MIN_RESERVED_CKB + 10000000000,
+                ),
+            ),
+            (
+                (1, 2),
+                (
+                    MIN_RESERVED_CKB + 10000000000,
+                    MIN_RESERVED_CKB + 10000000000,
+                ),
+            ),
+            (
+                (1, 2),
+                (
+                    MIN_RESERVED_CKB + 10000000000,
+                    MIN_RESERVED_CKB + 10000000000,
+                ),
+            ),
+            (
+                (2, 0),
+                (
+                    MIN_RESERVED_CKB + 10000000000,
+                    MIN_RESERVED_CKB + 10000000000,
+                ),
+            ),
+        ],
+        3,
+    )
+    .await;
+    let [node_0, node_1, node_2] = nodes.try_into().expect("3 nodes");
+    eprintln!("node_0: {:?}", node_0.pubkey);
+    eprintln!("node_1: {:?}", node_1.pubkey);
+    eprintln!("node_2: {:?}", node_2.pubkey);
 
-// TODO: The meaning of hop hints changed after https://github.com/nervosnetwork/fiber/pull/487/
-// It no longer forces the route to go through the specified node, but only hints the router to consider the specified node.
-// We need to update the test cases accordingly. When RPC like SendToRoute is implemented, we can test this feature more accurately.
-// https://lightning.engineering/api-docs/api/lnd/router/send-to-route-v2/
-// #[tokio::test]
-// async fn test_send_payment_with_route_to_self_with_outbound_hop_hints() {
-//     init_tracing();
-//     let _span = tracing::info_span!("node", node = "test").entered();
+    let router = node_0
+        .build_router(BuildRouterCommand {
+            amount: None,
+            hops_info: vec![
+                HopRequire {
+                    pubkey: node_1.pubkey,
+                    channel_outpoint: None,
+                },
+                HopRequire {
+                    pubkey: node_2.pubkey,
+                    channel_outpoint: None,
+                },
+                HopRequire {
+                    pubkey: node_0.pubkey,
+                    channel_outpoint: None,
+                },
+            ],
+            udt_type_script: None,
+            final_tlc_expiry_delta: None,
+        })
+        .await
+        .unwrap();
+    eprintln!("result: {:?}", router);
+    let amounts: Vec<_> = router
+        .router_hops
+        .iter()
+        .map(|x| x.amount_received)
+        .collect();
+    eprintln!("amounts: {:?}", amounts);
+    assert_eq!(amounts, vec![3, 2, 1]);
 
-//     let (nodes, channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
-//         &[
-//             (
-//                 (0, 1),
-//                 (
-//                     MIN_RESERVED_CKB + 10000000000,
-//                     MIN_RESERVED_CKB + 10000000000,
-//                 ),
-//             ),
-//             (
-//                 (1, 2),
-//                 (
-//                     MIN_RESERVED_CKB + 10000000000,
-//                     MIN_RESERVED_CKB + 10000000000,
-//                 ),
-//             ),
-//             (
-//                 (2, 0),
-//                 (
-//                     MIN_RESERVED_CKB + 10000000000,
-//                     MIN_RESERVED_CKB + 10000000000,
-//                 ),
-//             ),
-//         ],
-//         3,
-//         true,
-//     )
-//     .await;
-//     let [mut node_0, node_1, node_2] = nodes.try_into().expect("3 nodes");
-//     eprintln!("node_0: {:?}", node_0.pubkey);
-//     eprintln!("node_1: {:?}", node_1.pubkey);
-//     eprintln!("node_2: {:?}", node_2.pubkey);
+    let router_nodes: Vec<_> = router.router_hops.iter().map(|x| x.target).collect();
+    eprintln!("router_nodes: {:?}", router_nodes);
+    assert_eq!(
+        router_nodes,
+        vec![node_1.pubkey, node_2.pubkey, node_0.pubkey]
+    );
 
-//     let node_1_channel0_balance = node_1.get_local_balance_from_channel(channels[0]);
-//     let node_1_channel1_balance = node_1.get_local_balance_from_channel(channels[1]);
-//     let node_2_channel1_balance = node_2.get_local_balance_from_channel(channels[1]);
-//     let node_2_channel2_balance = node_2.get_local_balance_from_channel(channels[2]);
+    let channel_1_funding_tx = node_0.get_channel_funding_tx(&channels[0]).unwrap();
+    let channel_2_funding_tx = node_0.get_channel_funding_tx(&channels[2]).unwrap();
+    let channel_3_funding_tx = node_0.get_channel_funding_tx(&channels[3]).unwrap();
+    assert_eq!(
+        vec![
+            channel_1_funding_tx,
+            channel_2_funding_tx,
+            channel_3_funding_tx
+        ],
+        router
+            .router_hops
+            .iter()
+            .map(|x| x.channel_outpoint.tx_hash().into())
+            .collect::<Vec<_>>()
+    );
+}
 
-//     let channel_0_funding_tx = node_0.get_channel_funding_tx(&channels[0]).unwrap();
+#[tokio::test]
+async fn test_send_payment_build_router_amount_range() {
+    init_tracing();
 
-//     // node_0 -> node_0 will be ok if `allow_self_payment` is true
-//     // use hop hints to help find_path use node0 -> node1,
-//     // then the only valid route will be node0 -> node1 -> node2 -> node0
-//     let res = node_0
-//         .send_payment(SendPaymentCommand {
-//             target_pubkey: Some(node_0.pubkey.clone()),
-//             amount: Some(60000000),
-//             payment_hash: None,
-//             final_tlc_expiry_delta: None,
-//             tlc_expiry_limit: None,
-//             invoice: None,
-//             timeout: None,
-//             max_fee_amount: None,
-//             max_parts: None,
-//             keysend: Some(true),
-//             udt_type_script: None,
-//             allow_self_payment: true,
-//             hop_hints: Some(vec![HopHint {
-//                 pubkey: node_0.pubkey.clone(),
-//                 channel_funding_tx: channel_0_funding_tx,
-//                 inbound: false,
-//                 fee_rate: None,
-//                 tlc_expiry_delta: None,
-//             }]),
-//             dry_run: false,
-//         })
-//         .await;
+    let (nodes, _channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (MIN_RESERVED_CKB + 1000, MIN_RESERVED_CKB + 1000)),
+            ((1, 2), (MIN_RESERVED_CKB + 1000, MIN_RESERVED_CKB + 1000)),
+            ((2, 3), (MIN_RESERVED_CKB + 1000, MIN_RESERVED_CKB + 1000)),
+        ],
+        4,
+    )
+    .await;
+    let [node_0, node_1, node_2, _] = nodes.try_into().expect("3 nodes");
 
-//     eprintln!("res: {:?}", res);
-//     assert!(res.is_ok());
+    let router = node_0
+        .build_router(BuildRouterCommand {
+            amount: Some(0), // too small
+            hops_info: vec![HopRequire {
+                pubkey: node_1.pubkey,
+                channel_outpoint: None,
+            }],
+            udt_type_script: None,
+            final_tlc_expiry_delta: None,
+        })
+        .await;
 
-//     let res = res.unwrap();
-//     let payment_hash = res.payment_hash;
-//     node_0.wait_until_success(payment_hash).await;
-//     node_0
-//         .assert_payment_status(payment_hash, PaymentSessionStatus::Success, Some(1))
-//         .await;
+    assert!(router.is_err());
 
-//     let node_0_balance1 = node_0.get_local_balance_from_channel(channels[0]);
-//     let node_0_balance2 = node_0.get_local_balance_from_channel(channels[2]);
+    let router = node_0
+        .build_router(BuildRouterCommand {
+            amount: Some(1001), // too large
+            hops_info: vec![HopRequire {
+                pubkey: node_1.pubkey,
+                channel_outpoint: None,
+            }],
+            udt_type_script: None,
+            final_tlc_expiry_delta: None,
+        })
+        .await;
 
-//     eprintln!("fee: {:?}", res.fee);
-//     // for node0 pay to self, only the fee will be deducted
-//     assert!(node_0_balance1 + node_0_balance2 == 10000000000 + 10000000000 - res.fee);
+    assert!(router.is_err());
 
-//     eprintln!(
-//         "node1 left: {:?}, right: {:?}",
-//         node_1.get_local_balance_from_channel(channels[0]),
-//         node_1.get_local_balance_from_channel(channels[1])
-//     );
+    let router = node_0
+        .build_router(BuildRouterCommand {
+            amount: Some(1000), // add 1 as fee is too large for channel balance
+            hops_info: vec![
+                HopRequire {
+                    pubkey: node_1.pubkey,
+                    channel_outpoint: None,
+                },
+                HopRequire {
+                    pubkey: node_2.pubkey,
+                    channel_outpoint: None,
+                },
+            ],
+            udt_type_script: None,
+            final_tlc_expiry_delta: None,
+        })
+        .await;
 
-//     let node_1_new_channel0_balance = node_1.get_local_balance_from_channel(channels[0]);
-//     let node_1_new_channel1_balance = node_1.get_local_balance_from_channel(channels[1]);
-//     let node_2_new_channel1_balance = node_2.get_local_balance_from_channel(channels[1]);
-//     let node_2_new_channel2_balance = node_2.get_local_balance_from_channel(channels[2]);
+    assert!(router.is_err());
 
-//     // node0 can only route to self from
-//     // node0 -> node1 -> node2 -> node0
-//     let node1_fee = (node_1_new_channel0_balance - node_1_channel0_balance)
-//         - (node_1_channel1_balance - node_1_new_channel1_balance);
+    let router = node_0
+        .build_router(BuildRouterCommand {
+            amount: Some(999), // add 1 as fee is ok for channel balance
+            hops_info: vec![
+                HopRequire {
+                    pubkey: node_1.pubkey,
+                    channel_outpoint: None,
+                },
+                HopRequire {
+                    pubkey: node_2.pubkey,
+                    channel_outpoint: None,
+                },
+            ],
+            udt_type_script: None,
+            final_tlc_expiry_delta: None,
+        })
+        .await;
 
-//     assert!(node1_fee > 0);
+    assert!(router.is_ok());
+    let amounts: Vec<_> = router
+        .unwrap()
+        .router_hops
+        .iter()
+        .map(|x| x.amount_received)
+        .collect();
 
-//     let node2_fee = (node_2_new_channel1_balance - node_2_channel1_balance)
-//         - (node_2_channel2_balance - node_2_new_channel2_balance);
+    assert_eq!(amounts, vec![1000, 999]);
+}
 
-//     assert_eq!(node1_fee + node2_fee, res.fee);
-// }
+#[tokio::test]
+async fn test_send_payment_with_route_to_self_with_specified_router() {
+    init_tracing();
 
-// TODO: The meaning of hop hints changed after https://github.com/nervosnetwork/fiber/pull/487/
-// It no longer forces the route to go through the specified node, but only hints the router to consider the specified node.
-// We need to update the test cases accordingly. When RPC like SendToRoute is implemented, we can test this feature more accurately.
-// https://lightning.engineering/api-docs/api/lnd/router/send-to-route-v2/
-// #[tokio::test]
-// async fn test_send_payment_select_channel_with_hop_hints() {
-//     init_tracing();
-//     let _span = tracing::info_span!("node", node = "test").entered();
+    let (nodes, channels) = create_n_nodes_network(
+        &[
+            (
+                (0, 1),
+                (
+                    MIN_RESERVED_CKB + 10000000000,
+                    MIN_RESERVED_CKB + 10000000000,
+                ),
+            ),
+            (
+                (1, 2),
+                (
+                    MIN_RESERVED_CKB + 10000000000,
+                    MIN_RESERVED_CKB + 10000000000,
+                ),
+            ),
+            (
+                (2, 0),
+                (
+                    MIN_RESERVED_CKB + 10000000000,
+                    MIN_RESERVED_CKB + 10000000000,
+                ),
+            ),
+        ],
+        3,
+    )
+    .await;
+    let [node_0, node_1, node_2] = nodes.try_into().expect("3 nodes");
+    eprintln!("node_0: {:?}", node_0.pubkey);
+    eprintln!("node_1: {:?}", node_1.pubkey);
+    eprintln!("node_2: {:?}", node_2.pubkey);
 
-//     let (nodes, channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
-//         &[
-//             ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
-//             // there are 3 channels from node1 -> node2
-//             ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
-//             ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
-//             ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
-//             ((2, 3), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
-//         ],
-//         4,
-//         true,
-//     )
-//     .await;
-//     let [mut node_0, node_1, node_2, node_3] = nodes.try_into().expect("4 nodes");
-//     eprintln!("node_0: {:?}", node_0.pubkey);
-//     eprintln!("node_1: {:?}", node_1.pubkey);
-//     eprintln!("node_2: {:?}", node_2.pubkey);
-//     eprintln!("node_3: {:?}", node_3.pubkey);
+    let node_1_channel0_balance = node_1.get_local_balance_from_channel(channels[0]);
+    let node_1_channel1_balance = node_1.get_local_balance_from_channel(channels[1]);
+    let node_2_channel1_balance = node_2.get_local_balance_from_channel(channels[1]);
+    let node_2_channel2_balance = node_2.get_local_balance_from_channel(channels[2]);
 
-//     let channel_3_funding_tx = node_0.get_channel_funding_tx(&channels[3]).unwrap();
-//     eprintln!("channel_3_funding_tx: {:?}", channel_3_funding_tx);
-//     let res = node_0
-//         .send_payment(SendPaymentCommand {
-//             target_pubkey: Some(node_3.pubkey.clone()),
-//             amount: Some(60000000),
-//             payment_hash: None,
-//             final_tlc_expiry_delta: None,
-//             tlc_expiry_limit: None,
-//             invoice: None,
-//             timeout: None,
-//             max_fee_amount: None,
-//             max_parts: None,
-//             keysend: Some(true),
-//             udt_type_script: None,
-//             allow_self_payment: true,
-//             // at node_1, we must use channel_3 to reach node_2
-//             hop_hints: Some(vec![HopHint {
-//                 pubkey: node_2.pubkey.clone(),
-//                 channel_funding_tx: channel_3_funding_tx,
-//                 inbound: true,
-//                 fee_rate: None,
-//                 tlc_expiry_delta: None,
-//             }]),
-//             dry_run: false,
-//         })
-//         .await;
+    let router = node_0
+        .build_router(BuildRouterCommand {
+            amount: Some(60000000),
+            hops_info: vec![
+                HopRequire {
+                    pubkey: node_2.pubkey,
+                    channel_outpoint: None,
+                },
+                HopRequire {
+                    pubkey: node_1.pubkey,
+                    channel_outpoint: None,
+                },
+                HopRequire {
+                    pubkey: node_0.pubkey,
+                    channel_outpoint: None,
+                },
+            ],
+            udt_type_script: None,
+            final_tlc_expiry_delta: None,
+        })
+        .await
+        .unwrap();
 
-//     eprintln!("res: {:?}", res);
-//     assert!(res.is_ok());
-//     let payment_hash = res.unwrap().payment_hash;
-//     eprintln!("payment_hash: {:?}", payment_hash);
-//     let payment_session = node_0
-//         .get_payment_session(payment_hash)
-//         .expect("get payment");
-//     eprintln!("payment_session: {:?}", payment_session);
-//     let used_channels: Vec<Hash256> = payment_session
-//         .route
-//         .nodes
-//         .iter()
-//         .map(|x| x.channel_outpoint.tx_hash().into())
-//         .collect();
-//     eprintln!("used_channels: {:?}", used_channels);
-//     assert_eq!(used_channels.len(), 4);
-//     assert_eq!(used_channels[1], channel_3_funding_tx);
+    eprintln!("result: {:?}", router);
 
-//     tokio::time::sleep(tokio::time::Duration::from_millis(2500)).await;
+    // pay to self with router will be OK
+    let res = node_0
+        .send_payment_with_router(SendPaymentWithRouterCommand {
+            router: router.router_hops,
+            keysend: Some(true),
+            ..Default::default()
+        })
+        .await;
 
-//     // try channel_2 with outbound hop hints
-//     let channel_2_funding_tx = node_0.get_channel_funding_tx(&channels[2]).unwrap();
-//     eprintln!("channel_2_funding_tx: {:?}", channel_2_funding_tx);
-//     let res = node_0
-//         .send_payment(SendPaymentCommand {
-//             target_pubkey: Some(node_3.pubkey.clone()),
-//             amount: Some(60000000),
-//             payment_hash: None,
-//             final_tlc_expiry_delta: None,
-//             tlc_expiry_limit: None,
-//             invoice: None,
-//             timeout: None,
-//             max_fee_amount: None,
-//             max_parts: None,
-//             keysend: Some(true),
-//             udt_type_script: None,
-//             allow_self_payment: true,
-//             // at node_1, we must use channel_2 to reach node_2
-//             hop_hints: Some(vec![HopHint {
-//                 pubkey: node_1.pubkey.clone(),
-//                 channel_funding_tx: channel_2_funding_tx,
-//                 inbound: false,
-//                 fee_rate: None,
-//                 tlc_expiry_delta: None,
-//             }]),
-//             dry_run: false,
-//         })
-//         .await;
+    eprintln!("res: {:?}", res);
+    assert!(res.is_ok());
 
-//     eprintln!("res: {:?}", res);
-//     assert!(res.is_ok());
-//     let payment_hash = res.unwrap().payment_hash;
-//     eprintln!("payment_hash: {:?}", payment_hash);
-//     let payment_session = node_0
-//         .get_payment_session(payment_hash)
-//         .expect("get payment");
-//     eprintln!("payment_session: {:?}", payment_session);
-//     let used_channels: Vec<Hash256> = payment_session
-//         .route
-//         .nodes
-//         .iter()
-//         .map(|x| x.channel_outpoint.tx_hash().into())
-//         .collect();
-//     eprintln!("used_channels: {:?}", used_channels);
-//     assert_eq!(used_channels.len(), 4);
-//     assert_eq!(used_channels[1], channel_2_funding_tx);
+    let res = res.unwrap();
+    let payment_hash = res.payment_hash;
+    node_0.wait_until_success(payment_hash).await;
+    node_0
+        .assert_payment_status(payment_hash, PaymentSessionStatus::Success, Some(1))
+        .await;
 
-//     let wrong_channel_hash = Hash256::from([0u8; 32]);
-//     // if we specify a wrong funding_tx, the payment will fail
-//     let res = node_0
-//         .send_payment(SendPaymentCommand {
-//             target_pubkey: Some(node_3.pubkey.clone()),
-//             amount: Some(60000000),
-//             payment_hash: None,
-//             final_tlc_expiry_delta: None,
-//             tlc_expiry_limit: None,
-//             invoice: None,
-//             timeout: None,
-//             max_fee_amount: None,
-//             max_parts: None,
-//             keysend: Some(true),
-//             udt_type_script: None,
-//             allow_self_payment: true,
-//             // at node_1, we must use channel_3 to reach node_2
-//             hop_hints: Some(vec![HopHint {
-//                 pubkey: node_2.pubkey.clone(),
-//                 channel_funding_tx: wrong_channel_hash,
-//                 inbound: true,
-//                 fee_rate: None,
-//                 tlc_expiry_delta: None,
-//             }]),
-//             dry_run: false,
-//         })
-//         .await;
-//     eprintln!("res: {:?}", res);
-//     assert!(res
-//         .unwrap_err()
-//         .to_string()
-//         .contains("PathFind error: no path found"));
-// }
+    let node_0_balance1 = node_0.get_local_balance_from_channel(channels[0]);
+    let node_0_balance2 = node_0.get_local_balance_from_channel(channels[2]);
 
-// TODO: The meaning of hop hints changed after https://github.com/nervosnetwork/fiber/pull/487/
-// It no longer forces the route to go through the specified node, but only hints the router to consider the specified node.
-// We need to update the test cases accordingly. When RPC like SendToRoute is implemented, we can test this feature more accurately.
-// https://lightning.engineering/api-docs/api/lnd/router/send-to-route-v2/
-// #[tokio::test]
-// async fn test_send_payment_two_nodes_with_hop_hints_and_multiple_channels() {
-//     init_tracing();
-//     let _span = tracing::info_span!("node", node = "test").entered();
+    eprintln!("fee: {:?}", res.fee);
+    // for node0 pay to self, only the fee will be deducted
+    assert!(node_0_balance1 + node_0_balance2 == 10000000000 + 10000000000 - res.fee);
 
-//     let (nodes, channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
-//         &[
-//             ((0, 1), (HUGE_CKB_AMOUNT, MIN_RESERVED_CKB)),
-//             ((0, 1), (HUGE_CKB_AMOUNT, MIN_RESERVED_CKB)),
-//             ((1, 0), (HUGE_CKB_AMOUNT, MIN_RESERVED_CKB)),
-//             ((1, 0), (HUGE_CKB_AMOUNT, MIN_RESERVED_CKB)),
-//         ],
-//         2,
-//         true,
-//     )
-//     .await;
-//     let [mut node_0, node_1] = nodes.try_into().expect("2 nodes");
-//     eprintln!("node_0: {:?}", node_0.pubkey);
-//     eprintln!("node_1: {:?}", node_1.pubkey);
+    eprintln!(
+        "node1 left: {:?}, right: {:?}",
+        node_1.get_local_balance_from_channel(channels[0]),
+        node_1.get_local_balance_from_channel(channels[1])
+    );
 
-//     let channel_1_funding_tx = node_0.get_channel_funding_tx(&channels[1]).unwrap();
-//     let channel_3_funding_tx = node_0.get_channel_funding_tx(&channels[3]).unwrap();
-//     let old_balance = node_0.get_local_balance_from_channel(channels[1]);
-//     let old_node1_balance = node_1.get_local_balance_from_channel(channels[3]);
-//     eprintln!("channel_1_funding_tx: {:?}", channel_1_funding_tx);
-//     let res = node_0
-//         .send_payment(SendPaymentCommand {
-//             target_pubkey: Some(node_0.pubkey.clone()),
-//             amount: Some(60000000),
-//             payment_hash: None,
-//             final_tlc_expiry_delta: None,
-//             tlc_expiry_limit: None,
-//             invoice: None,
-//             timeout: None,
-//             max_fee_amount: None,
-//             max_parts: None,
-//             keysend: Some(true),
-//             udt_type_script: None,
-//             allow_self_payment: true,
-//             hop_hints: Some(vec![
-//                 // node1 - channel_1 -> node2
-//                 HopHint {
-//                     pubkey: node_0.pubkey.clone(),
-//                     channel_funding_tx: channel_1_funding_tx,
-//                     inbound: false,
-//                     fee_rate: None,
-//                     tlc_expiry_delta: None,
-//                 },
-//                 // node2 - channel_3 -> node1
-//                 HopHint {
-//                     pubkey: node_0.pubkey.clone(),
-//                     channel_funding_tx: channel_3_funding_tx,
-//                     inbound: true,
-//                     fee_rate: None,
-//                     tlc_expiry_delta: None,
-//                 },
-//             ]),
-//             dry_run: false,
-//         })
-//         .await
-//         .unwrap();
+    let node_1_new_channel0_balance = node_1.get_local_balance_from_channel(channels[0]);
+    let node_1_new_channel1_balance = node_1.get_local_balance_from_channel(channels[1]);
+    let node_2_new_channel1_balance = node_2.get_local_balance_from_channel(channels[1]);
+    let node_2_new_channel2_balance = node_2.get_local_balance_from_channel(channels[2]);
 
-//     let payment_hash = res.payment_hash;
-//     eprintln!("payment_hash: {:?}", payment_hash);
-//     let payment_session = node_0
-//         .get_payment_session(payment_hash)
-//         .expect("get payment");
-//     eprintln!("payment_session: {:?}", payment_session);
-//     let used_channels: Vec<Hash256> = payment_session
-//         .route
-//         .nodes
-//         .iter()
-//         .map(|x| x.channel_outpoint.tx_hash().into())
-//         .collect();
-//     eprintln!("used_channels: {:?}", used_channels);
-//     assert_eq!(used_channels.len(), 3);
-//     assert_eq!(used_channels[0], channel_1_funding_tx);
-//     assert_eq!(used_channels[1], channel_3_funding_tx);
+    // node0 can only route to self from
+    // node0 -> node2 -> node1 -> node0
+    let node1_fee = (node_1_new_channel1_balance - node_1_channel1_balance)
+        - (node_1_channel0_balance - node_1_new_channel0_balance);
 
-//     tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
+    assert!(node1_fee > 0);
 
-//     let balance = node_0.get_local_balance_from_channel(channels[1]);
-//     assert_eq!(balance, old_balance - 60000000 - res.fee);
+    let node2_fee = (node_2_new_channel2_balance - node_2_channel2_balance)
+        - (node_2_channel1_balance - node_2_new_channel1_balance);
 
-//     let node_1_balance = node_1.get_local_balance_from_channel(channels[1]);
-//     assert_eq!(node_1_balance, 60000000 + res.fee);
+    assert_eq!(node1_fee + node2_fee, res.fee);
+}
 
-//     let balance = node_0.get_local_balance_from_channel(channels[3]);
-//     assert_eq!(balance, 60000000);
+#[tokio::test]
+async fn test_send_payment_with_route_with_invalid_parameters() {
+    init_tracing();
 
-//     let node_1_balance = node_1.get_local_balance_from_channel(channels[3]);
-//     assert_eq!(node_1_balance, old_node1_balance - 60000000);
-// }
+    let (nodes, _channels) = create_n_nodes_network(
+        &[
+            (
+                (0, 1),
+                (
+                    MIN_RESERVED_CKB + 10000000000,
+                    MIN_RESERVED_CKB + 10000000000,
+                ),
+            ),
+            (
+                (1, 2),
+                (
+                    MIN_RESERVED_CKB + 10000000000,
+                    MIN_RESERVED_CKB + 10000000000,
+                ),
+            ),
+            (
+                (2, 3),
+                (
+                    MIN_RESERVED_CKB + 10000000000,
+                    MIN_RESERVED_CKB + 10000000000,
+                ),
+            ),
+        ],
+        4,
+    )
+    .await;
+    let [node_0, node_1, node_2, node_3] = nodes.try_into().expect("3 nodes");
+
+    let router = node_0
+        .build_router(BuildRouterCommand {
+            amount: Some(60000000),
+            hops_info: vec![
+                HopRequire {
+                    pubkey: node_1.pubkey,
+                    channel_outpoint: None,
+                },
+                HopRequire {
+                    pubkey: node_2.pubkey,
+                    channel_outpoint: None,
+                },
+                HopRequire {
+                    pubkey: node_3.pubkey,
+                    channel_outpoint: None,
+                },
+            ],
+            udt_type_script: None,
+            final_tlc_expiry_delta: None,
+        })
+        .await
+        .unwrap()
+        .router_hops;
+
+    // pay to node_3 with router will be OK
+    let res = node_0
+        .send_payment_with_router(SendPaymentWithRouterCommand {
+            router: router.clone(),
+            keysend: Some(true),
+            ..Default::default()
+        })
+        .await;
+
+    assert!(res.is_ok());
+    node_0.wait_until_success(res.unwrap().payment_hash).await;
+
+    // now we change the fee of the first channel
+    let mut copy_router = router.clone();
+    copy_router[1].amount_received = copy_router[0].amount_received;
+    // pay to node_3 with router will be failed
+    let res = node_0
+        .send_payment_with_router(SendPaymentWithRouterCommand {
+            router: copy_router,
+            keysend: Some(true),
+            ..Default::default()
+        })
+        .await;
+
+    assert!(res.is_ok());
+
+    let payment_hash = res.unwrap().payment_hash;
+    node_0.wait_until_failed(payment_hash).await;
+    let result = node_0
+        .get_payment_session(payment_hash)
+        .expect("get payment");
+    assert_eq!(result.retried_times, 1);
+
+    // ================================================================
+    // now we change the expiry delta in the middle hop
+    let mut copy_router = router.clone();
+    copy_router[1].incoming_tlc_expiry = copy_router[0].incoming_tlc_expiry;
+    // pay to node_3 with router will be failed
+    let res = node_0
+        .send_payment_with_router(SendPaymentWithRouterCommand {
+            router: copy_router,
+            keysend: Some(true),
+            ..Default::default()
+        })
+        .await;
+
+    assert!(res.is_ok());
+
+    let payment_hash = res.unwrap().payment_hash;
+    node_0.wait_until_failed(payment_hash).await;
+    let result = node_0
+        .get_payment_session(payment_hash)
+        .expect("get payment");
+    eprintln!("result: {:?}", result);
+    assert_eq!(result.retried_times, 1);
+}
+
+#[tokio::test]
+async fn test_send_payment_with_router_with_multiple_channels() {
+    init_tracing();
+
+    let (nodes, channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            // there are 3 channels from node1 -> node2
+            ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((2, 3), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+        ],
+        4,
+    )
+    .await;
+    let [node_0, node_1, node_2, node_3] = nodes.try_into().expect("4 nodes");
+
+    let channel_3_funding_tx = node_0.get_channel_funding_tx(&channels[3]).unwrap();
+
+    let router = node_0
+        .build_router(BuildRouterCommand {
+            amount: Some(60000000),
+            hops_info: vec![
+                HopRequire {
+                    pubkey: node_1.pubkey,
+                    channel_outpoint: None,
+                },
+                HopRequire {
+                    pubkey: node_2.pubkey,
+                    channel_outpoint: Some(OutPoint::new(channel_3_funding_tx.into(), 0)),
+                },
+                HopRequire {
+                    pubkey: node_3.pubkey,
+                    channel_outpoint: None,
+                },
+            ],
+            udt_type_script: None,
+            final_tlc_expiry_delta: None,
+        })
+        .await
+        .unwrap();
+
+    eprintln!("result: {:?}", router);
+
+    // pay to self with router will be OK
+    let res = node_0
+        .send_payment_with_router(SendPaymentWithRouterCommand {
+            router: router.router_hops,
+            keysend: Some(true),
+            ..Default::default()
+        })
+        .await;
+
+    assert!(res.is_ok());
+    let payment_hash = res.unwrap().payment_hash;
+
+    let payment_session = node_0
+        .get_payment_session(payment_hash)
+        .expect("get payment");
+    eprintln!("payment_session: {:?}", payment_session);
+    let used_channels: Vec<Hash256> = payment_session
+        .route
+        .nodes
+        .iter()
+        .map(|x| x.channel_outpoint.tx_hash().into())
+        .collect();
+    eprintln!("used_channels: {:?}", used_channels);
+    assert_eq!(used_channels.len(), 4);
+    assert_eq!(used_channels[1], channel_3_funding_tx);
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(2500)).await;
+
+    // try channel_2
+    let channel_2_funding_tx = node_0.get_channel_funding_tx(&channels[2]).unwrap();
+    eprintln!("channel_2_funding_tx: {:?}", channel_2_funding_tx);
+
+    let router = node_0
+        .build_router(BuildRouterCommand {
+            amount: Some(60000000),
+            hops_info: vec![
+                HopRequire {
+                    pubkey: node_1.pubkey,
+                    channel_outpoint: None,
+                },
+                HopRequire {
+                    pubkey: node_2.pubkey,
+                    channel_outpoint: Some(OutPoint::new(channel_2_funding_tx.into(), 0)),
+                },
+                HopRequire {
+                    pubkey: node_3.pubkey,
+                    channel_outpoint: None,
+                },
+            ],
+            udt_type_script: None,
+            final_tlc_expiry_delta: None,
+        })
+        .await
+        .unwrap();
+
+    eprintln!("result: {:?}", router);
+
+    // pay to self with router will be OK
+    let res = node_0
+        .send_payment_with_router(SendPaymentWithRouterCommand {
+            router: router.router_hops,
+            keysend: Some(true),
+            ..Default::default()
+        })
+        .await;
+
+    eprintln!("res: {:?}", res);
+    assert!(res.is_ok());
+    let payment_hash = res.unwrap().payment_hash;
+    eprintln!("payment_hash: {:?}", payment_hash);
+    let payment_session = node_0
+        .get_payment_session(payment_hash)
+        .expect("get payment");
+    eprintln!("payment_session: {:?}", payment_session);
+    let used_channels: Vec<Hash256> = payment_session
+        .route
+        .nodes
+        .iter()
+        .map(|x| x.channel_outpoint.tx_hash().into())
+        .collect();
+    eprintln!("used_channels: {:?}", used_channels);
+    assert_eq!(used_channels.len(), 4);
+    assert_eq!(used_channels[1], channel_2_funding_tx);
+
+    let wrong_channel_hash = Hash256::from([0u8; 32]);
+    // if we specify a wrong funding_tx, the payment will fail
+    let router = node_0
+        .build_router(BuildRouterCommand {
+            amount: Some(60000000),
+            hops_info: vec![
+                HopRequire {
+                    pubkey: node_1.pubkey,
+                    channel_outpoint: None,
+                },
+                HopRequire {
+                    pubkey: node_2.pubkey,
+                    channel_outpoint: Some(OutPoint::new(wrong_channel_hash.into(), 0)),
+                },
+                HopRequire {
+                    pubkey: node_2.pubkey,
+                    channel_outpoint: None,
+                },
+            ],
+            udt_type_script: None,
+            final_tlc_expiry_delta: None,
+        })
+        .await;
+
+    assert!(router
+        .unwrap_err()
+        .to_string()
+        .contains("PathFind error: no path found"));
+}
+
+#[tokio::test]
+async fn test_send_payment_two_nodes_with_router_and_multiple_channels() {
+    init_tracing();
+
+    let (nodes, channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (HUGE_CKB_AMOUNT, MIN_RESERVED_CKB)),
+            ((0, 1), (HUGE_CKB_AMOUNT, MIN_RESERVED_CKB)),
+            ((1, 0), (HUGE_CKB_AMOUNT, MIN_RESERVED_CKB)),
+            ((1, 0), (HUGE_CKB_AMOUNT, MIN_RESERVED_CKB)),
+        ],
+        2,
+    )
+    .await;
+    let [node_0, node_1] = nodes.try_into().expect("2 nodes");
+
+    let channel_1_funding_tx = node_0.get_channel_funding_tx(&channels[1]).unwrap();
+    let channel_3_funding_tx = node_0.get_channel_funding_tx(&channels[3]).unwrap();
+    let old_balance = node_0.get_local_balance_from_channel(channels[1]);
+    let old_node1_balance = node_1.get_local_balance_from_channel(channels[3]);
+
+    let router = node_0
+        .build_router(BuildRouterCommand {
+            amount: Some(60000000),
+            hops_info: vec![
+                HopRequire {
+                    pubkey: node_1.pubkey,
+                    channel_outpoint: Some(OutPoint::new(channel_1_funding_tx.into(), 0)),
+                },
+                HopRequire {
+                    pubkey: node_0.pubkey,
+                    channel_outpoint: Some(OutPoint::new(channel_3_funding_tx.into(), 0)),
+                },
+            ],
+            udt_type_script: None,
+            final_tlc_expiry_delta: None,
+        })
+        .await
+        .unwrap();
+
+    // pay to self with router will be OK
+    let res = node_0
+        .send_payment_with_router(SendPaymentWithRouterCommand {
+            router: router.router_hops,
+            keysend: Some(true),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    let payment_hash = res.payment_hash;
+    let payment_session = node_0
+        .get_payment_session(payment_hash)
+        .expect("get payment");
+
+    let used_channels: Vec<Hash256> = payment_session
+        .route
+        .nodes
+        .iter()
+        .map(|x| x.channel_outpoint.tx_hash().into())
+        .collect();
+
+    assert_eq!(used_channels.len(), 3);
+    assert_eq!(used_channels[0], channel_1_funding_tx);
+    assert_eq!(used_channels[1], channel_3_funding_tx);
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
+
+    let balance = node_0.get_local_balance_from_channel(channels[1]);
+    assert_eq!(balance, old_balance - 60000000 - res.fee);
+
+    let node_1_balance = node_1.get_local_balance_from_channel(channels[1]);
+    assert_eq!(node_1_balance, 60000000 + res.fee);
+
+    let balance = node_0.get_local_balance_from_channel(channels[3]);
+    assert_eq!(balance, 60000000);
+
+    let node_1_balance = node_1.get_local_balance_from_channel(channels[3]);
+    assert_eq!(node_1_balance, old_node1_balance - 60000000);
+}
+
+#[tokio::test]
+async fn test_send_payment_send_with_wrong_hop() {
+    init_tracing();
+
+    let (nodes, channels) = create_n_nodes_network(
+        &[
+            (
+                (0, 1),
+                (
+                    MIN_RESERVED_CKB + 10000000000,
+                    MIN_RESERVED_CKB + 10000000000,
+                ),
+            ),
+            (
+                (1, 2),
+                (
+                    MIN_RESERVED_CKB + 10000000000,
+                    MIN_RESERVED_CKB + 10000000000,
+                ),
+            ),
+            (
+                (2, 3),
+                (
+                    MIN_RESERVED_CKB + 10000000000,
+                    MIN_RESERVED_CKB + 10000000000,
+                ),
+            ),
+            (
+                (3, 0),
+                (
+                    MIN_RESERVED_CKB + 10000000000,
+                    MIN_RESERVED_CKB + 10000000000,
+                ),
+            ),
+        ],
+        4,
+    )
+    .await;
+    let [node_0, node_1, _node_2, node_3] = nodes.try_into().expect("3 nodes");
+
+    let channel_3_funding_tx = node_3.get_channel_funding_tx(&channels[3]).unwrap();
+
+    // can not build a invalid router from node3 -> node_1
+    let router = node_3
+        .build_router(BuildRouterCommand {
+            amount: Some(60000000),
+            hops_info: vec![HopRequire {
+                pubkey: node_1.pubkey,
+                channel_outpoint: Some(OutPoint::new(channel_3_funding_tx.into(), 0)),
+            }],
+            udt_type_script: None,
+            final_tlc_expiry_delta: None,
+        })
+        .await;
+
+    assert!(router.is_err());
+
+    // build a router from node3 -> node_0
+    let router = node_3
+        .build_router(BuildRouterCommand {
+            amount: Some(60000000),
+            hops_info: vec![HopRequire {
+                pubkey: node_0.pubkey,
+                channel_outpoint: Some(OutPoint::new(channel_3_funding_tx.into(), 0)),
+            }],
+            udt_type_script: None,
+            final_tlc_expiry_delta: None,
+        })
+        .await
+        .unwrap();
+
+    // pay the above router with node_3 will be ok
+    let res = node_3
+        .send_payment_with_router(SendPaymentWithRouterCommand {
+            router: router.router_hops.clone(),
+            keysend: Some(true),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    node_3.wait_until_success(res.payment_hash).await;
+
+    // pay the above router with node_1 will failed
+    let res = node_1
+        .send_payment_with_router(SendPaymentWithRouterCommand {
+            router: router.router_hops,
+            keysend: Some(true),
+            ..Default::default()
+        })
+        .await;
+
+    assert!(res.is_err());
+    assert!(res
+        .unwrap_err()
+        .to_string()
+        .contains("Failed to send onion packet with error UnknownNextPeer"));
+}
 
 #[tokio::test]
 async fn test_network_send_payment_randomly_send_each_other() {
     init_tracing();
 
-    let _span = tracing::info_span!("node", node = "test").entered();
     let node_a_funding_amount = 100000000000;
     let node_b_funding_amount = 100000000000;
 
@@ -1395,19 +1852,8 @@ async fn test_network_send_payment_randomly_send_each_other() {
                 SendPaymentCommand {
                     target_pubkey: Some(target),
                     amount: Some(amount),
-                    payment_hash: None,
-                    final_tlc_expiry_delta: None,
-                    tlc_expiry_limit: None,
-                    invoice: None,
-                    timeout: None,
-                    max_fee_amount: None,
-                    max_parts: None,
                     keysend: Some(true),
-                    udt_type_script: None,
-                    allow_self_payment: false,
-                    hop_hints: None,
-                    dry_run: false,
-                    custom_records: None,
+                    ..Default::default()
                 },
                 rpc_reply,
             ))
@@ -1484,7 +1930,6 @@ async fn test_network_send_payment_randomly_send_each_other() {
 async fn test_network_three_nodes_two_channels_send_each_other() {
     init_tracing();
 
-    let _span = tracing::info_span!("node", node = "test").entered();
     let (nodes, channels) = create_n_nodes_network(
         &[
             ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
@@ -1538,7 +1983,6 @@ async fn test_network_three_nodes_two_channels_send_each_other() {
 async fn test_network_three_nodes_send_each_other() {
     init_tracing();
 
-    let _span = tracing::info_span!("node", node = "test").entered();
     let (nodes, channels) = create_n_nodes_network(
         &[
             ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
@@ -1575,19 +2019,8 @@ async fn test_network_three_nodes_send_each_other() {
             SendPaymentCommand {
                 target_pubkey: Some(node_c_pubkey),
                 amount: Some(amount_a_to_c),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                tlc_expiry_limit: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                custom_records: None,
-                dry_run: false,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -1606,19 +2039,8 @@ async fn test_network_three_nodes_send_each_other() {
             SendPaymentCommand {
                 target_pubkey: Some(node_a_pubkey),
                 amount: Some(amount_c_to_a),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                tlc_expiry_limit: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                custom_records: None,
-                dry_run: false,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -1656,7 +2078,7 @@ async fn test_network_three_nodes_send_each_other() {
 #[tokio::test]
 async fn test_send_payment_bench_test() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
+
     let (nodes, _channels) = create_n_nodes_network(
         &[
             ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
@@ -1709,7 +2131,7 @@ async fn test_send_payment_bench_test() {
 #[tokio::test]
 async fn test_send_payment_three_nodes_wait_succ_bench_test() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
+
     let (nodes, _channels) = create_n_nodes_network(
         &[
             ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
@@ -1744,7 +2166,7 @@ async fn test_send_payment_three_nodes_wait_succ_bench_test() {
 #[tokio::test]
 async fn test_send_payment_three_nodes_send_each_other_bench_test() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
+
     let (nodes, _channels) = create_n_nodes_network(
         &[
             ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
@@ -1783,7 +2205,7 @@ async fn test_send_payment_three_nodes_send_each_other_bench_test() {
 #[tokio::test]
 async fn test_send_payment_three_nodes_send_each_other_no_wait() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
+
     let (nodes, channels) = create_n_nodes_network(
         &[
             ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
@@ -1864,7 +2286,7 @@ async fn test_send_payment_three_nodes_send_each_other_no_wait() {
 #[tokio::test]
 async fn test_send_payment_three_nodes_bench_test() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
+
     let (nodes, channels) = create_n_nodes_network(
         &[
             ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
@@ -1987,7 +2409,7 @@ async fn test_send_payment_three_nodes_bench_test() {
 #[tokio::test]
 async fn test_send_payment_middle_hop_stopped() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
+
     let (nodes, _channels) = create_n_nodes_network(
         &[
             ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
@@ -2028,7 +2450,7 @@ async fn test_send_payment_middle_hop_stopped() {
 #[tokio::test]
 async fn test_send_payment_middle_hop_stopped_retry_longer_path() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
+
     let (nodes, channels) = create_n_nodes_network(
         &[
             ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
@@ -2103,7 +2525,7 @@ async fn test_send_payment_max_value_in_flight_in_first_hop() {
     // https://github.com/nervosnetwork/fiber/issues/450
 
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
+
     let nodes = NetworkNode::new_interconnected_nodes(2, false).await;
     let [mut node_0, mut node_1] = nodes.try_into().expect("2 nodes");
     let (_channel_id, _funding_tx_hash) = {
@@ -2187,7 +2609,7 @@ async fn test_send_payment_max_value_in_flight_in_first_hop() {
 #[tokio::test]
 async fn test_send_payment_target_hop_stopped() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
+
     let (nodes, _channels) = create_n_nodes_network(
         &[
             ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
@@ -2228,7 +2650,7 @@ async fn test_send_payment_target_hop_stopped() {
 async fn test_send_payment_middle_hop_balance_is_not_enough() {
     // https://github.com/nervosnetwork/fiber/issues/286
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
+
     let (nodes, _channels) = create_n_nodes_network(
         &[
             ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
@@ -2260,7 +2682,7 @@ async fn test_send_payment_middle_hop_balance_is_not_enough() {
 #[tokio::test]
 async fn test_send_payment_middle_hop_update_fee_send_payment_failed() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
+
     let (nodes, channels) = create_n_nodes_network(
         &[
             ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
@@ -2299,7 +2721,7 @@ async fn test_send_payment_middle_hop_update_fee_send_payment_failed() {
 async fn test_send_payment_middle_hop_update_fee_multiple_payments() {
     // https://github.com/nervosnetwork/fiber/issues/480
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
+
     let (nodes, channels) = create_n_nodes_network(
         &[
             ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
@@ -2366,7 +2788,7 @@ async fn test_send_payment_middle_hop_update_fee_should_recovery() {
     // so the payment will fail, but after the payment failed, the path finding should pick the channels[1] in the next try
     // in the end, all the payments should success
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
+
     let (nodes, channels) = create_n_nodes_network(
         &[
             ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
@@ -2436,7 +2858,7 @@ async fn run_complex_network_with_params(
     payment_amount_gen: impl Fn() -> u128,
 ) -> Vec<(Hash256, PaymentSessionStatus)> {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
+
     let (nodes, _channels) = create_n_nodes_network(
         &[
             ((0, 1), (funding_amount, funding_amount)),
@@ -2543,7 +2965,7 @@ async fn test_send_payment_with_one_node_stop() {
     // make sure part of the payments will fail, since the node is stopped
     // TLC forwarding will fail and proper error will be returned
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
+
     let (mut nodes, _channels) = create_n_nodes_network(
         &[
             ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
@@ -2593,7 +3015,7 @@ async fn test_send_payment_with_one_node_stop() {
 #[tokio::test]
 async fn test_send_payment_shutdown_with_force() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
+
     let (nodes, channels) = create_n_nodes_network(
         &[
             ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
@@ -2673,7 +3095,7 @@ async fn test_send_payment_shutdown_with_force() {
 #[tokio::test]
 async fn test_send_payment_shutdown_cooperative() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
+
     let (nodes, channels) = create_n_nodes_network(
         &[
             ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
@@ -2755,7 +3177,7 @@ async fn test_send_payment_shutdown_cooperative() {
 #[tokio::test]
 async fn test_send_payment_shutdown_under_send_each_other() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
+
     let (nodes, channels) = create_n_nodes_network(
         &[
             ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
@@ -2825,7 +3247,7 @@ async fn test_send_payment_shutdown_under_send_each_other() {
 async fn test_send_payment_middle_hop_restart_will_be_ok() {
     async fn inner_run_restart_test(restart_node_index: usize) {
         init_tracing();
-        let _span = tracing::info_span!("node", node = "test").entered();
+
         let funding_amount = MIN_RESERVED_CKB + 1000 * 100_000_000;
         let (mut nodes, _channels) = create_n_nodes_network(
             &[
@@ -2872,7 +3294,7 @@ async fn test_send_payment_middle_hop_restart_will_be_ok() {
 async fn test_send_payment_middle_hop_stop_send_payment_then_start() {
     async fn inner_run_restart_test(restart_node_index: usize) {
         init_tracing();
-        let _span = tracing::info_span!("node", node = "test").entered();
+
         let funding_amount = MIN_RESERVED_CKB + 1000 * 100_000_000;
         let (mut nodes, _channels) = create_n_nodes_network(
             &[
@@ -2961,7 +3383,7 @@ async fn test_send_payment_middle_hop_stop_send_payment_then_start() {
 #[tokio::test]
 async fn test_send_payment_sync_up_new_channel_is_added() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
+
     // create a network with 4 nodes, but only connect with 2 channels
     // node0 -> node1 -> node2  node3
     let (nodes, _channels) = create_n_nodes_network(

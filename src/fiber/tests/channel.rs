@@ -1,4 +1,5 @@
 use super::test_utils::{init_tracing, NetworkNode};
+use crate::ckb::tests::test_utils::complete_commitment_tx;
 use crate::fiber::channel::{UpdateCommand, XUDT_COMPATIBLE_WITNESS};
 use crate::fiber::config::MAX_PAYMENT_TLC_EXPIRY_LIMIT;
 use crate::fiber::graph::{ChannelInfo, PaymentSessionStatus};
@@ -445,7 +446,6 @@ async fn test_owned_channel_saved_to_graph_on_reconnected_private_channel() {
 async fn do_test_update_graph_balance_after_payment(public: bool) {
     init_tracing();
 
-    let _span = tracing::info_span!("node", node = "test").entered();
     let node_a_funding_amount = 100000000000;
     let node_b_funding_amount = 6200000000;
 
@@ -722,7 +722,6 @@ async fn test_public_channel_with_unconfirmed_funding_tx() {
 async fn test_network_send_payment_normal_keysend_workflow() {
     init_tracing();
 
-    let _span = tracing::info_span!("node", node = "test").entered();
     let node_a_funding_amount = 100000000000;
     let node_b_funding_amount = 6200000000;
 
@@ -826,7 +825,6 @@ async fn test_network_send_payment_normal_keysend_workflow() {
 async fn test_network_send_payment_send_each_other() {
     init_tracing();
 
-    let _span = tracing::info_span!("node", node = "test").entered();
     let node_a_funding_amount = 100000000000;
     let node_b_funding_amount = 6200000000;
 
@@ -943,7 +941,6 @@ async fn test_network_send_payment_more_send_each_other() {
     // all the add_tlc are added at the same time
     // and the final balance should be same as the initial balance
 
-    let _span = tracing::info_span!("node", node = "test").entered();
     let node_a_funding_amount = 100000000000;
     let node_b_funding_amount = 6200000000;
 
@@ -1093,7 +1090,6 @@ async fn test_network_send_payment_more_send_each_other() {
 async fn test_network_send_payment_send_with_ack() {
     init_tracing();
 
-    let _span = tracing::info_span!("node", node = "test").entered();
     let node_a_funding_amount = 100000000000;
     let node_b_funding_amount = 6200000000;
 
@@ -1172,7 +1168,6 @@ async fn test_network_send_payment_send_with_ack() {
 async fn test_network_send_previous_tlc_error() {
     init_tracing();
 
-    let _span = tracing::info_span!("node", node = "test").entered();
     let node_a_funding_amount = 100000000000;
     let node_b_funding_amount = 6200000000;
 
@@ -1297,7 +1292,6 @@ async fn test_network_send_previous_tlc_error() {
 async fn test_network_send_previous_tlc_error_with_limit_amount_error() {
     init_tracing();
 
-    let _span = tracing::info_span!("node", node = "test").entered();
     let node_a_funding_amount = MIN_RESERVED_CKB + 400000000;
     let node_b_funding_amount = MIN_RESERVED_CKB;
 
@@ -1422,7 +1416,6 @@ async fn test_network_send_previous_tlc_error_with_limit_amount_error() {
 async fn test_network_send_payment_keysend_with_payment_hash() {
     init_tracing();
 
-    let _span = tracing::info_span!("node", node = "test").entered();
     let node_a_funding_amount = 100000000000;
     let node_b_funding_amount = 6200000000;
 
@@ -1470,7 +1463,6 @@ async fn test_network_send_payment_keysend_with_payment_hash() {
 async fn test_network_send_payment_final_incorrect_hash() {
     init_tracing();
 
-    let _span = tracing::info_span!("node", node = "test").entered();
     let node_a_funding_amount = 100000000000;
     let node_b_funding_amount = 6200000000;
 
@@ -1543,7 +1535,6 @@ async fn test_network_send_payment_final_incorrect_hash() {
 async fn test_network_send_payment_target_not_found() {
     init_tracing();
 
-    let _span = tracing::info_span!("node", node = "test").entered();
     let node_a_funding_amount = 100000000000;
     let node_b_funding_amount = 6200000000;
 
@@ -1585,7 +1576,6 @@ async fn test_network_send_payment_target_not_found() {
 async fn test_network_send_payment_amount_is_too_large() {
     init_tracing();
 
-    let _span = tracing::info_span!("node", node = "test").entered();
     let node_a_funding_amount = 100000000000 + MIN_RESERVED_CKB;
     let node_b_funding_amount = MIN_RESERVED_CKB + 2;
 
@@ -1631,7 +1621,6 @@ async fn test_network_send_payment_amount_is_too_large() {
 async fn test_network_send_payment_with_dry_run() {
     init_tracing();
 
-    let _span = tracing::info_span!("node", node = "test").entered();
     let node_a_funding_amount = 100000000000;
     let node_b_funding_amount = 62000000000;
 
@@ -1701,7 +1690,7 @@ async fn test_network_send_payment_with_dry_run() {
 #[tokio::test]
 async fn test_send_payment_with_3_nodes() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
+
     let (node_a, mut node_b, node_c, channel_1, channel_2) =
         create_3_nodes_with_established_channel(
             (100000000000, 100000000000),
@@ -1777,7 +1766,7 @@ async fn test_send_payment_with_3_nodes() {
 #[tokio::test]
 async fn test_send_payment_with_rev_3_nodes() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
+
     let (nodes, channels) = create_n_nodes_network(
         vec![
             ((2, 1), (100000000000, 100000000000)),
@@ -1854,7 +1843,7 @@ async fn test_send_payment_with_rev_3_nodes() {
 #[tokio::test]
 async fn test_send_payment_with_max_nodes() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
+
     let nodes_num = 15;
     let last = nodes_num - 1;
     let amounts = vec![(100000000000, 100000000000); nodes_num - 1];
@@ -1925,7 +1914,7 @@ async fn test_send_payment_with_3_nodes_overflow() {
     // Fix issue #361
 
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
+
     let (node_a, _node_b, node_c, ..) = create_3_nodes_with_established_channel(
         (1000000000 * 100000000, 1000000000 * 100000000),
         (1000000000 * 100000000, 1000000000 * 100000000),
@@ -1969,7 +1958,6 @@ async fn test_send_payment_with_3_nodes_overflow() {
 #[tokio::test]
 async fn test_send_payment_fail_with_3_nodes_invalid_hash() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
 
     let (node_a, node_b, node_c, channel_1, channel_2) = create_3_nodes_with_established_channel(
         (100000000000, 100000000000),
@@ -2046,7 +2034,6 @@ async fn test_send_payment_fail_with_3_nodes_final_tlc_expiry_delta() {
     // Fix issue #367, we should check the final_tlc_expiry_delta
 
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
 
     let (node_a, _node_b, node_c, ..) = create_3_nodes_with_established_channel(
         (100000000000, 100000000000),
@@ -2144,7 +2131,6 @@ async fn test_send_payment_fail_with_3_nodes_dry_run_fee() {
     // Fix issue #360, dryrun option should get correct fee
 
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
 
     let (node_a, _node_b, node_c, ..) = create_3_nodes_with_established_channel(
         (100000000000, 100000000000),
@@ -2269,7 +2255,6 @@ async fn test_send_payment_fail_with_3_nodes_dry_run_fee() {
 async fn test_network_send_payment_dry_run_can_still_query() {
     init_tracing();
 
-    let _span = tracing::info_span!("node", node = "test").entered();
     let node_a_funding_amount = 100000000000;
     let node_b_funding_amount = 6200000000;
 
@@ -2338,7 +2323,6 @@ async fn test_network_send_payment_dry_run_can_still_query() {
 async fn test_network_send_payment_dry_run_will_not_create_payment_session() {
     init_tracing();
 
-    let _span = tracing::info_span!("node", node = "test").entered();
     let node_a_funding_amount = 100000000000;
     let node_b_funding_amount = 6200000000;
 
@@ -2407,8 +2391,6 @@ async fn test_network_send_payment_dry_run_will_not_create_payment_session() {
 #[tokio::test]
 async fn test_stash_broadcast_messages() {
     init_tracing();
-
-    let _span = tracing::info_span!("node", node = "test").entered();
 
     let node_a_funding_amount = 100000000000;
     let node_b_funding_amount = 6200000000;
@@ -2554,7 +2536,7 @@ async fn do_test_channel_commitment_tx_after_add_tlc(algorithm: HashAlgorithm) {
                 );
                 assert_eq!(peer_id, &node_a.peer_id);
                 assert_eq!(channel_id, &new_channel_id);
-                Some(tx.clone())
+                Some(complete_commitment_tx(tx))
             }
             _ => None,
         })
@@ -2593,7 +2575,7 @@ async fn do_test_channel_commitment_tx_after_add_tlc(algorithm: HashAlgorithm) {
                 );
                 assert_eq!(peer_id, &node_b.peer_id);
                 assert_eq!(channel_id, &new_channel_id);
-                Some(tx.clone())
+                Some(complete_commitment_tx(tx))
             }
             _ => None,
         })
@@ -2840,7 +2822,6 @@ async fn do_test_channel_remote_commitment_error() {
 
 #[tokio::test]
 async fn test_network_add_two_tlcs_remove_one() {
-    let _span = tracing::info_span!("node", node = "test").entered();
     let node_a_funding_amount = 100000000000;
     let node_b_funding_amount = 100000000000;
 
@@ -3743,19 +3724,8 @@ async fn test_forward_payment_tlc_minimum_value() {
             SendPaymentCommand {
                 target_pubkey: Some(node_c_pubkey),
                 amount: Some(tlc_amount),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                tlc_expiry_limit: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -3810,7 +3780,6 @@ async fn test_forward_payment_tlc_minimum_value() {
     })
     .expect("node_b alive");
     assert!(add_tlc_result.is_ok());
-    // sleep for a while to make sure the AddTlc processed by both party
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
     // AddTlc from B to C is not OK because the forwarding value is too small
@@ -3824,8 +3793,6 @@ async fn test_forward_payment_tlc_minimum_value() {
     })
     .expect("node_b alive");
     assert!(add_tlc_result.is_err());
-    // sleep for a while to make sure the AddTlc processed by both party
-    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
     // sending payment from A to B is OK because this has nothing to do with the channel_a_b.
     let message = |rpc_reply| -> NetworkActorMessage {
@@ -3833,19 +3800,8 @@ async fn test_forward_payment_tlc_minimum_value() {
             SendPaymentCommand {
                 target_pubkey: Some(node_b_pubkey),
                 amount: Some(tlc_amount),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                tlc_expiry_limit: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -3860,46 +3816,24 @@ async fn test_forward_payment_tlc_minimum_value() {
             SendPaymentCommand {
                 target_pubkey: Some(node_c_pubkey),
                 amount: Some(tlc_amount),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                tlc_expiry_limit: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
     };
     let res = call!(node_b.network_actor, message).expect("node_b alive");
     assert!(res.is_err());
-    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
     // sending payment from A to C should fail because the forwarding value is too small
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
             SendPaymentCommand {
                 target_pubkey: Some(node_c_pubkey),
-                amount: Some(tlc_amount),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                tlc_expiry_limit: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                max_parts: None,
+                // 1 is used for fee
+                amount: Some(tlc_amount - 1),
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -3910,7 +3844,6 @@ async fn test_forward_payment_tlc_minimum_value() {
         .unwrap_err()
         .to_string()
         .contains("Failed to build route, PathFind error: no path found"));
-    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 }
 
 #[tokio::test]
@@ -4233,7 +4166,7 @@ async fn test_revoke_old_commitment_transaction() {
                 );
                 assert_eq!(peer_id, &node_a.peer_id);
                 assert_eq!(channel_id, &new_channel_id);
-                Some(tx.clone())
+                Some(complete_commitment_tx(tx))
             }
             _ => None,
         })
@@ -4407,7 +4340,7 @@ async fn test_create_channel() {
                 );
                 assert_eq!(peer_id, &node_b.peer_id);
                 assert_eq!(channel_id, &new_channel_id);
-                Some(tx.clone())
+                Some(complete_commitment_tx(tx))
             }
             _ => None,
         })
@@ -4422,7 +4355,7 @@ async fn test_create_channel() {
                 );
                 assert_eq!(peer_id, &node_a.peer_id);
                 assert_eq!(channel_id, &new_channel_id);
-                Some(tx.clone())
+                Some(complete_commitment_tx(tx))
             }
             _ => None,
         })
@@ -5192,7 +5125,7 @@ async fn test_shutdown_channel_network_graph_with_sync_up() {
 #[tokio::test]
 async fn test_send_payment_with_channel_balance_error() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
+
     let nodes_num = 4;
     let amounts = vec![(100000000000, 100000000000); nodes_num - 1];
     let (nodes, channels) = create_n_nodes_with_established_channel(&amounts, nodes_num).await;
@@ -5277,7 +5210,7 @@ async fn test_send_payment_with_channel_balance_error() {
 #[tokio::test]
 async fn test_send_payment_with_disable_channel() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
+
     let nodes_num = 4;
     let amounts = vec![(100000000000, 100000000000); nodes_num - 1];
     let (nodes, channels) = create_n_nodes_with_established_channel(&amounts, nodes_num).await;
@@ -5313,7 +5246,7 @@ async fn test_send_payment_with_disable_channel() {
 #[tokio::test]
 async fn test_send_payment_with_multiple_edges_in_middle_hops() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
+
     // we have two chaneels between node_1 and node_2, they are all with the same meta information except the later one has more capacity
     // path finding will try the channel with larger capacity first, so we assert the payment retry times is 1
     // the send payment should be succeed
@@ -5369,7 +5302,7 @@ async fn test_send_payment_with_multiple_edges_in_middle_hops() {
 #[tokio::test]
 async fn test_send_payment_with_all_failed_middle_hops() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
+
     // we have two chaneels between node_1 and node_2
     // they liquid capacity is enough for send payment, but actual balance are both not enough
     // path finding will all try them but all failed, so we assert the payment retry times is 3
@@ -5426,7 +5359,7 @@ async fn test_send_payment_with_all_failed_middle_hops() {
 #[tokio::test]
 async fn test_send_payment_with_multiple_edges_can_succeed_in_retry() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
+
     // we have two chaneels between node_1 and node_2, they are all with the same meta information except the later one has more capacity
     // but even channel_2's capacity is larger, the to_local_amount is not enough for the payment
     // path finding will retry the first channel and the send payment should be succeed
@@ -5483,7 +5416,7 @@ async fn test_send_payment_with_multiple_edges_can_succeed_in_retry() {
 #[tokio::test]
 async fn test_send_payment_with_final_hop_multiple_edges_in_middle_hops() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
+
     // we have two chaneels between node_2 and node_3, they are all with the same meta information except the later one has more capacity
     // path finding will try the channel with larger capacity first, so we assert the payment retry times is 1
     // the send payment should be succeed
@@ -5539,7 +5472,7 @@ async fn test_send_payment_with_final_hop_multiple_edges_in_middle_hops() {
 #[tokio::test]
 async fn test_send_payment_with_final_all_failed_middle_hops() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
+
     // we have two chaneels between node_2 and node_3
     // they liquid capacity is enough for send payment, but actual balance are both not enough
     // path finding will all try them but all failed, so we assert the payment retry times is 3
@@ -5594,7 +5527,7 @@ async fn test_send_payment_with_final_all_failed_middle_hops() {
 #[tokio::test]
 async fn test_send_payment_with_final_multiple_edges_can_succeed_in_retry() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
+
     // we have two chaneels between node_2 and node_3, they are all with the same meta information except the later one has more capacity
     // but even channel_2's capacity is larger, the to_local_amount is not enough for the payment
     // path finding will retry the first channel and the send payment should be succeed
@@ -5650,7 +5583,7 @@ async fn test_send_payment_with_final_multiple_edges_can_succeed_in_retry() {
 #[tokio::test]
 async fn test_send_payment_with_first_hop_failed_with_fee() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
+
     let (nodes, _channels) = create_n_nodes_network(
         &[
             // even 1000 > 999, but it's not enough for fee, and this is the direct channel
@@ -5699,7 +5632,7 @@ async fn test_send_payment_with_first_hop_failed_with_fee() {
 #[tokio::test]
 async fn test_send_payment_succeed_with_multiple_edges_in_first_hop() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
+
     // we have two chaneels between node_0 and node_1, they are all with the same meta information except the later one has more capacity
     // path finding will try the channel with larger capacity first, so we assert the payment retry times is 1
     // the send payment should be succeed
@@ -5754,7 +5687,7 @@ async fn test_send_payment_succeed_with_multiple_edges_in_first_hop() {
 #[tokio::test]
 async fn test_send_payment_with_first_hop_all_failed() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
+
     // we have two chaneels between node_0 and node_1
     // they liquid capacity is enough for send payment, but actual balance are both not enough
     // path finding will fail in the first time of send payment
@@ -5804,7 +5737,7 @@ async fn test_send_payment_with_first_hop_all_failed() {
 #[tokio::test]
 async fn test_send_payment_will_succeed_with_direct_channel_info_first_hop() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
+
     // we have two chaneels between node_0 and node_1
     // the path finding will first try the channel with larger capacity,
     // but we manually set the to_local_amount to smaller value for testing
@@ -5867,7 +5800,7 @@ async fn test_send_payment_will_succeed_with_direct_channel_info_first_hop() {
 #[tokio::test]
 async fn test_send_payment_will_succeed_with_retry_in_middle_hops() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
+
     // we have two chaneels between node_2 and node_3
     // the path finding will first try the channel with larger capacity,
     // but we manually set the to_local_amount to smaller value for testing
@@ -5937,7 +5870,7 @@ async fn test_send_payment_will_succeed_with_retry_in_middle_hops() {
 #[tokio::test]
 async fn test_send_payment_will_fail_with_last_hop_info_in_add_tlc_peer() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
+
     // we have two chaneels between node_2 and node_3
     // the path finding will first try the channel with larger capacity,
     // but we manually set the to_remote_amount for node_3 to a larger amount,
@@ -6007,7 +5940,6 @@ async fn test_send_payment_will_fail_with_last_hop_info_in_add_tlc_peer() {
 #[tokio::test]
 async fn test_send_payment_will_fail_with_invoice_not_generated_by_target() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
 
     let (nodes, _channels) = create_n_nodes_network(
         &[
@@ -6065,7 +5997,6 @@ async fn test_send_payment_will_fail_with_invoice_not_generated_by_target() {
 #[tokio::test]
 async fn test_send_payment_will_succeed_with_valid_invoice() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
 
     let (nodes, channels) = create_n_nodes_network(
         &[
@@ -6137,7 +6068,7 @@ async fn test_send_payment_will_succeed_with_valid_invoice() {
 #[tokio::test]
 async fn test_send_payment_will_fail_with_no_invoice_preimage() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
+
     let (nodes, channels) = create_n_nodes_network(
         &[
             ((0, 1), (100000000000, 100000000000)),
@@ -6208,7 +6139,6 @@ async fn test_send_payment_will_fail_with_no_invoice_preimage() {
 #[tokio::test]
 async fn test_send_payment_will_fail_with_cancelled_invoice() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
 
     let (nodes, channels) = create_n_nodes_network(
         &[
@@ -6281,7 +6211,7 @@ async fn test_send_payment_will_fail_with_cancelled_invoice() {
 #[tokio::test]
 async fn test_send_payment_will_succeed_with_large_tlc_expiry_limit() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
+
     // from https://github.com/nervosnetwork/fiber/issues/367
 
     let (nodes, _channels) = create_n_nodes_network(
