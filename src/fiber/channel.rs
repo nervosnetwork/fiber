@@ -6357,20 +6357,18 @@ impl ChannelActorState {
                 let my_waiting_ack = self.tlc_state.waiting_ack;
                 let peer_local_commitment_number = reestablish_channel.local_commitment_number;
                 let peer_remote_commitment_number = reestablish_channel.remote_commitment_number;
-                let peer_waiting_ack = reestablish_channel.waiting_ack;
 
                 warn!(
                     "peer: {:?} \
                     local_commitment_number ({:?}, {:?}) \
                     peer_commitment_number ({:?} {:?}) \
-                    waiting_ack: {:?} peer_waiting_ack: {:?}",
+                    waiting_ack: {:?}",
                     self.get_local_peer_id(),
                     my_local_commitment_number,
                     my_remote_commitment_number,
                     peer_local_commitment_number,
                     peer_remote_commitment_number,
                     my_waiting_ack,
-                    peer_waiting_ack
                 );
                 if my_local_commitment_number == peer_remote_commitment_number
                     && my_remote_commitment_number == peer_local_commitment_number
@@ -6393,9 +6391,7 @@ impl ChannelActorState {
                             ))
                             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
                     }
-                } else if my_remote_commitment_number == peer_local_commitment_number + 1
-                    && peer_waiting_ack
-                {
+                } else if my_remote_commitment_number == peer_local_commitment_number + 1 {
                     // peer need ACK, I need to send my revoke_and_ack message
                     // don't clear my waiting_ack flag here, since if i'm waiting for peer ack,
                     // peer will resend commitment_signed message

@@ -3102,7 +3102,7 @@ async fn test_send_payment_remove_tlc_with_preimage_will_retry() {
             .duration_since(started)
             .expect("time passed")
             .as_secs();
-        if escaped > 100 {
+        if elapsed > 50 {
             let node0_state = node_0.get_channel_actor_state(channels[0]);
             eprintln!("peer {:?} node_0_state:", node_0.get_peer_id());
             node0_state.tlc_state.debug();
