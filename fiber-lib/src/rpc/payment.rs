@@ -1,5 +1,9 @@
+use crate::fiber::graph::RouterHop;
 #[cfg(debug_assertions)]
 use crate::fiber::graph::SessionRouteNode as InternalSessionRouteNode;
+use crate::fiber::network::BuildRouterCommand;
+use crate::fiber::network::HopRequire;
+use crate::fiber::network::SendPaymentWithRouterCommand;
 use crate::fiber::serde_utils::SliceHex;
 use crate::fiber::serde_utils::U32Hex;
 use crate::fiber::{
@@ -122,11 +126,15 @@ pub struct SendPaymentCommandParams {
     /// the identifier of the payment target
     pub target_pubkey: Option<Pubkey>,
 
-    /// the amount of the payment
+    /// the amount of the payment, the unit is Shannons for non UDT payment
+    /// If not set and there is a invoice, the amount will be set to the invoice amount
     #[serde_as(as = "Option<U128Hex>")]
     pub amount: Option<u128>,
 
-    /// the hash to use within the payment's HTLC
+    /// the hash to use within the payment's HTLC.
+    /// If not set and `keysend` is set to true, a random hash will be generated.
+    /// If not set and there is a `payment_hash` in the invoice, it will be used.
+    /// Otherwise, `payment_hash` need to be set.
     pub payment_hash: Option<Hash256>,
 
     /// the TLC expiry delta should be used to set the timelock for the final hop, in milliseconds
@@ -193,7 +201,6 @@ pub struct SendPaymentCommandParams {
     /// default is false
     pub dry_run: Option<bool>,
 }
-
 /// A hop hint is a hint for a node to use a specific channel.
 #[serde_as]
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -223,6 +230,79 @@ impl From<HopHint> for NetworkHopHint {
     }
 }
 
+#[serde_as]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BuildRouterParams {
+    /// the amount of the payment, the unit is Shannons for non UDT payment
+    /// If not set, the minimum routable amount `1` is used
+    #[serde_as(as = "Option<U128Hex>")]
+    pub amount: Option<u128>,
+
+    /// udt type script for the payment router
+    pub udt_type_script: Option<Script>,
+
+    /// A list of hops that defines the route. This does not include the source hop pubkey.
+    /// A hop info is a tuple of pubkey and the channel(specified by channel funding tx) will be used.
+    /// This is a strong restriction given on payment router, which means these specified hops and channels
+    /// must be adapted in the router. This is different from hop hints, which maybe ignored by find path.
+    /// If channel is not specified, find path algorithm will pick a channel within these two peers.
+    ///
+    /// An error will be returned if there is no router could be build from given hops and channels
+    pub hops_info: Vec<HopRequire>,
+
+    /// the TLC expiry delta should be used to set the timelock for the final hop, in milliseconds
+    #[serde_as(as = "Option<U64Hex>")]
+    pub final_tlc_expiry_delta: Option<u64>,
+}
+
+/// The router returned by build_router
+#[serde_as]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct BuildPaymentRouterResult {
+    /// The hops information for router
+    router_hops: Vec<RouterHop>,
+}
+
+#[serde_as]
+#[derive(Serialize, Deserialize, Debug)]
+pub struct SendPaymentWithRouterParams {
+    /// the hash to use within the payment's HTLC.
+    /// If not set and `keysend` is set to true, a random hash will be generated.
+    /// If not set and there is a `payment_hash` in the invoice, it will be used.
+    /// Otherwise, `payment_hash` need to be set.
+    pub payment_hash: Option<Hash256>,
+
+    /// The router to use for the payment
+    pub router: Vec<RouterHop>,
+
+    /// the encoded invoice to send to the recipient
+    pub invoice: Option<String>,
+
+    /// Some custom records for the payment which contains a map of u32 to Vec<u8>
+    /// The key is the record type, and the value is the serialized data
+    /// For example:
+    /// ```json
+    /// "custom_records": {
+    ///    "0x1": "0x01020304",
+    ///    "0x2": "0x05060708",
+    ///    "0x3": "0x090a0b0c",
+    ///    "0x4": "0x0d0e0f10010d090a0b0c"
+    ///  }
+    /// ```
+    pub custom_records: Option<PaymentCustomRecords>,
+
+    /// keysend payment
+    pub keysend: Option<bool>,
+
+    /// udt type script for the payment
+    pub udt_type_script: Option<Script>,
+
+    /// dry_run for payment, used for check whether we can build valid router and the fee for this payment,
+    /// it's useful for the sender to double check the payment before sending it to the network,
+    /// default is false
+    pub dry_run: Option<bool>,
+}
+
 /// RPC module for channel management.
 #[rpc(server)]
 trait PaymentRpc {
@@ -238,6 +318,22 @@ trait PaymentRpc {
     async fn get_payment(
         &self,
         params: GetPaymentCommandParams,
+    ) -> Result<GetPaymentCommandResult, ErrorObjectOwned>;
+
+    /// Builds a router with a list of pubkeys and required channels.
+    #[method(name = "build_router")]
+    async fn build_router(
+        &self,
+        params: BuildRouterParams,
+    ) -> Result<BuildPaymentRouterResult, ErrorObjectOwned>;
+
+    /// Sends a payment to a peer with specified router
+    /// This method differs from SendPayment in that it allows users to specify a full route manually.
+    /// This can be used for things like rebalancing.
+    #[method(name = "send_payment_with_router")]
+    async fn send_payment_with_router(
+        &self,
+        params: SendPaymentWithRouterParams,
     ) -> Result<GetPaymentCommandResult, ErrorObjectOwned>;
 }
 
@@ -316,6 +412,60 @@ where
             status: response.status,
             last_updated_at: response.last_updated_at,
             created_at: response.created_at,
+            failed_error: response.failed_error,
+            fee: response.fee,
+            custom_records: response
+                .custom_records
+                .map(|records| PaymentCustomRecords { data: records.data }),
+            #[cfg(debug_assertions)]
+            router: response.router.nodes.into_iter().map(Into::into).collect(),
+        })
+    }
+
+    async fn build_router(
+        &self,
+        params: BuildRouterParams,
+    ) -> Result<BuildPaymentRouterResult, ErrorObjectOwned> {
+        let message = |rpc_reply| -> NetworkActorMessage {
+            NetworkActorMessage::Command(NetworkActorCommand::BuildPaymentRouter(
+                BuildRouterCommand {
+                    amount: params.amount,
+                    hops_info: params.hops_info.clone(),
+                    udt_type_script: params.udt_type_script.clone().map(|x| x.into()),
+                    final_tlc_expiry_delta: params.final_tlc_expiry_delta,
+                },
+                rpc_reply,
+            ))
+        };
+
+        handle_actor_call!(self.actor, message, params).map(|response| BuildPaymentRouterResult {
+            router_hops: response.router_hops,
+        })
+    }
+
+    async fn send_payment_with_router(
+        &self,
+        params: SendPaymentWithRouterParams,
+    ) -> Result<GetPaymentCommandResult, ErrorObjectOwned> {
+        let message = |rpc_reply| -> NetworkActorMessage {
+            NetworkActorMessage::Command(NetworkActorCommand::SendPaymentWithRouter(
+                SendPaymentWithRouterCommand {
+                    payment_hash: params.payment_hash,
+                    router: params.router.clone(),
+                    invoice: params.invoice.clone(),
+                    keysend: params.keysend,
+                    udt_type_script: params.udt_type_script.clone().map(|s| s.into()),
+                    custom_records: params.custom_records.clone().map(|records| records.into()),
+                    dry_run: params.dry_run.unwrap_or(false),
+                },
+                rpc_reply,
+            ))
+        };
+        handle_actor_call!(self.actor, message, params).map(|response| GetPaymentCommandResult {
+            payment_hash: response.payment_hash,
+            status: response.status,
+            created_at: response.created_at,
+            last_updated_at: response.last_updated_at,
             failed_error: response.failed_error,
             fee: response.fee,
             custom_records: response
