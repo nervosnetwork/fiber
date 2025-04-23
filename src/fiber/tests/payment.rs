@@ -27,6 +27,7 @@ use ractor::call;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::time::SystemTime;
+use tracing::error;
 
 #[tokio::test]
 async fn test_send_payment_custom_records() {
@@ -3055,6 +3056,8 @@ async fn test_send_payment_shutdown_with_force() {
     // which send shutdown force message
     let mut failed_count = 0;
     let expect_failed_count = all_sent.len();
+    let started = SystemTime::now();
+
     while !all_sent.is_empty() {
         for payment_hash in all_sent.clone().iter() {
             let res = nodes[0].get_payment_result(*payment_hash).await;
@@ -3068,6 +3071,14 @@ async fn test_send_payment_shutdown_with_force() {
             }
 
             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        }
+        let elapsed = SystemTime::now()
+            .duration_since(started)
+            .expect("time passed")
+            .as_secs();
+        if elapsed > 60 {
+            error!("timeout, failed_count: {:?}", failed_count);
+            break;
         }
     }
     assert!(failed_count >= expect_failed_count);

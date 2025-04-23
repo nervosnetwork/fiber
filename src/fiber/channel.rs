@@ -2412,9 +2412,8 @@ where
 
                 let reestablish_channel = ReestablishChannel {
                     channel_id,
-                    local_commitment_number: channel.get_current_commitment_number(true),
-                    remote_commitment_number: channel.get_current_commitment_number(false),
-                    waiting_ack: channel.tlc_state.waiting_ack,
+                    local_commitment_number: channel.get_local_commitment_number(),
+                    remote_commitment_number: channel.get_remote_commitment_number(),
                 };
 
                 self.network
@@ -7311,7 +7310,7 @@ impl ChannelActorState {
         verify_ctx.verify(commitment_tx_partial_signature, message.as_slice())?;
 
         Ok(PartiallySignedCommitmentTransaction {
-            version: self.get_current_commitment_number(false),
+            version: self.get_remote_commitment_number(),
             commitment_tx,
             settlement_tx,
             funding_tx_partial_signature,

@@ -159,7 +159,6 @@ table ReestablishChannel {
     channel_id: Byte32,
     local_commitment_number: Uint64,
     remote_commitment_number: Uint64,
-    waiting_ack: byte,
 }
 
 table AnnouncementSignatures {

@@ -1912,7 +1912,7 @@ where
                     "Failed to send onion packet with error {}",
                     error_detail.error_code_as_str()
                 );
-                eprintln!(
+                debug!(
                     "send onion packet failed: {:?} need_to_retry: {:?}",
                     err, need_to_retry
                 );

@@ -1689,7 +1689,6 @@ pub struct ReestablishChannel {
     pub channel_id: Hash256,
     pub local_commitment_number: u64,
     pub remote_commitment_number: u64,
-    pub waiting_ack: bool,
 }
 
 impl From<ReestablishChannel> for molecule_fiber::ReestablishChannel {
@@ -1698,11 +1697,6 @@ impl From<ReestablishChannel> for molecule_fiber::ReestablishChannel {
             .channel_id(reestablish_channel.channel_id.into())
             .local_commitment_number(reestablish_channel.local_commitment_number.pack())
             .remote_commitment_number(reestablish_channel.remote_commitment_number.pack())
-            .waiting_ack(Byte::new(if reestablish_channel.waiting_ack {
-                1
-            } else {
-                0
-            }))
             .build()
     }
 }
@@ -1717,7 +1711,6 @@ impl TryFrom<molecule_fiber::ReestablishChannel> for ReestablishChannel {
             channel_id: reestablish_channel.channel_id().into(),
             local_commitment_number: reestablish_channel.local_commitment_number().unpack(),
             remote_commitment_number: reestablish_channel.remote_commitment_number().unpack(),
-            waiting_ack: u8::from(reestablish_channel.waiting_ack()) != 0,
         })
     }
 }
