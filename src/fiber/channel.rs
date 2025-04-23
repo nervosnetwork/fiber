@@ -540,8 +540,7 @@ where
                 self.handle_remove_tlc_peer_message(state, remove_tlc)
             }
             FiberChannelMessage::Shutdown(shutdown) => {
-                self.handle_shutdown_peer_message(myself, state, shutdown)
-                    .await
+                self.handle_shutdown_peer_message(state, shutdown).await
             }
             FiberChannelMessage::ClosingSigned(closing) => {
                 let ClosingSigned {
@@ -1081,12 +1080,27 @@ where
 
     async fn handle_shutdown_peer_message(
         &self,
-        myself: &ActorRef<ChannelActorMessage>,
         state: &mut ChannelActorState,
         shutdown: Shutdown,
     ) -> Result<(), ProcessingChannelError> {
+        debug!("Received Shutdown message from peer: {:?}", shutdown);
+        #[cfg(debug_assertions)]
+        state.tlc_state.debug();
         let flags = match state.state {
-            ChannelState::ChannelReady => ShuttingDownFlags::empty(),
+            ChannelState::ChannelReady => {
+                if state.tlc_state.all_tlcs().any(|tlc| {
+                    matches!(
+                        tlc.status,
+                        TlcStatus::Inbound(InboundTlcStatus::RemoteAnnounced)
+                    )
+                }) {
+                    return Err(ProcessingChannelError::InvalidState(
+                        "Unable to process shutdown command peer message, as there are pending inbound tlcs"
+                            .to_string(),
+                    ));
+                }
+                ShuttingDownFlags::empty()
+            }
             ChannelState::ShuttingDown(flags)
                 if flags.contains(ShuttingDownFlags::THEIR_SHUTDOWN_SENT) =>
             {
@@ -1103,6 +1117,7 @@ where
                 )));
             }
         };
+
         state.remote_shutdown_info = Some(ShutdownInfo {
             close_script: shutdown.close_script,
             fee_rate: shutdown.fee_rate.as_u64(),
@@ -1141,20 +1156,6 @@ where
         }
 
         state.update_state(ChannelState::ShuttingDown(flags));
-        // let pending_ack_tlcs = state.get_ack_pending_tlcs();
-        // // if there are still some TLCs are waiting for ACK, they will never be acked
-        // // so we need to remove them from the channel and setting WaitingTlcAck to false
-        // if !pending_ack_tlcs.is_empty() {
-        //     state.set_waiting_ack(myself, false);
-        //     for tlc in pending_ack_tlcs.iter() {
-        //         let reason = RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
-        //             TlcErr::new(TlcErrorCode::TemporaryChannelFailure),
-        //             &tlc.shared_secret,
-        //         ));
-        //         self.register_retryable_tlc_remove(myself, state, tlc.tlc_id, reason)
-        //             .await;
-        //     }
-        // }
         state.maybe_transition_to_shutdown()?;
 
         Ok(())
@@ -1257,7 +1258,7 @@ where
                     "Received commitment_signed command in ShuttingDown state: {:?}",
                     flags
                 );
-                if flags.contains(ShuttingDownFlags::AWAITING_PENDING_TLCS) {
+                if !flags.contains(ShuttingDownFlags::DROPPING_PENDING) {
                     CommitmentSignedFlags::PendingShutdown()
                 } else {
                     return Err(ProcessingChannelError::InvalidState(format!(
@@ -1406,6 +1407,8 @@ where
         command: ShutdownCommand,
     ) -> ProcessingChannelResult {
         debug!("Handling shutdown command: {:?}", &command);
+        #[cfg(debug_assertions)]
+        state.tlc_state.debug();
         if command.force {
             match state.state {
                 ChannelState::ChannelReady => {
@@ -1446,6 +1449,17 @@ where
             let flags = match state.state {
                 ChannelState::ChannelReady => {
                     debug!("Handling shutdown command in ChannelReady state");
+                    if state.tlc_state.all_tlcs().any(|tlc| {
+                        matches!(
+                            tlc.status,
+                            TlcStatus::Outbound(OutboundTlcStatus::LocalAnnounced)
+                        )
+                    }) {
+                        return Err(ProcessingChannelError::InvalidState(
+                            "Unable to process shutdown command, as there are pending outbound tlcs"
+                                .to_string(),
+                        ));
+                    }
                     ShuttingDownFlags::empty()
                 }
                 _ => {
@@ -5254,22 +5268,6 @@ impl ChannelActorState {
             .any(|tlc| tlc.removed_reason.is_none())
     }
 
-    // pub fn get_ack_pending_tlcs(&self) -> Vec<TlcInfo> {
-    //     self.tlc_state
-    //         .all_tlcs()
-    //         .filter(|tlc| {
-    //             tlc.is_received()
-    //                 && matches!(
-    //                     tlc.status.as_inbound_status(),
-    //                     InboundTlcStatus::RemoteAnnounced
-    //                         | InboundTlcStatus::AnnounceWaitPrevAck
-    //                         | InboundTlcStatus::AnnounceWaitAck
-    //                 )
-    //         })
-    //         .cloned()
-    //         .collect()
-    // }
-
     pub fn get_local_funding_pubkey(&self) -> &Pubkey {
         &self.get_local_channel_public_keys().funding_pubkey
     }
@@ -5916,7 +5914,7 @@ impl ChannelActorState {
             }
             ChannelState::ChannelReady => CommitmentSignedFlags::ChannelReady(),
             ChannelState::ShuttingDown(flags) => {
-                if flags.contains(ShuttingDownFlags::AWAITING_PENDING_TLCS) {
+                if !flags.contains(ShuttingDownFlags::DROPPING_PENDING) {
                     debug!(
                         "Verify commitment_signed message while shutdown is pending, current state {:?}",
                         &self.state

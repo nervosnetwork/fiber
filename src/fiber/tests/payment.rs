@@ -2815,18 +2815,10 @@ async fn test_send_payment_shutdown_under_send_each_other() {
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
     let node_3_channel_actor_state = nodes[3].get_channel_actor_state(channels[2]);
-    error!("node_3 state: {:?}", node_3_channel_actor_state.state);
 
-    assert_eq!(
-        node_3_channel_actor_state.state,
-        ChannelState::Closed(CloseFlags::COOPERATIVE)
-    );
+    assert_eq!(node_3_channel_actor_state.state, ChannelState::ChannelReady);
     let node_2_channel_actor_state = nodes[2].get_channel_actor_state(channels[2]);
-    error!("node_2 state: {:?}", node_2_channel_actor_state.state);
-    assert_eq!(
-        node_2_channel_actor_state.state,
-        ChannelState::Closed(CloseFlags::COOPERATIVE)
-    );
+    assert_eq!(node_2_channel_actor_state.state, ChannelState::ChannelReady);
 }
 
 async fn run_shutdown_with_payment_send(sender: usize, receiver: usize) {
@@ -2899,7 +2891,7 @@ async fn run_shutdown_with_payment_send(sender: usize, receiver: usize) {
 
 #[tokio::test]
 async fn test_send_payment_shutdown_under_single_direction_send() {
-    run_shutdown_with_payment_send(2, 1).await;
+    run_shutdown_with_payment_send(1, 2).await;
 }
 
 #[tokio::test]
