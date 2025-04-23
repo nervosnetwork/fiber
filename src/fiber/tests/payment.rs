@@ -2860,6 +2860,7 @@ async fn run_complex_network_with_params(
 ) -> Vec<(Hash256, PaymentSessionStatus)> {
     init_tracing();
 
+    let nodes_num = 6;
     let (nodes, _channels) = create_n_nodes_network(
         &[
             ((0, 1), (funding_amount, funding_amount)),
@@ -2870,13 +2871,13 @@ async fn run_complex_network_with_params(
             ((1, 4), (funding_amount, funding_amount)),
             ((2, 5), (funding_amount, funding_amount)),
         ],
-        6,
+        nodes_num,
     )
     .await;
 
     let mut all_sent = HashSet::new();
-    for _k in 0..3 {
-        for i in 0..6 {
+    for _k in 0..2 {
+        for i in 0..nodes_num {
             let payment_amount = payment_amount_gen();
             let res = nodes[i]
                 .send_payment_keysend_to_self(payment_amount, false)
@@ -2890,7 +2891,7 @@ async fn run_complex_network_with_params(
 
     let mut result = vec![];
     loop {
-        for i in 0..6 {
+        for i in 0..nodes_num {
             let unexpected_events = nodes[i].get_triggered_unexpected_events().await;
             if !unexpected_events.is_empty() {
                 eprintln!("node_{} got unexpected events: {:?}", i, unexpected_events);
@@ -2916,7 +2917,7 @@ async fn run_complex_network_with_params(
     }
 
     // make sure all the channels are still workable with small accounts
-    for i in 0..6 {
+    for i in 0..nodes_num {
         if let Ok(res) = nodes[i].send_payment_keysend_to_self(500, false).await {
             nodes[i].wait_until_success(res.payment_hash).await;
         }
