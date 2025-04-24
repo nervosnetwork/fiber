@@ -59,23 +59,23 @@ jobs:
           set -euo pipefail
 
           if [ ${{ matrix.workflow }} = "cross-chain-hub" ]; then
-            ./tests/deploy/lnd-init/setup-lnd.sh
+            ./fiber-lib/tests/deploy/lnd-init/setup-lnd.sh
           fi
 
           # Prebuild the program so that we can run the following script faster
           cargo build
-          cd tests/deploy/udt-init && cargo build && cd -
+          cd ./fiber-lib/tests/deploy/udt-init && cargo build && cd -
           if [ ${{ matrix.workflow }} = "router-pay" ]; then
             export START_BOOTNODE=y
           fi
           export ON_GITHUB_ACTION=y
-          ./tests/nodes/start.sh &
+          ./fiber-lib/tests/nodes/start.sh &
 
           # Wait for the nodes to start, the initialization takes some time
           # check all the ports are open
 
           # when .ports file is not generated, we will retry 20 times to check if all ports are open
-          port_file=./tests/nodes/.ports
+          port_file=./fiber-lib/tests/nodes/.ports
           retry_count=0
           while [ $retry_count -lt 100 ]; do
             if [ -f $port_file ]; then
@@ -90,7 +90,7 @@ jobs:
           ports=()
           while IFS= read -r line; do
             ports+=("$line")
-          done < ./tests/nodes/.ports
+          done < ./fiber-lib/tests/nodes/.ports
 
           echo "Checking if all ports are open ... ${ports[@]}"
 
@@ -120,7 +120,7 @@ jobs:
           done
 
 
-          (cd ./tests/bruno; npm exec -- @usebruno/cli@1.20.0 run e2e/${{ matrix.workflow }} -r --env ${{ matrix.test_env }} ${{ matrix.extra_bru_args }} ) &
+          (cd ./fiber-lib/tests/bruno; npm exec -- @usebruno/cli@1.20.0 run e2e/${{ matrix.workflow }} -r --env ${{ matrix.test_env }} ${{ matrix.extra_bru_args }} ) &
 
           # -n means we will exit when any of the background processes exits.
           # https://www.gnu.org/software/bash/manual/bash.html#index-wait
