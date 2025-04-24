@@ -44,6 +44,8 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
     * [Module Payment](#module-payment)
         * [Method `send_payment`](#payment-send_payment)
         * [Method `get_payment`](#payment-get_payment)
+        * [Method `build_router`](#payment-build_router)
+        * [Method `send_payment_with_router`](#payment-send_payment_with_router)
     * [Module Peer](#module-peer)
         * [Method `connect_peer`](#peer-connect_peer)
         * [Method `disconnect_peer`](#peer-disconnect_peer)
@@ -62,6 +64,7 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
     * [Type `Hash256`](#type-hash256)
     * [Type `HashAlgorithm`](#type-hashalgorithm)
     * [Type `HopHint`](#type-hophint)
+    * [Type `HopRequire`](#type-hoprequire)
     * [Type `InvoiceData`](#type-invoicedata)
     * [Type `InvoiceSignature`](#type-invoicesignature)
     * [Type `NodeInfo`](#type-nodeinfo)
@@ -70,6 +73,7 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
     * [Type `PeerInfo`](#type-peerinfo)
     * [Type `Pubkey`](#type-pubkey)
     * [Type `RemoveTlcReason`](#type-removetlcreason)
+    * [Type `RouterHop`](#type-routerhop)
     * [Type `SessionRouteNode`](#type-sessionroutenode)
     * [Type `UdtArgInfo`](#type-udtarginfo)
     * [Type `UdtCellDep`](#type-udtcelldep)
@@ -602,8 +606,12 @@ Sends a payment to a peer.
 ##### Params
 
 * `target_pubkey` - <em>Option<[Pubkey](#type-pubkey)></em>, the identifier of the payment target
-* `amount` - <em>`Option<u128>`</em>, the amount of the payment
-* `payment_hash` - <em>Option<[Hash256](#type-hash256)></em>, the hash to use within the payment's HTLC
+* `amount` - <em>`Option<u128>`</em>, the amount of the payment, the unit is Shannons for non UDT payment
+ If not set and there is a invoice, the amount will be set to the invoice amount
+* `payment_hash` - <em>Option<[Hash256](#type-hash256)></em>, the hash to use within the payment's HTLC.
+ If not set and `keysend` is set to true, a random hash will be generated.
+ If not set and there is a `payment_hash` in the invoice, it will be used.
+ Otherwise, `payment_hash` need to be set.
 * `final_tlc_expiry_delta` - <em>`Option<u64>`</em>, the TLC expiry delta should be used to set the timelock for the final hop, in milliseconds
 * `tlc_expiry_limit` - <em>`Option<u64>`</em>, the TLC expiry limit for the whole payment, in milliseconds, each hop is with a default tlc delta of 1 day
  suppose the payment router is with N hops, the total tlc expiry limit is at least (N-1) days
@@ -668,6 +676,85 @@ Retrieves a payment.
 ##### Params
 
 * `payment_hash` - <em>[Hash256](#type-hash256)</em>, The payment hash of the payment to retrieve
+
+##### Returns
+
+* `payment_hash` - <em>[Hash256](#type-hash256)</em>, The payment hash of the payment
+* `status` - <em>[PaymentSessionStatus](#type-paymentsessionstatus)</em>, The status of the payment
+* `created_at` - <em>`u64`</em>, The time the payment was created at, in milliseconds from UNIX epoch
+* `last_updated_at` - <em>`u64`</em>, The time the payment was last updated at, in milliseconds from UNIX epoch
+* `failed_error` - <em>`Option<String>`</em>, The error message if the payment failed
+* `fee` - <em>`u128`</em>, fee paid for the payment
+* `custom_records` - <em>Option<[PaymentCustomRecords](#type-paymentcustomrecords)></em>, The custom records to be included in the payment.
+* `router` - <em>Vec<[SessionRouteNode](#type-sessionroutenode)></em>, The router is a list of nodes that the payment will go through.
+ We store in the payment session and then will use it to track the payment history.
+ The router is a list of nodes that the payment will go through.
+ For example:
+    `A(amount, channel) -> B -> C -> D`
+ means A will send `amount` with `channel` to B.
+
+---
+
+
+
+<a id="payment-build_router"></a>
+#### Method `build_router`
+
+Builds a router with a list of pubkeys and required channels.
+
+##### Params
+
+* `amount` - <em>`Option<u128>`</em>, the amount of the payment, the unit is Shannons for non UDT payment
+ If not set, the minimum routable amount `1` is used
+* `udt_type_script` - <em>`Option<Script>`</em>, udt type script for the payment router
+* `hops_info` - <em>Vec<[HopRequire](#type-hoprequire)></em>, A list of hops that defines the route. This does not include the source hop pubkey.
+ A hop info is a tuple of pubkey and the channel(specified by channel funding tx) will be used.
+ This is a strong restriction given on payment router, which means these specified hops and channels
+ must be adapted in the router. This is different from hop hints, which maybe ignored by find path.
+ If channel is not specified, find path algorithm will pick a channel within these two peers.
+
+ An error will be returned if there is no router could be build from given hops and channels
+* `final_tlc_expiry_delta` - <em>`Option<u64>`</em>, the TLC expiry delta should be used to set the timelock for the final hop, in milliseconds
+
+##### Returns
+
+* `router_hops` - <em>Vec<[RouterHop](#type-routerhop)></em>, The hops information for router
+
+---
+
+
+
+<a id="payment-send_payment_with_router"></a>
+#### Method `send_payment_with_router`
+
+Sends a payment to a peer with specified router
+ This method differs from SendPayment in that it allows users to specify a full route manually.
+ This can be used for things like rebalancing.
+
+##### Params
+
+* `payment_hash` - <em>Option<[Hash256](#type-hash256)></em>, the hash to use within the payment's HTLC.
+ If not set and `keysend` is set to true, a random hash will be generated.
+ If not set and there is a `payment_hash` in the invoice, it will be used.
+ Otherwise, `payment_hash` need to be set.
+* `router` - <em>Vec<[RouterHop](#type-routerhop)></em>, The router to use for the payment
+* `invoice` - <em>`Option<String>`</em>, the encoded invoice to send to the recipient
+* `custom_records` - <em>Option<[PaymentCustomRecords](#type-paymentcustomrecords)></em>, Some custom records for the payment which contains a map of u32 to Vec<u8>
+ The key is the record type, and the value is the serialized data
+ For example:
+ ```json
+ "custom_records": {
+    "0x1": "0x01020304",
+    "0x2": "0x05060708",
+    "0x3": "0x090a0b0c",
+    "0x4": "0x0d0e0f10010d090a0b0c"
+  }
+ ```
+* `keysend` - <em>`Option<bool>`</em>, keysend payment
+* `udt_type_script` - <em>`Option<Script>`</em>, udt type script for the payment
+* `dry_run` - <em>`Option<bool>`</em>, dry_run for payment, used for check whether we can build valid router and the fee for this payment,
+ it's useful for the sender to double check the payment before sending it to the network,
+ default is false
 
 ##### Returns
 
@@ -952,6 +1039,19 @@ A hop hint is a hint for a node to use a specific channel.
 * `tlc_expiry_delta` - <em>u64</em>, The TLC expiry delta to use this hop to forward the payment.
 ---
 
+<a id="#type-hoprequire"></a>
+### Type `HopRequire`
+
+A hop requirement need to meet when building router, do not including the source node,
+ the last hop is the target node.
+
+
+#### Fields
+
+* `pubkey` - <em>[Pubkey](#type-pubkey)</em>, The public key of the node
+* `channel_outpoint` - <em>Option<OutPoint></em>, The outpoint for the channel, which means use channel with `channel_outpoint` to reach this node
+---
+
 <a id="#type-invoicedata"></a>
 ### Type `InvoiceData`
 
@@ -1059,6 +1159,25 @@ The reason for removing a TLC
 
 * `RemoveTlcFulfill` - The reason for removing the TLC is that it was fulfilled
 * `RemoveTlcFail` - The reason for removing the TLC is that it failed
+---
+
+<a id="#type-routerhop"></a>
+### Type `RouterHop`
+
+An edge along the payment path from the source to the target.
+ This represents a TLC transfer from one node to another.
+
+
+#### Fields
+
+* `target` - <em>[Pubkey](#type-pubkey)</em>, The node that is sending the TLC to the next node.
+* `channel_outpoint` - <em>OutPoint</em>, The channel that is used to send the TLC to the next node.
+ If it's all zero bytes, it means this hop is payment receiver.
+* `amount_received` - <em>u128</em>, The amount that the source node will transfer to the target node.
+ We have already added up all the fees along the path, so this amount can be used directly for the TLC.
+* `incoming_tlc_expiry` - <em>u64</em>, The expiry for the TLC that the source node sends to the target node.
+ We have already added up all the expiry deltas along the path,
+ the only thing missing is current time. So the expiry is the current time plus the expiry delta.
 ---
 
 <a id="#type-sessionroutenode"></a>

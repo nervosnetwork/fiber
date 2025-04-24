@@ -5,18 +5,22 @@ use crate::fiber::channel::ChannelActorStateStore;
 use crate::fiber::channel::ChannelCommand;
 use crate::fiber::channel::ChannelCommandWithId;
 use crate::fiber::channel::ReloadParams;
+use crate::fiber::channel::ShutdownCommand;
 use crate::fiber::channel::UpdateCommand;
 use crate::fiber::gossip::get_gossip_actor_name;
 use crate::fiber::gossip::GossipActorMessage;
 use crate::fiber::graph::NetworkGraphStateStore;
 use crate::fiber::graph::PaymentSession;
 use crate::fiber::graph::PaymentSessionStatus;
+use crate::fiber::network::BuildRouterCommand;
 use crate::fiber::network::DebugEvent;
 use crate::fiber::network::GossipMessageWithPeerId;
 use crate::fiber::network::NodeInfoResponse;
 use crate::fiber::network::PaymentCustomRecords;
+use crate::fiber::network::PaymentRouter;
 use crate::fiber::network::SendPaymentCommand;
 use crate::fiber::network::SendPaymentResponse;
+use crate::fiber::network::SendPaymentWithRouterCommand;
 use crate::fiber::types::EcdsaSignature;
 use crate::fiber::types::GossipMessage;
 use crate::fiber::types::Pubkey;
@@ -26,6 +30,7 @@ use crate::invoice::InvoiceStore;
 use crate::start_rpc;
 use crate::RpcConfig;
 use ckb_sdk::core::TransactionBuilder;
+use ckb_types::core::FeeRate;
 use ckb_types::{
     core::{tx_pool::TxStatus, TransactionView},
     packed::{OutPoint, Script},
@@ -648,9 +653,36 @@ impl NetworkNode {
     pub async fn send_payment(
         &self,
         command: SendPaymentCommand,
-    ) -> std::result::Result<SendPaymentResponse, String> {
+    ) -> Result<SendPaymentResponse, String> {
         let message = |rpc_reply| -> NetworkActorMessage {
             NetworkActorMessage::Command(NetworkActorCommand::SendPayment(command, rpc_reply))
+        };
+
+        let res = call!(self.network_actor, message).expect("source_node alive");
+        eprintln!("result: {:?}", res);
+        res
+    }
+
+    pub async fn send_payment_with_router(
+        &self,
+        command: SendPaymentWithRouterCommand,
+    ) -> Result<SendPaymentResponse, String> {
+        let message = |rpc_reply| -> NetworkActorMessage {
+            NetworkActorMessage::Command(NetworkActorCommand::SendPaymentWithRouter(
+                command, rpc_reply,
+            ))
+        };
+
+        let res = call!(self.network_actor, message).expect("source_node alive");
+        eprintln!("result: {:?}", res);
+        res
+    }
+
+    pub async fn build_router(&self, command: BuildRouterCommand) -> Result<PaymentRouter, String> {
+        let message = |rpc_reply| -> NetworkActorMessage {
+            NetworkActorMessage::Command(NetworkActorCommand::BuildPaymentRouter(
+                command, rpc_reply,
+            ))
         };
 
         let res = call!(self.network_actor, message).expect("source_node alive");
@@ -670,8 +702,6 @@ impl NetworkNode {
         channel_id: Hash256,
         force: bool,
     ) -> std::result::Result<(), String> {
-        use crate::fiber::channel::ShutdownCommand;
-        use ckb_types::core::FeeRate;
         let message = |rpc_reply| -> NetworkActorMessage {
             NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
                 ChannelCommandWithId {
@@ -715,19 +745,10 @@ impl NetworkNode {
         self.send_payment(SendPaymentCommand {
             target_pubkey: Some(recipient.pubkey),
             amount: Some(amount),
-            payment_hash: None,
-            final_tlc_expiry_delta: None,
-            tlc_expiry_limit: None,
-            invoice: None,
-            timeout: None,
-            max_fee_amount: None,
-            max_parts: None,
             keysend: Some(true),
-            udt_type_script: None,
             allow_self_payment: false,
             dry_run,
-            hop_hints: None,
-            custom_records: None,
+            ..Default::default()
         })
         .await
     }
@@ -799,19 +820,10 @@ impl NetworkNode {
         self.send_payment(SendPaymentCommand {
             target_pubkey: Some(pubkey),
             amount: Some(amount),
-            payment_hash: None,
-            final_tlc_expiry_delta: None,
-            tlc_expiry_limit: None,
-            invoice: None,
-            timeout: None,
-            max_fee_amount: None,
-            max_parts: None,
             keysend: Some(true),
-            udt_type_script: None,
             allow_self_payment: true,
             dry_run,
-            hop_hints: None,
-            custom_records: None,
+            ..Default::default()
         })
         .await
     }
