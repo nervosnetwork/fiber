@@ -1160,12 +1160,20 @@ where
                     })?
                 };
                 let amount_to_send = next_hop_received_amount + fee;
-                if amount_to_send > channel_info.capacity() {
-                    debug!(
-                        "amount_to_send: {} > channel_info.capacity {}",
-                        amount_to_send,
-                        channel_info.capacity()
-                    );
+                let expiry_delta = if is_initial {
+                    0
+                } else {
+                    channel_update.tlc_expiry_delta
+                };
+
+                let incoming_tlc_expiry = cur_hop.incoming_tlc_expiry + expiry_delta;
+                if !self.check_channel_amount_and_expiry(
+                    amount_to_send,
+                    channel_info,
+                    channel_update,
+                    incoming_tlc_expiry,
+                    tlc_expiry_limit,
+                ) {
                     continue;
                 }
 
@@ -1179,40 +1187,6 @@ where
                         );
                         continue;
                     }
-                }
-                // check to make sure the current hop can send the amount
-                // if `tlc_maximum_value` equals 0, it means there is no limit
-                if amount_to_send > channel_info.capacity() {
-                    continue;
-                }
-                // We should use amount_to_send because that is the amount to be sent over the channel.
-                if amount_to_send < channel_update.tlc_minimum_value {
-                    continue;
-                }
-
-                // If we already know the balance of the channel, check if we can send the amount.
-                if let Some(balance) = channel_update.outbound_liquidity {
-                    if amount_to_send > balance {
-                        continue;
-                    }
-                }
-
-                let expiry_delta = if is_initial {
-                    0
-                } else {
-                    channel_update.tlc_expiry_delta
-                };
-
-                let incoming_tlc_expiry = cur_hop.incoming_tlc_expiry + expiry_delta;
-                debug!(
-                    "debug yukang incoming_tlc_expiry: {:?} tlc_expiry_limit: {:?}  skip: {:?}",
-                    incoming_tlc_expiry,
-                    tlc_expiry_limit,
-                    incoming_tlc_expiry > tlc_expiry_limit
-                );
-                if incoming_tlc_expiry > tlc_expiry_limit {
-                    debug!("skip ....");
-                    continue;
                 }
 
                 self.eval_and_update(
@@ -1282,20 +1256,13 @@ where
             if udt_type_script != channel_info.udt_type_script() {
                 continue;
             }
-            if let Some(balance) = channel_update.outbound_liquidity {
-                if balance < amount {
-                    continue;
-                }
-            }
-            // normal code path will not reach here, we must can get balance for direct channels
-            // anyway, check the capacity here for safety
-            if channel_info.capacity() < amount {
-                continue;
-            }
-            if amount < channel_update.tlc_minimum_value {
-                continue;
-            }
-            if channel_update.tlc_expiry_delta > tlc_expiry_limit {
+            if !self.check_channel_amount_and_expiry(
+                amount,
+                channel_info,
+                channel_update,
+                channel_update.tlc_expiry_delta,
+                tlc_expiry_limit,
+            ) {
                 continue;
             }
             channels.push((
@@ -1328,6 +1295,35 @@ where
                 "no direct channel found for source node".to_string(),
             ));
         }
+    }
+
+    fn check_channel_amount_and_expiry(
+        &self,
+        amount: u128,
+        channel_info: &ChannelInfo,
+        channel_update: &ChannelUpdateInfo,
+        incoming_tlc_expiry: u64,
+        tlc_expiry_limit: u64,
+    ) -> bool {
+        if amount > channel_info.capacity() {
+            return false;
+        }
+        // We should use amount_to_send because that is the amount to be sent over the channel.
+        if amount < channel_update.tlc_minimum_value {
+            return false;
+        }
+
+        // If we already know the balance of the channel, check if we can send the amount.
+        if let Some(balance) = channel_update.outbound_liquidity {
+            if amount > balance {
+                return false;
+            }
+        }
+
+        if incoming_tlc_expiry > tlc_expiry_limit {
+            return false;
+        }
+        true
     }
 
     fn edge_weight(&self, amount: u128, fee: u128, htlc_expiry_delta: u64) -> u128 {
