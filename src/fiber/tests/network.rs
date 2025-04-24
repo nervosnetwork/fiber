@@ -1,13 +1,18 @@
 use super::test_utils::{init_tracing, NetworkNode};
 use crate::{
-    ckb::tests::test_utils::set_next_block_timestamp,
+    ckb::{
+        tests::test_utils::{
+            set_next_block_timestamp, MockChainActorMiddleware, MockChainActorState,
+        },
+        CkbChainMessage, CkbTxTracingResult,
+    },
     fiber::{
         channel::ShutdownInfo,
         config::DEFAULT_TLC_EXPIRY_DELTA,
         gossip::{GossipActorMessage, GossipMessageStore},
         graph::ChannelUpdateInfo,
         network::{NetworkActorStateStore, SendPaymentCommand, SendPaymentData},
-        tests::test_utils::NetworkNodeConfigBuilder,
+        tests::test_utils::{NetworkNodeConfig, NetworkNodeConfigBuilder},
         types::{
             BroadcastMessage, BroadcastMessageWithTimestamp, BroadcastMessagesFilterResult,
             ChannelAnnouncement, ChannelUpdateChannelFlags, Cursor, GossipMessage,
@@ -26,7 +31,7 @@ use ckb_types::{
     prelude::{Builder, Entity, Pack},
 };
 use musig2::PartialSignature;
-use ractor::call;
+use ractor::{call, ActorProcessingErr, ActorRef};
 use std::{borrow::Cow, str::FromStr, time::Duration};
 use tentacle::{
     multiaddr::{MultiAddr, Multiaddr, Protocol},
@@ -978,6 +983,124 @@ async fn test_abort_funding_on_building_funding_tx() {
     node_a.connect_to(&node_b).await;
 
     // Use a huge amount to fail the funding
+    let message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
+            OpenChannelCommand {
+                peer_id: node_b.peer_id.clone(),
+                public: true,
+                shutdown_script: None,
+                funding_amount: funding_amount_a,
+                funding_udt_type_script: None,
+                commitment_fee_rate: None,
+                commitment_delay_epoch: None,
+                funding_fee_rate: None,
+                tlc_expiry_delta: None,
+                tlc_min_value: None,
+                tlc_fee_proportional_millionths: None,
+                max_tlc_number_in_flight: None,
+                max_tlc_value_in_flight: None,
+            },
+            rpc_reply,
+        ))
+    };
+    let open_channel_result = call!(node_a.network_actor, message)
+        .expect("node_a alive")
+        .expect("open channel success");
+
+    node_b
+        .expect_event(|event| match event {
+            NetworkServiceEvent::ChannelPendingToBeAccepted(peer_id, _channel_id) => {
+                assert_eq!(peer_id, &node_a.peer_id);
+                true
+            }
+            _ => false,
+        })
+        .await;
+    let message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::AcceptChannel(
+            AcceptChannelCommand {
+                temp_channel_id: open_channel_result.channel_id,
+                funding_amount: funding_amount_b,
+                shutdown_script: None,
+                max_tlc_number_in_flight: None,
+                max_tlc_value_in_flight: None,
+                min_tlc_value: None,
+                tlc_fee_proportional_millionths: None,
+                tlc_expiry_delta: None,
+            },
+            rpc_reply,
+        ))
+    };
+    let accept_channel_result = call!(node_b.network_actor, message)
+        .expect("node_b alive")
+        .expect("accept channel success");
+    let channel_id = accept_channel_result.new_channel_id;
+    node_b
+        .expect_event(|event| {
+            matches!(
+                event,
+                NetworkServiceEvent::ChannelFundingAborted(id) if *id == channel_id
+            )
+        })
+        .await;
+    node_a
+        .expect_event(|event| {
+            matches!(
+                event,
+                NetworkServiceEvent::ChannelFundingAborted(id) if *id == channel_id
+            )
+        })
+        .await;
+}
+
+#[derive(Clone, Debug)]
+struct CkbTxFailureMockMiddleware;
+#[ractor::async_trait]
+impl MockChainActorMiddleware for CkbTxFailureMockMiddleware {
+    async fn handle(
+        &mut self,
+        _inner_self: ActorRef<CkbChainMessage>,
+        message: CkbChainMessage,
+        _state: &mut MockChainActorState,
+    ) -> Result<Option<CkbChainMessage>, ActorProcessingErr> {
+        match message {
+            CkbChainMessage::CreateTxTracer(tracer) => {
+                let _ = tracer.callback.send(CkbTxTracingResult {
+                    tx_hash: tracer.tx_hash,
+                    tx_status: TxStatus::Rejected("mock".to_string()),
+                });
+                Ok(None)
+            }
+            _ => Ok(Some(message)),
+        }
+    }
+
+    fn clone_box(&self) -> Box<dyn MockChainActorMiddleware> {
+        Box::new(self.clone())
+    }
+}
+
+#[tokio::test]
+async fn test_abort_funding_on_committing_funding_tx_on_chain() {
+    use crate::fiber::network::{AcceptChannelCommand, OpenChannelCommand};
+
+    let funding_amount_a = 4_200_000_000u128;
+    let funding_amount_b: u128 = funding_amount_a;
+    let middleware = Box::new(CkbTxFailureMockMiddleware);
+    let mut node_a = NetworkNode::new_with_config(
+        NetworkNodeConfig::builder()
+            .mock_chain_actor_middleware(middleware.clone())
+            .build(),
+    )
+    .await;
+    let mut node_b = NetworkNode::new_with_config(
+        NetworkNodeConfig::builder()
+            .mock_chain_actor_middleware(middleware)
+            .build(),
+    )
+    .await;
+    node_a.connect_to(&node_b).await;
+
     let message = |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
             OpenChannelCommand {

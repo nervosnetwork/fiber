@@ -10,7 +10,7 @@ use crate::ckb::actor::CkbChainMessage;
 use crate::ckb::contracts::{get_cell_deps_by_contracts, get_script_by_contract, Contract};
 
 pub async fn create_mock_chain_actor() -> ActorRef<CkbChainMessage> {
-    Actor::spawn(None, MockChainActor::new(), ())
+    Actor::spawn(None, MockChainActor::new(), None)
         .await
         .expect("start mock chain actor")
         .0
