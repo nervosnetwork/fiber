@@ -17,7 +17,7 @@ bech32 = "0.9.1"
 rand = "0.8.5"
 serde_json = { version = "1.0" }
 home = "0.5.9"
-ckb-sdk = "3.6"
+ckb-sdk = "3.7"
 thiserror = "1.0.58"
 anyhow = "1.0.81"
 tentacle = { version = "0.6.6", default-features = false, features = ["upnp", "parking_lot", "openssl-vendored", "tokio-runtime", "tokio-timer", "ws"] }
