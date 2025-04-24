@@ -20,17 +20,3 @@ tokio = { version = "1", features = [
 ] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-jsonrpsee = { version = "0.22", features = ["server", "macros"] }
-ckb-jsonrpc-types = "0.200.0"
-ckb-types = "0.200.0"
-clap-serde-derive = "0.2.1"
-secp256k1 = { version = "0.28.0", features = ["serde", "recovery", "rand-std"] }
-socket2 = "0.5.7"
-tentacle = { version = "0.6.6", default-features = false, features = [
-    "upnp",
-    "parking_lot",
-    "openssl-vendored",
-    "tokio-runtime",
-    "tokio-timer",
-    "ws",
-] }

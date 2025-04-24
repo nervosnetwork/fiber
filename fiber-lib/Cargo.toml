@@ -25,8 +25,6 @@ molecule = { version = "0.8.0", default-features = false }
 ckb-types = "0.200.0"
 ckb-gen-types = "0.200.0"
 ckb-jsonrpc-types = "0.200.0"
-ckb-chain-spec = "0.200.0"
-ckb-resource = "0.200.0"
 serde_with = { version = "3.7.0", features = ["macros", "base64"] }
 hex = "0.4.3"
 bitflags = { version = "2.5.0", features = ["serde"] }
