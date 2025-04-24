@@ -1,9 +1,8 @@
 use clap::Parser;
 use fiber::store::db_migrate::DbMigrate;
+use fiber::store::Store;
 use fnn_migrate::migrations::*;
 use fnn_migrate::util::prompt;
-use rocksdb::ops::Open;
-use rocksdb::{DBCompressionType, Options, DB};
 use std::path::Path;
 use std::process::exit;
 use std::{cmp::Ordering, sync::Arc};
@@ -12,18 +11,24 @@ use tracing_subscriber;
 
 include!(concat!(env!("OUT_DIR"), "/migrations.rs"));
 
-fn init_db_migrate(db: Arc<DB>) -> DbMigrate {
-    let mut db_migrate = DbMigrate::new(db);
-    add_migrations(&mut db_migrate);
-    db_migrate
+#[ouroboros::self_referencing]
+struct DbAndDbMigrate {
+    db: Store,
+    #[borrows(db)]
+    #[covariant]
+    migrate: DbMigrate<'this>,
 }
 
-fn open_db(path: &Path) -> Result<Arc<DB>, String> {
-    let mut options = Options::default();
-    options.create_if_missing(false);
-    options.set_compression_type(DBCompressionType::Lz4);
-    let db = Arc::new(DB::open(&options, path).map_err(|e| e.to_string())?);
-    Ok(db)
+fn init_db_migrate(db: Store) -> DbAndDbMigrate {
+    DbAndDbMigrateBuilder {
+        db,
+        migrate_builder: |db| {
+            let mut db_migrate = DbMigrate::new(db);
+            add_migrations(&mut db_migrate);
+            db_migrate
+        },
+    }
+    .build()
 }
 
 #[derive(Parser, Debug)]
@@ -39,12 +44,12 @@ struct Args {
 }
 
 fn run_migrate<P: AsRef<Path>>(
-    migrate: DbMigrate,
+    migrate: DbAndDbMigrate,
     path: P,
     skip_confirm: bool,
-) -> Result<Arc<DB>, String> {
-    if let Err(_) = migrate.init_or_check(path.as_ref()) {
-        let result = migrate.check();
+) -> Result<DbAndDbMigrate, String> {
+    if let Err(_) = migrate.borrow_migrate().init_or_check(path.as_ref()) {
+        let result = migrate.borrow_migrate().check();
         if result == Ordering::Less {
             if !skip_confirm {
                 let path_buf = path.as_ref().to_path_buf();
@@ -61,15 +66,18 @@ fn run_migrate<P: AsRef<Path>>(
                 }
             }
             eprintln!("begin to migrate db ...");
-            let db = migrate.migrate().expect("failed to migrate db");
+            migrate
+                .borrow_migrate()
+                .migrate()
+                .expect("failed to migrate db");
             eprintln!("db migrated successfully, now your can restart the fiber node ...");
-            return Ok(db);
+            return Ok(migrate);
         } else {
             assert_eq!(result, Ordering::Greater);
             return Err("incompatible database, need to upgrade fiber binary".to_string());
         }
     }
-    Ok(migrate.db())
+    Ok(migrate)
 }
 
 fn main() {
@@ -82,7 +90,7 @@ fn main() {
     let path = Path::new(&args.path);
     let skip_confirm = args.skip_confirm;
 
-    let db = open_db(path).expect("failed to open db");
+    let db = fiber::store::Store::open_db(path).expect("failed to open db");
     let migrate = init_db_migrate(db);
     if let Err(err) = run_migrate(migrate, path, skip_confirm) {
         eprintln!("{}", err);

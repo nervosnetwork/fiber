@@ -1,8 +1,5 @@
 use fiber::{store::migration::Migration, Error};
 use indicatif::ProgressBar;
-use rocksdb::ops::Iterate;
-use rocksdb::ops::Put;
-use rocksdb::DB;
 use std::sync::Arc;
 use tracing::info;
 
@@ -53,11 +50,11 @@ fn convert_settlement_data(old: SettlementDataV031) -> SettlementDataV040 {
 }
 
 impl Migration for MigrationObj {
-    fn migrate(
+    fn migrate<'a>(
         &self,
-        db: Arc<DB>,
+        db: &'a fiber::store::Store,
         _pb: Arc<dyn Fn(u64) -> ProgressBar + Send + Sync>,
-    ) -> Result<Arc<DB>, Error> {
+    ) -> Result<&'a fiber::store::Store, Error> {
         info!(
             "MigrationObj::migrate to {} ...........",
             MIGRATION_DB_VERSION
@@ -67,7 +64,7 @@ impl Migration for MigrationObj {
         let prefix = vec![WATCHTOWER_CHANNEL_PREFIX];
 
         for (k, v) in db
-            .prefix_iterator(prefix.as_slice())
+            .prefix_iterator(prefix.clone().as_slice())
             .take_while(move |(col_key, _)| col_key.starts_with(prefix.as_slice()))
         {
             let old_channel_data: ChannelDataV031 =
@@ -77,8 +74,7 @@ impl Migration for MigrationObj {
             let new_channel_data_bytes =
                 bincode::serialize(&new_channel_data).expect("serialize to new channel data");
 
-            db.put(k, new_channel_data_bytes)
-                .expect("save new channel data");
+            db.put(k, new_channel_data_bytes);
         }
         Ok(db)
     }

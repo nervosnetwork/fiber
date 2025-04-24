@@ -29,9 +29,7 @@ struct StoreAndMigrate {
 impl StoreAndMigrate {
     fn new_with_path(path: impl AsRef<Path>) -> Self {
         StoreAndMigrateBuilder {
-            store: Store {
-                db: Store::open_db(path.as_ref()).unwrap(),
-            },
+            store: Store::open_db(path.as_ref()).unwrap(),
             migrate_builder: |store: &Store| DbMigrate::new(store),
         }
         .build()

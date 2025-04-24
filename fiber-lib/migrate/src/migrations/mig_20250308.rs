@@ -1,7 +1,5 @@
 use fiber::{store::migration::Migration, Error};
 use indicatif::ProgressBar;
-use rocksdb::ops::{Delete, Get, Iterate, Put};
-use rocksdb::DB;
 use std::sync::Arc;
 use tracing::info;
 
@@ -20,11 +18,11 @@ impl MigrationObj {
 }
 
 impl Migration for MigrationObj {
-    fn migrate(
+    fn migrate<'a>(
         &self,
-        db: Arc<DB>,
+        db: &'a fiber::store::Store,
         _pb: Arc<dyn Fn(u64) -> ProgressBar + Send + Sync>,
-    ) -> Result<Arc<DB>, Error> {
+    ) -> Result<&'a fiber::store::Store, Error> {
         info!(
             "MigrationObj::migrate to {} ...........",
             MIGRATION_DB_VERSION
@@ -50,17 +48,15 @@ impl Migration for MigrationObj {
             let outpoint = &k[2..];
             let channel_announcement_key =
                 [channel_announcement_timestamp_prefix.as_slice(), outpoint].concat();
-            if let Some(channel_announcement_timestamps) = db
-                .get(channel_announcement_timestamp_prefix)
-                .expect("read channel announcement timestamps")
+            if let Some(channel_announcement_timestamps) =
+                db.get(channel_announcement_timestamp_prefix)
             {
                 assert_eq!(channel_update_timestamps.len(), 24);
                 let mut timestamps = [0u8; 24];
                 timestamps[..8].copy_from_slice(&channel_announcement_timestamps[..8]);
                 timestamps[8..24].copy_from_slice(&channel_update_timestamps[8..24]);
-                db.put(channel_announcement_key, timestamps)
-                    .expect("save new channel state");
-                db.delete(k).expect("delete old channel state");
+                db.put(channel_announcement_key, timestamps);
+                db.delete(k);
             }
         }
         Ok(db)

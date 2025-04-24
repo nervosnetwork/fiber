@@ -5,9 +5,6 @@ edition = "2021"
 build = "build.rs"
 
 [dependencies]
-rocksdb = { package = "ckb-rocksdb", version = "=0.21.1", features = [
-    "lz4",
-], default-features = false }
 
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -27,7 +24,9 @@ fiber_v030 = { package = "fnn", git = "https://github.com/nervosnetwork/fiber.gi
 fiber_v031 = { package = "fnn", git = "https://github.com/nervosnetwork/fiber.git", tag = "v0.3.1-p1" }
 fiber_v040 = { package = "fnn", git = "https://github.com/nervosnetwork/fiber.git", tag = "v0.4.0-rc1-p1" }
 fiber_v041 = { package = "fnn", git = "https://github.com/nervosnetwork/fiber.git", tag = "v0.4.1-rc1" }
+ouroboros = "0.18.5"
 
 [features]
 default = []
-portable = ["rocksdb/portable"]
+
+[workspace]

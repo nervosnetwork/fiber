@@ -53,7 +53,7 @@ where
         .unwrap_or_else(|e| panic!("deserialization of {} failed: {}", field_name, e))
 }
 
-enum KeyValue {
+pub enum KeyValue {
     ChannelActorState(Hash256, ChannelActorState),
     CkbInvoice(Hash256, CkbInvoice),
     CkbInvoicePreimage(Hash256, Hash256),
