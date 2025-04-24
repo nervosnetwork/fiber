@@ -20,7 +20,6 @@ use crate::{
         config::DEFAULT_AUTO_ACCEPT_CHANNEL_CKB_FUNDING_AMOUNT,
         hash_algorithm::HashAlgorithm,
         network::{AcceptChannelCommand, OpenChannelCommand},
-        tests::test_utils::establish_channel_between_nodes,
         types::{Privkey, RemoveTlcFulfill, RemoveTlcReason},
         NetworkActorCommand, NetworkActorMessage,
     },
@@ -633,19 +632,12 @@ async fn test_public_channel_saved_to_the_other_nodes_graph() {
     let (_channel_id, funding_tx_hash) = establish_channel_between_nodes(
         &mut node1,
         &mut node2,
-        true,
-        node1_funding_amount,
-        node2_funding_amount,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
+        ChannelParameters {
+            public: true,
+            node_a_funding_amount: node1_funding_amount,
+            node_b_funding_amount: node2_funding_amount,
+            ..Default::default()
+        },
     )
     .await;
     let funding_tx = node1
@@ -689,19 +681,7 @@ async fn test_public_channel_with_unconfirmed_funding_tx() {
     let (_channel_id, _funding_tx_hash) = establish_channel_between_nodes(
         &mut node1,
         &mut node2,
-        true,
-        node1_funding_amount,
-        node2_funding_amount,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
+        ChannelParameters::new(node1_funding_amount, node2_funding_amount),
     )
     .await;
 
@@ -2733,19 +2713,14 @@ async fn do_test_channel_remote_commitment_error() {
     let (new_channel_id, _funding_tx_hash) = establish_channel_between_nodes(
         &mut node_a,
         &mut node_b,
-        false,
-        node_a_funding_amount,
-        node_b_funding_amount,
-        Some(tlc_number_in_flight_limit as u64),
-        None,
-        None,
-        None,
-        None,
-        Some(tlc_number_in_flight_limit as u64),
-        None,
-        None,
-        None,
-        None,
+        ChannelParameters {
+            public: false,
+            node_a_funding_amount,
+            node_b_funding_amount,
+            a_max_tlc_number_in_flight: Some(tlc_number_in_flight_limit as u64),
+            b_max_tlc_number_in_flight: Some(tlc_number_in_flight_limit as u64),
+            ..Default::default()
+        },
     )
     .await;
 
@@ -2860,7 +2835,6 @@ async fn test_network_add_two_tlcs_remove_one() {
     })
     .expect("node_a alive")
     .expect("successfully added tlc");
-    eprintln!("add_tlc_result: {:?}", add_tlc_result_a);
 
     // if we don't wait for a while, the next add_tlc will fail with temporary failure
     let preimage_b = [2; 32];
@@ -3166,19 +3140,13 @@ async fn do_test_add_tlc_with_number_limit() {
     let (new_channel_id, _funding_tx_hash) = establish_channel_between_nodes(
         &mut node_a,
         &mut node_b,
-        true,
-        node_a_funding_amount,
-        node_b_funding_amount,
-        Some(node_a_max_tlc_number),
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
+        ChannelParameters {
+            public: true,
+            node_a_funding_amount,
+            node_b_funding_amount,
+            a_max_tlc_number_in_flight: Some(node_a_max_tlc_number),
+            ..Default::default()
+        },
     )
     .await;
 
@@ -3252,19 +3220,13 @@ async fn do_test_add_tlc_number_limit_reverse() {
     let (new_channel_id, _funding_tx_hash) = establish_channel_between_nodes(
         &mut node_a,
         &mut node_b,
-        true,
-        node_a_funding_amount,
-        node_b_funding_amount,
-        None,
-        None,
-        None,
-        None,
-        None,
-        Some(node_b_max_tlc_number),
-        None,
-        None,
-        None,
-        None,
+        ChannelParameters {
+            public: true,
+            node_a_funding_amount,
+            node_b_funding_amount,
+            b_max_tlc_number_in_flight: Some(node_b_max_tlc_number),
+            ..Default::default()
+        },
     )
     .await;
 
@@ -3337,19 +3299,13 @@ async fn do_test_add_tlc_value_limit() {
     let (new_channel_id, _funding_tx_hash) = establish_channel_between_nodes(
         &mut node_a,
         &mut node_b,
-        true,
-        node_a_funding_amount,
-        node_b_funding_amount,
-        None,
-        Some(3000000000),
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
+        ChannelParameters {
+            public: true,
+            node_a_funding_amount,
+            node_b_funding_amount,
+            a_max_tlc_value_in_flight: Some(3000000000),
+            ..Default::default()
+        },
     )
     .await;
 
@@ -3423,19 +3379,13 @@ async fn do_test_add_tlc_min_tlc_value_limit() {
     let (new_channel_id, _funding_tx_hash) = establish_channel_between_nodes(
         &mut node_a,
         &mut node_b,
-        true,
-        node_a_funding_amount,
-        node_b_funding_amount,
-        None,
-        None,
-        None,
-        Some(100),
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
+        ChannelParameters {
+            public: true,
+            node_a_funding_amount,
+            node_b_funding_amount,
+            a_tlc_min_value: Some(100),
+            ..Default::default()
+        },
     )
     .await;
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
@@ -3522,19 +3472,7 @@ async fn test_channel_update_tlc_expiry() {
     let (new_channel_id, _funding_tx_hash) = establish_channel_between_nodes(
         &mut node_a,
         &mut node_b,
-        true,
-        node_a_funding_amount,
-        node_b_funding_amount,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
+        ChannelParameters::new(node_a_funding_amount, node_b_funding_amount),
     )
     .await;
 

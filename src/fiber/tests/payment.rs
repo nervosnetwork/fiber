@@ -22,6 +22,7 @@ use crate::invoice::CkbInvoice;
 use crate::invoice::Currency;
 use crate::invoice::InvoiceBuilder;
 use crate::NetworkServiceEvent;
+use ckb_types::packed::Script;
 use ckb_types::{core::tx_pool::TxStatus, packed::OutPoint};
 use ractor::call;
 use std::collections::HashMap;
@@ -230,19 +231,14 @@ async fn test_send_payment_fee_rate() {
     let (_new_channel_id, funding_tx_hash_0) = establish_channel_between_nodes(
         &mut node_0,
         &mut node_1,
-        true,
-        MIN_RESERVED_CKB + 1_000_000_000,
-        MIN_RESERVED_CKB,
-        None,
-        None,
-        None,
-        None,
-        Some(1_000_000),
-        None,
-        None,
-        None,
-        None,
-        Some(2_000_000),
+        ChannelParameters {
+            public: true,
+            node_a_funding_amount: MIN_RESERVED_CKB + 1_000_000_000,
+            node_b_funding_amount: MIN_RESERVED_CKB,
+            a_tlc_fee_proportional_millionths: Some(1_000_000),
+            b_tlc_fee_proportional_millionths: Some(2_000_000),
+            ..Default::default()
+        },
     )
     .await;
     let funding_tx_0 = node_0
@@ -254,19 +250,14 @@ async fn test_send_payment_fee_rate() {
     let (_new_channel_id, funding_tx_hash_1) = establish_channel_between_nodes(
         &mut node_1,
         &mut node_2,
-        true,
-        MIN_RESERVED_CKB + 1_000_000_000,
-        MIN_RESERVED_CKB,
-        None,
-        None,
-        None,
-        None,
-        Some(3_000_000),
-        None,
-        None,
-        None,
-        None,
-        Some(4_000_000),
+        ChannelParameters {
+            public: true,
+            node_a_funding_amount: MIN_RESERVED_CKB + 1_000_000_000,
+            node_b_funding_amount: MIN_RESERVED_CKB,
+            a_tlc_fee_proportional_millionths: Some(3_000_000),
+            b_tlc_fee_proportional_millionths: Some(4_000_000),
+            ..Default::default()
+        },
     )
     .await;
     let funding_tx_1 = node_1
@@ -321,19 +312,12 @@ async fn test_send_payment_over_private_channel() {
         let (_new_channel_id, _funding_tx) = establish_channel_between_nodes(
             &mut node1,
             &mut node2,
-            false,
-            MIN_RESERVED_CKB + 20000000000,
-            MIN_RESERVED_CKB,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
+            ChannelParameters {
+                public: false,
+                node_a_funding_amount: MIN_RESERVED_CKB + 20000000000,
+                node_b_funding_amount: MIN_RESERVED_CKB,
+                ..Default::default()
+            },
         )
         .await;
 
@@ -596,19 +580,12 @@ async fn test_send_payment_with_private_channel_hints() {
         let (_new_channel_id, funding_tx_hash) = establish_channel_between_nodes(
             &mut node2,
             &mut node3,
-            false,
-            MIN_RESERVED_CKB + 20000000000,
-            MIN_RESERVED_CKB,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
+            ChannelParameters {
+                public: false,
+                node_a_funding_amount: MIN_RESERVED_CKB + 20000000000,
+                node_b_funding_amount: MIN_RESERVED_CKB,
+                ..Default::default()
+            },
         )
         .await;
         let funding_tx = node2
@@ -679,19 +656,12 @@ async fn test_send_payment_with_private_channel_hints_fallback() {
     let (_new_channel_id, funding_tx_hash) = establish_channel_between_nodes(
         &mut node2,
         &mut node3,
-        false,
-        MIN_RESERVED_CKB + 20000000000,
-        MIN_RESERVED_CKB,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
+        ChannelParameters {
+            public: false,
+            node_a_funding_amount: MIN_RESERVED_CKB + 20000000000,
+            node_b_funding_amount: MIN_RESERVED_CKB,
+            ..Default::default()
+        },
     )
     .await;
     let funding_tx = node2
@@ -753,19 +723,12 @@ async fn test_send_payment_with_private_multiple_channel_hints_fallback() {
         let (_new_channel_id, funding_tx_hash) = establish_channel_between_nodes(
             node2,
             node3,
-            false,
-            MIN_RESERVED_CKB + amount,
-            MIN_RESERVED_CKB,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
+            ChannelParameters {
+                public: false,
+                node_a_funding_amount: MIN_RESERVED_CKB + amount,
+                node_b_funding_amount: MIN_RESERVED_CKB,
+                ..Default::default()
+            },
         )
         .await;
         node2
@@ -2531,19 +2494,13 @@ async fn test_send_payment_max_value_in_flight_in_first_hop() {
         establish_channel_between_nodes(
             &mut node_0,
             &mut node_1,
-            true,
-            HUGE_CKB_AMOUNT,
-            HUGE_CKB_AMOUNT,
-            None,
-            Some(100000000),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
+            ChannelParameters {
+                public: true,
+                node_a_funding_amount: HUGE_CKB_AMOUNT,
+                node_b_funding_amount: HUGE_CKB_AMOUNT,
+                a_max_tlc_value_in_flight: Some(100000000),
+                ..Default::default()
+            },
         )
         .await
     };
@@ -2574,19 +2531,13 @@ async fn test_send_payment_max_value_in_flight_in_first_hop() {
         establish_channel_between_nodes(
             &mut node_0,
             &mut node_1,
-            true,
-            HUGE_CKB_AMOUNT,
-            HUGE_CKB_AMOUNT,
-            None,
-            Some(100000000 + 2),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
+            ChannelParameters {
+                public: true,
+                node_a_funding_amount: HUGE_CKB_AMOUNT,
+                node_b_funding_amount: HUGE_CKB_AMOUNT,
+                a_max_tlc_value_in_flight: Some(100000000 + 2),
+                ..Default::default()
+            },
         )
         .await
     };
@@ -2957,6 +2908,80 @@ async fn test_send_payment_self_with_two_nodes() {
         create_n_nodes_network(&[((0, 1), (funding_amount, funding_amount))], 2).await;
     let res = nodes[0].send_payment_keysend_to_self(1000, false).await;
     assert!(res.is_err());
+}
+
+#[tokio::test]
+async fn test_send_payment_self_with_mixed_channel() {
+    // #678, payself with mixed channel got wrong
+    init_tracing();
+
+    let funding_amount = HUGE_CKB_AMOUNT;
+    let (nodes, _channels) = create_n_nodes_network_with_meta(
+        &[
+            ((0, 1), (funding_amount, funding_amount, None)),
+            (
+                (0, 1),
+                (funding_amount, funding_amount, Some(Script::default())),
+            ),
+        ],
+        2,
+        false,
+    )
+    .await;
+
+    let res = nodes[0].send_payment_keysend_to_self(1000, false).await;
+    assert!(res.is_err());
+
+    let (nodes, _channels) = create_n_nodes_network_with_meta(
+        &[
+            ((0, 1), (funding_amount, funding_amount, None)),
+            (
+                (0, 1),
+                (funding_amount, funding_amount, Some(Script::default())),
+            ),
+            ((0, 1), (funding_amount, funding_amount, None)),
+        ],
+        2,
+        false,
+    )
+    .await;
+
+    let res = nodes[0].send_payment_keysend_to_self(1000, false).await;
+    assert!(res.is_ok());
+
+    // all UDT channels
+    let (nodes, _channels) = create_n_nodes_network_with_meta(
+        &[
+            (
+                (0, 1),
+                (funding_amount, funding_amount, Some(Script::default())),
+            ),
+            (
+                (0, 1),
+                (funding_amount, funding_amount, Some(Script::default())),
+            ),
+            (
+                (0, 1),
+                (funding_amount, funding_amount, Some(Script::default())),
+            ),
+        ],
+        2,
+        false,
+    )
+    .await;
+
+    let res = nodes[0]
+        .send_payment(SendPaymentCommand {
+            target_pubkey: Some(nodes[0].pubkey),
+            amount: Some(1000),
+            keysend: Some(true),
+            allow_self_payment: true,
+            udt_type_script: Some(Script::default()),
+            ..Default::default()
+        })
+        .await;
+
+    assert!(res.is_ok());
 }
 
 #[tokio::test]
@@ -3446,19 +3471,7 @@ async fn test_send_payment_sync_up_new_channel_is_added() {
         establish_channel_between_nodes(
             &mut node_2,
             &mut node_3,
-            true,
-            HUGE_CKB_AMOUNT,
-            HUGE_CKB_AMOUNT,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
+            ChannelParameters::new(HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT),
         )
         .await
     };
