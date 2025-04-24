@@ -112,7 +112,7 @@ impl Migrations {
 
     /// Initial db version
     pub fn init_db_version(&self, db: &Store) -> Result<(), Error> {
-        if self.need_init(&db) {
+        if self.need_init(db) {
             eprintln!("Init database version {}", LATEST_DB_VERSION);
             db.put(MIGRATION_VERSION_KEY, LATEST_DB_VERSION);
         }
@@ -126,7 +126,7 @@ impl Migrations {
     }
 
     pub fn migrate<'a>(&self, db: &'a Store) -> Result<&'a Store, Error> {
-        let db_version = self.get_migration_version(&db)?;
+        let db_version = self.get_migration_version(db)?;
         match db_version {
             Some(ref v) => {
                 info!("Current database version {}", v);

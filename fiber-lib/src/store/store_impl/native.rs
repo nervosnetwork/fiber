@@ -70,6 +70,7 @@ impl Store {
         }
     }
     /// Returns a prefix iterator, using iterator mode `mode`, skipping items until `skip_while` returns false, iterating over items prefixed with `prefix`
+    #[allow(clippy::type_complexity)]
     pub(crate) fn prefix_iterator_with_skip_while_and_start<'a>(
         &'a self,
         prefix: &'a [u8],

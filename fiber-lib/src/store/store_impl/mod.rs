@@ -8,7 +8,6 @@ mod browser;
 #[cfg(target_arch = "wasm32")]
 pub use browser::{Batch, DbDirection, IteratorMode, Store};
 
-
 use std::path::Path;
 
 use super::db_migrate::DbMigrate;

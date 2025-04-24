@@ -50,7 +50,7 @@ impl<'a> DbMigrate<'a> {
     }
 
     pub fn need_init(&self) -> bool {
-        self.migrations.need_init(&self.db)
+        self.migrations.need_init(self.db)
     }
 
     pub fn init_or_check<P: AsRef<Path>>(&self, path: P) -> Result<&Store, String> {

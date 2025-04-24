@@ -1,4 +1,4 @@
-on: [push, pull_request]
+on: [push, pull_request, workflow_dispatch]
 
 name: Continuous integration
 
@@ -15,7 +15,7 @@ jobs:
           cargo check --release
           make check-migrate
           make check-dirty-rpc-doc
-          cd migrate && cargo check
+          cd fiber-lib/migrate && cargo check
 
   cargo-shear:
     name: Cargo Shear
