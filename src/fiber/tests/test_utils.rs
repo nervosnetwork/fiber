@@ -681,6 +681,17 @@ impl NetworkNode {
         res
     }
 
+    pub async fn assert_send_payment_success(
+        &self,
+        command: SendPaymentCommand,
+    ) -> SendPaymentResponse {
+        let res = self.send_payment(command).await;
+        assert!(res.is_ok());
+        let res = res.unwrap();
+        self.wait_until_success(res.payment_hash).await;
+        res
+    }
+
     pub async fn send_payment_with_router(
         &self,
         command: SendPaymentWithRouterCommand,

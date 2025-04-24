@@ -2986,6 +2986,7 @@ async fn test_send_payment_self_with_mixed_channel() {
 
     let res = nodes[0].send_payment_keysend_to_self(1000, false).await;
     assert!(res.is_ok());
+    nodes[0].wait_until_success(res.unwrap().payment_hash).await;
 
     // all UDT channels
     let (nodes, _channels) = create_n_nodes_network_with_params(
@@ -3026,8 +3027,8 @@ async fn test_send_payment_self_with_mixed_channel() {
     )
     .await;
 
-    let res = nodes[0]
-        .send_payment(SendPaymentCommand {
+    let _res = nodes[0]
+        .assert_send_payment_success(SendPaymentCommand {
             target_pubkey: Some(nodes[0].pubkey),
             amount: Some(1000),
             keysend: Some(true),
@@ -3036,8 +3037,6 @@ async fn test_send_payment_self_with_mixed_channel() {
             ..Default::default()
         })
         .await;
-
-    assert!(res.is_ok());
 }
 
 #[tokio::test]
@@ -3098,6 +3097,7 @@ async fn test_send_payment_with_invalid_tlc_expiry() {
         })
         .await;
     assert!(res.is_ok());
+    nodes[0].wait_until_success(res.unwrap().payment_hash).await;
 }
 
 #[tokio::test]
@@ -3134,8 +3134,8 @@ async fn test_send_payself_with_invalid_tlc_expiry() {
     .await;
 
     // no tlc_expiry_limit will be OK
-    let res = nodes[0]
-        .send_payment(SendPaymentCommand {
+    let _res = nodes[0]
+        .assert_send_payment_success(SendPaymentCommand {
             target_pubkey: Some(nodes[0].pubkey),
             amount: Some(1000),
             keysend: Some(true),
@@ -3143,7 +3143,6 @@ async fn test_send_payself_with_invalid_tlc_expiry() {
             ..Default::default()
         })
         .await;
-    assert!(res.is_ok());
 
     let res = nodes[0]
         .send_payment(SendPaymentCommand {
@@ -3155,7 +3154,7 @@ async fn test_send_payself_with_invalid_tlc_expiry() {
             ..Default::default()
         })
         .await;
-    eprintln!("res now: {:?}", res);
+
     assert!(res
         .unwrap_err()
         .to_string()

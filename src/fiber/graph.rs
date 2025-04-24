@@ -680,6 +680,25 @@ where
         self.channels.get(outpoint)
     }
 
+    pub fn get_outbound_channel_info_and_update(
+        &self,
+        outpoint: &OutPoint,
+        from: Pubkey,
+    ) -> (Option<&ChannelInfo>, Option<&ChannelUpdateInfo>) {
+        let channel_info = self.get_channel(outpoint);
+        if let Some(channel_info) = channel_info {
+            if channel_info.node1() == from {
+                (Some(channel_info), channel_info.update_of_node1.as_ref())
+            } else if channel_info.node2() == from {
+                (Some(channel_info), channel_info.update_of_node2.as_ref())
+            } else {
+                (None, None)
+            }
+        } else {
+            (None, None)
+        }
+    }
+
     pub fn get_channels_with_params(
         &self,
         limit: usize,
@@ -937,7 +956,7 @@ where
         // The source node of the edge.
         from: Pubkey,
         // The target node of the edge.
-        to: Pubkey,
+        target: Pubkey,
         // The amount that the source node will send to the target node.
         next_hop_received_amount: u128,
         // The amount that the source node will receive from forwarding `amount_to_send` to the target.
@@ -959,7 +978,7 @@ where
         let probability = cur_probability
             * self.history.eval_probability(
                 from,
-                to,
+                target,
                 channel_outpoint,
                 next_hop_received_amount,
                 channel_capacity,
@@ -967,7 +986,7 @@ where
 
         debug!(
             "probability: {} for channel_outpoint: {:?} from: {:?} => to: {:?}",
-            probability, channel_outpoint, from, to
+            probability, channel_outpoint, from, target
         );
         if probability < DEFAULT_MIN_PROBABILITY {
             debug!("probability is too low: {:?}", probability);
@@ -994,7 +1013,7 @@ where
             fee_charged: fee,
             probability,
             next_hop: Some(RouterHop {
-                target: to,
+                target,
                 channel_outpoint: channel_outpoint.clone(),
                 // Here we need to use the amount accumulated so far (i.e. with the fees in current hop)
                 // because the fee here is for the receiving node to forward the amount to the next node.
@@ -1030,7 +1049,6 @@ where
         let route_to_self = source == target;
 
         let mut result = vec![];
-
         let mut nodes_visited = 0;
         let mut edges_expanded = 0;
         let mut nodes_heap = NodeHeap::new(nodes_len);
@@ -1054,7 +1072,7 @@ where
         let mut last_edge = None;
 
         if route_to_self {
-            let (edge, new_target, e, f) = self.adjust_target_for_route_self(
+            let (edge, new_target, expiry_delta, fee) = self.adjust_target_for_route_self(
                 source,
                 &hop_hints,
                 amount,
@@ -1063,51 +1081,51 @@ where
                 tlc_expiry_limit,
             )?;
             target = new_target;
-            expiry += e;
-            amount += f;
+            expiry += expiry_delta;
+            amount += fee;
             last_edge = Some(edge);
         } else {
             // The calculation of probability and distance requires a capacity of the channel.
             // We don't know the capacity of the channels in the hop hints. We just assume that the capacity
-            // of these channels is sufficiently large. We will use 10 times the amount as the capacity.
-            // See also https://github.com/lightningnetwork/lnd/blob/506586a37e18446af6ce63723e44b2d849bd7fc1/routing/pathfind.go#L46-L49
-            let sufficiently_large_capacity = 10 * amount;
+            // of these channels is sufficiently large. We will use 2 times the amount as the capacity.
+            let sufficiently_large_capacity = 2 * amount;
             for hint in hop_hints {
-                let HopHint {
-                    pubkey: from,
-                    channel_outpoint,
-                    fee_rate,
-                    tlc_expiry_delta,
-                } = hint;
+                // here the hint may referring to private channel, only try to check the UDT type if we
+                // got a channel_info, do not check the amount here since we already assume the capacity is enough here
+                if let (Some(channel_info), _) =
+                    self.get_outbound_channel_info_and_update(&hint.channel_outpoint, hint.pubkey)
+                {
+                    if channel_info.udt_type_script() != &udt_type_script {
+                        continue;
+                    }
+                }
+
                 // Say we have a payment path A -- channel 1 --> B -- channel 2 --> C.
                 // For now, all the fees that B will receive are calculated based on the fee rate B sets in channel 1.
                 // We didn't use the outbound fees for B in channel 2 at all. This is different from lnd,
                 // which calculates both the inbound fees in channel 1 and the outbound fees in channel 2.
                 // For now, we set the fees to be 0. We may need to change this in the future.
-                match calculate_tlc_forward_fee(amount, fee_rate as u128) {
-                    Ok(fee) => {
-                        self.eval_and_update(
-                            &channel_outpoint,
-                            sufficiently_large_capacity,
-                            from,
-                            target,
-                            amount,
-                            fee,
-                            expiry,
-                            tlc_expiry_delta,
-                            1.0,
-                            0,
-                            &mut distances,
-                            &mut nodes_heap,
-                        );
-                    }
-                    Err(err) => {
-                        return Err(PathFindError::PathFind(format!(
+                let fee =
+                    calculate_tlc_forward_fee(amount, hint.fee_rate as u128).map_err(|err| {
+                        PathFindError::PathFind(format!(
                             "calculate_tlc_forward_fee error: {:?}",
                             err
-                        )));
-                    }
-                }
+                        ))
+                    })?;
+                self.eval_and_update(
+                    &hint.channel_outpoint,
+                    sufficiently_large_capacity,
+                    hint.pubkey,
+                    target,
+                    amount,
+                    fee,
+                    expiry,
+                    hint.tlc_expiry_delta,
+                    1.0,
+                    0,
+                    &mut distances,
+                    &mut nodes_heap,
+                );
             }
         }
         assert_ne!(source, target);
@@ -1233,58 +1251,85 @@ where
         Ok(result)
     }
 
+    // to resolve the scenario of network with cycle, we use the original `source` node as target,
+    // trying to find a new target which has direct channel to `source` node, then the find_path
+    // algorithm can work well to assume the network don't contains a cycle.
+    // This may makes the result of find_path is not a global optimimized path.
     fn adjust_target_for_route_self(
         &self,
-        node: Pubkey,
+        source: Pubkey,
         hop_hints: &[HopHint],
         amount: u128,
         expiry: u64,
         udt_type_script: &Option<Script>,
         tlc_expiry_limit: u64,
     ) -> Result<(RouterHop, Pubkey, u64, u128), PathFindError> {
-        let mut channels: Vec<(Pubkey, OutPoint, u64, u64)> = hop_hints
+        let channels: Vec<_> = hop_hints
             .iter()
             .map(|hint| {
-                let pubkey = hint.pubkey;
-                let outpoint = hint.channel_outpoint.clone();
-                let expiry = hint.tlc_expiry_delta;
-                let fee_rate = hint.fee_rate;
-                (pubkey, outpoint, expiry, fee_rate)
+                let (channel_info, channel_update) =
+                    self.get_outbound_channel_info_and_update(&hint.channel_outpoint, hint.pubkey);
+                (
+                    hint.pubkey,
+                    hint.channel_outpoint.clone(),
+                    // use the hint's tlc_expiry_delta, not from channel_update
+                    hint.tlc_expiry_delta,
+                    // use the hint's fee_rate
+                    hint.fee_rate,
+                    channel_info,
+                    channel_update,
+                )
+            })
+            .chain(
+                self.get_node_inbounds(source)
+                    .map(|(from, _, channel_info, channel_update)| {
+                        (
+                            from,
+                            channel_info.channel_outpoint.clone(),
+                            channel_update.tlc_expiry_delta,
+                            channel_update.fee_rate,
+                            Some(channel_info),
+                            Some(channel_update),
+                        )
+                    }),
+            )
+            .filter(|(_, _, expiry, _, channel_info, channel_update)| {
+                // we also check the validity of hint, if the hint is not valid, we will skip it
+                // for instance, if user specify a hint channel with UDT, but the payment is not UDT,
+                // this hint will be ignored, or if user specify a hint channel with too high fee rate,
+                // the whole fee exceed the max fee amount, this hint will be ignored too.
+                if let Some(channel_info) = channel_info {
+                    if udt_type_script != channel_info.udt_type_script() {
+                        return false;
+                    }
+                    if let Some(channel_update) = channel_update {
+                        if !self.check_channel_amount_and_expiry(
+                            amount,
+                            channel_info,
+                            channel_update,
+                            *expiry,
+                            tlc_expiry_limit,
+                        ) {
+                            return false;
+                        }
+                    }
+                }
+                true
             })
             .collect();
-        for (from, _, channel_info, channel_update) in self.get_node_inbounds(node) {
-            if udt_type_script != channel_info.udt_type_script() {
-                continue;
-            }
-            if !self.check_channel_amount_and_expiry(
-                amount,
-                channel_info,
-                channel_update,
-                channel_update.tlc_expiry_delta,
-                tlc_expiry_limit,
-            ) {
-                continue;
-            }
-            channels.push((
-                from,
-                channel_info.out_point().clone(),
-                channel_update.tlc_expiry_delta,
-                channel_update.fee_rate,
-            ))
-        }
 
         // a proper hop hint for route self will limit the direct_channels to only one
         // if there are multiple channels, we will randomly select a channel from the source node for route to self
-        // so that the following part of algorithm will always trying to find a path without cycle
-        if let Some((from, outpoint, tlc_expiry_delta, fee_rate)) =
+        // so that the following part of algorithm will always trying to find a path without a cycle in network graph
+        if let Some((from, outpoint, tlc_expiry_delta, fee_rate, ..)) =
             channels.choose(&mut thread_rng())
         {
-            assert_ne!(node, *from);
+            assert_ne!(source, *from);
             let fee = calculate_tlc_forward_fee(amount, *fee_rate as u128).map_err(|err| {
                 PathFindError::PathFind(format!("calculate_tlc_forward_fee error: {:?}", err))
             })?;
             let last_edge = RouterHop {
-                target: node,
+                target: source,
                 channel_outpoint: outpoint.clone(),
                 amount_received: amount,
                 incoming_tlc_expiry: expiry,
