@@ -3,6 +3,10 @@ name = "fiber-bin"
 version = "0.4.2"
 edition = "2021"
 
+[[bin]]
+name = "fnn"
+path = "src/main.rs"
+
 [dependencies]
 fnn = { path = "../fiber-lib" }
 ckb-chain-spec = "0.200.0"
