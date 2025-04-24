@@ -538,6 +538,10 @@ impl SendPaymentData {
             .tlc_expiry_limit
             .unwrap_or(MAX_PAYMENT_TLC_EXPIRY_LIMIT);
 
+        debug!(
+            "tlc_expiry_limit: {:?} final_tlc_expiry_delta: {:?}",
+            tlc_expiry_limit, final_tlc_expiry_delta
+        );
         if tlc_expiry_limit < final_tlc_expiry_delta || tlc_expiry_limit < MIN_TLC_EXPIRY_DELTA {
             return Err("tlc_expiry_limit is too small".to_string());
         }

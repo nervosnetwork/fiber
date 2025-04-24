@@ -1204,7 +1204,14 @@ where
                 };
 
                 let incoming_tlc_expiry = cur_hop.incoming_tlc_expiry + expiry_delta;
+                debug!(
+                    "debug yukang incoming_tlc_expiry: {:?} tlc_expiry_limit: {:?}  skip: {:?}",
+                    incoming_tlc_expiry,
+                    tlc_expiry_limit,
+                    incoming_tlc_expiry > tlc_expiry_limit
+                );
                 if incoming_tlc_expiry > tlc_expiry_limit {
+                    debug!("skip ....");
                     continue;
                 }
 
@@ -1283,6 +1290,9 @@ where
             // normal code path will not reach here, we must can get balance for direct channels
             // anyway, check the capacity here for safety
             if channel_info.capacity() < amount {
+                continue;
+            }
+            if amount < channel_update.tlc_minimum_value {
                 continue;
             }
             if channel_update.tlc_expiry_delta > tlc_expiry_limit {

@@ -343,7 +343,7 @@ impl NetworkNodeConfigBuilder {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub(crate) struct ChannelParameters {
     pub public: bool,
     pub node_a_funding_amount: u128,
@@ -528,8 +528,8 @@ pub(crate) async fn create_n_nodes_with_established_channel(
 }
 
 #[allow(clippy::type_complexity)]
-pub(crate) async fn create_n_nodes_network_with_meta(
-    amounts: &[((usize, usize), (u128, u128, Option<Script>))],
+pub(crate) async fn create_n_nodes_network_with_params(
+    amounts: &[((usize, usize), ChannelParameters)],
     n: usize,
     enable_rpc: bool,
 ) -> (Vec<NetworkNode>, Vec<Hash256>) {
@@ -537,7 +537,7 @@ pub(crate) async fn create_n_nodes_network_with_meta(
     let mut nodes = NetworkNode::new_interconnected_nodes(n, enable_rpc).await;
     let mut channels = vec![];
 
-    for ((i, j), (node_a_funding_amount, node_b_funding_amount, udt_script)) in amounts.iter() {
+    for ((i, j), channel_params) in amounts.iter() {
         let (channel_id, funding_tx) = {
             let (node_a, node_b) = {
                 // avoid borrow nodes as mutable more than once
@@ -550,18 +550,8 @@ pub(crate) async fn create_n_nodes_network_with_meta(
                     (&mut right[i - j - 1], &mut left[*j])
                 }
             };
-            let (channel_id, funding_tx_hash) = establish_channel_between_nodes(
-                node_a,
-                node_b,
-                ChannelParameters {
-                    public: true,
-                    node_a_funding_amount: *node_a_funding_amount,
-                    node_b_funding_amount: *node_b_funding_amount,
-                    funding_udt_type_script: udt_script.clone(),
-                    ..Default::default()
-                },
-            )
-            .await;
+            let (channel_id, funding_tx_hash) =
+                establish_channel_between_nodes(node_a, node_b, channel_params.clone()).await;
             let funding_tx = node_a
                 .get_transaction_view_from_hash(funding_tx_hash)
                 .await
@@ -606,9 +596,9 @@ pub(crate) async fn create_n_nodes_network(
 ) -> (Vec<NetworkNode>, Vec<Hash256>) {
     let amounts = amounts
         .iter()
-        .map(|((i, j), (a, b))| ((*i, *j), (*a, *b, None)))
+        .map(|((i, j), (a, b))| ((*i, *j), ChannelParameters::new(*a, *b)))
         .collect::<Vec<_>>();
-    create_n_nodes_network_with_meta(&amounts, n, false).await
+    create_n_nodes_network_with_params(&amounts, n, false).await
 }
 
 impl NetworkNode {

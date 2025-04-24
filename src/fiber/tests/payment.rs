@@ -5,6 +5,8 @@ use crate::fiber::channel::CloseFlags;
 use crate::fiber::channel::UpdateCommand;
 use crate::fiber::config::DEFAULT_TLC_EXPIRY_DELTA;
 use crate::fiber::config::DEFAULT_TLC_FEE_PROPORTIONAL_MILLIONTHS;
+use crate::fiber::config::MAX_PAYMENT_TLC_EXPIRY_LIMIT;
+use crate::fiber::config::MIN_TLC_EXPIRY_DELTA;
 use crate::fiber::graph::PaymentSessionStatus;
 use crate::fiber::network::BuildRouterCommand;
 use crate::fiber::network::HopHint;
@@ -2916,12 +2918,26 @@ async fn test_send_payment_self_with_mixed_channel() {
     init_tracing();
 
     let funding_amount = HUGE_CKB_AMOUNT;
-    let (nodes, _channels) = create_n_nodes_network_with_meta(
+    let (nodes, _channels) = create_n_nodes_network_with_params(
         &[
-            ((0, 1), (funding_amount, funding_amount, None)),
             (
                 (0, 1),
-                (funding_amount, funding_amount, Some(Script::default())),
+                ChannelParameters {
+                    public: true,
+                    node_a_funding_amount: funding_amount,
+                    node_b_funding_amount: funding_amount,
+                    ..Default::default()
+                },
+            ),
+            (
+                (0, 1),
+                ChannelParameters {
+                    public: true,
+                    node_a_funding_amount: funding_amount,
+                    node_b_funding_amount: funding_amount,
+                    funding_udt_type_script: Some(Script::default()),
+                    ..Default::default()
+                },
             ),
         ],
         2,
@@ -2932,14 +2948,36 @@ async fn test_send_payment_self_with_mixed_channel() {
     let res = nodes[0].send_payment_keysend_to_self(1000, false).await;
     assert!(res.is_err());
 
-    let (nodes, _channels) = create_n_nodes_network_with_meta(
+    let (nodes, _channels) = create_n_nodes_network_with_params(
         &[
-            ((0, 1), (funding_amount, funding_amount, None)),
             (
                 (0, 1),
-                (funding_amount, funding_amount, Some(Script::default())),
+                ChannelParameters {
+                    public: true,
+                    node_a_funding_amount: funding_amount,
+                    node_b_funding_amount: funding_amount,
+                    ..Default::default()
+                },
             ),
-            ((0, 1), (funding_amount, funding_amount, None)),
+            (
+                (0, 1),
+                ChannelParameters {
+                    public: true,
+                    node_a_funding_amount: funding_amount,
+                    node_b_funding_amount: funding_amount,
+                    funding_udt_type_script: Some(Script::default()),
+                    ..Default::default()
+                },
+            ),
+            (
+                (0, 1),
+                ChannelParameters {
+                    public: true,
+                    node_a_funding_amount: funding_amount,
+                    node_b_funding_amount: funding_amount,
+                    ..Default::default()
+                },
+            ),
         ],
         2,
         false,
@@ -2950,19 +2988,37 @@ async fn test_send_payment_self_with_mixed_channel() {
     assert!(res.is_ok());
 
     // all UDT channels
-    let (nodes, _channels) = create_n_nodes_network_with_meta(
+    let (nodes, _channels) = create_n_nodes_network_with_params(
         &[
             (
                 (0, 1),
-                (funding_amount, funding_amount, Some(Script::default())),
+                ChannelParameters {
+                    public: true,
+                    node_a_funding_amount: funding_amount,
+                    node_b_funding_amount: funding_amount,
+                    funding_udt_type_script: Some(Script::default()),
+                    ..Default::default()
+                },
             ),
             (
                 (0, 1),
-                (funding_amount, funding_amount, Some(Script::default())),
+                ChannelParameters {
+                    public: true,
+                    node_a_funding_amount: funding_amount,
+                    node_b_funding_amount: funding_amount,
+                    funding_udt_type_script: Some(Script::default()),
+                    ..Default::default()
+                },
             ),
             (
                 (0, 1),
-                (funding_amount, funding_amount, Some(Script::default())),
+                ChannelParameters {
+                    public: true,
+                    node_a_funding_amount: funding_amount,
+                    node_b_funding_amount: funding_amount,
+                    funding_udt_type_script: Some(Script::default()),
+                    ..Default::default()
+                },
             ),
         ],
         2,
@@ -2977,6 +3033,235 @@ async fn test_send_payment_self_with_mixed_channel() {
             keysend: Some(true),
             allow_self_payment: true,
             udt_type_script: Some(Script::default()),
+            ..Default::default()
+        })
+        .await;
+
+    assert!(res.is_ok());
+}
+
+#[tokio::test]
+async fn test_send_payment_with_invalid_tlc_expiry() {
+    init_tracing();
+
+    let funding_amount = HUGE_CKB_AMOUNT;
+    let (nodes, _channels) = create_n_nodes_network_with_params(
+        &[(
+            (0, 1),
+            ChannelParameters {
+                public: true,
+                node_a_funding_amount: funding_amount,
+                node_b_funding_amount: funding_amount,
+                ..Default::default()
+            },
+        )],
+        2,
+        false,
+    )
+    .await;
+
+    let res = nodes[0]
+        .send_payment(SendPaymentCommand {
+            target_pubkey: Some(nodes[1].pubkey),
+            amount: Some(1000),
+            keysend: Some(true),
+            tlc_expiry_limit: Some(10), // too small than MIN_TLC_EXPIRY_DELTA
+            ..Default::default()
+        })
+        .await;
+    assert!(res
+        .unwrap_err()
+        .to_string()
+        .contains("tlc_expiry_limit is too small"));
+
+    let res = nodes[0]
+        .send_payment(SendPaymentCommand {
+            target_pubkey: Some(nodes[1].pubkey),
+            amount: Some(1000),
+            keysend: Some(true),
+            tlc_expiry_limit: Some(MIN_TLC_EXPIRY_DELTA + 1), // still too small
+            ..Default::default()
+        })
+        .await;
+    assert!(res
+        .unwrap_err()
+        .to_string()
+        .contains("tlc_expiry_limit is too small"));
+
+    let res = nodes[0]
+        .send_payment(SendPaymentCommand {
+            target_pubkey: Some(nodes[1].pubkey),
+            amount: Some(1000),
+            keysend: Some(true),
+            tlc_expiry_limit: Some(DEFAULT_TLC_EXPIRY_DELTA + 1), // Ok now
+            ..Default::default()
+        })
+        .await;
+    assert!(res.is_ok());
+}
+
+#[tokio::test]
+async fn test_send_payself_with_invalid_tlc_expiry() {
+    init_tracing();
+
+    let funding_amount = HUGE_CKB_AMOUNT;
+    let (nodes, _channels) = create_n_nodes_network_with_params(
+        &[
+            (
+                (0, 1),
+                ChannelParameters {
+                    public: true,
+                    node_a_funding_amount: funding_amount,
+                    node_b_funding_amount: funding_amount,
+                    b_tlc_expiry_delta: Some(DEFAULT_TLC_EXPIRY_DELTA + 1), // a large value
+                    ..Default::default()
+                },
+            ),
+            (
+                (1, 0),
+                ChannelParameters {
+                    public: true,
+                    node_a_funding_amount: funding_amount,
+                    node_b_funding_amount: funding_amount,
+                    a_tlc_expiry_delta: Some(DEFAULT_TLC_EXPIRY_DELTA + 1), // a large value
+                    ..Default::default()
+                },
+            ),
+        ],
+        2,
+        false,
+    )
+    .await;
+
+    // no tlc_expiry_limit will be OK
+    let res = nodes[0]
+        .send_payment(SendPaymentCommand {
+            target_pubkey: Some(nodes[0].pubkey),
+            amount: Some(1000),
+            keysend: Some(true),
+            allow_self_payment: true,
+            ..Default::default()
+        })
+        .await;
+    assert!(res.is_ok());
+
+    let res = nodes[0]
+        .send_payment(SendPaymentCommand {
+            target_pubkey: Some(nodes[0].pubkey),
+            amount: Some(1000),
+            keysend: Some(true),
+            allow_self_payment: true,
+            tlc_expiry_limit: Some(DEFAULT_TLC_EXPIRY_DELTA),
+            ..Default::default()
+        })
+        .await;
+    eprintln!("res now: {:?}", res);
+    assert!(res
+        .unwrap_err()
+        .to_string()
+        .contains("no direct channel found for source node"));
+}
+
+#[tokio::test]
+async fn test_send_payself_with_single_limit_tlc_expiry() {
+    init_tracing();
+
+    let funding_amount = HUGE_CKB_AMOUNT;
+    let (nodes, _channels) = create_n_nodes_network_with_params(
+        &[
+            (
+                (0, 1),
+                ChannelParameters {
+                    public: true,
+                    node_a_funding_amount: funding_amount,
+                    node_b_funding_amount: funding_amount,
+                    ..Default::default()
+                },
+            ),
+            (
+                (1, 0),
+                ChannelParameters {
+                    public: true,
+                    node_a_funding_amount: funding_amount,
+                    node_b_funding_amount: funding_amount,
+                    a_tlc_expiry_delta: Some(DEFAULT_TLC_EXPIRY_DELTA + 1), // a large value
+                    ..Default::default()
+                },
+            ),
+        ],
+        2,
+        false,
+    )
+    .await;
+
+    let res = nodes[0]
+        .send_payment(SendPaymentCommand {
+            target_pubkey: Some(nodes[0].pubkey),
+            amount: Some(1000),
+            keysend: Some(true),
+            allow_self_payment: true,
+            tlc_expiry_limit: Some(MAX_PAYMENT_TLC_EXPIRY_LIMIT),
+            ..Default::default()
+        })
+        .await;
+    assert!(res.is_ok());
+}
+
+#[tokio::test]
+async fn test_send_payself_with_small_min_tlc_value() {
+    init_tracing();
+
+    let funding_amount = HUGE_CKB_AMOUNT;
+    let (nodes, _channels) = create_n_nodes_network_with_params(
+        &[
+            (
+                (0, 1),
+                ChannelParameters {
+                    public: true,
+                    node_a_funding_amount: funding_amount,
+                    node_b_funding_amount: funding_amount,
+                    b_tlc_min_value: Some(100), // a small value
+                    ..Default::default()
+                },
+            ),
+            (
+                (1, 0),
+                ChannelParameters {
+                    public: true,
+                    node_a_funding_amount: funding_amount,
+                    node_b_funding_amount: funding_amount,
+                    a_tlc_min_value: Some(100), // a small value
+                    ..Default::default()
+                },
+            ),
+        ],
+        2,
+        false,
+    )
+    .await;
+
+    // too small amount will fail
+    let res = nodes[0]
+        .send_payment(SendPaymentCommand {
+            target_pubkey: Some(nodes[0].pubkey),
+            amount: Some(99),
+            keysend: Some(true),
+            allow_self_payment: true,
+            ..Default::default()
+        })
+        .await;
+
+    assert!(res
+        .unwrap_err()
+        .to_string()
+        .contains("no direct channel found for source node"));
+
+    let res = nodes[0]
+        .send_payment(SendPaymentCommand {
+            target_pubkey: Some(nodes[0].pubkey),
+            amount: Some(100),
+            keysend: Some(true),
+            allow_self_payment: true,
             ..Default::default()
         })
         .await;
