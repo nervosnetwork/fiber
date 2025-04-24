@@ -843,8 +843,8 @@ where
         let target = payment_data.target_pubkey;
         let amount = payment_data.amount;
         let final_tlc_expiry_delta = payment_data.final_tlc_expiry_delta;
-
         let allow_self_payment = payment_data.allow_self_payment;
+
         if source == target && !allow_self_payment {
             return Err(PathFindError::PathFind(
                 "allow_self_payment is not enable, can not pay to self".to_string(),
@@ -1055,10 +1055,12 @@ where
 
         if route_to_self {
             let (edge, new_target, e, f) = self.adjust_target_for_route_self(
+                source,
                 &hop_hints,
                 amount,
                 final_tlc_expiry_delta,
-                source,
+                &udt_type_script,
+                tlc_expiry_limit,
             )?;
             target = new_target;
             expiry += e;
@@ -1252,10 +1254,12 @@ where
 
     fn adjust_target_for_route_self(
         &self,
+        node: Pubkey,
         hop_hints: &[HopHint],
         amount: u128,
         expiry: u64,
-        node: Pubkey,
+        udt_type_script: &Option<Script>,
+        tlc_expiry_limit: u64,
     ) -> Result<(RouterHop, Pubkey, u64, u128), PathFindError> {
         let mut channels: Vec<(Pubkey, OutPoint, u64, u64)> = hop_hints
             .iter()
@@ -1268,6 +1272,9 @@ where
             })
             .collect();
         for (from, _, channel_info, channel_update) in self.get_node_inbounds(node) {
+            if udt_type_script != channel_info.udt_type_script() {
+                continue;
+            }
             if let Some(balance) = channel_update.outbound_liquidity {
                 if balance < amount {
                     continue;
@@ -1276,6 +1283,9 @@ where
             // normal code path will not reach here, we must can get balance for direct channels
             // anyway, check the capacity here for safety
             if channel_info.capacity() < amount {
+                continue;
+            }
+            if channel_update.tlc_expiry_delta > tlc_expiry_limit {
                 continue;
             }
             channels.push((

@@ -2924,6 +2924,42 @@ async fn run_complex_network_with_params(
 }
 
 #[tokio::test]
+async fn test_send_payment_self_with_two_nodes() {
+    init_tracing();
+
+    let funding_amount = HUGE_CKB_AMOUNT;
+    let (nodes, channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (funding_amount, funding_amount)),
+            ((1, 0), (funding_amount, funding_amount)),
+        ],
+        2,
+    )
+    .await;
+
+    let old_balance0 = nodes[0].get_local_balance_from_channel(channels[0]);
+    let old_balance1 = nodes[0].get_local_balance_from_channel(channels[1]);
+    let res = nodes[0].send_payment_keysend_to_self(1000, false).await;
+    assert!(res.is_ok());
+
+    let payment_hash = res.unwrap().payment_hash;
+    nodes[0].wait_until_success(payment_hash).await;
+    let balance0 = nodes[0].get_local_balance_from_channel(channels[0]);
+    let balance1 = nodes[0].get_local_balance_from_channel(channels[1]);
+
+    eprintln!("old_balance: {}, new_balance: {}", old_balance0, balance0);
+    eprintln!("old_balance1: {}, new_balance1: {}", old_balance1, balance1);
+    let fee = old_balance0 + old_balance1 - balance0 - balance1;
+    assert_eq!(fee, 1);
+
+    // single edge network payself will fail
+    let (nodes, _channels) =
+        create_n_nodes_network(&[((0, 1), (funding_amount, funding_amount))], 2).await;
+    let res = nodes[0].send_payment_keysend_to_self(1000, false).await;
+    assert!(res.is_err());
+}
+
+#[tokio::test]
 async fn test_send_payment_complex_network_payself_all_succeed() {
     // from issue 475
     // channel amount is enough, so all payments should success
