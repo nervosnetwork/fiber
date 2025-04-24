@@ -2746,8 +2746,8 @@ impl Debug for TlcInfo {
 impl TlcInfo {
     pub fn log(&self) -> String {
         format!(
-            " id: {:?} status: {:?} amount: {:?} payment_hash: {:?} removed_reason: {:?}",
-            &self.tlc_id, self.status, self.amount, self.payment_hash, self.removed_reason
+            "id: {:?} status: {:?} amount: {:?} removed: {:?} hash: {:?} ",
+            &self.tlc_id, self.status, self.amount, self.removed_reason, self.payment_hash,
         )
     }
 
@@ -2925,21 +2925,28 @@ pub struct TlcState {
 impl TlcState {
     #[cfg(debug_assertions)]
     pub fn debug(&self) {
-        let offered = self
-            .offered_tlcs
-            .tlcs
-            .iter()
-            .map(|tlc| tlc.log())
-            .collect::<Vec<_>>()
-            .join("\n");
-        let received = self
-            .received_tlcs
-            .tlcs
-            .iter()
-            .map(|tlc| tlc.log())
-            .collect::<Vec<_>>()
-            .join("\n");
-        debug!("TlcState:\noffered:\n{}\nreceive:\n{}", offered, received);
+        let format_tlc_list = |tlcs: &[TlcInfo]| -> String {
+            if tlcs.is_empty() {
+                "    <none>".to_string()
+            } else {
+                tlcs.iter()
+                    .map(|tlc| format!("    {}", tlc.log()))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            }
+        };
+
+        let offered_str = format_tlc_list(&self.offered_tlcs.tlcs);
+        let received_str = format_tlc_list(&self.received_tlcs.tlcs);
+
+        if offered_str.contains("<none>") && received_str.contains("<none>") {
+            info!("TlcState: <none>");
+        } else {
+            info!(
+                "TlcState:\n  Offered:\n{}\n  Received:\n{}",
+                offered_str, received_str
+            );
+        }
     }
 
     pub fn get_mut(&mut self, tlc_id: &TLCId) -> Option<&mut TlcInfo> {
