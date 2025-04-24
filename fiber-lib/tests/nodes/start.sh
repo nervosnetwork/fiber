@@ -38,7 +38,7 @@ cargo build
 cd "$nodes_dir" || exit 1
 
 start() {
-    ../../target/debug/fnn "$@"
+    ../../../target/debug/fnn "$@"
 }
 
 if [ "$#" -ne 1 ]; then
