@@ -57,8 +57,6 @@ jobs:
       - name: Run e2e workflow
         run: |
           set -euo pipefail
-          pwd
-          ls
           if [ ${{ matrix.workflow }} = "cross-chain-hub" ]; then
             ./tests/deploy/lnd-init/setup-lnd.sh
           fi
