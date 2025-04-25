@@ -70,12 +70,12 @@ pub fn get_commit_date() -> Option<String> {
 
 #[allow(clippy::manual_strip)]
 fn main() {
-    println!("cargo:rerun-if-changed=migrate/src/migrations");
+    println!("cargo:rerun-if-changed=../migrate/src/migrations");
 
     let out_dir = env::var("OUT_DIR").unwrap();
     let dest_path = Path::new(&out_dir).join("latest_db_version.rs");
 
-    let migrations_dir = Path::new("migrate/src/migrations");
+    let migrations_dir = Path::new("../migrate/src/migrations");
     let mut migrations = Vec::new();
 
     let mut latest_db_version = "".to_string();

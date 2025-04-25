@@ -15,7 +15,7 @@ jobs:
           cargo check --release
           make check-migrate
           make check-dirty-rpc-doc
-          cd fiber-lib/migrate && cargo check
+          cd migrate && cargo check
 
   cargo-shear:
     name: Cargo Shear

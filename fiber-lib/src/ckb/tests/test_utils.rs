@@ -108,30 +108,32 @@ impl MockContext {
         let binaries = [
             (
                 Contract::CkbAuth,
-                Bytes::from_static(include_bytes!("../../../tests/deploy/contracts/auth")),
+                Bytes::from_static(include_bytes!("../../../../tests/deploy/contracts/auth")),
             ),
             (
                 Contract::FundingLock,
                 Bytes::from_static(include_bytes!(
-                    "../../../tests/deploy/contracts/funding-lock"
+                    "../../../../tests/deploy/contracts/funding-lock"
                 )),
             ),
             (
                 Contract::CommitmentLock,
                 Bytes::from_static(include_bytes!(
-                    "../../../tests/deploy/contracts/commitment-lock"
+                    "../../../../tests/deploy/contracts/commitment-lock"
                 )),
             ),
             // mock secp256k1 lock script
             (
                 Contract::Secp256k1Lock,
                 Bytes::from_static(include_bytes!(
-                    "../../../tests/deploy/contracts/always_success"
+                    "../../../../tests/deploy/contracts/always_success"
                 )),
             ),
             (
                 Contract::SimpleUDT,
-                Bytes::from_static(include_bytes!("../../../tests/deploy/contracts/simple_udt")),
+                Bytes::from_static(include_bytes!(
+                    "../../../../tests/deploy/contracts/simple_udt"
+                )),
             ),
         ];
         let mut context = Context::new_with_deterministic_rng();
