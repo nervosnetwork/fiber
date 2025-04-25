@@ -60,17 +60,17 @@ jobs:
           pwd
           ls
           if [ ${{ matrix.workflow }} = "cross-chain-hub" ]; then
-            ./fiber-lib/tests/deploy/lnd-init/setup-lnd.sh
+            ./tests/deploy/lnd-init/setup-lnd.sh
           fi
 
           # Prebuild the program so that we can run the following script faster
           cargo build
-          cd ./fiber-lib/tests/deploy/udt-init && cargo build && cd -
+          cd ./tests/deploy/udt-init && cargo build && cd -
           if [ ${{ matrix.workflow }} = "router-pay" ]; then
             export START_BOOTNODE=y
           fi
           export ON_GITHUB_ACTION=y
-          ./fiber-lib/tests/nodes/start.sh &
+          ./tests/nodes/start.sh &
 
           # Wait for the nodes to start, the initialization takes some time
           # check all the ports are open
