@@ -58,19 +58,9 @@ async fn test_send_payment_custom_records() {
         .send_payment(SendPaymentCommand {
             target_pubkey: Some(target_pubkey),
             amount: Some(10000000000),
-            payment_hash: None,
-            final_tlc_expiry_delta: None,
-            tlc_expiry_limit: None,
-            invoice: None,
-            timeout: None,
-            max_fee_amount: None,
-            max_parts: None,
             keysend: Some(true),
-            udt_type_script: None,
-            allow_self_payment: false,
-            hop_hints: None,
-            dry_run: false,
             custom_records: Some(custom_records.clone()),
+            ..Default::default()
         })
         .await;
 
@@ -606,24 +596,14 @@ async fn test_send_payment_with_private_channel_hints() {
             .send_payment(SendPaymentCommand {
                 target_pubkey: Some(target_pubkey),
                 amount: Some(amount_to_send),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                tlc_expiry_limit: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
                 hop_hints: Some(vec![HopHint {
                     pubkey: node2.pubkey,
                     channel_outpoint: outpoint,
                     fee_rate: DEFAULT_TLC_FEE_PROPORTIONAL_MILLIONTHS as u64,
                     tlc_expiry_delta: DEFAULT_TLC_EXPIRY_DELTA,
                 }]),
-                dry_run: false,
-                custom_records: None,
+                ..Default::default()
             })
             .await;
 
@@ -803,16 +783,7 @@ async fn test_send_payment_with_private_multiple_channel_hints_fallback() {
         .send_payment(SendPaymentCommand {
             target_pubkey: Some(target_pubkey),
             amount: Some(30000000000),
-            payment_hash: None,
-            final_tlc_expiry_delta: None,
-            tlc_expiry_limit: None,
-            invoice: None,
-            timeout: None,
-            max_fee_amount: None,
-            max_parts: None,
             keysend: Some(true),
-            udt_type_script: None,
-            allow_self_payment: false,
             hop_hints: Some(vec![
                 HopHint {
                     pubkey: node2.pubkey,
@@ -827,8 +798,7 @@ async fn test_send_payment_with_private_multiple_channel_hints_fallback() {
                     tlc_expiry_delta: DEFAULT_TLC_EXPIRY_DELTA,
                 },
             ]),
-            dry_run: false,
-            custom_records: None,
+            ..Default::default()
         })
         .await;
 
@@ -3940,19 +3910,8 @@ async fn test_send_payment_invoice_cancel_multiple_ops() {
             .send_payment(SendPaymentCommand {
                 invoice: Some(invoice.to_string()),
                 amount: invoice.amount,
-                target_pubkey: None,
                 allow_self_payment: true,
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                tlc_expiry_limit: None,
-                timeout: None,
-                max_fee_amount: None,
-                max_parts: None,
-                keysend: None,
-                udt_type_script: None,
-                dry_run: false,
-                hop_hints: None,
-                custom_records: None,
+                ..Default::default()
             })
             .await
             .unwrap();
