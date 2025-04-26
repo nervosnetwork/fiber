@@ -1,5 +1,5 @@
+use super::test_utils::submit_tx;
 use crate::ckb::contracts::{get_cell_deps_by_contracts, get_script_by_contract, Contract};
-use crate::ckb::tests::test_utils::submit_tx;
 use crate::create_mock_chain_actor;
 use ckb_types::core::tx_pool::TxStatus;
 use ckb_types::core::TransactionView;

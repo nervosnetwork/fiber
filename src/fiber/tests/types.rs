@@ -18,9 +18,11 @@ use ckb_hash::blake2b_256;
 use ckb_jsonrpc_types::OutPoint;
 use ckb_types::{
     core::{DepType, ScriptHashType},
+    prelude::Pack,
     H256,
 };
 use fiber_sphinx::OnionSharedSecretIter;
+use molecule::prelude::{Builder, Byte, Entity};
 use secp256k1::{PublicKey, Secp256k1, SecretKey};
 use serde::Deserialize;
 use serde::Serialize;
@@ -515,4 +517,85 @@ fn test_verify_payment_hop_data() {
             migration will not work with PaymentHopData"
         );
     }
+}
+
+#[test]
+fn test_convert_udt_arg_info() {
+    let udt_arg_info = UdtArgInfo {
+        name: "SIMPLE_UDT".to_string(),
+        script: UdtScript {
+            code_hash: H256::from_str(
+                "e1e354d6d643ad42724d40967e334984534e0367405c5ae42a9d7d63d77df419",
+            )
+            .expect("valid hash"),
+            hash_type: ScriptHashType::Data1,
+            args: "0x.*".to_string(),
+        },
+        auto_accept_amount: Some(1000),
+        cell_deps: vec![UdtDep::with_cell_dep(UdtCellDep {
+            dep_type: DepType::Code,
+            out_point: OutPoint {
+                tx_hash: H256::from_str(
+                    "f897bfc51766ee9cdb2b9279e63c8abdba4b35b6ee7dde5fed9b0a5a41c95dc4",
+                )
+                .expect("valid hash"),
+                index: 8.into(),
+            },
+        })],
+    };
+    let udt_arg_info_gen = molecule_fiber::UdtArgInfo::from(udt_arg_info.clone());
+    assert_eq!(udt_arg_info, udt_arg_info_gen.clone().into());
+
+    // 0x80 is not a valid utf-8 string, so it should be converted to empty string
+    let udt_arg_info_modified: UdtArgInfo = udt_arg_info_gen
+        .as_builder()
+        .name([0x80].pack())
+        .build()
+        .into();
+    assert_eq!("", udt_arg_info_modified.name);
+}
+
+#[test]
+fn test_convert_payment_hop_data() {
+    let sk = SecretKey::from_slice(&[42; 32]).unwrap();
+    let public_key = Pubkey::from(sk.public_key(secp256k1_instance()));
+
+    let payment_hop_data = PaymentHopData {
+        amount: 1000,
+        expiry: 1000,
+        next_hop: Some(public_key),
+        funding_tx_hash: Hash256::default(),
+        hash_algorithm: HashAlgorithm::Sha256,
+        payment_preimage: Some([1; 32].into()),
+        custom_records: Some(PaymentCustomRecords {
+            data: vec![(1, vec![2, 3])].into_iter().collect(),
+        }),
+    };
+    let payment_hop_data_gen = molecule_fiber::PaymentHopData::from(payment_hop_data.clone());
+    assert_eq!(payment_hop_data, payment_hop_data_gen.clone().into());
+
+    // 3 is not a valid hash algorithm, so it should be converted to CkbHash
+    let payment_hop_data_modified: PaymentHopData = payment_hop_data_gen
+        .clone()
+        .as_builder()
+        .hash_algorithm(Byte::new(3))
+        .build()
+        .into();
+    assert_eq!(
+        HashAlgorithm::CkbHash,
+        payment_hop_data_modified.hash_algorithm
+    );
+
+    // default pubkey value is [0; 33], it's not a valid public key, so it should be converted to None
+    let payment_hop_data_modified: PaymentHopData = payment_hop_data_gen
+        .clone()
+        .as_builder()
+        .next_hop(
+            molecule_fiber::PubkeyOpt::new_builder()
+                .set(Some(molecule_fiber::Pubkey::default()))
+                .build(),
+        )
+        .build()
+        .into();
+    assert_eq!(None, payment_hop_data_modified.next_hop);
 }

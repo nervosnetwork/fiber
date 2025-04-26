@@ -1,5 +1,5 @@
 use anyhow::anyhow;
-use ckb_sdk::RpcError;
+use ckb_sdk::{tx_builder::TxBuilderError, RpcError};
 use ckb_testtool::context::Context;
 use ckb_types::{
     bytes::Bytes,
@@ -17,7 +17,7 @@ use crate::{
         actor::GetTxResponse,
         config::UdtCfgInfos,
         contracts::{get_cell_deps, Contract, ContractsContext, ContractsInfo, ScriptCellDep},
-        CkbTxTracer, CkbTxTracingMask, CkbTxTracingResult,
+        CkbTxTracer, CkbTxTracingMask, CkbTxTracingResult, FundingError,
     },
     fiber::types::Hash256,
     now_timestamp_as_millis_u64,
@@ -246,11 +246,33 @@ impl Actor for TraceTxReplier {
     }
 }
 
+#[ractor::async_trait]
+pub trait MockChainActorMiddleware: Send + std::fmt::Debug {
+    /// Returns Ok(None) if the message is handled by the middleware, otherwise the message
+    /// will be forwarded to the underlying MockChainActor.
+    async fn handle(
+        &mut self,
+        inner_self: ActorRef<CkbChainMessage>,
+        message: CkbChainMessage,
+        state: &mut MockChainActorState,
+    ) -> Result<Option<CkbChainMessage>, ActorProcessingErr>;
+
+    // Trick to make `Box<dyn MockChainActorMiddleware>` cloneable
+    fn clone_box(&self) -> Box<dyn MockChainActorMiddleware>;
+}
+
+impl Clone for Box<dyn MockChainActorMiddleware> {
+    fn clone(&self) -> Self {
+        self.clone_box()
+    }
+}
+
 pub struct MockChainActorState {
     txs: HashMap<Hash256, GetTxResponse>,
     tx_tracing_tasks: HashMap<Hash256, Vec<ActorRef<CkbTxTracingResult>>>,
     tx_notifications: Arc<OutputPort<CkbTxTracingResult>>,
     cell_status: HashMap<OutPoint, CellStatus>,
+    middleware: Option<Box<dyn MockChainActorMiddleware>>,
 }
 
 impl Default for MockChainActorState {
@@ -266,6 +288,17 @@ impl MockChainActorState {
             tx_tracing_tasks: HashMap::new(),
             tx_notifications: Arc::new(OutputPort::default()),
             cell_status: HashMap::new(),
+            middleware: None,
+        }
+    }
+
+    pub fn with_optional_middleware(middleware: Option<Box<dyn MockChainActorMiddleware>>) -> Self {
+        Self {
+            txs: HashMap::new(),
+            tx_tracing_tasks: HashMap::new(),
+            tx_notifications: Arc::new(OutputPort::default()),
+            cell_status: HashMap::new(),
+            middleware,
         }
     }
 }
@@ -306,14 +339,14 @@ impl MockChainActor {
 impl Actor for MockChainActor {
     type Msg = CkbChainMessage;
     type State = MockChainActorState;
-    type Arguments = ();
+    type Arguments = Option<Box<dyn MockChainActorMiddleware>>;
 
     async fn pre_start(
         &self,
         _: ActorRef<Self::Msg>,
-        _: Self::Arguments,
+        args: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
-        Ok(Self::State::new())
+        Ok(Self::State::with_optional_middleware(args))
     }
 
     async fn handle(
@@ -322,6 +355,16 @@ impl Actor for MockChainActor {
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
+        let message = if let Some(mut middleware) = state.middleware.take() {
+            let handled = middleware.handle(myself.clone(), message, state).await;
+            state.middleware = Some(middleware);
+            match handled? {
+                Some(message) => message,
+                None => return Ok(()),
+            }
+        } else {
+            message
+        };
         use CkbChainMessage::*;
         match message {
             Fund(tx, request, reply_port) => {
@@ -330,6 +373,15 @@ impl Actor for MockChainActor {
                     .as_ref()
                     .map(|x| x.outputs())
                     .unwrap_or_default();
+                let mut capacity =
+                    request.local_amount + (request.local_reserved_ckb_amount as u128);
+                if capacity > u64::MAX as u128 {
+                    let _ = reply_port.send(Err(FundingError::CkbTxBuilderError(
+                        TxBuilderError::Other(anyhow!("capacity overflow")),
+                    )));
+                    return Ok(());
+                }
+
                 let outputs = match outputs.get(0) {
                     Some(output) => {
                         if output.lock() != request.script {
@@ -339,13 +391,22 @@ impl Actor for MockChainActor {
                             return Ok(());
                         }
                         let current_capacity: u64 = output.capacity().unpack();
-                        let capacity = request.local_amount as u64
-                            + request.local_reserved_ckb_amount
-                            + current_capacity;
-                        let mut outputs_builder = outputs.as_builder();
+                        capacity += current_capacity as u128;
+                        if capacity > u64::MAX as u128 {
+                            let _ = reply_port.send(Err(FundingError::CkbTxBuilderError(
+                                TxBuilderError::Other(anyhow!("capacity overflow")),
+                            )));
+                            return Ok(());
+                        }
 
-                        outputs_builder
-                            .replace(0, output.as_builder().capacity(capacity.pack()).build());
+                        let mut outputs_builder = outputs.as_builder();
+                        outputs_builder.replace(
+                            0,
+                            output
+                                .as_builder()
+                                .capacity((capacity as u64).pack())
+                                .build(),
+                        );
                         outputs_builder.build()
                     }
                     None => [CellOutput::new_builder()

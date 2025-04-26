@@ -1,6 +1,5 @@
-use secp256k1::{PublicKey, Secp256k1, SecretKey};
-
 use crate::fiber::path::{NodeHeap, NodeHeapElement};
+use secp256k1::{PublicKey, Secp256k1, SecretKey};
 
 #[test]
 fn test_node_heap() {

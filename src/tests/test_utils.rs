@@ -1,10 +1,12 @@
 use crate::ckb::tests::test_utils::get_tx_from_hash;
+use crate::ckb::tests::test_utils::MockChainActorMiddleware;
 use crate::ckb::GetTxResponse;
 use crate::fiber::channel::ChannelActorState;
 use crate::fiber::channel::ChannelActorStateStore;
 use crate::fiber::channel::ChannelCommand;
 use crate::fiber::channel::ChannelCommandWithId;
 use crate::fiber::channel::ReloadParams;
+use crate::fiber::channel::ShutdownCommand;
 use crate::fiber::channel::UpdateCommand;
 use crate::fiber::gossip::get_gossip_actor_name;
 use crate::fiber::gossip::GossipActorMessage;
@@ -12,12 +14,15 @@ use crate::fiber::graph::NetworkGraphStateStore;
 use crate::fiber::graph::PaymentSession;
 use crate::fiber::graph::PaymentSessionStatus;
 #[cfg(any(test, feature = "bench"))]
+use crate::fiber::network::BuildRouterCommand;
 use crate::fiber::network::DebugEvent;
 use crate::fiber::network::GossipMessageWithPeerId;
 use crate::fiber::network::NodeInfoResponse;
 use crate::fiber::network::PaymentCustomRecords;
+use crate::fiber::network::PaymentRouter;
 use crate::fiber::network::SendPaymentCommand;
 use crate::fiber::network::SendPaymentResponse;
+use crate::fiber::network::SendPaymentWithRouterCommand;
 use crate::fiber::types::EcdsaSignature;
 use crate::fiber::types::GossipMessage;
 use crate::fiber::types::Pubkey;
@@ -27,6 +32,7 @@ use crate::invoice::InvoiceStore;
 use crate::start_rpc;
 use crate::RpcConfig;
 use ckb_sdk::core::TransactionBuilder;
+use ckb_types::core::FeeRate;
 use ckb_types::{
     core::{tx_pool::TxStatus, TransactionView},
     packed::{OutPoint, Script},
@@ -204,6 +210,7 @@ pub struct NetworkNode {
     pub ckb_chain_actor: ActorRef<CkbChainMessage>,
     pub network_graph: Arc<TokioRwLock<NetworkGraph<Store>>>,
     pub chain_actor: ActorRef<CkbChainMessage>,
+    pub mock_chain_actor_middleware: Option<Box<dyn MockChainActorMiddleware>>,
     pub gossip_actor: ActorRef<GossipActorMessage>,
     pub private_key: Privkey,
     pub peer_id: PeerId,
@@ -220,6 +227,7 @@ pub struct NetworkNodeConfig {
     store: Store,
     fiber_config: FiberConfig,
     rpc_config: Option<RpcConfig>,
+    mock_chain_actor_middleware: Option<Box<dyn MockChainActorMiddleware>>,
 }
 
 impl NetworkNodeConfig {
@@ -236,6 +244,7 @@ pub struct NetworkNodeConfigBuilder {
     // but allow user to override it.
     #[allow(clippy::type_complexity)]
     fiber_config_updater: Option<Box<dyn FnOnce(&mut FiberConfig) + 'static>>,
+    mock_chain_actor_middleware: Option<Box<dyn MockChainActorMiddleware>>,
 }
 
 impl Default for NetworkNodeConfigBuilder {
@@ -251,6 +260,7 @@ impl NetworkNodeConfigBuilder {
             node_name: None,
             enable_rpc_server: false,
             fiber_config_updater: None,
+            mock_chain_actor_middleware: None,
         }
     }
 
@@ -278,6 +288,14 @@ impl NetworkNodeConfigBuilder {
         updater: impl FnOnce(&mut FiberConfig) + 'static,
     ) -> Self {
         self.fiber_config_updater = Some(Box::new(updater));
+        self
+    }
+
+    pub fn mock_chain_actor_middleware(
+        mut self,
+        middleware: Box<dyn MockChainActorMiddleware>,
+    ) -> Self {
+        self.mock_chain_actor_middleware = Some(middleware);
         self
     }
 
@@ -318,6 +336,7 @@ impl NetworkNodeConfigBuilder {
             store,
             fiber_config,
             rpc_config,
+            mock_chain_actor_middleware: self.mock_chain_actor_middleware,
         };
 
         if let Some(updater) = self.fiber_config_updater {
@@ -655,12 +674,39 @@ impl NetworkNode {
     pub async fn send_payment(
         &self,
         command: SendPaymentCommand,
-    ) -> std::result::Result<SendPaymentResponse, String> {
+    ) -> Result<SendPaymentResponse, String> {
         let message = |rpc_reply| -> NetworkActorMessage {
             NetworkActorMessage::Command(NetworkActorCommand::SendPayment(command, rpc_reply))
         };
 
         call!(self.network_actor, message).expect("source_node alive")
+    }
+
+    pub async fn send_payment_with_router(
+        &self,
+        command: SendPaymentWithRouterCommand,
+    ) -> Result<SendPaymentResponse, String> {
+        let message = |rpc_reply| -> NetworkActorMessage {
+            NetworkActorMessage::Command(NetworkActorCommand::SendPaymentWithRouter(
+                command, rpc_reply,
+            ))
+        };
+
+        let res = call!(self.network_actor, message).expect("source_node alive");
+        eprintln!("result: {:?}", res);
+        res
+    }
+
+    pub async fn build_router(&self, command: BuildRouterCommand) -> Result<PaymentRouter, String> {
+        let message = |rpc_reply| -> NetworkActorMessage {
+            NetworkActorMessage::Command(NetworkActorCommand::BuildPaymentRouter(
+                command, rpc_reply,
+            ))
+        };
+
+        let res = call!(self.network_actor, message).expect("source_node alive");
+        eprintln!("result: {:?}", res);
+        res
     }
 
     pub async fn send_abandon_channel(&self, channel_id: Hash256) -> Result<(), String> {
@@ -675,8 +721,6 @@ impl NetworkNode {
         channel_id: Hash256,
         force: bool,
     ) -> std::result::Result<(), String> {
-        use crate::fiber::channel::ShutdownCommand;
-        use ckb_types::core::FeeRate;
         let message = |rpc_reply| -> NetworkActorMessage {
             NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
                 ChannelCommandWithId {
@@ -720,19 +764,10 @@ impl NetworkNode {
         self.send_payment(SendPaymentCommand {
             target_pubkey: Some(recipient.pubkey),
             amount: Some(amount),
-            payment_hash: None,
-            final_tlc_expiry_delta: None,
-            tlc_expiry_limit: None,
-            invoice: None,
-            timeout: None,
-            max_fee_amount: None,
-            max_parts: None,
             keysend: Some(true),
-            udt_type_script: None,
             allow_self_payment: false,
             dry_run,
-            hop_hints: None,
-            custom_records: None,
+            ..Default::default()
         })
         .await
     }
@@ -804,19 +839,10 @@ impl NetworkNode {
         self.send_payment(SendPaymentCommand {
             target_pubkey: Some(pubkey),
             amount: Some(amount),
-            payment_hash: None,
-            final_tlc_expiry_delta: None,
-            tlc_expiry_limit: None,
-            invoice: None,
-            timeout: None,
-            max_fee_amount: None,
-            max_parts: None,
             keysend: Some(true),
-            udt_type_script: None,
             allow_self_payment: true,
             dry_run,
-            hop_hints: None,
-            custom_records: None,
+            ..Default::default()
         })
         .await
     }
@@ -1028,6 +1054,7 @@ impl NetworkNode {
             store,
             fiber_config,
             rpc_config,
+            mock_chain_actor_middleware,
         } = config;
 
         let _span = tracing::info_span!("NetworkNode", node_name = &node_name).entered();
@@ -1035,10 +1062,15 @@ impl NetworkNode {
         let root = get_test_root_actor().await;
         let (event_sender, mut event_receiver) = mpsc::channel(10000);
 
-        let chain_actor = Actor::spawn_linked(None, MockChainActor::new(), (), root.get_cell())
-            .await
-            .expect("start mock chain actor")
-            .0;
+        let chain_actor = Actor::spawn_linked(
+            None,
+            MockChainActor::new(),
+            mock_chain_actor_middleware.clone(),
+            root.get_cell(),
+        )
+        .await
+        .expect("start mock chain actor")
+        .0;
 
         let secret_key: Privkey = fiber_config
             .read_or_generate_secret_key()
@@ -1163,6 +1195,7 @@ impl NetworkNode {
             listening_addrs: announced_addrs,
             network_actor,
             ckb_chain_actor: chain_actor.clone(),
+            mock_chain_actor_middleware,
             network_graph,
             chain_actor,
             gossip_actor,
@@ -1183,6 +1216,7 @@ impl NetworkNode {
             store: self.store.clone(),
             fiber_config: self.fiber_config.clone(),
             rpc_config: self.rpc_config.clone(),
+            mock_chain_actor_middleware: self.mock_chain_actor_middleware.clone(),
         }
     }
 
@@ -1486,7 +1520,7 @@ impl NetworkNode {
 }
 
 pub async fn create_mock_chain_actor() -> ActorRef<CkbChainMessage> {
-    Actor::spawn(None, MockChainActor::new(), ())
+    Actor::spawn(None, MockChainActor::new(), None)
         .await
         .expect("start mock chain actor")
         .0

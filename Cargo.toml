@@ -69,6 +69,7 @@ num_enum = "0.7.3"
 bitmask-enum = "2.2.5"
 tempfile = { version = "3.10.1", optional = true }
 ckb-testtool = { version = "0.15.1", optional = true }
+either = "1.15.0"
 
 [features]
 default = []
