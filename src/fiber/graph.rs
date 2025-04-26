@@ -679,6 +679,25 @@ where
         self.channels.get(outpoint)
     }
 
+    pub fn get_outbound_channel_info_and_update(
+        &self,
+        outpoint: &OutPoint,
+        from: Pubkey,
+    ) -> (Option<&ChannelInfo>, Option<&ChannelUpdateInfo>) {
+        let channel_info = self.get_channel(outpoint);
+        if let Some(channel_info) = channel_info {
+            if channel_info.node1() == from {
+                (Some(channel_info), channel_info.update_of_node1.as_ref())
+            } else if channel_info.node2() == from {
+                (Some(channel_info), channel_info.update_of_node2.as_ref())
+            } else {
+                (None, None)
+            }
+        } else {
+            (None, None)
+        }
+    }
+
     pub fn get_channels_with_params(
         &self,
         limit: usize,
@@ -1069,10 +1088,12 @@ where
             // of these channels is sufficiently large. We will use 2 times the amount as the capacity.
             let sufficiently_large_capacity = 2 * amount;
             for hint in hop_hints {
-                // here the hint may referring to private channel, only try to check the UDT type if we
-                // got a channel_info, do not check the amount here since we already assume the capacity is enough here
-                if let Some(channel_info) = self.get_channel(&hint.channel_outpoint) {
-                    if channel_info.udt_type_script() != &udt_type_script {
+                // hop hint only referring to private channels for sender node,
+                // if we get public channel information for this hophint, we just ignore this hophint
+                if let (Some(channel_info), Some(channel_update)) =
+                    self.get_outbound_channel_info_and_update(&hint.channel_outpoint, hint.pubkey)
+                {
+                    if channel_info.udt_type_script != udt_type_script || channel_update.enabled {
                         continue;
                     }
                 }
