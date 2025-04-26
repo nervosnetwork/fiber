@@ -1437,6 +1437,11 @@ impl NetworkNode {
         self.channels_tx_map.get(channel_id).cloned()
     }
 
+    pub fn get_channel_outpoint(&self, channel_id: &Hash256) -> Option<OutPoint> {
+        self.get_channel_funding_tx(channel_id)
+            .map(|funding_tx| OutPoint::new(funding_tx.into(), 0))
+    }
+
     pub async fn trace_tx(&mut self, tx_hash: Hash256) -> TxStatus {
         trace_tx(self.chain_actor.clone(), tx_hash).await
     }

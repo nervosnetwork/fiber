@@ -622,6 +622,131 @@ async fn test_send_payment_with_private_channel_hints() {
 }
 
 #[tokio::test]
+async fn test_send_payment_hophint_for_middle_channels_does_not_work() {
+    let (nodes, _channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (MIN_RESERVED_CKB + 40000000000, MIN_RESERVED_CKB)),
+            ((2, 3), (MIN_RESERVED_CKB + 40000000000, MIN_RESERVED_CKB)),
+        ],
+        4,
+    )
+    .await;
+    let [node1, mut node2, mut node3, node4] = nodes.try_into().expect("4 nodes");
+
+    // create a private channel between node2 and node3
+    let (_new_channel_id, funding_tx_hash) = establish_channel_between_nodes(
+        &mut node2,
+        &mut node3,
+        ChannelParameters {
+            public: false,
+            node_a_funding_amount: MIN_RESERVED_CKB + 20000000000,
+            node_b_funding_amount: MIN_RESERVED_CKB,
+            ..Default::default()
+        },
+    )
+    .await;
+    let funding_tx = node2
+        .get_transaction_view_from_hash(funding_tx_hash)
+        .await
+        .expect("get funding tx");
+
+    let private_channel_outpoint = funding_tx.output_pts_iter().next().unwrap();
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
+    let res = node1
+        .send_payment(SendPaymentCommand {
+            target_pubkey: Some(node4.pubkey),
+            amount: Some(10000000000),
+            keysend: Some(true),
+            hop_hints: Some(vec![HopHint {
+                pubkey: node2.pubkey,
+                channel_outpoint: private_channel_outpoint.clone(),
+                fee_rate: DEFAULT_TLC_FEE_PROPORTIONAL_MILLIONTHS as u64,
+                tlc_expiry_delta: DEFAULT_TLC_EXPIRY_DELTA,
+            }]),
+            ..Default::default()
+        })
+        .await;
+
+    assert!(res.is_ok(), "Send payment failed: {:?}", res);
+    let res = res.unwrap();
+
+    // the router is wrong with node1 -> node2 -> node4
+    // the second channel is private_channel_outpoint
+    assert_eq!(
+        res.router.nodes[1].channel_outpoint,
+        private_channel_outpoint
+    );
+    let payment_hash = res.payment_hash;
+
+    // this router will not payment succeeded
+    node1.wait_until_failed(payment_hash).await;
+    let res = node1.get_payment_result(payment_hash).await;
+    eprintln!("res: {:?}", res);
+    assert!(res.failed_error.unwrap().contains("InvalidOnionPayload"));
+}
+
+#[tokio::test]
+async fn test_send_payment_hophint_for_mixed_channels_with_udt() {
+    let (nodes, _channels) = create_n_nodes_network_with_params(
+        &[
+            (
+                (0, 1),
+                ChannelParameters {
+                    node_a_funding_amount: HUGE_CKB_AMOUNT,
+                    node_b_funding_amount: HUGE_CKB_AMOUNT,
+                    public: true,
+                    ..Default::default()
+                },
+            ),
+            (
+                (1, 2),
+                ChannelParameters {
+                    node_a_funding_amount: HUGE_CKB_AMOUNT,
+                    node_b_funding_amount: HUGE_CKB_AMOUNT,
+                    public: true,
+                    ..Default::default()
+                },
+            ),
+            (
+                (2, 3),
+                ChannelParameters {
+                    node_a_funding_amount: HUGE_CKB_AMOUNT,
+                    node_b_funding_amount: HUGE_CKB_AMOUNT,
+                    public: true, // not a private channel
+                    funding_udt_type_script: Some(Script::default()), // a UDT channel
+                    ..Default::default()
+                },
+            ),
+        ],
+        4,
+        false,
+    )
+    .await;
+    let [node1, _node2, node3, node4] = nodes.try_into().expect("4 nodes");
+
+    let channel_outpoint = node3.get_channel_outpoint(&_channels[2]).unwrap();
+
+    let res = node1
+        .send_payment(SendPaymentCommand {
+            target_pubkey: Some(node4.pubkey),
+            amount: Some(10000000000),
+            keysend: Some(true),
+            // hop hints will be ignored because of find_path can get channel_info
+            hop_hints: Some(vec![HopHint {
+                pubkey: node3.pubkey,
+                channel_outpoint,
+                fee_rate: DEFAULT_TLC_FEE_PROPORTIONAL_MILLIONTHS as u64,
+                tlc_expiry_delta: DEFAULT_TLC_EXPIRY_DELTA,
+            }]),
+            ..Default::default()
+        })
+        .await;
+
+    assert!(res.is_err());
+}
+
+#[tokio::test]
 async fn test_send_payment_with_private_channel_hints_fallback() {
     init_tracing();
 
