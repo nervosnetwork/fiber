@@ -322,15 +322,14 @@ pub enum PathFindError {
     Other(String),
 }
 
-/// An edge along the payment path from the source to the target.
-/// This represents a TLC transfer from one node to another.
+/// A router hop information for a payment, a paymenter router is an array of RouterHop
+/// a router hop generally implies hop `target` will receive `amount_received` with `channel_outpoint` of channel
 #[serde_as]
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct RouterHop {
     /// The node that is sending the TLC to the next node.
     pub(crate) target: Pubkey,
-    /// The channel that is used to send the TLC to the next node.
-    /// If it's all zero bytes, it means this hop is payment receiver.
+    /// The channel of this hop used to receive TLC
     #[serde_as(as = "EntityHex")]
     pub(crate) channel_outpoint: OutPoint,
     /// The amount that the source node will transfer to the target node.
@@ -678,25 +677,6 @@ where
 
     pub fn get_channel(&self, outpoint: &OutPoint) -> Option<&ChannelInfo> {
         self.channels.get(outpoint)
-    }
-
-    pub fn get_outbound_channel_info_and_update(
-        &self,
-        outpoint: &OutPoint,
-        from: Pubkey,
-    ) -> (Option<&ChannelInfo>, Option<&ChannelUpdateInfo>) {
-        let channel_info = self.get_channel(outpoint);
-        if let Some(channel_info) = channel_info {
-            if channel_info.node1() == from {
-                (Some(channel_info), channel_info.update_of_node1.as_ref())
-            } else if channel_info.node2() == from {
-                (Some(channel_info), channel_info.update_of_node2.as_ref())
-            } else {
-                (None, None)
-            }
-        } else {
-            (None, None)
-        }
     }
 
     pub fn get_channels_with_params(
@@ -1074,7 +1054,6 @@ where
         if route_to_self {
             let (edge, new_target, expiry_delta, fee) = self.adjust_target_for_route_self(
                 source,
-                &hop_hints,
                 amount,
                 final_tlc_expiry_delta,
                 &udt_type_script,
@@ -1092,9 +1071,7 @@ where
             for hint in hop_hints {
                 // here the hint may referring to private channel, only try to check the UDT type if we
                 // got a channel_info, do not check the amount here since we already assume the capacity is enough here
-                if let (Some(channel_info), _) =
-                    self.get_outbound_channel_info_and_update(&hint.channel_outpoint, hint.pubkey)
-                {
+                if let Some(channel_info) = self.get_channel(&hint.channel_outpoint) {
                     if channel_info.udt_type_script() != &udt_type_script {
                         continue;
                     }
@@ -1258,67 +1235,42 @@ where
     fn adjust_target_for_route_self(
         &self,
         source: Pubkey,
-        hop_hints: &[HopHint],
         amount: u128,
         expiry: u64,
         udt_type_script: &Option<Script>,
         tlc_expiry_limit: u64,
     ) -> Result<(RouterHop, Pubkey, u64, u128), PathFindError> {
-        let channels: Vec<_> = hop_hints
-            .iter()
-            .map(|hint| {
-                let (channel_info, channel_update) =
-                    self.get_outbound_channel_info_and_update(&hint.channel_outpoint, hint.pubkey);
+        let channels: Vec<_> = self
+            .get_node_inbounds(source)
+            .map(|(from, _, channel_info, channel_update)| {
                 (
-                    hint.pubkey,
-                    hint.channel_outpoint.clone(),
-                    // use the hint's tlc_expiry_delta, not from channel_update
-                    hint.tlc_expiry_delta,
-                    // use the hint's fee_rate
-                    hint.fee_rate,
+                    from,
+                    channel_info.channel_outpoint.clone(),
+                    channel_update.tlc_expiry_delta,
+                    channel_update.fee_rate,
                     channel_info,
                     channel_update,
                 )
             })
-            .chain(
-                self.get_node_inbounds(source)
-                    .map(|(from, _, channel_info, channel_update)| {
-                        (
-                            from,
-                            channel_info.channel_outpoint.clone(),
-                            channel_update.tlc_expiry_delta,
-                            channel_update.fee_rate,
-                            Some(channel_info),
-                            Some(channel_update),
-                        )
-                    }),
-            )
             .filter(|(_, _, expiry, _, channel_info, channel_update)| {
                 // we also check the validity of hint, if the hint is not valid, we will skip it
                 // for instance, if user specify a hint channel with UDT, but the payment is not UDT,
                 // this hint will be ignored, or if user specify a hint channel with too high fee rate,
                 // the whole fee exceed the max fee amount, this hint will be ignored too.
-                if let Some(channel_info) = channel_info {
-                    if udt_type_script != channel_info.udt_type_script() {
-                        return false;
-                    }
-                    if let Some(channel_update) = channel_update {
-                        if !self.check_channel_amount_and_expiry(
-                            amount,
-                            channel_info,
-                            channel_update,
-                            *expiry,
-                            tlc_expiry_limit,
-                        ) {
-                            return false;
-                        }
-                    }
+                if udt_type_script != channel_info.udt_type_script() {
+                    return false;
                 }
-                true
+
+                self.check_channel_amount_and_expiry(
+                    amount,
+                    channel_info,
+                    channel_update,
+                    *expiry,
+                    tlc_expiry_limit,
+                )
             })
             .collect();
 
-        // a proper hop hint for route self will limit the direct_channels to only one
         // if there are multiple channels, we will randomly select a channel from the source node for route to self
         // so that the following part of algorithm will always trying to find a path without a cycle in network graph
         if let Some((from, outpoint, tlc_expiry_delta, fee_rate, ..)) =
