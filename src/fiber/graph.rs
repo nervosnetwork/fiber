@@ -322,15 +322,14 @@ pub enum PathFindError {
     Other(String),
 }
 
-/// An edge along the payment path from the source to the target.
-/// This represents a TLC transfer from one node to another.
+/// A router hop information for a payment, a paymenter router is an array of RouterHop
+/// a router hop generally implies hop `target` will receive `amount_received` with `channel_outpoint` of channel
 #[serde_as]
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct RouterHop {
     /// The node that is sending the TLC to the next node.
     pub(crate) target: Pubkey,
-    /// The channel that is used to send the TLC to the next node.
-    /// If it's all zero bytes, it means this hop is payment receiver.
+    /// The channel that is used to send the TLC to this hop.
     #[serde_as(as = "EntityHex")]
     pub(crate) channel_outpoint: OutPoint,
     /// The amount that the source node will transfer to the target node.

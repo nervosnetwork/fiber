@@ -288,8 +288,10 @@ impl InternalResult {
                         self.fail_range_pairs(nodes, 0, index - 1);
                     }
                 }
-                TlcErrorCode::IncorrectOrUnknownPaymentDetails
-                | TlcErrorCode::InvoiceExpired
+                TlcErrorCode::IncorrectOrUnknownPaymentDetails => {
+                    need_to_retry = false;
+                }
+                TlcErrorCode::InvoiceExpired
                 | TlcErrorCode::InvoiceCancelled
                 | TlcErrorCode::FinalIncorrectExpiryDelta
                 | TlcErrorCode::FinalIncorrectTlcAmount => {

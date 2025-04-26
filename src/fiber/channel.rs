@@ -1306,6 +1306,7 @@ where
         state: &mut ChannelActorState,
         command: AddTlcCommand,
     ) -> Result<u64, ProcessingChannelError> {
+        self.check_add_tlc_consistent(&command, state)?;
         state.check_for_tlc_update(Some(command.amount), true, true)?;
         state.check_tlc_expiry(command.expiry)?;
         state.check_tlc_forward_amount(
@@ -2096,6 +2097,25 @@ where
         ))
         .expect(ASSUME_NETWORK_ACTOR_ALIVE)
         .map_err(ProcessingChannelError::PeelingOnionPacketError)
+    }
+
+    fn check_add_tlc_consistent(
+        &self,
+        command: &AddTlcCommand,
+        current_state: &ChannelActorState,
+    ) -> ProcessingChannelResult {
+        if let Some(prev_tlc_info) = command.previous_tlc {
+            let prev_state = self
+                .store
+                .get_channel_actor_state(&prev_tlc_info.prev_channel_id)
+                .expect("prev_state error");
+            if prev_state.funding_udt_type_script != current_state.funding_udt_type_script {
+                return Err(ProcessingChannelError::InvalidParameter(
+                    "Previous forwarding channel is with different UDT type".to_string(),
+                ));
+            }
+        }
+        Ok(())
     }
 }
 

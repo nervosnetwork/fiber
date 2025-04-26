@@ -3977,3 +3977,93 @@ async fn test_send_payment_invoice_cancel_multiple_ops() {
         }
     }
 }
+
+#[tokio::test]
+async fn test_send_payment_with_mixed_channel_hops() {
+    init_tracing();
+    let _span = tracing::info_span!("node", node = "test").entered();
+    let (nodes, channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+        ],
+        3,
+    )
+    .await;
+    let [node0, mut node1, mut node2] = nodes.try_into().expect("3 nodes");
+
+    // create a private UDT channel with node_1 and node_2
+    let (_new_channel_id, funding_tx) = establish_channel_between_nodes(
+        &mut node1,
+        &mut node2,
+        ChannelParameters {
+            public: false,
+            node_a_funding_amount: HUGE_CKB_AMOUNT,
+            node_b_funding_amount: HUGE_CKB_AMOUNT,
+            funding_udt_type_script: Some(Script::default()), // UDT type
+            ..Default::default()
+        },
+    )
+    .await;
+    let private_udt_channel = OutPoint::new(funding_tx.into(), 0);
+
+    // get a router from node0 -> node2
+    let router = node0
+        .build_router(BuildRouterCommand {
+            amount: Some(1000),
+            hops_info: vec![
+                HopRequire {
+                    pubkey: node1.pubkey,
+                    channel_outpoint: None,
+                },
+                HopRequire {
+                    pubkey: node2.pubkey,
+                    channel_outpoint: None,
+                },
+            ],
+            udt_type_script: None,
+            final_tlc_expiry_delta: None,
+        })
+        .await
+        .unwrap();
+
+    let channel0_outpoint = node0.get_channel_outpoint(&channels[0]).unwrap();
+    let channel1_outpoint = node1.get_channel_outpoint(&channels[1]).unwrap();
+    assert_eq!(router.router_hops[0].channel_outpoint, channel0_outpoint);
+    assert_eq!(router.router_hops[1].channel_outpoint, channel1_outpoint);
+    let mut copied_router = router.clone();
+
+    // normal payment will succeed
+    let res = node0
+        .send_payment_with_router(SendPaymentWithRouterCommand {
+            router: router.router_hops,
+            keysend: Some(true),
+            ..Default::default()
+        })
+        .await;
+    eprintln!("res: {:?}", res);
+    node0.wait_until_success(res.unwrap().payment_hash).await;
+
+    // now we manually replace the second channel with the UDT channel
+    // the payment will failed with proper error code
+    copied_router.router_hops[1].channel_outpoint = private_udt_channel;
+    let res = node0
+        .send_payment_with_router(SendPaymentWithRouterCommand {
+            router: copied_router.router_hops,
+            keysend: Some(true),
+            ..Default::default()
+        })
+        .await;
+    eprintln!("res: {:?}", res);
+
+    let payment_hash = res.unwrap().payment_hash;
+    node0.wait_until_failed(payment_hash).await;
+    let payment_res = node0.get_payment_result(payment_hash).await;
+    eprintln!("payment_res: {:?}", payment_res);
+    assert_eq!(
+        payment_res.failed_error.unwrap(),
+        "IncorrectOrUnknownPaymentDetails"
+    );
+    let payment_session = node0.get_payment_session(payment_hash).unwrap();
+    assert_eq!(payment_session.retried_times, 1);
+}
