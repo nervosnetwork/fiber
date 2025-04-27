@@ -1087,17 +1087,20 @@ where
             // We don't know the capacity of the channels in the hop hints. We just assume that the capacity
             // of these channels is sufficiently large.
             let sufficiently_large_capacity = u128::MAX;
-            for hint in hop_hints {
-                // hop hint only referring to private channels for sender node,
-                // if we get public channel information for this hophint, we just ignore this hophint
-                if let (Some(channel_info), Some(channel_update)) =
-                    self.get_outbound_channel_info_and_update(&hint.channel_outpoint, hint.pubkey)
-                {
-                    if channel_info.udt_type_script != udt_type_script || channel_update.enabled {
-                        continue;
-                    }
-                }
 
+            // hop hint only referring to private channels for sender node,
+            // if we get public channel information for this hophint, we just ignore this hophint
+            let filtered_hints = hop_hints.iter().filter(|hint| {
+                match self.get_outbound_channel_info_and_update(&hint.channel_outpoint, hint.pubkey)
+                {
+                    (Some(channel_info), Some(channel_update)) => {
+                        channel_info.udt_type_script == udt_type_script && !channel_update.enabled
+                    }
+                    _ => true,
+                }
+            });
+
+            for hint in filtered_hints {
                 // Say we have a payment path A -- channel 1 --> B -- channel 2 --> C.
                 // For now, all the fees that B will receive are calculated based on the fee rate B sets in channel 1.
                 // We didn't use the outbound fees for B in channel 2 at all. This is different from lnd,
