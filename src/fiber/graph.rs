@@ -322,8 +322,9 @@ pub enum PathFindError {
     Other(String),
 }
 
-/// A router hop information for a payment, a paymenter router is an array of RouterHop
-/// a router hop generally implies hop `target` will receive `amount_received` with `channel_outpoint` of channel
+/// A router hop information for a payment, a paymenter router is an array of RouterHop,
+/// a router hop generally implies hop `target` will receive `amount_received` with `channel_outpoint` of channel.
+/// Improper hop hint may make payment fail, for example the specified channel do not have enough capacity.
 #[serde_as]
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct RouterHop {
