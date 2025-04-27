@@ -20,7 +20,7 @@ fn test_node_heap() {
         probability: 0.0,
         next_hop: None,
         incoming_tlc_expiry: 0,
-        adopted_outpoints: Default::default(),
+        pending_count: 0,
     };
     let node2 = NodeHeapElement {
         node_id: public_key2.into(),
@@ -31,7 +31,7 @@ fn test_node_heap() {
         probability: 0.0,
         next_hop: None,
         incoming_tlc_expiry: 0,
-        adopted_outpoints: Default::default(),
+        pending_count: 0,
     };
     assert!(heap.is_empty());
     heap.push(node1.clone());
@@ -62,7 +62,7 @@ fn test_node_heap_probability() {
         probability: 0.0,
         next_hop: None,
         incoming_tlc_expiry: 0,
-        adopted_outpoints: Default::default(),
+        pending_count: 0,
     };
     let node2 = NodeHeapElement {
         node_id: public_key2.into(),
@@ -73,7 +73,7 @@ fn test_node_heap_probability() {
         probability: 0.5,
         next_hop: None,
         incoming_tlc_expiry: 0,
-        adopted_outpoints: Default::default(),
+        pending_count: 0,
     };
     heap.push(node1.clone());
     heap.push(node2.clone());
@@ -101,7 +101,7 @@ fn test_node_heap_distance() {
         probability: 0.0,
         next_hop: None,
         incoming_tlc_expiry: 0,
-        adopted_outpoints: Default::default(),
+        pending_count: 0,
     };
     let node2 = NodeHeapElement {
         node_id: public_key2.into(),
@@ -112,7 +112,7 @@ fn test_node_heap_distance() {
         probability: 0.0,
         next_hop: None,
         incoming_tlc_expiry: 0,
-        adopted_outpoints: Default::default(),
+        pending_count: 0,
     };
     heap.push(node1.clone());
     heap.push(node2.clone());
@@ -140,7 +140,7 @@ fn test_node_heap_push_or_fix() {
         probability: 0.0,
         next_hop: None,
         incoming_tlc_expiry: 0,
-        adopted_outpoints: Default::default(),
+        pending_count: 0,
     };
     let node2 = NodeHeapElement {
         node_id: public_key2.into(),
@@ -151,7 +151,7 @@ fn test_node_heap_push_or_fix() {
         probability: 0.0,
         next_hop: None,
         incoming_tlc_expiry: 0,
-        adopted_outpoints: Default::default(),
+        pending_count: 0,
     };
 
     heap.push(node1.clone());
@@ -167,7 +167,7 @@ fn test_node_heap_push_or_fix() {
         probability: 0.0,
         next_hop: None,
         incoming_tlc_expiry: 0,
-        adopted_outpoints: Default::default(),
+        pending_count: 0,
     };
 
     heap.push_or_fix(node1_update.clone());

@@ -1,9 +1,7 @@
-use ckb_types::packed::OutPoint;
-
 use super::graph::RouterHop;
 use super::types::Pubkey;
 use std::cmp::Ordering;
-use std::collections::{BinaryHeap, HashSet};
+use std::collections::BinaryHeap;
 
 #[derive(Clone, Debug)]
 pub(crate) struct NodeHeapElement {
@@ -33,7 +31,7 @@ pub(crate) struct NodeHeapElement {
     pub next_hop: Option<RouterHop>,
 
     // adopted channels outpoint
-    pub adopted_outpoints: HashSet<OutPoint>,
+    pub pending_count: usize,
 }
 
 impl Ord for NodeHeapElement {

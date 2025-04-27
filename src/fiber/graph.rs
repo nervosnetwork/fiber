@@ -974,8 +974,8 @@ where
         cur_probability: f64,
         // The weight accumulated from the payment path from current target to the final payee.
         cur_weight: u128,
-        // The current adapted channel outpoint
-        adapted_channel_outpoints: &HashSet<OutPoint>,
+        // The pending channel count
+        cur_pending_count: usize,
         // The distances from nodes to the final payee.
         distances: &mut HashMap<Pubkey, NodeHeapElement>,
         // The priority queue of nodes to be visited (sorted by distance and probability).
@@ -998,23 +998,19 @@ where
             debug!("probability is too low: {:?}", probability);
             return;
         }
-        if adapted_channel_outpoints.contains(channel_outpoint) {
-            return;
-        }
-        let agg_pending_count = self
+
+        let agg_weight = self.edge_weight(next_hop_received_amount, fee, tlc_expiry_delta);
+        let weight = cur_weight + agg_weight;
+
+        let next_pending_count = self
             .channel_pending_stats
             .get(channel_outpoint)
             .copied()
             .unwrap_or(0)
-            + adapted_channel_outpoints
-                .iter()
-                .map(|x| self.channel_pending_stats.get(x).copied().unwrap_or(0))
-                .sum::<usize>();
+            + cur_pending_count;
 
-        let agg_weight = self.edge_weight(next_hop_received_amount, fee, tlc_expiry_delta);
-        let weight = cur_weight + agg_weight;
         let distance =
-            self.calculate_distance_based_probability(probability, weight, agg_pending_count);
+            self.calculate_distance_based_probability(probability, weight, next_pending_count);
 
         if let Some(node) = distances.get(&from) {
             if distance >= node.distance {
@@ -1023,11 +1019,7 @@ where
         }
         let total_amount = next_hop_received_amount + fee;
         let total_tlc_expiry = incoming_tlc_expiry + tlc_expiry_delta;
-        let adopted_outpoints = adapted_channel_outpoints
-            .iter()
-            .cloned()
-            .chain(std::iter::once(channel_outpoint.clone()))
-            .collect();
+
         let node = NodeHeapElement {
             node_id: from,
             weight,
@@ -1036,7 +1028,7 @@ where
             incoming_tlc_expiry: total_tlc_expiry,
             fee_charged: fee,
             probability,
-            adopted_outpoints,
+            pending_count: next_pending_count,
             next_hop: Some(RouterHop {
                 target: to,
                 channel_outpoint: channel_outpoint.clone(),
@@ -1139,7 +1131,7 @@ where
                             tlc_expiry_delta,
                             1.0,
                             0,
-                            &HashSet::new(),
+                            0,
                             &mut distances,
                             &mut nodes_heap,
                         );
@@ -1165,7 +1157,7 @@ where
             probability: 1.0,
             next_hop: None,
             incoming_tlc_expiry: expiry,
-            adopted_outpoints: HashSet::new(),
+            pending_count: 0,
         });
 
         while let Some(cur_hop) = nodes_heap.pop() {
@@ -1263,7 +1255,7 @@ where
                     expiry_delta,
                     cur_hop.probability,
                     cur_hop.weight,
-                    &cur_hop.adopted_outpoints,
+                    cur_hop.pending_count,
                     &mut distances,
                     &mut nodes_heap,
                 );
