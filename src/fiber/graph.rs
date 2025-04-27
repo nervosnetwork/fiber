@@ -1085,8 +1085,8 @@ where
         } else {
             // The calculation of probability and distance requires a capacity of the channel.
             // We don't know the capacity of the channels in the hop hints. We just assume that the capacity
-            // of these channels is sufficiently large. We will use 2 times the amount as the capacity.
-            let sufficiently_large_capacity = 2 * amount;
+            // of these channels is sufficiently large.
+            let sufficiently_large_capacity = u128::MAX;
             for hint in hop_hints {
                 // hop hint only referring to private channels for sender node,
                 // if we get public channel information for this hophint, we just ignore this hophint

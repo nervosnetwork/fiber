@@ -803,9 +803,11 @@ async fn test_send_payment_with_private_channel_hints_fallback() {
     assert!(res.is_ok(), "Send payment failed: {:?}", res);
     let res = res.unwrap();
     let payment_hash = res.payment_hash;
-    source_node.wait_until_success(payment_hash).await;
+
+    // the actual capacity of private channel is not enough for this payment
+    source_node.wait_until_failed(payment_hash).await;
     source_node
-        .assert_payment_status(payment_hash, PaymentSessionStatus::Success, Some(2))
+        .assert_payment_status(payment_hash, PaymentSessionStatus::Failed, Some(5))
         .await;
 }
 
@@ -930,7 +932,7 @@ async fn test_send_payment_with_private_multiple_channel_hints_fallback() {
     assert!(res.is_ok(), "Send payment failed: {:?}", res);
     let res = res.unwrap();
     let payment_hash = res.payment_hash;
-    source_node.wait_until_success(payment_hash).await;
+    source_node.wait_until_failed(payment_hash).await;
 }
 
 #[tokio::test]
