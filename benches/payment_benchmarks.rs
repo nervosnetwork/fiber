@@ -11,7 +11,7 @@ fn bench_payment_path_finding(c: &mut Criterion) {
     // Create a benchmark group with minimal/no warmup
     let mut group = c.benchmark_group("payment_path_finding");
 
-    for num_channels in [1, 2, 4, 8, 16] {
+    for num_channels in [1] {
         // Add throughput measurement based on the number of paths
         group.throughput(Throughput::Elements(num_channels as u64));
 
