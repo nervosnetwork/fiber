@@ -2882,6 +2882,7 @@ pub struct TlcState {
 }
 
 impl TlcState {
+    #[cfg(debug_assertions)]
     pub fn debug(&self) {
         for tlc in self.offered_tlcs.tlcs.iter() {
             debug!("offered_tlc: {:?}", tlc.log());

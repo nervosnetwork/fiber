@@ -821,6 +821,7 @@ where
     }
 
     pub(crate) fn record_payment_success(&mut self, mut payment_session: PaymentSession) {
+        self.untrack_payment_router(&payment_session);
         let session_route = &payment_session.route.nodes;
         let mut result = InternalResult::default();
         result.succeed_range_pairs(session_route, 0, session_route.len() - 1);
@@ -833,7 +834,11 @@ where
         &mut self,
         payment_session: &PaymentSession,
         tlc_err: TlcErr,
+        first_hop_error: bool,
     ) -> bool {
+        if !first_hop_error {
+            self.untrack_payment_router(payment_session);
+        }
         let mut internal_result = InternalResult::default();
         let nodes = &payment_session.route.nodes;
         let need_to_retry = internal_result.record_payment_fail(nodes, tlc_err);

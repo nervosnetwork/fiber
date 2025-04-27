@@ -1037,12 +1037,7 @@ where
                     .await;
             }
             NetworkActorEvent::RetrySendPayment(payment_hash) => {
-                let Some(mut payment_session) = self.store.get_payment_session(payment_hash) else {
-                    return Err(Error::InvalidParameter(payment_hash.to_string()));
-                };
-                let _ = self
-                    .try_payment_session(myself, state, &mut payment_session)
-                    .await;
+                let _ = self.try_payment_session(myself, state, payment_hash).await;
             }
             NetworkActorEvent::AddTlcResult(payment_hash, error_info, previous_tlc) => {
                 self.on_add_tlc_result_event(myself, state, payment_hash, error_info, previous_tlc)
@@ -1743,10 +1738,6 @@ where
         reason: RemoveTlcReason,
     ) {
         if let Some(mut payment_session) = self.store.get_payment_session(payment_hash) {
-            self.network_graph
-                .write()
-                .await
-                .untrack_payment_router(&payment_session);
             if payment_session.status == PaymentSessionStatus::Inflight {
                 match reason {
                     RemoveTlcReason::RemoveTlcFulfill(_) => {
@@ -1768,11 +1759,11 @@ where
 
                         self.update_graph_with_tlc_fail(&state.network, &error_detail)
                             .await;
-                        let need_to_retry = self
-                            .network_graph
-                            .write()
-                            .await
-                            .record_payment_fail(&payment_session, error_detail.clone());
+                        let need_to_retry = self.network_graph.write().await.record_payment_fail(
+                            &payment_session,
+                            error_detail.clone(),
+                            false,
+                        );
                         if need_to_retry {
                             self.register_payment_retry(myself, payment_hash);
                         } else {
@@ -1906,18 +1897,14 @@ where
             Err(error_detail) => {
                 self.update_graph_with_tlc_fail(&state.network, &error_detail)
                     .await;
-                let need_to_retry = self
-                    .network_graph
-                    .write()
-                    .await
-                    .record_payment_fail(payment_session, error_detail.clone());
+                let need_to_retry = self.network_graph.write().await.record_payment_fail(
+                    payment_session,
+                    error_detail.clone(),
+                    true,
+                );
                 let err = format!(
                     "Failed to send onion packet with error {}",
                     error_detail.error_code_as_str()
-                );
-                eprintln!(
-                    "send onion packet failed: {:?} need_to_retry: {:?}",
-                    err, need_to_retry
                 );
                 if !need_to_retry {
                     // only update the payment session status when we don't need to retry
@@ -1967,40 +1954,38 @@ where
             return;
         };
 
-        // process the result of sending onion packet for the first hop
-        match error_info {
-            None => {
-                // Add Tlc successfully in the current hop, change the status from into Inflight
-                payment_session.set_inflight_status();
-                self.store.insert_payment_session(payment_session.clone());
-                self.network_graph
-                    .write()
-                    .await
-                    .track_payment_router(&payment_session);
-            }
-            Some((ProcessingChannelError::RepeatedProcessing(_), _)) => {
-                // ignore repeated processing error
-            }
-            Some((ProcessingChannelError::WaitingTlcAck, _)) => {
-                payment_session.last_error = Some("WaitingTlcAck".to_string());
-                let _ = self
-                    .try_payment_session(myself, state, &mut payment_session)
-                    .await;
-            }
-            Some((_err, tlc_err)) => {
-                // other errors in the first hop, will not retry
-                self.network_graph
-                    .write()
-                    .await
-                    .record_payment_fail(&payment_session, tlc_err.clone());
+        if error_info.is_none() {
+            // Change the status from Created into Inflight
+            payment_session.set_inflight_status();
+            self.network_graph
+                .write()
+                .await
+                .track_payment_router(&payment_session);
+            self.store.insert_payment_session(payment_session);
+            return;
+        }
 
-                let error = format!(
-                    "Failed to send payment session: {:?}, retried times: {}",
-                    payment_session.payment_hash(),
-                    payment_session.retried_times
+        let (channel_error, tlc_err) = error_info.unwrap();
+        if matches!(channel_error, ProcessingChannelError::RepeatedProcessing(_)) {
+            return;
+        }
+
+        let (need_to_retry, error) =
+            if matches!(channel_error, ProcessingChannelError::WaitingTlcAck) {
+                (true, "WaitingTlcAck".to_string())
+            } else {
+                let retry = self.network_graph.write().await.record_payment_fail(
+                    &payment_session,
+                    tlc_err.clone(),
+                    true,
                 );
-                self.set_payment_fail_with_error(&mut payment_session, &error);
-            }
+                (retry, channel_error.to_string())
+            };
+        payment_session.last_error = Some(error);
+        self.store.insert_payment_session(payment_session);
+
+        if need_to_retry {
+            let _ = self.try_payment_session(myself, state, payment_hash).await;
         }
     }
 
@@ -2013,9 +1998,12 @@ where
         &self,
         myself: ActorRef<NetworkActorMessage>,
         state: &mut NetworkActorState<S>,
-        payment_session: &mut PaymentSession,
+        payment_hash: Hash256,
     ) -> Result<PaymentSession, Error> {
         self.update_graph().await;
+        let Some(mut payment_session) = self.store.get_payment_session(payment_hash) else {
+            return Err(Error::InvalidParameter(payment_hash.to_string()));
+        };
 
         assert!(payment_session.status != PaymentSessionStatus::Failed);
 
@@ -2031,9 +2019,10 @@ where
                 payment_session.retried_times += 1;
             }
 
-            let hops_info = self.build_payment_route(payment_session).await?;
+            let hops_info = self.build_payment_route(&mut payment_session).await?;
+
             match self
-                .send_payment_onion_packet(state, payment_session, &payment_data, hops_info)
+                .send_payment_onion_packet(state, &mut payment_session, &payment_data, hops_info)
                 .await
             {
                 Ok(payment_session) => return Ok(payment_session),
@@ -2043,8 +2032,8 @@ where
                         // If this is the first hop error, such as the WaitingTlcAck error,
                         // we will just retry later, return Ok here for letting endpoint user
                         // know payment session is created successfully
-                        self.register_payment_retry(myself, payment_session.payment_hash());
-                        return Ok(payment_session.clone());
+                        self.register_payment_retry(myself, payment_hash);
+                        return Ok(payment_session);
                     } else {
                         return Err(err);
                     }
@@ -2149,10 +2138,10 @@ where
             }
         }
 
-        let mut payment_session = PaymentSession::new(payment_data, 5);
+        let payment_session = PaymentSession::new(payment_data, 5);
         self.store.insert_payment_session(payment_session.clone());
         let session = self
-            .try_payment_session(myself, state, &mut payment_session)
+            .try_payment_session(myself, state, payment_session.payment_hash())
             .await?;
         return Ok(session.into());
     }
