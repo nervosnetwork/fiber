@@ -1164,14 +1164,15 @@ The reason for removing a TLC
 <a id="#type-routerhop"></a>
 ### Type `RouterHop`
 
-A router hop information for a payment, a paymenter router is an array of RouterHop
- a router hop generally implies hop `target` will receive `amount_received` with `channel_outpoint` of channel
+A router hop information for a payment, a paymenter router is an array of RouterHop,
+ a router hop generally implies hop `target` will receive `amount_received` with `channel_outpoint` of channel.
+ Improper hop hint may make payment fail, for example the specified channel do not have enough capacity.
 
 
 #### Fields
 
 * `target` - <em>[Pubkey](#type-pubkey)</em>, The node that is sending the TLC to the next node.
-* `channel_outpoint` - <em>OutPoint</em>, The channel that is used to send the TLC to this hop.
+* `channel_outpoint` - <em>OutPoint</em>, The channel of this hop used to receive TLC
 * `amount_received` - <em>u128</em>, The amount that the source node will transfer to the target node.
  We have already added up all the fees along the path, so this amount can be used directly for the TLC.
 * `incoming_tlc_expiry` - <em>u64</em>, The expiry for the TLC that the source node sends to the target node.

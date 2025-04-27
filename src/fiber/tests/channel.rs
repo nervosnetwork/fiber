@@ -508,19 +508,8 @@ async fn do_test_update_graph_balance_after_payment(public: bool) {
             SendPaymentCommand {
                 target_pubkey: Some(node_b_pubkey),
                 amount: Some(10000),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                tlc_expiry_limit: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -538,19 +527,8 @@ async fn do_test_update_graph_balance_after_payment(public: bool) {
             SendPaymentCommand {
                 target_pubkey: Some(node_a_pubkey),
                 amount: Some(9999),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                invoice: None,
-                timeout: None,
-                tlc_expiry_limit: None,
-                max_fee_amount: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -721,19 +699,8 @@ async fn test_network_send_payment_normal_keysend_workflow() {
             SendPaymentCommand {
                 target_pubkey: Some(node_b_pubkey),
                 amount: Some(10000),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                tlc_expiry_limit: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -771,19 +738,8 @@ async fn test_network_send_payment_normal_keysend_workflow() {
             SendPaymentCommand {
                 target_pubkey: Some(node_b_pubkey),
                 amount: Some(10000),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                invoice: None,
-                timeout: None,
-                tlc_expiry_limit: None,
-                max_fee_amount: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -823,19 +779,8 @@ async fn test_network_send_payment_send_each_other() {
             SendPaymentCommand {
                 target_pubkey: Some(node_b_pubkey),
                 amount: Some(10000),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                tlc_expiry_limit: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -853,19 +798,8 @@ async fn test_network_send_payment_send_each_other() {
             SendPaymentCommand {
                 target_pubkey: Some(node_a_pubkey),
                 amount: Some(9999),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                invoice: None,
-                timeout: None,
-                tlc_expiry_limit: None,
-                max_fee_amount: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -939,19 +873,8 @@ async fn test_network_send_payment_more_send_each_other() {
             SendPaymentCommand {
                 target_pubkey: Some(node_b_pubkey),
                 amount: Some(10000),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                tlc_expiry_limit: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                custom_records: None,
-                hop_hints: None,
-                dry_run: false,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -969,19 +892,8 @@ async fn test_network_send_payment_more_send_each_other() {
             SendPaymentCommand {
                 target_pubkey: Some(node_a_pubkey),
                 amount: Some(9999),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                invoice: None,
-                timeout: None,
-                tlc_expiry_limit: None,
-                max_fee_amount: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                custom_records: None,
-                hop_hints: None,
-                dry_run: false,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -998,19 +910,8 @@ async fn test_network_send_payment_more_send_each_other() {
             SendPaymentCommand {
                 target_pubkey: Some(node_b_pubkey),
                 amount: Some(9999),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                tlc_expiry_limit: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                custom_records: None,
-                hop_hints: None,
-                dry_run: false,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -1028,19 +929,8 @@ async fn test_network_send_payment_more_send_each_other() {
             SendPaymentCommand {
                 target_pubkey: Some(node_a_pubkey),
                 amount: Some(10000),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                invoice: None,
-                timeout: None,
-                tlc_expiry_limit: None,
-                max_fee_amount: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                custom_records: None,
-                hop_hints: None,
-                dry_run: false,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -1085,19 +975,8 @@ async fn test_network_send_payment_send_with_ack() {
             SendPaymentCommand {
                 target_pubkey: Some(node_b_pubkey),
                 amount: Some(10000),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                tlc_expiry_limit: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -1118,19 +997,8 @@ async fn test_network_send_payment_send_with_ack() {
             SendPaymentCommand {
                 target_pubkey: Some(node_b_pubkey),
                 amount: Some(10000),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                invoice: None,
-                timeout: None,
-                tlc_expiry_limit: None,
-                max_fee_amount: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -1243,19 +1111,8 @@ async fn test_network_send_previous_tlc_error() {
             SendPaymentCommand {
                 target_pubkey: Some(node_b.pubkey),
                 amount: Some(10000),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-                custom_records: None,
-                tlc_expiry_limit: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -1367,19 +1224,8 @@ async fn test_network_send_previous_tlc_error_with_limit_amount_error() {
             SendPaymentCommand {
                 target_pubkey: Some(node_b.pubkey),
                 amount: Some(300000000),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-                tlc_expiry_limit: None,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -1415,19 +1261,8 @@ async fn test_network_send_payment_keysend_with_payment_hash() {
                 target_pubkey: Some(node_b_pubkey),
                 amount: Some(10000),
                 payment_hash: Some(payment_hash),
-                final_tlc_expiry_delta: None,
-                tlc_expiry_limit: None,
-
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -1465,18 +1300,7 @@ async fn test_network_send_payment_final_incorrect_hash() {
                 target_pubkey: Some(node_b_pubkey),
                 amount: Some(10000),
                 payment_hash: Some(payment_hash),
-                final_tlc_expiry_delta: None,
-                tlc_expiry_limit: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                max_parts: None,
-                keysend: None,
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -1531,18 +1355,7 @@ async fn test_network_send_payment_target_not_found() {
                 target_pubkey: Some(node_b_pubkey),
                 amount: Some(10000),
                 payment_hash: Some(gen_rand_sha256_hash()),
-                final_tlc_expiry_delta: None,
-                tlc_expiry_limit: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                max_parts: None,
-                keysend: None,
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -1572,18 +1385,7 @@ async fn test_network_send_payment_amount_is_too_large() {
                 target_pubkey: Some(node_b_pubkey),
                 amount: Some(100000000000 + 5),
                 payment_hash: Some(gen_rand_sha256_hash()),
-                final_tlc_expiry_delta: None,
-                tlc_expiry_limit: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                max_parts: None,
-                keysend: None,
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -1617,18 +1419,8 @@ async fn test_network_send_payment_with_dry_run() {
                 target_pubkey: Some(node_b_pubkey),
                 amount: Some(100000),
                 payment_hash: Some(gen_rand_sha256_hash()),
-                final_tlc_expiry_delta: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                tlc_expiry_limit: None,
-                max_parts: None,
-                keysend: None,
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
                 dry_run: true,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -1646,18 +1438,8 @@ async fn test_network_send_payment_with_dry_run() {
                 target_pubkey: Some(gen_rand_fiber_public_key()),
                 amount: Some(1000 + 5),
                 payment_hash: Some(gen_rand_sha256_hash()),
-                final_tlc_expiry_delta: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                tlc_expiry_limit: None,
-                max_parts: None,
-                keysend: None,
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
                 dry_run: true,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -1691,19 +1473,8 @@ async fn test_send_payment_with_3_nodes() {
             SendPaymentCommand {
                 target_pubkey: Some(node_c_pubkey),
                 amount: Some(sent_amount),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                tlc_expiry_limit: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -1772,19 +1543,8 @@ async fn test_send_payment_with_rev_3_nodes() {
             SendPaymentCommand {
                 target_pubkey: Some(node_a_pubkey),
                 amount: Some(sent_amount),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                tlc_expiry_limit: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -1842,19 +1602,8 @@ async fn test_send_payment_with_max_nodes() {
             SendPaymentCommand {
                 target_pubkey: Some(target_pubkey),
                 amount: Some(sent_amount),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                tlc_expiry_limit: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -1910,19 +1659,8 @@ async fn test_send_payment_with_3_nodes_overflow() {
             SendPaymentCommand {
                 target_pubkey: Some(node_c_pubkey),
                 amount: Some(sent_amount),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                tlc_expiry_limit: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -1959,18 +1697,7 @@ async fn test_send_payment_fail_with_3_nodes_invalid_hash() {
                 target_pubkey: Some(node_c_pubkey),
                 amount: Some(1000000 + 5),
                 payment_hash: Some(gen_rand_sha256_hash()), // this payment hash is not from node_c
-                final_tlc_expiry_delta: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                tlc_expiry_limit: None,
-                max_parts: None,
-                keysend: None,
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -2029,19 +1756,9 @@ async fn test_send_payment_fail_with_3_nodes_final_tlc_expiry_delta() {
             SendPaymentCommand {
                 target_pubkey: Some(node_c_pubkey),
                 amount: Some(1000000000),
-                payment_hash: None,
                 final_tlc_expiry_delta: Some(86400000 + 100), // should be in normal range
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                tlc_expiry_limit: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -2059,17 +1776,8 @@ async fn test_send_payment_fail_with_3_nodes_final_tlc_expiry_delta() {
                 amount: Some(1000000000),
                 payment_hash: None,
                 final_tlc_expiry_delta: Some(14 * 24 * 60 * 60 * 1000 + 1), // 14 days + 1 ms
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                tlc_expiry_limit: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -2086,17 +1794,8 @@ async fn test_send_payment_fail_with_3_nodes_final_tlc_expiry_delta() {
                 amount: Some(1000000000),
                 payment_hash: None,
                 final_tlc_expiry_delta: Some(14 * 24 * 60 * 60 * 1000 - 100), // 14 days - 100, will not find a path
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                tlc_expiry_limit: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -2126,19 +1825,9 @@ async fn test_send_payment_fail_with_3_nodes_dry_run_fee() {
             SendPaymentCommand {
                 target_pubkey: Some(node_c_pubkey),
                 amount: Some(2000000000),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                tlc_expiry_limit: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
                 dry_run: true,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -2153,19 +1842,9 @@ async fn test_send_payment_fail_with_3_nodes_dry_run_fee() {
             SendPaymentCommand {
                 target_pubkey: Some(node_c_pubkey),
                 amount: Some(1000000000),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                tlc_expiry_limit: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
                 dry_run: true,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -2348,18 +2027,7 @@ async fn test_network_send_payment_dry_run_will_not_create_payment_session() {
                 target_pubkey: Some(node_b_pubkey),
                 amount: Some(10000),
                 payment_hash: Some(payment_hash),
-                final_tlc_expiry_delta: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                tlc_expiry_limit: None,
-                max_parts: None,
-                keysend: None,
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -3826,19 +3494,8 @@ async fn test_send_payment_with_outdated_fee_rate() {
             SendPaymentCommand {
                 target_pubkey: Some(node_c_pubkey),
                 amount: Some(10000000000),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                tlc_expiry_limit: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -5079,19 +4736,8 @@ async fn test_send_payment_with_channel_balance_error() {
             SendPaymentCommand {
                 target_pubkey: Some(target_pubkey),
                 amount: Some(3000),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                tlc_expiry_limit: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -5110,19 +4756,8 @@ async fn test_send_payment_with_channel_balance_error() {
             SendPaymentCommand {
                 target_pubkey: Some(target_pubkey),
                 amount: Some(3000),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                tlc_expiry_limit: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -5207,19 +4842,8 @@ async fn test_send_payment_with_multiple_edges_in_middle_hops() {
             SendPaymentCommand {
                 target_pubkey: Some(target_pubkey),
                 amount: Some(999),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                tlc_expiry_limit: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -5263,19 +4887,8 @@ async fn test_send_payment_with_all_failed_middle_hops() {
             SendPaymentCommand {
                 target_pubkey: Some(target_pubkey),
                 amount: Some(999),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                tlc_expiry_limit: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -5321,19 +4934,8 @@ async fn test_send_payment_with_multiple_edges_can_succeed_in_retry() {
             SendPaymentCommand {
                 target_pubkey: Some(target_pubkey),
                 amount: Some(999),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                tlc_expiry_limit: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -5377,19 +4979,8 @@ async fn test_send_payment_with_final_hop_multiple_edges_in_middle_hops() {
             SendPaymentCommand {
                 target_pubkey: Some(target_pubkey),
                 amount: Some(999),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                tlc_expiry_limit: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -5433,19 +5024,8 @@ async fn test_send_payment_with_final_all_failed_middle_hops() {
             SendPaymentCommand {
                 target_pubkey: Some(target_pubkey),
                 amount: Some(999),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                tlc_expiry_limit: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -5489,19 +5069,8 @@ async fn test_send_payment_with_final_multiple_edges_can_succeed_in_retry() {
             SendPaymentCommand {
                 target_pubkey: Some(target_pubkey),
                 amount: Some(999),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                tlc_expiry_limit: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -5543,19 +5112,8 @@ async fn test_send_payment_with_first_hop_failed_with_fee() {
             SendPaymentCommand {
                 target_pubkey: Some(target_pubkey),
                 amount: Some(999),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                tlc_expiry_limit: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -5593,19 +5151,8 @@ async fn test_send_payment_succeed_with_multiple_edges_in_first_hop() {
             SendPaymentCommand {
                 target_pubkey: Some(target_pubkey),
                 amount: Some(999),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                tlc_expiry_limit: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -5648,19 +5195,8 @@ async fn test_send_payment_with_first_hop_all_failed() {
             SendPaymentCommand {
                 target_pubkey: Some(target_pubkey),
                 amount: Some(999),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                tlc_expiry_limit: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -5706,19 +5242,8 @@ async fn test_send_payment_will_succeed_with_direct_channel_info_first_hop() {
             SendPaymentCommand {
                 target_pubkey: Some(target_pubkey),
                 amount: Some(999),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                tlc_expiry_limit: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -5769,19 +5294,8 @@ async fn test_send_payment_will_succeed_with_retry_in_middle_hops() {
             SendPaymentCommand {
                 target_pubkey: Some(target_pubkey),
                 amount: Some(amount),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                tlc_expiry_limit: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -5838,19 +5352,8 @@ async fn test_send_payment_will_fail_with_last_hop_info_in_add_tlc_peer() {
         .send_payment(SendPaymentCommand {
             target_pubkey: Some(target_pubkey),
             amount: Some(999),
-            payment_hash: None,
-            final_tlc_expiry_delta: None,
-            tlc_expiry_limit: None,
-            invoice: None,
-            timeout: None,
-            max_fee_amount: None,
-            max_parts: None,
             keysend: Some(true),
-            udt_type_script: None,
-            allow_self_payment: false,
-            hop_hints: None,
-            dry_run: false,
-            custom_records: None,
+            ..Default::default()
         })
         .await;
 
@@ -5906,19 +5409,8 @@ async fn test_send_payment_will_fail_with_invoice_not_generated_by_target() {
         .send_payment(SendPaymentCommand {
             target_pubkey: Some(target_pubkey),
             amount: Some(100),
-            payment_hash: None,
-            final_tlc_expiry_delta: None,
-            tlc_expiry_limit: None,
             invoice: Some(invoice.clone()),
-            timeout: None,
-            max_fee_amount: None,
-            max_parts: None,
-            keysend: None,
-            udt_type_script: None,
-            allow_self_payment: false,
-            hop_hints: None,
-            dry_run: false,
-            custom_records: None,
+            ..Default::default()
         })
         .await;
 
@@ -5966,19 +5458,8 @@ async fn test_send_payment_will_succeed_with_valid_invoice() {
         .send_payment(SendPaymentCommand {
             target_pubkey: Some(target_pubkey),
             amount: Some(100),
-            payment_hash: None,
-            final_tlc_expiry_delta: None,
-            tlc_expiry_limit: None,
             invoice: Some(ckb_invoice.to_string()),
-            timeout: None,
-            max_fee_amount: None,
-            max_parts: None,
-            keysend: None,
-            udt_type_script: None,
-            allow_self_payment: false,
-            hop_hints: None,
-            dry_run: false,
-            custom_records: None,
+            ..Default::default()
         })
         .await;
 
@@ -6038,19 +5519,8 @@ async fn test_send_payment_will_fail_with_no_invoice_preimage() {
         .send_payment(SendPaymentCommand {
             target_pubkey: Some(target_pubkey),
             amount: Some(100),
-            payment_hash: None,
-            final_tlc_expiry_delta: None,
-            tlc_expiry_limit: None,
             invoice: Some(ckb_invoice.to_string()),
-            timeout: None,
-            max_fee_amount: None,
-            max_parts: None,
-            keysend: None,
-            udt_type_script: None,
-            allow_self_payment: false,
-            hop_hints: None,
-            dry_run: false,
-            custom_records: None,
+            ..Default::default()
         })
         .await;
 
@@ -6111,19 +5581,8 @@ async fn test_send_payment_will_fail_with_cancelled_invoice() {
         .send_payment(SendPaymentCommand {
             target_pubkey: Some(target_pubkey),
             amount: Some(100),
-            payment_hash: None,
-            final_tlc_expiry_delta: None,
-            tlc_expiry_limit: None,
             invoice: Some(ckb_invoice.to_string()),
-            timeout: None,
-            max_fee_amount: None,
-            max_parts: None,
-            keysend: None,
-            udt_type_script: None,
-            allow_self_payment: false,
-            hop_hints: None,
-            dry_run: false,
-            custom_records: None,
+            ..Default::default()
         })
         .await;
 
@@ -6171,19 +5630,9 @@ async fn test_send_payment_will_succeed_with_large_tlc_expiry_limit() {
         .send_payment(SendPaymentCommand {
             target_pubkey: Some(target_pubkey),
             amount: Some(999),
-            payment_hash: None,
-            final_tlc_expiry_delta: None,
             tlc_expiry_limit: Some(expected_minimal_tlc_expiry_limit - 1),
-            invoice: None,
-            timeout: None,
-            max_fee_amount: None,
-            max_parts: None,
             keysend: Some(true),
-            udt_type_script: None,
-            allow_self_payment: false,
-            hop_hints: None,
-            dry_run: false,
-            custom_records: None,
+            ..Default::default()
         })
         .await;
 
@@ -6193,19 +5642,9 @@ async fn test_send_payment_will_succeed_with_large_tlc_expiry_limit() {
         .send_payment(SendPaymentCommand {
             target_pubkey: Some(target_pubkey),
             amount: Some(999),
-            payment_hash: None,
-            final_tlc_expiry_delta: None,
             tlc_expiry_limit: Some(expected_minimal_tlc_expiry_limit),
-            invoice: None,
-            timeout: None,
-            max_fee_amount: None,
-            max_parts: None,
             keysend: Some(true),
-            udt_type_script: None,
-            allow_self_payment: false,
-            hop_hints: None,
-            dry_run: false,
-            custom_records: None,
+            ..Default::default()
         })
         .await;
 
