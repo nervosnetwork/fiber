@@ -1306,21 +1306,23 @@ where
         state: &mut ChannelActorState,
         command: AddTlcCommand,
     ) -> Result<u64, ProcessingChannelError> {
-        self.check_add_tlc_consistent(&command, state)?;
         state.check_for_tlc_update(Some(command.amount), true, true)?;
         state.check_tlc_expiry(command.expiry)?;
         state.check_tlc_forward_amount(
             command.amount,
             command.previous_tlc.map(|x| x.forwarding_fee),
         )?;
-        let tlc = state.create_outbounding_tlc(command.clone());
+        let tlc = state.create_outbounding_tlc(&command);
         state.check_insert_tlc(&tlc)?;
-        state.tlc_state.add_offered_tlc(tlc.clone());
+        self.check_add_tlc_consistent(&command, state)?;
+
+        let tlc_id = tlc.tlc_id;
+        state.tlc_state.add_offered_tlc(tlc);
         state.increment_next_offered_tlc_id();
 
         let add_tlc = AddTlc {
             channel_id: state.get_id(),
-            tlc_id: tlc.tlc_id.into(),
+            tlc_id: tlc_id.into(),
             amount: command.amount,
             payment_hash: command.payment_hash,
             expiry: command.expiry,
@@ -1341,7 +1343,7 @@ where
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
 
         self.handle_commitment_signed_command(myself, state)?;
-        Ok(tlc.tlc_id.into())
+        Ok(tlc_id.into())
     }
 
     pub fn handle_remove_tlc_command(
@@ -5502,7 +5504,7 @@ impl ChannelActorState {
         Ok(())
     }
 
-    fn create_outbounding_tlc(&self, command: AddTlcCommand) -> TlcInfo {
+    fn create_outbounding_tlc(&self, command: &AddTlcCommand) -> TlcInfo {
         let tlc_id = self.get_next_offering_tlc_id();
         assert!(
             self.get_offered_tlc(tlc_id).is_none(),
@@ -5519,7 +5521,7 @@ impl ChannelActorState {
             hash_algorithm: command.hash_algorithm,
             created_at: self.get_current_commitment_numbers(),
             removed_reason: None,
-            onion_packet: command.onion_packet,
+            onion_packet: command.onion_packet.clone(),
             shared_secret: command.shared_secret,
             previous_tlc: command.previous_tlc.map(|prev_tlc| {
                 (
