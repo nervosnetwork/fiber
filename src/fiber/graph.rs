@@ -679,7 +679,7 @@ where
         self.channels.get(outpoint)
     }
 
-    pub fn get_outbound_channel_info_and_update(
+    fn get_outbound_channel_info_and_update(
         &self,
         outpoint: &OutPoint,
         from: Pubkey,
@@ -881,7 +881,7 @@ where
                 final_tlc_expiry_delta,
                 payment_data.tlc_expiry_limit,
                 allow_self_payment,
-                payment_data.hop_hints.clone(),
+                &payment_data.hop_hints,
             )?
         };
 
@@ -1041,7 +1041,7 @@ where
         final_tlc_expiry_delta: u64,
         tlc_expiry_limit: u64,
         allow_self: bool,
-        hop_hints: Vec<HopHint>,
+        hop_hints: &[HopHint],
     ) -> Result<Vec<RouterHop>, PathFindError> {
         let started_time = std::time::Instant::now();
         let nodes_len = self.nodes.len();
@@ -1263,6 +1263,16 @@ where
     ) -> Result<(RouterHop, Pubkey, u64, u128), PathFindError> {
         let channels: Vec<_> = self
             .get_node_inbounds(source)
+            .filter(|(_, _, channel_info, channel_update)| {
+                udt_type_script == channel_info.udt_type_script()
+                    && self.check_channel_amount_and_expiry(
+                        amount,
+                        channel_info,
+                        channel_update,
+                        channel_update.tlc_expiry_delta,
+                        tlc_expiry_limit,
+                    )
+            })
             .map(|(from, _, channel_info, channel_update)| {
                 (
                     from,
@@ -1271,23 +1281,6 @@ where
                     channel_update.fee_rate,
                     channel_info,
                     channel_update,
-                )
-            })
-            .filter(|(_, _, expiry, _, channel_info, channel_update)| {
-                // we also check the validity of hint, if the hint is not valid, we will skip it
-                // for instance, if user specify a hint channel with UDT, but the payment is not UDT,
-                // this hint will be ignored, or if user specify a hint channel with too high fee rate,
-                // the whole fee exceed the max fee amount, this hint will be ignored too.
-                if udt_type_script != channel_info.udt_type_script() {
-                    return false;
-                }
-
-                self.check_channel_amount_and_expiry(
-                    amount,
-                    channel_info,
-                    channel_update,
-                    *expiry,
-                    tlc_expiry_limit,
                 )
             })
             .collect();
