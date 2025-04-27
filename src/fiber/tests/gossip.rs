@@ -11,7 +11,9 @@ use tentacle::secio::PeerId;
 use tokio::sync::RwLock;
 
 use crate::fiber::gossip::{GossipActorMessage, GossipConfig, GossipService};
-use crate::fiber::tests::test_utils::{establish_channel_between_nodes, NetworkNode};
+use crate::fiber::tests::test_utils::{
+    establish_channel_between_nodes, ChannelParameters, NetworkNode,
+};
 use crate::fiber::types::{ChannelUpdateChannelFlags, NodeAnnouncement};
 use crate::{
     ckb::{
@@ -670,19 +672,7 @@ async fn test_our_own_channel_gossip_message_propagated() {
     let (_new_channel_id, _funding_tx_hash) = establish_channel_between_nodes(
         &mut node_a,
         &mut node_b,
-        true,
-        node_a_funding_amount,
-        node_b_funding_amount,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
+        ChannelParameters::new(node_a_funding_amount, node_b_funding_amount),
     )
     .await;
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
