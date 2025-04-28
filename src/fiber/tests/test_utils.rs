@@ -121,10 +121,6 @@ impl Drop for TempDir {
                 self.as_ref()
             );
         } else {
-            println!(
-                "Deleting temp directory {:?}. To keep this directory, set environment variable {RETAIN_VAR} to anything",
-                self.as_ref()
-            );
             unsafe {
                 ManuallyDrop::drop(&mut self.0);
             }
@@ -405,7 +401,7 @@ pub(crate) async fn establish_channel_between_nodes(
     node_b
         .expect_event(|event| match event {
             NetworkServiceEvent::ChannelPendingToBeAccepted(peer_id, channel_id) => {
-                println!("A channel ({:?}) to {:?} create", &channel_id, peer_id);
+                debug!("A channel ({:?}) to {:?} create", &channel_id, peer_id);
                 assert_eq!(peer_id, &node_a.peer_id);
                 true
             }
@@ -440,7 +436,7 @@ pub(crate) async fn establish_channel_between_nodes(
     let funding_tx_outpoint = node_a
         .expect_to_process_event(|event| match event {
             NetworkServiceEvent::ChannelReady(peer_id, channel_id, funding_tx_outpoint) => {
-                println!(
+                debug!(
                     "A channel ({:?}) to {:?} is now ready",
                     &channel_id, &peer_id
                 );
@@ -455,7 +451,7 @@ pub(crate) async fn establish_channel_between_nodes(
     node_b
         .expect_event(|event| match event {
             NetworkServiceEvent::ChannelReady(peer_id, channel_id, _funding_tx_hash) => {
-                println!(
+                debug!(
                     "A channel ({:?}) to {:?} is now ready",
                     &channel_id, &peer_id
                 );
@@ -1364,7 +1360,7 @@ impl NetworkNode {
 
     pub async fn connect_to_nonblocking(&mut self, other: &Self) {
         let peer_addr = other.listening_addrs[0].clone();
-        println!(
+        debug!(
             "Trying to connect to {:?} from {:?}",
             other.listening_addrs, &self.listening_addrs
         );
@@ -1395,9 +1391,9 @@ impl NetworkNode {
                     match event {
                         None => panic!("Event emitter unexpectedly stopped"),
                         Some(event) => {
-                            println!("Received event when waiting for specific event: {:?}", &event);
+                            debug!("Received event when waiting for specific event: {:?}", &event);
                             if let Some(r) = event_processor(&event) {
-                                println!("Event ({:?}) matching filter received, exiting waiting for event loop", &event);
+                                debug!("Event ({:?}) matching filter received, exiting waiting for event loop", &event);
                                 return r;
                             }
                         }
