@@ -5,6 +5,7 @@ use crate::fiber::channel::UpdateCommand;
 use crate::fiber::config::DEFAULT_TLC_EXPIRY_DELTA;
 use crate::fiber::config::DEFAULT_TLC_FEE_PROPORTIONAL_MILLIONTHS;
 use crate::fiber::graph::PaymentSessionStatus;
+use crate::fiber::graph::SessionRoute;
 use crate::fiber::network::BuildRouterCommand;
 use crate::fiber::network::HopHint;
 use crate::fiber::network::HopRequire;
@@ -3648,4 +3649,96 @@ async fn test_send_payment_invoice_cancel_multiple_ops() {
             break;
         }
     }
+}
+
+#[tokio::test]
+async fn test_send_payment_check_router_always_the_right_one() {
+    init_tracing();
+    let _span = tracing::info_span!("node", node = "test").entered();
+    let (nodes, channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((1, 3), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((1, 4), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((1, 5), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+        ],
+        6,
+    )
+    .await;
+
+    let channel1_funding_tx = nodes[0].get_channel_funding_tx(&channels[0]).unwrap();
+    let channel1_outpoint = OutPoint::new(channel1_funding_tx.into(), 0);
+    let channel2_funding_tx = nodes[1].get_channel_funding_tx(&channels[1]).unwrap();
+    let channel2_outpoint = OutPoint::new(channel2_funding_tx.into(), 0);
+
+    let check_router = |router: &SessionRoute| {
+        assert_eq!(router.nodes[0].channel_outpoint, channel1_outpoint);
+        assert_eq!(router.nodes[1].channel_outpoint, channel2_outpoint);
+    };
+
+    for _i in 0..5 {
+        let res = nodes[0]
+            .send_payment_keysend(&nodes[2], 100, false)
+            .await
+            .unwrap();
+        check_router(&res.router);
+    }
+
+    let res = nodes[0]
+        .send_payment_keysend(&nodes[2], 100, false)
+        .await
+        .unwrap();
+    check_router(&res.router);
+}
+
+#[tokio::test]
+async fn test_send_payment_with_reverse_channel_of_capaicity_not_enough() {
+    init_tracing();
+    let _span = tracing::info_span!("node", node = "test").entered();
+    let (nodes, channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (13900000000 + MIN_RESERVED_CKB, MIN_RESERVED_CKB)),
+            ((1, 2), (14000000000 + MIN_RESERVED_CKB, MIN_RESERVED_CKB)),
+            ((2, 1), (14100000000 + MIN_RESERVED_CKB, MIN_RESERVED_CKB)),
+        ],
+        3,
+    )
+    .await;
+
+    let node0_actor_state = nodes[0].get_channel_actor_state(channels[0]);
+    eprintln!(
+        "node_0: {:?} {:?}",
+        node0_actor_state.to_local_amount, node0_actor_state.to_remote_amount
+    );
+
+    let node1_actor_state = nodes[1].get_channel_actor_state(channels[0]);
+    eprintln!(
+        "node_1: {:?} {:?}",
+        node1_actor_state.to_local_amount, node1_actor_state.to_remote_amount
+    );
+
+    let mut payments = HashSet::new();
+    let mut statistic = HashMap::new();
+
+    let count = 5;
+    for _i in 0..count {
+        let payment = nodes[0].send_payment_keysend(&nodes[2], 1, false).await;
+        let payment_hash = payment.unwrap().payment_hash;
+        payments.insert(payment_hash);
+    }
+
+    for payment_hash in payments.iter() {
+        nodes[0].wait_until_success(*payment_hash).await;
+        let session = nodes[0].get_payment_session(*payment_hash).unwrap();
+        statistic
+            .entry(session.retried_times)
+            .and_modify(|e| *e += 1)
+            .or_insert(1);
+    }
+
+    // assert only one payment session will try 2 times
+    eprintln!("result: {:?}", statistic);
+    assert_eq!(statistic[&2], 1);
+    assert_eq!(statistic[&1], count - 1);
 }

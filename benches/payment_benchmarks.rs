@@ -1,6 +1,6 @@
 #![cfg(feature = "bench")]
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use fnn::tests::{create_n_nodes_network, HUGE_CKB_AMOUNT};
+use fnn::{tests::create_n_nodes_network, MIN_RESERVED_CKB};
 use std::collections::{HashMap, HashSet};
 use tokio::runtime::Runtime;
 
@@ -11,7 +11,7 @@ fn bench_payment_path_finding(c: &mut Criterion) {
     // Create a benchmark group with minimal/no warmup
     let mut group = c.benchmark_group("payment_path_finding");
 
-    for num_channels in [1, 2] {
+    for num_channels in [1, 2, 4, 8] {
         // Add throughput measurement based on the number of paths
         group.throughput(Throughput::Elements(num_channels as u64));
 
@@ -22,15 +22,16 @@ fn bench_payment_path_finding(c: &mut Criterion) {
                     let mut channel_configs = Vec::new();
 
                     for _ in 0..num_channels {
-                        channel_configs.push(((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)));
-                        channel_configs.push(((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)));
+                        channel_configs
+                            .push(((0, 1), (13900000000 + MIN_RESERVED_CKB, MIN_RESERVED_CKB)));
+                        channel_configs
+                            .push(((1, 2), (14000000000 + MIN_RESERVED_CKB, MIN_RESERVED_CKB)));
                     }
-                    channel_configs.push(((1, 3), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)));
-                    channel_configs.push(((1, 4), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)));
-                    channel_configs.push(((1, 5), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)));
+                    channel_configs
+                        .push(((2, 1), (14100000000 + MIN_RESERVED_CKB, MIN_RESERVED_CKB)));
 
                     // Create the network
-                    let (nodes, _channels) = create_n_nodes_network(&channel_configs, 6).await;
+                    let (nodes, _channels) = create_n_nodes_network(&channel_configs, 3).await;
 
                     // Start timing
                     let start = std::time::Instant::now();
@@ -40,7 +41,7 @@ fn bench_payment_path_finding(c: &mut Criterion) {
                         let mut payments = HashSet::new();
                         let mut channel_stats_map = HashMap::new();
 
-                        for _i in 0..10 {
+                        for _i in 0..7 {
                             let payment_amount = 10;
                             let res = nodes[0]
                                 .send_payment_keysend(&nodes[2], payment_amount, false)
@@ -82,7 +83,7 @@ criterion_group! {
     name = benches;
     config = Criterion::default()
         .warm_up_time(std::time::Duration::from_millis(500))
-        .measurement_time(std::time::Duration::from_secs(140)) // Increased from default 5s to 25s
+        .measurement_time(std::time::Duration::from_secs(40)) // Increased from default 5s to 25s
         .sample_size(10);
     targets = bench_payment_path_finding
 }
