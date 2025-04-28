@@ -1,13 +1,19 @@
 #![allow(clippy::needless_range_loop)]
 use super::test_utils::init_tracing;
+use crate::fiber::channel::AddTlcCommand;
+use crate::fiber::channel::ChannelCommand;
+use crate::fiber::channel::ChannelCommandWithId;
 use crate::fiber::channel::ChannelState;
 use crate::fiber::channel::CloseFlags;
+use crate::fiber::channel::RemoveTlcCommand;
+use crate::fiber::channel::ShuttingDownFlags;
 use crate::fiber::channel::UpdateCommand;
 use crate::fiber::config::DEFAULT_TLC_EXPIRY_DELTA;
 use crate::fiber::config::DEFAULT_TLC_FEE_PROPORTIONAL_MILLIONTHS;
 use crate::fiber::config::MAX_PAYMENT_TLC_EXPIRY_LIMIT;
 use crate::fiber::config::MIN_TLC_EXPIRY_DELTA;
 use crate::fiber::graph::PaymentSessionStatus;
+use crate::fiber::hash_algorithm::HashAlgorithm;
 use crate::fiber::network::BuildRouterCommand;
 use crate::fiber::network::HopHint;
 use crate::fiber::network::HopRequire;
@@ -16,6 +22,9 @@ use crate::fiber::network::SendPaymentCommand;
 use crate::fiber::network::SendPaymentWithRouterCommand;
 use crate::fiber::tests::test_utils::*;
 use crate::fiber::types::Hash256;
+use crate::fiber::types::RemoveTlcFulfill;
+use crate::fiber::types::RemoveTlcReason;
+use crate::fiber::types::NO_SHARED_SECRET;
 use crate::fiber::NetworkActorCommand;
 use crate::fiber::NetworkActorMessage;
 use crate::gen_rand_fiber_public_key;
@@ -23,6 +32,7 @@ use crate::gen_rand_sha256_hash;
 use crate::invoice::CkbInvoice;
 use crate::invoice::Currency;
 use crate::invoice::InvoiceBuilder;
+use crate::now_timestamp_as_millis_u64;
 use crate::NetworkServiceEvent;
 use ckb_types::packed::Script;
 use ckb_types::{core::tx_pool::TxStatus, packed::OutPoint};
@@ -30,6 +40,7 @@ use ractor::call;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::time::SystemTime;
+use tracing::debug;
 use tracing::error;
 
 #[tokio::test]
@@ -3691,25 +3702,39 @@ async fn test_send_payment_shutdown_under_send_each_other() {
     .await;
 
     let mut all_sent = HashSet::new();
-    let mut node0_sent_payments = HashSet::new();
-    let mut node3_sent_payments = HashSet::new();
     for _i in 0..5 {
-        let res = nodes[0].send_payment_keysend(&nodes[3], 1000, false).await;
+        let rand_amount = 1 + (rand::random::<u64>() % 1000) as u128;
+        let res = nodes[0]
+            .send_payment_keysend(&nodes[3], rand_amount, false)
+            .await;
         if let Ok(send_payment_res) = res {
             all_sent.insert(send_payment_res.payment_hash);
-            node0_sent_payments.insert(send_payment_res.payment_hash);
         }
-        let res = nodes[3].send_payment_keysend(&nodes[0], 1000, false).await;
+        let rand_amount = 1 + (rand::random::<u64>() % 1000) as u128;
+        let res = nodes[3]
+            .send_payment_keysend(&nodes[0], rand_amount, false)
+            .await;
         if let Ok(send_payment_res) = res {
             all_sent.insert(send_payment_res.payment_hash);
-            node3_sent_payments.insert(send_payment_res.payment_hash);
         }
     }
 
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
-    let _ = nodes[3].send_shutdown(channels[2], false).await;
 
-    for i in 0..100 {
+    for _i in 0..20 {
+        let res = nodes[3].send_shutdown(channels[2], false).await;
+        if res.is_ok() {
+            debug!("send shutdown successfully");
+            break;
+        }
+        debug!("shutdown res: {:?}", res);
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    }
+
+    for i in 0..10 {
+        assert!(nodes[2].get_triggered_unexpected_events().await.is_empty());
+        assert!(nodes[3].get_triggered_unexpected_events().await.is_empty());
+
         let node_2_channel_actor_state = nodes[2].get_channel_actor_state(channels[2]);
         eprintln!(
             "checking {}: node_2_channel_actor_state: {:?} tlc_pending:\n",
@@ -3741,6 +3766,166 @@ async fn test_send_payment_shutdown_under_send_each_other() {
     let node_2_channel_actor_state = nodes[2].get_channel_actor_state(channels[2]);
     assert_eq!(
         node_2_channel_actor_state.state,
+        ChannelState::Closed(CloseFlags::COOPERATIVE)
+    );
+}
+
+async fn run_shutdown_with_payment_send(sender: usize, receiver: usize) {
+    init_tracing();
+    let _span = tracing::info_span!("node", node = "test").entered();
+    let (nodes, channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+        ],
+        3,
+    )
+    .await;
+
+    let mut node0_sent_payments = HashSet::new();
+    for _i in 0..5 {
+        let rand_amount = 1 + (rand::random::<u64>() % 1000) as u128;
+        let res = nodes[sender]
+            .send_payment_keysend(&nodes[receiver], rand_amount, false)
+            .await;
+        if let Ok(send_payment_res) = res {
+            node0_sent_payments.insert(send_payment_res.payment_hash);
+        }
+    }
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+    let _ = nodes[2].send_shutdown(channels[1], false).await;
+
+    // there will be no pending tlcs
+    for i in 0..10 {
+        assert!(nodes[1].get_triggered_unexpected_events().await.is_empty());
+        assert!(nodes[2].get_triggered_unexpected_events().await.is_empty());
+
+        let node_1_channel_actor_state = nodes[1].get_channel_actor_state(channels[1]);
+        eprintln!(
+            "checking {}: node_1_channel_actor_state: {:?} tlc_pending:\n",
+            i, node_1_channel_actor_state.state,
+        );
+        node_1_channel_actor_state.tlc_state.debug();
+
+        let node_2_channel_actor_state = nodes[2].get_channel_actor_state(channels[1]);
+        eprintln!(
+            "checking { }: node_2_channel_actor_state: {:?} tlc_pending:\n",
+            i, node_2_channel_actor_state.state,
+        );
+        node_2_channel_actor_state.tlc_state.debug();
+        tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+        if !node_1_channel_actor_state.any_tlc_pending()
+            && !node_2_channel_actor_state.any_tlc_pending()
+        {
+            break;
+        }
+    }
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+    let node_1_channel_actor_state = nodes[1].get_channel_actor_state(channels[1]);
+    error!("node_1 state: {:?}", node_1_channel_actor_state.state);
+    assert_eq!(
+        node_1_channel_actor_state.state,
+        ChannelState::Closed(CloseFlags::COOPERATIVE)
+    );
+    let node_2_channel_actor_state = nodes[2].get_channel_actor_state(channels[1]);
+    error!("node_2 state: {:?}", node_2_channel_actor_state.state);
+    assert_eq!(
+        node_2_channel_actor_state.state,
+        ChannelState::Closed(CloseFlags::COOPERATIVE)
+    );
+}
+
+#[tokio::test]
+async fn test_send_payment_shutdown_under_single_direction_send() {
+    run_shutdown_with_payment_send(1, 2).await;
+}
+
+#[tokio::test]
+async fn test_shutdown_with_pending_tlc() {
+    init_tracing();
+
+    let (nodes, channels) =
+        create_n_nodes_network(&[((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT))], 2).await;
+
+    // create a new payment hash
+    let preimage: [u8; 32] = gen_rand_sha256_hash().as_ref().try_into().unwrap();
+
+    let hash_algorithm = HashAlgorithm::Sha256;
+    let digest = hash_algorithm.hash(preimage);
+    let add_tlc_result = call!(nodes[0].network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id: channels[0],
+                command: ChannelCommand::AddTlc(
+                    AddTlcCommand {
+                        amount: 1000,
+                        hash_algorithm,
+                        payment_hash: digest.into(),
+                        expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+                        onion_packet: None,
+                        shared_secret: NO_SHARED_SECRET,
+                        previous_tlc: None,
+                    },
+                    rpc_reply,
+                ),
+            },
+        ))
+    })
+    .expect("node alive");
+    assert!(add_tlc_result.is_ok());
+    let res = nodes[0].send_shutdown(channels[0], false).await;
+    assert!(res.is_err());
+
+    let res = nodes[1].send_shutdown(channels[0], false).await;
+    assert!(res.is_ok());
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+    let node_0_channel_actor_state = nodes[0].get_channel_actor_state(channels[0]);
+    assert!(node_0_channel_actor_state.any_tlc_pending());
+
+    assert!(matches!(
+        node_0_channel_actor_state.state,
+        ChannelState::ShuttingDown(ShuttingDownFlags::AWAITING_PENDING_TLCS)
+    ));
+    let node_1_channel_actor_state = nodes[1].get_channel_actor_state(channels[0]);
+    assert!(node_1_channel_actor_state.any_tlc_pending());
+    assert!(matches!(
+        node_1_channel_actor_state.state,
+        ChannelState::ShuttingDown(ShuttingDownFlags::AWAITING_PENDING_TLCS)
+    ));
+
+    let remove_tlc_result = call!(nodes[1].network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id: channels[0],
+                command: ChannelCommand::RemoveTlc(
+                    RemoveTlcCommand {
+                        id: add_tlc_result.unwrap().tlc_id,
+                        reason: RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+                            payment_preimage: preimage.into(),
+                        }),
+                    },
+                    rpc_reply,
+                ),
+            },
+        ))
+    })
+    .expect("node_b alive");
+    assert!(remove_tlc_result.is_ok());
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+    let node_0_channel_actor_state = nodes[0].get_channel_actor_state(channels[0]);
+    assert_eq!(
+        node_0_channel_actor_state.state,
+        ChannelState::Closed(CloseFlags::COOPERATIVE)
+    );
+    let node_1_channel_actor_state = nodes[1].get_channel_actor_state(channels[0]);
+    assert_eq!(
+        node_1_channel_actor_state.state,
         ChannelState::Closed(CloseFlags::COOPERATIVE)
     );
 }

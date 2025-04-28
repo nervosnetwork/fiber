@@ -1095,6 +1095,19 @@ pub struct AddTlc {
     pub onion_packet: Option<PaymentOnionPacket>,
 }
 
+impl Debug for AddTlc {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AddTlc")
+            .field("channel_id", &self.channel_id)
+            .field("tlc_id", &self.tlc_id)
+            .field("amount", &self.amount)
+            .field("payment_hash", &self.payment_hash)
+            .field("expiry", &self.expiry)
+            .field("hash_algorithm", &self.hash_algorithm)
+            .finish()
+    }
+}
+
 impl From<AddTlc> for molecule_fiber::AddTlc {
     fn from(add_tlc: AddTlc) -> Self {
         molecule_fiber::AddTlc::new_builder()
@@ -1112,19 +1125,6 @@ impl From<AddTlc> for molecule_fiber::AddTlc {
                     .pack(),
             )
             .build()
-    }
-}
-
-impl Debug for AddTlc {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AddTlc")
-            .field("channel_id", &self.channel_id)
-            .field("tlc_id", &self.tlc_id)
-            .field("amount", &self.amount)
-            .field("payment_hash", &self.payment_hash)
-            .field("expiry", &self.expiry)
-            .field("hash_algorithm", &self.hash_algorithm)
-            .finish()
     }
 }
 
