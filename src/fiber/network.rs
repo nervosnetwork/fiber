@@ -393,7 +393,8 @@ pub struct PaymentCustomRecords {
     pub data: HashMap<u32, Vec<u8>>,
 }
 
-/// A hop hint is a hint for a node to use a specific channel.
+/// A hop hint is a hint for a node to use a specific channel,
+/// will usually used for the last hop to the target node.
 #[serde_as]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HopHint {
