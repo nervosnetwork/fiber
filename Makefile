@@ -60,15 +60,15 @@ gen-rpc-doc:
         echo "Installing fiber-rpc-gen $(RPC_GEN_VERSION)..."; \
         cargo install fiber-rpc-gen --version $(RPC_GEN_VERSION) --force; \
 	fi
-	fiber-rpc-gen ./fiber-lib/src/
-	if grep -q "TODO: add desc" ./fiber-lib/src/rpc/README.md; then \
+	fiber-rpc-gen ./crates/fiber-lib/src/
+	if grep -q "TODO: add desc" ./crates/fiber-lib/src/rpc/README.md; then \
         echo "Warning: There are 'TODO: add desc' in src/rpc/README.md, please add documentation comments to resolve them"; \
 		exit 1; \
     fi
 
 .PHONY: check-dirty-rpc-doc
 check-dirty-rpc-doc: gen-rpc-doc
-	git diff --exit-code ./fiber-lib/src/rpc/README.md
+	git diff --exit-code ./crates/fiber-lib/src/rpc/README.md
 
 MIGRATION_CHECK_VERSION := 0.2.4
 install-migration-check:
@@ -79,9 +79,9 @@ install-migration-check:
 
 .PHONY: check-migrate
 check-migrate: install-migration-check
-	migration-check -s ./fiber-lib/src -o ./fiber-lib/src/store/.schema.json
+	migration-check -s ./crates/fiber-lib/src -o ./crates/fiber-lib/src/store/.schema.json
 
 .PHONY: update-migrate-check
 update-migrate-check: install-migration-check
-	migration-check -s ./fiber-lib/src -o ./fiber-lib/src/store/.schema.json -u
+	migration-check -s ./crates/fiber-lib/src -o ./crates/fiber-lib/src/store/.schema.json -u
 
