@@ -1146,12 +1146,12 @@ where
             incoming_tlc_expiry: expiry,
         });
 
-        while let Some(cur_hop) = nodes_heap.pop() {
+        'outer: while let Some(cur_hop) = nodes_heap.pop() {
             nodes_visited += 1;
 
             for (from, to, channel_info, channel_update) in self.get_node_inbounds(cur_hop.node_id)
             {
-                let is_initial = from == source;
+                let is_source = from == source;
 
                 assert_eq!(to, cur_hop.node_id);
                 if &udt_type_script != channel_info.udt_type_script() {
@@ -1167,7 +1167,7 @@ where
                 edges_expanded += 1;
 
                 let next_hop_received_amount = cur_hop.amount_to_send;
-                let fee = if is_initial {
+                let fee = if is_source {
                     0
                 } else {
                     calculate_tlc_forward_fee(
@@ -1182,7 +1182,7 @@ where
                     })?
                 };
                 let amount_to_send = next_hop_received_amount + fee;
-                let expiry_delta = if is_initial {
+                let expiry_delta = if is_source {
                     0
                 } else {
                     channel_update.tlc_expiry_delta
@@ -1225,6 +1225,9 @@ where
                     &mut distances,
                     &mut nodes_heap,
                 );
+                if is_source {
+                    break 'outer;
+                }
             }
         }
 
