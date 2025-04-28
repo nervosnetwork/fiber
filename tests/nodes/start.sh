@@ -43,19 +43,19 @@ start() {
 
 if [ "$#" -ne 1 ]; then
     if [[ -n "$should_start_bootnode" ]]; then
-        LOG_PREFIX=$'[boot node]' start -d bootnode &
+        FIBER_SECRET_KEY_PASSWORD='password0' LOG_PREFIX=$'[boot node]' start -d bootnode &
         # sleep some time to ensure bootnode started
         # while other nodes try to connect to it.
         sleep 5
         # export the environment variable so that other nodes can connect to the bootnode.
         export FIBER_BOOTNODE_ADDRS=/ip4/127.0.0.1/tcp/8343/p2p/Qmbyc4rhwEwxxSQXd5B4Ej4XkKZL6XLipa3iJrnPL9cjGR
     fi
-    LOG_PREFIX=$'[node 1]' start -d 1 &
-    LOG_PREFIX=$'[node 2]' start -d 2 &
-    LOG_PREFIX=$'[node 3]' start -d 3 &
+    FIBER_SECRET_KEY_PASSWORD='password1' LOG_PREFIX=$'[node 1]' start -d 1 &
+    FIBER_SECRET_KEY_PASSWORD='password2' LOG_PREFIX=$'[node 2]' start -d 2 &
+    FIBER_SECRET_KEY_PASSWORD='password3' LOG_PREFIX=$'[node 3]' start -d 3 &
 else
     for id in "$@"; do
-        LOG_PREFIX="[$id]"$'' start -d "$id" &
+        FIBER_SECRET_KEY_PASSWORD="password$id" LOG_PREFIX="[$id]"$'' start -d "$id" &
     done
 fi
 

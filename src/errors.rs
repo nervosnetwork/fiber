@@ -59,6 +59,8 @@ pub enum Error {
     InternalError(anyhow::Error),
     #[error("Invalid chain hash: {0} (expecting {1})")]
     InvalidChainHash(Hash256, Hash256),
+    #[error("Secret key file error: {0}")]
+    SecretKeyFileError(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
