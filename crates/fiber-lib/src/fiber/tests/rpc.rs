@@ -15,10 +15,26 @@ use crate::{
 
 #[tokio::test]
 async fn test_rpc_basic() {
-    let (nodes, _channels) = create_n_nodes_network_with_rpc_option(
+    let (nodes, _channels) = create_n_nodes_network_with_params(
         &[
-            ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
-            ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+            (
+                (0, 1),
+                ChannelParameters {
+                    public: true,
+                    node_a_funding_amount: MIN_RESERVED_CKB + 10000000000,
+                    node_b_funding_amount: MIN_RESERVED_CKB,
+                    ..Default::default()
+                },
+            ),
+            (
+                (0, 1),
+                ChannelParameters {
+                    public: true,
+                    node_a_funding_amount: MIN_RESERVED_CKB + 10000000000,
+                    node_b_funding_amount: MIN_RESERVED_CKB,
+                    ..Default::default()
+                },
+            ),
         ],
         2,
         true,
@@ -88,10 +104,26 @@ async fn test_rpc_basic() {
 
 #[tokio::test]
 async fn test_rpc_list_peers() {
-    let (nodes, _channels) = create_n_nodes_network_with_rpc_option(
+    let (nodes, _channels) = create_n_nodes_network_with_params(
         &[
-            ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
-            ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+            (
+                (0, 1),
+                ChannelParameters {
+                    public: true,
+                    node_a_funding_amount: MIN_RESERVED_CKB + 10000000000,
+                    node_b_funding_amount: MIN_RESERVED_CKB,
+                    ..Default::default()
+                },
+            ),
+            (
+                (0, 1),
+                ChannelParameters {
+                    public: true,
+                    node_a_funding_amount: MIN_RESERVED_CKB + 10000000000,
+                    node_b_funding_amount: MIN_RESERVED_CKB,
+                    ..Default::default()
+                },
+            ),
         ],
         2,
         true,

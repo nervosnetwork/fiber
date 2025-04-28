@@ -113,8 +113,6 @@ fn main() {
         "    pub const LATEST_DB_VERSION: &str = \"{}\";\n",
         latest_db_version
     ));
-    eprintln!("latest_db_version: {}", latest_db_version);
-    eprintln!("dest_path: {:?}", dest_path);
     fs::write(dest_path, code).unwrap();
 
     let files_stdout = std::process::Command::new("git")
