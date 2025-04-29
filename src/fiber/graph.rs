@@ -1146,8 +1146,12 @@ where
             incoming_tlc_expiry: expiry,
         });
 
-        'outer: while let Some(cur_hop) = nodes_heap.pop() {
+        while let Some(cur_hop) = nodes_heap.pop() {
             nodes_visited += 1;
+
+            if cur_hop.node_id == source {
+                break;
+            }
 
             for (from, to, channel_info, channel_update) in self.get_node_inbounds(cur_hop.node_id)
             {
@@ -1225,9 +1229,6 @@ where
                     &mut distances,
                     &mut nodes_heap,
                 );
-                if is_source {
-                    break 'outer;
-                }
             }
         }
 
@@ -1355,14 +1356,6 @@ where
         let time_lock_penalty = (amount as f64
             * (risk_factor * (htlc_expiry_delta as f64 / DEFAULT_TLC_EXPIRY_DELTA as f64)))
             as u128;
-        debug!(
-            "amount: {:?} fee: {:?} htlc_expiry_delta: {:?} time_lock_penalty: {:?}, return: {:?}",
-            amount,
-            fee,
-            htlc_expiry_delta,
-            time_lock_penalty,
-            fee + time_lock_penalty
-        );
         fee + time_lock_penalty
     }
 

@@ -4438,3 +4438,47 @@ async fn test_send_payment_with_mixed_channel_hops() {
     let payment_session = node0.get_payment_session(payment_hash).unwrap();
     assert_eq!(payment_session.retried_times, 1);
 }
+
+#[tokio::test]
+async fn test_send_payment_with_first_channel_retry_will_be_ok() {
+    init_tracing();
+    let _span = tracing::info_span!("node", node = "test").entered();
+    let (nodes, channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((0, 1), (HUGE_CKB_AMOUNT + 500, HUGE_CKB_AMOUNT)),
+            ((0, 1), (HUGE_CKB_AMOUNT + 1000, HUGE_CKB_AMOUNT)), // multiple node0 -> node1 channels
+            ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+        ],
+        3,
+    )
+    .await;
+    let [node0, _node1, node2] = nodes.try_into().expect("3 nodes");
+
+    // disable channels[2], which will be the first time choice of send_payment
+    node0.disable_channel_stealthy(channels[2]).await;
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+    let payment = node0
+        .send_payment_keysend(&node2, 1000, false)
+        .await
+        .unwrap();
+    node0
+        .expect_router_used_channel(&payment, channels[2])
+        .await;
+    eprintln!("payment: {:?}", payment);
+    node0.wait_until_success(payment.payment_hash).await;
+    let payment_session = node0.get_payment_session(payment.payment_hash).unwrap();
+    for i in 0..=2 {
+        let channel_outpoint = node0.get_channel_outpoint(&channels[i]);
+        eprintln!("i channel_outpoint: {:?}", channel_outpoint);
+    }
+    eprintln!("payment_session router: {:?}", payment_session);
+
+    // node0 will succeeded with another channel
+    node0
+        .expect_payment_used_channel(payment.payment_hash, channels[1])
+        .await;
+    assert_eq!(payment_session.retried_times, 2);
+}
