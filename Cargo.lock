@@ -381,28 +381,6 @@ dependencies = [
 
 [[package]]
 name = "bindgen"
-version = "0.64.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c4243e6031260db77ede97ad86c27e501d646a27ab57b59a574f725d98ab1fb4"
-dependencies = [
- "bitflags 1.3.2",
- "cexpr",
- "clang-sys",
- "lazy_static",
- "lazycell",
- "log",
- "peeking_take_while",
- "proc-macro2",
- "quote",
- "regex",
- "rustc-hash",
- "shlex",
- "syn 1.0.109",
- "which",
-]
-
-[[package]]
-name = "bindgen"
 version = "0.68.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "726e4313eb6ec35d2730258ad4e15b547ee75d6afaa1361a922e78e59b7d8078"
@@ -516,9 +494,9 @@ checksum = "294d17c72e0ba59fad763caa112368d0672083779cdebbb97164f4bb4c1e339a"
 [[package]]
 name = "blake2b-rs"
 version = "0.2.0"
-source = "git+https://github.com/Officeyutong/blake2b-rs?rev=f018d62#f018d62cde03b1c2b8b7c7946545e653521cb674"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a89a8565807f21b913288968e391819e7f9b2f0f46c7b89549c051cccf3a2771"
 dependencies = [
- "bindgen 0.64.0",
  "cc",
  "cty",
 ]
@@ -899,7 +877,7 @@ version = "8.5.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2e68e0993f54ba0d21152419a0668caa92adc928b5a9b01e45871ec055a31ce2"
 dependencies = [
- "bindgen 0.68.1",
+ "bindgen",
  "cc",
  "glob",
  "libc",
