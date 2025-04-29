@@ -1346,9 +1346,23 @@ where
         true
     }
 
+    // Larger fee and htlc_expiry_delta makes edge_weight large,
+    // which reduce the probability of choosing this edge,
     fn edge_weight(&self, amount: u128, fee: u128, htlc_expiry_delta: u64) -> u128 {
-        let risk_factor: u128 = 15;
-        let time_lock_penalty = amount * htlc_expiry_delta as u128 * (risk_factor / 1000000000);
+        // The factor is currently a fixed value, but might be configurable in the future,
+        // lock 1% of amount with default tlc expiry delta.
+        let risk_factor: f64 = 0.01;
+        let time_lock_penalty = (amount as f64
+            * (risk_factor * (htlc_expiry_delta as f64 / DEFAULT_TLC_EXPIRY_DELTA as f64)))
+            as u128;
+        debug!(
+            "amount: {:?} fee: {:?} htlc_expiry_delta: {:?} time_lock_penalty: {:?}, return: {:?}",
+            amount,
+            fee,
+            htlc_expiry_delta,
+            time_lock_penalty,
+            fee + time_lock_penalty
+        );
         fee + time_lock_penalty
     }
 
