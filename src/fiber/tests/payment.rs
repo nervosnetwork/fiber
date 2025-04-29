@@ -3688,6 +3688,128 @@ async fn test_send_payment_shutdown_cooperative() {
 }
 
 #[tokio::test]
+async fn test_send_payment_shutdown_cooperative_sender_sent() {
+    init_tracing();
+
+    let (nodes, channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((2, 3), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+        ],
+        4,
+    )
+    .await;
+
+    let old_node0_balance = nodes[0].get_local_balance_from_channel(channels[0]);
+    let old_node3_balance = nodes[3].get_local_balance_from_channel(channels[2]);
+
+    let mut all_sent = HashSet::new();
+    let tlc_amount = 1000;
+    for _i in 0..10 {
+        let res = nodes[0]
+            .send_payment_keysend(&nodes[3], tlc_amount, false)
+            .await;
+        if let Ok(send_payment_res) = res {
+            all_sent.insert(send_payment_res.payment_hash);
+        }
+    }
+
+    // sleep for a while to make sure some payments may Success
+    tokio::time::sleep(tokio::time::Duration::from_millis(4000)).await;
+
+    loop {
+        let res = nodes[2].send_shutdown(channels[2], false).await;
+        if res.is_ok() {
+            debug!("sent shutdown successfully");
+            break;
+        }
+    }
+
+    let mut failed_count = 0;
+    let mut succ_count = 0;
+    let all_tx_count = all_sent.len();
+    while !all_sent.is_empty() {
+        for payment_hash in all_sent.clone().iter() {
+            let res = nodes[0].get_payment_result(*payment_hash).await;
+            eprintln!(
+                "payment_hash: {:?} status: {:?} failed_count: {:?}",
+                payment_hash, res.status, failed_count
+            );
+            if res.status == PaymentSessionStatus::Failed {
+                failed_count += 1;
+                all_sent.remove(payment_hash);
+            } else if res.status == PaymentSessionStatus::Success {
+                succ_count += 1;
+                all_sent.remove(payment_hash);
+            }
+
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        }
+    }
+    debug!(
+        "all_count: {:?} failed_count: {:?} succ_count: {:?}",
+        all_tx_count, failed_count, succ_count
+    );
+
+    loop {
+        let node_3_channel_actor_state = nodes[3].get_channel_actor_state(channels[2]);
+        eprintln!(
+            "node_3_channel_actor_state: {:?}",
+            node_3_channel_actor_state.state
+        );
+        let node_2_channel_actor_state = nodes[2].get_channel_actor_state(channels[2]);
+        eprintln!(
+            "node_2_channel_actor_state: {:?}",
+            node_2_channel_actor_state.state
+        );
+        tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+        if !node_2_channel_actor_state.any_tlc_pending()
+            && !node_3_channel_actor_state.any_tlc_pending()
+        {
+            break;
+        }
+    }
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+    let node_3_channel_actor_state = nodes[3].get_channel_actor_state(channels[2]);
+    assert_eq!(
+        node_3_channel_actor_state.state,
+        ChannelState::Closed(CloseFlags::COOPERATIVE)
+    );
+    let node_2_channel_actor_state = nodes[2].get_channel_actor_state(channels[2]);
+    assert_eq!(
+        node_2_channel_actor_state.state,
+        ChannelState::Closed(CloseFlags::COOPERATIVE)
+    );
+
+    let new_node0_balance = nodes[0].get_local_balance_from_channel(channels[0]);
+    let new_node3_balance = nodes[3].get_local_balance_from_channel(channels[2]);
+    debug!(
+        "node0 send: {} - {} = {}",
+        old_node0_balance,
+        new_node0_balance,
+        old_node0_balance - new_node0_balance
+    );
+    debug!(
+        "node3 recv: {} + {} = {}",
+        old_node3_balance,
+        new_node3_balance - old_node3_balance,
+        new_node3_balance
+    );
+
+    assert_eq!(
+        old_node0_balance - new_node0_balance,
+        (tlc_amount + 3) * succ_count
+    );
+    assert_eq!(
+        new_node3_balance - old_node3_balance,
+        tlc_amount * succ_count
+    );
+}
+
+#[tokio::test]
 async fn test_send_payment_shutdown_under_send_each_other() {
     init_tracing();
 
@@ -3731,7 +3853,7 @@ async fn test_send_payment_shutdown_under_send_each_other() {
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
     }
 
-    for i in 0..10 {
+    for i in 0..30 {
         assert!(nodes[2].get_triggered_unexpected_events().await.is_empty());
         assert!(nodes[3].get_triggered_unexpected_events().await.is_empty());
 
