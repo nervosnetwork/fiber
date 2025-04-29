@@ -1274,7 +1274,7 @@ where
                     "Received commitment_signed command in ShuttingDown state: {:?}",
                     flags
                 );
-                if !flags.contains(ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION) {
+                if flags.is_ok_for_commitment_operation() {
                     CommitmentSignedFlags::PendingShutdown()
                 } else {
                     return Err(ProcessingChannelError::InvalidState(format!(
@@ -3745,6 +3745,13 @@ bitflags! {
     }
 }
 
+impl ShuttingDownFlags {
+    fn is_ok_for_commitment_operation(&self) -> bool {
+        !self.contains(ShuttingDownFlags::DROPPING_PENDING)
+            && !self.contains(ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION)
+    }
+}
+
 // Depending on the state of the channel, we may process the commitment_signed command differently.
 // Below are all the channel state flags variants that we may encounter
 // in normal commitment_signed processing flow.
@@ -6014,7 +6021,7 @@ impl ChannelActorState {
             }
             ChannelState::ChannelReady => CommitmentSignedFlags::ChannelReady(),
             ChannelState::ShuttingDown(flags) => {
-                if !flags.contains(ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION) {
+                if flags.is_ok_for_commitment_operation() {
                     debug!(
                         "Verify commitment_signed message while shutdown is pending, current state {:?}",
                         &self.state

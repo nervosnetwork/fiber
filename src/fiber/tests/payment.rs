@@ -3729,7 +3729,8 @@ async fn test_send_payment_shutdown_cooperative_sender_sent() {
     let mut failed_count = 0;
     let mut succ_count = 0;
     let all_tx_count = all_sent.len();
-    while !all_sent.is_empty() {
+    let mut count = 0;
+    while !all_sent.is_empty() && count < 100 {
         for payment_hash in all_sent.clone().iter() {
             let res = nodes[0].get_payment_result(*payment_hash).await;
             eprintln!(
@@ -3744,7 +3745,8 @@ async fn test_send_payment_shutdown_cooperative_sender_sent() {
                 all_sent.remove(payment_hash);
             }
 
-            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            count += 1;
+            tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
         }
     }
     debug!(
@@ -3752,7 +3754,7 @@ async fn test_send_payment_shutdown_cooperative_sender_sent() {
         all_tx_count, failed_count, succ_count
     );
 
-    loop {
+    for _i in 0..100 {
         let node_3_channel_actor_state = nodes[3].get_channel_actor_state(channels[2]);
         eprintln!(
             "node_3_channel_actor_state: {:?}",
