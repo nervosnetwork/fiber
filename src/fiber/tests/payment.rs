@@ -774,7 +774,7 @@ async fn test_send_payment_with_private_channel_hints_fallback() {
     .await;
     let [mut node1, mut node2, mut node3] = nodes.try_into().expect("3 nodes");
 
-    let (_new_channel_id, funding_tx_hash) = establish_channel_between_nodes(
+    let (_new_channel_id, _funding_tx_hash) = establish_channel_between_nodes(
         &mut node2,
         &mut node3,
         ChannelParameters {
@@ -785,12 +785,15 @@ async fn test_send_payment_with_private_channel_hints_fallback() {
         },
     )
     .await;
-    let funding_tx = node2
-        .get_transaction_view_from_hash(funding_tx_hash)
-        .await
-        .expect("get funding tx");
 
-    let outpoint = funding_tx.output_pts_iter().next().unwrap();
+    let outpoint = node2.get_channel_outpoint(&_new_channel_id).unwrap();
+    let channel1_outpoint = node1.get_channel_outpoint(&_channels[0]).unwrap();
+    let channel2_outpoint = node2.get_channel_outpoint(&_channels[1]).unwrap();
+
+    debug!("channel1 outpoint: {:?}", channel1_outpoint);
+    debug!("channel2 outpoint: {:?}", channel2_outpoint);
+    debug!("private_channel outpoint: {:?}", outpoint);
+
     // sleep for a while
     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 
@@ -819,9 +822,10 @@ async fn test_send_payment_with_private_channel_hints_fallback() {
     let payment_hash = res.payment_hash;
 
     // the actual capacity of private channel is not enough for this payment
-    source_node.wait_until_failed(payment_hash).await;
+    // will first use the private channel, then send payment retry will fallback to public channel
+    source_node.wait_until_success(payment_hash).await;
     source_node
-        .assert_payment_status(payment_hash, PaymentSessionStatus::Failed, Some(5))
+        .assert_payment_status(payment_hash, PaymentSessionStatus::Success, Some(2))
         .await;
 }
 
@@ -941,12 +945,13 @@ async fn test_send_payment_with_private_multiple_channel_hints_fallback() {
             ]),
             ..Default::default()
         })
-        .await;
+        .await
+        .unwrap();
 
-    assert!(res.is_ok(), "Send payment failed: {:?}", res);
-    let res = res.unwrap();
     let payment_hash = res.payment_hash;
-    source_node.wait_until_failed(payment_hash).await;
+    source_node.wait_until_success(payment_hash).await;
+    let payment_session = source_node.get_payment_session(payment_hash).unwrap();
+    assert_eq!(payment_session.retried_times, 2);
 }
 
 #[tokio::test]
