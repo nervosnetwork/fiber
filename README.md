@@ -54,12 +54,14 @@ mkdir ckb
 ckb-cli account export --lock-arg <lock_arg> --extended-privkey-path ./ckb/exported-key
 // ckb-cli exports master private key and chain code, FNN only needs the private key part
 head -n 1 ./ckb/exported-key > ./ckb/key
+// the exported key file can be deleted after the private key is extracted
+rm ./ckb/exported-key
 ```
 
-4. Start the node, by default it will output logs to the console, you may redirect it to a file:
+4. Start the node, by default it will output logs to the console, you may redirect it to a file. Before starting, you must set the `FIBER_SECRET_KEY_PASSWORD` environment variable to encrypt the wallet private key file (which was stored in plain text during the previous step). Additionally, you can configure logging verbosity with the `RUST_LOG` environment variable—use predefined levels like `info`, `debug`, or `trace`, or specify granular logging with patterns such as `info,fnn=debug` to enable debug logs only for the FNN module.
 
 ```
-RUST_LOG=info ./fnn -c config.yml -d .
+FIBER_SECRET_KEY_PASSWORD='YOUR_PASSWORD' RUST_LOG='info' ./fnn -c config.yml -d .
 ```
 
 ## Testnet compatibility issues

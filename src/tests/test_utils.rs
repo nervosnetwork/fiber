@@ -68,6 +68,7 @@ use tokio::{
     sync::{mpsc, OnceCell},
     time::sleep,
 };
+use tracing::debug;
 use tracing::error;
 use tracing::info;
 use tracing::warn;
@@ -346,40 +347,57 @@ impl NetworkNodeConfigBuilder {
     }
 }
 
+#[derive(Debug, Default, Clone)]
+pub(crate) struct ChannelParameters {
+    pub public: bool,
+    pub node_a_funding_amount: u128,
+    pub node_b_funding_amount: u128,
+    pub a_max_tlc_number_in_flight: Option<u64>,
+    pub a_max_tlc_value_in_flight: Option<u128>,
+    pub a_tlc_expiry_delta: Option<u64>,
+    pub a_tlc_min_value: Option<u128>,
+    pub a_tlc_fee_proportional_millionths: Option<u128>,
+    pub b_max_tlc_number_in_flight: Option<u64>,
+    pub b_max_tlc_value_in_flight: Option<u128>,
+    pub b_tlc_expiry_delta: Option<u64>,
+    pub b_tlc_min_value: Option<u128>,
+    pub b_tlc_fee_proportional_millionths: Option<u128>,
+    pub funding_udt_type_script: Option<Script>,
+}
+
+impl ChannelParameters {
+    pub fn new(node_a_funding_amount: u128, node_b_funding_amount: u128) -> Self {
+        Self {
+            public: true,
+            node_a_funding_amount,
+            node_b_funding_amount,
+            ..Default::default()
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn establish_channel_between_nodes(
     node_a: &mut NetworkNode,
     node_b: &mut NetworkNode,
-    public: bool,
-    node_a_funding_amount: u128,
-    node_b_funding_amount: u128,
-    a_max_tlc_number_in_flight: Option<u64>,
-    a_max_tlc_value_in_flight: Option<u128>,
-    a_tlc_expiry_delta: Option<u64>,
-    a_tlc_min_value: Option<u128>,
-    a_tlc_fee_proportional_millionths: Option<u128>,
-    b_max_tlc_number_in_flight: Option<u64>,
-    b_max_tlc_value_in_flight: Option<u128>,
-    b_tlc_expiry_delta: Option<u64>,
-    b_tlc_min_value: Option<u128>,
-    b_tlc_fee_proportional_millionths: Option<u128>,
+    params: ChannelParameters,
 ) -> (Hash256, Hash256) {
     let message = |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
             OpenChannelCommand {
                 peer_id: node_b.peer_id.clone(),
-                public,
+                public: params.public,
                 shutdown_script: None,
-                funding_amount: node_a_funding_amount,
-                funding_udt_type_script: None,
+                funding_amount: params.node_a_funding_amount,
+                funding_udt_type_script: params.funding_udt_type_script,
                 commitment_fee_rate: None,
                 commitment_delay_epoch: None,
                 funding_fee_rate: None,
-                tlc_expiry_delta: a_tlc_expiry_delta,
-                tlc_min_value: a_tlc_min_value,
-                tlc_fee_proportional_millionths: a_tlc_fee_proportional_millionths,
-                max_tlc_number_in_flight: a_max_tlc_number_in_flight,
-                max_tlc_value_in_flight: a_max_tlc_value_in_flight,
+                tlc_expiry_delta: params.a_tlc_expiry_delta,
+                tlc_min_value: params.a_tlc_min_value,
+                tlc_fee_proportional_millionths: params.a_tlc_fee_proportional_millionths,
+                max_tlc_number_in_flight: params.a_max_tlc_number_in_flight,
+                max_tlc_value_in_flight: params.a_max_tlc_value_in_flight,
             },
             rpc_reply,
         ))
@@ -391,24 +409,29 @@ pub(crate) async fn establish_channel_between_nodes(
     node_b
         .expect_event(|event| match event {
             NetworkServiceEvent::ChannelPendingToBeAccepted(peer_id, channel_id) => {
-                info!("A channel ({:?}) to {:?} create", &channel_id, peer_id);
+                debug!("A channel ({:?}) to {:?} create", &channel_id, peer_id);
                 assert_eq!(peer_id, &node_a.peer_id);
                 true
             }
             _ => false,
         })
         .await;
+
+    debug!(
+        "haha got ChannelPendingToBeAccepted: {:?}",
+        open_channel_result
+    );
     let message = |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::AcceptChannel(
             AcceptChannelCommand {
                 temp_channel_id: open_channel_result.channel_id,
-                funding_amount: node_b_funding_amount,
+                funding_amount: params.node_b_funding_amount,
                 shutdown_script: None,
-                max_tlc_number_in_flight: b_max_tlc_number_in_flight,
-                max_tlc_value_in_flight: b_max_tlc_value_in_flight,
-                min_tlc_value: b_tlc_min_value,
-                tlc_fee_proportional_millionths: b_tlc_fee_proportional_millionths,
-                tlc_expiry_delta: b_tlc_expiry_delta,
+                max_tlc_number_in_flight: params.b_max_tlc_number_in_flight,
+                max_tlc_value_in_flight: params.b_max_tlc_value_in_flight,
+                min_tlc_value: params.b_tlc_min_value,
+                tlc_fee_proportional_millionths: params.b_tlc_fee_proportional_millionths,
+                tlc_expiry_delta: params.b_tlc_expiry_delta,
             },
             rpc_reply,
         ))
@@ -421,7 +444,7 @@ pub(crate) async fn establish_channel_between_nodes(
     let funding_tx_outpoint = node_a
         .expect_to_process_event(|event| match event {
             NetworkServiceEvent::ChannelReady(peer_id, channel_id, funding_tx_outpoint) => {
-                info!(
+                debug!(
                     "A channel ({:?}) to {:?} is now ready",
                     &channel_id, &peer_id
                 );
@@ -436,7 +459,7 @@ pub(crate) async fn establish_channel_between_nodes(
     node_b
         .expect_event(|event| match event {
             NetworkServiceEvent::ChannelReady(peer_id, channel_id, _funding_tx_hash) => {
-                info!(
+                debug!(
                     "A channel ({:?}) to {:?} is now ready",
                     &channel_id, &peer_id
                 );
@@ -466,19 +489,12 @@ pub(crate) async fn create_nodes_with_established_channel(
     let (channel_id, _funding_tx_hash) = establish_channel_between_nodes(
         &mut node_a,
         &mut node_b,
-        public,
-        node_a_funding_amount,
-        node_b_funding_amount,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
+        ChannelParameters {
+            public,
+            node_a_funding_amount,
+            node_b_funding_amount,
+            ..Default::default()
+        },
     )
     .await;
 
@@ -519,8 +535,8 @@ pub(crate) async fn create_n_nodes_with_established_channel(
 }
 
 #[allow(clippy::type_complexity)]
-pub(crate) async fn create_n_nodes_network_with_rpc_option(
-    amounts: &[((usize, usize), (u128, u128))],
+pub(crate) async fn create_n_nodes_network_with_params(
+    amounts: &[((usize, usize), ChannelParameters)],
     n: usize,
     enable_rpc: bool,
 ) -> (Vec<NetworkNode>, Vec<Hash256>) {
@@ -528,37 +544,21 @@ pub(crate) async fn create_n_nodes_network_with_rpc_option(
     let mut nodes = NetworkNode::new_interconnected_nodes(n, enable_rpc).await;
     let mut channels = vec![];
 
-    for &((i, j), (node_a_amount, node_b_amount)) in amounts.iter() {
+    for ((i, j), channel_params) in amounts.iter() {
         let (channel_id, funding_tx) = {
             let (node_a, node_b) = {
                 // avoid borrow nodes as mutable more than once
                 assert_ne!(i, j);
                 if i < j {
                     let (left, right) = nodes.split_at_mut(i + 1);
-                    (&mut left[i], &mut right[j - i - 1])
+                    (&mut left[*i], &mut right[j - i - 1])
                 } else {
                     let (left, right) = nodes.split_at_mut(j + 1);
-                    (&mut right[i - j - 1], &mut left[j])
+                    (&mut right[i - j - 1], &mut left[*j])
                 }
             };
-            let (channel_id, funding_tx_hash) = establish_channel_between_nodes(
-                node_a,
-                node_b,
-                true,
-                node_a_amount,
-                node_b_amount,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-            )
-            .await;
+            let (channel_id, funding_tx_hash) =
+                establish_channel_between_nodes(node_a, node_b, channel_params.clone()).await;
             let funding_tx = node_a
                 .get_transaction_view_from_hash(funding_tx_hash)
                 .await
@@ -601,7 +601,11 @@ pub async fn create_n_nodes_network(
     amounts: &[((usize, usize), (u128, u128))],
     n: usize,
 ) -> (Vec<NetworkNode>, Vec<Hash256>) {
-    create_n_nodes_network_with_rpc_option(amounts, n, false).await
+    let amounts = amounts
+        .iter()
+        .map(|((i, j), (a, b))| ((*i, *j), ChannelParameters::new(*a, *b)))
+        .collect::<Vec<_>>();
+    create_n_nodes_network_with_params(&amounts, n, false).await
 }
 
 impl NetworkNode {
@@ -680,6 +684,17 @@ impl NetworkNode {
         };
 
         call!(self.network_actor, message).expect("source_node alive")
+    }
+
+    pub async fn assert_send_payment_success(
+        &self,
+        command: SendPaymentCommand,
+    ) -> SendPaymentResponse {
+        let res = self.send_payment(command).await;
+        assert!(res.is_ok());
+        let res = res.unwrap();
+        self.wait_until_success(res.payment_hash).await;
+        res
     }
 
     pub async fn send_payment_with_router(
@@ -1329,19 +1344,12 @@ impl NetworkNode {
         let (channel_id, funding_tx_hash) = establish_channel_between_nodes(
             &mut node_a,
             &mut node_b,
-            public,
-            node_a_funding_amount,
-            node_b_funding_amount,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
+            ChannelParameters {
+                public,
+                node_a_funding_amount,
+                node_b_funding_amount,
+                ..Default::default()
+            },
         )
         .await;
         let funding_tx = node_a
@@ -1372,7 +1380,7 @@ impl NetworkNode {
 
     pub async fn connect_to_nonblocking(&mut self, other: &Self) {
         let peer_addr = other.listening_addrs[0].clone();
-        info!(
+        debug!(
             "Trying to connect to {:?} from {:?}",
             other.listening_addrs, &self.listening_addrs
         );
@@ -1403,9 +1411,9 @@ impl NetworkNode {
                     match event {
                         None => panic!("Event emitter unexpectedly stopped"),
                         Some(event) => {
-                            info!("Received event when waiting for specific event: {:?}", &event);
+                            debug!("Received event when waiting for specific event: {:?}", &event);
                             if let Some(r) = event_processor(&event) {
-                                info!("Event ({:?}) matching filter received, exiting waiting for event loop", &event);
+                                debug!("Event ({:?}) matching filter received, exiting waiting for event loop", &event);
                                 return r;
                             }
                         }
@@ -1443,6 +1451,11 @@ impl NetworkNode {
 
     pub fn get_channel_funding_tx(&self, channel_id: &Hash256) -> Option<Hash256> {
         self.channels_tx_map.get(channel_id).cloned()
+    }
+
+    pub fn get_channel_outpoint(&self, channel_id: &Hash256) -> Option<OutPoint> {
+        self.get_channel_funding_tx(channel_id)
+            .map(|funding_tx| OutPoint::new(funding_tx.into(), 0))
     }
 
     pub async fn trace_tx(&mut self, tx_hash: Hash256) -> TxStatus {

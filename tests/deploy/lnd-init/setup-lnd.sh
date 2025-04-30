@@ -9,6 +9,22 @@ ingrid_port=10009
 echo "=> bootstrap"
 echo "script_dir=$script_dir"
 
+check-required-binaries() {
+  local binaries=(
+    bitcoind
+    bitcoin-cli
+    lnd
+    lncli
+  )
+
+  for binary in "${binaries[@]}"; do
+    if ! command -v "$binary" &>/dev/null; then
+      echo "Error: $binary is not installed." >&2
+      exit 1
+    fi
+  done
+}
+
 kill-via-pid-file () {
   local pid="$(cat "$1" 2>/dev/null || true)"
   if [ -n "$pid" ]; then
@@ -99,6 +115,7 @@ setup-channels() {
   bitcoin-cli -conf="$bitcoind_conf" -generate 3 >/dev/null
 }
 
+check-required-binaries
 cleanup
 setup-bitcoind
 setup-lnd lnd-bob $bob_port

@@ -393,7 +393,8 @@ pub struct PaymentCustomRecords {
     pub data: HashMap<u32, Vec<u8>>,
 }
 
-/// A hop hint is a hint for a node to use a specific channel.
+/// A hop hint is a hint for a node to use a specific channel,
+/// will usually used for the last hop to the target node.
 #[serde_as]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HopHint {
@@ -1217,6 +1218,9 @@ where
                 for (_peer_id, channel_id, channel_state) in self.store.get_channel_states(None) {
                     if matches!(channel_state, ChannelState::ChannelReady) {
                         if let Some(actor_state) = self.store.get_channel_actor_state(&channel_id) {
+                            if actor_state.reestablishing {
+                                continue;
+                            }
                             for tlc in actor_state.tlc_state.received_tlcs.get_committed_tlcs() {
                                 if let Some(payment_preimage) =
                                     self.store.get_invoice_preimage(&tlc.payment_hash)
@@ -1905,6 +1909,10 @@ where
                 let err = format!(
                     "Failed to send onion packet with error {}",
                     error_detail.error_code_as_str()
+                );
+                debug!(
+                    "send onion packet failed: {:?} need_to_retry: {:?}",
+                    err, need_to_retry
                 );
                 if !need_to_retry {
                     // only update the payment session status when we don't need to retry

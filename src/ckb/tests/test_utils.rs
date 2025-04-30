@@ -1,13 +1,15 @@
 use anyhow::anyhow;
 use ckb_sdk::{tx_builder::TxBuilderError, RpcError};
 use ckb_testtool::context::Context;
+use ckb_types::bytes::BufMut;
 use ckb_types::{
     bytes::Bytes,
-    core::{tx_pool::TxStatus, DepType, TransactionView},
-    packed::{CellDep, CellOutput, OutPoint, Script},
+    core::{tx_pool::TxStatus, Capacity, DepType, TransactionView},
+    packed::{self, CellDep, CellOutput, OutPoint, Script},
     prelude::{Builder, Entity, Pack, PackVec, Unpack},
     H256,
 };
+use molecule::bytes::BytesMut;
 use once_cell::sync::{Lazy, OnceCell};
 use std::{collections::HashMap, sync::Arc, sync::RwLock};
 use tokio::sync::RwLock as TokioRwLock;
@@ -15,7 +17,7 @@ use tokio::sync::RwLock as TokioRwLock;
 use crate::{
     ckb::{
         actor::GetTxResponse,
-        config::UdtCfgInfos,
+        config::{UdtArgInfo, UdtCfgInfos, UdtScript},
         contracts::{get_cell_deps, Contract, ContractsContext, ContractsInfo, ScriptCellDep},
         CkbTxTracer, CkbTxTracingMask, CkbTxTracingResult, FundingError,
     },
@@ -169,10 +171,17 @@ impl MockContext {
             script_cell_deps.insert(contract, cell_deps);
         }
 
+        let mock_udt_infos = UdtCfgInfos(vec![UdtArgInfo {
+            name: "Mock UDT".to_string(),
+            script: UdtScript::default(),
+            auto_accept_amount: None,
+            cell_deps: vec![],
+        }]);
+
         let contracts = ContractsInfo {
             contract_default_scripts,
             script_cell_deps,
-            udt_whitelist: UdtCfgInfos::default(),
+            udt_whitelist: mock_udt_infos,
         };
         let contracts_context = ContractsContext {
             contracts,
@@ -373,6 +382,9 @@ impl Actor for MockChainActor {
                     .as_ref()
                     .map(|x| x.outputs())
                     .unwrap_or_default();
+
+                let mut ckb_amount = request.local_reserved_ckb_amount;
+
                 let mut capacity =
                     request.local_amount + (request.local_reserved_ckb_amount as u128);
                 if capacity > u64::MAX as u128 {
@@ -390,24 +402,39 @@ impl Actor for MockChainActor {
                                 );
                             return Ok(());
                         }
-                        let current_capacity: u64 = output.capacity().unpack();
-                        capacity += current_capacity as u128;
-                        if capacity > u64::MAX as u128 {
-                            let _ = reply_port.send(Err(FundingError::CkbTxBuilderError(
-                                TxBuilderError::Other(anyhow!("capacity overflow")),
-                            )));
-                            return Ok(());
-                        }
+                        ckb_amount = ckb_amount
+                            .checked_add(request.remote_reserved_ckb_amount)
+                            .expect("valid ckb amount");
 
-                        let mut outputs_builder = outputs.as_builder();
-                        outputs_builder.replace(
-                            0,
-                            output
-                                .as_builder()
-                                .capacity((capacity as u64).pack())
-                                .build(),
-                        );
-                        outputs_builder.build()
+                        if let Some(ref udt_script) = request.udt_type_script {
+                            let udt_output = packed::CellOutput::new_builder()
+                                .capacity(Capacity::shannons(ckb_amount).pack())
+                                .type_(Some(udt_script.clone()).pack())
+                                .build();
+
+                            let mut outputs_builder = outputs.as_builder();
+                            outputs_builder.replace(0, udt_output);
+                            outputs_builder.build()
+                        } else {
+                            let current_capacity: u64 = output.capacity().unpack();
+                            capacity += current_capacity as u128;
+                            if capacity > u64::MAX as u128 {
+                                let _ = reply_port.send(Err(FundingError::CkbTxBuilderError(
+                                    TxBuilderError::Other(anyhow!("capacity overflow")),
+                                )));
+                                return Ok(());
+                            }
+
+                            let mut outputs_builder = outputs.as_builder();
+                            outputs_builder.replace(
+                                0,
+                                output
+                                    .as_builder()
+                                    .capacity((capacity as u64).pack())
+                                    .build(),
+                            );
+                            outputs_builder.build()
+                        }
                     }
                     None => [CellOutput::new_builder()
                         .capacity(
@@ -419,14 +446,21 @@ impl Actor for MockChainActor {
                     .pack(),
                 };
 
-                let outputs_data = fulfilled_tx
-                    .as_ref()
-                    .map(|x| x.outputs_data())
-                    .unwrap_or_default();
-                let outputs_data = if outputs_data.is_empty() {
-                    [Default::default()].pack()
+                let outputs_data = if let Some(ref _udt_script) = request.udt_type_script {
+                    let udt_amount = request.local_amount + request.remote_amount;
+                    let mut data = BytesMut::with_capacity(16);
+                    data.put(&udt_amount.to_le_bytes()[..]);
+                    vec![data.freeze().pack()].pack()
                 } else {
-                    outputs_data
+                    let outputs_data = fulfilled_tx
+                        .as_ref()
+                        .map(|x| x.outputs_data())
+                        .unwrap_or_default();
+                    if outputs_data.is_empty() {
+                        [Default::default()].pack()
+                    } else {
+                        outputs_data
+                    }
                 };
 
                 let tx_builder = fulfilled_tx

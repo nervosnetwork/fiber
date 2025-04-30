@@ -220,7 +220,7 @@ impl MockNetworkGraph {
             FINAL_TLC_EXPIRY_DELTA_IN_TESTS,
             MAX_PAYMENT_TLC_EXPIRY_LIMIT,
             false,
-            vec![],
+            &[],
         )
     }
 
@@ -243,7 +243,7 @@ impl MockNetworkGraph {
             FINAL_TLC_EXPIRY_DELTA_IN_TESTS,
             MAX_PAYMENT_TLC_EXPIRY_LIMIT,
             false,
-            vec![],
+            &[],
         )
     }
 
@@ -692,7 +692,7 @@ fn test_graph_find_path_err() {
         FINAL_TLC_EXPIRY_DELTA_IN_TESTS,
         MAX_PAYMENT_TLC_EXPIRY_LIMIT,
         false,
-        vec![],
+        &[],
     );
     assert!(route.is_err());
 
@@ -705,7 +705,7 @@ fn test_graph_find_path_err() {
         FINAL_TLC_EXPIRY_DELTA_IN_TESTS,
         MAX_PAYMENT_TLC_EXPIRY_LIMIT,
         false,
-        vec![],
+        &[],
     );
     assert!(route.is_err());
 }
@@ -729,7 +729,7 @@ fn test_graph_find_path_node_order() {
         FINAL_TLC_EXPIRY_DELTA_IN_TESTS,
         MAX_PAYMENT_TLC_EXPIRY_LIMIT,
         false,
-        vec![],
+        &[],
     );
     assert!(route.is_ok());
     // check the order of nodes in router is node1 -> node2 -> node3
@@ -755,7 +755,7 @@ fn test_graph_build_route_with_expiry_limit() {
         FINAL_TLC_EXPIRY_DELTA_IN_TESTS,
         MAX_PAYMENT_TLC_EXPIRY_LIMIT,
         false,
-        vec![],
+        &[],
     );
     assert!(route.is_ok());
 
@@ -768,7 +768,7 @@ fn test_graph_build_route_with_expiry_limit() {
         FINAL_TLC_EXPIRY_DELTA_IN_TESTS,
         100,
         false,
-        vec![],
+        &[],
     );
     assert!(route.is_err());
 }

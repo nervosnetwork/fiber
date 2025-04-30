@@ -326,15 +326,15 @@ pub enum PathFindError {
     Other(String),
 }
 
-/// An edge along the payment path from the source to the target.
-/// This represents a TLC transfer from one node to another.
+/// A router hop information for a payment, a paymenter router is an array of RouterHop,
+/// a router hop generally implies hop `target` will receive `amount_received` with `channel_outpoint` of channel.
+/// Improper hop hint may make payment fail, for example the specified channel do not have enough capacity.
 #[serde_as]
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct RouterHop {
     /// The node that is sending the TLC to the next node.
     pub(crate) target: Pubkey,
-    /// The channel that is used to send the TLC to the next node.
-    /// If it's all zero bytes, it means this hop is payment receiver.
+    /// The channel of this hop used to receive TLC
     #[serde_as(as = "EntityHex")]
     pub(crate) channel_outpoint: OutPoint,
     /// The amount that the source node will transfer to the target node.
@@ -395,7 +395,9 @@ where
             return false;
         }
         debug!("Updating network graph with {} messages", messages.len());
+        debug!("Latest cursor: {:?}", self.latest_cursor);
         for message in messages {
+            debug!("Processing message: {:?}", &message);
             self.update_latest_cursor(message.cursor());
             if message.chain_hash() != get_chain_hash() {
                 tracing::warn!(
@@ -686,6 +688,25 @@ where
         self.channels.get(outpoint)
     }
 
+    fn get_outbound_channel_info_and_update(
+        &self,
+        outpoint: &OutPoint,
+        from: Pubkey,
+    ) -> (Option<&ChannelInfo>, Option<&ChannelUpdateInfo>) {
+        let channel_info = self.get_channel(outpoint);
+        if let Some(channel_info) = channel_info {
+            if channel_info.node1() == from {
+                (Some(channel_info), channel_info.update_of_node1.as_ref())
+            } else if channel_info.node2() == from {
+                (Some(channel_info), channel_info.update_of_node2.as_ref())
+            } else {
+                (None, None)
+            }
+        } else {
+            (None, None)
+        }
+    }
+
     pub fn get_channels_with_params(
         &self,
         limit: usize,
@@ -872,8 +893,8 @@ where
         let target = payment_data.target_pubkey;
         let amount = payment_data.amount;
         let final_tlc_expiry_delta = payment_data.final_tlc_expiry_delta;
-
         let allow_self_payment = payment_data.allow_self_payment;
+
         if source == target && !allow_self_payment {
             return Err(PathFindError::PathFind(
                 "allow_self_payment is not enable, can not pay to self".to_string(),
@@ -892,7 +913,7 @@ where
                 final_tlc_expiry_delta,
                 payment_data.tlc_expiry_limit,
                 allow_self_payment,
-                payment_data.hop_hints.clone(),
+                &payment_data.hop_hints,
             )?
         };
 
@@ -966,7 +987,7 @@ where
         // The source node of the edge.
         from: Pubkey,
         // The target node of the edge.
-        to: Pubkey,
+        target: Pubkey,
         // The amount that the source node will send to the target node.
         next_hop_received_amount: u128,
         // The amount that the source node will receive from forwarding `amount_to_send` to the target.
@@ -990,7 +1011,7 @@ where
         let mut probability = cur_probability
             * self.history.eval_probability(
                 from,
-                to,
+                target,
                 channel_outpoint,
                 next_hop_received_amount,
                 channel_capacity,
@@ -1008,7 +1029,7 @@ where
 
         debug!(
             "probability: {} for channel_outpoint: {:?} from: {:?} => to: {:?}",
-            probability, channel_outpoint, from, to
+            probability, channel_outpoint, from, target
         );
         if probability < DEFAULT_MIN_PROBABILITY {
             debug!("probability is too low: {:?}", probability);
@@ -1038,7 +1059,7 @@ where
             probability,
             pending_count,
             next_hop: Some(RouterHop {
-                target: to,
+                target,
                 channel_outpoint: channel_outpoint.clone(),
                 // Here we need to use the amount accumulated so far (i.e. with the fees in current hop)
                 // because the fee here is for the receiving node to forward the amount to the next node.
@@ -1067,14 +1088,13 @@ where
         final_tlc_expiry_delta: u64,
         tlc_expiry_limit: u64,
         allow_self: bool,
-        hop_hints: Vec<HopHint>,
+        hop_hints: &[HopHint],
     ) -> Result<Vec<RouterHop>, PathFindError> {
         let started_time = std::time::Instant::now();
         let nodes_len = self.nodes.len();
         let route_to_self = source == target;
 
         let mut result = vec![];
-
         let mut nodes_visited = 0;
         let mut edges_expanded = 0;
         let mut nodes_heap = NodeHeap::new(nodes_len);
@@ -1098,59 +1118,63 @@ where
         let mut last_edge = None;
 
         if route_to_self {
-            let (edge, new_target, e, f) = self.adjust_target_for_route_self(
-                &hop_hints,
+            let (edge, new_target, expiry_delta, fee) = self.adjust_target_for_route_self(
+                source,
                 amount,
                 final_tlc_expiry_delta,
-                source,
+                &udt_type_script,
+                tlc_expiry_limit,
             )?;
             target = new_target;
-            expiry += e;
-            amount += f;
+            expiry += expiry_delta;
+            amount += fee;
             last_edge = Some(edge);
         } else {
             // The calculation of probability and distance requires a capacity of the channel.
             // We don't know the capacity of the channels in the hop hints. We just assume that the capacity
-            // of these channels is sufficiently large. We will use 10 times the amount as the capacity.
-            // See also https://github.com/lightningnetwork/lnd/blob/506586a37e18446af6ce63723e44b2d849bd7fc1/routing/pathfind.go#L46-L49
-            let sufficiently_large_capacity = 10 * amount;
-            for hint in hop_hints {
-                let HopHint {
-                    pubkey: from,
-                    channel_outpoint,
-                    fee_rate,
-                    tlc_expiry_delta,
-                } = hint;
+            // of these channels is sufficiently large.
+            let sufficiently_large_capacity = u128::MAX;
+
+            // hop hint only referring to private channels for sender node,
+            // if we get public channel information for this hophint, we just ignore this hophint
+            let filtered_hints = hop_hints.iter().filter(|hint| {
+                match self.get_outbound_channel_info_and_update(&hint.channel_outpoint, hint.pubkey)
+                {
+                    (Some(channel_info), Some(channel_update)) => {
+                        channel_info.udt_type_script == udt_type_script && !channel_update.enabled
+                    }
+                    _ => true,
+                }
+            });
+
+            for hint in filtered_hints {
                 // Say we have a payment path A -- channel 1 --> B -- channel 2 --> C.
                 // For now, all the fees that B will receive are calculated based on the fee rate B sets in channel 1.
                 // We didn't use the outbound fees for B in channel 2 at all. This is different from lnd,
                 // which calculates both the inbound fees in channel 1 and the outbound fees in channel 2.
                 // For now, we set the fees to be 0. We may need to change this in the future.
-                match calculate_tlc_forward_fee(amount, fee_rate as u128) {
-                    Ok(fee) => {
-                        self.eval_and_update(
-                            &channel_outpoint,
-                            sufficiently_large_capacity,
-                            from,
-                            target,
-                            amount,
-                            fee,
-                            expiry,
-                            tlc_expiry_delta,
-                            1.0,
-                            0,
-                            0,
-                            &mut distances,
-                            &mut nodes_heap,
-                        );
-                    }
-                    Err(err) => {
-                        return Err(PathFindError::PathFind(format!(
+                let fee =
+                    calculate_tlc_forward_fee(amount, hint.fee_rate as u128).map_err(|err| {
+                        PathFindError::PathFind(format!(
                             "calculate_tlc_forward_fee error: {:?}",
                             err
-                        )));
-                    }
-                }
+                        ))
+                    })?;
+                self.eval_and_update(
+                    &hint.channel_outpoint,
+                    sufficiently_large_capacity,
+                    hint.pubkey,
+                    target,
+                    amount,
+                    fee,
+                    expiry,
+                    hint.tlc_expiry_delta,
+                    1.0,
+                    0,
+                    0,
+                    &mut distances,
+                    &mut nodes_heap,
+                );
             }
         }
         assert_ne!(source, target);
@@ -1208,12 +1232,20 @@ where
                     })?
                 };
                 let amount_to_send = next_hop_received_amount + fee;
-                if amount_to_send > channel_info.capacity() {
-                    debug!(
-                        "amount_to_send: {} > channel_info.capacity {}",
-                        amount_to_send,
-                        channel_info.capacity()
-                    );
+                let expiry_delta = if is_initial {
+                    0
+                } else {
+                    channel_update.tlc_expiry_delta
+                };
+
+                let incoming_tlc_expiry = cur_hop.incoming_tlc_expiry + expiry_delta;
+                if !self.check_channel_amount_and_expiry(
+                    amount_to_send,
+                    channel_info,
+                    channel_update,
+                    incoming_tlc_expiry,
+                    tlc_expiry_limit,
+                ) {
                     continue;
                 }
 
@@ -1227,33 +1259,6 @@ where
                         );
                         continue;
                     }
-                }
-                // check to make sure the current hop can send the amount
-                // if `tlc_maximum_value` equals 0, it means there is no limit
-                if amount_to_send > channel_info.capacity() {
-                    continue;
-                }
-                // We should use amount_to_send because that is the amount to be sent over the channel.
-                if amount_to_send < channel_update.tlc_minimum_value {
-                    continue;
-                }
-
-                // If we already know the balance of the channel, check if we can send the amount.
-                if let Some(balance) = channel_update.outbound_liquidity {
-                    if amount_to_send > balance {
-                        continue;
-                    }
-                }
-
-                let expiry_delta = if is_initial {
-                    0
-                } else {
-                    channel_update.tlc_expiry_delta
-                };
-
-                let incoming_tlc_expiry = cur_hop.incoming_tlc_expiry + expiry_delta;
-                if incoming_tlc_expiry > tlc_expiry_limit {
-                    continue;
                 }
 
                 self.eval_and_update(
@@ -1301,54 +1306,53 @@ where
         Ok(result)
     }
 
+    // to resolve the scenario of network with cycle, we use the original `source` node as target,
+    // trying to find a new target which has direct channel to `source` node, then the find_path
+    // algorithm can work well to assume the network don't contains a cycle.
+    // This may makes the result of find_path is not a global optimimized path.
     fn adjust_target_for_route_self(
         &self,
-        hop_hints: &[HopHint],
+        source: Pubkey,
         amount: u128,
         expiry: u64,
-        node: Pubkey,
+        udt_type_script: &Option<Script>,
+        tlc_expiry_limit: u64,
     ) -> Result<(RouterHop, Pubkey, u64, u128), PathFindError> {
-        let mut channels: Vec<(Pubkey, OutPoint, u64, u64)> = hop_hints
-            .iter()
-            .map(|hint| {
-                let pubkey = hint.pubkey;
-                let outpoint = hint.channel_outpoint.clone();
-                let expiry = hint.tlc_expiry_delta;
-                let fee_rate = hint.fee_rate;
-                (pubkey, outpoint, expiry, fee_rate)
+        let channels: Vec<_> = self
+            .get_node_inbounds(source)
+            .filter(|(_, _, channel_info, channel_update)| {
+                udt_type_script == channel_info.udt_type_script()
+                    && self.check_channel_amount_and_expiry(
+                        amount,
+                        channel_info,
+                        channel_update,
+                        channel_update.tlc_expiry_delta,
+                        tlc_expiry_limit,
+                    )
+            })
+            .map(|(from, _, channel_info, channel_update)| {
+                (
+                    from,
+                    channel_info.channel_outpoint.clone(),
+                    channel_update.tlc_expiry_delta,
+                    channel_update.fee_rate,
+                    channel_info,
+                    channel_update,
+                )
             })
             .collect();
-        for (from, _, channel_info, channel_update) in self.get_node_inbounds(node) {
-            if let Some(balance) = channel_update.outbound_liquidity {
-                if balance < amount {
-                    continue;
-                }
-            }
-            // normal code path will not reach here, we must can get balance for direct channels
-            // anyway, check the capacity here for safety
-            if channel_info.capacity() < amount {
-                continue;
-            }
-            channels.push((
-                from,
-                channel_info.out_point().clone(),
-                channel_update.tlc_expiry_delta,
-                channel_update.fee_rate,
-            ))
-        }
 
-        // a proper hop hint for route self will limit the direct_channels to only one
         // if there are multiple channels, we will randomly select a channel from the source node for route to self
-        // so that the following part of algorithm will always trying to find a path without cycle
-        if let Some((from, outpoint, tlc_expiry_delta, fee_rate)) =
+        // so that the following part of algorithm will always trying to find a path without a cycle in network graph
+        if let Some((from, outpoint, tlc_expiry_delta, fee_rate, ..)) =
             channels.choose(&mut thread_rng())
         {
-            assert_ne!(node, *from);
+            assert_ne!(source, *from);
             let fee = calculate_tlc_forward_fee(amount, *fee_rate as u128).map_err(|err| {
                 PathFindError::PathFind(format!("calculate_tlc_forward_fee error: {:?}", err))
             })?;
             let last_edge = RouterHop {
-                target: node,
+                target: source,
                 channel_outpoint: outpoint.clone(),
                 amount_received: amount,
                 incoming_tlc_expiry: expiry,
@@ -1359,6 +1363,35 @@ where
                 "no direct channel found for source node".to_string(),
             ));
         }
+    }
+
+    fn check_channel_amount_and_expiry(
+        &self,
+        amount: u128,
+        channel_info: &ChannelInfo,
+        channel_update: &ChannelUpdateInfo,
+        incoming_tlc_expiry: u64,
+        tlc_expiry_limit: u64,
+    ) -> bool {
+        if amount > channel_info.capacity() {
+            return false;
+        }
+        // We should use amount_to_send because that is the amount to be sent over the channel.
+        if amount < channel_update.tlc_minimum_value {
+            return false;
+        }
+
+        // If we already know the balance of the channel, check if we can send the amount.
+        if let Some(balance) = channel_update.outbound_liquidity {
+            if amount > balance {
+                return false;
+            }
+        }
+
+        if incoming_tlc_expiry > tlc_expiry_limit {
+            return false;
+        }
+        true
     }
 
     fn edge_weight(&self, amount: u128, fee: u128, htlc_expiry_delta: u64) -> u128 {
