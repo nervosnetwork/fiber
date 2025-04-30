@@ -596,7 +596,8 @@ where
                     "Saving new channel update to the graph: {:?}",
                     &channel_update
                 );
-                *update_info = Some(ChannelUpdateInfo::from(channel_update));
+                *update_info = Some(ChannelUpdateInfo::from(&channel_update));
+                self.history.process_channel_update(&channel_update);
                 return Some(cursor);
             }
         }
@@ -986,7 +987,7 @@ where
         // The priority queue of nodes to be visited (sorted by distance and probability).
         nodes_heap: &mut NodeHeap,
     ) {
-        let probability = cur_probability
+        let mut probability = cur_probability
             * self.history.eval_probability(
                 from,
                 to,
@@ -994,6 +995,16 @@ where
                 next_hop_received_amount,
                 channel_capacity,
             );
+
+        let pending_count = self
+            .channel_pending_stats
+            .get(channel_outpoint)
+            .copied()
+            .unwrap_or(0)
+            + cur_pending_count;
+        if pending_count > 0 {
+            probability *= (0.95f64).powi(pending_count as i32);
+        }
 
         debug!(
             "probability: {} for channel_outpoint: {:?} from: {:?} => to: {:?}",
@@ -1007,15 +1018,7 @@ where
         let agg_weight = self.edge_weight(next_hop_received_amount, fee, tlc_expiry_delta);
         let weight = cur_weight + agg_weight;
 
-        let next_pending_count = self
-            .channel_pending_stats
-            .get(channel_outpoint)
-            .copied()
-            .unwrap_or(0)
-            + cur_pending_count;
-
-        let distance =
-            self.calculate_distance_based_probability(probability, weight, next_pending_count);
+        let distance = self.calculate_distance_based_probability(probability, weight);
 
         if let Some(node) = distances.get(&from) {
             if distance >= node.distance {
@@ -1033,7 +1036,7 @@ where
             incoming_tlc_expiry: total_tlc_expiry,
             fee_charged: fee,
             probability,
-            pending_count: next_pending_count,
+            pending_count,
             next_hop: Some(RouterHop {
                 target: to,
                 channel_outpoint: channel_outpoint.clone(),
@@ -1167,6 +1170,10 @@ where
 
         while let Some(cur_hop) = nodes_heap.pop() {
             nodes_visited += 1;
+
+            if cur_hop.node_id == source {
+                break;
+            }
 
             for (from, to, channel_info, channel_update) in self.get_node_inbounds(cur_hop.node_id)
             {
@@ -1361,12 +1368,7 @@ where
         fee + time_lock_penalty
     }
 
-    fn calculate_distance_based_probability(
-        &self,
-        probability: f64,
-        weight: u128,
-        pending_count: usize,
-    ) -> u128 {
+    fn calculate_distance_based_probability(&self, probability: f64, weight: u128) -> u128 {
         assert!(probability > 0.0);
         // FIXME: set this to configurable parameters
         let weight = weight as f64;
@@ -1374,10 +1376,7 @@ where
         let default_attempt_cost = 100_f64;
         let penalty = default_attempt_cost * (1.0 / (0.5 - time_pref / 2.0) - 1.0);
 
-        // Add a weight for pending payments count
-        let pending_penalty = pending_count as u128 * 100;
-
-        weight as u128 + (penalty / probability) as u128 + pending_penalty
+        weight as u128 + (penalty / probability) as u128
     }
 
     // This function is used to build the path from the specified path
@@ -1476,7 +1475,7 @@ where
                 );
 
                 let weight = self.edge_weight(amount_to_send, fee, current_incoming_tlc_expiry);
-                let distance = self.calculate_distance_based_probability(probability, weight, 0);
+                let distance = self.calculate_distance_based_probability(probability, weight);
 
                 if let Some((old_distance, _fee, _edge)) = &found {
                     if distance >= *old_distance {

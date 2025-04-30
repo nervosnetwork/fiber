@@ -58,6 +58,29 @@ pub fn now_timestamp_as_millis_u64() -> u64 {
         .as_millis() as u64
 }
 
+#[cfg(test)]
+thread_local! {
+    static MOCKED_TIME: std::cell::RefCell<Option<u64>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub fn mock_timestamp_as_millis_u64() -> u64 {
+    MOCKED_TIME.with(|time| {
+        let t = time.borrow();
+        match *t {
+            Some(mocked_time) => mocked_time,
+            None => now_timestamp_as_millis_u64(),
+        }
+    })
+}
+
+#[cfg(test)]
+pub fn set_mocked_time(time: u64) {
+    MOCKED_TIME.with(|t| {
+        *t.borrow_mut() = Some(time);
+    });
+}
+
 pub fn gen_rand_sha256_hash() -> Hash256 {
     let mut rng = rand::thread_rng();
     let mut result = [0u8; 32];

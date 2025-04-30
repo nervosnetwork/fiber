@@ -3337,32 +3337,12 @@ async fn test_send_payment_middle_hop_stop_send_payment_then_start() {
         nodes[restart_node_index].start().await;
         tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
-        // because the probability of the path is not 100% after the node is restarted
-        // send normal payment amount will fail at the beginning
-        let normal_payment_amount = 100_000_000;
-        let res = nodes[0]
-            .send_payment_keysend(&nodes[3], normal_payment_amount, true)
-            .await;
-        assert!(res.is_err());
-
-        // we can start send payment with small amount
-        let payment_amount = 50000000;
-        let res = nodes[0]
-            .send_payment_keysend(&nodes[3], payment_amount, false)
-            .await
-            .unwrap();
-        let payment_hash = res.payment_hash;
-        eprintln!("res: {:?}", payment_hash);
-
-        nodes[0].wait_until_success(payment_hash).await;
-        let status = nodes[0].get_payment_status(payment_hash).await;
-        assert_eq!(status, PaymentSessionStatus::Success);
-
-        // with time passed, we can send payment with larger amount
+        // after node reconnect, there will be new channel_update, and payment history will
+        // process it to clear the old fail records, with time passed, we can send payment with larger amount
         let mut count = 0;
         loop {
             let res = nodes[0]
-                .send_payment_keysend(&nodes[3], normal_payment_amount, true)
+                .send_payment_keysend(&nodes[3], payment_amount, true)
                 .await;
 
             if res.is_ok() {

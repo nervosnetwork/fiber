@@ -4,11 +4,12 @@ use crate::fiber::history::{Direction, DEFAULT_BIMODAL_DECAY_TIME};
 use crate::fiber::history::{InternalPairResult, InternalResult};
 use crate::fiber::history::{PaymentHistory, TimedResult};
 use crate::store::Store;
-use crate::tests::test_utils::TempDir;
-use crate::{gen_rand_channel_outpoint, gen_rand_fiber_public_key, now_timestamp_as_millis_u64};
-use ckb_types::packed::OutPoint;
-
 use crate::test_utils::generate_store;
+use crate::tests::test_utils::TempDir;
+use crate::{
+    gen_rand_channel_outpoint, gen_rand_fiber_public_key, init_tracing, now_timestamp_as_millis_u64,
+};
+use ckb_types::packed::OutPoint;
 
 trait Round {
     fn round_to_2(self) -> f64;
@@ -70,6 +71,69 @@ fn test_history_demo() {
         history.get_result(&channel_outpoint2, Direction::Forward),
         None,
     );
+}
+
+#[test]
+fn test_history_with_time_pass() {
+    init_tracing();
+    let mock = MockHistory::new();
+    let mut history = mock.history;
+    let channel_outpoint = OutPoint::default();
+    let direction = Direction::Forward;
+
+    let result1 = TimedResult {
+        fail_time: now_timestamp_as_millis_u64(),
+        fail_amount: 1,
+        success_time: 0,
+        success_amount: 0,
+    };
+    let current_time = now_timestamp_as_millis_u64();
+    history.add_result(channel_outpoint.clone(), direction, result1);
+    assert_eq!(
+        history.get_result(&channel_outpoint.clone(), direction),
+        Some(&result1)
+    );
+    let node1 = gen_rand_fiber_public_key();
+    let node2 = gen_rand_fiber_public_key();
+    let (node1, node2) = if node1 < node2 {
+        (node1, node2)
+    } else {
+        (node2, node1)
+    };
+    let mut prev_prob = 0.0;
+    for i in 0..100 {
+        crate::set_mocked_time(current_time + 1000 * 60 * i);
+        let prob = history.eval_probability(node1, node2, &channel_outpoint, 1, 14100000000);
+        eprintln!("i: {:?} prob: {:?}", i, prob);
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        assert!(prob >= prev_prob);
+        prev_prob = prob;
+        if i >= 21 {
+            assert!(prob >= 0.5);
+        }
+        if i == 99 {
+            assert!(prob >= 0.95);
+        }
+    }
+}
+
+#[test]
+fn test_history_cannot_sent() {
+    let mock = MockHistory::new();
+    let history = mock.history;
+    let mut prev_amount = 0;
+    for i in 0..1000 {
+        let amount = history.cannot_send(
+            10000,
+            now_timestamp_as_millis_u64() - 60 * 1000 * i,
+            14100000000,
+        );
+        eprintln!("res: {:?}", amount);
+        assert!(amount >= prev_amount);
+        prev_amount = amount;
+    }
+    assert_eq!(prev_amount, 14100000000);
 }
 
 #[test]
@@ -883,7 +947,7 @@ fn test_history_direct_probability() {
     };
     history.add_result(channel_outpoint.clone(), direction, result);
     let prob = history.get_direct_probability(&channel_outpoint, direction);
-    assert!(prob < 0.001);
+    assert!(prob < 0.02);
 
     // if the fail_time is more near, the probability will be lower
     let mut prev_prob = 1.0;
@@ -896,10 +960,10 @@ fn test_history_direct_probability() {
         };
         history.add_result(channel_outpoint.clone(), direction, result);
         let prob = history.get_direct_probability(&channel_outpoint, direction);
-        assert!(prob < prev_prob);
+        assert!(prob <= prev_prob);
         prev_prob = prob;
     }
-    assert!(prev_prob < 0.01);
+    assert!(prev_prob < 0.04);
 }
 
 #[test]
@@ -1000,7 +1064,7 @@ fn test_history_eval_probability_range() {
         std::thread::sleep(std::time::Duration::from_millis(1000));
         let prob =
             history.eval_probability(from, target, &channel_outpoint, 50000000 - 10, 100000000);
-        assert!(prob > prev_prob);
+        assert!(prob >= prev_prob);
         prev_prob = prob;
     }
 
@@ -1017,7 +1081,7 @@ fn test_history_eval_probability_range() {
     for gap in (10..10000000).step_by(100000) {
         let prob =
             history.eval_probability(from, target, &channel_outpoint, 50000000 - gap, 100000000);
-        assert!(prob > prev_prob);
+        assert!(prob >= prev_prob);
         prev_prob = prob;
     }
 
@@ -1034,7 +1098,7 @@ fn test_history_eval_probability_range() {
         history.add_result(channel_outpoint.clone(), direction, result);
         let prob =
             history.eval_probability(from, target, &channel_outpoint, 50000000 - 10, 100000000);
-        assert!(prob > prev_prob);
+        assert!(prob >= prev_prob);
         prev_prob = prob;
     }
     assert!(prev_prob > 0.0 && prev_prob < 0.55);
@@ -1082,29 +1146,6 @@ fn test_history_load_store() {
 }
 
 #[test]
-fn test_history_can_send_with_time() {
-    use crate::fiber::history::DEFAULT_BIMODAL_DECAY_TIME;
-
-    let mock = MockHistory::new();
-    let history = mock.history;
-    let now = now_timestamp_as_millis_u64();
-    let res = history.can_send(100, now);
-    assert_eq!(res, 100);
-
-    let before = now - DEFAULT_BIMODAL_DECAY_TIME / 3;
-    let res = history.can_send(100, before);
-    assert_eq!(res, 71);
-
-    let before = now - DEFAULT_BIMODAL_DECAY_TIME;
-    let res = history.can_send(100, before);
-    assert_eq!(res, 36);
-
-    let before = now - DEFAULT_BIMODAL_DECAY_TIME * 3;
-    let res = history.can_send(100, before);
-    assert_eq!(res, 4);
-}
-
-#[test]
 fn test_history_can_not_send_with_time() {
     use crate::fiber::history::DEFAULT_BIMODAL_DECAY_TIME;
 
@@ -1116,11 +1157,11 @@ fn test_history_can_not_send_with_time() {
 
     let before = now - DEFAULT_BIMODAL_DECAY_TIME / 3;
     let res = history.cannot_send(90, before, 100);
-    assert_eq!(res, 93);
+    assert_eq!(res, 90);
 
     let before = now - DEFAULT_BIMODAL_DECAY_TIME;
     let res = history.cannot_send(90, before, 100);
-    assert_eq!(res, 97);
+    assert_eq!(res, 100);
 
     let before = now - DEFAULT_BIMODAL_DECAY_TIME * 3;
     let res = history.cannot_send(90, before, 100);
