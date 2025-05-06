@@ -532,6 +532,69 @@ fn test_store_payment_session() {
 }
 
 #[test]
+fn test_store_payment_sessions_with_status() {
+    let (store, _dir) = generate_store();
+    let payment_hash0 = gen_rand_sha256_hash();
+    let payment_data = SendPaymentData {
+        target_pubkey: gen_rand_fiber_public_key(),
+        amount: 100,
+        payment_hash: payment_hash0,
+        invoice: None,
+        final_tlc_expiry_delta: DEFAULT_TLC_EXPIRY_DELTA,
+        tlc_expiry_limit: MAX_PAYMENT_TLC_EXPIRY_LIMIT,
+        timeout: Some(10),
+        max_fee_amount: Some(1000),
+        max_parts: None,
+        keysend: false,
+        udt_type_script: None,
+        preimage: None,
+        allow_self_payment: false,
+        hop_hints: vec![],
+        dry_run: false,
+        custom_records: None,
+        router: vec![],
+    };
+    let payment_session = PaymentSession::new(payment_data.clone(), 10);
+    store.insert_payment_session(payment_session.clone());
+
+    let payment_hash1 = gen_rand_sha256_hash();
+    let payment_data = SendPaymentData {
+        target_pubkey: gen_rand_fiber_public_key(),
+        amount: 100,
+        payment_hash: payment_hash1,
+        invoice: None,
+        final_tlc_expiry_delta: DEFAULT_TLC_EXPIRY_DELTA,
+        tlc_expiry_limit: MAX_PAYMENT_TLC_EXPIRY_LIMIT,
+        timeout: Some(10),
+        max_fee_amount: Some(1000),
+        max_parts: None,
+        keysend: false,
+        udt_type_script: None,
+        preimage: None,
+        allow_self_payment: false,
+        hop_hints: vec![],
+        dry_run: false,
+        custom_records: None,
+        router: vec![],
+    };
+    let mut payment_session = PaymentSession::new(payment_data.clone(), 10);
+    payment_session.set_success_status();
+    store.insert_payment_session(payment_session.clone());
+
+    let res = store.get_payment_sessions_with_status(PaymentSessionStatus::Created);
+    assert_eq!(res.len(), 1);
+    assert_eq!(res[0].payment_hash(), payment_hash0);
+
+    let res = store.get_payment_sessions_with_status(PaymentSessionStatus::Success);
+    assert_eq!(res.len(), 1);
+    assert_eq!(res[0].payment_hash(), payment_hash1);
+    assert_eq!(res[0].status, PaymentSessionStatus::Success);
+
+    let res = store.get_payment_sessions_with_status(PaymentSessionStatus::Failed);
+    assert_eq!(res.len(), 0);
+}
+
+#[test]
 fn test_store_payment_history() {
     let (mut store, _dir) = generate_store();
     let result = TimedResult {
