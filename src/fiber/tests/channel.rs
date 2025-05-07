@@ -1,6 +1,6 @@
 use super::test_utils::{init_tracing, NetworkNode};
 use crate::ckb::tests::test_utils::complete_commitment_tx;
-use crate::fiber::channel::{UpdateCommand, XUDT_COMPATIBLE_WITNESS};
+use crate::fiber::channel::{ChannelState, CloseFlags, UpdateCommand, XUDT_COMPATIBLE_WITNESS};
 use crate::fiber::config::{DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT};
 use crate::fiber::graph::{ChannelInfo, PaymentSessionStatus};
 use crate::fiber::network::{DebugEvent, SendPaymentCommand};
@@ -35,6 +35,7 @@ use ractor::call;
 use secp256k1::Secp256k1;
 use std::collections::HashSet;
 use std::time::Duration;
+use tracing::debug;
 
 #[test]
 fn test_per_commitment_point_and_secret_consistency() {
@@ -4159,6 +4160,107 @@ async fn test_force_close_channel_when_remote_is_offline() {
     call!(node_a.network_actor, message)
         .expect("node_a alive")
         .expect("successfully shutdown channel");
+}
+
+#[tokio::test]
+async fn test_normal_shutdown_with_remove_tlc() {
+    init_tracing();
+
+    let (node_a, node_b, channel_id, _) =
+        NetworkNode::new_2_nodes_with_established_channel(HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT, true)
+            .await;
+
+    let preimage = [1; 32];
+    let algorithm = HashAlgorithm::CkbHash;
+    let digest = algorithm.hash(preimage);
+    let tlc_amount = 1000000000;
+
+    let node_a_state = node_a.get_channel_actor_state(channel_id);
+    let node_b_state = node_b.get_channel_actor_state(channel_id);
+    let old_node_a_balance = node_a_state.to_local_amount;
+    let old_node_b_balance = node_b_state.to_local_amount;
+
+    let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id,
+                command: ChannelCommand::AddTlc(
+                    AddTlcCommand {
+                        amount: tlc_amount,
+                        hash_algorithm: algorithm,
+                        payment_hash: digest.into(),
+                        expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+                        onion_packet: None,
+                        shared_secret: NO_SHARED_SECRET,
+                        previous_tlc: None,
+                    },
+                    rpc_reply,
+                ),
+            },
+        ))
+    })
+    .expect("node_a alive")
+    .expect("successfully added tlc");
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+    // node_a send Shutdown
+    let message = |rpc_reply| -> NetworkActorMessage {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id,
+                command: ChannelCommand::Shutdown(
+                    ShutdownCommand {
+                        close_script: Script::default(),
+                        fee_rate: FeeRate::from_u64(1000),
+                        force: false,
+                    },
+                    rpc_reply,
+                ),
+            },
+        ))
+    };
+    let res = call!(node_a.network_actor, message);
+    debug!("shutdown res: {:?}", res);
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+    // node_b send remove tlc
+    call!(node_b.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id,
+                command: ChannelCommand::RemoveTlc(
+                    RemoveTlcCommand {
+                        id: add_tlc_result.tlc_id,
+                        reason: RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+                            payment_preimage: preimage.into(),
+                        }),
+                    },
+                    rpc_reply,
+                ),
+            },
+        ))
+    })
+    .expect("node_b alive")
+    .expect("successfully removed tlc");
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+    let node_a_state = node_a.get_channel_actor_state(channel_id);
+    let node_b_state = node_b.get_channel_actor_state(channel_id);
+
+    assert_eq!(
+        node_a_state.state,
+        ChannelState::Closed(CloseFlags::COOPERATIVE)
+    );
+    assert_eq!(
+        node_b_state.state,
+        ChannelState::Closed(CloseFlags::COOPERATIVE)
+    );
+    let node_a_balance = node_a_state.to_local_amount;
+    let node_b_balance = node_b_state.to_local_amount;
+    assert_eq!(node_a_balance, old_node_a_balance - tlc_amount);
+    assert_eq!(node_b_balance, old_node_b_balance + tlc_amount);
 }
 
 #[tokio::test]
