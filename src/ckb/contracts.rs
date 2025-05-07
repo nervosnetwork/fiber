@@ -407,14 +407,14 @@ pub fn try_init_contracts_context(
         .map_err(|_| ContractsContextError::ContextAlreadyInitialized)
 }
 
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "bench")))]
 fn get_contracts_context() -> &'static ContractsContext {
     CONTRACTS_CONTEXT_INSTANCE
         .get()
         .expect("init_contracts_context should be called first")
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "bench"))]
 fn get_contracts_context() -> ContractsContext {
     super::tests::test_utils::MOCK_CONTEXT
         .read()

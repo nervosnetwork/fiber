@@ -167,7 +167,7 @@ pub struct SendPaymentResponse {
     pub failed_error: Option<String>,
     pub custom_records: Option<PaymentCustomRecords>,
     pub fee: u128,
-    #[cfg(debug_assertions)]
+    #[cfg(any(debug_assertions, feature = "bench"))]
     pub router: SessionRoute,
 }
 
@@ -643,7 +643,7 @@ impl NetworkActorMessage {
     }
 }
 
-#[cfg(debug_assertions)]
+#[cfg(any(debug_assertions, feature = "bench"))]
 #[derive(Clone, Debug)]
 pub enum DebugEvent {
     // A AddTlc peer message processed with failure
@@ -655,7 +655,7 @@ pub enum DebugEvent {
 #[macro_export]
 macro_rules! debug_event {
     ($network:expr, $debug_event:expr) => {
-        #[cfg(debug_assertions)]
+        #[cfg(any(debug_assertions, feature = "bench"))]
         $network
             .send_message(NetworkActorMessage::new_notification(
                 NetworkServiceEvent::DebugEvent(DebugEvent::Common($debug_event.to_string())),
@@ -695,7 +695,7 @@ pub enum NetworkServiceEvent {
     // to create a complete commitment transaction and a settlement transaction.
     RemoteCommitmentSigned(PeerId, Hash256, TransactionView, SettlementData),
     // Some other debug event for assertion.
-    #[cfg(debug_assertions)]
+    #[cfg(any(debug_assertions, feature = "bench"))]
     DebugEvent(DebugEvent),
 }
 
@@ -1763,15 +1763,12 @@ where
 
                         self.update_graph_with_tlc_fail(&state.network, &error_detail)
                             .await;
-                        let need_to_retry = self
-                            .network_graph
-                            .write()
-                            .await
-                            .record_payment_fail(&payment_session, error_detail.clone());
+                        let need_to_retry = self.network_graph.write().await.record_payment_fail(
+                            &payment_session,
+                            error_detail.clone(),
+                            false,
+                        );
                         if need_to_retry {
-                            // If this is the first hop error, like the WaitingTlcAck error,
-                            // we will just retry later, return Ok here for letting endpoint user
-                            // know payment session is created successfully
                             self.register_payment_retry(myself, payment_hash);
                         } else {
                             self.set_payment_fail_with_error(
@@ -1904,11 +1901,11 @@ where
             Err(error_detail) => {
                 self.update_graph_with_tlc_fail(&state.network, &error_detail)
                     .await;
-                let need_to_retry = self
-                    .network_graph
-                    .write()
-                    .await
-                    .record_payment_fail(payment_session, error_detail.clone());
+                let need_to_retry = self.network_graph.write().await.record_payment_fail(
+                    payment_session,
+                    error_detail.clone(),
+                    true,
+                );
                 let err = format!(
                     "Failed to send onion packet with error {}",
                     error_detail.error_code_as_str()
@@ -1968,7 +1965,11 @@ where
         if error_info.is_none() {
             // Change the status from Created into Inflight
             payment_session.set_inflight_status();
-            self.store.insert_payment_session(payment_session.clone());
+            self.network_graph
+                .write()
+                .await
+                .track_payment_router(&payment_session);
+            self.store.insert_payment_session(payment_session);
             return;
         }
 
@@ -1981,25 +1982,18 @@ where
             if matches!(channel_error, ProcessingChannelError::WaitingTlcAck) {
                 (true, "WaitingTlcAck".to_string())
             } else {
-                let retry = self
-                    .network_graph
-                    .write()
-                    .await
-                    .record_payment_fail(&payment_session, tlc_err.clone());
+                let retry = self.network_graph.write().await.record_payment_fail(
+                    &payment_session,
+                    tlc_err.clone(),
+                    true,
+                );
                 (retry, channel_error.to_string())
             };
         payment_session.last_error = Some(error);
-        self.store.insert_payment_session(payment_session.clone());
+        self.store.insert_payment_session(payment_session);
 
         if need_to_retry {
             let _ = self.try_payment_session(myself, state, payment_hash).await;
-        } else {
-            let error = format!(
-                "Failed to send payment session: {:?}, retried times: {}",
-                payment_session.payment_hash(),
-                payment_session.retried_times
-            );
-            self.set_payment_fail_with_error(&mut payment_session, &error);
         }
     }
 

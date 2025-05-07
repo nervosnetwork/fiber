@@ -29,6 +29,9 @@ pub(crate) struct NodeHeapElement {
 
     // next_hop is the edge this route comes from, we also include the fee rate and tlc expiry delta.
     pub next_hop: Option<RouterHop>,
+
+    // adopted channels outpoint
+    pub pending_count: usize,
 }
 
 impl Ord for NodeHeapElement {
