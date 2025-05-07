@@ -4025,15 +4025,21 @@ impl ChannelActorState {
         let partial_signatures =
             self.order_things_for_musig2(local_partial_signature, remote_partial_signature);
 
-        let signature =
+        if let Ok(signature) =
             aggregate_partial_signatures(&key_agg_ctx, &agg_nonce, partial_signatures, message)
-                .expect("aggregate partial signatures");
-
-        channel_announcement.ckb_signature = Some(signature);
-
-        self.public_channel_state_mut().channel_announcement = Some(channel_announcement.clone());
-
-        Some(channel_announcement)
+        {
+            channel_announcement.ckb_signature = Some(signature);
+            self.public_channel_state_mut().channel_announcement =
+                Some(channel_announcement.clone());
+            Some(channel_announcement)
+        } else {
+            // TODO: we should ban remote peer if we fail to aggregate the signature since the error is caused by the wrong nonce.
+            warn!(
+                "Failed to aggregate channel announcement signature for channel {:?}",
+                self.get_id()
+            );
+            None
+        }
     }
 
     async fn do_generate_channel_update(
