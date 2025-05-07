@@ -1928,6 +1928,62 @@ dependencies = [
 
 [[package]]
 name = "fnn"
+version = "0.5.0"
+source = "git+https://github.com/nervosnetwork/fiber.git?tag=v0.5.0#173ae5f094a9ed15d4b76b7473aeed70a9a1052e"
+dependencies = [
+ "anyhow",
+ "arcode",
+ "async-trait",
+ "bech32 0.9.1",
+ "bincode",
+ "bitcoin",
+ "bitflags 2.7.0",
+ "bitmask-enum",
+ "ckb-chain-spec",
+ "ckb-gen-types",
+ "ckb-hash",
+ "ckb-jsonrpc-types",
+ "ckb-resource",
+ "ckb-rocksdb",
+ "ckb-sdk",
+ "ckb-types",
+ "clap",
+ "clap-serde-derive",
+ "console",
+ "fiber-sphinx",
+ "futures",
+ "git-version",
+ "hex",
+ "home",
+ "indicatif",
+ "jsonrpsee",
+ "lightning-invoice",
+ "lnd-grpc-tonic-client",
+ "molecule",
+ "musig2",
+ "nom",
+ "num_enum",
+ "once_cell",
+ "ractor 0.14.2",
+ "rand 0.8.5",
+ "regex",
+ "secp256k1 0.28.2",
+ "serde",
+ "serde_json",
+ "serde_with",
+ "serde_yaml",
+ "socket2",
+ "strum",
+ "tentacle",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "fnn"
 version = "0.5.1"
 dependencies = [
  "aes-gcm",
@@ -2057,6 +2113,7 @@ dependencies = [
  "fnn 0.3.1 (git+https://github.com/nervosnetwork/fiber.git?tag=v0.3.1-p1)",
  "fnn 0.3.1 (git+https://github.com/nervosnetwork/fiber.git?tag=v0.4.0-rc1-p1)",
  "fnn 0.4.0",
+ "fnn 0.5.0",
  "fnn 0.5.1",
  "fnn 0.5.1 (git+https://github.com/nervosnetwork/fiber.git?tag=v0.5.1-rc1)",
  "hex",

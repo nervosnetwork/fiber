@@ -10,11 +10,11 @@ const MIGRATION_DB_VERSION: &str = "20250428012453";
 
 use crate::util::convert;
 
-pub use fiber_v041::fiber::channel::ChannelActorState as OldChannelActorState;
+pub use fiber_v050::fiber::channel::ChannelActorState as OldChannelActorState;
 pub use fiber_v051::fiber::channel::ChannelActorState as NewChannelActorState;
 
-pub use fiber_v041::fiber::graph::PaymentSession as OldPaymentSession;
-pub use fiber_v041::fiber::network::SendPaymentData as OldSendPaymentData;
+pub use fiber_v050::fiber::graph::PaymentSession as OldPaymentSession;
+pub use fiber_v050::fiber::network::SendPaymentData as OldSendPaymentData;
 pub use fiber_v051::fiber::graph::PaymentSession as NewPaymentSession;
 pub use fiber_v051::fiber::network::SendPaymentData as NewSendPaymentData;
 
@@ -73,14 +73,14 @@ impl Migration for MigrationObj {
                 continue;
             }
             let old_payment_session: OldPaymentSession =
-                bincode::deserialize(&v).expect("deserialize to old channel state");
+                bincode::deserialize(&v).expect("deserialize to old payment session");
 
             let new_payment_session = migrate_payment_session(old_payment_session);
             let new_payment_session_bytes =
-                bincode::serialize(&new_payment_session).expect("serialize to new channel state");
+                bincode::serialize(&new_payment_session).expect("serialize to new payment session");
 
             db.put(k, new_payment_session_bytes)
-                .expect("save new channel state");
+                .expect("save new payment session");
         }
 
         Ok(db)
