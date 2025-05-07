@@ -1,6 +1,6 @@
 [package]
 name = "fnn"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2021"
 build = "src/build.rs"
 
@@ -70,13 +70,6 @@ bitmask-enum = "2.2.5"
 either = "1.15.0"
 aes-gcm = "0.10"
 scrypt = "0.11"
-
-fiber_v020 = { package = "fnn", git = "https://github.com/nervosnetwork/fiber.git", tag = "v0.2.0-p1" }
-fiber_v021 = { package = "fnn", git = "https://github.com/nervosnetwork/fiber.git", tag = "v0.2.1-p1" }
-fiber_v030 = { package = "fnn", git = "https://github.com/nervosnetwork/fiber.git", tag = "v0.3.0-p1" }
-fiber_v031 = { package = "fnn", git = "https://github.com/nervosnetwork/fiber.git", tag = "v0.3.1-p1" }
-fiber_v040 = { package = "fnn", git = "https://github.com/nervosnetwork/fiber.git", tag = "v0.4.0-rc1-p1" }
-
 
 [features]
 default = []

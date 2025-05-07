@@ -16,7 +16,6 @@ use crate::{
 };
 use ckb_types::packed::{OutPoint, Script};
 use ckb_types::prelude::Entity;
-use fiber_v031::invoice::CkbInvoice as OldCkbInvoice;
 use rocksdb::{
     prelude::*, DBCompressionType, DBIterator, Direction as DbDirection, IteratorMode, WriteBatch,
     DB,
@@ -24,7 +23,7 @@ use rocksdb::{
 use serde::Serialize;
 use std::{collections::HashSet, path::Path, sync::Arc};
 use tentacle::secio::PeerId;
-use tracing::{error, info};
+use tracing::info;
 
 #[derive(Clone, Debug)]
 pub struct Store {
@@ -135,7 +134,8 @@ impl Store {
         migrate.init_or_check(path)
     }
 
-    pub fn check_validate(&self) -> Result<(), Vec<String>> {
+    pub fn check_validate<P: AsRef<Path>>(path: P) -> Result<(), String> {
+        let db = Self::open_db(path.as_ref())?;
         let mut errors = HashSet::new();
 
         fn check_deserialization<T: serde::de::DeserializeOwned>(
@@ -144,26 +144,11 @@ impl Store {
             errors: &mut HashSet<String>,
         ) {
             if let Err(e) = bincode::deserialize::<T>(value) {
-                if prefix_name == "CKB_INVOICE_PREFIX" {
-                    match bincode::deserialize::<OldCkbInvoice>(value) {
-                        Ok(invoice) => invoice,
-                        Err(e) => {
-                            errors.insert(format!(
-                                "Failed to old deserialize {}: {:?}",
-                                prefix_name, e
-                            ));
-                            return;
-                        }
-                    };
-                } else {
-                    errors.insert(format!("Failed to deserialize {}: {:?}", prefix_name, e));
-                }
-            } else {
-                info!("Successfully deserialized {}: {:?}", prefix_name, value);
+                errors.insert(format!("Failed to deserialize {}: {:?}", prefix_name, e));
             }
         }
 
-        for (key, value) in self.db.iterator(rocksdb::IteratorMode::Start) {
+        for (key, value) in db.iterator(rocksdb::IteratorMode::Start) {
             if key.is_empty() {
                 errors.insert("Encountered empty key".to_string());
                 continue;
@@ -249,13 +234,15 @@ impl Store {
             }
         }
 
+        let mut errors: Vec<String> = errors.into_iter().collect();
+        if let Err(version_err) = Self::check_migrate(path, db) {
+            errors.push(version_err);
+        }
         if errors.is_empty() {
             info!("All keys and values in the store are valid.");
             Ok(())
         } else {
-            let errors_vec: Vec<String> = errors.into_iter().collect();
-            error!("Errors found during store validation: {:?}", errors_vec);
-            Err(errors_vec)
+            Err(errors.join("\n"))
         }
     }
 }

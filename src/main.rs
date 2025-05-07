@@ -77,9 +77,6 @@ pub async fn main() -> Result<(), ExitMessage> {
         .store_path();
 
     let store = Store::new(store_path).map_err(|err| ExitMessage(err.to_string()))?;
-    store
-        .check_validate()
-        .map_err(|err| ExitMessage(format!("failed to validate store: {:?}", err)))?;
 
     let tracker = new_tokio_task_tracker();
     let token = new_tokio_cancellation_token();
