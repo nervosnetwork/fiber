@@ -42,7 +42,7 @@ impl Migration for MigrationObj {
             .prefix_iterator(prefix.clone().as_slice())
             .take_while(move |(col_key, _)| col_key.starts_with(prefix.as_slice()))
         {
-            if let Ok(_) = bincode::deserialize::<NewSendPaymentData>(&v) {
+            if let Ok(_) = bincode::deserialize::<NewPaymentSession>(&v) {
                 // if we can deserialize the data correctly with new version, just skip it.
                 continue;
             }

@@ -567,7 +567,7 @@ where
                     shutdown_info.signature = Some(partial_signature);
                 }
 
-                state.maybe_transition_to_shutdown()?;
+                state.maybe_transfer_to_shutdown()?;
                 Ok(())
             }
             FiberChannelMessage::ReestablishChannel(ref reestablish_channel) => {
@@ -683,6 +683,11 @@ where
 
         // flush remove tlc for received tlcs after replying ack for peer
         self.apply_settled_remove_tlcs(myself, state, true).await;
+
+        // when we transfer to shutdown state, we need to build shutdown transaction
+        // here `maybe_transfer_to_shutdown` must be called after `apply_settled_remove_tlcs`
+        // so the closing transaction is symmetric with peer
+        state.maybe_transfer_to_shutdown()?;
 
         if need_commitment_signed && !state.tlc_state.waiting_ack {
             self.handle_commitment_signed_command(myself, state)?;
@@ -1167,7 +1172,7 @@ where
         // we need to check if we need to trigger remove tlc for previous channel
         // maybe could be done in cron task from network actor.
         state.update_state(ChannelState::ShuttingDown(flags));
-        state.maybe_transition_to_shutdown()?;
+        state.maybe_transfer_to_shutdown()?;
 
         Ok(())
     }
@@ -1269,7 +1274,7 @@ where
                     "Received commitment_signed command in ShuttingDown state: {:?}",
                     flags
                 );
-                if !flags.contains(ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION) {
+                if flags.is_ok_for_commitment_operation() {
                     CommitmentSignedFlags::PendingShutdown()
                 } else {
                     return Err(ProcessingChannelError::InvalidState(format!(
@@ -1316,14 +1321,14 @@ where
             CommitmentSignedFlags::SigningCommitment(flags) => {
                 let flags = flags | SigningCommitmentFlags::OUR_COMMITMENT_SIGNED_SENT;
                 state.update_state(ChannelState::SigningCommitment(flags));
-                state.maybe_transition_to_tx_signatures(flags)?;
+                state.maybe_transfer_to_tx_signatures(flags)?;
             }
             CommitmentSignedFlags::ChannelReady() => {
                 state.set_waiting_ack(myself, true);
             }
             CommitmentSignedFlags::PendingShutdown() => {
                 state.set_waiting_ack(myself, true);
-                state.maybe_transition_to_shutdown()?;
+                state.maybe_transfer_to_shutdown()?;
             }
         }
         state.update_last_commitment_signed_remote_nonce();
@@ -1410,7 +1415,7 @@ where
             ))
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
 
-        state.maybe_transition_to_shutdown()?;
+        state.maybe_transfer_to_shutdown()?;
         self.handle_commitment_signed_command(myself, state)?;
         Ok(())
     }
@@ -1512,7 +1517,7 @@ where
                 "Channel state updated to {:?} after processing shutdown command",
                 &state.state
             );
-            state.maybe_transition_to_shutdown()
+            state.maybe_transfer_to_shutdown()
         }
     }
 
@@ -3740,6 +3745,13 @@ bitflags! {
     }
 }
 
+impl ShuttingDownFlags {
+    fn is_ok_for_commitment_operation(&self) -> bool {
+        !self.contains(ShuttingDownFlags::DROPPING_PENDING)
+            && !self.contains(ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION)
+    }
+}
+
 // Depending on the state of the channel, we may process the commitment_signed command differently.
 // Below are all the channel state flags variants that we may encounter
 // in normal commitment_signed processing flow.
@@ -4013,15 +4025,21 @@ impl ChannelActorState {
         let partial_signatures =
             self.order_things_for_musig2(local_partial_signature, remote_partial_signature);
 
-        let signature =
+        if let Ok(signature) =
             aggregate_partial_signatures(&key_agg_ctx, &agg_nonce, partial_signatures, message)
-                .expect("aggregate partial signatures");
-
-        channel_announcement.ckb_signature = Some(signature);
-
-        self.public_channel_state_mut().channel_announcement = Some(channel_announcement.clone());
-
-        Some(channel_announcement)
+        {
+            channel_announcement.ckb_signature = Some(signature);
+            self.public_channel_state_mut().channel_announcement =
+                Some(channel_announcement.clone());
+            Some(channel_announcement)
+        } else {
+            // TODO: we should ban remote peer if we fail to aggregate the signature since the error is caused by the wrong nonce.
+            warn!(
+                "Failed to aggregate channel announcement signature for channel {:?}",
+                self.get_id()
+            );
+            None
+        }
     }
 
     async fn do_generate_channel_update(
@@ -5361,7 +5379,7 @@ impl ChannelActorState {
     pub fn any_tlc_pending(&self) -> bool {
         self.tlc_state
             .all_tlcs()
-            .any(|tlc| tlc.removed_reason.is_none())
+            .any(|tlc| tlc.removed_confirmed_at.is_none())
     }
 
     pub fn get_local_funding_pubkey(&self) -> &Pubkey {
@@ -5730,7 +5748,7 @@ impl ChannelActorState {
         Ok((completed_commitment_tx, settlement_data))
     }
 
-    fn maybe_transition_to_shutdown(&mut self) -> ProcessingChannelResult {
+    fn maybe_transfer_to_shutdown(&mut self) -> ProcessingChannelResult {
         // This function will also be called when we resolve all pending tlcs.
         // If we are not in the ShuttingDown state, we should not do anything.
         let flags = match self.state {
@@ -5984,7 +6002,6 @@ impl ChannelActorState {
         &mut self,
         commitment_signed: CommitmentSigned,
     ) -> ProcessingChannelResult {
-        let network = self.network();
         let flags = match self.state {
             ChannelState::CollaboratingFundingTx(flags)
                 if !flags.contains(CollaboratingFundingTxFlags::COLLABORATION_COMPLETED) =>
@@ -6010,7 +6027,7 @@ impl ChannelActorState {
             }
             ChannelState::ChannelReady => CommitmentSignedFlags::ChannelReady(),
             ChannelState::ShuttingDown(flags) => {
-                if !flags.contains(ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION) {
+                if flags.is_ok_for_commitment_operation() {
                     debug!(
                         "Verify commitment_signed message while shutdown is pending, current state {:?}",
                         &self.state
@@ -6048,7 +6065,7 @@ impl ChannelActorState {
         )?;
 
         // Notify outside observers.
-        network
+        self.network()
             .send_message(NetworkActorMessage::new_notification(
                 NetworkServiceEvent::RemoteCommitmentSigned(
                     self.get_remote_peer_id(),
@@ -6063,24 +6080,10 @@ impl ChannelActorState {
             CommitmentSignedFlags::SigningCommitment(flags) => {
                 let flags = flags | SigningCommitmentFlags::THEIR_COMMITMENT_SIGNED_SENT;
                 self.update_state(ChannelState::SigningCommitment(flags));
-                self.maybe_transition_to_tx_signatures(flags)?;
+                self.maybe_transfer_to_tx_signatures(flags)?;
             }
             CommitmentSignedFlags::ChannelReady() | CommitmentSignedFlags::PendingShutdown() => {
                 self.send_revoke_and_ack_message()?;
-                match flags {
-                    CommitmentSignedFlags::ChannelReady() => {}
-                    CommitmentSignedFlags::PendingShutdown() => {
-                        // TODO: Handle error in the below function call.
-                        // We've already updated our state, we should never fail here.
-                        self.maybe_transition_to_shutdown()?;
-                    }
-                    _ => {
-                        unreachable!(
-                            "Invalid flags for commitment signed message, should have handled {:?}",
-                            flags
-                        );
-                    }
-                }
             }
         }
         self.commit_remote_nonce(commitment_signed.next_local_nonce);
@@ -6088,7 +6091,7 @@ impl ChannelActorState {
         Ok(())
     }
 
-    fn maybe_transition_to_tx_signatures(
+    fn maybe_transfer_to_tx_signatures(
         &mut self,
         flags: SigningCommitmentFlags,
     ) -> ProcessingChannelResult {
