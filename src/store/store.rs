@@ -16,12 +16,13 @@ use crate::{
 };
 use ckb_types::packed::{OutPoint, Script};
 use ckb_types::prelude::Entity;
+use fiber_v031::invoice::CkbInvoice as OldCkbInvoice;
 use rocksdb::{
     prelude::*, DBCompressionType, DBIterator, Direction as DbDirection, IteratorMode, WriteBatch,
     DB,
 };
 use serde::Serialize;
-use std::{path::Path, sync::Arc};
+use std::{collections::HashSet, path::Path, sync::Arc};
 use tentacle::secio::PeerId;
 use tracing::{error, info};
 
@@ -132,6 +133,130 @@ impl Store {
     fn check_migrate<P: AsRef<Path>>(path: P, db: Arc<DB>) -> Result<Arc<DB>, String> {
         let migrate = DbMigrate::new(db);
         migrate.init_or_check(path)
+    }
+
+    pub fn check_validate(&self) -> Result<(), Vec<String>> {
+        let mut errors = HashSet::new();
+
+        fn check_deserialization<T: serde::de::DeserializeOwned>(
+            value: &[u8],
+            prefix_name: &str,
+            errors: &mut HashSet<String>,
+        ) {
+            if let Err(e) = bincode::deserialize::<T>(value) {
+                if prefix_name == "CKB_INVOICE_PREFIX" {
+                    match bincode::deserialize::<OldCkbInvoice>(value) {
+                        Ok(invoice) => invoice,
+                        Err(e) => {
+                            errors.insert(format!(
+                                "Failed to old deserialize {}: {:?}",
+                                prefix_name, e
+                            ));
+                            return;
+                        }
+                    };
+                } else {
+                    errors.insert(format!("Failed to deserialize {}: {:?}", prefix_name, e));
+                }
+            } else {
+                info!("Successfully deserialized {}: {:?}", prefix_name, value);
+            }
+        }
+
+        for (key, value) in self.db.iterator(rocksdb::IteratorMode::Start) {
+            if key.is_empty() {
+                errors.insert("Encountered empty key".to_string());
+                continue;
+            }
+
+            match key[0] {
+                CHANNEL_ACTOR_STATE_PREFIX => {
+                    check_deserialization::<ChannelActorState>(
+                        &value,
+                        "CHANNEL_ACTOR_STATE_PREFIX",
+                        &mut errors,
+                    );
+                }
+                PEER_ID_NETWORK_ACTOR_STATE_PREFIX => {
+                    check_deserialization::<PersistentNetworkActorState>(
+                        &value,
+                        "PEER_ID_NETWORK_ACTOR_STATE_PREFIX",
+                        &mut errors,
+                    );
+                }
+                CKB_INVOICE_PREFIX => {
+                    check_deserialization::<CkbInvoice>(&value, "CKB_INVOICE_PREFIX", &mut errors);
+                }
+                CKB_INVOICE_PREIMAGE_PREFIX => {
+                    check_deserialization::<Hash256>(
+                        &value,
+                        "CKB_INVOICE_PREIMAGE_PREFIX",
+                        &mut errors,
+                    );
+                }
+                CKB_INVOICE_STATUS_PREFIX => {
+                    check_deserialization::<CkbInvoiceStatus>(
+                        &value,
+                        "CKB_INVOICE_STATUS_PREFIX",
+                        &mut errors,
+                    );
+                }
+                PEER_ID_CHANNEL_ID_PREFIX => {}
+                CHANNEL_OUTPOINT_CHANNEL_ID_PREFIX => {
+                    check_deserialization::<Hash256>(
+                        &value,
+                        "CHANNEL_OUTPOINT_CHANNEL_ID_PREFIX",
+                        &mut errors,
+                    );
+                }
+                BROADCAST_MESSAGE_PREFIX => {
+                    check_deserialization::<BroadcastMessage>(
+                        &value,
+                        "BROADCAST_MESSAGE_PREFIX",
+                        &mut errors,
+                    );
+                }
+                BROADCAST_MESSAGE_TIMESTAMP_PREFIX => {}
+                PAYMENT_SESSION_PREFIX => {
+                    check_deserialization::<PaymentSession>(
+                        &value,
+                        "PAYMENT_SESSION_PREFIX",
+                        &mut errors,
+                    );
+                }
+                PAYMENT_HISTORY_TIMED_RESULT_PREFIX => {
+                    check_deserialization::<TimedResult>(
+                        &value,
+                        "PAYMENT_HISTORY_TIMED_RESULT_PREFIX",
+                        &mut errors,
+                    );
+                }
+                PAYMENT_CUSTOM_RECORD_PREFIX => {
+                    check_deserialization::<PaymentCustomRecords>(
+                        &value,
+                        "PAYMENT_CUSTOM_RECORD_PREFIX",
+                        &mut errors,
+                    );
+                }
+                WATCHTOWER_CHANNEL_PREFIX => {
+                    check_deserialization::<ChannelData>(
+                        &value,
+                        "WATCHTOWER_CHANNEL_PREFIX",
+                        &mut errors,
+                    );
+                }
+                _ => {}
+            }
+        }
+
+        if errors.is_empty() {
+            info!("All keys and values in the store are valid.");
+            Ok(())
+        } else {
+            let errors_vec: Vec<String> = errors.into_iter().collect();
+            error!("Errors found during store validation: {:?}", errors_vec);
+            Err(errors_vec)
+        }
     }
 }
 
@@ -837,131 +962,5 @@ impl WatchtowerStore for Store {
             batch.put_kv(KeyValue::WatchtowerChannel(channel_id, channel_data));
             batch.commit();
         }
-    }
-}
-
-pub fn check_store(db: &rocksdb::DB) -> Result<(), Vec<String>> {
-    let mut errors = Vec::new();
-
-    for (key, value) in db.iterator(rocksdb::IteratorMode::Start) {
-        if key.is_empty() {
-            errors.push("Encountered empty key".to_string());
-            continue;
-        }
-
-        match key[0] {
-            CHANNEL_ACTOR_STATE_PREFIX => {
-                if let Err(e) = bincode::deserialize::<ChannelActorState>(&value) {
-                    errors.push(format!(
-                        "Failed to deserialize CHANNEL_ACTOR_STATE_PREFIX: {:?}",
-                        e
-                    ));
-                }
-            }
-            PEER_ID_NETWORK_ACTOR_STATE_PREFIX => {
-                if let Err(e) = bincode::deserialize::<PersistentNetworkActorState>(&value) {
-                    errors.push(format!(
-                        "Failed to deserialize PEER_ID_NETWORK_ACTOR_STATE_PREFIX: {:?}",
-                        e
-                    ));
-                }
-            }
-            CKB_INVOICE_PREFIX => {
-                if let Err(e) = bincode::deserialize::<CkbInvoice>(&value) {
-                    errors.push(format!("Failed to deserialize CKB_INVOICE_PREFIX: {:?}", e));
-                }
-            }
-            CKB_INVOICE_PREIMAGE_PREFIX => {
-                if let Err(e) = bincode::deserialize::<Hash256>(&value) {
-                    errors.push(format!(
-                        "Failed to deserialize CKB_INVOICE_PREIMAGE_PREFIX: {:?}",
-                        e
-                    ));
-                }
-            }
-            CKB_INVOICE_STATUS_PREFIX => {
-                if let Err(e) = bincode::deserialize::<CkbInvoiceStatus>(&value) {
-                    errors.push(format!(
-                        "Failed to deserialize CKB_INVOICE_STATUS_PREFIX: {:?}",
-                        e
-                    ));
-                }
-            }
-            PEER_ID_CHANNEL_ID_PREFIX => {
-                if let Err(e) = bincode::deserialize::<Hash256>(&value) {
-                    errors.push(format!(
-                        "Failed to deserialize PEER_ID_CHANNEL_ID_PREFIX: {:?}",
-                        e
-                    ));
-                }
-            }
-            CHANNEL_OUTPOINT_CHANNEL_ID_PREFIX => {
-                if let Err(e) = bincode::deserialize::<Hash256>(&value) {
-                    errors.push(format!(
-                        "Failed to deserialize CHANNEL_OUTPOINT_CHANNEL_ID_PREFIX: {:?}",
-                        e
-                    ));
-                }
-            }
-            BROADCAST_MESSAGE_PREFIX => {
-                if let Err(e) = bincode::deserialize::<BroadcastMessage>(&value) {
-                    errors.push(format!(
-                        "Failed to deserialize BROADCAST_MESSAGE_PREFIX: {:?}",
-                        e
-                    ));
-                }
-            }
-            BROADCAST_MESSAGE_TIMESTAMP_PREFIX => {
-                if let Err(e) = bincode::deserialize::<[u8; 24]>(&value) {
-                    errors.push(format!(
-                        "Failed to deserialize BROADCAST_MESSAGE_TIMESTAMP_PREFIX: {:?}",
-                        e
-                    ));
-                }
-            }
-            PAYMENT_SESSION_PREFIX => {
-                if let Err(e) = bincode::deserialize::<PaymentSession>(&value) {
-                    errors.push(format!(
-                        "Failed to deserialize PAYMENT_SESSION_PREFIX: {:?}",
-                        e
-                    ));
-                }
-            }
-            PAYMENT_HISTORY_TIMED_RESULT_PREFIX => {
-                if let Err(e) = bincode::deserialize::<TimedResult>(&value) {
-                    errors.push(format!(
-                        "Failed to deserialize PAYMENT_HISTORY_TIMED_RESULT_PREFIX: {:?}",
-                        e
-                    ));
-                }
-            }
-            PAYMENT_CUSTOM_RECORD_PREFIX => {
-                if let Err(e) = bincode::deserialize::<PaymentCustomRecords>(&value) {
-                    errors.push(format!(
-                        "Failed to deserialize PAYMENT_CUSTOM_RECORD_PREFIX: {:?}",
-                        e
-                    ));
-                }
-            }
-            WATCHTOWER_CHANNEL_PREFIX => {
-                if let Err(e) = bincode::deserialize::<ChannelData>(&value) {
-                    errors.push(format!(
-                        "Failed to deserialize WATCHTOWER_CHANNEL_PREFIX: {:?}",
-                        e
-                    ));
-                }
-            }
-            _ => {
-                errors.push(format!("Unknown key prefix: {:?}", key[0]));
-            }
-        }
-    }
-
-    if errors.is_empty() {
-        info!("All keys and values in the store are valid.");
-        Ok(())
-    } else {
-        error!("Errors found during store validation: {:?}", errors);
-        Err(errors)
     }
 }

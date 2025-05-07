@@ -13,8 +13,10 @@ use crate::util::convert;
 pub use fiber_v050::fiber::channel::ChannelActorState as OldChannelActorState;
 pub use fiber_v051::fiber::channel::ChannelActorState as NewChannelActorState;
 
-pub use fiber_v050::fiber::graph::PaymentSession as OldPaymentSession;
-pub use fiber_v050::fiber::network::SendPaymentData as OldSendPaymentData;
+pub use fiber_v020::fiber::graph::PaymentSession as OldPaymentSessionV020;
+pub use fiber_v020::fiber::network::SendPaymentData as OldSendPaymentDataV020;
+pub use fiber_v050::fiber::graph::PaymentSession as OldPaymentSessionV050;
+pub use fiber_v050::fiber::network::SendPaymentData as OldSendPaymentDataV050;
 pub use fiber_v051::fiber::graph::PaymentSession as NewPaymentSession;
 pub use fiber_v051::fiber::network::SendPaymentData as NewSendPaymentData;
 
@@ -72,13 +74,20 @@ impl Migration for MigrationObj {
                 // if we can deserialize the data correctly with new version, just skip it.
                 continue;
             }
-            let old_payment_session: OldPaymentSession =
-                bincode::deserialize(&v).expect("deserialize to old payment session");
 
-            let new_payment_session = migrate_payment_session(old_payment_session);
+            // Try to deserialize with older versions and migrate if successful
+            let new_payment_session =
+                if let Ok(session) = bincode::deserialize::<OldPaymentSessionV020>(&v) {
+                    migrate_payment_session_v020(session)
+                } else if let Ok(session) = bincode::deserialize::<OldPaymentSessionV050>(&v) {
+                    migrate_payment_session_v050(session)
+                } else {
+                    panic!("failed to deserialize payment session");
+                };
+
+            // Save the migrated payment session
             let new_payment_session_bytes =
                 bincode::serialize(&new_payment_session).expect("serialize to new payment session");
-
             db.put(k, new_payment_session_bytes)
                 .expect("save new payment session");
         }
@@ -136,7 +145,43 @@ fn migrate_channel_state(old: OldChannelActorState) -> NewChannelActorState {
     }
 }
 
-fn migrate_payment_session(old: OldPaymentSession) -> NewPaymentSession {
+fn migrate_payment_session_v020(old: OldPaymentSessionV020) -> NewPaymentSession {
+    let old_request = old.request.clone();
+
+    let request = NewSendPaymentData {
+        target_pubkey: convert(old_request.target_pubkey),
+        amount: old_request.amount,
+        payment_hash: convert(old_request.payment_hash),
+        invoice: old_request.invoice,
+        final_tlc_expiry_delta: old_request.final_tlc_expiry_delta,
+        tlc_expiry_limit: old_request.tlc_expiry_limit,
+        timeout: old_request.timeout,
+        max_fee_amount: old_request.max_fee_amount,
+        max_parts: old_request.max_parts,
+        keysend: old_request.keysend,
+        udt_type_script: old_request.udt_type_script,
+        preimage: convert(old_request.preimage),
+        allow_self_payment: old_request.allow_self_payment,
+        dry_run: old_request.dry_run,
+        custom_records: None, // Old version doesn't have this field
+        hop_hints: vec![],    // New field
+        router: vec![],       // New field
+    };
+
+    NewPaymentSession {
+        request: request,
+        retried_times: old.retried_times,
+        last_error: old.last_error,
+        try_limit: old.try_limit,
+        status: convert(old.status),
+        created_at: old.created_at,
+        last_updated_at: old.last_updated_at,
+        route: convert(old.route),
+        session_key: old.session_key,
+    }
+}
+
+fn migrate_payment_session_v050(old: OldPaymentSessionV050) -> NewPaymentSession {
     let old_request = old.request.clone();
 
     let request = NewSendPaymentData {
