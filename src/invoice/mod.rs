@@ -8,6 +8,7 @@ mod tests;
 
 pub use errors::InvoiceError;
 pub use invoice_impl::{
-    Attribute, CkbInvoice, CkbInvoiceStatus, Currency, InvoiceBuilder, InvoiceSignature,
+    Attribute, CkbInvoice, CkbInvoiceStatus, Currency, InvoiceBuilder, InvoiceData,
+    InvoiceSignature,
 };
 pub use store::*;
