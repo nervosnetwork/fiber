@@ -2109,6 +2109,7 @@ version = "0.5.1"
 dependencies = [
  "bincode",
  "clap",
+ "console",
  "fnn 0.2.0",
  "fnn 0.2.1",
  "fnn 0.3.0",
@@ -2122,6 +2123,8 @@ dependencies = [
  "indicatif",
  "ouroboros",
  "serde",
+ "serde_json",
+ "thiserror 1.0.69",
  "tracing",
  "tracing-subscriber",
 ]
