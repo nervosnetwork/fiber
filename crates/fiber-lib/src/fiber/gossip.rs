@@ -1297,7 +1297,7 @@ impl<S: GossipMessageStore> ExtendedGossipMessageStoreState<S> {
                         Ok(Ok(result)) => {
                             let mut all_messages = result.messages;
                             // We need also to save the incomplete messages to the store.
-                            all_messages.extend(messages.iter().map(Clone::clone).map(Into::into));
+                            all_messages.extend(messages.iter().map(Clone::clone));
                             myself
                                 .send_message(ExtendedGossipMessageStoreMessage::SaveMessages(
                                     peer.clone(),
