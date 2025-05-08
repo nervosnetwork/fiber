@@ -99,6 +99,7 @@ pub const COMMITMENT_CELL_WITNESS_LEN: usize = 16 + 1 + 32 + 64;
 pub const INITIAL_COMMITMENT_NUMBER: u64 = 0;
 
 const RETRYABLE_TLC_OPS_INTERVAL: Duration = Duration::from_millis(1000);
+const WAITING_REESTABLISH_FINISH_TIMEOUT: Duration = Duration::from_millis(4000);
 
 // if a important TLC operation is not acked in 30 seconds, we will try to disconnect the peer.
 #[cfg(not(test))]
@@ -1652,7 +1653,7 @@ where
         state: &mut ChannelActorState,
     ) {
         if state.reestablishing {
-            myself.send_after(RETRYABLE_TLC_OPS_INTERVAL * 4, || {
+            myself.send_after(WAITING_REESTABLISH_FINISH_TIMEOUT, || {
                 ChannelActorMessage::Event(ChannelEvent::CheckTlcRetryOperation)
             });
             return;
@@ -2479,19 +2480,6 @@ where
                     ))
                     .expect(ASSUME_NETWORK_ACTOR_ALIVE);
 
-                // If the channel is already ready, we should notify the network actor.
-                // so that we update the network.outpoint_channel_map
-                if matches!(channel.state, ChannelState::ChannelReady) {
-                    self.network
-                        .send_message(NetworkActorMessage::new_event(
-                            NetworkActorEvent::ChannelReady(
-                                channel.get_id(),
-                                channel.get_remote_peer_id(),
-                                channel.must_get_funding_transaction_outpoint(),
-                            ),
-                        ))
-                        .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-                }
                 Ok(channel)
             }
         }
@@ -6259,10 +6247,21 @@ impl ChannelActorState {
             }
         }
         if self.tlc_state.has_pending_operations() {
-            myself.send_after(4 * RETRYABLE_TLC_OPS_INTERVAL, || {
+            myself.send_after(WAITING_REESTABLISH_FINISH_TIMEOUT, || {
                 ChannelActorMessage::Event(ChannelEvent::CheckTlcRetryOperation)
             });
         }
+        // If the channel is already ready, we should notify the network actor.
+        // so that we update the network.outpoint_channel_map
+        let channel_id = self.get_id();
+        let outpoint = self.must_get_funding_transaction_outpoint();
+        let peer_id = self.get_remote_peer_id();
+        self.network()
+            .send_after(WAITING_REESTABLISH_FINISH_TIMEOUT, move || {
+                NetworkActorMessage::new_event(NetworkActorEvent::ChannelReady(
+                    channel_id, peer_id, outpoint,
+                ))
+            });
         self.on_owned_channel_updated(myself, false).await;
     }
 

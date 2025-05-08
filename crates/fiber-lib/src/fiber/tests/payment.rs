@@ -4083,7 +4083,9 @@ async fn test_send_payment_middle_hop_restart_will_be_ok() {
         assert_eq!(status, PaymentSessionStatus::Success);
 
         nodes[restart_node_index].restart().await;
-        tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+        // wait for the node to be ready after reestablish channel
+        tokio::time::sleep(tokio::time::Duration::from_millis(5000)).await;
 
         let res = nodes[0]
             .send_payment_keysend(&nodes[3], payment_amount, false)
@@ -4147,7 +4149,7 @@ async fn test_send_payment_middle_hop_stop_send_payment_then_start() {
 
         // now we start nodes[2], expect the payment will success
         nodes[restart_node_index].start().await;
-        tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+        tokio::time::sleep(tokio::time::Duration::from_millis(5000)).await;
 
         // because the probability of the path is not 100% after the node is restarted
         // send normal payment amount will fail at the beginning
@@ -4561,4 +4563,81 @@ async fn test_send_payment_with_mixed_channel_hops() {
     );
     let payment_session = node0.get_payment_session(payment_hash).unwrap();
     assert_eq!(payment_session.retried_times, 1);
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_send_payment_with_reconnect_two_times() {
+    init_tracing();
+    let _span = tracing::info_span!("node", node = "test").entered();
+    let (nodes, _channels) =
+        create_n_nodes_network(&[((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT))], 2).await;
+    let [mut node0, mut node1] = nodes.try_into().expect("2 nodes");
+
+    for _i in 0..2 {
+        let mut payments = HashSet::new();
+        for _j in 0..5 {
+            let res = node0
+                .send_payment_keysend(&node1, 1000, false)
+                .await
+                .unwrap();
+            let payment_hash = res.payment_hash;
+            payments.insert(payment_hash);
+        }
+
+        // disconnect peer
+        let node1_id = node1.peer_id.clone();
+        let node0_id = node0.peer_id.clone();
+        node0
+            .network_actor
+            .send_message(NetworkActorMessage::new_command(
+                NetworkActorCommand::DisconnectPeer(node1_id.clone()),
+            ))
+            .expect("node_a alive");
+
+        node1
+            .expect_event(|event| match event {
+                NetworkServiceEvent::PeerDisConnected(peer_id, _) => {
+                    assert_eq!(peer_id, &node0_id);
+                    true
+                }
+                _ => false,
+            })
+            .await;
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
+
+        // reconnect peer
+        node0.connect_to_nonblocking(&node1).await;
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+        // wait for the payment to be retried
+        for _i in 0..20 {
+            assert!(node0.get_triggered_unexpected_events().await.is_empty());
+            assert!(node1.get_triggered_unexpected_events().await.is_empty());
+            for payment_hash in payments.clone().iter() {
+                let status = node0.get_payment_status(*payment_hash).await;
+                eprintln!("payment_hash: {:?} got status : {:?}", payment_hash, status);
+                if status == PaymentSessionStatus::Success || status == PaymentSessionStatus::Failed
+                {
+                    payments.remove(payment_hash);
+                } else if status == PaymentSessionStatus::Created {
+                    // wait for the payment to be retried
+                    let payment_session = node0.get_payment_session(*payment_hash).unwrap();
+                    eprintln!(
+                        "payment_session can_retry: {:?} retry_times: {:?}",
+                        payment_session.can_retry(),
+                        payment_session.retried_times
+                    );
+                }
+                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            }
+            if payments.is_empty() {
+                break;
+            }
+        }
+        if !payments.is_empty() {
+            panic!("some payments are not finished: {:?}", payments);
+        }
+    }
 }

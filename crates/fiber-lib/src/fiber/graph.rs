@@ -1487,6 +1487,8 @@ where
 
 pub trait NetworkGraphStateStore {
     fn get_payment_session(&self, payment_hash: Hash256) -> Option<PaymentSession>;
+    fn get_payment_sessions_with_status(&self, status: PaymentSessionStatus)
+        -> Vec<PaymentSession>;
     fn insert_payment_session(&self, session: PaymentSession);
     fn insert_payment_history_result(
         &mut self,
@@ -1610,6 +1612,14 @@ impl PaymentSession {
 
     pub fn is_send_payment_with_router(&self) -> bool {
         !self.request.router.is_empty()
+    }
+
+    pub fn first_hop_channel_outpoint_eq(&self, out_point: &OutPoint) -> bool {
+        self.route
+            .nodes
+            .first()
+            .map(|x| x.channel_outpoint.eq(out_point))
+            .unwrap_or_default()
     }
 
     fn set_status(&mut self, status: PaymentSessionStatus) {
