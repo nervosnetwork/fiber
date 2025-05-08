@@ -1,0 +1,26 @@
+[package]
+name = "fiber-bin"
+version = "0.5.1"
+edition = "2021"
+
+[[bin]]
+name = "fnn"
+path = "src/main.rs"
+
+[dependencies]
+fnn = { path = "../fiber-lib" }
+ckb-chain-spec = "0.200.0"
+ckb-resource = "0.200.0"
+ractor = { version = "0.15.3", features = ["async-trait"] }
+tokio = { version = "1", features = [
+    "io-util",
+    "macros",
+    "rt",
+    "rt-multi-thread",
+    "sync",
+    "net",
+    "time",
+    "signal",
+] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

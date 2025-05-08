@@ -1,8 +1,5 @@
 use fiber::{store::migration::Migration, Error};
 use indicatif::ProgressBar;
-use rocksdb::ops::Delete;
-use rocksdb::ops::Iterate;
-use rocksdb::DB;
 use std::sync::Arc;
 use tracing::info;
 
@@ -21,11 +18,11 @@ impl MigrationObj {
 }
 
 impl Migration for MigrationObj {
-    fn migrate(
+    fn migrate<'a>(
         &self,
-        db: Arc<DB>,
+        db: &'a fiber::store::Store,
         _pb: Arc<dyn Fn(u64) -> ProgressBar + Send + Sync>,
-    ) -> Result<Arc<DB>, Error> {
+    ) -> Result<&'a fiber::store::Store, Error> {
         info!(
             "MigrationObj::migrate to {} ...........",
             MIGRATION_DB_VERSION
@@ -35,11 +32,11 @@ impl Migration for MigrationObj {
         let prefix = vec![BROADCAST_MESSAGE_PREFIX];
 
         for (k, _v) in db
-            .prefix_iterator(prefix.as_slice())
+            .prefix_iterator(prefix.clone().as_slice())
             .take_while(move |(col_key, _)| col_key.starts_with(prefix.as_slice()))
         {
             // just delete the old broadcast message
-            db.delete(k).expect("delete old broadcast message");
+            db.delete(k);
         }
         Ok(db)
     }

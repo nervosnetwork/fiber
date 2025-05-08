@@ -1,8 +1,6 @@
+use fiber::store::Store;
 use fiber::{store::migration::Migration, Error};
 use indicatif::ProgressBar;
-use rocksdb::ops::Iterate;
-use rocksdb::ops::Put;
-use rocksdb::DB;
 use std::sync::Arc;
 use tracing::info;
 
@@ -30,11 +28,11 @@ impl MigrationObj {
 }
 
 impl Migration for MigrationObj {
-    fn migrate(
+    fn migrate<'a>(
         &self,
-        db: Arc<DB>,
+        db: &'a Store,
         _pb: Arc<dyn Fn(u64) -> ProgressBar + Send + Sync>,
-    ) -> Result<Arc<DB>, Error> {
+    ) -> Result<&'a Store, Error> {
         info!(
             "MigrationObj::migrate to {} ...........",
             MIGRATION_DB_VERSION
@@ -57,7 +55,7 @@ impl Migration for MigrationObj {
                 new.check_signature()
                     .expect("check signature for new ckb invoice");
                 let new_bytes = bincode::serialize(&new).expect("serialize to new ckb invoice");
-                db.put(k, new_bytes).expect("save new ckb invoice");
+                db.put(k, new_bytes);
             }
         }
         return Ok(db);

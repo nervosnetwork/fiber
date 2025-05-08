@@ -1,8 +1,6 @@
+use fiber::store::Store;
 use fiber::{store::migration::Migration, Error};
 use indicatif::ProgressBar;
-use rocksdb::ops::Iterate;
-use rocksdb::ops::Put;
-use rocksdb::DB;
 use std::sync::Arc;
 use tracing::info;
 
@@ -33,11 +31,11 @@ impl MigrationObj {
 }
 
 impl Migration for MigrationObj {
-    fn migrate(
+    fn migrate<'a>(
         &self,
-        db: Arc<DB>,
+        db: &'a Store,
         _pb: Arc<dyn Fn(u64) -> ProgressBar + Send + Sync>,
-    ) -> Result<Arc<DB>, Error> {
+    ) -> Result<&'a Store, Error> {
         info!(
             "MigrationObj::migrate to {} ...........",
             MIGRATION_DB_VERSION
@@ -59,7 +57,7 @@ impl Migration for MigrationObj {
             let new = migrate_channel_state(old);
 
             let new_bytes = bincode::serialize(&new).expect("serialize to new channel state");
-            db.put(k, new_bytes).expect("save new channel state");
+            db.put(k, new_bytes);
         }
 
         info!("migrate PaymentSession ...");
@@ -88,8 +86,7 @@ impl Migration for MigrationObj {
             // Save the migrated payment session
             let new_payment_session_bytes =
                 bincode::serialize(&new_payment_session).expect("serialize to new payment session");
-            db.put(k, new_payment_session_bytes)
-                .expect("save new payment session");
+            db.put(k, new_payment_session_bytes);
         }
 
         Ok(db)
