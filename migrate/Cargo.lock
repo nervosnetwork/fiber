@@ -28,6 +28,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "aes"
+version = "0.8.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b169f7a6d4742236a0a00c541b845991d0ac43e546831af1249753ab4c3aa3a0"
+dependencies = [
+ "cfg-if 1.0.0",
+ "cipher",
+ "cpufeatures",
+]
+
+[[package]]
+name = "aes-gcm"
+version = "0.10.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "831010a0f742e1209b3bcea8fab6a8e149051ba6099432c8cb2cc117dec3ead1"
+dependencies = [
+ "aead",
+ "aes",
+ "cipher",
+ "ctr",
+ "ghash",
+ "subtle",
+]
+
+[[package]]
 name = "ahash"
 version = "0.7.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -312,6 +337,12 @@ name = "base64"
 version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
+
+[[package]]
+name = "base64ct"
+version = "1.7.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "89e25b6adfb930f02d1981565a6e5d9c547ac15a96606256d3b59040e5cd4ca3"
 
 [[package]]
 name = "bech32"
@@ -1257,6 +1288,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ctr"
+version = "0.9.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0369ee1ad671834580515889b80f2ea915f23b8be8d0daa4bbaf2ac5c7590835"
+dependencies = [
+ "cipher",
+]
+
+[[package]]
 name = "cty"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1465,9 +1505,9 @@ checksum = "8d978bd5d343e8ab9b5c0fc8d93ff9c602fdc96616ffff9c05ac7a155419b824"
 
 [[package]]
 name = "either"
-version = "1.13.0"
+version = "1.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "60b1af1c220855b6ceac025d3f6ecdd2b7c4894bfe9cd9bda4fbb4bc7c0d4cf0"
+checksum = "48c757948c5ede0e46177b7add2e67155f70e33c07fea8284df6576da70b3719"
 
 [[package]]
 name = "encode_unicode"
@@ -1724,7 +1764,7 @@ dependencies = [
 [[package]]
 name = "fnn"
 version = "0.3.1"
-source = "git+https://github.com/nervosnetwork/fiber.git?tag=v0.3.1-p1#0671b08065a8d6c7264a66ebb07bc9003cf964a8"
+source = "git+https://github.com/nervosnetwork/fiber.git?tag=v0.3.1-p1#ad35a14d24fbd6ceb53235935f6d5ad8b1cdde27"
 dependencies = [
  "anyhow",
  "arcode",
@@ -1889,6 +1929,7 @@ dependencies = [
 [[package]]
 name = "fnn"
 version = "0.5.0"
+source = "git+https://github.com/nervosnetwork/fiber.git?tag=v0.5.0#173ae5f094a9ed15d4b76b7473aeed70a9a1052e"
 dependencies = [
  "anyhow",
  "arcode",
@@ -1942,8 +1983,125 @@ dependencies = [
 ]
 
 [[package]]
+name = "fnn"
+version = "0.5.1"
+dependencies = [
+ "aes-gcm",
+ "anyhow",
+ "arcode",
+ "async-trait",
+ "bech32 0.9.1",
+ "bincode",
+ "bitcoin",
+ "bitflags 2.7.0",
+ "bitmask-enum",
+ "ckb-chain-spec",
+ "ckb-gen-types",
+ "ckb-hash",
+ "ckb-jsonrpc-types",
+ "ckb-resource",
+ "ckb-rocksdb",
+ "ckb-sdk",
+ "ckb-types",
+ "clap",
+ "clap-serde-derive",
+ "console",
+ "either",
+ "fiber-sphinx",
+ "futures",
+ "git-version",
+ "hex",
+ "home",
+ "indicatif",
+ "jsonrpsee",
+ "lightning-invoice",
+ "lnd-grpc-tonic-client",
+ "molecule",
+ "musig2",
+ "nom",
+ "num_enum",
+ "once_cell",
+ "ractor 0.14.2",
+ "rand 0.8.5",
+ "regex",
+ "scrypt",
+ "secp256k1 0.28.2",
+ "serde",
+ "serde_json",
+ "serde_with",
+ "serde_yaml",
+ "socket2",
+ "strum",
+ "tentacle",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "fnn"
+version = "0.5.1"
+source = "git+https://github.com/nervosnetwork/fiber.git?tag=v0.5.1-rc1#634106ef3ca7912e4d0395fce1914ea24821beb7"
+dependencies = [
+ "aes-gcm",
+ "anyhow",
+ "arcode",
+ "async-trait",
+ "bech32 0.9.1",
+ "bincode",
+ "bitcoin",
+ "bitflags 2.7.0",
+ "bitmask-enum",
+ "ckb-chain-spec",
+ "ckb-gen-types",
+ "ckb-hash",
+ "ckb-jsonrpc-types",
+ "ckb-resource",
+ "ckb-rocksdb",
+ "ckb-sdk",
+ "ckb-types",
+ "clap",
+ "clap-serde-derive",
+ "console",
+ "either",
+ "fiber-sphinx",
+ "futures",
+ "git-version",
+ "hex",
+ "home",
+ "indicatif",
+ "jsonrpsee",
+ "lightning-invoice",
+ "lnd-grpc-tonic-client",
+ "molecule",
+ "musig2",
+ "nom",
+ "num_enum",
+ "once_cell",
+ "ractor 0.14.2",
+ "rand 0.8.5",
+ "regex",
+ "scrypt",
+ "secp256k1 0.28.2",
+ "serde",
+ "serde_json",
+ "serde_with",
+ "serde_yaml",
+ "socket2",
+ "strum",
+ "tentacle",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "fnn-migrate"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "bincode",
  "ckb-rocksdb",
@@ -1956,6 +2114,8 @@ dependencies = [
  "fnn 0.3.1 (git+https://github.com/nervosnetwork/fiber.git?tag=v0.4.0-rc1-p1)",
  "fnn 0.4.0",
  "fnn 0.5.0",
+ "fnn 0.5.1",
+ "fnn 0.5.1 (git+https://github.com/nervosnetwork/fiber.git?tag=v0.5.1-rc1)",
  "hex",
  "indicatif",
  "serde",
@@ -2116,6 +2276,16 @@ dependencies = [
  "libc",
  "wasi 0.11.0+wasi-snapshot-preview1",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "ghash"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f0d8a4362ccb29cb0b265253fb0a2728f592895ee6854fd9bc13f2ffda266ff1"
+dependencies = [
+ "opaque-debug",
+ "polyval",
 ]
 
 [[package]]
@@ -3386,10 +3556,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "password-hash"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "346f04948ba92c43e8469c1ee6736c7563d71012b17d40745260fe106aac2166"
+dependencies = [
+ "base64ct",
+ "rand_core 0.6.4",
+ "subtle",
+]
+
+[[package]]
 name = "paste"
 version = "1.0.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
+
+[[package]]
+name = "pbkdf2"
+version = "0.12.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f8ed6a7761f76e3b9f92dfb0a60a6a6477c61024b775147ff0973a02653abaf2"
+dependencies = [
+ "digest 0.10.7",
+ "hmac",
+]
 
 [[package]]
 name = "peeking_take_while"
@@ -3501,6 +3692,18 @@ version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8159bd90725d2df49889a078b54f4f79e87f1f8a8444194cdca81d38f5393abf"
 dependencies = [
+ "cpufeatures",
+ "opaque-debug",
+ "universal-hash",
+]
+
+[[package]]
+name = "polyval"
+version = "0.6.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9d1fe60d06143b2430aa532c94cfe9e29783047f06c0d7fd359a9a51b729fa25"
+dependencies = [
+ "cfg-if 1.0.0",
  "cpufeatures",
  "opaque-debug",
  "universal-hash",
@@ -3966,6 +4169,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f3cb5ba0dc43242ce17de99c180e96db90b235b8a9fdc9543c96d2209116bd9f"
 
 [[package]]
+name = "salsa20"
+version = "0.10.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "97a22f5af31f73a954c10289c93e8a50cc23d971e80ee446f1f6f7137a088213"
+dependencies = [
+ "cipher",
+]
+
+[[package]]
 name = "same-file"
 version = "1.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4007,6 +4219,18 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 1.0.109",
+]
+
+[[package]]
+name = "scrypt"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0516a385866c09368f0b5bcd1caff3366aace790fcd46e2bb032697bb172fd1f"
+dependencies = [
+ "password-hash",
+ "pbkdf2",
+ "salsa20",
+ "sha2",
 ]
 
 [[package]]

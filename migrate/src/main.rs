@@ -1,5 +1,6 @@
 use clap::Parser;
 use fiber::store::db_migrate::DbMigrate;
+use fiber::store::Store;
 use fnn_migrate::migrations::*;
 use fnn_migrate::util::prompt;
 use rocksdb::ops::Open;
@@ -34,8 +35,12 @@ struct Args {
     path: String,
 
     /// Skip confirmation prompts
-    #[arg(short, long, default_value_t = false)]
+    #[arg(short, long, default_value_t = false, group = "mode")]
     skip_confirm: bool,
+
+    /// Run db validation
+    #[arg(short, long, default_value_t = false, group = "mode")]
+    check_validate: bool,
 }
 
 fn run_migrate<P: AsRef<Path>>(
@@ -82,10 +87,21 @@ fn main() {
     let path = Path::new(&args.path);
     let skip_confirm = args.skip_confirm;
 
-    let db = open_db(path).expect("failed to open db");
-    let migrate = init_db_migrate(db);
-    if let Err(err) = run_migrate(migrate, path, skip_confirm) {
-        eprintln!("{}", err);
-        exit(1);
+    if args.check_validate {
+        if let Err(err) = Store::check_validate(path) {
+            eprintln!("db validate failed:\n{}", err);
+            exit(1);
+        } else {
+            println!("db validate success");
+            exit(0);
+        }
+    } else {
+        let db = open_db(path).expect("failed to open db");
+        let migrate = init_db_migrate(db);
+
+        if let Err(err) = run_migrate(migrate, path, skip_confirm) {
+            eprintln!("{}", err);
+            exit(1);
+        }
     }
 }

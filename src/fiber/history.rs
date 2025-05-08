@@ -196,10 +196,12 @@ impl InternalResult {
                 TlcErrorCode::InvalidOnionVersion
                 | TlcErrorCode::InvalidOnionHmac
                 | TlcErrorCode::InvalidOnionKey
-                | TlcErrorCode::InvalidOnionPayload => need_to_retry = false,
-                TlcErrorCode::IncorrectOrUnknownPaymentDetails
+                | TlcErrorCode::InvalidOnionPayload
+                | TlcErrorCode::IncorrectOrUnknownPaymentDetails
                 | TlcErrorCode::InvoiceExpired
                 | TlcErrorCode::InvoiceCancelled
+                | TlcErrorCode::UnknownNextPeer
+                | TlcErrorCode::RequiredNodeFeatureMissing
                 | TlcErrorCode::ExpiryTooFar => {
                     need_to_retry = false;
                 }
@@ -286,8 +288,10 @@ impl InternalResult {
                         self.fail_range_pairs(nodes, 0, index - 1);
                     }
                 }
-                TlcErrorCode::IncorrectOrUnknownPaymentDetails
-                | TlcErrorCode::InvoiceExpired
+                TlcErrorCode::IncorrectOrUnknownPaymentDetails => {
+                    need_to_retry = false;
+                }
+                TlcErrorCode::InvoiceExpired
                 | TlcErrorCode::InvoiceCancelled
                 | TlcErrorCode::FinalIncorrectExpiryDelta
                 | TlcErrorCode::FinalIncorrectTlcAmount => {

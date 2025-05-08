@@ -2,11 +2,11 @@ use ckb_hash::blake2b_256;
 use clap_serde_derive::ClapSerde;
 use secp256k1::{Secp256k1, SecretKey};
 use serde_with::serde_as;
-use std::{
-    io::{ErrorKind, Read},
-    path::PathBuf,
-    str::FromStr,
-};
+use std::{fs, path::PathBuf, str::FromStr};
+use tracing::info;
+
+use crate::utils::encrypt_decrypt_file::{decrypt_from_file, encrypt_to_file};
+use crate::{Error, Result};
 
 use ckb_jsonrpc_types::{OutPoint as OutPointWrapper, Script as ScriptWrapper};
 use ckb_types::core::ScriptHashType;
@@ -24,6 +24,7 @@ use super::contracts::{get_script_by_contract, Contract};
 
 pub const DEFAULT_CKB_BASE_DIR_NAME: &str = "ckb";
 const DEFAULT_CKB_NODE_RPC_URL: &str = "http://127.0.0.1:8114";
+const ENV_FIBER_SECRET_KEY_PASSWORD: &str = "FIBER_SECRET_KEY_PASSWORD";
 
 #[derive(ClapSerde, Debug, Clone)]
 pub struct CkbConfig {
@@ -68,7 +69,7 @@ impl CkbConfig {
         self.base_dir.as_ref().expect("have set base dir")
     }
 
-    pub fn create_base_dir(&self) -> crate::Result<()> {
+    pub fn create_base_dir(&self) -> Result<()> {
         if !self.base_dir().exists() {
             std::fs::create_dir_all(self.base_dir()).map_err(Into::into)
         } else {
@@ -76,45 +77,34 @@ impl CkbConfig {
         }
     }
 
-    // TODO: Use keystore and password to read secret key and add an RPC method to authorize the secret key access.
-    pub fn read_secret_key(&self) -> crate::Result<SecretKey> {
+    pub fn read_secret_key(&self) -> Result<SecretKey> {
         self.create_base_dir()?;
+        let password = std::env::var(ENV_FIBER_SECRET_KEY_PASSWORD).map_err(|_| {
+            Error::SecretKeyFileError(format!(
+                "please set {} environment variable to encrypt and decrypt the secret key",
+                ENV_FIBER_SECRET_KEY_PASSWORD
+            ))
+        })?;
+        let password_bytes = password.as_bytes();
+
         let path = self.base_dir().join("key");
-        let mut file = std::fs::File::open(&path)?;
-
-        let warn = |m: bool, d: &str| {
-            if m {
-                tracing::warn!(
-                    "Your secret file's permission is not {}, path: {:?}. \
-                Please fix it as soon as possible",
-                    d,
-                    path
-                )
+        if let Ok(plain_key_hex) = fs::read_to_string(&path) {
+            if let Ok(plain_key) = hex::decode(plain_key_hex.trim()) {
+                info!("secret key is using plain key format, start migrating to encrypted format");
+                encrypt_to_file(&path, plain_key.as_ref(), password_bytes)
+                    .map_err(Error::SecretKeyFileError)?;
+                info!("secret key migration done");
             }
-        };
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            warn(
-                file.metadata()?.permissions().mode() & 0o177 != 0,
-                "less than 0o600",
-            );
-        }
-        #[cfg(not(unix))]
-        {
-            warn(!file.metadata()?.permissions().readonly(), "readonly");
         }
 
-        let mut key_hex: String = Default::default();
-        file.read_to_string(&mut key_hex)?;
-        let key_bin = hex::decode(key_hex.trim())
-            .map_err(|_| std::io::Error::new(ErrorKind::InvalidData, "invalid secret key data"))?;
-        SecretKey::from_slice(&key_bin).map_err(|_| {
-            std::io::Error::new(ErrorKind::InvalidData, "invalid secret key data").into()
+        let key_bin =
+            decrypt_from_file(&path, password_bytes).map_err(Error::SecretKeyFileError)?;
+        SecretKey::from_slice(&key_bin).map_err(|err| {
+            Error::SecretKeyFileError(format!("invalid secret key data, error: {}", err))
         })
     }
 
-    pub fn get_default_funding_lock_script(&self) -> crate::Result<Script> {
+    pub fn get_default_funding_lock_script(&self) -> Result<Script> {
         let secret_key = self.read_secret_key()?;
         let secp = Secp256k1::new();
         let pubkey_hash = blake2b_256(secret_key.public_key(&secp).serialize());

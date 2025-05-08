@@ -1084,7 +1084,7 @@ impl From<UpdateTlcInfo> for ChannelTlcInfo {
     }
 }
 
-#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AddTlc {
     pub channel_id: Hash256,
     pub tlc_id: u64,
@@ -1093,6 +1093,19 @@ pub struct AddTlc {
     pub expiry: u64,
     pub hash_algorithm: HashAlgorithm,
     pub onion_packet: Option<PaymentOnionPacket>,
+}
+
+impl Debug for AddTlc {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AddTlc")
+            .field("channel_id", &self.channel_id)
+            .field("tlc_id", &self.tlc_id)
+            .field("amount", &self.amount)
+            .field("payment_hash", &self.payment_hash)
+            .field("expiry", &self.expiry)
+            .field("hash_algorithm", &self.hash_algorithm)
+            .finish()
+    }
 }
 
 impl From<AddTlc> for molecule_fiber::AddTlc {
@@ -1930,7 +1943,6 @@ impl From<molecule_fiber::UdtDep> for UdtDep {
 
 impl From<UdtArgInfo> for molecule_fiber::UdtArgInfo {
     fn from(udt_arg_info: UdtArgInfo) -> Self {
-        tracing::info!("udt_arg_info: {:?}", udt_arg_info);
         molecule_fiber::UdtArgInfo::new_builder()
             .name(udt_arg_info.name.pack())
             .script(udt_arg_info.script.into())
@@ -1957,7 +1969,7 @@ impl From<UdtArgInfo> for molecule_fiber::UdtArgInfo {
 impl From<molecule_fiber::UdtArgInfo> for UdtArgInfo {
     fn from(udt_arg_info: molecule_fiber::UdtArgInfo) -> Self {
         UdtArgInfo {
-            name: String::from_utf8(udt_arg_info.name().unpack()).expect("invalid name"),
+            name: String::from_utf8(udt_arg_info.name().unpack()).unwrap_or_default(),
             script: udt_arg_info.script().into(),
             auto_accept_amount: udt_arg_info
                 .auto_accept_amount()
@@ -3648,7 +3660,6 @@ pub(crate) fn deterministically_hash<T: Entity>(v: &T) -> [u8; 32] {
 pub struct PaymentHopData {
     pub amount: u128,
     pub expiry: u64,
-    // this is only specified in the last hop in the keysend mode
     pub payment_preimage: Option<Hash256>,
     pub hash_algorithm: HashAlgorithm,
     pub funding_tx_hash: Hash256,
@@ -3758,12 +3769,13 @@ impl From<molecule_fiber::PaymentHopData> for PaymentHopData {
             hash_algorithm: payment_hop_data
                 .hash_algorithm()
                 .try_into()
-                .expect("valid hash algorithm"),
+                .unwrap_or_default(),
             funding_tx_hash: payment_hop_data.funding_tx_hash().into(),
             next_hop: payment_hop_data
                 .next_hop()
                 .to_opt()
-                .map(|x| x.try_into().expect("invalid pubkey")),
+                .map(|x| x.try_into())
+                .and_then(Result::ok),
             custom_records: payment_hop_data.custom_records().to_opt().map(|x| x.into()),
         }
     }

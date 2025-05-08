@@ -1,13 +1,18 @@
 use super::test_utils::{init_tracing, NetworkNode};
 use crate::{
-    ckb::tests::test_utils::set_next_block_timestamp,
+    ckb::{
+        tests::test_utils::{
+            set_next_block_timestamp, MockChainActorMiddleware, MockChainActorState,
+        },
+        CkbChainMessage, CkbTxTracingResult,
+    },
     fiber::{
         channel::ShutdownInfo,
         config::DEFAULT_TLC_EXPIRY_DELTA,
         gossip::{GossipActorMessage, GossipMessageStore},
         graph::ChannelUpdateInfo,
         network::{NetworkActorStateStore, SendPaymentCommand, SendPaymentData},
-        tests::test_utils::NetworkNodeConfigBuilder,
+        tests::test_utils::{NetworkNodeConfig, NetworkNodeConfigBuilder},
         types::{
             BroadcastMessage, BroadcastMessageWithTimestamp, BroadcastMessagesFilterResult,
             ChannelAnnouncement, ChannelUpdateChannelFlags, Cursor, GossipMessage,
@@ -26,6 +31,7 @@ use ckb_types::{
     prelude::{Builder, Entity, Pack},
 };
 use musig2::PartialSignature;
+use ractor::{call, ActorProcessingErr, ActorRef};
 use std::{borrow::Cow, str::FromStr, time::Duration};
 use tentacle::{
     multiaddr::{MultiAddr, Multiaddr, Protocol},
@@ -813,20 +819,7 @@ fn test_send_payment_validate_payment_hash() {
     let send_command = SendPaymentCommand {
         target_pubkey: Some(gen_rand_fiber_public_key()),
         amount: Some(10000),
-        payment_hash: None,
-        final_tlc_expiry_delta: None,
-        tlc_expiry_limit: None,
-
-        invoice: None,
-        timeout: None,
-        max_fee_amount: None,
-        max_parts: None,
-        keysend: None,
-        udt_type_script: None,
-        allow_self_payment: false,
-        hop_hints: None,
-        dry_run: false,
-        custom_records: None,
+        ..Default::default()
     };
 
     let result = SendPaymentData::new(send_command);
@@ -838,21 +831,7 @@ fn test_send_payment_validate_payment_hash() {
 fn test_send_payment_validate_amount() {
     let send_command = SendPaymentCommand {
         target_pubkey: Some(gen_rand_fiber_public_key()),
-        amount: None,
-        payment_hash: None,
-        final_tlc_expiry_delta: None,
-        tlc_expiry_limit: None,
-
-        invoice: None,
-        timeout: None,
-        max_fee_amount: None,
-        max_parts: None,
-        keysend: None,
-        udt_type_script: None,
-        allow_self_payment: false,
-        hop_hints: None,
-        dry_run: false,
-        custom_records: None,
+        ..Default::default()
     };
 
     let result = SendPaymentData::new(send_command);
@@ -886,20 +865,8 @@ fn test_send_payment_validate_invoice() {
     let invoice_encoded = invoice.to_string();
     let send_command = SendPaymentCommand {
         target_pubkey: Some(gen_rand_fiber_public_key()),
-        amount: None,
-        payment_hash: None,
-        final_tlc_expiry_delta: None,
-        tlc_expiry_limit: None,
         invoice: Some(invoice_encoded.clone()),
-        timeout: None,
-        max_fee_amount: None,
-        max_parts: None,
-        keysend: None,
-        udt_type_script: None,
-        allow_self_payment: false,
-        hop_hints: None,
-        dry_run: false,
-        custom_records: None,
+        ..Default::default()
     };
 
     let result = SendPaymentData::new(send_command);
@@ -909,21 +876,9 @@ fn test_send_payment_validate_invoice() {
         .contains("target_pubkey does not match the invoice"));
 
     let send_command = SendPaymentCommand {
-        target_pubkey: None,
         amount: Some(10),
-        payment_hash: None,
-        final_tlc_expiry_delta: None,
-        tlc_expiry_limit: None,
         invoice: Some(invoice_encoded.clone()),
-        timeout: None,
-        max_fee_amount: None,
-        max_parts: None,
-        keysend: None,
-        udt_type_script: None,
-        allow_self_payment: false,
-        hop_hints: None,
-        dry_run: false,
-        custom_records: None,
+        ..Default::default()
     };
 
     // keysend is set with invoice, should be error
@@ -934,21 +889,9 @@ fn test_send_payment_validate_invoice() {
         .contains("amount does not match the invoice"));
 
     let send_command = SendPaymentCommand {
-        target_pubkey: None,
-        amount: None,
-        payment_hash: None,
-        final_tlc_expiry_delta: None,
-        tlc_expiry_limit: None,
         invoice: Some(invoice_encoded.clone()),
-        timeout: None,
-        max_fee_amount: None,
-        max_parts: None,
         keysend: Some(true),
-        udt_type_script: None,
-        allow_self_payment: false,
-        hop_hints: None,
-        dry_run: false,
-        custom_records: None,
+        ..Default::default()
     };
 
     let result = SendPaymentData::new(send_command);
@@ -956,21 +899,8 @@ fn test_send_payment_validate_invoice() {
 
     // normal invoice send payment
     let send_command = SendPaymentCommand {
-        target_pubkey: None,
-        amount: None,
-        payment_hash: None,
-        final_tlc_expiry_delta: None,
-        tlc_expiry_limit: None,
         invoice: Some(invoice_encoded.clone()),
-        timeout: None,
-        max_fee_amount: None,
-        max_parts: None,
-        keysend: None,
-        udt_type_script: None,
-        allow_self_payment: false,
-        hop_hints: None,
-        dry_run: false,
-        custom_records: None,
+        ..Default::default()
     };
 
     let result = SendPaymentData::new(send_command);
@@ -980,19 +910,8 @@ fn test_send_payment_validate_invoice() {
     let send_command = SendPaymentCommand {
         target_pubkey: Some(gen_rand_fiber_public_key()),
         amount: Some(10),
-        payment_hash: None,
-        final_tlc_expiry_delta: None,
-        tlc_expiry_limit: None,
-        invoice: None,
-        timeout: None,
-        max_fee_amount: None,
-        max_parts: None,
         keysend: Some(true),
-        udt_type_script: None,
-        allow_self_payment: false,
-        hop_hints: None,
-        dry_run: false,
-        custom_records: None,
+        ..Default::default()
     };
 
     let result = SendPaymentData::new(send_command);
@@ -1000,21 +919,9 @@ fn test_send_payment_validate_invoice() {
 
     // invoice with invalid final_tlc_expiry_delta
     let send_command = SendPaymentCommand {
-        target_pubkey: None,
-        amount: None,
-        payment_hash: None,
         final_tlc_expiry_delta: Some(11),
-        tlc_expiry_limit: None,
         invoice: Some(invoice_encoded.clone()),
-        timeout: None,
-        max_fee_amount: None,
-        max_parts: None,
-        keysend: None,
-        udt_type_script: None,
-        allow_self_payment: false,
-        hop_hints: None,
-        dry_run: false,
-        custom_records: None,
+        ..Default::default()
     };
 
     let result = SendPaymentData::new(send_command);
@@ -1037,21 +944,8 @@ fn test_send_payment_validate_invoice() {
         .unwrap();
     let invoice_encoded = invoice.to_string();
     let send_command = SendPaymentCommand {
-        target_pubkey: None,
-        amount: None,
-        payment_hash: None,
-        final_tlc_expiry_delta: None,
-        tlc_expiry_limit: None,
         invoice: Some(invoice_encoded.clone()),
-        timeout: None,
-        max_fee_amount: None,
-        max_parts: None,
-        keysend: None,
-        udt_type_script: None,
-        allow_self_payment: false,
-        hop_hints: None,
-        dry_run: false,
-        custom_records: None,
+        ..Default::default()
     };
 
     let result = SendPaymentData::new(send_command);
@@ -1068,17 +962,7 @@ fn test_send_payment_validate_htlc_expiry_delta() {
         amount: Some(1000),
         payment_hash: Some(gen_rand_sha256_hash()),
         final_tlc_expiry_delta: Some(100),
-        tlc_expiry_limit: None,
-        invoice: None,
-        timeout: None,
-        max_fee_amount: None,
-        max_parts: None,
-        keysend: None,
-        udt_type_script: None,
-        allow_self_payment: false,
-        hop_hints: None,
-        dry_run: false,
-        custom_records: None,
+        ..Default::default()
     };
 
     let result = SendPaymentData::new(send_command);
@@ -1086,4 +970,203 @@ fn test_send_payment_validate_htlc_expiry_delta() {
     assert!(result
         .unwrap_err()
         .contains("invalid final_tlc_expiry_delta"));
+}
+
+#[tokio::test]
+async fn test_abort_funding_on_building_funding_tx() {
+    use crate::fiber::network::{AcceptChannelCommand, OpenChannelCommand};
+
+    let funding_amount_a = 4_200_000_000u128;
+    let funding_amount_b: u128 = u64::MAX as u128 + 1 - funding_amount_a;
+    let mut node_a = NetworkNode::new().await;
+    let mut node_b = NetworkNode::new().await;
+    node_a.connect_to(&node_b).await;
+
+    // Use a huge amount to fail the funding
+    let message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
+            OpenChannelCommand {
+                peer_id: node_b.peer_id.clone(),
+                public: true,
+                shutdown_script: None,
+                funding_amount: funding_amount_a,
+                funding_udt_type_script: None,
+                commitment_fee_rate: None,
+                commitment_delay_epoch: None,
+                funding_fee_rate: None,
+                tlc_expiry_delta: None,
+                tlc_min_value: None,
+                tlc_fee_proportional_millionths: None,
+                max_tlc_number_in_flight: None,
+                max_tlc_value_in_flight: None,
+            },
+            rpc_reply,
+        ))
+    };
+    let open_channel_result = call!(node_a.network_actor, message)
+        .expect("node_a alive")
+        .expect("open channel success");
+
+    node_b
+        .expect_event(|event| match event {
+            NetworkServiceEvent::ChannelPendingToBeAccepted(peer_id, _channel_id) => {
+                assert_eq!(peer_id, &node_a.peer_id);
+                true
+            }
+            _ => false,
+        })
+        .await;
+    let message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::AcceptChannel(
+            AcceptChannelCommand {
+                temp_channel_id: open_channel_result.channel_id,
+                funding_amount: funding_amount_b,
+                shutdown_script: None,
+                max_tlc_number_in_flight: None,
+                max_tlc_value_in_flight: None,
+                min_tlc_value: None,
+                tlc_fee_proportional_millionths: None,
+                tlc_expiry_delta: None,
+            },
+            rpc_reply,
+        ))
+    };
+    let accept_channel_result = call!(node_b.network_actor, message)
+        .expect("node_b alive")
+        .expect("accept channel success");
+    let channel_id = accept_channel_result.new_channel_id;
+    node_b
+        .expect_event(|event| {
+            matches!(
+                event,
+                NetworkServiceEvent::ChannelFundingAborted(id) if *id == channel_id
+            )
+        })
+        .await;
+    node_a
+        .expect_event(|event| {
+            matches!(
+                event,
+                NetworkServiceEvent::ChannelFundingAborted(id) if *id == channel_id
+            )
+        })
+        .await;
+}
+
+#[derive(Clone, Debug)]
+struct CkbTxFailureMockMiddleware;
+#[ractor::async_trait]
+impl MockChainActorMiddleware for CkbTxFailureMockMiddleware {
+    async fn handle(
+        &mut self,
+        _inner_self: ActorRef<CkbChainMessage>,
+        message: CkbChainMessage,
+        _state: &mut MockChainActorState,
+    ) -> Result<Option<CkbChainMessage>, ActorProcessingErr> {
+        match message {
+            CkbChainMessage::CreateTxTracer(tracer) => {
+                let _ = tracer.callback.send(CkbTxTracingResult {
+                    tx_hash: tracer.tx_hash,
+                    tx_status: TxStatus::Rejected("mock".to_string()),
+                });
+                Ok(None)
+            }
+            _ => Ok(Some(message)),
+        }
+    }
+
+    fn clone_box(&self) -> Box<dyn MockChainActorMiddleware> {
+        Box::new(self.clone())
+    }
+}
+
+#[tokio::test]
+async fn test_abort_funding_on_committing_funding_tx_on_chain() {
+    use crate::fiber::network::{AcceptChannelCommand, OpenChannelCommand};
+
+    let funding_amount_a = 4_200_000_000u128;
+    let funding_amount_b: u128 = funding_amount_a;
+    let middleware = Box::new(CkbTxFailureMockMiddleware);
+    let mut node_a = NetworkNode::new_with_config(
+        NetworkNodeConfig::builder()
+            .mock_chain_actor_middleware(middleware.clone())
+            .build(),
+    )
+    .await;
+    let mut node_b = NetworkNode::new_with_config(
+        NetworkNodeConfig::builder()
+            .mock_chain_actor_middleware(middleware)
+            .build(),
+    )
+    .await;
+    node_a.connect_to(&node_b).await;
+
+    let message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
+            OpenChannelCommand {
+                peer_id: node_b.peer_id.clone(),
+                public: true,
+                shutdown_script: None,
+                funding_amount: funding_amount_a,
+                funding_udt_type_script: None,
+                commitment_fee_rate: None,
+                commitment_delay_epoch: None,
+                funding_fee_rate: None,
+                tlc_expiry_delta: None,
+                tlc_min_value: None,
+                tlc_fee_proportional_millionths: None,
+                max_tlc_number_in_flight: None,
+                max_tlc_value_in_flight: None,
+            },
+            rpc_reply,
+        ))
+    };
+    let open_channel_result = call!(node_a.network_actor, message)
+        .expect("node_a alive")
+        .expect("open channel success");
+
+    node_b
+        .expect_event(|event| match event {
+            NetworkServiceEvent::ChannelPendingToBeAccepted(peer_id, _channel_id) => {
+                assert_eq!(peer_id, &node_a.peer_id);
+                true
+            }
+            _ => false,
+        })
+        .await;
+    let message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::AcceptChannel(
+            AcceptChannelCommand {
+                temp_channel_id: open_channel_result.channel_id,
+                funding_amount: funding_amount_b,
+                shutdown_script: None,
+                max_tlc_number_in_flight: None,
+                max_tlc_value_in_flight: None,
+                min_tlc_value: None,
+                tlc_fee_proportional_millionths: None,
+                tlc_expiry_delta: None,
+            },
+            rpc_reply,
+        ))
+    };
+    let accept_channel_result = call!(node_b.network_actor, message)
+        .expect("node_b alive")
+        .expect("accept channel success");
+    let channel_id = accept_channel_result.new_channel_id;
+    node_b
+        .expect_event(|event| {
+            matches!(
+                event,
+                NetworkServiceEvent::ChannelFundingAborted(id) if *id == channel_id
+            )
+        })
+        .await;
+    node_a
+        .expect_event(|event| {
+            matches!(
+                event,
+                NetworkServiceEvent::ChannelFundingAborted(id) if *id == channel_id
+            )
+        })
+        .await;
 }

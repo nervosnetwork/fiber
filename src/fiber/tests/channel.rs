@@ -1,6 +1,7 @@
 use super::test_utils::{init_tracing, NetworkNode};
-use crate::fiber::channel::{UpdateCommand, XUDT_COMPATIBLE_WITNESS};
-use crate::fiber::config::MAX_PAYMENT_TLC_EXPIRY_LIMIT;
+use crate::ckb::tests::test_utils::complete_commitment_tx;
+use crate::fiber::channel::{ChannelState, CloseFlags, UpdateCommand, XUDT_COMPATIBLE_WITNESS};
+use crate::fiber::config::{DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT};
 use crate::fiber::graph::{ChannelInfo, PaymentSessionStatus};
 use crate::fiber::network::{DebugEvent, SendPaymentCommand};
 use crate::fiber::tests::test_utils::*;
@@ -19,7 +20,6 @@ use crate::{
         config::DEFAULT_AUTO_ACCEPT_CHANNEL_CKB_FUNDING_AMOUNT,
         hash_algorithm::HashAlgorithm,
         network::{AcceptChannelCommand, OpenChannelCommand},
-        tests::test_utils::establish_channel_between_nodes,
         types::{Privkey, RemoveTlcFulfill, RemoveTlcReason},
         NetworkActorCommand, NetworkActorMessage,
     },
@@ -35,8 +35,7 @@ use ractor::call;
 use secp256k1::Secp256k1;
 use std::collections::HashSet;
 use std::time::Duration;
-
-const DEFAULT_EXPIRY_DELTA: u64 = 24 * 60 * 60 * 1000; // 24 hours
+use tracing::debug;
 
 #[test]
 fn test_per_commitment_point_and_secret_consistency() {
@@ -445,7 +444,6 @@ async fn test_owned_channel_saved_to_graph_on_reconnected_private_channel() {
 async fn do_test_update_graph_balance_after_payment(public: bool) {
     init_tracing();
 
-    let _span = tracing::info_span!("node", node = "test").entered();
     let node_a_funding_amount = 100000000000;
     let node_b_funding_amount = 6200000000;
 
@@ -509,19 +507,8 @@ async fn do_test_update_graph_balance_after_payment(public: bool) {
             SendPaymentCommand {
                 target_pubkey: Some(node_b_pubkey),
                 amount: Some(10000),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                tlc_expiry_limit: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -539,19 +526,8 @@ async fn do_test_update_graph_balance_after_payment(public: bool) {
             SendPaymentCommand {
                 target_pubkey: Some(node_a_pubkey),
                 amount: Some(9999),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                invoice: None,
-                timeout: None,
-                tlc_expiry_limit: None,
-                max_fee_amount: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -633,19 +609,12 @@ async fn test_public_channel_saved_to_the_other_nodes_graph() {
     let (_channel_id, funding_tx_hash) = establish_channel_between_nodes(
         &mut node1,
         &mut node2,
-        true,
-        node1_funding_amount,
-        node2_funding_amount,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
+        ChannelParameters {
+            public: true,
+            node_a_funding_amount: node1_funding_amount,
+            node_b_funding_amount: node2_funding_amount,
+            ..Default::default()
+        },
     )
     .await;
     let funding_tx = node1
@@ -689,19 +658,7 @@ async fn test_public_channel_with_unconfirmed_funding_tx() {
     let (_channel_id, _funding_tx_hash) = establish_channel_between_nodes(
         &mut node1,
         &mut node2,
-        true,
-        node1_funding_amount,
-        node2_funding_amount,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
+        ChannelParameters::new(node1_funding_amount, node2_funding_amount),
     )
     .await;
 
@@ -722,7 +679,6 @@ async fn test_public_channel_with_unconfirmed_funding_tx() {
 async fn test_network_send_payment_normal_keysend_workflow() {
     init_tracing();
 
-    let _span = tracing::info_span!("node", node = "test").entered();
     let node_a_funding_amount = 100000000000;
     let node_b_funding_amount = 6200000000;
 
@@ -742,19 +698,8 @@ async fn test_network_send_payment_normal_keysend_workflow() {
             SendPaymentCommand {
                 target_pubkey: Some(node_b_pubkey),
                 amount: Some(10000),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                tlc_expiry_limit: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -792,19 +737,8 @@ async fn test_network_send_payment_normal_keysend_workflow() {
             SendPaymentCommand {
                 target_pubkey: Some(node_b_pubkey),
                 amount: Some(10000),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                invoice: None,
-                timeout: None,
-                tlc_expiry_limit: None,
-                max_fee_amount: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -826,7 +760,6 @@ async fn test_network_send_payment_normal_keysend_workflow() {
 async fn test_network_send_payment_send_each_other() {
     init_tracing();
 
-    let _span = tracing::info_span!("node", node = "test").entered();
     let node_a_funding_amount = 100000000000;
     let node_b_funding_amount = 6200000000;
 
@@ -845,19 +778,8 @@ async fn test_network_send_payment_send_each_other() {
             SendPaymentCommand {
                 target_pubkey: Some(node_b_pubkey),
                 amount: Some(10000),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                tlc_expiry_limit: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -875,19 +797,8 @@ async fn test_network_send_payment_send_each_other() {
             SendPaymentCommand {
                 target_pubkey: Some(node_a_pubkey),
                 amount: Some(9999),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                invoice: None,
-                timeout: None,
-                tlc_expiry_limit: None,
-                max_fee_amount: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -943,7 +854,6 @@ async fn test_network_send_payment_more_send_each_other() {
     // all the add_tlc are added at the same time
     // and the final balance should be same as the initial balance
 
-    let _span = tracing::info_span!("node", node = "test").entered();
     let node_a_funding_amount = 100000000000;
     let node_b_funding_amount = 6200000000;
 
@@ -962,19 +872,8 @@ async fn test_network_send_payment_more_send_each_other() {
             SendPaymentCommand {
                 target_pubkey: Some(node_b_pubkey),
                 amount: Some(10000),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                tlc_expiry_limit: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                custom_records: None,
-                hop_hints: None,
-                dry_run: false,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -992,19 +891,8 @@ async fn test_network_send_payment_more_send_each_other() {
             SendPaymentCommand {
                 target_pubkey: Some(node_a_pubkey),
                 amount: Some(9999),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                invoice: None,
-                timeout: None,
-                tlc_expiry_limit: None,
-                max_fee_amount: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                custom_records: None,
-                hop_hints: None,
-                dry_run: false,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -1021,19 +909,8 @@ async fn test_network_send_payment_more_send_each_other() {
             SendPaymentCommand {
                 target_pubkey: Some(node_b_pubkey),
                 amount: Some(9999),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                tlc_expiry_limit: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                custom_records: None,
-                hop_hints: None,
-                dry_run: false,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -1051,19 +928,8 @@ async fn test_network_send_payment_more_send_each_other() {
             SendPaymentCommand {
                 target_pubkey: Some(node_a_pubkey),
                 amount: Some(10000),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                invoice: None,
-                timeout: None,
-                tlc_expiry_limit: None,
-                max_fee_amount: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                custom_records: None,
-                hop_hints: None,
-                dry_run: false,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -1093,7 +959,6 @@ async fn test_network_send_payment_more_send_each_other() {
 async fn test_network_send_payment_send_with_ack() {
     init_tracing();
 
-    let _span = tracing::info_span!("node", node = "test").entered();
     let node_a_funding_amount = 100000000000;
     let node_b_funding_amount = 6200000000;
 
@@ -1109,19 +974,8 @@ async fn test_network_send_payment_send_with_ack() {
             SendPaymentCommand {
                 target_pubkey: Some(node_b_pubkey),
                 amount: Some(10000),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                tlc_expiry_limit: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -1142,19 +996,8 @@ async fn test_network_send_payment_send_with_ack() {
             SendPaymentCommand {
                 target_pubkey: Some(node_b_pubkey),
                 amount: Some(10000),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                invoice: None,
-                timeout: None,
-                tlc_expiry_limit: None,
-                max_fee_amount: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -1172,7 +1015,6 @@ async fn test_network_send_payment_send_with_ack() {
 async fn test_network_send_previous_tlc_error() {
     init_tracing();
 
-    let _span = tracing::info_span!("node", node = "test").entered();
     let node_a_funding_amount = 100000000000;
     let node_b_funding_amount = 6200000000;
 
@@ -1226,7 +1068,7 @@ async fn test_network_send_previous_tlc_error() {
                     AddTlcCommand {
                         amount: 10000,
                         payment_hash: generated_payment_hash,
-                        expiry: DEFAULT_EXPIRY_DELTA + now_timestamp_as_millis_u64(),
+                        expiry: DEFAULT_TLC_EXPIRY_DELTA + now_timestamp_as_millis_u64(),
                         hash_algorithm: HashAlgorithm::Sha256,
                         // invalid onion packet
                         onion_packet: packet.next.clone(),
@@ -1268,19 +1110,8 @@ async fn test_network_send_previous_tlc_error() {
             SendPaymentCommand {
                 target_pubkey: Some(node_b.pubkey),
                 amount: Some(10000),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-                custom_records: None,
-                tlc_expiry_limit: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -1297,7 +1128,6 @@ async fn test_network_send_previous_tlc_error() {
 async fn test_network_send_previous_tlc_error_with_limit_amount_error() {
     init_tracing();
 
-    let _span = tracing::info_span!("node", node = "test").entered();
     let node_a_funding_amount = MIN_RESERVED_CKB + 400000000;
     let node_b_funding_amount = MIN_RESERVED_CKB;
 
@@ -1351,7 +1181,7 @@ async fn test_network_send_previous_tlc_error_with_limit_amount_error() {
                     AddTlcCommand {
                         amount: 300300000,
                         payment_hash: generated_payment_hash,
-                        expiry: DEFAULT_EXPIRY_DELTA + now_timestamp_as_millis_u64(),
+                        expiry: DEFAULT_TLC_EXPIRY_DELTA + now_timestamp_as_millis_u64(),
                         hash_algorithm: HashAlgorithm::Sha256,
                         // invalid onion packet
                         onion_packet: packet.next.clone(),
@@ -1393,19 +1223,8 @@ async fn test_network_send_previous_tlc_error_with_limit_amount_error() {
             SendPaymentCommand {
                 target_pubkey: Some(node_b.pubkey),
                 amount: Some(300000000),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-                tlc_expiry_limit: None,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -1422,7 +1241,6 @@ async fn test_network_send_previous_tlc_error_with_limit_amount_error() {
 async fn test_network_send_payment_keysend_with_payment_hash() {
     init_tracing();
 
-    let _span = tracing::info_span!("node", node = "test").entered();
     let node_a_funding_amount = 100000000000;
     let node_b_funding_amount = 6200000000;
 
@@ -1442,19 +1260,8 @@ async fn test_network_send_payment_keysend_with_payment_hash() {
                 target_pubkey: Some(node_b_pubkey),
                 amount: Some(10000),
                 payment_hash: Some(payment_hash),
-                final_tlc_expiry_delta: None,
-                tlc_expiry_limit: None,
-
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -1470,7 +1277,6 @@ async fn test_network_send_payment_keysend_with_payment_hash() {
 async fn test_network_send_payment_final_incorrect_hash() {
     init_tracing();
 
-    let _span = tracing::info_span!("node", node = "test").entered();
     let node_a_funding_amount = 100000000000;
     let node_b_funding_amount = 6200000000;
 
@@ -1493,18 +1299,7 @@ async fn test_network_send_payment_final_incorrect_hash() {
                 target_pubkey: Some(node_b_pubkey),
                 amount: Some(10000),
                 payment_hash: Some(payment_hash),
-                final_tlc_expiry_delta: None,
-                tlc_expiry_limit: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                max_parts: None,
-                keysend: None,
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -1543,7 +1338,6 @@ async fn test_network_send_payment_final_incorrect_hash() {
 async fn test_network_send_payment_target_not_found() {
     init_tracing();
 
-    let _span = tracing::info_span!("node", node = "test").entered();
     let node_a_funding_amount = 100000000000;
     let node_b_funding_amount = 6200000000;
 
@@ -1560,18 +1354,7 @@ async fn test_network_send_payment_target_not_found() {
                 target_pubkey: Some(node_b_pubkey),
                 amount: Some(10000),
                 payment_hash: Some(gen_rand_sha256_hash()),
-                final_tlc_expiry_delta: None,
-                tlc_expiry_limit: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                max_parts: None,
-                keysend: None,
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -1585,7 +1368,6 @@ async fn test_network_send_payment_target_not_found() {
 async fn test_network_send_payment_amount_is_too_large() {
     init_tracing();
 
-    let _span = tracing::info_span!("node", node = "test").entered();
     let node_a_funding_amount = 100000000000 + MIN_RESERVED_CKB;
     let node_b_funding_amount = MIN_RESERVED_CKB + 2;
 
@@ -1602,18 +1384,7 @@ async fn test_network_send_payment_amount_is_too_large() {
                 target_pubkey: Some(node_b_pubkey),
                 amount: Some(100000000000 + 5),
                 payment_hash: Some(gen_rand_sha256_hash()),
-                final_tlc_expiry_delta: None,
-                tlc_expiry_limit: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                max_parts: None,
-                keysend: None,
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -1631,7 +1402,6 @@ async fn test_network_send_payment_amount_is_too_large() {
 async fn test_network_send_payment_with_dry_run() {
     init_tracing();
 
-    let _span = tracing::info_span!("node", node = "test").entered();
     let node_a_funding_amount = 100000000000;
     let node_b_funding_amount = 62000000000;
 
@@ -1648,18 +1418,8 @@ async fn test_network_send_payment_with_dry_run() {
                 target_pubkey: Some(node_b_pubkey),
                 amount: Some(100000),
                 payment_hash: Some(gen_rand_sha256_hash()),
-                final_tlc_expiry_delta: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                tlc_expiry_limit: None,
-                max_parts: None,
-                keysend: None,
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
                 dry_run: true,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -1677,18 +1437,8 @@ async fn test_network_send_payment_with_dry_run() {
                 target_pubkey: Some(gen_rand_fiber_public_key()),
                 amount: Some(1000 + 5),
                 payment_hash: Some(gen_rand_sha256_hash()),
-                final_tlc_expiry_delta: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                tlc_expiry_limit: None,
-                max_parts: None,
-                keysend: None,
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
                 dry_run: true,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -1701,7 +1451,7 @@ async fn test_network_send_payment_with_dry_run() {
 #[tokio::test]
 async fn test_send_payment_with_3_nodes() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
+
     let (node_a, mut node_b, node_c, channel_1, channel_2) =
         create_3_nodes_with_established_channel(
             (100000000000, 100000000000),
@@ -1722,19 +1472,8 @@ async fn test_send_payment_with_3_nodes() {
             SendPaymentCommand {
                 target_pubkey: Some(node_c_pubkey),
                 amount: Some(sent_amount),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                tlc_expiry_limit: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -1777,7 +1516,7 @@ async fn test_send_payment_with_3_nodes() {
 #[tokio::test]
 async fn test_send_payment_with_rev_3_nodes() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
+
     let (nodes, channels) = create_n_nodes_network(
         vec![
             ((2, 1), (100000000000, 100000000000)),
@@ -1803,19 +1542,8 @@ async fn test_send_payment_with_rev_3_nodes() {
             SendPaymentCommand {
                 target_pubkey: Some(node_a_pubkey),
                 amount: Some(sent_amount),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                tlc_expiry_limit: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -1854,7 +1582,7 @@ async fn test_send_payment_with_rev_3_nodes() {
 #[tokio::test]
 async fn test_send_payment_with_max_nodes() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
+
     let nodes_num = 15;
     let last = nodes_num - 1;
     let amounts = vec![(100000000000, 100000000000); nodes_num - 1];
@@ -1873,19 +1601,8 @@ async fn test_send_payment_with_max_nodes() {
             SendPaymentCommand {
                 target_pubkey: Some(target_pubkey),
                 amount: Some(sent_amount),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                tlc_expiry_limit: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -1925,7 +1642,7 @@ async fn test_send_payment_with_3_nodes_overflow() {
     // Fix issue #361
 
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
+
     let (node_a, _node_b, node_c, ..) = create_3_nodes_with_established_channel(
         (1000000000 * 100000000, 1000000000 * 100000000),
         (1000000000 * 100000000, 1000000000 * 100000000),
@@ -1941,19 +1658,8 @@ async fn test_send_payment_with_3_nodes_overflow() {
             SendPaymentCommand {
                 target_pubkey: Some(node_c_pubkey),
                 amount: Some(sent_amount),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                tlc_expiry_limit: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -1969,7 +1675,6 @@ async fn test_send_payment_with_3_nodes_overflow() {
 #[tokio::test]
 async fn test_send_payment_fail_with_3_nodes_invalid_hash() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
 
     let (node_a, node_b, node_c, channel_1, channel_2) = create_3_nodes_with_established_channel(
         (100000000000, 100000000000),
@@ -1991,18 +1696,7 @@ async fn test_send_payment_fail_with_3_nodes_invalid_hash() {
                 target_pubkey: Some(node_c_pubkey),
                 amount: Some(1000000 + 5),
                 payment_hash: Some(gen_rand_sha256_hash()), // this payment hash is not from node_c
-                final_tlc_expiry_delta: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                tlc_expiry_limit: None,
-                max_parts: None,
-                keysend: None,
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -2046,7 +1740,6 @@ async fn test_send_payment_fail_with_3_nodes_final_tlc_expiry_delta() {
     // Fix issue #367, we should check the final_tlc_expiry_delta
 
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
 
     let (node_a, _node_b, node_c, ..) = create_3_nodes_with_established_channel(
         (100000000000, 100000000000),
@@ -2062,19 +1755,9 @@ async fn test_send_payment_fail_with_3_nodes_final_tlc_expiry_delta() {
             SendPaymentCommand {
                 target_pubkey: Some(node_c_pubkey),
                 amount: Some(1000000000),
-                payment_hash: None,
                 final_tlc_expiry_delta: Some(86400000 + 100), // should be in normal range
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                tlc_expiry_limit: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -2092,17 +1775,8 @@ async fn test_send_payment_fail_with_3_nodes_final_tlc_expiry_delta() {
                 amount: Some(1000000000),
                 payment_hash: None,
                 final_tlc_expiry_delta: Some(14 * 24 * 60 * 60 * 1000 + 1), // 14 days + 1 ms
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                tlc_expiry_limit: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -2119,17 +1793,8 @@ async fn test_send_payment_fail_with_3_nodes_final_tlc_expiry_delta() {
                 amount: Some(1000000000),
                 payment_hash: None,
                 final_tlc_expiry_delta: Some(14 * 24 * 60 * 60 * 1000 - 100), // 14 days - 100, will not find a path
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                tlc_expiry_limit: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -2144,7 +1809,6 @@ async fn test_send_payment_fail_with_3_nodes_dry_run_fee() {
     // Fix issue #360, dryrun option should get correct fee
 
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
 
     let (node_a, _node_b, node_c, ..) = create_3_nodes_with_established_channel(
         (100000000000, 100000000000),
@@ -2160,19 +1824,9 @@ async fn test_send_payment_fail_with_3_nodes_dry_run_fee() {
             SendPaymentCommand {
                 target_pubkey: Some(node_c_pubkey),
                 amount: Some(2000000000),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                tlc_expiry_limit: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
                 dry_run: true,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -2187,19 +1841,9 @@ async fn test_send_payment_fail_with_3_nodes_dry_run_fee() {
             SendPaymentCommand {
                 target_pubkey: Some(node_c_pubkey),
                 amount: Some(1000000000),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                tlc_expiry_limit: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
                 dry_run: true,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -2269,7 +1913,6 @@ async fn test_send_payment_fail_with_3_nodes_dry_run_fee() {
 async fn test_network_send_payment_dry_run_can_still_query() {
     init_tracing();
 
-    let _span = tracing::info_span!("node", node = "test").entered();
     let node_a_funding_amount = 100000000000;
     let node_b_funding_amount = 6200000000;
 
@@ -2338,7 +1981,6 @@ async fn test_network_send_payment_dry_run_can_still_query() {
 async fn test_network_send_payment_dry_run_will_not_create_payment_session() {
     init_tracing();
 
-    let _span = tracing::info_span!("node", node = "test").entered();
     let node_a_funding_amount = 100000000000;
     let node_b_funding_amount = 6200000000;
 
@@ -2384,18 +2026,7 @@ async fn test_network_send_payment_dry_run_will_not_create_payment_session() {
                 target_pubkey: Some(node_b_pubkey),
                 amount: Some(10000),
                 payment_hash: Some(payment_hash),
-                final_tlc_expiry_delta: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                tlc_expiry_limit: None,
-                max_parts: None,
-                keysend: None,
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -2407,8 +2038,6 @@ async fn test_network_send_payment_dry_run_will_not_create_payment_session() {
 #[tokio::test]
 async fn test_stash_broadcast_messages() {
     init_tracing();
-
-    let _span = tracing::info_span!("node", node = "test").entered();
 
     let node_a_funding_amount = 100000000000;
     let node_b_funding_amount = 6200000000;
@@ -2527,7 +2156,7 @@ async fn do_test_channel_commitment_tx_after_add_tlc(algorithm: HashAlgorithm) {
                         amount: tlc_amount,
                         hash_algorithm: algorithm,
                         payment_hash: digest.into(),
-                        expiry: now_timestamp_as_millis_u64() + DEFAULT_EXPIRY_DELTA,
+                        expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
                         onion_packet: None,
                         shared_secret: NO_SHARED_SECRET,
                         previous_tlc: None,
@@ -2554,7 +2183,7 @@ async fn do_test_channel_commitment_tx_after_add_tlc(algorithm: HashAlgorithm) {
                 );
                 assert_eq!(peer_id, &node_a.peer_id);
                 assert_eq!(channel_id, &new_channel_id);
-                Some(tx.clone())
+                Some(complete_commitment_tx(tx))
             }
             _ => None,
         })
@@ -2593,7 +2222,7 @@ async fn do_test_channel_commitment_tx_after_add_tlc(algorithm: HashAlgorithm) {
                 );
                 assert_eq!(peer_id, &node_b.peer_id);
                 assert_eq!(channel_id, &new_channel_id);
-                Some(tx.clone())
+                Some(complete_commitment_tx(tx))
             }
             _ => None,
         })
@@ -2647,7 +2276,7 @@ async fn do_test_remove_tlc_with_wrong_hash_algorithm(
                         amount: tlc_amount,
                         hash_algorithm: correct_algorithm,
                         payment_hash: digest.into(),
-                        expiry: now_timestamp_as_millis_u64() + DEFAULT_EXPIRY_DELTA,
+                        expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
                         onion_packet: None,
                         shared_secret: NO_SHARED_SECRET,
                         previous_tlc: None,
@@ -2699,7 +2328,7 @@ async fn do_test_remove_tlc_with_wrong_hash_algorithm(
                         amount: tlc_amount,
                         hash_algorithm: wrong_algorithm,
                         payment_hash: digest.into(),
-                        expiry: now_timestamp_as_millis_u64() + DEFAULT_EXPIRY_DELTA,
+                        expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
                         onion_packet: None,
                         shared_secret: NO_SHARED_SECRET,
                         previous_tlc: None,
@@ -2751,19 +2380,14 @@ async fn do_test_channel_remote_commitment_error() {
     let (new_channel_id, _funding_tx_hash) = establish_channel_between_nodes(
         &mut node_a,
         &mut node_b,
-        false,
-        node_a_funding_amount,
-        node_b_funding_amount,
-        Some(tlc_number_in_flight_limit as u64),
-        None,
-        None,
-        None,
-        None,
-        Some(tlc_number_in_flight_limit as u64),
-        None,
-        None,
-        None,
-        None,
+        ChannelParameters {
+            public: false,
+            node_a_funding_amount,
+            node_b_funding_amount,
+            a_max_tlc_number_in_flight: Some(tlc_number_in_flight_limit as u64),
+            b_max_tlc_number_in_flight: Some(tlc_number_in_flight_limit as u64),
+            ..Default::default()
+        },
     )
     .await;
 
@@ -2784,7 +2408,7 @@ async fn do_test_channel_remote_commitment_error() {
                             amount: 1000,
                             hash_algorithm,
                             payment_hash: digest.into(),
-                            expiry: now_timestamp_as_millis_u64() + DEFAULT_EXPIRY_DELTA,
+                            expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
                             onion_packet: None,
                             shared_secret: NO_SHARED_SECRET,
                             previous_tlc: None,
@@ -2840,7 +2464,6 @@ async fn do_test_channel_remote_commitment_error() {
 
 #[tokio::test]
 async fn test_network_add_two_tlcs_remove_one() {
-    let _span = tracing::info_span!("node", node = "test").entered();
     let node_a_funding_amount = 100000000000;
     let node_b_funding_amount = 100000000000;
 
@@ -2867,7 +2490,7 @@ async fn test_network_add_two_tlcs_remove_one() {
                         amount: 1000,
                         hash_algorithm: algorithm,
                         payment_hash: digest.into(),
-                        expiry: now_timestamp_as_millis_u64() + DEFAULT_EXPIRY_DELTA,
+                        expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
                         onion_packet: None,
                         shared_secret: NO_SHARED_SECRET,
                         previous_tlc: None,
@@ -2879,7 +2502,6 @@ async fn test_network_add_two_tlcs_remove_one() {
     })
     .expect("node_a alive")
     .expect("successfully added tlc");
-    eprintln!("add_tlc_result: {:?}", add_tlc_result_a);
 
     // if we don't wait for a while, the next add_tlc will fail with temporary failure
     let preimage_b = [2; 32];
@@ -2894,7 +2516,7 @@ async fn test_network_add_two_tlcs_remove_one() {
                         amount: 2000,
                         hash_algorithm: algorithm,
                         payment_hash: digest.into(),
-                        expiry: now_timestamp_as_millis_u64() + DEFAULT_EXPIRY_DELTA,
+                        expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
                         onion_packet: None,
                         shared_secret: NO_SHARED_SECRET,
                         previous_tlc: None,
@@ -2918,7 +2540,7 @@ async fn test_network_add_two_tlcs_remove_one() {
                         amount: 2000,
                         hash_algorithm: algorithm,
                         payment_hash: digest.into(),
-                        expiry: now_timestamp_as_millis_u64() + DEFAULT_EXPIRY_DELTA,
+                        expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
                         onion_packet: None,
                         shared_secret: NO_SHARED_SECRET,
                         previous_tlc: None,
@@ -3185,19 +2807,13 @@ async fn do_test_add_tlc_with_number_limit() {
     let (new_channel_id, _funding_tx_hash) = establish_channel_between_nodes(
         &mut node_a,
         &mut node_b,
-        true,
-        node_a_funding_amount,
-        node_b_funding_amount,
-        Some(node_a_max_tlc_number),
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
+        ChannelParameters {
+            public: true,
+            node_a_funding_amount,
+            node_b_funding_amount,
+            a_max_tlc_number_in_flight: Some(node_a_max_tlc_number),
+            ..Default::default()
+        },
     )
     .await;
 
@@ -3271,19 +2887,13 @@ async fn do_test_add_tlc_number_limit_reverse() {
     let (new_channel_id, _funding_tx_hash) = establish_channel_between_nodes(
         &mut node_a,
         &mut node_b,
-        true,
-        node_a_funding_amount,
-        node_b_funding_amount,
-        None,
-        None,
-        None,
-        None,
-        None,
-        Some(node_b_max_tlc_number),
-        None,
-        None,
-        None,
-        None,
+        ChannelParameters {
+            public: true,
+            node_a_funding_amount,
+            node_b_funding_amount,
+            b_max_tlc_number_in_flight: Some(node_b_max_tlc_number),
+            ..Default::default()
+        },
     )
     .await;
 
@@ -3356,19 +2966,13 @@ async fn do_test_add_tlc_value_limit() {
     let (new_channel_id, _funding_tx_hash) = establish_channel_between_nodes(
         &mut node_a,
         &mut node_b,
-        true,
-        node_a_funding_amount,
-        node_b_funding_amount,
-        None,
-        Some(3000000000),
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
+        ChannelParameters {
+            public: true,
+            node_a_funding_amount,
+            node_b_funding_amount,
+            a_max_tlc_value_in_flight: Some(3000000000),
+            ..Default::default()
+        },
     )
     .await;
 
@@ -3442,19 +3046,13 @@ async fn do_test_add_tlc_min_tlc_value_limit() {
     let (new_channel_id, _funding_tx_hash) = establish_channel_between_nodes(
         &mut node_a,
         &mut node_b,
-        true,
-        node_a_funding_amount,
-        node_b_funding_amount,
-        None,
-        None,
-        None,
-        Some(100),
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
+        ChannelParameters {
+            public: true,
+            node_a_funding_amount,
+            node_b_funding_amount,
+            a_tlc_min_value: Some(100),
+            ..Default::default()
+        },
     )
     .await;
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
@@ -3541,19 +3139,7 @@ async fn test_channel_update_tlc_expiry() {
     let (new_channel_id, _funding_tx_hash) = establish_channel_between_nodes(
         &mut node_a,
         &mut node_b,
-        true,
-        node_a_funding_amount,
-        node_b_funding_amount,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
+        ChannelParameters::new(node_a_funding_amount, node_b_funding_amount),
     )
     .await;
 
@@ -3743,19 +3329,8 @@ async fn test_forward_payment_tlc_minimum_value() {
             SendPaymentCommand {
                 target_pubkey: Some(node_c_pubkey),
                 amount: Some(tlc_amount),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                tlc_expiry_limit: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -3810,7 +3385,6 @@ async fn test_forward_payment_tlc_minimum_value() {
     })
     .expect("node_b alive");
     assert!(add_tlc_result.is_ok());
-    // sleep for a while to make sure the AddTlc processed by both party
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
     // AddTlc from B to C is not OK because the forwarding value is too small
@@ -3824,8 +3398,6 @@ async fn test_forward_payment_tlc_minimum_value() {
     })
     .expect("node_b alive");
     assert!(add_tlc_result.is_err());
-    // sleep for a while to make sure the AddTlc processed by both party
-    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
     // sending payment from A to B is OK because this has nothing to do with the channel_a_b.
     let message = |rpc_reply| -> NetworkActorMessage {
@@ -3833,19 +3405,8 @@ async fn test_forward_payment_tlc_minimum_value() {
             SendPaymentCommand {
                 target_pubkey: Some(node_b_pubkey),
                 amount: Some(tlc_amount),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                tlc_expiry_limit: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -3860,46 +3421,24 @@ async fn test_forward_payment_tlc_minimum_value() {
             SendPaymentCommand {
                 target_pubkey: Some(node_c_pubkey),
                 amount: Some(tlc_amount),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                tlc_expiry_limit: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
     };
     let res = call!(node_b.network_actor, message).expect("node_b alive");
     assert!(res.is_err());
-    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
     // sending payment from A to C should fail because the forwarding value is too small
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
             SendPaymentCommand {
                 target_pubkey: Some(node_c_pubkey),
-                amount: Some(tlc_amount),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                tlc_expiry_limit: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                max_parts: None,
+                // 1 is used for fee
+                amount: Some(tlc_amount - 1),
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -3910,7 +3449,6 @@ async fn test_forward_payment_tlc_minimum_value() {
         .unwrap_err()
         .to_string()
         .contains("Failed to build route, PathFind error: no path found"));
-    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 }
 
 #[tokio::test]
@@ -3955,19 +3493,8 @@ async fn test_send_payment_with_outdated_fee_rate() {
             SendPaymentCommand {
                 target_pubkey: Some(node_c_pubkey),
                 amount: Some(10000000000),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                tlc_expiry_limit: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -4022,7 +3549,7 @@ async fn do_test_channel_with_simple_update_operation(algorithm: HashAlgorithm) 
                         amount: tlc_amount,
                         hash_algorithm: algorithm,
                         payment_hash: digest.into(),
-                        expiry: now_timestamp_as_millis_u64() + DEFAULT_EXPIRY_DELTA,
+                        expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
                         onion_packet: None,
                         shared_secret: NO_SHARED_SECRET,
                         previous_tlc: None,
@@ -4233,7 +3760,7 @@ async fn test_revoke_old_commitment_transaction() {
                 );
                 assert_eq!(peer_id, &node_a.peer_id);
                 assert_eq!(channel_id, &new_channel_id);
-                Some(tx.clone())
+                Some(complete_commitment_tx(tx))
             }
             _ => None,
         })
@@ -4407,7 +3934,7 @@ async fn test_create_channel() {
                 );
                 assert_eq!(peer_id, &node_b.peer_id);
                 assert_eq!(channel_id, &new_channel_id);
-                Some(tx.clone())
+                Some(complete_commitment_tx(tx))
             }
             _ => None,
         })
@@ -4422,7 +3949,7 @@ async fn test_create_channel() {
                 );
                 assert_eq!(peer_id, &node_a.peer_id);
                 assert_eq!(channel_id, &new_channel_id);
-                Some(tx.clone())
+                Some(complete_commitment_tx(tx))
             }
             _ => None,
         })
@@ -4636,6 +4163,107 @@ async fn test_force_close_channel_when_remote_is_offline() {
 }
 
 #[tokio::test]
+async fn test_normal_shutdown_with_remove_tlc() {
+    init_tracing();
+
+    let (node_a, node_b, channel_id, _) =
+        NetworkNode::new_2_nodes_with_established_channel(HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT, true)
+            .await;
+
+    let preimage = [1; 32];
+    let algorithm = HashAlgorithm::CkbHash;
+    let digest = algorithm.hash(preimage);
+    let tlc_amount = 1000000000;
+
+    let node_a_state = node_a.get_channel_actor_state(channel_id);
+    let node_b_state = node_b.get_channel_actor_state(channel_id);
+    let old_node_a_balance = node_a_state.to_local_amount;
+    let old_node_b_balance = node_b_state.to_local_amount;
+
+    let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id,
+                command: ChannelCommand::AddTlc(
+                    AddTlcCommand {
+                        amount: tlc_amount,
+                        hash_algorithm: algorithm,
+                        payment_hash: digest.into(),
+                        expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+                        onion_packet: None,
+                        shared_secret: NO_SHARED_SECRET,
+                        previous_tlc: None,
+                    },
+                    rpc_reply,
+                ),
+            },
+        ))
+    })
+    .expect("node_a alive")
+    .expect("successfully added tlc");
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+    // node_a send Shutdown
+    let message = |rpc_reply| -> NetworkActorMessage {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id,
+                command: ChannelCommand::Shutdown(
+                    ShutdownCommand {
+                        close_script: Script::default(),
+                        fee_rate: FeeRate::from_u64(1000),
+                        force: false,
+                    },
+                    rpc_reply,
+                ),
+            },
+        ))
+    };
+    let res = call!(node_a.network_actor, message);
+    debug!("shutdown res: {:?}", res);
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+    // node_b send remove tlc
+    call!(node_b.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id,
+                command: ChannelCommand::RemoveTlc(
+                    RemoveTlcCommand {
+                        id: add_tlc_result.tlc_id,
+                        reason: RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+                            payment_preimage: preimage.into(),
+                        }),
+                    },
+                    rpc_reply,
+                ),
+            },
+        ))
+    })
+    .expect("node_b alive")
+    .expect("successfully removed tlc");
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+    let node_a_state = node_a.get_channel_actor_state(channel_id);
+    let node_b_state = node_b.get_channel_actor_state(channel_id);
+
+    assert_eq!(
+        node_a_state.state,
+        ChannelState::Closed(CloseFlags::COOPERATIVE)
+    );
+    assert_eq!(
+        node_b_state.state,
+        ChannelState::Closed(CloseFlags::COOPERATIVE)
+    );
+    let node_a_balance = node_a_state.to_local_amount;
+    let node_b_balance = node_b_state.to_local_amount;
+    assert_eq!(node_a_balance, old_node_a_balance - tlc_amount);
+    assert_eq!(node_b_balance, old_node_b_balance + tlc_amount);
+}
+
+#[tokio::test]
 async fn test_commitment_tx_capacity() {
     let (amount_a, amount_b) = (16200000000, 6200000000);
     let (node_a, _node_b, channel_id, _) =
@@ -4815,7 +4443,7 @@ async fn test_node_reestablish_resend_remove_tlc() {
                         amount: 1000,
                         hash_algorithm: HashAlgorithm::CkbHash,
                         payment_hash: payment_hash.into(),
-                        expiry: now_timestamp_as_millis_u64() + DEFAULT_EXPIRY_DELTA,
+                        expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
                         onion_packet: None,
                         shared_secret: NO_SHARED_SECRET,
                         previous_tlc: None,
@@ -5192,7 +4820,7 @@ async fn test_shutdown_channel_network_graph_with_sync_up() {
 #[tokio::test]
 async fn test_send_payment_with_channel_balance_error() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
+
     let nodes_num = 4;
     let amounts = vec![(100000000000, 100000000000); nodes_num - 1];
     let (nodes, channels) = create_n_nodes_with_established_channel(&amounts, nodes_num).await;
@@ -5208,19 +4836,8 @@ async fn test_send_payment_with_channel_balance_error() {
             SendPaymentCommand {
                 target_pubkey: Some(target_pubkey),
                 amount: Some(3000),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                tlc_expiry_limit: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -5239,19 +4856,8 @@ async fn test_send_payment_with_channel_balance_error() {
             SendPaymentCommand {
                 target_pubkey: Some(target_pubkey),
                 amount: Some(3000),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                tlc_expiry_limit: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -5277,7 +4883,7 @@ async fn test_send_payment_with_channel_balance_error() {
 #[tokio::test]
 async fn test_send_payment_with_disable_channel() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
+
     let nodes_num = 4;
     let amounts = vec![(100000000000, 100000000000); nodes_num - 1];
     let (nodes, channels) = create_n_nodes_with_established_channel(&amounts, nodes_num).await;
@@ -5313,7 +4919,7 @@ async fn test_send_payment_with_disable_channel() {
 #[tokio::test]
 async fn test_send_payment_with_multiple_edges_in_middle_hops() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
+
     // we have two chaneels between node_1 and node_2, they are all with the same meta information except the later one has more capacity
     // path finding will try the channel with larger capacity first, so we assert the payment retry times is 1
     // the send payment should be succeed
@@ -5336,19 +4942,8 @@ async fn test_send_payment_with_multiple_edges_in_middle_hops() {
             SendPaymentCommand {
                 target_pubkey: Some(target_pubkey),
                 amount: Some(999),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                tlc_expiry_limit: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -5369,7 +4964,7 @@ async fn test_send_payment_with_multiple_edges_in_middle_hops() {
 #[tokio::test]
 async fn test_send_payment_with_all_failed_middle_hops() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
+
     // we have two chaneels between node_1 and node_2
     // they liquid capacity is enough for send payment, but actual balance are both not enough
     // path finding will all try them but all failed, so we assert the payment retry times is 3
@@ -5392,19 +4987,8 @@ async fn test_send_payment_with_all_failed_middle_hops() {
             SendPaymentCommand {
                 target_pubkey: Some(target_pubkey),
                 amount: Some(999),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                tlc_expiry_limit: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -5426,7 +5010,7 @@ async fn test_send_payment_with_all_failed_middle_hops() {
 #[tokio::test]
 async fn test_send_payment_with_multiple_edges_can_succeed_in_retry() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
+
     // we have two chaneels between node_1 and node_2, they are all with the same meta information except the later one has more capacity
     // but even channel_2's capacity is larger, the to_local_amount is not enough for the payment
     // path finding will retry the first channel and the send payment should be succeed
@@ -5450,19 +5034,8 @@ async fn test_send_payment_with_multiple_edges_can_succeed_in_retry() {
             SendPaymentCommand {
                 target_pubkey: Some(target_pubkey),
                 amount: Some(999),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                tlc_expiry_limit: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -5483,7 +5056,7 @@ async fn test_send_payment_with_multiple_edges_can_succeed_in_retry() {
 #[tokio::test]
 async fn test_send_payment_with_final_hop_multiple_edges_in_middle_hops() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
+
     // we have two chaneels between node_2 and node_3, they are all with the same meta information except the later one has more capacity
     // path finding will try the channel with larger capacity first, so we assert the payment retry times is 1
     // the send payment should be succeed
@@ -5506,19 +5079,8 @@ async fn test_send_payment_with_final_hop_multiple_edges_in_middle_hops() {
             SendPaymentCommand {
                 target_pubkey: Some(target_pubkey),
                 amount: Some(999),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                tlc_expiry_limit: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -5539,7 +5101,7 @@ async fn test_send_payment_with_final_hop_multiple_edges_in_middle_hops() {
 #[tokio::test]
 async fn test_send_payment_with_final_all_failed_middle_hops() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
+
     // we have two chaneels between node_2 and node_3
     // they liquid capacity is enough for send payment, but actual balance are both not enough
     // path finding will all try them but all failed, so we assert the payment retry times is 3
@@ -5562,19 +5124,8 @@ async fn test_send_payment_with_final_all_failed_middle_hops() {
             SendPaymentCommand {
                 target_pubkey: Some(target_pubkey),
                 amount: Some(999),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                tlc_expiry_limit: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -5594,7 +5145,7 @@ async fn test_send_payment_with_final_all_failed_middle_hops() {
 #[tokio::test]
 async fn test_send_payment_with_final_multiple_edges_can_succeed_in_retry() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
+
     // we have two chaneels between node_2 and node_3, they are all with the same meta information except the later one has more capacity
     // but even channel_2's capacity is larger, the to_local_amount is not enough for the payment
     // path finding will retry the first channel and the send payment should be succeed
@@ -5618,19 +5169,8 @@ async fn test_send_payment_with_final_multiple_edges_can_succeed_in_retry() {
             SendPaymentCommand {
                 target_pubkey: Some(target_pubkey),
                 amount: Some(999),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                tlc_expiry_limit: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -5650,7 +5190,7 @@ async fn test_send_payment_with_final_multiple_edges_can_succeed_in_retry() {
 #[tokio::test]
 async fn test_send_payment_with_first_hop_failed_with_fee() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
+
     let (nodes, _channels) = create_n_nodes_network(
         &[
             // even 1000 > 999, but it's not enough for fee, and this is the direct channel
@@ -5672,19 +5212,8 @@ async fn test_send_payment_with_first_hop_failed_with_fee() {
             SendPaymentCommand {
                 target_pubkey: Some(target_pubkey),
                 amount: Some(999),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                tlc_expiry_limit: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -5699,7 +5228,7 @@ async fn test_send_payment_with_first_hop_failed_with_fee() {
 #[tokio::test]
 async fn test_send_payment_succeed_with_multiple_edges_in_first_hop() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
+
     // we have two chaneels between node_0 and node_1, they are all with the same meta information except the later one has more capacity
     // path finding will try the channel with larger capacity first, so we assert the payment retry times is 1
     // the send payment should be succeed
@@ -5722,19 +5251,8 @@ async fn test_send_payment_succeed_with_multiple_edges_in_first_hop() {
             SendPaymentCommand {
                 target_pubkey: Some(target_pubkey),
                 amount: Some(999),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                tlc_expiry_limit: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -5754,7 +5272,7 @@ async fn test_send_payment_succeed_with_multiple_edges_in_first_hop() {
 #[tokio::test]
 async fn test_send_payment_with_first_hop_all_failed() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
+
     // we have two chaneels between node_0 and node_1
     // they liquid capacity is enough for send payment, but actual balance are both not enough
     // path finding will fail in the first time of send payment
@@ -5777,19 +5295,8 @@ async fn test_send_payment_with_first_hop_all_failed() {
             SendPaymentCommand {
                 target_pubkey: Some(target_pubkey),
                 amount: Some(999),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                tlc_expiry_limit: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -5804,7 +5311,7 @@ async fn test_send_payment_with_first_hop_all_failed() {
 #[tokio::test]
 async fn test_send_payment_will_succeed_with_direct_channel_info_first_hop() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
+
     // we have two chaneels between node_0 and node_1
     // the path finding will first try the channel with larger capacity,
     // but we manually set the to_local_amount to smaller value for testing
@@ -5835,19 +5342,8 @@ async fn test_send_payment_will_succeed_with_direct_channel_info_first_hop() {
             SendPaymentCommand {
                 target_pubkey: Some(target_pubkey),
                 amount: Some(999),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                tlc_expiry_limit: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -5867,7 +5363,7 @@ async fn test_send_payment_will_succeed_with_direct_channel_info_first_hop() {
 #[tokio::test]
 async fn test_send_payment_will_succeed_with_retry_in_middle_hops() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
+
     // we have two chaneels between node_2 and node_3
     // the path finding will first try the channel with larger capacity,
     // but we manually set the to_local_amount to smaller value for testing
@@ -5898,19 +5394,8 @@ async fn test_send_payment_will_succeed_with_retry_in_middle_hops() {
             SendPaymentCommand {
                 target_pubkey: Some(target_pubkey),
                 amount: Some(amount),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                tlc_expiry_limit: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                max_parts: None,
                 keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                hop_hints: None,
-                dry_run: false,
-                custom_records: None,
+                ..Default::default()
             },
             rpc_reply,
         ))
@@ -5937,7 +5422,7 @@ async fn test_send_payment_will_succeed_with_retry_in_middle_hops() {
 #[tokio::test]
 async fn test_send_payment_will_fail_with_last_hop_info_in_add_tlc_peer() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
+
     // we have two chaneels between node_2 and node_3
     // the path finding will first try the channel with larger capacity,
     // but we manually set the to_remote_amount for node_3 to a larger amount,
@@ -5967,19 +5452,8 @@ async fn test_send_payment_will_fail_with_last_hop_info_in_add_tlc_peer() {
         .send_payment(SendPaymentCommand {
             target_pubkey: Some(target_pubkey),
             amount: Some(999),
-            payment_hash: None,
-            final_tlc_expiry_delta: None,
-            tlc_expiry_limit: None,
-            invoice: None,
-            timeout: None,
-            max_fee_amount: None,
-            max_parts: None,
             keysend: Some(true),
-            udt_type_script: None,
-            allow_self_payment: false,
-            hop_hints: None,
-            dry_run: false,
-            custom_records: None,
+            ..Default::default()
         })
         .await;
 
@@ -6007,7 +5481,6 @@ async fn test_send_payment_will_fail_with_last_hop_info_in_add_tlc_peer() {
 #[tokio::test]
 async fn test_send_payment_will_fail_with_invoice_not_generated_by_target() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
 
     let (nodes, _channels) = create_n_nodes_network(
         &[
@@ -6036,19 +5509,8 @@ async fn test_send_payment_will_fail_with_invoice_not_generated_by_target() {
         .send_payment(SendPaymentCommand {
             target_pubkey: Some(target_pubkey),
             amount: Some(100),
-            payment_hash: None,
-            final_tlc_expiry_delta: None,
-            tlc_expiry_limit: None,
             invoice: Some(invoice.clone()),
-            timeout: None,
-            max_fee_amount: None,
-            max_parts: None,
-            keysend: None,
-            udt_type_script: None,
-            allow_self_payment: false,
-            hop_hints: None,
-            dry_run: false,
-            custom_records: None,
+            ..Default::default()
         })
         .await;
 
@@ -6065,7 +5527,6 @@ async fn test_send_payment_will_fail_with_invoice_not_generated_by_target() {
 #[tokio::test]
 async fn test_send_payment_will_succeed_with_valid_invoice() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
 
     let (nodes, channels) = create_n_nodes_network(
         &[
@@ -6097,19 +5558,8 @@ async fn test_send_payment_will_succeed_with_valid_invoice() {
         .send_payment(SendPaymentCommand {
             target_pubkey: Some(target_pubkey),
             amount: Some(100),
-            payment_hash: None,
-            final_tlc_expiry_delta: None,
-            tlc_expiry_limit: None,
             invoice: Some(ckb_invoice.to_string()),
-            timeout: None,
-            max_fee_amount: None,
-            max_parts: None,
-            keysend: None,
-            udt_type_script: None,
-            allow_self_payment: false,
-            hop_hints: None,
-            dry_run: false,
-            custom_records: None,
+            ..Default::default()
         })
         .await;
 
@@ -6137,7 +5587,7 @@ async fn test_send_payment_will_succeed_with_valid_invoice() {
 #[tokio::test]
 async fn test_send_payment_will_fail_with_no_invoice_preimage() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
+
     let (nodes, channels) = create_n_nodes_network(
         &[
             ((0, 1), (100000000000, 100000000000)),
@@ -6169,19 +5619,8 @@ async fn test_send_payment_will_fail_with_no_invoice_preimage() {
         .send_payment(SendPaymentCommand {
             target_pubkey: Some(target_pubkey),
             amount: Some(100),
-            payment_hash: None,
-            final_tlc_expiry_delta: None,
-            tlc_expiry_limit: None,
             invoice: Some(ckb_invoice.to_string()),
-            timeout: None,
-            max_fee_amount: None,
-            max_parts: None,
-            keysend: None,
-            udt_type_script: None,
-            allow_self_payment: false,
-            hop_hints: None,
-            dry_run: false,
-            custom_records: None,
+            ..Default::default()
         })
         .await;
 
@@ -6208,7 +5647,6 @@ async fn test_send_payment_will_fail_with_no_invoice_preimage() {
 #[tokio::test]
 async fn test_send_payment_will_fail_with_cancelled_invoice() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
 
     let (nodes, channels) = create_n_nodes_network(
         &[
@@ -6243,19 +5681,8 @@ async fn test_send_payment_will_fail_with_cancelled_invoice() {
         .send_payment(SendPaymentCommand {
             target_pubkey: Some(target_pubkey),
             amount: Some(100),
-            payment_hash: None,
-            final_tlc_expiry_delta: None,
-            tlc_expiry_limit: None,
             invoice: Some(ckb_invoice.to_string()),
-            timeout: None,
-            max_fee_amount: None,
-            max_parts: None,
-            keysend: None,
-            udt_type_script: None,
-            allow_self_payment: false,
-            hop_hints: None,
-            dry_run: false,
-            custom_records: None,
+            ..Default::default()
         })
         .await;
 
@@ -6281,7 +5708,7 @@ async fn test_send_payment_will_fail_with_cancelled_invoice() {
 #[tokio::test]
 async fn test_send_payment_will_succeed_with_large_tlc_expiry_limit() {
     init_tracing();
-    let _span = tracing::info_span!("node", node = "test").entered();
+
     // from https://github.com/nervosnetwork/fiber/issues/367
 
     let (nodes, _channels) = create_n_nodes_network(
@@ -6303,19 +5730,9 @@ async fn test_send_payment_will_succeed_with_large_tlc_expiry_limit() {
         .send_payment(SendPaymentCommand {
             target_pubkey: Some(target_pubkey),
             amount: Some(999),
-            payment_hash: None,
-            final_tlc_expiry_delta: None,
             tlc_expiry_limit: Some(expected_minimal_tlc_expiry_limit - 1),
-            invoice: None,
-            timeout: None,
-            max_fee_amount: None,
-            max_parts: None,
             keysend: Some(true),
-            udt_type_script: None,
-            allow_self_payment: false,
-            hop_hints: None,
-            dry_run: false,
-            custom_records: None,
+            ..Default::default()
         })
         .await;
 
@@ -6325,19 +5742,9 @@ async fn test_send_payment_will_succeed_with_large_tlc_expiry_limit() {
         .send_payment(SendPaymentCommand {
             target_pubkey: Some(target_pubkey),
             amount: Some(999),
-            payment_hash: None,
-            final_tlc_expiry_delta: None,
             tlc_expiry_limit: Some(expected_minimal_tlc_expiry_limit),
-            invoice: None,
-            timeout: None,
-            max_fee_amount: None,
-            max_parts: None,
             keysend: Some(true),
-            udt_type_script: None,
-            allow_self_payment: false,
-            hop_hints: None,
-            dry_run: false,
-            custom_records: None,
+            ..Default::default()
         })
         .await;
 

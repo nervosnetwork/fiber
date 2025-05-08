@@ -6,7 +6,7 @@ use crate::{
             ChannelActorState, ChannelActorStateStore, ChannelState, RevocationData, SettlementData,
         },
         gossip::GossipMessageStore,
-        graph::{NetworkGraphStateStore, PaymentSession},
+        graph::{NetworkGraphStateStore, PaymentSession, PaymentSessionStatus},
         history::{Direction, TimedResult},
         network::{NetworkActorStateStore, PaymentCustomRecords, PersistentNetworkActorState},
         types::{BroadcastMessage, BroadcastMessageID, Cursor, Hash256, CURSOR_SIZE},
@@ -21,8 +21,9 @@ use rocksdb::{
     DB,
 };
 use serde::Serialize;
-use std::{path::Path, sync::Arc};
+use std::{collections::HashSet, path::Path, sync::Arc};
 use tentacle::secio::PeerId;
+use tracing::info;
 
 #[derive(Clone, Debug)]
 pub struct Store {
@@ -131,6 +132,118 @@ impl Store {
     fn check_migrate<P: AsRef<Path>>(path: P, db: Arc<DB>) -> Result<Arc<DB>, String> {
         let migrate = DbMigrate::new(db);
         migrate.init_or_check(path)
+    }
+
+    pub fn check_validate<P: AsRef<Path>>(path: P) -> Result<(), String> {
+        let db = Self::open_db(path.as_ref())?;
+        let mut errors = HashSet::new();
+
+        fn check_deserialization<T: serde::de::DeserializeOwned>(
+            value: &[u8],
+            prefix_name: &str,
+            errors: &mut HashSet<String>,
+        ) {
+            if let Err(e) = bincode::deserialize::<T>(value) {
+                errors.insert(format!("Failed to deserialize {}: {:?}", prefix_name, e));
+            }
+        }
+
+        for (key, value) in db.iterator(rocksdb::IteratorMode::Start) {
+            if key.is_empty() {
+                errors.insert("Encountered empty key".to_string());
+                continue;
+            }
+
+            match key[0] {
+                CHANNEL_ACTOR_STATE_PREFIX => {
+                    check_deserialization::<ChannelActorState>(
+                        &value,
+                        "CHANNEL_ACTOR_STATE_PREFIX",
+                        &mut errors,
+                    );
+                }
+                PEER_ID_NETWORK_ACTOR_STATE_PREFIX => {
+                    check_deserialization::<PersistentNetworkActorState>(
+                        &value,
+                        "PEER_ID_NETWORK_ACTOR_STATE_PREFIX",
+                        &mut errors,
+                    );
+                }
+                CKB_INVOICE_PREFIX => {
+                    check_deserialization::<CkbInvoice>(&value, "CKB_INVOICE_PREFIX", &mut errors);
+                }
+                CKB_INVOICE_PREIMAGE_PREFIX => {
+                    check_deserialization::<Hash256>(
+                        &value,
+                        "CKB_INVOICE_PREIMAGE_PREFIX",
+                        &mut errors,
+                    );
+                }
+                CKB_INVOICE_STATUS_PREFIX => {
+                    check_deserialization::<CkbInvoiceStatus>(
+                        &value,
+                        "CKB_INVOICE_STATUS_PREFIX",
+                        &mut errors,
+                    );
+                }
+                PEER_ID_CHANNEL_ID_PREFIX => {}
+                CHANNEL_OUTPOINT_CHANNEL_ID_PREFIX => {
+                    check_deserialization::<Hash256>(
+                        &value,
+                        "CHANNEL_OUTPOINT_CHANNEL_ID_PREFIX",
+                        &mut errors,
+                    );
+                }
+                BROADCAST_MESSAGE_PREFIX => {
+                    check_deserialization::<BroadcastMessage>(
+                        &value,
+                        "BROADCAST_MESSAGE_PREFIX",
+                        &mut errors,
+                    );
+                }
+                BROADCAST_MESSAGE_TIMESTAMP_PREFIX => {}
+                PAYMENT_SESSION_PREFIX => {
+                    check_deserialization::<PaymentSession>(
+                        &value,
+                        "PAYMENT_SESSION_PREFIX",
+                        &mut errors,
+                    );
+                }
+                PAYMENT_HISTORY_TIMED_RESULT_PREFIX => {
+                    check_deserialization::<TimedResult>(
+                        &value,
+                        "PAYMENT_HISTORY_TIMED_RESULT_PREFIX",
+                        &mut errors,
+                    );
+                }
+                PAYMENT_CUSTOM_RECORD_PREFIX => {
+                    check_deserialization::<PaymentCustomRecords>(
+                        &value,
+                        "PAYMENT_CUSTOM_RECORD_PREFIX",
+                        &mut errors,
+                    );
+                }
+                WATCHTOWER_CHANNEL_PREFIX => {
+                    check_deserialization::<ChannelData>(
+                        &value,
+                        "WATCHTOWER_CHANNEL_PREFIX",
+                        &mut errors,
+                    );
+                }
+                _ => {}
+            }
+        }
+
+        let mut errors: Vec<String> = errors.into_iter().collect();
+        if let Err(version_err) = Self::check_migrate(path, db) {
+            errors.push(version_err);
+        }
+        if errors.is_empty() {
+            info!("All keys and values in the store are valid.");
+            Ok(())
+        } else {
+            Err(errors.join("\n"))
+        }
     }
 }
 
@@ -475,6 +588,23 @@ impl NetworkGraphStateStore for Store {
         let prefix = [&[PAYMENT_SESSION_PREFIX], payment_hash.as_ref()].concat();
         self.get(prefix)
             .map(|v| deserialize_from(v.as_ref(), "PaymentSession"))
+    }
+
+    fn get_payment_sessions_with_status(
+        &self,
+        status: PaymentSessionStatus,
+    ) -> Vec<PaymentSession> {
+        let prefix = [PAYMENT_SESSION_PREFIX];
+        self.prefix_iterator(&prefix)
+            .filter_map(|(_key, value)| {
+                let session: PaymentSession = deserialize_from(value.as_ref(), "PaymentSession");
+                if session.status == status {
+                    Some(session)
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 
     fn insert_payment_session(&self, session: PaymentSession) {
