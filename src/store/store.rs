@@ -6,7 +6,7 @@ use crate::{
             ChannelActorState, ChannelActorStateStore, ChannelState, RevocationData, SettlementData,
         },
         gossip::GossipMessageStore,
-        graph::{NetworkGraphStateStore, PaymentSession},
+        graph::{NetworkGraphStateStore, PaymentSession, PaymentSessionStatus},
         history::{Direction, TimedResult},
         network::{NetworkActorStateStore, PaymentCustomRecords, PersistentNetworkActorState},
         types::{BroadcastMessage, BroadcastMessageID, Cursor, Hash256, CURSOR_SIZE},
@@ -588,6 +588,23 @@ impl NetworkGraphStateStore for Store {
         let prefix = [&[PAYMENT_SESSION_PREFIX], payment_hash.as_ref()].concat();
         self.get(prefix)
             .map(|v| deserialize_from(v.as_ref(), "PaymentSession"))
+    }
+
+    fn get_payment_sessions_with_status(
+        &self,
+        status: PaymentSessionStatus,
+    ) -> Vec<PaymentSession> {
+        let prefix = [PAYMENT_SESSION_PREFIX];
+        self.prefix_iterator(&prefix)
+            .filter_map(|(_key, value)| {
+                let session: PaymentSession = deserialize_from(value.as_ref(), "PaymentSession");
+                if session.status == status {
+                    Some(session)
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 
     fn insert_payment_session(&self, session: PaymentSession) {
