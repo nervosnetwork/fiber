@@ -7,11 +7,12 @@ use ckb_sdk::{
     traits::{
         CellCollector, CellDepResolver, CellQueryOptions, DefaultCellCollector,
         DefaultCellDepResolver, DefaultHeaderDepResolver, DefaultTransactionDependencyProvider,
-        HeaderDepResolver, SecpCkbRawKeySigner, TransactionDependencyProvider, ValueRangeOption,
+        HeaderDepResolver, SecpCkbRawKeySigner, TransactionDependencyError,
+        TransactionDependencyProvider, ValueRangeOption,
     },
-    tx_builder::{unlock_tx, CapacityBalancer, TxBuilder, TxBuilderError},
-    unlock::{ScriptUnlocker, SecpSighashUnlocker},
-    CkbRpcClient, ScriptId,
+    tx_builder::{CapacityBalancer, ScriptGroups, TxBuilder, TxBuilderError},
+    unlock::{ScriptUnlocker, SecpSighashUnlocker, UnlockError},
+    CkbRpcAsyncClient, ScriptGroup, ScriptId,
 };
 use ckb_types::{
     core::{BlockView, Capacity, TransactionView},
@@ -353,7 +354,7 @@ impl FundingTxBuilder {
         )));
     }
 
-    fn build(
+    async fn build(
         self,
         live_cells_exclusion_map: &mut LiveCellsExclusionMap,
     ) -> Result<FundingTx, FundingError> {
@@ -379,9 +380,10 @@ impl FundingTxBuilder {
             self.request.funding_fee_rate,
         );
 
-        let ckb_client = CkbRpcClient::new(&self.context.rpc_url);
+        let ckb_client = CkbRpcAsyncClient::new(&self.context.rpc_url);
         let cell_dep_resolver = ckb_client
             .get_block_by_number(0.into())
+            .await
             .map_err(FundingError::CkbRpcError)?
             .and_then(|genesis_block| {
                 DefaultCellDepResolver::from_genesis(&BlockView::from(genesis_block)).ok()
@@ -394,20 +396,22 @@ impl FundingTxBuilder {
         let mut cell_collector = DefaultCellCollector::new(&self.context.rpc_url);
         let tx_dep_provider = DefaultTransactionDependencyProvider::new(&self.context.rpc_url, 10);
 
-        let tip_block_number: u64 = ckb_client.get_tip_block_number()?.into();
+        let tip_block_number: u64 = ckb_client.get_tip_block_number().await?.into();
         live_cells_exclusion_map.truncate(tip_block_number);
         live_cells_exclusion_map
             .apply(&mut cell_collector)
             .map_err(|err| FundingError::CkbTxBuilderError(TxBuilderError::Other(err.into())))?;
 
-        let (tx, _) = self.build_unlocked(
-            &mut cell_collector,
-            &cell_dep_resolver,
-            &header_dep_resolver,
-            &tx_dep_provider,
-            &balancer,
-            &unlockers,
-        )?;
+        let tx = self
+            .build_balanced_async(
+                &mut cell_collector,
+                &cell_dep_resolver,
+                &header_dep_resolver,
+                &tx_dep_provider,
+                &balancer,
+                &unlockers,
+            )
+            .await?;
 
         let old_tx_hash = self.funding_tx.tx.as_ref().map(|tx| tx.hash());
         let mut funding_tx = self.funding_tx;
@@ -443,7 +447,7 @@ impl FundingTx {
         self.tx
     }
 
-    pub fn fulfill(
+    pub async fn fulfill(
         self,
         request: FundingRequest,
         context: FundingContext,
@@ -454,10 +458,10 @@ impl FundingTx {
             request,
             context,
         };
-        builder.build(live_cells_exclusion_map)
+        builder.build(live_cells_exclusion_map).await
     }
 
-    pub fn sign(
+    pub async fn sign(
         mut self,
         secret_key: secp256k1::SecretKey,
         rpc_url: String,
@@ -487,7 +491,7 @@ impl FundingTx {
         let tx = self.take().ok_or(FundingError::AbsentTx)?;
         let tx_dep_provider = DefaultTransactionDependencyProvider::new(&rpc_url, 10);
 
-        let (tx, _) = unlock_tx(tx, &tx_dep_provider, &unlockers)?;
+        let (tx, _) = unlock_tx(tx, &tx_dep_provider, &unlockers).await?;
         self.update_for_self(tx)?;
         Ok(self)
     }
@@ -503,4 +507,73 @@ impl FundingTx {
         self.tx = Some(tx);
         Ok(())
     }
+}
+
+async fn unlock_tx(
+    balanced_tx: TransactionView,
+    tx_dep_provider: &dyn TransactionDependencyProvider,
+    unlockers: &HashMap<ScriptId, Box<dyn ScriptUnlocker>>,
+) -> Result<(TransactionView, Vec<ScriptGroup>), UnlockError> {
+    let ScriptGroups { lock_groups, .. } = gen_script_groups(&balanced_tx, tx_dep_provider).await?;
+    let mut tx = balanced_tx;
+    let mut not_unlocked = Vec::new();
+    for script_group in lock_groups.values() {
+        let script_id = ScriptId::from(&script_group.script);
+        let script_args = script_group.script.args().raw_data();
+        if let Some(unlocker) = unlockers.get(&script_id) {
+            if unlocker
+                .is_unlocked_async(&tx, script_group, tx_dep_provider)
+                .await?
+            {
+                tx = unlocker.clear_placeholder_witness(&tx, script_group)?;
+            } else if unlocker.match_args(script_args.as_ref()) {
+                tx = unlocker
+                    .unlock_async(&tx, script_group, tx_dep_provider)
+                    .await?;
+            } else {
+                not_unlocked.push(script_group.clone());
+            }
+        } else {
+            not_unlocked.push(script_group.clone());
+        }
+    }
+    Ok((tx, not_unlocked))
+}
+
+async fn gen_script_groups(
+    tx: &TransactionView,
+    tx_dep_provider: &dyn TransactionDependencyProvider,
+) -> Result<ScriptGroups, TransactionDependencyError> {
+    use ckb_types::packed::Byte32;
+    #[allow(clippy::mutable_key_type)]
+    let mut lock_groups: HashMap<Byte32, ScriptGroup> = HashMap::default();
+    #[allow(clippy::mutable_key_type)]
+    let mut type_groups: HashMap<Byte32, ScriptGroup> = HashMap::default();
+    for (i, input) in tx.inputs().into_iter().enumerate() {
+        let output = tx_dep_provider
+            .get_cell_async(&input.previous_output())
+            .await?;
+        let lock_group_entry = lock_groups
+            .entry(output.calc_lock_hash())
+            .or_insert_with(|| ScriptGroup::from_lock_script(&output.lock()));
+        lock_group_entry.input_indices.push(i);
+        if let Some(t) = &output.type_().to_opt() {
+            let type_group_entry = type_groups
+                .entry(t.calc_script_hash())
+                .or_insert_with(|| ScriptGroup::from_type_script(t));
+            type_group_entry.input_indices.push(i);
+        }
+    }
+    for (i, output) in tx.outputs().into_iter().enumerate() {
+        if let Some(t) = &output.type_().to_opt() {
+            let type_group_entry = type_groups
+                .entry(t.calc_script_hash())
+                .or_insert_with(|| ScriptGroup::from_type_script(t));
+            type_group_entry.output_indices.push(i);
+        }
+    }
+    Ok(ScriptGroups {
+        lock_groups,
+        type_groups,
+    })
 }
