@@ -28,7 +28,6 @@ ckb-jsonrpc-types = "0.200.0"
 serde_with = { version = "3.7.0", features = ["macros", "base64"] }
 hex = "0.4.3"
 bitflags = { version = "2.5.0", features = ["serde"] }
-ckb-hash = "0.200.0"
 secp256k1 = { version = "0.28.0", features = ["serde", "recovery", "rand-std"] }
 musig2 = { version = "0.0.11", features = ["secp256k1", "serde"] }
 ractor = { version = "0.15.3", features = ["async-trait"] }
@@ -79,13 +78,16 @@ tentacle = { version = "0.6.6", default-features = false, features = [
 socket2 = "0.5.7"
 lnd-grpc-tonic-client = "0.3.0"
 home = "0.5.9"
+ckb-hash = "0.200.0"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 tokio = { version = "1", features = ["io-util", "macros", "rt", "sync"] }
 tentacle = { version = "0.6.6", default-features = false, features = [
     "wasm-timer",
 ] }
-
+ckb-hash = { version = "0.200.0", features = [
+    "blake2b-ref",
+], default-features = false }
 [features]
 default = []
 portable = ["rocksdb/portable"]

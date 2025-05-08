@@ -103,7 +103,7 @@ fn main() {
             exit(0);
         }
     } else {
-        let db = open_db(path).expect("failed to open db");
+        let db = Store::open_db(path).expect("failed to open db");
         let migrate = init_db_migrate(db);
 
         if let Err(err) = run_migrate(migrate, path, skip_confirm) {
