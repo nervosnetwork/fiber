@@ -5,9 +5,6 @@ edition = "2021"
 build = "build.rs"
 
 [dependencies]
-rocksdb = { package = "ckb-rocksdb", version = "=0.21.1", features = [
-    "lz4",
-], default-features = false }
 
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -18,7 +15,7 @@ thiserror = "1.0.58"
 serde = { version = "1.0.197", features = ["derive"] }
 hex = "0.4.3"
 clap = { version = "4.0", features = ["derive"] }
-fiber = { package = "fnn", path = "../" }
+fiber = { package = "fnn", path = "../crates/fiber-lib" }
 serde_json = "1.0.135"
 
 fiber_v020 = { package = "fnn", git = "https://github.com/nervosnetwork/fiber.git", tag = "v0.2.0-p1" }
@@ -29,7 +26,9 @@ fiber_v040 = { package = "fnn", git = "https://github.com/nervosnetwork/fiber.gi
 fiber_v041 = { package = "fnn", git = "https://github.com/nervosnetwork/fiber.git", tag = "v0.4.1-rc1" }
 fiber_v050 = { package = "fnn", git = "https://github.com/nervosnetwork/fiber.git", tag = "v0.5.0" }
 fiber_v051 = { package = "fnn", git = "https://github.com/nervosnetwork/fiber.git", tag = "v0.5.1-rc1" }
+ouroboros = "0.18.5"
 
 [features]
 default = []
-portable = ["rocksdb/portable"]
+
+[workspace]
