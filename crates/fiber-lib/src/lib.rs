@@ -89,3 +89,18 @@ pub mod macros {
         };
     }
 }
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn block_in_place<F, R>(f: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    tokio::task::block_in_place(f)
+}
+#[cfg(target_arch = "wasm32")]
+pub fn block_in_place<F, R>(f: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    f()
+}

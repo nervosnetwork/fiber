@@ -260,7 +260,7 @@ async fn test_sync_channel_announcement_on_startup() {
 
 #[tokio::test]
 async fn test_node1_node2_channel_update() {
-    let channel_context = ChannelTestContext::gen();
+    let channel_context = ChannelTestContext::gen().await;
     let funding_tx = channel_context.funding_tx.clone();
     let out_point = channel_context.channel_outpoint().clone();
     let channel_announcement = channel_context.channel_announcement.clone();
@@ -320,7 +320,7 @@ async fn test_node1_node2_channel_update() {
 
 #[tokio::test]
 async fn test_channel_update_version() {
-    let channel_context = ChannelTestContext::gen();
+    let channel_context = ChannelTestContext::gen().await;
     let funding_tx = channel_context.funding_tx.clone();
     let out_point = channel_context.channel_outpoint().clone();
     let node = NetworkNode::new().await;
@@ -388,7 +388,7 @@ async fn test_channel_update_version() {
 
 #[tokio::test]
 async fn test_query_missing_broadcast_message() {
-    let channel_context = ChannelTestContext::gen();
+    let channel_context = ChannelTestContext::gen().await;
     let funding_tx = channel_context.funding_tx.clone();
     let out_point = channel_context.channel_outpoint().clone();
     let channel_announcement = channel_context.channel_announcement.clone();
@@ -445,7 +445,7 @@ async fn test_query_missing_broadcast_message() {
 
 #[tokio::test]
 async fn test_prune_channel_announcement_and_receive_channel_update() {
-    let channel_context = ChannelTestContext::gen();
+    let channel_context = ChannelTestContext::gen().await;
     let funding_tx = channel_context.funding_tx.clone();
     let out_point = channel_context.channel_outpoint().clone();
     let channel_announcement = channel_context.channel_announcement.clone();
@@ -1055,7 +1055,8 @@ async fn test_abort_funding_on_building_funding_tx() {
 
 #[derive(Clone, Debug)]
 struct CkbTxFailureMockMiddleware;
-#[ractor::async_trait]
+#[cfg_attr(target_arch="wasm32",ractor::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), ractor::async_trait)]
 impl MockChainActorMiddleware for CkbTxFailureMockMiddleware {
     async fn handle(
         &mut self,

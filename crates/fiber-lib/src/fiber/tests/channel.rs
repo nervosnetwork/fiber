@@ -2227,7 +2227,6 @@ async fn do_test_channel_commitment_tx_after_add_tlc(algorithm: HashAlgorithm) {
             _ => None,
         })
         .await;
-
     assert!(matches!(
         node_a.submit_tx(node_a_commitment_tx.clone()).await,
         TxStatus::Committed(..)
@@ -3765,7 +3764,6 @@ async fn test_revoke_old_commitment_transaction() {
             _ => None,
         })
         .await;
-
     node_a
         .expect_event(|event| match event {
             NetworkServiceEvent::ChannelReady(peer_id, channel_id, _funding_tx_hash) => {
@@ -3832,7 +3830,11 @@ async fn test_revoke_old_commitment_transaction() {
 
     let tx = Transaction::default()
         .as_advanced_builder()
-        .cell_deps(get_cell_deps(vec![Contract::CommitmentLock], &None).expect("get cell deps"))
+        .cell_deps(
+            get_cell_deps(vec![Contract::CommitmentLock], &None)
+                .await
+                .expect("get cell deps"),
+        )
         .input(
             CellInput::new_builder()
                 .previous_output(commitment_tx.output_pts().first().unwrap().clone())
@@ -4270,7 +4272,7 @@ async fn test_commitment_tx_capacity() {
         NetworkNode::new_2_nodes_with_established_channel(amount_a, amount_b, true).await;
 
     let state = node_a.store.get_channel_actor_state(&channel_id).unwrap();
-    let commitment_tx = state.get_latest_commitment_transaction().unwrap();
+    let commitment_tx = state.get_latest_commitment_transaction().await.unwrap();
     let output_capacity: u64 = commitment_tx.output(0).unwrap().capacity().unpack();
 
     // default fee rate is 1000 shannons per kb, and there is a gap of 20 bytes between the mock commitment tx and the real one

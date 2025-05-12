@@ -13,13 +13,11 @@ use ckb_types::{
     packed::OutPoint,
 };
 use ractor::{
-    async_trait as rasync_trait, call, call_t, concurrency::JoinHandle, Actor, ActorCell,
-    ActorProcessingErr, ActorRef, ActorRuntime, MessagingErr, OutputPort, RpcReplyPort,
-    SupervisionEvent,
+    call, call_t, concurrency::JoinHandle, Actor, ActorCell, ActorProcessingErr, ActorRef,
+    ActorRuntime, MessagingErr, OutputPort, RpcReplyPort, SupervisionEvent,
 };
 use secp256k1::Message;
 use tentacle::{
-    async_trait as tasync_trait,
     builder::MetaBuilder,
     bytes::Bytes,
     context::{ProtocolContext, ProtocolContextMutRef, SessionContext},
@@ -270,7 +268,9 @@ impl GossipMessageUpdates {
 /// This trait provides a way to subscribe to the updates of the gossip message store.
 /// The subscriber will receive a batch of messages that are added to the store since the last time
 /// we sent messages to the subscriber.
-#[rasync_trait]
+#[cfg_attr(target_arch="wasm32",ractor::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), ractor::async_trait)]
+
 pub trait SubscribableGossipMessageStore {
     type Subscription;
     type Error: std::error::Error;
@@ -576,7 +576,9 @@ pub(crate) enum GossipSyncingActorMessage {
     NewGetRequest(),
 }
 
-#[rasync_trait]
+#[cfg_attr(target_arch="wasm32",ractor::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), ractor::async_trait)]
+
 impl<S> Actor for GossipSyncingActor<S>
 where
     S: GossipMessageStore + Clone + Send + Sync + 'static,
@@ -797,7 +799,9 @@ enum PeerFilterProcessorMessage {
     UpdateFilter(Cursor),
 }
 
-#[rasync_trait]
+#[cfg_attr(target_arch="wasm32",ractor::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), ractor::async_trait)]
+
 impl<S> Actor for PeerFilterActor<S>
 where
     S: SubscribableGossipMessageStore + Clone + Send + Sync + 'static,
@@ -1015,7 +1019,9 @@ where
     }
 }
 
-#[rasync_trait]
+#[cfg_attr(target_arch="wasm32",ractor::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), ractor::async_trait)]
+
 impl<S: GossipMessageStore + Sync> SubscribableGossipMessageStore
     for ExtendedGossipMessageStore<S>
 {
@@ -1267,7 +1273,7 @@ impl<S: GossipMessageStore> ExtendedGossipMessageStoreState<S> {
             let myself = myself.clone();
             let incomplete_messages = incomplete_messages.into_iter().collect::<Vec<_>>();
 
-            ractor::concurrency::tokio_primitives::spawn(async move {
+            ractor::concurrency::spawn(async move {
                 let mut is_success = true;
                 let n_queries = incomplete_messages.len();
                 for messages in
@@ -1439,7 +1445,9 @@ impl<S: GossipMessageStore> ExtendedGossipMessageStoreActor<S> {
     }
 }
 
-#[rasync_trait]
+#[cfg_attr(target_arch="wasm32",ractor::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), ractor::async_trait)]
+
 impl<S: GossipMessageStore + Send + Sync + 'static> Actor for ExtendedGossipMessageStoreActor<S> {
     type Msg = ExtendedGossipMessageStoreMessage;
     type State = ExtendedGossipMessageStoreState<S>;
@@ -2138,12 +2146,10 @@ async fn get_channel_on_chain_info(
             return Err(Error::CkbRpcError(err));
         }
         Err(err) => {
-            return Err(Error::InternalError(anyhow::Error::new(err).context(
-                format!(
-                    "Error while trying to obtain block {:?} for channel outpoint {:?}",
-                    block_hash, &outpoint
-                ),
-            )));
+            return Err(Error::InternalError(anyhow::anyhow!(err).context(format!(
+                "Error while trying to obtain block {:?} for channel outpoint {:?}",
+                block_hash, &outpoint
+            ))));
         }
     };
 
@@ -2376,7 +2382,9 @@ impl GossipProtocolHandle {
     }
 }
 
-#[rasync_trait]
+#[cfg_attr(target_arch="wasm32",ractor::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), ractor::async_trait)]
+
 impl<S> Actor for GossipActor<S>
 where
     S: GossipMessageStore + Clone + Send + Sync + 'static,
@@ -2768,7 +2776,7 @@ where
     }
 }
 
-#[tasync_trait]
+#[async_trait::async_trait]
 impl ServiceProtocol for GossipProtocolHandle {
     async fn init(&mut self, context: &mut ProtocolContext) {
         let sender = self

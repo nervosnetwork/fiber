@@ -7,8 +7,8 @@ use either::Either;
 use once_cell::sync::OnceCell;
 use ractor::concurrency::Duration;
 use ractor::{
-    async_trait as rasync_trait, call, call_t, Actor, ActorCell, ActorProcessingErr, ActorRef,
-    RactorErr, RpcReplyPort, SupervisionEvent,
+    call, call_t, Actor, ActorCell, ActorProcessingErr, ActorRef, RactorErr, RpcReplyPort,
+    SupervisionEvent,
 };
 use rand::Rng;
 use secp256k1::Secp256k1;
@@ -25,7 +25,6 @@ use tentacle::multiaddr::{MultiAddr, Protocol};
 use tentacle::service::SessionType;
 use tentacle::utils::{extract_peer_id, is_reachable, multiaddr_to_socketaddr};
 use tentacle::{
-    async_trait,
     builder::{MetaBuilder, ServiceBuilder},
     bytes::Bytes,
     context::SessionContext,
@@ -2918,7 +2917,8 @@ where
                                 }
                             };
 
-                            let transaction = match state.get_latest_commitment_transaction() {
+                            let transaction = match state.get_latest_commitment_transaction().await
+                            {
                                 Ok(tx) => tx,
                                 Err(e) => {
                                     let error = Error::ChannelError(e);
@@ -3368,7 +3368,9 @@ pub struct NetworkActorStartArguments {
     pub default_shutdown_script: Script,
 }
 
-#[rasync_trait]
+#[cfg_attr(target_arch="wasm32",ractor::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), ractor::async_trait)]
+
 impl<S> Actor for NetworkActor<S>
 where
     S: NetworkActorStateStore
@@ -3392,9 +3394,11 @@ where
     ) -> Result<Self::State, ActorProcessingErr> {
         let NetworkActorStartArguments {
             config,
+            #[cfg(not(target_arch = "wasm32"))]
             tracker,
             channel_subscribers,
             default_shutdown_script,
+            ..
         } = args;
         let now = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
@@ -3505,12 +3509,16 @@ where
                 ),
             ))
             .expect(ASSUME_NETWORK_MYSELF_ALIVE);
-
+        #[cfg(not(target_arch = "wasm32"))]
         tracker.spawn(async move {
             service.run().await;
             debug!("Tentacle service stopped");
         });
-
+        #[cfg(target_arch = "wasm32")]
+        ractor::concurrency::spawn(async move {
+            service.run().await;
+            debug!("Tentacle service stopped");
+        });
         let mut state_to_be_persisted = self
             .store
             .get_network_actor_state(&my_peer_id)
@@ -3691,8 +3699,7 @@ impl FiberProtocolHandle {
             .build()
     }
 }
-
-#[async_trait]
+#[async_trait::async_trait]
 impl ServiceProtocol for FiberProtocolHandle {
     async fn init(&mut self, _context: &mut ProtocolContext) {}
 
@@ -3769,7 +3776,9 @@ impl From<&NetworkServiceHandle> for FiberProtocolHandle {
     }
 }
 
-#[async_trait]
+// #[cfg_attr(target_arch="wasm32",ractor::async_trait(?Send))]
+// #[cfg_attr(not(target_arch = "wasm32"), ractor::async_trait)]
+#[async_trait::async_trait]
 impl ServiceHandle for NetworkServiceHandle {
     async fn handle_error(&mut self, _context: &mut ServiceContext, error: ServiceError) {
         trace!("Service error: {:?}", error);

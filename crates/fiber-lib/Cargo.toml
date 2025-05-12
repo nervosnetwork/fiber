@@ -15,7 +15,7 @@ bitcoin = { version = "0.30.2", features = ["serde", "rand"] }
 bech32 = "0.8"
 rand = "0.8.5"
 serde_json = { version = "1.0" }
-ckb-sdk = "3.6"
+ckb-sdk = { git = "https://github.com/Officeyutong/ckb-sdk-rust", branch = "wasm" }
 thiserror = "1.0.58"
 anyhow = "1.0.81"
 futures = "0.3.30"
@@ -47,16 +47,15 @@ bitmask-enum = "2.2.5"
 either = "1.15.0"
 aes-gcm = "0.10"
 scrypt = "0.11"
-
+clap-serde-derive = "0.2.1"
+clap = { version = "4.5.2", features = ["derive", "env", "string"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 console = "0.15.8"
 rocksdb = { package = "ckb-rocksdb", version = "=0.21.1", features = [
     "lz4",
 ], default-features = false }
-clap = { version = "4.5.2", features = ["derive", "env", "string"] }
-clap-serde-derive = "0.2.1"
-jsonrpsee = { version = "0.22", features = ["server", "macros"] }
+jsonrpsee = { version = "0.25", features = ["server", "macros"] }
 tokio = { version = "1", features = [
     "io-util",
     "macros",
@@ -82,12 +81,16 @@ ckb-hash = "0.200.0"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 tokio = { version = "1", features = ["io-util", "macros", "rt", "sync"] }
-tentacle = { version = "0.6.6", default-features = false, features = [
+tentacle = { version = "0.7", default-features = false, features = [
     "wasm-timer",
 ] }
 ckb-hash = { version = "0.200.0", features = [
     "blake2b-ref",
 ], default-features = false }
+tracing = { version = "0.1", features = ["log"] }
+jsonrpsee = { version = "0.25", features = ["macros", "server-core"] }
+getrandom = { version = "0.3", features = ["wasm_js"] }
+
 [features]
 default = ["watchtower"]
 portable = ["rocksdb/portable"]
@@ -97,8 +100,9 @@ watchtower = []
 tempfile = "3.10.1"
 ckb-testtool = "0.15.1"
 ciborium = "0.2.2"
-jsonrpsee = { version = "0.22", features = ["server", "macros", "http-client"] }
+jsonrpsee = { version = "0.25", features = ["server", "macros", "http-client"] }
 ouroboros = "0.18.5"
+futures = "0.3.31"
 
 [lints.clippy]
 needless-return = "allow"
@@ -107,3 +111,6 @@ upper-case-acronyms = "allow"
 fallible-impl-from = "allow"
 expect-fun-call = "allow"
 large-enum-variant = "allow"
+
+[package.metadata.cargo-shear]
+ignored = ["getrandom"]

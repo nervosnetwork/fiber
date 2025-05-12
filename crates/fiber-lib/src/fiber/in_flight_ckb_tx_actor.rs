@@ -61,7 +61,9 @@ pub enum InFlightCkbTxActorMessage {
     Internal(InternalMessage),
 }
 
-#[ractor::async_trait]
+#[cfg_attr(target_arch="wasm32",ractor::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), ractor::async_trait)]
+
 impl Actor for InFlightCkbTxActor {
     type Msg = InFlightCkbTxActorMessage;
     type State = InFlightCkbTxActorState;

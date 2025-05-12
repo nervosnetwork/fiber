@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use bitmask_enum::bitmask;
-use ckb_sdk::CkbRpcClient;
+use ckb_sdk::CkbRpcAsyncClient;
 use ckb_types::core::tx_pool::TxStatus;
 use ractor::{concurrency::Duration, Actor, ActorProcessingErr, ActorRef, RpcReplyPort};
 
@@ -117,7 +117,8 @@ impl CkbTxTracingMessage {
     }
 }
 
-#[ractor::async_trait]
+#[cfg_attr(target_arch="wasm32",ractor::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), ractor::async_trait)]
 impl Actor for CkbTxTracingActor {
     type Msg = CkbTxTracingMessage;
     type State = CkbTxTracingState;
@@ -256,21 +257,21 @@ impl CkbTxTracingState {
 
 impl TracingTask {
     fn spawn(self) {
-        tokio::task::spawn_blocking(move || self.run());
+        ractor::concurrency::spawn(async move { self.run().await });
     }
 
-    fn run(self) {
-        if let Err(err) = self.run_inner() {
+    async fn run(self) {
+        if let Err(err) = self.run_inner().await {
             tracing::error!("Failed to run CKB tx tracing task: {:?}", err);
         }
     }
 
-    fn run_inner(self) -> Result<(), Box<dyn std::error::Error>> {
-        let ckb_client = CkbRpcClient::new(&self.rpc_url);
-        let tip_block_number: u64 = ckb_client.get_tip_block_number()?.into();
+    async fn run_inner(self) -> Result<(), Box<dyn std::error::Error>> {
+        let ckb_client = CkbRpcAsyncClient::new(&self.rpc_url);
+        let tip_block_number: u64 = ckb_client.get_tip_block_number().await?.into();
 
         for tx_hash in self.tx_hashes {
-            match ckb_client.get_transaction(tx_hash.into()) {
+            match ckb_client.get_transaction(tx_hash.into()).await {
                 Ok(response_opt) => {
                     let result = response_opt
                         .map(|response| CkbTxTracingResult {

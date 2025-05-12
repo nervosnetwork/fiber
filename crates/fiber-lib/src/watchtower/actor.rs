@@ -21,7 +21,7 @@ use tracing::{debug, error, info, trace, warn};
 
 use crate::{
     ckb::{
-        contracts::{get_cell_deps, get_script_by_contract, Contract},
+        contracts::{get_cell_deps_sync, get_script_by_contract, Contract},
         CkbConfig,
     },
     fiber::{
@@ -62,7 +62,7 @@ pub struct WatchtowerState {
     secret_key: SecretKey,
 }
 
-#[ractor::async_trait]
+#[async_trait::async_trait]
 impl<S> Actor for WatchtowerActor<S>
 where
     S: InvoiceStore + WatchtowerStore + Send + Sync + 'static,
@@ -348,7 +348,7 @@ fn build_revocation_tx(
 
     let mut tx_builder = Transaction::default()
         .as_advanced_builder()
-        .cell_deps(get_cell_deps(
+        .cell_deps(get_cell_deps_sync(
             vec![Contract::CommitmentLock, Contract::Secp256k1Lock],
             &revocation_data.output.type_().to_opt(),
         )?)
@@ -787,7 +787,7 @@ fn build_settlement_tx(
 
     let mut tx_builder = Transaction::default()
         .as_advanced_builder()
-        .cell_deps(get_cell_deps(
+        .cell_deps(get_cell_deps_sync(
             vec![Contract::CommitmentLock, Contract::Secp256k1Lock],
             &to_local_output.type_().to_opt(),
         )?)
@@ -1112,7 +1112,7 @@ fn build_settlement_tx_for_pending_tlcs<S: InvoiceStore>(
             };
             let mut tx_builder = Transaction::default()
                 .as_advanced_builder()
-                .cell_deps(get_cell_deps(
+                .cell_deps(get_cell_deps_sync(
                     vec![Contract::CommitmentLock, Contract::Secp256k1Lock],
                     &None,
                 )?)
@@ -1234,7 +1234,7 @@ fn build_settlement_tx_for_pending_tlcs<S: InvoiceStore>(
             };
             let mut tx_builder = Transaction::default()
                 .as_advanced_builder()
-                .cell_deps(get_cell_deps(
+                .cell_deps(get_cell_deps_sync(
                     vec![Contract::CommitmentLock, Contract::Secp256k1Lock],
                     &commitment_tx_cell.output.type_.map(|script| script.into()),
                 )?)

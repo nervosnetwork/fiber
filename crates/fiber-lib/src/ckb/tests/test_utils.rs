@@ -211,7 +211,8 @@ impl TraceTxReplier {
     }
 }
 
-#[ractor::async_trait]
+#[cfg_attr(target_arch="wasm32",ractor::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), ractor::async_trait)]
 impl Actor for TraceTxReplier {
     type Msg = CkbTxTracingResult;
     type Arguments = (
@@ -257,7 +258,8 @@ impl Actor for TraceTxReplier {
     }
 }
 
-#[ractor::async_trait]
+#[cfg_attr(target_arch="wasm32",ractor::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), ractor::async_trait)]
 pub trait MockChainActorMiddleware: Send + std::fmt::Debug {
     /// Returns Ok(None) if the message is handled by the middleware, otherwise the message
     /// will be forwarded to the underlying MockChainActor.
@@ -346,7 +348,8 @@ impl MockChainActor {
     }
 }
 
-#[ractor::async_trait]
+#[cfg_attr(target_arch="wasm32",ractor::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), ractor::async_trait)]
 impl Actor for MockChainActor {
     type Msg = CkbChainMessage;
     type State = MockChainActorState;
@@ -689,10 +692,10 @@ pub async fn get_tx_from_hash(
 }
 
 pub fn complete_commitment_tx(commitment_tx: &TransactionView) -> TransactionView {
-    let cell_deps = get_cell_deps(
+    let cell_deps = futures::executor::block_on(get_cell_deps(
         vec![Contract::FundingLock],
         &commitment_tx.outputs().get(0).unwrap().type_().to_opt(),
-    )
+    ))
     .expect("get cell deps should be ok");
     commitment_tx
         .as_advanced_builder()

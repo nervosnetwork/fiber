@@ -1,3 +1,5 @@
+// #[cfg(not(target_arch = "wasm32"))]
+// use crate::watchtower::WatchtowerStore;
 use crate::{
     fiber::{
         channel::{AddTlcCommand, ChannelCommand, ChannelCommandWithId, RemoveTlcCommand},
@@ -10,11 +12,9 @@ use crate::{
 };
 use ckb_types::core::TransactionView;
 #[cfg(not(target_arch = "wasm32"))]
-use jsonrpsee::{
-    core::async_trait,
-    proc_macros::rpc,
-    types::{error::CALL_EXECUTION_FAILED_CODE, ErrorObjectOwned},
-};
+use jsonrpsee::proc_macros::rpc;
+use jsonrpsee::types::{error::CALL_EXECUTION_FAILED_CODE, ErrorObjectOwned};
+
 use ractor::call;
 use std::str::FromStr;
 use std::{collections::HashMap, sync::Arc};
@@ -104,6 +104,7 @@ pub struct SubmitCommitmentTransactionResult {
 
 /// RPC module for development purposes, this module is not intended to be used in production.
 /// This module will be disabled in release build.
+#[cfg(not(target_arch = "wasm32"))]
 #[rpc(server)]
 trait DevRpc {
     /// Sends a commitment_signed message to the peer.
@@ -149,9 +150,37 @@ impl DevRpcServerImpl {
     }
 }
 
-#[async_trait]
+#[cfg(not(target_arch = "wasm32"))]
+#[async_trait::async_trait]
 impl DevRpcServer for DevRpcServerImpl {
+    /// Sends a commitment_signed message to the peer.
     async fn commitment_signed(
+        &self,
+        params: CommitmentSignedParams,
+    ) -> Result<(), ErrorObjectOwned> {
+        self.commitment_signed(params).await
+    }
+
+    /// Adds a TLC to a channel.
+    async fn add_tlc(&self, params: AddTlcParams) -> Result<AddTlcResult, ErrorObjectOwned> {
+        self.add_tlc(params).await
+    }
+
+    /// Removes a TLC from a channel.
+    async fn remove_tlc(&self, params: RemoveTlcParams) -> Result<(), ErrorObjectOwned> {
+        self.remove_tlc(params).await
+    }
+
+    /// Submit a commitment transaction to the chain
+    async fn submit_commitment_transaction(
+        &self,
+        params: SubmitCommitmentTransactionParams,
+    ) -> Result<SubmitCommitmentTransactionResult, ErrorObjectOwned> {
+        self.submit_commitment_transaction(params).await
+    }
+}
+impl DevRpcServerImpl {
+    pub async fn commitment_signed(
         &self,
         params: CommitmentSignedParams,
     ) -> Result<(), ErrorObjectOwned> {
@@ -164,7 +193,7 @@ impl DevRpcServer for DevRpcServerImpl {
         handle_actor_cast!(self.network_actor, message, params)
     }
 
-    async fn add_tlc(&self, params: AddTlcParams) -> Result<AddTlcResult, ErrorObjectOwned> {
+    pub async fn add_tlc(&self, params: AddTlcParams) -> Result<AddTlcResult, ErrorObjectOwned> {
         let message = |rpc_reply| -> NetworkActorMessage {
             NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
                 ChannelCommandWithId {
@@ -189,7 +218,7 @@ impl DevRpcServer for DevRpcServerImpl {
         })
     }
 
-    async fn remove_tlc(&self, params: RemoveTlcParams) -> Result<(), ErrorObjectOwned> {
+    pub async fn remove_tlc(&self, params: RemoveTlcParams) -> Result<(), ErrorObjectOwned> {
         let err_code = match &params.reason {
             RemoveTlcReason::RemoveTlcFail { error_code } => {
                 let Ok(err) = TlcErrorCode::from_str(error_code) else {
@@ -236,7 +265,7 @@ impl DevRpcServer for DevRpcServerImpl {
         handle_actor_call!(self.network_actor, message, params)
     }
 
-    async fn submit_commitment_transaction(
+    pub async fn submit_commitment_transaction(
         &self,
         params: SubmitCommitmentTransactionParams,
     ) -> Result<SubmitCommitmentTransactionResult, ErrorObjectOwned> {

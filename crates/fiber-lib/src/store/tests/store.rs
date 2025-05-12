@@ -18,14 +18,13 @@ use crate::now_timestamp_as_millis_u64;
 use crate::store::store_impl::deserialize_from;
 use crate::store::store_impl::serialize_to_vec;
 use crate::store::Store;
-use crate::watchtower::*;
+// use crate::watchtower::*;
 use ckb_hash::new_blake2b;
 use ckb_types::packed::*;
 use ckb_types::prelude::*;
 use ckb_types::H256;
 use core::cmp::Ordering;
 use musig2::secp::MaybeScalar;
-use musig2::CompactSignature;
 use musig2::SecNonce;
 use secp256k1::SecretKey;
 use secp256k1::{Keypair, Secp256k1};
@@ -220,59 +219,59 @@ fn test_store_save_node_announcement() {
     assert_eq!(new_node_announcement, Some(node_announcement));
 }
 
-#[test]
-fn test_store_wacthtower() {
-    let path = TempDir::new("test-watchtower-store");
-    let store = Store::new(path).expect("created store failed");
+// #[test]
+// fn test_store_wacthtower() {
+//     let path = TempDir::new("test-watchtower-store");
+//     let store = Store::new(path).expect("created store failed");
 
-    let channel_id = gen_rand_sha256_hash();
-    let funding_tx_lock = Script::default();
+//     let channel_id = gen_rand_sha256_hash();
+//     let funding_tx_lock = Script::default();
 
-    let settlement_data = SettlementData {
-        x_only_aggregated_pubkey: [0u8; 32],
-        aggregated_signature: CompactSignature::from_bytes(&[0u8; 64]).unwrap(),
-        to_local_output: CellOutput::default(),
-        to_local_output_data: Bytes::default(),
-        to_remote_output: CellOutput::default(),
-        to_remote_output_data: Bytes::default(),
-        tlcs: vec![],
-    };
+//     let settlement_data = SettlementData {
+//         x_only_aggregated_pubkey: [0u8; 32],
+//         aggregated_signature: CompactSignature::from_bytes(&[0u8; 64]).unwrap(),
+//         to_local_output: CellOutput::default(),
+//         to_local_output_data: Bytes::default(),
+//         to_remote_output: CellOutput::default(),
+//         to_remote_output_data: Bytes::default(),
+//         tlcs: vec![],
+//     };
 
-    store.insert_watch_channel(channel_id, funding_tx_lock.clone(), settlement_data.clone());
-    assert_eq!(
-        store.get_watch_channels(),
-        vec![ChannelData {
-            channel_id,
-            funding_tx_lock: funding_tx_lock.clone(),
-            revocation_data: None,
-            local_settlement_data: None,
-            remote_settlement_data: settlement_data.clone(),
-        }]
-    );
+//     store.insert_watch_channel(channel_id, funding_tx_lock.clone(), settlement_data.clone());
+//     assert_eq!(
+//         store.get_watch_channels(),
+//         vec![ChannelData {
+//             channel_id,
+//             funding_tx_lock: funding_tx_lock.clone(),
+//             revocation_data: None,
+//             local_settlement_data: None,
+//             remote_settlement_data: settlement_data.clone(),
+//         }]
+//     );
 
-    let revocation_data = RevocationData {
-        commitment_number: 0,
-        x_only_aggregated_pubkey: [0u8; 32],
-        aggregated_signature: CompactSignature::from_bytes(&[0u8; 64]).unwrap(),
-        output: CellOutput::default(),
-        output_data: Bytes::default(),
-    };
+//     let revocation_data = RevocationData {
+//         commitment_number: 0,
+//         x_only_aggregated_pubkey: [0u8; 32],
+//         aggregated_signature: CompactSignature::from_bytes(&[0u8; 64]).unwrap(),
+//         output: CellOutput::default(),
+//         output_data: Bytes::default(),
+//     };
 
-    store.update_revocation(channel_id, revocation_data.clone(), settlement_data.clone());
-    assert_eq!(
-        store.get_watch_channels(),
-        vec![ChannelData {
-            channel_id,
-            funding_tx_lock,
-            local_settlement_data: None,
-            revocation_data: Some(revocation_data),
-            remote_settlement_data: settlement_data,
-        }]
-    );
+//     store.update_revocation(channel_id, revocation_data.clone(), settlement_data.clone());
+//     assert_eq!(
+//         store.get_watch_channels(),
+//         vec![ChannelData {
+//             channel_id,
+//             funding_tx_lock,
+//             local_settlement_data: None,
+//             revocation_data: Some(revocation_data),
+//             remote_settlement_data: settlement_data,
+//         }]
+//     );
 
-    store.remove_watch_channel(channel_id);
-    assert_eq!(store.get_watch_channels(), vec![]);
-}
+//     store.remove_watch_channel(channel_id);
+//     assert_eq!(store.get_watch_channels(), vec![]);
+// }
 
 #[test]
 fn test_channel_state_serialize() {

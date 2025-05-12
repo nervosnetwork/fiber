@@ -1,4 +1,4 @@
-use ractor::{async_trait as rasync_trait, Actor, ActorProcessingErr, ActorRef, SupervisionEvent};
+use ractor::{Actor, ActorProcessingErr, ActorRef, SupervisionEvent};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::debug;
 
@@ -23,7 +23,9 @@ impl RootActor {
     }
 }
 
-#[rasync_trait]
+#[cfg_attr(target_arch="wasm32",ractor::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), ractor::async_trait)]
+
 impl Actor for RootActor {
     type Msg = RootActorMessage;
     type State = ();
