@@ -19,6 +19,7 @@ pub use cch::{start_cch, CchActor, CchConfig};
 pub mod invoice;
 pub mod rpc;
 pub mod store;
+#[cfg(feature = "watchtower")]
 pub mod watchtower;
 
 mod errors;
