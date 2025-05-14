@@ -7,7 +7,6 @@ use crate::{
         NetworkActorCommand, NetworkActorMessage,
     },
     handle_actor_cast,
-    watchtower::WatchtowerStore,
 };
 use ckb_types::core::TransactionView;
 #[cfg(not(target_arch = "wasm32"))]
@@ -103,13 +102,6 @@ pub struct SubmitCommitmentTransactionResult {
     pub tx_hash: Hash256,
 }
 
-#[serde_as]
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct RemoveWatchChannelParams {
-    /// Channel ID
-    pub channel_id: Hash256,
-}
-
 /// RPC module for development purposes, this module is not intended to be used in production.
 /// This module will be disabled in release build.
 #[rpc(server)]
@@ -135,43 +127,30 @@ trait DevRpc {
         &self,
         params: SubmitCommitmentTransactionParams,
     ) -> Result<SubmitCommitmentTransactionResult, ErrorObjectOwned>;
-
-    /// Remove a watched channel from the watchtower store
-    #[method(name = "remove_watch_channel")]
-    async fn remove_watch_channel(
-        &self,
-        params: RemoveWatchChannelParams,
-    ) -> Result<(), ErrorObjectOwned>;
 }
 
-pub struct DevRpcServerImpl<S> {
+pub struct DevRpcServerImpl {
     ckb_chain_actor: ActorRef<CkbChainMessage>,
     network_actor: ActorRef<NetworkActorMessage>,
     commitment_txs: Arc<RwLock<HashMap<(Hash256, u64), TransactionView>>>,
-    store: S,
 }
 
-impl<S> DevRpcServerImpl<S> {
+impl DevRpcServerImpl {
     pub fn new(
         ckb_chain_actor: ActorRef<CkbChainMessage>,
         network_actor: ActorRef<NetworkActorMessage>,
         commitment_txs: Arc<RwLock<HashMap<(Hash256, u64), TransactionView>>>,
-        store: S,
     ) -> Self {
         Self {
             ckb_chain_actor,
             network_actor,
             commitment_txs,
-            store,
         }
     }
 }
 
 #[async_trait]
-impl<S> DevRpcServer for DevRpcServerImpl<S>
-where
-    S: WatchtowerStore + Send + Sync + 'static,
-{
+impl DevRpcServer for DevRpcServerImpl {
     async fn commitment_signed(
         &self,
         params: CommitmentSignedParams,
@@ -292,13 +271,5 @@ where
                 Some(params),
             ))
         }
-    }
-
-    async fn remove_watch_channel(
-        &self,
-        params: RemoveWatchChannelParams,
-    ) -> Result<(), ErrorObjectOwned> {
-        self.store.remove_watch_channel(params.channel_id);
-        Ok(())
     }
 }
