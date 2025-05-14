@@ -318,6 +318,7 @@ impl NetworkNodeConfigBuilder {
                     "payment".to_string(),
                     "invoice".to_string(),
                     "peer".to_string(),
+                    "watchtower".to_string(),
                 ],
             })
         } else {
