@@ -14,20 +14,24 @@ use super::db_migrate::DbMigrate;
 use super::schema::*;
 use crate::fiber::gossip::GossipMessageStore;
 use crate::fiber::types::CURSOR_SIZE;
+#[cfg(feature = "watchtower")]
+use crate::{
+    fiber::channel::{RevocationData, SettlementData},
+    watchtower::{ChannelData, WatchtowerStore},
+};
 use crate::{
     fiber::{
-        channel::{
-            ChannelActorState, ChannelActorStateStore, ChannelState, RevocationData, SettlementData,
-        },
+        channel::{ChannelActorState, ChannelActorStateStore, ChannelState},
         graph::{NetworkGraphStateStore, PaymentSession, PaymentSessionStatus},
         history::{Direction, TimedResult},
         network::{NetworkActorStateStore, PaymentCustomRecords, PersistentNetworkActorState},
         types::{BroadcastMessage, BroadcastMessageID, Cursor, Hash256},
     },
     invoice::{CkbInvoice, CkbInvoiceStatus, InvoiceError, InvoiceStore},
-    watchtower::{ChannelData, WatchtowerStore},
 };
-use ckb_types::packed::{OutPoint, Script};
+use ckb_types::packed::OutPoint;
+#[cfg(feature = "watchtower")]
+use ckb_types::packed::Script;
 use ckb_types::prelude::Entity;
 
 use serde::Serialize;
@@ -155,6 +159,7 @@ impl Store {
                         &mut errors,
                     );
                 }
+                #[cfg(feature = "watchtower")]
                 WATCHTOWER_CHANNEL_PREFIX => {
                     check_deserialization::<ChannelData>(
                         &value,
@@ -188,6 +193,7 @@ pub enum KeyValue {
     OutPointChannelId(OutPoint, Hash256),
     BroadcastMessageTimestamp(BroadcastMessageID, u64),
     BroadcastMessage(Cursor, BroadcastMessage),
+    #[cfg(feature = "watchtower")]
     WatchtowerChannel(Hash256, ChannelData),
     PaymentSession(Hash256, PaymentSession),
     PaymentHistoryTimedResult((OutPoint, Direction), TimedResult),
@@ -225,6 +231,7 @@ impl StoreKeyValue for KeyValue {
             KeyValue::PaymentSession(payment_hash, _) => {
                 [&[PAYMENT_SESSION_PREFIX], payment_hash.as_ref()].concat()
             }
+            #[cfg(feature = "watchtower")]
             KeyValue::WatchtowerChannel(channel_id, _) => {
                 [&[WATCHTOWER_CHANNEL_PREFIX], channel_id.as_ref()].concat()
             }
@@ -262,6 +269,7 @@ impl StoreKeyValue for KeyValue {
             KeyValue::PaymentSession(_, payment_session) => {
                 serialize_to_vec(payment_session, "PaymentSession")
             }
+            #[cfg(feature = "watchtower")]
             KeyValue::WatchtowerChannel(_, channel_data) => {
                 serialize_to_vec(channel_data, "ChannelData")
             }
@@ -530,6 +538,7 @@ impl NetworkGraphStateStore for Store {
     }
 }
 
+#[cfg(feature = "watchtower")]
 impl WatchtowerStore for Store {
     fn get_watch_channels(&self) -> Vec<ChannelData> {
         let prefix = vec![WATCHTOWER_CHANNEL_PREFIX];

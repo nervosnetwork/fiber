@@ -1,6 +1,9 @@
 use clap_serde_derive::ClapSerde;
 
+#[cfg(not(feature = "watchtower"))]
 const DEFAULT_ENABLED_MODULES: &str = "cch,channel,graph,payment,info,invoice,peer";
+#[cfg(feature = "watchtower")]
+const DEFAULT_ENABLED_MODULES: &str = "cch,channel,graph,payment,info,invoice,peer,watchtower";
 
 #[derive(ClapSerde, Debug, Clone)]
 pub struct RpcConfig {

@@ -9,6 +9,8 @@ pub mod invoice;
 pub mod payment;
 pub mod peer;
 pub mod utils;
+#[cfg(feature = "watchtower")]
+pub mod watchtower;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod server {
 
@@ -26,7 +28,6 @@ pub mod server {
     use crate::rpc::payment::PaymentRpcServer;
     use crate::rpc::payment::PaymentRpcServerImpl;
     use crate::rpc::peer::{PeerRpcServer, PeerRpcServerImpl};
-    use crate::watchtower::WatchtowerStore;
     use crate::{
         cch::CchMessage,
         fiber::{
@@ -39,6 +40,11 @@ pub mod server {
     };
     #[cfg(debug_assertions)]
     use crate::{ckb::CkbChainMessage, fiber::types::Hash256};
+    #[cfg(feature = "watchtower")]
+    use crate::{
+        rpc::watchtower::{WatchtowerRpcServer, WatchtowerRpcServerImpl},
+        watchtower::WatchtowerStore,
+    };
     #[cfg(debug_assertions)]
     use ckb_types::core::TransactionView;
     use jsonrpsee::server::{Server, ServerHandle};
@@ -49,6 +55,35 @@ pub mod server {
     use std::net::SocketAddr;
     use std::sync::Arc;
     use tokio::sync::RwLock;
+
+    #[cfg(feature = "watchtower")]
+    pub trait RpcServerStore:
+        ChannelActorStateStore
+        + InvoiceStore
+        + NetworkGraphStateStore
+        + GossipMessageStore
+        + WatchtowerStore
+    {
+    }
+    #[cfg(feature = "watchtower")]
+    impl<T> RpcServerStore for T where
+        T: ChannelActorStateStore
+            + InvoiceStore
+            + NetworkGraphStateStore
+            + GossipMessageStore
+            + WatchtowerStore
+    {
+    }
+    #[cfg(not(feature = "watchtower"))]
+    pub trait RpcServerStore:
+        ChannelActorStateStore + InvoiceStore + NetworkGraphStateStore + GossipMessageStore
+    {
+    }
+    #[cfg(not(feature = "watchtower"))]
+    impl<T> RpcServerStore for T where
+        T: ChannelActorStateStore + InvoiceStore + NetworkGraphStateStore + GossipMessageStore
+    {
+    }
 
     async fn build_server(addr: &str) -> Server {
         #[cfg(debug_assertions)]
@@ -85,17 +120,7 @@ pub mod server {
 
     #[allow(clippy::type_complexity)]
     #[allow(clippy::too_many_arguments)]
-    pub async fn start_rpc<
-        S: ChannelActorStateStore
-            + InvoiceStore
-            + NetworkGraphStateStore
-            + GossipMessageStore
-            + WatchtowerStore
-            + Clone
-            + Send
-            + Sync
-            + 'static,
-    >(
+    pub async fn start_rpc<S: RpcServerStore + Clone + Send + Sync + 'static>(
         config: RpcConfig,
         ckb_config: Option<CkbConfig>,
         fiber_config: Option<FiberConfig>,
@@ -158,6 +183,13 @@ pub mod server {
                     .unwrap();
             }
 
+            #[cfg(feature = "watchtower")]
+            if config.is_module_enabled("watchtower") {
+                modules
+                    .merge(WatchtowerRpcServerImpl::new(store.clone()).into_rpc())
+                    .unwrap();
+            }
+
             #[cfg(debug_assertions)]
             if config.is_module_enabled("dev") {
                 modules
@@ -167,7 +199,6 @@ pub mod server {
                             network_actor.clone(),
                             rpc_dev_module_commitment_txs
                                 .expect("rpc_dev_module_commitment_txs should be set"),
-                            store.clone(),
                         )
                         .into_rpc(),
                     )

@@ -89,8 +89,9 @@ ckb-hash = { version = "0.200.0", features = [
     "blake2b-ref",
 ], default-features = false }
 [features]
-default = []
+default = ["watchtower"]
 portable = ["rocksdb/portable"]
+watchtower = []
 
 [dev-dependencies]
 tempfile = "3.10.1"
