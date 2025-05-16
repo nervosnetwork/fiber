@@ -92,14 +92,11 @@ fn test_store_invoice() {
         .insert_invoice(invoice.clone(), Some(preimage))
         .unwrap();
     assert_eq!(store.get_invoice(hash), Some(invoice.clone()));
-    assert_eq!(store.get_invoice_preimage(hash), Some(preimage));
-    assert_eq!(
-        store.search_payment_preimage(&hash.as_ref()[0..20]),
-        Some(preimage)
-    );
+    assert_eq!(store.get_preimage(hash), Some(preimage));
+    assert_eq!(store.search_preimage(&hash.as_ref()[0..20]), Some(preimage));
 
     let invalid_hash = gen_rand_sha256_hash();
-    assert_eq!(store.get_invoice_preimage(&invalid_hash), None);
+    assert_eq!(store.get_preimage(&invalid_hash), None);
 
     assert_eq!(store.get_invoice_status(hash), Some(CkbInvoiceStatus::Open));
     assert_eq!(store.get_invoice_status(&gen_rand_sha256_hash()), None);
