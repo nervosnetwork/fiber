@@ -1,12 +1,15 @@
 use std::path::PathBuf;
 
-use crate::{ckb::CkbConfig, rpc::config::RpcConfig, CchConfig, FiberConfig};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::CchConfig;
+use crate::{ckb::CkbConfig, rpc::config::RpcConfig, FiberConfig};
 
 #[derive(Debug)]
 pub struct Config {
     // fiber config, None represents that we should not run fiber service
     pub fiber: Option<FiberConfig>,
     // cch config, None represents that we should not run cch service
+    #[cfg(not(target_arch = "wasm32"))]
     pub cch: Option<CchConfig>,
     // rpc server config, None represents that we should not run rpc service
     pub rpc: Option<RpcConfig>,

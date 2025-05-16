@@ -1,9 +1,14 @@
-use ckb_sdk::{CkbRpcClient, RpcError};
+use std::future::Future;
+
+use ckb_sdk::{CkbRpcAsyncClient, RpcError};
 use ckb_types::{
     core::{tx_pool::TxStatus, TransactionView},
     packed,
 };
-use ractor::{concurrency::Duration, Actor, ActorProcessingErr, ActorRef, RpcReplyPort};
+use ractor::{
+    concurrency::{Duration, MaybeSend},
+    Actor, ActorProcessingErr, ActorRef, RpcReplyPort,
+};
 use tracing::debug;
 
 use crate::{
@@ -109,95 +114,93 @@ pub enum CkbChainMessage {
     Stop,
 }
 
-#[ractor::async_trait]
 impl Actor for CkbChainActor {
     type Msg = CkbChainMessage;
     type State = CkbChainState;
     type Arguments = CkbConfig;
 
-    async fn pre_start(
+    fn pre_start(
         &self,
         myself: ActorRef<Self::Msg>,
         config: Self::Arguments,
-    ) -> Result<Self::State, ActorProcessingErr> {
-        let secret_key = config.read_secret_key()?;
-        let secp = secp256k1::Secp256k1::new();
-        let pub_key = secret_key.public_key(&secp);
-        let pub_key_hash = ckb_hash::blake2b_256(pub_key.serialize());
-        let funding_source_lock_script =
-            get_script_by_contract(Contract::Secp256k1Lock, &pub_key_hash[0..20]);
-        let ckb_tx_tracing_actor = Actor::spawn_linked(
-            Some(format!(
-                "{}/ckb-tx-tracing",
-                myself.get_name().as_deref().unwrap_or_default()
-            )),
-            CkbTxTracingActor::new(),
-            CkbTxTracingArguments {
-                rpc_url: config.rpc_url.clone(),
-                polling_interval: Duration::from_millis(config.tx_tracing_polling_interval_ms),
-            },
-            myself.into(),
-        )
-        .await?
-        .0;
-        Ok(CkbChainState {
-            config,
-            secret_key,
-            funding_source_lock_script,
-            ckb_tx_tracing_actor,
-            live_cells_exclusion_map: Default::default(),
-        })
+    ) -> impl Future<Output = Result<Self::State, ActorProcessingErr>> + MaybeSend {
+        async move {
+            let secret_key = config.read_secret_key()?;
+            let secp = secp256k1::Secp256k1::new();
+            let pub_key = secret_key.public_key(&secp);
+            let pub_key_hash = ckb_hash::blake2b_256(pub_key.serialize());
+            let funding_source_lock_script =
+                get_script_by_contract(Contract::Secp256k1Lock, &pub_key_hash[0..20]);
+            let ckb_tx_tracing_actor = Actor::spawn_linked(
+                Some(format!(
+                    "{}/ckb-tx-tracing",
+                    myself.get_name().as_deref().unwrap_or_default()
+                )),
+                CkbTxTracingActor::new(),
+                CkbTxTracingArguments {
+                    rpc_url: config.rpc_url.clone(),
+                    polling_interval: Duration::from_millis(config.tx_tracing_polling_interval_ms),
+                },
+                myself.into(),
+            )
+            .await?
+            .0;
+            Ok(CkbChainState {
+                config,
+                secret_key,
+                funding_source_lock_script,
+                ckb_tx_tracing_actor,
+                live_cells_exclusion_map: Default::default(),
+            })
+        }
     }
 
-    async fn handle(
+    fn handle(
         &self,
         myself: ActorRef<Self::Msg>,
         message: Self::Msg,
         state: &mut Self::State,
-    ) -> Result<(), ActorProcessingErr> {
-        match message {
-            CkbChainMessage::Fund(tx, request, reply_port) => {
-                if !reply_port.is_closed() {
-                    let context = state.build_funding_context(&request);
-                    let exclusion = &mut state.live_cells_exclusion_map;
-                    tokio::task::block_in_place(move || {
-                        let result = tx.fulfill(request, context, exclusion);
+    ) -> impl Future<Output = Result<(), ActorProcessingErr>> + MaybeSend {
+        async move {
+            match message {
+                CkbChainMessage::Fund(tx, request, reply_port) => {
+                    if !reply_port.is_closed() {
+                        let context = state.build_funding_context(&request);
+                        let exclusion = &mut state.live_cells_exclusion_map;
+                        let result = tx.fulfill(request, context, exclusion).await;
                         if !reply_port.is_closed() {
                             // ignore error
                             let _ = reply_port.send(result);
                         }
-                    });
+                    }
                 }
-            }
-            CkbChainMessage::AddFundingTx(tx) => {
-                state.live_cells_exclusion_map.add_funding_tx(&tx);
-            }
-            CkbChainMessage::RemoveFundingTx(tx_hash) => {
-                state.live_cells_exclusion_map.remove(&tx_hash.into());
-            }
-            CkbChainMessage::CommitFundingTx(tx_hash, commit_block_number) => {
-                state
-                    .live_cells_exclusion_map
-                    .commit(&tx_hash.into(), commit_block_number);
-            }
-            CkbChainMessage::Sign(tx, reply_port) => {
-                if !reply_port.is_closed() {
-                    let secret_key = state.secret_key;
+                CkbChainMessage::AddFundingTx(tx) => {
+                    state.live_cells_exclusion_map.add_funding_tx(&tx);
+                }
+                CkbChainMessage::RemoveFundingTx(tx_hash) => {
+                    state.live_cells_exclusion_map.remove(&tx_hash.into());
+                }
+                CkbChainMessage::CommitFundingTx(tx_hash, commit_block_number) => {
+                    state
+                        .live_cells_exclusion_map
+                        .commit(&tx_hash.into(), commit_block_number);
+                }
+                CkbChainMessage::Sign(tx, reply_port) => {
+                    if !reply_port.is_closed() {
+                        let secret_key = state.secret_key;
+                        let rpc_url = state.config.rpc_url.clone();
+                        let result = tx.sign(secret_key, rpc_url).await;
+                        if !reply_port.is_closed() {
+                            // ignore error
+                            let _ = reply_port.send(result);
+                        }
+                    }
+                }
+                CkbChainMessage::SendTx(tx, reply_port) => {
                     let rpc_url = state.config.rpc_url.clone();
-                    tokio::task::block_in_place(move || {
-                        let result = tx.sign(secret_key, rpc_url);
-                        if !reply_port.is_closed() {
-                            // ignore error
-                            let _ = reply_port.send(result);
-                        }
-                    });
-                }
-            }
-            CkbChainMessage::SendTx(tx, reply_port) => {
-                let rpc_url = state.config.rpc_url.clone();
-                tokio::task::block_in_place(move || {
-                    let ckb_client = CkbRpcClient::new(&rpc_url);
-                    let result = match ckb_client.send_transaction(tx.data().into(), None) {
+                    // let ckb_client = CkbRpcClient::new(&rpc_url);
+                    let ckb_client = CkbRpcAsyncClient::new(&rpc_url);
+                    let result = match ckb_client.send_transaction(tx.data().into(), None).await {
                         Ok(_) => Ok(()),
                         Err(err) => {
                             //FIXME(yukang): RBF or duplicated transaction handling
@@ -228,55 +231,52 @@ impl Actor for CkbChainActor {
                         // ignore error
                         let _ = reply_port.send(result);
                     }
-                });
-            }
-            CkbChainMessage::GetTx(tx_hash, reply_port) => {
-                let rpc_url = state.config.rpc_url.clone();
-                tokio::task::block_in_place(move || {
-                    let ckb_client = CkbRpcClient::new(&rpc_url);
-                    let result = ckb_client.get_transaction(tx_hash.into());
+                }
+                CkbChainMessage::GetTx(tx_hash, reply_port) => {
+                    let rpc_url = state.config.rpc_url.clone();
+                    let ckb_client = CkbRpcAsyncClient::new(&rpc_url);
+                    let result = ckb_client.get_transaction(tx_hash.into()).await;
                     if !reply_port.is_closed() {
                         // ignore error
                         let _ = reply_port.send(result.map(Into::into));
                     }
-                });
-            }
-            CkbChainMessage::CreateTxTracer(tracer) => {
-                debug!(
-                    "[{}] trace transaction {} with {} confs",
-                    myself.get_name().unwrap_or_default(),
-                    tracer.tx_hash,
-                    tracer.confirmations
-                );
-                state
-                    .ckb_tx_tracing_actor
-                    .send_message(CkbTxTracingMessage::CreateTracer(tracer))?;
-            }
-            CkbChainMessage::RemoveTxTracers(tx_hash) => {
-                state
-                    .ckb_tx_tracing_actor
-                    .send_message(CkbTxTracingMessage::RemoveTracers(tx_hash))?;
-            }
-            CkbChainMessage::GetBlockTimestamp(
-                GetBlockTimestampRequest { block_hash },
-                reply_port,
-            ) => {
-                let rpc_url = state.config.rpc_url.clone();
-                tokio::task::block_in_place(move || {
-                    let ckb_client = CkbRpcClient::new(&rpc_url);
+                }
+                CkbChainMessage::CreateTxTracer(tracer) => {
+                    debug!(
+                        "[{}] trace transaction {} with {} confs",
+                        myself.get_name().unwrap_or_default(),
+                        tracer.tx_hash,
+                        tracer.confirmations
+                    );
+                    state
+                        .ckb_tx_tracing_actor
+                        .send_message(CkbTxTracingMessage::CreateTracer(tracer))?;
+                }
+                CkbChainMessage::RemoveTxTracers(tx_hash) => {
+                    state
+                        .ckb_tx_tracing_actor
+                        .send_message(CkbTxTracingMessage::RemoveTracers(tx_hash))?;
+                }
+                CkbChainMessage::GetBlockTimestamp(
+                    GetBlockTimestampRequest { block_hash },
+                    reply_port,
+                ) => {
+                    let rpc_url = state.config.rpc_url.clone();
+                    let ckb_client = CkbRpcAsyncClient::new(&rpc_url);
                     let _ = reply_port.send(
                         ckb_client
                             .get_header(block_hash.into())
+                            .await
                             .map(|x| x.map(|x| x.inner.timestamp.into())),
                     );
-                });
+                }
+                CkbChainMessage::Stop => {
+                    myself.stop(Some("stop received".to_string()));
+                }
             }
-            CkbChainMessage::Stop => {
-                myself.stop(Some("stop received".to_string()));
-            }
-        }
 
-        Ok(())
+            Ok(())
+        }
     }
 }
 
