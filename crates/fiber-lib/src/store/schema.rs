@@ -20,7 +20,7 @@
 pub(crate) const CHANNEL_ACTOR_STATE_PREFIX: u8 = 0;
 pub(crate) const PEER_ID_NETWORK_ACTOR_STATE_PREFIX: u8 = 16;
 pub(crate) const CKB_INVOICE_PREFIX: u8 = 32;
-pub(crate) const CKB_INVOICE_PREIMAGE_PREFIX: u8 = 33;
+pub(crate) const PREIMAGE_PREFIX: u8 = 33;
 pub(crate) const CKB_INVOICE_STATUS_PREFIX: u8 = 34;
 pub(crate) const PEER_ID_CHANNEL_ID_PREFIX: u8 = 64;
 pub(crate) const CHANNEL_OUTPOINT_CHANNEL_ID_PREFIX: u8 = 65;

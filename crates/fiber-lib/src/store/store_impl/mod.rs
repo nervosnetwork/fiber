@@ -27,7 +27,7 @@ use crate::{
         network::{NetworkActorStateStore, PaymentCustomRecords, PersistentNetworkActorState},
         types::{BroadcastMessage, BroadcastMessageID, Cursor, Hash256},
     },
-    invoice::{CkbInvoice, CkbInvoiceStatus, InvoiceError, InvoiceStore},
+    invoice::{CkbInvoice, CkbInvoiceStatus, InvoiceError, InvoiceStore, PreimageStore},
 };
 use ckb_types::packed::OutPoint;
 #[cfg(feature = "watchtower")]
@@ -108,12 +108,8 @@ impl Store {
                 CKB_INVOICE_PREFIX => {
                     check_deserialization::<CkbInvoice>(&value, "CKB_INVOICE_PREFIX", &mut errors);
                 }
-                CKB_INVOICE_PREIMAGE_PREFIX => {
-                    check_deserialization::<Hash256>(
-                        &value,
-                        "CKB_INVOICE_PREIMAGE_PREFIX",
-                        &mut errors,
-                    );
+                PREIMAGE_PREFIX => {
+                    check_deserialization::<Hash256>(&value, "PREIMAGE_PREFIX", &mut errors);
                 }
                 CKB_INVOICE_STATUS_PREFIX => {
                     check_deserialization::<CkbInvoiceStatus>(
@@ -187,7 +183,7 @@ impl Store {
 pub enum KeyValue {
     ChannelActorState(Hash256, ChannelActorState),
     CkbInvoice(Hash256, CkbInvoice),
-    CkbInvoicePreimage(Hash256, Hash256),
+    Preimage(Hash256, Hash256),
     CkbInvoiceStatus(Hash256, CkbInvoiceStatus),
     PeerIdChannelId((PeerId, Hash256), ChannelState),
     OutPointChannelId(OutPoint, Hash256),
@@ -213,9 +209,7 @@ impl StoreKeyValue for KeyValue {
                 [&[CHANNEL_ACTOR_STATE_PREFIX], id.as_ref()].concat()
             }
             KeyValue::CkbInvoice(id, _) => [&[CKB_INVOICE_PREFIX], id.as_ref()].concat(),
-            KeyValue::CkbInvoicePreimage(id, _) => {
-                [&[CKB_INVOICE_PREIMAGE_PREFIX], id.as_ref()].concat()
-            }
+            KeyValue::Preimage(id, _) => [&[PREIMAGE_PREFIX], id.as_ref()].concat(),
             KeyValue::CkbInvoiceStatus(id, _) => {
                 [&[CKB_INVOICE_STATUS_PREFIX], id.as_ref()].concat()
             }
@@ -262,7 +256,7 @@ impl StoreKeyValue for KeyValue {
         match self {
             KeyValue::ChannelActorState(_, state) => serialize_to_vec(state, "ChannelActorState"),
             KeyValue::CkbInvoice(_, invoice) => serialize_to_vec(invoice, "CkbInvoice"),
-            KeyValue::CkbInvoicePreimage(_, preimage) => serialize_to_vec(preimage, "Hash256"),
+            KeyValue::Preimage(_, preimage) => serialize_to_vec(preimage, "Hash256"),
             KeyValue::CkbInvoiceStatus(_, status) => serialize_to_vec(status, "CkbInvoiceStatus"),
             KeyValue::PeerIdChannelId(_, state) => serialize_to_vec(state, "ChannelState"),
             KeyValue::OutPointChannelId(_, channel_id) => serialize_to_vec(channel_id, "ChannelId"),
@@ -411,29 +405,22 @@ impl InvoiceStore for Store {
         invoice: CkbInvoice,
         preimage: Option<Hash256>,
     ) -> Result<(), InvoiceError> {
-        let payment_hash = invoice.payment_hash();
-        if self.get_invoice(payment_hash).is_some() {
+        let payment_hash = *invoice.payment_hash();
+        if self.get_invoice(&payment_hash).is_some() {
             return Err(InvoiceError::DuplicatedInvoice(payment_hash.to_string()));
         }
 
         let mut batch = self.batch();
-        if let Some(preimage) = preimage {
-            batch.put_kv(KeyValue::CkbInvoicePreimage(*payment_hash, preimage));
-        }
-        let payment_hash = *invoice.payment_hash();
         batch.put_kv(KeyValue::CkbInvoice(payment_hash, invoice));
         batch.put_kv(KeyValue::CkbInvoiceStatus(
             payment_hash,
             CkbInvoiceStatus::Open,
         ));
+        if let Some(preimage) = preimage {
+            batch.put_kv(KeyValue::Preimage(payment_hash, preimage));
+        }
         batch.commit();
         return Ok(());
-    }
-
-    fn get_invoice_preimage(&self, id: &Hash256) -> Option<Hash256> {
-        let key = [&[CKB_INVOICE_PREIMAGE_PREFIX], id.as_ref()].concat();
-        self.get(key)
-            .map(|v| deserialize_from(v.as_ref(), "Hash256"))
     }
 
     fn update_invoice_status(
@@ -453,30 +440,32 @@ impl InvoiceStore for Store {
         self.get(key)
             .map(|v| deserialize_from(v.as_ref(), "CkbInvoiceStatus"))
     }
+}
 
-    fn insert_payment_preimage(
-        &self,
-        payment_hash: Hash256,
-        preimage: Hash256,
-    ) -> Result<(), InvoiceError> {
+impl PreimageStore for Store {
+    fn insert_preimage(&self, payment_hash: Hash256, preimage: Hash256) {
         let mut batch = self.batch();
-        batch.put_kv(KeyValue::CkbInvoicePreimage(payment_hash, preimage));
+        batch.put_kv(KeyValue::Preimage(payment_hash, preimage));
         batch.commit();
-        Ok(())
     }
 
-    fn search_payment_preimage(&self, payment_hash_prefix: &[u8]) -> Option<Hash256> {
-        let prefix = [&[CKB_INVOICE_PREIMAGE_PREFIX], payment_hash_prefix].concat();
+    fn remove_preimage(&self, payment_hash: &Hash256) {
+        let mut batch = self.batch();
+        batch.delete([&[PREIMAGE_PREFIX], payment_hash.as_ref()].concat());
+        batch.commit();
+    }
+
+    fn get_preimage(&self, payment_hash: &Hash256) -> Option<Hash256> {
+        let key = [&[PREIMAGE_PREFIX], payment_hash.as_ref()].concat();
+        self.get(key)
+            .map(|v| deserialize_from(v.as_ref(), "Preimage"))
+    }
+
+    fn search_preimage(&self, payment_hash_prefix: &[u8]) -> Option<Hash256> {
+        let prefix = [&[PREIMAGE_PREFIX], payment_hash_prefix].concat();
         let mut iter = self.prefix_iterator(prefix.as_slice());
         iter.next()
-            .map(|(_key, value)| deserialize_from(value.as_ref(), "Hash256"))
-    }
-
-    fn remove_payment_preimage(&self, payment_hash: &Hash256) -> Result<(), InvoiceError> {
-        let mut batch = self.batch();
-        batch.delete([&[CKB_INVOICE_PREIMAGE_PREFIX], payment_hash.as_ref()].concat());
-        batch.commit();
-        Ok(())
+            .map(|(_key, value)| deserialize_from(value.as_ref(), "Preimage"))
     }
 }
 
