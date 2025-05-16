@@ -28,6 +28,7 @@ use crate::fiber::types::Pubkey;
 use crate::invoice::CkbInvoice;
 use crate::invoice::CkbInvoiceStatus;
 use crate::invoice::InvoiceStore;
+use crate::invoice::PreimageStore;
 use crate::rpc::config::RpcConfig;
 use crate::rpc::server::start_rpc;
 use ckb_sdk::core::TransactionBuilder;
@@ -662,7 +663,7 @@ impl NetworkNode {
     }
 
     pub fn get_payment_preimage(&self, payment_hash: &Hash256) -> Option<Hash256> {
-        self.store.get_invoice_preimage(payment_hash)
+        self.store.get_preimage(payment_hash)
     }
 
     pub async fn send_payment(

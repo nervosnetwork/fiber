@@ -84,7 +84,7 @@ use crate::fiber::types::{
     FiberChannelMessage, PaymentOnionPacket, PeeledPaymentOnionPacket, TxSignatures,
 };
 use crate::fiber::KeyPair;
-use crate::invoice::{CkbInvoice, CkbInvoiceStatus, InvoiceStore};
+use crate::invoice::{CkbInvoice, CkbInvoiceStatus, InvoiceStore, PreimageStore};
 use crate::{now_timestamp_as_millis_u64, unwrap_or_return, Error};
 
 pub const FIBER_PROTOCOL_ID: ProtocolId = ProtocolId::new(42);
@@ -814,6 +814,7 @@ where
         + ChannelActorStateStore
         + NetworkGraphStateStore
         + GossipMessageStore
+        + PreimageStore
         + InvoiceStore
         + Clone
         + Send
@@ -1241,7 +1242,7 @@ where
                             }
                             for tlc in actor_state.tlc_state.received_tlcs.get_committed_tlcs() {
                                 if let Some(payment_preimage) =
-                                    self.store.get_invoice_preimage(&tlc.payment_hash)
+                                    self.store.get_preimage(&tlc.payment_hash)
                                 {
                                     debug!(
                                         "Found payment preimage for channel {:?} tlc {:?}",
@@ -2355,6 +2356,7 @@ where
         + ChannelActorStateStore
         + NetworkGraphStateStore
         + GossipMessageStore
+        + PreimageStore
         + InvoiceStore
         + Clone
         + Send
@@ -3377,6 +3379,7 @@ where
         + ChannelActorStateStore
         + NetworkGraphStateStore
         + GossipMessageStore
+        + PreimageStore
         + InvoiceStore
         + Clone
         + Send
@@ -3805,6 +3808,7 @@ pub async fn start_network<
         + ChannelActorStateStore
         + NetworkGraphStateStore
         + GossipMessageStore
+        + PreimageStore
         + InvoiceStore
         + Clone
         + Send

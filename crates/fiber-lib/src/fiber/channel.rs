@@ -35,7 +35,7 @@ use crate::{
         },
         NetworkActorCommand, NetworkActorEvent, NetworkActorMessage, ASSUME_NETWORK_ACTOR_ALIVE,
     },
-    invoice::{CkbInvoice, CkbInvoiceStatus, InvoiceStore},
+    invoice::{CkbInvoice, CkbInvoiceStatus, InvoiceStore, PreimageStore},
     now_timestamp_as_millis_u64, NetworkServiceEvent,
 };
 use ckb_hash::{blake2b_256, new_blake2b};
@@ -333,7 +333,7 @@ pub struct ChannelActor<S> {
 
 impl<S> ChannelActor<S>
 where
-    S: InvoiceStore + ChannelActorStateStore,
+    S: ChannelActorStateStore + InvoiceStore + PreimageStore,
 {
     pub fn new(
         local_pubkey: Pubkey,
@@ -839,7 +839,7 @@ where
         tlc_id: TLCId,
     ) {
         let tlc_info = state.get_received_tlc(tlc_id).expect("expect tlc");
-        let preimage = self.store.get_invoice_preimage(&tlc_info.payment_hash);
+        let preimage = self.store.get_preimage(&tlc_info.payment_hash);
 
         let preimage = if let Some(preimage) = preimage {
             preimage
@@ -983,7 +983,7 @@ where
             let preimage = peeled_onion_packet
                 .current
                 .payment_preimage
-                .or_else(|| self.store.get_invoice_preimage(&add_tlc.payment_hash));
+                .or_else(|| self.store.get_preimage(&add_tlc.payment_hash));
 
             if let Some(preimage) = preimage {
                 let filled_payment_hash: Hash256 = add_tlc.hash_algorithm.hash(preimage).into();
@@ -1002,11 +1002,7 @@ where
                         .insert_payment_custom_records(&payment_hash, custom_records);
                 }
 
-                self.store
-                    .insert_payment_preimage(payment_hash, preimage)
-                    .map_err(|_| {
-                        ProcessingChannelError::InternalError("insert preimage failed".to_string())
-                    })?;
+                self.store.insert_preimage(payment_hash, preimage);
             } else {
                 return Err(ProcessingChannelError::FinalIncorrectPaymentHash);
             }
@@ -1079,11 +1075,7 @@ where
             // incase the peer has already shutdown the channel,
             // so we can send setttlement transaction to get money when necessary
             // the preimage must be valid since we have checked it in check_remove_tlc_with_reason
-            self.store
-                .insert_payment_preimage(payment_hash, payment_preimage)
-                .map_err(|_| {
-                    ProcessingChannelError::InternalError("insert preimage failed".to_string())
-                })?;
+            self.store.insert_preimage(payment_hash, payment_preimage);
             debug_event!(
                 self.network,
                 &format!("store payment_preimage for: {:?}", payment_hash)
@@ -1199,9 +1191,7 @@ where
             // when a hop is a forwarding hop, we need to keep preimage after relay RemoveTlc finished
             // incase watchtower may need preimage to settledown
             if tlc_info.previous_tlc.is_none() {
-                self.store
-                    .remove_payment_preimage(&tlc_info.payment_hash)
-                    .expect("remove preimage failed");
+                self.store.remove_preimage(&tlc_info.payment_hash);
             }
         }
 
@@ -1396,11 +1386,7 @@ where
         if let RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill { payment_preimage }) =
             command.reason
         {
-            self.store
-                .insert_payment_preimage(payment_hash, payment_preimage)
-                .map_err(|_| {
-                    ProcessingChannelError::InternalError("insert preimage failed".to_string())
-                })?;
+            self.store.insert_preimage(payment_hash, payment_preimage);
         }
         let msg = FiberMessageWithPeerId::new(
             state.get_remote_peer_id(),
@@ -2223,7 +2209,7 @@ where
 
 impl<S> Actor for ChannelActor<S>
 where
-    S: ChannelActorStateStore + InvoiceStore + Send + Sync + 'static,
+    S: ChannelActorStateStore + InvoiceStore + PreimageStore + Send + Sync + 'static,
 {
     type Msg = ChannelActorMessage;
     type State = ChannelActorState;

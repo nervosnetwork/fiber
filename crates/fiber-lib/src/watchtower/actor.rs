@@ -33,7 +33,7 @@ use crate::{
         hash_algorithm::HashAlgorithm,
         types::Hash256,
     },
-    invoice::InvoiceStore,
+    invoice::PreimageStore,
     utils::tx::compute_tx_message,
     NetworkServiceEvent,
 };
@@ -46,7 +46,7 @@ pub struct WatchtowerActor<S> {
     store: S,
 }
 
-impl<S: InvoiceStore + WatchtowerStore> WatchtowerActor<S> {
+impl<S: PreimageStore + WatchtowerStore> WatchtowerActor<S> {
     pub fn new(store: S) -> Self {
         Self { store }
     }
@@ -65,7 +65,7 @@ pub struct WatchtowerState {
 #[async_trait::async_trait]
 impl<S> Actor for WatchtowerActor<S>
 where
-    S: InvoiceStore + WatchtowerStore + Send + Sync + 'static,
+    S: PreimageStore + WatchtowerStore + Send + Sync + 'static,
 {
     type Msg = WatchtowerMessage;
     type State = WatchtowerState;
@@ -139,7 +139,7 @@ where
 
 impl<S> WatchtowerActor<S>
 where
-    S: InvoiceStore + WatchtowerStore,
+    S: PreimageStore + WatchtowerStore,
 {
     fn periodic_check(&self, state: &WatchtowerState) {
         let secret_key = state.secret_key;
@@ -416,7 +416,7 @@ fn build_revocation_tx(
     Err(Box::new(RpcError::Other(anyhow!("Not enough capacity"))))
 }
 
-fn try_settle_commitment_tx<S: InvoiceStore>(
+fn try_settle_commitment_tx<S: PreimageStore>(
     commitment_lock: Script,
     ckb_client: CkbRpcClient,
     settlement_data: SettlementData,
@@ -670,7 +670,7 @@ fn try_settle_commitment_tx<S: InvoiceStore>(
 }
 
 // find all on-chain transactions with the preimage and store them
-fn find_preimages<S: InvoiceStore>(search_key: SearchKey, ckb_client: &CkbRpcClient, store: &S) {
+fn find_preimages<S: PreimageStore>(search_key: SearchKey, ckb_client: &CkbRpcClient, store: &S) {
     let mut after = None;
     loop {
         match ckb_client.get_transactions(
@@ -717,10 +717,10 @@ fn find_preimages<S: InvoiceStore>(search_key: SearchKey, ckb_client: &CkbRpcCli
                                                     if payment_hash.starts_with(tlc.payment_hash())
                                                     {
                                                         info!("Found a preimage for payment hash: {:?}", payment_hash);
-                                                        store.insert_payment_preimage(
+                                                        store.insert_preimage(
                                                             payment_hash.into(),
                                                             preimage.into(),
-                                                        ).expect("insert payment preimage should be ok");
+                                                        );
                                                     } else {
                                                         warn!("Found a preimage for payment hash: {:?}, but not match the tlc", payment_hash);
                                                     }
@@ -940,7 +940,7 @@ fn sign_tx_with_settlement(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn build_settlement_tx_for_pending_tlcs<S: InvoiceStore>(
+fn build_settlement_tx_for_pending_tlcs<S: PreimageStore>(
     commitment_tx_cell: Cell,
     cell_header: HeaderView,
     delay_epoch: EpochNumberWithFraction,
@@ -969,7 +969,7 @@ fn build_settlement_tx_for_pending_tlcs<S: InvoiceStore>(
                             Some((index, settlement_tlc.clone(), None))
                         } else if pubkey_hash.starts_with(tlc.remote_pubkey_hash()) {
                             store
-                                .search_payment_preimage(tlc.payment_hash())
+                                .search_preimage(tlc.payment_hash())
                                 .map(|preimage| (index, settlement_tlc.clone(), Some(preimage)))
                         } else {
                             None
@@ -980,7 +980,7 @@ fn build_settlement_tx_for_pending_tlcs<S: InvoiceStore>(
                         Some((index, settlement_tlc.clone(), None))
                     } else if pubkey_hash.starts_with(tlc.local_pubkey_hash()) {
                         store
-                            .search_payment_preimage(tlc.payment_hash())
+                            .search_preimage(tlc.payment_hash())
                             .map(|preimage| (index, settlement_tlc.clone(), Some(preimage)))
                     } else {
                         None
@@ -1003,7 +1003,7 @@ fn build_settlement_tx_for_pending_tlcs<S: InvoiceStore>(
                         None
                     } else {
                         store
-                            .get_invoice_preimage(&settlement_tlc.payment_hash)
+                            .get_preimage(&settlement_tlc.payment_hash)
                             .map(|preimage| (index, settlement_tlc.clone(), Some(preimage)))
                     }
                 } else if settlement_tlc.expiry < current_time {
@@ -1014,7 +1014,7 @@ fn build_settlement_tx_for_pending_tlcs<S: InvoiceStore>(
                     }
                 } else if for_remote {
                     store
-                        .get_invoice_preimage(&settlement_tlc.payment_hash)
+                        .get_preimage(&settlement_tlc.payment_hash)
                         .map(|preimage| (index, settlement_tlc.clone(), Some(preimage)))
                 } else {
                     None
