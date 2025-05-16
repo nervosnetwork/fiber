@@ -1,4 +1,6 @@
-use ractor::{Actor, ActorProcessingErr, ActorRef, SupervisionEvent};
+use std::future::Future;
+
+use ractor::{concurrency::MaybeSend, Actor, ActorProcessingErr, ActorRef, SupervisionEvent};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::debug;
 
@@ -23,9 +25,6 @@ impl RootActor {
     }
 }
 
-#[cfg_attr(target_arch="wasm32",ractor::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), ractor::async_trait)]
-
 impl Actor for RootActor {
     type Msg = RootActorMessage;
     type State = ();
@@ -33,52 +32,58 @@ impl Actor for RootActor {
 
     /// Spawn a thread that waits for token to be cancelled,
     /// after that kill all sub actors.
-    async fn pre_start(
+    fn pre_start(
         &self,
         myself: ActorRef<Self::Msg>,
         (tracker, token): Self::Arguments,
-    ) -> Result<Self::State, ActorProcessingErr> {
-        tracker.spawn(async move {
-            token.cancelled().await;
-            debug!("Shutting down root actor due to cancellation token");
-            myself.stop(Some("Cancellation token received".to_owned()));
-        });
-        Ok(())
+    ) -> impl Future<Output = Result<Self::State, ActorProcessingErr>> + MaybeSend {
+        async move {
+            tracker.spawn(async move {
+                token.cancelled().await;
+                debug!("Shutting down root actor due to cancellation token");
+                myself.stop(Some("Cancellation token received".to_owned()));
+            });
+            Ok(())
+        }
     }
 
-    async fn post_stop(
+    fn post_stop(
         &self,
         myself: ActorRef<Self::Msg>,
         _state: &mut Self::State,
-    ) -> Result<(), ActorProcessingErr> {
-        debug!("Root actor stopped");
-        myself
-            .get_cell()
-            .stop_children_and_wait(Some("Root actor stopped".to_string()), None)
-            .await;
-        Ok(())
+    ) -> impl Future<Output = Result<(), ActorProcessingErr>> + MaybeSend {
+        async move {
+            debug!("Root actor stopped");
+            myself
+                .get_cell()
+                .stop_children_and_wait(Some("Root actor stopped".to_string()), None)
+                .await;
+            Ok(())
+        }
     }
 
-    async fn handle_supervisor_evt(
+    fn handle_supervisor_evt(
         &self,
         _myself: ActorRef<Self::Msg>,
         message: SupervisionEvent,
         _state: &mut Self::State,
-    ) -> Result<(), ActorProcessingErr> {
-        match message {
-            SupervisionEvent::ActorTerminated(who, _state, reason) => match reason {
-                Some(reason) => {
-                    debug!("Actor terminated for {:?} (id: {:?})", reason, who,);
+    ) -> impl Future<Output = Result<(), ActorProcessingErr>> + MaybeSend {
+        async move {
+            match message {
+                SupervisionEvent::ActorTerminated(who, _state, reason) => match reason {
+                    Some(reason) => {
+                        debug!("Actor terminated for {:?} (id: {:?})", reason, who,);
+                    }
+                    None => {
+                        debug!("Actor terminated for unknown reason (id: {:?})", who);
+                    }
+                },
+                SupervisionEvent::ActorFailed(who, err) => {
+                    panic!("Actor unexpectedly panicked (id: {:?}): {:?}", who, err);
                 }
-                None => {
-                    debug!("Actor terminated for unknown reason (id: {:?})", who);
-                }
-            },
-            SupervisionEvent::ActorFailed(who, err) => {
-                panic!("Actor unexpectedly panicked (id: {:?}): {:?}", who, err);
+                _ => {}
             }
-            _ => {}
+            Ok(())
         }
-        Ok(())
     }
 }

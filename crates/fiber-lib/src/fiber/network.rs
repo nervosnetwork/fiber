@@ -5,7 +5,7 @@ use ckb_types::prelude::{IntoTransactionView, Pack, Unpack};
 use ckb_types::H256;
 use either::Either;
 use once_cell::sync::OnceCell;
-use ractor::concurrency::Duration;
+use ractor::concurrency::{Duration, MaybeSend};
 use ractor::{
     call, call_t, Actor, ActorCell, ActorProcessingErr, ActorRef, RactorErr, RpcReplyPort,
     SupervisionEvent,
@@ -17,6 +17,7 @@ use serde_with::{serde_as, DisplayFromStr};
 use std::borrow::Cow;
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -3370,9 +3371,6 @@ pub struct NetworkActorStartArguments {
     pub default_shutdown_script: Script,
 }
 
-#[cfg_attr(target_arch="wasm32",ractor::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), ractor::async_trait)]
-
 impl<S> Actor for NetworkActor<S>
 where
     S: NetworkActorStateStore
@@ -3390,299 +3388,309 @@ where
     type State = NetworkActorState<S>;
     type Arguments = NetworkActorStartArguments;
 
-    async fn pre_start(
+    fn pre_start(
         &self,
         myself: ActorRef<Self::Msg>,
         args: Self::Arguments,
-    ) -> Result<Self::State, ActorProcessingErr> {
-        let NetworkActorStartArguments {
-            config,
-            #[cfg(not(target_arch = "wasm32"))]
-            tracker,
-            channel_subscribers,
-            default_shutdown_script,
-            ..
-        } = args;
-        let now = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .expect("SystemTime::now() should after UNIX_EPOCH");
-        let kp = config
-            .read_or_generate_secret_key()
-            .expect("read or generate secret key");
-        let private_key = <[u8; 32]>::try_from(kp.as_ref())
-            .expect("valid length for key")
-            .into();
-        let entropy = blake2b_hash_with_salt(
-            [kp.as_ref(), now.as_nanos().to_le_bytes().as_ref()]
-                .concat()
-                .as_slice(),
-            b"FIBER_NETWORK_ENTROPY",
-        );
-        let secio_kp = SecioKeyPair::from(kp);
-        let secio_pk = secio_kp.public_key();
-        let my_peer_id: PeerId = PeerId::from(secio_pk);
-        let handle = NetworkServiceHandle::new(myself.clone());
-        let fiber_handle = FiberProtocolHandle::from(&handle);
-        let mut gossip_config = GossipConfig::from(&config);
-        gossip_config.peer_id = Some(my_peer_id.clone());
-        let (gossip_service, gossip_handle) = GossipService::start(
-            gossip_config,
-            self.store.clone(),
-            self.chain_actor.clone(),
-            myself.get_cell(),
-        )
-        .await;
-        let mut graph = self.network_graph.write().await;
-        let graph_subscribing_cursor = graph
-            .get_latest_cursor()
-            .go_back_for_some_time(MAX_GRAPH_MISSING_BROADCAST_MESSAGE_TIMESTAMP_DRIFT);
-
-        gossip_service
-            .get_subscriber()
-            .subscribe(graph_subscribing_cursor, myself.clone(), |m| {
-                Some(NetworkActorMessage::new_event(
-                    NetworkActorEvent::GossipMessageUpdates(m),
-                ))
-            })
-            .await
-            .expect("subscribe to gossip store updates");
-        let gossip_actor = gossip_handle.actor().clone();
-        let mut service = ServiceBuilder::default()
-            .insert_protocol(fiber_handle.create_meta())
-            .insert_protocol(gossip_handle.create_meta())
-            .handshake_type(secio_kp.into())
-            .build(handle);
-        let mut listening_addr = service
-            .listen(
-                MultiAddr::from_str(config.listening_addr())
-                    .expect("valid tentacle listening address"),
+    ) -> impl Future<Output = Result<Self::State, ActorProcessingErr>> + MaybeSend {
+        async move {
+            let NetworkActorStartArguments {
+                config,
+                #[cfg(not(target_arch = "wasm32"))]
+                tracker,
+                channel_subscribers,
+                default_shutdown_script,
+                ..
+            } = args;
+            let now = SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .expect("SystemTime::now() should after UNIX_EPOCH");
+            let kp = config
+                .read_or_generate_secret_key()
+                .expect("read or generate secret key");
+            let private_key = <[u8; 32]>::try_from(kp.as_ref())
+                .expect("valid length for key")
+                .into();
+            let entropy = blake2b_hash_with_salt(
+                [kp.as_ref(), now.as_nanos().to_le_bytes().as_ref()]
+                    .concat()
+                    .as_slice(),
+                b"FIBER_NETWORK_ENTROPY",
+            );
+            let secio_kp = SecioKeyPair::from(kp);
+            let secio_pk = secio_kp.public_key();
+            let my_peer_id: PeerId = PeerId::from(secio_pk);
+            let handle = NetworkServiceHandle::new(myself.clone());
+            let fiber_handle = FiberProtocolHandle::from(&handle);
+            let mut gossip_config = GossipConfig::from(&config);
+            gossip_config.peer_id = Some(my_peer_id.clone());
+            let (gossip_service, gossip_handle) = GossipService::start(
+                gossip_config,
+                self.store.clone(),
+                self.chain_actor.clone(),
+                myself.get_cell(),
             )
-            .await
-            .expect("listen tentacle");
+            .await;
+            let mut graph = self.network_graph.write().await;
+            let graph_subscribing_cursor = graph
+                .get_latest_cursor()
+                .go_back_for_some_time(MAX_GRAPH_MISSING_BROADCAST_MESSAGE_TIMESTAMP_DRIFT);
 
-        listening_addr.push(Protocol::P2P(Cow::Owned(my_peer_id.clone().into_bytes())));
-        let mut announced_addrs = Vec::with_capacity(config.announced_addrs.len() + 1);
-        if config.announce_listening_addr() {
-            announced_addrs.push(listening_addr.clone());
-        }
-        for announced_addr in &config.announced_addrs {
-            let mut multiaddr =
-                MultiAddr::from_str(announced_addr.as_str()).expect("valid announced listen addr");
-            match multiaddr.pop() {
-                Some(Protocol::P2P(c)) => {
-                    // If the announced listen addr has a peer id, it must match our peer id.
-                    if c.as_ref() != my_peer_id.as_bytes() {
-                        panic!("Announced listen addr is using invalid peer id: announced addr {}, actual peer id {:?}", announced_addr, my_peer_id);
+            gossip_service
+                .get_subscriber()
+                .subscribe(graph_subscribing_cursor, myself.clone(), |m| {
+                    Some(NetworkActorMessage::new_event(
+                        NetworkActorEvent::GossipMessageUpdates(m),
+                    ))
+                })
+                .await
+                .expect("subscribe to gossip store updates");
+            let gossip_actor = gossip_handle.actor().clone();
+            let mut service = ServiceBuilder::default()
+                .insert_protocol(fiber_handle.create_meta())
+                .insert_protocol(gossip_handle.create_meta())
+                .handshake_type(secio_kp.into())
+                .build(handle);
+            let mut listening_addr = service
+                .listen(
+                    MultiAddr::from_str(config.listening_addr())
+                        .expect("valid tentacle listening address"),
+                )
+                .await
+                .expect("listen tentacle");
+
+            listening_addr.push(Protocol::P2P(Cow::Owned(my_peer_id.clone().into_bytes())));
+            let mut announced_addrs = Vec::with_capacity(config.announced_addrs.len() + 1);
+            if config.announce_listening_addr() {
+                announced_addrs.push(listening_addr.clone());
+            }
+            for announced_addr in &config.announced_addrs {
+                let mut multiaddr = MultiAddr::from_str(announced_addr.as_str())
+                    .expect("valid announced listen addr");
+                match multiaddr.pop() {
+                    Some(Protocol::P2P(c)) => {
+                        // If the announced listen addr has a peer id, it must match our peer id.
+                        if c.as_ref() != my_peer_id.as_bytes() {
+                            panic!("Announced listen addr is using invalid peer id: announced addr {}, actual peer id {:?}", announced_addr, my_peer_id);
+                        }
+                    }
+                    Some(component) => {
+                        // Push this unrecognized component back to the multiaddr.
+                        multiaddr.push(component);
+                    }
+                    None => {
+                        // Should never happen
                     }
                 }
-                Some(component) => {
-                    // Push this unrecognized component back to the multiaddr.
-                    multiaddr.push(component);
-                }
-                None => {
-                    // Should never happen
-                }
+                // Push our peer id to the multiaddr.
+                multiaddr.push(Protocol::P2P(Cow::Owned(my_peer_id.clone().into_bytes())));
+                announced_addrs.push(multiaddr);
             }
-            // Push our peer id to the multiaddr.
-            multiaddr.push(Protocol::P2P(Cow::Owned(my_peer_id.clone().into_bytes())));
-            announced_addrs.push(multiaddr);
-        }
 
-        if !config.announce_private_addr.unwrap_or_default() {
-            announced_addrs.retain(|addr| {
-                multiaddr_to_socketaddr(addr)
-                    .map(|socket_addr| is_reachable(socket_addr.ip()))
-                    .unwrap_or_default()
-            });
-        }
+            if !config.announce_private_addr.unwrap_or_default() {
+                announced_addrs.retain(|addr| {
+                    multiaddr_to_socketaddr(addr)
+                        .map(|socket_addr| is_reachable(socket_addr.ip()))
+                        .unwrap_or_default()
+                });
+            }
 
-        info!(
-            "Started listening tentacle on {:?}, peer id {:?}, announced addresses {:?}",
-            &listening_addr, &my_peer_id, &announced_addrs
-        );
+            info!(
+                "Started listening tentacle on {:?}, peer id {:?}, announced addresses {:?}",
+                &listening_addr, &my_peer_id, &announced_addrs
+            );
 
-        let control = service.control().to_owned();
+            let control = service.control().to_owned();
 
-        myself
-            .send_message(NetworkActorMessage::new_notification(
-                NetworkServiceEvent::NetworkStarted(
-                    my_peer_id.clone(),
-                    listening_addr.clone(),
-                    announced_addrs.clone(),
-                ),
-            ))
-            .expect(ASSUME_NETWORK_MYSELF_ALIVE);
-        #[cfg(not(target_arch = "wasm32"))]
-        tracker.spawn(async move {
-            service.run().await;
-            debug!("Tentacle service stopped");
-        });
-        #[cfg(target_arch = "wasm32")]
-        ractor::concurrency::spawn(async move {
-            service.run().await;
-            debug!("Tentacle service stopped");
-        });
-        let mut state_to_be_persisted = self
-            .store
-            .get_network_actor_state(&my_peer_id)
-            .unwrap_or_default();
-
-        for bootnode in &config.bootnode_addrs {
-            let addr = Multiaddr::from_str(bootnode.as_str()).expect("valid bootnode");
-            let peer_id = extract_peer_id(&addr).expect("valid peer id");
-            state_to_be_persisted.save_peer_address(peer_id, addr);
-        }
-
-        let chain_actor = self.chain_actor.clone();
-
-        let mut state = NetworkActorState {
-            store: self.store.clone(),
-            state_to_be_persisted,
-            node_name: config.announced_node_name,
-            peer_id: my_peer_id,
-            announced_addrs,
-            auto_announce: config.auto_announce_node(),
-            last_node_announcement_message: None,
-            private_key,
-            entropy,
-            default_shutdown_script,
-            network: myself.clone(),
-            control,
-            peer_session_map: Default::default(),
-            session_channels_map: Default::default(),
-            channels: Default::default(),
-            ckb_txs_in_flight: Default::default(),
-            outpoint_channel_map: Default::default(),
-            to_be_accepted_channels: Default::default(),
-            pending_channels: Default::default(),
-            chain_actor,
-            open_channel_auto_accept_min_ckb_funding_amount: config
-                .open_channel_auto_accept_min_ckb_funding_amount(),
-            auto_accept_channel_ckb_funding_amount: config.auto_accept_channel_ckb_funding_amount(),
-            tlc_expiry_delta: config.tlc_expiry_delta(),
-            tlc_min_value: config.tlc_min_value(),
-            tlc_fee_proportional_millionths: config.tlc_fee_proportional_millionths(),
-            gossip_actor,
-            channel_subscribers,
-            max_inbound_peers: config.max_inbound_peers(),
-            min_outbound_peers: config.min_outbound_peers(),
-        };
-
-        let node_announcement = state.get_or_create_new_node_announcement_message();
-        graph.process_node_announcement(node_announcement);
-        let announce_node_interval_seconds = config.announce_node_interval_seconds();
-        if announce_node_interval_seconds > 0 {
-            myself.send_interval(Duration::from_secs(announce_node_interval_seconds), || {
-                NetworkActorMessage::new_command(NetworkActorCommand::BroadcastLocalInfo(
-                    LocalInfoKind::NodeAnnouncement,
+            myself
+                .send_message(NetworkActorMessage::new_notification(
+                    NetworkServiceEvent::NetworkStarted(
+                        my_peer_id.clone(),
+                        listening_addr.clone(),
+                        announced_addrs.clone(),
+                    ),
                 ))
+                .expect(ASSUME_NETWORK_MYSELF_ALIVE);
+            #[cfg(not(target_arch = "wasm32"))]
+            tracker.spawn(async move {
+                service.run().await;
+                debug!("Tentacle service stopped");
             });
+            #[cfg(target_arch = "wasm32")]
+            ractor::concurrency::spawn(async move {
+                service.run().await;
+                debug!("Tentacle service stopped");
+            });
+            let mut state_to_be_persisted = self
+                .store
+                .get_network_actor_state(&my_peer_id)
+                .unwrap_or_default();
+
+            for bootnode in &config.bootnode_addrs {
+                let addr = Multiaddr::from_str(bootnode.as_str()).expect("valid bootnode");
+                let peer_id = extract_peer_id(&addr).expect("valid peer id");
+                state_to_be_persisted.save_peer_address(peer_id, addr);
+            }
+
+            let chain_actor = self.chain_actor.clone();
+
+            let mut state = NetworkActorState {
+                store: self.store.clone(),
+                state_to_be_persisted,
+                node_name: config.announced_node_name,
+                peer_id: my_peer_id,
+                announced_addrs,
+                auto_announce: config.auto_announce_node(),
+                last_node_announcement_message: None,
+                private_key,
+                entropy,
+                default_shutdown_script,
+                network: myself.clone(),
+                control,
+                peer_session_map: Default::default(),
+                session_channels_map: Default::default(),
+                channels: Default::default(),
+                ckb_txs_in_flight: Default::default(),
+                outpoint_channel_map: Default::default(),
+                to_be_accepted_channels: Default::default(),
+                pending_channels: Default::default(),
+                chain_actor,
+                open_channel_auto_accept_min_ckb_funding_amount: config
+                    .open_channel_auto_accept_min_ckb_funding_amount(),
+                auto_accept_channel_ckb_funding_amount: config
+                    .auto_accept_channel_ckb_funding_amount(),
+                tlc_expiry_delta: config.tlc_expiry_delta(),
+                tlc_min_value: config.tlc_min_value(),
+                tlc_fee_proportional_millionths: config.tlc_fee_proportional_millionths(),
+                gossip_actor,
+                channel_subscribers,
+                max_inbound_peers: config.max_inbound_peers(),
+                min_outbound_peers: config.min_outbound_peers(),
+            };
+
+            let node_announcement = state.get_or_create_new_node_announcement_message();
+            graph.process_node_announcement(node_announcement);
+            let announce_node_interval_seconds = config.announce_node_interval_seconds();
+            if announce_node_interval_seconds > 0 {
+                myself.send_interval(Duration::from_secs(announce_node_interval_seconds), || {
+                    NetworkActorMessage::new_command(NetworkActorCommand::BroadcastLocalInfo(
+                        LocalInfoKind::NodeAnnouncement,
+                    ))
+                });
+            }
+
+            // Save bootnodes to the network actor state.
+            state.persist_state();
+
+            Ok(state)
         }
-
-        // Save bootnodes to the network actor state.
-        state.persist_state();
-
-        Ok(state)
     }
 
-    async fn post_start(
+    fn post_start(
         &self,
         myself: ActorRef<Self::Msg>,
         state: &mut Self::State,
-    ) -> Result<(), ActorProcessingErr> {
-        debug!("Trying to connect to peers with mutual channels");
-        for (peer_id, channel_id, channel_state) in self.store.get_channel_states(None) {
-            let addresses = state.get_peer_addresses(&peer_id);
+    ) -> impl Future<Output = Result<(), ActorProcessingErr>> + MaybeSend {
+        async move {
+            debug!("Trying to connect to peers with mutual channels");
+            for (peer_id, channel_id, channel_state) in self.store.get_channel_states(None) {
+                let addresses = state.get_peer_addresses(&peer_id);
 
-            debug!(
-                "Reconnecting channel {:x} peers {:?} in state {:?} with addresses {:?}",
-                &channel_id, &peer_id, &channel_state, &addresses
-            );
-            for addr in addresses {
-                myself
-                    .send_message(NetworkActorMessage::new_command(
-                        NetworkActorCommand::ConnectPeer(addr),
-                    ))
-                    .expect(ASSUME_NETWORK_MYSELF_ALIVE);
+                debug!(
+                    "Reconnecting channel {:x} peers {:?} in state {:?} with addresses {:?}",
+                    &channel_id, &peer_id, &channel_state, &addresses
+                );
+                for addr in addresses {
+                    myself
+                        .send_message(NetworkActorMessage::new_command(
+                            NetworkActorCommand::ConnectPeer(addr),
+                        ))
+                        .expect(ASSUME_NETWORK_MYSELF_ALIVE);
+                }
             }
+            // MAINTAINING_CONNECTIONS_INTERVAL is long, we need to trigger when start
+            myself
+                .send_message(NetworkActorMessage::new_command(
+                    NetworkActorCommand::MaintainConnections,
+                ))
+                .expect(ASSUME_NETWORK_MYSELF_ALIVE);
+            myself.send_interval(MAINTAINING_CONNECTIONS_INTERVAL, || {
+                NetworkActorMessage::new_command(NetworkActorCommand::MaintainConnections)
+            });
+            myself.send_interval(CHECK_CHANNELS_INTERVAL, || {
+                NetworkActorMessage::new_command(NetworkActorCommand::CheckChannels)
+            });
+            Ok(())
         }
-        // MAINTAINING_CONNECTIONS_INTERVAL is long, we need to trigger when start
-        myself
-            .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::MaintainConnections,
-            ))
-            .expect(ASSUME_NETWORK_MYSELF_ALIVE);
-        myself.send_interval(MAINTAINING_CONNECTIONS_INTERVAL, || {
-            NetworkActorMessage::new_command(NetworkActorCommand::MaintainConnections)
-        });
-        myself.send_interval(CHECK_CHANNELS_INTERVAL, || {
-            NetworkActorMessage::new_command(NetworkActorCommand::CheckChannels)
-        });
-        Ok(())
     }
-
-    async fn handle(
+    fn handle(
         &self,
         myself: ActorRef<Self::Msg>,
         message: Self::Msg,
         state: &mut Self::State,
-    ) -> Result<(), ActorProcessingErr> {
-        match message {
-            NetworkActorMessage::Event(event) => {
-                if let Err(err) = self.handle_event(myself, state, event).await {
-                    error!("Failed to handle fiber network event: {}", err);
+    ) -> impl Future<Output = Result<(), ActorProcessingErr>> + MaybeSend {
+        async move {
+            match message {
+                NetworkActorMessage::Event(event) => {
+                    if let Err(err) = self.handle_event(myself, state, event).await {
+                        error!("Failed to handle fiber network event: {}", err);
+                    }
+                }
+                NetworkActorMessage::Command(command) => {
+                    if let Err(err) = self.handle_command(myself, state, command).await {
+                        error!("Failed to handle fiber network command: {}", err);
+                    }
+                }
+                NetworkActorMessage::Notification(event) => {
+                    if let Err(err) = self.event_sender.send(event).await {
+                        error!("Failed to notify outside observers: {}", err);
+                    }
                 }
             }
-            NetworkActorMessage::Command(command) => {
-                if let Err(err) = self.handle_command(myself, state, command).await {
-                    error!("Failed to handle fiber network command: {}", err);
-                }
-            }
-            NetworkActorMessage::Notification(event) => {
-                if let Err(err) = self.event_sender.send(event).await {
-                    error!("Failed to notify outside observers: {}", err);
-                }
-            }
+            Ok(())
         }
-        Ok(())
     }
 
-    async fn post_stop(
+    fn post_stop(
         &self,
         _myself: ActorRef<Self::Msg>,
         state: &mut Self::State,
-    ) -> Result<(), ActorProcessingErr> {
-        if let Err(err) = state.control.close().await {
-            error!("Failed to close tentacle service: {}", err);
+    ) -> impl Future<Output = Result<(), ActorProcessingErr>> + MaybeSend {
+        async move {
+            if let Err(err) = state.control.close().await {
+                error!("Failed to close tentacle service: {}", err);
+            }
+            debug!("Saving network actor state for {:?}", state.peer_id);
+            state.persist_state();
+            debug!("Network service for {:?} shutdown", state.peer_id);
+            // The event receiver may have been closed already.
+            // We ignore the error here.
+            let _ = self
+                .event_sender
+                .send(NetworkServiceEvent::NetworkStopped(state.peer_id.clone()))
+                .await;
+            Ok(())
         }
-        debug!("Saving network actor state for {:?}", state.peer_id);
-        state.persist_state();
-        debug!("Network service for {:?} shutdown", state.peer_id);
-        // The event receiver may have been closed already.
-        // We ignore the error here.
-        let _ = self
-            .event_sender
-            .send(NetworkServiceEvent::NetworkStopped(state.peer_id.clone()))
-            .await;
-        Ok(())
     }
 
-    async fn handle_supervisor_evt(
+    fn handle_supervisor_evt(
         &self,
         _myself: ActorRef<Self::Msg>,
         message: SupervisionEvent,
         _state: &mut Self::State,
-    ) -> Result<(), ActorProcessingErr> {
-        match message {
-            SupervisionEvent::ActorTerminated(who, _, _) => {
-                debug!("Actor {:?} terminated", who);
+    ) -> impl Future<Output = Result<(), ActorProcessingErr>> + MaybeSend {
+        async move {
+            match message {
+                SupervisionEvent::ActorTerminated(who, _, _) => {
+                    debug!("Actor {:?} terminated", who);
+                }
+                SupervisionEvent::ActorFailed(who, err) => {
+                    panic!("Actor unexpectedly panicked (id: {:?}): {:?}", who, err);
+                }
+                _ => {}
             }
-            SupervisionEvent::ActorFailed(who, err) => {
-                panic!("Actor unexpectedly panicked (id: {:?}): {:?}", who, err);
-            }
-            _ => {}
+            Ok(())
         }
-        Ok(())
     }
 }
 

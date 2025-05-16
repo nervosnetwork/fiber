@@ -1,3 +1,5 @@
+use std::future::Future;
+
 use anyhow::anyhow;
 use ckb_hash::{blake2b_256, new_blake2b};
 use ckb_jsonrpc_types::{Either, Status};
@@ -15,7 +17,7 @@ use ckb_types::{
     prelude::*,
 };
 use molecule::prelude::Entity;
-use ractor::{Actor, ActorProcessingErr, ActorRef};
+use ractor::{concurrency::MaybeSend, Actor, ActorProcessingErr, ActorRef};
 use secp256k1::{Message, PublicKey, Secp256k1, SecretKey};
 use tracing::{debug, error, info, trace, warn};
 
@@ -62,7 +64,6 @@ pub struct WatchtowerState {
     secret_key: SecretKey,
 }
 
-#[async_trait::async_trait]
 impl<S> Actor for WatchtowerActor<S>
 where
     S: PreimageStore + WatchtowerStore + Send + Sync + 'static,
@@ -71,69 +72,80 @@ where
     type State = WatchtowerState;
     type Arguments = CkbConfig;
 
-    async fn pre_start(
+    fn pre_start(
         &self,
         _myself: ActorRef<Self::Msg>,
         config: Self::Arguments,
-    ) -> Result<Self::State, ActorProcessingErr> {
-        let secret_key = config.read_secret_key()?;
-        Ok(Self::State { config, secret_key })
+    ) -> impl Future<Output = Result<Self::State, ActorProcessingErr>> + MaybeSend {
+        async move {
+            let secret_key = config.read_secret_key()?;
+            Ok(Self::State { config, secret_key })
+        }
     }
 
-    async fn handle(
+    fn handle(
         &self,
         _myself: ActorRef<Self::Msg>,
         message: Self::Msg,
         state: &mut Self::State,
-    ) -> Result<(), ActorProcessingErr> {
-        match message {
-            WatchtowerMessage::NetworkServiceEvent(event) => {
-                trace!("Received NetworkServiceEvent: {:?}", event);
-                match event {
-                    NetworkServiceEvent::RemoteTxComplete(
-                        _peer_id,
-                        channel_id,
-                        funding_tx_lock,
-                        settlement_data,
-                    ) => {
-                        self.store.insert_watch_channel(
+    ) -> impl Future<Output = Result<(), ActorProcessingErr>> + MaybeSend {
+        async move {
+            match message {
+                WatchtowerMessage::NetworkServiceEvent(event) => {
+                    trace!("Received NetworkServiceEvent: {:?}", event);
+                    match event {
+                        NetworkServiceEvent::RemoteTxComplete(
+                            _peer_id,
                             channel_id,
                             funding_tx_lock,
                             settlement_data,
-                        );
-                    }
-                    NetworkServiceEvent::ChannelClosed(_peer_id, channel_id, _close_tx_hash) => {
-                        self.store.remove_watch_channel(channel_id);
-                    }
-                    NetworkServiceEvent::ChannelAbandon(channel_id) => {
-                        self.store.remove_watch_channel(channel_id);
-                    }
-                    NetworkServiceEvent::RevokeAndAckReceived(
-                        _peer_id,
-                        channel_id,
-                        revocation_data,
-                        settlement_data,
-                    ) => {
-                        self.store
-                            .update_revocation(channel_id, revocation_data, settlement_data);
-                    }
-                    NetworkServiceEvent::RemoteCommitmentSigned(
-                        _peer_id,
-                        channel_id,
-                        _commitment_tx,
-                        settlement_data,
-                    ) => {
-                        self.store
-                            .update_local_settlement(channel_id, settlement_data);
-                    }
-                    _ => {
-                        // ignore
+                        ) => {
+                            self.store.insert_watch_channel(
+                                channel_id,
+                                funding_tx_lock,
+                                settlement_data,
+                            );
+                        }
+                        NetworkServiceEvent::ChannelClosed(
+                            _peer_id,
+                            channel_id,
+                            _close_tx_hash,
+                        ) => {
+                            self.store.remove_watch_channel(channel_id);
+                        }
+                        NetworkServiceEvent::ChannelAbandon(channel_id) => {
+                            self.store.remove_watch_channel(channel_id);
+                        }
+                        NetworkServiceEvent::RevokeAndAckReceived(
+                            _peer_id,
+                            channel_id,
+                            revocation_data,
+                            settlement_data,
+                        ) => {
+                            self.store.update_revocation(
+                                channel_id,
+                                revocation_data,
+                                settlement_data,
+                            );
+                        }
+                        NetworkServiceEvent::RemoteCommitmentSigned(
+                            _peer_id,
+                            channel_id,
+                            _commitment_tx,
+                            settlement_data,
+                        ) => {
+                            self.store
+                                .update_local_settlement(channel_id, settlement_data);
+                        }
+                        _ => {
+                            // ignore
+                        }
                     }
                 }
+                WatchtowerMessage::PeriodicCheck => self.periodic_check(state),
             }
-            WatchtowerMessage::PeriodicCheck => self.periodic_check(state),
+            Ok(())
         }
-        Ok(())
     }
 }
 

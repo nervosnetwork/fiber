@@ -11,6 +11,8 @@ use ckb_types::{
 };
 use molecule::bytes::BytesMut;
 use once_cell::sync::{Lazy, OnceCell};
+use ractor::concurrency::MaybeSend;
+use std::future::Future;
 use std::{collections::HashMap, sync::Arc, sync::RwLock};
 use tokio::sync::RwLock as TokioRwLock;
 
@@ -211,8 +213,6 @@ impl TraceTxReplier {
     }
 }
 
-#[cfg_attr(target_arch="wasm32",ractor::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), ractor::async_trait)]
 impl Actor for TraceTxReplier {
     type Msg = CkbTxTracingResult;
     type Arguments = (
@@ -222,44 +222,48 @@ impl Actor for TraceTxReplier {
     );
     type State = Option<RpcReplyPort<CkbTxTracingResult>>;
 
-    async fn pre_start(
+    fn pre_start(
         &self,
         myself: ActorRef<Self::Msg>,
         (notifier, timeout, reply_port): Self::Arguments,
-    ) -> Result<Self::State, ActorProcessingErr> {
-        let tx_hash = self.tx_hash;
-        myself.send_after(timeout, move || CkbTxTracingResult {
-            tx_hash,
-            tx_status: TxStatus::Unknown,
-        });
+    ) -> impl Future<Output = Result<Self::State, ActorProcessingErr>> + MaybeSend {
+        async move {
+            let tx_hash = self.tx_hash;
+            myself.send_after(timeout, move || CkbTxTracingResult {
+                tx_hash,
+                tx_status: TxStatus::Unknown,
+            });
 
-        let tx_hash = self.tx_hash;
-        notifier.subscribe(myself, move |notification| {
-            if notification.tx_hash == tx_hash {
-                Some(notification)
-            } else {
-                None
-            }
-        });
-        Ok(Some(reply_port))
+            let tx_hash = self.tx_hash;
+            notifier.subscribe(myself, move |notification| {
+                if notification.tx_hash == tx_hash {
+                    Some(notification)
+                } else {
+                    None
+                }
+            });
+            Ok(Some(reply_port))
+        }
     }
 
-    async fn handle(
+    fn handle(
         &self,
         myself: ActorRef<Self::Msg>,
         message: Self::Msg,
         reply_port: &mut Self::State,
-    ) -> Result<(), ActorProcessingErr> {
-        if let Some(reply_port) = reply_port.take() {
-            let _ = reply_port.send(message);
+    ) -> impl Future<Output = Result<(), ActorProcessingErr>> + MaybeSend {
+        async move {
+            if let Some(reply_port) = reply_port.take() {
+                let _ = reply_port.send(message);
+            }
+            myself.stop(Some("handled trace tx result".to_string()));
+            Ok(())
         }
-        myself.stop(Some("handled trace tx result".to_string()));
-        Ok(())
     }
 }
 
-#[cfg_attr(target_arch="wasm32",ractor::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), ractor::async_trait)]
+#[cfg_attr(target_arch="wasm32",async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 pub trait MockChainActorMiddleware: Send + std::fmt::Debug {
     /// Returns Ok(None) if the message is handled by the middleware, otherwise the message
     /// will be forwarded to the underlying MockChainActor.
@@ -348,311 +352,310 @@ impl MockChainActor {
     }
 }
 
-#[cfg_attr(target_arch="wasm32",ractor::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), ractor::async_trait)]
 impl Actor for MockChainActor {
     type Msg = CkbChainMessage;
     type State = MockChainActorState;
     type Arguments = Option<Box<dyn MockChainActorMiddleware>>;
-
-    async fn pre_start(
+    fn pre_start(
         &self,
-        _: ActorRef<Self::Msg>,
+        _myself: ActorRef<Self::Msg>,
         args: Self::Arguments,
-    ) -> Result<Self::State, ActorProcessingErr> {
-        Ok(Self::State::with_optional_middleware(args))
+    ) -> impl Future<Output = Result<Self::State, ActorProcessingErr>> + MaybeSend {
+        async move { Ok(Self::State::with_optional_middleware(args)) }
     }
 
-    async fn handle(
+    fn handle(
         &self,
         myself: ActorRef<Self::Msg>,
         message: Self::Msg,
         state: &mut Self::State,
-    ) -> Result<(), ActorProcessingErr> {
-        let message = if let Some(mut middleware) = state.middleware.take() {
-            let handled = middleware.handle(myself.clone(), message, state).await;
-            state.middleware = Some(middleware);
-            match handled? {
-                Some(message) => message,
-                None => return Ok(()),
-            }
-        } else {
-            message
-        };
-        use CkbChainMessage::*;
-        match message {
-            Fund(tx, request, reply_port) => {
-                let mut fulfilled_tx = tx.clone();
-                let outputs = fulfilled_tx
-                    .as_ref()
-                    .map(|x| x.outputs())
-                    .unwrap_or_default();
-
-                let mut ckb_amount = request.local_reserved_ckb_amount;
-
-                let mut capacity =
-                    request.local_amount + (request.local_reserved_ckb_amount as u128);
-                if capacity > u64::MAX as u128 {
-                    let _ = reply_port.send(Err(FundingError::CkbTxBuilderError(
-                        TxBuilderError::Other(anyhow!("capacity overflow")),
-                    )));
-                    return Ok(());
+    ) -> impl Future<Output = Result<(), ActorProcessingErr>> + MaybeSend {
+        async move {
+            let message = if let Some(mut middleware) = state.middleware.take() {
+                let handled = middleware.handle(myself.clone(), message, state).await;
+                state.middleware = Some(middleware);
+                match handled? {
+                    Some(message) => message,
+                    None => return Ok(()),
                 }
+            } else {
+                message
+            };
+            use CkbChainMessage::*;
+            match message {
+                Fund(tx, request, reply_port) => {
+                    let mut fulfilled_tx = tx.clone();
+                    let outputs = fulfilled_tx
+                        .as_ref()
+                        .map(|x| x.outputs())
+                        .unwrap_or_default();
 
-                let outputs = match outputs.get(0) {
-                    Some(output) => {
-                        if output.lock() != request.script {
-                            error!(
+                    let mut ckb_amount = request.local_reserved_ckb_amount;
+
+                    let mut capacity =
+                        request.local_amount + (request.local_reserved_ckb_amount as u128);
+                    if capacity > u64::MAX as u128 {
+                        let _ = reply_port.send(Err(FundingError::CkbTxBuilderError(
+                            TxBuilderError::Other(anyhow!("capacity overflow")),
+                        )));
+                        return Ok(());
+                    }
+
+                    let outputs = match outputs.get(0) {
+                        Some(output) => {
+                            if output.lock() != request.script {
+                                error!(
                                     "funding request script ({:?}) does not match the first output lock script ({:?})", request.script, output.lock()
                                 );
-                            return Ok(());
-                        }
-                        ckb_amount = ckb_amount
-                            .checked_add(request.remote_reserved_ckb_amount)
-                            .expect("valid ckb amount");
-
-                        if let Some(ref udt_script) = request.udt_type_script {
-                            let udt_output = packed::CellOutput::new_builder()
-                                .capacity(Capacity::shannons(ckb_amount).pack())
-                                .type_(Some(udt_script.clone()).pack())
-                                .build();
-
-                            let mut outputs_builder = outputs.as_builder();
-                            outputs_builder.replace(0, udt_output);
-                            outputs_builder.build()
-                        } else {
-                            let current_capacity: u64 = output.capacity().unpack();
-                            capacity += current_capacity as u128;
-                            if capacity > u64::MAX as u128 {
-                                let _ = reply_port.send(Err(FundingError::CkbTxBuilderError(
-                                    TxBuilderError::Other(anyhow!("capacity overflow")),
-                                )));
                                 return Ok(());
                             }
+                            ckb_amount = ckb_amount
+                                .checked_add(request.remote_reserved_ckb_amount)
+                                .expect("valid ckb amount");
 
-                            let mut outputs_builder = outputs.as_builder();
-                            outputs_builder.replace(
-                                0,
-                                output
-                                    .as_builder()
-                                    .capacity((capacity as u64).pack())
-                                    .build(),
-                            );
-                            outputs_builder.build()
+                            if let Some(ref udt_script) = request.udt_type_script {
+                                let udt_output = packed::CellOutput::new_builder()
+                                    .capacity(Capacity::shannons(ckb_amount).pack())
+                                    .type_(Some(udt_script.clone()).pack())
+                                    .build();
+
+                                let mut outputs_builder = outputs.as_builder();
+                                outputs_builder.replace(0, udt_output);
+                                outputs_builder.build()
+                            } else {
+                                let current_capacity: u64 = output.capacity().unpack();
+                                capacity += current_capacity as u128;
+                                if capacity > u64::MAX as u128 {
+                                    let _ = reply_port.send(Err(FundingError::CkbTxBuilderError(
+                                        TxBuilderError::Other(anyhow!("capacity overflow")),
+                                    )));
+                                    return Ok(());
+                                }
+
+                                let mut outputs_builder = outputs.as_builder();
+                                outputs_builder.replace(
+                                    0,
+                                    output
+                                        .as_builder()
+                                        .capacity((capacity as u64).pack())
+                                        .build(),
+                                );
+                                outputs_builder.build()
+                            }
                         }
-                    }
-                    None => [CellOutput::new_builder()
-                        .capacity(
-                            (request.local_amount as u64 + request.local_reserved_ckb_amount)
-                                .pack(),
-                        )
-                        .lock(request.script.clone())
-                        .build()]
-                    .pack(),
-                };
+                        None => [CellOutput::new_builder()
+                            .capacity(
+                                (request.local_amount as u64 + request.local_reserved_ckb_amount)
+                                    .pack(),
+                            )
+                            .lock(request.script.clone())
+                            .build()]
+                        .pack(),
+                    };
 
-                let outputs_data = if let Some(ref _udt_script) = request.udt_type_script {
-                    let udt_amount = request.local_amount + request.remote_amount;
-                    let mut data = BytesMut::with_capacity(16);
-                    data.put(&udt_amount.to_le_bytes()[..]);
-                    vec![data.freeze().pack()].pack()
-                } else {
-                    let outputs_data = fulfilled_tx
-                        .as_ref()
-                        .map(|x| x.outputs_data())
-                        .unwrap_or_default();
-                    if outputs_data.is_empty() {
-                        [Default::default()].pack()
+                    let outputs_data = if let Some(ref _udt_script) = request.udt_type_script {
+                        let udt_amount = request.local_amount + request.remote_amount;
+                        let mut data = BytesMut::with_capacity(16);
+                        data.put(&udt_amount.to_le_bytes()[..]);
+                        vec![data.freeze().pack()].pack()
                     } else {
-                        outputs_data
-                    }
-                };
+                        let outputs_data = fulfilled_tx
+                            .as_ref()
+                            .map(|x| x.outputs_data())
+                            .unwrap_or_default();
+                        if outputs_data.is_empty() {
+                            [Default::default()].pack()
+                        } else {
+                            outputs_data
+                        }
+                    };
 
-                let tx_builder = fulfilled_tx
-                    .take()
-                    .map(|x| x.as_advanced_builder())
-                    .unwrap_or_default();
+                    let tx_builder = fulfilled_tx
+                        .take()
+                        .map(|x| x.as_advanced_builder())
+                        .unwrap_or_default();
 
-                fulfilled_tx
-                    .update_for_self(
-                        tx_builder
-                            .set_outputs(outputs.into_iter().collect())
-                            .set_outputs_data(outputs_data.into_iter().collect())
-                            .build(),
-                    )
-                    .expect("update tx");
+                    fulfilled_tx
+                        .update_for_self(
+                            tx_builder
+                                .set_outputs(outputs.into_iter().collect())
+                                .set_outputs_data(outputs_data.into_iter().collect())
+                                .build(),
+                        )
+                        .expect("update tx");
 
-                debug!(
+                    debug!(
                     "Fulfilling funding request: request: {:?}, original tx: {:?}, fulfilled tx: {:?}",
                     request, &tx, &fulfilled_tx
                 );
 
-                if let Err(e) = reply_port.send(Ok(fulfilled_tx)) {
-                    error!(
-                        "[{}] send reply failed: {:?}",
-                        myself.get_name().unwrap_or_default(),
-                        e
-                    );
+                    if let Err(e) = reply_port.send(Ok(fulfilled_tx)) {
+                        error!(
+                            "[{}] send reply failed: {:?}",
+                            myself.get_name().unwrap_or_default(),
+                            e
+                        );
+                    }
                 }
-            }
-            AddFundingTx(_) | RemoveFundingTx(_) | CommitFundingTx(..) => {
-                // ignore
-            }
-            Sign(tx, reply_port) => {
-                // We don't need to sign the funding transaction in mock chain actor,
-                // as any funding transaction is considered correct if we can successfully
-                // run the scripts of transaction inputs, and we don't have inputs in the
-                // funding transaction.
-                let signed_tx = tx.clone();
-                debug!(
-                    "Signing transaction: original tx: {:?}, signed tx: {:?}",
-                    &tx, &signed_tx
-                );
-                if let Err(e) = reply_port.send(Ok(signed_tx)) {
-                    error!(
-                        "[{}] send reply failed: {:?}",
-                        myself.get_name().unwrap_or_default(),
-                        e
-                    );
+                AddFundingTx(_) | RemoveFundingTx(_) | CommitFundingTx(..) => {
+                    // ignore
                 }
-            }
-            SendTx(tx, reply_port) => {
-                const MAX_CYCLES: u64 = 100_000_000;
-                let mut f = || {
-                    // Mark the inputs as consumed
-                    for input in tx.input_pts_iter() {
-                        match state.cell_status.entry(input.clone()) {
-                            std::collections::hash_map::Entry::Occupied(mut entry) => {
-                                if *entry.get() == CellStatus::Consumed {
-                                    return (
-                                        TxStatus::Rejected("Cell already consumed".to_string()),
-                                        Err(ckb_sdk::RpcError::Other(anyhow!(
-                                            "Cell {:?} already consumed",
-                                            &input
-                                        ))),
+                Sign(tx, reply_port) => {
+                    // We don't need to sign the funding transaction in mock chain actor,
+                    // as any funding transaction is considered correct if we can successfully
+                    // run the scripts of transaction inputs, and we don't have inputs in the
+                    // funding transaction.
+                    let signed_tx = tx.clone();
+                    debug!(
+                        "Signing transaction: original tx: {:?}, signed tx: {:?}",
+                        &tx, &signed_tx
+                    );
+                    if let Err(e) = reply_port.send(Ok(signed_tx)) {
+                        error!(
+                            "[{}] send reply failed: {:?}",
+                            myself.get_name().unwrap_or_default(),
+                            e
+                        );
+                    }
+                }
+                SendTx(tx, reply_port) => {
+                    const MAX_CYCLES: u64 = 100_000_000;
+                    let mut f = || {
+                        // Mark the inputs as consumed
+                        for input in tx.input_pts_iter() {
+                            match state.cell_status.entry(input.clone()) {
+                                std::collections::hash_map::Entry::Occupied(mut entry) => {
+                                    if *entry.get() == CellStatus::Consumed {
+                                        return (
+                                            TxStatus::Rejected("Cell already consumed".to_string()),
+                                            Err(ckb_sdk::RpcError::Other(anyhow!(
+                                                "Cell {:?} already consumed",
+                                                &input
+                                            ))),
+                                        );
+                                    }
+                                    *entry.get_mut() = CellStatus::Consumed;
+                                }
+                                std::collections::hash_map::Entry::Vacant(entry) => {
+                                    debug!("Consuming cell {:?}", &input);
+                                    entry.insert(CellStatus::Consumed);
+                                }
+                            }
+                        }
+
+                        let context = &mut MOCK_CONTEXT.write().unwrap().context;
+                        match context.verify_tx(&tx, MAX_CYCLES) {
+                            Ok(c) => {
+                                debug!("Verified transaction: {:?} with {} CPU cycles", tx, c);
+                                // Also save the outputs to the context, so that we can refer to
+                                // these out points later.
+                                for outpoint in tx.output_pts().into_iter() {
+                                    let index: u32 = outpoint.index().unpack();
+                                    let index = index as usize;
+                                    let cell = tx.outputs().get(index).unwrap();
+                                    let data = tx.outputs_data().get(index).unwrap();
+                                    context.create_cell_with_out_point(
+                                        outpoint.clone(),
+                                        cell,
+                                        data.as_bytes(),
                                     );
                                 }
-                                *entry.get_mut() = CellStatus::Consumed;
+                                (TxStatus::Committed(0, H256::default(), 0), Ok(()))
                             }
-                            std::collections::hash_map::Entry::Vacant(entry) => {
-                                debug!("Consuming cell {:?}", &input);
-                                entry.insert(CellStatus::Consumed);
-                            }
+                            Err(e) => (
+                                TxStatus::Rejected("Failed to verify transaction".to_string()),
+                                Err(ckb_sdk::RpcError::Other(anyhow!(
+                                    "Failed to verify transaction: {:?}, error: {:?}",
+                                    tx,
+                                    e
+                                ))),
+                            ),
                         }
-                    }
-
-                    let context = &mut MOCK_CONTEXT.write().unwrap().context;
-                    match context.verify_tx(&tx, MAX_CYCLES) {
-                        Ok(c) => {
-                            debug!("Verified transaction: {:?} with {} CPU cycles", tx, c);
-                            // Also save the outputs to the context, so that we can refer to
-                            // these out points later.
-                            for outpoint in tx.output_pts().into_iter() {
-                                let index: u32 = outpoint.index().unpack();
-                                let index = index as usize;
-                                let cell = tx.outputs().get(index).unwrap();
-                                let data = tx.outputs_data().get(index).unwrap();
-                                context.create_cell_with_out_point(
-                                    outpoint.clone(),
-                                    cell,
-                                    data.as_bytes(),
-                                );
-                            }
-                            (TxStatus::Committed(0, H256::default(), 0), Ok(()))
-                        }
-                        Err(e) => (
-                            TxStatus::Rejected("Failed to verify transaction".to_string()),
-                            Err(ckb_sdk::RpcError::Other(anyhow!(
-                                "Failed to verify transaction: {:?}, error: {:?}",
-                                tx,
-                                e
-                            ))),
-                        ),
-                    }
-                };
-                let (tx_status, result) = f();
-                debug!(
-                    "Transaction verification result: tx {:?}, status: {:?}",
-                    &tx, &tx_status
-                );
-                let tx_hash = tx.hash().into();
-                state.tx_notifications.send(CkbTxTracingResult {
-                    tx_hash,
-                    tx_status: tx_status.clone(),
-                });
-                state.txs.insert(
-                    tx_hash,
-                    GetTxResponse {
-                        transaction: Some(tx),
-                        tx_status,
-                    },
-                );
-                if let Err(e) = reply_port.send(result) {
-                    error!(
-                        "[{}] send reply failed: {:?}",
-                        myself.get_name().unwrap_or_default(),
-                        e
+                    };
+                    let (tx_status, result) = f();
+                    debug!(
+                        "Transaction verification result: tx {:?}, status: {:?}",
+                        &tx, &tx_status
                     );
+                    let tx_hash = tx.hash().into();
+                    state.tx_notifications.send(CkbTxTracingResult {
+                        tx_hash,
+                        tx_status: tx_status.clone(),
+                    });
+                    state.txs.insert(
+                        tx_hash,
+                        GetTxResponse {
+                            transaction: Some(tx),
+                            tx_status,
+                        },
+                    );
+                    if let Err(e) = reply_port.send(result) {
+                        error!(
+                            "[{}] send reply failed: {:?}",
+                            myself.get_name().unwrap_or_default(),
+                            e
+                        );
+                    }
+                }
+                GetTx(tx_hash, reply_port) => {
+                    let result = Ok(state.txs.get(&tx_hash).cloned().unwrap_or(GetTxResponse {
+                        transaction: None,
+                        tx_status: TxStatus::Unknown,
+                    }));
+                    let _ = reply_port.send(result);
+                }
+                CreateTxTracer(tracer) => {
+                    debug!("Tracing transaction: {:?}", &tracer);
+                    match state.txs.get(&tracer.tx_hash) {
+                        Some(tx) => {
+                            let _ = tracer.callback.send(CkbTxTracingResult {
+                                tx_hash: tracer.tx_hash,
+                                tx_status: tx.tx_status.clone(),
+                            });
+                        }
+                        // The transaction is not found in the tx_status, we need to wait for the
+                        // tx notification from the mock chain actor.
+                        None => {
+                            self.start_trace_tx_replier(
+                                myself,
+                                tracer.tx_hash,
+                                state.tx_notifications.clone(),
+                                Duration::from_millis(TRACE_TX_WAITING_FOR_NOTIFICATION_MS),
+                                tracer.callback,
+                            )
+                            .await;
+                        }
+                    };
+                }
+                RemoveTxTracers(tx_hash) => {
+                    for task in state
+                        .tx_tracing_tasks
+                        .remove(&tx_hash)
+                        .unwrap_or_default()
+                        .into_iter()
+                    {
+                        task.stop(Some(format!("remove tracers for tx {}", tx_hash)));
+                    }
+                }
+                GetBlockTimestamp(request, rpc_reply_port) => {
+                    let timestamp = get_block_timestamp(request.block_hash().into()).await;
+                    let _ = rpc_reply_port.send(Ok(Some(timestamp)));
+                }
+                Stop => {
+                    myself.stop(Some("stop received".to_string()));
                 }
             }
-            GetTx(tx_hash, reply_port) => {
-                let result = Ok(state.txs.get(&tx_hash).cloned().unwrap_or(GetTxResponse {
-                    transaction: None,
-                    tx_status: TxStatus::Unknown,
-                }));
-                let _ = reply_port.send(result);
-            }
-            CreateTxTracer(tracer) => {
-                debug!("Tracing transaction: {:?}", &tracer);
-                match state.txs.get(&tracer.tx_hash) {
-                    Some(tx) => {
-                        let _ = tracer.callback.send(CkbTxTracingResult {
-                            tx_hash: tracer.tx_hash,
-                            tx_status: tx.tx_status.clone(),
-                        });
-                    }
-                    // The transaction is not found in the tx_status, we need to wait for the
-                    // tx notification from the mock chain actor.
-                    None => {
-                        self.start_trace_tx_replier(
-                            myself,
-                            tracer.tx_hash,
-                            state.tx_notifications.clone(),
-                            Duration::from_millis(TRACE_TX_WAITING_FOR_NOTIFICATION_MS),
-                            tracer.callback,
-                        )
-                        .await;
-                    }
-                };
-            }
-            RemoveTxTracers(tx_hash) => {
-                for task in state
-                    .tx_tracing_tasks
-                    .remove(&tx_hash)
-                    .unwrap_or_default()
-                    .into_iter()
-                {
-                    task.stop(Some(format!("remove tracers for tx {}", tx_hash)));
-                }
-            }
-            GetBlockTimestamp(request, rpc_reply_port) => {
-                let timestamp = get_block_timestamp(request.block_hash().into()).await;
-                let _ = rpc_reply_port.send(Ok(Some(timestamp)));
-            }
-            Stop => {
-                myself.stop(Some("stop received".to_string()));
-            }
+            Ok(())
         }
-        Ok(())
     }
 
-    async fn handle_supervisor_evt(
+    fn handle_supervisor_evt(
         &self,
         _myself: ActorRef<Self::Msg>,
         _message: SupervisionEvent,
         _state: &mut Self::State,
-    ) -> Result<(), ActorProcessingErr> {
-        Ok(())
+    ) -> impl Future<Output = Result<(), ActorProcessingErr>> + MaybeSend {
+        async move { Ok(()) }
     }
 }
 

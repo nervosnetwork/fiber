@@ -1,9 +1,12 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, future::Future};
 
 use bitmask_enum::bitmask;
 use ckb_sdk::CkbRpcAsyncClient;
 use ckb_types::core::tx_pool::TxStatus;
-use ractor::{concurrency::Duration, Actor, ActorProcessingErr, ActorRef, RpcReplyPort};
+use ractor::{
+    concurrency::{Duration, MaybeSend},
+    Actor, ActorProcessingErr, ActorRef, RpcReplyPort,
+};
 
 use crate::fiber::types::Hash256;
 
@@ -117,41 +120,42 @@ impl CkbTxTracingMessage {
     }
 }
 
-#[cfg_attr(target_arch="wasm32",ractor::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), ractor::async_trait)]
 impl Actor for CkbTxTracingActor {
     type Msg = CkbTxTracingMessage;
     type State = CkbTxTracingState;
     type Arguments = CkbTxTracingArguments;
 
-    async fn pre_start(
+    fn pre_start(
         &self,
         myself: ActorRef<Self::Msg>,
         arguments: Self::Arguments,
-    ) -> Result<Self::State, ActorProcessingErr> {
-        myself.send_interval(arguments.polling_interval, CkbTxTracingMessage::run_tracers);
-        Ok(Self::State {
-            rpc_url: arguments.rpc_url,
-            tracers: Default::default(),
-        })
+    ) -> impl Future<Output = Result<Self::State, ActorProcessingErr>> + MaybeSend {
+        async move {
+            myself.send_interval(arguments.polling_interval, CkbTxTracingMessage::run_tracers);
+            Ok(Self::State {
+                rpc_url: arguments.rpc_url,
+                tracers: Default::default(),
+            })
+        }
     }
-
-    async fn handle(
+    fn handle(
         &self,
         myself: ActorRef<Self::Msg>,
         message: Self::Msg,
         state: &mut Self::State,
-    ) -> Result<(), ActorProcessingErr> {
-        use CkbTxTracingMessage::{CreateTracer, Internal, RemoveTracers};
+    ) -> impl Future<Output = Result<(), ActorProcessingErr>> + MaybeSend {
+        async move {
+            use CkbTxTracingMessage::{CreateTracer, Internal, RemoveTracers};
 
-        match message {
-            CreateTracer(arguments) => state.create_tracer(myself, arguments).await,
-            RemoveTracers(arguments) => state.remove_tracers(arguments),
-            Internal(InternalMessage::RunTracers) => state.run_tracers(myself, None).await,
-            Internal(InternalMessage::ReportTracingResult(result, tip_block_number)) => {
-                state
-                    .report_tracing_result(myself, result, tip_block_number)
-                    .await
+            match message {
+                CreateTracer(arguments) => state.create_tracer(myself, arguments).await,
+                RemoveTracers(arguments) => state.remove_tracers(arguments),
+                Internal(InternalMessage::RunTracers) => state.run_tracers(myself, None).await,
+                Internal(InternalMessage::ReportTracingResult(result, tip_block_number)) => {
+                    state
+                        .report_tracing_result(myself, result, tip_block_number)
+                        .await
+                }
             }
         }
     }

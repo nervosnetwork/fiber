@@ -19,4 +19,4 @@ debug = false
 # Wasm support
 # ckb-sdk = { git = "https://github.com/Officeyutong/ckb-sdk-rust", branch = "wasm" }
 # Some traits being `?Send`
-ractor = { git = "https://github.com/Officeyutong/ractor", branch = "use-non-send-future-in-wasm" }
+# ractor = { git = "https://github.com/Officeyutong/ractor", branch = "use-non-send-future-in-wasm" }

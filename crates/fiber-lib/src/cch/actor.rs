@@ -6,9 +6,11 @@ use lnd_grpc_tonic_client::{
     create_invoices_client, create_router_client, invoicesrpc, lnrpc, routerrpc, InvoicesClient,
     RouterClient, Uri,
 };
+use ractor::concurrency::MaybeSend;
 use ractor::{call, RpcReplyPort};
 use ractor::{Actor, ActorCell, ActorProcessingErr, ActorRef};
 use serde::Deserialize;
+use std::future::Future;
 use std::str::FromStr;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::{select, time::sleep};
@@ -138,117 +140,120 @@ pub struct CchState {
     orders_db: CchOrdersDb,
 }
 
-#[async_trait::async_trait]
 impl Actor for CchActor {
     type Msg = CchMessage;
     type State = CchState;
     type Arguments = ();
 
-    async fn pre_start(
+    fn pre_start(
         &self,
         myself: ActorRef<Self::Msg>,
-        _config: Self::Arguments,
-    ) -> Result<Self::State, ActorProcessingErr> {
-        let lnd_rpc_url: Uri = self.config.lnd_rpc_url.clone().try_into()?;
-        let cert = match self.config.resolve_lnd_cert_path() {
-            Some(path) => Some(
-                tokio::fs::read(&path)
-                    .await
-                    .with_context(|| format!("read cert file {}", path.display()))?,
-            ),
-            None => None,
-        };
-        let macaroon = match self.config.resolve_lnd_macaroon_path() {
-            Some(path) => Some(
-                tokio::fs::read(&path)
-                    .await
-                    .with_context(|| format!("read macaroon file {}", path.display()))?,
-            ),
-            None => None,
-        };
-        let lnd_connection = LndConnectionInfo {
-            uri: lnd_rpc_url,
-            cert,
-            macaroon,
-        };
+        _args: Self::Arguments,
+    ) -> impl Future<Output = Result<Self::State, ActorProcessingErr>> + MaybeSend {
+        async move {
+            let lnd_rpc_url: Uri = self.config.lnd_rpc_url.clone().try_into()?;
+            let cert = match self.config.resolve_lnd_cert_path() {
+                Some(path) => Some(
+                    tokio::fs::read(&path)
+                        .await
+                        .with_context(|| format!("read cert file {}", path.display()))?,
+                ),
+                None => None,
+            };
+            let macaroon = match self.config.resolve_lnd_macaroon_path() {
+                Some(path) => Some(
+                    tokio::fs::read(&path)
+                        .await
+                        .with_context(|| format!("read macaroon file {}", path.display()))?,
+                ),
+                None => None,
+            };
+            let lnd_connection = LndConnectionInfo {
+                uri: lnd_rpc_url,
+                cert,
+                macaroon,
+            };
 
-        let payments_tracker =
-            LndPaymentsTracker::new(myself.clone(), lnd_connection.clone(), self.token.clone());
-        self.tracker
-            .spawn(async move { payments_tracker.run().await });
+            let payments_tracker =
+                LndPaymentsTracker::new(myself.clone(), lnd_connection.clone(), self.token.clone());
+            self.tracker
+                .spawn(async move { payments_tracker.run().await });
 
-        Ok(CchState {
-            lnd_connection,
-            orders_db: Default::default(),
-        })
+            Ok(CchState {
+                lnd_connection,
+                orders_db: Default::default(),
+            })
+        }
     }
 
-    async fn handle(
+    fn handle(
         &self,
         myself: ActorRef<Self::Msg>,
         message: Self::Msg,
         state: &mut Self::State,
-    ) -> Result<(), ActorProcessingErr> {
-        match message {
-            CchMessage::SendBTC(send_btc, port) => {
-                let result = self.send_btc(state, send_btc).await;
-                if !port.is_closed() {
-                    // ignore error
-                    let _ = port.send(result);
+    ) -> impl Future<Output = Result<(), ActorProcessingErr>> + MaybeSend {
+        async move {
+            match message {
+                CchMessage::SendBTC(send_btc, port) => {
+                    let result = self.send_btc(state, send_btc).await;
+                    if !port.is_closed() {
+                        // ignore error
+                        let _ = port.send(result);
+                    }
+                    Ok(())
                 }
-                Ok(())
-            }
-            CchMessage::ReceiveBTC(receive_btc, port) => {
-                let result = self.receive_btc(myself, state, receive_btc).await;
-                if !port.is_closed() {
-                    // ignore error
-                    let _ = port.send(result);
+                CchMessage::ReceiveBTC(receive_btc, port) => {
+                    let result = self.receive_btc(myself, state, receive_btc).await;
+                    if !port.is_closed() {
+                        // ignore error
+                        let _ = port.send(result);
+                    }
+                    Ok(())
                 }
-                Ok(())
-            }
-            CchMessage::GetReceiveBTCOrder(payment_hash, port) => {
-                let result = state
-                    .orders_db
-                    .get_receive_btc_order(&payment_hash)
-                    .await
-                    .map_err(Into::into);
-                if !port.is_closed() {
-                    // ignore error
-                    let _ = port.send(result);
+                CchMessage::GetReceiveBTCOrder(payment_hash, port) => {
+                    let result = state
+                        .orders_db
+                        .get_receive_btc_order(&payment_hash)
+                        .await
+                        .map_err(Into::into);
+                    if !port.is_closed() {
+                        // ignore error
+                        let _ = port.send(result);
+                    }
+                    Ok(())
                 }
-                Ok(())
-            }
-            CchMessage::SettleSendBTCOrder(event) => {
-                tracing::debug!("settle_send_btc_order {:?}", event);
-                if let Err(err) = self.settle_send_btc_order(state, event).await {
-                    tracing::error!("settle_send_btc_order failed: {}", err);
+                CchMessage::SettleSendBTCOrder(event) => {
+                    tracing::debug!("settle_send_btc_order {:?}", event);
+                    if let Err(err) = self.settle_send_btc_order(state, event).await {
+                        tracing::error!("settle_send_btc_order failed: {}", err);
+                    }
+                    Ok(())
                 }
-                Ok(())
-            }
-            CchMessage::SettleReceiveBTCOrder(event) => {
-                tracing::debug!("settle_receive_btc_order {:?}", event);
-                if let Err(err) = self.settle_receive_btc_order(state, event).await {
-                    tracing::error!("settle_receive_btc_order failed: {}", err);
+                CchMessage::SettleReceiveBTCOrder(event) => {
+                    tracing::debug!("settle_receive_btc_order {:?}", event);
+                    if let Err(err) = self.settle_receive_btc_order(state, event).await {
+                        tracing::error!("settle_receive_btc_order failed: {}", err);
+                    }
+                    Ok(())
                 }
-                Ok(())
-            }
-            CchMessage::PendingReceivedTlcNotification(tlc_notification) => {
-                if let Err(err) = self
-                    .handle_pending_received_tlc_notification(state, tlc_notification)
-                    .await
-                {
-                    tracing::error!("handle_pending_received_tlc_notification failed: {}", err);
+                CchMessage::PendingReceivedTlcNotification(tlc_notification) => {
+                    if let Err(err) = self
+                        .handle_pending_received_tlc_notification(state, tlc_notification)
+                        .await
+                    {
+                        tracing::error!("handle_pending_received_tlc_notification failed: {}", err);
+                    }
+                    Ok(())
                 }
-                Ok(())
-            }
-            CchMessage::SettledTlcNotification(tlc_notification) => {
-                if let Err(err) = self
-                    .handle_settled_tlc_notification(state, tlc_notification)
-                    .await
-                {
-                    tracing::error!("handle_settled_tlc_notification failed: {}", err);
+                CchMessage::SettledTlcNotification(tlc_notification) => {
+                    if let Err(err) = self
+                        .handle_settled_tlc_notification(state, tlc_notification)
+                        .await
+                    {
+                        tracing::error!("handle_settled_tlc_notification failed: {}", err);
+                    }
+                    Ok(())
                 }
-                Ok(())
             }
         }
     }

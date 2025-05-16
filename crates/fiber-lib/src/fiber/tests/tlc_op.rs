@@ -10,8 +10,10 @@ use crate::gen_rand_sha256_hash;
 use crate::now_timestamp_as_millis_u64;
 use ckb_hash::new_blake2b;
 use ckb_types::packed::Byte32;
+use ractor::concurrency::MaybeSend;
 use ractor::{Actor, ActorProcessingErr, ActorRef};
 use std::collections::HashMap;
+use std::future::Future;
 
 fn sign_tlcs<'a>(tlcs: impl Iterator<Item = &'a TlcInfo>) -> Hash256 {
     // serialize active_tls to ge a hash
@@ -118,206 +120,120 @@ pub enum NetworkActorMessage {
     PeerMsg(String, TlcActorMessage),
 }
 
-#[cfg_attr(target_arch="wasm32",ractor::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), ractor::async_trait)]
-
 impl Actor for NetworkActor {
     type Msg = NetworkActorMessage;
     type State = NetworkActorState;
     type Arguments = ();
 
-    async fn handle(
+    fn handle(
         &self,
         _myself: ActorRef<Self::Msg>,
         message: Self::Msg,
         state: &mut Self::State,
-    ) -> Result<(), ActorProcessingErr> {
-        match message {
-            NetworkActorMessage::RegisterPeer(peer_id) => {
-                state.add_peer(peer_id).await;
-            }
-            NetworkActorMessage::AddTlc(peer_id, add_tlc) => {
-                eprintln!("NetworkActorMessage::AddTlc");
-                if let Some(actor) = state.peers.get(&peer_id) {
-                    actor
-                        .send_message(TlcActorMessage::CommandAddTlc(add_tlc))
-                        .expect("send ok");
+    ) -> impl Future<Output = Result<(), ActorProcessingErr>> + MaybeSend {
+        async move {
+            match message {
+                NetworkActorMessage::RegisterPeer(peer_id) => {
+                    state.add_peer(peer_id).await;
+                }
+                NetworkActorMessage::AddTlc(peer_id, add_tlc) => {
+                    eprintln!("NetworkActorMessage::AddTlc");
+                    if let Some(actor) = state.peers.get(&peer_id) {
+                        actor
+                            .send_message(TlcActorMessage::CommandAddTlc(add_tlc))
+                            .expect("send ok");
+                    }
+                }
+                NetworkActorMessage::RemoveTlc(peer_id, tlc_id) => {
+                    if let Some(actor) = state.peers.get(&peer_id) {
+                        actor
+                            .send_message(TlcActorMessage::CommandRemoveTlc(tlc_id))
+                            .expect("send ok");
+                    }
+                }
+                NetworkActorMessage::PeerMsg(peer_id, peer_msg) => {
+                    if let Some(actor) = state.peers.get(&peer_id) {
+                        eprintln!("NetworkActorMessage::PeerMsg: {:?}", peer_msg);
+                        actor.send_message(peer_msg).expect("send ok");
+                    }
                 }
             }
-            NetworkActorMessage::RemoveTlc(peer_id, tlc_id) => {
-                if let Some(actor) = state.peers.get(&peer_id) {
-                    actor
-                        .send_message(TlcActorMessage::CommandRemoveTlc(tlc_id))
-                        .expect("send ok");
-                }
-            }
-            NetworkActorMessage::PeerMsg(peer_id, peer_msg) => {
-                if let Some(actor) = state.peers.get(&peer_id) {
-                    eprintln!("NetworkActorMessage::PeerMsg: {:?}", peer_msg);
-                    actor.send_message(peer_msg).expect("send ok");
-                }
-            }
+            Ok(())
         }
-        Ok(())
     }
 
-    async fn pre_start(
+    fn pre_start(
         &self,
         myself: ActorRef<Self::Msg>,
         _args: Self::Arguments,
-    ) -> Result<Self::State, ActorProcessingErr> {
-        eprintln!("NetworkActor pre_start");
-        Ok(NetworkActorState {
-            peers: Default::default(),
-            network: myself.clone(),
-        })
+    ) -> impl Future<Output = Result<Self::State, ActorProcessingErr>> + MaybeSend {
+        async move {
+            eprintln!("NetworkActor pre_start");
+            Ok(NetworkActorState {
+                peers: Default::default(),
+                network: myself.clone(),
+            })
+        }
     }
 }
-
-#[cfg_attr(target_arch="wasm32",ractor::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), ractor::async_trait)]
 
 impl Actor for TlcActor {
     type Msg = TlcActorMessage;
     type State = TlcActorState;
     type Arguments = String;
 
-    async fn handle(
+    fn handle(
         &self,
         _myself: ActorRef<Self::Msg>,
         message: Self::Msg,
         state: &mut Self::State,
-    ) -> Result<(), ActorProcessingErr> {
-        match message {
-            TlcActorMessage::Debug => {
-                eprintln!("Peer {} Debug", state.peer_id);
-                for tlc in state.tlc_state.offered_tlcs.tlcs.iter() {
-                    eprintln!("offered_tlc: {:?}", tlc.log());
+    ) -> impl Future<Output = Result<(), ActorProcessingErr>> + MaybeSend {
+        async move {
+            match message {
+                TlcActorMessage::Debug => {
+                    eprintln!("Peer {} Debug", state.peer_id);
+                    for tlc in state.tlc_state.offered_tlcs.tlcs.iter() {
+                        eprintln!("offered_tlc: {:?}", tlc.log());
+                    }
+                    for tlc in state.tlc_state.received_tlcs.tlcs.iter() {
+                        eprintln!("received_tlc: {:?}", tlc.log());
+                    }
                 }
-                for tlc in state.tlc_state.received_tlcs.tlcs.iter() {
-                    eprintln!("received_tlc: {:?}", tlc.log());
-                }
-            }
-            TlcActorMessage::CommandAddTlc(command) => {
-                eprintln!(
-                    "Peer {} TlcActorMessage::Command_AddTlc: {:?}",
-                    state.peer_id, command
-                );
-                let next_offer_id = state.tlc_state.get_next_offering();
-                let add_tlc = TlcInfo {
-                    channel_id: gen_rand_sha256_hash(),
-                    tlc_id: TLCId::Offered(next_offer_id),
-                    amount: command.amount,
-                    payment_hash: command.payment_hash,
-                    expiry: command.expiry,
-                    hash_algorithm: command.hash_algorithm,
-                    created_at: CommitmentNumbers::default(),
-                    removed_reason: None,
-                    onion_packet: command.onion_packet,
-                    shared_secret: command.shared_secret,
-                    previous_tlc: None,
-                    status: TlcStatus::Outbound(OutboundTlcStatus::LocalAnnounced),
-                    removed_confirmed_at: None,
-                };
-                state.tlc_state.add_offered_tlc(add_tlc.clone());
-                state.tlc_state.increment_offering();
-                let peer = state.get_peer();
-                self.network
-                    .send_message(NetworkActorMessage::PeerMsg(
-                        peer.clone(),
-                        TlcActorMessage::PeerAddTlc(add_tlc),
-                    ))
-                    .expect("send ok");
+                TlcActorMessage::CommandAddTlc(command) => {
+                    eprintln!(
+                        "Peer {} TlcActorMessage::Command_AddTlc: {:?}",
+                        state.peer_id, command
+                    );
+                    let next_offer_id = state.tlc_state.get_next_offering();
+                    let add_tlc = TlcInfo {
+                        channel_id: gen_rand_sha256_hash(),
+                        tlc_id: TLCId::Offered(next_offer_id),
+                        amount: command.amount,
+                        payment_hash: command.payment_hash,
+                        expiry: command.expiry,
+                        hash_algorithm: command.hash_algorithm,
+                        created_at: CommitmentNumbers::default(),
+                        removed_reason: None,
+                        onion_packet: command.onion_packet,
+                        shared_secret: command.shared_secret,
+                        previous_tlc: None,
+                        status: TlcStatus::Outbound(OutboundTlcStatus::LocalAnnounced),
+                        removed_confirmed_at: None,
+                    };
+                    state.tlc_state.add_offered_tlc(add_tlc.clone());
+                    state.tlc_state.increment_offering();
+                    let peer = state.get_peer();
+                    self.network
+                        .send_message(NetworkActorMessage::PeerMsg(
+                            peer.clone(),
+                            TlcActorMessage::PeerAddTlc(add_tlc),
+                        ))
+                        .expect("send ok");
 
-                // send commitment signed
-                let tlcs = state.tlc_state.commitment_signed_tlcs(false);
-                let hash = sign_tlcs(tlcs);
-                eprintln!("got hash: {:?}", hash);
-                self.network
-                    .send_message(NetworkActorMessage::PeerMsg(
-                        peer,
-                        TlcActorMessage::PeerCommitmentSigned(hash),
-                    ))
-                    .expect("send ok");
-            }
-            TlcActorMessage::CommandRemoveTlc(tlc_id) => {
-                eprintln!("Peer {} process remove tlc ....", state.peer_id);
-                state.tlc_state.set_received_tlc_removed(
-                    tlc_id,
-                    RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
-                        payment_preimage: Default::default(),
-                    }),
-                );
-                let peer = state.get_peer();
-                self.network
-                    .send_message(NetworkActorMessage::PeerMsg(
-                        peer.clone(),
-                        TlcActorMessage::PeerRemoveTlc(tlc_id),
-                    ))
-                    .expect("send ok");
-
-                // send commitment signed
-                let tlcs = state.tlc_state.commitment_signed_tlcs(false);
-                let hash = sign_tlcs(tlcs);
-                eprintln!("got hash: {:?}", hash);
-                self.network
-                    .send_message(NetworkActorMessage::PeerMsg(
-                        peer,
-                        TlcActorMessage::PeerCommitmentSigned(hash),
-                    ))
-                    .expect("send ok");
-            }
-            TlcActorMessage::PeerAddTlc(add_tlc) => {
-                eprintln!(
-                    "Peer {} process peer add_tlc .... with tlc_id: {:?}",
-                    state.peer_id, add_tlc.tlc_id
-                );
-                let mut tlc = add_tlc.clone();
-                tlc.flip_mut();
-                tlc.status = TlcStatus::Inbound(InboundTlcStatus::RemoteAnnounced);
-                state.tlc_state.add_received_tlc(tlc);
-                eprintln!("add peer tlc successfully: {:?}", add_tlc);
-            }
-            TlcActorMessage::PeerRemoveTlc(tlc_id) => {
-                eprintln!(
-                    "Peer {} process peer remove tlc .... with tlc_id: {}",
-                    state.peer_id, tlc_id
-                );
-                state.tlc_state.set_offered_tlc_removed(
-                    tlc_id,
-                    RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
-                        payment_preimage: Default::default(),
-                    }),
-                );
-            }
-            TlcActorMessage::PeerCommitmentSigned(peer_hash) => {
-                eprintln!(
-                    "\nPeer {} processed peer commitment_signed ....",
-                    state.peer_id
-                );
-                let tlcs = state.tlc_state.commitment_signed_tlcs(true);
-                let hash = sign_tlcs(tlcs);
-                assert_eq!(hash, peer_hash);
-
-                let peer = state.get_peer();
-
-                state.tlc_state.update_for_commitment_signed();
-
-                eprintln!("sending peer revoke and ack ....");
-                let tlcs = state.tlc_state.commitment_signed_tlcs(false);
-                let hash = sign_tlcs(tlcs);
-                self.network
-                    .send_message(NetworkActorMessage::PeerMsg(
-                        peer.clone(),
-                        TlcActorMessage::PeerRevokeAndAck(hash),
-                    ))
-                    .expect("send ok");
-
-                // send commitment signed from our side if necessary
-                if state.tlc_state.need_another_commitment_signed() {
-                    eprintln!("sending another commitment signed ....");
+                    // send commitment signed
                     let tlcs = state.tlc_state.commitment_signed_tlcs(false);
                     let hash = sign_tlcs(tlcs);
+                    eprintln!("got hash: {:?}", hash);
                     self.network
                         .send_message(NetworkActorMessage::PeerMsg(
                             peer,
@@ -325,32 +241,120 @@ impl Actor for TlcActor {
                         ))
                         .expect("send ok");
                 }
-            }
-            TlcActorMessage::PeerRevokeAndAck(peer_hash) => {
-                eprintln!("Peer {} processed peer revoke and ack ....", state.peer_id);
-                let tlcs = state.tlc_state.commitment_signed_tlcs(true);
-                let hash = sign_tlcs(tlcs);
-                assert_eq!(hash, peer_hash);
+                TlcActorMessage::CommandRemoveTlc(tlc_id) => {
+                    eprintln!("Peer {} process remove tlc ....", state.peer_id);
+                    state.tlc_state.set_received_tlc_removed(
+                        tlc_id,
+                        RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+                            payment_preimage: Default::default(),
+                        }),
+                    );
+                    let peer = state.get_peer();
+                    self.network
+                        .send_message(NetworkActorMessage::PeerMsg(
+                            peer.clone(),
+                            TlcActorMessage::PeerRemoveTlc(tlc_id),
+                        ))
+                        .expect("send ok");
 
-                state
-                    .tlc_state
-                    .update_for_revoke_and_ack(CommitmentNumbers::default());
+                    // send commitment signed
+                    let tlcs = state.tlc_state.commitment_signed_tlcs(false);
+                    let hash = sign_tlcs(tlcs);
+                    eprintln!("got hash: {:?}", hash);
+                    self.network
+                        .send_message(NetworkActorMessage::PeerMsg(
+                            peer,
+                            TlcActorMessage::PeerCommitmentSigned(hash),
+                        ))
+                        .expect("send ok");
+                }
+                TlcActorMessage::PeerAddTlc(add_tlc) => {
+                    eprintln!(
+                        "Peer {} process peer add_tlc .... with tlc_id: {:?}",
+                        state.peer_id, add_tlc.tlc_id
+                    );
+                    let mut tlc = add_tlc.clone();
+                    tlc.flip_mut();
+                    tlc.status = TlcStatus::Inbound(InboundTlcStatus::RemoteAnnounced);
+                    state.tlc_state.add_received_tlc(tlc);
+                    eprintln!("add peer tlc successfully: {:?}", add_tlc);
+                }
+                TlcActorMessage::PeerRemoveTlc(tlc_id) => {
+                    eprintln!(
+                        "Peer {} process peer remove tlc .... with tlc_id: {}",
+                        state.peer_id, tlc_id
+                    );
+                    state.tlc_state.set_offered_tlc_removed(
+                        tlc_id,
+                        RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+                            payment_preimage: Default::default(),
+                        }),
+                    );
+                }
+                TlcActorMessage::PeerCommitmentSigned(peer_hash) => {
+                    eprintln!(
+                        "\nPeer {} processed peer commitment_signed ....",
+                        state.peer_id
+                    );
+                    let tlcs = state.tlc_state.commitment_signed_tlcs(true);
+                    let hash = sign_tlcs(tlcs);
+                    assert_eq!(hash, peer_hash);
+
+                    let peer = state.get_peer();
+
+                    state.tlc_state.update_for_commitment_signed();
+
+                    eprintln!("sending peer revoke and ack ....");
+                    let tlcs = state.tlc_state.commitment_signed_tlcs(false);
+                    let hash = sign_tlcs(tlcs);
+                    self.network
+                        .send_message(NetworkActorMessage::PeerMsg(
+                            peer.clone(),
+                            TlcActorMessage::PeerRevokeAndAck(hash),
+                        ))
+                        .expect("send ok");
+
+                    // send commitment signed from our side if necessary
+                    if state.tlc_state.need_another_commitment_signed() {
+                        eprintln!("sending another commitment signed ....");
+                        let tlcs = state.tlc_state.commitment_signed_tlcs(false);
+                        let hash = sign_tlcs(tlcs);
+                        self.network
+                            .send_message(NetworkActorMessage::PeerMsg(
+                                peer,
+                                TlcActorMessage::PeerCommitmentSigned(hash),
+                            ))
+                            .expect("send ok");
+                    }
+                }
+                TlcActorMessage::PeerRevokeAndAck(peer_hash) => {
+                    eprintln!("Peer {} processed peer revoke and ack ....", state.peer_id);
+                    let tlcs = state.tlc_state.commitment_signed_tlcs(true);
+                    let hash = sign_tlcs(tlcs);
+                    assert_eq!(hash, peer_hash);
+
+                    state
+                        .tlc_state
+                        .update_for_revoke_and_ack(CommitmentNumbers::default());
+                }
             }
+            Ok(())
         }
-        Ok(())
     }
 
-    async fn pre_start(
+    fn pre_start(
         &self,
         _myself: ActorRef<Self::Msg>,
         args: Self::Arguments,
-    ) -> Result<Self::State, ActorProcessingErr> {
-        let peer_id = args;
-        {
-            Ok(TlcActorState {
-                tlc_state: Default::default(),
-                peer_id,
-            })
+    ) -> impl Future<Output = Result<Self::State, ActorProcessingErr>> + MaybeSend {
+        async move {
+            let peer_id = args;
+            {
+                Ok(TlcActorState {
+                    tlc_state: Default::default(),
+                    peer_id,
+                })
+            }
         }
     }
 }
