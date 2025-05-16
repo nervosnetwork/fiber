@@ -138,9 +138,7 @@ pub struct CchState {
     orders_db: CchOrdersDb,
 }
 
-#[cfg_attr(target_arch="wasm32",ractor::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), ractor::async_trait)]
-
+#[async_trait::async_trait]
 impl Actor for CchActor {
     type Msg = CchMessage;
     type State = CchState;
