@@ -1002,7 +1002,7 @@ where
                         .insert_payment_custom_records(&payment_hash, custom_records);
                 }
 
-                self.store.insert_preimage(payment_hash, preimage);
+                self.store_preimage(payment_hash, preimage);
             } else {
                 return Err(ProcessingChannelError::FinalIncorrectPaymentHash);
             }
@@ -1037,6 +1037,15 @@ where
             .await;
         }
         Ok(())
+    }
+
+    fn store_preimage(&self, payment_hash: Hash256, preimage: Hash256) {
+        self.store.insert_preimage(payment_hash, preimage);
+        self.network
+            .send_message(NetworkActorMessage::new_notification(
+                NetworkServiceEvent::PreimageCreated(payment_hash, preimage),
+            ))
+            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
     }
 
     fn handle_add_tlc_peer_message(
@@ -1075,7 +1084,7 @@ where
             // incase the peer has already shutdown the channel,
             // so we can send setttlement transaction to get money when necessary
             // the preimage must be valid since we have checked it in check_remove_tlc_with_reason
-            self.store.insert_preimage(payment_hash, payment_preimage);
+            self.store_preimage(payment_hash, payment_preimage);
             debug_event!(
                 self.network,
                 &format!("store payment_preimage for: {:?}", payment_hash)
@@ -1191,7 +1200,7 @@ where
             // when a hop is a forwarding hop, we need to keep preimage after relay RemoveTlc finished
             // incase watchtower may need preimage to settledown
             if tlc_info.previous_tlc.is_none() {
-                self.store.remove_preimage(&tlc_info.payment_hash);
+                self.remove_preimage(tlc_info.payment_hash);
             }
         }
 
@@ -1221,7 +1230,7 @@ where
                             remove_reason.clone(),
                         ),
                     ))
-                    .expect("myself alive");
+                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
             }
         } else {
             // relay RemoveTlc to previous channel if needed
@@ -1229,6 +1238,15 @@ where
                 .await;
         }
         Ok(())
+    }
+
+    fn remove_preimage(&self, payment_hash: Hash256) {
+        self.store.remove_preimage(&payment_hash);
+        self.network
+            .send_message(NetworkActorMessage::new_notification(
+                NetworkServiceEvent::PreimageRemoved(payment_hash),
+            ))
+            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
     }
 
     pub fn handle_commitment_signed_command(
@@ -1386,7 +1404,7 @@ where
         if let RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill { payment_preimage }) =
             command.reason
         {
-            self.store.insert_preimage(payment_hash, payment_preimage);
+            self.store_preimage(payment_hash, payment_preimage);
         }
         let msg = FiberMessageWithPeerId::new(
             state.get_remote_peer_id(),
@@ -1931,7 +1949,7 @@ where
                             command.previous_tlc,
                         ),
                     ))
-                    .expect("network actor alive");
+                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
 
                 match res {
                     Ok(tlc_id) => {
@@ -2613,9 +2631,12 @@ impl CommitmentNumbers {
     }
 }
 
+/// The id of a tlc, it can be either offered or received.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, PartialOrd, Ord, Hash)]
 pub enum TLCId {
+    /// Offered tlc id
     Offered(u64),
+    /// Received tlc id
     Received(u64),
 }
 
@@ -3237,44 +3258,66 @@ impl ChannelConstraints {
     }
 }
 
+/// Data needed to revoke an outdated commitment transaction.
 #[serde_as]
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct RevocationData {
+    /// The commitment transaction version number that was revoked
     pub commitment_number: u64,
+    /// The x-only aggregated public key used in the multisig for this commitment transaction
     pub x_only_aggregated_pubkey: [u8; 32],
+    /// The aggregated signature from both parties that authorizes the revocation
     #[serde_as(as = "CompactSignatureAsBytes")]
     pub aggregated_signature: CompactSignature,
+    /// The output cell from the revoked commitment transaction
     #[serde_as(as = "EntityHex")]
     pub output: CellOutput,
+    /// The associated data for the output cell (e.g., UDT amount for token transfers)
     #[serde_as(as = "EntityHex")]
     pub output_data: Bytes,
 }
 
+/// Data needed to authorize and execute a settlement transaction.
 #[serde_as]
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct SettlementData {
+    /// The x-only aggregated public key used in the multi-signature for the settlement transaction
     pub x_only_aggregated_pubkey: [u8; 32],
+    /// The aggregated signature from both parties that authorizes the settlement transaction
     #[serde_as(as = "CompactSignatureAsBytes")]
     pub aggregated_signature: CompactSignature,
+    /// The output cell for the local party (this node's owner) in the settlement transaction
     #[serde_as(as = "EntityHex")]
     pub to_local_output: CellOutput,
+    /// The associated data for the local output cell (e.g., UDT amount for token transfers)
     #[serde_as(as = "EntityHex")]
     pub to_local_output_data: Bytes,
+    /// The output cell for the remote party (channel partner) in the settlement transaction
     #[serde_as(as = "EntityHex")]
     pub to_remote_output: CellOutput,
+    /// The associated data for the remote output cell (e.g., UDT amount for token transfers)
     #[serde_as(as = "EntityHex")]
     pub to_remote_output_data: Bytes,
+    /// The list of Time-Locked Contracts (TLCs) included in this settlement
     pub tlcs: Vec<SettlementTlc>,
 }
 
+/// Data needed to authorize and execute a Time-Locked Contract (TLC) settlement transaction.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct SettlementTlc {
+    /// The ID of the TLC (either offered or received)
     pub tlc_id: TLCId,
+    /// The hash algorithm used for the TLC
     pub hash_algorithm: HashAlgorithm,
+    /// The amount of CKB/UDT involved in the TLC
     pub payment_amount: u128,
+    /// The hash of the payment preimage
     pub payment_hash: Hash256,
+    /// The expiry time for the TLC in milliseconds
     pub expiry: u64,
+    /// The local party's private key used to sign the TLC
     pub local_key: Privkey,
+    /// The remote party's public key used to verify the TLC
     pub remote_key: Pubkey,
 }
 
