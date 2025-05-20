@@ -8333,7 +8333,6 @@ impl ::core::fmt::Display for UpdateTlcInfo {
         write!(f, ", {}: {}", "channel_flags", self.channel_flags())?;
         write!(f, ", {}: {}", "tlc_expiry_delta", self.tlc_expiry_delta())?;
         write!(f, ", {}: {}", "tlc_minimum_value", self.tlc_minimum_value())?;
-        write!(f, ", {}: {}", "tlc_maximum_value", self.tlc_maximum_value())?;
         write!(
             f,
             ", {}: {}",
@@ -8350,15 +8349,14 @@ impl ::core::default::Default for UpdateTlcInfo {
     }
 }
 impl UpdateTlcInfo {
-    const DEFAULT_VALUE: [u8; 100] = [
+    const DEFAULT_VALUE: [u8; 84] = [
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     ];
-    pub const TOTAL_SIZE: usize = 100;
-    pub const FIELD_SIZES: [usize; 7] = [32, 8, 4, 8, 16, 16, 16];
-    pub const FIELD_COUNT: usize = 7;
+    pub const TOTAL_SIZE: usize = 84;
+    pub const FIELD_SIZES: [usize; 6] = [32, 8, 4, 8, 16, 16];
+    pub const FIELD_COUNT: usize = 6;
     pub fn channel_id(&self) -> Byte32 {
         Byte32::new_unchecked(self.0.slice(0..32))
     }
@@ -8374,11 +8372,8 @@ impl UpdateTlcInfo {
     pub fn tlc_minimum_value(&self) -> Uint128 {
         Uint128::new_unchecked(self.0.slice(52..68))
     }
-    pub fn tlc_maximum_value(&self) -> Uint128 {
-        Uint128::new_unchecked(self.0.slice(68..84))
-    }
     pub fn tlc_fee_proportional_millionths(&self) -> Uint128 {
-        Uint128::new_unchecked(self.0.slice(84..100))
+        Uint128::new_unchecked(self.0.slice(68..84))
     }
     pub fn as_reader<'r>(&'r self) -> UpdateTlcInfoReader<'r> {
         UpdateTlcInfoReader::new_unchecked(self.as_slice())
@@ -8412,7 +8407,6 @@ impl molecule::prelude::Entity for UpdateTlcInfo {
             .channel_flags(self.channel_flags())
             .tlc_expiry_delta(self.tlc_expiry_delta())
             .tlc_minimum_value(self.tlc_minimum_value())
-            .tlc_maximum_value(self.tlc_maximum_value())
             .tlc_fee_proportional_millionths(self.tlc_fee_proportional_millionths())
     }
 }
@@ -8440,7 +8434,6 @@ impl<'r> ::core::fmt::Display for UpdateTlcInfoReader<'r> {
         write!(f, ", {}: {}", "channel_flags", self.channel_flags())?;
         write!(f, ", {}: {}", "tlc_expiry_delta", self.tlc_expiry_delta())?;
         write!(f, ", {}: {}", "tlc_minimum_value", self.tlc_minimum_value())?;
-        write!(f, ", {}: {}", "tlc_maximum_value", self.tlc_maximum_value())?;
         write!(
             f,
             ", {}: {}",
@@ -8451,9 +8444,9 @@ impl<'r> ::core::fmt::Display for UpdateTlcInfoReader<'r> {
     }
 }
 impl<'r> UpdateTlcInfoReader<'r> {
-    pub const TOTAL_SIZE: usize = 100;
-    pub const FIELD_SIZES: [usize; 7] = [32, 8, 4, 8, 16, 16, 16];
-    pub const FIELD_COUNT: usize = 7;
+    pub const TOTAL_SIZE: usize = 84;
+    pub const FIELD_SIZES: [usize; 6] = [32, 8, 4, 8, 16, 16];
+    pub const FIELD_COUNT: usize = 6;
     pub fn channel_id(&self) -> Byte32Reader<'r> {
         Byte32Reader::new_unchecked(&self.as_slice()[0..32])
     }
@@ -8469,11 +8462,8 @@ impl<'r> UpdateTlcInfoReader<'r> {
     pub fn tlc_minimum_value(&self) -> Uint128Reader<'r> {
         Uint128Reader::new_unchecked(&self.as_slice()[52..68])
     }
-    pub fn tlc_maximum_value(&self) -> Uint128Reader<'r> {
-        Uint128Reader::new_unchecked(&self.as_slice()[68..84])
-    }
     pub fn tlc_fee_proportional_millionths(&self) -> Uint128Reader<'r> {
-        Uint128Reader::new_unchecked(&self.as_slice()[84..100])
+        Uint128Reader::new_unchecked(&self.as_slice()[68..84])
     }
 }
 impl<'r> molecule::prelude::Reader<'r> for UpdateTlcInfoReader<'r> {
@@ -8504,13 +8494,12 @@ pub struct UpdateTlcInfoBuilder {
     pub(crate) channel_flags: Uint32,
     pub(crate) tlc_expiry_delta: Uint64,
     pub(crate) tlc_minimum_value: Uint128,
-    pub(crate) tlc_maximum_value: Uint128,
     pub(crate) tlc_fee_proportional_millionths: Uint128,
 }
 impl UpdateTlcInfoBuilder {
-    pub const TOTAL_SIZE: usize = 100;
-    pub const FIELD_SIZES: [usize; 7] = [32, 8, 4, 8, 16, 16, 16];
-    pub const FIELD_COUNT: usize = 7;
+    pub const TOTAL_SIZE: usize = 84;
+    pub const FIELD_SIZES: [usize; 6] = [32, 8, 4, 8, 16, 16];
+    pub const FIELD_COUNT: usize = 6;
     pub fn channel_id(mut self, v: Byte32) -> Self {
         self.channel_id = v;
         self
@@ -8531,10 +8520,6 @@ impl UpdateTlcInfoBuilder {
         self.tlc_minimum_value = v;
         self
     }
-    pub fn tlc_maximum_value(mut self, v: Uint128) -> Self {
-        self.tlc_maximum_value = v;
-        self
-    }
     pub fn tlc_fee_proportional_millionths(mut self, v: Uint128) -> Self {
         self.tlc_fee_proportional_millionths = v;
         self
@@ -8552,7 +8537,6 @@ impl molecule::prelude::Builder for UpdateTlcInfoBuilder {
         writer.write_all(self.channel_flags.as_slice())?;
         writer.write_all(self.tlc_expiry_delta.as_slice())?;
         writer.write_all(self.tlc_minimum_value.as_slice())?;
-        writer.write_all(self.tlc_maximum_value.as_slice())?;
         writer.write_all(self.tlc_fee_proportional_millionths.as_slice())?;
         Ok(())
     }

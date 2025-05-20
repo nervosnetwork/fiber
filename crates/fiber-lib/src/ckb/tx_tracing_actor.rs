@@ -177,7 +177,7 @@ impl CkbTxTracingState {
         let tx_tracers = self.tracers.entry(tx_hash).or_default();
         tx_tracers.tracers.push(tracer);
 
-        if tx_tracers.tracers.len() > 1 {
+        if tx_tracers.tracers.len() == 1 {
             // If there's no existing tracer for the tx, trigger the tracing task now
             self.run_tracers(myself, Some(vec![tx_hash])).await?
         }

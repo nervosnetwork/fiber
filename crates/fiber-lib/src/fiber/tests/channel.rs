@@ -2462,6 +2462,75 @@ async fn do_test_channel_remote_commitment_error() {
 }
 
 #[tokio::test]
+async fn do_test_channel_add_tlc_amount_invalid() {
+    async fn run_add_tlc_amount(amount: u128, send_amount: u128) {
+        let node_a_funding_amount = amount + MIN_RESERVED_CKB;
+        let node_b_funding_amount = amount + MIN_RESERVED_CKB;
+
+        let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
+        let (new_channel_id, _funding_tx_hash) = establish_channel_between_nodes(
+            &mut node_a,
+            &mut node_b,
+            ChannelParameters {
+                public: false,
+                node_a_funding_amount,
+                node_b_funding_amount,
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let preimage: [u8; 32] = gen_rand_sha256_hash().as_ref().try_into().unwrap();
+        // create a new payment hash
+        let hash_algorithm = HashAlgorithm::Sha256;
+        let digest = hash_algorithm.hash(preimage);
+        let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
+            NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+                ChannelCommandWithId {
+                    channel_id: new_channel_id,
+                    command: ChannelCommand::AddTlc(
+                        AddTlcCommand {
+                            amount: send_amount,
+                            hash_algorithm,
+                            payment_hash: digest.into(),
+                            expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+                            onion_packet: None,
+                            shared_secret: NO_SHARED_SECRET,
+                            previous_tlc: None,
+                        },
+                        rpc_reply,
+                    ),
+                },
+            ))
+        })
+        .expect("node_b alive");
+
+        dbg!(&add_tlc_result);
+        if send_amount > amount {
+            assert!(add_tlc_result.is_err());
+            assert_eq!(
+                add_tlc_result.unwrap_err().to_string(),
+                "TemporaryChannelFailure".to_string()
+            );
+        } else if send_amount == 0 {
+            assert!(add_tlc_result.is_err());
+            assert_eq!(
+                add_tlc_result.unwrap_err().to_string(),
+                "AmountBelowMinimum".to_string()
+            );
+        } else {
+            assert!(add_tlc_result.is_ok());
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    }
+
+    run_add_tlc_amount(100, 0).await;
+    run_add_tlc_amount(1000, 100).await;
+    run_add_tlc_amount(1000, 1000).await;
+    run_add_tlc_amount(1000, 1000 + 1).await;
+}
+
+#[tokio::test]
 async fn test_network_add_two_tlcs_remove_one() {
     let node_a_funding_amount = 100000000000;
     let node_b_funding_amount = 100000000000;
@@ -4625,7 +4694,7 @@ async fn test_shutdown_channel_with_large_size_shutdown_script_should_fail() {
     let node_a_funding_amount = 100000000000;
     let node_b_funding_amount = 6200000000;
 
-    let (_node_a, node_b, new_channel_id) =
+    let (node_a, node_b, new_channel_id) =
         create_nodes_with_established_channel(node_a_funding_amount, node_b_funding_amount, false)
             .await;
 
@@ -4646,6 +4715,28 @@ async fn test_shutdown_channel_with_large_size_shutdown_script_should_fail() {
     };
 
     let shutdown_channel_result = call!(node_b.network_actor, message).expect("node_b alive");
+    assert!(shutdown_channel_result
+        .err()
+        .unwrap()
+        .contains("Local balance is not enough to pay the fee"));
+
+    let message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id: new_channel_id,
+                command: ChannelCommand::Shutdown(
+                    ShutdownCommand {
+                        close_script: Script::new_builder().args([0u8; 21].pack()).build(),
+                        fee_rate: FeeRate::from_u64(u64::MAX),
+                        force: false,
+                    },
+                    rpc_reply,
+                ),
+            },
+        ))
+    };
+
+    let shutdown_channel_result = call!(node_a.network_actor, message).expect("node_b alive");
     assert!(shutdown_channel_result
         .err()
         .unwrap()

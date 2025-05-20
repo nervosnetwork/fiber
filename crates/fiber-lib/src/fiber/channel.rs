@@ -3528,9 +3528,6 @@ pub struct ChannelTlcInfo {
 
     /// The minimal tcl value we can receive in relay tlc
     pub tlc_minimum_value: u128,
-
-    /// The maximal tcl value we can receive in relay tlc
-    pub tlc_maximum_value: u128,
 }
 
 impl ChannelTlcInfo {
@@ -3545,7 +3542,6 @@ impl ChannelTlcInfo {
             tlc_fee_proportional_millionths,
             enabled: true,
             timestamp: now_timestamp_as_millis_u64(),
-            ..Default::default()
         }
     }
 }
@@ -4091,7 +4087,6 @@ impl ChannelActorState {
             timestamp: self.local_tlc_info.timestamp,
             channel_flags: self.get_channel_update_channel_flags(),
             tlc_minimum_value: self.local_tlc_info.tlc_minimum_value,
-            tlc_maximum_value: self.local_tlc_info.tlc_maximum_value,
             tlc_fee_proportional_millionths: self.local_tlc_info.tlc_fee_proportional_millionths,
             tlc_expiry_delta: self.local_tlc_info.tlc_expiry_delta,
         }
@@ -5464,11 +5459,6 @@ impl ChannelActorState {
             && forward_amount < self.local_tlc_info.tlc_minimum_value
         {
             return Err(ProcessingChannelError::TlcAmountIsTooLow);
-        }
-        if self.local_tlc_info.tlc_maximum_value != 0
-            && forward_amount > self.local_tlc_info.tlc_minimum_value
-        {
-            return Err(ProcessingChannelError::TlcAmountExceedLimit);
         }
         let forward_fee = match forward_fee {
             Some(fee) => fee,
