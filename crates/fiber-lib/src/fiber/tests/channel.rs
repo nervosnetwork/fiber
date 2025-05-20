@@ -4692,7 +4692,7 @@ async fn test_shutdown_channel_with_large_size_shutdown_script_should_fail() {
     let node_a_funding_amount = 100000000000;
     let node_b_funding_amount = 6200000000;
 
-    let (_node_a, node_b, new_channel_id) =
+    let (node_a, node_b, new_channel_id) =
         create_nodes_with_established_channel(node_a_funding_amount, node_b_funding_amount, false)
             .await;
 
@@ -4713,6 +4713,28 @@ async fn test_shutdown_channel_with_large_size_shutdown_script_should_fail() {
     };
 
     let shutdown_channel_result = call!(node_b.network_actor, message).expect("node_b alive");
+    assert!(shutdown_channel_result
+        .err()
+        .unwrap()
+        .contains("Local balance is not enough to pay the fee"));
+
+    let message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id: new_channel_id,
+                command: ChannelCommand::Shutdown(
+                    ShutdownCommand {
+                        close_script: Script::new_builder().args([0u8; 21].pack()).build(),
+                        fee_rate: FeeRate::from_u64(u64::MAX),
+                        force: false,
+                    },
+                    rpc_reply,
+                ),
+            },
+        ))
+    };
+
+    let shutdown_channel_result = call!(node_a.network_actor, message).expect("node_b alive");
     assert!(shutdown_channel_result
         .err()
         .unwrap()
