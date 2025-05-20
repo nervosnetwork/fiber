@@ -1031,7 +1031,6 @@ pub struct UpdateTlcInfo {
     pub channel_flags: ChannelUpdateChannelFlags,
     pub tlc_expiry_delta: u64,
     pub tlc_minimum_value: u128,
-    pub tlc_maximum_value: u128,
     pub tlc_fee_proportional_millionths: u128,
 }
 
@@ -1043,7 +1042,6 @@ impl From<UpdateTlcInfo> for molecule_fiber::UpdateTlcInfo {
             .channel_flags(update_tlc_info.channel_flags.bits().pack())
             .tlc_expiry_delta(update_tlc_info.tlc_expiry_delta.pack())
             .tlc_minimum_value(update_tlc_info.tlc_minimum_value.pack())
-            .tlc_maximum_value(update_tlc_info.tlc_maximum_value.pack())
             .tlc_fee_proportional_millionths(update_tlc_info.tlc_fee_proportional_millionths.pack())
             .build()
     }
@@ -1059,7 +1057,6 @@ impl From<molecule_fiber::UpdateTlcInfo> for UpdateTlcInfo {
             ),
             tlc_expiry_delta: update_tlc_info.tlc_expiry_delta().unpack(),
             tlc_minimum_value: update_tlc_info.tlc_minimum_value().unpack(),
-            tlc_maximum_value: update_tlc_info.tlc_maximum_value().unpack(),
             tlc_fee_proportional_millionths: update_tlc_info
                 .tlc_fee_proportional_millionths()
                 .unpack(),
@@ -1076,7 +1073,6 @@ impl From<UpdateTlcInfo> for ChannelTlcInfo {
                 .contains(ChannelUpdateChannelFlags::DISABLED),
             tlc_expiry_delta: update_tlc_info.tlc_expiry_delta,
             tlc_minimum_value: update_tlc_info.tlc_minimum_value,
-            tlc_maximum_value: update_tlc_info.tlc_maximum_value,
             tlc_fee_proportional_millionths: update_tlc_info.tlc_fee_proportional_millionths,
         }
     }
