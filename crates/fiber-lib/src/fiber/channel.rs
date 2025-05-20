@@ -1646,8 +1646,8 @@ where
             });
             return;
         }
-        let mut pending_tlc_ops = state.tlc_state.get_pending_operations();
-        let mut should_keep_element = async |retryable_operation: &mut RetryableTlcOperation| {
+        let pending_tlc_ops = state.tlc_state.get_pending_operations();
+        let mut test_func = async |retryable_operation: &mut RetryableTlcOperation| {
             match retryable_operation {
                 RetryableTlcOperation::RemoveTlc(tlc_id, ref reason) => {
                     match self
@@ -1749,25 +1749,12 @@ where
                 }
             }
         };
-        let mut to_remove_index = HashSet::<usize>::default();
-
-        for (i, item) in pending_tlc_ops.iter_mut().enumerate() {
-            if !(should_keep_element(item).await) {
-                to_remove_index.insert(i);
+        let mut new_pending_tlc_ops = vec![];
+        for mut item in pending_tlc_ops.into_iter() {
+            if test_func(&mut item).await {
+                new_pending_tlc_ops.push(item);
             }
         }
-        let new_pending_tlc_ops = pending_tlc_ops
-            .into_iter()
-            .enumerate()
-            .filter_map(|(idx, item)| {
-                if to_remove_index.contains(&idx) {
-                    None
-                } else {
-                    Some(item)
-                }
-            })
-            .collect();
-
         state.tlc_state.retryable_tlc_operations = new_pending_tlc_ops;
         if state.tlc_state.has_pending_operations() {
             myself.send_after(RETRYABLE_TLC_OPS_INTERVAL, || {
@@ -2262,12 +2249,10 @@ where
                     } = &open_channel;
 
                     if *chain_hash != get_chain_hash() {
-                        return Err(ActorProcessingErr::from(
-                            ProcessingChannelError::InvalidParameter(format!(
-                                "Invalid chain hash {:?}",
-                                chain_hash
-                            )),
-                        ));
+                        return Err(Box::new(ProcessingChannelError::InvalidParameter(format!(
+                            "Invalid chain hash {:?}",
+                            chain_hash
+                        ))) as ActorProcessingErr);
                     }
 
                     // TODO: we may reject the channel opening request here
@@ -2275,8 +2260,16 @@ where
                     if public
                         && (channel_announcement_nonce.is_none() || public_channel_info.is_none())
                     {
-                        return Err(ActorProcessingErr::from(ProcessingChannelError::InvalidParameter(
+                        return Err(Box::new(ProcessingChannelError::InvalidParameter(
                         "Public channel should have channel announcement nonce and public channel info".to_string(),
+                    )));
+                    }
+
+                    if !public
+                        && (channel_announcement_nonce.is_some() || public_channel_info.is_some())
+                    {
+                        return Err(Box::new(ProcessingChannelError::InvalidParameter(
+                        "Non-public channel should not have channel announcement nonce and public channel info".to_string(),
                     )));
                     }
 
@@ -2366,6 +2359,66 @@ where
                     commitment_fee_rate,
                     commitment_delay_epoch,
                     funding_fee_rate,
+                    funding_udt_type_script,
+                    funding_amount,
+                    shutdown_script,
+                    reserved_ckb_amount,
+                    first_per_commitment_point,
+                    second_per_commitment_point,
+                    next_local_nonce,
+                    max_tlc_value_in_flight: remote_max_tlc_value_in_flight,
+                    max_tlc_number_in_flight: remote_max_tlc_number_in_flight,
+                    channel_announcement_nonce,
+                    ..
+                } = &open_channel;
+
+                if *chain_hash != get_chain_hash() {
+                    return Err(Box::new(ProcessingChannelError::InvalidParameter(format!(
+                        "Invalid chain hash {:?}",
+                        chain_hash
+                    ))));
+                }
+
+                // TODO: we may reject the channel opening request here
+                // if the peer want to open a public channel, but we don't want to.
+                if public && (channel_announcement_nonce.is_none() || public_channel_info.is_none())
+                {
+                    return Err(Box::new(ProcessingChannelError::InvalidParameter(
+                        "Public channel should have channel announcement nonce and public channel info".to_string(),
+                    )));
+                }
+
+                if !public
+                    && (channel_announcement_nonce.is_some() || public_channel_info.is_some())
+                {
+                    return Err(Box::new(ProcessingChannelError::InvalidParameter(
+                        "Non-public channel should not have channel announcement nonce and public channel info".to_string(),
+                    )));
+                }
+
+                let mut state = ChannelActorState::new_inbound_channel(
+                    *channel_id,
+                    public_channel_info,
+                    local_funding_amount,
+                    local_reserved_ckb_amount,
+                    *commitment_fee_rate,
+                    *commitment_delay_epoch,
+                    *funding_fee_rate,
+                    funding_udt_type_script.clone(),
+                    &seed,
+                    self.get_local_pubkey(),
+                    self.get_remote_pubkey(),
+                    local_shutdown_script.clone(),
+                    shutdown_script.clone(),
+                    *funding_amount,
+                    *reserved_ckb_amount,
+                    counterpart_pubkeys,
+                    next_local_nonce.clone(),
+                    channel_announcement_nonce.clone(),
+                    *first_per_commitment_point,
+                    *second_per_commitment_point,
+                    *remote_max_tlc_value_in_flight,
+                    *remote_max_tlc_number_in_flight,
                     max_tlc_number_in_flight,
                     max_tlc_value_in_flight,
                 }) => {
@@ -4505,6 +4558,24 @@ impl ChannelActorState {
 
         let udt_type_script = &self.funding_udt_type_script;
 
+        if udt_type_script.is_some() {
+            if self.to_local_amount > u128::MAX - self.to_remote_amount {
+                return Err(ProcessingChannelError::InvalidParameter(format!(
+                    "The total UDT funding amount should be less than {}",
+                    u128::MAX
+                )));
+            }
+        } else {
+            let total_ckb_amount = self.get_liquid_capacity();
+            let max_ckb_amount = u64::MAX as u128 - self.get_total_reserved_ckb_amount() as u128;
+            if total_ckb_amount > max_ckb_amount {
+                return Err(ProcessingChannelError::InvalidParameter(format!(
+                    "The total funding amount ({}) should be less than {}",
+                    total_ckb_amount, max_ckb_amount
+                )));
+            }
+        }
+
         // reserved_ckb_amount
         let occupied_capacity =
             occupied_capacity(&self.get_remote_shutdown_script(), udt_type_script)?.as_u64();
@@ -4742,18 +4813,10 @@ impl ChannelActorState {
             + self.get_total_reserved_ckb_amount()
     }
 
-    fn get_total_udt_amount(&self) -> u128 {
-        self.to_local_amount + self.to_remote_amount
-    }
-
     // Get the total liquid capacity of the channel, which will exclude the reserved ckb amount.
     // This is the capacity used for gossiping channel information.
     pub(crate) fn get_liquid_capacity(&self) -> u128 {
-        if self.funding_udt_type_script.is_some() {
-            self.get_total_udt_amount()
-        } else {
-            self.to_local_amount + self.to_remote_amount
-        }
+        self.to_local_amount + self.to_remote_amount
     }
 
     // Send RevokeAndAck message to the counterparty, and update the
@@ -4777,7 +4840,7 @@ impl ChannelActorState {
                     .capacity(capacity.pack())
                     .build();
 
-                let output_data = self.get_total_udt_amount().to_le_bytes().pack();
+                let output_data = self.get_liquid_capacity().to_le_bytes().pack();
                 (output, output_data)
             } else {
                 let capacity = self.get_total_ckb_amount() - commitment_tx_fee;
@@ -6335,7 +6398,7 @@ impl ChannelActorState {
                     .capacity(capacity.pack())
                     .build();
 
-                let output_data = self.get_total_udt_amount().to_le_bytes().pack();
+                let output_data = self.get_liquid_capacity().to_le_bytes().pack();
                 (output, output_data)
             } else {
                 let capacity = self.get_total_ckb_amount() - commitment_tx_fee;
@@ -6684,7 +6747,7 @@ impl ChannelActorState {
             );
             debug!("current_capacity: {}, remote_reserved_ckb_amount: {}, local_reserved_ckb_amount: {}",
                 current_capacity, self.remote_reserved_ckb_amount, self.local_reserved_ckb_amount);
-            let is_udt_amount_ok = udt_amount == self.get_total_udt_amount();
+            let is_udt_amount_ok = udt_amount == self.get_liquid_capacity();
             return Ok(is_udt_amount_ok);
         } else {
             let is_complete = current_capacity == self.get_total_ckb_amount();
@@ -7148,7 +7211,7 @@ impl ChannelActorState {
                 .capacity(capacity.pack())
                 .build();
 
-            let output_data = self.get_total_udt_amount().to_le_bytes().pack();
+            let output_data = self.get_liquid_capacity().to_le_bytes().pack();
             (output, output_data)
         } else {
             let capacity = self.get_total_ckb_amount() - commitment_tx_fee;

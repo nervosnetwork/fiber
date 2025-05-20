@@ -271,6 +271,46 @@ async fn do_test_owned_channel_saved_to_the_owner_graph(public: bool) {
 }
 
 #[tokio::test]
+async fn test_create_channel_with_too_large_amounts() {
+    let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
+
+    let params = ChannelParameters {
+        node_a_funding_amount: u64::MAX as u128 - 1,
+        node_b_funding_amount: MIN_RESERVED_CKB,
+        ..Default::default()
+    };
+    let res = create_channel_with_nodes(&mut node_a, &mut node_b, params).await;
+    assert!(res.is_err(), "Create channel failed: {:?}", res);
+    assert!(res.unwrap_err().to_string().contains(
+        "The total funding amount (18446744069509551614) should be less than 18446744065309551615"
+    ));
+
+    let params = ChannelParameters {
+        node_a_funding_amount: MIN_RESERVED_CKB,
+        node_b_funding_amount: u64::MAX as u128 - 1,
+        ..Default::default()
+    };
+    let res = create_channel_with_nodes(&mut node_a, &mut node_b, params).await;
+    assert!(res.is_err(), "Create channel failed: {:?}", res);
+    assert!(res.unwrap_err().to_string().contains(
+        "The total funding amount (18446744069509551614) should be less than 18446744065309551615"
+    ));
+
+    let params = ChannelParameters {
+        node_a_funding_amount: u128::MAX - 100,
+        node_b_funding_amount: 101,
+        funding_udt_type_script: Some(Script::default()),
+        ..Default::default()
+    };
+    let res = create_channel_with_nodes(&mut node_a, &mut node_b, params).await;
+    assert!(res.is_err(), "Create channel failed: {:?}", res);
+    assert!(res
+        .unwrap_err()
+        .to_string()
+        .contains("The total UDT funding amount should be less"));
+}
+
+#[tokio::test]
 async fn test_owned_public_channel_saved_to_the_owner_graph() {
     do_test_owned_channel_saved_to_the_owner_graph(true).await;
 }

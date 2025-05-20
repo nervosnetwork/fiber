@@ -148,7 +148,7 @@ impl Actor for CchActor {
     fn pre_start(
         &self,
         myself: ActorRef<Self::Msg>,
-        _args: Self::Arguments,
+        _config: Self::Arguments,
     ) -> impl Future<Output = Result<Self::State, ActorProcessingErr>> + MaybeSend {
         async move {
             let lnd_rpc_url: Uri = self.config.lnd_rpc_url.clone().try_into()?;

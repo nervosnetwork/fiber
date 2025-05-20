@@ -1,30 +1,15 @@
 #![allow(clippy::needless_range_loop)]
 use super::test_utils::init_tracing;
-use crate::fiber::channel::AddTlcCommand;
-use crate::fiber::channel::ChannelCommand;
-use crate::fiber::channel::ChannelCommandWithId;
-use crate::fiber::channel::ChannelState;
-use crate::fiber::channel::CloseFlags;
-use crate::fiber::channel::RemoveTlcCommand;
-use crate::fiber::channel::ShuttingDownFlags;
-use crate::fiber::channel::UpdateCommand;
+use crate::fiber::channel::*;
 use crate::fiber::config::DEFAULT_TLC_EXPIRY_DELTA;
 use crate::fiber::config::DEFAULT_TLC_FEE_PROPORTIONAL_MILLIONTHS;
 use crate::fiber::config::MAX_PAYMENT_TLC_EXPIRY_LIMIT;
 use crate::fiber::config::MIN_TLC_EXPIRY_DELTA;
 use crate::fiber::graph::PaymentSessionStatus;
 use crate::fiber::hash_algorithm::HashAlgorithm;
-use crate::fiber::network::BuildRouterCommand;
-use crate::fiber::network::HopHint;
-use crate::fiber::network::HopRequire;
-use crate::fiber::network::PaymentCustomRecords;
-use crate::fiber::network::SendPaymentCommand;
-use crate::fiber::network::SendPaymentWithRouterCommand;
+use crate::fiber::network::*;
 use crate::fiber::tests::test_utils::*;
-use crate::fiber::types::Hash256;
-use crate::fiber::types::RemoveTlcFulfill;
-use crate::fiber::types::RemoveTlcReason;
-use crate::fiber::types::NO_SHARED_SECRET;
+use crate::fiber::types::*;
 use crate::fiber::NetworkActorCommand;
 use crate::fiber::NetworkActorMessage;
 use crate::gen_rand_fiber_public_key;
@@ -226,6 +211,29 @@ async fn test_send_payment_prefer_channels_with_larger_balance() {
     let node_1_balance = node_1.get_local_balance_from_channel(channels[1]);
     assert_eq!(node_0_balance, 5000000000);
     assert_eq!(node_1_balance, 5000000000);
+}
+
+#[tokio::test]
+async fn test_send_payment_with_tool_large_fee_and_amount() {
+    init_tracing();
+
+    let (nodes, _channels) =
+        create_n_nodes_network(&[((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT))], 2).await;
+    let [node_0, node_1] = nodes.try_into().expect("2 nodes");
+    let target_pubkey = node_1.pubkey;
+
+    let res = node_0
+        .send_payment(SendPaymentCommand {
+            target_pubkey: Some(target_pubkey),
+            amount: Some(1),
+            max_fee_amount: Some(u128::MAX),
+            keysend: Some(true),
+            ..Default::default()
+        })
+        .await;
+
+    assert!(res.is_err());
+    assert!(res.unwrap_err().to_string().contains("max_fee_amount"));
 }
 
 #[tokio::test]
@@ -635,6 +643,55 @@ async fn test_send_payment_with_private_channel_hints() {
 }
 
 #[tokio::test]
+async fn test_send_payment_with_too_large_hop_hint_fee_rate() {
+    init_tracing();
+    let (nodes, _channels) =
+        create_n_nodes_network(&[((0, 1), (u64::MAX as u128 / 3, MIN_RESERVED_CKB))], 3).await;
+    let [mut node1, mut node2, mut node3] = nodes.try_into().expect("3 nodes");
+
+    let (_new_channel_id, funding_tx_hash) = establish_channel_between_nodes(
+        &mut node2,
+        &mut node3,
+        ChannelParameters {
+            public: false,
+            node_a_funding_amount: u64::MAX as u128 / 3,
+            node_b_funding_amount: MIN_RESERVED_CKB,
+            ..Default::default()
+        },
+    )
+    .await;
+    let funding_tx = node2
+        .get_transaction_view_from_hash(funding_tx_hash)
+        .await
+        .expect("get funding tx");
+
+    let outpoint = funding_tx.output_pts_iter().next().unwrap();
+    // sleep for a while
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
+    let source_node = &mut node1;
+    let target_pubkey = node3.pubkey;
+
+    let res = source_node
+        .send_payment(SendPaymentCommand {
+            target_pubkey: Some(target_pubkey),
+            amount: Some((u64::MAX / 4) as u128),
+            keysend: Some(true),
+            hop_hints: Some(vec![HopHint {
+                pubkey: node2.pubkey,
+                channel_outpoint: outpoint,
+                fee_rate: u64::MAX, // too large fee rate
+                tlc_expiry_delta: DEFAULT_TLC_EXPIRY_DELTA,
+            }]),
+            ..Default::default()
+        })
+        .await;
+
+    assert!(res.is_err(), "Expect send payment failed: {:?}", res);
+    assert!(res.unwrap_err().to_string().contains("no path found"));
+}
+
+#[tokio::test]
 async fn test_send_payment_hophint_for_middle_channels_does_not_work() {
     let (nodes, _channels) = create_n_nodes_network(
         &[
@@ -973,9 +1030,6 @@ async fn test_send_payment_build_router_basic() {
     )
     .await;
     let [node_0, node_1, node_2] = nodes.try_into().expect("3 nodes");
-    eprintln!("node_0: {:?}", node_0.pubkey);
-    eprintln!("node_1: {:?}", node_1.pubkey);
-    eprintln!("node_2: {:?}", node_2.pubkey);
 
     let router = node_0
         .build_router(BuildRouterCommand {

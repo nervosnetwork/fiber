@@ -26,6 +26,7 @@ use tentacle::multiaddr::{MultiAddr, Protocol};
 use tentacle::service::SessionType;
 use tentacle::utils::{extract_peer_id, is_reachable, multiaddr_to_socketaddr};
 use tentacle::{
+    async_trait,
     builder::{MetaBuilder, ServiceBuilder},
     bytes::Bytes,
     context::SessionContext,
@@ -581,6 +582,14 @@ impl SendPaymentData {
                 "The payment amount ({}) should be less than {}",
                 amount,
                 u64::MAX
+            ));
+        }
+
+        let max_fee_amount = command.max_fee_amount.unwrap_or(0);
+        if amount.checked_add(max_fee_amount).is_none() {
+            return Err(format!(
+                "amount + max_fee_amount overflow: amount = {}, max_fee_amount = {}",
+                amount, max_fee_amount
             ));
         }
 
@@ -3396,11 +3405,9 @@ where
         async move {
             let NetworkActorStartArguments {
                 config,
-                #[cfg(not(target_arch = "wasm32"))]
                 tracker,
                 channel_subscribers,
                 default_shutdown_script,
-                ..
             } = args;
             let now = SystemTime::now()
                 .duration_since(SystemTime::UNIX_EPOCH)
@@ -3511,16 +3518,12 @@ where
                     ),
                 ))
                 .expect(ASSUME_NETWORK_MYSELF_ALIVE);
-            #[cfg(not(target_arch = "wasm32"))]
+
             tracker.spawn(async move {
                 service.run().await;
                 debug!("Tentacle service stopped");
             });
-            #[cfg(target_arch = "wasm32")]
-            ractor::concurrency::spawn(async move {
-                service.run().await;
-                debug!("Tentacle service stopped");
-            });
+
             let mut state_to_be_persisted = self
                 .store
                 .get_network_actor_state(&my_peer_id)
@@ -3710,7 +3713,8 @@ impl FiberProtocolHandle {
             .build()
     }
 }
-#[async_trait::async_trait]
+
+#[async_trait]
 impl ServiceProtocol for FiberProtocolHandle {
     async fn init(&mut self, _context: &mut ProtocolContext) {}
 
@@ -3787,9 +3791,7 @@ impl From<&NetworkServiceHandle> for FiberProtocolHandle {
     }
 }
 
-// #[cfg_attr(target_arch="wasm32",ractor::async_trait(?Send))]
-// #[cfg_attr(not(target_arch = "wasm32"), ractor::async_trait)]
-#[async_trait::async_trait]
+#[async_trait]
 impl ServiceHandle for NetworkServiceHandle {
     async fn handle_error(&mut self, _context: &mut ServiceContext, error: ServiceError) {
         trace!("Service error: {:?}", error);

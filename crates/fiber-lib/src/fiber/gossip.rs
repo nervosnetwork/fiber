@@ -21,6 +21,7 @@ use ractor::{
 };
 use secp256k1::Message;
 use tentacle::{
+    async_trait as tasync_trait,
     builder::MetaBuilder,
     bytes::Bytes,
     context::{ProtocolContext, ProtocolContextMutRef, SessionContext},
@@ -271,9 +272,7 @@ impl GossipMessageUpdates {
 /// This trait provides a way to subscribe to the updates of the gossip message store.
 /// The subscriber will receive a batch of messages that are added to the store since the last time
 /// we sent messages to the subscriber.
-#[cfg_attr(target_arch="wasm32",async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-
+#[async_trait::async_trait]
 pub trait SubscribableGossipMessageStore {
     type Subscription;
     type Error: std::error::Error;
@@ -815,7 +814,7 @@ where
     fn pre_start(
         &self,
         myself: ActorRef<Self::Msg>,
-        filter_cursor: Self::Arguments,
+        filter_cursor: Cursor,
     ) -> impl Future<Output = Result<Self::State, ActorProcessingErr>> + MaybeSend {
         async move {
             let subscription = self
@@ -1026,9 +1025,7 @@ where
     }
 }
 
-#[cfg_attr(target_arch="wasm32",async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-
+#[async_trait::async_trait]
 impl<S: GossipMessageStore + Sync> SubscribableGossipMessageStore
     for ExtendedGossipMessageStore<S>
 {
@@ -1280,7 +1277,7 @@ impl<S: GossipMessageStore> ExtendedGossipMessageStoreState<S> {
             let myself = myself.clone();
             let incomplete_messages = incomplete_messages.into_iter().collect::<Vec<_>>();
 
-            ractor::concurrency::spawn(async move {
+            ractor::concurrency::tokio_primitives::spawn(async move {
                 let mut is_success = true;
                 let n_queries = incomplete_messages.len();
                 for messages in
@@ -2157,10 +2154,12 @@ async fn get_channel_on_chain_info(
             return Err(Error::CkbRpcError(err));
         }
         Err(err) => {
-            return Err(Error::InternalError(anyhow::anyhow!(err).context(format!(
-                "Error while trying to obtain block {:?} for channel outpoint {:?}",
-                block_hash, &outpoint
-            ))));
+            return Err(Error::InternalError(anyhow::Error::new(err).context(
+                format!(
+                    "Error while trying to obtain block {:?} for channel outpoint {:?}",
+                    block_hash, &outpoint
+                ),
+            )));
         }
     };
 
@@ -2392,6 +2391,7 @@ impl GossipProtocolHandle {
             .build()
     }
 }
+
 impl<S> Actor for GossipActor<S>
 where
     S: GossipMessageStore + Clone + Send + Sync + 'static,
@@ -2794,7 +2794,7 @@ where
     }
 }
 
-#[async_trait::async_trait]
+#[tasync_trait]
 impl ServiceProtocol for GossipProtocolHandle {
     async fn init(&mut self, context: &mut ProtocolContext) {
         let sender = self
