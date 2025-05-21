@@ -1,0 +1,7 @@
+[package]
+name = "fiber-wasm"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+fnn = { path = "../fiber-lib", default-features = false }

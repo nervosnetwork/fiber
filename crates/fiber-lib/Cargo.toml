@@ -90,6 +90,10 @@ ckb-hash = { version = "0.200.0", features = [
 tracing = { version = "0.1", features = ["log"] }
 jsonrpsee = { version = "0.25", features = ["macros", "server-core"] }
 getrandom = { version = "0.3", features = ["wasm_js"] }
+fiber-wasm-db-common = {path = "../fiber-wasm-db-common"}
+web-sys = "0.3.72"
+wasm-bindgen = "0.2.84"
+console_error_panic_hook = { version = "0.1.7" }
 
 [features]
 default = ["watchtower"]
