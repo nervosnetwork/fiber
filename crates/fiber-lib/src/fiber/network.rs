@@ -2267,7 +2267,7 @@ pub struct NetworkActorState<S> {
 pub struct PersistentNetworkActorState {
     // This map is used to store the public key of the peer.
     #[serde_as(as = "Vec<(DisplayFromStr, _)>")]
-    peer_pubkey_map: HashMap<PeerId, Pubkey>,
+    pub peer_pubkey_map: HashMap<PeerId, Pubkey>,
     // These addresses are saved by the user (e.g. the user sends a ConnectPeer rpc to the node),
     // we will then save these addresses to the peer store.
     #[serde_as(as = "Vec<(DisplayFromStr, _)>")]
@@ -2279,7 +2279,7 @@ impl PersistentNetworkActorState {
         Default::default()
     }
 
-    fn get_peer_addresses(&self, peer_id: &PeerId) -> Vec<Multiaddr> {
+    pub fn get_peer_addresses(&self, peer_id: &PeerId) -> Vec<Multiaddr> {
         self.saved_peer_addresses
             .get(peer_id)
             .cloned()

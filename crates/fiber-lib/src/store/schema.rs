@@ -17,17 +17,17 @@
 //! | 224          | Hash256              | ChannelData                 |
 //! +--------------+----------------------+-----------------------------+
 
-pub(crate) const CHANNEL_ACTOR_STATE_PREFIX: u8 = 0;
-pub(crate) const PEER_ID_NETWORK_ACTOR_STATE_PREFIX: u8 = 16;
-pub(crate) const CKB_INVOICE_PREFIX: u8 = 32;
-pub(crate) const PREIMAGE_PREFIX: u8 = 33;
-pub(crate) const CKB_INVOICE_STATUS_PREFIX: u8 = 34;
-pub(crate) const PEER_ID_CHANNEL_ID_PREFIX: u8 = 64;
-pub(crate) const CHANNEL_OUTPOINT_CHANNEL_ID_PREFIX: u8 = 65;
-pub(crate) const BROADCAST_MESSAGE_PREFIX: u8 = 96;
-pub(crate) const BROADCAST_MESSAGE_TIMESTAMP_PREFIX: u8 = 97;
-pub(crate) const PAYMENT_SESSION_PREFIX: u8 = 192;
-pub(crate) const PAYMENT_HISTORY_TIMED_RESULT_PREFIX: u8 = 193;
-pub(crate) const PAYMENT_CUSTOM_RECORD_PREFIX: u8 = 194;
+pub const CHANNEL_ACTOR_STATE_PREFIX: u8 = 0;
+pub const PEER_ID_NETWORK_ACTOR_STATE_PREFIX: u8 = 16;
+pub const CKB_INVOICE_PREFIX: u8 = 32;
+pub const PREIMAGE_PREFIX: u8 = 33;
+pub const CKB_INVOICE_STATUS_PREFIX: u8 = 34;
+pub const PEER_ID_CHANNEL_ID_PREFIX: u8 = 64;
+pub const CHANNEL_OUTPOINT_CHANNEL_ID_PREFIX: u8 = 65;
+pub const BROADCAST_MESSAGE_PREFIX: u8 = 96;
+pub const BROADCAST_MESSAGE_TIMESTAMP_PREFIX: u8 = 97;
+pub const PAYMENT_SESSION_PREFIX: u8 = 192;
+pub const PAYMENT_HISTORY_TIMED_RESULT_PREFIX: u8 = 193;
+pub const PAYMENT_CUSTOM_RECORD_PREFIX: u8 = 194;
 #[cfg(feature = "watchtower")]
-pub(crate) const WATCHTOWER_CHANNEL_PREFIX: u8 = 224;
+pub const WATCHTOWER_CHANNEL_PREFIX: u8 = 224;

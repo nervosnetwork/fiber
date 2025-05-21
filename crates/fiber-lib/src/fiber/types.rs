@@ -333,6 +333,14 @@ impl From<Point> for Pubkey {
     }
 }
 
+impl std::fmt::Display for crate::fiber::types::Pubkey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use hex::ToHex;
+        let bytes = self.serialize();
+        write!(f, "0x{}", bytes.encode_hex::<String>())
+    }
+}
+
 impl From<tentacle::secio::PublicKey> for Pubkey {
     fn from(pk: tentacle::secio::PublicKey) -> Self {
         secp256k1::PublicKey::from_slice(pk.inner_ref())
