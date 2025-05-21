@@ -25,7 +25,7 @@ pub(crate) async fn handle_prefix_iterator<F>(
     skip_while: F,
 ) -> anyhow::Result<Vec<KV>>
 where
-    F: Fn(&[u8], &[u8]) -> bool,
+    F: Fn(&[u8]) -> bool,
 {
     let cursor = match mode {
         IteratorModeOwned::Start => store.open_cursor(None, Some(idb::CursorDirection::Next)),
@@ -80,7 +80,7 @@ where
                 .expect("Expect non-null value"),
         )
         .unwrap();
-        if skip_while(&key, &value) {
+        if skip_while(&key) {
             debug!("Skip while returns true, skipping");
             continue;
         }
@@ -110,7 +110,7 @@ pub(crate) async fn handle_db_command<F>(
     invoke_skip_while: F,
 ) -> anyhow::Result<DbCommandResponse>
 where
-    F: Fn(&[u8], &[u8]) -> bool,
+    F: Fn(&[u8]) -> bool,
 {
     debug!("Handle command: {:?}", cmd);
     let tx_mode = match cmd {

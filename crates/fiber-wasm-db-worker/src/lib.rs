@@ -94,18 +94,15 @@ pub async fn main_loop(log_level: &str) {
             InputCommand::DbRequest => {
                 let db_cmd = read_command_payload(&input_i32_arr, &input_u8_arr).unwrap();
                 let db = db.as_ref().expect("Database not opened yet");
-                let result = handle_db_command(db, STORE_NAME, db_cmd, |key, value| {
+                let result = handle_db_command(db, STORE_NAME, db_cmd, |key| {
                     input_i32_arr.set_index(0, InputCommand::Waiting as i32);
                     debug!(
-                        "Invoking request take while with args key={:?}, value={:?}",
-                        key, value
+                        "Invoking request take while with args key={:?}",
+                        key, 
                     );
                     write_command_with_payload(
                         OutputCommand::PrefixIteratorRequestForNextEntry as i32,
-                        KV {
-                            key: key.to_vec(),
-                            value: value.to_vec(),
-                        },
+                        key.to_vec(),
                         &output_i32_arr,
                         &output_u8_arr,
                     )

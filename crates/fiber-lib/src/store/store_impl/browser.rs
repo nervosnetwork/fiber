@@ -1,4 +1,5 @@
 use super::KeyValue;
+use super::StoreKeyValue;
 use anyhow::anyhow;
 use anyhow::bail;
 use anyhow::Context;
@@ -12,37 +13,102 @@ pub use fiber_wasm_db_common::IteratorMode;
 use fiber_wasm_db_common::IteratorModeOwned;
 use fiber_wasm_db_common::OutputCommand;
 use fiber_wasm_db_common::KV;
-use web_sys::js_sys::Atomics;
 use std::cell::RefCell;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use tracing::debug;
+use tracing::info;
+use tracing::warn;
 use wasm_bindgen::prelude::wasm_bindgen;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
+use web_sys::js_sys::Atomics;
 use web_sys::js_sys::Int32Array;
 use web_sys::js_sys::SharedArrayBuffer;
 use web_sys::js_sys::Uint8Array;
 
-pub struct Store {}
+pub struct Store {
+    chan: CommunicationChannel,
+}
 impl Store {
-    pub fn new<P: AsRef<Path>>(path: P) -> Result<Self, String> {
-        todo!()
+    pub fn shutdown(self) {
+        info!("Shutting down database Store..");
+        let CommunicationChannel {
+            input_i32_arr,
+            input_u8_arr,
+            output_i32_arr,
+            ..
+        } = &self.chan;
+        output_i32_arr.set_index(0, InputCommand::Waiting as i32);
+        write_command_with_payload(
+            InputCommand::Shutdown as i32,
+            (),
+            input_i32_arr,
+            input_u8_arr,
+        )
+        .unwrap();
     }
+    /// Open a store, with migration check
+    pub fn new<P: AsRef<Path>>(path: P) -> Result<Self, String> {
+        warn!("fiber wasm doesn't support database migration yet");
+        Self::open_db(path.as_ref())
+    }
+    /// Open a store, without migration check
     pub fn open_db(path: &Path) -> Result<Self, String> {
-        todo!()
+        let chan = CommunicationChannel::prepare_from_global();
+        if !DB_INITIALIZED.load(std::sync::atomic::Ordering::SeqCst) {
+            chan.open_database(path.to_str().unwrap());
+            DB_INITIALIZED.store(true, std::sync::atomic::Ordering::SeqCst);
+        } else {
+            debug!("Database has already been initialized");
+        }
+        Ok(Self { chan })
     }
     pub fn get<K: AsRef<[u8]>>(&self, key: K) -> Option<Vec<u8>> {
-        todo!()
+        return match self
+            .chan
+            .dispatch_database_command(DbCommandRequestWithSkipWhileFunc::Read {
+                keys: vec![key.as_ref().to_vec()],
+            })
+            .unwrap()
+        {
+            DbCommandResponse::Read { mut values } => values.remove(0),
+            _ => unreachable!(),
+        };
     }
     pub fn delete<K: AsRef<[u8]>>(&self, key: K) {
-        todo!()
+        match self
+            .chan
+            .dispatch_database_command(DbCommandRequestWithSkipWhileFunc::Delete {
+                keys: vec![key.as_ref().to_vec()],
+            })
+            .unwrap()
+        {
+            DbCommandResponse::Delete {} => {}
+            _ => unreachable!(),
+        };
     }
     pub fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&self, key: K, value: V) {
-        todo!()
+        match self
+            .chan
+            .dispatch_database_command(DbCommandRequestWithSkipWhileFunc::Put {
+                kvs: vec![KV {
+                    key: key.as_ref().to_vec(),
+                    value: value.as_ref().to_vec(),
+                }],
+            })
+            .unwrap()
+        {
+            DbCommandResponse::Put {} => {}
+            _ => unreachable!(),
+        };
     }
     pub fn batch(&self) -> Batch {
-        Batch {}
+        Batch {
+            chan: self.chan.clone(),
+            delete: vec![],
+            puts: vec![],
+        }
     }
     #[allow(clippy::type_complexity)]
     pub fn prefix_iterator_with_skip_while_and_start<'a>(
@@ -51,7 +117,20 @@ impl Store {
         mode: IteratorMode<'a>,
         skip_while: Box<dyn Fn(&[u8]) -> bool + 'static>,
     ) -> impl Iterator<Item = (Box<[u8]>, Box<[u8]>)> + 'a {
-        vec![].into_iter()
+        match self
+            .chan
+            .dispatch_database_command(DbCommandRequestWithSkipWhileFunc::PrefixIterator {
+                prefix: prefix.to_vec(),
+                mode: mode.to_owned(),
+                skip_while,
+            })
+            .unwrap()
+        {
+            DbCommandResponse::PrefixIterator { data } => data
+                .into_iter()
+                .map(|kv| (kv.key.into_boxed_slice(), kv.value.into_boxed_slice())),
+            _ => unreachable!(),
+        }
     }
     pub fn prefix_iterator<'a>(
         &'a self,
@@ -64,26 +143,52 @@ impl Store {
         )
     }
 }
-pub struct Batch {}
+pub struct Batch {
+    chan: CommunicationChannel,
+    puts: Vec<KV>,
+    delete: Vec<Vec<u8>>,
+}
 impl Batch {
     pub fn get<K: AsRef<[u8]>>(&self, key: K) -> Option<Vec<u8>> {
-        todo!()
+        return match self
+            .chan
+            .dispatch_database_command(DbCommandRequestWithSkipWhileFunc::Read {
+                keys: vec![key.as_ref().to_vec()],
+            })
+            .unwrap()
+        {
+            DbCommandResponse::Read { mut values } => values.remove(0),
+            _ => unreachable!(),
+        };
     }
 
     pub fn put_kv(&mut self, key_value: KeyValue) {
-        todo!()
+        self.puts.push(KV {
+            key: key_value.key(),
+            value: key_value.value(),
+        });
     }
 
     pub fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&mut self, key: K, value: V) {
-        todo!()
+        self.puts.push(KV {
+            key: key.as_ref().to_vec(),
+            value: value.as_ref().to_vec(),
+        });
     }
 
     pub fn delete<K: AsRef<[u8]>>(&mut self, key: K) {
-        todo!()
+        self.delete.push(key.as_ref().to_vec());
     }
 
     pub fn commit(self) {
-        todo!()
+        self.chan
+            .dispatch_database_command(DbCommandRequestWithSkipWhileFunc::Delete {
+                keys: self.delete,
+            })
+            .expect("Failed to delete batch");
+        self.chan
+            .dispatch_database_command(DbCommandRequestWithSkipWhileFunc::Put { kvs: self.puts })
+            .expect("Failed to put batch");
     }
 }
 
@@ -91,6 +196,8 @@ thread_local! {
     static INPUT_BUFFER: RefCell<Option<SharedArrayBuffer>> = const { RefCell::new(None) };
     static OUTPUT_BUFFER: RefCell<Option<SharedArrayBuffer>> = const { RefCell::new(None) };
 }
+static DB_INITIALIZED: AtomicBool = AtomicBool::new(false);
+
 #[wasm_bindgen]
 /// Set `SharedArrayBuffer` used for communicating with light client worker. This must be called before executing `main_loop`
 /// input - The buffer used for sending data from light client worker to db worker
@@ -214,8 +321,8 @@ impl CommunicationChannel {
             match output_cmd {
                 OutputCommand::OpenDatabaseResponse | OutputCommand::Waiting => unreachable!(),
                 OutputCommand::PrefixIteratorRequestForNextEntry => {
-                    let arg = read_command_payload::<KV>(output_i32_arr, output_u8_arr)?;
-                    let ok = skip_while.as_ref().unwrap()(&arg.key, &arg.value);
+                    let arg = read_command_payload::<Vec<u8>>(output_i32_arr, output_u8_arr)?;
+                    let ok = skip_while.as_ref().unwrap()(&arg);
 
                     debug!(
                         "Received take while request with args {:?}, result {}",
@@ -244,8 +351,6 @@ impl CommunicationChannel {
     }
 }
 
-static DB_INITIALIZED: AtomicBool = AtomicBool::new(false);
-
 pub enum DbCommandRequestWithSkipWhileFunc {
     Read {
         keys: Vec<Vec<u8>>,
@@ -259,6 +364,6 @@ pub enum DbCommandRequestWithSkipWhileFunc {
     PrefixIterator {
         prefix: Vec<u8>,
         mode: IteratorModeOwned,
-        skip_while: Box<dyn Fn(&[u8], &[u8]) -> bool + Send + 'static>,
+        skip_while: Box<dyn Fn(&[u8]) -> bool + 'static>,
     },
 }
