@@ -4609,6 +4609,7 @@ async fn test_send_payment_with_first_channel_retry_will_be_ok() {
     assert_eq!(payment_session.retried_times, 2);
 }
 
+#[tokio::test]
 #[ignore]
 async fn test_send_payment_with_reconnect_two_times() {
     init_tracing();
