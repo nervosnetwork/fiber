@@ -4708,7 +4708,7 @@ impl ChannelActorState {
 
     // Get the total liquid capacity of the channel, which will exclude the reserved ckb amount.
     // This is the capacity used for gossiping channel information.
-    pub(crate) fn get_liquid_capacity(&self) -> u128 {
+    pub fn get_liquid_capacity(&self) -> u128 {
         if self.funding_udt_type_script.is_some() {
             self.get_total_udt_amount()
         } else {
