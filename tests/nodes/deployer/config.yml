@@ -19,6 +19,7 @@ rpc:
     - info
     - invoice
     - peer
+    - watchtower
     - dev
 
 cch:

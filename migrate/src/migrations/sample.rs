@@ -1,6 +1,5 @@
 use fiber::{store::migration::Migration, Error};
 use indicatif::ProgressBar;
-use rocksdb::{prelude::*, DB};
 use std::sync::Arc;
 
 // Remember to update the version number here
@@ -19,11 +18,11 @@ impl MigrationObj {
 }
 
 impl Migration for MigrationObj {
-    fn migrate(
+    fn migrate<'a>(
         &self,
-        db: Arc<DB>,
+        db: &'a fiber::store::Store,
         _pb: Arc<dyn Fn(u64) -> ProgressBar + Send + Sync>,
-    ) -> Result<Arc<DB>, Error> {
+    ) -> Result<&'a fiber::store::Store, Error> {
         eprintln!("MigrationObj::migrate .....{}....", MIGRATION_DB_VERSION);
         Ok(db)
     }
