@@ -1,3 +1,4 @@
+use super::check_migrate;
 use super::KeyValue;
 use super::StoreKeyValue;
 use anyhow::anyhow;
@@ -18,7 +19,6 @@ use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use tracing::debug;
 use tracing::info;
-use tracing::warn;
 use wasm_bindgen::prelude::wasm_bindgen;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
@@ -31,27 +31,11 @@ pub struct Store {
     chan: CommunicationChannel,
 }
 impl Store {
-    pub fn shutdown(self) {
-        info!("Shutting down database Store..");
-        let CommunicationChannel {
-            input_i32_arr,
-            input_u8_arr,
-            output_i32_arr,
-            ..
-        } = &self.chan;
-        output_i32_arr.set_index(0, InputCommand::Waiting as i32);
-        write_command_with_payload(
-            InputCommand::Shutdown as i32,
-            (),
-            input_i32_arr,
-            input_u8_arr,
-        )
-        .unwrap();
-    }
     /// Open a store, with migration check
     pub fn new<P: AsRef<Path>>(path: P) -> Result<Self, String> {
-        warn!("fiber wasm doesn't support database migration yet");
-        Self::open_db(path.as_ref())
+        let store = Self::open_db(path.as_ref())?;
+        let store = check_migrate(path, store)?;
+        Ok(store)
     }
     /// Open a store, without migration check
     pub fn open_db(path: &Path) -> Result<Self, String> {
@@ -141,6 +125,23 @@ impl Store {
             IteratorMode::From(prefix, DbDirection::Forward),
             Box::new(|_| false),
         )
+    }
+    pub fn shutdown(self) {
+        info!("Shutting down database Store..");
+        let CommunicationChannel {
+            input_i32_arr,
+            input_u8_arr,
+            output_i32_arr,
+            ..
+        } = &self.chan;
+        output_i32_arr.set_index(0, InputCommand::Waiting as i32);
+        write_command_with_payload(
+            InputCommand::Shutdown as i32,
+            (),
+            input_i32_arr,
+            input_u8_arr,
+        )
+        .unwrap();
     }
 }
 pub struct Batch {
