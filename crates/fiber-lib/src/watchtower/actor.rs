@@ -1,3 +1,5 @@
+use std::future::Future;
+
 use anyhow::anyhow;
 use ckb_hash::{blake2b_256, new_blake2b};
 use ckb_jsonrpc_types::{Either, Status};
@@ -15,13 +17,13 @@ use ckb_types::{
     prelude::*,
 };
 use molecule::prelude::Entity;
-use ractor::{Actor, ActorProcessingErr, ActorRef};
+use ractor::{concurrency::MaybeSend, Actor, ActorProcessingErr, ActorRef};
 use secp256k1::{Message, PublicKey, Secp256k1, SecretKey};
 use tracing::{debug, error, info, trace, warn};
 
 use crate::{
     ckb::{
-        contracts::{get_cell_deps, get_script_by_contract, Contract},
+        contracts::{get_cell_deps_sync, get_script_by_contract, Contract},
         CkbConfig,
     },
     fiber::{
@@ -62,7 +64,6 @@ pub struct WatchtowerState {
     secret_key: SecretKey,
 }
 
-#[ractor::async_trait]
 impl<S> Actor for WatchtowerActor<S>
 where
     S: PreimageStore + WatchtowerStore + Send + Sync + 'static,
@@ -71,69 +72,80 @@ where
     type State = WatchtowerState;
     type Arguments = CkbConfig;
 
-    async fn pre_start(
+    fn pre_start(
         &self,
         _myself: ActorRef<Self::Msg>,
         config: Self::Arguments,
-    ) -> Result<Self::State, ActorProcessingErr> {
-        let secret_key = config.read_secret_key()?;
-        Ok(Self::State { config, secret_key })
+    ) -> impl Future<Output = Result<Self::State, ActorProcessingErr>> + MaybeSend {
+        async move {
+            let secret_key = config.read_secret_key()?;
+            Ok(Self::State { config, secret_key })
+        }
     }
 
-    async fn handle(
+    fn handle(
         &self,
         _myself: ActorRef<Self::Msg>,
         message: Self::Msg,
         state: &mut Self::State,
-    ) -> Result<(), ActorProcessingErr> {
-        match message {
-            WatchtowerMessage::NetworkServiceEvent(event) => {
-                trace!("Received NetworkServiceEvent: {:?}", event);
-                match event {
-                    NetworkServiceEvent::RemoteTxComplete(
-                        _peer_id,
-                        channel_id,
-                        funding_tx_lock,
-                        settlement_data,
-                    ) => {
-                        self.store.insert_watch_channel(
+    ) -> impl Future<Output = Result<(), ActorProcessingErr>> + MaybeSend {
+        async move {
+            match message {
+                WatchtowerMessage::NetworkServiceEvent(event) => {
+                    trace!("Received NetworkServiceEvent: {:?}", event);
+                    match event {
+                        NetworkServiceEvent::RemoteTxComplete(
+                            _peer_id,
                             channel_id,
                             funding_tx_lock,
                             settlement_data,
-                        );
-                    }
-                    NetworkServiceEvent::ChannelClosed(_peer_id, channel_id, _close_tx_hash) => {
-                        self.store.remove_watch_channel(channel_id);
-                    }
-                    NetworkServiceEvent::ChannelAbandon(channel_id) => {
-                        self.store.remove_watch_channel(channel_id);
-                    }
-                    NetworkServiceEvent::RevokeAndAckReceived(
-                        _peer_id,
-                        channel_id,
-                        revocation_data,
-                        settlement_data,
-                    ) => {
-                        self.store
-                            .update_revocation(channel_id, revocation_data, settlement_data);
-                    }
-                    NetworkServiceEvent::RemoteCommitmentSigned(
-                        _peer_id,
-                        channel_id,
-                        _commitment_tx,
-                        settlement_data,
-                    ) => {
-                        self.store
-                            .update_local_settlement(channel_id, settlement_data);
-                    }
-                    _ => {
-                        // ignore
+                        ) => {
+                            self.store.insert_watch_channel(
+                                channel_id,
+                                funding_tx_lock,
+                                settlement_data,
+                            );
+                        }
+                        NetworkServiceEvent::ChannelClosed(
+                            _peer_id,
+                            channel_id,
+                            _close_tx_hash,
+                        ) => {
+                            self.store.remove_watch_channel(channel_id);
+                        }
+                        NetworkServiceEvent::ChannelAbandon(channel_id) => {
+                            self.store.remove_watch_channel(channel_id);
+                        }
+                        NetworkServiceEvent::RevokeAndAckReceived(
+                            _peer_id,
+                            channel_id,
+                            revocation_data,
+                            settlement_data,
+                        ) => {
+                            self.store.update_revocation(
+                                channel_id,
+                                revocation_data,
+                                settlement_data,
+                            );
+                        }
+                        NetworkServiceEvent::RemoteCommitmentSigned(
+                            _peer_id,
+                            channel_id,
+                            _commitment_tx,
+                            settlement_data,
+                        ) => {
+                            self.store
+                                .update_local_settlement(channel_id, settlement_data);
+                        }
+                        _ => {
+                            // ignore
+                        }
                     }
                 }
+                WatchtowerMessage::PeriodicCheck => self.periodic_check(state),
             }
-            WatchtowerMessage::PeriodicCheck => self.periodic_check(state),
+            Ok(())
         }
-        Ok(())
     }
 }
 
@@ -348,7 +360,7 @@ fn build_revocation_tx(
 
     let mut tx_builder = Transaction::default()
         .as_advanced_builder()
-        .cell_deps(get_cell_deps(
+        .cell_deps(get_cell_deps_sync(
             vec![Contract::CommitmentLock, Contract::Secp256k1Lock],
             &revocation_data.output.type_().to_opt(),
         )?)
@@ -787,7 +799,7 @@ fn build_settlement_tx(
 
     let mut tx_builder = Transaction::default()
         .as_advanced_builder()
-        .cell_deps(get_cell_deps(
+        .cell_deps(get_cell_deps_sync(
             vec![Contract::CommitmentLock, Contract::Secp256k1Lock],
             &to_local_output.type_().to_opt(),
         )?)
@@ -1112,7 +1124,7 @@ fn build_settlement_tx_for_pending_tlcs<S: PreimageStore>(
             };
             let mut tx_builder = Transaction::default()
                 .as_advanced_builder()
-                .cell_deps(get_cell_deps(
+                .cell_deps(get_cell_deps_sync(
                     vec![Contract::CommitmentLock, Contract::Secp256k1Lock],
                     &None,
                 )?)
@@ -1234,7 +1246,7 @@ fn build_settlement_tx_for_pending_tlcs<S: PreimageStore>(
             };
             let mut tx_builder = Transaction::default()
                 .as_advanced_builder()
-                .cell_deps(get_cell_deps(
+                .cell_deps(get_cell_deps_sync(
                     vec![Contract::CommitmentLock, Contract::Secp256k1Lock],
                     &commitment_tx_cell.output.type_.map(|script| script.into()),
                 )?)

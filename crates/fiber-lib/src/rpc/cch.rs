@@ -1,5 +1,6 @@
+#[cfg(not(target_arch = "wasm32"))]
+use crate::cch::{CchMessage, CchOrderStatus, ReceiveBTCOrder};
 use crate::{
-    cch::{CchMessage, CchOrderStatus, ReceiveBTCOrder},
     fiber::{
         serde_utils::{U128Hex, U64Hex},
         types::Hash256,
@@ -8,7 +9,6 @@ use crate::{
 };
 #[cfg(not(target_arch = "wasm32"))]
 use jsonrpsee::{
-    core::async_trait,
     proc_macros::rpc,
     types::{error::CALL_EXECUTION_FAILED_CODE, ErrorObjectOwned},
 };
@@ -117,6 +117,8 @@ pub struct ReceiveBTCResponse {
 }
 
 /// RPC module for cross chain hub demonstration.
+// #[rpc(server)]
+#[cfg(not(target_arch = "wasm32"))]
 #[rpc(server)]
 trait CchRpc {
     /// Send BTC to a address.
@@ -149,9 +151,34 @@ impl CchRpcServerImpl {
 }
 
 const TIMEOUT: u64 = 1000;
-
-#[async_trait]
+#[cfg(not(target_arch = "wasm32"))]
+#[async_trait::async_trait]
 impl CchRpcServer for CchRpcServerImpl {
+    /// Send BTC to a address.
+    async fn send_btc(&self, params: SendBtcParams) -> Result<SendBTCResponse, ErrorObjectOwned> {
+        // <Self as CchRpcServerImpl>::send_btc(self, params).await
+        self.send_btc(params).await
+    }
+
+    /// Receive BTC from a payment hash.
+    async fn receive_btc(
+        &self,
+        params: ReceiveBtcParams,
+    ) -> Result<ReceiveBTCResponse, ErrorObjectOwned> {
+        self.receive_btc(params).await
+    }
+
+    /// Get receive BTC order by payment hash.
+    async fn get_receive_btc_order(
+        &self,
+        params: GetReceiveBtcOrderParams,
+    ) -> Result<ReceiveBTCResponse, ErrorObjectOwned> {
+        self.get_receive_btc_order(params).await
+    }
+}
+
+// #[async_trait::async_trait(?Send)]
+impl CchRpcServerImpl {
     async fn send_btc(&self, params: SendBtcParams) -> Result<SendBTCResponse, ErrorObjectOwned> {
         let result = call_t!(
             self.cch_actor,
