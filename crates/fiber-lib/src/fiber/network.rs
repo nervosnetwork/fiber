@@ -694,6 +694,11 @@ pub enum NetworkServiceEvent {
     // and we successfully assemble the partial signature from other party
     // to create a complete commitment transaction and a settlement transaction.
     RemoteCommitmentSigned(PeerId, Hash256, TransactionView, SettlementData),
+    // Preimage is created for the payment hash, the first Hash256 is the payment hash,
+    // and the second Hash256 is the preimage.
+    PreimageCreated(Hash256, Hash256),
+    // Preimage is removed for the payment hash.
+    PreimageRemoved(Hash256),
     // Some other debug event for assertion.
     #[cfg(debug_assertions)]
     DebugEvent(DebugEvent),

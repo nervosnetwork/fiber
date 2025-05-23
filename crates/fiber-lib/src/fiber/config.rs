@@ -280,6 +280,24 @@ pub struct FiberConfig {
         help = "The interval to check watchtower, in seconds. 0 means never check. [default: 60 (1 minute)]"
     )]
     pub watchtower_check_interval_seconds: Option<u64>,
+
+    /// The url of the standalone watchtower rpc server. [default: None]
+    #[arg(
+        name = "FIBER_STANDALONE_WATCHTOWER_RPC_URL",
+        long = "fiber-standalone-watchtower-rpc-url",
+        env,
+        help = "The url of the standalone watchtower rpc server. [default: None]"
+    )]
+    pub standalone_watchtower_rpc_url: Option<String>,
+
+    /// Disable built-in watchtower actor. [default: false]
+    #[arg(
+        name = "FIBER_DISABLE_BUILT_IN_WATCHTOWER",
+        long = "fiber-disable-built-in-watchtower",
+        env,
+        help = "Disable built-in watchtower actor. [default: false]"
+    )]
+    pub disable_built_in_watchtower: Option<bool>,
 }
 
 /// Must be a valid utf-8 string of length maximal length 32 bytes.

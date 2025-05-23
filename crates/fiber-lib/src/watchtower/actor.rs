@@ -17,7 +17,7 @@ use ckb_types::{
 use molecule::prelude::Entity;
 use ractor::{Actor, ActorProcessingErr, ActorRef};
 use secp256k1::{Message, PublicKey, Secp256k1, SecretKey};
-use tracing::{debug, error, info, trace, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::{
     ckb::{
@@ -35,7 +35,6 @@ use crate::{
     },
     invoice::PreimageStore,
     utils::tx::compute_tx_message,
-    NetworkServiceEvent,
 };
 
 use super::WatchtowerStore;
@@ -53,7 +52,12 @@ impl<S: PreimageStore + WatchtowerStore> WatchtowerActor<S> {
 }
 
 pub enum WatchtowerMessage {
-    NetworkServiceEvent(NetworkServiceEvent),
+    CreateChannel(Hash256, Script, SettlementData),
+    RemoveChannel(Hash256),
+    UpdateRevocation(Hash256, RevocationData, SettlementData),
+    UpdateLocalSettlement(Hash256, SettlementData),
+    CreatePreimage(Hash256, Hash256),
+    RemovePreimage(Hash256),
     PeriodicCheck,
 }
 
@@ -87,49 +91,32 @@ where
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
-            WatchtowerMessage::NetworkServiceEvent(event) => {
-                trace!("Received NetworkServiceEvent: {:?}", event);
-                match event {
-                    NetworkServiceEvent::RemoteTxComplete(
-                        _peer_id,
-                        channel_id,
-                        funding_tx_lock,
-                        settlement_data,
-                    ) => {
-                        self.store.insert_watch_channel(
-                            channel_id,
-                            funding_tx_lock,
-                            settlement_data,
-                        );
-                    }
-                    NetworkServiceEvent::ChannelClosed(_peer_id, channel_id, _close_tx_hash) => {
-                        self.store.remove_watch_channel(channel_id);
-                    }
-                    NetworkServiceEvent::ChannelAbandon(channel_id) => {
-                        self.store.remove_watch_channel(channel_id);
-                    }
-                    NetworkServiceEvent::RevokeAndAckReceived(
-                        _peer_id,
-                        channel_id,
-                        revocation_data,
-                        settlement_data,
-                    ) => {
-                        self.store
-                            .update_revocation(channel_id, revocation_data, settlement_data);
-                    }
-                    NetworkServiceEvent::RemoteCommitmentSigned(
-                        _peer_id,
-                        channel_id,
-                        _commitment_tx,
-                        settlement_data,
-                    ) => {
-                        self.store
-                            .update_local_settlement(channel_id, settlement_data);
-                    }
-                    _ => {
-                        // ignore
-                    }
-                }
+            WatchtowerMessage::CreateChannel(
+                channel_id,
+                funding_tx_lock,
+                remote_settlement_data,
+            ) => {
+                self.store
+                    .insert_watch_channel(channel_id, funding_tx_lock, remote_settlement_data)
+            }
+            WatchtowerMessage::RemoveChannel(channel_id) => {
+                self.store.remove_watch_channel(channel_id)
+            }
+            WatchtowerMessage::UpdateRevocation(
+                channel_id,
+                revocation_data,
+                remote_settlement_data,
+            ) => self
+                .store
+                .update_revocation(channel_id, revocation_data, remote_settlement_data),
+            WatchtowerMessage::UpdateLocalSettlement(channel_id, local_settlement_data) => self
+                .store
+                .update_local_settlement(channel_id, local_settlement_data),
+            WatchtowerMessage::CreatePreimage(payment_hash, preimage) => {
+                self.store.insert_preimage(payment_hash, preimage)
+            }
+            WatchtowerMessage::RemovePreimage(payment_hash) => {
+                self.store.remove_preimage(&payment_hash)
             }
             WatchtowerMessage::PeriodicCheck => self.periodic_check(state),
         }
