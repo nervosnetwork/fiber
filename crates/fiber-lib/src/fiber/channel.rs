@@ -2249,6 +2249,14 @@ where
                     )));
                 }
 
+                if !public
+                    && (channel_announcement_nonce.is_some() || public_channel_info.is_some())
+                {
+                    return Err(Box::new(ProcessingChannelError::InvalidParameter(
+                        "Non-public channel should not have channel announcement nonce and public channel info".to_string(),
+                    )));
+                }
+
                 let mut state = ChannelActorState::new_inbound_channel(
                     *channel_id,
                     public_channel_info,
