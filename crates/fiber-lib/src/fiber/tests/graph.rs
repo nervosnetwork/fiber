@@ -20,7 +20,7 @@ use secp256k1::{PublicKey, SecretKey, XOnlyPublicKey};
 
 use crate::gen_rand_secp256k1_keypair_tuple;
 
-use super::test_utils::TempDir;
+use crate::test_utils::TempDir;
 
 // Default tlc expiry delta used in this test environment.
 // Should be a value larger than the running duration of the unit tests.

@@ -1,20 +1,11 @@
+use super::test_utils::submit_tx;
+use crate::ckb::contracts::{get_cell_deps_by_contracts, get_script_by_contract, Contract};
+use crate::create_mock_chain_actor;
 use ckb_types::core::tx_pool::TxStatus;
 use ckb_types::core::TransactionView;
 use ckb_types::packed::{CellInput, CellOutput};
 use ckb_types::prelude::{Builder, Pack};
 use molecule::prelude::Entity;
-use ractor::{Actor, ActorRef};
-
-use super::test_utils::{submit_tx, MockChainActor};
-use crate::ckb::actor::CkbChainMessage;
-use crate::ckb::contracts::{get_cell_deps_by_contracts, get_script_by_contract, Contract};
-
-pub async fn create_mock_chain_actor() -> ActorRef<CkbChainMessage> {
-    Actor::spawn(None, MockChainActor::new(), None)
-        .await
-        .expect("start mock chain actor")
-        .0
-}
 
 #[tokio::test]
 async fn test_submit_empty_tx() {

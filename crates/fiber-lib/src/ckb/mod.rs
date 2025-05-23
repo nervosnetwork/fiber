@@ -16,5 +16,5 @@ pub use tx_tracing_actor::{CkbTxTracer, CkbTxTracingMask, CkbTxTracingResult};
 pub mod config;
 pub mod contracts;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "bench"))]
 pub mod tests;
