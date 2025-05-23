@@ -19,14 +19,11 @@
 
 1. Download fnn
 
-   This is just a specific example provided for your reference. Please visit the [releases page](https://github.com/nervosnetwork/fiber/releases) to download and use the latest version of fnn.
+   Please visit the [releases page](https://github.com/nervosnetwork/fiber/releases) to download and use the latest version of fnn.
 
-   Example for macOS (Apple silicon):
-   
    ```bash
    mkdir tmp && cd tmp
-   wget https://github.com/nervosnetwork/fiber/releases/download/v0.5.1/fnn_v0.5.1-x86_64-darwin-portable.tar.gz
-   tar xzvf fnn_v0.5.1-x86_64-darwin-portable.tar.gz
+   tar xzvf fnn-latest.tar.gz
    ```
 
 
