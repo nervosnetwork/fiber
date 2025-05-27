@@ -1062,6 +1062,14 @@ where
             ));
         }
 
+        if amount.checked_add(max_fee_amount.unwrap_or(0)).is_none() {
+            return Err(PathFindError::Amount(format!(
+                "amount {} + max_fee_amount {} overflow",
+                amount,
+                max_fee_amount.unwrap_or(0)
+            )));
+        }
+
         if source == target && !allow_self {
             return Err(PathFindError::PathFind(
                 "allow_self_payment is not enable, can not pay self".to_string(),
