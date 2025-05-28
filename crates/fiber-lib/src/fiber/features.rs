@@ -86,6 +86,14 @@ impl FeatureVector {
         Self { inner: vec![] }
     }
 
+    pub fn from(bytes: Vec<u8>) -> Self {
+        Self { inner: bytes }
+    }
+
+    pub fn bytes(&self) -> Vec<u8> {
+        self.inner.clone()
+    }
+
     fn index(bit: FeatureBit, len: usize) -> Option<(usize, u16)> {
         let byte_idx = (bit / 8) as usize;
         let bit_idx = bit % 8;

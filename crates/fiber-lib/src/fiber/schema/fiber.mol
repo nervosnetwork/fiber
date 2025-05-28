@@ -20,6 +20,10 @@ table CustomRecords {
     data: CustomRecordData,
 }
 
+table Init {
+    features: Bytes,
+}
+
 table OpenChannel {
     chain_hash:                  Byte32,
     channel_id:                  Byte32,
@@ -195,6 +199,7 @@ table UdtArgInfo {
 vector UdtCfgInfos <UdtArgInfo>;
 
 union FiberMessage {
+    Init,
     OpenChannel,
     AcceptChannel,
     TxSignatures,

@@ -64,8 +64,8 @@ use super::graph::{
 use super::key::blake2b_hash_with_salt;
 use super::types::{
     BroadcastMessageWithTimestamp, EcdsaSignature, FiberMessage, ForwardTlcResult, GossipMessage,
-    Hash256, NodeAnnouncement, OpenChannel, PaymentHopData, Privkey, Pubkey, RemoveTlcFulfill,
-    RemoveTlcReason, TlcErr, TlcErrData, TlcErrorCode,
+    Hash256, Init, NodeAnnouncement, OpenChannel, PaymentHopData, Privkey, Pubkey,
+    RemoveTlcFulfill, RemoveTlcReason, TlcErr, TlcErrData, TlcErrorCode,
 };
 use super::{
     FiberConfig, InFlightCkbTxActor, InFlightCkbTxActorArguments, InFlightCkbTxActorMessage,
@@ -839,11 +839,15 @@ where
 
     pub async fn handle_peer_message(
         &self,
+        myself: ActorRef<NetworkActorMessage>,
         state: &mut NetworkActorState<S>,
         peer_id: PeerId,
         message: FiberMessage,
     ) -> crate::Result<()> {
         match message {
+            FiberMessage::Init(init_message) => {
+                state.on_init_msg(myself, peer_id, init_message).await?;
+            }
             // We should process OpenChannel message here because there is no channel corresponding
             // to the channel id in the message yet.
             FiberMessage::ChannelInitialization(open_channel) => {
@@ -1015,7 +1019,8 @@ where
                 }
             }
             NetworkActorEvent::FiberMessage(peer_id, message) => {
-                self.handle_peer_message(state, peer_id, message).await?
+                self.handle_peer_message(myself, state, peer_id, message)
+                    .await?
             }
             NetworkActorEvent::FundingTransactionPending(transaction, outpoint, channel_id) => {
                 state
@@ -2225,6 +2230,7 @@ pub struct NetworkActorState<S> {
     // the pre_start function.
     control: ServiceAsyncControl,
     peer_session_map: HashMap<PeerId, (SessionId, SessionType)>,
+    peer_features_map: HashMap<PeerId, FeatureVector>,
     session_channels_map: HashMap<SessionId, HashSet<Hash256>>,
     channels: HashMap<Hash256, ActorRef<ChannelActorMessage>>,
     ckb_txs_in_flight: HashMap<Hash256, ActorRef<InFlightCkbTxActorMessage>>,
@@ -2438,6 +2444,16 @@ where
             max_tlc_value_in_flight,
             max_tlc_number_in_flight,
         } = open_channel;
+
+        if let Some(_peer_feature) = self.peer_features_map.get(&peer_id) {
+            // check peer features
+        } else {
+            return Err(ProcessingChannelError::InvalidParameter(format!(
+                "Peer {:?}'s feature not found, waiting for peer to send Init message",
+                &peer_id
+            )));
+        }
+
         let remote_pubkey =
             self.get_peer_pubkey(&peer_id)
                 .ok_or(ProcessingChannelError::InvalidParameter(format!(
@@ -3053,6 +3069,16 @@ where
             );
         }
 
+        // send Init message to the peer
+        self.send_fiber_message_to_peer(
+            remote_peer_id,
+            FiberMessage::Init(Init {
+                features: self.features.clone(),
+            }),
+        )
+        .await
+        .expect("send Init message to peer must succeed");
+
         for channel_id in store.get_active_channel_ids_by_peer(remote_peer_id) {
             if let Err(e) = self.reestablish_channel(remote_peer_id, channel_id).await {
                 error!("Failed to reestablish channel {:x}: {:?}", &channel_id, &e);
@@ -3223,6 +3249,26 @@ where
             self.pending_channels.remove(outpoint);
         }
         self.outpoint_channel_map.retain(|_, id| *id != channel_id);
+    }
+
+    pub async fn on_init_msg(
+        &mut self,
+        myself: ActorRef<NetworkActorMessage>,
+        peer_id: PeerId,
+        init_msg: Init,
+    ) -> Result<(), ProcessingChannelError> {
+        if !self.is_connected(&peer_id) {
+            return Err(ProcessingChannelError::InvalidParameter(format!(
+                "Peer {:?} is not connected",
+                &peer_id
+            )));
+        }
+
+        self.peer_features_map
+            .insert(peer_id.clone(), init_msg.features.clone());
+
+        debug_event!(myself, "PeerInit");
+        Ok(())
     }
 
     pub async fn on_open_channel_msg(
@@ -3546,6 +3592,7 @@ where
             network: myself.clone(),
             control,
             peer_session_map: Default::default(),
+            peer_features_map: Default::default(),
             session_channels_map: Default::default(),
             channels: Default::default(),
             ckb_txs_in_flight: Default::default(),

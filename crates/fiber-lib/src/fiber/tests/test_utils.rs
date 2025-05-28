@@ -1296,7 +1296,7 @@ impl NetworkNode {
     pub async fn new_interconnected_nodes(n: usize, enable_rpc: bool) -> Vec<Self> {
         let mut nodes: Vec<NetworkNode> = Vec::with_capacity(n);
         for i in 0..n {
-            let new = Self::new_with_config(
+            let mut new = Self::new_with_config(
                 NetworkNodeConfigBuilder::new()
                     .node_name(Some(format!("node-{}", i)))
                     .base_dir_prefix(&format!("test-fnn-node-{}-", i))
@@ -1305,7 +1305,7 @@ impl NetworkNode {
             )
             .await;
             for node in nodes.iter_mut() {
-                node.connect_to(&new).await;
+                node.connect_to(&mut new).await;
             }
             nodes.push(new);
         }
@@ -1351,9 +1351,9 @@ impl NetworkNode {
     ) -> Vec<Self> {
         let mut nodes: Vec<NetworkNode> = Vec::with_capacity(n);
         for i in 0..n {
-            let new = Self::new_with_config(config_gen(i)).await;
+            let mut new = Self::new_with_config(config_gen(i)).await;
             for node in nodes.iter_mut() {
-                node.connect_to(&new).await;
+                node.connect_to(&mut new).await;
             }
             nodes.push(new);
         }
@@ -1374,13 +1374,15 @@ impl NetworkNode {
             .expect("self alive");
     }
 
-    pub async fn connect_to(&mut self, other: &Self) {
+    pub async fn connect_to(&mut self, other: &mut Self) {
         self.connect_to_nonblocking(other).await;
         let peer_id = &other.peer_id;
         self.expect_event(
             |event| matches!(event, NetworkServiceEvent::PeerConnected(id, _addr) if id == peer_id),
         )
         .await;
+        self.expect_debug_event("PeerInit").await;
+        other.expect_debug_event("PeerInit").await;
     }
 
     pub async fn expect_to_process_event<F, T>(&mut self, event_processor: F) -> T
@@ -1527,8 +1529,8 @@ impl NetworkNode {
 #[tokio::test]
 async fn test_connect_to_other_node() {
     let mut node_a = NetworkNode::new().await;
-    let node_b = NetworkNode::new().await;
-    node_a.connect_to(&node_b).await;
+    let mut node_b = NetworkNode::new().await;
+    node_a.connect_to(&mut node_b).await;
 }
 
 #[tokio::test]
