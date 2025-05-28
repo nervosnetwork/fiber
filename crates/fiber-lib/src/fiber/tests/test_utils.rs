@@ -370,12 +370,11 @@ impl ChannelParameters {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn establish_channel_between_nodes(
+pub(crate) async fn create_channel_with_nodes(
     node_a: &mut NetworkNode,
     node_b: &mut NetworkNode,
     params: ChannelParameters,
-) -> (Hash256, Hash256) {
+) -> Result<(Hash256, Hash256), String> {
     let message = |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
             OpenChannelCommand {
@@ -398,7 +397,7 @@ pub(crate) async fn establish_channel_between_nodes(
     };
     let open_channel_result = call!(node_a.network_actor, message)
         .expect("node_a alive")
-        .expect("open channel success");
+        .map_err(|e| e.to_string())?;
 
     node_b
         .expect_event(|event| match event {
@@ -411,10 +410,6 @@ pub(crate) async fn establish_channel_between_nodes(
         })
         .await;
 
-    debug!(
-        "haha got ChannelPendingToBeAccepted: {:?}",
-        open_channel_result
-    );
     let message = |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::AcceptChannel(
             AcceptChannelCommand {
@@ -432,7 +427,8 @@ pub(crate) async fn establish_channel_between_nodes(
     };
     let accept_channel_result = call!(node_b.network_actor, message)
         .expect("node_b alive")
-        .expect("accept channel success");
+        .map_err(|e| e.to_string())?;
+
     let new_channel_id = accept_channel_result.new_channel_id;
 
     let funding_tx_outpoint = node_a
@@ -468,8 +464,17 @@ pub(crate) async fn establish_channel_between_nodes(
     let funding_tx_hash = funding_tx_outpoint.tx_hash().into();
     node_a.add_channel_tx(new_channel_id, funding_tx_hash);
     node_b.add_channel_tx(new_channel_id, funding_tx_hash);
+    Ok((new_channel_id, funding_tx_hash))
+}
 
-    (new_channel_id, funding_tx_hash)
+pub(crate) async fn establish_channel_between_nodes(
+    node_a: &mut NetworkNode,
+    node_b: &mut NetworkNode,
+    params: ChannelParameters,
+) -> (Hash256, Hash256) {
+    create_channel_with_nodes(node_a, node_b, params)
+        .await
+        .expect("create channel between nodes")
 }
 
 pub(crate) async fn create_nodes_with_established_channel(
