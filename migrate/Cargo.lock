@@ -2025,6 +2025,7 @@ dependencies = [
  "nom",
  "num_enum",
  "once_cell",
+ "paste",
  "ractor 0.15.3",
  "rand 0.8.5",
  "regex",

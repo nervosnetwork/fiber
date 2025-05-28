@@ -55,6 +55,7 @@ use super::channel::{
     MAX_TLC_NUMBER_IN_FLIGHT, MIN_COMMITMENT_DELAY_EPOCHS, SYS_MAX_TLC_NUMBER_IN_FLIGHT,
 };
 use super::config::{AnnouncedNodeName, MIN_TLC_EXPIRY_DELTA};
+use super::features::FeatureVector;
 use super::fee::calculate_commitment_tx_fee;
 use super::gossip::{GossipActorMessage, GossipMessageStore, GossipMessageUpdates};
 use super::graph::{
@@ -2252,6 +2253,9 @@ pub struct NetworkActorState<S> {
     channel_subscribers: ChannelSubscribers,
     max_inbound_peers: usize,
     min_outbound_peers: usize,
+
+    // The features of the node, used to indicate the capabilities of the node.
+    features: FeatureVector,
 }
 
 #[serde_as]
@@ -3526,6 +3530,7 @@ where
         }
 
         let chain_actor = self.chain_actor.clone();
+        let features = config.gen_node_features();
 
         let mut state = NetworkActorState {
             store: self.store.clone(),
@@ -3558,6 +3563,7 @@ where
             channel_subscribers,
             max_inbound_peers: config.max_inbound_peers(),
             min_outbound_peers: config.min_outbound_peers(),
+            features,
         };
 
         let node_announcement = state.get_or_create_new_node_announcement_message();
