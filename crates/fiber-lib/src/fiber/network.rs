@@ -3051,7 +3051,6 @@ where
         remote_pubkey: Pubkey,
         session: &SessionContext,
     ) {
-        let store = self.store.clone();
         self.peer_session_map.insert(
             remote_peer_id.clone(),
             Peer {
@@ -3094,12 +3093,6 @@ where
         )
         .await
         .expect("send Init message to peer must succeed");
-
-        for channel_id in store.get_active_channel_ids_by_peer(remote_peer_id) {
-            if let Err(e) = self.reestablish_channel(remote_peer_id, channel_id).await {
-                error!("Failed to reestablish channel {:x}: {:?}", &channel_id, &e);
-            }
-        }
     }
 
     fn on_peer_disconnected(&mut self, id: &PeerId) {
@@ -3283,6 +3276,12 @@ where
         if let Some(info) = self.peer_session_map.get_mut(&peer_id) {
             info.features = Some(init_msg.features);
             debug_event!(myself, "PeerInit");
+
+            for channel_id in self.store.get_active_channel_ids_by_peer(&peer_id) {
+                if let Err(e) = self.reestablish_channel(&peer_id, channel_id).await {
+                    error!("Failed to reestablish channel {:x}: {:?}", &channel_id, &e);
+                }
+            }
         } else {
             return Err(ProcessingChannelError::InvalidParameter(format!(
                 "Peer {:?} session not found",

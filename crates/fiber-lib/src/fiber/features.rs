@@ -7,16 +7,14 @@ pub type FeatureBit = u16;
 #[macro_export]
 macro_rules! declare_feature_bits_and_methods {
     (
-        $( pair $name:ident, $odd:expr; )*
-        $( single $sname:ident, $sbit:expr; )*
+        $( $name:ident, $odd:expr; )*
     ) => {
         paste! {
             $(
-                pub const [<$name _REQUIRED>]: u16 = $odd;
-                pub const [<$name _OPTIONAL>]: u16 = $odd - 1;
-            )*
-            $(
-                pub const $sname: u16 = $sbit;
+                /// Even bit, the bit used to signify that the feature is required.
+                pub const [<$name _REQUIRED>]: u16 = $odd - 1;
+                /// Odd bit, the bit used to signify that the feature is optional.
+                pub const [<$name _OPTIONAL>]: u16 = $odd;
             )*
 
             pub fn feature_bit_name(bit: FeatureBit) -> &'static str {
@@ -24,9 +22,6 @@ macro_rules! declare_feature_bits_and_methods {
                     $(
                         [<$name _REQUIRED>] => stringify!([<$name _REQUIRED>]),
                         [<$name _OPTIONAL>] => stringify!([<$name _OPTIONAL>]),
-                    )*
-                    $(
-                        $sname => stringify!($sname),
                     )*
                     _ => "Unknown Feature",
                 }
@@ -53,32 +48,45 @@ macro_rules! declare_feature_bits_and_methods {
                         self.supports_feature([<$name _OPTIONAL>])
                     }
                 )*
-                $(
-                    pub fn [<set_ $sname:lower>](&mut self) {
-                        self.set_feature($sname);
-                    }
-                    pub fn [<unset_ $sname:lower>](&mut self) {
-                        self.unset_feature($sname);
-                    }
-                )*
             }
         }
     };
 }
 
+/// Feature bits and methods for the Fiber protocol
+/// Pair bits:
+///   - Each pair consists of a required and an optional bit.
+///   - Even bits are used to signify that the feature is required,
+///   - Odd bits are used to signify that the feature is optional.
+///   - Ideally, a feature can be introduced as optional (odd bits) and later upgraded to be compulsory (even bits)
 pub mod feature_bits {
     use super::*;
     declare_feature_bits_and_methods! {
-        pair GOSSIP_QUERIES, 1;
-        pair BASIC_MPP, 3;
-        pair TLV_ONION_PAYLOAD, 5;
+        GOSSIP_QUERIES, 1;
+        BASIC_MPP, 3;
+        TLV_ONION_PAYLOAD, 5;
+        CHANNEL_REBALANCE, 9;
         // more features ...
     }
 }
 
-#[derive(Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FeatureVector {
     inner: Vec<u8>,
+}
+
+impl Default for FeatureVector {
+    fn default() -> Self {
+        let mut feature = Self::new();
+        feature.set_gossip_queries_required();
+        feature.set_basic_mpp_optional();
+        feature.set_tlv_onion_payload_required();
+
+        // set other default features here
+        // ...
+
+        feature
+    }
 }
 
 impl FeatureVector {
@@ -162,6 +170,17 @@ impl FeatureVector {
 
     pub fn supports_feature(&self, bit: FeatureBit) -> bool {
         self.is_set(bit) || self.is_set(bit ^ 1)
+    }
+
+    pub fn compatible_with(&self, other: &Self) -> bool {
+        if self
+            .enabled_features()
+            .iter()
+            .any(|&bit| self.requires_feature(bit) && !other.supports_feature(bit))
+        {
+            return false;
+        }
+        true
     }
 }
 

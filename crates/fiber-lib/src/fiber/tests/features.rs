@@ -5,7 +5,7 @@ use crate::fiber::features::{
 
 #[test]
 fn test_feature_bits() {
-    let mut vector = FeatureVector::default();
+    let mut vector = FeatureVector::new();
 
     assert!(vector.is_empty());
     // Set some feature bits
@@ -31,7 +31,7 @@ fn test_feature_bits() {
 
 #[test]
 fn test_feature_support_and_requires() {
-    let mut vector = FeatureVector::default();
+    let mut vector = FeatureVector::new();
 
     vector.set_basic_mpp_optional();
 
@@ -53,7 +53,7 @@ fn test_feature_support_and_requires() {
 
 #[test]
 fn test_feature_vector_names() {
-    let mut vector = FeatureVector::default();
+    let mut vector = FeatureVector::new();
     let debug_str = format!("{:?}", vector);
     assert!(debug_str.contains("FeatureVector"));
     assert!(debug_str.contains("features"));
@@ -67,8 +67,8 @@ fn test_feature_vector_names() {
     assert_eq!(
         vector.enabled_features_names(),
         [
-            "BASIC_MPP_OPTIONAL".to_string(),
             "BASIC_MPP_REQUIRED".to_string(),
+            "BASIC_MPP_OPTIONAL".to_string(),
         ]
     );
 
@@ -77,18 +77,18 @@ fn test_feature_vector_names() {
         vector.enabled_features_names(),
         [
             "GOSSIP_QUERIES_REQUIRED".to_string(),
-            "BASIC_MPP_OPTIONAL".to_string(),
             "BASIC_MPP_REQUIRED".to_string(),
+            "BASIC_MPP_OPTIONAL".to_string(),
         ]
     );
     vector.set_gossip_queries_optional();
     assert_eq!(
         vector.enabled_features_names(),
         [
-            "GOSSIP_QUERIES_OPTIONAL".to_string(),
             "GOSSIP_QUERIES_REQUIRED".to_string(),
-            "BASIC_MPP_OPTIONAL".to_string(),
+            "GOSSIP_QUERIES_OPTIONAL".to_string(),
             "BASIC_MPP_REQUIRED".to_string(),
+            "BASIC_MPP_OPTIONAL".to_string(),
         ]
     );
 
@@ -97,15 +97,15 @@ fn test_feature_vector_names() {
         vector.enabled_features_names(),
         [
             "GOSSIP_QUERIES_OPTIONAL".to_string(),
-            "BASIC_MPP_OPTIONAL".to_string(),
             "BASIC_MPP_REQUIRED".to_string(),
+            "BASIC_MPP_OPTIONAL".to_string(),
         ]
     );
 }
 
 #[test]
 fn test_serialize() {
-    let mut vector = FeatureVector::default();
+    let mut vector = FeatureVector::new();
     vector.set_basic_mpp_optional();
     vector.set_basic_mpp_required();
     vector.set_gossip_queries_required();
@@ -116,4 +116,12 @@ fn test_serialize() {
         bincode::deserialize(&serialized).expect("Failed to deserialize FeatureVector");
 
     assert_eq!(vector, deserialized);
+}
+
+#[test]
+fn test_feature_default() {
+    let vector = FeatureVector::default();
+    assert!(vector.requires_gossip_queries());
+    assert!(vector.supports_basic_mpp());
+    assert!(!vector.requires_basic_mpp());
 }
