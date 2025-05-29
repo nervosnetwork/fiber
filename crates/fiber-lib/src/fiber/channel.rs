@@ -2287,13 +2287,13 @@ where
                 );
                 state.check_accept_channel_parameters()?;
 
-                let commitment_number = INITIAL_COMMITMENT_NUMBER;
-
                 let channel_announcement_nonce = if public {
                     Some(state.get_channel_announcement_musig2_pubnonce())
                 } else {
                     None
                 };
+
+                let commitment_number = INITIAL_COMMITMENT_NUMBER;
                 let accept_channel = AcceptChannel {
                     channel_id: *channel_id,
                     funding_amount: local_funding_amount,
@@ -2313,14 +2313,12 @@ where
                     next_local_nonce: state.get_local_musig2_pubnonce(),
                 };
 
-                let command = FiberMessageWithPeerId::new(
-                    peer_id,
-                    FiberMessage::accept_channel(accept_channel),
-                );
-                // TODO: maybe we should not use try_send here.
                 self.network
                     .send_message(NetworkActorMessage::new_command(
-                        NetworkActorCommand::SendFiberMessage(command),
+                        NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
+                            peer_id,
+                            FiberMessage::accept_channel(accept_channel),
+                        )),
                     ))
                     .expect(ASSUME_NETWORK_ACTOR_ALIVE);
 
