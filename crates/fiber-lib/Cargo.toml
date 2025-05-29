@@ -30,7 +30,10 @@ hex = "0.4.3"
 bitflags = { version = "2.5.0", features = ["serde"] }
 secp256k1 = { version = "0.28.0", features = ["serde", "recovery", "rand-std"] }
 musig2 = { version = "0.0.11", features = ["secp256k1", "serde"] }
-ractor = { version = "0.15.3" }
+# ractor = { version = "0.15.3" }
+ractor = { "git" = "https://github.com/officeyutong/ractor", branch = "use-non-send-future-in-wasm", features = [
+    "async-trait",
+] }
 arcode = "0.2.4"
 nom = "7.1.3"
 regex = "1.10.5"

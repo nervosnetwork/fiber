@@ -1,13 +1,8 @@
-use std::future::Future;
-
 use ckb_types::{
     core::{tx_pool::TxStatus, TransactionView},
     packed::OutPoint,
 };
-use ractor::{
-    concurrency::{Duration, MaybeSend},
-    Actor, ActorProcessingErr, ActorRef,
-};
+use ractor::{concurrency::Duration, Actor, ActorProcessingErr, ActorRef};
 use tentacle::secio::PeerId;
 
 use crate::{
@@ -66,70 +61,64 @@ pub enum InFlightCkbTxActorMessage {
     Internal(InternalMessage),
 }
 
+#[cfg_attr(target_arch="wasm32",async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl Actor for InFlightCkbTxActor {
     type Msg = InFlightCkbTxActorMessage;
     type State = InFlightCkbTxActorState;
     type Arguments = InFlightCkbTxActorArguments;
 
-    fn pre_start(
+    async fn pre_start(
         &self,
         _myself: ActorRef<Self::Msg>,
         args: Self::Arguments,
-    ) -> impl Future<Output = Result<Self::State, ActorProcessingErr>> + MaybeSend {
-        async move {
-            Ok(InFlightCkbTxActorState {
-                transaction: args.transaction,
-                result: None,
-            })
-        }
+    ) -> Result<Self::State, ActorProcessingErr> {
+        Ok(InFlightCkbTxActorState {
+            transaction: args.transaction,
+            result: None,
+        })
     }
 
-    fn post_start(
+    async fn post_start(
         &self,
         myself: ActorRef<Self::Msg>,
         _state: &mut Self::State,
-    ) -> impl Future<Output = Result<(), ActorProcessingErr>> + MaybeSend {
-        async move {
-            myself
-                .send_message(InFlightCkbTxActorMessage::Internal(InternalMessage::Start))
-                .map_err(Into::into)
-        }
+    ) -> Result<(), ActorProcessingErr> {
+        myself
+            .send_message(InFlightCkbTxActorMessage::Internal(InternalMessage::Start))
+            .map_err(Into::into)
     }
 
-    fn handle(
+    async fn handle(
         &self,
         myself: ActorRef<Self::Msg>,
         message: Self::Msg,
         state: &mut Self::State,
-    ) -> impl Future<Output = Result<(), ActorProcessingErr>> + MaybeSend {
-        async move {
-            match message {
-                InFlightCkbTxActorMessage::Internal(InternalMessage::Start) => {
-                    self.start(myself, state).await
-                }
-                InFlightCkbTxActorMessage::Internal(InternalMessage::SendTx) => {
-                    self.send_tx(myself, state).await
-                }
-                InFlightCkbTxActorMessage::Internal(InternalMessage::ReportTracingResult(
-                    result,
-                )) => {
-                    state.result = Some(result.clone());
-                    self.report_tracing_result(myself, result).await
-                }
-                InFlightCkbTxActorMessage::SendTx(tx) => {
-                    let tx_hash: Hash256 = tx.hash().into();
-                    // ignore if the tx has does not match
-                    if tx_hash == self.tx_hash {
-                        let should_send_tx = state.transaction.is_none();
-                        state.transaction = Some(tx);
-                        if should_send_tx {
-                            self.send_tx_interval(myself).await?;
-                        }
-                    } else {
-                        tracing::error!("expected tx hash {}, got {}", self.tx_hash, tx_hash);
+    ) -> Result<(), ActorProcessingErr> {
+        match message {
+            InFlightCkbTxActorMessage::Internal(InternalMessage::Start) => {
+                self.start(myself, state).await
+            }
+            InFlightCkbTxActorMessage::Internal(InternalMessage::SendTx) => {
+                self.send_tx(myself, state).await
+            }
+            InFlightCkbTxActorMessage::Internal(InternalMessage::ReportTracingResult(result)) => {
+                state.result = Some(result.clone());
+                self.report_tracing_result(myself, result).await
+            }
+            InFlightCkbTxActorMessage::SendTx(tx) => {
+                let tx_hash: Hash256 = tx.hash().into();
+                // ignore if the tx has does not match
+                if tx_hash == self.tx_hash {
+                    let should_send_tx = state.transaction.is_none();
+                    state.transaction = Some(tx);
+                    if should_send_tx {
+                        self.send_tx_interval(myself).await?;
                     }
-                    Ok(())
+                } else {
+                    tracing::error!("expected tx hash {}, got {}", self.tx_hash, tx_hash);
                 }
+                Ok(())
             }
         }
     }

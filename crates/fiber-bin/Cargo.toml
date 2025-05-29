@@ -11,7 +11,9 @@ path = "src/main.rs"
 fnn = { path = "../fiber-lib" }
 ckb-chain-spec = "0.200.0"
 ckb-resource = "0.200.0"
-ractor = { version = "0.15.3"}
+ractor = { "git" = "https://github.com/officeyutong/ractor", branch = "use-non-send-future-in-wasm", features = [
+    "async-trait",
+] }
 tokio = { version = "1", features = [
     "io-util",
     "macros",

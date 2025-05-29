@@ -1,4 +1,4 @@
-use std::{collections::HashSet, future::Future, sync::Arc};
+use std::{collections::HashSet, sync::Arc};
 
 use ckb_types::{
     core::{tx_pool::TxStatus, TransactionView},
@@ -6,10 +6,7 @@ use ckb_types::{
     prelude::{Builder, Entity},
 };
 use molecule::prelude::Byte;
-use ractor::{
-    concurrency::{Duration, MaybeSend},
-    Actor, ActorProcessingErr, ActorRef,
-};
+use ractor::{concurrency::Duration, Actor, ActorProcessingErr, ActorRef};
 use tentacle::secio::PeerId;
 use tokio::sync::RwLock;
 
@@ -135,42 +132,42 @@ enum SubscriberMessage {
     Update(GossipMessageUpdates),
 }
 
+#[cfg_attr(target_arch="wasm32",async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl Actor for Subscriber {
     type Msg = SubscriberMessage;
     type State = ();
     type Arguments = ();
 
-    fn pre_start(
+    async fn pre_start(
         &self,
         _myself: ActorRef<Self::Msg>,
         _args: Self::Arguments,
-    ) -> impl Future<Output = Result<Self::State, ActorProcessingErr>> + MaybeSend {
-        async move { Ok(()) }
+    ) -> Result<Self::State, ActorProcessingErr> {
+        Ok(())
     }
 
-    fn post_stop(
+    async fn post_stop(
         &self,
         _myself: ActorRef<Self::Msg>,
         _state: &mut Self::State,
-    ) -> impl Future<Output = Result<(), ActorProcessingErr>> + MaybeSend {
-        async move { Ok(()) }
+    ) -> Result<(), ActorProcessingErr> {
+        Ok(())
     }
 
-    fn handle(
+    async fn handle(
         &self,
         _myself: ActorRef<Self::Msg>,
         message: Self::Msg,
         _state: &mut Self::State,
-    ) -> impl Future<Output = Result<(), ActorProcessingErr>> + MaybeSend {
-        async move {
-            match message {
-                SubscriberMessage::Update(updates) => {
-                    let mut messages = self.messages.write().await;
-                    messages.extend(updates.messages);
-                }
+    ) -> Result<(), ActorProcessingErr> {
+        match message {
+            SubscriberMessage::Update(updates) => {
+                let mut messages = self.messages.write().await;
+                messages.extend(updates.messages);
             }
-            Ok(())
         }
+        Ok(())
     }
 }
 

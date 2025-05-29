@@ -3733,18 +3733,28 @@ checksum = "74765f6d916ee2faa39bc8e68e4f3ed8949b48cccdac59983d287a7cb71ce9c5"
 [[package]]
 name = "ractor"
 version = "0.15.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "164cbdac94cb8f5c3bbb031f959643619e7e74f13d94381d69ba6161640f063e"
+source = "git+https://github.com/officeyutong/ractor?branch=use-non-send-future-in-wasm#dfb3a909c25d17431736f91ea369e18a98dbb98b"
 dependencies = [
+ "async-trait",
  "bon",
  "dashmap 6.1.0",
  "futures",
  "once_cell",
+ "ractor_async_trait_decl",
  "strum",
  "tokio",
  "tokio_with_wasm",
  "tracing",
  "web-time",
+]
+
+[[package]]
+name = "ractor_async_trait_decl"
+version = "0.15.6"
+source = "git+https://github.com/officeyutong/ractor?branch=use-non-send-future-in-wasm#dfb3a909c25d17431736f91ea369e18a98dbb98b"
+dependencies = [
+ "quote",
+ "syn 2.0.101",
 ]
 
 [[package]]
