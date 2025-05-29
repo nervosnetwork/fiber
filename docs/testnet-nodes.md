@@ -66,7 +66,7 @@
 
 5. Start the node A
 
-   You need to set a `FIBER_SECRET_KEY_PASSWORD` environment variable in the startup command to encrypt your wallet private key file. In this example, I used '123', but you can choose any password.
+   You need to set a `FIBER_SECRET_KEY_PASSWORD` environment variable in the startup command to encrypt your wallet private key file. I used `123` here for demo purposes, but I recommend using a strong password.
    
    ```bash
    FIBER_SECRET_KEY_PASSWORD='123' RUST_LOG=info ./fnn -c testnet-fnn/nodeA/config.yml -d testnet-fnn/nodeA > testnet-fnn/nodeA/a.log 2>&1 &
