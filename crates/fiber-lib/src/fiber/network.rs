@@ -2229,8 +2229,7 @@ pub struct NetworkActorState<S> {
     // This immutable attribute is placed here because we need to create it in
     // the pre_start function.
     control: ServiceAsyncControl,
-    peer_session_map: HashMap<PeerId, (SessionId, SessionType)>,
-    peer_features_map: HashMap<PeerId, FeatureVector>,
+    peer_session_map: HashMap<PeerId, Peer>,
     session_channels_map: HashMap<SessionId, HashSet<Hash256>>,
     channels: HashMap<Hash256, ActorRef<ChannelActorMessage>>,
     ckb_txs_in_flight: HashMap<Hash256, ActorRef<InFlightCkbTxActorMessage>>,
@@ -2262,6 +2261,12 @@ pub struct NetworkActorState<S> {
 
     // The features of the node, used to indicate the capabilities of the node.
     features: FeatureVector,
+}
+
+pub(crate) struct Peer {
+    pub session_id: SessionId,
+    pub session_type: SessionType,
+    pub features: Option<FeatureVector>,
 }
 
 #[serde_as]
@@ -2445,8 +2450,13 @@ where
             max_tlc_number_in_flight,
         } = open_channel;
 
-        if let Some(_peer_feature) = self.peer_features_map.get(&peer_id) {
+        if let Some(Peer {
+            features: Some(peer_features),
+            ..
+        }) = self.peer_session_map.get(&peer_id)
+        {
             // check peer features
+            eprintln!("peer features: {:?}", peer_features);
         } else {
             return Err(ProcessingChannelError::InvalidParameter(format!(
                 "Peer {:?}'s feature not found, waiting for peer to send Init message",
@@ -2761,20 +2771,20 @@ where
     }
 
     fn get_peer_session(&self, peer_id: &PeerId) -> Option<SessionId> {
-        self.peer_session_map.get(peer_id).map(|s| s.0)
+        self.peer_session_map.get(peer_id).map(|s| s.session_id)
     }
 
     fn inbound_peer_sessions(&self) -> Vec<SessionId> {
         self.peer_session_map
             .values()
-            .filter_map(|s| (s.1 == SessionType::Inbound).then_some(s.0))
+            .filter_map(|s| (s.session_type == SessionType::Inbound).then_some(s.session_id))
             .collect()
     }
 
     fn num_of_outbound_peers(&self) -> usize {
         self.peer_session_map
             .values()
-            .filter(|s| s.1 == SessionType::Outbound)
+            .filter(|s| s.session_type == SessionType::Outbound)
             .count()
     }
 
@@ -2795,7 +2805,7 @@ where
         self.peer_session_map
             .values()
             .take(n)
-            .map(|s| s.0)
+            .map(|s| s.session_id)
             .collect()
     }
 
@@ -3042,8 +3052,14 @@ where
         session: &SessionContext,
     ) {
         let store = self.store.clone();
-        self.peer_session_map
-            .insert(remote_peer_id.clone(), (session.id, session.ty));
+        self.peer_session_map.insert(
+            remote_peer_id.clone(),
+            Peer {
+                session_id: session.id,
+                session_type: session.ty,
+                features: None,
+            },
+        );
         if self
             .state_to_be_persisted
             .save_peer_pubkey(remote_peer_id.clone(), remote_pubkey)
@@ -3087,8 +3103,8 @@ where
     }
 
     fn on_peer_disconnected(&mut self, id: &PeerId) {
-        if let Some(session) = self.peer_session_map.remove(id) {
-            if let Some(channel_ids) = self.session_channels_map.remove(&session.0) {
+        if let Some(peer) = self.peer_session_map.remove(id) {
+            if let Some(channel_ids) = self.session_channels_map.remove(&peer.session_id) {
                 for channel_id in channel_ids {
                     if let Some(channel) = self.channels.get(&channel_id) {
                         let _ = channel.send_message(ChannelActorMessage::Event(
@@ -3210,7 +3226,7 @@ where
     async fn on_channel_actor_stopped(&mut self, channel_id: Hash256, reason: StopReason) {
         // all check passed, now begin to remove from memory and DB
         self.channels.remove(&channel_id);
-        for (_peer_id, (session_id, _)) in self.peer_session_map.iter() {
+        for (_peer_id, Peer { session_id, .. }) in self.peer_session_map.iter() {
             if let Some(session_channels) = self.session_channels_map.get_mut(session_id) {
                 session_channels.remove(&channel_id);
             }
@@ -3264,10 +3280,16 @@ where
             )));
         }
 
-        self.peer_features_map
-            .insert(peer_id.clone(), init_msg.features.clone());
+        if let Some(info) = self.peer_session_map.get_mut(&peer_id) {
+            info.features = Some(init_msg.features);
+            debug_event!(myself, "PeerInit");
+        } else {
+            return Err(ProcessingChannelError::InvalidParameter(format!(
+                "Peer {:?} session not found",
+                &peer_id
+            )));
+        }
 
-        debug_event!(myself, "PeerInit");
         Ok(())
     }
 
@@ -3592,7 +3614,6 @@ where
             network: myself.clone(),
             control,
             peer_session_map: Default::default(),
-            peer_features_map: Default::default(),
             session_channels_map: Default::default(),
             channels: Default::default(),
             ckb_txs_in_flight: Default::default(),
