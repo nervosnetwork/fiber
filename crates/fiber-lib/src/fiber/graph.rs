@@ -1787,19 +1787,14 @@ impl PaymentSessionState {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PaymentSession {
     pub request: SendPaymentData,
-    /// Deprecated, use `TlcAttempt` instead.
-    #[deprecated]
     pub retried_times: u32,
     pub last_error: Option<String>,
     pub try_limit: u32,
-    #[deprecated]
     pub status: PaymentSessionStatus,
     pub created_at: u64,
     pub last_updated_at: u64,
-    #[deprecated]
     pub route: SessionRoute,
     // Session key for onion packet. Save it for decoding the error packet.
-    #[deprecated]
     pub session_key: [u8; 32],
 }
 
@@ -1835,31 +1830,25 @@ impl PaymentSession {
             .unwrap_or_default()
     }
 
-    // TODO decide status with DB records instead of set a status in DB
     fn set_status(&mut self, status: PaymentSessionStatus) {
         self.status = status;
         self.last_updated_at = now_timestamp_as_millis_u64();
     }
 
-    #[deprecated]
     pub fn set_inflight_status(&mut self) {
         self.set_status(PaymentSessionStatus::Inflight);
     }
 
-    #[deprecated]
     pub fn set_success_status(&mut self) {
         self.set_status(PaymentSessionStatus::Success);
         self.last_error = None;
     }
 
-    #[deprecated]
     pub fn set_failed_status(&mut self, error: &str) {
         self.set_status(PaymentSessionStatus::Failed);
         self.last_error = Some(error.to_string());
     }
 
-    // should replaced by more_attempts test
-    #[deprecated]
     pub fn can_retry(&self) -> bool {
         self.retried_times < self.try_limit
     }
@@ -1871,6 +1860,23 @@ impl PaymentSession {
     pub fn hops_public_keys(&self) -> Vec<Pubkey> {
         // Skip the first node, which is the sender.
         self.route.nodes.iter().skip(1).map(|x| x.pubkey).collect()
+    }
+}
+
+impl From<PaymentSession> for SendPaymentResponse {
+    fn from(session: PaymentSession) -> Self {
+        let fee = session.fee();
+        Self {
+            payment_hash: session.request.payment_hash,
+            status: session.status,
+            failed_error: session.last_error,
+            created_at: session.created_at,
+            last_updated_at: session.last_updated_at,
+            custom_records: session.request.custom_records,
+            fee,
+            #[cfg(debug_assertions)]
+            router: session.route,
+        }
     }
 }
 

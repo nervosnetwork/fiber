@@ -21,9 +21,7 @@ use crate::{
 };
 use crate::{
     fiber::{
-        channel::{
-            ChannelActorState, ChannelActorStateStore, ChannelState
-        },
+        channel::{ChannelActorState, ChannelActorStateStore, ChannelState},
         graph::{Attempt, NetworkGraphStateStore, PaymentSession, PaymentSessionStatus},
         history::{Direction, TimedResult},
         network::{NetworkActorStateStore, PaymentCustomRecords, PersistentNetworkActorState},

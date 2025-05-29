@@ -872,7 +872,10 @@ impl NetworkNode {
         assert_eq!(status, expected_status);
 
         if let Some(expected_retried) = expected_retried {
-            let payment_session = self.get_payment_session_state(payment_hash).unwrap().unwrap();
+            let payment_session = self
+                .get_payment_session_state(payment_hash)
+                .unwrap()
+                .unwrap();
             assert_eq!(payment_session.attempts.len(), expected_retried as usize);
         }
     }
@@ -1045,7 +1048,10 @@ impl NetworkNode {
         self.store.get_payment_session(payment_hash)
     }
 
-    pub fn get_payment_session_state(&self, payment_hash: Hash256) -> Result<Option<PaymentSessionState>, PaymentSessionError> {
+    pub fn get_payment_session_state(
+        &self,
+        payment_hash: Hash256,
+    ) -> Result<Option<PaymentSessionState>, PaymentSessionError> {
         PaymentSessionState::from_db(&self.store, payment_hash)
     }
 
