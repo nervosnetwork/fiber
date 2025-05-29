@@ -7,6 +7,7 @@ use fiber::store::schema::*;
 use fiber::store::store_impl::deserialize_from;
 use rand::{distributions::Alphanumeric, Rng};
 use rocksdb::{prelude::*, ColumnFamilyDescriptor, SecondaryDB, SecondaryOpenDescriptor};
+use std::cmp::Reverse;
 use std::path::Path;
 use std::sync::Arc;
 use tentacle::secio::PeerId;
@@ -106,7 +107,7 @@ impl SecondaryStore {
                 result.push(node);
             }
         }
-        result.reverse();
+        result.sort_by_key(|n| Reverse(n.timestamp));
         result
     }
 
@@ -117,7 +118,7 @@ impl SecondaryStore {
             let session: PaymentSession = deserialize_from(value.as_ref(), "PaymentSession");
             result.push(session);
         }
-        result.reverse();
+        result.sort_by_key(|s| Reverse(s.created_at));
         result
     }
 
@@ -129,7 +130,7 @@ impl SecondaryStore {
                 deserialize_from(value.as_ref(), "ChannelActorState");
             result.push(channel_actor_state);
         }
-        result.reverse();
+        result.sort_by_key(|s| Reverse(s.created_at));
         result
     }
 }

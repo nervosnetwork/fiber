@@ -32,7 +32,7 @@ enum TuiView {
     Peers,
     Nodes,
     Channels,
-    Sessions,
+    Payments,
 }
 
 struct TuiState {
@@ -180,6 +180,11 @@ impl TuiState {
         self.channels
             .iter()
             .map(|ch| {
+                let capacity_label = if ch.funding_udt_type_script.is_some() {
+                    "UDT Capacity"
+                } else {
+                    "CKB Capacity"
+                };
                 let lines = vec![
                     Line::from(vec![Span::styled(
                         format!("ChannelId: {}", ch.id),
@@ -191,14 +196,18 @@ impl TuiState {
                     )),
                     Line::raw(format!("  Remote Pubkey: {}", ch.remote_pubkey,)),
                     Line::raw(format!("  State: {:?}", ch.state)),
-                    Line::raw(format!("  CKB Capacity: {}", ch.get_liquid_capacity())),
+                    Line::raw(format!(
+                        "  {}: {}",
+                        capacity_label,
+                        ch.get_liquid_capacity()
+                    )),
                 ];
                 ListItem::new(lines)
             })
             .collect()
     }
 
-    fn render_sessions(&self) -> Vec<ListItem> {
+    fn render_payments(&self) -> Vec<ListItem> {
         self.payment_sessions
             .iter()
             .map(|sess| {
@@ -274,7 +283,7 @@ impl TuiState {
             ]),
             Line::from(vec![
                 Span::styled("Timestamp: ", Style::default().fg(Color::Green)),
-                Span::raw(format!("{}", node.timestamp)),
+                Span::raw(format!("{}", self.human_time(node.timestamp))),
             ]),
             Line::from(vec![
                 Span::styled("Auto Accept Min CKB: ", Style::default().fg(Color::Green)),
@@ -368,26 +377,26 @@ impl TuiState {
         let size = f.size();
         let block = Block::default()
             .title(match self.view {
-                TuiView::Sessions => format!(
+                TuiView::Payments => format!(
                     "Payment Sessions ({} total) - Press 'p' for peers, 'n' for nodes, 'c' for channels",
                     self.payment_sessions.len()
                 ),
                 TuiView::Channels => format!(
-                    "Channels ({} total) - Press 'p' for peers, 'n' for nodes, 's' for sessions",
+                    "Channels ({} total) - Press 'p' for peers, 'n' for nodes, 's' for payments",
                     self.channels.len()
                 ),
                 TuiView::Nodes => format!(
-                    "Known Nodes ({} nodes) - Press 'p' for peers, 'c' for channels, 's' for sessions",
+                    "Known Nodes ({} nodes) - Press 'p' for peers, 'c' for channels, 's' for payments",
                     self.nodes.len()
                 ),
                 TuiView::Peers => format!(
-                    "Connected Peers ({} peers) - Press 'n' for nodes, 'c' for channels, 's' for sessions",
+                    "Connected Peers ({} peers) - Press 'n' for nodes, 'c' for channels, 's' for payments",
                     self.peers.len()
                 ),
             })
             .borders(Borders::ALL);
         let items: Vec<ListItem> = match self.view {
-            TuiView::Sessions => self.render_sessions(),
+            TuiView::Payments => self.render_payments(),
             TuiView::Channels => self.render_channels(),
             TuiView::Nodes => self.render_nodes(),
             TuiView::Peers => self.render_peers(),
@@ -402,7 +411,7 @@ impl TuiState {
         self.list_state = list_state;
         if self.show_detail {
             let (title, detail_lines): (&str, Vec<Line>) = match self.view {
-                TuiView::Sessions => self.detail_sessions(),
+                TuiView::Payments => self.detail_sessions(),
                 TuiView::Channels => self.detail_channels(),
                 TuiView::Nodes => self.detail_nodes(),
                 TuiView::Peers => self.detail_peers(),
@@ -446,12 +455,12 @@ impl TuiState {
                     self.selected_idx = 0;
                 }
                 KeyCode::Char('s') => {
-                    self.view = TuiView::Sessions;
+                    self.view = TuiView::Payments;
                     self.selected_idx = 0;
                 }
                 KeyCode::Down => {
                     let len = match self.view {
-                        TuiView::Sessions => self.payment_sessions.len(),
+                        TuiView::Payments => self.payment_sessions.len(),
                         TuiView::Channels => self.channels.len(),
                         TuiView::Nodes => self.nodes.len(),
                         TuiView::Peers => self.peers.len(),
@@ -465,7 +474,7 @@ impl TuiState {
                 }
                 KeyCode::Enter => {
                     let len = match self.view {
-                        TuiView::Sessions => self.payment_sessions.len(),
+                        TuiView::Payments => self.payment_sessions.len(),
                         TuiView::Channels => self.channels.len(),
                         TuiView::Nodes => self.nodes.len(),
                         TuiView::Peers => self.peers.len(),
