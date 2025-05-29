@@ -2091,15 +2091,17 @@ where
             return;
         }
 
-        let error = if matches!(channel_error, ProcessingChannelError::WaitingTlcAck) {
-            "WaitingTlcAck".to_string()
-        } else {
-            self.network_graph
-                .write()
-                .await
-                .record_attempt_fail(&attempt, tlc_err.clone());
-            channel_error.to_string()
-        };
+        let (error, need_to_retry) =
+            if matches!(channel_error, ProcessingChannelError::WaitingTlcAck) {
+                ("WaitingTlcAck".to_string(), true)
+            } else {
+                let need_to_retry = self
+                    .network_graph
+                    .write()
+                    .await
+                    .record_attempt_fail(&attempt, tlc_err.clone());
+                (channel_error.to_string(), need_to_retry)
+            };
         // attempt.last_error = Some(error);
         // self.store.insert_attempt_info(attempt.clone());
 
@@ -2109,6 +2111,11 @@ where
         // );
         dbg!("set attempt failed to ", &error);
         self.set_attempt_fail_with_error(&mut attempt, &error);
+        if !need_to_retry {
+            if let Some(mut session) = self.store.get_payment_session(payment_hash) {
+                self.set_payment_fail_with_error(&mut session, &error);
+            }
+        }
 
         let _ = self
             .resume_payment_session(myself, state, payment_hash)
