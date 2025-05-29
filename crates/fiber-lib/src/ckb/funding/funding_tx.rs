@@ -385,26 +385,16 @@ impl FundingTxBuilder {
         );
 
         let ckb_client = CkbRpcAsyncClient::new(&self.context.rpc_url);
-        let cell_dep_resolver = {
-            let genesis_block = ckb_client
-                .get_block_by_number(0.into())
-                .await
-                .map_err(FundingError::CkbRpcError)?;
-            if let Some(data) = genesis_block {
-                DefaultCellDepResolver::from_genesis_async(&BlockView::from(data))
-                    .await
-                    .ok()
-                    .ok_or_else(|| {
-                        FundingError::CkbTxBuilderError(TxBuilderError::ResolveCellDepFailed(
-                            sender,
-                        ))
-                    })?
-            } else {
-                return Err(FundingError::CkbTxBuilderError(
-                    TxBuilderError::ResolveCellDepFailed(sender),
-                ));
-            }
-        };
+        let cell_dep_resolver = ckb_client
+            .get_block_by_number(0.into())
+            .await
+            .map_err(FundingError::CkbRpcError)?
+            .and_then(|genesis_block| {
+                DefaultCellDepResolver::from_genesis(&BlockView::from(genesis_block)).ok()
+            })
+            .ok_or_else(|| {
+                FundingError::CkbTxBuilderError(TxBuilderError::ResolveCellDepFailed(sender))
+            })?;
         let header_dep_resolver = DefaultHeaderDepResolver::new(&self.context.rpc_url);
         let mut cell_collector = DefaultCellCollector::new(&self.context.rpc_url);
         let tx_dep_provider = DefaultTransactionDependencyProvider::new(&self.context.rpc_url, 10);
