@@ -1623,9 +1623,10 @@ async fn test_send_payment_with_route_with_invalid_parameters() {
     let payment_hash = res.unwrap().payment_hash;
     node_0.wait_until_failed(payment_hash).await;
     let result = node_0
-        .get_payment_session(payment_hash)
+        .get_payment_session_state(payment_hash)
+        .unwrap()
         .expect("get payment");
-    assert_eq!(result.retried_times, 1);
+    assert_eq!(result.attempts.len(), 1);
 
     // ================================================================
     // now we change the expiry delta in the middle hop
@@ -1645,10 +1646,11 @@ async fn test_send_payment_with_route_with_invalid_parameters() {
     let payment_hash = res.unwrap().payment_hash;
     node_0.wait_until_failed(payment_hash).await;
     let result = node_0
-        .get_payment_session(payment_hash)
+        .get_payment_session_state(payment_hash)
+        .unwrap()
         .expect("get payment");
-    eprintln!("result: {:?}", result);
-    assert_eq!(result.retried_times, 1);
+    eprintln!("result: {:?}", result.status);
+    assert_eq!(result.attempts.len(), 1);
 }
 
 #[tokio::test]
@@ -1708,11 +1710,15 @@ async fn test_send_payment_with_router_with_multiple_channels() {
     assert!(res.is_ok());
     let payment_hash = res.unwrap().payment_hash;
 
-    let payment_session = node_0
-        .get_payment_session(payment_hash)
+    let payment_session_state = node_0
+        .get_payment_session_state(payment_hash)
+        .unwrap()
         .expect("get payment");
-    eprintln!("payment_session: {:?}", payment_session);
-    let used_channels: Vec<Hash256> = payment_session
+    eprintln!("payment_session: {:?}", &payment_session_state.session);
+    let used_channels: Vec<Hash256> = payment_session_state
+        .attempts
+        .first()
+        .unwrap()
         .route
         .nodes
         .iter()
@@ -1766,11 +1772,15 @@ async fn test_send_payment_with_router_with_multiple_channels() {
     assert!(res.is_ok());
     let payment_hash = res.unwrap().payment_hash;
     eprintln!("payment_hash: {:?}", payment_hash);
-    let payment_session = node_0
-        .get_payment_session(payment_hash)
+    let payment_session_state = node_0
+        .get_payment_session_state(payment_hash)
+        .unwrap()
         .expect("get payment");
-    eprintln!("payment_session: {:?}", payment_session);
-    let used_channels: Vec<Hash256> = payment_session
+    eprintln!("payment_session: {:?}", &payment_session_state.session);
+    let used_channels: Vec<Hash256> = payment_session_state
+        .attempts
+        .first()
+        .unwrap()
         .route
         .nodes
         .iter()
@@ -1861,11 +1871,15 @@ async fn test_send_payment_two_nodes_with_router_and_multiple_channels() {
         .unwrap();
 
     let payment_hash = res.payment_hash;
-    let payment_session = node_0
-        .get_payment_session(payment_hash)
+    let payment_session_state = node_0
+        .get_payment_session_state(payment_hash)
+        .unwrap()
         .expect("get payment");
 
-    let used_channels: Vec<Hash256> = payment_session
+    let used_channels: Vec<Hash256> = payment_session_state
+        .attempts
+        .first()
+        .unwrap()
         .route
         .nodes
         .iter()
@@ -4046,6 +4060,7 @@ async fn test_shutdown_with_pending_tlc() {
                         onion_packet: None,
                         shared_secret: NO_SHARED_SECRET,
                         previous_tlc: None,
+                        attempt_id: None,
                     },
                     rpc_reply,
                 ),
@@ -4615,8 +4630,11 @@ async fn test_send_payment_with_mixed_channel_hops() {
         payment_res.failed_error.unwrap(),
         "IncorrectOrUnknownPaymentDetails"
     );
-    let payment_session = node0.get_payment_session(payment_hash).unwrap();
-    assert_eq!(payment_session.retried_times, 1);
+    let payment_session = node0
+        .get_payment_session_state(payment_hash)
+        .unwrap()
+        .unwrap();
+    assert_eq!(payment_session.attempts.len(), 1);
 }
 
 #[tokio::test]

@@ -21,8 +21,10 @@ use crate::{
 };
 use crate::{
     fiber::{
-        channel::{ChannelActorState, ChannelActorStateStore, ChannelState},
-        graph::{NetworkGraphStateStore, PaymentSession, PaymentSessionStatus},
+        channel::{
+            ChannelActorState, ChannelActorStateStore, ChannelState
+        },
+        graph::{Attempt, NetworkGraphStateStore, PaymentSession, PaymentSessionStatus},
         history::{Direction, TimedResult},
         network::{NetworkActorStateStore, PaymentCustomRecords, PersistentNetworkActorState},
         types::{BroadcastMessage, BroadcastMessageID, Cursor, Hash256},
@@ -37,7 +39,7 @@ use ckb_types::prelude::Entity;
 use serde::Serialize;
 use std::collections::HashSet;
 use tentacle::secio::PeerId;
-use tracing::info;
+use tracing::{info, warn};
 
 #[derive(Copy, Clone)]
 enum ChannelTimestamp {
@@ -195,6 +197,8 @@ pub enum KeyValue {
     PaymentHistoryTimedResult((OutPoint, Direction), TimedResult),
     PaymentCustomRecord(Hash256, PaymentCustomRecords),
     NetworkActorState(PeerId, PersistentNetworkActorState),
+    Attempt((Hash256, u64), Attempt),
+    NextAttemptId(u64),
 }
 
 pub trait StoreKeyValue {
@@ -225,6 +229,13 @@ impl StoreKeyValue for KeyValue {
             KeyValue::PaymentSession(payment_hash, _) => {
                 [&[PAYMENT_SESSION_PREFIX], payment_hash.as_ref()].concat()
             }
+            KeyValue::Attempt((payment_hash, attempt_id), _) => [
+                &[ATTEMPT_PREFIX],
+                payment_hash.as_ref(),
+                &attempt_id.to_le_bytes(),
+            ]
+            .concat(),
+            KeyValue::NextAttemptId(_id) => vec![NEXT_ATTEMPT_ID],
             #[cfg(feature = "watchtower")]
             KeyValue::WatchtowerChannel(channel_id, _) => {
                 [&[WATCHTOWER_CHANNEL_PREFIX], channel_id.as_ref()].concat()
@@ -263,6 +274,8 @@ impl StoreKeyValue for KeyValue {
             KeyValue::PaymentSession(_, payment_session) => {
                 serialize_to_vec(payment_session, "PaymentSession")
             }
+            KeyValue::Attempt(_, attempt) => serialize_to_vec(attempt, "Attempt"),
+            KeyValue::NextAttemptId(id) => serialize_to_vec(&id, "u64"),
             #[cfg(feature = "watchtower")]
             KeyValue::WatchtowerChannel(_, channel_data) => {
                 serialize_to_vec(channel_data, "ChannelData")
@@ -497,6 +510,64 @@ impl NetworkGraphStateStore for Store {
         let mut batch = self.batch();
         batch.put_kv(KeyValue::PaymentSession(session.payment_hash(), session));
         batch.commit();
+    }
+
+    fn next_attempt_id(&self) -> u64 {
+        let mut batch = self.batch();
+        let next_id = batch
+            .get(&[NEXT_ATTEMPT_ID])
+            .map(|v| deserialize_from(v.as_ref(), "u64"))
+            .unwrap_or(1);
+        batch.put_kv(KeyValue::NextAttemptId(next_id + 1));
+        batch.commit();
+        next_id
+    }
+
+    fn get_attempt(&self, payment_hash: Hash256, attempt_id: u64) -> Option<Attempt> {
+        let key = [
+            &[ATTEMPT_PREFIX],
+            payment_hash.as_ref(),
+            &attempt_id.to_le_bytes(),
+        ]
+        .concat();
+        self.get(key)
+            .map(|v| deserialize_from(v.as_ref(), "Attempt"))
+    }
+
+    fn insert_attempt(&self, attempt: Attempt) {
+        let mut batch = self.batch();
+        batch.put_kv(KeyValue::Attempt(
+            (attempt.payment_hash, attempt.id),
+            attempt,
+        ));
+        batch.commit();
+    }
+
+    fn get_attempts(&self, payment_hash: Hash256) -> Vec<Attempt> {
+        let prefix = [&[ATTEMPT_PREFIX], payment_hash.as_ref()].concat();
+        self.prefix_iterator(&prefix)
+            .filter_map(|(key, value)| {
+                if key.len() != 41 {
+                    warn!(
+                        "invalid attempt key: {} value: {} payment_hash: {}",
+                        key.len(),
+                        value.len(),
+                        payment_hash
+                    );
+                    return None;
+                }
+                if &key[1..33] != payment_hash.as_ref() {
+                    let attempt_id: u64 = u64::from_le_bytes(key[prefix.len()..].try_into().ok()?);
+                    warn!(
+                        "extract invalid payment hash from attempt payment_hash: {} attempt_id: {}",
+                        payment_hash, attempt_id
+                    );
+                    return None;
+                }
+                let attempt = deserialize_from(value.as_ref(), "Attempt");
+                Some(attempt)
+            })
+            .collect()
     }
 
     fn insert_payment_history_result(

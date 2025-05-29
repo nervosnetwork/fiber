@@ -197,6 +197,8 @@ pub enum TxCollaborationCommand {
 pub struct AddTlcCommand {
     pub amount: u128,
     pub payment_hash: Hash256,
+    /// The attempt id associate with the tlc
+    pub attempt_id: Option<u64>,
     pub expiry: u64,
     pub hash_algorithm: HashAlgorithm,
     /// Onion packet for the next node
@@ -214,6 +216,7 @@ impl Debug for AddTlcCommand {
         f.debug_struct("AddTlcCommand")
             .field("amount", &self.amount)
             .field("payment_hash", &self.payment_hash)
+            .field("attempt_id", &self.attempt_id)
             .field("expiry", &self.expiry)
             .field("hash_algorithm", &self.hash_algorithm)
             .field("previous_tlc", &self.previous_tlc)
@@ -1218,6 +1221,7 @@ where
                     .send_message(NetworkActorMessage::new_event(
                         NetworkActorEvent::TlcRemoveReceived(
                             tlc_info.payment_hash,
+                            tlc_info.attempt_id,
                             remove_reason.clone(),
                         ),
                     ))
@@ -1726,6 +1730,7 @@ where
                                     *forward_fee,
                                 )),
                                 payment_hash: *payment_hash,
+                                attempt_id: None,
                             }),
                         )) {
                             Ok(_) => {
@@ -1927,6 +1932,7 @@ where
                     .send_message(NetworkActorMessage::new_event(
                         NetworkActorEvent::AddTlcResult(
                             command.payment_hash,
+                            command.attempt_id,
                             error_info,
                             command.previous_tlc,
                         ),
@@ -2724,6 +2730,8 @@ pub struct TlcInfo {
     pub tlc_id: TLCId,
     pub amount: u128,
     pub payment_hash: Hash256,
+    /// The attempt id associate with the tlc, only on outbound tlc
+    pub attempt_id: Option<u64>,
     pub expiry: u64,
     pub hash_algorithm: HashAlgorithm,
     // the onion packet for multi-hop payment
@@ -5596,6 +5604,7 @@ impl ChannelActorState {
             channel_id: self.get_id(),
             status: TlcStatus::Outbound(OutboundTlcStatus::LocalAnnounced),
             tlc_id,
+            attempt_id: command.attempt_id,
             amount: command.amount,
             payment_hash: command.payment_hash,
             expiry: command.expiry,
@@ -5621,6 +5630,7 @@ impl ChannelActorState {
             channel_id: self.get_id(),
             amount: message.amount,
             payment_hash: message.payment_hash,
+            attempt_id: None,
             expiry: message.expiry,
             hash_algorithm: message.hash_algorithm,
             // will be set when apply AddTlc operations after the signature is checked

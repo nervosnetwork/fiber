@@ -74,6 +74,9 @@ pub const DEFAULT_GOSSIP_STORE_MAINTENANCE_INTERVAL_MS: u64 = 50;
 /// Whether to sync the network graph from the network. true means syncing.
 pub const DEFAULT_SYNC_NETWORK_GRAPH: bool = true;
 
+/// The maximum number of parts for a multi-part payment.
+pub const DEFAULT_MAX_PARTS: u64 = 16;
+
 // See comment in `LdkConfig` for why do we need to specify both name and long,
 // and prefix them with `ckb-`/`CKB_`.
 #[derive(ClapSerde, Debug, Clone)]

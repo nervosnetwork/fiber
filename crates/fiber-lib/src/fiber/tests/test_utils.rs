@@ -12,6 +12,8 @@ use crate::fiber::gossip::get_gossip_actor_name;
 use crate::fiber::gossip::GossipActorMessage;
 use crate::fiber::graph::NetworkGraphStateStore;
 use crate::fiber::graph::PaymentSession;
+use crate::fiber::graph::PaymentSessionError;
+use crate::fiber::graph::PaymentSessionState;
 use crate::fiber::graph::PaymentSessionStatus;
 use crate::fiber::network::BuildRouterCommand;
 use crate::fiber::network::DebugEvent;
@@ -870,8 +872,8 @@ impl NetworkNode {
         assert_eq!(status, expected_status);
 
         if let Some(expected_retried) = expected_retried {
-            let payment_session = self.get_payment_session(payment_hash).unwrap();
-            assert_eq!(payment_session.retried_times, expected_retried);
+            let payment_session = self.get_payment_session_state(payment_hash).unwrap().unwrap();
+            assert_eq!(payment_session.attempts.len(), expected_retried as usize);
         }
     }
 
@@ -916,6 +918,7 @@ impl NetworkNode {
         loop {
             assert!(self.get_triggered_unexpected_events().await.is_empty());
             let status = self.get_payment_status(payment_hash).await;
+            eprintln!("Payment status: {:?}", status);
             if status == PaymentSessionStatus::Success {
                 eprintln!("Payment success: {:?}\n\n", payment_hash);
                 break;
@@ -1040,6 +1043,10 @@ impl NetworkNode {
 
     pub fn get_payment_session(&self, payment_hash: Hash256) -> Option<PaymentSession> {
         self.store.get_payment_session(payment_hash)
+    }
+
+    pub fn get_payment_session_state(&self, payment_hash: Hash256) -> Result<Option<PaymentSessionState>, PaymentSessionError> {
+        PaymentSessionState::from_db(&self.store, payment_hash)
     }
 
     pub fn get_payment_custom_records(
