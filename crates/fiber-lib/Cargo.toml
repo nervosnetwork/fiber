@@ -56,7 +56,7 @@ rocksdb = { package = "ckb-rocksdb", version = "=0.21.1", features = [
 ], default-features = false }
 clap = { version = "4.5.2", features = ["derive", "env", "string"] }
 clap-serde-derive = "0.2.1"
-jsonrpsee = { version = "0.22", features = ["server", "macros"] }
+jsonrpsee = { version = "0.22", features = ["client", "server", "macros"] }
 tokio = { version = "1", features = [
     "io-util",
     "macros",
@@ -97,7 +97,7 @@ watchtower = []
 tempfile = "3.10.1"
 ckb-testtool = "0.15.1"
 ciborium = "0.2.2"
-jsonrpsee = { version = "0.22", features = ["server", "macros", "http-client"] }
+jsonrpsee = { version = "0.22", features = ["client", "server", "macros"] }
 ouroboros = "0.18.5"
 
 [lints.clippy]

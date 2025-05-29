@@ -50,7 +50,12 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
         * [Method `disconnect_peer`](#peer-disconnect_peer)
         * [Method `list_peers`](#peer-list_peers)
     * [Module Watchtower](#module-watchtower)
+        * [Method `create_watch_channel`](#watchtower-create_watch_channel)
         * [Method `remove_watch_channel`](#watchtower-remove_watch_channel)
+        * [Method `update_revocation`](#watchtower-update_revocation)
+        * [Method `update_local_settlement`](#watchtower-update_local_settlement)
+        * [Method `create_preimage`](#watchtower-create_preimage)
+        * [Method `remove_preimage`](#watchtower-remove_preimage)
 * [RPC Types](#rpc-types)
 
     * [Type `Attribute`](#type-attribute)
@@ -72,10 +77,15 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
     * [Type `PaymentCustomRecords`](#type-paymentcustomrecords)
     * [Type `PaymentSessionStatus`](#type-paymentsessionstatus)
     * [Type `PeerInfo`](#type-peerinfo)
+    * [Type `Privkey`](#type-privkey)
     * [Type `Pubkey`](#type-pubkey)
     * [Type `RemoveTlcReason`](#type-removetlcreason)
+    * [Type `RevocationData`](#type-revocationdata)
     * [Type `RouterHop`](#type-routerhop)
     * [Type `SessionRouteNode`](#type-sessionroutenode)
+    * [Type `SettlementData`](#type-settlementdata)
+    * [Type `SettlementTlc`](#type-settlementtlc)
+    * [Type `TLCId`](#type-tlcid)
     * [Type `UdtArgInfo`](#type-udtarginfo)
     * [Type `UdtCellDep`](#type-udtcelldep)
     * [Type `UdtCfgInfos`](#type-udtcfginfos)
@@ -821,14 +831,105 @@ List connected peers
 RPC module for watchtower related operations
 
 
-<a id="watchtower-remove_watch_channel"></a>
-#### Method `remove_watch_channel`
+<a id="watchtower-create_watch_channel"></a>
+#### Method `create_watch_channel`
 
-Remove a watched channel from the watchtower store
+Create a new watched channel
 
 ##### Params
 
 * `channel_id` - <em>[Hash256](#type-hash256)</em>, Channel ID
+* `funding_tx_lock` - <em>`Script`</em>, Channel funding transaction lock script
+* `remote_settlement_data` - <em>[SettlementData](#type-settlementdata)</em>, Remote settlement data
+
+##### Returns
+
+* None
+
+---
+
+
+
+<a id="watchtower-remove_watch_channel"></a>
+#### Method `remove_watch_channel`
+
+Remove a watched channel
+
+##### Params
+
+* `channel_id` - <em>[Hash256](#type-hash256)</em>, Channel ID
+
+##### Returns
+
+* None
+
+---
+
+
+
+<a id="watchtower-update_revocation"></a>
+#### Method `update_revocation`
+
+Update revocation
+
+##### Params
+
+* `channel_id` - <em>[Hash256](#type-hash256)</em>, Channel ID
+* `revocation_data` - <em>[RevocationData](#type-revocationdata)</em>, Revocation data
+* `settlement_data` - <em>[SettlementData](#type-settlementdata)</em>, Settlement data
+
+##### Returns
+
+* None
+
+---
+
+
+
+<a id="watchtower-update_local_settlement"></a>
+#### Method `update_local_settlement`
+
+Update settlement
+
+##### Params
+
+* `channel_id` - <em>[Hash256](#type-hash256)</em>, Channel ID
+* `settlement_data` - <em>[SettlementData](#type-settlementdata)</em>, Settlement data
+
+##### Returns
+
+* None
+
+---
+
+
+
+<a id="watchtower-create_preimage"></a>
+#### Method `create_preimage`
+
+Create preimage
+
+##### Params
+
+* `payment_hash` - <em>[Hash256](#type-hash256)</em>, Payment hash
+* `preimage` - <em>[Hash256](#type-hash256)</em>, Preimage
+
+##### Returns
+
+* None
+
+---
+
+
+
+<a id="watchtower-remove_preimage"></a>
+#### Method `remove_preimage`
+
+Remove preimage
+
+##### Params
+
+* `payment_hash` - <em>[Hash256](#type-hash256)</em>, Payment hash
 
 ##### Returns
 
@@ -1146,6 +1247,15 @@ The information about a peer connected to the node.
 * `addresses` - <em>Vec<MultiAddr></em>, A list of multi-addresses associated with the peer.
 ---
 
+<a id="#type-privkey"></a>
+### Type `Privkey`
+
+A wrapper for secp256k1 secret key
+
+
+
+---
+
 <a id="#type-pubkey"></a>
 ### Type `Pubkey`
 
@@ -1165,6 +1275,21 @@ The reason for removing a TLC
 
 * `RemoveTlcFulfill` - The reason for removing the TLC is that it was fulfilled
 * `RemoveTlcFail` - The reason for removing the TLC is that it failed
+---
+
+<a id="#type-revocationdata"></a>
+### Type `RevocationData`
+
+Data needed to revoke an outdated commitment transaction.
+
+
+#### Fields
+
+* `commitment_number` - <em>u64</em>, The commitment transaction version number that was revoked
+* `x_only_aggregated_pubkey` - The x-only aggregated public key used in the multisig for this commitment transaction
+* `aggregated_signature` - <em>CompactSignature</em>, The aggregated signature from both parties that authorizes the revocation
+* `output` - <em>CellOutput</em>, The output cell from the revoked commitment transaction
+* `output_data` - <em>Bytes</em>, The associated data for the output cell (e.g., UDT amount for token transfers)
 ---
 
 <a id="#type-routerhop"></a>
@@ -1197,6 +1322,52 @@ The node and channel information in a payment route hop
 * `pubkey` - <em>[Pubkey](#type-pubkey)</em>, the public key of the node
 * `amount` - <em>u128</em>, the amount for this hop
 * `channel_outpoint` - <em>OutPoint</em>, the channel outpoint for this hop
+---
+
+<a id="#type-settlementdata"></a>
+### Type `SettlementData`
+
+Data needed to authorize and execute a settlement transaction.
+
+
+#### Fields
+
+* `x_only_aggregated_pubkey` - The x-only aggregated public key used in the multi-signature for the settlement transaction
+* `aggregated_signature` - <em>CompactSignature</em>, The aggregated signature from both parties that authorizes the settlement transaction
+* `to_local_output` - <em>CellOutput</em>, The output cell for the local party (this node's owner) in the settlement transaction
+* `to_local_output_data` - <em>Bytes</em>, The associated data for the local output cell (e.g., UDT amount for token transfers)
+* `to_remote_output` - <em>CellOutput</em>, The output cell for the remote party (channel partner) in the settlement transaction
+* `to_remote_output_data` - <em>Bytes</em>, The associated data for the remote output cell (e.g., UDT amount for token transfers)
+* `tlcs` - <em>Vec<[SettlementTlc](#type-settlementtlc)></em>, The list of Time-Locked Contracts (TLCs) included in this settlement
+---
+
+<a id="#type-settlementtlc"></a>
+### Type `SettlementTlc`
+
+Data needed to authorize and execute a Time-Locked Contract (TLC) settlement transaction.
+
+
+#### Fields
+
+* `tlc_id` - <em>[TLCId](#type-tlcid)</em>, The ID of the TLC (either offered or received)
+* `hash_algorithm` - <em>[HashAlgorithm](#type-hashalgorithm)</em>, The hash algorithm used for the TLC
+* `payment_amount` - <em>u128</em>, The amount of CKB/UDT involved in the TLC
+* `payment_hash` - <em>[Hash256](#type-hash256)</em>, The hash of the payment preimage
+* `expiry` - <em>u64</em>, The expiry time for the TLC in milliseconds
+* `local_key` - <em>[Privkey](#type-privkey)</em>, The local party's private key used to sign the TLC
+* `remote_key` - <em>[Pubkey](#type-pubkey)</em>, The remote party's public key used to verify the TLC
+---
+
+<a id="#type-tlcid"></a>
+### Type `TLCId`
+
+The id of a tlc, it can be either offered or received.
+
+
+#### Enum with values of
+
+* `Offered` - <em>u64</em>, Offered tlc id
+* `Received` - <em>u64</em>, Received tlc id
 ---
 
 <a id="#type-udtarginfo"></a>
