@@ -2262,14 +2262,6 @@ where
                     )));
                 }
 
-                if !public
-                    && (channel_announcement_nonce.is_some() || public_channel_info.is_some())
-                {
-                    return Err(Box::new(ProcessingChannelError::InvalidParameter(
-                        "Non-public channel should not have channel announcement nonce and public channel info".to_string(),
-                    )));
-                }
-
                 let mut state = ChannelActorState::new_inbound_channel(
                     *channel_id,
                     public_channel_info,
@@ -4486,24 +4478,6 @@ impl ChannelActorState {
 
         let udt_type_script = &self.funding_udt_type_script;
 
-        if udt_type_script.is_some() {
-            if self.to_local_amount > u128::MAX - self.to_remote_amount {
-                return Err(ProcessingChannelError::InvalidParameter(format!(
-                    "The total UDT funding amount should be less than {}",
-                    u128::MAX
-                )));
-            }
-        } else {
-            let total_ckb_amount = self.get_liquid_capacity();
-            let max_ckb_amount = u64::MAX as u128 - self.get_total_reserved_ckb_amount() as u128;
-            if total_ckb_amount > max_ckb_amount {
-                return Err(ProcessingChannelError::InvalidParameter(format!(
-                    "The total funding amount ({}) should be less than {}",
-                    total_ckb_amount, max_ckb_amount
-                )));
-            }
-        }
-
         // reserved_ckb_amount
         let occupied_capacity =
             occupied_capacity(&self.get_remote_shutdown_script(), udt_type_script)?.as_u64();
@@ -4740,11 +4714,17 @@ impl ChannelActorState {
             + self.to_remote_amount as u64
             + self.get_total_reserved_ckb_amount()
     }
-
+    fn get_total_udt_amount(&self) -> u128 {
+        self.to_local_amount + self.to_remote_amount
+    }
     // Get the total liquid capacity of the channel, which will exclude the reserved ckb amount.
     // This is the capacity used for gossiping channel information.
     pub(crate) fn get_liquid_capacity(&self) -> u128 {
-        self.to_local_amount + self.to_remote_amount
+        if self.funding_udt_type_script.is_some() {
+            self.get_total_udt_amount()
+        } else {
+            self.to_local_amount + self.to_remote_amount
+        }
     }
 
     // Send RevokeAndAck message to the counterparty, and update the
@@ -4768,7 +4748,7 @@ impl ChannelActorState {
                     .capacity(capacity.pack())
                     .build();
 
-                let output_data = self.get_liquid_capacity().to_le_bytes().pack();
+                let output_data = self.get_total_udt_amount().to_le_bytes().pack();
                 (output, output_data)
             } else {
                 let capacity = self.get_total_ckb_amount() - commitment_tx_fee;
@@ -6326,7 +6306,7 @@ impl ChannelActorState {
                     .capacity(capacity.pack())
                     .build();
 
-                let output_data = self.get_liquid_capacity().to_le_bytes().pack();
+                let output_data = self.get_total_udt_amount().to_le_bytes().pack();
                 (output, output_data)
             } else {
                 let capacity = self.get_total_ckb_amount() - commitment_tx_fee;
@@ -6675,7 +6655,7 @@ impl ChannelActorState {
             );
             debug!("current_capacity: {}, remote_reserved_ckb_amount: {}, local_reserved_ckb_amount: {}",
                 current_capacity, self.remote_reserved_ckb_amount, self.local_reserved_ckb_amount);
-            let is_udt_amount_ok = udt_amount == self.get_liquid_capacity();
+            let is_udt_amount_ok = udt_amount == self.get_total_udt_amount();
             return Ok(is_udt_amount_ok);
         } else {
             let is_complete = current_capacity == self.get_total_ckb_amount();
@@ -7139,7 +7119,7 @@ impl ChannelActorState {
                 .capacity(capacity.pack())
                 .build();
 
-            let output_data = self.get_liquid_capacity().to_le_bytes().pack();
+            let output_data = self.get_total_udt_amount().to_le_bytes().pack();
             (output, output_data)
         } else {
             let capacity = self.get_total_ckb_amount() - commitment_tx_fee;

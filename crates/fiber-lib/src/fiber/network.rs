@@ -585,14 +585,6 @@ impl SendPaymentData {
             ));
         }
 
-        let max_fee_amount = command.max_fee_amount.unwrap_or(0);
-        if amount.checked_add(max_fee_amount).is_none() {
-            return Err(format!(
-                "amount + max_fee_amount overflow: amount = {}, max_fee_amount = {}",
-                amount, max_fee_amount
-            ));
-        }
-
         let hop_hints = command.hop_hints.unwrap_or_default();
 
         Ok(SendPaymentData {
