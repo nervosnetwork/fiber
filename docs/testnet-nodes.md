@@ -19,12 +19,11 @@
 
 1. Download fnn
 
-   Example for macOS (Apple silicon):
+   Please visit the [releases page](https://github.com/nervosnetwork/fiber/releases) to download and use the latest version of fnn.
 
    ```bash
    mkdir tmp && cd tmp
-   wget https://github.com/nervosnetwork/fiber/releases/download/v0.4.0/fnn_v0.4.0-x86_64-darwin-portable.tar.gz
-   tar xzvf fnn_v0.4.0-x86_64-darwin-portable.tar.gz
+   tar xzvf fnn-latest.tar.gz
    ```
 
 
@@ -67,8 +66,10 @@
 
 5. Start the node A
 
+   You need to set a `FIBER_SECRET_KEY_PASSWORD` environment variable in the startup command to encrypt your wallet private key file. I used `123` here for demo purposes, but I recommend using a strong password.
+   
    ```bash
-   RUST_LOG=info ./fnn -c testnet-fnn/nodeA/config.yml -d testnet-fnn/nodeA > testnet-fnn/nodeA/a.log 2>&1 &
+   FIBER_SECRET_KEY_PASSWORD='123' RUST_LOG=info ./fnn -c testnet-fnn/nodeA/config.yml -d testnet-fnn/nodeA > testnet-fnn/nodeA/a.log 2>&1 &
    ```
 
 
