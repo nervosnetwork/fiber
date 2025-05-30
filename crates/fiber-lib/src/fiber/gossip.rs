@@ -269,7 +269,8 @@ impl GossipMessageUpdates {
 /// This trait provides a way to subscribe to the updates of the gossip message store.
 /// The subscriber will receive a batch of messages that are added to the store since the last time
 /// we sent messages to the subscriber.
-#[async_trait::async_trait]
+#[cfg_attr(target_arch="wasm32",async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 pub trait SubscribableGossipMessageStore {
     type Subscription;
     type Error: std::error::Error;
@@ -1016,7 +1017,8 @@ where
     }
 }
 
-#[async_trait::async_trait]
+#[cfg_attr(target_arch="wasm32",async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl<S: GossipMessageStore + Sync> SubscribableGossipMessageStore
     for ExtendedGossipMessageStore<S>
 {
@@ -1268,7 +1270,7 @@ impl<S: GossipMessageStore> ExtendedGossipMessageStoreState<S> {
             let myself = myself.clone();
             let incomplete_messages = incomplete_messages.into_iter().collect::<Vec<_>>();
 
-            ractor::concurrency::tokio_primitives::spawn(async move {
+            ractor::concurrency::spawn(async move {
                 let mut is_success = true;
                 let n_queries = incomplete_messages.len();
                 for messages in

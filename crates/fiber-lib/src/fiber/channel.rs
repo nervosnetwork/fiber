@@ -58,7 +58,7 @@ use musig2::{
     PubNonce, SecNonce,
 };
 use ractor::{
-    async_trait as rasync_trait, call,
+    call,
     concurrency::{Duration, JoinHandle},
     Actor, ActorProcessingErr, ActorRef, MessagingErr, OutputPort, RpcReplyPort,
 };
@@ -2191,7 +2191,8 @@ where
     }
 }
 
-#[rasync_trait]
+#[cfg_attr(target_arch="wasm32",async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl<S> Actor for ChannelActor<S>
 where
     S: ChannelActorStateStore + InvoiceStore + PreimageStore + Send + Sync + 'static,
