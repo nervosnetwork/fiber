@@ -77,6 +77,9 @@ pub const DEFAULT_SYNC_NETWORK_GRAPH: bool = true;
 /// The maximum number of parts for a multi-part payment.
 pub const DEFAULT_MAX_PARTS: u64 = 16;
 
+/// The minimum amount for a part of a multi-part payment.
+pub const DEFAULT_MPP_MIN_AMOUNT: u128 = 10000;
+
 // See comment in `LdkConfig` for why do we need to specify both name and long,
 // and prefix them with `ckb-`/`CKB_`.
 #[derive(ClapSerde, Debug, Clone)]

@@ -55,7 +55,7 @@ use super::channel::{
     MAX_COMMITMENT_DELAY_EPOCHS, MAX_TLC_NUMBER_IN_FLIGHT, MIN_COMMITMENT_DELAY_EPOCHS,
     SYS_MAX_TLC_NUMBER_IN_FLIGHT,
 };
-use super::config::{AnnouncedNodeName, MIN_TLC_EXPIRY_DELTA};
+use super::config::{AnnouncedNodeName, DEFAULT_MPP_MIN_AMOUNT, MIN_TLC_EXPIRY_DELTA};
 use super::fee::calculate_commitment_tx_fee;
 use super::gossip::{GossipActorMessage, GossipMessageStore, GossipMessageUpdates};
 use super::graph::{
@@ -1935,12 +1935,21 @@ where
 
     async fn build_payment_route(
         &self,
-        session: &mut PaymentSession,
+        payment_session: &mut PaymentSessionState,
         attempt: &mut Attempt,
     ) -> Result<Vec<PaymentHopData>, Error> {
         let graph = self.network_graph.read().await;
         let source = graph.get_source_pubkey();
-        match graph.build_route(session.request.clone()) {
+        let max_amount = payment_session.remain_amount;
+        let min_amount = DEFAULT_MPP_MIN_AMOUNT;
+        let active_parts = payment_session.attempts.len();
+        let session = &mut payment_session.session;
+        match graph.build_route(
+            max_amount,
+            min_amount,
+            active_parts,
+            session.request.clone(),
+        ) {
             Err(e) => {
                 let error = format!("Failed to build route, {}", e);
                 if !session.request.dry_run {
@@ -2200,7 +2209,7 @@ where
         let attempt_id = self.store.next_attempt_id();
         let mut attempt = session_state.new_attempt(attempt_id);
         let hops_info = self
-            .build_payment_route(&mut session_state.session, &mut attempt)
+            .build_payment_route(&mut session_state, &mut attempt)
             .await?;
 
         // send attemp
@@ -2299,7 +2308,7 @@ where
             let mut session_state = PaymentSessionState::new(payment_session, vec![])?;
             let mut attempt = session_state.new_attempt(0);
             let _hops = self
-                .build_payment_route(&mut session_state.session, &mut attempt)
+                .build_payment_route(&mut session_state, &mut attempt)
                 .await?;
             session_state.attempts.push(attempt);
             let response: SendPaymentResponse = session_state.into();

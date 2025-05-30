@@ -318,6 +318,10 @@ pub enum PathFindError {
     Amount(String),
     #[error("PathFind error: {0}")]
     PathFind(String),
+    #[error("Feature not enabled: {0}")]
+    FeatureNotEnabled(String),
+    #[error("Insufficient balance: {0}")]
+    InsufficientBalance(String),
     #[error("Graph other error: {0}")]
     Other(String),
 }
@@ -857,16 +861,24 @@ where
     /// including the origin and the target node.
     pub fn build_route(
         &self,
+        mut max_amount: u128,
+        min_amount: u128,
+        active_parts: usize,
         payment_data: SendPaymentData,
     ) -> Result<Vec<PaymentHopData>, PathFindError> {
         let source = self.get_source_pubkey();
         let target = payment_data.target_pubkey;
-        let amount = payment_data.amount;
         let final_tlc_expiry_delta = payment_data.final_tlc_expiry_delta;
         let allow_self_payment = payment_data.allow_self_payment;
+        // TODO check feature bits after https://github.com/nervosnetwork/fiber/pull/719/files is merged
+        let (allow_mpp, max_parts) = match payment_data.max_parts {
+            Some(max_parts) if max_parts > 1 => (true, max_parts),
+            _ => (false, 1),
+        };
+        let is_last_part = active_parts + 1 >= max_parts as usize;
 
         if source == target && !allow_self_payment {
-            return Err(PathFindError::PathFind(
+            return Err(PathFindError::FeatureNotEnabled(
                 "allow_self_payment is not enable, can not pay to self".to_string(),
             ));
         }
@@ -874,17 +886,31 @@ where
         let route = if !payment_data.router.is_empty() {
             payment_data.router.clone()
         } else {
-            self.find_path(
-                source,
-                target,
-                amount,
-                payment_data.max_fee_amount,
-                payment_data.udt_type_script.clone(),
-                final_tlc_expiry_delta,
-                payment_data.tlc_expiry_limit,
-                allow_self_payment,
-                &payment_data.hop_hints,
-            )?
+            // try find half
+            loop {
+                match self.find_path(
+                    source,
+                    target,
+                    max_amount,
+                    payment_data.max_fee_amount,
+                    payment_data.udt_type_script.clone(),
+                    final_tlc_expiry_delta,
+                    payment_data.tlc_expiry_limit,
+                    allow_self_payment,
+                    &payment_data.hop_hints,
+                ) {
+                    Err(PathFindError::PathFind(err)) if allow_mpp && !is_last_part => {
+                        debug!("find path failed, try find half: {}", err);
+                        max_amount /= 2;
+                        if max_amount < min_amount {
+                            return Err(PathFindError::PathFind(err));
+                        }
+                        continue;
+                    }
+                    Ok(route) => break route,
+                    Err(err) => return Err(err),
+                }
+            }
         };
 
         assert!(!route.is_empty());
@@ -1070,7 +1096,7 @@ where
         }
 
         if source == target && !allow_self {
-            return Err(PathFindError::PathFind(
+            return Err(PathFindError::FeatureNotEnabled(
                 "allow_self_payment is not enable, can not pay self".to_string(),
             ));
         }
@@ -1246,6 +1272,9 @@ where
         }
 
         if result.is_empty() || current != target {
+            // TODO check total outbound balance and return error if it's not enough
+            // this can help us early return if the payment is not possible to be sent
+            // otherwise when PathFind error is returned, we need to retry with half amount
             return Err(PathFindError::PathFind("no path found".to_string()));
         }
         if let Some(edge) = last_edge {
