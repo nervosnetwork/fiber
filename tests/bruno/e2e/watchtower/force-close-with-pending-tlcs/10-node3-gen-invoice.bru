@@ -59,7 +59,7 @@ script:pre-request {
 
 script:post-response {
   // Sleep for sometime to make sure current operation finishes before next request starts.
-  await new Promise(r => setTimeout(r, 15000));
+  await new Promise(r => setTimeout(r, 1000));
   console.log("generated result: ", res.body.result);
   bru.setVar("payment_hash", res.body.result.invoice.data.payment_hash);
   bru.setVar("payment_amount", res.body.result.invoice.amount);
