@@ -38,12 +38,12 @@ assert {
 
 script:pre-request {
   // 10 seconds expiry
-  let expiry = "0x" + (Date.now() + 1000 * 10).toString(16);
+  let expiry = "0x" + (Date.now() + 1000 * 20).toString(16);
   bru.setVar("expiry", expiry);
 }
 
 script:post-response {
   console.log("generated result: ", res.body.result);
   // Sleep for sometime to make sure current operation finishes before next request starts.
-  await new Promise(r => setTimeout(r, 1000));
+  await new Promise(r => setTimeout(r, 5000));
 }
