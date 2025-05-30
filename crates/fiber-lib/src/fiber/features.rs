@@ -17,6 +17,17 @@ macro_rules! declare_feature_bits_and_methods {
                 pub const [<$name _OPTIONAL>]: u16 = $odd;
             )*
 
+            pub const MAX_FEATURE_BIT: u16 = {
+                let mut max = 0;
+                $(
+                    if $odd % 2 == 0 || $odd <= max {
+                        panic!("feature base bit must be defined as increasing odd numbers");
+                    }
+                    max = $odd;
+                )*
+                max
+            };
+
             pub fn feature_bit_name(bit: FeatureBit) -> &'static str {
                 match bit {
                     $(
@@ -30,16 +41,16 @@ macro_rules! declare_feature_bits_and_methods {
             impl FeatureVector {
                 $(
                     pub fn [<set_ $name:lower _required>](&mut self) {
-                        self.set_feature([<$name _REQUIRED>]);
+                        self.set([<$name _REQUIRED>], true);
                     }
                     pub fn [<set_ $name:lower _optional>](&mut self) {
-                        self.set_feature([<$name _OPTIONAL>]);
+                        self.set([<$name _OPTIONAL>], true);
                     }
                     pub fn [<unset_ $name:lower _required>](&mut self) {
-                        self.unset_feature([<$name _REQUIRED>]);
+                        self.set([<$name _REQUIRED>], false);
                     }
                     pub fn [<unset_ $name:lower _optional>](&mut self) {
-                        self.unset_feature([<$name _OPTIONAL>]);
+                        self.set([<$name _OPTIONAL>], false);
                     }
                     pub fn [<requires_ $name:lower>](&self) -> bool {
                         self.requires_feature([<$name _REQUIRED>])
@@ -54,18 +65,18 @@ macro_rules! declare_feature_bits_and_methods {
 }
 
 /// Feature bits and methods for the Fiber protocol
-/// Pair bits:
-///   - Each pair consists of a required and an optional bit.
+/// Pair bits, ideally, a feature can be introduced as optional (odd bits)
+/// and later upgraded to be compulsory (even bits)
 ///   - Even bits are used to signify that the feature is required,
 ///   - Odd bits are used to signify that the feature is optional.
-///   - Ideally, a feature can be introduced as optional (odd bits) and later upgraded to be compulsory (even bits)
 pub mod feature_bits {
     use super::*;
     declare_feature_bits_and_methods! {
         GOSSIP_QUERIES, 1;
         BASIC_MPP, 3;
         TLV_ONION_PAYLOAD, 5;
-        CHANNEL_REBALANCE, 9;
+        CHANNEL_REBALANCE, 7;
+        HTLC_RESOLUTION, 9;
         // more features ...
     }
 }
@@ -91,7 +102,10 @@ impl Default for FeatureVector {
 
 impl FeatureVector {
     pub fn new() -> Self {
-        Self { inner: vec![] }
+        let len = (feature_bits::MAX_FEATURE_BIT / 8) as usize + 1;
+        Self {
+            inner: vec![0; len],
+        }
     }
 
     pub fn from(bytes: Vec<u8>) -> Self {
@@ -102,46 +116,33 @@ impl FeatureVector {
         self.inner.clone()
     }
 
-    fn index(bit: FeatureBit, len: usize) -> Option<(usize, u16)> {
-        let byte_idx = (bit / 8) as usize;
-        let bit_idx = bit % 8;
-        (byte_idx < len).then(|| (len - byte_idx - 1, bit_idx))
-    }
-
-    pub fn is_set(&self, bit: FeatureBit) -> bool {
-        Self::index(bit, self.inner.len())
-            .is_some_and(|(idx, bit_idx)| (self.inner[idx] >> bit_idx) & 1 == 1)
+    fn is_set(&self, bit: FeatureBit) -> bool {
+        let idx = (bit / 8) as usize;
+        if idx >= self.inner.len() {
+            return false;
+        }
+        self.inner
+            .get(idx)
+            .map(|&byte| (byte >> (bit % 8)) & 1 == 1)
+            .unwrap_or(false)
     }
 
     fn set(&mut self, bit: FeatureBit, set: bool) {
-        let len = ((bit / 8) + 1) as usize;
-        if self.inner.len() < len {
-            self.inner.resize(len, 0);
+        let idx = (bit / 8) as usize;
+        if self.inner.len() <= idx {
+            self.inner.resize(idx + 1, 0);
         }
-        if let Some((idx, bit_idx)) = Self::index(bit, self.inner.len()) {
-            let mask = 1 << bit_idx;
-            if set {
-                self.inner[idx] |= mask;
-            } else {
-                self.inner[idx] &= !mask;
-            }
+        let mask = 1 << (bit % 8);
+        if set {
+            self.inner[idx] |= mask;
+        } else {
+            self.inner[idx] &= !mask;
         }
     }
 
     pub fn enabled_features(&self) -> Vec<FeatureBit> {
-        self.inner
-            .iter()
-            .enumerate()
-            .flat_map(|(byte_idx, &byte)| {
-                (0..8).filter_map(move |bit_idx| {
-                    if (byte >> bit_idx) & 1 == 1 {
-                        let bit = ((self.inner.len() - byte_idx - 1) * 8 + bit_idx) as FeatureBit;
-                        Some(bit)
-                    } else {
-                        None
-                    }
-                })
-            })
+        (0..(self.inner.len() * 8) as FeatureBit)
+            .filter(|&bit| self.is_set(bit))
             .collect()
     }
 
@@ -156,16 +157,18 @@ impl FeatureVector {
         self.inner.iter().all(|&b| b == 0)
     }
 
+    #[cfg(test)]
     pub fn set_feature(&mut self, bit: FeatureBit) {
         self.set(bit, true);
     }
 
+    #[cfg(test)]
     pub fn unset_feature(&mut self, bit: FeatureBit) {
         self.set(bit, false);
     }
 
     pub fn requires_feature(&self, bit: FeatureBit) -> bool {
-        self.is_set(bit)
+        self.is_set(bit) && bit % 2 == 0
     }
 
     pub fn supports_feature(&self, bit: FeatureBit) -> bool {
