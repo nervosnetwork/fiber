@@ -34,7 +34,7 @@ assert {
 }
 
 script:post-response {
-  await new Promise(r => setTimeout(r, 2000));
+  await new Promise(r => setTimeout(r, 5000));
   console.log(res.body.result);
   bru.setVar("CHANNEL_ID", res.body.result.channels[0].channel_id);
 }
