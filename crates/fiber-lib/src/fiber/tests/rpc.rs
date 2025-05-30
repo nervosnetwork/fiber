@@ -129,7 +129,7 @@ async fn test_rpc_list_peers() {
         true,
     )
     .await;
-    let [mut node_0, node_1] = nodes.try_into().expect("2 nodes");
+    let [mut node_0, mut node_1] = nodes.try_into().expect("2 nodes");
 
     let list_peers: ListPeersResult = node_0.send_rpc_request("list_peers", ()).await.unwrap();
     assert_eq!(list_peers.peers.len(), 1);
@@ -151,7 +151,7 @@ async fn test_rpc_list_peers() {
     let list_peers: ListPeersResult = node_0.send_rpc_request("list_peers", ()).await.unwrap();
     assert_eq!(list_peers.peers.len(), 0);
 
-    let node_3 = NetworkNode::new_with_config(
+    let mut node_3 = NetworkNode::new_with_config(
         NetworkNodeConfigBuilder::new()
             .node_name(Some(format!("node-{}", 3)))
             .base_dir_prefix(&format!("test-fnn-node-{}-", 3))
@@ -163,12 +163,12 @@ async fn test_rpc_list_peers() {
     let list_peers: ListPeersResult = node_3.send_rpc_request("list_peers", ()).await.unwrap();
     assert_eq!(list_peers.peers.len(), 0);
 
-    node_0.connect_to(&node_3).await;
+    node_0.connect_to(&mut node_3).await;
     let list_peers: ListPeersResult = node_3.send_rpc_request("list_peers", ()).await.unwrap();
     assert_eq!(list_peers.peers.len(), 1);
     assert_eq!(list_peers.peers[0].pubkey, node_0.pubkey);
 
-    node_0.connect_to(&node_1).await;
+    node_0.connect_to(&mut node_1).await;
     let list_peers: ListPeersResult = node_0.send_rpc_request("list_peers", ()).await.unwrap();
     assert_eq!(list_peers.peers.len(), 2);
 }
