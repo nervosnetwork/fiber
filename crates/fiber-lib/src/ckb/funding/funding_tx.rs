@@ -397,7 +397,11 @@ impl FundingTxBuilder {
                 .map_err(FundingError::CkbRpcError)?
             {
                 Some(genesis_block) => {
-                    match DefaultCellDepResolver::from_genesis_async(&BlockView::from(genesis_block)).await.ok()
+                    match DefaultCellDepResolver::from_genesis_async(&BlockView::from(
+                        genesis_block,
+                    ))
+                    .await
+                    .ok()
                     {
                         Some(ret) => ret,
                         None => {
