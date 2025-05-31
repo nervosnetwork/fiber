@@ -35,11 +35,11 @@ assert {
 
 script:pre-request {
   // sleep for a while
-  await new Promise(r => setTimeout(r, 1000));
+  await new Promise(r => setTimeout(r, 5000));
 }
 
 
 script:post-response {
   // Sleep for sometime to make sure current operation finishes before next request starts.
-  await new Promise(r => setTimeout(r, 1000));
+  await new Promise(r => setTimeout(r, 5000));
 }

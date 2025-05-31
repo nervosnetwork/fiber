@@ -58,7 +58,7 @@ version = "0.7.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "891477e0c6a8957309ee5c45a6368af3ae14bb510732d2684ffa19af310920f9"
 dependencies = [
- "getrandom 0.2.15",
+ "getrandom 0.2.16",
  "once_cell",
  "version_check",
 ]
@@ -160,10 +160,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "arrayref"
+version = "0.3.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "76a2e8124351fda1ef8aaaa3bbd7ebbcb486bbcd4225aca0aa0d84bb2db8fecb"
+
+[[package]]
 name = "arrayvec"
 version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7c02d123df017efcdfbd739ef81735b36c5ba83ec3c59c80a9d7ecc718f92e50"
+
+[[package]]
+name = "async-iterator"
+version = "2.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "742b2f12ff517f144b6181d24f3f2481b503e05650ee79feec1f090048089f88"
 
 [[package]]
 name = "async-stream"
@@ -197,6 +209,12 @@ dependencies = [
  "quote",
  "syn 2.0.96",
 ]
+
+[[package]]
+name = "atomic-waker"
+version = "1.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
 name = "attohttpc"
@@ -397,7 +415,7 @@ dependencies = [
  "proc-macro2",
  "quote",
  "regex",
- "rustc-hash",
+ "rustc-hash 1.1.0",
  "shlex",
  "syn 2.0.96",
  "which",
@@ -1012,6 +1030,50 @@ dependencies = [
 ]
 
 [[package]]
+name = "ckb-sdk"
+version = "3.7.0"
+source = "git+https://github.com/Officeyutong/ckb-sdk-rust?branch=wasm#a1bd8bb7107d0093d04a012ff5b8a8c7141718c8"
+dependencies = [
+ "anyhow",
+ "async-iterator",
+ "async-trait",
+ "bech32 0.8.1",
+ "bitflags 1.3.2",
+ "bytes",
+ "ckb-chain-spec",
+ "ckb-crypto",
+ "ckb-dao-utils",
+ "ckb-hash",
+ "ckb-jsonrpc-types",
+ "ckb-mock-tx-types",
+ "ckb-resource",
+ "ckb-script",
+ "ckb-traits",
+ "ckb-types",
+ "dashmap 5.5.3",
+ "derive-getters",
+ "dyn-clone",
+ "enum-repr-derive",
+ "futures",
+ "getrandom 0.2.16",
+ "jsonrpc-core",
+ "log",
+ "lru",
+ "parking_lot",
+ "reqwest",
+ "secp256k1 0.30.0",
+ "serde",
+ "serde_derive",
+ "serde_json",
+ "sha3",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
+ "tokio_with_wasm",
+ "web-time",
+]
+
+[[package]]
 name = "ckb-system-scripts"
 version = "0.5.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1216,7 +1278,7 @@ version = "0.1.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f9d839f2a20b0aee515dc581a6172f2321f96cab76c1a38a4c584a194955390e"
 dependencies = [
- "getrandom 0.2.15",
+ "getrandom 0.2.16",
  "once_cell",
  "tiny-keccak",
 ]
@@ -1550,6 +1612,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "fast-socks5"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d09fe4a491909a716088083eeb5bcc25427330fdbcd4ecd3dfa5469b3da795df"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "log",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-stream",
+]
+
+[[package]]
 name = "faster-hex"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1620,7 +1696,7 @@ dependencies = [
  "ckb-jsonrpc-types",
  "ckb-resource",
  "ckb-rocksdb",
- "ckb-sdk",
+ "ckb-sdk 3.6.0",
  "ckb-types",
  "clap",
  "clap-serde-derive",
@@ -1631,7 +1707,7 @@ dependencies = [
  "hex",
  "home",
  "indicatif",
- "jsonrpsee",
+ "jsonrpsee 0.22.5",
  "lightning-invoice",
  "lnd-grpc-tonic-client",
  "molecule",
@@ -1649,7 +1725,7 @@ dependencies = [
  "serde_yaml",
  "socket2",
  "strum",
- "tentacle",
+ "tentacle 0.6.7",
  "thiserror 1.0.69",
  "tokio",
  "tokio-util",
@@ -1675,7 +1751,7 @@ dependencies = [
  "ckb-jsonrpc-types",
  "ckb-resource",
  "ckb-rocksdb",
- "ckb-sdk",
+ "ckb-sdk 3.6.0",
  "ckb-types",
  "clap",
  "clap-serde-derive",
@@ -1686,7 +1762,7 @@ dependencies = [
  "hex",
  "home",
  "indicatif",
- "jsonrpsee",
+ "jsonrpsee 0.22.5",
  "lightning-invoice",
  "lnd-grpc-tonic-client",
  "molecule",
@@ -1704,7 +1780,7 @@ dependencies = [
  "serde_yaml",
  "socket2",
  "strum",
- "tentacle",
+ "tentacle 0.6.7",
  "thiserror 1.0.69",
  "tokio",
  "tokio-util",
@@ -1730,7 +1806,7 @@ dependencies = [
  "ckb-jsonrpc-types",
  "ckb-resource",
  "ckb-rocksdb",
- "ckb-sdk",
+ "ckb-sdk 3.6.0",
  "ckb-types",
  "clap",
  "clap-serde-derive",
@@ -1741,7 +1817,7 @@ dependencies = [
  "hex",
  "home",
  "indicatif",
- "jsonrpsee",
+ "jsonrpsee 0.22.5",
  "lightning-invoice",
  "lnd-grpc-tonic-client",
  "molecule",
@@ -1759,7 +1835,7 @@ dependencies = [
  "serde_yaml",
  "socket2",
  "strum",
- "tentacle",
+ "tentacle 0.6.7",
  "thiserror 1.0.69",
  "tokio",
  "tokio-util",
@@ -1785,7 +1861,7 @@ dependencies = [
  "ckb-jsonrpc-types",
  "ckb-resource",
  "ckb-rocksdb",
- "ckb-sdk",
+ "ckb-sdk 3.6.0",
  "ckb-types",
  "clap",
  "clap-serde-derive",
@@ -1796,7 +1872,7 @@ dependencies = [
  "hex",
  "home",
  "indicatif",
- "jsonrpsee",
+ "jsonrpsee 0.22.5",
  "lightning-invoice",
  "lnd-grpc-tonic-client",
  "molecule",
@@ -1814,7 +1890,7 @@ dependencies = [
  "serde_yaml",
  "socket2",
  "strum",
- "tentacle",
+ "tentacle 0.6.7",
  "thiserror 1.0.69",
  "tokio",
  "tokio-util",
@@ -1840,7 +1916,7 @@ dependencies = [
  "ckb-jsonrpc-types",
  "ckb-resource",
  "ckb-rocksdb",
- "ckb-sdk",
+ "ckb-sdk 3.6.0",
  "ckb-types",
  "clap",
  "clap-serde-derive",
@@ -1851,7 +1927,7 @@ dependencies = [
  "hex",
  "home",
  "indicatif",
- "jsonrpsee",
+ "jsonrpsee 0.22.5",
  "lightning-invoice",
  "lnd-grpc-tonic-client",
  "molecule",
@@ -1869,7 +1945,7 @@ dependencies = [
  "serde_yaml",
  "socket2",
  "strum",
- "tentacle",
+ "tentacle 0.6.7",
  "thiserror 1.0.69",
  "tokio",
  "tokio-util",
@@ -1895,7 +1971,7 @@ dependencies = [
  "ckb-jsonrpc-types",
  "ckb-resource",
  "ckb-rocksdb",
- "ckb-sdk",
+ "ckb-sdk 3.6.0",
  "ckb-types",
  "clap",
  "clap-serde-derive",
@@ -1906,7 +1982,7 @@ dependencies = [
  "hex",
  "home",
  "indicatif",
- "jsonrpsee",
+ "jsonrpsee 0.22.5",
  "lightning-invoice",
  "lnd-grpc-tonic-client",
  "molecule",
@@ -1924,7 +2000,7 @@ dependencies = [
  "serde_yaml",
  "socket2",
  "strum",
- "tentacle",
+ "tentacle 0.6.7",
  "thiserror 1.0.69",
  "tokio",
  "tokio-util",
@@ -1951,7 +2027,7 @@ dependencies = [
  "ckb-jsonrpc-types",
  "ckb-resource",
  "ckb-rocksdb",
- "ckb-sdk",
+ "ckb-sdk 3.6.0",
  "ckb-types",
  "clap",
  "clap-serde-derive",
@@ -1962,7 +2038,7 @@ dependencies = [
  "hex",
  "home",
  "indicatif",
- "jsonrpsee",
+ "jsonrpsee 0.22.5",
  "lightning-invoice",
  "lnd-grpc-tonic-client",
  "molecule",
@@ -1980,7 +2056,7 @@ dependencies = [
  "serde_yaml",
  "socket2",
  "strum",
- "tentacle",
+ "tentacle 0.6.7",
  "thiserror 1.0.69",
  "tokio",
  "tokio-util",
@@ -2005,7 +2081,7 @@ dependencies = [
  "ckb-hash",
  "ckb-jsonrpc-types",
  "ckb-rocksdb",
- "ckb-sdk",
+ "ckb-sdk 3.7.0",
  "ckb-types",
  "clap",
  "clap-serde-derive",
@@ -2013,11 +2089,12 @@ dependencies = [
  "either",
  "fiber-sphinx",
  "futures",
+ "getrandom 0.3.3",
  "git-version",
  "hex",
  "home",
  "indicatif",
- "jsonrpsee",
+ "jsonrpsee 0.25.1",
  "lightning-invoice",
  "lnd-grpc-tonic-client",
  "molecule",
@@ -2036,7 +2113,8 @@ dependencies = [
  "serde_yaml",
  "socket2",
  "strum",
- "tentacle",
+ "tentacle 0.6.7",
+ "tentacle 0.7.0",
  "thiserror 1.0.69",
  "tokio",
  "tokio-util",
@@ -2064,7 +2142,7 @@ dependencies = [
  "ckb-jsonrpc-types",
  "ckb-resource",
  "ckb-rocksdb",
- "ckb-sdk",
+ "ckb-sdk 3.6.0",
  "ckb-types",
  "clap",
  "clap-serde-derive",
@@ -2076,7 +2154,7 @@ dependencies = [
  "hex",
  "home",
  "indicatif",
- "jsonrpsee",
+ "jsonrpsee 0.22.5",
  "lightning-invoice",
  "lnd-grpc-tonic-client",
  "molecule",
@@ -2095,7 +2173,7 @@ dependencies = [
  "serde_yaml",
  "socket2",
  "strum",
- "tentacle",
+ "tentacle 0.6.7",
  "thiserror 1.0.69",
  "tokio",
  "tokio-util",
@@ -2281,14 +2359,28 @@ dependencies = [
 
 [[package]]
 name = "getrandom"
-version = "0.2.15"
+version = "0.2.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c4567c8db10ae91089c99af84c68c38da3ec2f087c3f82960bcdbf3656b6f4d7"
+checksum = "335ff9f135e4384c8150d6f27c6daed433577f86b4750418338c01a1a2528592"
 dependencies = [
  "cfg-if 1.0.0",
  "js-sys",
  "libc",
  "wasi 0.11.0+wasi-snapshot-preview1",
+ "wasm-bindgen",
+]
+
+[[package]]
+name = "getrandom"
+version = "0.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "26145e563e54f2cadc477553f1ec5ee650b00862f0a58bcd12cbdc5f0ea2d2f4"
+dependencies = [
+ "cfg-if 1.0.0",
+ "js-sys",
+ "libc",
+ "r-efi",
+ "wasi 0.14.2+wasi-0.2.4",
  "wasm-bindgen",
 ]
 
@@ -2389,6 +2481,25 @@ dependencies = [
  "futures-sink",
  "futures-util",
  "http 0.2.12",
+ "indexmap 2.7.0",
+ "slab",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
+name = "h2"
+version = "0.4.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a9421a676d1b147b16b82c9225157dc629087ef8ec4d5e2960f9437a90dac0a5"
+dependencies = [
+ "atomic-waker",
+ "bytes",
+ "fnv",
+ "futures-core",
+ "futures-sink",
+ "http 1.2.0",
  "indexmap 2.7.0",
  "slab",
  "tokio",
@@ -2573,7 +2684,7 @@ dependencies = [
  "futures-channel",
  "futures-core",
  "futures-util",
- "h2",
+ "h2 0.3.26",
  "http 0.2.12",
  "http-body 0.4.6",
  "httparse",
@@ -2596,9 +2707,11 @@ dependencies = [
  "bytes",
  "futures-channel",
  "futures-util",
+ "h2 0.4.10",
  "http 1.2.0",
  "http-body 1.0.1",
  "httparse",
+ "httpdate",
  "itoa",
  "pin-project-lite",
  "smallvec",
@@ -2992,10 +3105,24 @@ version = "0.22.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cfdb12a2381ea5b2e68c3469ec604a007b367778cdb14d09612c8069ebd616ad"
 dependencies = [
- "jsonrpsee-core",
- "jsonrpsee-proc-macros",
- "jsonrpsee-server",
- "jsonrpsee-types",
+ "jsonrpsee-core 0.22.5",
+ "jsonrpsee-proc-macros 0.22.5",
+ "jsonrpsee-server 0.22.5",
+ "jsonrpsee-types 0.22.5",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "jsonrpsee"
+version = "0.25.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1fba77a59c4c644fd48732367624d1bcf6f409f9c9a286fbc71d2f1fc0b2ea16"
+dependencies = [
+ "jsonrpsee-core 0.25.1",
+ "jsonrpsee-proc-macros 0.25.1",
+ "jsonrpsee-server 0.25.1",
+ "jsonrpsee-types 0.25.1",
  "tokio",
  "tracing",
 ]
@@ -3011,14 +3138,39 @@ dependencies = [
  "beef",
  "futures-util",
  "hyper 0.14.32",
- "jsonrpsee-types",
+ "jsonrpsee-types 0.22.5",
  "parking_lot",
  "rand 0.8.5",
- "rustc-hash",
+ "rustc-hash 1.1.0",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
  "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "jsonrpsee-core"
+version = "0.25.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "693c93cbb7db25f4108ed121304b671a36002c2db67dff2ee4391a688c738547"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "futures-util",
+ "http 1.2.0",
+ "http-body 1.0.1",
+ "http-body-util",
+ "jsonrpsee-types 0.25.1",
+ "parking_lot",
+ "pin-project",
+ "rand 0.9.1",
+ "rustc-hash 2.1.1",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.11",
+ "tokio",
+ "tower 0.5.2",
  "tracing",
 ]
 
@@ -3036,6 +3188,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "jsonrpsee-proc-macros"
+version = "0.25.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2fa4f5daed39f982a1bb9d15449a28347490ad42b212f8eaa2a2a344a0dce9e9"
+dependencies = [
+ "heck 0.5.0",
+ "proc-macro-crate",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.96",
+]
+
+[[package]]
 name = "jsonrpsee-server"
 version = "0.22.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3044,18 +3209,45 @@ dependencies = [
  "futures-util",
  "http 0.2.12",
  "hyper 0.14.32",
- "jsonrpsee-core",
- "jsonrpsee-types",
+ "jsonrpsee-core 0.22.5",
+ "jsonrpsee-types 0.22.5",
  "pin-project",
  "route-recognizer",
  "serde",
  "serde_json",
- "soketto",
+ "soketto 0.7.1",
  "thiserror 1.0.69",
  "tokio",
  "tokio-stream",
  "tokio-util",
  "tower 0.4.13",
+ "tracing",
+]
+
+[[package]]
+name = "jsonrpsee-server"
+version = "0.25.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d38b0bcf407ac68d241f90e2d46041e6a06988f97fe1721fb80b91c42584fae6"
+dependencies = [
+ "futures-util",
+ "http 1.2.0",
+ "http-body 1.0.1",
+ "http-body-util",
+ "hyper 1.6.0",
+ "hyper-util",
+ "jsonrpsee-core 0.25.1",
+ "jsonrpsee-types 0.25.1",
+ "pin-project",
+ "route-recognizer",
+ "serde",
+ "serde_json",
+ "soketto 0.8.1",
+ "thiserror 2.0.11",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tower 0.5.2",
  "tracing",
 ]
 
@@ -3070,6 +3262,18 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 1.0.69",
+]
+
+[[package]]
+name = "jsonrpsee-types"
+version = "0.25.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "66df7256371c45621b3b7d2fb23aea923d577616b9c0e9c0b950a6ea5c2be0ca"
+dependencies = [
+ "http 1.2.0",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.11",
 ]
 
 [[package]]
@@ -3925,6 +4129,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "r-efi"
+version = "5.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "74765f6d916ee2faa39bc8e68e4f3ed8949b48cccdac59983d287a7cb71ce9c5"
+
+[[package]]
 name = "ractor"
 version = "0.9.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3999,6 +4209,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rand"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9fbfd9d094a40bf3ae768db9361049ace4c0e04a4fd6b359518bd7b73a73dd97"
+dependencies = [
+ "rand_chacha 0.9.0",
+ "rand_core 0.9.3",
+]
+
+[[package]]
 name = "rand_chacha"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4019,6 +4239,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rand_chacha"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d3022b5f1df60f26e1ffddd6c66e8aa15de382ae63b3a0c1bfc0e4d3e3f325cb"
+dependencies = [
+ "ppv-lite86",
+ "rand_core 0.9.3",
+]
+
+[[package]]
 name = "rand_core"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4033,7 +4263,16 @@ version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ec0be4795e2f6a28069bec0b5ff3e2ac9bafc99e6a9a7dc3547996c5c816922c"
 dependencies = [
- "getrandom 0.2.15",
+ "getrandom 0.2.16",
+]
+
+[[package]]
+name = "rand_core"
+version = "0.9.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "99d9a13982dcf210057a8a78572b2217b667c3beacbf3a0d8b454f6f82837d38"
+dependencies = [
+ "getrandom 0.3.3",
 ]
 
 [[package]]
@@ -4166,7 +4405,7 @@ checksum = "70ac5d832aa16abd7d1def883a8545280c20a60f523a370aa3a9617c2b8550ee"
 dependencies = [
  "cc",
  "cfg-if 1.0.0",
- "getrandom 0.2.15",
+ "getrandom 0.2.16",
  "libc",
  "untrusted",
  "windows-sys 0.52.0",
@@ -4199,6 +4438,12 @@ name = "rustc-hash"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "08d43f7aa6b08d49f382cde6a7982047c3426db949b1424bc4b7ec9ae12c6ce2"
+
+[[package]]
+name = "rustc-hash"
+version = "2.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "357703d41365b4b27c590e3ed91eabb1b663f07c4c084095e60cbed4362dff0d"
 
 [[package]]
 name = "rustc_version"
@@ -4660,6 +4905,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "soketto"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2e859df029d160cb88608f5d7df7fb4753fd20fdfb4de5644f3d8b8440841721"
+dependencies = [
+ "base64 0.22.1",
+ "bytes",
+ "futures",
+ "http 1.2.0",
+ "httparse",
+ "log",
+ "rand 0.8.5",
+ "sha1",
+]
+
+[[package]]
 name = "sparse-merkle-tree"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4789,7 +5050,7 @@ checksum = "9a8a559c81686f576e8cd0290cd2a24a2a9ad80c98b3478856500fcbd7acd704"
 dependencies = [
  "cfg-if 1.0.0",
  "fastrand",
- "getrandom 0.2.15",
+ "getrandom 0.2.16",
  "once_cell",
  "rustix",
  "windows-sys 0.59.0",
@@ -4804,7 +5065,6 @@ dependencies = [
  "async-trait",
  "bytes",
  "futures",
- "futures-timer",
  "httparse",
  "igd-next",
  "js-sys",
@@ -4828,13 +5088,46 @@ dependencies = [
 ]
 
 [[package]]
-name = "tentacle-multiaddr"
-version = "0.3.4"
+name = "tentacle"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8a9e71b28bf0bbf274b92f47cb2c5b42755d84a11e2246cf7bcb7b65c89483b9"
+checksum = "47aff14515ffd53f333b93053e4f3476eccc801f4d1f34f7dfe392d967fc6985"
 dependencies = [
- "bs58",
+ "async-trait",
  "bytes",
+ "fast-socks5",
+ "futures",
+ "futures-timer",
+ "js-sys",
+ "libc",
+ "log",
+ "molecule",
+ "nohash-hasher",
+ "rand 0.8.5",
+ "socket2",
+ "tentacle-multiaddr",
+ "tentacle-secio",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
+ "tokio-yamux",
+ "url",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "winapi",
+]
+
+[[package]]
+name = "tentacle-multiaddr"
+version = "0.3.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "11d2d1d3511bbe6d6a662ee13616a31268d0558c73d25dfe6b5a5dcb376719c7"
+dependencies = [
+ "arrayref",
+ "bs58",
+ "byteorder",
+ "bytes",
+ "data-encoding",
  "serde",
  "sha2",
  "unsigned-varint",
@@ -4842,15 +5135,15 @@ dependencies = [
 
 [[package]]
 name = "tentacle-secio"
-version = "0.6.4"
+version = "0.6.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "53d53673d63399e1d557c2e884b045d242811079d3b2f17a569310e5c3f1db33"
+checksum = "60516aaca2ce3d00ef741d1bb01216921a062371bb63dd2ef53775b42afb9865"
 dependencies = [
  "bs58",
  "bytes",
  "chacha20poly1305",
  "futures",
- "getrandom 0.2.15",
+ "getrandom 0.2.16",
  "hmac",
  "log",
  "molecule",
@@ -5084,9 +5377,9 @@ dependencies = [
 
 [[package]]
 name = "tokio-yamux"
-version = "0.3.10"
+version = "0.3.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "966579a01e6900c22634f5915fda56358496e71067f3dd26572f9fbe85f4b62e"
+checksum = "e448cb88b75c217ab89014b0c66221260aef0c53f1c021f60a7dca26a299f7cf"
 dependencies = [
  "bytes",
  "futures",
@@ -5161,7 +5454,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-util",
- "h2",
+ "h2 0.3.26",
  "http 0.2.12",
  "http-body 0.4.6",
  "hyper 0.14.32",
@@ -5191,7 +5484,7 @@ dependencies = [
  "axum 0.6.20",
  "base64 0.21.7",
  "bytes",
- "h2",
+ "h2 0.3.26",
  "http 0.2.12",
  "http-body 0.4.6",
  "hyper 0.14.32",
@@ -5537,6 +5830,15 @@ name = "wasi"
 version = "0.11.0+wasi-snapshot-preview1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9c8d87e72b64a3b4db28d11ce29237c246188f4f51057d65a7eab63b7987e423"
+
+[[package]]
+name = "wasi"
+version = "0.14.2+wasi-0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9683f9a5a998d873c0d21fcbe3c083009670149a8fab228644b8bd36b2c48cb3"
+dependencies = [
+ "wit-bindgen-rt",
+]
 
 [[package]]
 name = "wasm-bindgen"
@@ -5908,6 +6210,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c8d71a593cc5c42ad7876e2c1fda56f314f3754c084128833e64f1345ff8a03a"
 dependencies = [
  "memchr",
+]
+
+[[package]]
+name = "wit-bindgen-rt"
+version = "0.39.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6f42320e61fe2cfd34354ecb597f86f413484a798ba44a8ca1165c58d42da6c1"
+dependencies = [
+ "bitflags 2.7.0",
 ]
 
 [[package]]
