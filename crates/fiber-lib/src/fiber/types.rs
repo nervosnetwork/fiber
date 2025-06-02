@@ -8,7 +8,7 @@ use super::gen::gossip::{self as molecule_gossip};
 use super::hash_algorithm::{HashAlgorithm, UnknownHashAlgorithmError};
 use super::network::{get_chain_hash, PaymentCustomRecords};
 use super::r#gen::fiber::PubNonceOpt;
-use super::serde_utils::{EntityHex, SliceHex};
+use super::serde_utils::{EntityHex, PubNonceAsBytes, SliceHex};
 use crate::ckb::config::{UdtArgInfo, UdtCellDep, UdtCfgInfos, UdtDep, UdtScript};
 use crate::ckb::contracts::get_udt_whitelist;
 use ckb_jsonrpc_types::CellOutput;
@@ -27,7 +27,6 @@ use ckb_types::{
 use core::fmt::{self, Formatter};
 use fiber_sphinx::{OnionErrorPacket, SphinxError};
 use molecule::prelude::{Builder, Byte, Entity};
-use musig2::errors::DecodeError;
 use musig2::secp::{Point, Scalar};
 use musig2::{BinaryEncoding, PartialSignature, PubNonce};
 use once_cell::sync::OnceCell;
@@ -68,14 +67,14 @@ bitflags::bitflags! {
     }
 }
 
-impl From<&Byte66> for PubNonce {
-    fn from(value: &Byte66) -> Self {
+impl From<Byte66> for PubNonce {
+    fn from(value: Byte66) -> Self {
         PubNonce::from_bytes(value.as_slice()).expect("PubNonce from Byte66")
     }
 }
 
-impl From<&PubNonce> for Byte66 {
-    fn from(value: &PubNonce) -> Self {
+impl From<PubNonce> for Byte66 {
+    fn from(value: PubNonce) -> Self {
         Byte66::from_slice(&value.to_bytes()).expect("valid pubnonce serialized to 66 bytes")
     }
 }
@@ -531,11 +530,63 @@ impl TryFrom<molecule_gossip::SchnorrSignature> for SchnorrSignature {
     }
 }
 
-impl TryFrom<Byte66> for PubNonce {
-    type Error = DecodeError<Self>;
+/// A wrapper for musig2 public nonce list, which will be updated in each round of commitment tx generation.
+#[serde_as]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CommitmentNonce {
+    /// The funding nonce is used to sign the tx which unlocks the funding tx output.
+    #[serde_as(as = "PubNonceAsBytes")]
+    pub funding: PubNonce,
+    /// The commitment nonce is used to sign the tx which unlocks the commitment tx output.
+    #[serde_as(as = "PubNonceAsBytes")]
+    pub commitment: PubNonce,
+}
 
-    fn try_from(value: Byte66) -> Result<Self, Self::Error> {
-        PubNonce::from_bytes(value.as_slice())
+/// A wrapper for musig2 public nonce list, which will be updated in each round of commitment tx revocation.
+#[serde_as]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RevocationNonce {
+    /// The revocation nonce is used to sign the tx which revokes the previous commitment tx.
+    #[serde_as(as = "PubNonceAsBytes")]
+    pub revoke: PubNonce,
+    /// The ack nonce is used to sign the tx which acknowledges the previous commitment tx.
+    #[serde_as(as = "PubNonceAsBytes")]
+    pub ack: PubNonce,
+}
+
+impl From<molecule_fiber::CommitmentNonce> for CommitmentNonce {
+    fn from(nonce: molecule_fiber::CommitmentNonce) -> Self {
+        Self {
+            funding: nonce.funding().into(),
+            commitment: nonce.commitment().into(),
+        }
+    }
+}
+
+impl From<CommitmentNonce> for molecule_fiber::CommitmentNonce {
+    fn from(nonce: CommitmentNonce) -> Self {
+        Self::new_builder()
+            .funding(nonce.funding.into())
+            .commitment(nonce.commitment.into())
+            .build()
+    }
+}
+
+impl From<molecule_fiber::RevocationNonce> for RevocationNonce {
+    fn from(nonce: molecule_fiber::RevocationNonce) -> Self {
+        Self {
+            revoke: nonce.revoke().into(),
+            ack: nonce.ack().into(),
+        }
+    }
+}
+
+impl From<RevocationNonce> for molecule_fiber::RevocationNonce {
+    fn from(nonce: RevocationNonce) -> Self {
+        Self::new_builder()
+            .revoke(nonce.revoke.into())
+            .ack(nonce.ack.into())
+            .build()
     }
 }
 
@@ -557,7 +608,8 @@ pub struct OpenChannel {
     pub first_per_commitment_point: Pubkey,
     pub second_per_commitment_point: Pubkey,
     pub channel_announcement_nonce: Option<PubNonce>,
-    pub next_local_nonce: PubNonce,
+    pub next_commitment_nonce: CommitmentNonce,
+    pub next_revocation_nonce: RevocationNonce,
     pub channel_flags: ChannelFlags,
 }
 
@@ -593,10 +645,11 @@ impl From<OpenChannel> for molecule_fiber::OpenChannel {
             .tlc_basepoint(open_channel.tlc_basepoint.into())
             .first_per_commitment_point(open_channel.first_per_commitment_point.into())
             .second_per_commitment_point(open_channel.second_per_commitment_point.into())
-            .next_local_nonce((&open_channel.next_local_nonce).into())
+            .next_commitment_nonce(open_channel.next_commitment_nonce.into())
+            .next_revocation_nonce(open_channel.next_revocation_nonce.into())
             .channel_announcement_nonce(
                 PubNonceOpt::new_builder()
-                    .set(open_channel.channel_announcement_nonce.map(|x| (&x).into()))
+                    .set(open_channel.channel_announcement_nonce.map(Into::into))
                     .build(),
             )
             .channel_flags(open_channel.channel_flags.bits().into())
@@ -624,10 +677,8 @@ impl TryFrom<molecule_fiber::OpenChannel> for OpenChannel {
             tlc_basepoint: open_channel.tlc_basepoint().try_into()?,
             first_per_commitment_point: open_channel.first_per_commitment_point().try_into()?,
             second_per_commitment_point: open_channel.second_per_commitment_point().try_into()?,
-            next_local_nonce: open_channel
-                .next_local_nonce()
-                .try_into()
-                .map_err(|err| Error::Musig2(format!("{err}")))?,
+            next_commitment_nonce: open_channel.next_commitment_nonce().into(),
+            next_revocation_nonce: open_channel.next_revocation_nonce().into(),
             channel_announcement_nonce: open_channel
                 .channel_announcement_nonce()
                 .to_opt()
@@ -654,7 +705,8 @@ pub struct AcceptChannel {
     pub first_per_commitment_point: Pubkey,
     pub second_per_commitment_point: Pubkey,
     pub channel_announcement_nonce: Option<PubNonce>,
-    pub next_local_nonce: PubNonce,
+    pub next_commitment_nonce: CommitmentNonce,
+    pub next_revocation_nonce: RevocationNonce,
 }
 
 impl From<AcceptChannel> for molecule_fiber::AcceptChannel {
@@ -672,14 +724,11 @@ impl From<AcceptChannel> for molecule_fiber::AcceptChannel {
             .second_per_commitment_point(accept_channel.second_per_commitment_point.into())
             .channel_announcement_nonce(
                 PubNonceOpt::new_builder()
-                    .set(
-                        accept_channel
-                            .channel_announcement_nonce
-                            .map(|x| (&x).into()),
-                    )
+                    .set(accept_channel.channel_announcement_nonce.map(Into::into))
                     .build(),
             )
-            .next_local_nonce((&accept_channel.next_local_nonce).into())
+            .next_commitment_nonce(accept_channel.next_commitment_nonce.into())
+            .next_revocation_nonce(accept_channel.next_revocation_nonce.into())
             .build()
     }
 }
@@ -705,10 +754,8 @@ impl TryFrom<molecule_fiber::AcceptChannel> for AcceptChannel {
                 .map(TryInto::try_into)
                 .transpose()
                 .map_err(|err| Error::Musig2(format!("{err}")))?,
-            next_local_nonce: accept_channel
-                .next_local_nonce()
-                .try_into()
-                .map_err(|err| Error::Musig2(format!("{err}")))?,
+            next_commitment_nonce: accept_channel.next_commitment_nonce().into(),
+            next_revocation_nonce: accept_channel.next_revocation_nonce().into(),
         })
     }
 }
@@ -718,7 +765,7 @@ pub struct CommitmentSigned {
     pub channel_id: Hash256,
     pub funding_tx_partial_signature: PartialSignature,
     pub commitment_tx_partial_signature: PartialSignature,
-    pub next_local_nonce: PubNonce,
+    pub next_commitment_nonce: CommitmentNonce,
 }
 
 fn partial_signature_to_molecule(partial_signature: PartialSignature) -> MByte32 {
@@ -735,7 +782,7 @@ impl From<CommitmentSigned> for molecule_fiber::CommitmentSigned {
             .commitment_tx_partial_signature(partial_signature_to_molecule(
                 commitment_signed.commitment_tx_partial_signature,
             ))
-            .next_local_nonce((&commitment_signed.next_local_nonce).into())
+            .next_commitment_nonce(commitment_signed.next_commitment_nonce.into())
             .build()
     }
 }
@@ -756,10 +803,7 @@ impl TryFrom<molecule_fiber::CommitmentSigned> for CommitmentSigned {
                     .as_slice(),
             )
             .map_err(|e| anyhow!(e))?,
-            next_local_nonce: commitment_signed
-                .next_local_nonce()
-                .try_into()
-                .map_err(|e| anyhow!(format!("{e:?}")))?,
+            next_commitment_nonce: commitment_signed.next_commitment_nonce().into(),
         })
     }
 }
@@ -863,6 +907,7 @@ impl TryFrom<molecule_fiber::TxUpdate> for TxUpdate {
 pub struct TxComplete {
     pub channel_id: Hash256,
     pub commitment_tx_partial_signature: PartialSignature,
+    pub next_commitment_nonce: CommitmentNonce,
 }
 
 impl From<TxComplete> for molecule_fiber::TxComplete {
@@ -872,6 +917,7 @@ impl From<TxComplete> for molecule_fiber::TxComplete {
             .commitment_tx_partial_signature(partial_signature_to_molecule(
                 tx_complete.commitment_tx_partial_signature,
             ))
+            .next_commitment_nonce(tx_complete.next_commitment_nonce.into())
             .build()
     }
 }
@@ -886,6 +932,7 @@ impl TryFrom<molecule_fiber::TxComplete> for TxComplete {
                 tx_complete.commitment_tx_partial_signature().as_slice(),
             )
             .map_err(|e| anyhow!(e))?,
+            next_commitment_nonce: tx_complete.next_commitment_nonce().into(),
         })
     }
 }
@@ -1151,6 +1198,7 @@ pub struct RevokeAndAck {
     pub revocation_partial_signature: PartialSignature,
     pub commitment_tx_partial_signature: PartialSignature,
     pub next_per_commitment_point: Pubkey,
+    pub next_revocation_nonce: RevocationNonce,
 }
 
 impl From<RevokeAndAck> for molecule_fiber::RevokeAndAck {
@@ -1164,6 +1212,7 @@ impl From<RevokeAndAck> for molecule_fiber::RevokeAndAck {
                 revoke_and_ack.commitment_tx_partial_signature,
             ))
             .next_per_commitment_point(revoke_and_ack.next_per_commitment_point.into())
+            .next_revocation_nonce(revoke_and_ack.next_revocation_nonce.into())
             .build()
     }
 }
@@ -1183,6 +1232,7 @@ impl TryFrom<molecule_fiber::RevokeAndAck> for RevokeAndAck {
             )
             .map_err(|e| anyhow!(e))?,
             next_per_commitment_point: revoke_and_ack.next_per_commitment_point().try_into()?,
+            next_revocation_nonce: revoke_and_ack.next_revocation_nonce().into(),
         })
     }
 }
