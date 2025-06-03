@@ -2456,7 +2456,12 @@ where
         }) = self.peer_session_map.get(&peer_id)
         {
             // check peer features
-            eprintln!("peer features: {:?}", peer_features);
+            if !self.features.compatible_with(peer_features) {
+                return Err(ProcessingChannelError::InvalidParameter(format!(
+                    "Peer {:?} features {:?} are not compatible with our features {:?}",
+                    &peer_id, peer_features, self.features
+                )));
+            }
         } else {
             return Err(ProcessingChannelError::InvalidParameter(format!(
                 "Peer {:?}'s feature not found, waiting for peer to send Init message",
@@ -3087,8 +3092,9 @@ where
         // send Init message to the peer
         self.send_fiber_message_to_peer(
             remote_peer_id,
-            FiberMessage::Init(Init {
+            FiberMessage::init(Init {
                 features: self.features.clone(),
+                chain_hash: get_chain_hash(),
             }),
         )
         .await
@@ -3272,6 +3278,16 @@ where
                 &peer_id
             )));
         }
+
+        check_chain_hash(&init_msg.chain_hash).map_err(|e| {
+            self.network
+                .send_message(NetworkActorMessage::new_command(
+                    NetworkActorCommand::DisconnectPeer(peer_id.clone()),
+                ))
+                .expect(ASSUME_NETWORK_MYSELF_ALIVE);
+
+            ProcessingChannelError::InvalidParameter(e.to_string())
+        })?;
 
         if let Some(info) = self.peer_session_map.get_mut(&peer_id) {
             info.features = Some(init_msg.features);

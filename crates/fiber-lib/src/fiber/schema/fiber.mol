@@ -22,6 +22,7 @@ table CustomRecords {
 
 table Init {
     features: Bytes,
+    chain_hash: Byte32,
 }
 
 table OpenChannel {

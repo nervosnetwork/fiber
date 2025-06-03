@@ -542,12 +542,14 @@ impl TryFrom<Byte66> for PubNonce {
 #[derive(Clone, Debug)]
 pub struct Init {
     pub features: FeatureVector,
+    pub chain_hash: Hash256,
 }
 
 impl From<Init> for molecule_fiber::Init {
     fn from(init: Init) -> Self {
         molecule_fiber::Init::new_builder()
             .features(init.features.bytes().pack())
+            .chain_hash(init.chain_hash.into())
             .build()
     }
 }
@@ -558,6 +560,7 @@ impl TryFrom<molecule_fiber::Init> for Init {
         let bytes: Vec<u8> = init.features().unpack();
         Ok(Init {
             features: FeatureVector::from(bytes),
+            chain_hash: init.chain_hash().into(),
         })
     }
 }
