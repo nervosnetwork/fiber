@@ -3286,6 +3286,10 @@ where
                 ))
                 .expect(ASSUME_NETWORK_MYSELF_ALIVE);
 
+            error!(
+                "chain hash mismatch with peer {:?}: {:?}, disconnect now...",
+                &peer_id, e
+            );
             ProcessingChannelError::InvalidParameter(e.to_string())
         })?;
 

@@ -15,6 +15,7 @@ use crate::fiber::graph::PaymentSession;
 use crate::fiber::graph::PaymentSessionStatus;
 use crate::fiber::network::BuildRouterCommand;
 use crate::fiber::network::DebugEvent;
+use crate::fiber::network::FiberMessageWithPeerId;
 use crate::fiber::network::GossipMessageWithPeerId;
 use crate::fiber::network::NodeInfoResponse;
 use crate::fiber::network::PaymentCustomRecords;
@@ -23,7 +24,9 @@ use crate::fiber::network::SendPaymentCommand;
 use crate::fiber::network::SendPaymentResponse;
 use crate::fiber::network::SendPaymentWithRouterCommand;
 use crate::fiber::types::EcdsaSignature;
+use crate::fiber::types::FiberMessage;
 use crate::fiber::types::GossipMessage;
+use crate::fiber::types::Init;
 use crate::fiber::types::Pubkey;
 use crate::invoice::CkbInvoice;
 use crate::invoice::CkbInvoiceStatus;
@@ -1231,6 +1234,17 @@ impl NetworkNode {
         self.ckb_chain_actor
             .send_message(message)
             .expect("send ckb chain message");
+    }
+
+    pub fn send_init_peer_message(&self, remote_peer_id: PeerId, message: Init) {
+        self.network_actor
+            .send_message(NetworkActorMessage::new_command(
+                crate::fiber::NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
+                    remote_peer_id,
+                    FiberMessage::Init(message),
+                )),
+            ))
+            .expect("send init peer message");
     }
 
     pub async fn add_unexpected_events(&self, events: Vec<String>) {
