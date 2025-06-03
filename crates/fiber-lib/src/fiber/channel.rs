@@ -842,6 +842,12 @@ where
         tlc_id: TLCId,
     ) {
         let tlc_info = state.get_received_tlc(tlc_id).expect("expect tlc");
+
+        // 1. check tlc if fulfilled invoice and invoice support MPP
+        // 2. hold tlc, record hold at, return nothing
+        // 3. check timeout automatically, remove tlc after timeout
+        // 4. when invoice is fulfilled, remove tlc and send fulfill message to peer
+
         let preimage = self.store.get_preimage(&tlc_info.payment_hash);
 
         let preimage = if let Some(preimage) = preimage {
@@ -854,7 +860,21 @@ where
             payment_preimage: preimage,
         });
         let tlc = tlc_info.clone();
+        let tlcs: Vec<_> = state
+            .list_hold_tlcs_by_payment_hash(&tlc_info.payment_hash)
+            .collect();
         if let Some(invoice) = self.store.get_invoice(&tlc.payment_hash) {
+            // TODO check if tlc is MPP
+            // TODO check if invoice support MPP
+            let total_amount = tlcs.iter().map(|tlc| tlc.amount).sum::<u128>();
+
+            let is_fulfilled = total_amount >= invoice.amount.unwrap_or_default();
+            if !is_fulfilled {
+                // TODO add to hold tlc list
+                // wait for other tlc to fulfill the invoice
+                return;
+            }
+
             let status = self.get_invoice_status(&invoice);
             match status {
                 CkbInvoiceStatus::Expired => {
@@ -881,8 +901,11 @@ where
             }
         }
 
-        self.register_retryable_tlc_remove(myself, state, tlc.tlc_id, remove_reason)
-            .await;
+        let tlcs_id: Vec<_> = tlcs.iter().map(|tlc| tlc.tlc_id).collect();
+        for tlc_id in tlcs_id {
+            self.register_retryable_tlc_remove(myself, state, tlc_id, remove_reason.clone())
+                .await;
+        }
     }
 
     async fn apply_add_tlc_operation(
@@ -3020,6 +3043,16 @@ impl TlcState {
         }
     }
 
+    pub fn list_hold_tlcs_by_payment_hash<'a>(
+        &'a self,
+        payment_hash: &'a Hash256,
+    ) -> impl Iterator<Item = &'a TlcInfo> {
+        self.received_tlcs
+            .tlcs
+            .iter()
+            .filter(move |tlc| &tlc.payment_hash == payment_hash)
+    }
+
     pub fn get_committed_received_tlcs(&self) -> Vec<TlcInfo> {
         self.received_tlcs.get_committed_tlcs()
     }
@@ -4975,6 +5008,13 @@ impl ChannelActorState {
 
     pub fn get_received_tlc(&self, tlc_id: TLCId) -> Option<&TlcInfo> {
         self.tlc_state.get(&tlc_id)
+    }
+
+    pub fn list_hold_tlcs_by_payment_hash<'a>(
+        &'a self,
+        payment_hash: &'a Hash256,
+    ) -> impl Iterator<Item = &'a TlcInfo> {
+        self.tlc_state.list_hold_tlcs_by_payment_hash(payment_hash)
     }
 
     pub fn check_insert_tlc(&mut self, tlc: &TlcInfo) -> Result<(), ProcessingChannelError> {
