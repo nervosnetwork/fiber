@@ -123,7 +123,10 @@ fn test_serialize() {
 fn test_feature_default() {
     let vector = FeatureVector::default();
     assert!(vector.requires_gossip_queries());
-    assert!(vector.supports_basic_mpp());
+    assert!(vector.supports_gossip_queries());
+    assert!(vector.requires_tlv_onion_payload());
+    assert!(vector.supports_tlv_onion_payload());
+    assert!(!vector.supports_basic_mpp());
     assert!(!vector.requires_basic_mpp());
 }
 
