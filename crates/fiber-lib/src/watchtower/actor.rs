@@ -21,7 +21,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::{
     ckb::{
-        contracts::{get_cell_deps_sync, get_script_by_contract, Contract},
+        contracts::{get_cell_deps, get_script_by_contract, Contract},
         CkbConfig,
     },
     fiber::{
@@ -215,7 +215,7 @@ where
                                                                                     revocation_data,
                                                                                     secret_key,
                                                                                     &mut cell_collector,
-                                                                                ) {
+                                                                                ).await {
                                                                                     Ok(tx) => {
                                                                                        Some(tx)
                                                                                     }
@@ -309,7 +309,7 @@ where
     }
 }
 
-fn build_revocation_tx(
+async fn build_revocation_tx(
     commitment_tx_out_point: OutPoint,
     revocation_data: RevocationData,
     secret_key: SecretKey,
@@ -341,10 +341,13 @@ fn build_revocation_tx(
 
     let mut tx_builder = Transaction::default()
         .as_advanced_builder()
-        .cell_deps(get_cell_deps_sync(
-            vec![Contract::CommitmentLock, Contract::Secp256k1Lock],
-            &revocation_data.output.type_().to_opt(),
-        )?)
+        .cell_deps(
+            get_cell_deps(
+                vec![Contract::CommitmentLock, Contract::Secp256k1Lock],
+                &revocation_data.output.type_().to_opt(),
+            )
+            .await?,
+        )
         .input(
             CellInput::new_builder()
                 .previous_output(commitment_tx_out_point)
@@ -584,7 +587,9 @@ async fn try_settle_commitment_tx<S: PreimageStore>(
                                                     current_time,
                                                     current_epoch,
                                                     store,
-                                                ) {
+                                                )
+                                                .await
+                                                {
                                                     Ok(Some(tx)) => Some(tx),
                                                     Ok(None) => {
                                                         info!("No need to settle the commitment tx: {:#x} with pending tlcs", commitment_tx_hash);
@@ -644,7 +649,9 @@ async fn try_settle_commitment_tx<S: PreimageStore>(
                                 settlement_data.clone(),
                                 secret_key,
                                 cell_collector,
-                            ) {
+                            )
+                            .await
+                            {
                                 Ok(tx) => Some(tx),
                                 Err(err) => {
                                     error!("Failed to build settlement tx: {:?}", err);
@@ -769,7 +776,7 @@ async fn find_preimages<S: PreimageStore>(
     }
 }
 
-fn build_settlement_tx(
+async fn build_settlement_tx(
     commitment_tx_out_point: OutPoint,
     since: u64,
     settlement_data: SettlementData,
@@ -803,10 +810,13 @@ fn build_settlement_tx(
 
     let mut tx_builder = Transaction::default()
         .as_advanced_builder()
-        .cell_deps(get_cell_deps_sync(
-            vec![Contract::CommitmentLock, Contract::Secp256k1Lock],
-            &to_local_output.type_().to_opt(),
-        )?)
+        .cell_deps(
+            get_cell_deps(
+                vec![Contract::CommitmentLock, Contract::Secp256k1Lock],
+                &to_local_output.type_().to_opt(),
+            )
+            .await?,
+        )
         .input(
             CellInput::new_builder()
                 .previous_output(commitment_tx_out_point)
@@ -956,7 +966,7 @@ fn sign_tx_with_settlement(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn build_settlement_tx_for_pending_tlcs<S: PreimageStore>(
+async fn build_settlement_tx_for_pending_tlcs<S: PreimageStore>(
     commitment_tx_cell: Cell,
     cell_header: HeaderView,
     delay_epoch: EpochNumberWithFraction,
@@ -1128,10 +1138,13 @@ fn build_settlement_tx_for_pending_tlcs<S: PreimageStore>(
             };
             let mut tx_builder = Transaction::default()
                 .as_advanced_builder()
-                .cell_deps(get_cell_deps_sync(
-                    vec![Contract::CommitmentLock, Contract::Secp256k1Lock],
-                    &None,
-                )?)
+                .cell_deps(
+                    get_cell_deps(
+                        vec![Contract::CommitmentLock, Contract::Secp256k1Lock],
+                        &None,
+                    )
+                    .await?,
+                )
                 .input(input)
                 .output(new_commitment_output.clone())
                 .output_data(Bytes::default())
@@ -1250,10 +1263,13 @@ fn build_settlement_tx_for_pending_tlcs<S: PreimageStore>(
             };
             let mut tx_builder = Transaction::default()
                 .as_advanced_builder()
-                .cell_deps(get_cell_deps_sync(
-                    vec![Contract::CommitmentLock, Contract::Secp256k1Lock],
-                    &commitment_tx_cell.output.type_.map(|script| script.into()),
-                )?)
+                .cell_deps(
+                    get_cell_deps(
+                        vec![Contract::CommitmentLock, Contract::Secp256k1Lock],
+                        &commitment_tx_cell.output.type_.map(|script| script.into()),
+                    )
+                    .await?,
+                )
                 .input(input)
                 .output(new_commitment_output.clone())
                 .output_data(new_commitment_output_data)
@@ -1347,7 +1363,8 @@ fn build_settlement_tx_for_pending_tlcs<S: PreimageStore>(
             settlement_data,
             secret_key,
             cell_collector,
-        )?;
+        )
+        .await?;
         Ok(Some(tx))
     }
 }
