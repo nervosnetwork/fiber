@@ -1124,6 +1124,12 @@ where
             }
         };
 
+        if !state.check_shutdown_fee_valid(shutdown.fee_rate.as_u64()) {
+            return Err(ProcessingChannelError::InvalidParameter(
+                "Shutdown fee is invalid".to_string(),
+            ));
+        }
+
         state.remote_shutdown_info = Some(ShutdownInfo {
             close_script: shutdown.close_script,
             fee_rate: shutdown.fee_rate.as_u64(),
@@ -1137,7 +1143,6 @@ where
         // e.g. our shutdown message is also sent, or we are trying to force shutdown,
         // we should not reply.
         let should_we_reply_shutdown = matches!(flags, ShuttingDownFlags::THEIR_SHUTDOWN_SENT);
-
         if state.check_valid_to_auto_accept_shutdown() && should_we_reply_shutdown {
             let close_script = state.get_local_shutdown_script();
             self.network
@@ -5375,14 +5380,8 @@ impl ChannelActorState {
         &self.get_remote_channel_public_keys().funding_pubkey
     }
 
-    fn check_valid_to_auto_accept_shutdown(&self) -> bool {
-        let Some(remote_fee_rate) = self.remote_shutdown_info.as_ref().map(|i| i.fee_rate) else {
-            return false;
-        };
-        if remote_fee_rate < self.commitment_fee_rate {
-            return false;
-        }
-        let fee = calculate_shutdown_tx_fee(
+    fn check_shutdown_fee_valid(&self, remote_fee_rate: u64) -> bool {
+        let remote_shutdown_fee = calculate_shutdown_tx_fee(
             remote_fee_rate,
             &self.funding_udt_type_script,
             (
@@ -5404,7 +5403,13 @@ impl ChannelActorState {
             self.remote_reserved_ckb_amount
                 .saturating_sub(occupied_capacity)
         };
-        return fee <= remote_available_max_fee;
+        return remote_shutdown_fee <= remote_available_max_fee;
+    }
+
+    fn check_valid_to_auto_accept_shutdown(&self) -> bool {
+        self.remote_shutdown_info
+            .as_ref()
+            .map_or(false, |i| i.fee_rate >= self.commitment_fee_rate)
     }
 
     fn check_tlc_expiry(&self, expiry: u64) -> ProcessingChannelResult {
