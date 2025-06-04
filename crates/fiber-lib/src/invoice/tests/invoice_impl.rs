@@ -1,7 +1,10 @@
 use bech32::ToBase32;
 use ckb_hash::blake2b_256;
 use ckb_types::packed::Script;
-use secp256k1::{Message, Secp256k1};
+use secp256k1::{
+    ecdsa::{RecoverableSignature, RecoveryId},
+    Message, Secp256k1,
+};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::{
@@ -506,4 +509,28 @@ fn test_invoice_check_expired() {
     assert!(!invoice.is_expired());
     std::thread::sleep(Duration::from_secs(2));
     assert!(invoice.is_expired());
+}
+
+#[test]
+fn test_check_signature_should_not_panic() {
+    let gen_payment_hash = gen_rand_sha256_hash();
+    let (private_key, public_key) = gen_rand_secp256k1_keypair_tuple();
+
+    let mut invoice = InvoiceBuilder::new(Currency::Fibb)
+        .amount(Some(1280))
+        .payment_hash(gen_payment_hash)
+        .fallback_address("address".to_string())
+        .expiry_time(Duration::from_secs(1024))
+        .payee_pub_key(public_key)
+        .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))
+        .unwrap();
+
+    // create a recoverable signature with invalid recovery id
+    let raw_signature = [0u8; 64];
+    let recovery_id = RecoveryId::from_i32(0).expect("valid recovery id");
+    let recoverable_signature = RecoverableSignature::from_compact(&raw_signature, recovery_id)
+        .expect("signature from compact");
+    invoice.signature = Some(InvoiceSignature(recoverable_signature));
+    // check signature should not panic
+    assert!(invoice.check_signature().is_err());
 }
