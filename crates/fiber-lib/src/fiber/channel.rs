@@ -5452,7 +5452,7 @@ impl ChannelActorState {
     fn check_valid_to_auto_accept_shutdown(&self) -> bool {
         self.remote_shutdown_info
             .as_ref()
-            .map_or(false, |i| i.fee_rate >= self.commitment_fee_rate)
+            .is_some_and(|i| i.fee_rate >= self.commitment_fee_rate)
     }
 
     fn check_tlc_expiry(&self, expiry: u64) -> ProcessingChannelResult {
