@@ -200,7 +200,8 @@ impl InFlightCkbTxActor {
             self.chain_actor,
             CkbChainMessage::SendTx,
             self.timeout_ms(),
-            tx
+            tx,
+            std::time::Instant::now()
         ) {
             Ok(Ok(_)) => {
                 // repeat sending the tx on success to let the CKB node broadcasts it

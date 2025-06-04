@@ -658,8 +658,14 @@ impl Actor for MockChainActor {
 pub async fn submit_tx(mock_actor: ActorRef<CkbChainMessage>, tx: TransactionView) -> TxStatus {
     pub const TIMEOUT: u64 = 1000;
     debug!("Calling chain actor to submit tx: {:?}", &tx);
-    if let Err(error) = call_t!(mock_actor, CkbChainMessage::SendTx, TIMEOUT, tx.clone())
-        .expect("chain actor alive")
+    if let Err(error) = call_t!(
+        mock_actor,
+        CkbChainMessage::SendTx,
+        TIMEOUT,
+        tx.clone(),
+        std::time::Instant::now()
+    )
+    .expect("chain actor alive")
     {
         error!("submit tx failed: {:?}", error);
         return TxStatus::Rejected("submit tx failed".to_string());
