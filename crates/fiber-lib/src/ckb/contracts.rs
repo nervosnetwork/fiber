@@ -512,7 +512,7 @@ pub fn get_cell_deps_sync(
     // rx.blocking_recv().unwrap()
     tokio::runtime::Runtime::new()
         .unwrap()
-        .block_on(get_cell_deps(contracts, &udt_script))?;
+        .block_on(get_cell_deps(contracts, &udt_script))
 }
 
 pub fn get_cell_deps_count(contracts: Vec<Contract>, udt_script: &Option<Script>) -> usize {
