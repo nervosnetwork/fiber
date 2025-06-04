@@ -34,5 +34,5 @@ assert {
 script:post-response {
   // Dialing a peer is async in tentacle. Sleep for some time to make sure
   // we're connected to the peer.
-  await new Promise(r => setTimeout(r, 15000));
+  await new Promise(r => setTimeout(r, 1000));
 }

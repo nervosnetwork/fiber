@@ -30,7 +30,7 @@ assert {
 
 script:pre-request {
   // wait 10 seconds for the onchain timestamp to be updated
-  await new Promise(r => setTimeout(r, 5000));
+  await new Promise(r => setTimeout(r, 10000));
 }
 
 script:post-response {

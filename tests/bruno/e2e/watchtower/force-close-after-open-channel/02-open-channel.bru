@@ -40,6 +40,6 @@ assert {
 }
 
 script:post-response {
-  await new Promise(r => setTimeout(r, 5000));
+  await new Promise(r => setTimeout(r, 2000));
     bru.setVar("N1N2_TEMP_CHANNEL_ID", res.body.result.temporary_channel_id);
 }

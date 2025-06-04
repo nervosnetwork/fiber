@@ -35,7 +35,7 @@ assert {
 
 script:post-response {
   // Sleep for sometime to make sure current operation finishes before next request starts.
-  await new Promise(r => setTimeout(r, 15000));
+  await new Promise(r => setTimeout(r, 1000));
   console.log("accept channel result: ", res.body);
   bru.setVar("CHANNEL_ID", res.body.result.channel_id);
 }

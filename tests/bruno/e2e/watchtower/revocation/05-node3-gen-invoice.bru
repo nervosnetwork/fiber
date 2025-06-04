@@ -61,5 +61,5 @@ script:post-response {
   console.log("generated result: ", res.body.result);
   bru.setVar("encoded_invoice", res.body.result.invoice_address);
   // Sleep for sometime to make sure current operation finishes before next request starts.
-  await new Promise(r => setTimeout(r, 5000));
+  await new Promise(r => setTimeout(r, 1000));
 }
