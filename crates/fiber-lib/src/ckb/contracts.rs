@@ -500,7 +500,7 @@ pub fn get_cell_deps_sync(
     contracts: Vec<Contract>,
     udt_script: &Option<Script>,
 ) -> Result<CellDepVec, ContractsContextError> {
-    // use tokio::runtime::Handle;
+    use tokio::runtime::Handle;
 
     // let runtime = Handle::current();
     // let (tx, rx) = tokio::sync::oneshot::channel();
@@ -510,9 +510,10 @@ pub fn get_cell_deps_sync(
     //     tx.send(result).unwrap();
     // });
     // rx.blocking_recv().unwrap()
-    tokio::runtime::Runtime::new()
-        .unwrap()
-        .block_on(get_cell_deps(contracts, &udt_script))
+    // tokio::runtime::Runtime::new()
+    //     .unwrap()
+    //     .block_on(get_cell_deps(contracts, &udt_script))
+    Handle::current().block_on(get_cell_deps(contracts, &udt_script))
 }
 
 pub fn get_cell_deps_count(contracts: Vec<Contract>, udt_script: &Option<Script>) -> usize {
