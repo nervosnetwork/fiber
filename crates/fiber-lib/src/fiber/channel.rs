@@ -6536,6 +6536,15 @@ impl ChannelActorState {
                     peer_remote_commitment_number,
                     my_waiting_ack,
                 );
+
+                if peer_local_commitment_number.abs_diff(my_remote_commitment_number) > 1
+                    || peer_remote_commitment_number.abs_diff(my_local_commitment_number) > 1
+                {
+                    return Err(ProcessingChannelError::InvalidParameter(
+                        "reestablish channel message with invalid commitment numbers".to_string(),
+                    ));
+                }
+
                 if my_local_commitment_number == peer_remote_commitment_number
                     && my_remote_commitment_number == peer_local_commitment_number
                 {

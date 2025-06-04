@@ -497,6 +497,13 @@ fn test_invoice_udt_script() {
 }
 
 #[test]
+fn test_invoice_check_expiry_should_not_overflow() {
+    let mut invoice = mock_invoice();
+    invoice.data.timestamp = u128::MAX;
+    assert!(!invoice.is_expired()); // should not panic
+}
+
+#[test]
 fn test_invoice_check_expired() {
     let private_key = gen_rand_secp256k1_private_key();
     let invoice = InvoiceBuilder::new(Currency::Fibb)
