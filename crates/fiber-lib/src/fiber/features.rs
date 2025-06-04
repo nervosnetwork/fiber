@@ -143,10 +143,11 @@ impl FeatureVector {
             .collect()
     }
 
-    pub fn enabled_features_names(&self) -> Vec<&'static str> {
+    pub fn enabled_features_names(&self) -> Vec<String> {
         self.enabled_features()
             .into_iter()
             .map(feature_bits::feature_bit_name)
+            .map(|name| name.to_string())
             .collect()
     }
 

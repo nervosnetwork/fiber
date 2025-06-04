@@ -483,6 +483,7 @@ Get the node information.
 * `version` - <em>`String`</em>, The version of the node software.
 * `commit_hash` - <em>`String`</em>, The commit hash of the node software.
 * `node_id` - <em>[Pubkey](#type-pubkey)</em>, The identity public key of the node.
+* `features` - <em>`Vec<String>`</em>, The features supported by the node.
 * `node_name` - <em>`Option<String>`</em>, The optional name of the node.
 * `addresses` - <em>`Vec<MultiAddr>`</em>, A list of multi-addresses associated with the node.
 * `chain_hash` - <em>[Hash256](#type-hash256)</em>, The hash of the blockchain that the node is connected to.
@@ -1191,6 +1192,7 @@ The Node information.
 
 * `node_name` - <em>String</em>, The name of the node.
 * `addresses` - <em>Vec<MultiAddr></em>, The addresses of the node.
+* `features` - <em>Vec<String></em>, The node features supported by the node.
 * `node_id` - <em>[Pubkey](#type-pubkey)</em>, The identity public key of the node.
 * `timestamp` - <em>u64</em>, The latest timestamp set by the owner for the node announcement.
  When a Node is online this timestamp will be updated to the latest value.

@@ -183,6 +183,7 @@ pub struct NodeInfoResponse {
     pub node_name: Option<AnnouncedNodeName>,
     pub node_id: Pubkey,
     pub addresses: Vec<MultiAddr>,
+    pub features: FeatureVector,
     pub chain_hash: Hash256,
     pub open_channel_auto_accept_min_ckb_funding_amount: u64,
     pub auto_accept_channel_ckb_funding_amount: u64,
@@ -1646,6 +1647,7 @@ where
                 let response = NodeInfoResponse {
                     node_name: state.node_name,
                     node_id: state.get_public_key(),
+                    features: state.features.clone(),
                     addresses: state.announced_addrs.clone(),
                     chain_hash: get_chain_hash(),
                     open_channel_auto_accept_min_ckb_funding_amount: state
