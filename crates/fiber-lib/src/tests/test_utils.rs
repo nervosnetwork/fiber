@@ -1,35 +1,20 @@
 use crate::ckb::tests::test_utils::get_tx_from_hash;
 use crate::ckb::tests::test_utils::MockChainActorMiddleware;
 use crate::ckb::GetTxResponse;
-use crate::fiber::channel::ChannelActorState;
-use crate::fiber::channel::ChannelActorStateStore;
-use crate::fiber::channel::ChannelCommand;
-use crate::fiber::channel::ChannelCommandWithId;
-use crate::fiber::channel::ReloadParams;
-use crate::fiber::channel::ShutdownCommand;
-use crate::fiber::channel::UpdateCommand;
+use crate::fiber::channel::*;
 use crate::fiber::gossip::get_gossip_actor_name;
 use crate::fiber::gossip::GossipActorMessage;
 use crate::fiber::graph::NetworkGraphStateStore;
 use crate::fiber::graph::PaymentSession;
 use crate::fiber::graph::PaymentSessionStatus;
-#[cfg(any(test, feature = "bench"))]
-use crate::fiber::network::BuildRouterCommand;
-use crate::fiber::network::DebugEvent;
-use crate::fiber::network::GossipMessageWithPeerId;
-use crate::fiber::network::NodeInfoResponse;
-use crate::fiber::network::PaymentCustomRecords;
-use crate::fiber::network::PaymentRouter;
-use crate::fiber::network::SendPaymentCommand;
-use crate::fiber::network::SendPaymentResponse;
-use crate::fiber::network::SendPaymentWithRouterCommand;
+use crate::fiber::network::*;
 use crate::fiber::types::EcdsaSignature;
+use crate::fiber::types::FiberMessage;
 use crate::fiber::types::GossipMessage;
 use crate::fiber::types::Pubkey;
-use crate::invoice::CkbInvoice;
-use crate::invoice::CkbInvoiceStatus;
-use crate::invoice::InvoiceStore;
-use crate::invoice::PreimageStore;
+use crate::fiber::types::Shutdown;
+use crate::fiber::ASSUME_NETWORK_ACTOR_ALIVE;
+use crate::invoice::*;
 use crate::rpc::config::RpcConfig;
 use crate::rpc::server::start_rpc;
 use ckb_sdk::core::TransactionBuilder;
@@ -378,12 +363,11 @@ impl ChannelParameters {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn establish_channel_between_nodes(
+pub(crate) async fn create_channel_with_nodes(
     node_a: &mut NetworkNode,
     node_b: &mut NetworkNode,
     params: ChannelParameters,
-) -> (Hash256, Hash256) {
+) -> Result<(Hash256, Hash256), String> {
     let message = |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
             OpenChannelCommand {
@@ -406,7 +390,7 @@ pub(crate) async fn establish_channel_between_nodes(
     };
     let open_channel_result = call!(node_a.network_actor, message)
         .expect("node_a alive")
-        .expect("open channel success");
+        .map_err(|e| e.to_string())?;
 
     node_b
         .expect_event(|event| match event {
@@ -419,10 +403,6 @@ pub(crate) async fn establish_channel_between_nodes(
         })
         .await;
 
-    debug!(
-        "haha got ChannelPendingToBeAccepted: {:?}",
-        open_channel_result
-    );
     let message = |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::AcceptChannel(
             AcceptChannelCommand {
@@ -440,7 +420,8 @@ pub(crate) async fn establish_channel_between_nodes(
     };
     let accept_channel_result = call!(node_b.network_actor, message)
         .expect("node_b alive")
-        .expect("accept channel success");
+        .map_err(|e| e.to_string())?;
+
     let new_channel_id = accept_channel_result.new_channel_id;
 
     let funding_tx_outpoint = node_a
@@ -476,8 +457,17 @@ pub(crate) async fn establish_channel_between_nodes(
     let funding_tx_hash = funding_tx_outpoint.tx_hash().into();
     node_a.add_channel_tx(new_channel_id, funding_tx_hash);
     node_b.add_channel_tx(new_channel_id, funding_tx_hash);
+    Ok((new_channel_id, funding_tx_hash))
+}
 
-    (new_channel_id, funding_tx_hash)
+pub(crate) async fn establish_channel_between_nodes(
+    node_a: &mut NetworkNode,
+    node_b: &mut NetworkNode,
+    params: ChannelParameters,
+) -> (Hash256, Hash256) {
+    create_channel_with_nodes(node_a, node_b, params)
+        .await
+        .expect("create channel between nodes")
 }
 
 #[cfg(test)]
@@ -1025,6 +1015,26 @@ impl NetworkNode {
             }),
         )
         .await;
+    }
+
+    pub async fn handle_shutdown_command_without_check(
+        &self,
+        channel_id: Hash256,
+        command: ShutdownCommand,
+    ) {
+        let state = self.get_channel_actor_state(channel_id);
+        self.network_actor
+            .send_message(NetworkActorMessage::new_command(
+                NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
+                    state.get_remote_peer_id(),
+                    FiberMessage::shutdown(Shutdown {
+                        channel_id: state.get_id(),
+                        close_script: command.close_script.clone(),
+                        fee_rate: command.fee_rate,
+                    }),
+                )),
+            ))
+            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
     }
 
     pub async fn update_channel_with_command(&self, channel_id: Hash256, command: UpdateCommand) {
