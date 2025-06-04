@@ -1303,6 +1303,10 @@ where
                                 continue;
                             }
                             for tlc in actor_state.tlc_state.received_tlcs.get_committed_tlcs() {
+                                dbg!("check channels", &channel_id, &tlc.id());
+                                // TODO we should ship hold tlcs, keep continue here
+                                continue;
+                                // TODO check max hold_time and remove hold tlcs
                                 if let Some(payment_preimage) =
                                     self.store.get_preimage(&tlc.payment_hash)
                                 {
@@ -1325,6 +1329,7 @@ where
                                     }
                                     let (send, _recv) = oneshot::channel();
                                     let rpc_reply = RpcReplyPort::from(send);
+                                    dbg!("send remove tlc command", &tlc.id());
                                     if let Err(err) = state
                                         .send_command_to_channel(
                                             channel_id,
@@ -1835,6 +1840,7 @@ where
             // if payment_session.status == PaymentSessionStatus::Inflight {
             match reason {
                 RemoveTlcReason::RemoveTlcFulfill(_) => {
+                    dbg!("record attempt fulfilled", &reason);
                     self.network_graph
                         .write()
                         .await
@@ -1960,6 +1966,9 @@ where
             }
             Ok(hops) => {
                 attempt.route = SessionRoute::new(source, session.request.target_pubkey, &hops);
+                // update amount
+                attempt.amount = attempt.route.nodes.last().unwrap().amount;
+                dbg!(attempt.amount);
                 assert_ne!(hops[0].funding_tx_hash, Hash256::default());
                 return Ok(hops);
             }
@@ -2230,6 +2239,13 @@ where
                 return Err(err);
             }
         }
+
+        let pss =
+            PaymentSessionState::from_db(&self.store, payment_hash)?.expect("payment session");
+        if pss.remain_amount > 0 {
+            self.register_payment_retry(myself, payment_hash);
+        }
+
         Ok(Some(attempt.route.clone()))
     }
 

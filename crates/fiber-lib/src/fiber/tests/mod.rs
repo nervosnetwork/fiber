@@ -3,6 +3,7 @@ mod gossip;
 mod graph;
 mod hash_algorithm;
 mod history;
+mod mpp;
 mod network;
 mod path;
 mod payment;

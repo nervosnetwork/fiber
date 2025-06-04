@@ -21,6 +21,7 @@ use crate::fiber::types::PaymentHopData;
 use crate::invoice::CkbInvoice;
 use crate::now_timestamp_as_millis_u64;
 use ckb_types::packed::{OutPoint, Script};
+use lightning_invoice::payment;
 use rand::seq::SliceRandom;
 use rand::thread_rng;
 use serde::{Deserialize, Serialize};
@@ -871,8 +872,10 @@ where
         let final_tlc_expiry_delta = payment_data.final_tlc_expiry_delta;
         let allow_self_payment = payment_data.allow_self_payment;
         // TODO check feature bits after https://github.com/nervosnetwork/fiber/pull/719/files is merged
+        // if max_parts is set, and keysend is not set, then allow mpp
+        // in keysend mode, receiver doesn't know the amount to receive, so we don't allow mpp
         let (allow_mpp, max_parts) = match payment_data.max_parts {
-            Some(max_parts) if max_parts > 1 => (true, max_parts),
+            Some(max_parts) if max_parts > 1 && !payment_data.keysend => (true, max_parts),
             _ => (false, 1),
         };
         let is_last_part = active_parts + 1 >= max_parts as usize;
@@ -915,12 +918,13 @@ where
 
         assert!(!route.is_empty());
 
-        Ok(self.build_router_from_path(&route, payment_data))
+        Ok(self.build_router_from_path(&route, max_amount, payment_data))
     }
 
     fn build_router_from_path(
         &self,
         route: &Vec<RouterHop>,
+        max_amount: u128,
         payment_data: SendPaymentData,
     ) -> Vec<PaymentHopData> {
         let invoice = payment_data
@@ -947,7 +951,7 @@ where
             });
         }
         hops_data.push(PaymentHopData {
-            amount: payment_data.amount,
+            amount: max_amount,
             next_hop: None,
             hash_algorithm,
             expiry: now + payment_data.final_tlc_expiry_delta,
@@ -1584,6 +1588,7 @@ impl SessionRoute {
     // the `payment_hops` is [B, C, D], which is a convenient way for onion routing.
     // here we need to create a session route with source, which is A -> B -> C -> D
     pub fn new(source: Pubkey, target: Pubkey, payment_hops: &[PaymentHopData]) -> Self {
+        dbg!(payment_hops);
         let nodes = std::iter::once(source)
             .chain(
                 payment_hops
@@ -1610,6 +1615,7 @@ impl SessionRoute {
     pub fn fee(&self) -> u128 {
         let first_amount = self.nodes.first().map_or(0, |s| s.amount);
         let last_amount = self.nodes.last().map_or(0, |s| s.amount);
+        dbg!(first_amount, last_amount);
         assert!(first_amount >= last_amount);
         first_amount - last_amount
     }

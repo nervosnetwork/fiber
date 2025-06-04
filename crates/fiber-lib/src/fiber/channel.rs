@@ -714,6 +714,11 @@ where
         };
         let settled_tlcs: Vec<_> = pending_tlcs
             .filter(|tlc| {
+                dbg!(
+                    &tlc.removed_reason,
+                    &tlc.status,
+                    state.tlc_state.applied_remove_tlcs.contains(&tlc.tlc_id)
+                );
                 tlc.removed_reason.is_some()
                     && matches!(
                         tlc.status,
@@ -726,6 +731,7 @@ where
             .collect();
 
         for tlc_id in settled_tlcs {
+            dbg!("apply remove tlc operation", &tlc_id);
             self.apply_remove_tlc_operation(myself, state, tlc_id)
                 .await
                 .expect("expect remove tlc success");
@@ -794,6 +800,8 @@ where
 
         for add_tlc in apply_tlcs {
             assert!(add_tlc.is_received());
+            dbg!("update tlc status on ack", &add_tlc.tlc_id);
+            // TODO do we need to check hold timeout here?
             if let Err(error) = self.apply_add_tlc_operation(myself, state, &add_tlc).await {
                 self.process_add_tlc_error(
                     myself,
@@ -1091,6 +1099,7 @@ where
         // maybe we need to go through shutdown process for this error
         state
             .check_remove_tlc_with_reason(TLCId::Offered(remove_tlc.tlc_id), &remove_tlc.reason)?;
+        dbg!("set offered tlc removed", &remove_tlc.tlc_id);
         let payment_hash = state
             .tlc_state
             .set_offered_tlc_removed(remove_tlc.tlc_id, remove_tlc.reason.clone());
@@ -1240,6 +1249,7 @@ where
             // only the original sender of the TLC should send `TlcRemoveReceived` event
             // because only the original sender cares about the TLC event to settle the payment
             if tlc_info.is_offered() {
+                dbg!("Send tlc remove received event");
                 self.network
                     .send_message(NetworkActorMessage::new_event(
                         NetworkActorEvent::TlcRemoveReceived(
@@ -2944,8 +2954,10 @@ impl PendingTlcs {
             .iter()
             .filter(|tlc| {
                 if tlc.is_offered() {
+                    dbg!(&tlc.tlc_id, &tlc.outbound_status());
                     matches!(tlc.outbound_status(), OutboundTlcStatus::Committed)
                 } else {
+                    dbg!(&tlc.tlc_id, &tlc.inbound_status());
                     matches!(tlc.inbound_status(), InboundTlcStatus::Committed)
                 }
             })
@@ -3149,6 +3161,7 @@ impl TlcState {
     pub fn set_received_tlc_removed(&mut self, tlc_id: u64, reason: RemoveTlcReason) -> Hash256 {
         let tlc = self.get_mut(&TLCId::Received(tlc_id)).expect("get tlc");
         assert_eq!(tlc.inbound_status(), InboundTlcStatus::Committed);
+        dbg!("set received tlc removed", &tlc_id, &reason);
         tlc.removed_reason = Some(reason);
         tlc.status = TlcStatus::Inbound(InboundTlcStatus::LocalRemoved);
         tlc.payment_hash
@@ -3157,6 +3170,7 @@ impl TlcState {
     pub fn set_offered_tlc_removed(&mut self, tlc_id: u64, reason: RemoveTlcReason) -> Hash256 {
         let tlc = self.get_mut(&TLCId::Offered(tlc_id)).expect("get tlc");
         assert_eq!(tlc.outbound_status(), OutboundTlcStatus::Committed);
+        dbg!("set offered tlc removed", &tlc_id, &reason);
         tlc.removed_reason = Some(reason);
         tlc.status = TlcStatus::Outbound(OutboundTlcStatus::RemoteRemoved);
         tlc.payment_hash
@@ -3236,6 +3250,7 @@ impl TlcState {
                     tlc.status = TlcStatus::Inbound(InboundTlcStatus::AnnounceWaitAck);
                 }
                 InboundTlcStatus::AnnounceWaitAck => {
+                    dbg!("set inbound tlc committed", &tlc.tlc_id);
                     tlc.status = TlcStatus::Inbound(InboundTlcStatus::Committed);
                 }
                 InboundTlcStatus::LocalRemoved => {
@@ -5031,18 +5046,19 @@ impl ChannelActorState {
         }
         let payment_hash = tlc.payment_hash;
 
-        // If all the tlcs with the same payment hash are confirmed to be failed,
-        // then it's safe to insert the new tlc, the old tlcs will be removed later.
-        if self
-            .tlc_state
-            .all_tlcs()
-            .any(|tlc| tlc.payment_hash == payment_hash && !tlc.is_fail_remove_confirmed())
-        {
-            return Err(ProcessingChannelError::RepeatedProcessing(format!(
-                "Trying to insert tlc with duplicate payment hash {:?}",
-                payment_hash
-            )));
-        }
+        // TODO remove here, mpp has same payment hash for each tlc
+        // // If all the tlcs with the same payment hash are confirmed to be failed,
+        // // then it's safe to insert the new tlc, the old tlcs will be removed later.
+        // if self
+        //     .tlc_state
+        //     .all_tlcs()
+        //     .any(|tlc| tlc.payment_hash == payment_hash && !tlc.is_fail_remove_confirmed())
+        // {
+        //     return Err(ProcessingChannelError::RepeatedProcessing(format!(
+        //         "Trying to insert tlc with duplicate payment hash {:?}",
+        //         payment_hash
+        //     )));
+        // }
 
         if tlc.is_offered() {
             let sent_tlc_value = self.get_offered_tlc_balance();

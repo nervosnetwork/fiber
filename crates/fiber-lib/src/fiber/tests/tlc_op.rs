@@ -282,6 +282,7 @@ impl Actor for TlcActor {
                     "Peer {} process peer remove tlc .... with tlc_id: {}",
                     state.peer_id, tlc_id
                 );
+                dbg!("set offered tlc removed", &tlc_id);
                 state.tlc_state.set_offered_tlc_removed(
                     tlc_id,
                     RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
