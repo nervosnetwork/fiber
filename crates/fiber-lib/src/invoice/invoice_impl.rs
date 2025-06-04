@@ -265,17 +265,14 @@ impl CkbInvoice {
         let hash = Message::from_digest_slice(&self.hash()[..])
             .expect("Hash is 32 bytes long, same as MESSAGE_SIZE");
 
-        let res = secp256k1::Secp256k1::new()
-            .recover_ecdsa(
-                &hash,
-                &self
-                    .signature
-                    .as_ref()
-                    .expect("signature must be present")
-                    .0,
-            )
-            .expect("payee pub key recovered");
-        Ok(res)
+        secp256k1::Secp256k1::new().recover_ecdsa(
+            &hash,
+            &self
+                .signature
+                .as_ref()
+                .expect("signature must be present")
+                .0,
+        )
     }
 
     pub fn is_signed(&self) -> bool {
@@ -288,11 +285,16 @@ impl CkbInvoice {
 
     pub fn is_expired(&self) -> bool {
         self.expiry_time().is_some_and(|expiry| {
-            self.data.timestamp + expiry.as_millis()
-                < std::time::UNIX_EPOCH
-                    .elapsed()
-                    .expect("Duration since unix epoch")
-                    .as_millis()
+            self.data
+                .timestamp
+                .checked_add(expiry.as_millis())
+                .is_some_and(|expiry_time| {
+                    let now = std::time::UNIX_EPOCH
+                        .elapsed()
+                        .expect("Duration since unix epoch")
+                        .as_millis();
+                    expiry_time < now
+                })
         })
     }
 

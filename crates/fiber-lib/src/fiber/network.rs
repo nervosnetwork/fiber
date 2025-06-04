@@ -585,6 +585,14 @@ impl SendPaymentData {
             ));
         }
 
+        let max_fee_amount = command.max_fee_amount.unwrap_or(0);
+        if amount.checked_add(max_fee_amount).is_none() {
+            return Err(format!(
+                "amount + max_fee_amount overflow: amount = {}, max_fee_amount = {}",
+                amount, max_fee_amount
+            ));
+        }
+
         let hop_hints = command.hop_hints.unwrap_or_default();
 
         Ok(SendPaymentData {
@@ -695,6 +703,11 @@ pub enum NetworkServiceEvent {
     // and we successfully assemble the partial signature from other party
     // to create a complete commitment transaction and a settlement transaction.
     RemoteCommitmentSigned(PeerId, Hash256, TransactionView, SettlementData),
+    // Preimage is created for the payment hash, the first Hash256 is the payment hash,
+    // and the second Hash256 is the preimage.
+    PreimageCreated(Hash256, Hash256),
+    // Preimage is removed for the payment hash.
+    PreimageRemoved(Hash256),
     // Some other debug event for assertion.
     #[cfg(debug_assertions)]
     DebugEvent(DebugEvent),

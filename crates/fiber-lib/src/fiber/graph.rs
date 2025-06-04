@@ -1062,6 +1062,14 @@ where
             ));
         }
 
+        if amount.checked_add(max_fee_amount.unwrap_or(0)).is_none() {
+            return Err(PathFindError::Amount(format!(
+                "amount {} + max_fee_amount {} overflow",
+                amount,
+                max_fee_amount.unwrap_or(0)
+            )));
+        }
+
         if source == target && !allow_self {
             return Err(PathFindError::PathFind(
                 "allow_self_payment is not enable, can not pay self".to_string(),
@@ -1149,9 +1157,13 @@ where
         while let Some(cur_hop) = nodes_heap.pop() {
             nodes_visited += 1;
 
+            if cur_hop.node_id == source {
+                break;
+            }
+
             for (from, to, channel_info, channel_update) in self.get_node_inbounds(cur_hop.node_id)
             {
-                let is_initial = from == source;
+                let is_source = from == source;
 
                 assert_eq!(to, cur_hop.node_id);
                 if &udt_type_script != channel_info.udt_type_script() {
@@ -1167,7 +1179,7 @@ where
                 edges_expanded += 1;
 
                 let next_hop_received_amount = cur_hop.amount_to_send;
-                let fee = if is_initial {
+                let fee = if is_source {
                     0
                 } else {
                     calculate_tlc_forward_fee(
@@ -1182,7 +1194,7 @@ where
                     })?
                 };
                 let amount_to_send = next_hop_received_amount + fee;
-                let expiry_delta = if is_initial {
+                let expiry_delta = if is_source {
                     0
                 } else {
                     channel_update.tlc_expiry_delta
@@ -1343,9 +1355,15 @@ where
         true
     }
 
+    // Larger fee and htlc_expiry_delta makes edge_weight large,
+    // which reduce the probability of choosing this edge,
     fn edge_weight(&self, amount: u128, fee: u128, htlc_expiry_delta: u64) -> u128 {
-        let risk_factor: u128 = 15;
-        let time_lock_penalty = amount * htlc_expiry_delta as u128 * (risk_factor / 1000000000);
+        // The factor is currently a fixed value, but might be configurable in the future,
+        // lock 1% of amount with default tlc expiry delta.
+        let risk_factor: f64 = 0.01;
+        let time_lock_penalty = (amount as f64
+            * (risk_factor * (htlc_expiry_delta as f64 / DEFAULT_TLC_EXPIRY_DELTA as f64)))
+            as u128;
         fee + time_lock_penalty
     }
 

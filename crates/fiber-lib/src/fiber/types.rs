@@ -81,6 +81,7 @@ impl From<&PubNonce> for Byte66 {
     }
 }
 
+/// A wrapper for secp256k1 secret key
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Privkey(pub SecretKey);
 
