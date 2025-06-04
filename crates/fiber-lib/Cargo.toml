@@ -58,7 +58,9 @@ console = "0.15.8"
 rocksdb = { package = "ckb-rocksdb", version = "=0.21.1", features = [
     "lz4",
 ], default-features = false }
-jsonrpsee = { version = "0.25", features = ["server", "macros"] }
+clap = { version = "4.5.2", features = ["derive", "env", "string"] }
+clap-serde-derive = "0.2.1"
+jsonrpsee = { version = "0.22", features = ["client", "server", "macros"] }
 tokio = { version = "1", features = [
     "io-util",
     "macros",

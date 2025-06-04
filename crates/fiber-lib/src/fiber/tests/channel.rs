@@ -3972,6 +3972,8 @@ async fn test_revoke_old_commitment_transaction() {
 
 #[tokio::test]
 async fn test_channel_with_simple_update_operation() {
+    init_tracing();
+
     for algorithm in HashAlgorithm::supported_algorithms() {
         do_test_channel_with_simple_update_operation(algorithm).await
     }
@@ -4781,6 +4783,34 @@ async fn test_shutdown_channel_with_large_size_shutdown_script_should_fail() {
         .err()
         .unwrap()
         .contains("Local balance is not enough to pay the fee"));
+}
+
+#[tokio::test]
+async fn test_shutdown_channel_with_invalid_feerate_peer_message() {
+    init_tracing();
+
+    let node_a_funding_amount = 100000000000;
+    let node_b_funding_amount = 6200000000;
+
+    let (node_a, mut node_b, new_channel_id) =
+        create_nodes_with_established_channel(node_a_funding_amount, node_b_funding_amount, false)
+            .await;
+
+    let command = ShutdownCommand {
+        close_script: Script::new_builder().args([0u8; 21].pack()).build(),
+        fee_rate: FeeRate::from_u64(u64::MAX),
+        force: false,
+    };
+
+    node_a
+        .handle_shutdown_command_without_check(new_channel_id, command)
+        .await;
+
+    node_b
+        .expect_debug_event("InvalidParameter(\"Shutdown fee is invalid\")")
+        .await;
+    let state = node_b.get_channel_actor_state(new_channel_id);
+    matches!(state.state, ChannelState::ChannelReady);
 }
 
 #[tokio::test]
