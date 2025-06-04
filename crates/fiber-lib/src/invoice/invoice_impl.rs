@@ -265,17 +265,14 @@ impl CkbInvoice {
         let hash = Message::from_digest_slice(&self.hash()[..])
             .expect("Hash is 32 bytes long, same as MESSAGE_SIZE");
 
-        let res = secp256k1::Secp256k1::new()
-            .recover_ecdsa(
-                &hash,
-                &self
-                    .signature
-                    .as_ref()
-                    .expect("signature must be present")
-                    .0,
-            )
-            .expect("payee pub key recovered");
-        Ok(res)
+        secp256k1::Secp256k1::new().recover_ecdsa(
+            &hash,
+            &self
+                .signature
+                .as_ref()
+                .expect("signature must be present")
+                .0,
+        )
     }
 
     pub fn is_signed(&self) -> bool {
