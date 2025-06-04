@@ -93,7 +93,7 @@ ckb-hash = { version = "0.200.0", features = [
     "blake2b-ref",
 ], default-features = false }
 tracing = { version = "0.1", features = ["log"] }
-jsonrpsee = { version = "0.25", features = ["macros", "server-core"] }
+jsonrpsee = { version = "0.22", features = ["macros", "server-core"] }
 getrandom = { version = "0.3", features = ["wasm_js"] }
 
 [features]
@@ -105,7 +105,7 @@ watchtower = []
 tempfile = "3.10.1"
 ckb-testtool = "0.15.1"
 ciborium = "0.2.2"
-jsonrpsee = { version = "0.25", features = ["server", "macros", "http-client"] }
+jsonrpsee = { version = "0.22", features = ["server", "macros", "http-client"] }
 ouroboros = "0.18.5"
 futures = "0.3.31"
 

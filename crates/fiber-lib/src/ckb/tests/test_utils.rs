@@ -515,7 +515,7 @@ impl Actor for MockChainActor {
                     );
                 }
             }
-            SendTx(tx, reply_port) => {
+            SendTx(tx, _, reply_port) => {
                 const MAX_CYCLES: u64 = 100_000_000;
                 let mut f = || {
                     // Mark the inputs as consumed

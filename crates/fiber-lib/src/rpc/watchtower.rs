@@ -3,8 +3,6 @@ use jsonrpsee::proc_macros::rpc;
 use jsonrpsee::types::ErrorObjectOwned;
 
 use ckb_jsonrpc_types::Script;
-use jsonrpsee::{proc_macros::rpc, types::ErrorObjectOwned};
-use ractor::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 
@@ -140,18 +138,6 @@ where
         Ok(())
     }
 
-    async fn remove_watch_channel(
-        &self,
-        params: RemoveWatchChannelParams,
-    ) -> Result<(), ErrorObjectOwned> {
-        self.remove_watch_channel(params).await
-    }
-}
-
-impl<S> WatchtowerRpcServerImpl<S>
-where
-    S: WatchtowerStore + Send + Sync + 'static,
-{
     async fn remove_watch_channel(
         &self,
         params: RemoveWatchChannelParams,
