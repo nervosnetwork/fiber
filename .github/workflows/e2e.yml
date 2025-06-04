@@ -23,8 +23,8 @@ jobs:
           - "test"
         extra_bru_args:
           - ""
-        include:
-          # add an extra workflow to run udt using the env file xudt-test
+        # include:
+          # # add an extra workflow to run udt using the env file xudt-test
           # - workflow: "udt"
           #   test_env: "xudt-test"
           #   release: "0.116.1"
