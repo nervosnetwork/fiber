@@ -2,6 +2,7 @@ use crate::{
     ckb::config::{UdtArgInfo, UdtCellDep, UdtCfgInfos, UdtDep, UdtScript},
     fiber::{
         config::AnnouncedNodeName,
+        features::FeatureVector,
         gen::{fiber as molecule_fiber, gossip},
         hash_algorithm::HashAlgorithm,
         types::{
@@ -319,7 +320,7 @@ fn test_verify_hard_coded_node_announcement() {
         let node_id = privkey.pubkey();
         let mut node_announcement = NodeAnnouncement {
             signature: None,
-            features: 0,
+            features: FeatureVector::default(),
             timestamp: 1737451664358,
             node_id,
             node_name: AnnouncedNodeName::from_string("fiber-1").expect("valid name"),
@@ -389,7 +390,7 @@ fn test_verify_hard_coded_node_announcement() {
         let privkey = gen_deterministic_fiber_private_key();
         let mut node_announcement = NodeAnnouncement {
             signature: None,
-            features: 0,
+            features: FeatureVector::default(),
             timestamp: 1737449487183,
             node_id: privkey.pubkey(),
             node_name: AnnouncedNodeName::default(),
@@ -433,13 +434,13 @@ fn test_verify_hard_coded_node_announcement() {
 
     for (signature, message, node_announcement) in [
         (
-            "75a5419da26e24eace8426ed84180d7c340001c99f94e2657330361126d4f6854cf3c72c2632bf103361fbf3149535077d99e24833164d54b217e4daa2b4def5",
-            "8eea99f1c1a541b89c3ea84b5fed1a1311cd9c9e6490c9f9a1393348cf337855",
+            "0050f434c38a0ff570c608be7a6e823d6820a8cd9f73e9541fa5299622453ee213d255ee92164b16b5b3ecb892e6dc0d5b571f2821a1377547828773281fe4fa",
+            "f8f9124e028786d7134d475dbb12004d7b717e62df955716d9783f7f00b8dcc5",
             node1(),
         ),
         (
-            "6bcab4422ae8bf96db20089c04e41d5ba2726bc60ef1c5bc10f3aea7e9f2d30c1f9d3e64a65bdb4878f0953de93c4b4a622bc2e82d37d833472dfe04ecbd56e2",
-            "a71050674b30dc5c0355d83f210ccce4ff07a8c4412142659817b0ae2308bd71",
+            "0ac46cea0fe3bd1508f6cf7008100849e82efb6106fad8107b579be8b3834ddd0d4b23f231579f6a93c56e3d8dd83ff068a0ddd3ad6b0a67c358627c32f3f915",
+            "bd3dfefec4af70cb2bfac2ff3522eedb880e7030b8c83862c8cc42287a46c5ba",
             node2(),
         ),
     ] {

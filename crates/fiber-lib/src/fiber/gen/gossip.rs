@@ -3107,15 +3107,15 @@ impl ::core::default::Default for NodeAnnouncement {
     }
 }
 impl NodeAnnouncement {
-    const DEFAULT_VALUE: [u8; 233] = [
-        233, 0, 0, 0, 40, 0, 0, 0, 104, 0, 0, 0, 112, 0, 0, 0, 120, 0, 0, 0, 153, 0, 0, 0, 185, 0,
-        0, 0, 189, 0, 0, 0, 221, 0, 0, 0, 229, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    const DEFAULT_VALUE: [u8; 229] = [
+        229, 0, 0, 0, 40, 0, 0, 0, 104, 0, 0, 0, 108, 0, 0, 0, 116, 0, 0, 0, 149, 0, 0, 0, 181, 0,
+        0, 0, 185, 0, 0, 0, 217, 0, 0, 0, 225, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0,
     ];
     pub const FIELD_COUNT: usize = 9;
     pub fn total_size(&self) -> usize {
@@ -3140,11 +3140,11 @@ impl NodeAnnouncement {
         let end = molecule::unpack_number(&slice[8..]) as usize;
         EcdsaSignature::new_unchecked(self.0.slice(start..end))
     }
-    pub fn features(&self) -> Uint64 {
+    pub fn features(&self) -> Bytes {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[8..]) as usize;
         let end = molecule::unpack_number(&slice[12..]) as usize;
-        Uint64::new_unchecked(self.0.slice(start..end))
+        Bytes::new_unchecked(self.0.slice(start..end))
     }
     pub fn timestamp(&self) -> Uint64 {
         let slice = self.as_slice();
@@ -3294,11 +3294,11 @@ impl<'r> NodeAnnouncementReader<'r> {
         let end = molecule::unpack_number(&slice[8..]) as usize;
         EcdsaSignatureReader::new_unchecked(&self.as_slice()[start..end])
     }
-    pub fn features(&self) -> Uint64Reader<'r> {
+    pub fn features(&self) -> BytesReader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[8..]) as usize;
         let end = molecule::unpack_number(&slice[12..]) as usize;
-        Uint64Reader::new_unchecked(&self.as_slice()[start..end])
+        BytesReader::new_unchecked(&self.as_slice()[start..end])
     }
     pub fn timestamp(&self) -> Uint64Reader<'r> {
         let slice = self.as_slice();
@@ -3394,7 +3394,7 @@ impl<'r> molecule::prelude::Reader<'r> for NodeAnnouncementReader<'r> {
             return ve!(Self, OffsetsNotMatch);
         }
         EcdsaSignatureReader::verify(&slice[offsets[0]..offsets[1]], compatible)?;
-        Uint64Reader::verify(&slice[offsets[1]..offsets[2]], compatible)?;
+        BytesReader::verify(&slice[offsets[1]..offsets[2]], compatible)?;
         Uint64Reader::verify(&slice[offsets[2]..offsets[3]], compatible)?;
         PubkeyReader::verify(&slice[offsets[3]..offsets[4]], compatible)?;
         Byte32Reader::verify(&slice[offsets[4]..offsets[5]], compatible)?;
@@ -3408,7 +3408,7 @@ impl<'r> molecule::prelude::Reader<'r> for NodeAnnouncementReader<'r> {
 #[derive(Clone, Debug, Default)]
 pub struct NodeAnnouncementBuilder {
     pub(crate) signature: EcdsaSignature,
-    pub(crate) features: Uint64,
+    pub(crate) features: Bytes,
     pub(crate) timestamp: Uint64,
     pub(crate) node_id: Pubkey,
     pub(crate) node_name: Byte32,
@@ -3423,7 +3423,7 @@ impl NodeAnnouncementBuilder {
         self.signature = v;
         self
     }
-    pub fn features(mut self, v: Uint64) -> Self {
+    pub fn features(mut self, v: Bytes) -> Self {
         self.features = v;
         self
     }
@@ -4045,16 +4045,15 @@ impl ::core::default::Default for BroadcastMessage {
     }
 }
 impl BroadcastMessage {
-    const DEFAULT_VALUE: [u8; 237] = [
-        0, 0, 0, 0, 233, 0, 0, 0, 40, 0, 0, 0, 104, 0, 0, 0, 112, 0, 0, 0, 120, 0, 0, 0, 153, 0, 0,
-        0, 185, 0, 0, 0, 189, 0, 0, 0, 221, 0, 0, 0, 229, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    const DEFAULT_VALUE: [u8; 233] = [
+        0, 0, 0, 0, 229, 0, 0, 0, 40, 0, 0, 0, 104, 0, 0, 0, 108, 0, 0, 0, 116, 0, 0, 0, 149, 0, 0,
+        0, 181, 0, 0, 0, 185, 0, 0, 0, 217, 0, 0, 0, 225, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 0,
-        0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0,
     ];
     pub const ITEMS_COUNT: usize = 3;
     pub fn item_id(&self) -> molecule::Number {
