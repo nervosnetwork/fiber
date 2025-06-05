@@ -1,5 +1,6 @@
 use super::channel::{ChannelActorState, ChannelActorStateStore, ChannelTlcInfo};
 use super::config::AnnouncedNodeName;
+use super::features::FeatureVector;
 use super::gossip::GossipMessageStore;
 use super::history::{Direction, InternalResult, PaymentHistory, TimedResult};
 use super::network::{
@@ -44,7 +45,7 @@ pub struct NodeInfo {
     pub timestamp: u64,
     // Tentatively using 64 bits for features. May change the type later while developing.
     // rust-lightning uses a Vec<u8> here.
-    pub features: u64,
+    pub features: FeatureVector,
     // The name of the node. This is a human-readable string that is meant to be used for labelling nodes in the UI.
     pub node_name: AnnouncedNodeName,
     // All the reachable addresses.

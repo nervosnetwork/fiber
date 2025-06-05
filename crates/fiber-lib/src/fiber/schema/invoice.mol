@@ -6,8 +6,6 @@ option SignatureOpt (Signature);
 
 option AmountOpt (Uint128);
 
-option FeatureOpt (Uint32);
-
 struct FinalHtlcTimeout {
     value: Uint64,
 }
@@ -28,8 +26,8 @@ table FallbackAddr {
     value: Bytes,
 }
 
-struct Feature {
-    value: Uint64,
+table Feature {
+    value: Bytes,
 }
 
 table UdtScript {

@@ -1,5 +1,6 @@
 pub mod channel;
 pub mod config;
+pub mod features;
 pub mod gen;
 pub mod graph;
 pub mod hash_algorithm;

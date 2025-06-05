@@ -2,11 +2,12 @@ use super::test_utils::{init_tracing, NetworkNode};
 use crate::ckb::tests::test_utils::complete_commitment_tx;
 use crate::fiber::channel::{ChannelState, CloseFlags, UpdateCommand, XUDT_COMPATIBLE_WITNESS};
 use crate::fiber::config::{DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT};
+use crate::fiber::features::FeatureVector;
 use crate::fiber::graph::{ChannelInfo, PaymentSessionStatus};
 use crate::fiber::network::{DebugEvent, SendPaymentCommand};
 use crate::fiber::tests::test_utils::*;
 use crate::fiber::types::{
-    Hash256, PaymentHopData, PeeledOnionPacket, Pubkey, TlcErrorCode, NO_SHARED_SECRET,
+    Hash256, Init, PaymentHopData, PeeledOnionPacket, Pubkey, TlcErrorCode, NO_SHARED_SECRET,
 };
 use crate::invoice::{CkbInvoiceStatus, Currency, InvoiceBuilder};
 use crate::{
@@ -170,6 +171,44 @@ async fn test_create_private_channel() {
         false,
     )
     .await;
+}
+
+#[tokio::test]
+async fn test_send_init_msg_with_different_chain_hash() {
+    init_tracing();
+
+    let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
+
+    let dummy_err_chain_hash = Hash256::from([1; 32]);
+    node_a.send_init_peer_message(
+        node_b.peer_id.clone(),
+        Init {
+            features: FeatureVector::default(),
+            chain_hash: dummy_err_chain_hash,
+        },
+    );
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+    node_a
+        .expect_event(|event| match event {
+            NetworkServiceEvent::PeerDisConnected(peer_id, _reason) => {
+                assert_eq!(peer_id, &node_b.peer_id);
+                true
+            }
+            _ => false,
+        })
+        .await;
+
+    node_b
+        .expect_event(|event| match event {
+            NetworkServiceEvent::PeerDisConnected(peer_id, _reason) => {
+                assert_eq!(peer_id, &node_a.peer_id);
+                true
+            }
+            _ => false,
+        })
+        .await;
 }
 
 #[tokio::test]
