@@ -864,6 +864,7 @@ where
         &self,
         mut max_amount: u128,
         min_amount: u128,
+        max_fee_amount: Option<u128>,
         active_parts: usize,
         payment_data: SendPaymentData,
     ) -> Result<Vec<PaymentHopData>, PathFindError> {
@@ -896,7 +897,7 @@ where
                     source,
                     target,
                     max_amount,
-                    payment_data.max_fee_amount,
+                    max_fee_amount,
                     payment_data.udt_type_script.clone(),
                     final_tlc_expiry_delta,
                     payment_data.tlc_expiry_limit,
@@ -1551,6 +1552,7 @@ pub trait NetworkGraphStateStore {
     fn get_payment_history_results(&self) -> Vec<(OutPoint, Direction, TimedResult)>;
     fn get_attempt(&self, payment_hash: Hash256, attempt_id: u64) -> Option<Attempt>;
     fn insert_attempt(&self, attempt: Attempt);
+    fn remove_attempt(&self, payment_hash: Hash256, attempt_id: u64);
     fn get_attempts(&self, payment_hash: Hash256) -> Vec<Attempt>;
     fn next_attempt_id(&self) -> u64;
 }
@@ -1624,9 +1626,13 @@ impl SessionRoute {
         Self { nodes }
     }
 
+    pub fn receiver_amount(&self) -> u128 {
+        self.nodes.last().map_or(0, |s| s.amount)
+    }
+
     pub fn fee(&self) -> u128 {
         let first_amount = self.nodes.first().map_or(0, |s| s.amount);
-        let last_amount = self.nodes.last().map_or(0, |s| s.amount);
+        let last_amount = self.receiver_amount();
         dbg!(first_amount, last_amount);
         assert!(first_amount >= last_amount);
         first_amount - last_amount
@@ -1655,17 +1661,29 @@ pub struct PaymentSessionState {
     pub attempts: Vec<Attempt>,
     pub status: PaymentSessionStatus,
     pub remain_amount: u128,
+    pub fee_paid: u128,
 }
 
-fn send_amount(attempts: &[Attempt]) -> u128 {
+impl PaymentSessionState {
+    pub fn remain_fee(&self) -> Option<u128> {
+        let max_fee_amount = self.session.request.max_fee_amount?;
+        let remain_fee = max_fee_amount.saturating_sub(self.fee_paid);
+        Some(remain_fee)
+    }
+}
+
+/// return the amount sent and the fee paid
+fn send_amount(attempts: &[Attempt]) -> (u128, u128) {
     let mut sent = 0;
+    let mut fee_paid = 0;
     for a in attempts {
         if a.is_failed() {
             continue;
         }
-        sent += a.amount;
+        sent += a.route.receiver_amount();
+        fee_paid += a.route.fee();
     }
-    sent
+    (sent, fee_paid)
 }
 
 fn decide_payment_status(
@@ -1731,7 +1749,7 @@ impl PaymentSessionState {
         session: PaymentSession,
         attempts: Vec<Attempt>,
     ) -> Result<Self, PaymentSessionError> {
-        let sent = send_amount(&attempts);
+        let (sent, fee_paid) = send_amount(&attempts);
         if sent > session.request.amount {
             return Err(PaymentSessionError::OverSent {
                 sent_amount: sent,
@@ -1746,6 +1764,7 @@ impl PaymentSessionState {
             attempts,
             status,
             remain_amount,
+            fee_paid,
         })
     }
 
@@ -1768,12 +1787,7 @@ impl PaymentSessionState {
 
     pub fn next_step(&self) -> Result<bool, PaymentSessionError> {
         if self.allow_more_attempts() {
-            // do not count the WaitingTlcAck error, since we always retry it
-            let tried_count = self
-                .attempts
-                .iter()
-                .filter(|a| a.last_error != Some("WaitingTlcAck".to_string()))
-                .count() as u32;
+            let tried_count = self.attempts.iter().count() as u32;
             if tried_count >= self.session.try_limit {
                 let inflight = self.attempts.iter().any(|a| a.is_inflight());
                 assert!(!inflight);
@@ -1820,7 +1834,6 @@ impl PaymentSessionState {
     }
 
     pub fn new_attempt(&self, attempt_id: u64) -> Attempt {
-        let remain_amount = self.remain_amount;
         let now = now_timestamp_as_millis_u64();
         let payment_hash = self.session.payment_hash();
         // For HTLC, the attempt hash is the payment hash
@@ -1830,7 +1843,6 @@ impl PaymentSessionState {
             id: attempt_id,
             hash,
             payment_hash,
-            amount: remain_amount,
             route: Default::default(),
             session_key: [0; 32],
             preimage: None,
@@ -1846,7 +1858,6 @@ impl PaymentSessionState {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PaymentSession {
     pub request: SendPaymentData,
-    pub retried_times: u32,
     pub last_error: Option<String>,
     pub try_limit: u32,
     pub status: PaymentSessionStatus,
@@ -1862,7 +1873,6 @@ impl PaymentSession {
         let now = now_timestamp_as_millis_u64();
         Self {
             request,
-            retried_times: 0,
             last_error: None,
             try_limit,
             status: PaymentSessionStatus::Created,
@@ -1908,10 +1918,6 @@ impl PaymentSession {
         self.last_error = Some(error.to_string());
     }
 
-    pub fn can_retry(&self) -> bool {
-        self.retried_times < self.try_limit
-    }
-
     pub fn fee(&self) -> u128 {
         self.route.fee()
     }
@@ -1944,7 +1950,6 @@ pub struct Attempt {
     pub id: u64,
     pub hash: Hash256,
     pub payment_hash: Hash256,
-    pub amount: u128,
     pub route: SessionRoute,
     pub session_key: [u8; 32],
     pub preimage: Option<Hash256>,

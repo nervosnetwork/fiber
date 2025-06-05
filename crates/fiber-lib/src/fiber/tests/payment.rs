@@ -4740,12 +4740,11 @@ async fn test_send_payment_with_reconnect_two_times() {
                     payments.remove(payment_hash);
                 } else if status == PaymentSessionStatus::Created {
                     // wait for the payment to be retried
-                    let payment_session = node0.get_payment_session(*payment_hash).unwrap();
-                    eprintln!(
-                        "payment_session can_retry: {:?} retry_times: {:?}",
-                        payment_session.can_retry(),
-                        payment_session.retried_times
-                    );
+                    let pss = node0
+                        .get_payment_session_state(*payment_hash)
+                        .unwrap()
+                        .unwrap();
+                    eprintln!("payment_session attempts: {:?}", pss.attempts.len());
                 }
                 tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
             }

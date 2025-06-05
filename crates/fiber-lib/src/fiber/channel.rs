@@ -845,12 +845,7 @@ where
         .await;
     }
 
-    async fn try_to_settle_down_tlc(
-        &self,
-        myself: &ActorRef<ChannelActorMessage>,
-        state: &mut ChannelActorState,
-        tlc_id: TLCId,
-    ) {
+    async fn try_to_settle_down_tlc(&self, state: &mut ChannelActorState, tlc_id: TLCId) {
         let tlc_info = state.get_received_tlc(tlc_id).expect("expect tlc");
 
         // 1. check tlc if fulfilled invoice and invoice support MPP
@@ -885,21 +880,6 @@ where
         if let Some(invoice) = self.store.get_invoice(&tlc.payment_hash) {
             // TODO check if tlc is MPP
             // TODO check if invoice support MPP
-            let total_amount = tlcs.iter().map(|tlc| tlc.amount).sum::<u128>();
-
-            let is_fulfilled = total_amount >= invoice.amount.unwrap_or_default();
-            if !is_fulfilled {
-                self.store.insert_hold_tlc(
-                    tlc_info.payment_hash,
-                    HoldTlc {
-                        channel_actor_state_id: state.get_id(),
-                        tlc_id: tlc_info.tlc_id.into(),
-                    },
-                );
-                // TODO add to hold tlc list
-                // wait for other tlc to fulfill the invoice
-                return;
-            }
 
             let status = self.get_invoice_status(&invoice);
             match status {
@@ -921,7 +901,22 @@ where
                     error!("invoice already paid, ignore");
                 }
                 _ => {
-                    // do nothing
+                    let total_amount = tlcs.iter().map(|tlc| tlc.amount).sum::<u128>();
+                    let is_fulfilled = total_amount >= invoice.amount.unwrap_or_default();
+
+                    if !is_fulfilled {
+                        // hold the tlc if the invoice is not fulfilled
+                        self.store.insert_hold_tlc(
+                            tlc_info.payment_hash,
+                            HoldTlc {
+                                channel_actor_state_id: state.get_id(),
+                                tlc_id: tlc_info.tlc_id.into(),
+                            },
+                        );
+                        // just return, the hold tlc will be settle when the invoice is fulfilled
+                        return;
+                    }
+
                     // invoice status will be updated to paid after apply remove tlc operation
                 }
             }
@@ -986,8 +981,7 @@ where
         // we don't need to settle down the tlc if it is not the last hop here,
         // some e2e tests are calling AddTlc manually, so we can not use onion packet to
         // check whether it's the last hop here, maybe need to revisit in future.
-        self.try_to_settle_down_tlc(myself, state, add_tlc.tlc_id)
-            .await;
+        self.try_to_settle_down_tlc(state, add_tlc.tlc_id).await;
 
         warn!("finished check tlc for peer message: {:?}", &add_tlc.tlc_id);
         Ok(())
@@ -5109,7 +5103,6 @@ impl ChannelActorState {
                 tlc.tlc_id, next_tlc_id
             )));
         }
-        let payment_hash = tlc.payment_hash;
 
         // TODO remove here, mpp has same payment hash for each tlc
         // // If all the tlcs with the same payment hash are confirmed to be failed,

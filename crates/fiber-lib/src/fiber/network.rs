@@ -175,6 +175,7 @@ pub struct SendPaymentResponse {
 impl From<PaymentSessionState> for SendPaymentResponse {
     fn from(pss: PaymentSessionState) -> Self {
         let status = pss.status;
+        let fee = pss.fee_paid;
         let route = match status {
             PaymentSessionStatus::Created | PaymentSessionStatus::Inflight => pss.attempts.first(),
             PaymentSessionStatus::Success => pss.attempts.iter().find(|a| a.is_settled()),
@@ -182,7 +183,6 @@ impl From<PaymentSessionState> for SendPaymentResponse {
         }
         .map(|a| a.route.clone())
         .unwrap_or_default();
-        let fee = route.fee();
         dbg!(
             route.nodes.len(),
             fee,
@@ -1950,16 +1950,27 @@ where
         let source = graph.get_source_pubkey();
         let max_amount = payment_session.remain_amount;
         let min_amount = DEFAULT_MPP_MIN_AMOUNT;
+        let remain_fee = payment_session.remain_fee();
         let active_parts = payment_session.attempts.len();
         let session = &mut payment_session.session;
+        dbg!(
+            "build route",
+            max_amount,
+            min_amount,
+            remain_fee,
+            active_parts,
+            attempt.id
+        );
         match graph.build_route(
             max_amount,
             min_amount,
+            remain_fee,
             active_parts,
             session.request.clone(),
         ) {
             Err(e) => {
                 let error = format!("Failed to build route, {}", e);
+                dbg!("build route error ", attempt.id, &error);
                 if !session.request.dry_run {
                     self.set_attempt_fail_with_error(attempt, &error);
                     self.set_payment_fail_with_error(session, &error);
@@ -1969,8 +1980,12 @@ where
             Ok(hops) => {
                 attempt.route = SessionRoute::new(source, session.request.target_pubkey, &hops);
                 // update amount
-                attempt.amount = attempt.route.nodes.last().unwrap().amount;
-                dbg!(attempt.amount);
+                dbg!(
+                    "build route success",
+                    attempt.id,
+                    attempt.route.receiver_amount(),
+                    attempt.route.fee()
+                );
                 assert_ne!(hops[0].funding_tx_hash, Hash256::default());
                 return Ok(hops);
             }
@@ -2149,7 +2164,12 @@ where
 
     fn set_attempt_fail_with_error(&self, attempt: &mut Attempt, error: &str) {
         attempt.set_failed_status(error);
-        self.store.insert_attempt(attempt.clone());
+        // The peer is waiting for tlc ack, just delete the attempt
+        if error == "WaitingTlcAck" {
+            self.store.remove_attempt(attempt.payment_hash, attempt.id);
+        } else {
+            self.store.insert_attempt(attempt.clone());
+        }
     }
 
     /// Resume the payment session
@@ -2191,12 +2211,10 @@ where
         }
 
         debug!(
-            "try_payment_session: {:?} times: {:?}",
+            "try_payment_session: {:?} attempts: {:?}",
             session_state.session.payment_hash(),
-            session_state.session.retried_times
+            session_state.attempts.len()
         );
-
-        let payment_data = session_state.session.request.clone();
 
         // // fail if no more attempts or no more retries
         // // TODO: check if the payment is inflight
@@ -2328,7 +2346,7 @@ where
             let _hops = self
                 .build_payment_route(&mut session_state, &mut attempt)
                 .await?;
-            session_state.attempts.push(attempt);
+            let session_state = PaymentSessionState::new(session_state.session, vec![attempt])?;
             let response: SendPaymentResponse = session_state.into();
             return Ok(response);
         }
