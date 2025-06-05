@@ -1623,10 +1623,9 @@ async fn test_send_payment_with_route_with_invalid_parameters() {
     let payment_hash = res.unwrap().payment_hash;
     node_0.wait_until_failed(payment_hash).await;
     let result = node_0
-        .get_payment_session_state(payment_hash)
-        .unwrap()
+        .get_payment_session(payment_hash)
         .expect("get payment");
-    assert_eq!(result.attempts.len(), 1);
+    assert_eq!(result.attempts().len(), 1);
 
     // ================================================================
     // now we change the expiry delta in the middle hop
@@ -1646,11 +1645,10 @@ async fn test_send_payment_with_route_with_invalid_parameters() {
     let payment_hash = res.unwrap().payment_hash;
     node_0.wait_until_failed(payment_hash).await;
     let result = node_0
-        .get_payment_session_state(payment_hash)
-        .unwrap()
+        .get_payment_session(payment_hash)
         .expect("get payment");
     eprintln!("result: {:?}", result.status);
-    assert_eq!(result.attempts.len(), 1);
+    assert_eq!(result.attempts().len(), 1);
 }
 
 #[tokio::test]
@@ -1710,13 +1708,12 @@ async fn test_send_payment_with_router_with_multiple_channels() {
     assert!(res.is_ok());
     let payment_hash = res.unwrap().payment_hash;
 
-    let payment_session_state = node_0
-        .get_payment_session_state(payment_hash)
-        .unwrap()
+    let payment_session = node_0
+        .get_payment_session(payment_hash)
         .expect("get payment");
-    eprintln!("payment_session: {:?}", &payment_session_state.session);
-    let used_channels: Vec<Hash256> = payment_session_state
-        .attempts
+    eprintln!("payment_session: {:?}", &payment_session);
+    let used_channels: Vec<Hash256> = payment_session
+        .attempts()
         .first()
         .unwrap()
         .route
@@ -1772,13 +1769,10 @@ async fn test_send_payment_with_router_with_multiple_channels() {
     assert!(res.is_ok());
     let payment_hash = res.unwrap().payment_hash;
     eprintln!("payment_hash: {:?}", payment_hash);
-    let payment_session_state = node_0
-        .get_payment_session_state(payment_hash)
-        .unwrap()
-        .expect("get payment");
-    eprintln!("payment_session: {:?}", &payment_session_state.session);
-    let used_channels: Vec<Hash256> = payment_session_state
-        .attempts
+    let payment_session = node_0.get_payment_session(payment_hash).unwrap();
+    eprintln!("payment_session: {:?}", &payment_session);
+    let used_channels: Vec<Hash256> = payment_session
+        .attempts()
         .first()
         .unwrap()
         .route
@@ -1871,13 +1865,12 @@ async fn test_send_payment_two_nodes_with_router_and_multiple_channels() {
         .unwrap();
 
     let payment_hash = res.payment_hash;
-    let payment_session_state = node_0
-        .get_payment_session_state(payment_hash)
-        .unwrap()
+    let payment_session = node_0
+        .get_payment_session(payment_hash)
         .expect("get payment");
 
-    let used_channels: Vec<Hash256> = payment_session_state
-        .attempts
+    let used_channels: Vec<Hash256> = payment_session
+        .attempts()
         .first()
         .unwrap()
         .route
@@ -4631,11 +4624,8 @@ async fn test_send_payment_with_mixed_channel_hops() {
         payment_res.failed_error.unwrap(),
         "IncorrectOrUnknownPaymentDetails"
     );
-    let payment_session = node0
-        .get_payment_session_state(payment_hash)
-        .unwrap()
-        .unwrap();
-    assert_eq!(payment_session.attempts.len(), 1);
+    let payment_session = node0.get_payment_session(payment_hash).unwrap();
+    assert_eq!(payment_session.attempts().len(), 1);
 }
 
 #[tokio::test]
@@ -4679,7 +4669,7 @@ async fn test_send_payment_with_first_channel_retry_will_be_ok() {
     node0
         .expect_payment_used_channel(payment.payment_hash, channels[1])
         .await;
-    assert_eq!(payment_session.retried_times, 2);
+    assert_eq!(payment_session.attempts().len(), 2);
 }
 
 #[tokio::test]
@@ -4740,11 +4730,8 @@ async fn test_send_payment_with_reconnect_two_times() {
                     payments.remove(payment_hash);
                 } else if status == PaymentSessionStatus::Created {
                     // wait for the payment to be retried
-                    let pss = node0
-                        .get_payment_session_state(*payment_hash)
-                        .unwrap()
-                        .unwrap();
-                    eprintln!("payment_session attempts: {:?}", pss.attempts.len());
+                    let pss = node0.get_payment_session(*payment_hash).unwrap();
+                    eprintln!("payment_session attempts: {:?}", pss.attempts().len());
                 }
                 tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
             }

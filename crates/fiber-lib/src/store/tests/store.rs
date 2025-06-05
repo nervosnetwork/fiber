@@ -518,7 +518,7 @@ fn test_store_payment_session() {
         custom_records: None,
         router: vec![],
     };
-    let payment_session = PaymentSession::new(payment_data.clone(), 10);
+    let payment_session = PaymentSession::new(&store, payment_data.clone(), 10);
     store.insert_payment_session(payment_session.clone());
     let res = store.get_payment_session(payment_hash).unwrap();
     assert_eq!(res.payment_hash(), payment_hash);
@@ -549,7 +549,7 @@ fn test_store_payment_sessions_with_status() {
         custom_records: None,
         router: vec![],
     };
-    let payment_session = PaymentSession::new(payment_data.clone(), 10);
+    let payment_session = PaymentSession::new(&store, payment_data.clone(), 10);
     store.insert_payment_session(payment_session.clone());
 
     let payment_hash1 = gen_rand_sha256_hash();
@@ -572,7 +572,7 @@ fn test_store_payment_sessions_with_status() {
         custom_records: None,
         router: vec![],
     };
-    let mut payment_session = PaymentSession::new(payment_data.clone(), 10);
+    let mut payment_session = PaymentSession::new(&store, payment_data.clone(), 10);
     payment_session.set_success_status();
     store.insert_payment_session(payment_session.clone());
 

@@ -1,6 +1,5 @@
 use crate::{
     fiber::{
-        graph::PaymentSessionState,
         network::SendPaymentCommand,
         tests::test_utils::{
             create_n_nodes_network, establish_channel_between_nodes, init_tracing,
@@ -52,10 +51,8 @@ async fn test_send_mpp() {
     eprintln!("begin to wait for payment: {} success ...", payment_hash);
     source_node.wait_until_success(payment_hash).await;
 
-    let pss = PaymentSessionState::from_db(&source_node.store, payment_hash)
-        .unwrap()
-        .unwrap();
-    dbg!(&pss.status, &pss.attempts.len());
+    let payment_session = source_node.get_payment_session(payment_hash).unwrap();
+    dbg!(&payment_session.status, &payment_session.attempts().len());
 
     let node_0_balance = source_node.get_local_balance_from_channel(channels[0]);
     let node_1_balance = node_1.get_local_balance_from_channel(channels[0]);
@@ -110,10 +107,8 @@ async fn test_send_mpp_amount_split() {
     let payment_hash = res.unwrap().payment_hash;
     source_node.wait_until_success(payment_hash).await;
 
-    let pss = PaymentSessionState::from_db(&source_node.store, payment_hash)
-        .unwrap()
-        .unwrap();
-    dbg!(&pss.status, &pss.attempts.len());
+    let pss = source_node.get_payment_session(payment_hash).unwrap();
+    dbg!(&pss.status, &pss.attempts().len());
 
     // Spent the half of amount in the first channel
     let node_0_balance = source_node.get_local_balance_from_channel(channels[0]);

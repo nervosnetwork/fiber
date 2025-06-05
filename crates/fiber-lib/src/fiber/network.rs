@@ -1932,7 +1932,7 @@ where
     }
 
     fn on_get_payment(&self, payment_hash: &Hash256) -> Result<SendPaymentResponse, Error> {
-        match PaymentSessionState::from_db(&self.store, *payment_hash)? {
+        match self.store.get_payment_session(*payment_hash) {
             Some(session_state) => Ok(session_state.into()),
             None => Err(Error::InvalidParameter(format!(
                 "Payment session not found: {:?}",
@@ -1943,16 +1943,15 @@ where
 
     async fn build_payment_route(
         &self,
-        payment_session: &mut PaymentSessionState,
+        session: &mut PaymentSession,
         attempt: &mut Attempt,
     ) -> Result<Vec<PaymentHopData>, Error> {
         let graph = self.network_graph.read().await;
         let source = graph.get_source_pubkey();
-        let max_amount = payment_session.remain_amount;
+        let max_amount = session.remain_amount();
         let min_amount = DEFAULT_MPP_MIN_AMOUNT;
-        let remain_fee = payment_session.remain_fee();
-        let active_parts = payment_session.attempts.len();
-        let session = &mut payment_session.session;
+        let remain_fee = session.remain_fee_amount();
+        let active_parts = session.attempts().len();
         dbg!(
             "build route",
             max_amount,
@@ -2183,12 +2182,11 @@ where
     ) -> Result<Option<SessionRoute>, Error> {
         eprintln!("resume_payment_session: {:?}", payment_hash);
         self.update_graph().await;
-        let Some(mut session_state) = PaymentSessionState::from_db(&self.store, payment_hash)?
-        else {
+        let Some(mut payment_session) = self.store.get_payment_session(payment_hash) else {
             return Err(Error::InvalidParameter(payment_hash.to_string()));
         };
 
-        match session_state.status {
+        match payment_session.status {
             PaymentSessionStatus::Failed | PaymentSessionStatus::Success => {
                 warn!("Payment session already finished: {:?}", payment_hash);
                 return Ok(None);
@@ -2196,10 +2194,10 @@ where
             _ => {}
         }
 
-        let more_attempt = match session_state.next_step() {
+        let more_attempt = match payment_session.next_step() {
             Ok(more_attempt) => more_attempt,
             Err(err) => {
-                self.set_payment_fail_with_error(&mut session_state.session, &err.to_string());
+                self.set_payment_fail_with_error(&mut payment_session, &err.to_string());
                 return Err(Error::SendPaymentError(err.to_string()));
             }
         };
@@ -2212,8 +2210,8 @@ where
 
         debug!(
             "try_payment_session: {:?} attempts: {:?}",
-            session_state.session.payment_hash(),
-            session_state.attempts.len()
+            payment_session.payment_hash(),
+            payment_session.attempts().len()
         );
 
         // // fail if no more attempts or no more retries
@@ -2236,9 +2234,9 @@ where
 
         // build route
         let attempt_id = self.store.next_attempt_id();
-        let mut attempt = session_state.new_attempt(attempt_id);
+        let mut attempt = payment_session.new_attempt(attempt_id);
         let hops_info = self
-            .build_payment_route(&mut session_state, &mut attempt)
+            .build_payment_route(&mut payment_session, &mut attempt)
             .await?;
 
         // send attemp
@@ -2255,7 +2253,7 @@ where
                 // know payment session is created successfully
                 return Ok(None);
             } else {
-                self.set_payment_fail_with_error(&mut session_state.session, &err.to_string());
+                self.set_payment_fail_with_error(&mut payment_session, &err.to_string());
                 return Err(err);
             }
         }
@@ -2340,15 +2338,13 @@ where
         // for dry run, we only build the route and return the hops info,
         // will not store the payment session and send the onion packet
         if payment_data.dry_run {
-            let payment_session = PaymentSession::new(payment_data, 0);
-            let mut session_state = PaymentSessionState::new(payment_session, vec![])?;
-            let mut attempt = session_state.new_attempt(0);
+            let mut payment_session = PaymentSession::new(&self.store, payment_data, 0);
+            let mut attempt = payment_session.new_attempt(0);
             let _hops = self
-                .build_payment_route(&mut session_state, &mut attempt)
+                .build_payment_route(&mut payment_session, &mut attempt)
                 .await?;
-            let session_state = PaymentSessionState::new(session_state.session, vec![attempt])?;
-            let response: SendPaymentResponse = session_state.into();
-            return Ok(response);
+            payment_session.append_attempt(attempt);
+            return Ok(payment_session.into());
         }
 
         // initialize the payment session in db and begin the payment process lifecycle
@@ -2363,7 +2359,7 @@ where
             }
         }
 
-        let payment_session = PaymentSession::new(payment_data, 5);
+        let payment_session = PaymentSession::new(&self.store, payment_data, 5);
         self.store.insert_payment_session(payment_session.clone());
         self.resume_payment_session(myself, state, payment_session.payment_hash())
             .await?;

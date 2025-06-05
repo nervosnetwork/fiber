@@ -534,6 +534,7 @@ impl NetworkGraphStateStore for Store {
         let prefix = [&[PAYMENT_SESSION_PREFIX], payment_hash.as_ref()].concat();
         self.get(prefix)
             .map(|v| deserialize_from(v.as_ref(), "PaymentSession"))
+            .map(|session: PaymentSession| session.init_attempts(self))
     }
 
     fn get_payment_sessions_with_status(
@@ -545,7 +546,7 @@ impl NetworkGraphStateStore for Store {
             .filter_map(|(_key, value)| {
                 let session: PaymentSession = deserialize_from(value.as_ref(), "PaymentSession");
                 if session.status == status {
-                    Some(session)
+                    Some(session.init_attempts(self))
                 } else {
                     None
                 }
