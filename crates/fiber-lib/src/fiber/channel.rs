@@ -880,21 +880,6 @@ where
         if let Some(invoice) = self.store.get_invoice(&tlc.payment_hash) {
             // TODO check if tlc is MPP
             // TODO check if invoice support MPP
-            let total_amount = tlcs.iter().map(|tlc| tlc.amount).sum::<u128>();
-
-            let is_fulfilled = total_amount >= invoice.amount.unwrap_or_default();
-            if !is_fulfilled {
-                self.store.insert_hold_tlc(
-                    tlc_info.payment_hash,
-                    HoldTlc {
-                        channel_actor_state_id: state.get_id(),
-                        tlc_id: tlc_info.tlc_id.into(),
-                    },
-                );
-                // TODO add to hold tlc list
-                // wait for other tlc to fulfill the invoice
-                return;
-            }
 
             let status = self.get_invoice_status(&invoice);
             match status {
@@ -916,7 +901,22 @@ where
                     error!("invoice already paid, ignore");
                 }
                 _ => {
-                    // do nothing
+                    let total_amount = tlcs.iter().map(|tlc| tlc.amount).sum::<u128>();
+                    let is_fulfilled = total_amount >= invoice.amount.unwrap_or_default();
+
+                    if !is_fulfilled {
+                        // hold the tlc if the invoice is not fulfilled
+                        self.store.insert_hold_tlc(
+                            tlc_info.payment_hash,
+                            HoldTlc {
+                                channel_actor_state_id: state.get_id(),
+                                tlc_id: tlc_info.tlc_id.into(),
+                            },
+                        );
+                        // just return, the hold tlc will be settle when the invoice is fulfilled
+                        return;
+                    }
+
                     // invoice status will be updated to paid after apply remove tlc operation
                 }
             }

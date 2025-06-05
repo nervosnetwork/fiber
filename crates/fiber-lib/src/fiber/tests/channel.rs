@@ -1469,7 +1469,7 @@ async fn test_network_send_payment_with_dry_run() {
     let res = call!(node_a.network_actor, message).expect("node_a alive");
     assert!(res.is_ok());
     let res = res.unwrap();
-    assert_eq!(res.status, PaymentSessionStatus::Created);
+    assert_eq!(res.status, PaymentSessionStatus::Inflight);
     // since there are only sender and receiver in the router, fee will be 0
     assert_eq!(res.fee, 0);
 

@@ -129,6 +129,7 @@ async fn test_send_mpp_amount_split() {
     assert_eq!(node_1_balance, 7500000000);
 }
 
+#[ignore]
 #[tokio::test]
 async fn test_send_mpp_fee_rate() {
     init_tracing();

@@ -2328,7 +2328,7 @@ where
             let _hops = self
                 .build_payment_route(&mut session_state, &mut attempt)
                 .await?;
-            session_state.attempts.push(attempt);
+            let session_state = PaymentSessionState::new(session_state.session, vec![attempt])?;
             let response: SendPaymentResponse = session_state.into();
             return Ok(response);
         }
