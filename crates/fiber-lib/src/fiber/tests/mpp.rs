@@ -56,14 +56,12 @@ async fn test_send_mpp() {
         .unwrap();
     dbg!(&pss.status, &pss.attempts.len());
 
-    // We are using the second (newer) channel, so the first channel's balances are unchanged.
     let node_0_balance = source_node.get_local_balance_from_channel(channels[0]);
     let node_1_balance = node_1.get_local_balance_from_channel(channels[0]);
     dbg!(node_0_balance, node_1_balance);
     assert_eq!(node_0_balance, 0);
     assert_eq!(node_1_balance, 10000000000);
 
-    // We are using the second (newer) channel, so the second channel's balances are changed.
     let node_0_balance = source_node.get_local_balance_from_channel(channels[1]);
     let node_1_balance = node_1.get_local_balance_from_channel(channels[1]);
     dbg!(node_0_balance, node_1_balance);
@@ -116,14 +114,14 @@ async fn test_send_mpp_amount_split() {
         .unwrap();
     dbg!(&pss.status, &pss.attempts.len());
 
-    // We are using the second (newer) channel, so the first channel's balances are unchanged.
+    // Spent the half of amount in the first channel
     let node_0_balance = source_node.get_local_balance_from_channel(channels[0]);
     let node_1_balance = node_1.get_local_balance_from_channel(channels[0]);
     dbg!(node_0_balance, node_1_balance);
     assert_eq!(node_0_balance, 2500000000);
     assert_eq!(node_1_balance, 7500000000);
 
-    // We are using the second (newer) channel, so the second channel's balances are changed.
+    // Spent the half of amount in the second channel
     let node_0_balance = source_node.get_local_balance_from_channel(channels[1]);
     let node_1_balance = node_1.get_local_balance_from_channel(channels[1]);
     dbg!(node_0_balance, node_1_balance);
