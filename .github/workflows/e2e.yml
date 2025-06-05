@@ -56,6 +56,7 @@ jobs:
 
       - name: Run e2e workflow
         run: |
+          export MULTISIG_LEGACY_DEP_GROUP=0xb870e36b1dd50df1b4a1118cf4bee3bf7120a2d63e7a39b434ca09261284d064,1
           set -euo pipefail
           set -x
           if [ ${{ matrix.workflow }} = "cross-chain-hub" ]; then
