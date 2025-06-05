@@ -1774,8 +1774,10 @@ impl PaymentSessionState {
 
     pub fn next_step(&self) -> Result<bool, PaymentSessionError> {
         if self.allow_more_attempts() {
-            let tried_count = self.attempts.iter().count() as u32;
-            if tried_count >= self.session.try_limit {
+            let count = self.attempts.iter().count() as u64;
+            let max_attempts =
+                self.session.try_limit as u64 + self.session.request.max_parts.unwrap_or_default();
+            if count >= max_attempts {
                 let inflight = self.attempts.iter().any(|a| a.is_inflight());
                 assert!(!inflight);
                 for a in self.attempts.iter() {
