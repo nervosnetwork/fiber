@@ -1539,6 +1539,7 @@ pub trait NetworkGraphStateStore {
     fn get_payment_history_results(&self) -> Vec<(OutPoint, Direction, TimedResult)>;
     fn get_attempt(&self, payment_hash: Hash256, attempt_id: u64) -> Option<Attempt>;
     fn insert_attempt(&self, attempt: Attempt);
+    fn remove_attempt(&self, payment_hash: Hash256, attempt_id: u64);
     fn get_attempts(&self, payment_hash: Hash256) -> Vec<Attempt>;
     fn next_attempt_id(&self) -> u64;
 }
@@ -1773,12 +1774,7 @@ impl PaymentSessionState {
 
     pub fn next_step(&self) -> Result<bool, PaymentSessionError> {
         if self.allow_more_attempts() {
-            // do not count the WaitingTlcAck error, since we always retry it
-            let tried_count = self
-                .attempts
-                .iter()
-                .filter(|a| a.last_error != Some("WaitingTlcAck".to_string()))
-                .count() as u32;
+            let tried_count = self.attempts.iter().count() as u32;
             if tried_count >= self.session.try_limit {
                 let inflight = self.attempts.iter().any(|a| a.is_inflight());
                 assert!(!inflight);

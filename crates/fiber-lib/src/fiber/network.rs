@@ -2151,7 +2151,12 @@ where
 
     fn set_attempt_fail_with_error(&self, attempt: &mut Attempt, error: &str) {
         attempt.set_failed_status(error);
-        self.store.insert_attempt(attempt.clone());
+        // The peer is waiting for tlc ack, just delete the attempt
+        if error == "WaitingTlcAck" {
+            self.store.remove_attempt(attempt.payment_hash, attempt.id);
+        } else {
+            self.store.insert_attempt(attempt.clone());
+        }
     }
 
     /// Resume the payment session
