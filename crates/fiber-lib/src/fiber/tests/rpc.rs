@@ -84,6 +84,7 @@ async fn test_rpc_basic() {
                 udt_type_script: Some(Script::default().into()),
                 payment_preimage: Hash256::default(),
                 hash_algorithm: Some(crate::fiber::hash_algorithm::HashAlgorithm::CkbHash),
+                allow_mpp: None,
             },
         )
         .await

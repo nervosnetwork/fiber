@@ -523,6 +523,7 @@ Generates a new invoice.
 * `final_expiry_delta` - <em>`Option<u64>`</em>, The final HTLC timeout of the invoice, in milliseconds.
 * `udt_type_script` - <em>`Option<Script>`</em>, The UDT type script of the invoice.
 * `hash_algorithm` - <em>Option<[HashAlgorithm](#type-hashalgorithm)></em>, The hash algorithm of the invoice.
+* `allow_mpp` - <em>`Option<bool>`</em>, Whether allow payment to use MPP
 
 ##### Returns
 
@@ -960,7 +961,7 @@ The attributes of the invoice
 * `UdtScript` - <em>[CkbScript](#type-ckbscript)</em>, The udt type script of the invoice
 * `PayeePublicKey` - <em>PublicKey</em>, The payee public key of the invoice
 * `HashAlgorithm` - <em>[HashAlgorithm](#type-hashalgorithm)</em>, The hash algorithm of the invoice
-* `Feature` - <em>u64</em>, The feature flags of the invoice
+* `Feature` - <em>[FeatureVector](#type-featurevector)</em>, The feature flags of the invoice
 ---
 
 <a id="#type-cchorderstatus"></a>
