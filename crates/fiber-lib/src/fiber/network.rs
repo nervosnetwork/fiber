@@ -50,17 +50,15 @@ use super::channel::{
     ChannelCommand, ChannelCommandWithId, ChannelEvent, ChannelInitializationParameter,
     ChannelState, ChannelSubscribers, ChannelTlcInfo, OpenChannelParameter, PrevTlcInfo,
     ProcessingChannelError, ProcessingChannelResult, PublicChannelInfo, RemoveTlcCommand,
-    RevocationData, SettlementData, ShuttingDownFlags, StopReason,
-    DEFAULT_COMMITMENT_FEE_RATE, DEFAULT_FEE_RATE, DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
-    MAX_COMMITMENT_DELAY_EPOCHS, MAX_TLC_NUMBER_IN_FLIGHT, MIN_COMMITMENT_DELAY_EPOCHS,
-    SYS_MAX_TLC_NUMBER_IN_FLIGHT,
+    RevocationData, SettlementData, ShuttingDownFlags, StopReason, DEFAULT_COMMITMENT_FEE_RATE,
+    DEFAULT_FEE_RATE, DEFAULT_MAX_TLC_VALUE_IN_FLIGHT, MAX_COMMITMENT_DELAY_EPOCHS,
+    MAX_TLC_NUMBER_IN_FLIGHT, MIN_COMMITMENT_DELAY_EPOCHS, SYS_MAX_TLC_NUMBER_IN_FLIGHT,
 };
 use super::config::{AnnouncedNodeName, DEFAULT_MPP_MIN_AMOUNT, MIN_TLC_EXPIRY_DELTA};
 use super::fee::calculate_commitment_tx_fee;
 use super::gossip::{GossipActorMessage, GossipMessageStore, GossipMessageUpdates};
 use super::graph::{
-    Attempt, NetworkGraph, NetworkGraphStateStore, OwnedChannelUpdateEvent, RouterHop,
-    SessionRoute,
+    Attempt, NetworkGraph, NetworkGraphStateStore, OwnedChannelUpdateEvent, RouterHop, SessionRoute,
 };
 use super::key::blake2b_hash_with_salt;
 use super::types::{
@@ -79,9 +77,7 @@ use crate::ckb::{CkbChainMessage, FundingRequest, FundingTx};
 use crate::fiber::channel::{
     AddTlcCommand, AddTlcResponse, ShutdownCommand, TxCollaborationCommand, TxUpdateCommand,
 };
-use crate::fiber::config::{
-    DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT,
-};
+use crate::fiber::config::{DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT};
 use crate::fiber::gossip::{GossipConfig, GossipService, SubscribableGossipMessageStore};
 use crate::fiber::graph::{PaymentSession, PaymentSessionState, PaymentSessionStatus};
 use crate::fiber::serde_utils::EntityHex;
