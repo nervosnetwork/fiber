@@ -40,6 +40,10 @@ script:pre-request {
 
 
 script:post-response {
+
   // Sleep for sometime to make sure current operation finishes before next request starts.
   await new Promise(r => setTimeout(r, 1000));
+    console.log("06 response",res.body);
+  await new Promise(r => setTimeout(r, 10000));
+    console.log("06 response after sleep",res.body);
 }
