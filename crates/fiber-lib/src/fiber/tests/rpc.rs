@@ -7,6 +7,7 @@ use crate::{
     invoice::Currency,
     rpc::{
         channel::{ListChannelsParams, ListChannelsResult},
+        graph::{GraphNodesParams, GraphNodesResult},
         invoice::{InvoiceParams, InvoiceResult, NewInvoiceParams},
         payment::{GetPaymentCommandParams, GetPaymentCommandResult},
         peer::ListPeersResult,
@@ -83,6 +84,7 @@ async fn test_rpc_basic() {
                 udt_type_script: Some(Script::default().into()),
                 payment_preimage: Hash256::default(),
                 hash_algorithm: Some(crate::fiber::hash_algorithm::HashAlgorithm::CkbHash),
+                allow_mpp: None,
             },
         )
         .await
@@ -129,7 +131,7 @@ async fn test_rpc_list_peers() {
         true,
     )
     .await;
-    let [mut node_0, node_1] = nodes.try_into().expect("2 nodes");
+    let [mut node_0, mut node_1] = nodes.try_into().expect("2 nodes");
 
     let list_peers: ListPeersResult = node_0.send_rpc_request("list_peers", ()).await.unwrap();
     assert_eq!(list_peers.peers.len(), 1);
@@ -151,7 +153,7 @@ async fn test_rpc_list_peers() {
     let list_peers: ListPeersResult = node_0.send_rpc_request("list_peers", ()).await.unwrap();
     assert_eq!(list_peers.peers.len(), 0);
 
-    let node_3 = NetworkNode::new_with_config(
+    let mut node_3 = NetworkNode::new_with_config(
         NetworkNodeConfigBuilder::new()
             .node_name(Some(format!("node-{}", 3)))
             .base_dir_prefix(&format!("test-fnn-node-{}-", 3))
@@ -163,12 +165,57 @@ async fn test_rpc_list_peers() {
     let list_peers: ListPeersResult = node_3.send_rpc_request("list_peers", ()).await.unwrap();
     assert_eq!(list_peers.peers.len(), 0);
 
-    node_0.connect_to(&node_3).await;
+    node_0.connect_to(&mut node_3).await;
     let list_peers: ListPeersResult = node_3.send_rpc_request("list_peers", ()).await.unwrap();
     assert_eq!(list_peers.peers.len(), 1);
     assert_eq!(list_peers.peers[0].pubkey, node_0.pubkey);
 
-    node_0.connect_to(&node_1).await;
+    node_0.connect_to(&mut node_1).await;
     let list_peers: ListPeersResult = node_0.send_rpc_request("list_peers", ()).await.unwrap();
     assert_eq!(list_peers.peers.len(), 2);
+}
+
+#[tokio::test]
+async fn test_rpc_graph() {
+    let (nodes, _channels) = create_n_nodes_network_with_params(
+        &[
+            (
+                (0, 1),
+                ChannelParameters {
+                    public: true,
+                    node_a_funding_amount: MIN_RESERVED_CKB + 10000000000,
+                    node_b_funding_amount: MIN_RESERVED_CKB,
+                    ..Default::default()
+                },
+            ),
+            (
+                (0, 1),
+                ChannelParameters {
+                    public: true,
+                    node_a_funding_amount: MIN_RESERVED_CKB + 10000000000,
+                    node_b_funding_amount: MIN_RESERVED_CKB,
+                    ..Default::default()
+                },
+            ),
+        ],
+        2,
+        true,
+    )
+    .await;
+    let [node_0, node_1] = nodes.try_into().expect("2 nodes");
+
+    let graph_nodes: GraphNodesResult = node_0
+        .send_rpc_request(
+            "graph_nodes",
+            GraphNodesParams {
+                limit: None,
+                after: None,
+            },
+        )
+        .await
+        .unwrap();
+    eprintln!("Graph nodes: {:#?}", graph_nodes);
+    assert!(!graph_nodes.nodes.is_empty());
+    assert!(graph_nodes.nodes.iter().any(|n| n.node_id == node_1.pubkey));
+    assert!(!graph_nodes.nodes[0].features.is_empty());
 }

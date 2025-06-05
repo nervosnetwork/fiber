@@ -10,6 +10,8 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::{fs, path::PathBuf, str::FromStr};
 use tentacle::secio::{PublicKey, SecioKeyPair};
 
+use super::features::FeatureVector;
+
 pub const CKB_SHANNONS: u64 = 100_000_000; // 1 CKB = 10 ^ 8 shannons
 pub const DEFAULT_MIN_SHUTDOWN_FEE: u64 = CKB_SHANNONS; // 1 CKB prepared for shutdown transaction fee
 
@@ -286,6 +288,24 @@ pub struct FiberConfig {
         help = "The interval to check watchtower, in seconds. 0 means never check. [default: 60 (1 minute)]"
     )]
     pub watchtower_check_interval_seconds: Option<u64>,
+
+    /// The url of the standalone watchtower rpc server. [default: None]
+    #[arg(
+        name = "FIBER_STANDALONE_WATCHTOWER_RPC_URL",
+        long = "fiber-standalone-watchtower-rpc-url",
+        env,
+        help = "The url of the standalone watchtower rpc server. [default: None]"
+    )]
+    pub standalone_watchtower_rpc_url: Option<String>,
+
+    /// Disable built-in watchtower actor. [default: false]
+    #[arg(
+        name = "FIBER_DISABLE_BUILT_IN_WATCHTOWER",
+        long = "fiber-disable-built-in-watchtower",
+        env,
+        help = "Disable built-in watchtower actor. [default: false]"
+    )]
+    pub disable_built_in_watchtower: Option<bool>,
 }
 
 /// Must be a valid utf-8 string of length maximal length 32 bytes.
@@ -479,6 +499,13 @@ impl FiberConfig {
     pub fn sync_network_graph(&self) -> bool {
         self.sync_network_graph
             .unwrap_or(DEFAULT_SYNC_NETWORK_GRAPH)
+    }
+
+    pub fn gen_node_features(&self) -> FeatureVector {
+        let mut feature = FeatureVector::default();
+        feature.set_gossip_queries_required();
+        // override default features from config settings
+        feature
     }
 }
 

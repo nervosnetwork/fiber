@@ -1036,7 +1036,7 @@ where
                         .insert_payment_custom_records(&payment_hash, custom_records);
                 }
 
-                self.store.insert_preimage(payment_hash, preimage);
+                self.store_preimage(payment_hash, preimage);
             } else {
                 return Err(ProcessingChannelError::FinalIncorrectPaymentHash);
             }
@@ -1071,6 +1071,15 @@ where
             .await;
         }
         Ok(())
+    }
+
+    fn store_preimage(&self, payment_hash: Hash256, preimage: Hash256) {
+        self.store.insert_preimage(payment_hash, preimage);
+        self.network
+            .send_message(NetworkActorMessage::new_notification(
+                NetworkServiceEvent::PreimageCreated(payment_hash, preimage),
+            ))
+            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
     }
 
     fn handle_add_tlc_peer_message(
@@ -1110,7 +1119,7 @@ where
             // incase the peer has already shutdown the channel,
             // so we can send setttlement transaction to get money when necessary
             // the preimage must be valid since we have checked it in check_remove_tlc_with_reason
-            self.store.insert_preimage(payment_hash, payment_preimage);
+            self.store_preimage(payment_hash, payment_preimage);
             debug_event!(
                 self.network,
                 &format!("store payment_preimage for: {:?}", payment_hash)
@@ -1159,6 +1168,12 @@ where
             }
         };
 
+        if !state.check_shutdown_fee_valid(shutdown.fee_rate.as_u64()) {
+            return Err(ProcessingChannelError::InvalidParameter(
+                "Shutdown fee is invalid".to_string(),
+            ));
+        }
+
         state.remote_shutdown_info = Some(ShutdownInfo {
             close_script: shutdown.close_script,
             fee_rate: shutdown.fee_rate.as_u64(),
@@ -1172,7 +1187,6 @@ where
         // e.g. our shutdown message is also sent, or we are trying to force shutdown,
         // we should not reply.
         let should_we_reply_shutdown = matches!(flags, ShuttingDownFlags::THEIR_SHUTDOWN_SENT);
-
         if state.check_valid_to_auto_accept_shutdown() && should_we_reply_shutdown {
             let close_script = state.get_local_shutdown_script();
             self.network
@@ -1226,7 +1240,7 @@ where
             // when a hop is a forwarding hop, we need to keep preimage after relay RemoveTlc finished
             // incase watchtower may need preimage to settledown
             if tlc_info.previous_tlc.is_none() {
-                self.store.remove_preimage(&tlc_info.payment_hash);
+                self.remove_preimage(tlc_info.payment_hash);
             }
         }
 
@@ -1258,7 +1272,7 @@ where
                             remove_reason.clone(),
                         ),
                     ))
-                    .expect("myself alive");
+                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
             }
         } else {
             // relay RemoveTlc to previous channel if needed
@@ -1266,6 +1280,15 @@ where
                 .await;
         }
         Ok(())
+    }
+
+    fn remove_preimage(&self, payment_hash: Hash256) {
+        self.store.remove_preimage(&payment_hash);
+        self.network
+            .send_message(NetworkActorMessage::new_notification(
+                NetworkServiceEvent::PreimageRemoved(payment_hash),
+            ))
+            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
     }
 
     pub fn handle_commitment_signed_command(
@@ -1423,7 +1446,7 @@ where
         if let RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill { payment_preimage }) =
             command.reason
         {
-            self.store.insert_preimage(payment_hash, payment_preimage);
+            self.store_preimage(payment_hash, payment_preimage);
         }
         let msg = FiberMessageWithPeerId::new(
             state.get_remote_peer_id(),
@@ -1970,7 +1993,7 @@ where
                             command.previous_tlc,
                         ),
                     ))
-                    .expect("network actor alive");
+                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
 
                 match res {
                     Ok(tlc_id) => {
@@ -2326,13 +2349,13 @@ where
                 );
                 state.check_accept_channel_parameters()?;
 
-                let commitment_number = INITIAL_COMMITMENT_NUMBER;
-
                 let channel_announcement_nonce = if public {
                     Some(state.get_channel_announcement_musig2_pubnonce())
                 } else {
                     None
                 };
+
+                let commitment_number = INITIAL_COMMITMENT_NUMBER;
                 let accept_channel = AcceptChannel {
                     channel_id: *channel_id,
                     funding_amount: local_funding_amount,
@@ -2352,14 +2375,12 @@ where
                     next_local_nonce: state.get_local_musig2_pubnonce(),
                 };
 
-                let command = FiberMessageWithPeerId::new(
-                    peer_id,
-                    FiberMessage::accept_channel(accept_channel),
-                );
-                // TODO: maybe we should not use try_send here.
                 self.network
                     .send_message(NetworkActorMessage::new_command(
-                        NetworkActorCommand::SendFiberMessage(command),
+                        NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
+                            peer_id,
+                            FiberMessage::accept_channel(accept_channel),
+                        )),
                     ))
                     .expect(ASSUME_NETWORK_ACTOR_ALIVE);
 
@@ -2660,9 +2681,12 @@ impl CommitmentNumbers {
     }
 }
 
+/// The id of a tlc, it can be either offered or received.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, PartialOrd, Ord, Hash)]
 pub enum TLCId {
+    /// Offered tlc id
     Offered(u64),
+    /// Received tlc id
     Received(u64),
 }
 
@@ -3301,44 +3325,66 @@ impl ChannelConstraints {
     }
 }
 
+/// Data needed to revoke an outdated commitment transaction.
 #[serde_as]
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct RevocationData {
+    /// The commitment transaction version number that was revoked
     pub commitment_number: u64,
+    /// The x-only aggregated public key used in the multisig for this commitment transaction
     pub x_only_aggregated_pubkey: [u8; 32],
+    /// The aggregated signature from both parties that authorizes the revocation
     #[serde_as(as = "CompactSignatureAsBytes")]
     pub aggregated_signature: CompactSignature,
+    /// The output cell from the revoked commitment transaction
     #[serde_as(as = "EntityHex")]
     pub output: CellOutput,
+    /// The associated data for the output cell (e.g., UDT amount for token transfers)
     #[serde_as(as = "EntityHex")]
     pub output_data: Bytes,
 }
 
+/// Data needed to authorize and execute a settlement transaction.
 #[serde_as]
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct SettlementData {
+    /// The x-only aggregated public key used in the multi-signature for the settlement transaction
     pub x_only_aggregated_pubkey: [u8; 32],
+    /// The aggregated signature from both parties that authorizes the settlement transaction
     #[serde_as(as = "CompactSignatureAsBytes")]
     pub aggregated_signature: CompactSignature,
+    /// The output cell for the local party (this node's owner) in the settlement transaction
     #[serde_as(as = "EntityHex")]
     pub to_local_output: CellOutput,
+    /// The associated data for the local output cell (e.g., UDT amount for token transfers)
     #[serde_as(as = "EntityHex")]
     pub to_local_output_data: Bytes,
+    /// The output cell for the remote party (channel partner) in the settlement transaction
     #[serde_as(as = "EntityHex")]
     pub to_remote_output: CellOutput,
+    /// The associated data for the remote output cell (e.g., UDT amount for token transfers)
     #[serde_as(as = "EntityHex")]
     pub to_remote_output_data: Bytes,
+    /// The list of Time-Locked Contracts (TLCs) included in this settlement
     pub tlcs: Vec<SettlementTlc>,
 }
 
+/// Data needed to authorize and execute a Time-Locked Contract (TLC) settlement transaction.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct SettlementTlc {
+    /// The ID of the TLC (either offered or received)
     pub tlc_id: TLCId,
+    /// The hash algorithm used for the TLC
     pub hash_algorithm: HashAlgorithm,
+    /// The amount of CKB/UDT involved in the TLC
     pub payment_amount: u128,
+    /// The hash of the payment preimage
     pub payment_hash: Hash256,
+    /// The expiry time for the TLC in milliseconds
     pub expiry: u64,
+    /// The local party's private key used to sign the TLC
     pub local_key: Privkey,
+    /// The remote party's public key used to verify the TLC
     pub remote_key: Pubkey,
 }
 
@@ -5441,14 +5487,8 @@ impl ChannelActorState {
         &self.get_remote_channel_public_keys().funding_pubkey
     }
 
-    fn check_valid_to_auto_accept_shutdown(&self) -> bool {
-        let Some(remote_fee_rate) = self.remote_shutdown_info.as_ref().map(|i| i.fee_rate) else {
-            return false;
-        };
-        if remote_fee_rate < self.commitment_fee_rate {
-            return false;
-        }
-        let fee = calculate_shutdown_tx_fee(
+    fn check_shutdown_fee_valid(&self, remote_fee_rate: u64) -> bool {
+        let remote_shutdown_fee = calculate_shutdown_tx_fee(
             remote_fee_rate,
             &self.funding_udt_type_script,
             (
@@ -5470,7 +5510,13 @@ impl ChannelActorState {
             self.remote_reserved_ckb_amount
                 .saturating_sub(occupied_capacity)
         };
-        return fee <= remote_available_max_fee;
+        return remote_shutdown_fee <= remote_available_max_fee;
+    }
+
+    fn check_valid_to_auto_accept_shutdown(&self) -> bool {
+        self.remote_shutdown_info
+            .as_ref()
+            .is_some_and(|i| i.fee_rate >= self.commitment_fee_rate)
     }
 
     fn check_tlc_expiry(&self, expiry: u64) -> ProcessingChannelResult {
@@ -6542,6 +6588,15 @@ impl ChannelActorState {
                     peer_remote_commitment_number,
                     my_waiting_ack,
                 );
+
+                if peer_local_commitment_number.abs_diff(my_remote_commitment_number) > 1
+                    || peer_remote_commitment_number.abs_diff(my_local_commitment_number) > 1
+                {
+                    return Err(ProcessingChannelError::InvalidParameter(
+                        "reestablish channel message with invalid commitment numbers".to_string(),
+                    ));
+                }
+
                 if my_local_commitment_number == peer_remote_commitment_number
                     && my_remote_commitment_number == peer_local_commitment_number
                 {
