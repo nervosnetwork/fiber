@@ -80,7 +80,7 @@ use crate::fiber::channel::{
 };
 use crate::fiber::config::{DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT};
 use crate::fiber::gossip::{GossipConfig, GossipService, SubscribableGossipMessageStore};
-use crate::fiber::graph::{PaymentSession, PaymentSessionState, PaymentSessionStatus};
+use crate::fiber::graph::{PaymentSession, PaymentSessionStatus};
 use crate::fiber::serde_utils::EntityHex;
 use crate::fiber::types::{
     FiberChannelMessage, PaymentOnionPacket, PeeledPaymentOnionPacket, TxSignatures,
@@ -170,38 +170,6 @@ pub struct SendPaymentResponse {
     pub fee: u128,
     #[cfg(debug_assertions)]
     pub router: SessionRoute,
-}
-
-impl From<PaymentSessionState> for SendPaymentResponse {
-    fn from(pss: PaymentSessionState) -> Self {
-        let status = pss.status;
-        let fee = pss.fee_paid;
-        let route = match status {
-            PaymentSessionStatus::Created | PaymentSessionStatus::Inflight => pss.attempts.first(),
-            PaymentSessionStatus::Success => pss.attempts.iter().find(|a| a.is_settled()),
-            PaymentSessionStatus::Failed => pss.attempts.iter().find(|a| a.last_error.is_some()),
-        }
-        .map(|a| a.route.clone())
-        .unwrap_or_default();
-        dbg!(
-            route.nodes.len(),
-            fee,
-            &status,
-            pss.attempts.len(),
-            pss.session.try_limit
-        );
-        Self {
-            payment_hash: pss.session.request.payment_hash,
-            status,
-            failed_error: pss.session.last_error,
-            created_at: pss.session.created_at,
-            last_updated_at: pss.session.last_updated_at,
-            custom_records: pss.session.request.custom_records,
-            fee,
-            #[cfg(debug_assertions)]
-            router: route,
-        }
-    }
 }
 
 /// What kind of local information should be broadcasted to the network.
@@ -2258,9 +2226,11 @@ where
             }
         }
 
-        let pss =
-            PaymentSessionState::from_db(&self.store, payment_hash)?.expect("payment session");
-        if pss.remain_amount > 0 {
+        let payment_session = self
+            .store
+            .get_payment_session(payment_hash)
+            .expect("get payment session");
+        if payment_session.remain_amount() > 0 {
             self.register_payment_retry(myself, payment_hash);
         }
 
@@ -2363,10 +2333,11 @@ where
         self.store.insert_payment_session(payment_session.clone());
         self.resume_payment_session(myself, state, payment_session.payment_hash())
             .await?;
-        let session_state =
-            PaymentSessionState::from_db(&self.store, payment_session.payment_hash())?
-                .expect("payment session");
-        return Ok(session_state.into());
+        let payment_session = self
+            .store
+            .get_payment_session(payment_session.payment_hash())
+            .expect("payment session should exist after updated");
+        return Ok(payment_session.into());
     }
 
     async fn on_build_payment_router(
