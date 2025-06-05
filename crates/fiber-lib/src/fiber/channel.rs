@@ -599,6 +599,7 @@ where
         state: &mut ChannelActorState,
         error: &ProcessingChannelError,
     ) -> TlcErr {
+        dbg!("now got error: ", error);
         let error_code = match error {
             ProcessingChannelError::PeelingOnionPacketError(_) => TlcErrorCode::InvalidOnionPayload,
             ProcessingChannelError::TlcForwardFeeIsTooLow => TlcErrorCode::FeeInsufficient,

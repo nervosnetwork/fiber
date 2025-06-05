@@ -46,6 +46,7 @@ async fn test_send_mpp() {
     eprintln!("res: {:?}", res);
     assert!(res.is_ok());
     let payment_hash = res.unwrap().payment_hash;
+    eprintln!("begin to wait for payment: {} success ...", payment_hash);
     source_node.wait_until_success(payment_hash).await;
 
     let pss = PaymentSessionState::from_db(&source_node.store, payment_hash)

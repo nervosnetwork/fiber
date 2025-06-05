@@ -892,6 +892,7 @@ where
         } else {
             // try find half
             loop {
+                dbg!("now try find path with max_amount: {}", max_amount);
                 match self.find_path(
                     source,
                     target,
@@ -919,6 +920,7 @@ where
 
         assert!(!route.is_empty());
 
+        dbg!("found route: {:?}", &route);
         Ok(self.build_router_from_path(&route, max_amount, payment_data))
     }
 
