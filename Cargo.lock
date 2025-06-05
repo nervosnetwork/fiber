@@ -1024,7 +1024,7 @@ dependencies = [
 [[package]]
 name = "ckb-sdk"
 version = "4.0.0"
-source = "git+https://github.com/nervosnetwork/ckb-sdk-rust?branch=master#2c7a03b828d68872c4db5292d8ce44dcd4f00350"
+source = "git+https://github.com/nervosnetwork/ckb-sdk-rust?rev=2c7a03b#2c7a03b828d68872c4db5292d8ce44dcd4f00350"
 dependencies = [
  "anyhow",
  "async-iterator",
