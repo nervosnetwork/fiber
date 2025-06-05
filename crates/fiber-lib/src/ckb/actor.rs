@@ -98,11 +98,7 @@ pub enum CkbChainMessage {
     /// CommitFundingTx(tx_hash, commit_block_number),
     CommitFundingTx(Hash256, u64),
     Sign(FundingTx, RpcReplyPort<Result<FundingTx, FundingError>>),
-    SendTx(
-        TransactionView,
-        std::time::Instant,
-        RpcReplyPort<Result<(), RpcError>>,
-    ),
+    SendTx(TransactionView, RpcReplyPort<Result<(), RpcError>>),
     GetTx(Hash256, RpcReplyPort<Result<GetTxResponse, RpcError>>),
     CreateTxTracer(CkbTxTracer),
     RemoveTxTracers(Hash256),
@@ -193,25 +189,11 @@ impl Actor for CkbChainActor {
                     }
                 }
             }
-            CkbChainMessage::SendTx(tx, send_instant, reply_port) => {
-                tracing::info!(
-                    "From Sending SendTx to Receiving SendTx: {}",
-                    send_instant.elapsed().as_nanos()
-                );
-                let start_time = std::time::Instant::now();
-                // tracing::info!("SendTx ")
+            CkbChainMessage::SendTx(tx, reply_port) => {
                 let rpc_url = state.config.rpc_url.clone();
-                // let ckb_client = CkbRpcClient::new(&rpc_url);
                 let ckb_client = CkbRpcAsyncClient::new(&rpc_url);
                 let result = match ckb_client.send_transaction(tx.data().into(), None).await {
-                    Ok(_) => {
-                        tracing::info!(
-                            "From SendTx to client submitted: {}",
-                            start_time.elapsed().as_nanos()
-                        );
-
-                        Ok(())
-                    }
+                    Ok(_) => Ok(()),
                     Err(err) => {
                         //FIXME(yukang): RBF or duplicated transaction handling
                         match err {

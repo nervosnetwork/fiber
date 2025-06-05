@@ -1023,8 +1023,9 @@ dependencies = [
 
 [[package]]
 name = "ckb-sdk"
-version = "3.7.0"
-source = "git+https://github.com/officeyutong/ckb-sdk-rust?rev=f827659fb0f3db179061c08ff62f40285fb151c9#f827659fb0f3db179061c08ff62f40285fb151c9"
+version = "4.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d2b55227f8a7e8e7c5918433f03c67c4347481c92291cafcbb567a963575226c"
 dependencies = [
  "anyhow",
  "async-iterator",
