@@ -172,6 +172,7 @@ impl InFlightCkbTxActor {
         &self,
         myself: ActorRef<InFlightCkbTxActorMessage>,
     ) -> Result<(), ActorProcessingErr> {
+        tracing::debug!("Executing send_tx_interval...");
         let message = InFlightCkbTxActorMessage::Internal(InternalMessage::SendTx);
 
         // send once immediately
@@ -195,7 +196,7 @@ impl InFlightCkbTxActor {
             Some(tx) => tx,
             None => return Ok(()),
         };
-
+        tracing::debug!("Executing send_tx...");
         match ractor::call_t!(
             self.chain_actor,
             CkbChainMessage::SendTx,
