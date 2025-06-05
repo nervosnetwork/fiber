@@ -1693,7 +1693,9 @@ fn decide_payment_status(
             htlc_settled = true;
             continue;
         }
-        htlc_inflight = true;
+        if a.inflight_at.is_some() {
+            htlc_inflight = true;
+        }
     }
 
     dbg!(
@@ -1839,6 +1841,7 @@ impl PaymentSessionState {
             last_updated_at: now,
             last_error: None,
             settled_at: None,
+            inflight_at: None,
         }
     }
 }
@@ -1944,13 +1947,17 @@ pub struct Attempt {
     pub preimage: Option<Hash256>,
     pub created_at: u64,
     pub last_updated_at: u64,
+    pub inflight_at: Option<u64>,
     pub settled_at: Option<u64>,
     pub last_error: Option<String>,
 }
 
 impl Attempt {
+    pub fn set_inflight_status(&mut self) {
+        self.inflight_at = Some(now_timestamp_as_millis_u64());
+    }
+
     pub fn set_failed_status(&mut self, error: &str) {
-        // self.set_status(PaymentSessionStatus::Failed);
         self.last_error = Some(error.to_string());
     }
 
@@ -1972,7 +1979,7 @@ impl Attempt {
     }
 
     pub fn is_inflight(&self) -> bool {
-        !self.is_settled() && !self.is_failed()
+        !self.is_settled() && !self.is_failed() && self.inflight_at.is_some()
     }
 }
 

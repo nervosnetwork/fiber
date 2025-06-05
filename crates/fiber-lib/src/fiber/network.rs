@@ -2097,16 +2097,10 @@ where
         };
         eprintln!("attempt found: {:?}", attempt_id);
 
-        // TODO Consider MMP, we should detect payment session state on fetch just like lnd
-        // if error_info.is_none() {
-        // Change the status from Created into Inflight
-        // payment_session.set_inflight_status();
-        // self.store.insert_attempt_info(attempt.clone());
-        //     return;
-        // }
-
-        // attempt is inflight
         let Some((channel_error, tlc_err)) = error_info else {
+            // attempt is inflight
+            attempt.set_inflight_status();
+            self.store.insert_attempt(attempt.clone());
             return;
         };
         if matches!(channel_error, ProcessingChannelError::RepeatedProcessing(_)) {
