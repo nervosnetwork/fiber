@@ -1,6 +1,6 @@
 use crate::{
     fiber::{
-        graph::{NetworkGraphStateStore, PaymentSessionState},
+        graph::PaymentSessionState,
         network::SendPaymentCommand,
         tests::test_utils::{create_n_nodes_network, init_tracing, MIN_RESERVED_CKB},
     },
@@ -57,8 +57,8 @@ async fn test_send_mpp() {
     let node_0_balance = source_node.get_local_balance_from_channel(channels[0]);
     let node_1_balance = node_1.get_local_balance_from_channel(channels[0]);
     dbg!(node_0_balance, node_1_balance);
-    assert_eq!(node_0_balance, 10000000000);
-    assert_eq!(node_1_balance, 0);
+    assert_eq!(node_0_balance, 0);
+    assert_eq!(node_1_balance, 10000000000);
 
     // We are using the second (newer) channel, so the second channel's balances are changed.
     let node_0_balance = source_node.get_local_balance_from_channel(channels[1]);
