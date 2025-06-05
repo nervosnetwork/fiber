@@ -845,12 +845,7 @@ where
         .await;
     }
 
-    async fn try_to_settle_down_tlc(
-        &self,
-        myself: &ActorRef<ChannelActorMessage>,
-        state: &mut ChannelActorState,
-        tlc_id: TLCId,
-    ) {
+    async fn try_to_settle_down_tlc(&self, state: &mut ChannelActorState, tlc_id: TLCId) {
         let tlc_info = state.get_received_tlc(tlc_id).expect("expect tlc");
 
         // 1. check tlc if fulfilled invoice and invoice support MPP
@@ -986,8 +981,7 @@ where
         // we don't need to settle down the tlc if it is not the last hop here,
         // some e2e tests are calling AddTlc manually, so we can not use onion packet to
         // check whether it's the last hop here, maybe need to revisit in future.
-        self.try_to_settle_down_tlc(myself, state, add_tlc.tlc_id)
-            .await;
+        self.try_to_settle_down_tlc(state, add_tlc.tlc_id).await;
 
         warn!("finished check tlc for peer message: {:?}", &add_tlc.tlc_id);
         Ok(())
@@ -5063,7 +5057,6 @@ impl ChannelActorState {
                 tlc.tlc_id, next_tlc_id
             )));
         }
-        let payment_hash = tlc.payment_hash;
 
         // TODO remove here, mpp has same payment hash for each tlc
         // // If all the tlcs with the same payment hash are confirmed to be failed,
