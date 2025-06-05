@@ -12,6 +12,7 @@ nodes_dir="$(dirname "$script_dir")/nodes"
 deploy_dir="$(dirname "$script_dir")/deploy"
 bruno_dir="$(dirname "$script_dir")/bruno/environments"
 
+echo nodes_dir=${nodes_dir}
 # The following environment variables are used in the contract tests.
 # We may load all contracts within the following folder to the test environment.
 export TESTING_CONTRACTS_DIR="$deploy_dir/contracts"
