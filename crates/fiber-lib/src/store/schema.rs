@@ -31,5 +31,6 @@ pub(crate) const PAYMENT_HISTORY_TIMED_RESULT_PREFIX: u8 = 193;
 pub(crate) const PAYMENT_CUSTOM_RECORD_PREFIX: u8 = 194;
 pub(crate) const ATTEMPT_PREFIX: u8 = 195;
 pub(crate) const NEXT_ATTEMPT_ID: u8 = 196;
+pub(crate) const HOLD_TLC_PREFIX: u8 = 197;
 #[cfg(feature = "watchtower")]
 pub(crate) const WATCHTOWER_CHANNEL_PREFIX: u8 = 224;

@@ -68,6 +68,7 @@ use tentacle::secio::PeerId;
 use thiserror::Error;
 use tokio::sync::oneshot;
 
+use super::graph::HoldTlc;
 use super::{
     gossip::SOFT_BROADCAST_MESSAGES_CONSIDERED_STALE_DURATION, graph::ChannelUpdateInfo,
     types::ForwardTlcResult,
@@ -599,7 +600,7 @@ where
         state: &mut ChannelActorState,
         error: &ProcessingChannelError,
     ) -> TlcErr {
-        dbg!("now got error: ", error);
+        dbg!("get_tlc_error", error);
         let error_code = match error {
             ProcessingChannelError::PeelingOnionPacketError(_) => TlcErrorCode::InvalidOnionPayload,
             ProcessingChannelError::TlcForwardFeeIsTooLow => TlcErrorCode::FeeInsufficient,
@@ -869,9 +870,18 @@ where
             payment_preimage: preimage,
         });
         let tlc = tlc_info.clone();
-        let tlcs: Vec<_> = state
-            .list_hold_tlcs_by_payment_hash(&tlc_info.payment_hash)
+        let hold_tlcs = self.store.get_hold_tlcs(tlc_info.payment_hash);
+        let mut tlcs: Vec<_> = hold_tlcs
+            .iter()
+            .filter_map(|hold_tlc| {
+                let state = self
+                    .store
+                    .get_channel_actor_state(&hold_tlc.channel_actor_state_id)?;
+                let tlc_id = TLCId::Received(hold_tlc.tlc_id);
+                state.get_received_tlc(tlc_id).cloned()
+            })
             .collect();
+        tlcs.push(tlc.clone());
         if let Some(invoice) = self.store.get_invoice(&tlc.payment_hash) {
             // TODO check if tlc is MPP
             // TODO check if invoice support MPP
@@ -879,6 +889,13 @@ where
 
             let is_fulfilled = total_amount >= invoice.amount.unwrap_or_default();
             if !is_fulfilled {
+                self.store.insert_hold_tlc(
+                    tlc_info.payment_hash,
+                    HoldTlc {
+                        channel_actor_state_id: state.get_id(),
+                        tlc_id: tlc_info.tlc_id.into(),
+                    },
+                );
                 // TODO add to hold tlc list
                 // wait for other tlc to fulfill the invoice
                 return;
@@ -910,10 +927,24 @@ where
             }
         }
 
-        let tlcs_id: Vec<_> = tlcs.iter().map(|tlc| tlc.tlc_id).collect();
-        for tlc_id in tlcs_id {
-            self.register_retryable_tlc_remove(myself, state, tlc_id, remove_reason.clone())
-                .await;
+        for tlc in tlcs {
+            dbg!("settle", &tlc);
+            let (send, _recv) = oneshot::channel::<Result<(), ProcessingChannelError>>();
+            let port = RpcReplyPort::from(send);
+            self.network
+                .send_message(NetworkActorMessage::new_command(
+                    NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
+                        channel_id: tlc.channel_id,
+                        command: ChannelCommand::RemoveTlc(
+                            RemoveTlcCommand {
+                                id: tlc.tlc_id.into(),
+                                reason: remove_reason.clone(),
+                            },
+                            port,
+                        ),
+                    }),
+                ))
+                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
         }
     }
 
@@ -1007,7 +1038,10 @@ where
 
             if let Some(invoice) = self.store.get_invoice(&payment_hash) {
                 let invoice_status = self.get_invoice_status(&invoice);
-                if invoice_status != CkbInvoiceStatus::Open {
+                if !matches!(
+                    invoice_status,
+                    CkbInvoiceStatus::Open | CkbInvoiceStatus::Received
+                ) {
                     return Err(ProcessingChannelError::FinalInvoiceInvalid(invoice_status));
                 }
             }
@@ -1980,6 +2014,7 @@ where
             ChannelCommand::AddTlc(command, reply) => {
                 let res = self.handle_add_tlc_command(myself, state, command.clone());
                 let error_info = if let Err(ref err) = res {
+                    dbg!("add tlc error", err);
                     Some((err.clone(), self.get_tlc_error(state, err).await))
                 } else {
                     None
@@ -3078,16 +3113,6 @@ impl TlcState {
                 .iter()
                 .find(|tlc| tlc.tlc_id == *tlc_id)
         }
-    }
-
-    pub fn list_hold_tlcs_by_payment_hash<'a>(
-        &'a self,
-        payment_hash: &'a Hash256,
-    ) -> impl Iterator<Item = &'a TlcInfo> {
-        self.received_tlcs
-            .tlcs
-            .iter()
-            .filter(move |tlc| &tlc.payment_hash == payment_hash)
     }
 
     pub fn get_committed_received_tlcs(&self) -> Vec<TlcInfo> {
@@ -5070,13 +5095,6 @@ impl ChannelActorState {
 
     pub fn get_received_tlc(&self, tlc_id: TLCId) -> Option<&TlcInfo> {
         self.tlc_state.get(&tlc_id)
-    }
-
-    pub fn list_hold_tlcs_by_payment_hash<'a>(
-        &'a self,
-        payment_hash: &'a Hash256,
-    ) -> impl Iterator<Item = &'a TlcInfo> {
-        self.tlc_state.list_hold_tlcs_by_payment_hash(payment_hash)
     }
 
     pub fn check_insert_tlc(&mut self, tlc: &TlcInfo) -> Result<(), ProcessingChannelError> {
@@ -7664,6 +7682,8 @@ pub trait ChannelActorStateStore {
         custom_records: PaymentCustomRecords,
     );
     fn get_payment_custom_records(&self, payment_hash: &Hash256) -> Option<PaymentCustomRecords>;
+    fn insert_hold_tlc(&self, payment_hash: Hash256, hold_tlc: HoldTlc);
+    fn get_hold_tlcs(&self, payment_hash: Hash256) -> Vec<HoldTlc>;
 }
 
 /// A wrapper on CommitmentTransaction that has a partial signature along with

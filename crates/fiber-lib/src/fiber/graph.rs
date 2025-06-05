@@ -22,7 +22,6 @@ use crate::fiber::types::PaymentHopData;
 use crate::invoice::CkbInvoice;
 use crate::now_timestamp_as_millis_u64;
 use ckb_types::packed::{OutPoint, Script};
-use lightning_invoice::payment;
 use rand::seq::SliceRandom;
 use rand::thread_rng;
 use serde::{Deserialize, Serialize};
@@ -1692,7 +1691,19 @@ fn decide_payment_status(
         htlc_inflight = true;
     }
 
-    dbg!(htlc_inflight, htlc_failed, htlc_settled, payment_failed);
+    dbg!(
+        htlc_inflight,
+        htlc_failed,
+        htlc_settled,
+        payment_failed,
+        attempts.len(),
+        attempts.iter().filter(|a| a.is_settled()).count(),
+        &last_error
+    );
+
+    for a in attempts {
+        dbg!(a.last_error.as_ref());
+    }
 
     // no matter the payment status, if the htlc is inflight, the payment is inflight
     if htlc_inflight {
@@ -1969,4 +1980,10 @@ impl Attempt {
     pub fn is_inflight(&self) -> bool {
         !self.is_settled() && !self.is_failed()
     }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct HoldTlc {
+    pub channel_actor_state_id: Hash256,
+    pub tlc_id: u64,
 }

@@ -50,10 +50,9 @@ use super::channel::{
     ChannelCommand, ChannelCommandWithId, ChannelEvent, ChannelInitializationParameter,
     ChannelState, ChannelSubscribers, ChannelTlcInfo, OpenChannelParameter, PrevTlcInfo,
     ProcessingChannelError, ProcessingChannelResult, PublicChannelInfo, RemoveTlcCommand,
-    RevocationData, SettlementData, ShuttingDownFlags, StopReason, TLCId,
-    DEFAULT_COMMITMENT_FEE_RATE, DEFAULT_FEE_RATE, DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
-    MAX_COMMITMENT_DELAY_EPOCHS, MAX_TLC_NUMBER_IN_FLIGHT, MIN_COMMITMENT_DELAY_EPOCHS,
-    SYS_MAX_TLC_NUMBER_IN_FLIGHT,
+    RevocationData, SettlementData, ShuttingDownFlags, StopReason, DEFAULT_COMMITMENT_FEE_RATE,
+    DEFAULT_FEE_RATE, DEFAULT_MAX_TLC_VALUE_IN_FLIGHT, MAX_COMMITMENT_DELAY_EPOCHS,
+    MAX_TLC_NUMBER_IN_FLIGHT, MIN_COMMITMENT_DELAY_EPOCHS, SYS_MAX_TLC_NUMBER_IN_FLIGHT,
 };
 use super::config::{AnnouncedNodeName, DEFAULT_MPP_MIN_AMOUNT, MIN_TLC_EXPIRY_DELTA};
 use super::features::FeatureVector;
@@ -79,9 +78,7 @@ use crate::ckb::{CkbChainMessage, FundingRequest, FundingTx};
 use crate::fiber::channel::{
     AddTlcCommand, AddTlcResponse, ShutdownCommand, TxCollaborationCommand, TxUpdateCommand,
 };
-use crate::fiber::config::{
-    DEFAULT_MAX_PARTS, DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT,
-};
+use crate::fiber::config::{DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT};
 use crate::fiber::gossip::{GossipConfig, GossipService, SubscribableGossipMessageStore};
 use crate::fiber::graph::{PaymentSession, PaymentSessionState, PaymentSessionStatus};
 use crate::fiber::serde_utils::EntityHex;
@@ -1171,7 +1168,6 @@ where
             NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId { peer_id, message }) => {
                 state.send_fiber_message_to_peer(&peer_id, message).await?;
             }
-
             NetworkActorCommand::ConnectPeer(addr) => {
                 // TODO: It is more than just dialing a peer. We need to exchange capabilities of the peer,
                 // e.g. whether the peer support some specific feature.
@@ -1198,13 +1194,11 @@ where
                 // Tentacle sends an event by calling handle_error function instead, which
                 // may receive errors like DialerError.
             }
-
             NetworkActorCommand::DisconnectPeer(peer_id) => {
                 if let Some(session) = state.get_peer_session(&peer_id) {
                     state.control.disconnect(session).await?;
                 }
             }
-
             NetworkActorCommand::SavePeerAddress(addr) => match extract_peer_id(&addr) {
                 Some(peer) => {
                     debug!("Saved peer id {:?} with address {:?}", &peer, &addr);
@@ -1214,7 +1208,6 @@ where
                     error!("Failed to save address to peer store: unable to extract peer id from address {:?}", &addr);
                 }
             },
-
             NetworkActorCommand::MaintainConnections => {
                 let mut inbound_peer_sessions = state.inbound_peer_sessions();
                 let num_inbound_peers = inbound_peer_sessions.len();
@@ -1224,17 +1217,17 @@ where
 
                 if num_inbound_peers > state.max_inbound_peers {
                     debug!(
-                        "Already connected to {} inbound peers, only wants {} peers, disconnecting some",
-                        num_inbound_peers, state.max_inbound_peers
-                    );
+                                "Already connected to {} inbound peers, only wants {} peers, disconnecting some",
+                                num_inbound_peers, state.max_inbound_peers
+                            );
                     inbound_peer_sessions.retain(|k| !state.session_channels_map.contains_key(k));
                     let sessions_to_disconnect = if inbound_peer_sessions.len()
                         < num_inbound_peers - state.max_inbound_peers
                     {
                         warn!(
-                            "Wants to disconnect more {} inbound peers, but all peers except {:?} have channels, will not disconnect any peer with channels",
-                            num_inbound_peers - state.max_inbound_peers, &inbound_peer_sessions
-                        );
+                                    "Wants to disconnect more {} inbound peers, but all peers except {:?} have channels, will not disconnect any peer with channels",
+                                    num_inbound_peers - state.max_inbound_peers, &inbound_peer_sessions
+                                );
                         &inbound_peer_sessions[..]
                     } else {
                         &inbound_peer_sessions[..num_inbound_peers - state.max_inbound_peers]
@@ -1252,9 +1245,9 @@ where
 
                 if num_outbound_peers >= state.min_outbound_peers {
                     debug!(
-                        "Already connected to {} outbound peers, wants a minimal of {} peers, skipping connecting to more peers",
-                        num_outbound_peers, state.min_outbound_peers
-                    );
+                                "Already connected to {} outbound peers, wants a minimal of {} peers, skipping connecting to more peers",
+                                num_outbound_peers, state.min_outbound_peers
+                            );
                     return Ok(());
                 }
 
@@ -1291,9 +1284,9 @@ where
                 for (peer_id, addresses) in peers_to_connect {
                     if let Some(session) = state.get_peer_session(&peer_id) {
                         debug!(
-                            "Randomly selected peer {:?} already connected with session id {:?}, skipping connection",
-                            peer_id, session
-                        );
+                                    "Randomly selected peer {:?} already connected with session id {:?}, skipping connection",
+                                    peer_id, session
+                                );
                         continue;
                     }
                     for addr in addresses {
@@ -1429,7 +1422,6 @@ where
                     }
                 }
             }
-
             NetworkActorCommand::AbandonChannel(channel_id, reply) => {
                 match state.abandon_channel(channel_id).await {
                     Ok(_) => {
@@ -1441,13 +1433,11 @@ where
                     }
                 }
             }
-
             NetworkActorCommand::ControlFiberChannel(c) => {
                 state
                     .send_command_to_channel(c.channel_id, c.command)
                     .await?
             }
-
             NetworkActorCommand::SendPaymentOnionPacket(command) => {
                 let res = self
                     .handle_send_onion_packet_command(state, command.clone())
@@ -1475,7 +1465,6 @@ where
 
                 let _ = reply.send(response);
             }
-
             NetworkActorCommand::UpdateChannelFunding(channel_id, transaction, request) => {
                 let old_tx = transaction.into_view();
                 let mut tx = FundingTx::new();
@@ -1531,13 +1520,13 @@ where
                 let msg = match partial_witnesses {
                     Some(partial_witnesses) => {
                         debug!(
-                            "Received SignFudningTx request with for transaction {:?} and partial witnesses {:?}",
-                            &funding_tx,
-                            partial_witnesses
-                                .iter()
-                                .map(hex::encode)
-                                .collect::<Vec<_>>()
-                        );
+                                    "Received SignFudningTx request with for transaction {:?} and partial witnesses {:?}",
+                                    &funding_tx,
+                                    partial_witnesses
+                                        .iter()
+                                        .map(hex::encode)
+                                        .collect::<Vec<_>>()
+                                );
                         let funding_tx = funding_tx
                             .into_view()
                             .as_advanced_builder()
@@ -1589,9 +1578,9 @@ where
                     }
                     None => {
                         debug!(
-                            "Received SignFundingTx request with for transaction {:?} without partial witnesses, so start signing it now",
-                            &funding_tx,
-                        );
+                                    "Received SignFundingTx request with for transaction {:?} without partial witnesses, so start signing it now",
+                                    &funding_tx,
+                                );
                         let mut funding_tx = call_t!(
                             self.chain_actor,
                             CkbChainMessage::Sign,
@@ -2333,7 +2322,7 @@ where
         // for dry run, we only build the route and return the hops info,
         // will not store the payment session and send the onion packet
         if payment_data.dry_run {
-            let mut payment_session = PaymentSession::new(payment_data, 0);
+            let payment_session = PaymentSession::new(payment_data, 0);
             let mut session_state = PaymentSessionState::new(payment_session, vec![])?;
             let mut attempt = session_state.new_attempt(0);
             let _hops = self
