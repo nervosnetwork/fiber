@@ -2180,7 +2180,7 @@ where
     ) -> Result<Option<SessionRoute>, Error> {
         let hops_info = self.build_payment_route(session, attempt).await?;
 
-        // send attemp
+        // send attempt
         if let Err(err) = self
             .send_payment_onion_packet(state, attempt, hops_info)
             .await
@@ -2247,7 +2247,6 @@ where
         let attempt_id = self.store.next_attempt_id();
         let mut attempt = payment_session.new_attempt(attempt_id);
 
-        // send attemp
         self.send_attempt(myself.clone(), state, &mut payment_session, &mut attempt)
             .await?;
 
