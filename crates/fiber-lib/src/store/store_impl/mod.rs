@@ -563,10 +563,7 @@ impl NetworkGraphStateStore for Store {
     fn get_attempts(&self, payment_hash: Hash256) -> Vec<Attempt> {
         let prefix = [&[ATTEMPT_PREFIX], payment_hash.as_ref()].concat();
         self.prefix_iterator(&prefix)
-            .filter_map(|(_key, value)| {
-                let attempt = deserialize_from(value.as_ref(), "Attempt");
-                Some(attempt)
-            })
+            .map(|(_key, value)| deserialize_from(value.as_ref(), "Attempt"))
             .collect()
     }
 
