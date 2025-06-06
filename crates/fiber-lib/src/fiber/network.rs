@@ -1294,7 +1294,7 @@ where
 
                 // remove settled hold tlcs
                 for payment_hash in all_hold_tlcs.keys() {
-                    let Some(status) = self.store.get_invoice_status(&payment_hash) else {
+                    let Some(status) = self.store.get_invoice_status(payment_hash) else {
                         continue;
                     };
 
@@ -1304,7 +1304,7 @@ where
                             | CkbInvoiceStatus::Expired
                             | CkbInvoiceStatus::Paid
                     ) {
-                        self.store.remove_hold_tlcs(&payment_hash);
+                        self.store.remove_hold_tlcs(payment_hash);
                     }
                 }
 
