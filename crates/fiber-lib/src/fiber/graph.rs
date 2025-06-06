@@ -1663,9 +1663,6 @@ pub struct PaymentSession {
     pub status: PaymentSessionStatus,
     pub created_at: u64,
     pub last_updated_at: u64,
-    pub route: SessionRoute,
-    // Session key for onion packet. Save it for decoding the error packet.
-    pub session_key: [u8; 32],
     #[serde(skip)]
     cached_attempts: Vec<Attempt>, // Add a cache for attempts
 }
@@ -1684,8 +1681,6 @@ impl PaymentSession {
             status: PaymentSessionStatus::Created,
             created_at: now,
             last_updated_at: now,
-            route: SessionRoute::default(),
-            session_key: Default::default(),
             cached_attempts: vec![],
         }
         .init_attempts(store)
@@ -1703,14 +1698,6 @@ impl PaymentSession {
 
     pub fn is_send_payment_with_router(&self) -> bool {
         !self.request.router.is_empty()
-    }
-
-    pub fn first_hop_channel_outpoint_eq(&self, out_point: &OutPoint) -> bool {
-        self.route
-            .nodes
-            .first()
-            .map(|x| x.channel_outpoint.eq(out_point))
-            .unwrap_or_default()
     }
 
     pub fn attempts(&self) -> Vec<Attempt> {
@@ -1905,15 +1892,6 @@ impl PaymentSession {
         self.set_status(PaymentSessionStatus::Failed);
         self.last_error = Some(error.to_string());
     }
-
-    pub fn fee(&self) -> u128 {
-        self.route.fee()
-    }
-
-    pub fn hops_public_keys(&self) -> Vec<Pubkey> {
-        // Skip the first node, which is the sender.
-        self.route.nodes.iter().skip(1).map(|x| x.pubkey).collect()
-    }
 }
 
 impl From<PaymentSession> for SendPaymentResponse {
@@ -1999,6 +1977,14 @@ impl Attempt {
 
     pub fn is_inflight(&self) -> bool {
         !self.is_settled() && !self.is_failed() && self.inflight_at.is_some()
+    }
+
+    pub fn first_hop_channel_outpoint_eq(&self, out_point: &OutPoint) -> bool {
+        self.route
+            .nodes
+            .first()
+            .map(|x| x.channel_outpoint.eq(out_point))
+            .unwrap_or_default()
     }
 }
 

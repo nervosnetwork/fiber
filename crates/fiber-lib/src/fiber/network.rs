@@ -1024,19 +1024,20 @@ where
                     .expect(ASSUME_NETWORK_MYSELF_ALIVE);
 
                 // retry related payment session for this channel
-                for session in self
-                    .store
-                    .get_payment_sessions_with_status(PaymentSessionStatus::Created)
-                {
-                    if session.first_hop_channel_outpoint_eq(&channel_outpoint) {
-                        debug!(
-                            "Now retrying payment session {:?} for channel {:?} reestablished",
-                            session.payment_hash(),
-                            channel_id
-                        );
-                        self.register_payment_retry(myself.clone(), session.payment_hash());
-                    }
-                }
+                // TODO(yukang): make sure attempts retry after channel is reestablished
+                // for session in self
+                //     .store
+                //     .get_payment_sessions_with_status(PaymentSessionStatus::Created)
+                // {
+                //     if session.first_hop_channel_outpoint_eq(&channel_outpoint) {
+                //         debug!(
+                //             "Now retrying payment session {:?} for channel {:?} reestablished",
+                //             session.payment_hash(),
+                //             channel_id
+                //         );
+                //         self.register_payment_retry(myself.clone(), session.payment_hash());
+                //     }
+                // }
             }
             NetworkActorEvent::FiberMessage(peer_id, message) => {
                 self.handle_peer_message(myself, state, peer_id, message)
@@ -3446,7 +3447,7 @@ where
 
     pub async fn on_init_msg(
         &mut self,
-        myself: ActorRef<NetworkActorMessage>,
+        _myself: ActorRef<NetworkActorMessage>,
         peer_id: PeerId,
         init_msg: Init,
     ) -> Result<(), ProcessingChannelError> {
@@ -3473,7 +3474,7 @@ where
 
         if let Some(info) = self.peer_session_map.get_mut(&peer_id) {
             info.features = Some(init_msg.features);
-            debug_event!(myself, "PeerInit");
+            debug_event!(_myself, "PeerInit");
 
             for channel_id in self.store.get_active_channel_ids_by_peer(&peer_id) {
                 if let Err(e) = self.reestablish_channel(&peer_id, channel_id).await {
