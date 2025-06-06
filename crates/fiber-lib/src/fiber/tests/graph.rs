@@ -259,7 +259,13 @@ impl MockNetworkGraph {
     }
 
     pub fn build_route_with_expect(&self, payment_data: &SendPaymentData, expect: Vec<usize>) {
-        let route = self.graph.build_route(payment_data.clone());
+        let route = self.graph.build_route(
+            payment_data.amount,
+            payment_data.amount,
+            None,
+            0,
+            payment_data.clone(),
+        );
         assert!(route.is_ok());
         let route = route.unwrap();
         let nodes = route.iter().filter_map(|x| x.next_hop).collect::<Vec<_>>();
@@ -275,7 +281,13 @@ impl MockNetworkGraph {
         payment_data: &SendPaymentData,
         expects: &[Vec<usize>],
     ) {
-        let route = self.graph.build_route(payment_data.clone());
+        let route = self.graph.build_route(
+            payment_data.amount,
+            payment_data.amount,
+            None,
+            0,
+            payment_data.clone(),
+        );
         assert!(route.is_ok());
         let route = route.unwrap();
         let nodes = route.iter().filter_map(|x| x.next_hop).collect::<Vec<_>>();
@@ -581,7 +593,8 @@ fn test_graph_build_router_is_ok_with_fee_rate() {
     let source = network.keys[1];
     network.set_source(source);
     let node5 = network.keys[5];
-    let route = network.graph.build_route(SendPaymentData {
+
+    let payment_data = SendPaymentData {
         target_pubkey: node5.into(),
         amount: 1000,
         payment_hash: Hash256::default(),
@@ -599,7 +612,14 @@ fn test_graph_build_router_is_ok_with_fee_rate() {
         dry_run: false,
         custom_records: None,
         router: vec![],
-    });
+    };
+    let route = network.graph.build_route(
+        payment_data.amount,
+        payment_data.amount,
+        None,
+        0,
+        payment_data.clone(),
+    );
     assert!(route.is_ok());
     let route = route.unwrap();
     let amounts = route.iter().map(|x| x.amount).collect::<Vec<_>>();
@@ -624,7 +644,8 @@ fn test_graph_build_router_fee_rate_optimize() {
     let source = network.keys[1];
     network.set_source(source);
     let node5 = network.keys[5];
-    let route = network.graph.build_route(SendPaymentData {
+
+    let payment_data = SendPaymentData {
         target_pubkey: node5.into(),
         amount: 1000,
         payment_hash: Hash256::default(),
@@ -642,7 +663,15 @@ fn test_graph_build_router_fee_rate_optimize() {
         dry_run: false,
         custom_records: None,
         router: vec![],
-    });
+    };
+
+    let route = network.graph.build_route(
+        payment_data.amount,
+        payment_data.amount,
+        None,
+        0,
+        payment_data,
+    );
     assert!(route.is_ok());
     let route = route.unwrap();
     let amounts = route.iter().map(|x| x.amount).collect::<Vec<_>>();
@@ -659,7 +688,7 @@ fn test_graph_build_router_no_fee_with_direct_pay() {
     let source = network.keys[1];
     network.set_source(source);
     let node5 = network.keys[5];
-    let route = network.graph.build_route(SendPaymentData {
+    let payment_data = SendPaymentData {
         target_pubkey: node5.into(),
         amount: 1000,
         payment_hash: Hash256::default(),
@@ -677,7 +706,14 @@ fn test_graph_build_router_no_fee_with_direct_pay() {
         dry_run: false,
         custom_records: None,
         router: vec![],
-    });
+    };
+    let route = network.graph.build_route(
+        payment_data.amount,
+        payment_data.amount,
+        None,
+        0,
+        payment_data.clone(),
+    );
     assert!(route.is_ok());
     let route = route.unwrap();
     let amounts = route.iter().map(|x| x.amount).collect::<Vec<_>>();
@@ -792,7 +828,7 @@ fn test_graph_build_route_three_nodes_amount() {
     let node2 = network.keys[2];
     let node3 = network.keys[3];
     // Test build route from node1 to node3
-    let route = network.graph.build_route(SendPaymentData {
+    let payment_data = SendPaymentData {
         target_pubkey: node3.into(),
         amount: 100,
         payment_hash: Hash256::default(),
@@ -810,7 +846,14 @@ fn test_graph_build_route_three_nodes_amount() {
         dry_run: false,
         custom_records: None,
         router: vec![],
-    });
+    };
+    let route = network.graph.build_route(
+        payment_data.amount,
+        payment_data.amount,
+        None,
+        0,
+        payment_data.clone(),
+    );
     assert!(route.is_ok());
     let route = route.unwrap();
     assert_eq!(route.len(), 3);
@@ -844,7 +887,7 @@ fn do_test_graph_build_route_expiry(n_nodes: usize) {
     let last_node = network.keys[n_nodes - 1];
     let timestamp_before_building_route = now_timestamp_as_millis_u64();
     // Send a payment from the first node to the last node
-    let route = network.graph.build_route(SendPaymentData {
+    let payment_data = SendPaymentData {
         target_pubkey: last_node.into(),
         amount: 100,
         payment_hash: Hash256::default(),
@@ -862,7 +905,14 @@ fn do_test_graph_build_route_expiry(n_nodes: usize) {
         dry_run: false,
         custom_records: None,
         router: vec![],
-    });
+    };
+    let route = network.graph.build_route(
+        payment_data.amount,
+        payment_data.amount,
+        None,
+        0,
+        payment_data.clone(),
+    );
     let timestamp_after_building_route = now_timestamp_as_millis_u64();
     assert!(route.is_ok());
     let route = route.unwrap();
@@ -924,7 +974,7 @@ fn test_graph_build_route_below_min_tlc_value() {
     let node3 = network.keys[3];
 
     // Test build route from node1 to node3 with amount below min_tlc_value
-    let route = network.graph.build_route(SendPaymentData {
+    let payment_data = SendPaymentData {
         target_pubkey: node3.into(),
         amount: 10, // Below min_tlc_value of 50
         payment_hash: Hash256::default(),
@@ -942,7 +992,14 @@ fn test_graph_build_route_below_min_tlc_value() {
         dry_run: false,
         custom_records: None,
         router: vec![],
-    });
+    };
+    let route = network.graph.build_route(
+        payment_data.amount,
+        payment_data.amount,
+        None,
+        0,
+        payment_data.clone(),
+    );
     assert!(route.is_err());
 }
 
@@ -956,7 +1013,7 @@ fn test_graph_build_route_select_edge_with_latest_timestamp() {
     network.add_edge_with_config(0, 2, Some(500), Some(2), Some(50), None, None, None);
     let node2 = network.keys[2];
 
-    let route = network.graph.build_route(SendPaymentData {
+    let payment_data = SendPaymentData {
         target_pubkey: node2.into(),
         amount: 100,
         payment_hash: Hash256::default(),
@@ -974,7 +1031,14 @@ fn test_graph_build_route_select_edge_with_latest_timestamp() {
         dry_run: false,
         custom_records: None,
         router: vec![],
-    });
+    };
+    let route = network.graph.build_route(
+        payment_data.amount,
+        payment_data.amount,
+        None,
+        0,
+        payment_data.clone(),
+    );
     assert!(route.is_ok());
     eprintln!("got route {:?}", route);
     let route = route.unwrap();
@@ -996,7 +1060,7 @@ fn test_graph_build_route_select_edge_with_large_capacity() {
     network.add_edge_with_config(0, 2, Some(500), Some(2), Some(50), None, None, None);
     let node2 = network.keys[2];
 
-    let route = network.graph.build_route(SendPaymentData {
+    let payment_data = SendPaymentData {
         target_pubkey: node2.into(),
         amount: 100,
         payment_hash: Hash256::default(),
@@ -1014,7 +1078,14 @@ fn test_graph_build_route_select_edge_with_large_capacity() {
         dry_run: false,
         custom_records: None,
         router: vec![],
-    });
+    };
+    let route = network.graph.build_route(
+        payment_data.amount,
+        payment_data.amount,
+        None,
+        0,
+        payment_data.clone(),
+    );
     assert!(route.is_ok());
     let route = route.unwrap();
     assert_eq!(route.len(), 2);
@@ -1053,7 +1124,7 @@ fn test_graph_mark_failed_channel() {
 
     network.mark_channel_failed(2, 3);
     // Test build route from node1 to node3
-    let route = network.graph.build_route(SendPaymentData {
+    let payment_data = SendPaymentData {
         target_pubkey: node3.into(),
         amount: 100,
         payment_hash: Hash256::default(),
@@ -1071,14 +1142,21 @@ fn test_graph_mark_failed_channel() {
         dry_run: false,
         custom_records: None,
         router: vec![],
-    });
+    };
+    let route = network.graph.build_route(
+        payment_data.amount,
+        payment_data.amount,
+        None,
+        0,
+        payment_data.clone(),
+    );
     assert!(route.is_err());
 
     network.add_edge(0, 5, Some(500), Some(2));
     network.add_edge(5, 3, Some(500), Some(2));
 
     // Test build route from node1 to node3
-    let route = network.graph.build_route(SendPaymentData {
+    let payment_data = SendPaymentData {
         target_pubkey: node3.into(),
         amount: 100,
         payment_hash: Hash256::default(),
@@ -1096,7 +1174,14 @@ fn test_graph_mark_failed_channel() {
         dry_run: false,
         custom_records: None,
         router: vec![],
-    });
+    };
+    let route = network.graph.build_route(
+        payment_data.amount,
+        payment_data.amount,
+        None,
+        0,
+        payment_data.clone(),
+    );
     assert!(route.is_ok());
 }
 
@@ -1113,7 +1198,7 @@ fn test_graph_session_router() {
     let node4 = network.keys[4];
 
     // Test build route from node1 to node4 should be Ok
-    let route = network.graph.build_route(SendPaymentData {
+    let payment_data = SendPaymentData {
         target_pubkey: node4.into(),
         amount: 100,
         payment_hash: Hash256::default(),
@@ -1131,7 +1216,14 @@ fn test_graph_session_router() {
         dry_run: false,
         custom_records: None,
         router: vec![],
-    });
+    };
+    let route = network.graph.build_route(
+        payment_data.amount,
+        payment_data.amount,
+        None,
+        0,
+        payment_data.clone(),
+    );
     assert!(route.is_ok());
 
     let route = route.unwrap();
@@ -1161,7 +1253,7 @@ fn test_graph_mark_failed_node() {
     let node4 = network.keys[4];
 
     // Test build route from node1 to node3
-    let route = network.graph.build_route(SendPaymentData {
+    let payment_data = SendPaymentData {
         target_pubkey: node3.into(),
         amount: 100,
         payment_hash: Hash256::default(),
@@ -1179,11 +1271,18 @@ fn test_graph_mark_failed_node() {
         dry_run: false,
         custom_records: None,
         router: vec![],
-    });
+    };
+    let route = network.graph.build_route(
+        payment_data.amount,
+        payment_data.amount,
+        None,
+        0,
+        payment_data.clone(),
+    );
     assert!(route.is_ok());
 
     // Test build route from node1 to node4 should be Ok
-    let route = network.graph.build_route(SendPaymentData {
+    let payment_data = SendPaymentData {
         target_pubkey: node4.into(),
         amount: 100,
         payment_hash: Hash256::default(),
@@ -1202,13 +1301,20 @@ fn test_graph_mark_failed_node() {
         dry_run: false,
         custom_records: None,
         router: vec![],
-    });
+    };
+    let route = network.graph.build_route(
+        payment_data.amount,
+        payment_data.amount,
+        None,
+        0,
+        payment_data.clone(),
+    );
     assert!(route.is_ok());
 
     network.mark_node_failed(2);
 
     // Test build route from node1 to node3
-    let route = network.graph.build_route(SendPaymentData {
+    let payment_data = SendPaymentData {
         target_pubkey: node3.into(),
         amount: 100,
         payment_hash: Hash256::default(),
@@ -1227,11 +1333,18 @@ fn test_graph_mark_failed_node() {
         dry_run: false,
         custom_records: None,
         router: vec![],
-    });
+    };
+    let route = network.graph.build_route(
+        payment_data.amount,
+        payment_data.amount,
+        None,
+        0,
+        payment_data.clone(),
+    );
     assert!(route.is_err());
 
     // Test build route from node1 to node4
-    let route = network.graph.build_route(SendPaymentData {
+    let payment_data = SendPaymentData {
         target_pubkey: node4.into(),
         amount: 100,
         payment_hash: Hash256::default(),
@@ -1249,7 +1362,14 @@ fn test_graph_mark_failed_node() {
         dry_run: false,
         custom_records: None,
         router: vec![],
-    });
+    };
+    let route = network.graph.build_route(
+        payment_data.amount,
+        payment_data.amount,
+        None,
+        0,
+        payment_data.clone(),
+    );
     assert!(route.is_err());
 }
 
@@ -1275,7 +1395,14 @@ fn test_graph_payment_self_default_is_false() {
     let payment_data = SendPaymentData::new(command);
     assert!(payment_data.is_ok());
 
-    let route = network.graph.build_route(payment_data.unwrap());
+    let payment_data = payment_data.unwrap();
+    let route = network.graph.build_route(
+        payment_data.amount,
+        payment_data.amount,
+        None,
+        0,
+        payment_data.clone(),
+    );
     assert!(route.is_err());
     let message = route.unwrap_err().to_string();
     assert!(message.contains("allow_self_payment is not enable, can not pay to self"));
@@ -1332,7 +1459,13 @@ fn test_graph_payment_pay_self_with_one_node() {
     assert!(payment_data.is_ok());
     let payment_data = payment_data.unwrap();
 
-    let route = network.graph.build_route(payment_data);
+    let route = network.graph.build_route(
+        payment_data.amount,
+        payment_data.amount,
+        None,
+        0,
+        payment_data.clone(),
+    );
     assert!(route.is_ok());
     let route = route.unwrap();
     assert_eq!(route[1].next_hop, Some(node0.into()));
@@ -1361,7 +1494,13 @@ fn test_graph_payment_pay_self_with_one_node_fee_rate() {
     assert!(payment_data.is_ok());
     let payment_data = payment_data.unwrap();
 
-    let route = network.graph.build_route(payment_data);
+    let route = network.graph.build_route(
+        payment_data.amount,
+        payment_data.amount,
+        None,
+        0,
+        payment_data.clone(),
+    );
     assert!(route.is_ok());
     let route = route.unwrap();
     assert_eq!(route.len(), 3);
@@ -1410,7 +1549,13 @@ fn test_graph_build_route_with_double_edge_node() {
         ..Default::default()
     };
     let payment_data = SendPaymentData::new(command).unwrap();
-    let route = network.graph.build_route(payment_data);
+    let route = network.graph.build_route(
+        payment_data.amount,
+        payment_data.amount,
+        None,
+        0,
+        payment_data.clone(),
+    );
     assert!(route.is_ok());
 }
 
@@ -1458,7 +1603,13 @@ fn test_graph_build_route_with_other_node_maybe_better() {
         ..Default::default()
     };
     let payment_data = SendPaymentData::new(command).unwrap();
-    let route = network.graph.build_route(payment_data);
+    let route = network.graph.build_route(
+        payment_data.amount,
+        payment_data.amount,
+        None,
+        0,
+        payment_data.clone(),
+    );
     assert!(route.is_ok());
     let route = route.unwrap();
     assert_eq!(route[0].next_hop, Some(node1.into()));
@@ -1489,7 +1640,13 @@ fn test_graph_payment_pay_self_will_ok() {
     assert!(payment_data.is_ok());
     let payment_data = payment_data.unwrap();
 
-    let route = network.graph.build_route(payment_data.clone());
+    let route = network.graph.build_route(
+        payment_data.amount,
+        payment_data.amount,
+        None,
+        0,
+        payment_data.clone(),
+    );
     // since we don't have a route to node0, it will fail
     assert!(route.is_err());
 
@@ -1543,7 +1700,13 @@ fn test_graph_build_route_with_path_limits() {
         ..Default::default()
     };
     let payment_data = SendPaymentData::new(command).unwrap();
-    let route = network.graph.build_route(payment_data);
+    let route = network.graph.build_route(
+        payment_data.amount,
+        payment_data.amount,
+        None,
+        0,
+        payment_data.clone(),
+    );
     assert!(route.is_ok());
     let route = route.unwrap();
     assert_eq!(route.len(), 100);
@@ -1588,7 +1751,13 @@ fn test_graph_build_route_with_path_limit_fail_with_fee_not_enough() {
         ..Default::default()
     };
     let payment_data = SendPaymentData::new(command).unwrap();
-    let route = network.graph.build_route(payment_data);
+    let route = network.graph.build_route(
+        payment_data.amount,
+        payment_data.amount,
+        None,
+        0,
+        payment_data.clone(),
+    );
     assert!(route.is_err());
 }
 
@@ -1614,7 +1783,14 @@ fn test_graph_payment_expiry_is_in_right_order() {
     assert!(payment_data.is_ok());
 
     let current_time = now_timestamp_as_millis_u64();
-    let route = network.graph.build_route(payment_data.unwrap());
+    let payment_data = payment_data.unwrap();
+    let route = network.graph.build_route(
+        payment_data.amount,
+        payment_data.amount,
+        None,
+        0,
+        payment_data,
+    );
     assert!(route.is_ok());
     let route = route.unwrap();
     let expiries = route.iter().map(|e| e.expiry).collect::<Vec<_>>();
@@ -1639,7 +1815,14 @@ fn test_graph_payment_expiry_is_in_right_order() {
     assert!(payment_data.is_ok());
 
     let current_time = now_timestamp_as_millis_u64();
-    let route = network.graph.build_route(payment_data.unwrap());
+    let payment_data = payment_data.unwrap();
+    let route = network.graph.build_route(
+        payment_data.amount,
+        payment_data.amount,
+        None,
+        0,
+        payment_data.clone(),
+    );
     assert!(route.is_ok());
     let route = route.unwrap();
     let expiries = route.iter().map(|e| e.expiry).collect::<Vec<_>>();

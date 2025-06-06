@@ -1771,6 +1771,7 @@ dependencies = [
  "num_enum",
  "once_cell",
  "ouroboros",
+ "paste",
  "ractor",
  "rand 0.8.5",
  "regex",

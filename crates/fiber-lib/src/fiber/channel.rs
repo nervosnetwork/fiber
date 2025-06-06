@@ -68,10 +68,13 @@ use tentacle::secio::PeerId;
 use thiserror::Error;
 use tokio::sync::oneshot;
 
+use super::config::DEFAULT_HOLD_TLC_TIMEOUT;
+use super::graph::HoldTlc;
 use super::{
     gossip::SOFT_BROADCAST_MESSAGES_CONSIDERED_STALE_DURATION, graph::ChannelUpdateInfo,
     types::ForwardTlcResult,
 };
+use std::collections::HashMap;
 use std::{
     collections::HashSet,
     fmt::{self, Debug, Display},
@@ -197,6 +200,8 @@ pub enum TxCollaborationCommand {
 pub struct AddTlcCommand {
     pub amount: u128,
     pub payment_hash: Hash256,
+    /// The attempt id associate with the tlc
+    pub attempt_id: Option<u64>,
     pub expiry: u64,
     pub hash_algorithm: HashAlgorithm,
     /// Onion packet for the next node
@@ -214,6 +219,7 @@ impl Debug for AddTlcCommand {
         f.debug_struct("AddTlcCommand")
             .field("amount", &self.amount)
             .field("payment_hash", &self.payment_hash)
+            .field("attempt_id", &self.attempt_id)
             .field("expiry", &self.expiry)
             .field("hash_algorithm", &self.hash_algorithm)
             .field("previous_tlc", &self.previous_tlc)
@@ -596,6 +602,7 @@ where
         state: &mut ChannelActorState,
         error: &ProcessingChannelError,
     ) -> TlcErr {
+        dbg!("get_tlc_error", error);
         let error_code = match error {
             ProcessingChannelError::PeelingOnionPacketError(_) => TlcErrorCode::InvalidOnionPayload,
             ProcessingChannelError::TlcForwardFeeIsTooLow => TlcErrorCode::FeeInsufficient,
@@ -711,6 +718,11 @@ where
         };
         let settled_tlcs: Vec<_> = pending_tlcs
             .filter(|tlc| {
+                dbg!(
+                    &tlc.removed_reason,
+                    &tlc.status,
+                    state.tlc_state.applied_remove_tlcs.contains(&tlc.tlc_id)
+                );
                 tlc.removed_reason.is_some()
                     && matches!(
                         tlc.status,
@@ -723,6 +735,7 @@ where
             .collect();
 
         for tlc_id in settled_tlcs {
+            dbg!("apply remove tlc operation", &tlc_id);
             self.apply_remove_tlc_operation(myself, state, tlc_id)
                 .await
                 .expect("expect remove tlc success");
@@ -791,6 +804,8 @@ where
 
         for add_tlc in apply_tlcs {
             assert!(add_tlc.is_received());
+            dbg!("update tlc status on ack", &add_tlc.tlc_id);
+            // TODO do we need to check hold timeout here?
             if let Err(error) = self.apply_add_tlc_operation(myself, state, &add_tlc).await {
                 self.process_add_tlc_error(
                     myself,
@@ -832,13 +847,14 @@ where
         .await;
     }
 
-    async fn try_to_settle_down_tlc(
-        &self,
-        myself: &ActorRef<ChannelActorMessage>,
-        state: &mut ChannelActorState,
-        tlc_id: TLCId,
-    ) {
+    async fn try_to_settle_down_tlc(&self, state: &mut ChannelActorState, tlc_id: TLCId) {
         let tlc_info = state.get_received_tlc(tlc_id).expect("expect tlc");
+
+        // 1. check tlc if fulfilled invoice and invoice support MPP
+        // 2. hold tlc, record hold at, return nothing
+        // 3. check timeout automatically, remove tlc after timeout
+        // 4. when invoice is fulfilled, remove tlc and send fulfill message to peer
+
         let preimage = self.store.get_preimage(&tlc_info.payment_hash);
 
         let preimage = if let Some(preimage) = preimage {
@@ -851,7 +867,22 @@ where
             payment_preimage: preimage,
         });
         let tlc = tlc_info.clone();
+        let hold_tlcs = self.store.get_hold_tlcs(tlc_info.payment_hash);
+        let mut tlcs: Vec<_> = hold_tlcs
+            .iter()
+            .filter_map(|hold_tlc| {
+                let state = self
+                    .store
+                    .get_channel_actor_state(&hold_tlc.channel_actor_state_id)?;
+                let tlc_id = TLCId::Received(hold_tlc.tlc_id);
+                state.get_received_tlc(tlc_id).cloned()
+            })
+            .collect();
+        tlcs.push(tlc.clone());
         if let Some(invoice) = self.store.get_invoice(&tlc.payment_hash) {
+            // TODO check if tlc is MPP
+            // TODO check if invoice support MPP
+
             let status = self.get_invoice_status(&invoice);
             match status {
                 CkbInvoiceStatus::Expired => {
@@ -872,14 +903,47 @@ where
                     error!("invoice already paid, ignore");
                 }
                 _ => {
-                    // do nothing
+                    let total_amount = tlcs.iter().map(|tlc| tlc.amount).sum::<u128>();
+                    let is_fulfilled = total_amount >= invoice.amount.unwrap_or_default();
+
+                    if !is_fulfilled {
+                        // hold the tlc if the invoice is not fulfilled
+                        self.store.insert_hold_tlc(
+                            tlc_info.payment_hash,
+                            HoldTlc {
+                                channel_actor_state_id: state.get_id(),
+                                tlc_id: tlc_info.tlc_id.into(),
+                                hold_expire_at: now_timestamp_as_millis_u64()
+                                    + DEFAULT_HOLD_TLC_TIMEOUT,
+                            },
+                        );
+                        // just return, the hold tlc will be settle when the invoice is fulfilled
+                        return;
+                    }
+
                     // invoice status will be updated to paid after apply remove tlc operation
                 }
             }
         }
 
-        self.register_retryable_tlc_remove(myself, state, tlc.tlc_id, remove_reason)
-            .await;
+        for tlc in tlcs {
+            let (send, _recv) = oneshot::channel::<Result<(), ProcessingChannelError>>();
+            let port = RpcReplyPort::from(send);
+            self.network
+                .send_message(NetworkActorMessage::new_command(
+                    NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
+                        channel_id: tlc.channel_id,
+                        command: ChannelCommand::RemoveTlc(
+                            RemoveTlcCommand {
+                                id: tlc.tlc_id.into(),
+                                reason: remove_reason.clone(),
+                            },
+                            port,
+                        ),
+                    }),
+                ))
+                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+        }
     }
 
     async fn apply_add_tlc_operation(
@@ -920,8 +984,7 @@ where
         // we don't need to settle down the tlc if it is not the last hop here,
         // some e2e tests are calling AddTlc manually, so we can not use onion packet to
         // check whether it's the last hop here, maybe need to revisit in future.
-        self.try_to_settle_down_tlc(myself, state, add_tlc.tlc_id)
-            .await;
+        self.try_to_settle_down_tlc(state, add_tlc.tlc_id).await;
 
         warn!("finished check tlc for peer message: {:?}", &add_tlc.tlc_id);
         Ok(())
@@ -972,7 +1035,10 @@ where
 
             if let Some(invoice) = self.store.get_invoice(&payment_hash) {
                 let invoice_status = self.get_invoice_status(&invoice);
-                if invoice_status != CkbInvoiceStatus::Open {
+                if !matches!(
+                    invoice_status,
+                    CkbInvoiceStatus::Open | CkbInvoiceStatus::Received
+                ) {
                     return Err(ProcessingChannelError::FinalInvoiceInvalid(invoice_status));
                 }
             }
@@ -1074,6 +1140,7 @@ where
         // maybe we need to go through shutdown process for this error
         state
             .check_remove_tlc_with_reason(TLCId::Offered(remove_tlc.tlc_id), &remove_tlc.reason)?;
+        dbg!("set offered tlc removed", &remove_tlc.tlc_id);
         let payment_hash = state
             .tlc_state
             .set_offered_tlc_removed(remove_tlc.tlc_id, remove_tlc.reason.clone());
@@ -1228,10 +1295,12 @@ where
             // only the original sender of the TLC should send `TlcRemoveReceived` event
             // because only the original sender cares about the TLC event to settle the payment
             if tlc_info.is_offered() {
+                dbg!("Send tlc remove received event");
                 self.network
                     .send_message(NetworkActorMessage::new_event(
                         NetworkActorEvent::TlcRemoveReceived(
                             tlc_info.payment_hash,
+                            tlc_info.attempt_id,
                             remove_reason.clone(),
                         ),
                     ))
@@ -1749,6 +1818,7 @@ where
                                     *forward_fee,
                                 )),
                                 payment_hash: *payment_hash,
+                                attempt_id: None,
                             }),
                         )) {
                             Ok(_) => {
@@ -1941,6 +2011,7 @@ where
             ChannelCommand::AddTlc(command, reply) => {
                 let res = self.handle_add_tlc_command(myself, state, command.clone());
                 let error_info = if let Err(ref err) = res {
+                    dbg!("add tlc error", err);
                     Some((err.clone(), self.get_tlc_error(state, err).await))
                 } else {
                     None
@@ -1950,6 +2021,7 @@ where
                     .send_message(NetworkActorMessage::new_event(
                         NetworkActorEvent::AddTlcResult(
                             command.payment_hash,
+                            command.attempt_id,
                             error_info,
                             command.previous_tlc,
                         ),
@@ -2748,6 +2820,8 @@ pub struct TlcInfo {
     pub tlc_id: TLCId,
     pub amount: u128,
     pub payment_hash: Hash256,
+    /// The attempt id associate with the tlc, only on outbound tlc
+    pub attempt_id: Option<u64>,
     pub expiry: u64,
     pub hash_algorithm: HashAlgorithm,
     // the onion packet for multi-hop payment
@@ -2937,8 +3011,10 @@ impl PendingTlcs {
             .iter()
             .filter(|tlc| {
                 if tlc.is_offered() {
+                    dbg!(&tlc.tlc_id, &tlc.outbound_status());
                     matches!(tlc.outbound_status(), OutboundTlcStatus::Committed)
                 } else {
+                    dbg!(&tlc.tlc_id, &tlc.inbound_status());
                     matches!(tlc.inbound_status(), InboundTlcStatus::Committed)
                 }
             })
@@ -3132,6 +3208,7 @@ impl TlcState {
     pub fn set_received_tlc_removed(&mut self, tlc_id: u64, reason: RemoveTlcReason) -> Hash256 {
         let tlc = self.get_mut(&TLCId::Received(tlc_id)).expect("get tlc");
         assert_eq!(tlc.inbound_status(), InboundTlcStatus::Committed);
+        dbg!("set received tlc removed", &tlc_id, &reason);
         tlc.removed_reason = Some(reason);
         tlc.status = TlcStatus::Inbound(InboundTlcStatus::LocalRemoved);
         tlc.payment_hash
@@ -3140,6 +3217,7 @@ impl TlcState {
     pub fn set_offered_tlc_removed(&mut self, tlc_id: u64, reason: RemoveTlcReason) -> Hash256 {
         let tlc = self.get_mut(&TLCId::Offered(tlc_id)).expect("get tlc");
         assert_eq!(tlc.outbound_status(), OutboundTlcStatus::Committed);
+        dbg!("set offered tlc removed", &tlc_id, &reason);
         tlc.removed_reason = Some(reason);
         tlc.status = TlcStatus::Outbound(OutboundTlcStatus::RemoteRemoved);
         tlc.payment_hash
@@ -3219,6 +3297,7 @@ impl TlcState {
                     tlc.status = TlcStatus::Inbound(InboundTlcStatus::AnnounceWaitAck);
                 }
                 InboundTlcStatus::AnnounceWaitAck => {
+                    dbg!("set inbound tlc committed", &tlc.tlc_id);
                     tlc.status = TlcStatus::Inbound(InboundTlcStatus::Committed);
                 }
                 InboundTlcStatus::LocalRemoved => {
@@ -5027,20 +5106,20 @@ impl ChannelActorState {
                 tlc.tlc_id, next_tlc_id
             )));
         }
-        let payment_hash = tlc.payment_hash;
 
-        // If all the tlcs with the same payment hash are confirmed to be failed,
-        // then it's safe to insert the new tlc, the old tlcs will be removed later.
-        if self
-            .tlc_state
-            .all_tlcs()
-            .any(|tlc| tlc.payment_hash == payment_hash && !tlc.is_fail_remove_confirmed())
-        {
-            return Err(ProcessingChannelError::RepeatedProcessing(format!(
-                "Trying to insert tlc with duplicate payment hash {:?}",
-                payment_hash
-            )));
-        }
+        // TODO remove here, mpp has same payment hash for each tlc
+        // // If all the tlcs with the same payment hash are confirmed to be failed,
+        // // then it's safe to insert the new tlc, the old tlcs will be removed later.
+        // if self
+        //     .tlc_state
+        //     .all_tlcs()
+        //     .any(|tlc| tlc.payment_hash == payment_hash && !tlc.is_fail_remove_confirmed())
+        // {
+        //     return Err(ProcessingChannelError::RepeatedProcessing(format!(
+        //         "Trying to insert tlc with duplicate payment hash {:?}",
+        //         payment_hash
+        //     )));
+        // }
 
         if tlc.is_offered() {
             let sent_tlc_value = self.get_offered_tlc_balance();
@@ -5642,6 +5721,7 @@ impl ChannelActorState {
             channel_id: self.get_id(),
             status: TlcStatus::Outbound(OutboundTlcStatus::LocalAnnounced),
             tlc_id,
+            attempt_id: command.attempt_id,
             amount: command.amount,
             payment_hash: command.payment_hash,
             expiry: command.expiry,
@@ -5667,6 +5747,7 @@ impl ChannelActorState {
             channel_id: self.get_id(),
             amount: message.amount,
             payment_hash: message.payment_hash,
+            attempt_id: None,
             expiry: message.expiry,
             hash_algorithm: message.hash_algorithm,
             // will be set when apply AddTlc operations after the signature is checked
@@ -7597,6 +7678,10 @@ pub trait ChannelActorStateStore {
         custom_records: PaymentCustomRecords,
     );
     fn get_payment_custom_records(&self, payment_hash: &Hash256) -> Option<PaymentCustomRecords>;
+    fn insert_hold_tlc(&self, payment_hash: Hash256, hold_tlc: HoldTlc);
+    fn get_hold_tlcs(&self, payment_hash: Hash256) -> Vec<HoldTlc>;
+    fn list_all_hold_tlcs(&self) -> HashMap<Hash256, Vec<HoldTlc>>;
+    fn remove_hold_tlcs(&self, payment_hash: &Hash256);
 }
 
 /// A wrapper on CommitmentTransaction that has a partial signature along with

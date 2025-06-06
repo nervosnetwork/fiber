@@ -11,6 +11,7 @@ use crate::fiber::network::*;
 use crate::fiber::types::EcdsaSignature;
 use crate::fiber::types::FiberMessage;
 use crate::fiber::types::GossipMessage;
+use crate::fiber::types::Init;
 use crate::fiber::types::Pubkey;
 use crate::fiber::types::Shutdown;
 use crate::fiber::ASSUME_NETWORK_ACTOR_ALIVE;
@@ -691,9 +692,7 @@ impl NetworkNode {
             ))
         };
 
-        let res = call!(self.network_actor, message).expect("source_node alive");
-        eprintln!("result: {:?}", res);
-        res
+        call!(self.network_actor, message).expect("source_node alive")
     }
 
     pub async fn build_router(&self, command: BuildRouterCommand) -> Result<PaymentRouter, String> {
@@ -703,9 +702,7 @@ impl NetworkNode {
             ))
         };
 
-        let res = call!(self.network_actor, message).expect("source_node alive");
-        eprintln!("result: {:?}", res);
-        res
+        call!(self.network_actor, message).expect("source_node alive")
     }
 
     pub async fn send_abandon_channel(&self, channel_id: Hash256) -> Result<(), String> {
@@ -857,7 +854,7 @@ impl NetworkNode {
 
         if let Some(expected_retried) = expected_retried {
             let payment_session = self.get_payment_session(payment_hash).unwrap();
-            assert_eq!(payment_session.retried_times, expected_retried);
+            assert_eq!(payment_session.attempts().len(), expected_retried as usize);
         }
     }
 
@@ -902,6 +899,7 @@ impl NetworkNode {
         loop {
             assert!(self.get_triggered_unexpected_events().await.is_empty());
             let status = self.get_payment_status(payment_hash).await;
+            eprintln!("Payment status: {:?}", status);
             if status == PaymentSessionStatus::Success {
                 eprintln!("Payment success: {:?}\n\n", payment_hash);
                 break;
@@ -1047,6 +1045,13 @@ impl NetworkNode {
     pub fn get_payment_session(&self, payment_hash: Hash256) -> Option<PaymentSession> {
         self.store.get_payment_session(payment_hash)
     }
+
+    // pub fn get_payment_session(
+    //     &self,
+    //     payment_hash: Hash256,
+    // ) -> Result<Option<PaymentSessionState>, PaymentSessionError> {
+    //     PaymentSessionState::from_db(&self.store, payment_hash)
+    // }
 
     pub fn get_payment_custom_records(
         &self,
@@ -1244,6 +1249,17 @@ impl NetworkNode {
             .expect("send ckb chain message");
     }
 
+    pub fn send_init_peer_message(&self, remote_peer_id: PeerId, message: Init) {
+        self.network_actor
+            .send_message(NetworkActorMessage::new_command(
+                crate::fiber::NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
+                    remote_peer_id,
+                    FiberMessage::Init(message),
+                )),
+            ))
+            .expect("send init peer message");
+    }
+
     pub async fn add_unexpected_events(&self, events: Vec<String>) {
         let mut unexpected_events = self.unexpected_events.write().await;
         for event in events {
@@ -1307,7 +1323,7 @@ impl NetworkNode {
     pub async fn new_interconnected_nodes(n: usize, enable_rpc: bool) -> Vec<Self> {
         let mut nodes: Vec<NetworkNode> = Vec::with_capacity(n);
         for i in 0..n {
-            let new = Self::new_with_config(
+            let mut new = Self::new_with_config(
                 NetworkNodeConfigBuilder::new()
                     .node_name(Some(format!("node-{}", i)))
                     .base_dir_prefix(&format!("test-fnn-node-{}-", i))
@@ -1316,7 +1332,7 @@ impl NetworkNode {
             )
             .await;
             for node in nodes.iter_mut() {
-                node.connect_to(&new).await;
+                node.connect_to(&mut new).await;
             }
             nodes.push(new);
         }
@@ -1362,9 +1378,9 @@ impl NetworkNode {
     ) -> Vec<Self> {
         let mut nodes: Vec<NetworkNode> = Vec::with_capacity(n);
         for i in 0..n {
-            let new = Self::new_with_config(config_gen(i)).await;
+            let mut new = Self::new_with_config(config_gen(i)).await;
             for node in nodes.iter_mut() {
-                node.connect_to(&new).await;
+                node.connect_to(&mut new).await;
             }
             nodes.push(new);
         }
@@ -1385,13 +1401,15 @@ impl NetworkNode {
             .expect("self alive");
     }
 
-    pub async fn connect_to(&mut self, other: &Self) {
+    pub async fn connect_to(&mut self, other: &mut Self) {
         self.connect_to_nonblocking(other).await;
         let peer_id = &other.peer_id;
         self.expect_event(
             |event| matches!(event, NetworkServiceEvent::PeerConnected(id, _addr) if id == peer_id),
         )
         .await;
+        self.expect_debug_event("PeerInit").await;
+        other.expect_debug_event("PeerInit").await;
     }
 
     pub async fn expect_to_process_event<F, T>(&mut self, event_processor: F) -> T
@@ -1538,8 +1556,8 @@ impl NetworkNode {
 #[tokio::test]
 async fn test_connect_to_other_node() {
     let mut node_a = NetworkNode::new().await;
-    let node_b = NetworkNode::new().await;
-    node_a.connect_to(&node_b).await;
+    let mut node_b = NetworkNode::new().await;
+    node_a.connect_to(&mut node_b).await;
 }
 
 #[tokio::test]

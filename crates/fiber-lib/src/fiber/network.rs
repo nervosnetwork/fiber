@@ -50,21 +50,23 @@ use super::channel::{
     ChannelCommand, ChannelCommandWithId, ChannelEvent, ChannelInitializationParameter,
     ChannelState, ChannelSubscribers, ChannelTlcInfo, OpenChannelParameter, PrevTlcInfo,
     ProcessingChannelError, ProcessingChannelResult, PublicChannelInfo, RemoveTlcCommand,
-    RevocationData, SettlementData, ShuttingDownFlags, StopReason, DEFAULT_COMMITMENT_FEE_RATE,
-    DEFAULT_FEE_RATE, DEFAULT_MAX_TLC_VALUE_IN_FLIGHT, MAX_COMMITMENT_DELAY_EPOCHS,
-    MAX_TLC_NUMBER_IN_FLIGHT, MIN_COMMITMENT_DELAY_EPOCHS, SYS_MAX_TLC_NUMBER_IN_FLIGHT,
+    RevocationData, SettlementData, ShuttingDownFlags, StopReason, TLCId,
+    DEFAULT_COMMITMENT_FEE_RATE, DEFAULT_FEE_RATE, DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
+    MAX_COMMITMENT_DELAY_EPOCHS, MAX_TLC_NUMBER_IN_FLIGHT, MIN_COMMITMENT_DELAY_EPOCHS,
+    SYS_MAX_TLC_NUMBER_IN_FLIGHT,
 };
-use super::config::{AnnouncedNodeName, MIN_TLC_EXPIRY_DELTA};
+use super::config::{AnnouncedNodeName, DEFAULT_MPP_MIN_AMOUNT, MIN_TLC_EXPIRY_DELTA};
+use super::features::FeatureVector;
 use super::fee::calculate_commitment_tx_fee;
 use super::gossip::{GossipActorMessage, GossipMessageStore, GossipMessageUpdates};
 use super::graph::{
-    NetworkGraph, NetworkGraphStateStore, OwnedChannelUpdateEvent, RouterHop, SessionRoute,
+    Attempt, NetworkGraph, NetworkGraphStateStore, OwnedChannelUpdateEvent, RouterHop, SessionRoute,
 };
 use super::key::blake2b_hash_with_salt;
 use super::types::{
     BroadcastMessageWithTimestamp, EcdsaSignature, FiberMessage, ForwardTlcResult, GossipMessage,
-    Hash256, NodeAnnouncement, OpenChannel, PaymentHopData, Privkey, Pubkey, RemoveTlcFulfill,
-    RemoveTlcReason, TlcErr, TlcErrData, TlcErrorCode,
+    Hash256, Init, NodeAnnouncement, OpenChannel, PaymentHopData, Privkey, Pubkey,
+    RemoveTlcFulfill, RemoveTlcReason, TlcErr, TlcErrData, TlcErrorCode,
 };
 use super::{
     FiberConfig, InFlightCkbTxActor, InFlightCkbTxActorArguments, InFlightCkbTxActorMessage,
@@ -82,7 +84,7 @@ use crate::fiber::gossip::{GossipConfig, GossipService, SubscribableGossipMessag
 use crate::fiber::graph::{PaymentSession, PaymentSessionStatus};
 use crate::fiber::serde_utils::EntityHex;
 use crate::fiber::types::{
-    FiberChannelMessage, PaymentOnionPacket, PeeledPaymentOnionPacket, TxSignatures,
+    FiberChannelMessage, PaymentOnionPacket, PeeledPaymentOnionPacket, TlcErrPacket, TxSignatures,
 };
 use crate::fiber::KeyPair;
 use crate::invoice::{CkbInvoice, CkbInvoiceStatus, InvoiceStore, PreimageStore};
@@ -182,6 +184,7 @@ pub struct NodeInfoResponse {
     pub node_name: Option<AnnouncedNodeName>,
     pub node_id: Pubkey,
     pub addresses: Vec<MultiAddr>,
+    pub features: FeatureVector,
     pub chain_hash: Hash256,
     pub open_channel_auto_accept_min_ckb_funding_amount: u64,
     pub auto_accept_channel_ckb_funding_amount: u64,
@@ -449,6 +452,7 @@ pub struct SendPaymentData {
     pub tlc_expiry_limit: u64,
     pub timeout: Option<u64>,
     pub max_fee_amount: Option<u128>,
+    /// The number of parts for the payment, only used for multi-part payment
     pub max_parts: Option<u64>,
     pub keysend: bool,
     #[serde_as(as = "Option<EntityHex>")]
@@ -635,6 +639,7 @@ pub struct SendOnionPacketCommand {
     // and the fee paid are included here.
     pub previous_tlc: Option<PrevTlcInfo>,
     pub payment_hash: Hash256,
+    pub attempt_id: Option<u64>,
 }
 
 impl NetworkActorMessage {
@@ -763,15 +768,19 @@ pub enum NetworkActorEvent {
     /// A closing transaction has failed (either because of invalid transaction or timeout)
     ClosingTransactionFailed(PeerId, Hash256, Byte32),
 
-    // A tlc remove message is received. (payment_hash, remove_tlc)
-    TlcRemoveReceived(Hash256, RemoveTlcReason),
+    // A tlc remove message is received. (payment_hash, attempt_id, remove_tlc)
+    TlcRemoveReceived(Hash256, Option<u64>, RemoveTlcReason),
 
     // A payment need to retry
     RetrySendPayment(Hash256),
 
-    // AddTlc result from peer (payment_hash, (process_channel_error, tlc_err), (previous_channel_id, previous_tlc_id))
+    // retry send attempt
+    RetrySendAttempt(Hash256, u64),
+
+    // AddTlc result from peer (payment_hash, attempt_id, (process_channel_error, tlc_err), (previous_channel_id, previous_tlc_id))
     AddTlcResult(
         Hash256,
+        Option<u64>,
         Option<(ProcessingChannelError, TlcErr)>,
         Option<PrevTlcInfo>,
     ),
@@ -851,11 +860,15 @@ where
 
     pub async fn handle_peer_message(
         &self,
+        myself: ActorRef<NetworkActorMessage>,
         state: &mut NetworkActorState<S>,
         peer_id: PeerId,
         message: FiberMessage,
     ) -> crate::Result<()> {
         match message {
+            FiberMessage::Init(init_message) => {
+                state.on_init_msg(myself, peer_id, init_message).await?;
+            }
             // We should process OpenChannel message here because there is no channel corresponding
             // to the channel id in the message yet.
             FiberMessage::ChannelInitialization(open_channel) => {
@@ -1011,23 +1024,27 @@ where
                     ))
                     .expect(ASSUME_NETWORK_MYSELF_ALIVE);
 
-                // retry related payment session for this channel
-                for session in self
+                // retry related payment attempts for this channel
+                for attempt in self
                     .store
-                    .get_payment_sessions_with_status(PaymentSessionStatus::Created)
+                    .get_attempts_with_status(PaymentSessionStatus::Created)
                 {
-                    if session.first_hop_channel_outpoint_eq(&channel_outpoint) {
+                    if attempt.first_hop_channel_outpoint_eq(&channel_outpoint) {
                         debug!(
-                            "Now retrying payment session {:?} for channel {:?} reestablished",
-                            session.payment_hash(),
-                            channel_id
+                            "Now retrying payment attempt {:?} for channel {:?} reestablished",
+                            attempt.payment_hash, channel_id
                         );
-                        self.register_payment_retry(myself.clone(), session.payment_hash());
+                        self.register_attempt_retry(
+                            myself.clone(),
+                            attempt.payment_hash,
+                            attempt.id,
+                        );
                     }
                 }
             }
             NetworkActorEvent::FiberMessage(peer_id, message) => {
-                self.handle_peer_message(state, peer_id, message).await?
+                self.handle_peer_message(myself, state, peer_id, message)
+                    .await?
             }
             NetworkActorEvent::FundingTransactionPending(transaction, outpoint, channel_id) => {
                 state
@@ -1065,17 +1082,45 @@ where
                 );
                 state.remove_in_flight_tx(tx_hash);
             }
-            NetworkActorEvent::TlcRemoveReceived(payment_hash, remove_tlc_reason) => {
+            NetworkActorEvent::TlcRemoveReceived(payment_hash, attempt_id, remove_tlc_reason) => {
                 // When a node is restarted, RemoveTLC will also be resent if necessary
-                self.on_remove_tlc_event(myself, state, payment_hash, remove_tlc_reason)
-                    .await;
+                self.on_remove_tlc_event(
+                    myself,
+                    state,
+                    payment_hash,
+                    attempt_id,
+                    remove_tlc_reason,
+                )
+                .await;
             }
             NetworkActorEvent::RetrySendPayment(payment_hash) => {
-                let _ = self.try_payment_session(myself, state, payment_hash).await;
-            }
-            NetworkActorEvent::AddTlcResult(payment_hash, error_info, previous_tlc) => {
-                self.on_add_tlc_result_event(myself, state, payment_hash, error_info, previous_tlc)
+                let _ = self
+                    .resume_payment_session(myself, state, payment_hash)
                     .await;
+            }
+            NetworkActorEvent::RetrySendAttempt(payment_hash, attempt_id) => {
+                let Some(mut session) = self.store.get_payment_session(payment_hash) else {
+                    error!("Failed to load payment session {:?}", payment_hash);
+                    return Ok(());
+                };
+                let Some(mut attempt) = self.store.get_attempt(payment_hash, attempt_id) else {
+                    error!("Attempt not found {payment_hash:?} {attempt_id}");
+                    return Ok(());
+                };
+                let _ = self
+                    .send_attempt(myself, state, &mut session, &mut attempt)
+                    .await;
+            }
+            NetworkActorEvent::AddTlcResult(payment_hash, attempt_id, error_info, previous_tlc) => {
+                self.on_add_tlc_result_event(
+                    myself,
+                    state,
+                    payment_hash,
+                    attempt_id,
+                    error_info,
+                    previous_tlc,
+                )
+                .await;
             }
             NetworkActorEvent::GossipMessageUpdates(gossip_message_updates) => {
                 let mut graph = self.network_graph.write().await;
@@ -1111,7 +1156,6 @@ where
             NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId { peer_id, message }) => {
                 state.send_fiber_message_to_peer(&peer_id, message).await?;
             }
-
             NetworkActorCommand::ConnectPeer(addr) => {
                 // TODO: It is more than just dialing a peer. We need to exchange capabilities of the peer,
                 // e.g. whether the peer support some specific feature.
@@ -1138,13 +1182,11 @@ where
                 // Tentacle sends an event by calling handle_error function instead, which
                 // may receive errors like DialerError.
             }
-
             NetworkActorCommand::DisconnectPeer(peer_id) => {
                 if let Some(session) = state.get_peer_session(&peer_id) {
                     state.control.disconnect(session).await?;
                 }
             }
-
             NetworkActorCommand::SavePeerAddress(addr) => match extract_peer_id(&addr) {
                 Some(peer) => {
                     debug!("Saved peer id {:?} with address {:?}", &peer, &addr);
@@ -1154,7 +1196,6 @@ where
                     error!("Failed to save address to peer store: unable to extract peer id from address {:?}", &addr);
                 }
             },
-
             NetworkActorCommand::MaintainConnections => {
                 let mut inbound_peer_sessions = state.inbound_peer_sessions();
                 let num_inbound_peers = inbound_peer_sessions.len();
@@ -1164,17 +1205,17 @@ where
 
                 if num_inbound_peers > state.max_inbound_peers {
                     debug!(
-                        "Already connected to {} inbound peers, only wants {} peers, disconnecting some",
-                        num_inbound_peers, state.max_inbound_peers
-                    );
+                                "Already connected to {} inbound peers, only wants {} peers, disconnecting some",
+                                num_inbound_peers, state.max_inbound_peers
+                            );
                     inbound_peer_sessions.retain(|k| !state.session_channels_map.contains_key(k));
                     let sessions_to_disconnect = if inbound_peer_sessions.len()
                         < num_inbound_peers - state.max_inbound_peers
                     {
                         warn!(
-                            "Wants to disconnect more {} inbound peers, but all peers except {:?} have channels, will not disconnect any peer with channels",
-                            num_inbound_peers - state.max_inbound_peers, &inbound_peer_sessions
-                        );
+                                    "Wants to disconnect more {} inbound peers, but all peers except {:?} have channels, will not disconnect any peer with channels",
+                                    num_inbound_peers - state.max_inbound_peers, &inbound_peer_sessions
+                                );
                         &inbound_peer_sessions[..]
                     } else {
                         &inbound_peer_sessions[..num_inbound_peers - state.max_inbound_peers]
@@ -1192,9 +1233,9 @@ where
 
                 if num_outbound_peers >= state.min_outbound_peers {
                     debug!(
-                        "Already connected to {} outbound peers, wants a minimal of {} peers, skipping connecting to more peers",
-                        num_outbound_peers, state.min_outbound_peers
-                    );
+                                "Already connected to {} outbound peers, wants a minimal of {} peers, skipping connecting to more peers",
+                                num_outbound_peers, state.min_outbound_peers
+                            );
                     return Ok(());
                 }
 
@@ -1231,9 +1272,9 @@ where
                 for (peer_id, addresses) in peers_to_connect {
                     if let Some(session) = state.get_peer_session(&peer_id) {
                         debug!(
-                            "Randomly selected peer {:?} already connected with session id {:?}, skipping connection",
-                            peer_id, session
-                        );
+                                    "Randomly selected peer {:?} already connected with session id {:?}, skipping connection",
+                                    peer_id, session
+                                );
                         continue;
                     }
                     for addr in addresses {
@@ -1248,13 +1289,87 @@ where
             }
             NetworkActorCommand::CheckChannels => {
                 let now = now_timestamp_as_millis_u64();
+
+                let all_hold_tlcs = self.store.list_all_hold_tlcs();
+
+                // remove settled hold tlcs
+                for payment_hash in all_hold_tlcs.keys() {
+                    let Some(status) = self.store.get_invoice_status(payment_hash) else {
+                        continue;
+                    };
+
+                    if matches!(
+                        status,
+                        CkbInvoiceStatus::Cancelled
+                            | CkbInvoiceStatus::Expired
+                            | CkbInvoiceStatus::Paid
+                    ) {
+                        self.store.remove_hold_tlcs(payment_hash);
+                    }
+                }
+
                 for (_peer_id, channel_id, channel_state) in self.store.get_channel_states(None) {
                     if matches!(channel_state, ChannelState::ChannelReady) {
                         if let Some(actor_state) = self.store.get_channel_actor_state(&channel_id) {
                             if actor_state.reestablishing {
                                 continue;
                             }
+
+                            // collect hold tlcs for this channel
+                            let mut hold_tlcs: HashSet<u64> = HashSet::default();
+                            for hold_tlc in all_hold_tlcs
+                                .values()
+                                .flatten()
+                                .filter(|hold_tlc| hold_tlc.channel_actor_state_id == channel_id)
+                            {
+                                let Some(tlc) =
+                                    actor_state.tlc_state.get(&TLCId::Received(hold_tlc.tlc_id))
+                                else {
+                                    continue;
+                                };
+                                hold_tlcs.insert(hold_tlc.tlc_id);
+
+                                // check hold timeout
+                                if hold_tlc.hold_expire_at < now {
+                                    debug!("Remove timeout hold tlc {:?}", tlc.id(),);
+                                    let (send, _recv) = oneshot::channel();
+                                    let rpc_reply = RpcReplyPort::from(send);
+                                    if let Err(err) = state
+                                        .send_command_to_channel(
+                                            channel_id,
+                                            ChannelCommand::RemoveTlc(
+                                                RemoveTlcCommand {
+                                                    id: tlc.id(),
+                                                    reason: RemoveTlcReason::RemoveTlcFail(
+                                                        TlcErrPacket::new(
+                                                            TlcErr::new(
+                                                                TlcErrorCode::HoldTlcTimeout,
+                                                            ),
+                                                            &tlc.shared_secret,
+                                                        ),
+                                                    ),
+                                                },
+                                                rpc_reply,
+                                            ),
+                                        )
+                                        .await
+                                    {
+                                        error!(
+                                            "Failed to remove tlc {:?} for channel {:?}: {}",
+                                            tlc.id(),
+                                            channel_id,
+                                            err
+                                        );
+                                    }
+                                }
+                            }
+
                             for tlc in actor_state.tlc_state.received_tlcs.get_committed_tlcs() {
+                                // skip if tlc is in hold
+                                if hold_tlcs.contains(&tlc.id()) {
+                                    continue;
+                                }
+
                                 if let Some(payment_preimage) =
                                     self.store.get_preimage(&tlc.payment_hash)
                                 {
@@ -1277,6 +1392,7 @@ where
                                     }
                                     let (send, _recv) = oneshot::channel();
                                     let rpc_reply = RpcReplyPort::from(send);
+
                                     if let Err(err) = state
                                         .send_command_to_channel(
                                             channel_id,
@@ -1364,7 +1480,6 @@ where
                     }
                 }
             }
-
             NetworkActorCommand::AbandonChannel(channel_id, reply) => {
                 match state.abandon_channel(channel_id).await {
                     Ok(_) => {
@@ -1376,13 +1491,11 @@ where
                     }
                 }
             }
-
             NetworkActorCommand::ControlFiberChannel(c) => {
                 state
                     .send_command_to_channel(c.channel_id, c.command)
                     .await?
             }
-
             NetworkActorCommand::SendPaymentOnionPacket(command) => {
                 let res = self
                     .handle_send_onion_packet_command(state, command.clone())
@@ -1392,6 +1505,7 @@ where
                         myself,
                         state,
                         command.payment_hash,
+                        command.attempt_id,
                         Some((ProcessingChannelError::TlcForwardingError(err.clone()), err)),
                         command.previous_tlc,
                     )
@@ -1409,7 +1523,6 @@ where
 
                 let _ = reply.send(response);
             }
-
             NetworkActorCommand::UpdateChannelFunding(channel_id, transaction, request) => {
                 let old_tx = transaction.into_view();
                 let mut tx = FundingTx::new();
@@ -1465,13 +1578,13 @@ where
                 let msg = match partial_witnesses {
                     Some(partial_witnesses) => {
                         debug!(
-                            "Received SignFudningTx request with for transaction {:?} and partial witnesses {:?}",
-                            &funding_tx,
-                            partial_witnesses
-                                .iter()
-                                .map(hex::encode)
-                                .collect::<Vec<_>>()
-                        );
+                                    "Received SignFudningTx request with for transaction {:?} and partial witnesses {:?}",
+                                    &funding_tx,
+                                    partial_witnesses
+                                        .iter()
+                                        .map(hex::encode)
+                                        .collect::<Vec<_>>()
+                                );
                         let funding_tx = funding_tx
                             .into_view()
                             .as_advanced_builder()
@@ -1523,9 +1636,9 @@ where
                     }
                     None => {
                         debug!(
-                            "Received SignFundingTx request with for transaction {:?} without partial witnesses, so start signing it now",
-                            &funding_tx,
-                        );
+                                    "Received SignFundingTx request with for transaction {:?} without partial witnesses, so start signing it now",
+                                    &funding_tx,
+                                );
                         let mut funding_tx = call_t!(
                             self.chain_actor,
                             CkbChainMessage::Sign,
@@ -1640,6 +1753,7 @@ where
                 let response = NodeInfoResponse {
                     node_name: state.node_name,
                     node_id: state.get_public_key(),
+                    features: state.features.clone(),
                     addresses: state.announced_addrs.clone(),
                     chain_hash: get_chain_hash(),
                     open_channel_auto_accept_min_ckb_funding_amount: state
@@ -1684,6 +1798,7 @@ where
             peeled_onion_packet,
             previous_tlc,
             payment_hash,
+            attempt_id,
         } = command;
 
         let info = peeled_onion_packet.current.clone();
@@ -1712,6 +1827,7 @@ where
             AddTlcCommand {
                 amount: info.amount,
                 payment_hash,
+                attempt_id,
                 expiry: info.expiry,
                 hash_algorithm: info.hash_algorithm,
                 onion_packet: peeled_onion_packet.next.clone(),
@@ -1772,49 +1888,64 @@ where
         myself: ActorRef<NetworkActorMessage>,
         state: &mut NetworkActorState<S>,
         payment_hash: Hash256,
+        attempt_id: Option<u64>,
         reason: RemoveTlcReason,
     ) {
-        if let Some(mut payment_session) = self.store.get_payment_session(payment_hash) {
-            if payment_session.status == PaymentSessionStatus::Inflight {
-                match reason {
-                    RemoveTlcReason::RemoveTlcFulfill(_) => {
-                        self.network_graph
-                            .write()
-                            .await
-                            .record_payment_success(payment_session);
-                    }
-                    RemoveTlcReason::RemoveTlcFail(reason) => {
-                        let error_detail = reason
-                            .decode(
-                                &payment_session.session_key,
-                                payment_session.hops_public_keys(),
-                            )
-                            .unwrap_or_else(|| {
-                                debug_event!(myself, "InvalidOnionError");
-                                TlcErr::new(TlcErrorCode::InvalidOnionError)
-                            });
+        // return if not associate with attempt
+        let Some(attempt_id) = attempt_id else {
+            return;
+        };
+        if let Some(mut attempt) = self.store.get_attempt(payment_hash, attempt_id) {
+            // TODO: check if the payment_session.status == PaymentSessionStatus::Inflight
+            // if payment_session.status == PaymentSessionStatus::Inflight {
+            match reason {
+                RemoveTlcReason::RemoveTlcFulfill(_) => {
+                    dbg!("record attempt fulfilled", &reason);
+                    self.network_graph
+                        .write()
+                        .await
+                        .record_attempt_success(attempt);
+                }
+                RemoveTlcReason::RemoveTlcFail(reason) => {
+                    let error_detail = reason
+                        .decode(&attempt.session_key, attempt.hops_public_keys())
+                        .unwrap_or_else(|| {
+                            debug_event!(myself, "InvalidOnionError");
+                            TlcErr::new(TlcErrorCode::InvalidOnionError)
+                        });
 
-                        self.update_graph_with_tlc_fail(&state.network, &error_detail)
-                            .await;
-                        let need_to_retry = self
-                            .network_graph
-                            .write()
-                            .await
-                            .record_payment_fail(&payment_session, error_detail.clone());
-                        if need_to_retry {
-                            // If this is the first hop error, like the WaitingTlcAck error,
-                            // we will just retry later, return Ok here for letting endpoint user
-                            // know payment session is created successfully
-                            self.register_payment_retry(myself, payment_hash);
-                        } else {
+                    self.update_graph_with_tlc_fail(&state.network, &error_detail)
+                        .await;
+                    let need_to_retry = self
+                        .network_graph
+                        .write()
+                        .await
+                        .record_attempt_fail(&attempt, error_detail.clone());
+                    dbg!("set attempt failed to ", error_detail.error_code.as_ref());
+
+                    // If this is the first hop error, like the WaitingTlcAck error,
+                    // we will just retry later
+                    self.set_attempt_fail_with_error(
+                        &mut attempt,
+                        error_detail.error_code.as_ref(),
+                    );
+                    if attempt.is_retryable() {
+                        self.register_attempt_retry(myself.clone(), payment_hash, attempt_id);
+                    }
+                    self.register_payment_retry(myself.clone(), payment_hash);
+                    if !need_to_retry {
+                        dbg!("set error to", &error_detail.error_code.as_ref());
+                        // TODO fail payment
+                        if let Some(mut session) = self.store.get_payment_session(payment_hash) {
                             self.set_payment_fail_with_error(
-                                &mut payment_session,
+                                &mut session,
                                 error_detail.error_code.as_ref(),
                             );
                         }
                     }
                 }
             }
+            // }
         }
     }
 
@@ -1863,7 +1994,7 @@ where
 
     fn on_get_payment(&self, payment_hash: &Hash256) -> Result<SendPaymentResponse, Error> {
         match self.store.get_payment_session(*payment_hash) {
-            Some(payment_session) => Ok(payment_session.into()),
+            Some(session_state) => Ok(session_state.into()),
             None => Err(Error::InvalidParameter(format!(
                 "Payment session not found: {:?}",
                 payment_hash
@@ -1873,19 +2004,56 @@ where
 
     async fn build_payment_route(
         &self,
-        payment_session: &mut PaymentSession,
+        session: &mut PaymentSession,
+        attempt: &mut Attempt,
     ) -> Result<Vec<PaymentHopData>, Error> {
         let graph = self.network_graph.read().await;
         let source = graph.get_source_pubkey();
-        match graph.build_route(payment_session.request.clone()) {
+        let mut max_amount = session.remain_amount();
+        let min_amount = DEFAULT_MPP_MIN_AMOUNT;
+        let mut remain_fee = session.remain_fee_amount();
+        let mut active_parts = session.attempts().len();
+
+        // retrying current attempt
+        if attempt.is_retryable() {
+            max_amount += attempt.route.receiver_amount();
+            remain_fee = remain_fee.map(|fee| fee + attempt.route.fee());
+            active_parts -= 1;
+        }
+
+        dbg!(
+            "build route",
+            max_amount,
+            min_amount,
+            remain_fee,
+            active_parts,
+            attempt.id
+        );
+        match graph.build_route(
+            max_amount,
+            min_amount,
+            remain_fee,
+            active_parts,
+            session.request.clone(),
+        ) {
             Err(e) => {
                 let error = format!("Failed to build route, {}", e);
-                self.set_payment_fail_with_error(payment_session, &error);
+                dbg!("build route error ", attempt.id, &error);
+                if !session.request.dry_run {
+                    self.set_attempt_fail_with_error(attempt, &error);
+                    self.set_payment_fail_with_error(session, &error);
+                }
                 return Err(Error::SendPaymentError(error));
             }
             Ok(hops) => {
-                payment_session.route =
-                    SessionRoute::new(source, payment_session.request.target_pubkey, &hops);
+                attempt.route = SessionRoute::new(source, session.request.target_pubkey, &hops);
+                // update amount
+                dbg!(
+                    "build route success",
+                    attempt.id,
+                    attempt.route.receiver_amount(),
+                    attempt.route.fee()
+                );
                 assert_ne!(hops[0].funding_tx_hash, Hash256::default());
                 return Ok(hops);
             }
@@ -1895,30 +2063,28 @@ where
     async fn send_payment_onion_packet(
         &self,
         state: &mut NetworkActorState<S>,
-        payment_session: &mut PaymentSession,
-        payment_data: &SendPaymentData,
+        attempt: &mut Attempt,
         hops: Vec<PaymentHopData>,
-    ) -> Result<PaymentSession, Error> {
+    ) -> Result<Attempt, Error> {
         let session_key = Privkey::from_slice(KeyPair::generate_random_key().as_ref());
         assert_ne!(hops[0].funding_tx_hash, Hash256::default());
 
-        payment_session
-            .session_key
-            .copy_from_slice(session_key.as_ref());
+        attempt.session_key.copy_from_slice(session_key.as_ref());
 
         let peeled_onion_packet = match PeeledPaymentOnionPacket::create(
             session_key,
             hops,
-            Some(payment_data.payment_hash.as_ref().to_vec()),
+            Some(attempt.hash.as_ref().to_vec()),
             &Secp256k1::signing_only(),
         ) {
             Ok(packet) => packet,
             Err(e) => {
                 let err = format!(
                     "Failed to create onion packet: {:?}, error: {:?}",
-                    payment_data.payment_hash, e
+                    attempt.hash, e
                 );
-                self.set_payment_fail_with_error(payment_session, &err);
+                dbg!("set attempt failed to ", &err);
+                self.set_attempt_fail_with_error(attempt, &err);
                 return Err(Error::SendPaymentFirstHopError(err, false));
             }
         };
@@ -1929,7 +2095,8 @@ where
                 SendOnionPacketCommand {
                     peeled_onion_packet,
                     previous_tlc: None,
-                    payment_hash: payment_data.payment_hash,
+                    payment_hash: attempt.payment_hash,
+                    attempt_id: Some(attempt.id),
                 },
             )
             .await
@@ -1941,7 +2108,10 @@ where
                     .network_graph
                     .write()
                     .await
-                    .record_payment_fail(payment_session, error_detail.clone());
+                    .record_attempt_fail(attempt, error_detail.clone());
+                // TODO retry condition:
+                // && !payment_session.is_send_payment_with_router()
+                // && payment_session.can_retry();
                 let err = format!(
                     "Failed to send onion packet with error {}",
                     error_detail.error_code_as_str()
@@ -1950,16 +2120,13 @@ where
                     "send onion packet failed: {:?} need_to_retry: {:?}",
                     err, need_to_retry
                 );
-                if !need_to_retry {
-                    // only update the payment session status when we don't need to retry
-                    // otherwise the endpoint user may get confused in the internal state changes
-                    self.set_payment_fail_with_error(payment_session, &err);
-                }
+                dbg!("set attempt failed to ", &err);
+                self.set_attempt_fail_with_error(attempt, &err);
                 return Err(Error::SendPaymentFirstHopError(err, need_to_retry));
             }
             Ok(_) => {
-                self.store.insert_payment_session(payment_session.clone());
-                return Ok(payment_session.clone());
+                self.store.insert_attempt(attempt.clone());
+                return Ok(attempt.clone());
             }
         }
     }
@@ -1969,6 +2136,7 @@ where
         myself: ActorRef<NetworkActorMessage>,
         state: &mut NetworkActorState<S>,
         payment_hash: Hash256,
+        attempt_id: Option<u64>,
         error_info: Option<(ProcessingChannelError, TlcErr)>,
         previous_tlc: Option<PrevTlcInfo>,
     ) {
@@ -1994,107 +2162,172 @@ where
             return;
         }
 
-        let Some(mut payment_session) = self.store.get_payment_session(payment_hash) else {
+        eprintln!(
+            "on_add_tlc_result_event: {:?} {:?} {:?}",
+            payment_hash, attempt_id, &error_info
+        );
+
+        // Handle attempt result if attempt_id exist
+        let Some(attempt_id) = attempt_id else {
             return;
         };
 
-        if error_info.is_none() {
-            // Change the status from Created into Inflight
-            payment_session.set_inflight_status();
-            self.store.insert_payment_session(payment_session.clone());
+        let Some(mut attempt) = self.store.get_attempt(payment_hash, attempt_id) else {
+            eprintln!("attempt not found: {:?} {:?}", payment_hash, attempt_id);
             return;
-        }
+        };
+        eprintln!("attempt found: {:?}", attempt_id);
 
-        let (channel_error, tlc_err) = error_info.unwrap();
+        let Some((channel_error, tlc_err)) = error_info else {
+            // attempt is inflight
+            attempt.set_inflight_status();
+            self.store.insert_attempt(attempt.clone());
+            return;
+        };
         if matches!(channel_error, ProcessingChannelError::RepeatedProcessing(_)) {
             return;
         }
 
-        let (need_to_retry, error) =
+        let (error, need_to_retry) =
             if matches!(channel_error, ProcessingChannelError::WaitingTlcAck) {
-                (true, "WaitingTlcAck".to_string())
+                ("WaitingTlcAck".to_string(), true)
             } else {
-                let retry = self
+                let need_to_retry = self
                     .network_graph
                     .write()
                     .await
-                    .record_payment_fail(&payment_session, tlc_err.clone());
-                (retry, channel_error.to_string())
+                    .record_attempt_fail(&attempt, tlc_err.clone());
+                (channel_error.to_string(), need_to_retry)
             };
-        payment_session.last_error = Some(error);
-        self.store.insert_payment_session(payment_session.clone());
 
-        if need_to_retry {
-            let _ = self.try_payment_session(myself, state, payment_hash).await;
-        } else {
-            let error = format!(
-                "Failed to send payment session: {:?}, retried times: {}",
-                payment_session.payment_hash(),
-                payment_session.retried_times
-            );
-            self.set_payment_fail_with_error(&mut payment_session, &error);
+        self.set_attempt_fail_with_error(&mut attempt, &error);
+        if !need_to_retry {
+            if let Some(mut session) = self.store.get_payment_session(payment_hash) {
+                self.set_payment_fail_with_error(&mut session, &error);
+            }
         }
+
+        // retry the current attempt if it is retryable
+        if attempt.is_retryable() {
+            self.register_attempt_retry(myself.clone(), payment_hash, attempt_id);
+        }
+        let _ = self
+            .resume_payment_session(myself, state, payment_hash)
+            .await;
     }
 
-    fn set_payment_fail_with_error(&self, payment_session: &mut PaymentSession, error: &str) {
-        payment_session.set_failed_status(error);
-        self.store.insert_payment_session(payment_session.clone());
+    fn set_payment_fail_with_error(&self, session: &mut PaymentSession, error: &str) {
+        session.set_failed_status(error);
+        self.store.insert_payment_session(session.clone());
     }
 
-    async fn try_payment_session(
+    fn set_attempt_fail_with_error(&self, attempt: &mut Attempt, error: &str) {
+        attempt.set_failed_status(error);
+        self.store.insert_attempt(attempt.clone());
+    }
+
+    fn register_attempt_retry(
+        &self,
+        myself: ActorRef<NetworkActorMessage>,
+        payment_hash: Hash256,
+        attempt_id: u64,
+    ) {
+        myself.send_after(Duration::from_millis(500), move || {
+            NetworkActorMessage::new_event(NetworkActorEvent::RetrySendAttempt(
+                payment_hash,
+                attempt_id,
+            ))
+        });
+    }
+
+    async fn send_attempt(
+        &self,
+        myself: ActorRef<NetworkActorMessage>,
+        state: &mut NetworkActorState<S>,
+        session: &mut PaymentSession,
+        attempt: &mut Attempt,
+    ) -> Result<Option<SessionRoute>, Error> {
+        let hops_info = self.build_payment_route(session, attempt).await?;
+
+        // send attempt
+        if let Err(err) = self
+            .send_payment_onion_packet(state, attempt, hops_info)
+            .await
+        {
+            self.register_payment_retry(myself, session.payment_hash());
+            let need_retry = matches!(err, Error::SendPaymentFirstHopError(_, true));
+            if need_retry {
+                // If this is the first hop error, such as the WaitingTlcAck error,
+                // we will just retry later, return Ok here for letting endpoint user
+                // know payment session is created successfully
+                return Ok(None);
+            } else {
+                self.set_payment_fail_with_error(session, &err.to_string());
+                return Err(err);
+            }
+        }
+        Ok(Some(attempt.route.clone()))
+    }
+
+    /// Resume the payment session
+    /// this function kicks the payment session lifecycle
+    /// TODO this function should be async without a return value
+    async fn resume_payment_session(
         &self,
         myself: ActorRef<NetworkActorMessage>,
         state: &mut NetworkActorState<S>,
         payment_hash: Hash256,
-    ) -> Result<PaymentSession, Error> {
+    ) -> Result<Option<SessionRoute>, Error> {
+        eprintln!("resume_payment_session: {:?}", payment_hash);
         self.update_graph().await;
         let Some(mut payment_session) = self.store.get_payment_session(payment_hash) else {
             return Err(Error::InvalidParameter(payment_hash.to_string()));
         };
 
-        assert!(payment_session.status != PaymentSessionStatus::Failed);
+        match payment_session.status {
+            PaymentSessionStatus::Failed | PaymentSessionStatus::Success => {
+                warn!("Payment session already finished: {:?}", payment_hash);
+                return Ok(None);
+            }
+            _ => {}
+        }
+
+        let more_attempt = match payment_session.next_step() {
+            Ok(more_attempt) => more_attempt,
+            Err(err) => {
+                self.set_payment_fail_with_error(&mut payment_session, &err.to_string());
+                return Err(Error::SendPaymentError(err.to_string()));
+            }
+        };
+
+        // just wait for flight to be settled or failed
+        if !more_attempt {
+            self.register_payment_retry(myself, payment_hash);
+            return Ok(None);
+        }
 
         debug!(
-            "try_payment_session: {:?} times: {:?}",
+            "try_payment_session: {:?} attempts: {:?}",
             payment_session.payment_hash(),
-            payment_session.retried_times
+            payment_session.attempts().len()
         );
 
-        let payment_data = payment_session.request.clone();
-        if payment_session.can_retry() {
-            if payment_session.last_error != Some("WaitingTlcAck".to_string()) {
-                payment_session.retried_times += 1;
-            }
+        // build route
+        let attempt_id = self.store.next_attempt_id();
+        let mut attempt = payment_session.new_attempt(attempt_id);
 
-            let hops_info = self.build_payment_route(&mut payment_session).await?;
+        self.send_attempt(myself.clone(), state, &mut payment_session, &mut attempt)
+            .await?;
 
-            match self
-                .send_payment_onion_packet(state, &mut payment_session, &payment_data, hops_info)
-                .await
-            {
-                Ok(payment_session) => return Ok(payment_session),
-                Err(err) => {
-                    let need_retry = matches!(err, Error::SendPaymentFirstHopError(_, true));
-                    if need_retry {
-                        // If this is the first hop error, such as the WaitingTlcAck error,
-                        // we will just retry later, return Ok here for letting endpoint user
-                        // know payment session is created successfully
-                        self.register_payment_retry(myself, payment_hash);
-                        return Ok(payment_session);
-                    } else {
-                        return Err(err);
-                    }
-                }
-            }
-        } else {
-            let error = payment_session.last_error.clone().unwrap_or_else(|| {
-                format!(
-                    "Failed to send payment session: {:?}, retried times: {}",
-                    payment_data.payment_hash, payment_session.retried_times
-                )
-            });
-            return Err(Error::SendPaymentError(error));
+        let payment_session = self
+            .store
+            .get_payment_session(payment_hash)
+            .expect("get payment session");
+        if payment_session.remain_amount() > 0 {
+            self.register_payment_retry(myself, payment_hash);
         }
+
+        Ok(Some(attempt.route.clone()))
     }
 
     fn register_payment_retry(&self, myself: ActorRef<NetworkActorMessage>, payment_hash: Hash256) {
@@ -2168,8 +2401,12 @@ where
         // for dry run, we only build the route and return the hops info,
         // will not store the payment session and send the onion packet
         if payment_data.dry_run {
-            let mut payment_session = PaymentSession::new(payment_data, 0);
-            let _hops = self.build_payment_route(&mut payment_session).await?;
+            let mut payment_session = PaymentSession::new(&self.store, payment_data, 0);
+            let mut attempt = payment_session.new_attempt(0);
+            let _hops = self
+                .build_payment_route(&mut payment_session, &mut attempt)
+                .await?;
+            payment_session.append_attempt(attempt);
             return Ok(payment_session.into());
         }
 
@@ -2185,12 +2422,15 @@ where
             }
         }
 
-        let payment_session = PaymentSession::new(payment_data, 5);
+        let payment_session = PaymentSession::new(&self.store, payment_data, 5);
         self.store.insert_payment_session(payment_session.clone());
-        let session = self
-            .try_payment_session(myself, state, payment_session.payment_hash())
+        self.resume_payment_session(myself, state, payment_session.payment_hash())
             .await?;
-        return Ok(session.into());
+        let payment_session = self
+            .store
+            .get_payment_session(payment_session.payment_hash())
+            .expect("payment session should exist after updated");
+        return Ok(payment_session.into());
     }
 
     async fn on_build_payment_router(
@@ -2236,7 +2476,7 @@ pub struct NetworkActorState<S> {
     // This immutable attribute is placed here because we need to create it in
     // the pre_start function.
     control: ServiceAsyncControl,
-    peer_session_map: HashMap<PeerId, (SessionId, SessionType)>,
+    peer_session_map: HashMap<PeerId, Peer>,
     session_channels_map: HashMap<SessionId, HashSet<Hash256>>,
     channels: HashMap<Hash256, ActorRef<ChannelActorMessage>>,
     ckb_txs_in_flight: HashMap<Hash256, ActorRef<InFlightCkbTxActorMessage>>,
@@ -2265,6 +2505,15 @@ pub struct NetworkActorState<S> {
     channel_subscribers: ChannelSubscribers,
     max_inbound_peers: usize,
     min_outbound_peers: usize,
+
+    // The features of the node, used to indicate the capabilities of the node.
+    features: FeatureVector,
+}
+
+pub(crate) struct Peer {
+    pub session_id: SessionId,
+    pub session_type: SessionType,
+    pub features: Option<FeatureVector>,
 }
 
 #[serde_as]
@@ -2447,6 +2696,26 @@ where
             max_tlc_value_in_flight,
             max_tlc_number_in_flight,
         } = open_channel;
+
+        if let Some(Peer {
+            features: Some(peer_features),
+            ..
+        }) = self.peer_session_map.get(&peer_id)
+        {
+            // check peer features
+            if !self.features.compatible_with(peer_features) {
+                return Err(ProcessingChannelError::InvalidParameter(format!(
+                    "Peer {:?} features {:?} are not compatible with our features {:?}",
+                    &peer_id, peer_features, self.features
+                )));
+            }
+        } else {
+            return Err(ProcessingChannelError::InvalidParameter(format!(
+                "Peer {:?}'s feature not found, waiting for peer to send Init message",
+                &peer_id
+            )));
+        }
+
         let remote_pubkey =
             self.get_peer_pubkey(&peer_id)
                 .ok_or(ProcessingChannelError::InvalidParameter(format!(
@@ -2754,20 +3023,20 @@ where
     }
 
     fn get_peer_session(&self, peer_id: &PeerId) -> Option<SessionId> {
-        self.peer_session_map.get(peer_id).map(|s| s.0)
+        self.peer_session_map.get(peer_id).map(|s| s.session_id)
     }
 
     fn inbound_peer_sessions(&self) -> Vec<SessionId> {
         self.peer_session_map
             .values()
-            .filter_map(|s| (s.1 == SessionType::Inbound).then_some(s.0))
+            .filter_map(|s| (s.session_type == SessionType::Inbound).then_some(s.session_id))
             .collect()
     }
 
     fn num_of_outbound_peers(&self) -> usize {
         self.peer_session_map
             .values()
-            .filter(|s| s.1 == SessionType::Outbound)
+            .filter(|s| s.session_type == SessionType::Outbound)
             .count()
     }
 
@@ -2788,7 +3057,7 @@ where
         self.peer_session_map
             .values()
             .take(n)
-            .map(|s| s.0)
+            .map(|s| s.session_id)
             .collect()
     }
 
@@ -3034,9 +3303,14 @@ where
         remote_pubkey: Pubkey,
         session: &SessionContext,
     ) {
-        let store = self.store.clone();
-        self.peer_session_map
-            .insert(remote_peer_id.clone(), (session.id, session.ty));
+        self.peer_session_map.insert(
+            remote_peer_id.clone(),
+            Peer {
+                session_id: session.id,
+                session_type: session.ty,
+                features: None,
+            },
+        );
         if self
             .state_to_be_persisted
             .save_peer_pubkey(remote_peer_id.clone(), remote_pubkey)
@@ -3062,16 +3336,21 @@ where
             );
         }
 
-        for channel_id in store.get_active_channel_ids_by_peer(remote_peer_id) {
-            if let Err(e) = self.reestablish_channel(remote_peer_id, channel_id).await {
-                error!("Failed to reestablish channel {:x}: {:?}", &channel_id, &e);
-            }
-        }
+        // send Init message to the peer
+        self.send_fiber_message_to_peer(
+            remote_peer_id,
+            FiberMessage::init(Init {
+                features: self.features.clone(),
+                chain_hash: get_chain_hash(),
+            }),
+        )
+        .await
+        .expect("send Init message to peer must succeed");
     }
 
     fn on_peer_disconnected(&mut self, id: &PeerId) {
-        if let Some(session) = self.peer_session_map.remove(id) {
-            if let Some(channel_ids) = self.session_channels_map.remove(&session.0) {
+        if let Some(peer) = self.peer_session_map.remove(id) {
+            if let Some(channel_ids) = self.session_channels_map.remove(&peer.session_id) {
                 for channel_id in channel_ids {
                     if let Some(channel) = self.channels.get(&channel_id) {
                         let _ = channel.send_message(ChannelActorMessage::Event(
@@ -3193,7 +3472,7 @@ where
     async fn on_channel_actor_stopped(&mut self, channel_id: Hash256, reason: StopReason) {
         // all check passed, now begin to remove from memory and DB
         self.channels.remove(&channel_id);
-        for (_peer_id, (session_id, _)) in self.peer_session_map.iter() {
+        for (_peer_id, Peer { session_id, .. }) in self.peer_session_map.iter() {
             if let Some(session_channels) = self.session_channels_map.get_mut(session_id) {
                 session_channels.remove(&channel_id);
             }
@@ -3232,6 +3511,52 @@ where
             self.pending_channels.remove(outpoint);
         }
         self.outpoint_channel_map.retain(|_, id| *id != channel_id);
+    }
+
+    pub async fn on_init_msg(
+        &mut self,
+        _myself: ActorRef<NetworkActorMessage>,
+        peer_id: PeerId,
+        init_msg: Init,
+    ) -> Result<(), ProcessingChannelError> {
+        if !self.is_connected(&peer_id) {
+            return Err(ProcessingChannelError::InvalidParameter(format!(
+                "Peer {:?} is not connected",
+                &peer_id
+            )));
+        }
+
+        check_chain_hash(&init_msg.chain_hash).map_err(|e| {
+            self.network
+                .send_message(NetworkActorMessage::new_command(
+                    NetworkActorCommand::DisconnectPeer(peer_id.clone()),
+                ))
+                .expect(ASSUME_NETWORK_MYSELF_ALIVE);
+
+            error!(
+                "chain hash mismatch with peer {:?}: {:?}, disconnect now...",
+                &peer_id, e
+            );
+            ProcessingChannelError::InvalidParameter(e.to_string())
+        })?;
+
+        if let Some(info) = self.peer_session_map.get_mut(&peer_id) {
+            info.features = Some(init_msg.features);
+            debug_event!(_myself, "PeerInit");
+
+            for channel_id in self.store.get_active_channel_ids_by_peer(&peer_id) {
+                if let Err(e) = self.reestablish_channel(&peer_id, channel_id).await {
+                    error!("Failed to reestablish channel {:x}: {:?}", &channel_id, &e);
+                }
+            }
+        } else {
+            return Err(ProcessingChannelError::InvalidParameter(format!(
+                "Peer {:?} session not found",
+                &peer_id
+            )));
+        }
+
+        Ok(())
     }
 
     pub async fn on_open_channel_msg(
@@ -3539,6 +3864,7 @@ where
         }
 
         let chain_actor = self.chain_actor.clone();
+        let features = config.gen_node_features();
 
         let mut state = NetworkActorState {
             store: self.store.clone(),
@@ -3571,6 +3897,7 @@ where
             channel_subscribers,
             max_inbound_peers: config.max_inbound_peers(),
             min_outbound_peers: config.min_outbound_peers(),
+            features,
         };
 
         let node_announcement = state.get_or_create_new_node_announcement_message();

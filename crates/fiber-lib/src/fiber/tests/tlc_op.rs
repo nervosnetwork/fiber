@@ -88,6 +88,8 @@ impl TlcActor {
 pub struct AddTlcCommand {
     pub amount: u128,
     pub payment_hash: Hash256,
+    /// The attempt id associate with the tlc
+    pub attempt_id: Option<u64>,
     pub expiry: u64,
     pub hash_algorithm: HashAlgorithm,
     pub onion_packet: Option<PaymentOnionPacket>,
@@ -205,6 +207,7 @@ impl Actor for TlcActor {
                     tlc_id: TLCId::Offered(next_offer_id),
                     amount: command.amount,
                     payment_hash: command.payment_hash,
+                    attempt_id: command.attempt_id,
                     expiry: command.expiry,
                     hash_algorithm: command.hash_algorithm,
                     created_at: CommitmentNumbers::default(),
@@ -279,6 +282,7 @@ impl Actor for TlcActor {
                     "Peer {} process peer remove tlc .... with tlc_id: {}",
                     state.peer_id, tlc_id
                 );
+                dbg!("set offered tlc removed", &tlc_id);
                 state.tlc_state.set_offered_tlc_removed(
                     tlc_id,
                     RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
@@ -369,6 +373,7 @@ async fn test_tlc_actor() {
             AddTlcCommand {
                 amount: 10000,
                 payment_hash: gen_rand_sha256_hash(),
+                attempt_id: None,
                 expiry: now_timestamp_as_millis_u64() + 1000,
                 hash_algorithm: HashAlgorithm::Sha256,
                 onion_packet: None,
@@ -385,6 +390,7 @@ async fn test_tlc_actor() {
             AddTlcCommand {
                 amount: 20000,
                 payment_hash: gen_rand_sha256_hash(),
+                attempt_id: None,
                 expiry: now_timestamp_as_millis_u64() + 1000,
                 hash_algorithm: HashAlgorithm::Sha256,
                 onion_packet: None,
@@ -401,6 +407,7 @@ async fn test_tlc_actor() {
             AddTlcCommand {
                 amount: 30000,
                 payment_hash: gen_rand_sha256_hash(),
+                attempt_id: None,
                 expiry: now_timestamp_as_millis_u64() + 1000,
                 hash_algorithm: HashAlgorithm::Sha256,
                 onion_packet: None,
@@ -417,6 +424,7 @@ async fn test_tlc_actor() {
             AddTlcCommand {
                 amount: 50000,
                 payment_hash: gen_rand_sha256_hash(),
+                attempt_id: None,
                 expiry: now_timestamp_as_millis_u64() + 1000,
                 hash_algorithm: HashAlgorithm::Sha256,
                 onion_packet: None,
@@ -459,6 +467,7 @@ fn test_tlc_state_v2() {
         status: TlcStatus::Outbound(OutboundTlcStatus::LocalAnnounced),
         channel_id: gen_rand_sha256_hash(),
         payment_hash: gen_rand_sha256_hash(),
+        attempt_id: None,
         expiry: now_timestamp_as_millis_u64() + 1000,
         hash_algorithm: HashAlgorithm::Sha256,
         onion_packet: None,
@@ -474,6 +483,7 @@ fn test_tlc_state_v2() {
         status: TlcStatus::Outbound(OutboundTlcStatus::LocalAnnounced),
         channel_id: gen_rand_sha256_hash(),
         payment_hash: gen_rand_sha256_hash(),
+        attempt_id: None,
         expiry: now_timestamp_as_millis_u64() + 2000,
         hash_algorithm: HashAlgorithm::Sha256,
         onion_packet: None,
