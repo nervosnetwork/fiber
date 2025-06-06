@@ -1757,10 +1757,6 @@ impl PaymentSession {
         self.cached_attempts.push(attempt);
     }
 
-    pub fn get_settled_attempt(&self) -> Option<&Attempt> {
-        self.cached_attempts.iter().find(|a| a.is_settled())
-    }
-
     pub fn next_step(&self) -> Result<bool, PaymentSessionError> {
         if self.allow_more_attempts() {
             let attempts = self.attempts();
