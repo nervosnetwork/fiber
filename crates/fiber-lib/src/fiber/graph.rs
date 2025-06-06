@@ -1539,7 +1539,6 @@ pub trait NetworkGraphStateStore {
     fn get_payment_history_results(&self) -> Vec<(OutPoint, Direction, TimedResult)>;
     fn get_attempt(&self, payment_hash: Hash256, attempt_id: u64) -> Option<Attempt>;
     fn insert_attempt(&self, attempt: Attempt);
-    fn remove_attempt(&self, payment_hash: Hash256, attempt_id: u64);
     fn get_attempts(&self, payment_hash: Hash256) -> Vec<Attempt>;
     fn next_attempt_id(&self) -> u64;
 }
@@ -1975,7 +1974,14 @@ impl Attempt {
     }
 
     pub fn is_failed(&self) -> bool {
-        self.last_error.is_some()
+        self.last_error.is_some() && !self.is_retryable()
+    }
+
+    // The attempt is considered as inflight if error can be retried immediately
+    pub fn is_retryable(&self) -> bool {
+        self.last_error
+            .as_ref()
+            .is_some_and(|err| err.as_str() == "WaitingTlcAck")
     }
 
     pub fn is_inflight(&self) -> bool {
