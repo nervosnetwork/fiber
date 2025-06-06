@@ -37,7 +37,7 @@ use ckb_types::prelude::Entity;
 use serde::Serialize;
 use std::collections::HashSet;
 use tentacle::secio::PeerId;
-use tracing::{info, warn};
+use tracing::info;
 
 #[derive(Copy, Clone)]
 enum ChannelTimestamp {
@@ -259,13 +259,9 @@ impl StoreKeyValue for KeyValue {
             KeyValue::PaymentCustomRecord(payment_hash, _data) => {
                 [&[PAYMENT_CUSTOM_RECORD_PREFIX], payment_hash.as_ref()].concat()
             }
-            KeyValue::HoldTlc(payment_hash, hold_tlc) => [
-                &[HOLD_TLC_PREFIX],
-                payment_hash.as_ref(),
-                hold_tlc.channel_actor_state_id.as_ref(),
-                &hold_tlc.tlc_id.to_le_bytes(),
-            ]
-            .concat(),
+            KeyValue::HoldTlc(payment_hash, _hold_tlc) => {
+                [&[HOLD_TLC_PREFIX], payment_hash.as_ref()].concat()
+            }
         }
     }
 
@@ -300,7 +296,7 @@ impl StoreKeyValue for KeyValue {
             KeyValue::PaymentCustomRecord(_, custom_records) => {
                 serialize_to_vec(custom_records, "PaymentCustomRecord")
             }
-            KeyValue::HoldTlc(_payment_hash, _hold_tlc) => Vec::new(),
+            KeyValue::HoldTlc(_payment_hash, hold_tlc) => serialize_to_vec(hold_tlc, "HoldTlc"),
         }
     }
 }
@@ -422,34 +418,7 @@ impl ChannelActorStateStore for Store {
     fn get_hold_tlcs(&self, payment_hash: Hash256) -> Vec<HoldTlc> {
         let prefix = [&[HOLD_TLC_PREFIX], payment_hash.as_ref()].concat();
         self.prefix_iterator(&prefix)
-            .filter_map(|(key, value)| {
-                if key.len() != 73 {
-                    warn!(
-                        "invalid hold tlc key: {} value: {} payment_hash: {}",
-                        key.len(),
-                        value.len(),
-                        payment_hash
-                    );
-                    return None;
-                }
-                if &key[1..33] != payment_hash.as_ref() {
-                    warn!(
-                        "extract invalid payment hash from hold_tlc payment_hash: {}",
-                        payment_hash
-                    );
-                    return None;
-                }
-                let channel_actor_state_id: [u8; 32] = key[33..65]
-                    .try_into()
-                    .expect("channel_actor_state_id should be 32 bytes");
-                let tlc_id =
-                    u64::from_le_bytes(key[65..73].try_into().expect("tlc_id should be 8 bytes"));
-                let hold_tlc = HoldTlc {
-                    channel_actor_state_id: Hash256::from(channel_actor_state_id),
-                    tlc_id,
-                };
-                Some(hold_tlc)
-            })
+            .map(|(_key, value)| deserialize_from(value.as_ref(), "HoldTlc"))
             .collect()
     }
 }
