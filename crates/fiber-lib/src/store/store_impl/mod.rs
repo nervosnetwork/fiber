@@ -591,16 +591,6 @@ impl NetworkGraphStateStore for Store {
         batch.commit();
     }
 
-    fn remove_attempt(&self, payment_hash: Hash256, attempt_id: u64) {
-        let key = [
-            &[ATTEMPT_PREFIX],
-            payment_hash.as_ref(),
-            &attempt_id.to_le_bytes(),
-        ]
-        .concat();
-        self.delete(key);
-    }
-
     fn get_attempts(&self, payment_hash: Hash256) -> Vec<Attempt> {
         let prefix = [&[ATTEMPT_PREFIX], payment_hash.as_ref()].concat();
         self.prefix_iterator(&prefix)

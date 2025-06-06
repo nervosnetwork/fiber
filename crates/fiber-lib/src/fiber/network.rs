@@ -773,6 +773,9 @@ pub enum NetworkActorEvent {
     // A payment need to retry
     RetrySendPayment(Hash256),
 
+    // retry send attempt
+    RetrySendAttempt(Hash256, u64),
+
     // AddTlc result from peer (payment_hash, attempt_id, (process_channel_error, tlc_err), (previous_channel_id, previous_tlc_id))
     AddTlcResult(
         Hash256,
@@ -1091,6 +1094,19 @@ where
                     .resume_payment_session(myself, state, payment_hash)
                     .await;
             }
+            NetworkActorEvent::RetrySendAttempt(payment_hash, attempt_id) => {
+                let Some(mut session) = self.store.get_payment_session(payment_hash) else {
+                    error!("Failed to load payment session {:?}", payment_hash);
+                    return Ok(());
+                };
+                let Some(mut attempt) = self.store.get_attempt(payment_hash, attempt_id) else {
+                    error!("Attempt not found {payment_hash:?} {attempt_id}");
+                    return Ok(());
+                };
+                let _ = self
+                    .send_attempt(myself, state, &mut session, &mut attempt)
+                    .await;
+            }
             NetworkActorEvent::AddTlcResult(payment_hash, attempt_id, error_info, previous_tlc) => {
                 self.on_add_tlc_result_event(
                     myself,
@@ -1277,9 +1293,14 @@ where
                             }
                             for tlc in actor_state.tlc_state.received_tlcs.get_committed_tlcs() {
                                 dbg!("check channels", &channel_id, &tlc.id());
-                                // TODO we should ship hold tlcs, keep continue here
-                                continue;
+                                // TODO(jjy) we should ship hold tlcs, keep continue here
                                 // TODO check max hold_time and remove hold tlcs
+
+                                let hold_tlcs = self.store.get_hold_tlcs(tlc.payment_hash);
+                                if hold_tlcs.is_empty() {
+                                    continue;
+                                }
+
                                 if let Some(payment_preimage) =
                                     self.store.get_preimage(&tlc.payment_hash)
                                 {
@@ -1832,14 +1853,17 @@ where
                         .await
                         .record_attempt_fail(&attempt, error_detail.clone());
                     dbg!("set attempt failed to ", error_detail.error_code.as_ref());
+
                     // If this is the first hop error, like the WaitingTlcAck error,
-                    // we will just retry later, return Ok here for letting endpoint user
-                    // know payment session is created successfully
+                    // we will just retry later
                     self.set_attempt_fail_with_error(
                         &mut attempt,
                         error_detail.error_code.as_ref(),
                     );
-                    self.register_payment_retry(myself, payment_hash);
+                    if attempt.is_retryable() {
+                        self.register_attempt_retry(myself.clone(), payment_hash, attempt_id);
+                    }
+                    self.register_payment_retry(myself.clone(), payment_hash);
                     if !need_to_retry {
                         dbg!("set error to", &error_detail.error_code.as_ref());
                         // TODO fail payment
@@ -1916,10 +1940,18 @@ where
     ) -> Result<Vec<PaymentHopData>, Error> {
         let graph = self.network_graph.read().await;
         let source = graph.get_source_pubkey();
-        let max_amount = session.remain_amount();
+        let mut max_amount = session.remain_amount();
         let min_amount = DEFAULT_MPP_MIN_AMOUNT;
-        let remain_fee = session.remain_fee_amount();
-        let active_parts = session.attempts().len();
+        let mut remain_fee = session.remain_fee_amount();
+        let mut active_parts = session.attempts().len();
+
+        // retrying current attempt
+        if attempt.is_retryable() {
+            max_amount += attempt.route.receiver_amount();
+            remain_fee = remain_fee.map(|fee| fee + attempt.route.fee());
+            active_parts -= 1;
+        }
+
         dbg!(
             "build route",
             max_amount,
@@ -2077,16 +2109,10 @@ where
         };
         eprintln!("attempt found: {:?}", attempt_id);
 
-        // TODO Consider MMP, we should detect payment session state on fetch just like lnd
-        // if error_info.is_none() {
-        // Change the status from Created into Inflight
-        // payment_session.set_inflight_status();
-        // self.store.insert_attempt_info(attempt.clone());
-        //     return;
-        // }
-
-        // attempt is inflight
         let Some((channel_error, tlc_err)) = error_info else {
+            // attempt is inflight
+            attempt.set_inflight_status();
+            self.store.insert_attempt(attempt.clone());
             return;
         };
         if matches!(channel_error, ProcessingChannelError::RepeatedProcessing(_)) {
@@ -2104,14 +2130,7 @@ where
                     .record_attempt_fail(&attempt, tlc_err.clone());
                 (channel_error.to_string(), need_to_retry)
             };
-        // attempt.last_error = Some(error);
-        // self.store.insert_attempt_info(attempt.clone());
 
-        // let error = format!(
-        //     "Failed to send attempt: {:?}, error: {}",
-        //     attempt.hash, error
-        // );
-        dbg!("set attempt failed to ", &error);
         self.set_attempt_fail_with_error(&mut attempt, &error);
         if !need_to_retry {
             if let Some(mut session) = self.store.get_payment_session(payment_hash) {
@@ -2119,6 +2138,10 @@ where
             }
         }
 
+        // retry the current attempt if it is retryable
+        if attempt.is_retryable() {
+            self.register_attempt_retry(myself.clone(), payment_hash, attempt_id);
+        }
         let _ = self
             .resume_payment_session(myself, state, payment_hash)
             .await;
@@ -2131,12 +2154,50 @@ where
 
     fn set_attempt_fail_with_error(&self, attempt: &mut Attempt, error: &str) {
         attempt.set_failed_status(error);
-        // The peer is waiting for tlc ack, just delete the attempt
-        if error == "WaitingTlcAck" {
-            self.store.remove_attempt(attempt.payment_hash, attempt.id);
-        } else {
-            self.store.insert_attempt(attempt.clone());
+        self.store.insert_attempt(attempt.clone());
+    }
+
+    fn register_attempt_retry(
+        &self,
+        myself: ActorRef<NetworkActorMessage>,
+        payment_hash: Hash256,
+        attempt_id: u64,
+    ) {
+        myself.send_after(Duration::from_millis(500), move || {
+            NetworkActorMessage::new_event(NetworkActorEvent::RetrySendAttempt(
+                payment_hash,
+                attempt_id,
+            ))
+        });
+    }
+
+    async fn send_attempt(
+        &self,
+        myself: ActorRef<NetworkActorMessage>,
+        state: &mut NetworkActorState<S>,
+        session: &mut PaymentSession,
+        attempt: &mut Attempt,
+    ) -> Result<Option<SessionRoute>, Error> {
+        let hops_info = self.build_payment_route(session, attempt).await?;
+
+        // send attemp
+        if let Err(err) = self
+            .send_payment_onion_packet(state, attempt, hops_info)
+            .await
+        {
+            self.register_payment_retry(myself, session.payment_hash());
+            let need_retry = matches!(err, Error::SendPaymentFirstHopError(_, true));
+            if need_retry {
+                // If this is the first hop error, such as the WaitingTlcAck error,
+                // we will just retry later, return Ok here for letting endpoint user
+                // know payment session is created successfully
+                return Ok(None);
+            } else {
+                self.set_payment_fail_with_error(session, &err.to_string());
+                return Err(err);
+            }
         }
+        Ok(Some(attempt.route.clone()))
     }
 
     /// Resume the payment session
@@ -2182,49 +2243,13 @@ where
             payment_session.attempts().len()
         );
 
-        // // fail if no more attempts or no more retries
-        // // TODO: check if the payment is inflight
-        // if !session_state.allow_more_attempts() {
-        //     let error = session_state.session.last_error.clone().unwrap_or_else(|| {
-        //         format!(
-        //             "Failed to send payment session: {:?}, retried times: {}",
-        //             payment_data.payment_hash, session_state.session.retried_times
-        //         )
-        //     });
-        //     return Err(Error::SendPaymentError(error));
-        // }
-
-        // if payment_session.last_error != Some("WaitingTlcAck".to_string()) {
-        //     payment_session.retried_times += 1;
-        // }
-
-        // regitry attemp
-
         // build route
         let attempt_id = self.store.next_attempt_id();
         let mut attempt = payment_session.new_attempt(attempt_id);
-        let hops_info = self
-            .build_payment_route(&mut payment_session, &mut attempt)
-            .await?;
 
         // send attemp
-        if let Err(err) = self
-            .send_payment_onion_packet(state, &mut attempt, hops_info)
-            .await
-        {
-            self.register_payment_retry(myself, payment_hash);
-            let need_retry = matches!(err, Error::SendPaymentFirstHopError(_, true));
-            // TODO: Find a better way to handle the error and retry limit
-            if need_retry {
-                // If this is the first hop error, such as the WaitingTlcAck error,
-                // we will just retry later, return Ok here for letting endpoint user
-                // know payment session is created successfully
-                return Ok(None);
-            } else {
-                self.set_payment_fail_with_error(&mut payment_session, &err.to_string());
-                return Err(err);
-            }
-        }
+        self.send_attempt(myself.clone(), state, &mut payment_session, &mut attempt)
+            .await?;
 
         let payment_session = self
             .store

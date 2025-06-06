@@ -1552,7 +1552,6 @@ pub trait NetworkGraphStateStore {
     fn get_payment_history_results(&self) -> Vec<(OutPoint, Direction, TimedResult)>;
     fn get_attempt(&self, payment_hash: Hash256, attempt_id: u64) -> Option<Attempt>;
     fn insert_attempt(&self, attempt: Attempt);
-    fn remove_attempt(&self, payment_hash: Hash256, attempt_id: u64);
     fn get_attempts(&self, payment_hash: Hash256) -> Vec<Attempt>;
     fn next_attempt_id(&self) -> u64;
 }
@@ -1762,6 +1761,7 @@ impl PaymentSession {
             last_updated_at: now,
             last_error: None,
             settled_at: None,
+            inflight_at: None,
         }
     }
 
@@ -1844,7 +1844,9 @@ impl PaymentSession {
                 htlc_settled = true;
                 continue;
             }
-            htlc_inflight = true;
+            if a.inflight_at.is_some() {
+                htlc_inflight = true;
+            }
         }
 
         dbg!(
@@ -1957,13 +1959,17 @@ pub struct Attempt {
     pub preimage: Option<Hash256>,
     pub created_at: u64,
     pub last_updated_at: u64,
+    pub inflight_at: Option<u64>,
     pub settled_at: Option<u64>,
     pub last_error: Option<String>,
 }
 
 impl Attempt {
+    pub fn set_inflight_status(&mut self) {
+        self.inflight_at = Some(now_timestamp_as_millis_u64());
+    }
+
     pub fn set_failed_status(&mut self, error: &str) {
-        // self.set_status(PaymentSessionStatus::Failed);
         self.last_error = Some(error.to_string());
     }
 
@@ -1981,11 +1987,18 @@ impl Attempt {
     }
 
     pub fn is_failed(&self) -> bool {
-        self.last_error.is_some()
+        self.last_error.is_some() && !self.is_retryable()
+    }
+
+    // The attempt is considered as inflight if error can be retried immediately
+    pub fn is_retryable(&self) -> bool {
+        self.last_error
+            .as_ref()
+            .is_some_and(|err| err.as_str() == "WaitingTlcAck")
     }
 
     pub fn is_inflight(&self) -> bool {
-        !self.is_settled() && !self.is_failed()
+        !self.is_settled() && !self.is_failed() && self.inflight_at.is_some()
     }
 }
 
