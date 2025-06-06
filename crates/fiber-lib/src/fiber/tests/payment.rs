@@ -4312,7 +4312,6 @@ async fn test_send_payment_sync_up_new_channel_is_added() {
     node_0.wait_until_success(payment_hash).await;
 }
 
-#[ignore]
 #[tokio::test]
 // This test implies a bug when reconnecting a peer under the condition of multiple TLC operation
 // skip temporarily until the bug is fixed

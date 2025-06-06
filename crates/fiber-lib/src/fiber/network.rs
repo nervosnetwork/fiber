@@ -1023,21 +1023,23 @@ where
                     ))
                     .expect(ASSUME_NETWORK_MYSELF_ALIVE);
 
-                // retry related payment session for this channel
-                // TODO(yukang): make sure attempts retry after channel is reestablished
-                // for session in self
-                //     .store
-                //     .get_payment_sessions_with_status(PaymentSessionStatus::Created)
-                // {
-                //     if session.first_hop_channel_outpoint_eq(&channel_outpoint) {
-                //         debug!(
-                //             "Now retrying payment session {:?} for channel {:?} reestablished",
-                //             session.payment_hash(),
-                //             channel_id
-                //         );
-                //         self.register_payment_retry(myself.clone(), session.payment_hash());
-                //     }
-                // }
+                // retry related payment attempts for this channel
+                for attempt in self
+                    .store
+                    .get_attempts_with_status(PaymentSessionStatus::Created)
+                {
+                    if attempt.first_hop_channel_outpoint_eq(&channel_outpoint) {
+                        debug!(
+                            "Now retrying payment attempt {:?} for channel {:?} reestablished",
+                            attempt.payment_hash, channel_id
+                        );
+                        self.register_attempt_retry(
+                            myself.clone(),
+                            attempt.payment_hash,
+                            attempt.id,
+                        );
+                    }
+                }
             }
             NetworkActorEvent::FiberMessage(peer_id, message) => {
                 self.handle_peer_message(myself, state, peer_id, message)

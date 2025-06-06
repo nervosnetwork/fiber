@@ -1553,6 +1553,7 @@ pub trait NetworkGraphStateStore {
     fn get_attempt(&self, payment_hash: Hash256, attempt_id: u64) -> Option<Attempt>;
     fn insert_attempt(&self, attempt: Attempt);
     fn get_attempts(&self, payment_hash: Hash256) -> Vec<Attempt>;
+    fn get_attempts_with_status(&self, status: PaymentSessionStatus) -> Vec<Attempt>;
     fn next_attempt_id(&self) -> u64;
 }
 
@@ -1747,8 +1748,7 @@ impl PaymentSession {
             created_at: now,
             last_updated_at: now,
             last_error: None,
-            settled_at: None,
-            inflight_at: None,
+            status: PaymentSessionStatus::Created,
         }
     }
 
@@ -1766,8 +1766,6 @@ impl PaymentSession {
             let attempts = self.attempts();
             let tried_count = attempts.len() as u32;
             if tried_count >= self.try_limit {
-                let inflight = attempts.iter().any(|a| a.is_inflight());
-                assert!(!inflight);
                 for a in attempts.iter() {
                     dbg!(
                         a.is_settled(),
@@ -1831,7 +1829,7 @@ impl PaymentSession {
                 htlc_settled = true;
                 continue;
             }
-            if a.inflight_at.is_some() {
+            if a.is_inflight() {
                 htlc_inflight = true;
             }
         }
@@ -1931,20 +1929,19 @@ impl From<PaymentSession> for SendPaymentResponse {
 pub struct Attempt {
     pub id: u64,
     pub hash: Hash256,
+    pub status: PaymentSessionStatus,
     pub payment_hash: Hash256,
     pub route: SessionRoute,
     pub session_key: [u8; 32],
     pub preimage: Option<Hash256>,
     pub created_at: u64,
     pub last_updated_at: u64,
-    pub inflight_at: Option<u64>,
-    pub settled_at: Option<u64>,
     pub last_error: Option<String>,
 }
 
 impl Attempt {
     pub fn set_inflight_status(&mut self) {
-        self.inflight_at = Some(now_timestamp_as_millis_u64());
+        self.status = PaymentSessionStatus::Inflight;
     }
 
     pub fn set_failed_status(&mut self, error: &str) {
@@ -1957,11 +1954,15 @@ impl Attempt {
     }
 
     pub fn set_success_status(&mut self) {
-        self.settled_at = Some(now_timestamp_as_millis_u64());
+        self.status = PaymentSessionStatus::Success;
     }
 
     pub fn is_settled(&self) -> bool {
-        self.settled_at.is_some()
+        self.status == PaymentSessionStatus::Success
+    }
+
+    pub fn is_inflight(&self) -> bool {
+        self.status == PaymentSessionStatus::Inflight
     }
 
     pub fn is_failed(&self) -> bool {
@@ -1973,10 +1974,6 @@ impl Attempt {
         self.last_error
             .as_ref()
             .is_some_and(|err| err.as_str() == "WaitingTlcAck")
-    }
-
-    pub fn is_inflight(&self) -> bool {
-        !self.is_settled() && !self.is_failed() && self.inflight_at.is_some()
     }
 
     pub fn first_hop_channel_outpoint_eq(&self, out_point: &OutPoint) -> bool {

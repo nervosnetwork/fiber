@@ -594,26 +594,23 @@ impl NetworkGraphStateStore for Store {
     fn get_attempts(&self, payment_hash: Hash256) -> Vec<Attempt> {
         let prefix = [&[ATTEMPT_PREFIX], payment_hash.as_ref()].concat();
         self.prefix_iterator(&prefix)
-            .filter_map(|(key, value)| {
-                if key.len() != 41 {
-                    warn!(
-                        "invalid attempt key: {} value: {} payment_hash: {}",
-                        key.len(),
-                        value.len(),
-                        payment_hash
-                    );
-                    return None;
-                }
-                if &key[1..33] != payment_hash.as_ref() {
-                    let attempt_id: u64 = u64::from_le_bytes(key[prefix.len()..].try_into().ok()?);
-                    warn!(
-                        "extract invalid payment hash from attempt payment_hash: {} attempt_id: {}",
-                        payment_hash, attempt_id
-                    );
-                    return None;
-                }
+            .filter_map(|(_key, value)| {
                 let attempt = deserialize_from(value.as_ref(), "Attempt");
                 Some(attempt)
+            })
+            .collect()
+    }
+
+    fn get_attempts_with_status(&self, status: PaymentSessionStatus) -> Vec<Attempt> {
+        let prefix = [ATTEMPT_PREFIX];
+        self.prefix_iterator(&prefix)
+            .filter_map(|(_key, value)| {
+                let attempt: Attempt = deserialize_from(value.as_ref(), "Attempt");
+                if attempt.status == status {
+                    Some(attempt)
+                } else {
+                    None
+                }
             })
             .collect()
     }
