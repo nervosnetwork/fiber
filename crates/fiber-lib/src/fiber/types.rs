@@ -1552,6 +1552,7 @@ pub enum TlcErrorCode {
     InvalidOnionHmac = BADONION | PERM | 5,
     InvalidOnionKey = BADONION | PERM | 6,
     TemporaryChannelFailure = UPDATE | 7,
+    HoldTlcTimeout = UPDATE | 8,
     // used for shutting down the channel
     PermanentChannelFailure = PERM | 8,
     RequiredChannelFeatureMissing = PERM | 9,

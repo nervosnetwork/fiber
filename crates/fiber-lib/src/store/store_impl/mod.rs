@@ -35,9 +35,9 @@ use ckb_types::packed::Script;
 use ckb_types::prelude::Entity;
 
 use serde::Serialize;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use tentacle::secio::PeerId;
-use tracing::info;
+use tracing::{info, warn};
 
 #[derive(Copy, Clone)]
 enum ChannelTimestamp {
@@ -197,7 +197,7 @@ pub enum KeyValue {
     NetworkActorState(PeerId, PersistentNetworkActorState),
     Attempt((Hash256, u64), Attempt),
     NextAttemptId(u64),
-    HoldTlc(Hash256, HoldTlc),
+    HoldTlcs(Hash256, Vec<HoldTlc>),
 }
 
 pub trait StoreKeyValue {
@@ -259,7 +259,7 @@ impl StoreKeyValue for KeyValue {
             KeyValue::PaymentCustomRecord(payment_hash, _data) => {
                 [&[PAYMENT_CUSTOM_RECORD_PREFIX], payment_hash.as_ref()].concat()
             }
-            KeyValue::HoldTlc(payment_hash, _hold_tlc) => {
+            KeyValue::HoldTlcs(payment_hash, _hold_tlc) => {
                 [&[HOLD_TLC_PREFIX], payment_hash.as_ref()].concat()
             }
         }
@@ -296,7 +296,7 @@ impl StoreKeyValue for KeyValue {
             KeyValue::PaymentCustomRecord(_, custom_records) => {
                 serialize_to_vec(custom_records, "PaymentCustomRecord")
             }
-            KeyValue::HoldTlc(_payment_hash, hold_tlc) => serialize_to_vec(hold_tlc, "HoldTlc"),
+            KeyValue::HoldTlcs(_payment_hash, hold_tlc) => serialize_to_vec(hold_tlc, "HoldTlc"),
         }
     }
 }
@@ -410,15 +410,47 @@ impl ChannelActorStateStore for Store {
     }
 
     fn insert_hold_tlc(&self, payment_hash: Hash256, hold_tlc: HoldTlc) {
+        let prefix = [&[HOLD_TLC_PREFIX], payment_hash.as_ref()].concat();
         let mut batch = self.batch();
-        batch.put_kv(KeyValue::HoldTlc(payment_hash, hold_tlc));
+        let mut hold_tlcs: Vec<HoldTlc> = batch
+            .get(&prefix)
+            .map(|v| deserialize_from(v.as_ref(), "HoldTlc"))
+            .unwrap_or_default();
+        hold_tlcs.push(hold_tlc);
+        batch.put_kv(KeyValue::HoldTlcs(payment_hash, hold_tlcs));
         batch.commit();
     }
 
     fn get_hold_tlcs(&self, payment_hash: Hash256) -> Vec<HoldTlc> {
         let prefix = [&[HOLD_TLC_PREFIX], payment_hash.as_ref()].concat();
+        self.get(&prefix)
+            .map(|v| deserialize_from(v.as_ref(), "HoldTlc"))
+            .unwrap_or_default()
+    }
+
+    fn remove_hold_tlcs(&self, payment_hash: &Hash256) {
+        let prefix = [&[HOLD_TLC_PREFIX], payment_hash.as_ref()].concat();
+        let mut batch = self.batch();
+        for (key, _) in self.prefix_iterator(&prefix) {
+            batch.delete(key);
+        }
+        batch.commit();
+    }
+
+    fn list_all_hold_tlcs(&self) -> HashMap<Hash256, Vec<HoldTlc>> {
+        let prefix = [HOLD_TLC_PREFIX];
         self.prefix_iterator(&prefix)
-            .map(|(_key, value)| deserialize_from(value.as_ref(), "HoldTlc"))
+            .filter_map(|(key, value)| {
+                if key.len() != 33 {
+                    warn!("invalid hold tlc key: {}", key.len());
+                    return None;
+                }
+                let payment_hash: [u8; 32] = key[1..33]
+                    .try_into()
+                    .expect("payment_hash should be 32 bytes");
+                let hold_tlcs: Vec<HoldTlc> = deserialize_from(value.as_ref(), "HoldTlc");
+                Some((payment_hash.into(), hold_tlcs))
+            })
             .collect()
     }
 }

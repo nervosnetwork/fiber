@@ -51,6 +51,9 @@ pub const DEFAULT_AUTO_ANNOUNCE_NODE: bool = true;
 /// The interval to reannounce NodeAnnouncement, in seconds.
 pub const DEFAULT_ANNOUNCE_NODE_INTERVAL_SECONDS: u64 = 3600;
 
+/// The maximum time to hold a tlc, in milliseconds.
+pub const DEFAULT_HOLD_TLC_TIMEOUT: u64 = 120 * 1000;
+
 /// The interval to maintain the gossip network, in milli-seconds.
 #[cfg(not(test))]
 pub const DEFAULT_GOSSIP_NETWORK_MAINTENANCE_INTERVAL_MS: u64 = 1000 * 60;

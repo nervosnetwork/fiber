@@ -68,11 +68,13 @@ use tentacle::secio::PeerId;
 use thiserror::Error;
 use tokio::sync::oneshot;
 
+use super::config::DEFAULT_HOLD_TLC_TIMEOUT;
 use super::graph::HoldTlc;
 use super::{
     gossip::SOFT_BROADCAST_MESSAGES_CONSIDERED_STALE_DURATION, graph::ChannelUpdateInfo,
     types::ForwardTlcResult,
 };
+use std::collections::HashMap;
 use std::{
     collections::HashSet,
     fmt::{self, Debug, Display},
@@ -911,6 +913,8 @@ where
                             HoldTlc {
                                 channel_actor_state_id: state.get_id(),
                                 tlc_id: tlc_info.tlc_id.into(),
+                                hold_expire_at: now_timestamp_as_millis_u64()
+                                    + DEFAULT_HOLD_TLC_TIMEOUT,
                             },
                         );
                         // just return, the hold tlc will be settle when the invoice is fulfilled
@@ -923,7 +927,6 @@ where
         }
 
         for tlc in tlcs {
-            dbg!("settle", &tlc);
             let (send, _recv) = oneshot::channel::<Result<(), ProcessingChannelError>>();
             let port = RpcReplyPort::from(send);
             self.network
@@ -7677,6 +7680,8 @@ pub trait ChannelActorStateStore {
     fn get_payment_custom_records(&self, payment_hash: &Hash256) -> Option<PaymentCustomRecords>;
     fn insert_hold_tlc(&self, payment_hash: Hash256, hold_tlc: HoldTlc);
     fn get_hold_tlcs(&self, payment_hash: Hash256) -> Vec<HoldTlc>;
+    fn list_all_hold_tlcs(&self) -> HashMap<Hash256, Vec<HoldTlc>>;
+    fn remove_hold_tlcs(&self, payment_hash: &Hash256);
 }
 
 /// A wrapper on CommitmentTransaction that has a partial signature along with

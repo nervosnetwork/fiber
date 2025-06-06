@@ -50,9 +50,10 @@ use super::channel::{
     ChannelCommand, ChannelCommandWithId, ChannelEvent, ChannelInitializationParameter,
     ChannelState, ChannelSubscribers, ChannelTlcInfo, OpenChannelParameter, PrevTlcInfo,
     ProcessingChannelError, ProcessingChannelResult, PublicChannelInfo, RemoveTlcCommand,
-    RevocationData, SettlementData, ShuttingDownFlags, StopReason, DEFAULT_COMMITMENT_FEE_RATE,
-    DEFAULT_FEE_RATE, DEFAULT_MAX_TLC_VALUE_IN_FLIGHT, MAX_COMMITMENT_DELAY_EPOCHS,
-    MAX_TLC_NUMBER_IN_FLIGHT, MIN_COMMITMENT_DELAY_EPOCHS, SYS_MAX_TLC_NUMBER_IN_FLIGHT,
+    RevocationData, SettlementData, ShuttingDownFlags, StopReason, TLCId,
+    DEFAULT_COMMITMENT_FEE_RATE, DEFAULT_FEE_RATE, DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
+    MAX_COMMITMENT_DELAY_EPOCHS, MAX_TLC_NUMBER_IN_FLIGHT, MIN_COMMITMENT_DELAY_EPOCHS,
+    SYS_MAX_TLC_NUMBER_IN_FLIGHT,
 };
 use super::config::{AnnouncedNodeName, DEFAULT_MPP_MIN_AMOUNT, MIN_TLC_EXPIRY_DELTA};
 use super::features::FeatureVector;
@@ -83,7 +84,7 @@ use crate::fiber::gossip::{GossipConfig, GossipService, SubscribableGossipMessag
 use crate::fiber::graph::{PaymentSession, PaymentSessionStatus};
 use crate::fiber::serde_utils::EntityHex;
 use crate::fiber::types::{
-    FiberChannelMessage, PaymentOnionPacket, PeeledPaymentOnionPacket, TxSignatures,
+    FiberChannelMessage, PaymentOnionPacket, PeeledPaymentOnionPacket, TlcErrPacket, TxSignatures,
 };
 use crate::fiber::KeyPair;
 use crate::invoice::{CkbInvoice, CkbInvoiceStatus, InvoiceStore, PreimageStore};
@@ -1288,19 +1289,84 @@ where
             }
             NetworkActorCommand::CheckChannels => {
                 let now = now_timestamp_as_millis_u64();
+
+                let all_hold_tlcs = self.store.list_all_hold_tlcs();
+
+                // remove settled hold tlcs
+                for payment_hash in all_hold_tlcs.keys() {
+                    let Some(status) = self.store.get_invoice_status(&payment_hash) else {
+                        continue;
+                    };
+
+                    if matches!(
+                        status,
+                        CkbInvoiceStatus::Cancelled
+                            | CkbInvoiceStatus::Expired
+                            | CkbInvoiceStatus::Paid
+                    ) {
+                        self.store.remove_hold_tlcs(&payment_hash);
+                    }
+                }
+
                 for (_peer_id, channel_id, channel_state) in self.store.get_channel_states(None) {
                     if matches!(channel_state, ChannelState::ChannelReady) {
                         if let Some(actor_state) = self.store.get_channel_actor_state(&channel_id) {
                             if actor_state.reestablishing {
                                 continue;
                             }
-                            for tlc in actor_state.tlc_state.received_tlcs.get_committed_tlcs() {
-                                dbg!("check channels", &channel_id, &tlc.id());
-                                // TODO(jjy) we should ship hold tlcs, keep continue here
-                                // TODO check max hold_time and remove hold tlcs
 
-                                let hold_tlcs = self.store.get_hold_tlcs(tlc.payment_hash);
-                                if hold_tlcs.is_empty() {
+                            // collect hold tlcs for this channel
+                            let mut hold_tlcs: HashSet<u64> = HashSet::default();
+                            for hold_tlc in all_hold_tlcs
+                                .values()
+                                .flatten()
+                                .filter(|hold_tlc| hold_tlc.channel_actor_state_id == channel_id)
+                            {
+                                let Some(tlc) =
+                                    actor_state.tlc_state.get(&TLCId::Received(hold_tlc.tlc_id))
+                                else {
+                                    continue;
+                                };
+                                hold_tlcs.insert(hold_tlc.tlc_id);
+
+                                // check hold timeout
+                                if hold_tlc.hold_expire_at < now {
+                                    debug!("Remove timeout hold tlc {:?}", tlc.id(),);
+                                    let (send, _recv) = oneshot::channel();
+                                    let rpc_reply = RpcReplyPort::from(send);
+                                    if let Err(err) = state
+                                        .send_command_to_channel(
+                                            channel_id,
+                                            ChannelCommand::RemoveTlc(
+                                                RemoveTlcCommand {
+                                                    id: tlc.id(),
+                                                    reason: RemoveTlcReason::RemoveTlcFail(
+                                                        TlcErrPacket::new(
+                                                            TlcErr::new(
+                                                                TlcErrorCode::HoldTlcTimeout,
+                                                            ),
+                                                            &tlc.shared_secret,
+                                                        ),
+                                                    ),
+                                                },
+                                                rpc_reply,
+                                            ),
+                                        )
+                                        .await
+                                    {
+                                        error!(
+                                            "Failed to remove tlc {:?} for channel {:?}: {}",
+                                            tlc.id(),
+                                            channel_id,
+                                            err
+                                        );
+                                    }
+                                }
+                            }
+
+                            for tlc in actor_state.tlc_state.received_tlcs.get_committed_tlcs() {
+                                // skip if tlc is in hold
+                                if hold_tlcs.contains(&tlc.id()) {
                                     continue;
                                 }
 
@@ -1326,7 +1392,7 @@ where
                                     }
                                     let (send, _recv) = oneshot::channel();
                                     let rpc_reply = RpcReplyPort::from(send);
-                                    dbg!("send remove tlc command", &tlc.id());
+
                                     if let Err(err) = state
                                         .send_command_to_channel(
                                             channel_id,

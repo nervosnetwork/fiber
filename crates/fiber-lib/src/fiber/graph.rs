@@ -1983,18 +1983,11 @@ impl Attempt {
             .map(|x| x.channel_outpoint.eq(out_point))
             .unwrap_or_default()
     }
-
-    pub fn first_hop_channel_outpoint_eq(&self, out_point: &OutPoint) -> bool {
-        self.route
-            .nodes
-            .first()
-            .map(|x| x.channel_outpoint.eq(out_point))
-            .unwrap_or_default()
-    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HoldTlc {
     pub channel_actor_state_id: Hash256,
     pub tlc_id: u64,
+    pub hold_expire_at: u64,
 }
