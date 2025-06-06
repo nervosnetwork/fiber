@@ -1,6 +1,8 @@
+#[cfg(not(target_arch = "wasm32"))]
+use jsonrpsee::proc_macros::rpc;
+use jsonrpsee::types::ErrorObjectOwned;
+
 use ckb_jsonrpc_types::Script;
-use jsonrpsee::{proc_macros::rpc, types::ErrorObjectOwned};
-use ractor::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 
@@ -14,6 +16,7 @@ use crate::{
 };
 
 /// RPC module for watchtower related operations
+#[cfg(not(target_arch = "wasm32"))]
 #[rpc(client, server)]
 trait WatchtowerRpc {
     /// Create a new watched channel
@@ -117,7 +120,8 @@ impl<S> WatchtowerRpcServerImpl<S> {
     }
 }
 
-#[async_trait]
+#[cfg(not(target_arch = "wasm32"))]
+#[async_trait::async_trait]
 impl<S> WatchtowerRpcServer for WatchtowerRpcServerImpl<S>
 where
     S: PreimageStore + WatchtowerStore + Send + Sync + 'static,
