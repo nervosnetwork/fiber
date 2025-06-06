@@ -6,7 +6,7 @@ use ckb_sdk::{
     traits::{CellCollector, CellQueryOptions, DefaultCellCollector, ValueRangeOption},
     transaction::builder::FeeCalculator,
     util::blake160,
-    CkbRpcAsyncClient, RpcError, Since, SinceType,
+    CkbRpcClient, RpcError, Since, SinceType,
 };
 use ckb_types::{
     self,
@@ -21,7 +21,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::{
     ckb::{
-        contracts::{get_cell_deps, get_script_by_contract, Contract},
+        contracts::{get_cell_deps_sync, get_script_by_contract, Contract},
         CkbConfig,
     },
     fiber::{
@@ -66,8 +66,7 @@ pub struct WatchtowerState {
     secret_key: SecretKey,
 }
 
-#[cfg_attr(target_arch="wasm32",async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[async_trait::async_trait]
 impl<S> Actor for WatchtowerActor<S>
 where
     S: PreimageStore + WatchtowerStore + Send + Sync + 'static,
@@ -119,7 +118,7 @@ where
             WatchtowerMessage::RemovePreimage(payment_hash) => {
                 self.store.remove_preimage(&payment_hash)
             }
-            WatchtowerMessage::PeriodicCheck => self.periodic_check(state).await,
+            WatchtowerMessage::PeriodicCheck => self.periodic_check(state),
         }
         Ok(())
     }
@@ -129,110 +128,100 @@ impl<S> WatchtowerActor<S>
 where
     S: PreimageStore + WatchtowerStore,
 {
-    async fn periodic_check(&self, state: &WatchtowerState) {
+    fn periodic_check(&self, state: &WatchtowerState) {
         let secret_key = state.secret_key;
         let rpc_url = state.config.rpc_url.clone();
-        let mut cell_collector = DefaultCellCollector::new(&rpc_url);
+        tokio::task::block_in_place(move || {
+            let mut cell_collector = DefaultCellCollector::new(&rpc_url);
 
-        for channel_data in self.store.get_watch_channels() {
-            let ckb_client = CkbRpcAsyncClient::new(&rpc_url);
-            let search_key = SearchKey {
-                script: channel_data.funding_tx_lock.clone().into(),
-                script_type: ScriptType::Lock,
-                script_search_mode: Some(SearchMode::Exact),
-                with_data: None,
-                filter: None,
-                group_by_transaction: None,
-            };
-            // we need two parties' signatures to unlock the funding tx, so we can check the last one transaction only to see if it's an old version commitment tx
-            match ckb_client
-                .get_transactions(search_key, Order::Desc, 1u32.into(), None)
-                .await
-            {
-                Ok(txs) => {
-                    if let Some(Tx::Ungrouped(tx)) = txs.objects.first() {
-                        if matches!(tx.io_type, CellType::Input) {
-                            match ckb_client.get_transaction(tx.tx_hash.clone()).await {
-                                Ok(Some(tx_with_status)) => {
-                                    if tx_with_status.tx_status.status != Status::Committed {
-                                        error!("Cannot find the commitment tx: {:?}, status is {:?}, maybe ckb indexer bug?", tx_with_status.tx_status.status, tx.tx_hash);
-                                    } else if let Some(tx) = tx_with_status.transaction {
-                                        match tx.inner {
-                                            Either::Left(tx) => {
-                                                let tx: Transaction = tx.inner.into();
-                                                if tx.raw().outputs().len() == 1 {
-                                                    let output = tx
-                                                        .raw()
-                                                        .outputs()
-                                                        .get(0)
-                                                        .expect("get output 0 of tx");
-                                                    let commitment_lock = output.lock();
-                                                    let lock_args =
-                                                        commitment_lock.args().raw_data();
-                                                    let pub_key_hash: [u8; 20] = lock_args[0..20]
-                                                        .try_into()
-                                                        .expect("checked length");
-                                                    let commitment_number = u64::from_be_bytes(
-                                                        lock_args[28..36]
+            for channel_data in self.store.get_watch_channels() {
+                let ckb_client = CkbRpcClient::new(&rpc_url);
+                let search_key = SearchKey {
+                    script: channel_data.funding_tx_lock.clone().into(),
+                    script_type: ScriptType::Lock,
+                    script_search_mode: Some(SearchMode::Exact),
+                    with_data: None,
+                    filter: None,
+                    group_by_transaction: None,
+                };
+                // we need two parties' signatures to unlock the funding tx, so we can check the last one transaction only to see if it's an old version commitment tx
+                match ckb_client.get_transactions(search_key, Order::Desc, 1u32.into(), None) {
+                    Ok(txs) => {
+                        if let Some(Tx::Ungrouped(tx)) = txs.objects.first() {
+                            if matches!(tx.io_type, CellType::Input) {
+                                match ckb_client.get_transaction(tx.tx_hash.clone()) {
+                                    Ok(Some(tx_with_status)) => {
+                                        if tx_with_status.tx_status.status != Status::Committed {
+                                            error!("Cannot find the commitment tx: {:?}, status is {:?}, maybe ckb indexer bug?", tx_with_status.tx_status.status, tx.tx_hash);
+                                        } else if let Some(tx) = tx_with_status.transaction {
+                                            match tx.inner {
+                                                Either::Left(tx) => {
+                                                    let tx: Transaction = tx.inner.into();
+                                                    if tx.raw().outputs().len() == 1 {
+                                                        let output = tx
+                                                            .raw()
+                                                            .outputs()
+                                                            .get(0)
+                                                            .expect("get output 0 of tx");
+                                                        let commitment_lock = output.lock();
+                                                        let lock_args =
+                                                            commitment_lock.args().raw_data();
+                                                        let pub_key_hash: [u8; 20] = lock_args
+                                                            [0..20]
                                                             .try_into()
-                                                            .expect("u64 from slice"),
-                                                    );
+                                                            .expect("checked length");
+                                                        let commitment_number = u64::from_be_bytes(
+                                                            lock_args[28..36]
+                                                                .try_into()
+                                                                .expect("u64 from slice"),
+                                                        );
 
-                                                    if blake160(
-                                                        &channel_data
-                                                            .remote_settlement_data
-                                                            .x_only_aggregated_pubkey,
-                                                    )
-                                                    .0 == pub_key_hash
-                                                    {
-                                                        match channel_data.revocation_data.clone() {
-                                                            Some(revocation_data)
-                                                                if revocation_data
-                                                                    .commitment_number
-                                                                    >= commitment_number =>
+                                                        if blake160(
+                                                            &channel_data
+                                                                .remote_settlement_data
+                                                                .x_only_aggregated_pubkey,
+                                                        )
+                                                        .0 == pub_key_hash
+                                                        {
+                                                            match channel_data
+                                                                .revocation_data
+                                                                .clone()
                                                             {
-                                                                let commitment_tx_out_point =
-                                                                    OutPoint::new(
-                                                                        tx.calc_tx_hash(),
-                                                                        0,
-                                                                    );
-                                                                match ckb_client
-                                                                    .get_live_cell(
+                                                                Some(revocation_data)
+                                                                    if revocation_data
+                                                                        .commitment_number
+                                                                        >= commitment_number =>
+                                                                {
+                                                                    let commitment_tx_out_point =
+                                                                        OutPoint::new(
+                                                                            tx.calc_tx_hash(),
+                                                                            0,
+                                                                        );
+                                                                    match ckb_client.get_live_cell(
                                                                         commitment_tx_out_point
                                                                             .clone()
                                                                             .into(),
                                                                         false,
-                                                                    )
-                                                                    .await
-                                                                {
-                                                                    Ok(cell_with_status) => {
-                                                                        if cell_with_status.status
-                                                                            == "live"
-                                                                        {
-                                                                            warn!("Found an old version commitment tx submitted by remote: {:#x}", tx.calc_tx_hash());
-                                                                            let tx_to_send=  match build_revocation_tx(
+                                                                    ) {
+                                                                        Ok(cell_with_status) => {
+                                                                            if cell_with_status
+                                                                                .status
+                                                                                == "live"
+                                                                            {
+                                                                                warn!("Found an old version commitment tx submitted by remote: {:#x}", tx.calc_tx_hash());
+                                                                                match build_revocation_tx(
                                                                                     commitment_tx_out_point,
                                                                                     revocation_data,
                                                                                     secret_key,
                                                                                     &mut cell_collector,
-                                                                                ).await {
+                                                                                ) {
                                                                                     Ok(tx) => {
-                                                                                       Some(tx)
-                                                                                    }
-                                                                                    Err(err) => {
-                                                                                        error!("Failed to build revocation tx: {:?}", err);
-                                                                                    None
-                                                                                    }
-                                                                                };
-                                                                            if let Some(tx) =
-                                                                                tx_to_send
-                                                                            {
-                                                                                match ckb_client
+                                                                                        match ckb_client
                                                                                             .send_transaction(
                                                                                                 tx.data()
                                                                                                     .into(),
                                                                                                 None,
-                                                                                            ).await {
+                                                                                            ) {
                                                                                             Ok(tx_hash) => {
                                                                                                 info!("Revocation tx: {:?} sent, tx_hash: {:?}", tx, tx_hash);
                                                                                             }
@@ -240,76 +229,81 @@ where
                                                                                                 error!("Failed to send revocation tx: {:?}, error: {:?}", tx, err);
                                                                                             }
                                                                                         }
+                                                                                    }
+                                                                                    Err(err) => {
+                                                                                        error!("Failed to build revocation tx: {:?}", err);
+                                                                                    }
+                                                                                }
                                                                             }
                                                                         }
-                                                                    }
-                                                                    Err(err) => {
-                                                                        error!("Failed to get live cell: {:?}", err);
+                                                                        Err(err) => {
+                                                                            error!("Failed to get live cell: {:?}", err);
+                                                                        }
                                                                     }
                                                                 }
+                                                                _ => {
+                                                                    try_settle_commitment_tx(
+                                                                        commitment_lock,
+                                                                        ckb_client,
+                                                                        channel_data
+                                                                            .remote_settlement_data
+                                                                            .clone(),
+                                                                        true,
+                                                                        secret_key,
+                                                                        &mut cell_collector,
+                                                                        &self.store,
+                                                                    );
+                                                                }
                                                             }
-                                                            _ => {
-                                                                try_settle_commitment_tx(
-                                                                    commitment_lock,
-                                                                    ckb_client,
-                                                                    channel_data
-                                                                        .remote_settlement_data
-                                                                        .clone(),
-                                                                    true,
-                                                                    secret_key,
-                                                                    &mut cell_collector,
-                                                                    &self.store,
-                                                                )
-                                                                .await;
-                                                            }
+                                                        } else {
+                                                            try_settle_commitment_tx(
+                                                                commitment_lock,
+                                                                ckb_client,
+                                                                channel_data
+                                                                    .local_settlement_data
+                                                                    .clone()
+                                                                    .expect(
+                                                                        "local settlement data",
+                                                                    ),
+                                                                false,
+                                                                secret_key,
+                                                                &mut cell_collector,
+                                                                &self.store,
+                                                            );
                                                         }
                                                     } else {
-                                                        try_settle_commitment_tx(
-                                                            commitment_lock,
-                                                            ckb_client,
-                                                            channel_data
-                                                                .local_settlement_data
-                                                                .clone()
-                                                                .expect("local settlement data"),
-                                                            false,
-                                                            secret_key,
-                                                            &mut cell_collector,
-                                                            &self.store,
-                                                        )
-                                                        .await;
+                                                        // there may be a race condition that PeriodicCheck is triggered before the remove_channel fn is called
+                                                        // it's a close channel tx, ignore
                                                     }
-                                                } else {
-                                                    // there may be a race condition that PeriodicCheck is triggered before the remove_channel fn is called
-                                                    // it's a close channel tx, ignore
+                                                }
+                                                Either::Right(_tx) => {
+                                                    // unreachable, ignore
                                                 }
                                             }
-                                            Either::Right(_tx) => {
-                                                // unreachable, ignore
-                                            }
+                                        } else {
+                                            error!("Cannot find the commitment tx: {:?}, transaction is none, maybe ckb indexer bug?", tx.tx_hash);
                                         }
-                                    } else {
-                                        error!("Cannot find the commitment tx: {:?}, transaction is none, maybe ckb indexer bug?", tx.tx_hash);
                                     }
-                                }
-                                Ok(None) => {
-                                    error!("Cannot find the commitment tx: {:?}, maybe ckb indexer bug?", tx.tx_hash);
-                                }
-                                Err(err) => {
-                                    error!("Failed to get funding tx: {:?}", err);
+                                    Ok(None) => {
+                                        error!("Cannot find the commitment tx: {:?}, maybe ckb indexer bug?", tx.tx_hash);
+                                    }
+                                    Err(err) => {
+                                        error!("Failed to get funding tx: {:?}", err);
+                                    }
                                 }
                             }
                         }
                     }
-                }
-                Err(err) => {
-                    error!("Failed to get transactions: {:?}", err);
+                    Err(err) => {
+                        error!("Failed to get transactions: {:?}", err);
+                    }
                 }
             }
-        }
+        });
     }
 }
 
-async fn build_revocation_tx(
+fn build_revocation_tx(
     commitment_tx_out_point: OutPoint,
     revocation_data: RevocationData,
     secret_key: SecretKey,
@@ -341,13 +335,10 @@ async fn build_revocation_tx(
 
     let mut tx_builder = Transaction::default()
         .as_advanced_builder()
-        .cell_deps(
-            get_cell_deps(
-                vec![Contract::CommitmentLock, Contract::Secp256k1Lock],
-                &revocation_data.output.type_().to_opt(),
-            )
-            .await?,
-        )
+        .cell_deps(get_cell_deps_sync(
+            vec![Contract::CommitmentLock, Contract::Secp256k1Lock],
+            &revocation_data.output.type_().to_opt(),
+        )?)
         .input(
             CellInput::new_builder()
                 .previous_output(commitment_tx_out_point)
@@ -412,9 +403,9 @@ async fn build_revocation_tx(
     Err(Box::new(RpcError::Other(anyhow!("Not enough capacity"))))
 }
 
-async fn try_settle_commitment_tx<S: PreimageStore>(
+fn try_settle_commitment_tx<S: PreimageStore>(
     commitment_lock: Script,
-    ckb_client: CkbRpcAsyncClient,
+    ckb_client: CkbRpcClient,
     settlement_data: SettlementData,
     for_remote: bool,
     secret_key: SecretKey,
@@ -435,13 +426,10 @@ async fn try_settle_commitment_tx<S: PreimageStore>(
         group_by_transaction: Some(true),
     };
 
-    find_preimages(search_key.clone(), &ckb_client, store).await;
+    find_preimages(search_key.clone(), &ckb_client, store);
 
-    let (current_epoch, current_time) = match ckb_client.get_tip_header().await {
-        Ok(tip_header) => match ckb_client
-            .get_block_median_time(tip_header.hash.clone())
-            .await
-        {
+    let (current_epoch, current_time) = match ckb_client.get_tip_header() {
+        Ok(tip_header) => match ckb_client.get_block_median_time(tip_header.hash.clone()) {
             Ok(Some(median_time)) => {
                 let tip_header: HeaderView = tip_header.into();
                 let epoch = tip_header.epoch();
@@ -468,15 +456,12 @@ async fn try_settle_commitment_tx<S: PreimageStore>(
     // however, an attacker may create a lot of cells to implement a tx pinning attack, we have to use loop to get all cells
     let mut after = None;
     loop {
-        match ckb_client
-            .get_cells(
-                search_key.clone(),
-                Order::Desc,
-                100u32.into(),
-                after.clone(),
-            )
-            .await
-        {
+        match ckb_client.get_cells(
+            search_key.clone(),
+            Order::Desc,
+            100u32.into(),
+            after.clone(),
+        ) {
             Ok(cells) => {
                 if cells.objects.is_empty() {
                     break;
@@ -512,7 +497,7 @@ async fn try_settle_commitment_tx<S: PreimageStore>(
                     }
 
                     let cell_header: HeaderView =
-                        match ckb_client.get_header_by_number(cell.block_number).await {
+                        match ckb_client.get_header_by_number(cell.block_number) {
                             Ok(Some(header)) => header.into(),
                             Ok(None) => {
                                 error!("Cannot find header: {}", cell.block_number);
@@ -529,7 +514,7 @@ async fn try_settle_commitment_tx<S: PreimageStore>(
                             "Found a force closed commitment tx with pending tlcs: {:#x}",
                             commitment_tx_hash
                         );
-                        match ckb_client.get_transaction(commitment_tx_hash.clone()).await {
+                        match ckb_client.get_transaction(commitment_tx_hash.clone()) {
                             Ok(Some(tx_with_status)) => {
                                 if tx_with_status.tx_status.status != Status::Committed {
                                     error!("Cannot find the commitment tx: {:?}, status is {:?}, maybe ckb indexer bug?", tx_with_status.tx_status.status, commitment_tx_hash);
@@ -574,36 +559,21 @@ async fn try_settle_commitment_tx<S: PreimageStore>(
                                                     }
                                                 });
 
-                                            let to_send_tx =
-                                                match build_settlement_tx_for_pending_tlcs(
-                                                    cell,
-                                                    cell_header,
-                                                    delay_epoch.unwrap(),
-                                                    settlement_data.clone(),
-                                                    for_remote,
-                                                    pending_tlcs,
-                                                    secret_key,
-                                                    cell_collector,
-                                                    current_time,
-                                                    current_epoch,
-                                                    store,
-                                                )
-                                                .await
-                                                {
-                                                    Ok(Some(tx)) => Some(tx),
-                                                    Ok(None) => {
-                                                        info!("No need to settle the commitment tx: {:#x} with pending tlcs", commitment_tx_hash);
-                                                        None
-                                                    }
-                                                    Err(err) => {
-                                                        error!("Failed to build settlement tx for pending tlcs: {:?}", err);
-                                                        None
-                                                    }
-                                                };
-                                            if let Some(tx) = to_send_tx {
-                                                match ckb_client
+                                            match build_settlement_tx_for_pending_tlcs(
+                                                cell,
+                                                cell_header,
+                                                delay_epoch.unwrap(),
+                                                settlement_data.clone(),
+                                                for_remote,
+                                                pending_tlcs,
+                                                secret_key,
+                                                cell_collector,
+                                                current_time,
+                                                current_epoch,
+                                                store,
+                                            ) {
+                                                Ok(Some(tx)) => match ckb_client
                                                     .send_transaction(tx.data().into(), None)
-                                                    .await
                                                 {
                                                     Ok(tx_hash) => {
                                                         info!("Settlement tx for pending tlcs: {:?} sent, tx_hash: {:#x}", tx, tx_hash);
@@ -611,6 +581,12 @@ async fn try_settle_commitment_tx<S: PreimageStore>(
                                                     Err(err) => {
                                                         error!("Failed to send settlement tx for pending tlcs: {:?}, error: {:?}", tx, err);
                                                     }
+                                                },
+                                                Ok(None) => {
+                                                    info!("No need to settle the commitment tx: {:#x} with pending tlcs", commitment_tx_hash);
+                                                }
+                                                Err(err) => {
+                                                    error!("Failed to build settlement tx for pending tlcs: {:?}", err);
                                                 }
                                             }
                                         }
@@ -643,23 +619,15 @@ async fn try_settle_commitment_tx<S: PreimageStore>(
                                 cell.out_point.tx_hash
                             );
                         } else {
-                            let to_send_tx = match build_settlement_tx(
+                            match build_settlement_tx(
                                 commitment_tx_out_point,
                                 since,
                                 settlement_data.clone(),
                                 secret_key,
                                 cell_collector,
-                            )
-                            .await
-                            {
-                                Ok(tx) => Some(tx),
-                                Err(err) => {
-                                    error!("Failed to build settlement tx: {:?}", err);
-                                    None
-                                }
-                            };
-                            if let Some(tx) = to_send_tx {
-                                match ckb_client.send_transaction(tx.data().into(), None).await {
+                            ) {
+                                Ok(tx) => match ckb_client.send_transaction(tx.data().into(), None)
+                                {
                                     Ok(tx_hash) => {
                                         info!(
                                             "Settlement tx: {:?} sent, tx_hash: {:#x}",
@@ -672,6 +640,9 @@ async fn try_settle_commitment_tx<S: PreimageStore>(
                                             tx, err
                                         );
                                     }
+                                },
+                                Err(err) => {
+                                    error!("Failed to build settlement tx: {:?}", err);
                                 }
                             }
                         }
@@ -686,29 +657,22 @@ async fn try_settle_commitment_tx<S: PreimageStore>(
 }
 
 // find all on-chain transactions with the preimage and store them
-async fn find_preimages<S: PreimageStore>(
-    search_key: SearchKey,
-    ckb_client: &CkbRpcAsyncClient,
-    store: &S,
-) {
+fn find_preimages<S: PreimageStore>(search_key: SearchKey, ckb_client: &CkbRpcClient, store: &S) {
     let mut after = None;
     loop {
-        match ckb_client
-            .get_transactions(
-                search_key.clone(),
-                Order::Desc,
-                100u32.into(),
-                after.clone(),
-            )
-            .await
-        {
+        match ckb_client.get_transactions(
+            search_key.clone(),
+            Order::Desc,
+            100u32.into(),
+            after.clone(),
+        ) {
             Ok(txs) => {
                 if txs.objects.is_empty() {
                     break;
                 }
                 after = Some(txs.last_cursor.clone());
                 for tx in txs.objects {
-                    match ckb_client.get_transaction(tx.tx_hash()).await {
+                    match ckb_client.get_transaction(tx.tx_hash()) {
                         Ok(Some(tx_with_status)) => {
                             if tx_with_status.tx_status.status != Status::Committed {
                                 error!("Cannot find the tx: {:?}, status is {:?}, maybe ckb indexer bug?", tx_with_status.tx_status.status, tx.tx_hash());
@@ -776,7 +740,7 @@ async fn find_preimages<S: PreimageStore>(
     }
 }
 
-async fn build_settlement_tx(
+fn build_settlement_tx(
     commitment_tx_out_point: OutPoint,
     since: u64,
     settlement_data: SettlementData,
@@ -810,13 +774,10 @@ async fn build_settlement_tx(
 
     let mut tx_builder = Transaction::default()
         .as_advanced_builder()
-        .cell_deps(
-            get_cell_deps(
-                vec![Contract::CommitmentLock, Contract::Secp256k1Lock],
-                &to_local_output.type_().to_opt(),
-            )
-            .await?,
-        )
+        .cell_deps(get_cell_deps_sync(
+            vec![Contract::CommitmentLock, Contract::Secp256k1Lock],
+            &to_local_output.type_().to_opt(),
+        )?)
         .input(
             CellInput::new_builder()
                 .previous_output(commitment_tx_out_point)
@@ -966,7 +927,7 @@ fn sign_tx_with_settlement(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn build_settlement_tx_for_pending_tlcs<S: PreimageStore>(
+fn build_settlement_tx_for_pending_tlcs<S: PreimageStore>(
     commitment_tx_cell: Cell,
     cell_header: HeaderView,
     delay_epoch: EpochNumberWithFraction,
@@ -1138,13 +1099,10 @@ async fn build_settlement_tx_for_pending_tlcs<S: PreimageStore>(
             };
             let mut tx_builder = Transaction::default()
                 .as_advanced_builder()
-                .cell_deps(
-                    get_cell_deps(
-                        vec![Contract::CommitmentLock, Contract::Secp256k1Lock],
-                        &None,
-                    )
-                    .await?,
-                )
+                .cell_deps(get_cell_deps_sync(
+                    vec![Contract::CommitmentLock, Contract::Secp256k1Lock],
+                    &None,
+                )?)
                 .input(input)
                 .output(new_commitment_output.clone())
                 .output_data(Bytes::default())
@@ -1263,13 +1221,10 @@ async fn build_settlement_tx_for_pending_tlcs<S: PreimageStore>(
             };
             let mut tx_builder = Transaction::default()
                 .as_advanced_builder()
-                .cell_deps(
-                    get_cell_deps(
-                        vec![Contract::CommitmentLock, Contract::Secp256k1Lock],
-                        &commitment_tx_cell.output.type_.map(|script| script.into()),
-                    )
-                    .await?,
-                )
+                .cell_deps(get_cell_deps_sync(
+                    vec![Contract::CommitmentLock, Contract::Secp256k1Lock],
+                    &commitment_tx_cell.output.type_.map(|script| script.into()),
+                )?)
                 .input(input)
                 .output(new_commitment_output.clone())
                 .output_data(new_commitment_output_data)
@@ -1363,8 +1318,7 @@ async fn build_settlement_tx_for_pending_tlcs<S: PreimageStore>(
             settlement_data,
             secret_key,
             cell_collector,
-        )
-        .await?;
+        )?;
         Ok(Some(tx))
     }
 }

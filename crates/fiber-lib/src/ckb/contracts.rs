@@ -495,27 +495,15 @@ pub async fn get_cell_deps(
     Ok(cell_deps)
 }
 
-// #[cfg(not(target_arch = "wasm32"))]
-// pub fn get_cell_deps_sync(
-//     contracts: Vec<Contract>,
-//     udt_script: &Option<Script>,
-// ) -> Result<CellDepVec, ContractsContextError> {
-//     use tokio::runtime::Handle;
-
-//     // let runtime = Handle::current();
-//     // let (tx, rx) = tokio::sync::oneshot::channel();
-//     // let udt_script = udt_script.clone();
-//     // std::thread::spawn(move || {
-//     //     let result = runtime.block_on(async move { get_cell_deps(contracts, &udt_script).await });
-//     //     tx.send(result).unwrap();
-//     // });
-//     // rx.blocking_recv().unwrap()
-//     // tokio::runtime::Runtime::new()
-//     //     .unwrap()
-//     //     .block_on(get_cell_deps(contracts, &udt_script))
-//     // Handle::current().block_on(get_cell_deps(contracts, &udt_script))
-
-// }
+#[cfg(not(target_arch = "wasm32"))]
+pub fn get_cell_deps_sync(
+    contracts: Vec<Contract>,
+    udt_script: &Option<Script>,
+) -> Result<CellDepVec, ContractsContextError> {
+    tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(get_cell_deps(contracts, &udt_script))
+}
 
 pub fn get_cell_deps_count(contracts: Vec<Contract>, udt_script: &Option<Script>) -> usize {
     let mut count = get_cell_deps_count_by_contracts(contracts);
