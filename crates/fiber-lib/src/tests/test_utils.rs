@@ -56,6 +56,9 @@ use tokio::{
     time::sleep,
 };
 use tracing::debug;
+use tracing::error;
+use tracing::info;
+use tracing::warn;
 
 use crate::fiber::graph::ChannelInfo;
 use crate::fiber::graph::NodeInfo;
@@ -76,8 +79,8 @@ use crate::{
 };
 
 static RETAIN_VAR: &str = "TEST_TEMP_RETAIN";
-pub(crate) const MIN_RESERVED_CKB: u128 = 4200000000;
-pub(crate) const HUGE_CKB_AMOUNT: u128 = MIN_RESERVED_CKB + 1000000000000_u128;
+pub const MIN_RESERVED_CKB: u128 = 4200000000;
+pub const HUGE_CKB_AMOUNT: u128 = MIN_RESERVED_CKB + 1000000000000_u128;
 
 #[derive(Debug)]
 pub struct TempDir(ManuallyDrop<OldTempDir>);
@@ -104,11 +107,15 @@ impl Drop for TempDir {
     fn drop(&mut self) {
         let retain = env::var(RETAIN_VAR);
         if retain.is_ok() {
-            println!(
+            warn!(
                 "Keeping temp directory {:?}, as environment variable {RETAIN_VAR} set",
                 self.as_ref()
             );
         } else {
+            warn!(
+                "Deleting temp directory {:?}. To keep this directory, set environment variable {RETAIN_VAR} to anything",
+                self.as_ref()
+            );
             unsafe {
                 ManuallyDrop::drop(&mut self.0);
             }
@@ -464,6 +471,7 @@ pub(crate) async fn establish_channel_between_nodes(
         .expect("create channel between nodes")
 }
 
+#[cfg(test)]
 pub(crate) async fn create_nodes_with_established_channel(
     node_a_funding_amount: u128,
     node_b_funding_amount: u128,
@@ -486,6 +494,7 @@ pub(crate) async fn create_nodes_with_established_channel(
     (node_a, node_b, channel_id)
 }
 
+#[cfg(test)]
 pub(crate) async fn create_3_nodes_with_established_channel(
     (channel_1_amount_a, channel_1_amount_b): (u128, u128),
     (channel_2_amount_b, channel_2_amount_c): (u128, u128),
@@ -502,6 +511,7 @@ pub(crate) async fn create_3_nodes_with_established_channel(
     (node_a, node_b, node_c, channels[0], channels[1])
 }
 
+#[cfg(test)]
 // make a network like A -> B -> C -> D
 pub(crate) async fn create_n_nodes_with_established_channel(
     amounts: &[(u128, u128)],
@@ -580,7 +590,7 @@ pub(crate) async fn create_n_nodes_network_with_params(
 }
 
 #[allow(clippy::type_complexity)]
-pub(crate) async fn create_n_nodes_network(
+pub async fn create_n_nodes_network(
     amounts: &[((usize, usize), (u128, u128))],
     n: usize,
 ) -> (Vec<NetworkNode>, Vec<Hash256>) {
@@ -666,9 +676,7 @@ impl NetworkNode {
             NetworkActorMessage::Command(NetworkActorCommand::SendPayment(command, rpc_reply))
         };
 
-        let res = call!(self.network_actor, message).expect("source_node alive");
-        eprintln!("result: {:?}", res);
-        res
+        call!(self.network_actor, message).expect("source_node alive")
     }
 
     pub async fn assert_send_payment_success(
@@ -900,10 +908,10 @@ impl NetworkNode {
             assert!(self.get_triggered_unexpected_events().await.is_empty());
             let status = self.get_payment_status(payment_hash).await;
             if status == PaymentSessionStatus::Success {
-                eprintln!("Payment success: {:?}\n\n", payment_hash);
+                error!("Payment success: {:?}\n\n", payment_hash);
                 break;
             } else if status == PaymentSessionStatus::Failed {
-                eprintln!("Payment failed: {:?}\n\n", payment_hash);
+                error!("Payment failed: {:?}\n\n", payment_hash);
                 // report error
                 assert_eq!(status, PaymentSessionStatus::Success);
             }
@@ -916,10 +924,10 @@ impl NetworkNode {
             assert!(self.get_triggered_unexpected_events().await.is_empty());
             let status = self.get_payment_status(payment_hash).await;
             if status == PaymentSessionStatus::Failed {
-                eprintln!("Payment failed: {:?}\n\n", payment_hash);
+                error!("Payment failed: {:?}\n\n", payment_hash);
                 break;
             } else if status == PaymentSessionStatus::Success {
-                eprintln!("Payment success: {:?}\n\n", payment_hash);
+                error!("Payment success: {:?}\n\n", payment_hash);
                 // report error
                 assert_eq!(status, PaymentSessionStatus::Failed);
             }
@@ -941,7 +949,6 @@ impl NetworkNode {
     pub async fn node_info(&self) -> NodeInfoResponse {
         let message =
             |rpc_reply| NetworkActorMessage::Command(NetworkActorCommand::NodeInfo((), rpc_reply));
-        eprintln!("query node_info ...");
 
         call!(self.network_actor, message)
             .expect("node_a alive")
@@ -1043,6 +1050,16 @@ impl NetworkNode {
 
     pub fn get_payment_session(&self, payment_hash: Hash256) -> Option<PaymentSession> {
         self.store.get_payment_session(payment_hash)
+    }
+
+    pub fn assert_router_used(&self, index: usize, payment_hash: Hash256, channel_id: Hash256) {
+        let funding_tx_hash = self.get_channel_funding_tx(&channel_id).unwrap();
+        let channel_outpoint = OutPoint::new(funding_tx_hash.into(), 0);
+        let payment_session = self.get_payment_session(payment_hash).unwrap();
+        assert_eq!(
+            payment_session.route.nodes[index].channel_outpoint,
+            channel_outpoint
+        );
     }
 
     pub fn get_payment_custom_records(
@@ -1171,7 +1188,7 @@ impl NetworkNode {
             }
         });
 
-        println!(
+        info!(
             "Network node started for peer_id {:?} in directory {:?}",
             &peer_id,
             base_dir.as_ref()
@@ -1191,7 +1208,9 @@ impl NetworkNode {
                     None,
                     store.clone(),
                     network_graph.clone(),
+                    #[cfg(debug_assertions)]
                     None,
+                    #[cfg(debug_assertions)]
                     None,
                 )
                 .await,
@@ -1543,6 +1562,13 @@ impl NetworkNode {
     pub fn get_store(&self) -> &Store {
         &self.store
     }
+}
+
+pub async fn create_mock_chain_actor() -> ActorRef<CkbChainMessage> {
+    Actor::spawn(None, MockChainActor::new(), None)
+        .await
+        .expect("start mock chain actor")
+        .0
 }
 
 #[tokio::test]
