@@ -96,6 +96,8 @@ pub struct AddTlcCommand {
     pub shared_secret: [u8; 32],
     #[allow(dead_code)]
     pub previous_tlc: Option<(Hash256, u64)>,
+    pub total_amount: Option<u128>,
+    pub payment_secret: Option<Hash256>,
 }
 
 pub struct NetworkActor {}
@@ -217,6 +219,8 @@ impl Actor for TlcActor {
                     previous_tlc: None,
                     status: TlcStatus::Outbound(OutboundTlcStatus::LocalAnnounced),
                     removed_confirmed_at: None,
+                    total_amount: command.total_amount,
+                    payment_secret: command.payment_secret,
                 };
                 state.tlc_state.add_offered_tlc(add_tlc.clone());
                 state.tlc_state.increment_offering();
@@ -379,11 +383,14 @@ async fn test_tlc_actor() {
                 onion_packet: None,
                 shared_secret: NO_SHARED_SECRET,
                 previous_tlc: None,
+                total_amount: None,
+                payment_secret: None,
             },
         ))
         .unwrap();
 
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
     network_actor
         .send_message(NetworkActorMessage::AddTlc(
             "peer_a".to_string(),
@@ -396,11 +403,14 @@ async fn test_tlc_actor() {
                 onion_packet: None,
                 shared_secret: NO_SHARED_SECRET,
                 previous_tlc: None,
+                total_amount: None,
+                payment_secret: None,
             },
         ))
         .unwrap();
 
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
     network_actor
         .send_message(NetworkActorMessage::AddTlc(
             "peer_b".to_string(),
@@ -413,11 +423,14 @@ async fn test_tlc_actor() {
                 onion_packet: None,
                 shared_secret: NO_SHARED_SECRET,
                 previous_tlc: None,
+                total_amount: None,
+                payment_secret: None,
             },
         ))
         .unwrap();
 
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
     network_actor
         .send_message(NetworkActorMessage::AddTlc(
             "peer_b".to_string(),
@@ -430,6 +443,8 @@ async fn test_tlc_actor() {
                 onion_packet: None,
                 shared_secret: NO_SHARED_SECRET,
                 previous_tlc: None,
+                total_amount: None,
+                payment_secret: None,
             },
         ))
         .unwrap();
@@ -477,6 +492,8 @@ fn test_tlc_state_v2() {
         removed_reason: None,
         previous_tlc: None,
         removed_confirmed_at: None,
+        total_amount: None,
+        payment_secret: None,
     };
     let mut add_tlc2 = TlcInfo {
         amount: 20000,
@@ -493,6 +510,8 @@ fn test_tlc_state_v2() {
         removed_reason: None,
         previous_tlc: None,
         removed_confirmed_at: None,
+        total_amount: None,
+        payment_secret: None,
     };
     tlc_state.add_offered_tlc(add_tlc1.clone());
     tlc_state.add_offered_tlc(add_tlc2.clone());

@@ -29,6 +29,8 @@ async fn test_send_mpp() {
         .amount(Some(20000000000))
         .payment_preimage(preimage)
         .payee_pub_key(target_pubkey.into())
+        .allow_mpp(true)
+        .payment_secret(gen_rand_sha256_hash())
         .build()
         .expect("build invoice success");
 
@@ -66,6 +68,138 @@ async fn test_send_mpp() {
 }
 
 #[tokio::test]
+async fn test_send_mpp_will_not_enabled_if_not_set_allow_mpp() {
+    init_tracing();
+
+    let (nodes, _channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+            ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+        ],
+        2,
+    )
+    .await;
+    let [mut node_0, mut node_1] = nodes.try_into().expect("2 nodes");
+    let source_node = &mut node_0;
+    let target_pubkey = node_1.pubkey;
+
+    let preimage = gen_rand_sha256_hash();
+    let ckb_invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(20000000000))
+        .payment_preimage(preimage)
+        .payee_pub_key(target_pubkey.into())
+        .payment_secret(gen_rand_sha256_hash())
+        .build()
+        .expect("build invoice success");
+
+    node_1.insert_invoice(ckb_invoice.clone(), Some(preimage));
+
+    let res = source_node
+        .send_payment(SendPaymentCommand {
+            invoice: Some(ckb_invoice.to_string()),
+            amount: ckb_invoice.amount,
+            max_parts: Some(2),
+            ..Default::default()
+        })
+        .await;
+
+    eprintln!("res: {:?}", res);
+    assert!(res.is_err(), "should fail because allow_mpp is not set");
+    // no path found since mpp is not enabled
+    assert!(res.unwrap_err().contains("no path found"));
+}
+
+#[tokio::test]
+async fn test_send_mpp_without_payment_secret_will_fail() {
+    init_tracing();
+
+    let (nodes, _channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+            ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+        ],
+        2,
+    )
+    .await;
+    let [mut node_0, mut node_1] = nodes.try_into().expect("2 nodes");
+    let source_node = &mut node_0;
+    let target_pubkey = node_1.pubkey;
+
+    let preimage = gen_rand_sha256_hash();
+    let ckb_invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(20000000000))
+        .payment_preimage(preimage)
+        .payee_pub_key(target_pubkey.into())
+        .allow_mpp(true)
+        .build()
+        .expect("build invoice success");
+
+    node_1.insert_invoice(ckb_invoice.clone(), Some(preimage));
+
+    let res = source_node
+        .send_payment(SendPaymentCommand {
+            invoice: Some(ckb_invoice.to_string()),
+            amount: ckb_invoice.amount,
+            max_parts: Some(2),
+            ..Default::default()
+        })
+        .await;
+
+    eprintln!("res: {:?}", res);
+    assert!(
+        res.is_err(),
+        "should fail because payment secret is missing"
+    );
+    assert!(res
+        .unwrap_err()
+        .contains("payment secret is required for multi-path payment"));
+}
+
+#[tokio::test]
+async fn test_send_mpp_with_max_parts_1_will_fail() {
+    init_tracing();
+
+    let (nodes, _channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+            ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+        ],
+        2,
+    )
+    .await;
+    let [mut node_0, mut node_1] = nodes.try_into().expect("2 nodes");
+    let source_node = &mut node_0;
+    let target_pubkey = node_1.pubkey;
+
+    let preimage = gen_rand_sha256_hash();
+    let ckb_invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(20000000000))
+        .payment_preimage(preimage)
+        .payee_pub_key(target_pubkey.into())
+        .allow_mpp(true)
+        .payment_secret(gen_rand_sha256_hash())
+        .build()
+        .expect("build invoice success");
+
+    node_1.insert_invoice(ckb_invoice.clone(), Some(preimage));
+
+    let res = source_node
+        .send_payment(SendPaymentCommand {
+            invoice: Some(ckb_invoice.to_string()),
+            amount: ckb_invoice.amount,
+            max_parts: Some(1),
+            ..Default::default()
+        })
+        .await;
+
+    eprintln!("res: {:?}", res);
+    assert!(res.is_err(), "should fail because max_parts is 1");
+    assert!(res
+        .unwrap_err()
+        .contains("max_parts should be greater than 1 for multi-path payment"));
+}
+
+#[tokio::test]
 async fn test_send_mpp_amount_split() {
     init_tracing();
 
@@ -86,6 +220,8 @@ async fn test_send_mpp_amount_split() {
         .amount(Some(15000000000))
         .payment_preimage(preimage)
         .payee_pub_key(target_pubkey.into())
+        .allow_mpp(true)
+        .payment_secret(gen_rand_sha256_hash())
         .build()
         .expect("build invoice success");
 

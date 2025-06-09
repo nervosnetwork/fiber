@@ -904,20 +904,15 @@ where
         let target = payment_data.target_pubkey;
         let final_tlc_expiry_delta = payment_data.final_tlc_expiry_delta;
         let allow_self_payment = payment_data.allow_self_payment;
+        let allow_mpp = payment_data.allow_mpp();
+        let max_parts = payment_data.max_parts();
         let mut max_amount = amount;
-        let min_amount = if payment_data.allow_mpp() {
+        let min_amount = if allow_mpp {
             DEFAULT_MPP_MIN_AMOUNT
         } else {
             amount
         };
 
-        // TODO check feature bits after https://github.com/nervosnetwork/fiber/pull/719/files is merged
-        // if max_parts is set, and keysend is not set, then allow mpp
-        // in keysend mode, receiver doesn't know the amount to receive, so we don't allow mpp
-        let (allow_mpp, max_parts) = match payment_data.max_parts {
-            Some(max_parts) if max_parts > 1 && !payment_data.keysend => (true, max_parts),
-            _ => (false, 1),
-        };
         let is_last_part = active_parts + 1 >= max_parts as usize;
 
         if source == target && !allow_self_payment {
@@ -931,7 +926,6 @@ where
         } else {
             // try find half
             loop {
-                dbg!("now try find path with max_amount: {}", max_amount);
                 match self.find_path(
                     source,
                     target,
@@ -959,7 +953,6 @@ where
 
         assert!(!route.is_empty());
 
-        dbg!("found route: {:?}", &route);
         Ok(self.build_router_from_path(&route, max_amount, payment_data))
     }
 
@@ -992,6 +985,7 @@ where
                 custom_records: None,
             });
         }
+
         hops_data.push(PaymentHopData {
             amount: max_amount,
             next_hop: None,

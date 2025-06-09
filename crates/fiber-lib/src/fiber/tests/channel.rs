@@ -1154,6 +1154,8 @@ async fn test_network_send_previous_tlc_error() {
                         onion_packet: packet.next.clone(),
                         shared_secret: packet.shared_secret,
                         previous_tlc: None,
+                        total_amount: None,
+                        payment_secret: None,
                     },
                     rpc_reply,
                 ),
@@ -1268,6 +1270,8 @@ async fn test_network_send_previous_tlc_error_with_limit_amount_error() {
                         onion_packet: packet.next.clone(),
                         shared_secret: packet.shared_secret,
                         previous_tlc: None,
+                        total_amount: None,
+                        payment_secret: None,
                     },
                     rpc_reply,
                 ),
@@ -2242,6 +2246,8 @@ async fn do_test_channel_commitment_tx_after_add_tlc(algorithm: HashAlgorithm) {
                         onion_packet: None,
                         shared_secret: NO_SHARED_SECRET,
                         previous_tlc: None,
+                        total_amount: None,
+                        payment_secret: None,
                     },
                     rpc_reply,
                 ),
@@ -2363,6 +2369,8 @@ async fn do_test_remove_tlc_with_wrong_hash_algorithm(
                         onion_packet: None,
                         shared_secret: NO_SHARED_SECRET,
                         previous_tlc: None,
+                        total_amount: None,
+                        payment_secret: None,
                     },
                     rpc_reply,
                 ),
@@ -2416,6 +2424,8 @@ async fn do_test_remove_tlc_with_wrong_hash_algorithm(
                         onion_packet: None,
                         shared_secret: NO_SHARED_SECRET,
                         previous_tlc: None,
+                        total_amount: None,
+                        payment_secret: None,
                     },
                     rpc_reply,
                 ),
@@ -2497,6 +2507,8 @@ async fn do_test_channel_remote_commitment_error() {
                             onion_packet: None,
                             shared_secret: NO_SHARED_SECRET,
                             previous_tlc: None,
+                            total_amount: None,
+                            payment_secret: None,
                         },
                         rpc_reply,
                     ),
@@ -2584,6 +2596,8 @@ async fn do_test_channel_add_tlc_amount_invalid() {
                             onion_packet: None,
                             shared_secret: NO_SHARED_SECRET,
                             previous_tlc: None,
+                            total_amount: None,
+                            payment_secret: None,
                         },
                         rpc_reply,
                     ),
@@ -2650,6 +2664,8 @@ async fn test_network_add_two_tlcs_remove_one() {
                         onion_packet: None,
                         shared_secret: NO_SHARED_SECRET,
                         previous_tlc: None,
+                        total_amount: None,
+                        payment_secret: None,
                     },
                     rpc_reply,
                 ),
@@ -2677,6 +2693,8 @@ async fn test_network_add_two_tlcs_remove_one() {
                         onion_packet: None,
                         shared_secret: NO_SHARED_SECRET,
                         previous_tlc: None,
+                        total_amount: None,
+                        payment_secret: None,
                     },
                     rpc_reply,
                 ),
@@ -2702,6 +2720,8 @@ async fn test_network_add_two_tlcs_remove_one() {
                         onion_packet: None,
                         shared_secret: NO_SHARED_SECRET,
                         previous_tlc: None,
+                        total_amount: None,
+                        payment_secret: None,
                     },
                     rpc_reply,
                 ),
@@ -2801,6 +2821,8 @@ async fn test_remove_tlc_with_expiry_error() {
         onion_packet: None,
         shared_secret: NO_SHARED_SECRET,
         previous_tlc: None,
+        total_amount: None,
+        payment_secret: None,
     };
 
     std::thread::sleep(std::time::Duration::from_millis(400));
@@ -2825,6 +2847,8 @@ async fn test_remove_tlc_with_expiry_error() {
         onion_packet: None,
         shared_secret: NO_SHARED_SECRET,
         previous_tlc: None,
+        total_amount: None,
+        payment_secret: None,
     };
 
     let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
@@ -2865,6 +2889,8 @@ async fn do_test_add_tlc_duplicated() {
             onion_packet: None,
             shared_secret: NO_SHARED_SECRET,
             previous_tlc: None,
+            total_amount: None,
+            payment_secret: None,
         };
         let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
             NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
@@ -2905,6 +2931,8 @@ async fn do_test_add_tlc_waiting_ack() {
             onion_packet: None,
             shared_secret: NO_SHARED_SECRET,
             previous_tlc: None,
+            total_amount: None,
+            payment_secret: None,
         };
         let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
             NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
@@ -2937,6 +2965,8 @@ async fn do_test_add_tlc_waiting_ack() {
             onion_packet: None,
             previous_tlc: None,
             shared_secret: NO_SHARED_SECRET,
+            total_amount: None,
+            payment_secret: None,
         };
         let add_tlc_result = call!(node_b.network_actor, |rpc_reply| {
             NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
@@ -2993,6 +3023,8 @@ async fn do_test_add_tlc_with_number_limit() {
             onion_packet: None,
             shared_secret: NO_SHARED_SECRET,
             previous_tlc: None,
+            total_amount: None,
+            payment_secret: None,
         };
         let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
             NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
@@ -3025,6 +3057,8 @@ async fn do_test_add_tlc_with_number_limit() {
             onion_packet: None,
             shared_secret: NO_SHARED_SECRET,
             previous_tlc: None,
+            total_amount: None,
+            payment_secret: None,
         };
         let add_tlc_result = call!(node_b.network_actor, |rpc_reply| {
             NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
@@ -3074,6 +3108,8 @@ async fn do_test_add_tlc_number_limit_reverse() {
             onion_packet: None,
             shared_secret: NO_SHARED_SECRET,
             previous_tlc: None,
+            total_amount: None,
+            payment_secret: None,
         };
         let add_tlc_result = call!(node_b.network_actor, |rpc_reply| {
             NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
@@ -3106,6 +3142,8 @@ async fn do_test_add_tlc_number_limit_reverse() {
             onion_packet: None,
             shared_secret: NO_SHARED_SECRET,
             previous_tlc: None,
+            total_amount: None,
+            payment_secret: None,
         };
         let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
             NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
@@ -3156,6 +3194,8 @@ async fn do_test_add_tlc_value_limit() {
             onion_packet: None,
             shared_secret: NO_SHARED_SECRET,
             previous_tlc: None,
+            total_amount: None,
+            payment_secret: None,
         };
         let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
             NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
@@ -3189,6 +3229,8 @@ async fn do_test_add_tlc_value_limit() {
             onion_packet: None,
             shared_secret: NO_SHARED_SECRET,
             previous_tlc: None,
+            total_amount: None,
+            payment_secret: None,
         };
         let add_tlc_result = call!(node_b.network_actor, |rpc_reply| {
             NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
@@ -3237,6 +3279,8 @@ async fn do_test_add_tlc_min_tlc_value_limit() {
         onion_packet: None,
         previous_tlc: None,
         shared_secret: NO_SHARED_SECRET,
+        total_amount: None,
+        payment_secret: None,
     };
     let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
@@ -3262,6 +3306,8 @@ async fn do_test_add_tlc_min_tlc_value_limit() {
         onion_packet: None,
         previous_tlc: None,
         shared_secret: NO_SHARED_SECRET,
+        total_amount: None,
+        payment_secret: None,
     };
     let add_tlc_result = call!(node_b.network_actor, |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
@@ -3287,6 +3333,8 @@ async fn do_test_add_tlc_min_tlc_value_limit() {
         onion_packet: None,
         previous_tlc: None,
         shared_secret: NO_SHARED_SECRET,
+        total_amount: None,
+        payment_secret: None,
     };
     let add_tlc_result = call!(node_b.network_actor, |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
@@ -3547,6 +3595,8 @@ async fn test_forward_payment_tlc_minimum_value() {
         onion_packet: None,
         previous_tlc: None,
         shared_secret: NO_SHARED_SECRET,
+        total_amount: None,
+        payment_secret: None,
     };
     let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
@@ -3727,6 +3777,8 @@ async fn do_test_channel_with_simple_update_operation(algorithm: HashAlgorithm) 
                         onion_packet: None,
                         shared_secret: NO_SHARED_SECRET,
                         previous_tlc: None,
+                        total_amount: None,
+                        payment_secret: None,
                     },
                     rpc_reply,
                 ),
@@ -4370,6 +4422,8 @@ async fn test_normal_shutdown_with_remove_tlc() {
                         onion_packet: None,
                         shared_secret: NO_SHARED_SECRET,
                         previous_tlc: None,
+                        total_amount: None,
+                        payment_secret: None,
                     },
                     rpc_reply,
                 ),
@@ -4625,6 +4679,8 @@ async fn test_node_reestablish_resend_remove_tlc() {
                         onion_packet: None,
                         shared_secret: NO_SHARED_SECRET,
                         previous_tlc: None,
+                        total_amount: None,
+                        payment_secret: None,
                     },
                     rpc_reply,
                 ),

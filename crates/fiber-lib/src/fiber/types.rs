@@ -1560,6 +1560,7 @@ pub enum TlcErrorCode {
     AmountBelowMinimum = UPDATE | 11,
     FeeInsufficient = UPDATE | 12,
     IncorrectTlcExpiry = UPDATE | 13,
+    TotalAmountMismatch = UPDATE | 14,
     ExpiryTooSoon = PERM | 14,
     IncorrectOrUnknownPaymentDetails = PERM | 15,
     InvoiceExpired = PERM | 16,
@@ -3683,9 +3684,54 @@ pub(crate) fn deterministically_hash<T: Entity>(v: &T) -> [u8; 32] {
     ckb_hash::blake2b_256(v.as_slice())
 }
 
+/// Bolt04 payment data record
+pub struct PaymentDataRecord {
+    pub payment_secret: Hash256,
+    pub total_amount: u128,
+}
+
+impl PaymentDataRecord {
+    // record type for payment data record in bolt04
+    pub const RECORD_TYPE: u32 = 8;
+
+    pub fn new(payment_secret: Hash256, total_amount: u128) -> Self {
+        Self {
+            payment_secret,
+            total_amount,
+        }
+    }
+
+    fn to_vec(&self) -> Vec<u8> {
+        let mut vec = Vec::new();
+        vec.extend_from_slice(self.payment_secret.as_ref());
+        vec.extend_from_slice(&self.total_amount.to_le_bytes());
+        vec
+    }
+
+    pub fn write(self, custom_records: &mut PaymentCustomRecords) {
+        custom_records.data.insert(Self::RECORD_TYPE, self.to_vec());
+    }
+
+    pub fn read(custom_records: &PaymentCustomRecords) -> Option<Self> {
+        custom_records
+            .data
+            .get(&Self::RECORD_TYPE)
+            .and_then(|data| {
+                if data.len() != 32 + 16 {
+                    return None;
+                }
+                let secret: [u8; 32] = data[..32].try_into().unwrap();
+                let payment_secret = Hash256::from(secret);
+                let total_amount = u128::from_le_bytes(data[32..].try_into().unwrap());
+                Some(Self::new(payment_secret, total_amount))
+            })
+    }
+}
+
 #[serde_as]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaymentHopData {
+    /// The amount of the tlc, <= total amount
     pub amount: u128,
     pub expiry: u64,
     pub payment_preimage: Option<Hash256>,

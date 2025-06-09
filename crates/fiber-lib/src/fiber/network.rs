@@ -55,7 +55,7 @@ use super::channel::{
     MAX_COMMITMENT_DELAY_EPOCHS, MAX_TLC_NUMBER_IN_FLIGHT, MIN_COMMITMENT_DELAY_EPOCHS,
     SYS_MAX_TLC_NUMBER_IN_FLIGHT,
 };
-use super::config::{AnnouncedNodeName, MIN_TLC_EXPIRY_DELTA};
+use super::config::{AnnouncedNodeName, DEFAULT_MAX_PARTS, MIN_TLC_EXPIRY_DELTA};
 use super::features::FeatureVector;
 use super::fee::calculate_commitment_tx_fee;
 use super::gossip::{GossipActorMessage, GossipMessageStore, GossipMessageUpdates};
@@ -65,8 +65,8 @@ use super::graph::{
 use super::key::blake2b_hash_with_salt;
 use super::types::{
     BroadcastMessageWithTimestamp, EcdsaSignature, FiberMessage, ForwardTlcResult, GossipMessage,
-    Hash256, Init, NodeAnnouncement, OpenChannel, PaymentHopData, Privkey, Pubkey,
-    RemoveTlcFulfill, RemoveTlcReason, TlcErr, TlcErrData, TlcErrorCode,
+    Hash256, Init, NodeAnnouncement, OpenChannel, PaymentDataRecord, PaymentHopData, Privkey,
+    Pubkey, RemoveTlcFulfill, RemoveTlcReason, TlcErr, TlcErrData, TlcErrorCode,
 };
 use super::{
     FiberConfig, InFlightCkbTxActor, InFlightCkbTxActorArguments, InFlightCkbTxActorMessage,
@@ -462,6 +462,7 @@ pub struct SendPaymentData {
     pub allow_self_payment: bool,
     pub hop_hints: Vec<HopHint>,
     pub router: Vec<RouterHop>,
+    pub allow_mpp: bool,
     pub dry_run: bool,
 }
 
@@ -598,6 +599,34 @@ impl SendPaymentData {
 
         let hop_hints = command.hop_hints.unwrap_or_default();
 
+        let allow_mpp = invoice.as_ref().is_some_and(|inv| inv.allow_mpp());
+        let payment_secret = invoice
+            .as_ref()
+            .and_then(|inv| inv.payment_secret().cloned());
+        if allow_mpp && payment_secret.is_none() {
+            return Err("payment secret is required for multi-path payment".to_string());
+        }
+        if allow_mpp && command.max_parts.is_some_and(|max_parts| max_parts <= 1) {
+            return Err("max_parts should be greater than 1 for multi-path payment".to_string());
+        }
+
+        let mut custom_records = command.custom_records;
+
+        // bolt04 write payment data record to custom records if payment secret is set
+        if let Some(payment_secret) = payment_secret {
+            if custom_records.is_none() {
+                custom_records = Some(PaymentCustomRecords::default());
+            }
+            let records = custom_records.as_mut().unwrap();
+
+            if records.data.contains_key(&PaymentDataRecord::RECORD_TYPE) {
+                return Err("custom_records should not contain payment_data_record".to_string());
+            }
+
+            let payment_data_record = PaymentDataRecord::new(payment_secret, amount);
+            payment_data_record.write(records);
+        }
+
         Ok(SendPaymentData {
             target_pubkey: target,
             amount,
@@ -611,16 +640,22 @@ impl SendPaymentData {
             keysend,
             udt_type_script,
             preimage,
-            custom_records: command.custom_records,
+            custom_records,
             allow_self_payment: command.allow_self_payment,
             hop_hints,
+            allow_mpp,
             router: vec![],
             dry_run: command.dry_run,
         })
     }
 
+    pub fn max_parts(&self) -> u64 {
+        self.max_parts.unwrap_or(DEFAULT_MAX_PARTS)
+    }
+
     pub fn allow_mpp(&self) -> bool {
-        self.max_parts.unwrap_or(1) > 1
+        // only allow mpp if max_parts is greater than 1 and not keysend
+        self.allow_mpp && self.max_parts() > 1 && !self.keysend
     }
 }
 
@@ -1806,6 +1841,19 @@ where
                 return Err(tlc_err);
             }
         };
+
+        let payment_data_record = peeled_onion_packet
+            .current
+            .custom_records
+            .as_ref()
+            .and_then(PaymentDataRecord::read);
+        let total_amount = payment_data_record
+            .as_ref()
+            .map(|record| record.total_amount);
+        let payment_secret = payment_data_record
+            .as_ref()
+            .map(|record| record.payment_secret);
+
         let (send, _recv) = oneshot::channel::<Result<AddTlcResponse, TlcErr>>();
         // explicitly don't wait for the response, we will handle the result in AddTlcResult
         let rpc_reply = RpcReplyPort::from(send);
@@ -1819,6 +1867,8 @@ where
                 onion_packet: peeled_onion_packet.next.clone(),
                 shared_secret,
                 previous_tlc,
+                total_amount,
+                payment_secret,
             },
             rpc_reply,
         );
@@ -2049,7 +2099,6 @@ where
                     "Failed to create onion packet: {:?}, error: {:?}",
                     attempt.hash, e
                 );
-                dbg!("set attempt failed to ", &err);
                 self.set_attempt_fail_with_error(attempt, &err, false);
                 return Err(Error::SendPaymentFirstHopError(err, false));
             }
@@ -2083,7 +2132,6 @@ where
                     "send onion packet failed: {:?} need_to_retry: {:?}",
                     err, need_to_retry
                 );
-                dbg!("set attempt failed to ", &err);
                 self.set_attempt_fail_with_error(attempt, &err, need_to_retry);
                 return Err(Error::SendPaymentFirstHopError(err, need_to_retry));
             }

@@ -51,6 +51,11 @@ pub struct AddTlcParams {
     pub expiry: u64,
     /// The hash algorithm of the TLC
     pub hash_algorithm: Option<HashAlgorithm>,
+    /// The total amount of the TLC
+    #[serde_as(as = "Option<U128Hex>")]
+    pub total_amount: Option<u128>,
+    /// The payment secret of the TLC
+    pub payment_secret: Option<Hash256>,
 }
 
 #[serde_as]
@@ -179,6 +184,8 @@ impl DevRpcServer for DevRpcServerImpl {
                             onion_packet: None,
                             shared_secret: NO_SHARED_SECRET,
                             previous_tlc: None,
+                            total_amount: params.total_amount,
+                            payment_secret: params.payment_secret,
                         },
                         rpc_reply,
                     ),

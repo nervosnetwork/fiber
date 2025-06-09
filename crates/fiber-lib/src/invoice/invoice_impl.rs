@@ -133,6 +133,8 @@ pub enum Attribute {
     HashAlgorithm(HashAlgorithm),
     /// The feature flags of the invoice
     Feature(FeatureVector),
+    /// The payment secret of the invoice
+    PaymentSecret(Hash256),
 }
 
 /// The metadata of the invoice
@@ -344,6 +346,7 @@ impl CkbInvoice {
     );
     attr_getter!(fallback_address, FallbackAddr, String);
     attr_getter!(hash_algorithm, HashAlgorithm, HashAlgorithm);
+    attr_getter!(payment_secret, PaymentSecret, Hash256);
 
     pub fn allow_mpp(&self) -> bool {
         self.data
@@ -538,6 +541,11 @@ impl From<Attribute> for InvoiceAttr {
                     .value(Byte::new(hash_algorithm as u8))
                     .build(),
             ),
+            Attribute::PaymentSecret(payment_secret) => InvoiceAttrUnion::PaymentSecret(
+                PaymentSecret::new_builder()
+                    .value(payment_secret.into())
+                    .build(),
+            ),
         };
         InvoiceAttr::new_builder().set(a).build()
     }
@@ -584,6 +592,7 @@ impl From<InvoiceAttr> for Attribute {
                 let hash_algorithm = value.try_into().unwrap_or_default();
                 Attribute::HashAlgorithm(hash_algorithm)
             }
+            InvoiceAttrUnion::PaymentSecret(x) => Attribute::PaymentSecret(x.value().into()),
         }
     }
 }
@@ -652,6 +661,10 @@ impl InvoiceBuilder {
 
     pub fn hash_algorithm(self, algorithm: HashAlgorithm) -> Self {
         self.add_attr(Attribute::HashAlgorithm(algorithm))
+    }
+
+    pub fn payment_secret(self, payment_secret: Hash256) -> Self {
+        self.add_attr(Attribute::PaymentSecret(payment_secret))
     }
 
     attr_setter!(description, Description, String);

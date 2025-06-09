@@ -4061,6 +4061,8 @@ async fn test_shutdown_with_pending_tlc() {
                         shared_secret: NO_SHARED_SECRET,
                         previous_tlc: None,
                         attempt_id: None,
+                        total_amount: None,
+                        payment_secret: None,
                     },
                     rpc_reply,
                 ),
