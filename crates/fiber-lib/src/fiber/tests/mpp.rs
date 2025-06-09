@@ -215,7 +215,7 @@ async fn test_send_mpp_fee_rate() {
     let payment_hash = res.payment_hash;
     node_0.wait_until_success(payment_hash).await;
     assert!(res.fee > 0);
-    let nodes = res.router.nodes;
+    let nodes = &res.routers[0].nodes;
     assert_eq!(nodes.len(), 3);
     assert_eq!(nodes[2].amount, 187500000);
     assert_eq!(nodes[1].amount, 187500000);

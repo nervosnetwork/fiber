@@ -289,7 +289,7 @@ async fn test_send_payment_fee_rate() {
     assert!(res.is_ok(), "Send payment failed: {:?}", res);
     let res = res.unwrap();
     assert!(res.fee > 0);
-    let nodes = res.router.nodes;
+    let nodes = &res.routers[0].nodes;
     assert_eq!(nodes.len(), 3);
     assert_eq!(nodes[2].amount, 10_000_000);
     assert_eq!(nodes[1].amount, 10_000_000);
@@ -302,7 +302,7 @@ async fn test_send_payment_fee_rate() {
     assert!(res.is_ok(), "Send payment failed: {:?}", res);
     let res = res.unwrap();
     assert!(res.fee > 0);
-    let nodes = res.router.nodes;
+    let nodes = &res.routers[0].nodes;
     assert_eq!(nodes.len(), 3);
     assert_eq!(nodes[2].amount, 1_000_000);
     assert_eq!(nodes[1].amount, 1_000_000);
@@ -745,7 +745,7 @@ async fn test_send_payment_hophint_for_middle_channels_does_not_work() {
     // the router is wrong with node1 -> node2 -> node4
     // the second channel is private_channel_outpoint
     assert_eq!(
-        res.router.nodes[1].channel_outpoint,
+        res.routers[0].nodes[1].channel_outpoint,
         private_channel_outpoint
     );
     let payment_hash = res.payment_hash;
@@ -4760,7 +4760,7 @@ async fn test_send_payment_pending_count_on_find_path() {
             .unwrap();
 
         let payment_hash = res.payment_hash;
-        let second_hop_channel = res.router.nodes[1].channel_outpoint.clone();
+        let second_hop_channel = res.routers[0].nodes[1].channel_outpoint.clone();
         channel_stats_map
             .entry(second_hop_channel)
             .and_modify(|e| *e += 1)
@@ -4815,14 +4815,14 @@ async fn test_send_payment_check_router_always_the_right_one() {
             .send_payment_keysend(&nodes[2], 100, false)
             .await
             .unwrap();
-        check_router(&res.router);
+        check_router(&res.routers[0]);
     }
 
     let res = nodes[0]
         .send_payment_keysend(&nodes[2], 100, false)
         .await
         .unwrap();
-    check_router(&res.router);
+    check_router(&res.routers[0]);
 }
 
 #[tokio::test]

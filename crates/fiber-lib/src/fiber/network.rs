@@ -170,7 +170,7 @@ pub struct SendPaymentResponse {
     pub custom_records: Option<PaymentCustomRecords>,
     pub fee: u128,
     #[cfg(any(debug_assertions, feature = "bench"))]
-    pub router: SessionRoute,
+    pub routers: Vec<SessionRoute>,
 }
 
 /// What kind of local information should be broadcasted to the network.

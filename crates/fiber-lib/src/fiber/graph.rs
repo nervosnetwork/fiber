@@ -1630,6 +1630,7 @@ pub struct SessionRouteNode {
     /// the public key of the node
     pub pubkey: Pubkey,
     /// the amount for this hop
+    #[serde_as(as = "U128Hex")]
     pub amount: u128,
     /// the channel outpoint for this hop
     #[serde_as(as = "EntityHex")]
@@ -1945,21 +1946,13 @@ impl From<PaymentSession> for SendPaymentResponse {
     fn from(session: PaymentSession) -> Self {
         let status = session.decide_payment_status();
         let fee = session.fee_paid();
-        let attempts = session.attempts();
-        let route = match status {
-            PaymentSessionStatus::Created | PaymentSessionStatus::Inflight => attempts.first(),
-            PaymentSessionStatus::Success => attempts.iter().find(|a| a.is_settled()),
-            PaymentSessionStatus::Failed => attempts.iter().find(|a| a.last_error.is_some()),
-        }
-        .map(|a| a.route.clone())
-        .unwrap_or_default();
-        dbg!(
-            route.nodes.len(),
-            fee,
-            &status,
-            attempts.len(),
-            session.try_limit
-        );
+        let all_attempts = session.attempts();
+        let attempts = all_attempts
+            .iter()
+            .filter(|a| !a.is_failed())
+            .collect::<Vec<_>>();
+
+        dbg!(fee, &status, attempts.len(), session.try_limit);
         Self {
             payment_hash: session.request.payment_hash,
             status,
@@ -1969,7 +1962,7 @@ impl From<PaymentSession> for SendPaymentResponse {
             custom_records: session.request.custom_records,
             fee,
             #[cfg(any(debug_assertions, feature = "bench"))]
-            router: route,
+            routers: attempts.iter().map(|a| a.route.clone()).collect::<Vec<_>>(),
         }
     }
 }

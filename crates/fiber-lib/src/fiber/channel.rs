@@ -3998,7 +3998,6 @@ pub(crate) fn occupied_capacity(
 }
 
 // Constructors for the channel actor state.
-#[allow(clippy::too_many_arguments)]
 impl ChannelActorState {
     pub fn network(&self) -> ActorRef<NetworkActorMessage> {
         self.network
@@ -4347,6 +4346,7 @@ impl ChannelActorState {
         ))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn new_inbound_channel(
         temp_channel_id: Hash256,
         public_channel_info: Option<PublicChannelInfo>,
@@ -5106,20 +5106,6 @@ impl ChannelActorState {
                 tlc.tlc_id, next_tlc_id
             )));
         }
-
-        // TODO remove here, mpp has same payment hash for each tlc
-        // // If all the tlcs with the same payment hash are confirmed to be failed,
-        // // then it's safe to insert the new tlc, the old tlcs will be removed later.
-        // if self
-        //     .tlc_state
-        //     .all_tlcs()
-        //     .any(|tlc| tlc.payment_hash == payment_hash && !tlc.is_fail_remove_confirmed())
-        // {
-        //     return Err(ProcessingChannelError::RepeatedProcessing(format!(
-        //         "Trying to insert tlc with duplicate payment hash {:?}",
-        //         payment_hash
-        //     )));
-        // }
 
         if tlc.is_offered() {
             let sent_tlc_value = self.get_offered_tlc_balance();

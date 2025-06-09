@@ -890,8 +890,7 @@ impl NetworkNode {
         payment_result: &SendPaymentResponse,
         channel_id: Hash256,
     ) {
-        let used_channels = payment_result
-            .router
+        let used_channels = payment_result.routers[0]
             .nodes
             .iter()
             .map(|r| r.channel_outpoint.clone())

@@ -82,6 +82,7 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
     * [Type `RemoveTlcReason`](#type-removetlcreason)
     * [Type `RevocationData`](#type-revocationdata)
     * [Type `RouterHop`](#type-routerhop)
+    * [Type `SessionRoute`](#type-sessionroute)
     * [Type `SessionRouteNode`](#type-sessionroutenode)
     * [Type `SettlementData`](#type-settlementdata)
     * [Type `SettlementTlc`](#type-settlementtlc)
@@ -653,9 +654,10 @@ Sends a payment to a peer.
 * `failed_error` - <em>`Option<String>`</em>, The error message if the payment failed
 * `fee` - <em>`u128`</em>, fee paid for the payment
 * `custom_records` - <em>Option<[PaymentCustomRecords](#type-paymentcustomrecords)></em>, The custom records to be included in the payment.
-* `router` - <em>Vec<[SessionRouteNode](#type-sessionroutenode)></em>, The router is a list of nodes that the payment will go through.
+* `routers` - <em>Vec<[SessionRoute](#type-sessionroute)></em>, The router is a list of nodes that the payment will go through.
  We store in the payment session and then will use it to track the payment history.
  The router is a list of nodes that the payment will go through.
+ If the payment adapted MPP (multi-part payment), the routers will be a list of nodes
  For example:
     `A(amount, channel) -> B -> C -> D`
  means A will send `amount` with `channel` to B.
@@ -682,9 +684,10 @@ Retrieves a payment.
 * `failed_error` - <em>`Option<String>`</em>, The error message if the payment failed
 * `fee` - <em>`u128`</em>, fee paid for the payment
 * `custom_records` - <em>Option<[PaymentCustomRecords](#type-paymentcustomrecords)></em>, The custom records to be included in the payment.
-* `router` - <em>Vec<[SessionRouteNode](#type-sessionroutenode)></em>, The router is a list of nodes that the payment will go through.
+* `routers` - <em>Vec<[SessionRoute](#type-sessionroute)></em>, The router is a list of nodes that the payment will go through.
  We store in the payment session and then will use it to track the payment history.
  The router is a list of nodes that the payment will go through.
+ If the payment adapted MPP (multi-part payment), the routers will be a list of nodes
  For example:
     `A(amount, channel) -> B -> C -> D`
  means A will send `amount` with `channel` to B.
@@ -761,9 +764,10 @@ Sends a payment to a peer with specified router
 * `failed_error` - <em>`Option<String>`</em>, The error message if the payment failed
 * `fee` - <em>`u128`</em>, fee paid for the payment
 * `custom_records` - <em>Option<[PaymentCustomRecords](#type-paymentcustomrecords)></em>, The custom records to be included in the payment.
-* `router` - <em>Vec<[SessionRouteNode](#type-sessionroutenode)></em>, The router is a list of nodes that the payment will go through.
+* `routers` - <em>Vec<[SessionRoute](#type-sessionroute)></em>, The router is a list of nodes that the payment will go through.
  We store in the payment session and then will use it to track the payment history.
  The router is a list of nodes that the payment will go through.
+ If the payment adapted MPP (multi-part payment), the routers will be a list of nodes
  For example:
     `A(amount, channel) -> B -> C -> D`
  means A will send `amount` with `channel` to B.
@@ -1312,6 +1316,22 @@ A router hop information for a payment, a paymenter router is an array of Router
 * `incoming_tlc_expiry` - <em>u64</em>, The expiry for the TLC that the source node sends to the target node.
  We have already added up all the expiry deltas along the path,
  the only thing missing is current time. So the expiry is the current time plus the expiry delta.
+---
+
+<a id="#type-sessionroute"></a>
+### Type `SessionRoute`
+
+The router is a list of nodes that the payment will go through.
+ We store in the payment session and then will use it to track the payment history.
+ The router is a list of nodes that the payment will go through.
+ For example:
+    `A(amount, channel) -> B -> C -> D`
+ means A will send `amount` with `channel` to B.
+
+
+#### Fields
+
+* `nodes` - <em>Vec<[SessionRouteNode](#type-sessionroutenode)></em>, the nodes in the route
 ---
 
 <a id="#type-sessionroutenode"></a>
