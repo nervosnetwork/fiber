@@ -1861,15 +1861,11 @@ impl PaymentSession {
 
     fn allow_more_attempts(&self) -> bool {
         if self.remain_amount() == 0 {
-            if matches!(self.status, PaymentSessionStatus::Created) {
-                error!("remain_amount is 0 but status is created");
-            }
             // no remaining amount, imply no need to retry
             return false;
         }
 
         if matches!(self.status, PaymentSessionStatus::Success) {
-            error!("remain_amount is not 0 but status is success");
             return false;
         }
 

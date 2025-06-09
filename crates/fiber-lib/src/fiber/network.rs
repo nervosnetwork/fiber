@@ -776,10 +776,7 @@ pub enum NetworkActorEvent {
     TlcRemoveReceived(Hash256, Option<u64>, RemoveTlcReason),
 
     // A payment need to retry
-    RetrySendPayment(Hash256),
-
-    // retry send attempt
-    RetrySendAttempt(Hash256, u64),
+    RetrySendPayment(Hash256, Option<u64>),
 
     // AddTlc result from peer (payment_hash, attempt_id, (process_channel_error, tlc_err), (previous_channel_id, previous_tlc_id))
     AddTlcResult(
@@ -1038,10 +1035,10 @@ where
                             "Now retrying payment attempt {:?} for channel {:?} reestablished",
                             attempt.payment_hash, channel_id
                         );
-                        self.register_attempt_retry(
+                        self.register_payment_retry(
                             myself.clone(),
                             attempt.payment_hash,
-                            attempt.id,
+                            Some(attempt.id),
                         );
                     }
                 }
@@ -1097,28 +1094,14 @@ where
                 )
                 .await;
             }
-            NetworkActorEvent::RetrySendPayment(payment_hash) => {
+            NetworkActorEvent::RetrySendPayment(payment_hash, attempt_id) => {
                 let _ = self
-                    .resume_payment_session(myself, state, payment_hash)
-                    .await;
-            }
-            NetworkActorEvent::RetrySendAttempt(payment_hash, attempt_id) => {
-                let Some(mut session) = self.store.get_payment_session(payment_hash) else {
-                    error!("Failed to load payment session {:?}", payment_hash);
-                    return Ok(());
-                };
-                let Some(mut attempt) = self.store.get_attempt(payment_hash, attempt_id) else {
-                    error!("Attempt not found {payment_hash:?} {attempt_id}");
-                    return Ok(());
-                };
-                let _ = self
-                    .send_attempt(myself, state, &mut session, &mut attempt)
+                    .resume_payment_session(myself, state, payment_hash, attempt_id)
                     .await;
             }
             NetworkActorEvent::AddTlcResult(payment_hash, attempt_id, error_info, previous_tlc) => {
                 self.on_add_tlc_result_event(
                     myself,
-                    state,
                     payment_hash,
                     attempt_id,
                     error_info,
@@ -1507,7 +1490,6 @@ where
                 if let Err(err) = res {
                     self.on_add_tlc_result_event(
                         myself,
-                        state,
                         command.payment_hash,
                         command.attempt_id,
                         Some((ProcessingChannelError::TlcForwardingError(err.clone()), err)),
@@ -1937,14 +1919,9 @@ where
                         &mut attempt,
                         error_detail.error_code.as_ref(),
                     );
-                    if attempt.is_retryable() {
-                        // If this is the first hop error, like the WaitingTlcAck error,
-                        // we will just retry later
-                        self.register_attempt_retry(myself.clone(), payment_hash, attempt_id);
-                    }
 
                     if need_to_retry {
-                        self.register_payment_retry(myself, payment_hash);
+                        self.register_payment_retry(myself, payment_hash, Some(attempt.id));
                     } else if !payment_session.allow_mpp() {
                         dbg!("set error to", &error_detail.error_code.as_ref());
                         self.set_payment_fail_with_error(
@@ -1987,7 +1964,6 @@ where
                 let channel_outpoint = tcl_error_detail
                     .error_channel_outpoint()
                     .expect("expect channel outpoint");
-                debug!("mark channel failed: {:?}", channel_outpoint);
                 let mut graph = self.network_graph.write().await;
                 graph.mark_channel_failed(&channel_outpoint);
             }
@@ -2138,7 +2114,6 @@ where
     async fn on_add_tlc_result_event(
         &self,
         myself: ActorRef<NetworkActorMessage>,
-        state: &mut NetworkActorState<S>,
         payment_hash: Hash256,
         attempt_id: Option<u64>,
         error_info: Option<(ProcessingChannelError, TlcErr)>,
@@ -2180,7 +2155,6 @@ where
             eprintln!("attempt not found: {:?} {:?}", payment_hash, attempt_id);
             return;
         };
-        eprintln!("attempt found: {:?}", attempt_id);
 
         let Some((channel_error, tlc_err)) = error_info else {
             // attempt is inflight
@@ -2189,6 +2163,7 @@ where
                 .write()
                 .await
                 .track_attempt_router(&attempt);
+            dbg!("now track attempt router", attempt.id);
             self.store.insert_attempt(attempt.clone());
             return;
         };
@@ -2216,12 +2191,8 @@ where
         }
 
         // retry the current attempt if it is retryable
-        if attempt.is_retryable() {
-            self.register_attempt_retry(myself.clone(), payment_hash, attempt_id);
-        }
-        let _ = self
-            .resume_payment_session(myself, state, payment_hash)
-            .await;
+
+        self.register_payment_retry(myself, payment_hash, Some(attempt.id));
     }
 
     fn set_payment_fail_with_error(&self, session: &mut PaymentSession, error: &str) {
@@ -2232,20 +2203,6 @@ where
     fn set_attempt_fail_with_error(&self, attempt: &mut Attempt, error: &str) {
         attempt.set_failed_status(error);
         self.store.insert_attempt(attempt.clone());
-    }
-
-    fn register_attempt_retry(
-        &self,
-        myself: ActorRef<NetworkActorMessage>,
-        payment_hash: Hash256,
-        attempt_id: u64,
-    ) {
-        myself.send_after(Duration::from_millis(500), move || {
-            NetworkActorMessage::new_event(NetworkActorEvent::RetrySendAttempt(
-                payment_hash,
-                attempt_id,
-            ))
-        });
     }
 
     async fn send_attempt(
@@ -2262,7 +2219,7 @@ where
             .send_payment_onion_packet(state, attempt, hops_info)
             .await
         {
-            self.register_payment_retry(myself, session.payment_hash());
+            self.register_payment_retry(myself, session.payment_hash(), None);
             let need_retry = matches!(err, Error::SendPaymentFirstHopError(_, true));
             if need_retry {
                 // If this is the first hop error, such as the WaitingTlcAck error,
@@ -2285,6 +2242,7 @@ where
         myself: ActorRef<NetworkActorMessage>,
         state: &mut NetworkActorState<S>,
         payment_hash: Hash256,
+        attempt_id: Option<u64>,
     ) -> Result<Option<SessionRoute>, Error> {
         self.update_graph().await;
         let Some(mut payment_session) = self.store.get_payment_session(payment_hash) else {
@@ -2297,6 +2255,17 @@ where
                 payment_hash, payment_session.status
             );
             return Ok(None);
+        }
+
+        if let Some(attempt_id) = attempt_id {
+            let Some(mut attempt) = self.store.get_attempt(payment_hash, attempt_id) else {
+                return Ok(None);
+            };
+            if attempt.is_retryable() {
+                let _ = self
+                    .send_attempt(myself.clone(), state, &mut payment_session, &mut attempt)
+                    .await;
+            }
         }
 
         let more_attempt = match payment_session.next_step() {
@@ -2330,15 +2299,23 @@ where
             .get_payment_session(payment_hash)
             .expect("get payment session");
         if payment_session.remain_amount() > 0 {
-            self.register_payment_retry(myself, payment_hash);
+            self.register_payment_retry(myself, payment_hash, None);
         }
 
         Ok(Some(attempt.route.clone()))
     }
 
-    fn register_payment_retry(&self, myself: ActorRef<NetworkActorMessage>, payment_hash: Hash256) {
+    fn register_payment_retry(
+        &self,
+        myself: ActorRef<NetworkActorMessage>,
+        payment_hash: Hash256,
+        attempt_id: Option<u64>,
+    ) {
         myself.send_after(Duration::from_millis(500), move || {
-            NetworkActorMessage::new_event(NetworkActorEvent::RetrySendPayment(payment_hash))
+            NetworkActorMessage::new_event(NetworkActorEvent::RetrySendPayment(
+                payment_hash,
+                attempt_id,
+            ))
         });
     }
 
@@ -2430,7 +2407,7 @@ where
 
         let payment_session = PaymentSession::new(&self.store, payment_data, 5);
         self.store.insert_payment_session(payment_session.clone());
-        self.resume_payment_session(myself, state, payment_session.payment_hash())
+        self.resume_payment_session(myself, state, payment_session.payment_hash(), None)
             .await?;
         let payment_session = self
             .store
