@@ -94,7 +94,9 @@ pub async fn create_funding_tx(x_only: &XOnlyPublicKey) -> TransactionView {
 
     TransactionView::new_advanced_builder()
         .cell_deps(
-            get_cell_deps_by_contracts(vec![Contract::Secp256k1Lock]).await.expect("get cell deps"),
+            get_cell_deps_by_contracts(vec![Contract::Secp256k1Lock])
+                .await
+                .expect("get cell deps"),
         )
         .output(
             CellOutput::new_builder()
