@@ -1,4 +1,4 @@
-use super::test_utils::{init_tracing, NetworkNode};
+use crate::test_utils::*;
 use crate::{
     ckb::{
         tests::test_utils::{
@@ -12,7 +12,6 @@ use crate::{
         gossip::{GossipActorMessage, GossipMessageStore},
         graph::ChannelUpdateInfo,
         network::{NetworkActorStateStore, SendPaymentCommand, SendPaymentData},
-        tests::test_utils::{NetworkNodeConfig, NetworkNodeConfigBuilder},
         types::{
             BroadcastMessage, BroadcastMessageWithTimestamp, BroadcastMessagesFilterResult,
             ChannelAnnouncement, ChannelUpdateChannelFlags, Cursor, GossipMessage,
@@ -974,6 +973,7 @@ fn test_send_payment_validate_htlc_expiry_delta() {
 
 #[tokio::test]
 async fn test_abort_funding_on_building_funding_tx() {
+    init_tracing();
     use crate::fiber::network::{AcceptChannelCommand, OpenChannelCommand};
 
     let funding_amount_a = 4_200_000_000u128;
@@ -1031,26 +1031,9 @@ async fn test_abort_funding_on_building_funding_tx() {
             rpc_reply,
         ))
     };
-    let accept_channel_result = call!(node_b.network_actor, message)
-        .expect("node_b alive")
-        .expect("accept channel success");
-    let channel_id = accept_channel_result.new_channel_id;
-    node_b
-        .expect_event(|event| {
-            matches!(
-                event,
-                NetworkServiceEvent::ChannelFundingAborted(id) if *id == channel_id
-            )
-        })
-        .await;
-    node_a
-        .expect_event(|event| {
-            matches!(
-                event,
-                NetworkServiceEvent::ChannelFundingAborted(id) if *id == channel_id
-            )
-        })
-        .await;
+    let accept_channel_result = call!(node_b.network_actor, message).expect("node_b alive");
+
+    assert!(accept_channel_result.is_err());
 }
 
 #[derive(Clone, Debug)]

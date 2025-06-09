@@ -415,14 +415,14 @@ pub async fn try_init_contracts_context(
         .map_err(|_| ContractsContextError::ContextAlreadyInitialized)
 }
 
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "bench")))]
 fn get_contracts_context() -> &'static ContractsContext {
     CONTRACTS_CONTEXT_INSTANCE
         .get()
         .expect("init_contracts_context should be called first")
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "bench"))]
 fn get_contracts_context() -> ContractsContext {
     super::tests::test_utils::MOCK_CONTEXT
         .read()
@@ -500,16 +500,9 @@ pub fn get_cell_deps_sync(
     contracts: Vec<Contract>,
     udt_script: &Option<Script>,
 ) -> Result<CellDepVec, ContractsContextError> {
-    use tokio::runtime::Handle;
-
-    let runtime = Handle::current();
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    let udt_script = udt_script.clone();
-    std::thread::spawn(move || {
-        let result = runtime.block_on(async move { get_cell_deps(contracts, &udt_script).await });
-        tx.send(result).unwrap();
-    });
-    rx.blocking_recv().unwrap()
+    tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(get_cell_deps(contracts, udt_script))
 }
 
 pub fn get_cell_deps_count(contracts: Vec<Contract>, udt_script: &Option<Script>) -> usize {

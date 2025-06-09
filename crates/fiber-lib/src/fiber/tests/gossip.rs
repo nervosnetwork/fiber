@@ -1,4 +1,4 @@
-use std::{collections::HashSet, future::Future, sync::Arc};
+use std::{collections::HashSet, sync::Arc};
 
 use ckb_types::{
     core::{tx_pool::TxStatus, TransactionView},
@@ -6,23 +6,16 @@ use ckb_types::{
     prelude::{Builder, Entity},
 };
 use molecule::prelude::Byte;
-use ractor::{
-    concurrency::{Duration, MaybeSend},
-    Actor, ActorProcessingErr, ActorRef,
-};
+use ractor::{concurrency::Duration, Actor, ActorProcessingErr, ActorRef};
 use tentacle::secio::PeerId;
 use tokio::sync::RwLock;
 
 use crate::fiber::gossip::{GossipActorMessage, GossipConfig, GossipService};
-use crate::fiber::tests::test_utils::{
-    establish_channel_between_nodes, ChannelParameters, NetworkNode,
-};
 use crate::fiber::types::{ChannelUpdateChannelFlags, NodeAnnouncement};
+use crate::tests::test_utils::create_mock_chain_actor;
+use crate::tests::test_utils::{establish_channel_between_nodes, ChannelParameters, NetworkNode};
 use crate::{
-    ckb::{
-        tests::{actor::create_mock_chain_actor, test_utils::submit_tx},
-        CkbChainMessage,
-    },
+    ckb::{tests::test_utils::submit_tx, CkbChainMessage},
     fiber::{
         gossip::{
             ExtendedGossipMessageStoreMessage, GossipMessageStore, GossipMessageUpdates,
@@ -35,7 +28,7 @@ use crate::{
 };
 use crate::{create_invalid_ecdsa_signature, now_timestamp_as_millis_u64, ChannelTestContext};
 
-use super::test_utils::{get_test_root_actor, TempDir};
+use crate::test_utils::{get_test_root_actor, TempDir};
 
 struct GossipTestingContext {
     chain_actor: ActorRef<CkbChainMessage>,
@@ -135,42 +128,42 @@ enum SubscriberMessage {
     Update(GossipMessageUpdates),
 }
 
+#[cfg_attr(target_arch="wasm32",async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl Actor for Subscriber {
     type Msg = SubscriberMessage;
     type State = ();
     type Arguments = ();
 
-    fn pre_start(
+    async fn pre_start(
         &self,
         _myself: ActorRef<Self::Msg>,
         _args: Self::Arguments,
-    ) -> impl Future<Output = Result<Self::State, ActorProcessingErr>> + MaybeSend {
-        async move { Ok(()) }
+    ) -> Result<Self::State, ActorProcessingErr> {
+        Ok(())
     }
 
-    fn post_stop(
+    async fn post_stop(
         &self,
         _myself: ActorRef<Self::Msg>,
         _state: &mut Self::State,
-    ) -> impl Future<Output = Result<(), ActorProcessingErr>> + MaybeSend {
-        async move { Ok(()) }
+    ) -> Result<(), ActorProcessingErr> {
+        Ok(())
     }
 
-    fn handle(
+    async fn handle(
         &self,
         _myself: ActorRef<Self::Msg>,
         message: Self::Msg,
         _state: &mut Self::State,
-    ) -> impl Future<Output = Result<(), ActorProcessingErr>> + MaybeSend {
-        async move {
-            match message {
-                SubscriberMessage::Update(updates) => {
-                    let mut messages = self.messages.write().await;
-                    messages.extend(updates.messages);
-                }
+    ) -> Result<(), ActorProcessingErr> {
+        match message {
+            SubscriberMessage::Update(updates) => {
+                let mut messages = self.messages.write().await;
+                messages.extend(updates.messages);
             }
-            Ok(())
         }
+        Ok(())
     }
 }
 
@@ -667,7 +660,7 @@ async fn test_gossip_store_updates_saving_invalid_message_3() {
 
 #[tokio::test]
 async fn test_our_own_channel_gossip_message_propagated() {
-    crate::fiber::tests::test_utils::init_tracing();
+    crate::tests::test_utils::init_tracing();
     let node_a_funding_amount = 100000000000;
     let node_b_funding_amount = 6200000000;
 

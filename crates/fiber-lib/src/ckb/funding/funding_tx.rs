@@ -291,7 +291,7 @@ impl FundingTxBuilder {
             TxBuilderError::InvalidParameter(anyhow!("UDT type script not configured"))
         })?;
         let owner = self.context.funding_source_lock_script.clone();
-        let mut found_udt_amount = 0;
+        let mut found_udt_amount: u128 = 0;
 
         let mut query = CellQueryOptions::new_lock(owner.clone());
         query.script_search_mode = Some(SearchMode::Exact);
@@ -315,31 +315,36 @@ impl FundingTxBuilder {
                     "found udt cell ckb_amount: {:?} udt_amount: {:?} cell: {:?}",
                     ckb_amount, cell_udt_amount, cell
                 );
-                found_udt_amount += cell_udt_amount;
+
+                found_udt_amount = found_udt_amount
+                    .checked_add(cell_udt_amount)
+                    .ok_or_else(|| TxBuilderError::Other(anyhow!("UDT amount overflow")))?;
+
                 inputs.push(CellInput::new(cell.out_point.clone(), 0));
 
                 if found_udt_amount >= udt_amount {
-                    let change_output_data: Bytes =
-                        (found_udt_amount - udt_amount).to_le_bytes().pack();
+                    let change_amount = found_udt_amount - udt_amount;
+                    if change_amount > 0 {
+                        let change_output_data: Bytes = change_amount.to_le_bytes().pack();
+                        let dummy_output = CellOutput::new_builder()
+                            .lock(owner)
+                            .type_(Some(udt_type_script.clone()).pack())
+                            .build();
+                        let required_capacity = dummy_output
+                            .occupied_capacity(
+                                Capacity::bytes(change_output_data.len())
+                                    .map_err(|err| TxBuilderError::Other(err.into()))?,
+                            )
+                            .map_err(|err| TxBuilderError::Other(err.into()))?
+                            .pack();
+                        let change_output = dummy_output
+                            .as_builder()
+                            .capacity(required_capacity)
+                            .build();
 
-                    let dummy_output = CellOutput::new_builder()
-                        .lock(owner)
-                        .type_(Some(udt_type_script.clone()).pack())
-                        .build();
-                    let required_capacity = dummy_output
-                        .occupied_capacity(
-                            Capacity::bytes(change_output_data.len())
-                                .map_err(|err| TxBuilderError::Other(err.into()))?,
-                        )
-                        .map_err(|err| TxBuilderError::Other(err.into()))?
-                        .pack();
-                    let change_output = dummy_output
-                        .as_builder()
-                        .capacity(required_capacity)
-                        .build();
-
-                    outputs.push(change_output);
-                    outputs_data.push(change_output_data);
+                        outputs.push(change_output);
+                        outputs_data.push(change_output_data);
+                    }
 
                     debug!("find proper UDT owner cells: {:?}", inputs);
                     // we need to filter the cell deps by the contracts_context
@@ -385,17 +390,34 @@ impl FundingTxBuilder {
         );
 
         let ckb_client = CkbRpcAsyncClient::new(&self.context.rpc_url);
-        let cell_dep_resolver = ckb_client
-            .get_block_by_number(0.into())
-            .await
-            .map_err(FundingError::CkbRpcError)?
-            .and_then(|genesis_block| {
-                DefaultCellDepResolver::from_genesis(&BlockView::from(genesis_block)).ok()
-            })
-            .ok_or_else(|| {
-                FundingError::CkbTxBuilderError(TxBuilderError::ResolveCellDepFailed(sender))
-            })?;
-
+        let cell_dep_resolver = {
+            match ckb_client
+                .get_block_by_number(0.into())
+                .await
+                .map_err(FundingError::CkbRpcError)?
+            {
+                Some(genesis_block) => {
+                    match DefaultCellDepResolver::from_genesis_async(&BlockView::from(
+                        genesis_block,
+                    ))
+                    .await
+                    .ok()
+                    {
+                        Some(ret) => ret,
+                        None => {
+                            return Err(FundingError::CkbTxBuilderError(
+                                TxBuilderError::ResolveCellDepFailed(sender),
+                            ))
+                        }
+                    }
+                }
+                None => {
+                    return Err(FundingError::CkbTxBuilderError(
+                        TxBuilderError::ResolveCellDepFailed(sender),
+                    ))
+                }
+            }
+        };
         let header_dep_resolver = DefaultHeaderDepResolver::new(&self.context.rpc_url);
         let mut cell_collector = DefaultCellCollector::new(&self.context.rpc_url);
         let tx_dep_provider = DefaultTransactionDependencyProvider::new(&self.context.rpc_url, 10);

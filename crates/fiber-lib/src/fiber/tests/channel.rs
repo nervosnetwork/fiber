@@ -1,14 +1,14 @@
-use super::test_utils::{init_tracing, NetworkNode};
 use crate::ckb::tests::test_utils::complete_commitment_tx;
 use crate::fiber::channel::{ChannelState, CloseFlags, UpdateCommand, XUDT_COMPATIBLE_WITNESS};
 use crate::fiber::config::{DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT};
 use crate::fiber::graph::{ChannelInfo, PaymentSessionStatus};
 use crate::fiber::network::{DebugEvent, SendPaymentCommand};
-use crate::fiber::tests::test_utils::*;
 use crate::fiber::types::{
     Hash256, PaymentHopData, PeeledOnionPacket, Pubkey, TlcErrorCode, NO_SHARED_SECRET,
 };
 use crate::invoice::{CkbInvoiceStatus, Currency, InvoiceBuilder};
+use crate::test_utils::{init_tracing, NetworkNode};
+use crate::tests::test_utils::*;
 use crate::{
     ckb::contracts::{get_cell_deps, Contract},
     fiber::{
@@ -268,6 +268,46 @@ async fn do_test_owned_channel_saved_to_the_owner_graph(public: bool) {
     for node in node2_nodes {
         assert!(node.node_id == node2_channel.node1() || node.node_id == node2_channel.node2());
     }
+}
+
+#[tokio::test]
+async fn test_create_channel_with_too_large_amounts() {
+    let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
+
+    let params = ChannelParameters {
+        node_a_funding_amount: u64::MAX as u128 - 1,
+        node_b_funding_amount: MIN_RESERVED_CKB,
+        ..Default::default()
+    };
+    let res = create_channel_with_nodes(&mut node_a, &mut node_b, params).await;
+    assert!(res.is_err(), "Create channel failed: {:?}", res);
+    assert!(res.unwrap_err().to_string().contains(
+        "The total funding amount (18446744069509551614) should be less than 18446744065309551615"
+    ));
+
+    let params = ChannelParameters {
+        node_a_funding_amount: MIN_RESERVED_CKB,
+        node_b_funding_amount: u64::MAX as u128 - 1,
+        ..Default::default()
+    };
+    let res = create_channel_with_nodes(&mut node_a, &mut node_b, params).await;
+    assert!(res.is_err(), "Create channel failed: {:?}", res);
+    assert!(res.unwrap_err().to_string().contains(
+        "The total funding amount (18446744069509551614) should be less than 18446744065309551615"
+    ));
+
+    let params = ChannelParameters {
+        node_a_funding_amount: u128::MAX - 100,
+        node_b_funding_amount: 101,
+        funding_udt_type_script: Some(Script::default()),
+        ..Default::default()
+    };
+    let res = create_channel_with_nodes(&mut node_a, &mut node_b, params).await;
+    assert!(res.is_err(), "Create channel failed: {:?}", res);
+    assert!(res
+        .unwrap_err()
+        .to_string()
+        .contains("The total UDT funding amount should be less"));
 }
 
 #[tokio::test]
@@ -3932,6 +3972,8 @@ async fn test_revoke_old_commitment_transaction() {
 
 #[tokio::test]
 async fn test_channel_with_simple_update_operation() {
+    init_tracing();
+
     for algorithm in HashAlgorithm::supported_algorithms() {
         do_test_channel_with_simple_update_operation(algorithm).await
     }
@@ -4741,6 +4783,34 @@ async fn test_shutdown_channel_with_large_size_shutdown_script_should_fail() {
         .err()
         .unwrap()
         .contains("Local balance is not enough to pay the fee"));
+}
+
+#[tokio::test]
+async fn test_shutdown_channel_with_invalid_feerate_peer_message() {
+    init_tracing();
+
+    let node_a_funding_amount = 100000000000;
+    let node_b_funding_amount = 6200000000;
+
+    let (node_a, mut node_b, new_channel_id) =
+        create_nodes_with_established_channel(node_a_funding_amount, node_b_funding_amount, false)
+            .await;
+
+    let command = ShutdownCommand {
+        close_script: Script::new_builder().args([0u8; 21].pack()).build(),
+        fee_rate: FeeRate::from_u64(u64::MAX),
+        force: false,
+    };
+
+    node_a
+        .handle_shutdown_command_without_check(new_channel_id, command)
+        .await;
+
+    node_b
+        .expect_debug_event("InvalidParameter(\"Shutdown fee is invalid\")")
+        .await;
+    let state = node_b.get_channel_actor_state(new_channel_id);
+    matches!(state.state, ChannelState::ChannelReady);
 }
 
 #[tokio::test]

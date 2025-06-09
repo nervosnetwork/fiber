@@ -4,7 +4,7 @@ use clap_serde_derive::{
     clap::{self},
     ClapSerde,
 };
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "bench")))]
 use once_cell::sync::OnceCell;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::{fs, path::PathBuf, str::FromStr};
@@ -50,9 +50,9 @@ pub const DEFAULT_AUTO_ANNOUNCE_NODE: bool = true;
 pub const DEFAULT_ANNOUNCE_NODE_INTERVAL_SECONDS: u64 = 3600;
 
 /// The interval to maintain the gossip network, in milli-seconds.
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "bench")))]
 pub const DEFAULT_GOSSIP_NETWORK_MAINTENANCE_INTERVAL_MS: u64 = 1000 * 60;
-#[cfg(test)]
+#[cfg(any(test, feature = "bench"))]
 // This config is needed for the timely processing of gossip messages.
 // Without this, some tests may fail due to the delay in processing gossip messages.
 pub const DEFAULT_GOSSIP_NETWORK_MAINTENANCE_INTERVAL_MS: u64 = 50;
@@ -64,9 +64,9 @@ pub const DEFAULT_MAX_INBOUND_PEERS: usize = 16;
 pub const DEFAULT_MIN_OUTBOUND_PEERS: usize = 8;
 
 /// The interval to maintain the gossip network, in milli-seconds.
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "bench")))]
 pub const DEFAULT_GOSSIP_STORE_MAINTENANCE_INTERVAL_MS: u64 = 20 * 1000;
-#[cfg(test)]
+#[cfg(any(test, feature = "bench"))]
 // This config is needed for the timely processing of gossip messages.
 // Without this, some tests may fail due to the delay in processing gossip messages.
 pub const DEFAULT_GOSSIP_STORE_MAINTENANCE_INTERVAL_MS: u64 = 50;
@@ -280,6 +280,24 @@ pub struct FiberConfig {
         help = "The interval to check watchtower, in seconds. 0 means never check. [default: 60 (1 minute)]"
     )]
     pub watchtower_check_interval_seconds: Option<u64>,
+
+    /// The url of the standalone watchtower rpc server. [default: None]
+    #[arg(
+        name = "FIBER_STANDALONE_WATCHTOWER_RPC_URL",
+        long = "fiber-standalone-watchtower-rpc-url",
+        env,
+        help = "The url of the standalone watchtower rpc server. [default: None]"
+    )]
+    pub standalone_watchtower_rpc_url: Option<String>,
+
+    /// Disable built-in watchtower actor. [default: false]
+    #[arg(
+        name = "FIBER_DISABLE_BUILT_IN_WATCHTOWER",
+        long = "fiber-disable-built-in-watchtower",
+        env,
+        help = "Disable built-in watchtower actor. [default: false]"
+    )]
+    pub disable_built_in_watchtower: Option<bool>,
 }
 
 /// Must be a valid utf-8 string of length maximal length 32 bytes.
@@ -353,7 +371,7 @@ impl<'de> serde::Deserialize<'de> for AnnouncedNodeName {
     }
 }
 
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "bench")))]
 static FIBER_SECRET_KEY: OnceCell<super::KeyPair> = OnceCell::new();
 
 impl FiberConfig {
@@ -376,12 +394,12 @@ impl FiberConfig {
 
     // `OnceCell` will make all actors in UI tests use the same secret key.
     // which is not what we want. So we disable it in tests.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "bench"))]
     pub fn read_or_generate_secret_key(&self) -> Result<super::KeyPair> {
         self.inner_read_or_generate_secret_key()
     }
 
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "bench")))]
     pub fn read_or_generate_secret_key(&self) -> Result<super::KeyPair> {
         FIBER_SECRET_KEY
             .get_or_try_init(|| self.inner_read_or_generate_secret_key())

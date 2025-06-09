@@ -15,7 +15,8 @@ bitcoin = { version = "0.30.2", features = ["serde", "rand"] }
 bech32 = "0.8"
 rand = "0.8.5"
 serde_json = { version = "1.0" }
-ckb-sdk = { git = "https://github.com/Officeyutong/ckb-sdk-rust", branch = "wasm" }
+# ckb-sdk = "4.0.0"
+ckb-sdk = { git = "https://github.com/nervosnetwork/ckb-sdk-rust", rev = "2c7a03b" }
 thiserror = "1.0.58"
 anyhow = "1.0.81"
 futures = "0.3.30"
@@ -30,7 +31,10 @@ hex = "0.4.3"
 bitflags = { version = "2.5.0", features = ["serde"] }
 secp256k1 = { version = "0.28.0", features = ["serde", "recovery", "rand-std"] }
 musig2 = { version = "0.0.11", features = ["secp256k1", "serde"] }
-ractor = { version = "0.15.3" }
+# ractor = { version = "0.15.3" }
+ractor = { "git" = "https://github.com/officeyutong/ractor", branch = "use-non-send-future-in-wasm", features = [
+    "async-trait",
+] }
 arcode = "0.2.4"
 nom = "7.1.3"
 regex = "1.10.5"
@@ -44,6 +48,8 @@ indicatif = "0.16"
 bincode = "1.3.3"
 num_enum = "0.7.3"
 bitmask-enum = "2.2.5"
+tempfile = { version = "3.10.1", optional = true }
+ckb-testtool = { version = "0.15.1", optional = true }
 either = "1.15.0"
 aes-gcm = "0.10"
 scrypt = "0.11"
@@ -55,7 +61,9 @@ console = "0.15.8"
 rocksdb = { package = "ckb-rocksdb", version = "=0.21.1", features = [
     "lz4",
 ], default-features = false }
-jsonrpsee = { version = "0.25", features = ["server", "macros"] }
+clap = { version = "4.5.2", features = ["derive", "env", "string"] }
+clap-serde-derive = "0.2.1"
+jsonrpsee = { version = "0.22", features = ["client", "server", "macros"] }
 tokio = { version = "1", features = [
     "io-util",
     "macros",
@@ -88,7 +96,7 @@ ckb-hash = { version = "0.200.0", features = [
     "blake2b-ref",
 ], default-features = false }
 tracing = { version = "0.1", features = ["log"] }
-jsonrpsee = { version = "0.25", features = ["macros", "server-core"] }
+jsonrpsee = { version = "0.22", features = ["macros", "server-core"] }
 getrandom = { version = "0.3", features = ["wasm_js"] }
 fiber-wasm-db-common = {path = "../fiber-wasm-db-common"}
 web-sys = "0.3.72"
@@ -99,14 +107,16 @@ console_error_panic_hook = { version = "0.1.7" }
 default = ["watchtower"]
 portable = ["rocksdb/portable"]
 watchtower = []
+bench = ["tempfile", "ckb-testtool"]
 
 [dev-dependencies]
 tempfile = "3.10.1"
 ckb-testtool = "0.15.1"
 ciborium = "0.2.2"
-jsonrpsee = { version = "0.25", features = ["server", "macros", "http-client"] }
+jsonrpsee = { version = "0.22", features = ["server", "macros", "http-client"] }
 ouroboros = "0.18.5"
 futures = "0.3.31"
+criterion = { version = "0.5", features = ["html_reports"] }
 
 [lints.clippy]
 needless-return = "allow"
@@ -115,7 +125,10 @@ upper-case-acronyms = "allow"
 fallible-impl-from = "allow"
 expect-fun-call = "allow"
 large-enum-variant = "allow"
-manual_async_fn = "allow"
 
 [package.metadata.cargo-shear]
 ignored = ["getrandom"]
+
+[[bench]]
+name = "payment_benchmarks"
+harness = false

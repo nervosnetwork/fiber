@@ -9,6 +9,10 @@ use fnn::ckb::contracts::{get_cell_deps, Contract};
 use fnn::ckb::{contracts::try_init_contracts_context, CkbChainActor};
 use fnn::fiber::{channel::ChannelSubscribers, graph::NetworkGraph, network::init_chain_hash};
 use fnn::rpc::server::start_rpc;
+use fnn::rpc::watchtower::{
+    CreatePreimageParams, CreateWatchChannelParams, RemovePreimageParams, RemoveWatchChannelParams,
+    UpdateLocalSettlementParams, UpdateRevocationParams, WatchtowerRpcClient,
+};
 use fnn::store::Store;
 use fnn::tasks::{
     cancel_tasks_and_wait_for_completion, new_tokio_cancellation_token, new_tokio_task_tracker,
@@ -16,10 +20,9 @@ use fnn::tasks::{
 use fnn::watchtower::{
     WatchtowerActor, WatchtowerMessage, DEFAULT_WATCHTOWER_CHECK_INTERVAL_SECONDS,
 };
-#[cfg(debug_assertions)]
-use fnn::NetworkServiceEvent;
-use fnn::{start_cch, start_network, Config};
-use ractor::Actor;
+use fnn::{start_cch, start_network, Config, NetworkServiceEvent};
+use jsonrpsee::http_client::HttpClientBuilder;
+use ractor::{Actor, ActorRef};
 #[cfg(debug_assertions)]
 use std::collections::HashMap;
 use std::fmt::Debug;
@@ -32,6 +35,9 @@ use tokio::sync::{mpsc, RwLock};
 use tracing::error;
 use tracing::{debug, info, info_span, trace};
 use tracing_subscriber::{field::MakeExt, fmt, fmt::format, EnvFilter};
+
+const ASSUME_WATCHTOWER_ACTOR_ALIVE: &str = "watchtower actor must be alive";
+const ASSUME_WATCHTOWER_CLIENT_CALL_OK: &str = "watchtower client call should be ok";
 
 pub struct ExitMessage(String);
 
@@ -166,24 +172,47 @@ pub async fn main() -> Result<(), ExitMessage> {
             )
             .await;
 
-            let watchtower_actor = Actor::spawn_linked(
-                Some("watchtower".to_string()),
-                WatchtowerActor::new(store.clone()),
-                ckb_config,
-                root_actor.get_cell(),
-            )
-            .await
-            .map_err(|err| ExitMessage(format!("failed to start watchtower actor: {}", err)))?
-            .0;
+            if fiber_config.standalone_watchtower_rpc_url.is_none()
+                && fiber_config.disable_built_in_watchtower.unwrap_or_default()
+            {
+                return ExitMessage::err(
+                    "fiber config requires standalone watchtower rpc url or built-in watchtower to be enabled"
+                        .to_string(),
+                );
+            }
 
-            watchtower_actor.send_interval(
-                Duration::from_secs(
-                    fiber_config
-                        .watchtower_check_interval_seconds
-                        .unwrap_or(DEFAULT_WATCHTOWER_CHECK_INTERVAL_SECONDS),
-                ),
-                || WatchtowerMessage::PeriodicCheck,
-            );
+            let watchtower_client = if let Some(url) = fiber_config.standalone_watchtower_rpc_url {
+                let watchtower_client = HttpClientBuilder::default().build(url).map_err(|err| {
+                    ExitMessage(format!("failed to create watchtower rpc client: {}", err))
+                })?;
+                Some(watchtower_client)
+            } else {
+                None
+            };
+
+            let watchtower_actor = if fiber_config.disable_built_in_watchtower.unwrap_or_default() {
+                None
+            } else {
+                let watchtower_actor = Actor::spawn_linked(
+                    Some("watchtower".to_string()),
+                    WatchtowerActor::new(store.clone()),
+                    ckb_config,
+                    root_actor.get_cell(),
+                )
+                .await
+                .map_err(|err| ExitMessage(format!("failed to start watchtower actor: {}", err)))?
+                .0;
+
+                watchtower_actor.send_interval(
+                    Duration::from_secs(
+                        fiber_config
+                            .watchtower_check_interval_seconds
+                            .unwrap_or(DEFAULT_WATCHTOWER_CHECK_INTERVAL_SECONDS),
+                    ),
+                    || WatchtowerMessage::PeriodicCheck,
+                );
+                Some(watchtower_actor)
+            };
 
             #[cfg(debug_assertions)]
             let rpc_dev_module_commitment_txs_clone = rpc_dev_module_commitment_txs.clone();
@@ -223,8 +252,12 @@ pub async fn main() -> Result<(), ExitMessage> {
                                             }
                                         }
                                     }
-                                    // forward the event to the watchtower actor
-                                    let _ = watchtower_actor.send_message(WatchtowerMessage::NetworkServiceEvent(event));
+                                    if let Some(watchtower_client) = watchtower_client.as_ref() {
+                                        forward_event_to_client(event.clone(), watchtower_client).await;
+                                    }
+                                    if let Some(watchtower_actor) = watchtower_actor.as_ref() {
+                                        forward_event_to_actor(event, watchtower_actor);
+                                    }
                                 }
                             }
                         }
@@ -325,6 +358,147 @@ pub async fn main() -> Result<(), ExitMessage> {
     cancel_tasks_and_wait_for_completion().await;
 
     Ok(())
+}
+
+fn forward_event_to_actor(
+    event: NetworkServiceEvent,
+    watchtower_actor: &ActorRef<WatchtowerMessage>,
+) {
+    match event {
+        NetworkServiceEvent::RemoteTxComplete(
+            _peer_id,
+            channel_id,
+            funding_tx_lock,
+            remote_settlement_data,
+        ) => {
+            watchtower_actor
+                .send_message(WatchtowerMessage::CreateChannel(
+                    channel_id,
+                    funding_tx_lock,
+                    remote_settlement_data,
+                ))
+                .expect(ASSUME_WATCHTOWER_ACTOR_ALIVE);
+        }
+        NetworkServiceEvent::ChannelClosed(_, channel_id, _)
+        | NetworkServiceEvent::ChannelAbandon(channel_id) => {
+            watchtower_actor
+                .send_message(WatchtowerMessage::RemoveChannel(channel_id))
+                .expect(ASSUME_WATCHTOWER_ACTOR_ALIVE);
+        }
+        NetworkServiceEvent::RevokeAndAckReceived(
+            _peer_id,
+            channel_id,
+            revocation_data,
+            settlement_data,
+        ) => {
+            watchtower_actor
+                .send_message(WatchtowerMessage::UpdateRevocation(
+                    channel_id,
+                    revocation_data,
+                    settlement_data,
+                ))
+                .expect(ASSUME_WATCHTOWER_ACTOR_ALIVE);
+        }
+        NetworkServiceEvent::RemoteCommitmentSigned(
+            _peer_id,
+            channel_id,
+            _commitment_tx,
+            settlement_data,
+        ) => {
+            watchtower_actor
+                .send_message(WatchtowerMessage::UpdateLocalSettlement(
+                    channel_id,
+                    settlement_data,
+                ))
+                .expect(ASSUME_WATCHTOWER_ACTOR_ALIVE);
+        }
+        NetworkServiceEvent::PreimageCreated(_payment_hash, _preimage) => {
+            // ignore, the store of channel actor already has stored the preimage
+        }
+        NetworkServiceEvent::PreimageRemoved(_payment_hash) => {
+            // ignore, the store of channel actor already has removed the preimage
+        }
+        _ => {
+            // ignore other non-watchtower related events
+        }
+    }
+}
+
+async fn forward_event_to_client<T: WatchtowerRpcClient + Sync>(
+    event: NetworkServiceEvent,
+    watchtower_client: &T,
+) {
+    match event {
+        NetworkServiceEvent::RemoteTxComplete(
+            _peer_id,
+            channel_id,
+            funding_tx_lock,
+            remote_settlement_data,
+        ) => {
+            watchtower_client
+                .create_watch_channel(CreateWatchChannelParams {
+                    channel_id,
+                    funding_tx_lock: funding_tx_lock.into(),
+                    remote_settlement_data,
+                })
+                .await
+                .expect(ASSUME_WATCHTOWER_CLIENT_CALL_OK);
+        }
+        NetworkServiceEvent::ChannelClosed(_, channel_id, _)
+        | NetworkServiceEvent::ChannelAbandon(channel_id) => {
+            watchtower_client
+                .remove_watch_channel(RemoveWatchChannelParams { channel_id })
+                .await
+                .expect(ASSUME_WATCHTOWER_CLIENT_CALL_OK);
+        }
+        NetworkServiceEvent::RevokeAndAckReceived(
+            _peer_id,
+            channel_id,
+            revocation_data,
+            settlement_data,
+        ) => {
+            watchtower_client
+                .update_revocation(UpdateRevocationParams {
+                    channel_id,
+                    revocation_data,
+                    settlement_data,
+                })
+                .await
+                .expect(ASSUME_WATCHTOWER_CLIENT_CALL_OK);
+        }
+        NetworkServiceEvent::RemoteCommitmentSigned(
+            _peer_id,
+            channel_id,
+            _commitment_tx,
+            settlement_data,
+        ) => {
+            watchtower_client
+                .update_local_settlement(UpdateLocalSettlementParams {
+                    channel_id,
+                    settlement_data,
+                })
+                .await
+                .expect(ASSUME_WATCHTOWER_CLIENT_CALL_OK);
+        }
+        NetworkServiceEvent::PreimageCreated(payment_hash, preimage) => {
+            watchtower_client
+                .create_preimage(CreatePreimageParams {
+                    payment_hash,
+                    preimage,
+                })
+                .await
+                .expect(ASSUME_WATCHTOWER_CLIENT_CALL_OK);
+        }
+        NetworkServiceEvent::PreimageRemoved(payment_hash) => {
+            watchtower_client
+                .remove_preimage(RemovePreimageParams { payment_hash })
+                .await
+                .expect(ASSUME_WATCHTOWER_CLIENT_CALL_OK);
+        }
+        _ => {
+            // ignore other non-watchtower related events
+        }
+    }
 }
 
 impl Debug for ExitMessage {

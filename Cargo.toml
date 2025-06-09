@@ -25,10 +25,3 @@ panic = "abort"
 inherits = "test"
 opt-level = 3
 debug = false
-
-[patch.crates-io]
-# ckb-sdk = { git = "https://github.com/nervosnetwork/ckb-sdk-rust" }
-# Wasm support
-# ckb-sdk = { git = "https://github.com/Officeyutong/ckb-sdk-rust", branch = "wasm" }
-# Some traits being `?Send`
-# ractor = { git = "https://github.com/Officeyutong/ractor", branch = "use-non-send-future-in-wasm" }
