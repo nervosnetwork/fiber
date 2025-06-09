@@ -55,7 +55,7 @@ use super::channel::{
     MAX_COMMITMENT_DELAY_EPOCHS, MAX_TLC_NUMBER_IN_FLIGHT, MIN_COMMITMENT_DELAY_EPOCHS,
     SYS_MAX_TLC_NUMBER_IN_FLIGHT,
 };
-use super::config::{AnnouncedNodeName, DEFAULT_MPP_MIN_AMOUNT, MIN_TLC_EXPIRY_DELTA};
+use super::config::{AnnouncedNodeName, MIN_TLC_EXPIRY_DELTA};
 use super::features::FeatureVector;
 use super::fee::calculate_commitment_tx_fee;
 use super::gossip::{GossipActorMessage, GossipMessageStore, GossipMessageUpdates};
@@ -617,6 +617,10 @@ impl SendPaymentData {
             router: vec![],
             dry_run: command.dry_run,
         })
+    }
+
+    pub fn allow_mpp(&self) -> bool {
+        self.max_parts.unwrap_or(1) > 1
     }
 }
 
@@ -1929,17 +1933,19 @@ where
                     );
                     dbg!("set attempt failed to ", error_detail.error_code.as_ref());
 
-                    // If this is the first hop error, like the WaitingTlcAck error,
-                    // we will just retry later
                     self.set_attempt_fail_with_error(
                         &mut attempt,
                         error_detail.error_code.as_ref(),
                     );
                     if attempt.is_retryable() {
+                        // If this is the first hop error, like the WaitingTlcAck error,
+                        // we will just retry later
                         self.register_attempt_retry(myself.clone(), payment_hash, attempt_id);
                     }
-                    self.register_payment_retry(myself.clone(), payment_hash);
-                    if !need_to_retry {
+
+                    if need_to_retry {
+                        self.register_payment_retry(myself, payment_hash);
+                    } else if !payment_session.allow_mpp() {
                         dbg!("set error to", &error_detail.error_code.as_ref());
                         self.set_payment_fail_with_error(
                             &mut payment_session,
@@ -2012,7 +2018,6 @@ where
         let graph = self.network_graph.read().await;
         let source = graph.get_source_pubkey();
         let mut max_amount = session.remain_amount();
-        let min_amount = DEFAULT_MPP_MIN_AMOUNT;
         let mut remain_fee = session.remain_fee_amount();
         let mut active_parts = session.attempts().len();
 
@@ -2026,14 +2031,12 @@ where
         dbg!(
             "build route",
             max_amount,
-            min_amount,
             remain_fee,
             active_parts,
             attempt.id
         );
         match graph.build_route(
             max_amount,
-            min_amount,
             remain_fee,
             active_parts,
             session.request.clone(),
@@ -2049,7 +2052,6 @@ where
             }
             Ok(hops) => {
                 attempt.route = SessionRoute::new(source, session.request.target_pubkey, &hops);
-                // update amount
                 dbg!(
                     "build route success",
                     attempt.id,

@@ -258,13 +258,9 @@ impl MockNetworkGraph {
     }
 
     pub fn build_route_with_expect(&self, payment_data: &SendPaymentData, expect: Vec<usize>) {
-        let route = self.graph.build_route(
-            payment_data.amount,
-            payment_data.amount,
-            None,
-            0,
-            payment_data.clone(),
-        );
+        let route = self
+            .graph
+            .build_route(payment_data.amount, None, 0, payment_data.clone());
         assert!(route.is_ok());
         let route = route.unwrap();
         let nodes = route.iter().filter_map(|x| x.next_hop).collect::<Vec<_>>();
@@ -280,13 +276,9 @@ impl MockNetworkGraph {
         payment_data: &SendPaymentData,
         expects: &[Vec<usize>],
     ) {
-        let route = self.graph.build_route(
-            payment_data.amount,
-            payment_data.amount,
-            None,
-            0,
-            payment_data.clone(),
-        );
+        let route = self
+            .graph
+            .build_route(payment_data.amount, None, 0, payment_data.clone());
         assert!(route.is_ok());
         let route = route.unwrap();
         let nodes = route.iter().filter_map(|x| x.next_hop).collect::<Vec<_>>();
@@ -612,13 +604,9 @@ fn test_graph_build_router_is_ok_with_fee_rate() {
         custom_records: None,
         router: vec![],
     };
-    let route = network.graph.build_route(
-        payment_data.amount,
-        payment_data.amount,
-        None,
-        0,
-        payment_data.clone(),
-    );
+    let route = network
+        .graph
+        .build_route(payment_data.amount, None, 0, payment_data.clone());
     assert!(route.is_ok());
     let route = route.unwrap();
     let amounts = route.iter().map(|x| x.amount).collect::<Vec<_>>();
@@ -664,13 +652,9 @@ fn test_graph_build_router_fee_rate_optimize() {
         router: vec![],
     };
 
-    let route = network.graph.build_route(
-        payment_data.amount,
-        payment_data.amount,
-        None,
-        0,
-        payment_data,
-    );
+    let route = network
+        .graph
+        .build_route(payment_data.amount, None, 0, payment_data);
     assert!(route.is_ok());
     let route = route.unwrap();
     let amounts = route.iter().map(|x| x.amount).collect::<Vec<_>>();
@@ -706,13 +690,9 @@ fn test_graph_build_router_no_fee_with_direct_pay() {
         custom_records: None,
         router: vec![],
     };
-    let route = network.graph.build_route(
-        payment_data.amount,
-        payment_data.amount,
-        None,
-        0,
-        payment_data.clone(),
-    );
+    let route = network
+        .graph
+        .build_route(payment_data.amount, None, 0, payment_data.clone());
     assert!(route.is_ok());
     let route = route.unwrap();
     let amounts = route.iter().map(|x| x.amount).collect::<Vec<_>>();
@@ -846,13 +826,9 @@ fn test_graph_build_route_three_nodes_amount() {
         custom_records: None,
         router: vec![],
     };
-    let route = network.graph.build_route(
-        payment_data.amount,
-        payment_data.amount,
-        None,
-        0,
-        payment_data.clone(),
-    );
+    let route = network
+        .graph
+        .build_route(payment_data.amount, None, 0, payment_data.clone());
     assert!(route.is_ok());
     let route = route.unwrap();
     assert_eq!(route.len(), 3);
@@ -905,13 +881,9 @@ fn do_test_graph_build_route_expiry(n_nodes: usize) {
         custom_records: None,
         router: vec![],
     };
-    let route = network.graph.build_route(
-        payment_data.amount,
-        payment_data.amount,
-        None,
-        0,
-        payment_data.clone(),
-    );
+    let route = network
+        .graph
+        .build_route(payment_data.amount, None, 0, payment_data.clone());
     let timestamp_after_building_route = now_timestamp_as_millis_u64();
     assert!(route.is_ok());
     let route = route.unwrap();
@@ -992,13 +964,9 @@ fn test_graph_build_route_below_min_tlc_value() {
         custom_records: None,
         router: vec![],
     };
-    let route = network.graph.build_route(
-        payment_data.amount,
-        payment_data.amount,
-        None,
-        0,
-        payment_data.clone(),
-    );
+    let route = network
+        .graph
+        .build_route(payment_data.amount, None, 0, payment_data.clone());
     assert!(route.is_err());
 }
 
@@ -1031,13 +999,9 @@ fn test_graph_build_route_select_edge_with_latest_timestamp() {
         custom_records: None,
         router: vec![],
     };
-    let route = network.graph.build_route(
-        payment_data.amount,
-        payment_data.amount,
-        None,
-        0,
-        payment_data.clone(),
-    );
+    let route = network
+        .graph
+        .build_route(payment_data.amount, None, 0, payment_data.clone());
     assert!(route.is_ok());
     eprintln!("got route {:?}", route);
     let route = route.unwrap();
@@ -1078,13 +1042,9 @@ fn test_graph_build_route_select_edge_with_large_capacity() {
         custom_records: None,
         router: vec![],
     };
-    let route = network.graph.build_route(
-        payment_data.amount,
-        payment_data.amount,
-        None,
-        0,
-        payment_data.clone(),
-    );
+    let route = network
+        .graph
+        .build_route(payment_data.amount, None, 0, payment_data.clone());
     assert!(route.is_ok());
     let route = route.unwrap();
     assert_eq!(route.len(), 2);
@@ -1142,13 +1102,9 @@ fn test_graph_mark_failed_channel() {
         custom_records: None,
         router: vec![],
     };
-    let route = network.graph.build_route(
-        payment_data.amount,
-        payment_data.amount,
-        None,
-        0,
-        payment_data.clone(),
-    );
+    let route = network
+        .graph
+        .build_route(payment_data.amount, None, 0, payment_data.clone());
     assert!(route.is_err());
 
     network.add_edge(0, 5, Some(500), Some(2));
@@ -1174,13 +1130,9 @@ fn test_graph_mark_failed_channel() {
         custom_records: None,
         router: vec![],
     };
-    let route = network.graph.build_route(
-        payment_data.amount,
-        payment_data.amount,
-        None,
-        0,
-        payment_data.clone(),
-    );
+    let route = network
+        .graph
+        .build_route(payment_data.amount, None, 0, payment_data.clone());
     assert!(route.is_ok());
 }
 
@@ -1216,13 +1168,9 @@ fn test_graph_session_router() {
         custom_records: None,
         router: vec![],
     };
-    let route = network.graph.build_route(
-        payment_data.amount,
-        payment_data.amount,
-        None,
-        0,
-        payment_data.clone(),
-    );
+    let route = network
+        .graph
+        .build_route(payment_data.amount, None, 0, payment_data.clone());
     assert!(route.is_ok());
 
     let route = route.unwrap();
@@ -1271,13 +1219,9 @@ fn test_graph_mark_failed_node() {
         custom_records: None,
         router: vec![],
     };
-    let route = network.graph.build_route(
-        payment_data.amount,
-        payment_data.amount,
-        None,
-        0,
-        payment_data.clone(),
-    );
+    let route = network
+        .graph
+        .build_route(payment_data.amount, None, 0, payment_data.clone());
     assert!(route.is_ok());
 
     // Test build route from node1 to node4 should be Ok
@@ -1301,13 +1245,9 @@ fn test_graph_mark_failed_node() {
         custom_records: None,
         router: vec![],
     };
-    let route = network.graph.build_route(
-        payment_data.amount,
-        payment_data.amount,
-        None,
-        0,
-        payment_data.clone(),
-    );
+    let route = network
+        .graph
+        .build_route(payment_data.amount, None, 0, payment_data.clone());
     assert!(route.is_ok());
 
     network.mark_node_failed(2);
@@ -1333,13 +1273,9 @@ fn test_graph_mark_failed_node() {
         custom_records: None,
         router: vec![],
     };
-    let route = network.graph.build_route(
-        payment_data.amount,
-        payment_data.amount,
-        None,
-        0,
-        payment_data.clone(),
-    );
+    let route = network
+        .graph
+        .build_route(payment_data.amount, None, 0, payment_data.clone());
     assert!(route.is_err());
 
     // Test build route from node1 to node4
@@ -1362,13 +1298,9 @@ fn test_graph_mark_failed_node() {
         custom_records: None,
         router: vec![],
     };
-    let route = network.graph.build_route(
-        payment_data.amount,
-        payment_data.amount,
-        None,
-        0,
-        payment_data.clone(),
-    );
+    let route = network
+        .graph
+        .build_route(payment_data.amount, None, 0, payment_data.clone());
     assert!(route.is_err());
 }
 
@@ -1395,13 +1327,9 @@ fn test_graph_payment_self_default_is_false() {
     assert!(payment_data.is_ok());
 
     let payment_data = payment_data.unwrap();
-    let route = network.graph.build_route(
-        payment_data.amount,
-        payment_data.amount,
-        None,
-        0,
-        payment_data.clone(),
-    );
+    let route = network
+        .graph
+        .build_route(payment_data.amount, None, 0, payment_data.clone());
     assert!(route.is_err());
     let message = route.unwrap_err().to_string();
     assert!(message.contains("allow_self_payment is not enable, can not pay to self"));
@@ -1458,13 +1386,9 @@ fn test_graph_payment_pay_self_with_one_node() {
     assert!(payment_data.is_ok());
     let payment_data = payment_data.unwrap();
 
-    let route = network.graph.build_route(
-        payment_data.amount,
-        payment_data.amount,
-        None,
-        0,
-        payment_data.clone(),
-    );
+    let route = network
+        .graph
+        .build_route(payment_data.amount, None, 0, payment_data.clone());
     assert!(route.is_ok());
     let route = route.unwrap();
     assert_eq!(route[1].next_hop, Some(node0.into()));
@@ -1493,13 +1417,9 @@ fn test_graph_payment_pay_self_with_one_node_fee_rate() {
     assert!(payment_data.is_ok());
     let payment_data = payment_data.unwrap();
 
-    let route = network.graph.build_route(
-        payment_data.amount,
-        payment_data.amount,
-        None,
-        0,
-        payment_data.clone(),
-    );
+    let route = network
+        .graph
+        .build_route(payment_data.amount, None, 0, payment_data.clone());
     assert!(route.is_ok());
     let route = route.unwrap();
     assert_eq!(route.len(), 3);
@@ -1548,13 +1468,9 @@ fn test_graph_build_route_with_double_edge_node() {
         ..Default::default()
     };
     let payment_data = SendPaymentData::new(command).unwrap();
-    let route = network.graph.build_route(
-        payment_data.amount,
-        payment_data.amount,
-        None,
-        0,
-        payment_data.clone(),
-    );
+    let route = network
+        .graph
+        .build_route(payment_data.amount, None, 0, payment_data.clone());
     assert!(route.is_ok());
 }
 
@@ -1602,13 +1518,9 @@ fn test_graph_build_route_with_other_node_maybe_better() {
         ..Default::default()
     };
     let payment_data = SendPaymentData::new(command).unwrap();
-    let route = network.graph.build_route(
-        payment_data.amount,
-        payment_data.amount,
-        None,
-        0,
-        payment_data.clone(),
-    );
+    let route = network
+        .graph
+        .build_route(payment_data.amount, None, 0, payment_data.clone());
     assert!(route.is_ok());
     let route = route.unwrap();
     assert_eq!(route[0].next_hop, Some(node1.into()));
@@ -1639,13 +1551,9 @@ fn test_graph_payment_pay_self_will_ok() {
     assert!(payment_data.is_ok());
     let payment_data = payment_data.unwrap();
 
-    let route = network.graph.build_route(
-        payment_data.amount,
-        payment_data.amount,
-        None,
-        0,
-        payment_data.clone(),
-    );
+    let route = network
+        .graph
+        .build_route(payment_data.amount, None, 0, payment_data.clone());
     // since we don't have a route to node0, it will fail
     assert!(route.is_err());
 
@@ -1699,13 +1607,9 @@ fn test_graph_build_route_with_path_limits() {
         ..Default::default()
     };
     let payment_data = SendPaymentData::new(command).unwrap();
-    let route = network.graph.build_route(
-        payment_data.amount,
-        payment_data.amount,
-        None,
-        0,
-        payment_data.clone(),
-    );
+    let route = network
+        .graph
+        .build_route(payment_data.amount, None, 0, payment_data.clone());
     assert!(route.is_ok());
     let route = route.unwrap();
     assert_eq!(route.len(), 100);
@@ -1750,13 +1654,9 @@ fn test_graph_build_route_with_path_limit_fail_with_fee_not_enough() {
         ..Default::default()
     };
     let payment_data = SendPaymentData::new(command).unwrap();
-    let route = network.graph.build_route(
-        payment_data.amount,
-        payment_data.amount,
-        None,
-        0,
-        payment_data.clone(),
-    );
+    let route = network
+        .graph
+        .build_route(payment_data.amount, None, 0, payment_data.clone());
     assert!(route.is_err());
 }
 
@@ -1783,13 +1683,9 @@ fn test_graph_payment_expiry_is_in_right_order() {
 
     let current_time = now_timestamp_as_millis_u64();
     let payment_data = payment_data.unwrap();
-    let route = network.graph.build_route(
-        payment_data.amount,
-        payment_data.amount,
-        None,
-        0,
-        payment_data,
-    );
+    let route = network
+        .graph
+        .build_route(payment_data.amount, None, 0, payment_data);
     assert!(route.is_ok());
     let route = route.unwrap();
     let expiries = route.iter().map(|e| e.expiry).collect::<Vec<_>>();
@@ -1815,13 +1711,9 @@ fn test_graph_payment_expiry_is_in_right_order() {
 
     let current_time = now_timestamp_as_millis_u64();
     let payment_data = payment_data.unwrap();
-    let route = network.graph.build_route(
-        payment_data.amount,
-        payment_data.amount,
-        None,
-        0,
-        payment_data.clone(),
-    );
+    let route = network
+        .graph
+        .build_route(payment_data.amount, None, 0, payment_data.clone());
     assert!(route.is_ok());
     let route = route.unwrap();
     let expiries = route.iter().map(|e| e.expiry).collect::<Vec<_>>();

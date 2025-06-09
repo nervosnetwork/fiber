@@ -13,7 +13,7 @@ use super::types::{
 };
 use super::types::{Cursor, Pubkey, TlcErr};
 use crate::ckb::config::UdtCfgInfos;
-use crate::fiber::config::DEFAULT_TLC_EXPIRY_DELTA;
+use crate::fiber::config::{DEFAULT_MPP_MIN_AMOUNT, DEFAULT_TLC_EXPIRY_DELTA};
 use crate::fiber::fee::calculate_tlc_forward_fee;
 use crate::fiber::path::NodeHeapElement;
 use crate::fiber::serde_utils::EntityHex;
@@ -895,8 +895,7 @@ where
     /// including the origin and the target node.
     pub fn build_route(
         &self,
-        mut max_amount: u128,
-        min_amount: u128,
+        amount: u128,
         max_fee_amount: Option<u128>,
         active_parts: usize,
         payment_data: SendPaymentData,
@@ -905,6 +904,13 @@ where
         let target = payment_data.target_pubkey;
         let final_tlc_expiry_delta = payment_data.final_tlc_expiry_delta;
         let allow_self_payment = payment_data.allow_self_payment;
+        let mut max_amount = amount;
+        let min_amount = if payment_data.allow_mpp() {
+            DEFAULT_MPP_MIN_AMOUNT
+        } else {
+            amount
+        };
+
         // TODO check feature bits after https://github.com/nervosnetwork/fiber/pull/719/files is merged
         // if max_parts is set, and keysend is not set, then allow mpp
         // in keysend mode, receiver doesn't know the amount to receive, so we don't allow mpp
@@ -1756,6 +1762,10 @@ impl PaymentSession {
         self
     }
 
+    pub fn allow_mpp(&self) -> bool {
+        self.request.max_parts.unwrap_or(1) > 1
+    }
+
     pub fn payment_hash(&self) -> Hash256 {
         self.request.payment_hash
     }
@@ -1997,6 +2007,9 @@ impl Attempt {
 
     pub fn set_failed_status(&mut self, error: &str) {
         self.last_error = Some(error.to_string());
+        if !self.is_retryable() {
+            self.status = PaymentSessionStatus::Failed;
+        }
     }
 
     pub fn hops_public_keys(&self) -> Vec<Pubkey> {
@@ -2017,7 +2030,7 @@ impl Attempt {
     }
 
     pub fn is_failed(&self) -> bool {
-        self.last_error.is_some() && !self.is_retryable()
+        self.status == PaymentSessionStatus::Failed
     }
 
     // The attempt is considered as inflight if error can be retried immediately

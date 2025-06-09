@@ -4872,7 +4872,6 @@ async fn test_send_payment_with_reverse_channel_of_capaicity_not_enough() {
     }
 
     // assert only one payment session will try 2 times
-    eprintln!("result: {:?}", statistic);
     assert_eq!(statistic[&2], 1);
     assert_eq!(statistic[&1], count - 1);
 }
