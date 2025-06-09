@@ -116,7 +116,7 @@ impl Migrations {
     /// Initial db version
     pub fn init_db_version(&self, db: &Store) -> Result<(), Error> {
         if self.need_init(db) {
-            eprintln!("Init database version {}", LATEST_DB_VERSION);
+            info!("Init database version {}", LATEST_DB_VERSION);
             db.put(MIGRATION_VERSION_KEY, LATEST_DB_VERSION);
         }
         Ok(())

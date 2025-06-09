@@ -2056,7 +2056,7 @@ async fn get_channel_tx(
     // transactions are synchronized to all the mock ckb chain actors in all
     // nodes. Thus there is a time window that when the channel announcement
     // is broadcasted, the funding transaction is still unknown.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "bench"))]
     let _ = call_t!(
         chain,
         |callback| CkbChainMessage::CreateTxTracer(crate::ckb::CkbTxTracer {

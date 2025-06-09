@@ -4,7 +4,7 @@ use clap_serde_derive::{
     clap::{self},
     ClapSerde,
 };
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "bench")))]
 use once_cell::sync::OnceCell;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::{fs, path::PathBuf, str::FromStr};
@@ -50,9 +50,9 @@ pub const DEFAULT_AUTO_ANNOUNCE_NODE: bool = true;
 pub const DEFAULT_ANNOUNCE_NODE_INTERVAL_SECONDS: u64 = 3600;
 
 /// The interval to maintain the gossip network, in milli-seconds.
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "bench")))]
 pub const DEFAULT_GOSSIP_NETWORK_MAINTENANCE_INTERVAL_MS: u64 = 1000 * 60;
-#[cfg(test)]
+#[cfg(any(test, feature = "bench"))]
 // This config is needed for the timely processing of gossip messages.
 // Without this, some tests may fail due to the delay in processing gossip messages.
 pub const DEFAULT_GOSSIP_NETWORK_MAINTENANCE_INTERVAL_MS: u64 = 50;
@@ -64,9 +64,9 @@ pub const DEFAULT_MAX_INBOUND_PEERS: usize = 16;
 pub const DEFAULT_MIN_OUTBOUND_PEERS: usize = 8;
 
 /// The interval to maintain the gossip network, in milli-seconds.
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "bench")))]
 pub const DEFAULT_GOSSIP_STORE_MAINTENANCE_INTERVAL_MS: u64 = 20 * 1000;
-#[cfg(test)]
+#[cfg(any(test, feature = "bench"))]
 // This config is needed for the timely processing of gossip messages.
 // Without this, some tests may fail due to the delay in processing gossip messages.
 pub const DEFAULT_GOSSIP_STORE_MAINTENANCE_INTERVAL_MS: u64 = 50;
@@ -371,7 +371,7 @@ impl<'de> serde::Deserialize<'de> for AnnouncedNodeName {
     }
 }
 
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "bench")))]
 static FIBER_SECRET_KEY: OnceCell<super::KeyPair> = OnceCell::new();
 
 impl FiberConfig {
@@ -394,12 +394,12 @@ impl FiberConfig {
 
     // `OnceCell` will make all actors in UI tests use the same secret key.
     // which is not what we want. So we disable it in tests.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "bench"))]
     pub fn read_or_generate_secret_key(&self) -> Result<super::KeyPair> {
         self.inner_read_or_generate_secret_key()
     }
 
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "bench")))]
     pub fn read_or_generate_secret_key(&self) -> Result<super::KeyPair> {
         FIBER_SECRET_KEY
             .get_or_try_init(|| self.inner_read_or_generate_secret_key())
