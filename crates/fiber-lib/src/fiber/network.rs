@@ -2291,12 +2291,12 @@ where
             return Err(Error::InvalidParameter(payment_hash.to_string()));
         };
 
-        match payment_session.status {
-            PaymentSessionStatus::Failed | PaymentSessionStatus::Success => {
-                warn!("Payment session already finished: {:?}", payment_hash);
-                return Ok(None);
-            }
-            _ => {}
+        if payment_session.status.is_final() {
+            warn!(
+                "Payment session {:?} already in final status: {:?}",
+                payment_hash, payment_session.status
+            );
+            return Ok(None);
         }
 
         let more_attempt = match payment_session.next_step() {
@@ -2309,7 +2309,6 @@ where
 
         // just wait for flight to be settled or failed
         if !more_attempt {
-            self.register_payment_retry(myself, payment_hash);
             return Ok(None);
         }
 
