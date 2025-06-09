@@ -2,7 +2,6 @@
 use crate::fiber::config::MAX_PAYMENT_TLC_EXPIRY_LIMIT;
 use crate::fiber::gossip::GossipMessageStore;
 use crate::fiber::graph::{PathFindError, SessionRoute};
-use crate::fiber::tests::test_utils::init_tracing;
 use crate::fiber::types::{ChannelUpdateChannelFlags, ChannelUpdateMessageFlags, Pubkey};
 use crate::{
     fiber::{
@@ -18,9 +17,9 @@ use ckb_types::{
 };
 use secp256k1::{PublicKey, SecretKey, XOnlyPublicKey};
 
-use crate::{gen_rand_secp256k1_keypair_tuple, now_timestamp_as_millis_u64};
+use crate::{gen_rand_secp256k1_keypair_tuple, init_tracing, now_timestamp_as_millis_u64};
 
-use super::test_utils::TempDir;
+use crate::test_utils::TempDir;
 
 // Default tlc expiry delta used in this test environment.
 // Should be a value larger than the running duration of the unit tests.

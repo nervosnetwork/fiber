@@ -1,13 +1,11 @@
 use crate::{
-    fiber::{
-        network::SendPaymentCommand,
-        tests::test_utils::{
-            create_n_nodes_network, establish_channel_between_nodes, init_tracing,
-            ChannelParameters, NetworkNode, MIN_RESERVED_CKB,
-        },
-    },
+    fiber::network::SendPaymentCommand,
     gen_rand_sha256_hash,
     invoice::{Currency, InvoiceBuilder},
+    test_utils::{
+        create_n_nodes_network, establish_channel_between_nodes, init_tracing, ChannelParameters,
+        NetworkNode, MIN_RESERVED_CKB,
+    },
 };
 
 #[tokio::test]

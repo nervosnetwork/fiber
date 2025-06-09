@@ -1,15 +1,15 @@
-use super::test_utils::{init_tracing, NetworkNode};
 use crate::ckb::tests::test_utils::complete_commitment_tx;
 use crate::fiber::channel::{ChannelState, CloseFlags, UpdateCommand, XUDT_COMPATIBLE_WITNESS};
 use crate::fiber::config::{DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT};
 use crate::fiber::features::FeatureVector;
 use crate::fiber::graph::{ChannelInfo, PaymentSessionStatus};
 use crate::fiber::network::{DebugEvent, SendPaymentCommand};
-use crate::fiber::tests::test_utils::*;
 use crate::fiber::types::{
     Hash256, Init, PaymentHopData, PeeledOnionPacket, Pubkey, TlcErrorCode, NO_SHARED_SECRET,
 };
 use crate::invoice::{CkbInvoiceStatus, Currency, InvoiceBuilder};
+use crate::test_utils::{init_tracing, NetworkNode};
+use crate::tests::test_utils::*;
 use crate::{
     ckb::contracts::{get_cell_deps, Contract},
     fiber::{

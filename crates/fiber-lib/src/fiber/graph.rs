@@ -139,7 +139,7 @@ impl ChannelInfo {
             .max(self.update_of_node1.as_ref().map(|n| n.timestamp))
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "bench"))]
     pub fn get_channel_update_of(&self, node: Pubkey) -> Option<&ChannelUpdateInfo> {
         if self.node1() == node {
             self.update_of_node1.as_ref()
@@ -291,7 +291,7 @@ pub struct NetworkGraph<S> {
     // See comments in should_process_gossip_message_for_channel for why we need this.
     // TLDR: Most of the tests do not need this. Only tests in src/fiber/tests/graph.rs need this.
     // We will only set this to true for tests in src/fiber/tests/graph.rs.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "bench"))]
     pub always_process_gossip_message: bool,
     // The pubkey of the node that is running this instance of the network graph.
     source: Pubkey,
@@ -299,6 +299,10 @@ pub struct NetworkGraph<S> {
     pub(crate) channels: HashMap<OutPoint, ChannelInfo>,
     // All the nodes in the network.
     nodes: HashMap<Pubkey, NodeInfo>,
+
+    // Channel pending stats map
+    channel_pending_stats: HashMap<OutPoint, usize>,
+
     // The latest cursor we read from the GossipMessageStore. When we need to refresh our view of the
     // the network, we need to load all the messages starting from this cursor.
     latest_cursor: Cursor,
@@ -361,10 +365,11 @@ where
 {
     pub fn new(store: S, source: Pubkey, announce_private_addr: bool) -> Self {
         let mut network_graph = Self {
-            #[cfg(test)]
+            #[cfg(any(test, feature = "bench"))]
             always_process_gossip_message: false,
             source,
             channels: HashMap::new(),
+            channel_pending_stats: HashMap::new(),
             nodes: HashMap::new(),
             latest_cursor: Cursor::default(),
             store: store.clone(),
@@ -509,7 +514,7 @@ where
     // to update the network graph. Many of the tests are messages from the graph.source.
     // If we ignore these messages, the graph won't be updated. And many tests will fail.
     fn should_process_gossip_message_for_nodes(&self, node1: &Pubkey, node2: &Pubkey) -> bool {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "bench"))]
         if self.always_process_gossip_message {
             return true;
         }
@@ -598,7 +603,8 @@ where
                     "Saving new channel update to the graph: {:?}",
                     &channel_update
                 );
-                *update_info = Some(ChannelUpdateInfo::from(channel_update));
+                *update_info = Some(ChannelUpdateInfo::from(&channel_update));
+                self.history.process_channel_update(&channel_update);
                 return Some(cursor);
             }
         }
@@ -823,7 +829,26 @@ where
         }
     }
 
+    pub(crate) fn track_attempt_router(&mut self, attempt: &Attempt) {
+        for channel_outpoint in attempt.channel_outpoints() {
+            self.channel_pending_stats
+                .entry(channel_outpoint.clone())
+                .and_modify(|e| *e += 1)
+                .or_insert(1);
+        }
+    }
+
+    pub(crate) fn untrack_attempt_router(&mut self, attempt: &Attempt) {
+        for channel_outpoint in attempt.channel_outpoints() {
+            self.channel_pending_stats
+                .entry(channel_outpoint.clone())
+                .and_modify(|e| *e -= 1)
+                .or_insert(0);
+        }
+    }
+
     pub(crate) fn record_attempt_success(&mut self, mut attempt: Attempt) {
+        self.untrack_attempt_router(&attempt);
         let session_route = &attempt.route.nodes;
         let mut result = InternalResult::default();
         result.succeed_range_pairs(session_route, 0, session_route.len() - 1);
@@ -832,7 +857,15 @@ where
         self.store.insert_attempt(attempt);
     }
 
-    pub(crate) fn record_attempt_fail(&mut self, attempt: &Attempt, tlc_err: TlcErr) -> bool {
+    pub(crate) fn record_attempt_fail(
+        &mut self,
+        attempt: &Attempt,
+        tlc_err: TlcErr,
+        first_hop_error: bool,
+    ) -> bool {
+        if !first_hop_error {
+            self.untrack_attempt_router(attempt);
+        }
         let mut internal_result = InternalResult::default();
         let nodes = &attempt.route.nodes;
         let need_to_retry = internal_result.record_payment_fail(nodes, tlc_err);
@@ -845,7 +878,7 @@ where
         return need_to_retry && !is_send_payment_with_router;
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "bench"))]
     pub fn reset(&mut self) {
         self.latest_cursor = Cursor::default();
         self.channels.clear();
@@ -853,7 +886,7 @@ where
         self.history.reset();
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "bench"))]
     pub fn set_source(&mut self, source: Pubkey) {
         self.source = source;
     }
@@ -1004,12 +1037,14 @@ where
         cur_probability: f64,
         // The weight accumulated from the payment path from current target to the final payee.
         cur_weight: u128,
+        // The pending channel count
+        cur_pending_count: usize,
         // The distances from nodes to the final payee.
         distances: &mut HashMap<Pubkey, NodeHeapElement>,
         // The priority queue of nodes to be visited (sorted by distance and probability).
         nodes_heap: &mut NodeHeap,
     ) {
-        let probability = cur_probability
+        let mut probability = cur_probability
             * self.history.eval_probability(
                 from,
                 target,
@@ -1017,6 +1052,16 @@ where
                 next_hop_received_amount,
                 channel_capacity,
             );
+
+        let pending_count = self
+            .channel_pending_stats
+            .get(channel_outpoint)
+            .copied()
+            .unwrap_or(0)
+            + cur_pending_count;
+        if pending_count > 0 {
+            probability *= (0.95f64).powi(pending_count as i32);
+        }
 
         debug!(
             "probability: {} for channel_outpoint: {:?} from: {:?} => to: {:?}",
@@ -1026,8 +1071,10 @@ where
             debug!("probability is too low: {:?}", probability);
             return;
         }
+
         let agg_weight = self.edge_weight(next_hop_received_amount, fee, tlc_expiry_delta);
         let weight = cur_weight + agg_weight;
+
         let distance = self.calculate_distance_based_probability(probability, weight);
 
         if let Some(node) = distances.get(&from) {
@@ -1046,6 +1093,7 @@ where
             incoming_tlc_expiry: total_tlc_expiry,
             fee_charged: fee,
             probability,
+            pending_count,
             next_hop: Some(RouterHop {
                 target,
                 channel_outpoint: channel_outpoint.clone(),
@@ -1167,6 +1215,7 @@ where
                     hint.tlc_expiry_delta,
                     1.0,
                     0,
+                    0,
                     &mut distances,
                     &mut nodes_heap,
                 );
@@ -1184,6 +1233,7 @@ where
             probability: 1.0,
             next_hop: None,
             incoming_tlc_expiry: expiry,
+            pending_count: 0,
         });
 
         while let Some(cur_hop) = nodes_heap.pop() {
@@ -1266,6 +1316,7 @@ where
                     expiry_delta,
                     cur_hop.probability,
                     cur_hop.weight,
+                    cur_hop.pending_count,
                     &mut distances,
                     &mut nodes_heap,
                 );
@@ -1406,9 +1457,10 @@ where
         assert!(probability > 0.0);
         // FIXME: set this to configurable parameters
         let weight = weight as f64;
-        let time_pref = 0.5_f64;
-        let default_attempt_cost = 0.1_f64;
+        let time_pref = 0.9_f64;
+        let default_attempt_cost = 100_f64;
         let penalty = default_attempt_cost * (1.0 / (0.5 - time_pref / 2.0) - 1.0);
+
         weight as u128 + (penalty / probability) as u128
     }
 
@@ -1506,6 +1558,7 @@ where
                     amount_to_send,
                     channel_info.capacity(),
                 );
+
                 let weight = self.edge_weight(amount_to_send, fee, current_incoming_tlc_expiry);
                 let distance = self.calculate_distance_based_probability(probability, weight);
 
@@ -1915,7 +1968,7 @@ impl From<PaymentSession> for SendPaymentResponse {
             last_updated_at: session.last_updated_at,
             custom_records: session.request.custom_records,
             fee,
-            #[cfg(debug_assertions)]
+            #[cfg(any(debug_assertions, feature = "bench"))]
             router: route,
         }
     }
@@ -1978,6 +2031,10 @@ impl Attempt {
             .first()
             .map(|x| x.channel_outpoint.eq(out_point))
             .unwrap_or_default()
+    }
+
+    fn channel_outpoints(&self) -> impl Iterator<Item = &OutPoint> {
+        self.route.nodes.iter().map(|x| &x.channel_outpoint)
     }
 }
 

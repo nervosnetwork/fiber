@@ -1,9 +1,7 @@
 #![allow(clippy::needless_range_loop)]
-
-use ckb_types::packed::Script;
-
+use crate::tests::*;
 use crate::{
-    fiber::{tests::test_utils::*, types::Hash256},
+    fiber::types::Hash256,
     invoice::Currency,
     rpc::{
         channel::{ListChannelsParams, ListChannelsResult},
@@ -13,6 +11,7 @@ use crate::{
         peer::ListPeersResult,
     },
 };
+use ckb_types::packed::Script;
 
 #[tokio::test]
 async fn test_rpc_basic() {

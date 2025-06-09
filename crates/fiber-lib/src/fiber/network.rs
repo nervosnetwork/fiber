@@ -169,7 +169,7 @@ pub struct SendPaymentResponse {
     pub failed_error: Option<String>,
     pub custom_records: Option<PaymentCustomRecords>,
     pub fee: u128,
-    #[cfg(debug_assertions)]
+    #[cfg(any(debug_assertions, feature = "bench"))]
     pub router: SessionRoute,
 }
 
@@ -656,7 +656,7 @@ impl NetworkActorMessage {
     }
 }
 
-#[cfg(debug_assertions)]
+#[cfg(any(debug_assertions, feature = "bench"))]
 #[derive(Clone, Debug)]
 pub enum DebugEvent {
     // A AddTlc peer message processed with failure
@@ -668,7 +668,7 @@ pub enum DebugEvent {
 #[macro_export]
 macro_rules! debug_event {
     ($network:expr, $debug_event:expr) => {
-        #[cfg(debug_assertions)]
+        #[cfg(any(debug_assertions, feature = "bench"))]
         $network
             .send_message(NetworkActorMessage::new_notification(
                 NetworkServiceEvent::DebugEvent(DebugEvent::Common($debug_event.to_string())),
@@ -713,7 +713,7 @@ pub enum NetworkServiceEvent {
     // Preimage is removed for the payment hash.
     PreimageRemoved(Hash256),
     // Some other debug event for assertion.
-    #[cfg(debug_assertions)]
+    #[cfg(any(debug_assertions, feature = "bench"))]
     DebugEvent(DebugEvent),
 }
 
@@ -1916,11 +1916,11 @@ where
 
                     self.update_graph_with_tlc_fail(&state.network, &error_detail)
                         .await;
-                    let need_to_retry = self
-                        .network_graph
-                        .write()
-                        .await
-                        .record_attempt_fail(&attempt, error_detail.clone());
+                    let need_to_retry = self.network_graph.write().await.record_attempt_fail(
+                        &attempt,
+                        error_detail.clone(),
+                        false,
+                    );
                     dbg!("set attempt failed to ", error_detail.error_code.as_ref());
 
                     // If this is the first hop error, like the WaitingTlcAck error,
@@ -2104,11 +2104,11 @@ where
             Err(error_detail) => {
                 self.update_graph_with_tlc_fail(&state.network, &error_detail)
                     .await;
-                let need_to_retry = self
-                    .network_graph
-                    .write()
-                    .await
-                    .record_attempt_fail(attempt, error_detail.clone());
+                let need_to_retry = self.network_graph.write().await.record_attempt_fail(
+                    attempt,
+                    error_detail.clone(),
+                    true,
+                );
                 // TODO retry condition:
                 // && !payment_session.is_send_payment_with_router()
                 // && payment_session.can_retry();
@@ -2181,6 +2181,10 @@ where
         let Some((channel_error, tlc_err)) = error_info else {
             // attempt is inflight
             attempt.set_inflight_status();
+            self.network_graph
+                .write()
+                .await
+                .track_attempt_router(&attempt);
             self.store.insert_attempt(attempt.clone());
             return;
         };
@@ -2192,11 +2196,11 @@ where
             if matches!(channel_error, ProcessingChannelError::WaitingTlcAck) {
                 ("WaitingTlcAck".to_string(), true)
             } else {
-                let need_to_retry = self
-                    .network_graph
-                    .write()
-                    .await
-                    .record_attempt_fail(&attempt, tlc_err.clone());
+                let need_to_retry = self.network_graph.write().await.record_attempt_fail(
+                    &attempt,
+                    tlc_err.clone(),
+                    true,
+                );
                 (channel_error.to_string(), need_to_retry)
             };
 

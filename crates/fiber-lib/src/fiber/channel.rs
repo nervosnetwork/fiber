@@ -1,4 +1,4 @@
-#[cfg(debug_assertions)]
+#[cfg(any(debug_assertions, feature = "bench"))]
 use crate::fiber::network::DebugEvent;
 use crate::fiber::network::PaymentCustomRecords;
 use crate::fiber::types::BroadcastMessageWithTimestamp;
@@ -105,9 +105,9 @@ const RETRYABLE_TLC_OPS_INTERVAL: Duration = Duration::from_millis(1000);
 const WAITING_REESTABLISH_FINISH_TIMEOUT: Duration = Duration::from_millis(4000);
 
 // if a important TLC operation is not acked in 30 seconds, we will try to disconnect the peer.
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "bench")))]
 pub const PEER_CHANNEL_RESPONSE_TIMEOUT: u64 = 30 * 1000;
-#[cfg(test)]
+#[cfg(any(test, feature = "bench"))]
 pub const PEER_CHANNEL_RESPONSE_TIMEOUT: u64 = 10 * 1000;
 
 #[derive(Debug)]
@@ -154,7 +154,7 @@ pub enum ChannelCommand {
     BroadcastChannelUpdate(),
     Update(UpdateCommand, RpcReplyPort<Result<(), String>>),
     ForwardTlcResult(ForwardTlcResult),
-    #[cfg(test)]
+    #[cfg(any(test, feature = "bench"))]
     ReloadState(ReloadParams),
 }
 
@@ -169,19 +169,19 @@ impl Display for ChannelCommand {
             ChannelCommand::BroadcastChannelUpdate() => write!(f, "BroadcastChannelUpdate"),
             ChannelCommand::Update(_, _) => write!(f, "Update"),
             ChannelCommand::ForwardTlcResult(res) => write!(f, "ForwardTlcResult [{:?}]", res),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "bench"))]
             ChannelCommand::ReloadState(_) => write!(f, "ReloadState"),
         }
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "bench"))]
 #[derive(Debug)]
 pub struct ReloadParams {
     pub notify_changes: bool,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "bench"))]
 impl Default for ReloadParams {
     fn default() -> Self {
         Self {
@@ -2098,7 +2098,7 @@ where
                     .await;
                 Ok(())
             }
-            #[cfg(test)]
+            #[cfg(any(test, feature = "bench"))]
             ChannelCommand::ReloadState(reload_params) => {
                 *state = self
                     .store
@@ -3059,7 +3059,7 @@ pub struct TlcState {
 }
 
 impl TlcState {
-    #[cfg(debug_assertions)]
+    #[cfg(any(debug_assertions, feature = "bench"))]
     pub fn debug(&self) {
         let format_tlc_list = |tlcs: &[TlcInfo]| -> String {
             if tlcs.is_empty() {
