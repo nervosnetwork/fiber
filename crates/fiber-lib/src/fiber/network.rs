@@ -1578,13 +1578,13 @@ where
                 let msg = match partial_witnesses {
                     Some(partial_witnesses) => {
                         debug!(
-                                    "Received SignFudningTx request with for transaction {:?} and partial witnesses {:?}",
-                                    &funding_tx,
-                                    partial_witnesses
-                                        .iter()
-                                        .map(hex::encode)
-                                        .collect::<Vec<_>>()
-                                );
+                            "Received SignFudningTx request with for transaction {:?} and partial witnesses {:?}",
+                            &funding_tx,
+                            partial_witnesses
+                                .iter()
+                                .map(hex::encode)
+                                .collect::<Vec<_>>()
+                        );
                         let funding_tx = funding_tx
                             .into_view()
                             .as_advanced_builder()
@@ -1895,9 +1895,15 @@ where
         let Some(attempt_id) = attempt_id else {
             return;
         };
+        let Some(mut payment_session) = self.store.get_payment_session(payment_hash) else {
+            error!("Payment session not found: {:?}", payment_hash);
+            return;
+        };
+        if payment_session.decide_payment_status().is_final() {
+            dbg!("payment session already in final status: {:?payment_status}, skip remove tlc");
+            return;
+        }
         if let Some(mut attempt) = self.store.get_attempt(payment_hash, attempt_id) {
-            // TODO: check if the payment_session.status == PaymentSessionStatus::Inflight
-            // if payment_session.status == PaymentSessionStatus::Inflight {
             match reason {
                 RemoveTlcReason::RemoveTlcFulfill(_) => {
                     dbg!("record attempt fulfilled", &reason);
@@ -1935,17 +1941,13 @@ where
                     self.register_payment_retry(myself.clone(), payment_hash);
                     if !need_to_retry {
                         dbg!("set error to", &error_detail.error_code.as_ref());
-                        // TODO fail payment
-                        if let Some(mut session) = self.store.get_payment_session(payment_hash) {
-                            self.set_payment_fail_with_error(
-                                &mut session,
-                                error_detail.error_code.as_ref(),
-                            );
-                        }
+                        self.set_payment_fail_with_error(
+                            &mut payment_session,
+                            error_detail.error_code.as_ref(),
+                        );
                     }
                 }
             }
-            // }
         }
     }
 
@@ -2282,7 +2284,6 @@ where
         state: &mut NetworkActorState<S>,
         payment_hash: Hash256,
     ) -> Result<Option<SessionRoute>, Error> {
-        eprintln!("resume_payment_session: {:?}", payment_hash);
         self.update_graph().await;
         let Some(mut payment_session) = self.store.get_payment_session(payment_hash) else {
             return Err(Error::InvalidParameter(payment_hash.to_string()));

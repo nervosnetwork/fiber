@@ -1623,6 +1623,15 @@ pub enum PaymentSessionStatus {
     Failed,
 }
 
+impl PaymentSessionStatus {
+    pub fn is_final(&self) -> bool {
+        matches!(
+            self,
+            PaymentSessionStatus::Success | PaymentSessionStatus::Failed
+        )
+    }
+}
+
 /// The node and channel information in a payment route hop
 #[serde_as]
 #[derive(Clone, Debug, Serialize, Deserialize)]
