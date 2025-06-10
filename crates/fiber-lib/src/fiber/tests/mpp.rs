@@ -200,6 +200,111 @@ async fn test_send_mpp_with_max_parts_1_will_fail() {
 }
 
 #[tokio::test]
+async fn test_send_mpp_amount_choose_single_path() {
+    init_tracing();
+
+    // we enable basic mpp, but the amount is small enough to choose a single path
+    // so the mpp will not be used actually
+    let (nodes, _channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+            ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+            ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+        ],
+        2,
+    )
+    .await;
+    let [mut node_0, mut node_1] = nodes.try_into().expect("2 nodes");
+    let source_node = &mut node_0;
+    let target_pubkey = node_1.pubkey;
+
+    let preimage = gen_rand_sha256_hash();
+    let ckb_invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(1000))
+        .payment_preimage(preimage)
+        .payee_pub_key(target_pubkey.into())
+        .allow_mpp(true)
+        .payment_secret(gen_rand_sha256_hash())
+        .build()
+        .expect("build invoice success");
+
+    node_1.insert_invoice(ckb_invoice.clone(), Some(preimage));
+
+    let res = source_node
+        .send_payment(SendPaymentCommand {
+            invoice: Some(ckb_invoice.to_string()),
+            amount: ckb_invoice.amount,
+            max_parts: Some(3),
+            ..Default::default()
+        })
+        .await;
+
+    eprintln!("res: {:?}", res);
+    assert!(res.is_ok());
+    let payment_hash = res.unwrap().payment_hash;
+    source_node.wait_until_success(payment_hash).await;
+    let payment_session = source_node.get_payment_session(payment_hash).unwrap();
+    dbg!(&payment_session.status, &payment_session.attempts().len());
+    assert_eq!(payment_session.attempts().len(), 1);
+    assert_eq!(payment_session.retry_times(), 1);
+}
+
+#[tokio::test]
+async fn test_send_mpp_amount_3_splits() {
+    init_tracing();
+
+    // FIXME: our path-finding algorithm should handle this case better
+    // currently, it will try to split the payment into 3 parts, but it will fail
+    // we should split the payment into 3 parts with equally amount
+    let (nodes, _channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+            ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+            ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+        ],
+        2,
+    )
+    .await;
+    let [mut node_0, mut node_1] = nodes.try_into().expect("2 nodes");
+    let source_node = &mut node_0;
+    let target_pubkey = node_1.pubkey;
+
+    let preimage = gen_rand_sha256_hash();
+    let ckb_invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(30000000000))
+        .payment_preimage(preimage)
+        .payee_pub_key(target_pubkey.into())
+        .allow_mpp(true)
+        .payment_secret(gen_rand_sha256_hash())
+        .build()
+        .expect("build invoice success");
+
+    node_1.insert_invoice(ckb_invoice.clone(), Some(preimage));
+
+    let res = source_node
+        .send_payment(SendPaymentCommand {
+            invoice: Some(ckb_invoice.to_string()),
+            amount: ckb_invoice.amount,
+            max_parts: Some(3),
+            ..Default::default()
+        })
+        .await;
+
+    eprintln!("res: {:?}", res);
+    assert!(res.is_ok());
+    let payment_hash = res.unwrap().payment_hash;
+    source_node.wait_until_failed(payment_hash).await;
+    let payment_session = source_node.get_payment_session(payment_hash).unwrap();
+    dbg!(
+        &payment_session.status,
+        &payment_session.attempts().len(),
+        &payment_session.retry_times()
+    );
+    assert_eq!(payment_session.attempts().len(), 3);
+    assert_eq!(payment_session.retry_times(), 3);
+}
+
+#[tokio::test]
 async fn test_send_mpp_amount_split() {
     init_tracing();
 
@@ -241,8 +346,8 @@ async fn test_send_mpp_amount_split() {
     let payment_hash = res.unwrap().payment_hash;
     source_node.wait_until_success(payment_hash).await;
 
-    let pss = source_node.get_payment_session(payment_hash).unwrap();
-    dbg!(&pss.status, &pss.attempts().len());
+    let payment_session = source_node.get_payment_session(payment_hash).unwrap();
+    dbg!(&payment_session.status, &payment_session.attempts().len());
 
     // Spent the half of amount in the first channel
     let node_0_balance = source_node.get_local_balance_from_channel(channels[0]);

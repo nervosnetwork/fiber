@@ -1778,6 +1778,18 @@ impl PaymentSession {
         self.cached_attempts.clone()
     }
 
+    pub fn max_parts(&self) -> usize {
+        self.request.max_parts.unwrap_or(1) as usize
+    }
+
+    pub fn active_attempts(&self) -> Vec<Attempt> {
+        self.cached_attempts
+            .iter()
+            .filter(|a| a.is_active())
+            .cloned()
+            .collect()
+    }
+
     pub fn fee_paid(&self) -> u128 {
         self.cached_attempts.iter().fold(0, |acc, a| {
             if !a.is_failed() {
@@ -1875,6 +1887,10 @@ impl PaymentSession {
             return false;
         }
 
+        if self.active_attempts().len() >= self.max_parts() {
+            return false;
+        }
+
         // otherwise, should continue retry
         true
     }
@@ -1886,6 +1902,11 @@ impl PaymentSession {
         }
         // if last error is not none, the payment is failed
         let payment_failed = self.last_error.is_some();
+        // no settled htlc, the payment is failed
+        if payment_failed {
+            return PaymentSessionStatus::Failed;
+        }
+
         let mut htlc_inflight = false;
         let mut htlc_failed = false;
         let mut htlc_settled = false;
@@ -1919,6 +1940,7 @@ impl PaymentSession {
                 .iter()
                 .map(|a| a.tried_times)
                 .collect::<Vec<_>>(),
+            &self.cached_attempts,
             &self.last_error
         );
 
@@ -1934,11 +1956,7 @@ impl PaymentSession {
         if htlc_settled {
             return PaymentSessionStatus::Success;
         }
-        // no settled htlc, the payment is failed
-        if payment_failed {
-            dbg!("last error is some", &self.last_error);
-            return PaymentSessionStatus::Failed;
-        }
+
         // if htlc is failed but the payment is not failed, the payment is inflight
         if htlc_failed {
             if self.allow_more_attempts() {

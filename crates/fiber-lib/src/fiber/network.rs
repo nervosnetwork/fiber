@@ -2054,6 +2054,7 @@ where
                 let error = format!("Failed to build route, {}", e);
                 dbg!("build route error ", attempt.id, &error);
                 self.set_attempt_fail_with_error(session, attempt, &error, false);
+                self.set_payment_fail_with_error(session, &error);
                 return Err(Error::SendPaymentError(error));
             }
             Ok(hops) => {
