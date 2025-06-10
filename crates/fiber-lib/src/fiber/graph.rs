@@ -898,7 +898,7 @@ where
         amount: u128,
         max_fee_amount: Option<u128>,
         active_parts: usize,
-        payment_data: SendPaymentData,
+        payment_data: &SendPaymentData,
     ) -> Result<Vec<PaymentHopData>, PathFindError> {
         let source = self.get_source_pubkey();
         let target = payment_data.target_pubkey;
@@ -960,10 +960,11 @@ where
         &self,
         route: &Vec<RouterHop>,
         max_amount: u128,
-        payment_data: SendPaymentData,
+        payment_data: &SendPaymentData,
     ) -> Vec<PaymentHopData> {
         let invoice = payment_data
             .invoice
+            .clone()
             .map(|x| x.parse::<CkbInvoice>().expect("parse CKB invoice"));
         let hash_algorithm = invoice
             .as_ref()
