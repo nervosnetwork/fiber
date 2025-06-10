@@ -2020,10 +2020,8 @@ where
             Err(e) => {
                 let error = format!("Failed to build route, {}", e);
                 dbg!("build route error ", attempt.id, &error);
-                if !session.request.dry_run {
-                    self.set_attempt_fail_with_error(attempt, &error);
-                    self.set_payment_fail_with_error(session, &error);
-                }
+                self.set_attempt_fail_with_error(attempt, &error);
+                self.set_payment_fail_with_error(session, &error);
                 return Err(Error::SendPaymentError(error));
             }
             Ok(hops) => {
@@ -2191,7 +2189,6 @@ where
         }
 
         // retry the current attempt if it is retryable
-
         self.register_payment_retry(myself, payment_hash, Some(attempt.id));
     }
 
@@ -2219,12 +2216,12 @@ where
             .send_payment_onion_packet(state, attempt, hops_info)
             .await
         {
-            self.register_payment_retry(myself, session.payment_hash(), None);
             let need_retry = matches!(err, Error::SendPaymentFirstHopError(_, true));
             if need_retry {
                 // If this is the first hop error, such as the WaitingTlcAck error,
                 // we will just retry later, return Ok here for letting endpoint user
                 // know payment session is created successfully
+                self.register_payment_retry(myself, session.payment_hash(), Some(attempt.id));
                 return Ok(None);
             } else {
                 self.set_payment_fail_with_error(session, &err.to_string());
