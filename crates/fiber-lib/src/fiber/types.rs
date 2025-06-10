@@ -1552,7 +1552,6 @@ pub enum TlcErrorCode {
     InvalidOnionHmac = BADONION | PERM | 5,
     InvalidOnionKey = BADONION | PERM | 6,
     TemporaryChannelFailure = UPDATE | 7,
-    HoldTlcTimeout = UPDATE | 8,
     // used for shutting down the channel
     PermanentChannelFailure = PERM | 8,
     RequiredChannelFeatureMissing = PERM | 9,
@@ -1560,7 +1559,6 @@ pub enum TlcErrorCode {
     AmountBelowMinimum = UPDATE | 11,
     FeeInsufficient = UPDATE | 12,
     IncorrectTlcExpiry = UPDATE | 13,
-    TotalAmountMismatch = UPDATE | 14,
     ExpiryTooSoon = PERM | 14,
     IncorrectOrUnknownPaymentDetails = PERM | 15,
     InvoiceExpired = PERM | 16,
@@ -1570,6 +1568,7 @@ pub enum TlcErrorCode {
     ChannelDisabled = UPDATE | 20,
     ExpiryTooFar = PERM | 21,
     InvalidOnionPayload = PERM | 22,
+    HoldTlcTimeout = 23,
     InvalidOnionError = BADONION | PERM | 25,
 }
 

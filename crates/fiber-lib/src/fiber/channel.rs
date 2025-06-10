@@ -912,7 +912,7 @@ where
                         return TlcSettleDownResult::Failed(
                             tlcs,
                             RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
-                                TlcErr::new(TlcErrorCode::TotalAmountMismatch),
+                                TlcErr::new(TlcErrorCode::IncorrectOrUnknownPaymentDetails),
                                 &tlc.shared_secret,
                             )),
                         );
