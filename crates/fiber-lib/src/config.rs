@@ -1,5 +1,9 @@
 use std::path::PathBuf;
 
+use clap::Parser;
+use clap_serde_derive::ClapSerde;
+use serde::{Deserialize, Serialize};
+
 #[cfg(not(target_arch = "wasm32"))]
 use crate::CchConfig;
 use crate::{ckb::CkbConfig, rpc::config::RpcConfig, FiberConfig};
@@ -16,6 +20,29 @@ pub struct Config {
     // ckb actor config, None represents that we should not run ckb actor
     pub ckb: Option<CkbConfig>,
     pub base_dir: PathBuf,
+}
+
+#[derive(Serialize, Deserialize, Parser, Copy, Clone, Debug, PartialEq)]
+pub enum Service {
+    #[serde(alias = "fiber", alias = "FIBER")]
+    FIBER,
+    #[cfg(not(target_arch = "wasm32"))]
+    #[serde(alias = "cch", alias = "CCH")]
+    CCH,
+    #[serde(alias = "rpc", alias = "RPC")]
+    RPC,
+    #[serde(alias = "ckb", alias = "CKB")]
+    CkbChain,
+}
+
+#[derive(Deserialize)]
+struct SerializedConfig {
+    services: Option<Vec<Service>>,
+    fiber: Option<<FiberConfig as ClapSerde>::Opt>,
+    #[cfg(not(target_arch = "wasm32"))]
+    cch: Option<<CchConfig as ClapSerde>::Opt>,
+    rpc: Option<<RpcConfig as ClapSerde>::Opt>,
+    ckb: Option<<CkbConfig as ClapSerde>::Opt>,
 }
 #[cfg(not(target_arch = "wasm32"))]
 pub mod native {
@@ -88,18 +115,6 @@ pub mod native {
         pub ckb: <CkbConfig as ClapSerde>::Opt,
     }
 
-    #[derive(Serialize, Deserialize, Parser, Copy, Clone, Debug, PartialEq)]
-    pub enum Service {
-        #[serde(alias = "fiber", alias = "FIBER")]
-        FIBER,
-        #[serde(alias = "cch", alias = "CCH")]
-        CCH,
-        #[serde(alias = "rpc", alias = "RPC")]
-        RPC,
-        #[serde(alias = "ckb", alias = "CKB")]
-        CkbChain,
-    }
-
     impl FromStr for Service {
         type Err = String;
         fn from_str(s: &str) -> Result<Self, Self::Err> {
@@ -111,14 +126,6 @@ pub mod native {
                 _ => Err(format!("invalid service {}", s)),
             }
         }
-    }
-    #[derive(Deserialize)]
-    struct SerializedConfig {
-        services: Option<Vec<Service>>,
-        fiber: Option<<FiberConfig as ClapSerde>::Opt>,
-        cch: Option<<CchConfig as ClapSerde>::Opt>,
-        rpc: Option<<RpcConfig as ClapSerde>::Opt>,
-        ckb: Option<<CkbConfig as ClapSerde>::Opt>,
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -213,6 +220,65 @@ pub mod native {
                 rpc,
                 ckb,
                 base_dir,
+            }
+        }
+    }
+}
+
+mod wasm {
+    use std::{path::PathBuf, str::FromStr};
+
+    use crate::{ckb::CkbConfig, rpc::config::RpcConfig, FiberConfig};
+
+    use super::{Config, SerializedConfig, Service};
+    impl Config {
+        pub fn parse_from_str(str: impl AsRef<str>) -> Self {
+            let config_from_file = serde_yaml::from_str::<SerializedConfig>(str.as_ref())
+                .expect("valid config file format");
+
+            // Services to run can be passed from
+            // 1. command line
+            // 2. config file
+            // If command line arguments contain services, then don't read config file
+            // for services to run any more, otherwise use config file for that.
+            let services = config_from_file.services.clone().unwrap_or_default();
+
+            if services.is_empty() {
+                panic!("Must run at least one service. Specifying services to run by command line or config file.");
+            };
+
+            let (fiber, rpc, ckb) = {
+                let SerializedConfig {
+                    fiber,
+                    rpc,
+                    ckb,
+                    ..
+                } = config_from_file;
+                (
+                    fiber.unwrap_or_default(),
+                    rpc.unwrap_or_default(),
+                    ckb.unwrap_or_default(),
+                )
+            };
+
+            let fiber = services
+                .contains(&Service::FIBER)
+                .then_some(fiber)
+                .map(|c| FiberConfig::from(c));
+            let rpc = services
+                .contains(&Service::RPC)
+                .then_some(rpc)
+                .map(|c| RpcConfig::from(c));
+            let ckb = services
+                .contains(&Service::CkbChain)
+                .then_some(ckb)
+                .map(|c| CkbConfig::from(c));
+
+            Self {
+                fiber,
+                rpc,
+                ckb,
+                base_dir: PathBuf::from_str("/wasm/").unwrap(),
             }
         }
     }

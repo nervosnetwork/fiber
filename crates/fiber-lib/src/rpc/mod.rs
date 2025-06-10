@@ -10,7 +10,6 @@ pub mod invoice;
 pub mod payment;
 pub mod peer;
 pub mod utils;
-#[cfg(feature = "watchtower")]
 pub mod watchtower;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod server {

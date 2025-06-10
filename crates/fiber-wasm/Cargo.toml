@@ -4,7 +4,19 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+console_error_panic_hook = "0.1.7"
 fnn = { path = "../fiber-lib", default-features = false }
+serde = "1.0.219"
+wasm-logger = "0.2.0"
+ckb-chain-spec = "0.200.0"
+ckb-resource = "0.200.0"
+ractor = { "git" = "https://github.com/officeyutong/ractor", branch = "use-non-send-future-in-wasm", features = [
+    "async-trait",
+] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tokio = { version = "1.45.1", features = ["macros", "rt", "sync", "time"] }
+jsonrpsee = { version = "0.22", features = ["wasm-client"] }
 
 [lib]
 crate-type = ["cdylib", "rlib"]

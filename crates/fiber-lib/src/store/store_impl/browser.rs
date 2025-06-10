@@ -27,6 +27,10 @@ use web_sys::js_sys::Int32Array;
 use web_sys::js_sys::SharedArrayBuffer;
 use web_sys::js_sys::Uint8Array;
 
+unsafe impl Send for Store {}
+unsafe impl Sync for Store {}
+
+#[derive(Clone)]
 pub struct Store {
     chan: CommunicationChannel,
 }
