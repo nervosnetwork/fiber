@@ -323,6 +323,8 @@ pub enum PathFindError {
     Amount(String),
     #[error("PathFind error: {0}")]
     PathFind(String),
+    #[error("Overflow error: {0}")]
+    Overflow(String),
     #[error("Feature not enabled: {0}")]
     FeatureNotEnabled(String),
     #[error("Insufficient balance: {0}")]
@@ -902,58 +904,159 @@ where
     ) -> Result<Vec<PaymentHopData>, PathFindError> {
         let source = self.get_source_pubkey();
         let target = payment_data.target_pubkey;
-        let final_tlc_expiry_delta = payment_data.final_tlc_expiry_delta;
         let allow_self_payment = payment_data.allow_self_payment;
         let allow_mpp = payment_data.allow_mpp();
-        let max_parts = payment_data.max_parts();
-        let mut max_amount = amount;
-        let min_amount = if allow_mpp {
+        let max_total_parts = payment_data.max_parts(); // Total maximum parts for the entire payment
+
+        let min_amount_for_a_part = if allow_mpp {
             DEFAULT_MPP_MIN_AMOUNT
         } else {
-            amount
+            amount // If not MPP, this part must carry the full amount
         };
 
-        let is_last_part = active_parts + 1 >= max_parts as usize;
+        // Check if this is potentially the last part we are trying to build
+        let is_last_part = active_parts + 1 >= max_total_parts as usize;
 
         if source == target && !allow_self_payment {
             return Err(PathFindError::FeatureNotEnabled(
-                "allow_self_payment is not enable, can not pay to self".to_string(),
+                "allow_self_payment is not enabled, can not pay to self".to_string(),
             ));
         }
 
-        let route = if !payment_data.router.is_empty() {
-            payment_data.router.clone()
+        let (route_hops, actual_amount_for_route) = if !payment_data.router.is_empty() {
+            // If a router is explicitly provided, use it.
+            // Assume it's valid for the requested `amount`.
+            (payment_data.router.clone(), amount)
         } else {
-            // try find half
-            loop {
-                match self.find_path(
+            // Attempt to find a path for the requested `amount`.
+            match self.find_path_with_payment_data(
+            source,
+            amount, // Initial attempt with the full requested amount for this part
+            max_fee_amount,
+            payment_data,
+        ) {
+            Ok(route) => (route, amount), // Success with the full requested amount
+            Err(PathFindError::PathFind(orig_err))
+                // Condition to attempt finding a smaller amount:
+                // - MPP is allowed for the payment.
+                // - This is not the last part we are forced to make (more flexible).
+                // - The requested amount is greater than the minimum allowed for a part.
+                if allow_mpp && !is_last_part && amount > min_amount_for_a_part =>
+            {
+               if let Ok(res) = self.binary_find_path_in_range(
                     source,
-                    target,
-                    max_amount,
+                    amount,
+                    min_amount_for_a_part,
                     max_fee_amount,
-                    payment_data.udt_type_script.clone(),
-                    final_tlc_expiry_delta,
-                    payment_data.tlc_expiry_limit,
-                    allow_self_payment,
-                    &payment_data.hop_hints,
+                    payment_data
                 ) {
-                    Err(PathFindError::PathFind(err)) if allow_mpp && !is_last_part => {
-                        debug!("find path failed, try find half: {}", err);
-                        max_amount /= 2;
-                        if max_amount < min_amount {
-                            return Err(PathFindError::PathFind(err));
-                        }
-                        continue;
-                    }
-                    Ok(route) => break route,
-                    Err(err) => return Err(err),
+                    res
+                } else {
+                    return Err(PathFindError::PathFind(orig_err));
                 }
             }
+            // Initial find_path failed with a non-PathFind error,
+            // or conditions for trying smaller amounts were not met.
+            Err(err) => return Err(err),
+        }
         };
 
-        assert!(!route.is_empty());
+        assert!(
+            !route_hops.is_empty(),
+            "Route hops should not be empty if Ok"
+        );
 
-        Ok(self.build_router_from_path(&route, max_amount, payment_data))
+        Ok(self.build_router_from_path(&route_hops, actual_amount_for_route, payment_data))
+    }
+
+    fn find_path_with_payment_data(
+        &self,
+        source: Pubkey,
+        amount: u128,
+        max_fee_amount: Option<u128>,
+        payment_data: &SendPaymentData,
+    ) -> Result<Vec<RouterHop>, PathFindError> {
+        self.find_path(
+            source,
+            payment_data.target_pubkey,
+            amount,
+            max_fee_amount,
+            payment_data.udt_type_script.clone(),
+            payment_data.final_tlc_expiry_delta,
+            payment_data.tlc_expiry_limit,
+            payment_data.allow_self_payment,
+            &payment_data.hop_hints,
+        )
+    }
+
+    // This function attempts to find a path for the given `amount` using binary search.
+    // It will try to find the largest feasible sub-amount that can be sent.
+    // not a efficient algorithm, but it is simple and works for most cases.
+    // maybe we can use a more efficient algorithm in the future.
+    fn binary_find_path_in_range(
+        &self,
+        source: Pubkey,
+        amount: u128,
+        min_amount_for_a_part: u128,
+        max_fee_amount: Option<u128>,
+        payment_data: &SendPaymentData,
+    ) -> Result<(Vec<RouterHop>, u128), PathFindError> {
+        debug!(
+            "find_path for amount {}. Trying to find largest feasible sub-amount.",
+            amount,
+        );
+
+        let mut low = min_amount_for_a_part;
+        // Search up to `amount - 1` because `amount` itself failed.
+        let mut high = amount.saturating_sub(1);
+
+        if low > high {
+            return Err(PathFindError::PathFind("can not found".to_string()));
+        }
+
+        const MAX_BINARY_SEARCH_ITERATIONS: usize = 50;
+        let mut best_route_found: Option<Vec<RouterHop>> = None;
+        let mut amount_for_best_route: u128 = 0;
+        let mut iterations = 0;
+
+        while low <= high && iterations < MAX_BINARY_SEARCH_ITERATIONS {
+            iterations += 1;
+            dbg!("iterations: {}", iterations);
+
+            let mid = low + (high - low) / 2;
+            // Ensure mid is not zero if min_amount_for_a_part is non-zero.
+            // Given low >= min_amount_for_a_part, mid should be fine.
+            // Should not happen if low is correctly initialized
+            if mid == 0 && min_amount_for_a_part > 0 {
+                break;
+            }
+
+            match self.find_path_with_payment_data(
+                source,
+                mid, // Try with the mid amount
+                max_fee_amount,
+                payment_data,
+            ) {
+                Ok(route) => {
+                    // Found a path for `mid`. Store it and try for a larger amount.
+                    best_route_found = Some(route);
+                    amount_for_best_route = mid;
+                    low = mid.saturating_add(1);
+                }
+                Err(PathFindError::PathFind(_)) => {
+                    // `mid` is too high, try smaller.
+                    high = mid.saturating_sub(1);
+                }
+                Err(non_pathfind_err) => return Err(non_pathfind_err),
+            }
+        }
+
+        if let Some(route) = best_route_found {
+            Ok((route, amount_for_best_route))
+        } else {
+            // No path found even with binary search. Return the initial error.
+            return Err(PathFindError::PathFind("can not found".to_string()));
+        }
     }
 
     fn build_router_from_path(
@@ -1200,7 +1303,7 @@ where
                 // For now, we set the fees to be 0. We may need to change this in the future.
                 let fee =
                     calculate_tlc_forward_fee(amount, hint.fee_rate as u128).map_err(|err| {
-                        PathFindError::PathFind(format!(
+                        PathFindError::Overflow(format!(
                             "calculate_tlc_forward_fee error: {:?}",
                             err
                         ))
@@ -1270,7 +1373,7 @@ where
                         channel_update.fee_rate as u128,
                     )
                     .map_err(|err| {
-                        PathFindError::PathFind(format!(
+                        PathFindError::Overflow(format!(
                             "calculate_tlc_forward_fee error: {:?}",
                             err
                         ))
@@ -1397,7 +1500,7 @@ where
         {
             assert_ne!(source, *from);
             let fee = calculate_tlc_forward_fee(amount, *fee_rate as u128).map_err(|err| {
-                PathFindError::PathFind(format!("calculate_tlc_forward_fee error: {:?}", err))
+                PathFindError::Overflow(format!("calculate_tlc_forward_fee error: {:?}", err))
             })?;
             let last_edge = RouterHop {
                 target: source,
@@ -1524,7 +1627,7 @@ where
                 } else {
                     calculate_tlc_forward_fee(amount_to_send, channel_update.fee_rate as u128)
                         .map_err(|err| {
-                            PathFindError::PathFind(format!(
+                            PathFindError::Overflow(format!(
                                 "calculate_tlc_forward_fee error: {:?}",
                                 err
                             ))

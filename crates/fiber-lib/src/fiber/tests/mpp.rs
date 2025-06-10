@@ -293,7 +293,7 @@ async fn test_send_mpp_amount_3_splits() {
     eprintln!("res: {:?}", res);
     assert!(res.is_ok());
     let payment_hash = res.unwrap().payment_hash;
-    source_node.wait_until_failed(payment_hash).await;
+    source_node.wait_until_success(payment_hash).await;
     let payment_session = source_node.get_payment_session(payment_hash).unwrap();
     dbg!(
         &payment_session.status,
@@ -353,15 +353,15 @@ async fn test_send_mpp_amount_split() {
     let node_0_balance = source_node.get_local_balance_from_channel(channels[0]);
     let node_1_balance = node_1.get_local_balance_from_channel(channels[0]);
     dbg!(node_0_balance, node_1_balance);
-    assert_eq!(node_0_balance, 2500000000);
-    assert_eq!(node_1_balance, 7500000000);
+    assert_eq!(node_0_balance, 5000000000);
+    assert_eq!(node_1_balance, 5000000000);
 
     // Spent the half of amount in the second channel
     let node_0_balance = source_node.get_local_balance_from_channel(channels[1]);
     let node_1_balance = node_1.get_local_balance_from_channel(channels[1]);
     dbg!(node_0_balance, node_1_balance);
-    assert_eq!(node_0_balance, 2500000000);
-    assert_eq!(node_1_balance, 7500000000);
+    assert_eq!(node_0_balance, 0);
+    assert_eq!(node_1_balance, 10000000000);
 }
 
 #[ignore]
