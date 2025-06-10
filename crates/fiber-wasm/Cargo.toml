@@ -5,3 +5,6 @@ edition = "2024"
 
 [dependencies]
 fnn = { path = "../fiber-lib", default-features = false }
+
+[lib]
+crate-type = ["cdylib", "rlib"]
