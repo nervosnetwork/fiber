@@ -1008,7 +1008,7 @@ async fn test_send_payment_with_private_multiple_channel_hints_fallback() {
     let payment_hash = res.payment_hash;
     source_node.wait_until_success(payment_hash).await;
     let payment_session = source_node.get_payment_session(payment_hash).unwrap();
-    assert_eq!(payment_session.attempts().len(), 2);
+    assert_eq!(payment_session.retry_times(), 2);
 }
 
 #[tokio::test]
@@ -1631,7 +1631,7 @@ async fn test_send_payment_with_route_with_invalid_parameters() {
     let result = node_0
         .get_payment_session(payment_hash)
         .expect("get payment");
-    assert_eq!(result.attempts().len(), 1);
+    assert_eq!(result.retry_times(), 1);
 
     // ================================================================
     // now we change the expiry delta in the middle hop
@@ -2687,6 +2687,7 @@ async fn test_send_payment_middle_hop_stopped_retry_longer_path() {
     assert_eq!(res.fee, 3);
 
     node_0.wait_until_success(res.payment_hash).await;
+
     let payment = node_0.get_payment_result(res.payment_hash).await;
     eprintln!("payment: {:?}", payment);
 
@@ -4611,6 +4612,7 @@ async fn test_send_payment_with_mixed_channel_hops() {
     );
     let payment_session = node0.get_payment_session(payment_hash).unwrap();
     assert_eq!(payment_session.attempts().len(), 1);
+    assert_eq!(payment_session.retry_times(), 1);
 }
 
 #[tokio::test]
@@ -4654,7 +4656,7 @@ async fn test_send_payment_with_first_channel_retry_will_be_ok() {
     node0
         .expect_payment_used_channel(payment.payment_hash, channels[1])
         .await;
-    assert_eq!(payment_session.attempts().len(), 2);
+    assert_eq!(payment_session.retry_times(), 2);
 }
 
 #[tokio::test]
@@ -4864,7 +4866,7 @@ async fn test_send_payment_with_reverse_channel_of_capaicity_not_enough() {
     for payment_hash in payments.iter() {
         nodes[0].wait_until_success(*payment_hash).await;
         let session = nodes[0].get_payment_session(*payment_hash).unwrap();
-        let retry_times = session.attempts().len();
+        let retry_times = session.retry_times();
         statistic
             .entry(retry_times)
             .and_modify(|e| *e += 1)

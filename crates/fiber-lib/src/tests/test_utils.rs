@@ -862,7 +862,7 @@ impl NetworkNode {
 
         if let Some(expected_retried) = expected_retried {
             let payment_session = self.get_payment_session(payment_hash).unwrap();
-            assert_eq!(payment_session.attempts().len(), expected_retried as usize);
+            assert_eq!(payment_session.retry_times(), expected_retried);
         }
     }
 

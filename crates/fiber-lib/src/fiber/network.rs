@@ -1918,6 +1918,7 @@ where
                     self.set_attempt_fail_with_error(
                         &mut attempt,
                         error_detail.error_code.as_ref(),
+                        need_to_retry,
                     );
 
                     if need_to_retry {
@@ -1990,37 +1991,24 @@ where
         &self,
         session: &mut PaymentSession,
         attempt: &mut Attempt,
+        retry: bool,
     ) -> Result<Vec<PaymentHopData>, Error> {
         let graph = self.network_graph.read().await;
         let source = graph.get_source_pubkey();
-        let mut max_amount = session.remain_amount();
-        let mut remain_fee = session.remain_fee_amount();
-        let mut active_parts = session.attempts().len();
+        let max_amount = if retry {
+            attempt.route.receiver_amount()
+        } else {
+            session.remain_amount()
+        };
+        let max_fee = session.remain_fee_amount();
+        let active_parts = session.attempts().iter().filter(|a| a.is_active()).count();
 
-        // retrying current attempt
-        if attempt.is_retryable() {
-            max_amount += attempt.route.receiver_amount();
-            remain_fee = remain_fee.map(|fee| fee + attempt.route.fee());
-            active_parts -= 1;
-        }
-
-        dbg!(
-            "build route",
-            max_amount,
-            remain_fee,
-            active_parts,
-            attempt.id
-        );
-        match graph.build_route(
-            max_amount,
-            remain_fee,
-            active_parts,
-            session.request.clone(),
-        ) {
+        dbg!("build route", max_amount, max_fee, active_parts, attempt.id);
+        match graph.build_route(max_amount, max_fee, active_parts, session.request.clone()) {
             Err(e) => {
                 let error = format!("Failed to build route, {}", e);
                 dbg!("build route error ", attempt.id, &error);
-                self.set_attempt_fail_with_error(attempt, &error);
+                self.set_attempt_fail_with_error(attempt, &error, false);
                 self.set_payment_fail_with_error(session, &error);
                 return Err(Error::SendPaymentError(error));
             }
@@ -2062,7 +2050,7 @@ where
                     attempt.hash, e
                 );
                 dbg!("set attempt failed to ", &err);
-                self.set_attempt_fail_with_error(attempt, &err);
+                self.set_attempt_fail_with_error(attempt, &err, false);
                 return Err(Error::SendPaymentFirstHopError(err, false));
             }
         };
@@ -2087,9 +2075,6 @@ where
                     error_detail.clone(),
                     true,
                 );
-                // TODO retry condition:
-                // && !payment_session.is_send_payment_with_router()
-                // && payment_session.can_retry();
                 let err = format!(
                     "Failed to send onion packet with error {}",
                     error_detail.error_code_as_str()
@@ -2099,7 +2084,7 @@ where
                     err, need_to_retry
                 );
                 dbg!("set attempt failed to ", &err);
-                self.set_attempt_fail_with_error(attempt, &err);
+                self.set_attempt_fail_with_error(attempt, &err, need_to_retry);
                 return Err(Error::SendPaymentFirstHopError(err, need_to_retry));
             }
             Ok(_) => {
@@ -2181,7 +2166,7 @@ where
                 (channel_error.to_string(), need_to_retry)
             };
 
-        self.set_attempt_fail_with_error(&mut attempt, &error);
+        self.set_attempt_fail_with_error(&mut attempt, &error, need_to_retry);
         if !need_to_retry {
             if let Some(mut session) = self.store.get_payment_session(payment_hash) {
                 self.set_payment_fail_with_error(&mut session, &error);
@@ -2197,8 +2182,8 @@ where
         self.store.insert_payment_session(session.clone());
     }
 
-    fn set_attempt_fail_with_error(&self, attempt: &mut Attempt, error: &str) {
-        attempt.set_failed_status(error);
+    fn set_attempt_fail_with_error(&self, attempt: &mut Attempt, error: &str, retryable: bool) {
+        attempt.set_failed_status(error, retryable);
         self.store.insert_attempt(attempt.clone());
     }
 
@@ -2208,8 +2193,9 @@ where
         state: &mut NetworkActorState<S>,
         session: &mut PaymentSession,
         attempt: &mut Attempt,
+        retry: bool,
     ) -> Result<Option<SessionRoute>, Error> {
-        let hops_info = self.build_payment_route(session, attempt).await?;
+        let hops_info = self.build_payment_route(session, attempt, retry).await?;
 
         // send attempt
         if let Err(err) = self
@@ -2260,7 +2246,13 @@ where
             };
             if attempt.is_retryable() {
                 let _ = self
-                    .send_attempt(myself.clone(), state, &mut payment_session, &mut attempt)
+                    .send_attempt(
+                        myself.clone(),
+                        state,
+                        &mut payment_session,
+                        &mut attempt,
+                        true,
+                    )
                     .await;
             }
         }
@@ -2288,8 +2280,14 @@ where
         let attempt_id = self.store.next_attempt_id();
         let mut attempt = payment_session.new_attempt(attempt_id);
 
-        self.send_attempt(myself.clone(), state, &mut payment_session, &mut attempt)
-            .await?;
+        self.send_attempt(
+            myself.clone(),
+            state,
+            &mut payment_session,
+            &mut attempt,
+            false,
+        )
+        .await?;
 
         let payment_session = self
             .store
@@ -2384,7 +2382,7 @@ where
             let mut payment_session = PaymentSession::new(&self.store, payment_data, 0);
             let mut attempt = payment_session.new_attempt(0);
             let _hops = self
-                .build_payment_route(&mut payment_session, &mut attempt)
+                .build_payment_route(&mut payment_session, &mut attempt, false)
                 .await?;
             payment_session.append_attempt(attempt);
             return Ok(payment_session.into());

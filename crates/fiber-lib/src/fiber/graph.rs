@@ -1762,6 +1762,12 @@ impl PaymentSession {
         self
     }
 
+    pub fn retry_times(&self) -> u32 {
+        self.cached_attempts
+            .iter()
+            .fold(0, |acc, a| acc + a.tried_times)
+    }
+
     pub fn allow_mpp(&self) -> bool {
         self.request.max_parts.unwrap_or(1) > 1
     }
@@ -1814,6 +1820,7 @@ impl PaymentSession {
         Attempt {
             id: attempt_id,
             hash,
+            tried_times: 1,
             payment_hash,
             route: Default::default(),
             session_key: [0; 32],
@@ -1909,6 +1916,10 @@ impl PaymentSession {
                 .iter()
                 .filter(|a| a.is_settled())
                 .count(),
+            self.cached_attempts
+                .iter()
+                .map(|a| a.tried_times)
+                .collect::<Vec<_>>(),
             &self.last_error
         );
 
@@ -1985,6 +1996,7 @@ impl From<PaymentSession> for SendPaymentResponse {
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct Attempt {
     pub id: u64,
+    pub tried_times: u32,
     pub hash: Hash256,
     pub status: PaymentSessionStatus,
     pub payment_hash: Hash256,
@@ -2001,9 +2013,13 @@ impl Attempt {
         self.status = PaymentSessionStatus::Inflight;
     }
 
-    pub fn set_failed_status(&mut self, error: &str) {
+    pub fn set_failed_status(&mut self, error: &str, retryable: bool) {
         self.last_error = Some(error.to_string());
-        if !self.is_retryable() {
+        if retryable {
+            if !error.to_string().contains("WaitingTlcAck") {
+                self.tried_times += 1;
+            }
+        } else {
             self.status = PaymentSessionStatus::Failed;
         }
     }
@@ -2029,11 +2045,13 @@ impl Attempt {
         self.status == PaymentSessionStatus::Failed
     }
 
+    pub fn is_active(&self) -> bool {
+        !matches!(self.status, PaymentSessionStatus::Failed)
+    }
+
     // The attempt is considered as inflight if error can be retried immediately
     pub fn is_retryable(&self) -> bool {
-        self.last_error
-            .as_ref()
-            .is_some_and(|err| err.as_str() == "WaitingTlcAck")
+        self.last_error.as_ref().is_some() && !self.status.is_final()
     }
 
     pub fn first_hop_channel_outpoint_eq(&self, out_point: &OutPoint) -> bool {
