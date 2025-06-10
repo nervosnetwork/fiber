@@ -1752,7 +1752,7 @@ impl PaymentSession {
 
     pub fn init_attempts(mut self, store: &impl NetworkGraphStateStore) -> Self {
         self.cached_attempts = store.get_attempts(self.request.payment_hash);
-        self.status = self.decide_payment_status();
+        self.status = self.calc_payment_session_status();
         self
     }
 
@@ -1860,13 +1860,18 @@ impl PaymentSession {
         }
     }
 
-    fn allow_more_attempts(&self) -> bool {
+    pub fn allow_more_attempts(&self) -> bool {
+        if self.status.is_final() {
+            return false;
+        }
+
         if self.remain_amount() == 0 {
             // no remaining amount, imply no need to retry
             return false;
         }
 
-        if matches!(self.status, PaymentSessionStatus::Success) {
+        if self.retry_times() >= self.try_limit {
+            // already reached the retry limit, no more attempts allowed
             return false;
         }
 
@@ -1874,7 +1879,7 @@ impl PaymentSession {
         true
     }
 
-    pub fn decide_payment_status(&self) -> PaymentSessionStatus {
+    pub fn calc_payment_session_status(&self) -> PaymentSessionStatus {
         if self.cached_attempts.is_empty() {
             // no attempts, the payment is created
             return self.status;
@@ -1936,7 +1941,11 @@ impl PaymentSession {
         }
         // if htlc is failed but the payment is not failed, the payment is inflight
         if htlc_failed {
-            return PaymentSessionStatus::Inflight;
+            if self.allow_more_attempts() {
+                return PaymentSessionStatus::Inflight;
+            } else {
+                return PaymentSessionStatus::Failed;
+            }
         } else {
             return PaymentSessionStatus::Created;
         }
@@ -1964,7 +1973,7 @@ impl PaymentSession {
 
 impl From<PaymentSession> for SendPaymentResponse {
     fn from(session: PaymentSession) -> Self {
-        let status = session.decide_payment_status();
+        let status = session.calc_payment_session_status();
         let fee = session.fee_paid();
         let all_attempts = session.attempts();
         let attempts = all_attempts

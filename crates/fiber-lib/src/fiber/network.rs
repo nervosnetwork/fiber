@@ -1935,7 +1935,7 @@ where
             error!("Payment session not found: {:?}", payment_hash);
             return;
         };
-        if payment_session.decide_payment_status().is_final() {
+        if payment_session.status.is_final() {
             dbg!("payment session already in final status: {:?payment_status}, skip remove tlc");
             return;
         }
@@ -1966,6 +1966,7 @@ where
                     dbg!("set attempt failed to ", error_detail.error_code.as_ref());
 
                     self.set_attempt_fail_with_error(
+                        &mut payment_session,
                         &mut attempt,
                         error_detail.error_code.as_ref(),
                         need_to_retry,
@@ -1973,12 +1974,6 @@ where
 
                     if need_to_retry {
                         self.register_payment_retry(myself, payment_hash, Some(attempt.id));
-                    } else if !payment_session.allow_mpp() {
-                        dbg!("set error to", &error_detail.error_code.as_ref());
-                        self.set_payment_fail_with_error(
-                            &mut payment_session,
-                            error_detail.error_code.as_ref(),
-                        );
                     }
                 }
             }
@@ -2058,8 +2053,7 @@ where
             Err(e) => {
                 let error = format!("Failed to build route, {}", e);
                 dbg!("build route error ", attempt.id, &error);
-                self.set_attempt_fail_with_error(attempt, &error, false);
-                self.set_payment_fail_with_error(session, &error);
+                self.set_attempt_fail_with_error(session, attempt, &error, false);
                 return Err(Error::SendPaymentError(error));
             }
             Ok(hops) => {
@@ -2079,6 +2073,7 @@ where
     async fn send_payment_onion_packet(
         &self,
         state: &mut NetworkActorState<S>,
+        session: &mut PaymentSession,
         attempt: &mut Attempt,
         hops: Vec<PaymentHopData>,
     ) -> Result<Attempt, Error> {
@@ -2099,7 +2094,8 @@ where
                     "Failed to create onion packet: {:?}, error: {:?}",
                     attempt.hash, e
                 );
-                self.set_attempt_fail_with_error(attempt, &err, false);
+                dbg!("set attempt failed to ", &err);
+                self.set_attempt_fail_with_error(session, attempt, &err, false);
                 return Err(Error::SendPaymentFirstHopError(err, false));
             }
         };
@@ -2128,11 +2124,7 @@ where
                     "Failed to send onion packet with error {}",
                     error_detail.error_code_as_str()
                 );
-                debug!(
-                    "send onion packet failed: {:?} need_to_retry: {:?}",
-                    err, need_to_retry
-                );
-                self.set_attempt_fail_with_error(attempt, &err, need_to_retry);
+                self.set_attempt_fail_with_error(session, attempt, &err, need_to_retry);
                 return Err(Error::SendPaymentFirstHopError(err, need_to_retry));
             }
             Ok(_) => {
@@ -2182,6 +2174,10 @@ where
             return;
         };
 
+        let Some(mut session) = self.store.get_payment_session(payment_hash) else {
+            return;
+        };
+
         let Some(mut attempt) = self.store.get_attempt(payment_hash, attempt_id) else {
             eprintln!("attempt not found: {:?} {:?}", payment_hash, attempt_id);
             return;
@@ -2214,13 +2210,7 @@ where
                 (channel_error.to_string(), need_to_retry)
             };
 
-        self.set_attempt_fail_with_error(&mut attempt, &error, need_to_retry);
-        if !need_to_retry {
-            if let Some(mut session) = self.store.get_payment_session(payment_hash) {
-                self.set_payment_fail_with_error(&mut session, &error);
-            }
-        }
-
+        self.set_attempt_fail_with_error(&mut session, &mut attempt, &error, need_to_retry);
         // retry the current attempt if it is retryable
         self.register_payment_retry(myself, payment_hash, Some(attempt.id));
     }
@@ -2230,9 +2220,32 @@ where
         self.store.insert_payment_session(session.clone());
     }
 
-    fn set_attempt_fail_with_error(&self, attempt: &mut Attempt, error: &str, retryable: bool) {
+    fn set_attempt_fail_with_error(
+        &self,
+        session: &mut PaymentSession,
+        attempt: &mut Attempt,
+        error: &str,
+        retryable: bool,
+    ) {
+        let mut payment_failed = false;
+        if (!session.allow_mpp() || !session.allow_more_attempts()) && !retryable {
+            // if mpp is not allowed, or mpp is allowed but attempt is not retryable
+            // we will set the session status to failed
+            dbg!("now set session failed", &error);
+            self.set_payment_fail_with_error(session, error);
+            payment_failed = true;
+        }
+
         attempt.set_failed_status(error, retryable);
         self.store.insert_attempt(attempt.clone());
+
+        if !payment_failed {
+            let payment_session_status = session.calc_payment_session_status();
+            if payment_session_status != session.status {
+                session.status = payment_session_status;
+                self.store.insert_payment_session(session.clone());
+            }
+        }
     }
 
     async fn send_attempt(
@@ -2247,7 +2260,7 @@ where
 
         // send attempt
         if let Err(err) = self
-            .send_payment_onion_packet(state, attempt, hops_info)
+            .send_payment_onion_packet(state, session, attempt, hops_info)
             .await
         {
             let need_retry = matches!(err, Error::SendPaymentFirstHopError(_, true));
@@ -2258,7 +2271,7 @@ where
                 self.register_payment_retry(myself, session.payment_hash(), Some(attempt.id));
                 return Ok(None);
             } else {
-                self.set_payment_fail_with_error(session, &err.to_string());
+                self.set_attempt_fail_with_error(session, attempt, &err.to_string(), false);
                 return Err(err);
             }
         }
