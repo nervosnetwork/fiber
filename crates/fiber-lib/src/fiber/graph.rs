@@ -753,6 +753,33 @@ where
             .filter(move |channel| channel.node1() == node_id || channel.node2() == node_id)
     }
 
+    pub fn get_node_outbounds(
+        &self,
+        node_id: Pubkey,
+    ) -> impl Iterator<Item = (Pubkey, &ChannelInfo, &ChannelUpdateInfo)> {
+        let channels: Vec<_> = self
+            .channels
+            .values()
+            .filter_map(move |channel| {
+                match channel.update_of_node1.as_ref() {
+                    Some(info) if node_id == channel.node1() && info.enabled => {
+                        return Some((channel.node2(), channel, info));
+                    }
+                    _ => {}
+                }
+                match channel.update_of_node2.as_ref() {
+                    Some(info) if node_id == channel.node2() && info.enabled => {
+                        return Some((channel.node1(), channel, info));
+                    }
+                    _ => {}
+                }
+                None
+            })
+            .collect();
+
+        channels.into_iter()
+    }
+
     pub fn get_node_inbounds(
         &self,
         node_id: Pubkey,
@@ -1011,6 +1038,21 @@ where
         // Search up to `amount - 1` because `amount` itself failed.
         let mut high = amount.saturating_sub(1);
 
+        let direct_channel_amounts: Vec<_> = self
+            .get_node_outbounds(source)
+            .filter_map(|(_, channel_info, update_info)| {
+                if channel_info.udt_type_script == payment_data.udt_type_script {
+                    Some(update_info.outbound_liquidity.unwrap_or(0))
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+
+        dbg!("direct_channel_amounts: {:?}", &direct_channel_amounts);
+        let max_liquidity = direct_channel_amounts.iter().max().copied().unwrap_or(0);
+        high = high.min(max_liquidity);
+
         if low > high {
             return Err(PathFindError::PathFind("can not found".to_string()));
         }
@@ -1022,15 +1064,9 @@ where
 
         while low <= high && iterations < MAX_BINARY_SEARCH_ITERATIONS {
             iterations += 1;
-            dbg!("iterations: {}", iterations);
 
             let mid = low + (high - low) / 2;
-            // Ensure mid is not zero if min_amount_for_a_part is non-zero.
-            // Given low >= min_amount_for_a_part, mid should be fine.
-            // Should not happen if low is correctly initialized
-            if mid == 0 && min_amount_for_a_part > 0 {
-                break;
-            }
+            dbg!("iterations: {}", iterations, mid);
 
             match self.find_path_with_payment_data(
                 source,
