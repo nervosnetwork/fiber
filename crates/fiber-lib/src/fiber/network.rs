@@ -79,7 +79,9 @@ use crate::ckb::{CkbChainMessage, FundingRequest, FundingTx};
 use crate::fiber::channel::{
     AddTlcCommand, AddTlcResponse, ShutdownCommand, TxCollaborationCommand, TxUpdateCommand,
 };
-use crate::fiber::config::{DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT};
+use crate::fiber::config::{
+    DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT, PAYMENT_MAXEST_PARTS,
+};
 use crate::fiber::gossip::{GossipConfig, GossipService, SubscribableGossipMessageStore};
 use crate::fiber::graph::{PaymentSession, PaymentSessionStatus};
 use crate::fiber::serde_utils::EntityHex;
@@ -606,8 +608,15 @@ impl SendPaymentData {
         if allow_mpp && payment_secret.is_none() {
             return Err("payment secret is required for multi-path payment".to_string());
         }
-        if allow_mpp && command.max_parts.is_some_and(|max_parts| max_parts <= 1) {
-            return Err("max_parts should be greater than 1 for multi-path payment".to_string());
+        if allow_mpp
+            && command
+                .max_parts
+                .is_some_and(|max_parts| max_parts <= 1 || max_parts > PAYMENT_MAXEST_PARTS)
+        {
+            return Err(format!(
+                "invalid max_parts, value should be in range [1, {}]",
+                PAYMENT_MAXEST_PARTS
+            ));
         }
 
         let mut custom_records = command.custom_records;

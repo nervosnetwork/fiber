@@ -196,7 +196,7 @@ async fn test_send_mpp_with_max_parts_1_will_fail() {
     assert!(res.is_err(), "should fail because max_parts is 1");
     assert!(res
         .unwrap_err()
-        .contains("max_parts should be greater than 1 for multi-path payment"));
+        .contains("invalid max_parts, value should be in range"));
 }
 
 #[tokio::test]

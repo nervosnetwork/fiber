@@ -906,7 +906,8 @@ where
         let target = payment_data.target_pubkey;
         let allow_self_payment = payment_data.allow_self_payment;
         let allow_mpp = payment_data.allow_mpp();
-        let max_total_parts = payment_data.max_parts(); // Total maximum parts for the entire payment
+        // Total maximum parts for the entire payment
+        let max_total_parts = payment_data.max_parts();
 
         let min_amount_for_a_part = if allow_mpp {
             DEFAULT_MPP_MIN_AMOUNT
@@ -1882,8 +1883,12 @@ impl PaymentSession {
         self.cached_attempts.clone()
     }
 
-    pub fn max_parts(&self) -> usize {
-        self.request.max_parts.unwrap_or(1) as usize
+    pub fn max_parts(&self) -> u64 {
+        if self.allow_mpp() {
+            self.request.max_parts()
+        } else {
+            1
+        }
     }
 
     pub fn active_attempts(&self) -> Vec<Attempt> {
@@ -1991,7 +1996,7 @@ impl PaymentSession {
             return false;
         }
 
-        if self.active_attempts().len() >= self.max_parts() {
+        if self.active_attempts().len() >= self.max_parts() as usize {
             return false;
         }
 
