@@ -973,7 +973,7 @@ where
             {
                if let Ok(res) = self.binary_find_path_in_range(
                     source,
-                    amount,
+                    amount.saturating_sub(1),
                     min_amount_for_a_part,
                     max_fee_amount,
                     payment_data
@@ -1035,8 +1035,7 @@ where
         );
 
         let mut low = min_amount_for_a_part;
-        // Search up to `amount - 1` because `amount` itself failed.
-        let mut high = amount.saturating_sub(1);
+        let mut high = amount;
 
         let direct_channel_amounts: Vec<_> = self
             .get_node_outbounds(source)
@@ -1057,6 +1056,18 @@ where
             return Err(PathFindError::PathFind("can not found".to_string()));
         }
 
+        if self
+            .find_path_with_payment_data(source, low, max_fee_amount, payment_data)
+            .is_err()
+        {
+            return Err(PathFindError::PathFind("can not found".to_string()));
+        }
+        if let Ok(router) =
+            self.find_path_with_payment_data(source, high, max_fee_amount, payment_data)
+        {
+            return Ok((router, high));
+        }
+
         const MAX_BINARY_SEARCH_ITERATIONS: usize = 50;
         let mut best_route_found: Option<Vec<RouterHop>> = None;
         let mut amount_for_best_route: u128 = 0;
@@ -1068,12 +1079,7 @@ where
             let mid = low + (high - low) / 2;
             dbg!("iterations: {}", iterations, mid);
 
-            match self.find_path_with_payment_data(
-                source,
-                mid, // Try with the mid amount
-                max_fee_amount,
-                payment_data,
-            ) {
+            match self.find_path_with_payment_data(source, mid, max_fee_amount, payment_data) {
                 Ok(route) => {
                     // Found a path for `mid`. Store it and try for a larger amount.
                     best_route_found = Some(route);
