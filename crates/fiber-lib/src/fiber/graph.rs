@@ -1187,15 +1187,13 @@ where
                 return;
             }
         }
-        let total_amount = next_hop_received_amount + fee;
-        let total_tlc_expiry = incoming_tlc_expiry + tlc_expiry_delta;
 
         let node = NodeHeapElement {
             node_id: from,
             weight,
             distance,
-            amount_to_send: total_amount,
-            incoming_tlc_expiry: total_tlc_expiry,
+            amount_to_send: next_hop_received_amount + fee,
+            incoming_tlc_expiry: incoming_tlc_expiry + tlc_expiry_delta,
             fee_charged: fee,
             probability,
             pending_count,
@@ -1208,8 +1206,9 @@ where
                 amount_received: next_hop_received_amount,
                 // We need to use cur_hop.incoming_tlc_expiry instead of incoming_tlc_expiry here
                 // because we need the expiry for the AddTlc packet sent from source to target.
-                // cur_hop.incoming_tlc_expiry is the expiry time for the TLC that is going to be received by the target,
-                // while incoming_tlc_expiry is the expiry time for the TLC that is going to be received by the source.
+                // cur_hop.incoming_tlc_expiry is the expiry time for the TLC that is going to be
+                // received by the target, while incoming_tlc_expiry is the expiry time for the TLC
+                // that is going to be received by the source.
                 incoming_tlc_expiry,
             }),
         };
