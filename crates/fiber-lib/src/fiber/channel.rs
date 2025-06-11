@@ -70,6 +70,7 @@ use tentacle::secio::PeerId;
 use thiserror::Error;
 use tokio::sync::oneshot;
 
+use super::config::DEFAULT_FUNDING_TIMEOUT_SECONDS;
 use super::{
     gossip::SOFT_BROADCAST_MESSAGES_CONSIDERED_STALE_DURATION, graph::ChannelUpdateInfo,
     types::ForwardTlcResult,
@@ -2172,6 +2173,15 @@ where
                         .expect(ASSUME_NETWORK_ACTOR_ALIVE);
                 }
             }
+            ChannelEvent::CheckFundingTimeout => {
+                if state.can_abort_funding_on_timeout() {
+                    myself
+                        .send_message(ChannelActorMessage::Event(ChannelEvent::Stop(
+                            StopReason::AbortFunding,
+                        )))
+                        .expect("myself alive");
+                }
+            }
         }
         Ok(())
     }
@@ -2584,6 +2594,24 @@ where
     ) -> Result<(), ActorProcessingErr> {
         if state.tlc_state.has_pending_operations() && !state.reestablishing {
             state.trigger_retryable_tasks(&myself, false);
+        }
+
+        // handle funding timeout
+        if state.can_abort_funding_on_timeout() {
+            let event_factory = || ChannelActorMessage::Event(ChannelEvent::CheckFundingTimeout);
+
+            match Duration::from_secs(DEFAULT_FUNDING_TIMEOUT_SECONDS)
+                .checked_sub(state.created_at.elapsed().unwrap_or_default())
+            {
+                Some(timeout) => {
+                    // timeout in future
+                    myself.send_after(timeout, event_factory);
+                }
+                None => {
+                    // already timeout
+                    myself.send_message(event_factory()).expect("myself alive");
+                }
+            }
         }
 
         Ok(())
@@ -3631,6 +3659,7 @@ pub enum ChannelEvent {
     ClosingTransactionConfirmed(bool),
     CheckTlcRetryOperation(bool),
     CheckActiveChannel,
+    CheckFundingTimeout,
 }
 
 pub type ProcessingChannelResult = Result<(), ProcessingChannelError>;
@@ -7543,6 +7572,25 @@ impl ChannelActorState {
             let _ = network.send_message(NetworkActorMessage::new_command(
                 NetworkActorCommand::NotifyFundingTx(tx.clone()),
             ));
+        }
+    }
+
+    fn can_abort_funding_on_timeout(&self) -> bool {
+        // Can abort funding on timeout if the channel is not ready and we have
+        // not signed the funding tx yet.
+        match self.state {
+            ChannelState::NegotiatingFunding(_)
+            | ChannelState::CollaboratingFundingTx(_)
+            | ChannelState::SigningCommitment(_) => true,
+            // Once we have sent the signature, the peer may succeed to submit
+            // the funding tx on-chain.The best solution is waiting for the
+            // confirmations or spending any input of the funding tx.
+            ChannelState::AwaitingTxSignatures(flags)
+                if !flags.contains(AwaitingTxSignaturesFlags::OUR_TX_SIGNATURES_SENT) =>
+            {
+                true
+            }
+            _ => false,
         }
     }
 }
