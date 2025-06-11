@@ -2614,6 +2614,24 @@ where
             }
         }
 
+        // handle funding timeout
+        if state.can_abort_funding_on_timeout() {
+            let event_factory = || ChannelActorMessage::Event(ChannelEvent::CheckFundingTimeout);
+
+            match Duration::from_secs(DEFAULT_FUNDING_TIMEOUT_SECONDS)
+                .checked_sub(state.created_at.elapsed().unwrap_or_default())
+            {
+                Some(timeout) => {
+                    // timeout in future
+                    myself.send_after(timeout, event_factory);
+                }
+                None => {
+                    // already timeout
+                    myself.send_message(event_factory()).expect("myself alive");
+                }
+            }
+        }
+
         Ok(())
     }
 
