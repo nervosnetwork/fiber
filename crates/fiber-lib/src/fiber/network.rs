@@ -118,6 +118,9 @@ const CHECK_CHANNELS_INTERVAL: Duration = Duration::from_secs(3); // use a short
 #[cfg(not(debug_assertions))]
 const CHECK_CHANNELS_INTERVAL: Duration = Duration::from_secs(60);
 
+// The duration for which we will check peer init messages.
+const CHECK_PEER_INIT_INTERVAL: Duration = Duration::from_secs(20);
+
 // While creating a network graph from the gossip messages, we will load current gossip messages
 // in the store and process them. We will load all current messages and get the latest cursor.
 // The problem is that we can't guarantee that the messages are in order, that is to say it is
@@ -229,6 +232,8 @@ pub enum NetworkActorCommand {
     MaintainConnections,
     // Check all channels and see if we need to force close any of them or settle down tlc with preimage.
     CheckChannels,
+    // Check peer send us Init message in a expected time, otherwise disconnect with the peer.
+    CheckPeerInit(PeerId),
     // For internal use and debugging only. Most of the messages requires some
     // changes to local state. Even if we can send a message to a peer, some
     // part of the local state is not changed.
@@ -1248,6 +1253,19 @@ where
                             .network
                             .send_message(NetworkActorMessage::new_command(
                                 NetworkActorCommand::ConnectPeer(addr.clone()),
+                            ))
+                            .expect(ASSUME_NETWORK_MYSELF_ALIVE);
+                    }
+                }
+            }
+            NetworkActorCommand::CheckPeerInit(peer_id) => {
+                // Check if the peer has sent Init message.
+                if let Some(session) = state.peer_session_map.get(&peer_id) {
+                    if session.features.is_none() {
+                        state
+                            .network
+                            .send_message(NetworkActorMessage::new_command(
+                                NetworkActorCommand::DisconnectPeer(peer_id.clone()),
                             ))
                             .expect(ASSUME_NETWORK_MYSELF_ALIVE);
                     }
@@ -3108,6 +3126,11 @@ where
         )
         .await
         .expect("send Init message to peer must succeed");
+
+        let remote_peer_id = remote_peer_id.clone();
+        self.network.send_after(CHECK_PEER_INIT_INTERVAL, move || {
+            NetworkActorMessage::new_command(NetworkActorCommand::CheckPeerInit(remote_peer_id))
+        });
     }
 
     fn on_peer_disconnected(&mut self, id: &PeerId) {
