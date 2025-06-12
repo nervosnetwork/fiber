@@ -1051,7 +1051,8 @@ where
         let min_amount_for_a_part = if allow_mpp {
             DEFAULT_MPP_MIN_AMOUNT
         } else {
-            amount // If not MPP, this part must carry the full amount
+            // If not MPP, this part must carry the full amount
+            amount
         };
 
         // Check if this is potentially the last part we are trying to build
@@ -1063,6 +1064,17 @@ where
             ));
         }
 
+        dbg!(
+            "now is_last_part : {:?}, active_parts: {:?}, max_total_parts: {:?} allow_mpp: {:?}",
+            is_last_part,
+            active_parts,
+            max_total_parts,
+            allow_mpp,
+            amount,
+            min_amount_for_a_part,
+            amount > min_amount_for_a_part,
+        );
+
         let (route_hops, actual_amount_for_route) = if !payment_data.router.is_empty() {
             // If a router is explicitly provided, use it.
             // Assume it's valid for the requested `amount`.
@@ -1070,19 +1082,20 @@ where
         } else {
             // Attempt to find a path for the requested `amount`.
             match self.find_path_with_payment_data(
-            source,
-            amount, // Initial attempt with the full requested amount for this part
-            max_fee_amount,
-            payment_data,
-        ) {
+                source,
+                amount,
+                max_fee_amount,
+                payment_data,
+            ) {
             Ok(route) => (route, amount), // Success with the full requested amount
             Err(PathFindError::PathFind(orig_err))
                 // Condition to attempt finding a smaller amount:
                 // - MPP is allowed for the payment.
                 // - This is not the last part we are forced to make (more flexible).
                 // - The requested amount is greater than the minimum allowed for a part.
-                if allow_mpp && !is_last_part && amount > min_amount_for_a_part =>
+                if allow_mpp && amount > min_amount_for_a_part =>
             {
+                dbg!("begin binary search amount for path");
                if let Ok(res) = self.binary_find_path_in_range(
                     source,
                     amount.saturating_sub(1),
@@ -1092,6 +1105,7 @@ where
                 ) {
                     res
                 } else {
+                    dbg!("binary search amount failed, trying smaller amounts");
                     return Err(PathFindError::PathFind(orig_err));
                 }
             }

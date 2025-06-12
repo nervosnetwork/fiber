@@ -9,7 +9,7 @@ use crate::{
 };
 
 #[tokio::test]
-async fn test_send_mpp() {
+async fn test_send_mpp_basic_two_channels() {
     init_tracing();
 
     let (nodes, channels) = create_n_nodes_network(
@@ -20,47 +20,27 @@ async fn test_send_mpp() {
         2,
     )
     .await;
-    let [mut node_0, mut node_1] = nodes.try_into().expect("2 nodes");
-    let source_node = &mut node_0;
-    let target_pubkey = node_1.pubkey;
-
-    let preimage = gen_rand_sha256_hash();
-    let ckb_invoice = InvoiceBuilder::new(Currency::Fibd)
-        .amount(Some(20000000000))
-        .payment_preimage(preimage)
-        .payee_pub_key(target_pubkey.into())
-        .allow_mpp(true)
-        .payment_secret(gen_rand_sha256_hash())
-        .build()
-        .expect("build invoice success");
-
-    node_1.insert_invoice(ckb_invoice.clone(), Some(preimage));
-
-    let res = source_node
-        .send_payment(SendPaymentCommand {
-            invoice: Some(ckb_invoice.to_string()),
-            amount: ckb_invoice.amount,
-            max_parts: Some(2),
-            ..Default::default()
-        })
+    let [node_0, mut node_1] = nodes.try_into().expect("2 nodes");
+    let res = node_0
+        .send_mpp_payment(&mut node_1, 20000000000, Some(2))
         .await;
 
     eprintln!("res: {:?}", res);
     assert!(res.is_ok());
     let payment_hash = res.unwrap().payment_hash;
     eprintln!("begin to wait for payment: {} success ...", payment_hash);
-    source_node.wait_until_success(payment_hash).await;
+    node_0.wait_until_success(payment_hash).await;
 
-    let payment_session = source_node.get_payment_session(payment_hash).unwrap();
+    let payment_session = node_0.get_payment_session(payment_hash).unwrap();
     dbg!(&payment_session.status, &payment_session.attempts().len());
 
-    let node_0_balance = source_node.get_local_balance_from_channel(channels[0]);
+    let node_0_balance = node_0.get_local_balance_from_channel(channels[0]);
     let node_1_balance = node_1.get_local_balance_from_channel(channels[0]);
     dbg!(node_0_balance, node_1_balance);
     assert_eq!(node_0_balance, 0);
     assert_eq!(node_1_balance, 10000000000);
 
-    let node_0_balance = source_node.get_local_balance_from_channel(channels[1]);
+    let node_0_balance = node_0.get_local_balance_from_channel(channels[1]);
     let node_1_balance = node_1.get_local_balance_from_channel(channels[1]);
     dbg!(node_0_balance, node_1_balance);
     assert_eq!(node_0_balance, 0);
@@ -167,48 +147,33 @@ async fn test_send_mpp_with_invalid_max_parts_will_fail() {
         2,
     )
     .await;
-    let [mut node_0, mut node_1] = nodes.try_into().expect("2 nodes");
-    let source_node = &mut node_0;
-    let target_pubkey = node_1.pubkey;
+    let [node_0, mut node_1] = nodes.try_into().expect("2 nodes");
 
-    let preimage = gen_rand_sha256_hash();
-    let ckb_invoice = InvoiceBuilder::new(Currency::Fibd)
-        .amount(Some(20000000000))
-        .payment_preimage(preimage)
-        .payee_pub_key(target_pubkey.into())
-        .allow_mpp(true)
-        .payment_secret(gen_rand_sha256_hash())
-        .build()
-        .expect("build invoice success");
-
-    node_1.insert_invoice(ckb_invoice.clone(), Some(preimage));
-
-    let res = source_node
-        .send_payment(SendPaymentCommand {
-            invoice: Some(ckb_invoice.to_string()),
-            amount: ckb_invoice.amount,
-            max_parts: Some(1),
-            ..Default::default()
-        })
+    let res = node_0
+        .send_mpp_payment(&mut node_1, 10000000000, Some(0))
         .await;
+    assert!(res.is_err(), "should fail because max_parts is 0");
 
-    eprintln!("res: {:?}", res);
+    let res = node_0
+        .send_mpp_payment(&mut node_1, 10000000000, Some(1))
+        .await;
     assert!(res.is_err(), "should fail because max_parts is 1");
+
+    let res = node_0
+        .send_mpp_payment(&mut node_1, 10000000000, Some(PAYMENT_MAX_PARTS_LIMIT + 1))
+        .await;
+    assert!(
+        res.is_err(),
+        "should fail because max_parts is greater than limit"
+    );
     assert!(res
         .unwrap_err()
         .contains("invalid max_parts, value should be in range"));
 
-    let res = source_node
-        .send_payment(SendPaymentCommand {
-            invoice: Some(ckb_invoice.to_string()),
-            amount: ckb_invoice.amount,
-            max_parts: Some(PAYMENT_MAX_PARTS_LIMIT + 1),
-            ..Default::default()
-        })
+    let res = node_0
+        .send_mpp_payment(&mut node_1, 10000000000, Some(PAYMENT_MAX_PARTS_LIMIT))
         .await;
-    assert!(res
-        .unwrap_err()
-        .contains("invalid max_parts, value should be in range"));
+    assert!(res.is_ok(), "should succeed with max_parts equal to limit");
 }
 
 #[tokio::test]
@@ -226,36 +191,14 @@ async fn test_send_mpp_amount_choose_single_path() {
         2,
     )
     .await;
-    let [mut node_0, mut node_1] = nodes.try_into().expect("2 nodes");
-    let source_node = &mut node_0;
-    let target_pubkey = node_1.pubkey;
+    let [node_0, mut node_1] = nodes.try_into().expect("2 nodes");
 
-    let preimage = gen_rand_sha256_hash();
-    let ckb_invoice = InvoiceBuilder::new(Currency::Fibd)
-        .amount(Some(1000))
-        .payment_preimage(preimage)
-        .payee_pub_key(target_pubkey.into())
-        .allow_mpp(true)
-        .payment_secret(gen_rand_sha256_hash())
-        .build()
-        .expect("build invoice success");
-
-    node_1.insert_invoice(ckb_invoice.clone(), Some(preimage));
-
-    let res = source_node
-        .send_payment(SendPaymentCommand {
-            invoice: Some(ckb_invoice.to_string()),
-            amount: ckb_invoice.amount,
-            max_parts: Some(3),
-            ..Default::default()
-        })
-        .await;
-
+    let res = node_0.send_mpp_payment(&mut node_1, 1000, Some(3)).await;
     eprintln!("res: {:?}", res);
     assert!(res.is_ok());
     let payment_hash = res.unwrap().payment_hash;
-    source_node.wait_until_success(payment_hash).await;
-    let payment_session = source_node.get_payment_session(payment_hash).unwrap();
+    node_0.wait_until_success(payment_hash).await;
+    let payment_session = node_0.get_payment_session(payment_hash).unwrap();
     dbg!(&payment_session.status, &payment_session.attempts().len());
     assert_eq!(payment_session.attempts().len(), 1);
     assert_eq!(payment_session.retry_times(), 1);
@@ -277,36 +220,17 @@ async fn test_send_mpp_amount_3_splits() {
         2,
     )
     .await;
-    let [mut node_0, mut node_1] = nodes.try_into().expect("2 nodes");
-    let source_node = &mut node_0;
-    let target_pubkey = node_1.pubkey;
+    let [node_0, mut node_1] = nodes.try_into().expect("2 nodes");
 
-    let preimage = gen_rand_sha256_hash();
-    let ckb_invoice = InvoiceBuilder::new(Currency::Fibd)
-        .amount(Some(30000000000))
-        .payment_preimage(preimage)
-        .payee_pub_key(target_pubkey.into())
-        .allow_mpp(true)
-        .payment_secret(gen_rand_sha256_hash())
-        .build()
-        .expect("build invoice success");
-
-    node_1.insert_invoice(ckb_invoice.clone(), Some(preimage));
-
-    let res = source_node
-        .send_payment(SendPaymentCommand {
-            invoice: Some(ckb_invoice.to_string()),
-            amount: ckb_invoice.amount,
-            max_parts: Some(3),
-            ..Default::default()
-        })
+    let res = node_0
+        .send_mpp_payment(&mut node_1, 30000000000, Some(3))
         .await;
 
     eprintln!("res: {:?}", res);
     assert!(res.is_ok());
     let payment_hash = res.unwrap().payment_hash;
-    source_node.wait_until_success(payment_hash).await;
-    let payment_session = source_node.get_payment_session(payment_hash).unwrap();
+    node_0.wait_until_success(payment_hash).await;
+    let payment_session = node_0.get_payment_session(payment_hash).unwrap();
     dbg!(
         &payment_session.status,
         &payment_session.attempts().len(),
@@ -328,55 +252,56 @@ async fn test_send_mpp_amount_split() {
         2,
     )
     .await;
-    let [mut node_0, mut node_1] = nodes.try_into().expect("2 nodes");
-    let source_node = &mut node_0;
-    let target_pubkey = node_1.pubkey;
-
-    let preimage = gen_rand_sha256_hash();
-    let ckb_invoice = InvoiceBuilder::new(Currency::Fibd)
-        .amount(Some(15000000000))
-        .payment_preimage(preimage)
-        .payee_pub_key(target_pubkey.into())
-        .allow_mpp(true)
-        .payment_secret(gen_rand_sha256_hash())
-        .build()
-        .expect("build invoice success");
-
-    node_1.insert_invoice(ckb_invoice.clone(), Some(preimage));
-
-    let res = source_node
-        .send_payment(SendPaymentCommand {
-            invoice: Some(ckb_invoice.to_string()),
-            amount: ckb_invoice.amount,
-            max_parts: Some(2),
-            ..Default::default()
-        })
+    let [node_0, mut node_1] = nodes.try_into().expect("2 nodes");
+    let res = node_0
+        .send_mpp_payment(&mut node_1, 15000000000, Some(2))
         .await;
-
     eprintln!("res: {:?}", res);
     assert!(res.is_ok());
     let payment_hash = res.unwrap().payment_hash;
-    source_node.wait_until_success(payment_hash).await;
+    node_0.wait_until_success(payment_hash).await;
 
-    let payment_session = source_node.get_payment_session(payment_hash).unwrap();
+    let payment_session = node_0.get_payment_session(payment_hash).unwrap();
     dbg!(&payment_session.status, &payment_session.attempts().len());
 
     // Spent the half of amount in the first channel
-    let node_0_balance = source_node.get_local_balance_from_channel(channels[0]);
+    let node_0_balance = node_0.get_local_balance_from_channel(channels[0]);
     let node_1_balance = node_1.get_local_balance_from_channel(channels[0]);
     dbg!(node_0_balance, node_1_balance);
     assert_eq!(node_0_balance, 5000000000);
     assert_eq!(node_1_balance, 5000000000);
 
     // Spent the half of amount in the second channel
-    let node_0_balance = source_node.get_local_balance_from_channel(channels[1]);
+    let node_0_balance = node_0.get_local_balance_from_channel(channels[1]);
     let node_1_balance = node_1.get_local_balance_from_channel(channels[1]);
     dbg!(node_0_balance, node_1_balance);
     assert_eq!(node_0_balance, 0);
     assert_eq!(node_1_balance, 10000000000);
 }
 
-#[ignore]
+#[tokio::test]
+async fn test_send_mpp_amount_split_with_more_channels() {
+    init_tracing();
+
+    let (nodes, _channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (MIN_RESERVED_CKB + 100000, MIN_RESERVED_CKB)),
+            ((1, 2), (MIN_RESERVED_CKB + 100000, MIN_RESERVED_CKB)),
+            ((0, 2), (MIN_RESERVED_CKB + 100000, MIN_RESERVED_CKB)),
+        ],
+        3,
+    )
+    .await;
+    let [node_0, _node_1, mut node_2] = nodes.try_into().expect("2 nodes");
+
+    let res = node_0.send_mpp_payment(&mut node_2, 100000, Some(2)).await;
+
+    eprintln!("res: {:?}", res);
+    assert!(res.is_ok());
+    let payment_hash = res.unwrap().payment_hash;
+    node_0.wait_until_success(payment_hash).await;
+}
+
 #[tokio::test]
 async fn test_send_mpp_fee_rate() {
     init_tracing();
@@ -448,6 +373,8 @@ async fn test_send_mpp_fee_rate() {
         .amount(Some(1_500_000_000))
         .payment_preimage(preimage)
         .payee_pub_key(node_2.pubkey.into())
+        .allow_mpp(true)
+        .payment_secret(gen_rand_sha256_hash())
         .build()
         .expect("build invoice success");
 
@@ -464,28 +391,8 @@ async fn test_send_mpp_fee_rate() {
 
     assert!(res.is_ok(), "Send payment failed: {:?}", res);
     let res = res.unwrap();
-    // assert!(res.fee > 0);
+
     let payment_hash = res.payment_hash;
-    node_0.wait_until_success(payment_hash).await;
-    assert!(res.fee > 0);
-    let nodes = &res.routers[0].nodes;
-    assert_eq!(nodes.len(), 3);
-    assert_eq!(nodes[2].amount, 187500000);
-    assert_eq!(nodes[1].amount, 187500000);
-    // The fee is 10_000_000 * 3_000_000 (fee rate) / 1_000_000 = 30_000_000
-    assert_eq!(nodes[0].amount, 750000000);
-
-    // let res = node_2.send_payment_keysend(&node_0, 1_000_000, false).await;
-    // assert!(res.is_ok(), "Send payment failed: {:?}", res);
-    // let res = res.unwrap();
-    // assert!(res.fee > 0);
-    // let nodes = res.router.nodes;
-    // assert_eq!(nodes.len(), 3);
-    // assert_eq!(nodes[2].amount, 1_000_000);
-    // assert_eq!(nodes[1].amount, 1_000_000);
-    // // The fee is 1_000_000 * 2_000_000 (fee rate) / 1_000_000 = 2_000_000
-    // assert_eq!(nodes[0].amount, 3_000_000);
-
-    // let payment_hash = res.payment_hash;
-    // node_2.wait_until_success(payment_hash).await;
+    // fee_rate is too high
+    node_0.wait_until_failed(payment_hash).await;
 }

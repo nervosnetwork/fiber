@@ -15,6 +15,7 @@ use crate::fiber::types::Init;
 use crate::fiber::types::Pubkey;
 use crate::fiber::types::Shutdown;
 use crate::fiber::ASSUME_NETWORK_ACTOR_ALIVE;
+use crate::gen_rand_sha256_hash;
 use crate::invoice::*;
 use crate::rpc::config::RpcConfig;
 use crate::rpc::server::start_rpc;
@@ -677,6 +678,34 @@ impl NetworkNode {
         };
 
         call!(self.network_actor, message).expect("source_node alive")
+    }
+
+    pub async fn send_mpp_payment(
+        &self,
+        target_node: &mut NetworkNode,
+        amount: u128,
+        max_parts: Option<u64>,
+    ) -> Result<SendPaymentResponse, String> {
+        let target_pubkey = target_node.get_public_key();
+        let preimage = gen_rand_sha256_hash();
+        let ckb_invoice = InvoiceBuilder::new(Currency::Fibd)
+            .amount(Some(amount))
+            .payment_preimage(preimage)
+            .payee_pub_key(target_pubkey.into())
+            .allow_mpp(true)
+            .payment_secret(gen_rand_sha256_hash())
+            .build()
+            .expect("build invoice success");
+
+        target_node.insert_invoice(ckb_invoice.clone(), Some(preimage));
+
+        self.send_payment(SendPaymentCommand {
+            invoice: Some(ckb_invoice.to_string()),
+            amount: ckb_invoice.amount,
+            max_parts,
+            ..Default::default()
+        })
+        .await
     }
 
     pub async fn assert_send_payment_success(
