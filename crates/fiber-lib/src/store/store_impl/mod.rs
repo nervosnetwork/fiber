@@ -1,12 +1,12 @@
 #[cfg(not(target_arch = "wasm32"))]
 mod native;
 #[cfg(not(target_arch = "wasm32"))]
-pub use native::{Batch, DbDirection, IteratorMode, Store};
+pub use native::{Batch, DbDirection, IteratorMode, Store, StoreWithPubSub};
 
 #[cfg(target_arch = "wasm32")]
 mod browser;
 #[cfg(target_arch = "wasm32")]
-pub use browser::{Batch, DbDirection, IteratorMode, Store};
+pub use browser::{Batch, DbDirection, IteratorMode, Store, StoreWithPubSub};
 
 use std::path::Path;
 
@@ -14,6 +14,7 @@ use super::db_migrate::DbMigrate;
 use super::schema::*;
 use crate::fiber::gossip::GossipMessageStore;
 use crate::fiber::types::CURSOR_SIZE;
+use crate::store::subscription::StorePublisherMessage;
 #[cfg(feature = "watchtower")]
 use crate::{
     fiber::channel::{RevocationData, SettlementData},
@@ -442,6 +443,52 @@ impl InvoiceStore for Store {
     }
 }
 
+impl<S> InvoiceStore for StoreWithPubSub<S>
+where
+    S: InvoiceStore,
+{
+    fn get_invoice(&self, id: &Hash256) -> Option<CkbInvoice> {
+        self.inner.get_invoice(id)
+    }
+
+    fn insert_invoice(
+        &self,
+        invoice: CkbInvoice,
+        preimage: Option<Hash256>,
+    ) -> Result<(), InvoiceError> {
+        let invoice_hash = *invoice.payment_hash();
+        let result = self.inner.insert_invoice(invoice, preimage);
+        if result.is_ok() {
+            self.publish(StorePublisherMessage::InvoiceUpdated {
+                invoice_hash,
+                status: CkbInvoiceStatus::Open,
+            })
+            .expect("store publisher is alive");
+        }
+        result
+    }
+
+    fn update_invoice_status(
+        &self,
+        id: &Hash256,
+        status: crate::invoice::CkbInvoiceStatus,
+    ) -> Result<(), InvoiceError> {
+        let result = self.inner.update_invoice_status(id, status);
+        if result.is_ok() {
+            self.publish(StorePublisherMessage::InvoiceUpdated {
+                invoice_hash: *id,
+                status,
+            })
+            .expect("store publisher is alive");
+        }
+        result
+    }
+
+    fn get_invoice_status(&self, id: &Hash256) -> Option<CkbInvoiceStatus> {
+        self.inner.get_invoice_status(id)
+    }
+}
+
 impl PreimageStore for Store {
     fn insert_preimage(&self, payment_hash: Hash256, preimage: Hash256) {
         let mut batch = self.batch();
@@ -524,6 +571,48 @@ impl NetworkGraphStateStore for Store {
             (channel_outpoint, direction, result)
         })
         .collect()
+    }
+}
+
+impl<S> NetworkGraphStateStore for StoreWithPubSub<S>
+where
+    S: NetworkGraphStateStore,
+{
+    fn get_payment_session(&self, payment_hash: Hash256) -> Option<PaymentSession> {
+        self.inner.get_payment_session(payment_hash)
+    }
+
+    fn get_payment_sessions_with_status(
+        &self,
+        status: PaymentSessionStatus,
+    ) -> Vec<PaymentSession> {
+        self.inner.get_payment_sessions_with_status(status)
+    }
+
+    fn insert_payment_session(&self, session: PaymentSession) {
+        let payment_hash = session.payment_hash();
+        let status = session.status.clone();
+
+        self.inner.insert_payment_session(session);
+        self.publish(StorePublisherMessage::PaymentUpdated {
+            payment_hash,
+            status,
+        })
+        .expect("store publisher is alive")
+    }
+
+    fn insert_payment_history_result(
+        &mut self,
+        channel_outpoint: OutPoint,
+        direction: Direction,
+        result: TimedResult,
+    ) {
+        self.inner
+            .insert_payment_history_result(channel_outpoint, direction, result)
+    }
+
+    fn get_payment_history_results(&self) -> Vec<(OutPoint, Direction, TimedResult)> {
+        self.inner.get_payment_history_results()
     }
 }
 

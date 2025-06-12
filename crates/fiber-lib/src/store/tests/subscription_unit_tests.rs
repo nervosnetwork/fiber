@@ -17,12 +17,12 @@ use crate::{
 use ckb_types::packed;
 use ractor::{async_trait, concurrency::Duration, Actor, ActorProcessingErr, ActorRef};
 
-#[derive(Default)]
-struct MockStore {
-    invoice: Option<CkbInvoice>,
-    invoice_status: Option<CkbInvoiceStatus>,
-    payment_session: Option<PaymentSession>,
-    preimage: Option<Hash256>,
+#[derive(Default, Clone)]
+pub struct MockStore {
+    pub invoice: Option<CkbInvoice>,
+    pub invoice_status: Option<CkbInvoiceStatus>,
+    pub payment_session: Option<PaymentSession>,
+    pub preimage: Option<Hash256>,
 }
 
 impl NetworkGraphStateStore for MockStore {
@@ -38,7 +38,7 @@ impl NetworkGraphStateStore for MockStore {
     }
 
     fn insert_payment_session(&self, _session: PaymentSession) {
-        unimplemented!()
+        // skip
     }
 
     fn insert_payment_history_result(
@@ -65,7 +65,8 @@ impl InvoiceStore for MockStore {
         _invoice: CkbInvoice,
         _preimage: Option<Hash256>,
     ) -> Result<(), crate::invoice::InvoiceError> {
-        unimplemented!()
+        // skip
+        Ok(())
     }
 
     fn update_invoice_status(
@@ -73,7 +74,8 @@ impl InvoiceStore for MockStore {
         _id: &Hash256,
         _status: CkbInvoiceStatus,
     ) -> Result<(), crate::invoice::InvoiceError> {
-        unimplemented!()
+        // skip
+        Ok(())
     }
 
     fn get_invoice_status(&self, _id: &Hash256) -> Option<CkbInvoiceStatus> {
@@ -99,7 +101,7 @@ impl PreimageStore for MockStore {
     }
 }
 
-struct StoreTestSubscriber;
+pub struct StoreTestSubscriber;
 
 #[async_trait]
 impl Actor for StoreTestSubscriber {
@@ -131,14 +133,14 @@ impl Actor for StoreTestSubscriber {
     }
 }
 
-fn mock_invoice(amount: u128) -> CkbInvoice {
+pub fn mock_invoice(amount: u128) -> CkbInvoice {
     InvoiceBuilder::new(Currency::Fibb)
         .amount(Some(amount))
         .build()
         .expect("mock invoice")
 }
 
-fn mock_payment_session(payment_hash: Hash256, status: PaymentSessionStatus) -> PaymentSession {
+pub fn mock_payment_session(payment_hash: Hash256, status: PaymentSessionStatus) -> PaymentSession {
     let payment_data = SendPaymentData {
         target_pubkey: gen_rand_fiber_public_key(),
         amount: 100,
