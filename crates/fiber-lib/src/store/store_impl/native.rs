@@ -120,6 +120,10 @@ impl<S> StoreWithPubSub<S> {
         }
     }
 
+    pub fn into_inner(self) -> S {
+        self.inner
+    }
+
     pub(crate) fn publish(&self, event: StoreUpdatedEvent) {
         self.publisher.publish(event);
     }
