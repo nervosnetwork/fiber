@@ -16,6 +16,7 @@ pub mod server {
 
     use crate::ckb::CkbConfig;
     use crate::fiber::gossip::GossipMessageStore;
+    #[cfg(feature = "watchtower")]
     use crate::invoice::PreimageStore;
     use crate::rpc::cch::{CchRpcServer, CchRpcServerImpl};
     use crate::rpc::channel::{ChannelRpcServer, ChannelRpcServerImpl};
