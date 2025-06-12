@@ -4879,3 +4879,51 @@ async fn test_send_payment_with_reverse_channel_of_capaicity_not_enough() {
     assert_eq!(statistic[&2], 1);
     assert_eq!(statistic[&1], count - 1);
 }
+
+#[tokio::test]
+async fn test_send_payment_will_use_sent_amount_for_better_path_finding() {
+    init_tracing();
+    let _span = tracing::info_span!("node", node = "test").entered();
+    let (nodes, _channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((1, 2), (105 + MIN_RESERVED_CKB, MIN_RESERVED_CKB)),
+            ((1, 2), (105 + MIN_RESERVED_CKB, MIN_RESERVED_CKB)),
+            ((1, 2), (105 + MIN_RESERVED_CKB, MIN_RESERVED_CKB)),
+            ((2, 3), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+        ],
+        4,
+    )
+    .await;
+
+    let [node0, _node1, _node2, node3] = nodes.try_into().expect("4 nodes");
+
+    let payment0 = node0
+        .send_payment_keysend(&node3, 100, false)
+        .await
+        .unwrap()
+        .payment_hash;
+    let payment0_retry_times = node0.get_payment_session(payment0).unwrap().retry_times();
+    node0.wait_until_success(payment0).await;
+    assert_eq!(payment0_retry_times, 1);
+
+    let payment1 = node0
+        .send_payment_keysend(&node3, 100, false)
+        .await
+        .unwrap()
+        .payment_hash;
+
+    node0.wait_until_success(payment1).await;
+    let payment1_retry_times = node0.get_payment_session(payment1).unwrap().retry_times();
+    assert_eq!(payment1_retry_times, 1);
+
+    let payment2 = node0
+        .send_payment_keysend(&node3, 100, false)
+        .await
+        .unwrap()
+        .payment_hash;
+
+    node0.wait_until_success(payment2).await;
+    let payment2_retry_times = node0.get_payment_session(payment2).unwrap().retry_times();
+    assert_eq!(payment2_retry_times, 1);
+}

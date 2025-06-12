@@ -140,6 +140,16 @@ impl ChannelInfo {
             .max(self.update_of_node1.as_ref().map(|n| n.timestamp))
     }
 
+    pub fn get_send_node(&self, from: Pubkey) -> Option<SentNode> {
+        if self.node1() == from {
+            Some(SentNode::Node1)
+        } else if self.node2() == from {
+            Some(SentNode::Node2)
+        } else {
+            None
+        }
+    }
+
     #[cfg(any(test, feature = "bench"))]
     pub fn get_channel_update_of(&self, node: Pubkey) -> Option<&ChannelUpdateInfo> {
         if self.node1() == node {
@@ -1303,6 +1313,7 @@ where
 
         let pending_count =
             self.get_channel_pending_attempts_count(channel_outpoint) + cur_pending_count;
+
         if pending_count > 0 {
             probability *= (0.95f64).powi(pending_count as i32);
         }
@@ -1526,12 +1537,17 @@ where
                 };
 
                 let incoming_tlc_expiry = cur_hop.incoming_tlc_expiry + expiry_delta;
+                let send_node = channel_info
+                    .get_send_node(from)
+                    .expect("send_node should exist");
+
                 if !self.check_channel_amount_and_expiry(
                     amount_to_send,
                     channel_info,
                     channel_update,
                     incoming_tlc_expiry,
                     tlc_expiry_limit,
+                    send_node,
                 ) {
                     continue;
                 }
@@ -1610,7 +1626,7 @@ where
     ) -> Result<(RouterHop, Pubkey, u64, u128), PathFindError> {
         let channels: Vec<_> = self
             .get_node_inbounds(source)
-            .filter(|(_, _, channel_info, channel_update)| {
+            .filter(|(from, _, channel_info, channel_update)| {
                 udt_type_script == channel_info.udt_type_script()
                     && self.check_channel_amount_and_expiry(
                         amount,
@@ -1618,6 +1634,9 @@ where
                         channel_update,
                         channel_update.tlc_expiry_delta,
                         tlc_expiry_limit,
+                        channel_info
+                            .get_send_node(*from)
+                            .expect("send_node should exist"),
                     )
             })
             .map(|(from, _, channel_info, channel_update)| {
@@ -1662,18 +1681,42 @@ where
         channel_update: &ChannelUpdateInfo,
         incoming_tlc_expiry: u64,
         tlc_expiry_limit: u64,
+        sent_node: SentNode,
     ) -> bool {
-        if amount > channel_info.capacity() {
-            return false;
-        }
         // We should use amount_to_send because that is the amount to be sent over the channel.
         if amount < channel_update.tlc_minimum_value {
             return false;
         }
 
+        let sent_amount = self
+            .channel_stats
+            .get(channel_info.out_point())
+            .map(|stat| match sent_node {
+                SentNode::Node1 => stat.node1_sent_amount,
+                SentNode::Node2 => stat.node2_sent_amount,
+            })
+            .unwrap_or(0);
+
+        debug_assert!(
+            sent_amount <= channel_info.capacity(),
+            "sent amount {} is greater than channel capacity {}",
+            sent_amount,
+            channel_info.capacity()
+        );
+
+        if amount > channel_info.capacity().saturating_sub(sent_amount) {
+            return false;
+        }
+
         // If we already know the balance of the channel, check if we can send the amount.
         if let Some(balance) = channel_update.outbound_liquidity {
-            if amount > balance {
+            debug_assert!(
+                balance >= sent_amount,
+                "balance {} is less than sent amount {}",
+                balance,
+                sent_amount
+            );
+            if amount > balance.saturating_sub(sent_amount) {
                 return false;
             }
         }
