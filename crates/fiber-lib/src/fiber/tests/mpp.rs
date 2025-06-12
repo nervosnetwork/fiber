@@ -2,7 +2,9 @@ use secp256k1::Secp256k1;
 
 use crate::{
     fiber::{
-        channel::{AddTlcCommand, ChannelCommand, ChannelCommandWithId, TLCId},
+        channel::{
+            AddTlcCommand, ChannelActorStateStore, ChannelCommand, ChannelCommandWithId, TLCId,
+        },
         config::{DEFAULT_HOLD_TLC_TIMEOUT, DEFAULT_TLC_EXPIRY_DELTA, PAYMENT_MAX_PARTS_LIMIT},
         hash_algorithm::HashAlgorithm,
         network::SendPaymentCommand,
@@ -1010,11 +1012,26 @@ async fn test_mpp_tlc_set_timeout() {
     .expect("node alive")
     .expect("tlc");
 
+    // wait until tlc is hold
+    while node_1.store.get_hold_tlcs(payment_hash).is_empty() {
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    }
+
     // sleep enough time to timeout hold tlc
     tokio::time::sleep(tokio::time::Duration::from_millis(
-        DEFAULT_HOLD_TLC_TIMEOUT + 1000,
+        DEFAULT_HOLD_TLC_TIMEOUT + 500,
     ))
     .await;
+
+    // check channels
+    ractor::cast!(
+        source_node.network_actor,
+        NetworkActorMessage::Command(NetworkActorCommand::CheckChannels)
+    )
+    .expect("node alive");
+
+    // ensure check channels is done
+    tokio::time::sleep(tokio::time::Duration::from_millis(4000)).await;
 
     let add_tlc_result_2 = ractor::call!(source_node.network_actor, |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
