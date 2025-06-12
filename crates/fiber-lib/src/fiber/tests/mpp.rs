@@ -303,6 +303,83 @@ async fn test_send_mpp_amount_split_with_more_channels() {
 }
 
 #[tokio::test]
+async fn test_send_mpp_amount_split_with_last_channels() {
+    init_tracing();
+
+    async fn test_with_params(amount: u128, max_parts: Option<u64>, expect_status: &str) {
+        let (nodes, _channels) = create_n_nodes_network(
+            &[
+                ((0, 1), (MIN_RESERVED_CKB + 400000, MIN_RESERVED_CKB)),
+                ((1, 2), (MIN_RESERVED_CKB + 100000, MIN_RESERVED_CKB)),
+                ((1, 2), (MIN_RESERVED_CKB + 100000, MIN_RESERVED_CKB)),
+                ((1, 2), (MIN_RESERVED_CKB + 100000, MIN_RESERVED_CKB)),
+            ],
+            3,
+        )
+        .await;
+        let [node_0, _node_1, mut node_2] = nodes.try_into().expect("2 nodes");
+
+        let res = node_0
+            .send_mpp_payment(&mut node_2, amount, max_parts)
+            .await;
+        if expect_status == "success" {
+            node_0.wait_until_success(res.unwrap().payment_hash).await;
+        } else {
+            node_0.wait_until_failed(res.unwrap().payment_hash).await;
+        }
+    }
+
+    test_with_params(300000, Some(2), "fail").await;
+    test_with_params(300000, Some(3), "fail").await;
+    test_with_params(290000, Some(3), "success").await;
+    test_with_params(290000, None, "success").await;
+}
+
+#[tokio::test]
+async fn test_send_mpp_amount_split_with_one_extra_direct_channel() {
+    init_tracing();
+
+    async fn test_with_params(
+        amount: u128,
+        max_parts: Option<u64>,
+        expect_status: &str,
+        expect_attempts_count: usize,
+    ) {
+        let (nodes, _channels) = create_n_nodes_network(
+            &[
+                ((0, 1), (MIN_RESERVED_CKB + 400000, MIN_RESERVED_CKB)),
+                ((1, 2), (MIN_RESERVED_CKB + 100000, MIN_RESERVED_CKB)),
+                ((1, 2), (MIN_RESERVED_CKB + 100000, MIN_RESERVED_CKB)),
+                ((1, 2), (MIN_RESERVED_CKB + 100000, MIN_RESERVED_CKB)),
+                ((0, 2), (MIN_RESERVED_CKB + 400000, MIN_RESERVED_CKB)),
+            ],
+            3,
+        )
+        .await;
+        let [node_0, _node_1, mut node_2] = nodes.try_into().expect("2 nodes");
+
+        let res = node_0
+            .send_mpp_payment(&mut node_2, amount, max_parts)
+            .await;
+        let payment_hash = res.unwrap().payment_hash;
+        if expect_status == "success" {
+            node_0.wait_until_success(payment_hash).await;
+        } else {
+            node_0.wait_until_failed(payment_hash).await;
+        }
+        let payment_session = node_0.get_payment_session(payment_hash).unwrap();
+        assert_eq!(payment_session.attempts().len(), expect_attempts_count);
+    }
+
+    test_with_params(400000, Some(2), "success", 1).await;
+    test_with_params(300000, Some(2), "success", 1).await;
+    // need to split into 2 parts
+    test_with_params(400001, Some(2), "success", 2).await;
+    test_with_params(800000, None, "fail", 5).await;
+    test_with_params(700000 - 5000, Some(4), "success", 4).await;
+}
+
+#[tokio::test]
 async fn test_send_mpp_fee_rate() {
     init_tracing();
     let [mut node_0, mut node_1, mut node_2] = NetworkNode::new_n_interconnected_nodes().await;
