@@ -16,6 +16,7 @@ use crate::ckb::config::UdtCfgInfos;
 use crate::fiber::config::{DEFAULT_MPP_MIN_AMOUNT, DEFAULT_TLC_EXPIRY_DELTA};
 use crate::fiber::fee::calculate_tlc_forward_fee;
 use crate::fiber::history::SentNode;
+use crate::fiber::network::DEFAULT_PAYMENT_MPP_ATTEMPT_TRY_LIMIT;
 use crate::fiber::path::NodeHeapElement;
 use crate::fiber::serde_utils::EntityHex;
 use crate::fiber::serde_utils::{U128Hex, U64Hex};
@@ -2009,6 +2010,8 @@ impl From<PaymentSessionError> for crate::errors::Error {
 pub struct PaymentSession {
     pub request: SendPaymentData,
     pub last_error: Option<String>,
+    // For non-MPP, this is the maximum number of single attempt retry limit
+    // For MPP, this is the sum limit of all parts' retry times.
     pub try_limit: u32,
     pub status: PaymentSessionStatus,
     pub created_at: u64,
@@ -2049,7 +2052,7 @@ impl PaymentSession {
     }
 
     pub fn allow_mpp(&self) -> bool {
-        self.request.max_parts.unwrap_or(1) > 1
+        self.request.allow_mpp()
     }
 
     pub fn payment_hash(&self) -> Hash256 {
@@ -2081,13 +2084,7 @@ impl PaymentSession {
     }
 
     pub fn fee_paid(&self) -> u128 {
-        self.cached_attempts.iter().fold(0, |acc, a| {
-            if !a.is_failed() {
-                acc + a.route.fee()
-            } else {
-                acc
-            }
-        })
+        self.active_attempts().iter().map(|a| a.route.fee()).sum()
     }
 
     pub fn remain_fee_amount(&self) -> Option<u128> {
@@ -2097,14 +2094,12 @@ impl PaymentSession {
     }
 
     pub fn remain_amount(&self) -> u128 {
-        let sent = self.cached_attempts.iter().fold(0, |acc, a| {
-            if !a.is_failed() {
-                acc + a.route.receiver_amount()
-            } else {
-                acc
-            }
-        });
-        self.request.amount.saturating_sub(sent)
+        let sent_amount = self
+            .active_attempts()
+            .iter()
+            .map(|a| a.route.receiver_amount())
+            .sum::<u128>();
+        self.request.amount.saturating_sub(sent_amount)
     }
 
     pub fn new_attempt(&self, attempt_id: u64) -> Attempt {
@@ -2112,10 +2107,16 @@ impl PaymentSession {
         let payment_hash = self.payment_hash();
         // For HTLC, the attempt hash is the payment hash
         let hash = payment_hash;
+        let try_limit = if self.allow_mpp() {
+            DEFAULT_PAYMENT_MPP_ATTEMPT_TRY_LIMIT
+        } else {
+            self.try_limit
+        };
 
         Attempt {
             id: attempt_id,
             hash,
+            try_limit,
             tried_times: 1,
             payment_hash,
             route: Default::default(),
@@ -2131,35 +2132,6 @@ impl PaymentSession {
     // FIXME: we may need to remove this
     pub fn append_attempt(&mut self, attempt: Attempt) {
         self.cached_attempts.push(attempt);
-    }
-
-    pub fn next_step(&self) -> Result<bool, PaymentSessionError> {
-        if self.allow_more_attempts() {
-            let attempts = self.attempts();
-            let tried_count = attempts.len() as u32;
-            if tried_count >= self.try_limit {
-                for a in attempts.iter() {
-                    dbg!(
-                        a.is_settled(),
-                        a.is_inflight(),
-                        a.is_failed(),
-                        a.last_error.as_ref()
-                    );
-                }
-                dbg!(
-                    "allow more attempts",
-                    &attempts.len(),
-                    self.try_limit,
-                    self.remain_amount(),
-                );
-                return Err(PaymentSessionError::RetryLimitExceeded);
-            }
-            // new attempt
-            Ok(true)
-        } else {
-            // just wait for the htlc to be settled or failed
-            Ok(false)
-        }
     }
 
     pub fn allow_more_attempts(&self) -> bool {
@@ -2307,6 +2279,7 @@ impl From<PaymentSession> for SendPaymentResponse {
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct Attempt {
     pub id: u64,
+    pub try_limit: u32,
     pub tried_times: u32,
     pub hash: Hash256,
     pub status: PaymentSessionStatus,
@@ -2326,13 +2299,17 @@ impl Attempt {
 
     pub fn set_failed_status(&mut self, error: &str, retryable: bool) {
         self.last_error = Some(error.to_string());
+
         if retryable {
-            if !error.to_string().contains("WaitingTlcAck") {
-                self.tried_times += 1;
+            if error.to_string().contains("WaitingTlcAck") {
+                return;
             }
-        } else {
-            self.status = PaymentSessionStatus::Failed;
+            if self.tried_times < self.try_limit {
+                self.tried_times += 1;
+                return;
+            }
         }
+        self.status = PaymentSessionStatus::Failed;
     }
 
     pub fn hops_public_keys(&self) -> Vec<Pubkey> {

@@ -101,6 +101,9 @@ pub const DEFAULT_CHAIN_ACTOR_TIMEOUT: u64 = 300000;
 // TODO: make it configurable
 pub const CKB_TX_TRACING_CONFIRMATIONS: u64 = 4;
 
+pub const DEFAULT_PAYMENT_TRY_LIMIT: u32 = 5;
+pub const DEFAULT_PAYMENT_MPP_ATTEMPT_TRY_LIMIT: u32 = 3;
+
 // This is a temporary way to document that we assume the chain actor is always alive.
 // We may later relax this assumption. At the moment, if the chain actor fails, we
 // should panic with this message, and later we may find all references to this message
@@ -2328,16 +2331,12 @@ where
             }
         }
 
-        let more_attempt = match payment_session.next_step() {
-            Ok(more_attempt) => more_attempt,
-            Err(err) => {
-                self.set_payment_fail_with_error(&mut payment_session, &err.to_string());
+        if !payment_session.allow_more_attempts() {
+            if payment_session.remain_amount() > 0 {
+                let err = "No more attempts allowed";
+                self.set_payment_fail_with_error(&mut payment_session, err);
                 return Err(Error::SendPaymentError(err.to_string()));
             }
-        };
-
-        // just wait for flight to be settled or failed
-        if !more_attempt {
             return Ok(None);
         }
 
@@ -2471,7 +2470,12 @@ where
             }
         }
 
-        let payment_session = PaymentSession::new(&self.store, payment_data, 5);
+        let try_limit = if payment_data.allow_mpp() {
+            payment_data.max_parts() as u32 * DEFAULT_PAYMENT_MPP_ATTEMPT_TRY_LIMIT
+        } else {
+            DEFAULT_PAYMENT_TRY_LIMIT
+        };
+        let payment_session = PaymentSession::new(&self.store, payment_data, try_limit);
         self.store.insert_payment_session(payment_session.clone());
         self.resume_payment_session(myself, state, payment_session.payment_hash(), None)
             .await?;
