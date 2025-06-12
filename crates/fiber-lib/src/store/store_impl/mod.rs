@@ -12,9 +12,14 @@ use std::path::Path;
 
 use super::db_migrate::DbMigrate;
 use super::schema::*;
-use crate::fiber::gossip::GossipMessageStore;
+use crate::fiber::gossip::GossipMessageStoreDeref;
+use crate::fiber::network::NetworkActorStateStoreDeref;
 use crate::fiber::types::CURSOR_SIZE;
+use crate::fiber::{channel::ChannelActorStateStoreDeref, gossip::GossipMessageStore};
+use crate::invoice::PreimageStoreDeref;
 use crate::store::subscription::StorePublisherMessage;
+#[cfg(feature = "watchtower")]
+use crate::watchtower::WatchtowerStoreDeref;
 #[cfg(feature = "watchtower")]
 use crate::{
     fiber::channel::{RevocationData, SettlementData},
@@ -300,6 +305,14 @@ impl NetworkActorStateStore for Store {
     }
 }
 
+impl<T: NetworkActorStateStore> NetworkActorStateStoreDeref for StoreWithPubSub<T> {
+    type Target = T;
+
+    fn network_actor_state_store_deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
 impl ChannelActorStateStore for Store {
     fn get_channel_actor_state(&self, id: &Hash256) -> Option<ChannelActorState> {
         let key = [&[CHANNEL_ACTOR_STATE_PREFIX], id.as_ref()].concat();
@@ -392,6 +405,14 @@ impl ChannelActorStateStore for Store {
         let key = [&[PAYMENT_CUSTOM_RECORD_PREFIX], payment_hash.as_ref()].concat();
         self.get(key)
             .map(|v| deserialize_from(v.as_ref(), "PaymentCustomRecord"))
+    }
+}
+
+impl<T: ChannelActorStateStore> ChannelActorStateStoreDeref for StoreWithPubSub<T> {
+    type Target = T;
+
+    fn channel_actor_state_store_deref(&self) -> &Self::Target {
+        &self.inner
     }
 }
 
@@ -513,6 +534,14 @@ impl PreimageStore for Store {
         let mut iter = self.prefix_iterator(prefix.as_slice());
         iter.next()
             .map(|(_key, value)| deserialize_from(value.as_ref(), "Preimage"))
+    }
+}
+
+impl<T: PreimageStore> PreimageStoreDeref for StoreWithPubSub<T> {
+    type Target = T;
+
+    fn preimage_store_deref(&self) -> &Self::Target {
+        &self.inner
     }
 }
 
@@ -682,6 +711,15 @@ impl WatchtowerStore for Store {
             batch.put_kv(KeyValue::WatchtowerChannel(channel_id, channel_data));
             batch.commit();
         }
+    }
+}
+
+#[cfg(feature = "watchtower")]
+impl<T: WatchtowerStore> WatchtowerStoreDeref for StoreWithPubSub<T> {
+    type Target = T;
+
+    fn watchtower_store_deref(&self) -> &Self::Target {
+        &self.inner
     }
 }
 
@@ -944,6 +982,14 @@ impl GossipMessageStore for Store {
         let mut batch = self.batch();
         batch.delete([&[BROADCAST_MESSAGE_TIMESTAMP_PREFIX], key.as_slice()].concat());
         batch.commit();
+    }
+}
+
+impl<T: GossipMessageStore> GossipMessageStoreDeref for StoreWithPubSub<T> {
+    type Target = T;
+
+    fn gossip_message_store_deref(&self) -> &Self::Target {
+        &self.inner
     }
 }
 

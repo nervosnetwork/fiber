@@ -13,7 +13,9 @@ use fnn::rpc::watchtower::{
     CreatePreimageParams, CreateWatchChannelParams, RemovePreimageParams, RemoveWatchChannelParams,
     UpdateLocalSettlementParams, UpdateRevocationParams, WatchtowerRpcClient,
 };
+use fnn::store::subscription::StorePublisher;
 use fnn::store::Store;
+use fnn::store::StoreWithPubSub;
 use fnn::tasks::{
     cancel_tasks_and_wait_for_completion, new_tokio_cancellation_token, new_tokio_task_tracker,
 };
@@ -89,6 +91,16 @@ pub async fn main() -> Result<(), ExitMessage> {
     let token = new_tokio_cancellation_token();
     let root_actor = RootActor::start(tracker, token).await;
     let subscribers = ChannelSubscribers::default();
+
+    let (store_publisher_ref, _store_publisher_handle) = Actor::spawn_linked(
+        None,
+        StorePublisher::new(),
+        store.clone(),
+        root_actor.get_cell(),
+    )
+    .await
+    .map_err(|err| ExitMessage(err.to_string()))?;
+    let store = StoreWithPubSub::new(store.clone(), store_publisher_ref);
 
     #[cfg(debug_assertions)]
     let rpc_dev_module_commitment_txs = config.rpc.as_ref().and_then(|rpc_config| {

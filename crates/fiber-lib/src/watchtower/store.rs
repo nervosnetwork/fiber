@@ -32,6 +32,54 @@ pub trait WatchtowerStore {
     fn update_local_settlement(&self, channel_id: Hash256, local_settlement_data: SettlementData);
 }
 
+/// Used for delegating the store trait
+pub trait WatchtowerStoreDeref {
+    type Target: WatchtowerStore;
+    fn watchtower_store_deref(&self) -> &Self::Target;
+}
+
+impl<T: WatchtowerStoreDeref> WatchtowerStore for T {
+    fn get_watch_channels(&self) -> Vec<ChannelData> {
+        self.watchtower_store_deref().get_watch_channels()
+    }
+
+    fn insert_watch_channel(
+        &self,
+        channel_id: Hash256,
+        funding_tx_lock: Script,
+        remote_settlement_data: SettlementData,
+    ) {
+        self.watchtower_store_deref().insert_watch_channel(
+            channel_id,
+            funding_tx_lock,
+            remote_settlement_data,
+        );
+    }
+
+    fn remove_watch_channel(&self, channel_id: Hash256) {
+        self.watchtower_store_deref()
+            .remove_watch_channel(channel_id);
+    }
+
+    fn update_revocation(
+        &self,
+        channel_id: Hash256,
+        revocation_data: RevocationData,
+        remote_settlement_data: SettlementData,
+    ) {
+        self.watchtower_store_deref().update_revocation(
+            channel_id,
+            revocation_data,
+            remote_settlement_data,
+        );
+    }
+
+    fn update_local_settlement(&self, channel_id: Hash256, local_settlement_data: SettlementData) {
+        self.watchtower_store_deref()
+            .update_local_settlement(channel_id, local_settlement_data);
+    }
+}
+
 /// The data of a channel that the watchtower is monitoring
 #[serde_as]
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
