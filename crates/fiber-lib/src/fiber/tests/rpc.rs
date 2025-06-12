@@ -1,7 +1,6 @@
 #![allow(clippy::needless_range_loop)]
 use crate::tests::*;
 use crate::{
-    fiber::types::Hash256,
     invoice::Currency,
     rpc::{
         channel::{ListChannelsParams, ListChannelsResult},
@@ -80,7 +79,8 @@ async fn test_rpc_basic() {
                 fallback_address: None,
                 final_expiry_delta: Some(900000 + 1234),
                 udt_type_script: Some(Script::default().into()),
-                payment_preimage: Hash256::default(),
+                payment_preimage: None,
+                payment_hash: None,
                 hash_algorithm: Some(crate::fiber::hash_algorithm::HashAlgorithm::CkbHash),
             },
         )
