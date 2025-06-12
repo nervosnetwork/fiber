@@ -1568,7 +1568,7 @@ pub enum TlcErrorCode {
     ChannelDisabled = UPDATE | 20,
     ExpiryTooFar = PERM | 21,
     InvalidOnionPayload = PERM | 22,
-    HoldTlcTimeout = 23,
+    HoldTlcTimeout = PERM | 23,
     InvalidOnionError = BADONION | PERM | 25,
 }
 
