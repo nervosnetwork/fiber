@@ -95,6 +95,8 @@ default = ["watchtower"]
 portable = ["rocksdb/portable"]
 watchtower = []
 bench = ["tempfile", "ckb-testtool"]
+# Some lnd related unit tests will only run if this feature is enabled.
+lnd-tests = []
 
 [dev-dependencies]
 tempfile = "3.10.1"
@@ -103,6 +105,7 @@ ciborium = "0.2.2"
 jsonrpsee = { version = "0.22", features = ["client", "server", "macros"] }
 ouroboros = "0.18.5"
 criterion = { version = "0.5", features = ["html_reports"] }
+lnd = "0.1.6"
 
 [lints.clippy]
 needless-return = "allow"

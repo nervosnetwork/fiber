@@ -5,17 +5,18 @@ use serde_with::serde_as;
 use std::{fs, path::PathBuf, str::FromStr};
 use tracing::info;
 
+use crate::ckb::contracts::ScriptCellDep;
 use crate::utils::encrypt_decrypt_file::{decrypt_from_file, encrypt_to_file};
 use crate::{Error, Result};
 
 use ckb_jsonrpc_types::{OutPoint as OutPointWrapper, Script as ScriptWrapper};
-use ckb_types::core::ScriptHashType;
 use ckb_types::prelude::Builder;
 use ckb_types::H256;
 use ckb_types::{
     core::DepType,
     packed::{CellDep, Script},
 };
+use ckb_types::{core::ScriptHashType, prelude::Unpack};
 use clap_serde_derive::clap::{self};
 use molecule::prelude::Entity;
 use serde::{Deserialize, Serialize};
@@ -196,6 +197,25 @@ impl UdtDep {
     }
 }
 
+impl From<&ScriptCellDep> for UdtDep {
+    fn from(value: &ScriptCellDep) -> Self {
+        match value {
+            ScriptCellDep::CellDep(cell_dep) => UdtDep::with_cell_dep(UdtCellDep::from(cell_dep)),
+            ScriptCellDep::TypeID(type_id) => UdtDep::with_type_id(type_id.clone().into()),
+        }
+    }
+}
+
+impl UdtScript {
+    pub fn allow_all_for_script(script: &Script) -> Self {
+        Self {
+            code_hash: H256(script.code_hash().as_slice().try_into().expect("32 bytes")),
+            hash_type: script.hash_type().try_into().expect("valid hash type"),
+            args: "0x.*".to_string(),
+        }
+    }
+}
+
 #[serde_as]
 #[derive(Serialize, Deserialize, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct UdtCellDep {
@@ -230,5 +250,25 @@ impl From<&UdtCellDep> for CellDep {
             .dep_type(cell_dep.dep_type.into())
             .out_point(cell_dep.out_point.clone().into())
             .build()
+    }
+}
+
+impl From<&CellDep> for UdtCellDep {
+    fn from(cell_dep: &CellDep) -> Self {
+        let index = cell_dep.out_point().index().unpack();
+        UdtCellDep {
+            dep_type: cell_dep.dep_type().try_into().expect("valid dep type"),
+            out_point: OutPointWrapper {
+                tx_hash: H256(
+                    cell_dep
+                        .out_point()
+                        .tx_hash()
+                        .as_slice()
+                        .try_into()
+                        .expect("32 bytes"),
+                ),
+                index,
+            },
+        }
     }
 }
