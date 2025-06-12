@@ -67,6 +67,7 @@ rule("new_invoice", r#"allow if write("invoices");"#);
 rule("parse_invoice", r#"allow if read("invoices");"#); 
 rule("get_invoice", r#"allow if read("invoices");"#); 
 rule("cancel_invoice", r#"allow if write("invoices");"#); 
+rule("settle_invoice", r#"allow if write("invoices");"#); 
 
 // payment 
 rule("send_payment", r#"allow if write("payments");"#); 

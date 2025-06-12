@@ -1,10 +1,7 @@
 #[cfg(not(target_arch = "wasm32"))]
 use crate::cch::{CchMessage, CchOrderStatus, ReceiveBTCOrder};
 use crate::{
-    fiber::{
-        serde_utils::{U128Hex, U64Hex},
-        types::Hash256,
-    },
+    fiber::serde_utils::{U128Hex, U64Hex},
     invoice::Currency,
 };
 #[cfg(not(target_arch = "wasm32"))]
@@ -44,8 +41,8 @@ pub struct SendBTCResponse {
 
     /// Payment request for BTC
     pub btc_pay_req: String,
-    /// Payment request for CKB
-    pub ckb_pay_req: String,
+    /// Generated invoice for CKB
+    pub fiber_pay_invoice: String,
     /// Payment hash for the HTLC for both CKB and BTC.
     pub payment_hash: String,
     /// Amount required to pay in Satoshis, including fee
@@ -61,16 +58,8 @@ pub struct SendBTCResponse {
 #[serde_as]
 #[derive(Serialize, Deserialize)]
 pub struct ReceiveBtcParams {
-    /// Payment hash for the HTLC for both CKB and BTC.
-    pub payment_hash: String,
-    /// Channel ID for the CKB payment.
-    pub channel_id: Hash256,
-    /// How many satoshis to receive, excluding cross-chain hub fee.
-    #[serde_as(as = "U128Hex")]
-    pub amount_sats: u128,
-    /// Expiry set for the HTLC for the CKB payment to the payee.
-    #[serde_as(as = "U64Hex")]
-    pub final_tlc_expiry: u64,
+    /// Fiber payment request string
+    pub fiber_pay_req: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -99,11 +88,6 @@ pub struct ReceiveBTCResponse {
     pub btc_pay_req: String,
     /// Payment hash for the HTLC for both CKB and BTC.
     pub payment_hash: String,
-    /// Channel ID for the CKB payment.
-    pub channel_id: Hash256,
-    /// TLC ID for the CKB payment.
-    #[serde_as(as = "Option<U64Hex>")]
-    pub tlc_id: Option<u64>,
 
     /// Amount will be received by the payee
     #[serde_as(as = "U128Hex")]
@@ -205,7 +189,11 @@ impl CchRpcServerImpl {
                 currency: order.currency,
                 wrapped_btc_type_script: order.wrapped_btc_type_script,
                 btc_pay_req: order.btc_pay_req,
-                ckb_pay_req: order.ckb_pay_req,
+                fiber_pay_invoice: order
+                    .fiber_pay_invoice
+                    .as_ref()
+                    .map(ToString::to_string)
+                    .unwrap_or_default(),
                 payment_hash: order.payment_hash,
                 amount_sats: order.amount_sats,
                 fee_sats: order.fee_sats,
@@ -223,10 +211,7 @@ impl CchRpcServerImpl {
             CchMessage::ReceiveBTC,
             TIMEOUT,
             crate::cch::ReceiveBTC {
-                payment_hash: params.payment_hash,
-                channel_id: params.channel_id,
-                amount_sats: params.amount_sats,
-                final_tlc_expiry: params.final_tlc_expiry,
+                fiber_pay_req: params.fiber_pay_req,
             }
         )
         .map_err(|ractor_error| {
@@ -271,8 +256,6 @@ impl From<ReceiveBTCOrder> for ReceiveBTCResponse {
             wrapped_btc_type_script: value.wrapped_btc_type_script,
             btc_pay_req: value.btc_pay_req,
             payment_hash: value.payment_hash,
-            channel_id: value.channel_id,
-            tlc_id: value.tlc_id,
             amount_sats: value.amount_sats,
             fee_sats: value.fee_sats,
             status: value.status,

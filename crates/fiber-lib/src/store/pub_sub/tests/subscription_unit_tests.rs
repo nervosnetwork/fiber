@@ -105,6 +105,21 @@ impl InvoiceStore for MockStore {
     fn get_invoice_status(&self, _id: &Hash256) -> Option<CkbInvoiceStatus> {
         self.invoice_status
     }
+
+    fn get_invoice_channel_info(
+        &self,
+        _payment_hash: &Hash256,
+    ) -> Vec<crate::invoice::InvoiceChannelInfo> {
+        unimplemented!()
+    }
+
+    fn add_invoice_channel_info(
+        &self,
+        _payment_hash: &Hash256,
+        _invoice_channel_info: crate::invoice::InvoiceChannelInfo,
+    ) -> Result<Vec<crate::invoice::InvoiceChannelInfo>, crate::invoice::InvoiceError> {
+        unimplemented!()
+    }
 }
 
 impl PreimageStore for MockStore {
@@ -156,6 +171,7 @@ impl Actor for StoreTestSubscriber {
 pub fn mock_invoice(amount: u128) -> CkbInvoice {
     InvoiceBuilder::new(Currency::Fibb)
         .amount(Some(amount))
+        .payment_hash(gen_rand_sha256_hash())
         .build()
         .expect("mock invoice")
 }

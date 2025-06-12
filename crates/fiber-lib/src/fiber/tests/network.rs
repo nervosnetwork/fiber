@@ -153,22 +153,17 @@ async fn test_set_announced_addrs_with_invalid_peer_id() {
 async fn test_set_announced_addrs_with_valid_peer_id() {
     let mut node = NetworkNode::new().await;
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-    node.stop().await;
 
     let peer_id = node.get_peer_id();
     let addr = format!("/ip4/1.1.1.1/tcp/8346/p2p/{}", peer_id);
     let multiaddr = Multiaddr::from_str(&addr).expect("valid multiaddr");
-    let mut node = NetworkNode::new_with_config(
-        NetworkNodeConfigBuilder::new()
-            .base_dir(node.base_dir.clone())
-            .fiber_config_updater(move |config| {
-                config.announced_addrs = vec![addr.clone()];
-            })
-            .build(),
-    )
-    .await;
+    node.stop().await;
+    node.fiber_config.announced_addrs = vec![addr.clone()];
+    node.start().await;
+
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
     node.stop().await;
+
     let nodes = node.get_network_graph_nodes().await;
     assert_eq!(nodes.len(), 1);
     assert_eq!(nodes[0].node_id, node.get_public_key());

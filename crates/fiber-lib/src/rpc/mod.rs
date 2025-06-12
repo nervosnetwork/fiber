@@ -243,8 +243,14 @@ pub mod server {
 
         let mut modules = RpcModule::new(());
         if config.is_module_enabled("invoice") {
+            if network_actor.is_none() {
+                tracing::warn!("network_actor should be set when invoice module is enabled");
+            }
             modules
-                .merge(InvoiceRpcServerImpl::new(store.clone(), fiber_config).into_rpc())
+                .merge(
+                    InvoiceRpcServerImpl::new(store.clone(), network_actor.clone(), fiber_config)
+                        .into_rpc(),
+                )
                 .unwrap();
         }
         if config.is_module_enabled("graph") {

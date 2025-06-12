@@ -195,6 +195,15 @@ pub mod invoice {
             .map(result)
             .map_err(error)
     }
+    #[wasm_bindgen]
+    pub async fn settle_invoice(params: JsValue) -> Result<JsValue, JsValue> {
+        fiber_wasm()?
+            .invoice
+            .settle_invoice(param(params)?)
+            .await
+            .map(result)
+            .map_err(error)
+    }
 }
 pub mod payment {
     use wasm_bindgen::{JsValue, prelude::wasm_bindgen};

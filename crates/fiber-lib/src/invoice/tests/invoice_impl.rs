@@ -417,6 +417,20 @@ fn test_invoice_builder_both_payment_hash_preimage() {
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), test)]
+fn test_invoice_builder_neither_payment_hash_not_preimage() {
+    let private_key = gen_rand_secp256k1_private_key();
+    let invoice = InvoiceBuilder::new(Currency::Fibb)
+        .amount(Some(1280))
+        .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key));
+
+    assert_eq!(
+        invoice.err(),
+        Some(InvoiceError::NeitherPaymenthashNorPreimage)
+    );
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
 fn test_invoice_serialize() {
     let invoice = mock_invoice();
     let invoice_2 = mock_invoice();
@@ -483,16 +497,6 @@ fn test_invoice_gen_payment_hash() {
     let payment_hash = invoice.payment_hash();
     let expected_hash: Hash256 = blake2b_256(payment_preimage.as_ref()).into();
     assert_eq!(expected_hash, *payment_hash);
-}
-
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
-fn test_invoice_rand_payment_hash() {
-    let private_key = gen_rand_secp256k1_private_key();
-    let invoice = InvoiceBuilder::new(Currency::Fibb)
-        .amount(Some(1280))
-        .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key));
-    assert!(invoice.is_ok());
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]

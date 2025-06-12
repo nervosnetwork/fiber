@@ -14,7 +14,9 @@ use crate::{
         payment::{Attempt, AttemptStatus, PaymentSession, PaymentStatus},
         types::Hash256,
     },
-    invoice::{CkbInvoice, CkbInvoiceStatus, InvoiceError, InvoiceStore, PreimageStore},
+    invoice::{
+        CkbInvoice, CkbInvoiceStatus, InvoiceChannelInfo, InvoiceError, InvoiceStore, PreimageStore,
+    },
 };
 
 #[derive(Clone, Debug)]
@@ -125,6 +127,18 @@ where
 
     fn get_invoice_status(&self, id: &Hash256) -> Option<CkbInvoiceStatus> {
         self.inner.get_invoice_status(id)
+    }
+
+    fn get_invoice_channel_info(&self, payment_hash: &Hash256) -> Vec<InvoiceChannelInfo> {
+        self.inner.get_invoice_channel_info(payment_hash)
+    }
+
+    fn add_invoice_channel_info(
+        &self,
+        id: &Hash256,
+        channel_info: InvoiceChannelInfo,
+    ) -> Result<Vec<InvoiceChannelInfo>, InvoiceError> {
+        self.inner.add_invoice_channel_info(id, channel_info)
     }
 }
 

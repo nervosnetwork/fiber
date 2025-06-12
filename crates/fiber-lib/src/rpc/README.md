@@ -41,6 +41,7 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
         * [Method `parse_invoice`](#invoice-parse_invoice)
         * [Method `get_invoice`](#invoice-get_invoice)
         * [Method `cancel_invoice`](#invoice-cancel_invoice)
+        * [Method `settle_invoice`](#invoice-settle_invoice)
     * [Module Payment](#module-payment)
         * [Method `send_payment`](#payment-send_payment)
         * [Method `get_payment`](#payment-get_payment)
@@ -119,7 +120,7 @@ Send BTC to a address.
 * `currency` - <em>[Currency](#type-currency)</em>, Request currency
 * `wrapped_btc_type_script` - <em>`ckb_jsonrpc_types::Script`</em>, Wrapped BTC type script
 * `btc_pay_req` - <em>`String`</em>, Payment request for BTC
-* `ckb_pay_req` - <em>`String`</em>, Payment request for CKB
+* `fiber_pay_invoice` - <em>`String`</em>, Generated invoice for CKB
 * `payment_hash` - <em>`String`</em>, Payment hash for the HTLC for both CKB and BTC.
 * `amount_sats` - <em>`u128`</em>, Amount required to pay in Satoshis, including fee
 * `fee_sats` - <em>`u128`</em>, Fee in Satoshis
@@ -136,10 +137,7 @@ Receive BTC from a payment hash.
 
 ##### Params
 
-* `payment_hash` - <em>`String`</em>, Payment hash for the HTLC for both CKB and BTC.
-* `channel_id` - <em>[Hash256](#type-hash256)</em>, Channel ID for the CKB payment.
-* `amount_sats` - <em>`u128`</em>, How many satoshis to receive, excluding cross-chain hub fee.
-* `final_tlc_expiry` - <em>`u64`</em>, Expiry set for the HTLC for the CKB payment to the payee.
+* `fiber_pay_req` - <em>`String`</em>, Fiber payment request string
 
 ##### Returns
 
@@ -149,8 +147,6 @@ Receive BTC from a payment hash.
 * `wrapped_btc_type_script` - <em>`ckb_jsonrpc_types::Script`</em>, Wrapped BTC type script
 * `btc_pay_req` - <em>`String`</em>, Payment request for BTC
 * `payment_hash` - <em>`String`</em>, Payment hash for the HTLC for both CKB and BTC.
-* `channel_id` - <em>[Hash256](#type-hash256)</em>, Channel ID for the CKB payment.
-* `tlc_id` - <em>`Option<u64>`</em>, TLC ID for the CKB payment.
 * `amount_sats` - <em>`u128`</em>, Amount will be received by the payee
 * `fee_sats` - <em>`u128`</em>, Fee in Satoshis
 * `status` - <em>[CchOrderStatus](#type-cchorderstatus)</em>, Order status
@@ -176,8 +172,6 @@ Get receive BTC order by payment hash.
 * `wrapped_btc_type_script` - <em>`ckb_jsonrpc_types::Script`</em>, Wrapped BTC type script
 * `btc_pay_req` - <em>`String`</em>, Payment request for BTC
 * `payment_hash` - <em>`String`</em>, Payment hash for the HTLC for both CKB and BTC.
-* `channel_id` - <em>[Hash256](#type-hash256)</em>, Channel ID for the CKB payment.
-* `tlc_id` - <em>`Option<u64>`</em>, TLC ID for the CKB payment.
 * `amount_sats` - <em>`u128`</em>, Amount will be received by the payee
 * `fee_sats` - <em>`u128`</em>, Fee in Satoshis
 * `status` - <em>[CchOrderStatus](#type-cchorderstatus)</em>, Order status
@@ -539,7 +533,8 @@ Generates a new invoice.
 * `amount` - <em>`u128`</em>, The amount of the invoice.
 * `description` - <em>`Option<String>`</em>, The description of the invoice.
 * `currency` - <em>[Currency](#type-currency)</em>, The currency of the invoice.
-* `payment_preimage` - <em>[Hash256](#type-hash256)</em>, The payment preimage of the invoice.
+* `payment_preimage` - <em>Option<[Hash256](#type-hash256)></em>, The preimage to settle an incoming TLC payable to this invoice. If preimage is set, hash must be absent. If both preimage and hash are absent, a random preimage is generated.
+* `payment_hash` - <em>Option<[Hash256](#type-hash256)></em>, The hash of the preimage. If hash is set, preimage must be absent. This condition indicates a 'hold invoice' for which the tlc must be accepted and held until the preimage becomes known.
 * `expiry` - <em>`Option<u64>`</em>, The expiry time of the invoice, in seconds.
 * `fallback_address` - <em>`Option<String>`</em>, The fallback address of the invoice.
 * `final_expiry_delta` - <em>`Option<u64>`</em>, The final HTLC timeout of the invoice, in milliseconds.
@@ -607,6 +602,24 @@ Cancels an invoice, only when invoice is in status `Open` can be canceled.
 * `invoice_address` - <em>`String`</em>, The encoded invoice address.
 * `invoice` - <em>[CkbInvoice](#type-ckbinvoice)</em>, The invoice.
 * `status` - <em>[CkbInvoiceStatus](#type-ckbinvoicestatus)</em>, The invoice status
+
+---
+
+
+
+<a id="invoice-settle_invoice"></a>
+#### Method `settle_invoice`
+
+Settles an invoice by saving the preimage to this invoice.
+
+##### Params
+
+* `payment_hash` - <em>[Hash256](#type-hash256)</em>, The payment hash of the invoice.
+* `payment_preimage` - <em>[Hash256](#type-hash256)</em>, The payment preimage of the invoice.
+
+##### Returns
+
+* None
 
 ---
 

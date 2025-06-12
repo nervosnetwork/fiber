@@ -20,6 +20,7 @@ use super::schema::*;
 use crate::fiber::gossip::GossipMessageStore;
 use crate::fiber::payment::{Attempt, AttemptStatus, PaymentSession, PaymentStatus};
 use crate::fiber::types::{HoldTlc, CURSOR_SIZE};
+use crate::invoice::InvoiceChannelInfo;
 use crate::{
     fiber::{
         channel::{ChannelActorState, ChannelActorStateStore, ChannelState},
@@ -218,6 +219,7 @@ pub enum KeyValue {
     CkbInvoice(Hash256, CkbInvoice),
     Preimage(Hash256, Hash256),
     CkbInvoiceStatus(Hash256, CkbInvoiceStatus),
+    CkbInvoiceChannels(Hash256, Vec<InvoiceChannelInfo>),
     PeerIdChannelId((PeerId, Hash256), ChannelState),
     OutPointChannelId(OutPoint, Hash256),
     BroadcastMessageTimestamp(BroadcastMessageID, u64),
@@ -253,6 +255,9 @@ impl StoreKeyValue for KeyValue {
             KeyValue::Preimage(id, _) => [&[PREIMAGE_PREFIX], id.as_ref()].concat(),
             KeyValue::CkbInvoiceStatus(id, _) => {
                 [&[CKB_INVOICE_STATUS_PREFIX], id.as_ref()].concat()
+            }
+            KeyValue::CkbInvoiceChannels(id, _) => {
+                [&[CKB_INVOICE_CHANNELS_PREFIX], id.as_ref()].concat()
             }
             KeyValue::PeerIdChannelId((peer_id, channel_id), _) => [
                 &[PEER_ID_CHANNEL_ID_PREFIX],
@@ -330,6 +335,9 @@ impl StoreKeyValue for KeyValue {
             KeyValue::CkbInvoice(_, invoice) => serialize_to_vec(invoice, "CkbInvoice"),
             KeyValue::Preimage(_, preimage) => serialize_to_vec(preimage, "Hash256"),
             KeyValue::CkbInvoiceStatus(_, status) => serialize_to_vec(status, "CkbInvoiceStatus"),
+            KeyValue::CkbInvoiceChannels(_, channel) => {
+                serialize_to_vec(channel, "CkbInvoiceChannels")
+            }
             KeyValue::PeerIdChannelId(_, state) => serialize_to_vec(state, "ChannelState"),
             KeyValue::OutPointChannelId(_, channel_id) => serialize_to_vec(channel_id, "ChannelId"),
             KeyValue::PaymentSession(_, payment_session) => {
@@ -559,6 +567,40 @@ impl InvoiceStore for Store {
         let key = [&[CKB_INVOICE_STATUS_PREFIX], id.as_ref()].concat();
         self.get(key)
             .map(|v| deserialize_from(v.as_ref(), "CkbInvoiceStatus"))
+    }
+
+    fn get_invoice_channel_info(&self, payment_hash: &Hash256) -> Vec<InvoiceChannelInfo> {
+        let key = [&[CKB_INVOICE_CHANNELS_PREFIX], payment_hash.as_ref()].concat();
+        self.get(key)
+            .map(|v| deserialize_from(&v, "CkbInvoiceChannels"))
+            .unwrap_or_default()
+    }
+
+    fn add_invoice_channel_info(
+        &self,
+        id: &Hash256,
+        channel_info: InvoiceChannelInfo,
+    ) -> Result<Vec<InvoiceChannelInfo>, InvoiceError> {
+        let mut batch = self.batch();
+        let key = [&[CKB_INVOICE_CHANNELS_PREFIX], id.as_ref()].concat();
+        let mut channels: Vec<InvoiceChannelInfo> = batch
+            .get(&key)
+            .map(|v| deserialize_from(&v, "CkbInvoiceChannels"))
+            .unwrap_or_default();
+        match channels
+            .iter_mut()
+            .find(|info| info.channel_id == channel_info.channel_id)
+        {
+            Some(info) => {
+                info.amount += channel_info.amount;
+            }
+            None => {
+                channels.push(channel_info);
+            }
+        }
+        batch.put_kv(KeyValue::CkbInvoiceChannels(*id, channels.clone()));
+        batch.commit();
+        Ok(channels)
     }
 }
 
