@@ -15,3 +15,5 @@ tests/nodes/.ports
 /migrate/target
 /package-lock.json
 /node_modules
+/index.html
+/fiber-wasm-worker.js

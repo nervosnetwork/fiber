@@ -233,8 +233,14 @@ mod wasm {
     use super::{Config, SerializedConfig, Service};
     impl Config {
         pub fn parse_from_str(str: impl AsRef<str>) -> Self {
-            let config_from_file = serde_yaml::from_str::<SerializedConfig>(str.as_ref())
+            let mut config_from_file = serde_yaml::from_str::<SerializedConfig>(str.as_ref())
                 .expect("valid config file format");
+            if let Some(ref mut ckb) = config_from_file.ckb {
+                ckb.base_dir = Some(Some(PathBuf::from_str("/wasm").unwrap()));
+            }
+            if let Some(ref mut fiber) = config_from_file.fiber {
+                fiber.base_dir = Some(Some(PathBuf::from_str("/wasm").unwrap()));
+            }
 
             // Services to run can be passed from
             // 1. command line
@@ -249,10 +255,7 @@ mod wasm {
 
             let (fiber, rpc, ckb) = {
                 let SerializedConfig {
-                    fiber,
-                    rpc,
-                    ckb,
-                    ..
+                    fiber, rpc, ckb, ..
                 } = config_from_file;
                 (
                     fiber.unwrap_or_default(),

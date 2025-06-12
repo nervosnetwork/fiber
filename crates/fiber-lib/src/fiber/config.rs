@@ -408,6 +408,7 @@ impl FiberConfig {
 
     pub fn store_path(&self) -> PathBuf {
         let path = self.base_dir().join("store");
+        #[cfg(not(target_arch = "wasm32"))]
         if !path.exists() {
             fs::create_dir_all(&path).expect("create store directory");
         }

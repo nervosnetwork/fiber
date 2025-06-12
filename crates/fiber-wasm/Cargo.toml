@@ -17,6 +17,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tokio = { version = "1.45.1", features = ["macros", "rt", "sync", "time"] }
 jsonrpsee = { version = "0.22", features = ["wasm-client"] }
+wasm-bindgen = "0.2.100"
+wasm-bindgen-futures = "0.4.50"
 
 [lib]
 crate-type = ["cdylib", "rlib"]

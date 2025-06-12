@@ -1,14 +1,33 @@
-use std::{str::FromStr, sync::Arc, time::Duration};
+use std::{str::FromStr, sync::Arc};
 
 use ckb_chain_spec::ChainSpec;
 use ckb_resource::Resource;
-use fnn::{actors::RootActor, ckb::{contracts::{try_init_contracts_context, TypeIDResolver}, CkbChainActor}, fiber::{channel::ChannelSubscribers, graph::NetworkGraph, network::init_chain_hash}, rpc::watchtower::{CreatePreimageParams, CreateWatchChannelParams, RemovePreimageParams, RemoveWatchChannelParams, UpdateLocalSettlementParams, UpdateRevocationParams, WatchtowerRpcClient}, start_network, store::Store, tasks::{new_tokio_cancellation_token, new_tokio_task_tracker}, Config, NetworkServiceEvent};
+use fnn::{
+    Config, NetworkServiceEvent,
+    actors::RootActor,
+    ckb::{
+        CkbChainActor,
+        contracts::{TypeIDResolver, try_init_contracts_context},
+    },
+    fiber::{channel::ChannelSubscribers, graph::NetworkGraph, network::init_chain_hash},
+    rpc::watchtower::{
+        CreatePreimageParams, CreateWatchChannelParams, RemovePreimageParams,
+        RemoveWatchChannelParams, UpdateLocalSettlementParams, UpdateRevocationParams,
+        WatchtowerRpcClient,
+    },
+    start_network,
+    store::Store,
+    tasks::{new_tokio_cancellation_token, new_tokio_task_tracker},
+};
 use jsonrpsee::wasm_client::WasmClientBuilder;
 use ractor::Actor;
-use tokio::{select, sync::{mpsc, RwLock}};
-use tracing::{debug, info, trace};
-use tracing_subscriber::{field::MakeExt, fmt::format};
 use std::fmt::Debug;
+use tokio::{
+    select,
+    sync::{RwLock, mpsc},
+};
+use tracing::{debug, info, trace};
+use wasm_bindgen::{JsValue, prelude::wasm_bindgen};
 
 pub struct ExitMessage(String);
 impl Debug for ExitMessage {
@@ -22,9 +41,14 @@ impl ExitMessage {
         Err(ExitMessage(message))
     }
 }
+impl Into<JsValue> for ExitMessage {
+    fn into(self) -> JsValue {
+        JsValue::from_str(&self.0)
+    }
+}
 
-
-pub async fn fiber(config: &str, log_level: &str) -> Result<(), ExitMessage> {
+#[wasm_bindgen]
+pub async fn fiber(config: &str, log_level: &str, spec: Option<String>) -> Result<(), ExitMessage> {
     console_error_panic_hook::set_once();
     wasm_logger::init(wasm_logger::Config::new(
         tracing::log::Level::from_str(&log_level).expect("Bad log level"),
@@ -32,20 +56,26 @@ pub async fn fiber(config: &str, log_level: &str) -> Result<(), ExitMessage> {
     // ractor will set "id" for each actor:
     // https://github.com/slawlor/ractor/blob/67d657e4cdcb8884a9ccc9b758704cbb447ac163/ractor/src/actor/mod.rs#L701
     // here we map it with the node prefix
-    let node_formatter = format::debug_fn(|writer, field, value| {
-        let prefix = if field.name() == "id" {
-            let r = fnn::get_node_prefix();
-            if !r.is_empty() {
-                format!(" on {}", r)
-            } else {
-                "".to_string()
-            }
-        } else {
-            "".to_string()
-        };
-        write!(writer, "{}: {:?}{}", field, value, prefix)
-    })
-    .delimited(", ");
+    // let node_formatter = format::debug_fn(|writer, field, value| {
+    //     let prefix = if field.name() == "id" {
+    //         let r = fnn::get_node_prefix();
+    //         if !r.is_empty() {
+    //             format!(" on {}", r)
+    //         } else {
+    //             "".to_string()
+    //         }
+    //     } else {
+    //         "".to_string()
+    //     };
+    //     write!(writer, "{}: {:?}{}", field, value, prefix)
+    // })
+    // .delimited(", ");
+    // fmt()
+    //     .with_env_filter(EnvFilter::from_default_env())
+    //     .pretty()
+    //     .fmt_fields(node_formatter)
+    //     .try_init()
+    //     .map_err(|err| ExitMessage(format!("failed to initialize logger: {}", err)))?;
 
     info!(
         "Starting node with git version {} ({})",
@@ -54,7 +84,6 @@ pub async fn fiber(config: &str, log_level: &str) -> Result<(), ExitMessage> {
     );
 
     let config = Config::parse_from_str(config);
-
 
     let store_path = config
         .fiber
@@ -86,7 +115,9 @@ pub async fn fiber(config: &str, log_level: &str) -> Result<(), ExitMessage> {
             let chain_spec = ChainSpec::load_from(&match chain {
                 "mainnet" => Resource::bundled("specs/mainnet.toml".to_string()),
                 "testnet" => Resource::bundled("specs/testnet.toml".to_string()),
-                path => Resource::file_system(Path::new(&config.base_dir).join(path)),
+                path => Resource::raw(
+                    spec.expect("spec must be provided if chain is not mainnet nor testnet"),
+                ),
             })
             .map_err(|err| ExitMessage(format!("failed to load chain spec: {}", err)))?;
             let genesis_block = chain_spec.build_genesis().map_err(|err| {
@@ -152,37 +183,17 @@ pub async fn fiber(config: &str, log_level: &str) -> Result<(), ExitMessage> {
             }
 
             let watchtower_client = if let Some(url) = fiber_config.standalone_watchtower_rpc_url {
-                let watchtower_client = WasmClientBuilder::default().build(url).await.map_err(|err| {
-                    ExitMessage(format!("failed to create watchtower rpc client: {}", err))
-                })?;
+                let watchtower_client =
+                    WasmClientBuilder::default()
+                        .build(url)
+                        .await
+                        .map_err(|err| {
+                            ExitMessage(format!("failed to create watchtower rpc client: {}", err))
+                        })?;
                 Some(watchtower_client)
             } else {
                 None
             };
-
-            // let watchtower_actor = if fiber_config.disable_built_in_watchtower.unwrap_or_default() {
-            //     None
-            // } else {
-            //     let watchtower_actor = Actor::spawn_linked(
-            //         Some("watchtower".to_string()),
-            //         WatchtowerActor::new(store.clone()),
-            //         ckb_config,
-            //         root_actor.get_cell(),
-            //     )
-            //     .await
-            //     .map_err(|err| ExitMessage(format!("failed to start watchtower actor: {}", err)))?
-            //     .0;
-
-            //     watchtower_actor.send_interval(
-            //         Duration::from_secs(
-            //             fiber_config
-            //                 .watchtower_check_interval_seconds
-            //                 .unwrap_or(DEFAULT_WATCHTOWER_CHECK_INTERVAL_SECONDS),
-            //         ),
-            //         || WatchtowerMessage::PeriodicCheck,
-            //     );
-            //     Some(watchtower_actor)
-            // };
 
             new_tokio_task_tracker().spawn(async move {
                 let token = new_tokio_cancellation_token();
@@ -195,11 +206,9 @@ pub async fn fiber(config: &str, log_level: &str) -> Result<(), ExitMessage> {
                                     break;
                                 }
                                 Some(event) => {
-                                    
                                     if let Some(watchtower_client) = watchtower_client.as_ref() {
                                         forward_event_to_client(event.clone(), watchtower_client).await;
                                     }
-                                   
                                 }
                             }
                         }
@@ -221,19 +230,9 @@ pub async fn fiber(config: &str, log_level: &str) -> Result<(), ExitMessage> {
         None => (None, None, None),
     };
 
-    // signal_listener().await;
-    // if let Some((handle, _)) = rpc_server_handle {
-    //     handle
-    //         .stop()
-    //         .map_err(|err| ExitMessage(format!("failed to stop rpc server: {}", err)))?;
-    //     handle.stopped().await;
-    // }
-    // cancel_tasks_and_wait_for_completion().await;
-
     Ok(())
 }
 
-const ASSUME_WATCHTOWER_ACTOR_ALIVE: &str = "watchtower actor must be alive";
 const ASSUME_WATCHTOWER_CLIENT_CALL_OK: &str = "watchtower client call should be ok";
 
 async fn forward_event_to_client<T: WatchtowerRpcClient + Sync>(
