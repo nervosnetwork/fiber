@@ -39,6 +39,12 @@ pub enum Direction {
     Backward,
 }
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SentNode {
+    Node1,
+    Node2,
+}
+
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub(crate) struct InternalPairResult {
     pub(crate) success: bool,

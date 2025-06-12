@@ -15,6 +15,7 @@ use super::types::{Cursor, Pubkey, TlcErr};
 use crate::ckb::config::UdtCfgInfos;
 use crate::fiber::config::{DEFAULT_MPP_MIN_AMOUNT, DEFAULT_TLC_EXPIRY_DELTA};
 use crate::fiber::fee::calculate_tlc_forward_fee;
+use crate::fiber::history::SentNode;
 use crate::fiber::path::NodeHeapElement;
 use crate::fiber::serde_utils::EntityHex;
 use crate::fiber::serde_utils::{U128Hex, U64Hex};
@@ -285,6 +286,66 @@ pub enum OwnedChannelUpdateEvent {
     Updated(OutPoint, Pubkey, ChannelUpdateInfo),
 }
 
+/// TODO: store this into DB in future?
+#[derive(Clone, Debug, Default)]
+pub struct GraphChannelStat {
+    // The pending payment attempt for a channel,
+    // increase when a payment is sent, decreasing when a payment is succeed or failed.
+    pub pending_count: usize,
+    // The total amount sent through the channel,
+    // increase when a payment is sent, decreasing when a payment is only failed.
+    pub node1_sent_amount: u128,
+    pub node2_sent_amount: u128,
+}
+
+impl GraphChannelStat {
+    pub fn new(pending_count: usize, sent_node: SentNode, amount: u128) -> Self {
+        if sent_node == SentNode::Node1 {
+            Self {
+                pending_count,
+                node1_sent_amount: amount,
+                node2_sent_amount: 0,
+            }
+        } else {
+            Self {
+                pending_count,
+                node1_sent_amount: 0,
+                node2_sent_amount: amount,
+            }
+        }
+    }
+
+    pub fn new_attempt(&mut self, send_node: SentNode, amount: u128) {
+        self.pending_count += 1;
+        if send_node == SentNode::Node1 {
+            self.node1_sent_amount += amount;
+        } else {
+            self.node2_sent_amount += amount;
+        }
+    }
+
+    pub fn set_attempt_result(&mut self, send_node: SentNode, amount: u128, success: bool) {
+        self.pending_count = self.pending_count.saturating_sub(1);
+        if !success {
+            if send_node == SentNode::Node1 {
+                self.node1_sent_amount = self.node1_sent_amount.saturating_sub(amount);
+            } else {
+                self.node2_sent_amount = self.node2_sent_amount.saturating_sub(amount);
+            }
+        }
+    }
+
+    // when we cat channel update event from direct channel, the actual channel balance is more accurate
+    // than the amount here, so we need to reset the sent amount to 0.
+    pub fn reset_attempt(&mut self, sent_node: SentNode) {
+        if sent_node == SentNode::Node1 {
+            self.node1_sent_amount = 0;
+        } else {
+            self.node2_sent_amount = 0;
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct NetworkGraph<S> {
     // Whether to always process gossip messages for our own channels.
@@ -300,8 +361,11 @@ pub struct NetworkGraph<S> {
     // All the nodes in the network.
     nodes: HashMap<Pubkey, NodeInfo>,
 
-    // Channel pending stats map
-    channel_pending_stats: HashMap<OutPoint, usize>,
+    // Channel stats map, used to track the attempts for each channel,
+    // this information is used to HELP the path finding algorithm for better routing in two ways:
+    // 1. If a channel has more pending payment attempts, it may be overloaded and should not be used for routing.
+    // 2. For middle hops, network graph can only get the channel capacity,
+    channel_stats: HashMap<OutPoint, GraphChannelStat>,
 
     // The latest cursor we read from the GossipMessageStore. When we need to refresh our view of the
     // the network, we need to load all the messages starting from this cursor.
@@ -371,7 +435,7 @@ where
             always_process_gossip_message: false,
             source,
             channels: HashMap::new(),
-            channel_pending_stats: HashMap::new(),
+            channel_stats: HashMap::new(),
             nodes: HashMap::new(),
             latest_cursor: Cursor::default(),
             store: store.clone(),
@@ -389,6 +453,24 @@ where
     fn update_latest_cursor(&mut self, cursor: Cursor) {
         if cursor > self.latest_cursor {
             self.latest_cursor = cursor;
+        }
+    }
+
+    pub fn get_channel_pending_attempts_count(&self, channel_outpoint: &OutPoint) -> usize {
+        self.channel_stats
+            .get(channel_outpoint)
+            .map_or(0, |stat| stat.pending_count)
+    }
+
+    pub fn reset_channel_stats_for_direct_channel(
+        &mut self,
+        channel_outpoint: &OutPoint,
+        node: Pubkey,
+    ) {
+        if let Some(sent_node) = self.get_channel_sent_node(channel_outpoint, node) {
+            self.channel_stats
+                .entry(channel_outpoint.clone())
+                .and_modify(|e| e.reset_attempt(sent_node));
         }
     }
 
@@ -444,6 +526,7 @@ where
             }
             OwnedChannelUpdateEvent::Down(channel_outpoint) => {
                 self.channels.remove(&channel_outpoint);
+                self.channel_stats.remove(&channel_outpoint);
             }
             OwnedChannelUpdateEvent::Updated(channel_outpoint, node, channel_update) => {
                 if let Some(channel) = self.channels.get_mut(&channel_outpoint) {
@@ -454,6 +537,7 @@ where
                         channel.update_of_node1 = Some(channel_update);
                     }
                 }
+                self.reset_channel_stats_for_direct_channel(&channel_outpoint, node);
             }
         }
     }
@@ -695,6 +779,18 @@ where
         self.channels.get(outpoint)
     }
 
+    pub fn get_channel_sent_node(&self, outpoint: &OutPoint, from: Pubkey) -> Option<SentNode> {
+        self.get_channel(outpoint).and_then(|channel_info| {
+            if channel_info.node1() == from {
+                Some(SentNode::Node1)
+            } else if channel_info.node2() == from {
+                Some(SentNode::Node2)
+            } else {
+                None
+            }
+        })
+    }
+
     fn get_outbound_channel_info_and_update(
         &self,
         outpoint: &OutPoint,
@@ -859,25 +955,30 @@ where
     }
 
     pub(crate) fn track_attempt_router(&mut self, attempt: &Attempt) {
-        for channel_outpoint in attempt.channel_outpoints() {
-            self.channel_pending_stats
+        for (from, channel_outpoint, amount) in attempt.channel_outpoints() {
+            let Some(sent_node) = self.get_channel_sent_node(channel_outpoint, from) else {
+                continue;
+            };
+            self.channel_stats
                 .entry(channel_outpoint.clone())
-                .and_modify(|e| *e += 1)
-                .or_insert(1);
+                .and_modify(|e| e.new_attempt(sent_node, amount))
+                .or_insert(GraphChannelStat::new(1, sent_node, amount));
         }
     }
 
-    pub(crate) fn untrack_attempt_router(&mut self, attempt: &Attempt) {
-        for channel_outpoint in attempt.channel_outpoints() {
-            self.channel_pending_stats
+    pub(crate) fn untrack_attempt_router(&mut self, attempt: &Attempt, success: bool) {
+        for (from, channel_outpoint, amount) in attempt.channel_outpoints() {
+            let Some(sent_node) = self.get_channel_sent_node(channel_outpoint, from) else {
+                continue;
+            };
+            self.channel_stats
                 .entry(channel_outpoint.clone())
-                .and_modify(|e| *e -= 1)
-                .or_insert(0);
+                .and_modify(|e| e.set_attempt_result(sent_node, amount, success));
         }
     }
 
     pub(crate) fn record_attempt_success(&mut self, mut attempt: Attempt) {
-        self.untrack_attempt_router(&attempt);
+        self.untrack_attempt_router(&attempt, true);
         let session_route = &attempt.route.nodes;
         let mut result = InternalResult::default();
         result.succeed_range_pairs(session_route, 0, session_route.len() - 1);
@@ -893,7 +994,7 @@ where
         first_hop_error: bool,
     ) -> bool {
         if !first_hop_error {
-            self.untrack_attempt_router(attempt);
+            self.untrack_attempt_router(attempt, false);
         }
         let mut internal_result = InternalResult::default();
         let nodes = &attempt.route.nodes;
@@ -1200,12 +1301,8 @@ where
                 channel_capacity,
             );
 
-        let pending_count = self
-            .channel_pending_stats
-            .get(channel_outpoint)
-            .copied()
-            .unwrap_or(0)
-            + cur_pending_count;
+        let pending_count =
+            self.get_channel_pending_attempts_count(channel_outpoint) + cur_pending_count;
         if pending_count > 0 {
             probability *= (0.95f64).powi(pending_count as i32);
         }
@@ -2233,8 +2330,11 @@ impl Attempt {
             .unwrap_or_default()
     }
 
-    fn channel_outpoints(&self) -> impl Iterator<Item = &OutPoint> {
-        self.route.nodes.iter().map(|x| &x.channel_outpoint)
+    fn channel_outpoints(&self) -> impl Iterator<Item = (Pubkey, &OutPoint, u128)> {
+        self.route
+            .nodes
+            .iter()
+            .map(|x| (x.pubkey, &x.channel_outpoint, x.amount))
     }
 }
 
