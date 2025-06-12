@@ -1,5 +1,5 @@
 use crate::{
-    fiber::network::SendPaymentCommand,
+    fiber::{config::PAYMENT_MAX_PARTS_LIMIT, network::SendPaymentCommand},
     gen_rand_sha256_hash,
     invoice::{Currency, InvoiceBuilder},
     test_utils::{
@@ -156,7 +156,7 @@ async fn test_send_mpp_without_payment_secret_will_fail() {
 }
 
 #[tokio::test]
-async fn test_send_mpp_with_max_parts_1_will_fail() {
+async fn test_send_mpp_with_invalid_max_parts_will_fail() {
     init_tracing();
 
     let (nodes, _channels) = create_n_nodes_network(
@@ -194,6 +194,18 @@ async fn test_send_mpp_with_max_parts_1_will_fail() {
 
     eprintln!("res: {:?}", res);
     assert!(res.is_err(), "should fail because max_parts is 1");
+    assert!(res
+        .unwrap_err()
+        .contains("invalid max_parts, value should be in range"));
+
+    let res = source_node
+        .send_payment(SendPaymentCommand {
+            invoice: Some(ckb_invoice.to_string()),
+            amount: ckb_invoice.amount,
+            max_parts: Some(PAYMENT_MAX_PARTS_LIMIT + 1),
+            ..Default::default()
+        })
+        .await;
     assert!(res
         .unwrap_err()
         .contains("invalid max_parts, value should be in range"));

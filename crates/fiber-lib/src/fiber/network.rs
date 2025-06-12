@@ -80,7 +80,7 @@ use crate::fiber::channel::{
     AddTlcCommand, AddTlcResponse, ShutdownCommand, TxCollaborationCommand, TxUpdateCommand,
 };
 use crate::fiber::config::{
-    DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT, PAYMENT_MAXEST_PARTS,
+    DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT, PAYMENT_MAX_PARTS_LIMIT,
 };
 use crate::fiber::gossip::{GossipConfig, GossipService, SubscribableGossipMessageStore};
 use crate::fiber::graph::{PaymentSession, PaymentSessionStatus};
@@ -611,11 +611,11 @@ impl SendPaymentData {
         if allow_mpp
             && command
                 .max_parts
-                .is_some_and(|max_parts| max_parts <= 1 || max_parts > PAYMENT_MAXEST_PARTS)
+                .is_some_and(|max_parts| max_parts <= 1 || max_parts > PAYMENT_MAX_PARTS_LIMIT)
         {
             return Err(format!(
                 "invalid max_parts, value should be in range [1, {}]",
-                PAYMENT_MAXEST_PARTS
+                PAYMENT_MAX_PARTS_LIMIT
             ));
         }
 
@@ -1528,10 +1528,10 @@ where
                     .await?
             }
             NetworkActorCommand::SendPaymentOnionPacket(command) => {
-                let res = self
+                if let Err(err) = self
                     .handle_send_onion_packet_command(state, command.clone())
-                    .await;
-                if let Err(err) = res {
+                    .await
+                {
                     self.on_add_tlc_result_event(
                         myself,
                         command.payment_hash,

@@ -81,7 +81,7 @@ pub const DEFAULT_SYNC_NETWORK_GRAPH: bool = true;
 
 /// The maximum number of parts for a multi-part payment.
 pub const DEFAULT_MAX_PARTS: u64 = 16;
-pub const PAYMENT_MAXEST_PARTS: u64 = 64;
+pub const PAYMENT_MAX_PARTS_LIMIT: u64 = 64;
 
 /// The minimum amount for a part of a multi-part payment.
 pub const DEFAULT_MPP_MIN_AMOUNT: u128 = 10000;
