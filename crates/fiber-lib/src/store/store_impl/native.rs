@@ -119,6 +119,10 @@ impl<S> StoreWithPubSub<S> {
         }
     }
 
+    pub fn into_inner(self) -> S {
+        self.inner
+    }
+
     pub(crate) fn publish(&self, msg: StorePublisherMessage) -> Result<(), String> {
         self.publisher
             .send_message(StorePubSubMessage::Publish(msg))
