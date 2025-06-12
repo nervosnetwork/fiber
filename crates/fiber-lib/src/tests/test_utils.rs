@@ -637,6 +637,14 @@ impl NetworkNode {
             .to_remote_amount
     }
 
+    pub fn get_tlc(&self, channel_id: Hash256, tlc_id: TLCId) -> Option<TlcInfo> {
+        let state = self.get_channel_actor_state(channel_id);
+        match tlc_id {
+            TLCId::Offered(..) => state.get_offered_tlc(tlc_id).cloned(),
+            TLCId::Received(..) => state.get_received_tlc(tlc_id).cloned(),
+        }
+    }
+
     pub fn get_channel_actor_state(&self, channel_id: Hash256) -> ChannelActorState {
         self.get_channel_actor_state_unchecked(channel_id)
             .expect("get channel")

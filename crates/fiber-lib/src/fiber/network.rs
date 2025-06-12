@@ -1365,7 +1365,12 @@ where
 
                                 // check hold timeout
                                 if hold_tlc.hold_expire_at < now {
-                                    debug!("Remove timeout hold tlc {:?}", tlc.id(),);
+                                    debug!(
+                                        "Remove timeout hold tlc payment hash {:?} tlc id {:?}",
+                                        tlc.payment_hash,
+                                        tlc.id()
+                                    );
+                                    self.store.remove_hold_tlcs(&tlc.payment_hash);
                                     let (send, _recv) = oneshot::channel();
                                     let rpc_reply = RpcReplyPort::from(send);
                                     if let Err(err) = state

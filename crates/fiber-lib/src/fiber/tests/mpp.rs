@@ -1,7 +1,17 @@
+use secp256k1::Secp256k1;
+
 use crate::{
-    fiber::{config::PAYMENT_MAX_PARTS_LIMIT, network::SendPaymentCommand},
+    fiber::{
+        channel::{AddTlcCommand, ChannelCommand, ChannelCommandWithId, TLCId},
+        config::{DEFAULT_HOLD_TLC_TIMEOUT, DEFAULT_TLC_EXPIRY_DELTA, PAYMENT_MAX_PARTS_LIMIT},
+        hash_algorithm::HashAlgorithm,
+        network::SendPaymentCommand,
+        types::{Hash256, PaymentDataRecord, PaymentHopData, PeeledOnionPacket, RemoveTlcReason},
+        NetworkActorCommand, NetworkActorMessage, PaymentCustomRecords,
+    },
     gen_rand_sha256_hash,
     invoice::{Currency, InvoiceBuilder},
+    now_timestamp_as_millis_u64,
     test_utils::{
         create_n_nodes_network, establish_channel_between_nodes, init_tracing, ChannelParameters,
         NetworkNode, MIN_RESERVED_CKB,
@@ -472,4 +482,747 @@ async fn test_send_mpp_fee_rate() {
     let payment_hash = res.payment_hash;
     // fee_rate is too high
     node_0.wait_until_failed(payment_hash).await;
+}
+
+#[tokio::test]
+async fn test_mpp_tlc_set() {
+    init_tracing();
+
+    let (nodes, channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+            ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+        ],
+        2,
+    )
+    .await;
+    let [mut node_0, mut node_1] = nodes.try_into().expect("2 nodes");
+    let source_node = &mut node_0;
+    let target_pubkey = node_1.pubkey;
+
+    let preimage = gen_rand_sha256_hash();
+    let payment_secret = gen_rand_sha256_hash();
+    let ckb_invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(20000000000))
+        .payment_preimage(preimage)
+        .payee_pub_key(target_pubkey.into())
+        .allow_mpp(true)
+        .payment_secret(payment_secret)
+        .build()
+        .expect("build invoice success");
+
+    node_1.insert_invoice(ckb_invoice.clone(), Some(preimage));
+
+    let payment_hash = *ckb_invoice.payment_hash();
+    let hash_algorithm = HashAlgorithm::CkbHash;
+
+    let secp = Secp256k1::new();
+    let mut custom_records = PaymentCustomRecords::default();
+    let record = PaymentDataRecord::new(payment_secret, 20000000000);
+    record.write(&mut custom_records);
+    let hops_infos = vec![
+        PaymentHopData {
+            amount: 10000000000,
+            expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+            next_hop: Some(target_pubkey),
+            funding_tx_hash: Hash256::default(),
+            hash_algorithm,
+            payment_preimage: None,
+            custom_records: Some(custom_records.clone()),
+        },
+        PaymentHopData {
+            amount: 10000000000,
+            expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+            next_hop: None,
+            funding_tx_hash: Hash256::default(),
+            hash_algorithm,
+            payment_preimage: None,
+            custom_records: Some(custom_records.clone()),
+        },
+    ];
+
+    let packet = PeeledOnionPacket::create(
+        source_node.get_private_key().clone(),
+        hops_infos.clone(),
+        Some(payment_hash.as_ref().to_vec()),
+        &secp,
+    )
+    .expect("create peeled packet");
+
+    let _add_tlc_result_1 = ractor::call!(source_node.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id: channels[0],
+                command: ChannelCommand::AddTlc(
+                    AddTlcCommand {
+                        amount: 10000000000,
+                        hash_algorithm,
+                        payment_hash,
+                        expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+                        onion_packet: packet.next.clone(),
+                        shared_secret: packet.shared_secret,
+                        previous_tlc: None,
+                        attempt_id: None,
+                        total_amount: Some(20000000000),
+                        payment_secret: Some(payment_secret),
+                    },
+                    rpc_reply,
+                ),
+            },
+        ))
+    })
+    .expect("node alive")
+    .expect("tlc");
+
+    let _add_tlc_result_2 = ractor::call!(source_node.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id: channels[1],
+                command: ChannelCommand::AddTlc(
+                    AddTlcCommand {
+                        amount: 10000000000,
+                        hash_algorithm,
+                        payment_hash,
+                        expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+                        onion_packet: packet.next.clone(),
+                        shared_secret: packet.shared_secret,
+                        previous_tlc: None,
+                        attempt_id: None,
+                        total_amount: Some(20000000000),
+                        payment_secret: Some(payment_secret),
+                    },
+                    rpc_reply,
+                ),
+            },
+        ))
+    })
+    .expect("node alive")
+    .expect("tlc");
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+    let node_0_balance = source_node.get_local_balance_from_channel(channels[0]);
+    let node_1_balance = node_1.get_local_balance_from_channel(channels[0]);
+    assert_eq!(node_0_balance, 0);
+    assert_eq!(node_1_balance, 10000000000);
+
+    let node_0_balance = source_node.get_local_balance_from_channel(channels[1]);
+    let node_1_balance = node_1.get_local_balance_from_channel(channels[1]);
+    assert_eq!(node_0_balance, 0);
+    assert_eq!(node_1_balance, 10000000000);
+}
+
+#[tokio::test]
+async fn test_mpp_tlc_set_total_amount_mismatch() {
+    init_tracing();
+
+    let (nodes, channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+            ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+        ],
+        2,
+    )
+    .await;
+    let [mut node_0, mut node_1] = nodes.try_into().expect("2 nodes");
+    let source_node = &mut node_0;
+    let target_pubkey = node_1.pubkey;
+
+    let preimage = gen_rand_sha256_hash();
+    let payment_secret = gen_rand_sha256_hash();
+    let ckb_invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(20000000000))
+        .payment_preimage(preimage)
+        .payee_pub_key(target_pubkey.into())
+        .allow_mpp(true)
+        .payment_secret(payment_secret)
+        .build()
+        .expect("build invoice success");
+
+    node_1.insert_invoice(ckb_invoice.clone(), Some(preimage));
+
+    let payment_hash = *ckb_invoice.payment_hash();
+    let hash_algorithm = HashAlgorithm::CkbHash;
+
+    let secp = Secp256k1::new();
+    let mut custom_records = PaymentCustomRecords::default();
+    // the total amount should be 20000000000, but we set 10000000000 here
+    let record = PaymentDataRecord::new(payment_secret, 10000000000);
+    record.write(&mut custom_records);
+    let hops_infos = vec![
+        PaymentHopData {
+            amount: 10000000000,
+            expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+            next_hop: Some(target_pubkey),
+            funding_tx_hash: Hash256::default(),
+            hash_algorithm,
+            payment_preimage: None,
+            custom_records: Some(custom_records.clone()),
+        },
+        PaymentHopData {
+            amount: 10000000000,
+            expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+            next_hop: None,
+            funding_tx_hash: Hash256::default(),
+            hash_algorithm,
+            payment_preimage: None,
+            custom_records: Some(custom_records.clone()),
+        },
+    ];
+
+    let packet = PeeledOnionPacket::create(
+        source_node.get_private_key().clone(),
+        hops_infos.clone(),
+        Some(payment_hash.as_ref().to_vec()),
+        &secp,
+    )
+    .expect("create peeled packet");
+
+    let add_tlc_result_1 = ractor::call!(source_node.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id: channels[0],
+                command: ChannelCommand::AddTlc(
+                    AddTlcCommand {
+                        amount: 10000000000,
+                        hash_algorithm,
+                        payment_hash,
+                        expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+                        onion_packet: packet.next.clone(),
+                        shared_secret: packet.shared_secret,
+                        previous_tlc: None,
+                        attempt_id: None,
+                        total_amount: Some(20000000000),
+                        payment_secret: Some(payment_secret),
+                    },
+                    rpc_reply,
+                ),
+            },
+        ))
+    })
+    .expect("node alive")
+    .expect("tlc");
+
+    let add_tlc_result_2 = ractor::call!(source_node.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id: channels[1],
+                command: ChannelCommand::AddTlc(
+                    AddTlcCommand {
+                        amount: 10000000000,
+                        hash_algorithm,
+                        payment_hash,
+                        expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+                        onion_packet: packet.next.clone(),
+                        shared_secret: packet.shared_secret,
+                        previous_tlc: None,
+                        attempt_id: None,
+                        total_amount: Some(20000000000),
+                        payment_secret: Some(payment_secret),
+                    },
+                    rpc_reply,
+                ),
+            },
+        ))
+    })
+    .expect("node alive")
+    .expect("tlc");
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+    // check offered tlcs should be fail
+    let tlc1 = source_node.get_tlc(channels[0], TLCId::Offered(add_tlc_result_1.tlc_id));
+    let tlc2 = source_node.get_tlc(channels[1], TLCId::Offered(add_tlc_result_2.tlc_id));
+    assert!(matches!(
+        tlc1.unwrap().removed_reason,
+        Some(RemoveTlcReason::RemoveTlcFail(..))
+    ));
+    assert!(matches!(
+        tlc2.unwrap().removed_reason,
+        Some(RemoveTlcReason::RemoveTlcFail(..))
+    ));
+
+    // check received tlcs should be fail
+    let tlc1 = node_1.get_tlc(channels[0], TLCId::Received(add_tlc_result_1.tlc_id));
+    let tlc2 = node_1.get_tlc(channels[1], TLCId::Received(add_tlc_result_2.tlc_id));
+    assert!(matches!(
+        tlc1.unwrap().removed_reason,
+        Some(RemoveTlcReason::RemoveTlcFail(..))
+    ));
+    assert!(matches!(
+        tlc2.unwrap().removed_reason,
+        Some(RemoveTlcReason::RemoveTlcFail(..))
+    ));
+
+    // balance should not change
+    let node_0_balance = source_node.get_local_balance_from_channel(channels[0]);
+    let node_1_balance = node_1.get_local_balance_from_channel(channels[0]);
+    assert_eq!(node_0_balance, 10000000000);
+    assert_eq!(node_1_balance, 0);
+
+    let node_0_balance = source_node.get_local_balance_from_channel(channels[1]);
+    let node_1_balance = node_1.get_local_balance_from_channel(channels[1]);
+    assert_eq!(node_0_balance, 10000000000);
+    assert_eq!(node_1_balance, 0);
+}
+
+#[tokio::test]
+async fn test_mpp_tlc_set_payment_secret_mismatch() {
+    init_tracing();
+
+    let (nodes, channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+            ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+        ],
+        2,
+    )
+    .await;
+    let [mut node_0, mut node_1] = nodes.try_into().expect("2 nodes");
+    let source_node = &mut node_0;
+    let target_pubkey = node_1.pubkey;
+
+    let preimage = gen_rand_sha256_hash();
+    let payment_secret = gen_rand_sha256_hash();
+    let ckb_invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(20000000000))
+        .payment_preimage(preimage)
+        .payee_pub_key(target_pubkey.into())
+        .allow_mpp(true)
+        .payment_secret(payment_secret)
+        .build()
+        .expect("build invoice success");
+
+    node_1.insert_invoice(ckb_invoice.clone(), Some(preimage));
+
+    let payment_hash = *ckb_invoice.payment_hash();
+    let hash_algorithm = HashAlgorithm::CkbHash;
+
+    let secp = Secp256k1::new();
+    let mut custom_records = PaymentCustomRecords::default();
+    // set the payment secret to a random value
+    let record = PaymentDataRecord::new(gen_rand_sha256_hash(), 20000000000);
+    record.write(&mut custom_records);
+    let hops_infos = vec![
+        PaymentHopData {
+            amount: 10000000000,
+            expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+            next_hop: Some(target_pubkey),
+            funding_tx_hash: Hash256::default(),
+            hash_algorithm,
+            payment_preimage: None,
+            custom_records: Some(custom_records.clone()),
+        },
+        PaymentHopData {
+            amount: 10000000000,
+            expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+            next_hop: None,
+            funding_tx_hash: Hash256::default(),
+            hash_algorithm,
+            payment_preimage: None,
+            custom_records: Some(custom_records.clone()),
+        },
+    ];
+
+    let packet = PeeledOnionPacket::create(
+        source_node.get_private_key().clone(),
+        hops_infos.clone(),
+        Some(payment_hash.as_ref().to_vec()),
+        &secp,
+    )
+    .expect("create peeled packet");
+
+    let add_tlc_result_1 = ractor::call!(source_node.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id: channels[0],
+                command: ChannelCommand::AddTlc(
+                    AddTlcCommand {
+                        amount: 10000000000,
+                        hash_algorithm,
+                        payment_hash,
+                        expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+                        onion_packet: packet.next.clone(),
+                        shared_secret: packet.shared_secret,
+                        previous_tlc: None,
+                        attempt_id: None,
+                        total_amount: Some(20000000000),
+                        payment_secret: Some(payment_secret),
+                    },
+                    rpc_reply,
+                ),
+            },
+        ))
+    })
+    .expect("node alive")
+    .expect("tlc");
+
+    let add_tlc_result_2 = ractor::call!(source_node.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id: channels[1],
+                command: ChannelCommand::AddTlc(
+                    AddTlcCommand {
+                        amount: 10000000000,
+                        hash_algorithm,
+                        payment_hash,
+                        expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+                        onion_packet: packet.next.clone(),
+                        shared_secret: packet.shared_secret,
+                        previous_tlc: None,
+                        attempt_id: None,
+                        total_amount: Some(20000000000),
+                        payment_secret: Some(payment_secret),
+                    },
+                    rpc_reply,
+                ),
+            },
+        ))
+    })
+    .expect("node alive")
+    .expect("tlc");
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+    // check offered tlcs should be fail
+    let tlc1 = source_node.get_tlc(channels[0], TLCId::Offered(add_tlc_result_1.tlc_id));
+    let tlc2 = source_node.get_tlc(channels[1], TLCId::Offered(add_tlc_result_2.tlc_id));
+    assert!(matches!(
+        tlc1.unwrap().removed_reason,
+        Some(RemoveTlcReason::RemoveTlcFail(..))
+    ));
+    assert!(matches!(
+        tlc2.unwrap().removed_reason,
+        Some(RemoveTlcReason::RemoveTlcFail(..))
+    ));
+
+    // check received tlcs should be fail
+    let tlc1 = node_1.get_tlc(channels[0], TLCId::Received(add_tlc_result_1.tlc_id));
+    let tlc2 = node_1.get_tlc(channels[1], TLCId::Received(add_tlc_result_2.tlc_id));
+    assert!(matches!(
+        tlc1.unwrap().removed_reason,
+        Some(RemoveTlcReason::RemoveTlcFail(..))
+    ));
+    assert!(matches!(
+        tlc2.unwrap().removed_reason,
+        Some(RemoveTlcReason::RemoveTlcFail(..))
+    ));
+
+    // balance should not change
+    let node_0_balance = source_node.get_local_balance_from_channel(channels[0]);
+    let node_1_balance = node_1.get_local_balance_from_channel(channels[0]);
+    assert_eq!(node_0_balance, 10000000000);
+    assert_eq!(node_1_balance, 0);
+
+    let node_0_balance = source_node.get_local_balance_from_channel(channels[1]);
+    let node_1_balance = node_1.get_local_balance_from_channel(channels[1]);
+    assert_eq!(node_0_balance, 10000000000);
+    assert_eq!(node_1_balance, 0);
+}
+
+#[tokio::test]
+async fn test_mpp_tlc_set_timeout() {
+    init_tracing();
+
+    let (nodes, channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+            ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+        ],
+        2,
+    )
+    .await;
+    let [mut node_0, mut node_1] = nodes.try_into().expect("2 nodes");
+    let source_node = &mut node_0;
+    let target_pubkey = node_1.pubkey;
+
+    let preimage = gen_rand_sha256_hash();
+    let payment_secret = gen_rand_sha256_hash();
+    let ckb_invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(20000000000))
+        .payment_preimage(preimage)
+        .payee_pub_key(target_pubkey.into())
+        .allow_mpp(true)
+        .payment_secret(payment_secret)
+        .build()
+        .expect("build invoice success");
+
+    node_1.insert_invoice(ckb_invoice.clone(), Some(preimage));
+
+    let payment_hash = *ckb_invoice.payment_hash();
+    let hash_algorithm = HashAlgorithm::CkbHash;
+
+    let secp = Secp256k1::new();
+    let mut custom_records = PaymentCustomRecords::default();
+    let record = PaymentDataRecord::new(payment_secret, 20000000000);
+    record.write(&mut custom_records);
+    let hops_infos = vec![
+        PaymentHopData {
+            amount: 10000000000,
+            expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+            next_hop: Some(target_pubkey),
+            funding_tx_hash: Hash256::default(),
+            hash_algorithm,
+            payment_preimage: None,
+            custom_records: Some(custom_records.clone()),
+        },
+        PaymentHopData {
+            amount: 10000000000,
+            expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+            next_hop: None,
+            funding_tx_hash: Hash256::default(),
+            hash_algorithm,
+            payment_preimage: None,
+            custom_records: Some(custom_records.clone()),
+        },
+    ];
+
+    let packet = PeeledOnionPacket::create(
+        source_node.get_private_key().clone(),
+        hops_infos.clone(),
+        Some(payment_hash.as_ref().to_vec()),
+        &secp,
+    )
+    .expect("create peeled packet");
+
+    let add_tlc_result_1 = ractor::call!(source_node.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id: channels[0],
+                command: ChannelCommand::AddTlc(
+                    AddTlcCommand {
+                        amount: 10000000000,
+                        hash_algorithm,
+                        payment_hash,
+                        expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+                        onion_packet: packet.next.clone(),
+                        shared_secret: packet.shared_secret,
+                        previous_tlc: None,
+                        attempt_id: None,
+                        total_amount: Some(20000000000),
+                        payment_secret: Some(payment_secret),
+                    },
+                    rpc_reply,
+                ),
+            },
+        ))
+    })
+    .expect("node alive")
+    .expect("tlc");
+
+    // sleep enough time to timeout hold tlc
+    tokio::time::sleep(tokio::time::Duration::from_millis(
+        DEFAULT_HOLD_TLC_TIMEOUT + 1000,
+    ))
+    .await;
+
+    let add_tlc_result_2 = ractor::call!(source_node.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id: channels[1],
+                command: ChannelCommand::AddTlc(
+                    AddTlcCommand {
+                        amount: 10000000000,
+                        hash_algorithm,
+                        payment_hash,
+                        expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+                        onion_packet: packet.next.clone(),
+                        shared_secret: packet.shared_secret,
+                        previous_tlc: None,
+                        attempt_id: None,
+                        total_amount: Some(20000000000),
+                        payment_secret: Some(payment_secret),
+                    },
+                    rpc_reply,
+                ),
+            },
+        ))
+    })
+    .expect("node alive")
+    .expect("tlc");
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+    // check offered tlcs should be fail
+    let tlc1 = source_node.get_tlc(channels[0], TLCId::Offered(add_tlc_result_1.tlc_id));
+    let tlc2 = source_node.get_tlc(channels[1], TLCId::Offered(add_tlc_result_2.tlc_id));
+    // tlc 1 is timeout
+    assert!(matches!(
+        tlc1.unwrap().removed_reason,
+        Some(RemoveTlcReason::RemoveTlcFail(..))
+    ));
+    // tlc 2 is still in hold
+    assert!(tlc2.unwrap().removed_reason.is_none());
+
+    // check received tlcs should be fail
+    let tlc1 = node_1.get_tlc(channels[0], TLCId::Received(add_tlc_result_1.tlc_id));
+    let tlc2 = node_1.get_tlc(channels[1], TLCId::Received(add_tlc_result_2.tlc_id));
+    // tlc 1 is timeout
+    assert!(matches!(
+        tlc1.unwrap().removed_reason,
+        Some(RemoveTlcReason::RemoveTlcFail(..))
+    ));
+    // tlc 2 is still in hold
+    assert!(tlc2.unwrap().removed_reason.is_none());
+
+    let node_0_balance = source_node.get_local_balance_from_channel(channels[0]);
+    let node_1_balance = node_1.get_local_balance_from_channel(channels[0]);
+    assert_eq!(node_0_balance, 10000000000);
+    assert_eq!(node_1_balance, 0);
+
+    let node_0_balance = source_node.get_local_balance_from_channel(channels[1]);
+    let node_1_balance = node_1.get_local_balance_from_channel(channels[1]);
+    assert_eq!(node_0_balance, 10000000000);
+    assert_eq!(node_1_balance, 0);
+}
+
+#[tokio::test]
+async fn test_mpp_tlc_set_without_payment_data() {
+    init_tracing();
+
+    let (nodes, channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+            ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+        ],
+        2,
+    )
+    .await;
+    let [mut node_0, mut node_1] = nodes.try_into().expect("2 nodes");
+    let source_node = &mut node_0;
+    let target_pubkey = node_1.pubkey;
+
+    let preimage = gen_rand_sha256_hash();
+    let payment_secret = gen_rand_sha256_hash();
+    let ckb_invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(20000000000))
+        .payment_preimage(preimage)
+        .payee_pub_key(target_pubkey.into())
+        .allow_mpp(true)
+        .payment_secret(payment_secret)
+        .build()
+        .expect("build invoice success");
+
+    node_1.insert_invoice(ckb_invoice.clone(), Some(preimage));
+
+    let payment_hash = *ckb_invoice.payment_hash();
+    let hash_algorithm = HashAlgorithm::CkbHash;
+
+    let secp = Secp256k1::new();
+    // We leave payment_data in the custom_records as none
+    let hops_infos = vec![
+        PaymentHopData {
+            amount: 10000000000,
+            expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+            next_hop: Some(target_pubkey),
+            funding_tx_hash: Hash256::default(),
+            hash_algorithm,
+            payment_preimage: None,
+            custom_records: None,
+        },
+        PaymentHopData {
+            amount: 10000000000,
+            expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+            next_hop: None,
+            funding_tx_hash: Hash256::default(),
+            hash_algorithm,
+            payment_preimage: None,
+            custom_records: None,
+        },
+    ];
+
+    let packet = PeeledOnionPacket::create(
+        source_node.get_private_key().clone(),
+        hops_infos.clone(),
+        Some(payment_hash.as_ref().to_vec()),
+        &secp,
+    )
+    .expect("create peeled packet");
+
+    let add_tlc_result_1 = ractor::call!(source_node.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id: channels[0],
+                command: ChannelCommand::AddTlc(
+                    AddTlcCommand {
+                        amount: 10000000000,
+                        hash_algorithm,
+                        payment_hash,
+                        expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+                        onion_packet: packet.next.clone(),
+                        shared_secret: packet.shared_secret,
+                        previous_tlc: None,
+                        attempt_id: None,
+                        total_amount: Some(20000000000),
+                        payment_secret: Some(payment_secret),
+                    },
+                    rpc_reply,
+                ),
+            },
+        ))
+    })
+    .expect("node alive")
+    .expect("tlc");
+
+    let add_tlc_result_2 = ractor::call!(source_node.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id: channels[1],
+                command: ChannelCommand::AddTlc(
+                    AddTlcCommand {
+                        amount: 10000000000,
+                        hash_algorithm,
+                        payment_hash,
+                        expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+                        onion_packet: packet.next.clone(),
+                        shared_secret: packet.shared_secret,
+                        previous_tlc: None,
+                        attempt_id: None,
+                        total_amount: Some(20000000000),
+                        payment_secret: Some(payment_secret),
+                    },
+                    rpc_reply,
+                ),
+            },
+        ))
+    })
+    .expect("node alive")
+    .expect("tlc");
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+    // check offered tlcs should be fail
+    let tlc1 = source_node.get_tlc(channels[0], TLCId::Offered(add_tlc_result_1.tlc_id));
+    let tlc2 = source_node.get_tlc(channels[1], TLCId::Offered(add_tlc_result_2.tlc_id));
+    assert!(matches!(
+        tlc1.unwrap().removed_reason,
+        Some(RemoveTlcReason::RemoveTlcFail(..))
+    ));
+    assert!(matches!(
+        tlc2.unwrap().removed_reason,
+        Some(RemoveTlcReason::RemoveTlcFail(..))
+    ));
+
+    // check received tlcs should be fail
+    let tlc1 = node_1.get_tlc(channels[0], TLCId::Received(add_tlc_result_1.tlc_id));
+    let tlc2 = node_1.get_tlc(channels[1], TLCId::Received(add_tlc_result_2.tlc_id));
+    assert!(matches!(
+        tlc1.unwrap().removed_reason,
+        Some(RemoveTlcReason::RemoveTlcFail(..))
+    ));
+    assert!(matches!(
+        tlc2.unwrap().removed_reason,
+        Some(RemoveTlcReason::RemoveTlcFail(..))
+    ));
+
+    // balance should not change
+    let node_0_balance = source_node.get_local_balance_from_channel(channels[0]);
+    let node_1_balance = node_1.get_local_balance_from_channel(channels[0]);
+    assert_eq!(node_0_balance, 10000000000);
+    assert_eq!(node_1_balance, 0);
+
+    let node_0_balance = source_node.get_local_balance_from_channel(channels[1]);
+    let node_1_balance = node_1.get_local_balance_from_channel(channels[1]);
+    assert_eq!(node_0_balance, 10000000000);
+    assert_eq!(node_1_balance, 0);
 }
