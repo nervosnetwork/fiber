@@ -2,9 +2,9 @@
 members = [
     "crates/fiber-lib",
     "crates/fiber-bin",
-    "crates/fiber-wasm",
-    "crates/fiber-wasm-db-worker",
-    "crates/fiber-wasm-db-common",
+    # "crates/fiber-wasm",
+    # "crates/fiber-wasm-db-worker",
+    # "crates/fiber-wasm-db-common",
 ]
 resolver = "2"
 default-members = [

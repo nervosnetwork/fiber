@@ -49,15 +49,15 @@ pub mod native {
     const DEFAULT_CONFIG_FILE_NAME: &str = "config.yml";
     const DEFAULT_FIBER_DIR_NAME: &str = "fiber";
     const DEFAULT_CCH_DIR_NAME: &str = "cch";
-    use std::{fs::File, io::BufReader, path::PathBuf, str::FromStr};
-
+    use crate::config::SerializedConfig;
+    use crate::config::Service;
     use clap::CommandFactory;
     use clap_serde_derive::{
         clap::{self, Parser},
         ClapSerde,
     };
     use home::home_dir;
-    use serde::{Deserialize, Serialize};
+    use std::{fs::File, io::BufReader, path::PathBuf, str::FromStr};
     use tracing::error;
 
     use crate::{ckb::CkbConfig, rpc::config::RpcConfig, CchConfig, FiberConfig};
@@ -224,7 +224,7 @@ pub mod native {
         }
     }
 }
-
+#[cfg(target_arch = "wasm32")]
 mod wasm {
     use std::{path::PathBuf, str::FromStr};
 

@@ -1844,50 +1844,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "fiber-wasm"
-version = "0.1.0"
-dependencies = [
- "ckb-chain-spec",
- "ckb-resource",
- "console_error_panic_hook",
- "fnn",
- "jsonrpsee",
- "ractor",
- "secp256k1 0.28.2",
- "serde",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "wasm-logger",
- "web-time",
-]
-
-[[package]]
 name = "fiber-wasm-db-common"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "bincode 2.0.1",
  "serde",
- "web-sys",
-]
-
-[[package]]
-name = "fiber-wasm-db-worker"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "console_error_panic_hook",
- "fiber-wasm-db-common",
- "idb",
- "log",
- "serde",
- "serde-wasm-bindgen",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "wasm-logger",
  "web-sys",
 ]
 
@@ -2710,20 +2672,6 @@ dependencies = [
  "zerofrom",
  "zerotrie",
  "zerovec",
-]
-
-[[package]]
-name = "idb"
-version = "0.6.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3afe8830d5802f769dc0be20a87f9f116798c896650cb6266eb5c19a3c109eed"
-dependencies = [
- "js-sys",
- "num-traits",
- "thiserror 1.0.69",
- "tokio",
- "wasm-bindgen",
- "web-sys",
 ]
 
 [[package]]
@@ -4639,17 +4587,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "serde-wasm-bindgen"
-version = "0.6.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8302e169f0eddcc139c70f139d19d6467353af16f9fce27e8c30158036a1e16b"
-dependencies = [
- "js-sys",
- "serde",
- "wasm-bindgen",
-]
-
-[[package]]
 name = "serde_derive"
 version = "1.0.219"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5904,17 +5841,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1a05d73b933a847d6cccdda8f838a22ff101ad9bf93e33684f39c1f5f0eece3d"
 dependencies = [
  "unicode-ident",
-]
-
-[[package]]
-name = "wasm-logger"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "074649a66bb306c8f2068c9016395fa65d8e08d2affcbf95acf3c24c3ab19718"
-dependencies = [
- "log",
- "wasm-bindgen",
- "web-sys",
 ]
 
 [[package]]
