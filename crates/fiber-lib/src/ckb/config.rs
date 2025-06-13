@@ -89,10 +89,7 @@ impl CkbConfig {
     }
     #[cfg(target_arch = "wasm32")]
     pub fn read_secret_key(&self) -> Result<SecretKey> {
-        Ok(self
-            .wasm_secret_key
-            .clone()
-            .expect("SecretKey not found on wasm"))
+        Ok(self.wasm_secret_key.expect("SecretKey not found on wasm"))
     }
     #[cfg(not(target_arch = "wasm32"))]
     pub fn read_secret_key(&self) -> Result<SecretKey> {

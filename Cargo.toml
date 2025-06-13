@@ -2,17 +2,13 @@
 members = [
     "crates/fiber-lib",
     "crates/fiber-bin",
-    # "crates/fiber-wasm",
-    # "crates/fiber-wasm-db-worker",
-    # "crates/fiber-wasm-db-common",
+    "crates/fiber-wasm",
+    "crates/fiber-wasm-db-worker",
+    "crates/fiber-wasm-db-common",
 ]
 resolver = "2"
 default-members = [
-    # "crates/fiber-bin",
-    "crates/fiber-lib",
-    # "crates/fiber-wasm",
-    # "crates/fiber-wasm-db-worker",
-    # "crates/fiber-wasm-db-common",
+    "crates/fiber-bin",
 ]
 [profile.release]
 panic = "abort"

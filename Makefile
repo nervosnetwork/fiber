@@ -11,7 +11,9 @@ test:
 
 .PHONY: clippy
 clippy:
-	cargo clippy --all --all-targets --all-features -- -D warnings -A clippy::module-inception
+	cargo clippy --all-targets --all-features -p fnn -p fiber-bin -- -D warnings -A clippy::module-inception
+	cargo clippy -p fiber-wasm -p fiber-wasm-db-worker  -p fiber-wasm-db-common --target wasm32-unknown-unknown -- -D warnings -A clippy::module-inception
+	
 
 .PHONY: bless
 bless:

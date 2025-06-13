@@ -42,9 +42,9 @@ impl ExitMessage {
         Err(ExitMessage(message))
     }
 }
-impl Into<JsValue> for ExitMessage {
-    fn into(self) -> JsValue {
-        JsValue::from_str(&self.0)
+impl From<ExitMessage> for JsValue {
+    fn from(val: ExitMessage) -> Self {
+        JsValue::from_str(&val.0)
     }
 }
 
@@ -58,7 +58,7 @@ pub async fn fiber(
 ) -> Result<(), ExitMessage> {
     console_error_panic_hook::set_once();
     wasm_logger::init(wasm_logger::Config::new(
-        tracing::log::Level::from_str(&log_level).expect("Bad log level"),
+        tracing::log::Level::from_str(log_level).expect("Bad log level"),
     ));
 
     info!(

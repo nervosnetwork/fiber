@@ -369,6 +369,7 @@ pub enum DbCommandRequestWithSkipWhileFunc {
     PrefixIterator {
         prefix: Vec<u8>,
         mode: IteratorModeOwned,
+        #[allow(clippy::type_complexity)]
         skip_while: Box<dyn Fn(&[u8]) -> bool + 'static>,
     },
 }

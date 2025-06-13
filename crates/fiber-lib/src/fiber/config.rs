@@ -1,3 +1,5 @@
+#[cfg(target_arch = "wasm32")]
+use crate::fiber::KeyPair;
 use crate::{ckb::contracts::Contract, Result};
 use ckb_jsonrpc_types::{CellDep, Script};
 use clap_serde_derive::{

@@ -267,15 +267,15 @@ mod wasm {
             let fiber = services
                 .contains(&Service::FIBER)
                 .then_some(fiber)
-                .map(|c| FiberConfig::from(c));
+                .map(FiberConfig::from);
             let rpc = services
                 .contains(&Service::RPC)
                 .then_some(rpc)
-                .map(|c| RpcConfig::from(c));
+                .map(RpcConfig::from);
             let ckb = services
                 .contains(&Service::CkbChain)
                 .then_some(ckb)
-                .map(|c| CkbConfig::from(c));
+                .map(CkbConfig::from);
 
             Self {
                 fiber,
