@@ -1859,18 +1859,6 @@ where
             }
         };
 
-        let payment_data_record = peeled_onion_packet
-            .current
-            .custom_records
-            .as_ref()
-            .and_then(PaymentDataRecord::read);
-        let total_amount = payment_data_record
-            .as_ref()
-            .map(|record| record.total_amount);
-        let payment_secret = payment_data_record
-            .as_ref()
-            .map(|record| record.payment_secret);
-
         let (send, _recv) = oneshot::channel::<Result<AddTlcResponse, TlcErr>>();
         // explicitly don't wait for the response, we will handle the result in AddTlcResult
         let rpc_reply = RpcReplyPort::from(send);
@@ -1884,8 +1872,6 @@ where
                 onion_packet: peeled_onion_packet.next.clone(),
                 shared_secret,
                 previous_tlc,
-                total_amount,
-                payment_secret,
             },
             rpc_reply,
         );

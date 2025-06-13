@@ -597,8 +597,6 @@ impl CchActor {
                                 onion_packet: None,
                                 shared_secret: NO_SHARED_SECRET,
                                 previous_tlc: None,
-                                total_amount: None,
-                                payment_secret: None,
                             },
                             rpc_reply,
                         ),

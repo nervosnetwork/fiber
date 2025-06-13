@@ -214,8 +214,6 @@ pub struct AddTlcCommand {
     /// Use all zeros when no shared secrets are available.
     pub shared_secret: [u8; 32],
     pub previous_tlc: Option<PrevTlcInfo>,
-    pub total_amount: Option<u128>,
-    pub payment_secret: Option<Hash256>,
 }
 
 impl Debug for AddTlcCommand {
@@ -5806,8 +5804,8 @@ impl ChannelActorState {
                 )
             }),
             removed_confirmed_at: None,
-            total_amount: command.total_amount,
-            payment_secret: command.payment_secret,
+            total_amount: None,
+            payment_secret: None,
         }
     }
 

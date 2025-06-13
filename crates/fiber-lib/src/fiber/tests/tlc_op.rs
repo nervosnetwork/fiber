@@ -96,8 +96,6 @@ pub struct AddTlcCommand {
     pub shared_secret: [u8; 32],
     #[allow(dead_code)]
     pub previous_tlc: Option<(Hash256, u64)>,
-    pub total_amount: Option<u128>,
-    pub payment_secret: Option<Hash256>,
 }
 
 pub struct NetworkActor {}
@@ -219,8 +217,8 @@ impl Actor for TlcActor {
                     previous_tlc: None,
                     status: TlcStatus::Outbound(OutboundTlcStatus::LocalAnnounced),
                     removed_confirmed_at: None,
-                    total_amount: command.total_amount,
-                    payment_secret: command.payment_secret,
+                    total_amount: None,
+                    payment_secret: None,
                 };
                 state.tlc_state.add_offered_tlc(add_tlc.clone());
                 state.tlc_state.increment_offering();
@@ -383,8 +381,6 @@ async fn test_tlc_actor() {
                 onion_packet: None,
                 shared_secret: NO_SHARED_SECRET,
                 previous_tlc: None,
-                total_amount: None,
-                payment_secret: None,
             },
         ))
         .unwrap();
@@ -403,8 +399,6 @@ async fn test_tlc_actor() {
                 onion_packet: None,
                 shared_secret: NO_SHARED_SECRET,
                 previous_tlc: None,
-                total_amount: None,
-                payment_secret: None,
             },
         ))
         .unwrap();
@@ -423,8 +417,6 @@ async fn test_tlc_actor() {
                 onion_packet: None,
                 shared_secret: NO_SHARED_SECRET,
                 previous_tlc: None,
-                total_amount: None,
-                payment_secret: None,
             },
         ))
         .unwrap();
@@ -443,8 +435,6 @@ async fn test_tlc_actor() {
                 onion_packet: None,
                 shared_secret: NO_SHARED_SECRET,
                 previous_tlc: None,
-                total_amount: None,
-                payment_secret: None,
             },
         ))
         .unwrap();
