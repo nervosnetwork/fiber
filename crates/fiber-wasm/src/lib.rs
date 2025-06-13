@@ -200,7 +200,7 @@ pub async fn fiber(
                 None
             };
 
-            new_tokio_task_tracker().spawn(async move {
+            ractor::concurrency::spawn(async move {
                 let token = new_tokio_cancellation_token();
                 loop {
                     select! {

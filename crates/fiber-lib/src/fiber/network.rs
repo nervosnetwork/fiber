@@ -674,7 +674,10 @@ macro_rules! debug_event {
 
 #[derive(Clone, Debug)]
 pub enum NetworkServiceEvent {
+    #[cfg(not(target_arch = "wasm32"))]
     NetworkStarted(PeerId, MultiAddr, Vec<Multiaddr>),
+    #[cfg(target_arch = "wasm32")]
+    NetworkStarted(PeerId, Vec<Multiaddr>),
     NetworkStopped(PeerId),
     PeerConnected(PeerId, Multiaddr),
     PeerDisConnected(PeerId, Multiaddr),
@@ -3404,9 +3407,11 @@ where
     ) -> Result<Self::State, ActorProcessingErr> {
         let NetworkActorStartArguments {
             config,
+            #[cfg(not(target_arch = "wasm32"))]
             tracker,
             channel_subscribers,
             default_shutdown_script,
+            ..
         } = args;
         let now = crate::time::SystemTime::now()
             .duration_since(crate::time::SystemTime::UNIX_EPOCH)
@@ -3457,19 +3462,25 @@ where
             .insert_protocol(gossip_handle.create_meta())
             .handshake_type(secio_kp.into())
             .build(handle);
-        let mut listening_addr = service
-            .listen(
-                MultiAddr::from_str(config.listening_addr())
-                    .expect("valid tentacle listening address"),
-            )
-            .await
-            .expect("listen tentacle");
 
-        listening_addr.push(Protocol::P2P(Cow::Owned(my_peer_id.clone().into_bytes())));
         let mut announced_addrs = Vec::with_capacity(config.announced_addrs.len() + 1);
-        if config.announce_listening_addr() {
-            announced_addrs.push(listening_addr.clone());
-        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        let listening_addr = {
+            let mut listening_addr = service
+                .listen(
+                    MultiAddr::from_str(config.listening_addr())
+                        .expect("valid tentacle listening address"),
+                )
+                .await
+                .expect("listen tentacle");
+
+            listening_addr.push(Protocol::P2P(Cow::Owned(my_peer_id.clone().into_bytes())));
+            if config.announce_listening_addr() {
+                announced_addrs.push(listening_addr.clone());
+            }
+            listening_addr
+        };
         for announced_addr in &config.announced_addrs {
             let mut multiaddr =
                 MultiAddr::from_str(announced_addr.as_str()).expect("valid announced listen addr");
@@ -3500,14 +3511,20 @@ where
                     .unwrap_or_default()
             });
         }
-
+        #[cfg(not(target_arch = "wasm32"))]
         info!(
             "Started listening tentacle on {:?}, peer id {:?}, announced addresses {:?}",
             &listening_addr, &my_peer_id, &announced_addrs
         );
 
-        let control = service.control().to_owned();
+        #[cfg(target_arch = "wasm32")]
+        info!(
+            "Started fiber network service peer id {:?}, announced addresses {:?}",
+            &my_peer_id, &announced_addrs
+        );
 
+        let control = service.control().to_owned();
+        #[cfg(not(target_arch = "wasm32"))]
         myself
             .send_message(NetworkActorMessage::new_notification(
                 NetworkServiceEvent::NetworkStarted(
@@ -3518,11 +3535,22 @@ where
             ))
             .expect(ASSUME_NETWORK_MYSELF_ALIVE);
 
+        #[cfg(target_arch = "wasm32")]
+        myself
+            .send_message(NetworkActorMessage::new_notification(
+                NetworkServiceEvent::NetworkStarted(my_peer_id.clone(), announced_addrs.clone()),
+            ))
+            .expect(ASSUME_NETWORK_MYSELF_ALIVE);
+        #[cfg(not(target_arch = "wasm32"))]
         tracker.spawn(async move {
             service.run().await;
             debug!("Tentacle service stopped");
         });
-
+        #[cfg(target_arch = "wasm32")]
+        ractor::concurrency::spawn(async move {
+            service.run().await;
+            debug!("Tentacle service stopped");
+        });
         let mut state_to_be_persisted = self
             .store
             .get_network_actor_state(&my_peer_id)

@@ -1854,14 +1854,11 @@ dependencies = [
  "jsonrpsee",
  "ractor",
  "secp256k1 0.28.2",
- "serde",
  "tokio",
  "tracing",
- "tracing-subscriber",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "wasm-logger",
- "web-time",
 ]
 
 [[package]]
