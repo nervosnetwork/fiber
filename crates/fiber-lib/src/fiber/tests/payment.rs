@@ -1,4 +1,6 @@
 #![allow(clippy::needless_range_loop)]
+use crate::ckb::contracts::get_script_by_contract;
+use crate::ckb::contracts::Contract;
 use crate::fiber::channel::*;
 use crate::fiber::config::DEFAULT_TLC_EXPIRY_DELTA;
 use crate::fiber::config::DEFAULT_TLC_FEE_PROPORTIONAL_MILLIONTHS;
@@ -28,6 +30,12 @@ use std::collections::HashSet;
 use std::time::SystemTime;
 use tracing::debug;
 use tracing::error;
+
+fn get_simple_udt_script() -> Script {
+    let args =
+        hex::decode("32e555f3ff8e135cece1351a6a2971518392c1e30375c1e006ad0ce8eac07947").unwrap();
+    get_script_by_contract(Contract::SimpleUDT, &args)
+}
 
 #[tokio::test]
 async fn test_send_payment_custom_records() {
@@ -766,7 +774,7 @@ async fn test_send_payment_hophint_for_mixed_channels_with_udt() {
                     node_a_funding_amount: HUGE_CKB_AMOUNT,
                     node_b_funding_amount: HUGE_CKB_AMOUNT,
                     public: true, // not a private channel
-                    funding_udt_type_script: Some(Script::default()), // a UDT channel
+                    funding_udt_type_script: Some(get_simple_udt_script()), // a UDT channel
                     ..Default::default()
                 },
             ),
@@ -3075,6 +3083,7 @@ async fn test_send_payment_self_with_two_nodes() {
 async fn test_send_payment_self_with_mixed_channel() {
     // #678, payself with mixed channel got wrong
     init_tracing();
+    let udt_script = get_simple_udt_script();
 
     let funding_amount = HUGE_CKB_AMOUNT;
     let (nodes, _channels) = create_n_nodes_network_with_params(
@@ -3094,7 +3103,7 @@ async fn test_send_payment_self_with_mixed_channel() {
                     public: true,
                     node_a_funding_amount: funding_amount,
                     node_b_funding_amount: funding_amount,
-                    funding_udt_type_script: Some(Script::default()),
+                    funding_udt_type_script: Some(udt_script.clone()),
                     ..Default::default()
                 },
             ),
@@ -3124,7 +3133,7 @@ async fn test_send_payment_self_with_mixed_channel() {
                     public: true,
                     node_a_funding_amount: funding_amount,
                     node_b_funding_amount: funding_amount,
-                    funding_udt_type_script: Some(Script::default()),
+                    funding_udt_type_script: Some(udt_script.clone()),
                     ..Default::default()
                 },
             ),
@@ -3156,7 +3165,7 @@ async fn test_send_payment_self_with_mixed_channel() {
                     public: true,
                     node_a_funding_amount: funding_amount,
                     node_b_funding_amount: funding_amount,
-                    funding_udt_type_script: Some(Script::default()),
+                    funding_udt_type_script: Some(udt_script.clone()),
                     ..Default::default()
                 },
             ),
@@ -3166,7 +3175,7 @@ async fn test_send_payment_self_with_mixed_channel() {
                     public: true,
                     node_a_funding_amount: funding_amount,
                     node_b_funding_amount: funding_amount,
-                    funding_udt_type_script: Some(Script::default()),
+                    funding_udt_type_script: Some(udt_script.clone()),
                     ..Default::default()
                 },
             ),
@@ -3176,7 +3185,7 @@ async fn test_send_payment_self_with_mixed_channel() {
                     public: true,
                     node_a_funding_amount: funding_amount,
                     node_b_funding_amount: funding_amount,
-                    funding_udt_type_script: Some(Script::default()),
+                    funding_udt_type_script: Some(udt_script.clone()),
                     ..Default::default()
                 },
             ),
@@ -3192,7 +3201,7 @@ async fn test_send_payment_self_with_mixed_channel() {
             amount: Some(1000),
             keysend: Some(true),
             allow_self_payment: true,
-            udt_type_script: Some(Script::default()),
+            udt_type_script: Some(udt_script.clone()),
             ..Default::default()
         })
         .await;
@@ -4489,6 +4498,7 @@ async fn test_send_payment_no_preimage_invoice_will_make_payment_failed() {
 async fn test_send_payment_with_mixed_channel_hops() {
     init_tracing();
     let _span = tracing::info_span!("node", node = "test").entered();
+    let udt_script = get_simple_udt_script();
     let (nodes, channels) = create_n_nodes_network(
         &[
             ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
@@ -4507,7 +4517,7 @@ async fn test_send_payment_with_mixed_channel_hops() {
             public: false,
             node_a_funding_amount: HUGE_CKB_AMOUNT,
             node_b_funding_amount: HUGE_CKB_AMOUNT,
-            funding_udt_type_script: Some(Script::default()), // UDT type
+            funding_udt_type_script: Some(udt_script.clone()), // UDT type
             ..Default::default()
         },
     )

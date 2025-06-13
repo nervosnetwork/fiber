@@ -631,7 +631,11 @@ pub(crate) async fn create_n_nodes_network_with_params(
         for node in nodes.iter_mut() {
             let res = node.submit_tx(funding_tx.clone()).await;
             node.add_channel_tx(channel_id, funding_tx.hash().into());
-            assert!(matches!(res, TxStatus::Committed(..)));
+            assert!(
+                matches!(res, TxStatus::Committed(..)),
+                "expect committed tx, got {:?}",
+                res
+            );
         }
     }
     wait_for_network_graph_update(&nodes[0], amounts.len()).await;
