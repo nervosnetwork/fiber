@@ -36,7 +36,7 @@ coverage-run-unittests:
 	RUSTFLAGS="${RUSTFLAGS} -Cinstrument-coverage" \
 		RUST_LOG=off \
 		LLVM_PROFILE_FILE="${COVERAGE_PROFRAW_DIR}/unittests-%p-%m.profraw" \
-			cargo test --all
+			cargo test -p fnn -p fiber-bin
 
 coverage-collect-data:
 	grcov "${COVERAGE_PROFRAW_DIR}" --binary-path "${CARGO_TARGET_DIR}/debug/" \
