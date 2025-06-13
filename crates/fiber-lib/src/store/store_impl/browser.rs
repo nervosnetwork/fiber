@@ -281,7 +281,7 @@ impl CommunicationChannel {
         }
     }
 
-    /// Executa a database command, retriving the response (or error)
+    /// Executa a database command, retrieving the response (or error)
     /// cmd: The command
     fn dispatch_database_command(
         &self,

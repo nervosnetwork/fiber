@@ -55,7 +55,7 @@ where
     }
     .map_err(|e| anyhow!("Unable to create cursor: {}", e))?
     .await
-    .map_err(|e| anyhow!("Unable to perform cursor requets: {}", e))?;
+    .map_err(|e| anyhow!("Unable to perform cursor requests: {}", e))?;
     let mut cursor = match cursor {
         Some(cursor) => cursor.into_managed(),
         None => {

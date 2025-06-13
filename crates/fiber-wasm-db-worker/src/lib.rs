@@ -107,7 +107,7 @@ pub async fn main_loop(log_level: &str) {
                         &output_u8_arr,
                     )
                     .unwrap();
-                    // Sync wait here, so transaction of IndexedDB won't be commited (it will be commited once control flow was returned from sync call stack)
+                    // Sync wait here, so transaction of IndexedDB won't be committed (it will be committed once control flow was returned from sync call stack)
                     wait_for_command_sync(&input_i32_arr, InputCommand::Waiting).unwrap();
 
                     let result =
