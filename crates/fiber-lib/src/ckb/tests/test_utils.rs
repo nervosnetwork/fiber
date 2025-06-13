@@ -598,7 +598,7 @@ impl Actor for MockChainActor {
                         state
                             .cell_status
                             .get(input)
-                            .map_or(false, |status| *status == CellStatus::Consumed)
+                            .is_some_and(|status| *status == CellStatus::Consumed)
                     }) {
                         Some(input) => (
                             TxStatus::Rejected("Cell already consumed".to_string()),
