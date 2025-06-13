@@ -11,7 +11,7 @@ pub enum IteratorMode<'a> {
     From(&'a [u8], DbDirection),
 }
 
-impl<'a> IteratorMode<'a> {
+impl IteratorMode<'_> {
     pub fn to_owned(&self) -> IteratorModeOwned {
         match self {
             IteratorMode::Start => IteratorModeOwned::Start,

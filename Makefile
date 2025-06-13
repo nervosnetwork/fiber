@@ -7,7 +7,7 @@ GRCOV_EXCL_LINE = ^\s*(\})*(\))*(;)*$$|\s*((log::|tracing::)?(trace|debug|info|w
 
 .PHONY: test
 test:
-	RUST_LOG=off cargo nextest run --no-fail-fast --target x86_64-unknown-linux-gnu
+	RUST_LOG=off cargo nextest run --no-fail-fast -p fnn -p fiber-bin
 
 .PHONY: clippy
 clippy:
