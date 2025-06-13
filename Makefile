@@ -9,6 +9,13 @@ GRCOV_EXCL_LINE = ^\s*(\})*(\))*(;)*$$|\s*((log::|tracing::)?(trace|debug|info|w
 test:
 	RUST_LOG=off cargo nextest run --no-fail-fast
 
+.PHONY: check
+check:
+	cargo check
+	cargo check --release
+	cargo check --package fnn --no-default-features
+	cd migrate && cargo check
+
 .PHONY: clippy
 clippy:
 	cargo clippy --all --all-targets --all-features -- -D warnings -A clippy::module-inception
