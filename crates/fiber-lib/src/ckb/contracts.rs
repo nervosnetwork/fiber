@@ -28,7 +28,7 @@ pub enum Contract {
     CommitmentLock,
     Secp256k1Lock,
     SimpleUDT,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "bench"))]
     AlwaysSuccess,
 }
 

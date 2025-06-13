@@ -673,7 +673,7 @@ where
 
     fn insert_payment_session(&self, session: PaymentSession) {
         let payment_hash = session.payment_hash();
-        let status = session.status.clone();
+        let status = session.status;
 
         self.inner.insert_payment_session(session);
         self.publish(StorePublisherMessage::PaymentUpdated {

@@ -7,7 +7,7 @@ use ractor::call_t;
 
 use crate::{
     cch::{
-        tests::lnd::{LndBitcoinDConf, LndNode},
+        tests::lnd_test_utils::{LndBitcoinDConf, LndNode},
         CchMessage, ReceiveBTC, ReceiveBTCOrder, SendBTC, SendBTCOrder,
     },
     ckb::contracts::{get_script_by_contract, Contract},
