@@ -1,3 +1,4 @@
+use crate::ckb::contracts::get_script_by_contract;
 use crate::ckb::tests::test_utils::complete_commitment_tx;
 use crate::fiber::channel::{ChannelState, CloseFlags, UpdateCommand, XUDT_COMPATIBLE_WITNESS};
 use crate::fiber::config::{DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT};
@@ -296,18 +297,28 @@ async fn test_create_channel_with_too_large_amounts() {
         "The total funding amount (18446744069509551614) should be less than 18446744065309551615"
     ));
 
+    let udt_args =
+        hex::decode("32e555f3ff8e135cece1351a6a2971518392c1e30375c1e006ad0ce8eac07947").unwrap();
+    let udt_script = get_script_by_contract(Contract::SimpleUDT, &udt_args);
+
     let params = ChannelParameters {
         node_a_funding_amount: u128::MAX - 100,
         node_b_funding_amount: 101,
-        funding_udt_type_script: Some(Script::default()),
+        funding_udt_type_script: Some(udt_script),
         ..Default::default()
     };
     let res = create_channel_with_nodes(&mut node_a, &mut node_b, params).await;
-    assert!(res.is_err(), "Create channel failed: {:?}", res);
-    assert!(res
-        .unwrap_err()
-        .to_string()
-        .contains("The total UDT funding amount should be less"));
+    assert!(
+        res.is_err(),
+        "Create channel should fail but succeeded: {:?}",
+        res
+    );
+    let err = res.unwrap_err().to_string();
+    assert!(
+        err.contains("The total UDT funding amount should be less"),
+        "Unmatched error: {}",
+        err
+    );
 }
 
 #[tokio::test]
