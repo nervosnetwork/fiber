@@ -1,4 +1,4 @@
-use crate::cch::tests::lnd::LndNode;
+use crate::cch::tests::lnd_test_utils::LndNode;
 use crate::cch::CchMessage;
 use crate::ckb::tests::test_utils::get_tx_from_hash;
 use crate::ckb::tests::test_utils::MockChainActorMiddleware;

@@ -624,7 +624,7 @@ where
         payment_hash: Hash256,
         status: PaymentSessionStatus,
     ) {
-        let payload_opt = status.clone().try_into().ok().or_else(|| match status {
+        let payload_opt = status.try_into().ok().or_else(|| match status {
             // If preimage is not available, defer the notification on `insert_preimage`.
             // See `publish_payment_updated_event_when_removing_preimage`.
             PaymentSessionStatus::Success => self
@@ -772,7 +772,7 @@ where
 
     fn insert_payment_session(&self, session: PaymentSession) {
         let payment_hash = session.payment_hash();
-        let status = session.status.clone();
+        let status = session.status;
 
         self.inner.insert_payment_session(session);
         self.publish_payment_updated_event_when_inserting_payment_session(payment_hash, status);
