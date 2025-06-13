@@ -1037,7 +1037,7 @@ where
                 self.store
                     .insert_payment_custom_records(&payment_hash, custom_records);
             }
-            self.store.insert_preimage(payment_hash, preimage);
+            self.store_preimage(payment_hash, preimage);
         } else {
             // here we don't need to check current config is public or enabled, because
             // handle_add_tlc_command will check the channel state before forwarding
