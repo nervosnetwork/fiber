@@ -52,10 +52,9 @@ pub fn get_node_prefix() -> &'static str {
     static INSTANCE: once_cell::sync::OnceCell<String> = once_cell::sync::OnceCell::new();
     INSTANCE.get_or_init(|| std::env::var("LOG_PREFIX").unwrap_or_else(|_| "".to_string()))
 }
-
 pub fn now_timestamp_as_millis_u64() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    crate::time::SystemTime::now()
+        .duration_since(crate::time::UNIX_EPOCH)
         .expect("Duration since unix epoch")
         .as_millis() as u64
 }
@@ -115,16 +114,6 @@ pub mod macros {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub fn block_in_place<F, R>(f: F) -> R
-where
-    F: FnOnce() -> R,
-{
-    tokio::task::block_in_place(f)
-}
+use std::time;
 #[cfg(target_arch = "wasm32")]
-pub fn block_in_place<F, R>(f: F) -> R
-where
-    F: FnOnce() -> R,
-{
-    f()
-}
+use web_time as time;

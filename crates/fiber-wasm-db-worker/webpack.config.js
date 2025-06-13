@@ -17,7 +17,7 @@ module.exports = {
         new WasmPackPlugin({
             crateDirectory: path.resolve(__dirname, "."),
             outName: "fiber-wasm-db-worker",
-            extraArgs: "--target web"
+            extraArgs: "--target web --dev"
         }),
         new webpack.ProvidePlugin({
             Buffer: ['buffer', 'Buffer'],

@@ -142,7 +142,7 @@ where
                         .map_err(|e| anyhow!("Failed to send get request: {:?}", e))?
                         .await
                         .map_err(|e| anyhow!("Failed to fetch value: {:?}", e))?
-                        .map(|v| serde_wasm_bindgen::from_value::<KV>(v).unwrap().value),
+                        .map(|v| serde_wasm_bindgen::from_value::<Vec<u8>>(v).unwrap()),
                 );
             }
             DbCommandResponse::Read { values: res }

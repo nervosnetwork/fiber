@@ -17,3 +17,4 @@ tests/nodes/.ports
 /node_modules
 /index.html
 /fiber-wasm-worker.js
+/fiber-db-worker.js

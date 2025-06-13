@@ -25,3 +25,6 @@ panic = "abort"
 inherits = "test"
 opt-level = 3
 debug = false
+
+[patch.crates-io]
+tokio_with_wasm = { git = "https://github.com/Officeyutong/tokio-with-wasm", rev = "60f495c" }

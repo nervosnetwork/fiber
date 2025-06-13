@@ -60,7 +60,7 @@ pub async fn main_loop(log_level: &str) {
     });
 
     let mut db: Option<Database> = None;
-
+    log::debug!("Entered main loop of db worker");
     loop {
         let cmd = wait_for_command(&input_i32_arr, InputCommand::Waiting)
             .await
@@ -82,13 +82,16 @@ pub async fn main_loop(log_level: &str) {
                         )
                         .unwrap();
                     }
-                    Err(err) => write_command_with_payload(
-                        OutputCommand::Error as i32,
-                        format!("{:?}", err),
-                        &output_i32_arr,
-                        &output_u8_arr,
-                    )
-                    .unwrap(),
+                    Err(err) => {
+                        log::error!("Failed to open database: {:?}", err);
+                        write_command_with_payload(
+                            OutputCommand::Error as i32,
+                            format!("{:?}", err),
+                            &output_i32_arr,
+                            &output_u8_arr,
+                        )
+                        .unwrap();
+                    }
                 }
             }
             InputCommand::DbRequest => {
@@ -96,10 +99,7 @@ pub async fn main_loop(log_level: &str) {
                 let db = db.as_ref().expect("Database not opened yet");
                 let result = handle_db_command(db, STORE_NAME, db_cmd, |key| {
                     input_i32_arr.set_index(0, InputCommand::Waiting as i32);
-                    debug!(
-                        "Invoking request take while with args key={:?}",
-                        key, 
-                    );
+                    debug!("Invoking request take while with args key={:?}", key,);
                     write_command_with_payload(
                         OutputCommand::PrefixIteratorRequestForNextEntry as i32,
                         key.to_vec(),

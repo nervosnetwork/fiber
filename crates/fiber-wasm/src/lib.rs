@@ -9,7 +9,7 @@ use fnn::{
         CkbChainActor,
         contracts::{TypeIDResolver, try_init_contracts_context},
     },
-    fiber::{channel::ChannelSubscribers, graph::NetworkGraph, network::init_chain_hash},
+    fiber::{KeyPair, channel::ChannelSubscribers, graph::NetworkGraph, network::init_chain_hash},
     rpc::watchtower::{
         CreatePreimageParams, CreateWatchChannelParams, RemovePreimageParams,
         RemoveWatchChannelParams, UpdateLocalSettlementParams, UpdateRevocationParams,
@@ -21,6 +21,7 @@ use fnn::{
 };
 use jsonrpsee::wasm_client::WasmClientBuilder;
 use ractor::Actor;
+use secp256k1::{Secp256k1, SecretKey};
 use std::fmt::Debug;
 use tokio::{
     select,
@@ -48,34 +49,17 @@ impl Into<JsValue> for ExitMessage {
 }
 
 #[wasm_bindgen]
-pub async fn fiber(config: &str, log_level: &str, spec: Option<String>) -> Result<(), ExitMessage> {
+pub async fn fiber(
+    config: &str,
+    log_level: &str,
+    spec: Option<String>,
+    fiber_key_pair: Option<Vec<u8>>,
+    ckb_secret_key: Option<Vec<u8>>,
+) -> Result<(), ExitMessage> {
     console_error_panic_hook::set_once();
     wasm_logger::init(wasm_logger::Config::new(
         tracing::log::Level::from_str(&log_level).expect("Bad log level"),
     ));
-    // ractor will set "id" for each actor:
-    // https://github.com/slawlor/ractor/blob/67d657e4cdcb8884a9ccc9b758704cbb447ac163/ractor/src/actor/mod.rs#L701
-    // here we map it with the node prefix
-    // let node_formatter = format::debug_fn(|writer, field, value| {
-    //     let prefix = if field.name() == "id" {
-    //         let r = fnn::get_node_prefix();
-    //         if !r.is_empty() {
-    //             format!(" on {}", r)
-    //         } else {
-    //             "".to_string()
-    //         }
-    //     } else {
-    //         "".to_string()
-    //     };
-    //     write!(writer, "{}: {:?}{}", field, value, prefix)
-    // })
-    // .delimited(", ");
-    // fmt()
-    //     .with_env_filter(EnvFilter::from_default_env())
-    //     .pretty()
-    //     .fmt_fields(node_formatter)
-    //     .try_init()
-    //     .map_err(|err| ExitMessage(format!("failed to initialize logger: {}", err)))?;
 
     info!(
         "Starting node with git version {} ({})",
@@ -83,8 +67,29 @@ pub async fn fiber(config: &str, log_level: &str, spec: Option<String>) -> Resul
         fnn::get_git_commit_info()
     );
 
-    let config = Config::parse_from_str(config);
-
+    let mut config = Config::parse_from_str(config);
+    let fiber_key_pair = match fiber_key_pair.map(|value| KeyPair::try_from(&value[..]).unwrap()) {
+        Some(v) => v,
+        None => {
+            tracing::warn!("Fiber KeyPair not provided, generating a random one..");
+            KeyPair::generate_random_key()
+        }
+    };
+    if let Some(ref mut value) = config.fiber {
+        value.wasm_key_pair = Some(fiber_key_pair)
+    }
+    let ckb_secret_key =
+        match ckb_secret_key.map(|value| SecretKey::from_slice(&value[..]).unwrap()) {
+            Some(v) => v,
+            None => {
+                tracing::warn!("Ckb SecretKey not provided, generating a random one..");
+                let mut rng = secp256k1::rand::thread_rng();
+                Secp256k1::new().generate_keypair(&mut rng).0
+            }
+        };
+    if let Some(ref mut value) = config.ckb {
+        value.wasm_secret_key = Some(ckb_secret_key);
+    }
     let store_path = config
         .fiber
         .as_ref()
