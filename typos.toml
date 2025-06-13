@@ -8,3 +8,4 @@ ignore-hidden = false
 
 [default.extend-identifiers]
 ba = "ba"
+ratatui = "ratatui"
