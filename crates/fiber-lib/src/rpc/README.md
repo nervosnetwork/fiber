@@ -377,8 +377,6 @@ Adds a TLC to a channel.
 * `payment_hash` - <em>[Hash256](#type-hash256)</em>, The payment hash of the TLC
 * `expiry` - <em>`u64`</em>, The expiry of the TLC
 * `hash_algorithm` - <em>Option<[HashAlgorithm](#type-hashalgorithm)></em>, The hash algorithm of the TLC
-* `total_amount` - <em>`Option<u128>`</em>, The total amount of the TLC
-* `payment_secret` - <em>Option<[Hash256](#type-hash256)></em>, The payment secret of the TLC
 
 ##### Returns
 
