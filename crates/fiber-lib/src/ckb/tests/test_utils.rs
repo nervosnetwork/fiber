@@ -593,7 +593,25 @@ impl Actor for MockChainActor {
             }
             SendTx(tx, reply_port) => {
                 const MAX_CYCLES: u64 = 100_000_000;
-                let (tx_status, result) = {
+                let (tx_status, result) = if let Some(resp) = state.txs.get(&tx.hash().into()) {
+                    // Like a real CKB node, this mock should allow sending
+                    // duplicate transactions. This is required because the
+                    // `Fund(..)` branch may add inputs for UDT channels, and
+                    // processing the same UDT funding transaction multiple
+                    // times would otherwise lead to consumed cell errors.
+                    (
+                        resp.tx_status.clone(),
+                        match &resp.tx_status {
+                            TxStatus::Committed(..) => Ok(()),
+                            TxStatus::Rejected(reason) => {
+                                Err(ckb_sdk::RpcError::Other(anyhow!("{}", reason)))
+                            }
+                            _ => {
+                                unreachable!();
+                            }
+                        },
+                    )
+                } else {
                     match tx.input_pts_iter().find(|input| {
                         state
                             .cell_status
@@ -735,8 +753,9 @@ pub async fn submit_tx(mock_actor: ActorRef<CkbChainMessage>, tx: TransactionVie
     if let Err(error) = call_t!(mock_actor, CkbChainMessage::SendTx, TIMEOUT, tx.clone())
         .expect("chain actor alive")
     {
-        error!("submit tx failed: {:?}", error);
-        return TxStatus::Rejected("submit tx failed".to_string());
+        let reject_reason = format!("submit tx failed: {:?}", error);
+        error!("{}", reject_reason);
+        return TxStatus::Rejected(reject_reason);
     }
     trace_tx(mock_actor, tx.hash().into()).await
 }
