@@ -4925,3 +4925,46 @@ async fn test_send_payment_will_use_sent_amount_for_better_path_finding() {
     let payment2_retry_times = node0.get_payment_session(payment2).unwrap().retry_times();
     assert_eq!(payment2_retry_times, 1);
 }
+
+#[tokio::test]
+async fn test_send_payment_dry_run_will_not_create_payment_session() {
+    init_tracing();
+
+    let (nodes, _channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (MIN_RESERVED_CKB + 400000, MIN_RESERVED_CKB)),
+            ((1, 2), (MIN_RESERVED_CKB + 100000, MIN_RESERVED_CKB)),
+        ],
+        4,
+    )
+    .await;
+    let [node_0, _node_1, node_2, node_3] = nodes.try_into().expect("4 nodes");
+
+    let payment_hash = gen_rand_sha256_hash();
+    let res = node_0
+        .send_payment(SendPaymentCommand {
+            payment_hash: Some(payment_hash),
+            amount: Some(1000),
+            dry_run: true,
+            target_pubkey: node_3.pubkey.into(),
+            ..Default::default()
+        })
+        .await;
+    eprintln!("res: {:?}", res);
+    let payment = node_0.get_payment_session(payment_hash);
+    assert!(payment.is_none(), "Payment session should not be created");
+
+    let payment_hash = gen_rand_sha256_hash();
+    let res = node_0
+        .send_payment(SendPaymentCommand {
+            payment_hash: Some(payment_hash),
+            amount: Some(1000),
+            dry_run: true,
+            target_pubkey: node_2.pubkey.into(),
+            ..Default::default()
+        })
+        .await;
+    assert!(res.is_ok(), "Send payment query failed: {:?}", res);
+    let payment = node_0.get_payment_session(payment_hash);
+    assert!(payment.is_none(), "Payment session should not be created");
+}

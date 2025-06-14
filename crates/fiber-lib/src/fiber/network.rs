@@ -2054,10 +2054,8 @@ where
         match graph.build_route(max_amount, max_fee, active_parts, &session.request) {
             Err(e) => {
                 let error = format!("Failed to build route, {}", e);
-                if !session.request.dry_run {
-                    self.set_attempt_fail_with_error(session, attempt, &error, false);
-                    self.set_payment_fail_with_error(session, &error);
-                }
+                self.set_attempt_fail_with_error(session, attempt, &error, false);
+                self.set_payment_fail_with_error(session, &error);
                 return Err(Error::SendPaymentError(error));
             }
             Ok(hops) => {
@@ -2221,7 +2219,9 @@ where
 
     fn set_payment_fail_with_error(&self, session: &mut PaymentSession, error: &str) {
         session.set_failed_status(error);
-        self.store.insert_payment_session(session.clone());
+        if !session.is_dry_run() {
+            self.store.insert_payment_session(session.clone());
+        }
     }
 
     fn set_attempt_fail_with_error(
@@ -2232,6 +2232,7 @@ where
         retryable: bool,
     ) {
         let mut payment_failed = false;
+        let dry_run = session.is_dry_run();
         if (!session.allow_mpp() || !session.allow_more_attempts()) && !retryable {
             // if mpp is not allowed, or mpp is allowed but attempt is not retryable
             // we will set the session status to failed
@@ -2241,13 +2242,17 @@ where
         }
 
         attempt.set_failed_status(error, retryable);
-        self.store.insert_attempt(attempt.clone());
+        if !dry_run {
+            self.store.insert_attempt(attempt.clone());
+        }
 
         if !payment_failed {
             let payment_session_status = session.calc_payment_session_status();
             if payment_session_status != session.status {
                 session.status = payment_session_status;
-                self.store.insert_payment_session(session.clone());
+                if !dry_run {
+                    self.store.insert_payment_session(session.clone());
+                }
             }
         }
     }

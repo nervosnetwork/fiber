@@ -694,6 +694,22 @@ impl NetworkNode {
         amount: u128,
         max_parts: Option<u64>,
     ) -> Result<SendPaymentResponse, String> {
+        self.send_mpp_payment_with_dry_run_option(
+            target_node,
+            amount,
+            max_parts,
+            false, // dry_run
+        )
+        .await
+    }
+
+    pub async fn send_mpp_payment_with_dry_run_option(
+        &self,
+        target_node: &mut NetworkNode,
+        amount: u128,
+        max_parts: Option<u64>,
+        dry_run: bool,
+    ) -> Result<SendPaymentResponse, String> {
         let target_pubkey = target_node.get_public_key();
         let preimage = gen_rand_sha256_hash();
         let ckb_invoice = InvoiceBuilder::new(Currency::Fibd)
@@ -711,6 +727,7 @@ impl NetworkNode {
             invoice: Some(ckb_invoice.to_string()),
             amount: ckb_invoice.amount,
             max_parts,
+            dry_run,
             ..Default::default()
         })
         .await

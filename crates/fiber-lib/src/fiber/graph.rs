@@ -1038,15 +1038,13 @@ where
         &self,
         amount: u128,
         max_fee_amount: Option<u128>,
-        active_parts: usize,
+        _active_parts: usize,
         payment_data: &SendPaymentData,
     ) -> Result<Vec<PaymentHopData>, PathFindError> {
         let source = self.get_source_pubkey();
         let target = payment_data.target_pubkey;
         let allow_self_payment = payment_data.allow_self_payment;
         let allow_mpp = payment_data.allow_mpp();
-        // Total maximum parts for the entire payment
-        let max_total_parts = payment_data.max_parts();
 
         let min_amount_for_a_part = if allow_mpp {
             DEFAULT_MPP_MIN_AMOUNT
@@ -1055,25 +1053,11 @@ where
             amount
         };
 
-        // Check if this is potentially the last part we are trying to build
-        let is_last_part = active_parts + 1 >= max_total_parts as usize;
-
         if source == target && !allow_self_payment {
             return Err(PathFindError::FeatureNotEnabled(
                 "allow_self_payment is not enabled, can not pay to self".to_string(),
             ));
         }
-
-        dbg!(
-            "now is_last_part : {:?}, active_parts: {:?}, max_total_parts: {:?} allow_mpp: {:?}",
-            is_last_part,
-            active_parts,
-            max_total_parts,
-            allow_mpp,
-            amount,
-            min_amount_for_a_part,
-            amount > min_amount_for_a_part,
-        );
 
         let (route_hops, actual_amount_for_route) = if !payment_data.router.is_empty() {
             // If a router is explicitly provided, use it.
@@ -1093,9 +1077,8 @@ where
                 // - MPP is allowed for the payment.
                 // - This is not the last part we are forced to make (more flexible).
                 // - The requested amount is greater than the minimum allowed for a part.
-                if allow_mpp && amount > min_amount_for_a_part =>
+                if allow_mpp && amount > min_amount_for_a_part && !payment_data.dry_run =>
             {
-                dbg!("begin binary search amount for path");
                if let Ok(res) = self.binary_find_path_in_range(
                     source,
                     amount.saturating_sub(1),
@@ -1105,7 +1088,6 @@ where
                 ) {
                     res
                 } else {
-                    dbg!("binary search amount failed, trying smaller amounts");
                     return Err(PathFindError::PathFind(orig_err));
                 }
             }
@@ -2075,6 +2057,10 @@ impl PaymentSession {
 
     pub fn is_send_payment_with_router(&self) -> bool {
         !self.request.router.is_empty()
+    }
+
+    pub fn is_dry_run(&self) -> bool {
+        self.request.dry_run
     }
 
     pub fn attempts(&self) -> Vec<Attempt> {

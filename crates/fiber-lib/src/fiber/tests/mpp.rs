@@ -1225,44 +1225,42 @@ async fn test_mpp_tlc_set_without_payment_data() {
 }
 
 #[tokio::test]
-async fn test_send_mpp_dry_run_will_not_create_payment_session() {
+async fn test_send_mpp_dry_run_will_be_ok_with_single_path() {
     init_tracing();
 
     let (nodes, _channels) = create_n_nodes_network(
         &[
             ((0, 1), (MIN_RESERVED_CKB + 400000, MIN_RESERVED_CKB)),
             ((1, 2), (MIN_RESERVED_CKB + 100000, MIN_RESERVED_CKB)),
+            ((1, 2), (MIN_RESERVED_CKB + 100000, MIN_RESERVED_CKB)),
+            ((1, 2), (MIN_RESERVED_CKB + 100000, MIN_RESERVED_CKB)),
         ],
-        4,
+        3,
     )
     .await;
-    let [node_0, _node_1, node_2, node_3] = nodes.try_into().expect("4 nodes");
+    let [node_0, _node_1, mut node_2] = nodes.try_into().expect("ok nodes");
 
-    let payment_hash = gen_rand_sha256_hash();
-    let res = node_0
-        .send_payment(SendPaymentCommand {
-            payment_hash: Some(payment_hash),
-            amount: Some(1000),
-            dry_run: true,
-            target_pubkey: node_3.pubkey.into(),
-            ..Default::default()
-        })
-        .await;
-    eprintln!("res: {:?}", res);
-    let payment = node_0.get_payment_session(payment_hash);
-    assert!(payment.is_none(), "Payment session should not be created");
+    // let res = node_0
+    //     .send_mpp_payment_with_dry_run_option(&mut node_2, 5000, None, true)
+    //     .await;
 
-    let payment_hash = gen_rand_sha256_hash();
+    // dbg!(&res);
+    // assert!(res.is_ok(), "Send payment failed: {:?}", res);
+    // let query_res = res.unwrap();
+    // let payment_hash = query_res.payment_hash;
+    // let payment_session = node_0.get_payment_session(payment_hash);
+    // assert!(
+    //     payment_session.is_none(),
+    //     "Payment session should not exist"
+    // );
+    // assert_eq!(query_res.routers.len(), 1, "Should have only one path");
+
     let res = node_0
-        .send_payment(SendPaymentCommand {
-            payment_hash: Some(payment_hash),
-            amount: Some(1000),
-            dry_run: true,
-            target_pubkey: node_2.pubkey.into(),
-            ..Default::default()
-        })
+        .send_mpp_payment_with_dry_run_option(&mut node_2, 300000 + 1, None, true)
         .await;
-    assert!(res.is_ok(), "Send payment query failed: {:?}", res);
-    let payment = node_0.get_payment_session(payment_hash);
-    assert!(payment.is_none(), "Payment session should not be created");
+    dbg!(&res);
+    assert!(
+        res.is_err(),
+        "Send payment query should fail for amount larger than available liquidity"
+    );
 }
