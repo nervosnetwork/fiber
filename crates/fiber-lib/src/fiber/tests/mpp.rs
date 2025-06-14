@@ -1228,59 +1228,132 @@ async fn test_mpp_tlc_set_without_payment_data() {
 async fn test_send_mpp_dry_run_will_be_ok_with_single_path() {
     init_tracing();
 
-    let (nodes, _channels) = create_n_nodes_network(
-        &[
-            ((0, 1), (MIN_RESERVED_CKB + 400000, MIN_RESERVED_CKB)),
-            ((1, 2), (MIN_RESERVED_CKB + 100000, MIN_RESERVED_CKB)),
-            ((1, 2), (MIN_RESERVED_CKB + 100000, MIN_RESERVED_CKB)),
-            ((1, 2), (MIN_RESERVED_CKB + 100000, MIN_RESERVED_CKB)),
-        ],
-        3,
-    )
-    .await;
-    let [node_0, _node_1, mut node_2] = nodes.try_into().expect("ok nodes");
-
-    let res = node_0
-        .send_mpp_payment_with_dry_run_option(&mut node_2, 5000, None, true)
+    async fn test_dryrun_with_network(
+        amount: u128,
+        expect_routers_count: Option<usize>,
+        expected_fee: Option<u128>,
+    ) {
+        let (nodes, _channels) = create_n_nodes_network(
+            &[
+                ((0, 1), (MIN_RESERVED_CKB + 400000, MIN_RESERVED_CKB)),
+                ((1, 2), (MIN_RESERVED_CKB + 100000, MIN_RESERVED_CKB)),
+                ((1, 2), (MIN_RESERVED_CKB + 100000, MIN_RESERVED_CKB)),
+                ((1, 2), (MIN_RESERVED_CKB + 100000, MIN_RESERVED_CKB)),
+            ],
+            3,
+        )
         .await;
+        let [node_0, _node_1, mut node_2] = nodes.try_into().expect("ok nodes");
+        let res = node_0
+            .send_mpp_payment_with_dry_run_option(&mut node_2, amount, None, true)
+            .await;
 
-    dbg!(&res);
-    assert!(res.is_ok(), "Send payment failed: {:?}", res);
-    let query_res = res.unwrap();
-    let payment_hash = query_res.payment_hash;
-    let payment_session = node_0.get_payment_session(payment_hash);
-    assert!(
-        payment_session.is_none(),
-        "Payment session should not exist"
-    );
-    assert_eq!(query_res.routers.len(), 1, "Should have only one path");
+        if let Some(count) = expect_routers_count {
+            assert!(res.is_ok(), "Send payment failed: {:?}", res);
+            let query_res = res.unwrap();
+            assert_eq!(query_res.routers.len(), count);
+            let fee = query_res.fee;
+            let total_amount: u128 = query_res.routers.iter().map(|r| r.receiver_amount()).sum();
+            assert_eq!(total_amount, amount,);
+            if let Some(expect_fee) = expected_fee {
+                assert_eq!(fee, expect_fee);
+            }
+        } else {
+            assert!(res.is_err());
+        }
+    }
 
-    let res = node_0
-        .send_mpp_payment_with_dry_run_option(&mut node_2, 300000 + 1, None, true)
+    test_dryrun_with_network(5000, Some(1), Some(5)).await;
+    test_dryrun_with_network(300000, None, None).await;
+    test_dryrun_with_network(300000 - 200, None, None).await;
+    test_dryrun_with_network(300000 - 300, Some(3), Some(300)).await;
+}
+
+#[tokio::test]
+async fn test_send_mpp_direct_channels_dry_run() {
+    init_tracing();
+
+    async fn test_dryrun_with_network(amount: u128, expect_routers_count: Option<usize>) {
+        let (nodes, _channels) = create_n_nodes_network(
+            &[
+                ((0, 1), (MIN_RESERVED_CKB + 100000, MIN_RESERVED_CKB)),
+                ((0, 1), (MIN_RESERVED_CKB + 100000, MIN_RESERVED_CKB)),
+                ((0, 1), (MIN_RESERVED_CKB + 100000, MIN_RESERVED_CKB)),
+            ],
+            3,
+        )
         .await;
-    dbg!(&res);
-    assert!(
-        res.is_err(),
-        "Send payment query should fail for amount larger than available liquidity"
-    );
+        let [node_0, mut node_1, _node_2] = nodes.try_into().expect("ok nodes");
 
-    let res = node_0
-        .send_mpp_payment_with_dry_run_option(&mut node_2, 280000, None, true)
+        let res = node_0
+            .send_mpp_payment_with_dry_run_option(&mut node_1, amount, None, true)
+            .await;
+
+        if let Some(count) = expect_routers_count {
+            assert!(res.is_ok(), "Send payment failed: {:?}", res);
+            let query_res = res.unwrap();
+            assert_eq!(query_res.routers.len(), count);
+            let fee = query_res.fee;
+            assert_eq!(fee, 0);
+        } else {
+            assert!(res.is_err());
+        }
+    }
+
+    test_dryrun_with_network(100000 - 1, Some(1)).await;
+    test_dryrun_with_network(100000, Some(1)).await;
+    test_dryrun_with_network(100001, Some(2)).await;
+    test_dryrun_with_network(200000, Some(2)).await;
+    test_dryrun_with_network(200001, Some(3)).await;
+    test_dryrun_with_network(300000, Some(3)).await;
+    test_dryrun_with_network(300001, None).await;
+}
+
+#[tokio::test]
+async fn test_send_mpp_dry_run_single_path_mixed_with_multiple_paths() {
+    init_tracing();
+
+    async fn test_dryrun_with_network(
+        amount: u128,
+        expect_routers_count: Option<usize>,
+        expected_fee: Option<u128>,
+    ) {
+        let (nodes, _channels) = create_n_nodes_network(
+            &[
+                ((0, 1), (MIN_RESERVED_CKB + 400000, MIN_RESERVED_CKB)),
+                ((1, 2), (MIN_RESERVED_CKB + 100000, MIN_RESERVED_CKB)),
+                ((1, 2), (MIN_RESERVED_CKB + 100000, MIN_RESERVED_CKB)),
+                ((1, 2), (MIN_RESERVED_CKB + 100000, MIN_RESERVED_CKB)),
+                ((0, 2), (MIN_RESERVED_CKB + 500000, MIN_RESERVED_CKB)),
+            ],
+            3,
+        )
         .await;
-    dbg!(&res);
-    assert!(res.is_ok(), "Send payment query should ok");
-    let routers = res.unwrap().routers;
-    assert_eq!(routers.len(), 3);
-    let fee: u128 = routers.iter().map(|r| r.fee()).sum();
-    eprintln!("Total fee: {}", fee);
-    assert!(fee > 0);
-    assert!(
-        routers.iter().all(|r| r.nodes.len() == 3),
-        "All paths should be 3 hops"
-    );
-    let total_amount: u128 = routers.iter().map(|r| r.receiver_amount()).sum();
-    assert_eq!(
-        total_amount, 280000,
-        "Total amount should match requested amount"
-    );
+        let [node_0, _node_1, mut node_2] = nodes.try_into().expect("ok nodes");
+        let res = node_0
+            .send_mpp_payment_with_dry_run_option(&mut node_2, amount, None, true)
+            .await;
+
+        if let Some(count) = expect_routers_count {
+            assert!(res.is_ok(), "Send payment failed: {:?}", res);
+            let query_res = res.unwrap();
+            assert_eq!(query_res.routers.len(), count);
+            let fee = query_res.fee;
+            let total_amount: u128 = query_res.routers.iter().map(|r| r.receiver_amount()).sum();
+            assert_eq!(total_amount, amount,);
+            if let Some(expect_fee) = expected_fee {
+                assert_eq!(fee, expect_fee);
+            }
+        } else {
+            assert!(res.is_err());
+        }
+    }
+
+    test_dryrun_with_network(1000, Some(1), Some(0)).await;
+    test_dryrun_with_network(500000, Some(1), Some(0)).await;
+    test_dryrun_with_network(300000, Some(1), None).await;
+    test_dryrun_with_network(500000 + 5, Some(2), Some(1)).await;
+    test_dryrun_with_network(600000 + 5, Some(3), Some(101)).await;
+    test_dryrun_with_network(700000 + 5, Some(4), Some(201)).await;
+    test_dryrun_with_network(800000, None, None).await;
 }
