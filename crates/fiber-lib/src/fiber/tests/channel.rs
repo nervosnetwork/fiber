@@ -1,10 +1,11 @@
 use crate::ckb::tests::test_utils::complete_commitment_tx;
 use crate::fiber::channel::{ChannelState, CloseFlags, UpdateCommand, XUDT_COMPATIBLE_WITNESS};
 use crate::fiber::config::{DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT};
+use crate::fiber::features::FeatureVector;
 use crate::fiber::graph::{ChannelInfo, PaymentSessionStatus};
 use crate::fiber::network::{DebugEvent, SendPaymentCommand};
 use crate::fiber::types::{
-    Hash256, PaymentHopData, PeeledOnionPacket, Pubkey, TlcErrorCode, NO_SHARED_SECRET,
+    Hash256, Init, PaymentHopData, PeeledOnionPacket, Pubkey, TlcErrorCode, NO_SHARED_SECRET,
 };
 use crate::invoice::{CkbInvoiceStatus, Currency, InvoiceBuilder};
 use crate::test_utils::{init_tracing, NetworkNode};
@@ -170,6 +171,44 @@ async fn test_create_private_channel() {
         false,
     )
     .await;
+}
+
+#[tokio::test]
+async fn test_send_init_msg_with_different_chain_hash() {
+    init_tracing();
+
+    let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
+
+    let dummy_err_chain_hash = Hash256::from([1; 32]);
+    node_a.send_init_peer_message(
+        node_b.peer_id.clone(),
+        Init {
+            features: FeatureVector::default(),
+            chain_hash: dummy_err_chain_hash,
+        },
+    );
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+    node_a
+        .expect_event(|event| match event {
+            NetworkServiceEvent::PeerDisConnected(peer_id, _reason) => {
+                assert_eq!(peer_id, &node_b.peer_id);
+                true
+            }
+            _ => false,
+        })
+        .await;
+
+    node_b
+        .expect_event(|event| match event {
+            NetworkServiceEvent::PeerDisConnected(peer_id, _reason) => {
+                assert_eq!(peer_id, &node_a.peer_id);
+                true
+            }
+            _ => false,
+        })
+        .await;
 }
 
 #[tokio::test]
@@ -1108,6 +1147,7 @@ async fn test_network_send_previous_tlc_error() {
                     AddTlcCommand {
                         amount: 10000,
                         payment_hash: generated_payment_hash,
+                        attempt_id: None,
                         expiry: DEFAULT_TLC_EXPIRY_DELTA + now_timestamp_as_millis_u64(),
                         hash_algorithm: HashAlgorithm::Sha256,
                         // invalid onion packet
@@ -1221,6 +1261,7 @@ async fn test_network_send_previous_tlc_error_with_limit_amount_error() {
                     AddTlcCommand {
                         amount: 300300000,
                         payment_hash: generated_payment_hash,
+                        attempt_id: None,
                         expiry: DEFAULT_TLC_EXPIRY_DELTA + now_timestamp_as_millis_u64(),
                         hash_algorithm: HashAlgorithm::Sha256,
                         // invalid onion packet
@@ -2196,6 +2237,7 @@ async fn do_test_channel_commitment_tx_after_add_tlc(algorithm: HashAlgorithm) {
                         amount: tlc_amount,
                         hash_algorithm: algorithm,
                         payment_hash: digest.into(),
+                        attempt_id: None,
                         expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
                         onion_packet: None,
                         shared_secret: NO_SHARED_SECRET,
@@ -2316,6 +2358,7 @@ async fn do_test_remove_tlc_with_wrong_hash_algorithm(
                         amount: tlc_amount,
                         hash_algorithm: correct_algorithm,
                         payment_hash: digest.into(),
+                        attempt_id: None,
                         expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
                         onion_packet: None,
                         shared_secret: NO_SHARED_SECRET,
@@ -2368,6 +2411,7 @@ async fn do_test_remove_tlc_with_wrong_hash_algorithm(
                         amount: tlc_amount,
                         hash_algorithm: wrong_algorithm,
                         payment_hash: digest.into(),
+                        attempt_id: None,
                         expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
                         onion_packet: None,
                         shared_secret: NO_SHARED_SECRET,
@@ -2448,6 +2492,7 @@ async fn do_test_channel_remote_commitment_error() {
                             amount: 1000,
                             hash_algorithm,
                             payment_hash: digest.into(),
+                            attempt_id: None,
                             expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
                             onion_packet: None,
                             shared_secret: NO_SHARED_SECRET,
@@ -2531,6 +2576,7 @@ async fn do_test_channel_add_tlc_amount_invalid() {
                     channel_id: new_channel_id,
                     command: ChannelCommand::AddTlc(
                         AddTlcCommand {
+                            attempt_id: None,
                             amount: send_amount,
                             hash_algorithm,
                             payment_hash: digest.into(),
@@ -2599,6 +2645,7 @@ async fn test_network_add_two_tlcs_remove_one() {
                         amount: 1000,
                         hash_algorithm: algorithm,
                         payment_hash: digest.into(),
+                        attempt_id: None,
                         expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
                         onion_packet: None,
                         shared_secret: NO_SHARED_SECRET,
@@ -2625,6 +2672,7 @@ async fn test_network_add_two_tlcs_remove_one() {
                         amount: 2000,
                         hash_algorithm: algorithm,
                         payment_hash: digest.into(),
+                        attempt_id: None,
                         expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
                         onion_packet: None,
                         shared_secret: NO_SHARED_SECRET,
@@ -2649,6 +2697,7 @@ async fn test_network_add_two_tlcs_remove_one() {
                         amount: 2000,
                         hash_algorithm: algorithm,
                         payment_hash: digest.into(),
+                        attempt_id: None,
                         expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
                         onion_packet: None,
                         shared_secret: NO_SHARED_SECRET,
@@ -2747,6 +2796,7 @@ async fn test_remove_tlc_with_expiry_error() {
         amount: tlc_amount,
         hash_algorithm: HashAlgorithm::CkbHash,
         payment_hash: digest.into(),
+        attempt_id: None,
         expiry: now_timestamp_as_millis_u64() + 10,
         onion_packet: None,
         shared_secret: NO_SHARED_SECRET,
@@ -2770,6 +2820,7 @@ async fn test_remove_tlc_with_expiry_error() {
         amount: tlc_amount,
         hash_algorithm: HashAlgorithm::CkbHash,
         payment_hash: digest.into(),
+        attempt_id: None,
         expiry: now_timestamp_as_millis_u64() + MAX_PAYMENT_TLC_EXPIRY_LIMIT + 20 * 1000,
         onion_packet: None,
         shared_secret: NO_SHARED_SECRET,
@@ -2809,6 +2860,7 @@ async fn do_test_add_tlc_duplicated() {
             amount: tlc_amount,
             hash_algorithm: HashAlgorithm::CkbHash,
             payment_hash: digest.into(),
+            attempt_id: None,
             expiry: now_timestamp_as_millis_u64() + 10,
             onion_packet: None,
             shared_secret: NO_SHARED_SECRET,
@@ -2848,6 +2900,7 @@ async fn do_test_add_tlc_waiting_ack() {
             amount: tlc_amount,
             hash_algorithm: HashAlgorithm::CkbHash,
             payment_hash: gen_rand_sha256_hash(),
+            attempt_id: None,
             expiry: now_timestamp_as_millis_u64() + 100000000,
             onion_packet: None,
             shared_secret: NO_SHARED_SECRET,
@@ -2879,6 +2932,7 @@ async fn do_test_add_tlc_waiting_ack() {
             amount: tlc_amount,
             hash_algorithm: HashAlgorithm::CkbHash,
             payment_hash: gen_rand_sha256_hash(),
+            attempt_id: None,
             expiry: now_timestamp_as_millis_u64() + 100000000,
             onion_packet: None,
             previous_tlc: None,
@@ -2934,6 +2988,7 @@ async fn do_test_add_tlc_with_number_limit() {
             amount: tlc_amount,
             hash_algorithm: HashAlgorithm::CkbHash,
             payment_hash: gen_rand_sha256_hash(),
+            attempt_id: None,
             expiry: now_timestamp_as_millis_u64() + 100000000,
             onion_packet: None,
             shared_secret: NO_SHARED_SECRET,
@@ -2965,6 +3020,7 @@ async fn do_test_add_tlc_with_number_limit() {
             amount: tlc_amount,
             hash_algorithm: HashAlgorithm::CkbHash,
             payment_hash: gen_rand_sha256_hash(),
+            attempt_id: None,
             expiry: now_timestamp_as_millis_u64() + 100000000,
             onion_packet: None,
             shared_secret: NO_SHARED_SECRET,
@@ -3013,6 +3069,7 @@ async fn do_test_add_tlc_number_limit_reverse() {
             amount: tlc_amount,
             hash_algorithm: HashAlgorithm::CkbHash,
             payment_hash: gen_rand_sha256_hash(),
+            attempt_id: None,
             expiry: now_timestamp_as_millis_u64() + 100000000,
             onion_packet: None,
             shared_secret: NO_SHARED_SECRET,
@@ -3044,6 +3101,7 @@ async fn do_test_add_tlc_number_limit_reverse() {
             amount: tlc_amount,
             hash_algorithm: HashAlgorithm::CkbHash,
             payment_hash: gen_rand_sha256_hash(),
+            attempt_id: None,
             expiry: now_timestamp_as_millis_u64() + 100000000,
             onion_packet: None,
             shared_secret: NO_SHARED_SECRET,
@@ -3093,6 +3151,7 @@ async fn do_test_add_tlc_value_limit() {
             amount: tlc_amount,
             hash_algorithm: HashAlgorithm::CkbHash,
             payment_hash: gen_rand_sha256_hash(),
+            attempt_id: None,
             expiry: now_timestamp_as_millis_u64() + 100000000,
             onion_packet: None,
             shared_secret: NO_SHARED_SECRET,
@@ -3125,6 +3184,7 @@ async fn do_test_add_tlc_value_limit() {
             amount: tlc_amount,
             hash_algorithm: HashAlgorithm::CkbHash,
             payment_hash: gen_rand_sha256_hash(),
+            attempt_id: None,
             expiry: now_timestamp_as_millis_u64() + 100000000,
             onion_packet: None,
             shared_secret: NO_SHARED_SECRET,
@@ -3172,6 +3232,7 @@ async fn do_test_add_tlc_min_tlc_value_limit() {
         amount: tlc_amount,
         hash_algorithm: HashAlgorithm::CkbHash,
         payment_hash: gen_rand_sha256_hash(),
+        attempt_id: None,
         expiry: now_timestamp_as_millis_u64() + 100000000,
         onion_packet: None,
         previous_tlc: None,
@@ -3196,6 +3257,7 @@ async fn do_test_add_tlc_min_tlc_value_limit() {
         amount: tlc_amount,
         hash_algorithm: HashAlgorithm::CkbHash,
         payment_hash: gen_rand_sha256_hash(),
+        attempt_id: None,
         expiry: now_timestamp_as_millis_u64() + 100000000,
         onion_packet: None,
         previous_tlc: None,
@@ -3220,6 +3282,7 @@ async fn do_test_add_tlc_min_tlc_value_limit() {
         amount: tlc_amount,
         hash_algorithm: HashAlgorithm::CkbHash,
         payment_hash: gen_rand_sha256_hash(),
+        attempt_id: None,
         expiry: now_timestamp_as_millis_u64() + 100000000,
         onion_packet: None,
         previous_tlc: None,
@@ -3479,6 +3542,7 @@ async fn test_forward_payment_tlc_minimum_value() {
         amount: tlc_amount,
         hash_algorithm: HashAlgorithm::CkbHash,
         payment_hash: gen_rand_sha256_hash(),
+        attempt_id: None,
         expiry: now_timestamp_as_millis_u64() + 100000000,
         onion_packet: None,
         previous_tlc: None,
@@ -3658,6 +3722,7 @@ async fn do_test_channel_with_simple_update_operation(algorithm: HashAlgorithm) 
                         amount: tlc_amount,
                         hash_algorithm: algorithm,
                         payment_hash: digest.into(),
+                        attempt_id: None,
                         expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
                         onion_packet: None,
                         shared_secret: NO_SHARED_SECRET,
@@ -4300,6 +4365,7 @@ async fn test_normal_shutdown_with_remove_tlc() {
                         amount: tlc_amount,
                         hash_algorithm: algorithm,
                         payment_hash: digest.into(),
+                        attempt_id: None,
                         expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
                         onion_packet: None,
                         shared_secret: NO_SHARED_SECRET,
@@ -4554,6 +4620,7 @@ async fn test_node_reestablish_resend_remove_tlc() {
                         amount: 1000,
                         hash_algorithm: HashAlgorithm::CkbHash,
                         payment_hash: payment_hash.into(),
+                        attempt_id: None,
                         expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
                         onion_packet: None,
                         shared_secret: NO_SHARED_SECRET,
@@ -5038,7 +5105,8 @@ async fn test_send_payment_with_channel_balance_error() {
     // because there is only one path for the payment, the payment will fail in the second try
     // this assertion make sure we didn't do meaningless retry
     let payment_session = source_node.get_payment_session(payment_hash).unwrap();
-    assert_eq!(payment_session.retried_times, 2);
+    assert_eq!(payment_session.attempts().len(), 1);
+    assert_eq!(payment_session.retry_times(), 2);
 }
 
 #[tokio::test]
@@ -5063,8 +5131,8 @@ async fn test_send_payment_with_disable_channel() {
 
     // because there is only one path for the payment, the payment will fail in the second try
     // this assertion make sure we didn't do meaningless retry
-    let payment_session = node_3.get_payment_session(payment_hash).unwrap();
-    assert_eq!(payment_session.retried_times, 2);
+    let payment_session_state = node_3.get_payment_session(payment_hash).unwrap();
+    assert_eq!(payment_session_state.retry_times(), 2);
 
     // expect send payment successfully from node_0 to node_3
     let res = node_0.send_payment_keysend(&node_3, 3000, false).await;
@@ -5074,7 +5142,7 @@ async fn test_send_payment_with_disable_channel() {
     node_0.wait_until_success(payment_hash).await;
 
     let payment_session = node_0.get_payment_session(payment_hash).unwrap();
-    assert_eq!(payment_session.retried_times, 1);
+    assert_eq!(payment_session.retry_times(), 1);
 }
 
 #[tokio::test]
@@ -5119,7 +5187,8 @@ async fn test_send_payment_with_multiple_edges_in_middle_hops() {
     // because there is only one path for the payment, the payment will fail in the second try
     // this assertion make sure we didn't do meaningless retry
     let payment_session = source_node.get_payment_session(payment_hash).unwrap();
-    assert_eq!(payment_session.retried_times, 1);
+    assert_eq!(payment_session.retry_times(), 1);
+    assert_eq!(payment_session.attempts().len(), 1);
 }
 
 #[tokio::test]
@@ -5165,7 +5234,8 @@ async fn test_send_payment_with_all_failed_middle_hops() {
     // this assertion make sure we didn't do meaningless retry
     assert!(node_0.get_triggered_unexpected_events().await.is_empty());
     let payment_session = source_node.get_payment_session(payment_hash).unwrap();
-    assert_eq!(payment_session.retried_times, 3);
+    assert_eq!(payment_session.attempts().len(), 1);
+    assert_eq!(payment_session.retry_times(), 3);
 }
 
 #[tokio::test]
@@ -5211,7 +5281,8 @@ async fn test_send_payment_with_multiple_edges_can_succeed_in_retry() {
     // because there is only one path for the payment, the payment will fail in the second try
     // this assertion make sure we didn't do meaningless retry
     let payment_session = source_node.get_payment_session(payment_hash).unwrap();
-    assert_eq!(payment_session.retried_times, 2);
+    assert_eq!(payment_session.attempts().len(), 1);
+    assert_eq!(payment_session.retry_times(), 2);
 }
 
 #[tokio::test]
@@ -5256,7 +5327,8 @@ async fn test_send_payment_with_final_hop_multiple_edges_in_middle_hops() {
     // because there is only one path for the payment, the payment will fail in the second try
     // this assertion make sure we didn't do meaningless retry
     let payment_session = source_node.get_payment_session(payment_hash).unwrap();
-    assert_eq!(payment_session.retried_times, 1);
+    assert_eq!(payment_session.attempts().len(), 1);
+    assert_eq!(payment_session.retry_times(), 1);
 }
 
 #[tokio::test]

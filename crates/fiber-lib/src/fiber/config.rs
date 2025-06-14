@@ -10,6 +10,8 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::{fs, path::PathBuf, str::FromStr};
 use tentacle::secio::{PublicKey, SecioKeyPair};
 
+use super::features::FeatureVector;
+
 pub const CKB_SHANNONS: u64 = 100_000_000; // 1 CKB = 10 ^ 8 shannons
 pub const DEFAULT_MIN_SHUTDOWN_FEE: u64 = CKB_SHANNONS; // 1 CKB prepared for shutdown transaction fee
 
@@ -49,6 +51,12 @@ pub const DEFAULT_AUTO_ANNOUNCE_NODE: bool = true;
 /// The interval to reannounce NodeAnnouncement, in seconds.
 pub const DEFAULT_ANNOUNCE_NODE_INTERVAL_SECONDS: u64 = 3600;
 
+/// The maximum time to hold a tlc, in milliseconds.
+#[cfg(not(test))]
+pub const DEFAULT_HOLD_TLC_TIMEOUT: u64 = 120 * 1000;
+#[cfg(test)]
+pub const DEFAULT_HOLD_TLC_TIMEOUT: u64 = 2000;
+
 /// The interval to maintain the gossip network, in milli-seconds.
 #[cfg(not(any(test, feature = "bench")))]
 pub const DEFAULT_GOSSIP_NETWORK_MAINTENANCE_INTERVAL_MS: u64 = 1000 * 60;
@@ -73,6 +81,13 @@ pub const DEFAULT_GOSSIP_STORE_MAINTENANCE_INTERVAL_MS: u64 = 50;
 
 /// Whether to sync the network graph from the network. true means syncing.
 pub const DEFAULT_SYNC_NETWORK_GRAPH: bool = true;
+
+/// The maximum number of parts for a multi-part payment.
+pub const DEFAULT_MAX_PARTS: u64 = 16;
+pub const PAYMENT_MAX_PARTS_LIMIT: u64 = 64;
+
+/// The minimum amount for a part of a multi-part payment.
+pub const DEFAULT_MPP_MIN_AMOUNT: u128 = 10000;
 
 // See comment in `LdkConfig` for why do we need to specify both name and long,
 // and prefix them with `ckb-`/`CKB_`.
@@ -491,6 +506,13 @@ impl FiberConfig {
     pub fn sync_network_graph(&self) -> bool {
         self.sync_network_graph
             .unwrap_or(DEFAULT_SYNC_NETWORK_GRAPH)
+    }
+
+    pub fn gen_node_features(&self) -> FeatureVector {
+        let mut feature = FeatureVector::default();
+        feature.set_gossip_queries_required();
+        // override default features from config settings
+        feature
     }
 }
 

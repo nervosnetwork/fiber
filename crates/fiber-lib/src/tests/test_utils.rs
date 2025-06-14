@@ -11,9 +11,11 @@ use crate::fiber::network::*;
 use crate::fiber::types::EcdsaSignature;
 use crate::fiber::types::FiberMessage;
 use crate::fiber::types::GossipMessage;
+use crate::fiber::types::Init;
 use crate::fiber::types::Pubkey;
 use crate::fiber::types::Shutdown;
 use crate::fiber::ASSUME_NETWORK_ACTOR_ALIVE;
+use crate::gen_rand_sha256_hash;
 use crate::invoice::*;
 use crate::rpc::config::RpcConfig;
 use crate::rpc::server::start_rpc;
@@ -635,6 +637,14 @@ impl NetworkNode {
             .to_remote_amount
     }
 
+    pub fn get_tlc(&self, channel_id: Hash256, tlc_id: TLCId) -> Option<TlcInfo> {
+        let state = self.get_channel_actor_state(channel_id);
+        match tlc_id {
+            TLCId::Offered(..) => state.get_offered_tlc(tlc_id).cloned(),
+            TLCId::Received(..) => state.get_received_tlc(tlc_id).cloned(),
+        }
+    }
+
     pub fn get_channel_actor_state(&self, channel_id: Hash256) -> ChannelActorState {
         self.get_channel_actor_state_unchecked(channel_id)
             .expect("get channel")
@@ -678,6 +688,51 @@ impl NetworkNode {
         call!(self.network_actor, message).expect("source_node alive")
     }
 
+    pub async fn send_mpp_payment(
+        &self,
+        target_node: &mut NetworkNode,
+        amount: u128,
+        max_parts: Option<u64>,
+    ) -> Result<SendPaymentResponse, String> {
+        self.send_mpp_payment_with_dry_run_option(
+            target_node,
+            amount,
+            max_parts,
+            false, // dry_run is false
+        )
+        .await
+    }
+
+    pub async fn send_mpp_payment_with_dry_run_option(
+        &self,
+        target_node: &mut NetworkNode,
+        amount: u128,
+        max_parts: Option<u64>,
+        dry_run: bool,
+    ) -> Result<SendPaymentResponse, String> {
+        let target_pubkey = target_node.get_public_key();
+        let preimage = gen_rand_sha256_hash();
+        let ckb_invoice = InvoiceBuilder::new(Currency::Fibd)
+            .amount(Some(amount))
+            .payment_preimage(preimage)
+            .payee_pub_key(target_pubkey.into())
+            .allow_mpp(true)
+            .payment_secret(gen_rand_sha256_hash())
+            .build()
+            .expect("build invoice success");
+
+        target_node.insert_invoice(ckb_invoice.clone(), Some(preimage));
+
+        self.send_payment(SendPaymentCommand {
+            invoice: Some(ckb_invoice.to_string()),
+            amount: ckb_invoice.amount,
+            max_parts,
+            dry_run,
+            ..Default::default()
+        })
+        .await
+    }
+
     pub async fn assert_send_payment_success(
         &self,
         command: SendPaymentCommand,
@@ -699,9 +754,7 @@ impl NetworkNode {
             ))
         };
 
-        let res = call!(self.network_actor, message).expect("source_node alive");
-        eprintln!("result: {:?}", res);
-        res
+        call!(self.network_actor, message).expect("source_node alive")
     }
 
     pub async fn build_router(&self, command: BuildRouterCommand) -> Result<PaymentRouter, String> {
@@ -711,9 +764,7 @@ impl NetworkNode {
             ))
         };
 
-        let res = call!(self.network_actor, message).expect("source_node alive");
-        eprintln!("result: {:?}", res);
-        res
+        call!(self.network_actor, message).expect("source_node alive")
     }
 
     pub async fn send_abandon_channel(&self, channel_id: Hash256) -> Result<(), String> {
@@ -865,7 +916,7 @@ impl NetworkNode {
 
         if let Some(expected_retried) = expected_retried {
             let payment_session = self.get_payment_session(payment_hash).unwrap();
-            assert_eq!(payment_session.retried_times, expected_retried);
+            assert_eq!(payment_session.retry_times(), expected_retried);
         }
     }
 
@@ -893,8 +944,7 @@ impl NetworkNode {
         payment_result: &SendPaymentResponse,
         channel_id: Hash256,
     ) {
-        let used_channels = payment_result
-            .router
+        let used_channels = payment_result.routers[0]
             .nodes
             .iter()
             .map(|r| r.channel_outpoint.clone())
@@ -910,6 +960,7 @@ impl NetworkNode {
         loop {
             assert!(self.get_triggered_unexpected_events().await.is_empty());
             let status = self.get_payment_status(payment_hash).await;
+            eprintln!("Payment status: {:?}", status);
             if status == PaymentSessionStatus::Success {
                 error!("Payment success: {:?}\n\n", payment_hash);
                 break;
@@ -1059,8 +1110,10 @@ impl NetworkNode {
         let funding_tx_hash = self.get_channel_funding_tx(&channel_id).unwrap();
         let channel_outpoint = OutPoint::new(funding_tx_hash.into(), 0);
         let payment_session = self.get_payment_session(payment_hash).unwrap();
+        let attempts = payment_session.attempts();
+        let first_attempt = attempts.first().expect("at least one attempt");
         assert_eq!(
-            payment_session.route.nodes[index].channel_outpoint,
+            first_attempt.route.nodes[index].channel_outpoint,
             channel_outpoint
         );
     }
@@ -1263,6 +1316,17 @@ impl NetworkNode {
             .expect("send ckb chain message");
     }
 
+    pub fn send_init_peer_message(&self, remote_peer_id: PeerId, message: Init) {
+        self.network_actor
+            .send_message(NetworkActorMessage::new_command(
+                crate::fiber::NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
+                    remote_peer_id,
+                    FiberMessage::Init(message),
+                )),
+            ))
+            .expect("send init peer message");
+    }
+
     pub async fn add_unexpected_events(&self, events: Vec<String>) {
         let mut unexpected_events = self.unexpected_events.write().await;
         for event in events {
@@ -1326,7 +1390,7 @@ impl NetworkNode {
     pub async fn new_interconnected_nodes(n: usize, enable_rpc: bool) -> Vec<Self> {
         let mut nodes: Vec<NetworkNode> = Vec::with_capacity(n);
         for i in 0..n {
-            let new = Self::new_with_config(
+            let mut new = Self::new_with_config(
                 NetworkNodeConfigBuilder::new()
                     .node_name(Some(format!("node-{}", i)))
                     .base_dir_prefix(&format!("test-fnn-node-{}-", i))
@@ -1335,7 +1399,7 @@ impl NetworkNode {
             )
             .await;
             for node in nodes.iter_mut() {
-                node.connect_to(&new).await;
+                node.connect_to(&mut new).await;
             }
             nodes.push(new);
         }
@@ -1381,9 +1445,9 @@ impl NetworkNode {
     ) -> Vec<Self> {
         let mut nodes: Vec<NetworkNode> = Vec::with_capacity(n);
         for i in 0..n {
-            let new = Self::new_with_config(config_gen(i)).await;
+            let mut new = Self::new_with_config(config_gen(i)).await;
             for node in nodes.iter_mut() {
-                node.connect_to(&new).await;
+                node.connect_to(&mut new).await;
             }
             nodes.push(new);
         }
@@ -1404,13 +1468,15 @@ impl NetworkNode {
             .expect("self alive");
     }
 
-    pub async fn connect_to(&mut self, other: &Self) {
+    pub async fn connect_to(&mut self, other: &mut Self) {
         self.connect_to_nonblocking(other).await;
         let peer_id = &other.peer_id;
         self.expect_event(
             |event| matches!(event, NetworkServiceEvent::PeerConnected(id, _addr) if id == peer_id),
         )
         .await;
+        self.expect_debug_event("PeerInit").await;
+        other.expect_debug_event("PeerInit").await;
     }
 
     pub async fn expect_to_process_event<F, T>(&mut self, event_processor: F) -> T
@@ -1559,4 +1625,17 @@ pub async fn create_mock_chain_actor() -> ActorRef<CkbChainMessage> {
         .await
         .expect("start mock chain actor")
         .0
+}
+
+#[tokio::test]
+async fn test_connect_to_other_node() {
+    let mut node_a = NetworkNode::new().await;
+    let mut node_b = NetworkNode::new().await;
+    node_a.connect_to(&mut node_b).await;
+}
+
+#[tokio::test]
+async fn test_restart_network_node() {
+    let mut node = NetworkNode::new().await;
+    node.restart().await;
 }
