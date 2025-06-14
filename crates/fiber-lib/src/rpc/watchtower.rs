@@ -1,20 +1,22 @@
+use jsonrpsee::proc_macros::rpc;
+#[cfg(feature = "watchtower")]
+use jsonrpsee::types::ErrorObjectOwned;
+
 use ckb_jsonrpc_types::Script;
-use jsonrpsee::{proc_macros::rpc, types::ErrorObjectOwned};
-use ractor::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 
-use crate::{
-    fiber::{
-        channel::{RevocationData, SettlementData},
-        types::Hash256,
-    },
-    invoice::PreimageStore,
-    watchtower::WatchtowerStore,
+use crate::fiber::{
+    channel::{RevocationData, SettlementData},
+    types::Hash256,
 };
 
+#[cfg(feature = "watchtower")]
+use crate::{invoice::PreimageStore, watchtower::WatchtowerStore};
+
 /// RPC module for watchtower related operations
-#[rpc(client, server)]
+#[cfg_attr(feature = "watchtower", rpc(client, server))]
+#[cfg_attr(not(feature = "watchtower"), rpc(client))]
 trait WatchtowerRpc {
     /// Create a new watched channel
     #[method(name = "create_watch_channel")]
@@ -107,17 +109,20 @@ pub struct RemovePreimageParams {
     pub payment_hash: Hash256,
 }
 
+#[cfg(feature = "watchtower")]
 pub struct WatchtowerRpcServerImpl<S> {
     store: S,
 }
 
+#[cfg(feature = "watchtower")]
 impl<S> WatchtowerRpcServerImpl<S> {
     pub fn new(store: S) -> Self {
         Self { store }
     }
 }
 
-#[async_trait]
+#[cfg(feature = "watchtower")]
+#[async_trait::async_trait]
 impl<S> WatchtowerRpcServer for WatchtowerRpcServerImpl<S>
 where
     S: PreimageStore + WatchtowerStore + Send + Sync + 'static,

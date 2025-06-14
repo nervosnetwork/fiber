@@ -1,6 +1,6 @@
 use ckb_sdk::{
     rpc::ckb_indexer::{Order, ScriptType, SearchKey, SearchMode},
-    CkbRpcClient,
+    CkbRpcAsyncClient,
 };
 use ckb_types::{
     core::{BlockView, DepType, ScriptHashType},
@@ -81,8 +81,8 @@ impl TypeIDResolver {
         Self { ckb_url }
     }
 
-    pub fn resolve(&self, type_id: Script) -> Option<CellDep> {
-        let ckb_client = CkbRpcClient::new(&self.ckb_url);
+    pub async fn resolve(&self, type_id: Script) -> Option<CellDep> {
+        let ckb_client = CkbRpcAsyncClient::new(&self.ckb_url);
         let search_key = SearchKey {
             script: type_id.into(),
             script_type: ScriptType::Type,
@@ -93,6 +93,7 @@ impl TypeIDResolver {
         };
         let cells = ckb_client
             .get_cells(search_key, Order::Desc, 1u32.into(), None)
+            .await
             .ok()?;
         let cell = cells.objects.first()?;
         let cell_dep = CellDep::new_builder()
@@ -131,7 +132,7 @@ pub enum ContractsContextError {
 }
 
 impl ContractsContext {
-    pub fn try_new(
+    pub async fn try_new(
         genesis_block: BlockView,
         fiber_scripts: Vec<FiberScript>,
         udt_whitelist: UdtCfgInfos,
@@ -260,7 +261,7 @@ impl ContractsContext {
             if let ScriptCellDep::TypeID(type_id) = cell_dep {
                 let err = || ContractsContextError::CannotResolveCellDep(type_id.clone());
                 let resolver = type_id_resolver.as_ref().ok_or_else(err)?;
-                resolver.resolve(type_id.clone()).ok_or_else(err)?;
+                resolver.resolve(type_id.clone()).await.ok_or_else(err)?;
             }
         }
 
@@ -272,7 +273,10 @@ impl ContractsContext {
             if let Some(type_id) = cell_dep.type_id {
                 let err = || ContractsContextError::CannotResolveCellDep(type_id.clone().into());
                 let resolver = type_id_resolver.as_ref().ok_or_else(err)?;
-                resolver.resolve(type_id.clone().into()).ok_or_else(err)?;
+                resolver
+                    .resolve(type_id.clone().into())
+                    .await
+                    .ok_or_else(err)?;
             }
         }
 
@@ -290,7 +294,7 @@ impl ContractsContext {
         &self.contracts.contract_default_scripts
     }
 
-    pub(crate) fn get_cell_deps(
+    pub(crate) async fn get_cell_deps(
         &self,
         contracts: Vec<Contract>,
     ) -> Result<CellDepVec, ContractsContextError> {
@@ -306,7 +310,8 @@ impl ContractsContext {
                             let err =
                                 || ContractsContextError::CannotResolveCellDep(type_id.clone());
                             let resolver = self.type_id_resolver.as_ref().ok_or_else(err)?;
-                            let cell_dep = resolver.resolve(type_id.clone()).ok_or_else(err)?;
+                            let cell_dep =
+                                resolver.resolve(type_id.clone()).await.ok_or_else(err)?;
                             builder = builder.push(cell_dep);
                         }
                     }
@@ -327,7 +332,7 @@ impl ContractsContext {
         count
     }
 
-    pub(crate) fn get_udt_cell_deps(
+    pub(crate) async fn get_udt_cell_deps(
         &self,
         udt_deps: Vec<UdtDep>,
     ) -> Result<CellDepVec, ContractsContextError> {
@@ -349,7 +354,7 @@ impl ContractsContext {
                         .hash_type(type_id.hash_type())
                         .args(type_id.args())
                         .build();
-                    let cell_dep = resolver.resolve(type_id).ok_or_else(err)?;
+                    let cell_dep = resolver.resolve(type_id).await.ok_or_else(err)?;
                     builder = builder.push(cell_dep);
                 }
             }
@@ -391,19 +396,22 @@ impl ContractsContext {
 
 pub static CONTRACTS_CONTEXT_INSTANCE: OnceCell<ContractsContext> = OnceCell::new();
 
-pub fn try_init_contracts_context(
+pub async fn try_init_contracts_context(
     genesis_block: BlockView,
     fiber_scripts: Vec<FiberScript>,
     udt_whitelist: UdtCfgInfos,
     type_id_resolver: Option<TypeIDResolver>,
 ) -> Result<(), ContractsContextError> {
     CONTRACTS_CONTEXT_INSTANCE
-        .set(ContractsContext::try_new(
-            genesis_block,
-            fiber_scripts,
-            udt_whitelist,
-            type_id_resolver,
-        )?)
+        .set(
+            ContractsContext::try_new(
+                genesis_block,
+                fiber_scripts,
+                udt_whitelist,
+                type_id_resolver,
+            )
+            .await?,
+        )
         .map_err(|_| ContractsContextError::ContextAlreadyInitialized)
 }
 
@@ -427,10 +435,10 @@ pub fn get_script_by_contract(contract: Contract, args: &[u8]) -> Script {
     get_contracts_context().get_script(contract, args)
 }
 
-pub fn get_cell_deps_by_contracts(
+pub async fn get_cell_deps_by_contracts(
     contracts: Vec<Contract>,
 ) -> Result<CellDepVec, ContractsContextError> {
-    get_contracts_context().get_cell_deps(contracts)
+    get_contracts_context().get_cell_deps(contracts).await
 }
 
 pub fn get_cell_deps_count_by_contracts(contracts: Vec<Contract>) -> usize {
@@ -445,15 +453,16 @@ pub fn check_udt_script(script: &Script) -> bool {
     get_udt_info(script).is_some()
 }
 
-pub fn resolve_udt_cell_deps(udt: &UdtArgInfo) -> Result<CellDepVec, ContractsContextError> {
+pub async fn resolve_udt_cell_deps(udt: &UdtArgInfo) -> Result<CellDepVec, ContractsContextError> {
     get_contracts_context()
         .get_udt_cell_deps(udt.cell_deps.iter().cloned().map(Into::into).collect())
+        .await
 }
 
-pub fn get_udt_cell_deps(script: &Script) -> Result<CellDepVec, ContractsContextError> {
+pub async fn get_udt_cell_deps(script: &Script) -> Result<CellDepVec, ContractsContextError> {
     let udt = get_udt_info(script)
         .ok_or_else(|| ContractsContextError::CannotResolveUdtInfo(script.clone()))?;
-    resolve_udt_cell_deps(&udt)
+    resolve_udt_cell_deps(&udt).await
 }
 
 pub fn get_udt_whitelist() -> UdtCfgInfos {
@@ -469,13 +478,13 @@ pub fn is_udt_type_auto_accept(script: &Script, amount: u128) -> bool {
     false
 }
 
-pub fn get_cell_deps(
+pub async fn get_cell_deps(
     contracts: Vec<Contract>,
     udt_script: &Option<Script>,
 ) -> Result<CellDepVec, ContractsContextError> {
-    let cell_deps = get_cell_deps_by_contracts(contracts)?;
+    let cell_deps = get_cell_deps_by_contracts(contracts).await?;
     if let Some(udt_script) = udt_script {
-        if let Ok(udt_cell_deps) = get_udt_cell_deps(udt_script) {
+        if let Ok(udt_cell_deps) = get_udt_cell_deps(udt_script).await {
             let res = cell_deps
                 .into_iter()
                 .chain(udt_cell_deps)
@@ -484,6 +493,16 @@ pub fn get_cell_deps(
         }
     }
     Ok(cell_deps)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn get_cell_deps_sync(
+    contracts: Vec<Contract>,
+    udt_script: &Option<Script>,
+) -> Result<CellDepVec, ContractsContextError> {
+    tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(get_cell_deps(contracts, udt_script))
 }
 
 pub fn get_cell_deps_count(contracts: Vec<Contract>, udt_script: &Option<Script>) -> usize {
