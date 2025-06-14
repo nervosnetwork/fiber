@@ -83,7 +83,7 @@ use crate::fiber::config::{
     DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT, PAYMENT_MAX_PARTS_LIMIT,
 };
 use crate::fiber::gossip::{GossipConfig, GossipService, SubscribableGossipMessageStore};
-use crate::fiber::graph::{PaymentSession, PaymentSessionStatus};
+use crate::fiber::graph::{GraphChannelStat, PaymentSession, PaymentSessionStatus};
 use crate::fiber::serde_utils::EntityHex;
 use crate::fiber::types::{
     FiberChannelMessage, PaymentOnionPacket, PeeledPaymentOnionPacket, TlcErrPacket, TxSignatures,
@@ -469,6 +469,8 @@ pub struct SendPaymentData {
     pub router: Vec<RouterHop>,
     pub allow_mpp: bool,
     pub dry_run: bool,
+    #[serde(skip)]
+    pub channel_stats: GraphChannelStat,
 }
 
 impl SendPaymentData {
@@ -658,6 +660,7 @@ impl SendPaymentData {
             allow_mpp,
             router: vec![],
             dry_run: command.dry_run,
+            channel_stats: GraphChannelStat::default(),
         })
     }
 
@@ -2051,6 +2054,7 @@ where
         let max_fee = session.remain_fee_amount();
         let active_parts = session.attempts().iter().filter(|a| a.is_active()).count();
 
+        session.request.channel_stats = graph.channel_stats.clone();
         match graph.build_route(max_amount, max_fee, active_parts, &session.request) {
             Err(e) => {
                 let error = format!("Failed to build route, {}", e);
@@ -2070,6 +2074,54 @@ where
                 return Ok(hops);
             }
         };
+    }
+
+    async fn build_payment_routes(
+        &self,
+        session: &mut PaymentSession,
+    ) -> Result<Vec<Vec<PaymentHopData>>, Error> {
+        let graph = self.network_graph.read().await;
+        let source = graph.get_source_pubkey();
+        let active_parts = session.attempts().iter().filter(|a| a.is_active()).count();
+        let mut max_amount = session.remain_amount();
+        let mut max_fee = session.remain_fee_amount();
+        let mut routers = vec![];
+
+        session.request.channel_stats = graph.channel_stats.clone();
+        let mut attempt_id = 0;
+        while (routers.len() < session.max_parts() as usize - active_parts) && max_amount > 0 {
+            match graph.build_route(max_amount, max_fee, active_parts, &session.request) {
+                Err(e) => {
+                    let error = format!("Failed to build route, {}", e);
+                    self.set_payment_fail_with_error(session, &error);
+                    return Err(Error::SendPaymentError(error));
+                }
+                Ok(hops) => {
+                    let mut attempt = session.new_attempt(attempt_id);
+                    attempt_id += 1;
+                    attempt.route = SessionRoute::new(source, session.request.target_pubkey, &hops);
+                    assert_ne!(hops[0].funding_tx_hash, Hash256::default());
+                    for (from, channel_outpoint, amount) in attempt.channel_outpoints() {
+                        let Some(sent_node) = graph.get_channel_sent_node(channel_outpoint, from)
+                        else {
+                            continue;
+                        };
+                        session.request.channel_stats.add_channel(
+                            channel_outpoint,
+                            sent_node,
+                            amount,
+                        );
+                    }
+                    routers.push(hops);
+                    max_amount -= attempt.route.receiver_amount();
+                    if let Some(fee) = max_fee {
+                        max_fee = Some(fee - attempt.route.fee());
+                    }
+                    session.append_attempt(attempt);
+                }
+            };
+        }
+        return Ok(routers);
     }
 
     async fn send_payment_onion_packet(
@@ -2446,11 +2498,7 @@ where
         // will not store the payment session and send the onion packet
         if payment_data.dry_run {
             let mut payment_session = PaymentSession::new(&self.store, payment_data, 0);
-            let mut attempt = payment_session.new_attempt(0);
-            let _hops = self
-                .build_payment_route(&mut payment_session, &mut attempt, false)
-                .await?;
-            payment_session.append_attempt(attempt);
+            let _hops = self.build_payment_routes(&mut payment_session).await?;
             return Ok(payment_session.into());
         }
 

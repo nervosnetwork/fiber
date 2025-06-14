@@ -518,6 +518,7 @@ fn test_store_payment_session() {
         custom_records: None,
         router: vec![],
         allow_mpp: false,
+        channel_stats: Default::default(),
     };
     let payment_session = PaymentSession::new(&store, payment_data.clone(), 10);
     store.insert_payment_session(payment_session.clone());
@@ -550,6 +551,7 @@ fn test_store_payment_sessions_with_status() {
         custom_records: None,
         router: vec![],
         allow_mpp: false,
+        channel_stats: Default::default(),
     };
     let payment_session = PaymentSession::new(&store, payment_data.clone(), 10);
     store.insert_payment_session(payment_session.clone());
@@ -574,6 +576,7 @@ fn test_store_payment_sessions_with_status() {
         custom_records: None,
         router: vec![],
         allow_mpp: false,
+        channel_stats: Default::default(),
     };
     let mut payment_session = PaymentSession::new(&store, payment_data.clone(), 10);
     payment_session.set_success_status();

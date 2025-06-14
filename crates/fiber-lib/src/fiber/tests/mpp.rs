@@ -1240,20 +1240,20 @@ async fn test_send_mpp_dry_run_will_be_ok_with_single_path() {
     .await;
     let [node_0, _node_1, mut node_2] = nodes.try_into().expect("ok nodes");
 
-    // let res = node_0
-    //     .send_mpp_payment_with_dry_run_option(&mut node_2, 5000, None, true)
-    //     .await;
+    let res = node_0
+        .send_mpp_payment_with_dry_run_option(&mut node_2, 5000, None, true)
+        .await;
 
-    // dbg!(&res);
-    // assert!(res.is_ok(), "Send payment failed: {:?}", res);
-    // let query_res = res.unwrap();
-    // let payment_hash = query_res.payment_hash;
-    // let payment_session = node_0.get_payment_session(payment_hash);
-    // assert!(
-    //     payment_session.is_none(),
-    //     "Payment session should not exist"
-    // );
-    // assert_eq!(query_res.routers.len(), 1, "Should have only one path");
+    dbg!(&res);
+    assert!(res.is_ok(), "Send payment failed: {:?}", res);
+    let query_res = res.unwrap();
+    let payment_hash = query_res.payment_hash;
+    let payment_session = node_0.get_payment_session(payment_hash);
+    assert!(
+        payment_session.is_none(),
+        "Payment session should not exist"
+    );
+    assert_eq!(query_res.routers.len(), 1, "Should have only one path");
 
     let res = node_0
         .send_mpp_payment_with_dry_run_option(&mut node_2, 300000 + 1, None, true)

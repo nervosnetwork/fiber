@@ -299,7 +299,7 @@ pub enum OwnedChannelUpdateEvent {
 
 /// TODO: store this into DB in future?
 #[derive(Clone, Debug, Default)]
-pub struct GraphChannelStat {
+pub struct ChannelStatElem {
     // The pending payment attempt for a channel,
     // increase when a payment is sent, decreasing when a payment is succeed or failed.
     pub pending_count: usize,
@@ -309,7 +309,7 @@ pub struct GraphChannelStat {
     pub node2_sent_amount: u128,
 }
 
-impl GraphChannelStat {
+impl ChannelStatElem {
     pub fn new(pending_count: usize, sent_node: SentNode, amount: u128) -> Self {
         if sent_node == SentNode::Node1 {
             Self {
@@ -357,6 +357,44 @@ impl GraphChannelStat {
     }
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct GraphChannelStat {
+    pub inner: HashMap<OutPoint, ChannelStatElem>,
+}
+
+impl GraphChannelStat {
+    pub fn new() -> Self {
+        Self {
+            inner: HashMap::new(),
+        }
+    }
+
+    pub fn get_channel_count(&self, channel_outpoint: &OutPoint) -> usize {
+        self.inner
+            .get(channel_outpoint)
+            .map_or(0, |stat| stat.pending_count)
+    }
+
+    pub fn add_channel(&mut self, channel_outpoint: &OutPoint, sent_node: SentNode, amount: u128) {
+        self.inner
+            .entry(channel_outpoint.clone())
+            .and_modify(|e| e.new_attempt(sent_node, amount))
+            .or_insert(ChannelStatElem::new(1, sent_node, amount));
+    }
+
+    pub fn untrack_channel(
+        &mut self,
+        channel_outpoint: &OutPoint,
+        sent_node: SentNode,
+        amount: u128,
+        success: bool,
+    ) {
+        self.inner
+            .entry(channel_outpoint.clone())
+            .and_modify(|e| e.set_attempt_result(sent_node, amount, success));
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct NetworkGraph<S> {
     // Whether to always process gossip messages for our own channels.
@@ -376,7 +414,7 @@ pub struct NetworkGraph<S> {
     // this information is used to HELP the path finding algorithm for better routing in two ways:
     // 1. If a channel has more pending payment attempts, it may be overloaded and should not be used for routing.
     // 2. For middle hops, network graph can only get the channel capacity,
-    channel_stats: HashMap<OutPoint, GraphChannelStat>,
+    pub(crate) channel_stats: GraphChannelStat,
 
     // The latest cursor we read from the GossipMessageStore. When we need to refresh our view of the
     // the network, we need to load all the messages starting from this cursor.
@@ -446,7 +484,7 @@ where
             always_process_gossip_message: false,
             source,
             channels: HashMap::new(),
-            channel_stats: HashMap::new(),
+            channel_stats: GraphChannelStat::new(),
             nodes: HashMap::new(),
             latest_cursor: Cursor::default(),
             store: store.clone(),
@@ -467,12 +505,6 @@ where
         }
     }
 
-    pub fn get_channel_pending_attempts_count(&self, channel_outpoint: &OutPoint) -> usize {
-        self.channel_stats
-            .get(channel_outpoint)
-            .map_or(0, |stat| stat.pending_count)
-    }
-
     pub fn reset_channel_stats_for_direct_channel(
         &mut self,
         channel_outpoint: &OutPoint,
@@ -480,6 +512,7 @@ where
     ) {
         if let Some(sent_node) = self.get_channel_sent_node(channel_outpoint, node) {
             self.channel_stats
+                .inner
                 .entry(channel_outpoint.clone())
                 .and_modify(|e| e.reset_attempt(sent_node));
         }
@@ -537,7 +570,7 @@ where
             }
             OwnedChannelUpdateEvent::Down(channel_outpoint) => {
                 self.channels.remove(&channel_outpoint);
-                self.channel_stats.remove(&channel_outpoint);
+                self.channel_stats.inner.remove(&channel_outpoint);
             }
             OwnedChannelUpdateEvent::Updated(channel_outpoint, node, channel_update) => {
                 if let Some(channel) = self.channels.get_mut(&channel_outpoint) {
@@ -971,9 +1004,7 @@ where
                 continue;
             };
             self.channel_stats
-                .entry(channel_outpoint.clone())
-                .and_modify(|e| e.new_attempt(sent_node, amount))
-                .or_insert(GraphChannelStat::new(1, sent_node, amount));
+                .add_channel(channel_outpoint, sent_node, amount);
         }
     }
 
@@ -983,8 +1014,7 @@ where
                 continue;
             };
             self.channel_stats
-                .entry(channel_outpoint.clone())
-                .and_modify(|e| e.set_attempt_result(sent_node, amount, success));
+                .untrack_channel(channel_outpoint, sent_node, amount, success);
         }
     }
 
@@ -1071,30 +1101,30 @@ where
                 max_fee_amount,
                 payment_data,
             ) {
-            Ok(route) => (route, amount),
-            Err(PathFindError::PathFind(orig_err))
-                // Condition to attempt finding a smaller amount:
-                // - MPP is allowed for the payment.
-                // - This is not the last part we are forced to make (more flexible).
-                // - The requested amount is greater than the minimum allowed for a part.
-                if allow_mpp && amount > min_amount_for_a_part && !payment_data.dry_run =>
-            {
-               if let Ok(res) = self.binary_find_path_in_range(
-                    source,
-                    amount.saturating_sub(1),
-                    min_amount_for_a_part,
-                    max_fee_amount,
-                    payment_data
-                ) {
-                    res
-                } else {
-                    return Err(PathFindError::PathFind(orig_err));
+                Ok(route) => (route, amount),
+                Err(PathFindError::PathFind(orig_err))
+                    // Condition to attempt finding a smaller amount:
+                    // - MPP is allowed for the payment.
+                    // - This is not the last part we are forced to make (more flexible).
+                    // - The requested amount is greater than the minimum allowed for a part.
+                    if allow_mpp && amount > min_amount_for_a_part && !payment_data.dry_run =>
+                {
+                if let Ok(res) = self.binary_find_path_in_range(
+                        source,
+                        amount.saturating_sub(1),
+                        min_amount_for_a_part,
+                        max_fee_amount,
+                        payment_data
+                    ) {
+                        res
+                    } else {
+                        return Err(PathFindError::PathFind(orig_err));
+                    }
                 }
+                // Initial find_path failed with a non-PathFind error,
+                // or conditions for trying smaller amounts were not met.
+                Err(err) => return Err(err),
             }
-            // Initial find_path failed with a non-PathFind error,
-            // or conditions for trying smaller amounts were not met.
-            Err(err) => return Err(err),
-        }
         };
 
         assert!(
@@ -1122,6 +1152,7 @@ where
             payment_data.tlc_expiry_limit,
             payment_data.allow_self_payment,
             &payment_data.hop_hints,
+            &payment_data.channel_stats,
         )
     }
 
@@ -1298,6 +1329,7 @@ where
         distances: &mut HashMap<Pubkey, NodeHeapElement>,
         // The priority queue of nodes to be visited (sorted by distance and probability).
         nodes_heap: &mut NodeHeap,
+        channel_stats: &GraphChannelStat,
     ) {
         let mut probability = cur_probability
             * self.history.eval_probability(
@@ -1308,8 +1340,7 @@ where
                 channel_capacity,
             );
 
-        let pending_count =
-            self.get_channel_pending_attempts_count(channel_outpoint) + cur_pending_count;
+        let pending_count = channel_stats.get_channel_count(channel_outpoint) + cur_pending_count;
 
         if pending_count > 0 {
             probability *= (0.95f64).powi(pending_count as i32);
@@ -1376,6 +1407,7 @@ where
         tlc_expiry_limit: u64,
         allow_self: bool,
         hop_hints: &[HopHint],
+        channel_stats: &GraphChannelStat,
     ) -> Result<Vec<RouterHop>, PathFindError> {
         let started_time = std::time::Instant::now();
         let nodes_len = self.nodes.len();
@@ -1419,6 +1451,7 @@ where
                 final_tlc_expiry_delta,
                 &udt_type_script,
                 tlc_expiry_limit,
+                channel_stats,
             )?;
             target = new_target;
             expiry += expiry_delta;
@@ -1469,6 +1502,7 @@ where
                     0,
                     &mut distances,
                     &mut nodes_heap,
+                    channel_stats,
                 );
             }
         }
@@ -1545,6 +1579,7 @@ where
                     incoming_tlc_expiry,
                     tlc_expiry_limit,
                     send_node,
+                    channel_stats,
                 ) {
                     continue;
                 }
@@ -1575,6 +1610,7 @@ where
                     cur_hop.pending_count,
                     &mut distances,
                     &mut nodes_heap,
+                    channel_stats,
                 );
             }
         }
@@ -1620,6 +1656,7 @@ where
         expiry: u64,
         udt_type_script: &Option<Script>,
         tlc_expiry_limit: u64,
+        channel_stats: &GraphChannelStat,
     ) -> Result<(RouterHop, Pubkey, u64, u128), PathFindError> {
         let channels: Vec<_> = self
             .get_node_inbounds(source)
@@ -1634,6 +1671,7 @@ where
                         channel_info
                             .get_send_node(*from)
                             .expect("send_node should exist"),
+                        channel_stats,
                     )
             })
             .map(|(from, _, channel_info, channel_update)| {
@@ -1671,6 +1709,7 @@ where
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn check_channel_amount_and_expiry(
         &self,
         amount: u128,
@@ -1679,14 +1718,15 @@ where
         incoming_tlc_expiry: u64,
         tlc_expiry_limit: u64,
         sent_node: SentNode,
+        channel_stats: &GraphChannelStat,
     ) -> bool {
         // We should use amount_to_send because that is the amount to be sent over the channel.
         if amount < channel_update.tlc_minimum_value {
             return false;
         }
 
-        let sent_amount = self
-            .channel_stats
+        let sent_amount = channel_stats
+            .inner
             .get(channel_info.out_point())
             .map(|stat| match sent_node {
                 SentNode::Node1 => stat.node1_sent_amount,
@@ -2350,7 +2390,7 @@ impl Attempt {
             .unwrap_or_default()
     }
 
-    fn channel_outpoints(&self) -> impl Iterator<Item = (Pubkey, &OutPoint, u128)> {
+    pub(crate) fn channel_outpoints(&self) -> impl Iterator<Item = (Pubkey, &OutPoint, u128)> {
         self.route
             .nodes
             .iter()

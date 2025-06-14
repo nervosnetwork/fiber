@@ -231,6 +231,7 @@ impl MockNetworkGraph {
             MAX_PAYMENT_TLC_EXPIRY_LIMIT,
             false,
             &[],
+            &Default::default(),
         )
     }
 
@@ -254,6 +255,7 @@ impl MockNetworkGraph {
             MAX_PAYMENT_TLC_EXPIRY_LIMIT,
             false,
             &[],
+            &Default::default(),
         )
     }
 
@@ -604,6 +606,7 @@ fn test_graph_build_router_is_ok_with_fee_rate() {
         custom_records: None,
         router: vec![],
         allow_mpp: false,
+        channel_stats: Default::default(),
     };
     let route = network
         .graph
@@ -652,6 +655,7 @@ fn test_graph_build_router_fee_rate_optimize() {
         custom_records: None,
         router: vec![],
         allow_mpp: false,
+        channel_stats: Default::default(),
     };
 
     let route = network
@@ -692,6 +696,7 @@ fn test_graph_build_router_no_fee_with_direct_pay() {
         custom_records: None,
         router: vec![],
         allow_mpp: false,
+        channel_stats: Default::default(),
     };
     let route = network
         .graph
@@ -722,6 +727,7 @@ fn test_graph_find_path_err() {
         MAX_PAYMENT_TLC_EXPIRY_LIMIT,
         false,
         &[],
+        &Default::default(),
     );
     assert!(route.is_err());
 
@@ -735,6 +741,7 @@ fn test_graph_find_path_err() {
         MAX_PAYMENT_TLC_EXPIRY_LIMIT,
         false,
         &[],
+        &Default::default(),
     );
     assert!(route.is_err());
 }
@@ -759,6 +766,7 @@ fn test_graph_find_path_node_order() {
         MAX_PAYMENT_TLC_EXPIRY_LIMIT,
         false,
         &[],
+        &Default::default(),
     );
     assert!(route.is_ok());
     // check the order of nodes in router is node1 -> node2 -> node3
@@ -785,6 +793,7 @@ fn test_graph_build_route_with_expiry_limit() {
         MAX_PAYMENT_TLC_EXPIRY_LIMIT,
         false,
         &[],
+        &Default::default(),
     );
     assert!(route.is_ok());
 
@@ -798,6 +807,7 @@ fn test_graph_build_route_with_expiry_limit() {
         100,
         false,
         &[],
+        &Default::default(),
     );
     assert!(route.is_err());
 }
@@ -829,6 +839,7 @@ fn test_graph_build_route_three_nodes_amount() {
         custom_records: None,
         router: vec![],
         allow_mpp: false,
+        channel_stats: Default::default(),
     };
     let route = network
         .graph
@@ -885,6 +896,7 @@ fn do_test_graph_build_route_expiry(n_nodes: usize) {
         custom_records: None,
         router: vec![],
         allow_mpp: false,
+        channel_stats: Default::default(),
     };
     let route = network
         .graph
@@ -969,6 +981,7 @@ fn test_graph_build_route_below_min_tlc_value() {
         custom_records: None,
         router: vec![],
         allow_mpp: false,
+        channel_stats: Default::default(),
     };
     let route = network
         .graph
@@ -1005,6 +1018,7 @@ fn test_graph_build_route_select_edge_with_latest_timestamp() {
         custom_records: None,
         router: vec![],
         allow_mpp: false,
+        channel_stats: Default::default(),
     };
     let route = network
         .graph
@@ -1049,6 +1063,7 @@ fn test_graph_build_route_select_edge_with_large_capacity() {
         custom_records: None,
         router: vec![],
         allow_mpp: false,
+        channel_stats: Default::default(),
     };
     let route = network
         .graph
@@ -1110,6 +1125,7 @@ fn test_graph_mark_failed_channel() {
         custom_records: None,
         router: vec![],
         allow_mpp: false,
+        channel_stats: Default::default(),
     };
     let route = network
         .graph
@@ -1139,6 +1155,7 @@ fn test_graph_mark_failed_channel() {
         custom_records: None,
         router: vec![],
         allow_mpp: false,
+        channel_stats: Default::default(),
     };
     let route = network
         .graph
@@ -1178,6 +1195,7 @@ fn test_graph_session_router() {
         custom_records: None,
         router: vec![],
         allow_mpp: false,
+        channel_stats: Default::default(),
     };
     let route = network
         .graph
@@ -1230,6 +1248,7 @@ fn test_graph_mark_failed_node() {
         custom_records: None,
         router: vec![],
         allow_mpp: false,
+        channel_stats: Default::default(),
     };
     let route = network
         .graph
@@ -1257,6 +1276,7 @@ fn test_graph_mark_failed_node() {
         custom_records: None,
         router: vec![],
         allow_mpp: false,
+        channel_stats: Default::default(),
     };
     let route = network
         .graph
@@ -1286,6 +1306,7 @@ fn test_graph_mark_failed_node() {
         custom_records: None,
         router: vec![],
         allow_mpp: false,
+        channel_stats: Default::default(),
     };
     let route = network
         .graph
@@ -1312,6 +1333,7 @@ fn test_graph_mark_failed_node() {
         custom_records: None,
         router: vec![],
         allow_mpp: false,
+        channel_stats: Default::default(),
     };
     let route = network
         .graph
@@ -1761,6 +1783,7 @@ fn test_graph_find_path_source_with_multiple_edges_fee_rate() {
             MAX_PAYMENT_TLC_EXPIRY_LIMIT,
             false,
             &[],
+            &Default::default(),
         )
         .unwrap();
 
@@ -1803,6 +1826,7 @@ fn test_graph_find_path_source_with_multiple_edges_with_different_fee_rate() {
             MAX_PAYMENT_TLC_EXPIRY_LIMIT,
             false,
             &[],
+            &Default::default(),
         )
         .unwrap();
 
@@ -1854,6 +1878,7 @@ fn test_graph_find_path_will_consider_tlc_expiry_delta() {
             MAX_PAYMENT_TLC_EXPIRY_LIMIT,
             false,
             &[],
+            &Default::default(),
         )
         .unwrap();
 
