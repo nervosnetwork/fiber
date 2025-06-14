@@ -1,6 +1,11 @@
 use super::check_migrate;
 use super::{KeyValue, StoreKeyValue};
+use crate::store::subscription::{
+    StorePubSubMessage, StorePublisherMessage, StoreSubscriberMessage,
+};
 
+use ractor::port::OutputPortSubscriber;
+use ractor::ActorRef;
 pub use rocksdb::Direction as DbDirection;
 pub use rocksdb::IteratorMode;
 use rocksdb::{prelude::*, DBCompressionType, DBIterator, WriteBatch, DB};
@@ -9,6 +14,12 @@ use std::{path::Path, sync::Arc};
 #[derive(Clone, Debug)]
 pub struct Store {
     pub(crate) db: Arc<DB>,
+}
+
+#[derive(Clone, Debug)]
+pub struct StoreWithPubSub<S> {
+    pub(crate) inner: S,
+    publisher: ActorRef<StorePubSubMessage>,
 }
 
 impl Store {
@@ -97,6 +108,34 @@ impl Store {
             IteratorMode::From(prefix, DbDirection::Forward),
             Box::new(|_| false),
         )
+    }
+}
+
+impl<S> StoreWithPubSub<S> {
+    pub fn new(store: S, publisher: ActorRef<StorePubSubMessage>) -> Self {
+        Self {
+            inner: store,
+            publisher,
+        }
+    }
+
+    pub fn into_inner(self) -> S {
+        self.inner
+    }
+
+    pub(crate) fn publish(&self, msg: StorePublisherMessage) -> Result<(), String> {
+        self.publisher
+            .send_message(StorePubSubMessage::Publish(msg))
+            .map_err(|err| err.to_string())
+    }
+
+    pub fn subscribe(
+        &self,
+        subscriber: OutputPortSubscriber<StoreSubscriberMessage>,
+    ) -> Result<(), String> {
+        self.publisher
+            .send_message(StorePubSubMessage::Subscribe(subscriber))
+            .map_err(|err| err.to_string())
     }
 }
 

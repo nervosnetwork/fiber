@@ -1,0 +1,66 @@
+meta {
+  name: 13-get-invoice-status
+  type: http
+  seq: 13
+}
+
+post {
+  url: {{NODE1_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "get_invoice",
+    "params": [
+      {
+        "payment_hash": "{{PAYMENT_HASH}}"
+      }
+    ]
+  }
+}
+
+assert {
+  res.body.error: isUndefined
+  res.body.result.status: isDefined
+}
+
+
+script:pre-request {
+  if(bru.getVar("iteration") === undefined){
+    bru.setVar("iteration", 0);
+  }
+}
+
+vars:post-response {
+  max_iterations: 20
+}
+
+script:post-response {
+  const i = bru.getVar("iteration");
+  const n = bru.getVar("max_iterations");
+  if (i < n) {
+    console.log(`Try ${i+1}/${n}`);
+    console.log(res.body)
+  }
+
+  if (res.body.result.status != "Paid") {
+    console.log("Invoicee is paid");
+    bru.setVar("iteration", 0);
+  } else if (i+1 < n) {
+    await new Promise(r => setTimeout(r, 100));
+    bru.setVar("iteration", i + 1);
+    bru.setNextRequest("12-get-invoice-status");
+  } else {
+    bru.setVar("iteration", 0);
+    throw new Error("Bob has not received the payment");
+  }
+}
