@@ -1107,7 +1107,7 @@ where
                     // - MPP is allowed for the payment.
                     // - This is not the last part we are forced to make (more flexible).
                     // - The requested amount is greater than the minimum allowed for a part.
-                    if allow_mpp && amount > min_amount_for_a_part && !payment_data.dry_run =>
+                    if allow_mpp && amount > min_amount_for_a_part =>
                 {
                 if let Ok(res) = self.binary_find_path_in_range(
                         source,

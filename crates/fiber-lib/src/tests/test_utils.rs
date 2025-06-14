@@ -698,7 +698,7 @@ impl NetworkNode {
             target_node,
             amount,
             max_parts,
-            false, // dry_run
+            false, // dry_run is false
         )
         .await
     }

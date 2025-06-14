@@ -1263,4 +1263,24 @@ async fn test_send_mpp_dry_run_will_be_ok_with_single_path() {
         res.is_err(),
         "Send payment query should fail for amount larger than available liquidity"
     );
+
+    let res = node_0
+        .send_mpp_payment_with_dry_run_option(&mut node_2, 280000, None, true)
+        .await;
+    dbg!(&res);
+    assert!(res.is_ok(), "Send payment query should ok");
+    let routers = res.unwrap().routers;
+    assert_eq!(routers.len(), 3);
+    let fee: u128 = routers.iter().map(|r| r.fee()).sum();
+    eprintln!("Total fee: {}", fee);
+    assert!(fee > 0);
+    assert!(
+        routers.iter().all(|r| r.nodes.len() == 3),
+        "All paths should be 3 hops"
+    );
+    let total_amount: u128 = routers.iter().map(|r| r.receiver_amount()).sum();
+    assert_eq!(
+        total_amount, 280000,
+        "Total amount should match requested amount"
+    );
 }
