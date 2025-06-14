@@ -1000,21 +1000,19 @@ where
 
     pub(crate) fn track_attempt_router(&mut self, attempt: &Attempt) {
         for (from, channel_outpoint, amount) in attempt.channel_outpoints() {
-            let Some(sent_node) = self.get_channel_sent_node(channel_outpoint, from) else {
-                continue;
-            };
-            self.channel_stats
-                .add_channel(channel_outpoint, sent_node, amount);
+            if let Some(sent_node) = self.get_channel_sent_node(channel_outpoint, from) {
+                self.channel_stats
+                    .add_channel(channel_outpoint, sent_node, amount);
+            }
         }
     }
 
     pub(crate) fn untrack_attempt_router(&mut self, attempt: &Attempt, success: bool) {
         for (from, channel_outpoint, amount) in attempt.channel_outpoints() {
-            let Some(sent_node) = self.get_channel_sent_node(channel_outpoint, from) else {
-                continue;
-            };
-            self.channel_stats
-                .untrack_channel(channel_outpoint, sent_node, amount, success);
+            if let Some(sent_node) = self.get_channel_sent_node(channel_outpoint, from) {
+                self.channel_stats
+                    .untrack_channel(channel_outpoint, sent_node, amount, success);
+            }
         }
     }
 
