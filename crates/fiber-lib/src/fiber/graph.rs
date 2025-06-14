@@ -1087,7 +1087,7 @@ where
                 max_fee_amount,
                 payment_data,
             ) {
-            Ok(route) => (route, amount), // Success with the full requested amount
+            Ok(route) => (route, amount),
             Err(PathFindError::PathFind(orig_err))
                 // Condition to attempt finding a smaller amount:
                 // - MPP is allowed for the payment.

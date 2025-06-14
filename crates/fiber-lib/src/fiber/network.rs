@@ -2051,13 +2051,13 @@ where
         let max_fee = session.remain_fee_amount();
         let active_parts = session.attempts().iter().filter(|a| a.is_active()).count();
 
-        dbg!("build route", max_amount, max_fee, active_parts, attempt.id);
         match graph.build_route(max_amount, max_fee, active_parts, &session.request) {
             Err(e) => {
                 let error = format!("Failed to build route, {}", e);
-                dbg!("build route error ", attempt.id, &error);
-                self.set_attempt_fail_with_error(session, attempt, &error, false);
-                self.set_payment_fail_with_error(session, &error);
+                if !session.request.dry_run {
+                    self.set_attempt_fail_with_error(session, attempt, &error, false);
+                    self.set_payment_fail_with_error(session, &error);
+                }
                 return Err(Error::SendPaymentError(error));
             }
             Ok(hops) => {
