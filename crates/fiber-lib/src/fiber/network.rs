@@ -2348,7 +2348,7 @@ where
         state: &mut NetworkActorState<S>,
         payment_hash: Hash256,
         attempt_id: Option<u64>,
-    ) -> Result<Option<SessionRoute>, Error> {
+    ) -> Result<(), Error> {
         self.update_graph().await;
         let Some(mut payment_session) = self.store.get_payment_session(payment_hash) else {
             return Err(Error::InvalidParameter(payment_hash.to_string()));
@@ -2359,24 +2359,22 @@ where
                 "Payment session {:?} already in final status: {:?}",
                 payment_hash, payment_session.status
             );
-            return Ok(None);
+            return Ok(());
         }
 
         if let Some(attempt_id) = attempt_id {
-            let Some(mut attempt) = self.store.get_attempt(payment_hash, attempt_id) else {
-                return Ok(None);
-            };
-            if attempt.is_retryable() {
-                let _ = self
-                    .send_attempt(
+            if let Some(mut attempt) = self.store.get_attempt(payment_hash, attempt_id) {
+                if attempt.is_retryable() {
+                    self.send_attempt(
                         myself.clone(),
                         state,
                         &mut payment_session,
                         &mut attempt,
                         true,
                     )
-                    .await;
-            }
+                    .await?;
+                }
+            };
         }
 
         if !payment_session.allow_more_attempts() {
@@ -2385,14 +2383,8 @@ where
                 self.set_payment_fail_with_error(&mut payment_session, err);
                 return Err(Error::SendPaymentError(err.to_string()));
             }
-            return Ok(None);
+            return Ok(());
         }
-
-        debug!(
-            "try_payment_session: {:?} attempts: {:?}",
-            payment_session.payment_hash(),
-            payment_session.attempts().len()
-        );
 
         // build route
         let attempt_id = self.store.next_attempt_id();
@@ -2415,7 +2407,7 @@ where
             self.register_payment_retry(myself, payment_hash, None);
         }
 
-        Ok(Some(attempt.route.clone()))
+        Ok(())
     }
 
     fn register_payment_retry(
