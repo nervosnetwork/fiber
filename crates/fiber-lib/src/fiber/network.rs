@@ -1118,7 +1118,7 @@ where
             NetworkActorCommand::ConnectPeer(addr) => {
                 // TODO: It is more than just dialing a peer. We need to exchange capabilities of the peer,
                 // e.g. whether the peer support some specific feature.
-
+                debug!("Received ConnectPeer for connecting to {:?}", addr);
                 if let Some(peer_id) = extract_peer_id(&addr) {
                     if state.is_connected(&peer_id) {
                         debug!("Peer {:?} already connected, ignoring...", peer_id);
@@ -1232,6 +1232,7 @@ where
                         .chain(graph_nodes_to_connect.into_iter())
                 };
                 for (peer_id, addresses) in peers_to_connect {
+                    debug!("Peer to connect: {:?}, {:?}", peer_id, addresses);
                     if let Some(session) = state.get_peer_session(&peer_id) {
                         debug!(
                             "Randomly selected peer {:?} already connected with session id {:?}, skipping connection",
@@ -3457,10 +3458,19 @@ where
             .await
             .expect("subscribe to gossip store updates");
         let gossip_actor = gossip_handle.actor().clone();
+        #[cfg(not(target_arch = "wasm32"))]
         let mut service = ServiceBuilder::default()
             .insert_protocol(fiber_handle.create_meta())
             .insert_protocol(gossip_handle.create_meta())
             .handshake_type(secio_kp.into())
+            .build(handle);
+        #[cfg(target_arch = "wasm32")]
+        let mut service = ServiceBuilder::default()
+            .insert_protocol(fiber_handle.create_meta())
+            .insert_protocol(gossip_handle.create_meta())
+            .handshake_type(secio_kp.into())
+            // Sets forever to true so the network service won't be shutdown due to no incoming connections
+            .forever(true)
             .build(handle);
 
         let mut announced_addrs = Vec::with_capacity(config.announced_addrs.len() + 1);
@@ -3522,7 +3532,6 @@ where
             "Started fiber network service peer id {:?}, announced addresses {:?}",
             &my_peer_id, &announced_addrs
         );
-
         let control = service.control().to_owned();
         #[cfg(not(target_arch = "wasm32"))]
         myself
@@ -3811,7 +3820,7 @@ impl From<&NetworkServiceHandle> for FiberProtocolHandle {
 #[async_trait]
 impl ServiceHandle for NetworkServiceHandle {
     async fn handle_error(&mut self, _context: &mut ServiceContext, error: ServiceError) {
-        trace!("Service error: {:?}", error);
+        debug!("Service error: {:?}", error);
         // TODO
         // ServiceError::DialerError => remove address from peer store
         // ServiceError::ProtocolError => ban peer

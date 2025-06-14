@@ -7,10 +7,7 @@ members = [
     "crates/fiber-wasm-db-common",
 ]
 resolver = "2"
-default-members = [
-    "crates/fiber-bin",
-    "crates/fiber-lib",
-]
+default-members = ["crates/fiber-bin", "crates/fiber-lib"]
 [profile.release]
 panic = "abort"
 overflow-checks = true

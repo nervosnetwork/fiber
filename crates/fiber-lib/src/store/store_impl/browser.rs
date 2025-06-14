@@ -17,8 +17,9 @@ use fiber_wasm_db_common::KV;
 use std::cell::RefCell;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
-use tracing::debug;
 use tracing::info;
+use tracing::trace;
+use tracing::warn;
 use wasm_bindgen::prelude::wasm_bindgen;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
@@ -48,7 +49,7 @@ impl Store {
             chan.open_database(path.to_str().unwrap());
             DB_INITIALIZED.store(true, std::sync::atomic::Ordering::SeqCst);
         } else {
-            debug!("Database has already been initialized");
+            warn!("Database has already been initialized");
         }
         Ok(Self { chan })
     }
@@ -304,7 +305,7 @@ impl CommunicationChannel {
                 Some(skip_while),
             ),
         };
-        debug!("Dispatching database command: {:?}", new_cmd);
+        trace!("Dispatching database command: {:?}", new_cmd);
         let CommunicationChannel {
             input_i32_arr,
             input_u8_arr,
@@ -329,7 +330,7 @@ impl CommunicationChannel {
                     let arg = read_command_payload::<Vec<u8>>(output_i32_arr, output_u8_arr)?;
                     let ok = skip_while.as_ref().unwrap()(&arg);
 
-                    debug!(
+                    trace!(
                         "Received take while request with args {:?}, result {}",
                         arg, ok
                     );

@@ -18,3 +18,4 @@ tests/nodes/.ports
 /index.html
 /fiber-wasm-worker.js
 /fiber-db-worker.js
+/wasm-config.yml

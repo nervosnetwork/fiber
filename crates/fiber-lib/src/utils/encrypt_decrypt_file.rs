@@ -2,8 +2,10 @@ use aes_gcm::aead::{generic_array::GenericArray, Aead, KeyInit};
 use aes_gcm::{Aes256Gcm, Key, Nonce};
 use rand::RngCore;
 use scrypt::{scrypt, Params};
+use std::fmt::Debug;
 use std::fs;
 use std::path::Path;
+use tracing::debug;
 
 const VERSION: u8 = 0;
 const NONCE_LEN: usize = 12;
@@ -40,7 +42,8 @@ pub fn encrypt_to_file<P: AsRef<Path>>(
     fs::write(file, file_bytes).map_err(|err| format!("failed to write to file: {}", err))
 }
 
-pub fn decrypt_from_file<P: AsRef<Path>>(file: P, password: &[u8]) -> Result<Vec<u8>, String> {
+pub fn decrypt_from_file<P: AsRef<Path> + Debug>(file: P, password: &[u8]) -> Result<Vec<u8>, String> {
+    debug!("Decrypting key from file {:?}", file);
     let file_bytes = fs::read(file).unwrap();
     let salt = &file_bytes[1..SALT_LEN + 1];
     let nonce = &file_bytes[SALT_LEN + 1..SALT_LEN + NONCE_LEN + 1];
