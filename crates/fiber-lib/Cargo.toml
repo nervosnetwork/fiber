@@ -19,6 +19,7 @@ ckb-sdk = "3.6"
 thiserror = "1.0.58"
 anyhow = "1.0.81"
 futures = "0.3.30"
+parking_lot = "0.12"
 once_cell = "1.19.0"
 tokio-util = { version = "0.7.10", features = ["rt"] }
 molecule = { version = "0.8.0", default-features = false }

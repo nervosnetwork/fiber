@@ -2052,7 +2052,7 @@ where
         let amount = session.remain_amount() + attempt.route.receiver_amount();
         let max_fee = session.remain_fee_amount();
 
-        session.request.channel_stats = GraphChannelStat::new(Some(graph.channel_stats.clone()));
+        session.request.channel_stats = GraphChannelStat::new(Some(graph.channel_stats()));
         match graph.build_route(amount, max_fee, &session.request) {
             Err(e) => {
                 let error = format!("Failed to build route, {}", e);
@@ -2079,7 +2079,7 @@ where
         let mut max_fee = session.remain_fee_amount();
         let mut result = vec![];
 
-        session.request.channel_stats = GraphChannelStat::new(Some(graph.channel_stats.clone()));
+        session.request.channel_stats = GraphChannelStat::new(Some(graph.channel_stats()));
         let mut attempt_id = session.attempts().len() as u64;
         while (result.len() < session.max_parts() as usize - active_parts) && remain_amount > 0 {
             match graph.build_route(remain_amount, max_fee, &session.request) {

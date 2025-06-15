@@ -24,6 +24,7 @@ use crate::fiber::types::PaymentHopData;
 use crate::invoice::CkbInvoice;
 use crate::now_timestamp_as_millis_u64;
 use ckb_types::packed::{OutPoint, Script};
+use parking_lot::Mutex;
 use rand::seq::SliceRandom;
 use rand::thread_rng;
 use serde::{Deserialize, Serialize};
@@ -360,12 +361,12 @@ impl ChannelStatElem {
 
 #[derive(Clone, Debug, Default)]
 pub struct GraphChannelStat {
-    pub base: Option<Arc<GraphChannelStat>>,
-    pub inner: HashMap<OutPoint, ChannelStatElem>,
+    base: Option<Arc<Mutex<GraphChannelStat>>>,
+    inner: HashMap<OutPoint, ChannelStatElem>,
 }
 
 impl GraphChannelStat {
-    pub fn new(base: Option<Arc<GraphChannelStat>>) -> Self {
+    pub fn new(base: Option<Arc<Mutex<GraphChannelStat>>>) -> Self {
         Self {
             inner: HashMap::new(),
             base,
@@ -375,7 +376,7 @@ impl GraphChannelStat {
     pub fn get_channel_count(&self, channel_outpoint: &OutPoint) -> usize {
         self.base
             .as_ref()
-            .map_or(0, |base| base.get_channel_count(channel_outpoint))
+            .map_or(0, |base| base.lock().get_channel_count(channel_outpoint))
             + self
                 .inner
                 .get(channel_outpoint)
@@ -388,7 +389,8 @@ impl GraphChannelStat {
         sent_node: SentNode,
     ) -> u128 {
         self.base.as_ref().map_or(0, |base| {
-            base.get_channel_sent_amount(channel_outpoint, sent_node)
+            base.lock()
+                .get_channel_sent_amount(channel_outpoint, sent_node)
         }) + self
             .inner
             .get(channel_outpoint)
@@ -408,6 +410,12 @@ impl GraphChannelStat {
 
     pub fn remove_channel(&mut self, channel_outpoint: &OutPoint) {
         self.inner.remove(channel_outpoint);
+    }
+
+    pub fn reset_channel(&mut self, channel_outpoint: &OutPoint, sent_node: SentNode) {
+        self.inner
+            .entry(channel_outpoint.clone())
+            .and_modify(|e| e.reset_attempt(sent_node));
     }
 
     pub fn untrack_channel(
@@ -442,7 +450,7 @@ pub struct NetworkGraph<S> {
     // this information is used to HELP the path finding algorithm for better routing in two ways:
     // 1. If a channel has more pending payment attempts, it may be overloaded and should not be used for routing.
     // 2. For middle hops, network graph can only get the channel capacity,
-    pub(crate) channel_stats: Arc<GraphChannelStat>,
+    channel_stats: Arc<Mutex<GraphChannelStat>>,
 
     // The latest cursor we read from the GossipMessageStore. When we need to refresh our view of the
     // the network, we need to load all the messages starting from this cursor.
@@ -533,17 +541,19 @@ where
         }
     }
 
-    pub fn reset_channel_stats_for_direct_channel(
+    pub(crate) fn channel_stats(&self) -> Arc<Mutex<GraphChannelStat>> {
+        self.channel_stats.clone()
+    }
+
+    pub(crate) fn reset_channel_stats_for_direct_channel(
         &mut self,
         channel_outpoint: &OutPoint,
         node: Pubkey,
     ) {
         if let Some(sent_node) = self.get_channel_sent_node(channel_outpoint, node) {
-            Arc::get_mut(&mut self.channel_stats)
-                .unwrap()
-                .inner
-                .entry(channel_outpoint.clone())
-                .and_modify(|e| e.reset_attempt(sent_node));
+            self.channel_stats
+                .lock()
+                .reset_channel(channel_outpoint, sent_node);
         }
     }
 
@@ -599,9 +609,7 @@ where
             }
             OwnedChannelUpdateEvent::Down(channel_outpoint) => {
                 self.channels.remove(&channel_outpoint);
-                Arc::get_mut(&mut self.channel_stats)
-                    .unwrap()
-                    .remove_channel(&channel_outpoint);
+                self.channel_stats.lock().remove_channel(&channel_outpoint);
             }
             OwnedChannelUpdateEvent::Updated(channel_outpoint, node, channel_update) => {
                 if let Some(channel) = self.channels.get_mut(&channel_outpoint) {
@@ -1032,11 +1040,9 @@ where
     pub(crate) fn track_attempt_router(&mut self, attempt: &Attempt) {
         for (from, channel_outpoint, amount) in attempt.channel_outpoints() {
             if let Some(sent_node) = self.get_channel_sent_node(channel_outpoint, from) {
-                Arc::get_mut(&mut self.channel_stats).unwrap().add_channel(
-                    channel_outpoint,
-                    sent_node,
-                    amount,
-                );
+                self.channel_stats
+                    .lock()
+                    .add_channel(channel_outpoint, sent_node, amount);
             }
         }
     }
@@ -1044,9 +1050,12 @@ where
     pub(crate) fn untrack_attempt_router(&mut self, attempt: &Attempt, success: bool) {
         for (from, channel_outpoint, amount) in attempt.channel_outpoints() {
             if let Some(sent_node) = self.get_channel_sent_node(channel_outpoint, from) {
-                Arc::get_mut(&mut self.channel_stats)
-                    .unwrap()
-                    .untrack_channel(channel_outpoint, sent_node, amount, success);
+                self.channel_stats.lock().untrack_channel(
+                    channel_outpoint,
+                    sent_node,
+                    amount,
+                    success,
+                );
             }
         }
     }
