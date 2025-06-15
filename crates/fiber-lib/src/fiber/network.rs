@@ -2052,10 +2052,9 @@ where
             session.remain_amount()
         };
         let max_fee = session.remain_fee_amount();
-        let active_parts = session.attempts().iter().filter(|a| a.is_active()).count();
 
         session.request.channel_stats = graph.channel_stats.clone();
-        match graph.build_route(max_amount, max_fee, active_parts, &session.request) {
+        match graph.build_route(max_amount, max_fee, &session.request) {
             Err(e) => {
                 let error = format!("Failed to build route, {}", e);
                 self.set_attempt_fail_with_error(session, attempt, &error, false);
@@ -2079,29 +2078,27 @@ where
     async fn build_payment_routes(
         &self,
         session: &mut PaymentSession,
-    ) -> Result<Vec<Vec<PaymentHopData>>, Error> {
+    ) -> Result<Vec<(Attempt, Vec<PaymentHopData>)>, Error> {
         let graph = self.network_graph.read().await;
         let source = graph.get_source_pubkey();
         let active_parts = session.attempts().iter().filter(|a| a.is_active()).count();
-        let mut max_amount = session.remain_amount();
+        let mut remain_amount = session.remain_amount();
         let mut max_fee = session.remain_fee_amount();
-        let mut routers = vec![];
+        let mut result = vec![];
 
         session.request.channel_stats = graph.channel_stats.clone();
-        let mut attempt_id = 0;
-        while (routers.len() < session.max_parts() as usize - active_parts) && max_amount > 0 {
-            match graph.build_route(max_amount, max_fee, active_parts, &session.request) {
+        let mut attempt_id = session.attempts().len() as u64;
+        while (result.len() < session.max_parts() as usize - active_parts) && remain_amount > 0 {
+            match graph.build_route(remain_amount, max_fee, &session.request) {
                 Err(e) => {
                     let error = format!("Failed to build route, {}", e);
                     self.set_payment_fail_with_error(session, &error);
                     return Err(Error::SendPaymentError(error));
                 }
                 Ok(hops) => {
-                    let mut attempt = session.new_attempt(attempt_id);
-                    attempt_id += 1;
-                    attempt.route = SessionRoute::new(source, session.request.target_pubkey, &hops);
                     assert_ne!(hops[0].funding_tx_hash, Hash256::default());
-                    for (from, channel_outpoint, amount) in attempt.channel_outpoints() {
+                    let route = SessionRoute::new(source, session.request.target_pubkey, &hops);
+                    for (from, channel_outpoint, amount) in route.channel_outpoints() {
                         if let Some(sent_node) = graph.get_channel_sent_node(channel_outpoint, from)
                         {
                             session.request.channel_stats.add_channel(
@@ -2111,16 +2108,34 @@ where
                             );
                         }
                     }
-                    routers.push(hops);
-                    max_amount -= attempt.route.receiver_amount();
+                    remain_amount -= route.receiver_amount();
                     if let Some(fee) = max_fee {
-                        max_fee = Some(fee - attempt.route.fee());
+                        max_fee = Some(fee - route.fee());
                     }
-                    session.append_attempt(attempt);
+
+                    let attempt_id = if session.is_dry_run() {
+                        0
+                    } else {
+                        attempt_id += 1;
+                        attempt_id
+                    };
+
+                    let mut attempt = session.new_attempt(attempt_id);
+                    attempt.route = route;
+
+                    result.push((attempt, hops));
                 }
             };
         }
-        return Ok(routers);
+
+        for (attempt, _) in &result {
+            if !session.is_dry_run() {
+                self.store.insert_attempt(attempt.clone());
+            }
+            session.append_attempt(attempt.clone());
+        }
+
+        return Ok(result);
     }
 
     async fn send_payment_onion_packet(

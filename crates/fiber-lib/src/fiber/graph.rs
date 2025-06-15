@@ -1066,7 +1066,6 @@ where
         &self,
         amount: u128,
         max_fee_amount: Option<u128>,
-        _active_parts: usize,
         payment_data: &SendPaymentData,
     ) -> Result<Vec<PaymentHopData>, PathFindError> {
         let source = self.get_source_pubkey();
@@ -2021,6 +2020,12 @@ impl SessionRoute {
         assert!(first_amount >= last_amount);
         first_amount - last_amount
     }
+
+    pub(crate) fn channel_outpoints(&self) -> impl Iterator<Item = (Pubkey, &OutPoint, u128)> {
+        self.nodes
+            .iter()
+            .map(|x| (x.pubkey, &x.channel_outpoint, x.amount))
+    }
 }
 
 #[derive(Error, Debug)]
@@ -2389,10 +2394,7 @@ impl Attempt {
     }
 
     pub(crate) fn channel_outpoints(&self) -> impl Iterator<Item = (Pubkey, &OutPoint, u128)> {
-        self.route
-            .nodes
-            .iter()
-            .map(|x| (x.pubkey, &x.channel_outpoint, x.amount))
+        self.route.channel_outpoints()
     }
 }
 

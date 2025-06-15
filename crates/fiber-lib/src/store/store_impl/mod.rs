@@ -584,6 +584,7 @@ impl NetworkGraphStateStore for Store {
     }
 
     fn insert_attempt(&self, attempt: Attempt) {
+        assert_ne!(attempt.id, 0, "Attempt ID should not be zero");
         let mut batch = self.batch();
         batch.put_kv(KeyValue::Attempt(
             (attempt.payment_hash, attempt.id),
