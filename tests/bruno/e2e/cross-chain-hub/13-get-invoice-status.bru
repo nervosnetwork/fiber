@@ -52,13 +52,13 @@ script:post-response {
     console.log(res.body)
   }
 
-  if (res.body.result.status != "Paid") {
+  if (res.body.result.status == "Paid") {
     console.log("Invoicee is paid");
     bru.setVar("iteration", 0);
   } else if (i+1 < n) {
     await new Promise(r => setTimeout(r, 100));
     bru.setVar("iteration", i + 1);
-    bru.setNextRequest("12-get-invoice-status");
+    bru.setNextRequest("13-get-invoice-status");
   } else {
     bru.setVar("iteration", 0);
     throw new Error("Bob has not received the payment");
