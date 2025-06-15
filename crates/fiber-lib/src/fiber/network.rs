@@ -660,7 +660,7 @@ impl SendPaymentData {
             allow_mpp,
             router: vec![],
             dry_run: command.dry_run,
-            channel_stats: GraphChannelStat::default(),
+            channel_stats: Default::default(),
         })
     }
 
@@ -2046,10 +2046,13 @@ where
         assert!(attempt.is_retryable());
         let graph = self.network_graph.read().await;
         let source = graph.get_source_pubkey();
+        // now the current attempt is retryable,
+        // `session.remain_amount()` will not contains this part of amount,
+        // so we need to add the receiver amount to it.
         let amount = session.remain_amount() + attempt.route.receiver_amount();
         let max_fee = session.remain_fee_amount();
 
-        session.request.channel_stats = graph.channel_stats.clone();
+        session.request.channel_stats = GraphChannelStat::new(Some(graph.channel_stats.clone()));
         match graph.build_route(amount, max_fee, &session.request) {
             Err(e) => {
                 let error = format!("Failed to build route, {}", e);
@@ -2076,7 +2079,7 @@ where
         let mut max_fee = session.remain_fee_amount();
         let mut result = vec![];
 
-        session.request.channel_stats = graph.channel_stats.clone();
+        session.request.channel_stats = GraphChannelStat::new(Some(graph.channel_stats.clone()));
         let mut attempt_id = session.attempts().len() as u64;
         while (result.len() < session.max_parts() as usize - active_parts) && remain_amount > 0 {
             match graph.build_route(remain_amount, max_fee, &session.request) {
