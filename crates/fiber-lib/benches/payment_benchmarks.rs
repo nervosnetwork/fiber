@@ -49,7 +49,8 @@ fn bench_payment_path_finding(c: &mut Criterion) {
                                 .unwrap();
 
                             let payment_hash = res.payment_hash;
-                            let second_hop_channel = res.router.nodes[1].channel_outpoint.clone();
+                            let second_hop_channel =
+                                res.routers[0].nodes[1].channel_outpoint.clone();
                             channel_stats_map
                                 .entry(second_hop_channel)
                                 .and_modify(|e| *e += 1)

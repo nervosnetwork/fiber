@@ -12,8 +12,8 @@ use std::path::Path;
 
 use super::db_migrate::DbMigrate;
 use super::schema::*;
-use crate::fiber::gossip::GossipMessageStore;
 use crate::fiber::types::CURSOR_SIZE;
+use crate::fiber::{gossip::GossipMessageStore, graph::HoldTlc};
 #[cfg(feature = "watchtower")]
 use crate::{
     fiber::channel::{RevocationData, SettlementData},
@@ -22,7 +22,7 @@ use crate::{
 use crate::{
     fiber::{
         channel::{ChannelActorState, ChannelActorStateStore, ChannelState},
-        graph::{NetworkGraphStateStore, PaymentSession, PaymentSessionStatus},
+        graph::{Attempt, NetworkGraphStateStore, PaymentSession, PaymentSessionStatus},
         history::{Direction, TimedResult},
         network::{NetworkActorStateStore, PaymentCustomRecords, PersistentNetworkActorState},
         types::{BroadcastMessage, BroadcastMessageID, Cursor, Hash256},
@@ -35,9 +35,9 @@ use ckb_types::packed::Script;
 use ckb_types::prelude::Entity;
 
 use serde::Serialize;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use tentacle::secio::PeerId;
-use tracing::info;
+use tracing::{info, warn};
 
 #[derive(Copy, Clone)]
 enum ChannelTimestamp {
@@ -195,6 +195,9 @@ pub enum KeyValue {
     PaymentHistoryTimedResult((OutPoint, Direction), TimedResult),
     PaymentCustomRecord(Hash256, PaymentCustomRecords),
     NetworkActorState(PeerId, PersistentNetworkActorState),
+    Attempt((Hash256, u64), Attempt),
+    NextAttemptId(u64),
+    HoldTlcs(Hash256, Vec<HoldTlc>),
 }
 
 pub trait StoreKeyValue {
@@ -225,6 +228,13 @@ impl StoreKeyValue for KeyValue {
             KeyValue::PaymentSession(payment_hash, _) => {
                 [&[PAYMENT_SESSION_PREFIX], payment_hash.as_ref()].concat()
             }
+            KeyValue::Attempt((payment_hash, attempt_id), _) => [
+                &[ATTEMPT_PREFIX],
+                payment_hash.as_ref(),
+                &attempt_id.to_le_bytes(),
+            ]
+            .concat(),
+            KeyValue::NextAttemptId(_id) => vec![NEXT_ATTEMPT_ID],
             #[cfg(feature = "watchtower")]
             KeyValue::WatchtowerChannel(channel_id, _) => {
                 [&[WATCHTOWER_CHANNEL_PREFIX], channel_id.as_ref()].concat()
@@ -249,6 +259,9 @@ impl StoreKeyValue for KeyValue {
             KeyValue::PaymentCustomRecord(payment_hash, _data) => {
                 [&[PAYMENT_CUSTOM_RECORD_PREFIX], payment_hash.as_ref()].concat()
             }
+            KeyValue::HoldTlcs(payment_hash, _hold_tlc) => {
+                [&[HOLD_TLC_PREFIX], payment_hash.as_ref()].concat()
+            }
         }
     }
 
@@ -263,6 +276,8 @@ impl StoreKeyValue for KeyValue {
             KeyValue::PaymentSession(_, payment_session) => {
                 serialize_to_vec(payment_session, "PaymentSession")
             }
+            KeyValue::Attempt(_, attempt) => serialize_to_vec(attempt, "Attempt"),
+            KeyValue::NextAttemptId(id) => serialize_to_vec(&id, "u64"),
             #[cfg(feature = "watchtower")]
             KeyValue::WatchtowerChannel(_, channel_data) => {
                 serialize_to_vec(channel_data, "ChannelData")
@@ -281,6 +296,7 @@ impl StoreKeyValue for KeyValue {
             KeyValue::PaymentCustomRecord(_, custom_records) => {
                 serialize_to_vec(custom_records, "PaymentCustomRecord")
             }
+            KeyValue::HoldTlcs(_payment_hash, hold_tlc) => serialize_to_vec(hold_tlc, "HoldTlc"),
         }
     }
 }
@@ -392,6 +408,51 @@ impl ChannelActorStateStore for Store {
         self.get(key)
             .map(|v| deserialize_from(v.as_ref(), "PaymentCustomRecord"))
     }
+
+    fn insert_hold_tlc(&self, payment_hash: Hash256, hold_tlc: HoldTlc) {
+        let prefix = [&[HOLD_TLC_PREFIX], payment_hash.as_ref()].concat();
+        let mut batch = self.batch();
+        let mut hold_tlcs: Vec<HoldTlc> = batch
+            .get(&prefix)
+            .map(|v| deserialize_from(v.as_ref(), "HoldTlc"))
+            .unwrap_or_default();
+        hold_tlcs.push(hold_tlc);
+        batch.put_kv(KeyValue::HoldTlcs(payment_hash, hold_tlcs));
+        batch.commit();
+    }
+
+    fn get_hold_tlcs(&self, payment_hash: Hash256) -> Vec<HoldTlc> {
+        let prefix = [&[HOLD_TLC_PREFIX], payment_hash.as_ref()].concat();
+        self.get(&prefix)
+            .map(|v| deserialize_from(v.as_ref(), "HoldTlc"))
+            .unwrap_or_default()
+    }
+
+    fn remove_hold_tlcs(&self, payment_hash: &Hash256) {
+        let prefix = [&[HOLD_TLC_PREFIX], payment_hash.as_ref()].concat();
+        let mut batch = self.batch();
+        for (key, _) in self.prefix_iterator(&prefix) {
+            batch.delete(key);
+        }
+        batch.commit();
+    }
+
+    fn list_all_hold_tlcs(&self) -> HashMap<Hash256, Vec<HoldTlc>> {
+        let prefix = [HOLD_TLC_PREFIX];
+        self.prefix_iterator(&prefix)
+            .filter_map(|(key, value)| {
+                if key.len() != 33 {
+                    warn!("invalid hold tlc key: {}", key.len());
+                    return None;
+                }
+                let payment_hash: [u8; 32] = key[1..33]
+                    .try_into()
+                    .expect("payment_hash should be 32 bytes");
+                let hold_tlcs: Vec<HoldTlc> = deserialize_from(value.as_ref(), "HoldTlc");
+                Some((payment_hash.into(), hold_tlcs))
+            })
+            .collect()
+    }
 }
 
 impl InvoiceStore for Store {
@@ -474,6 +535,7 @@ impl NetworkGraphStateStore for Store {
         let prefix = [&[PAYMENT_SESSION_PREFIX], payment_hash.as_ref()].concat();
         self.get(prefix)
             .map(|v| deserialize_from(v.as_ref(), "PaymentSession"))
+            .map(|session: PaymentSession| session.init_attempts(self))
     }
 
     fn get_payment_sessions_with_status(
@@ -485,7 +547,7 @@ impl NetworkGraphStateStore for Store {
             .filter_map(|(_key, value)| {
                 let session: PaymentSession = deserialize_from(value.as_ref(), "PaymentSession");
                 if session.status == status {
-                    Some(session)
+                    Some(session.init_attempts(self))
                 } else {
                     None
                 }
@@ -497,6 +559,59 @@ impl NetworkGraphStateStore for Store {
         let mut batch = self.batch();
         batch.put_kv(KeyValue::PaymentSession(session.payment_hash(), session));
         batch.commit();
+    }
+
+    fn next_attempt_id(&self) -> u64 {
+        let mut batch = self.batch();
+        let next_id = batch
+            .get([NEXT_ATTEMPT_ID])
+            .map(|v| deserialize_from(v.as_ref(), "u64"))
+            .unwrap_or(1);
+        batch.put_kv(KeyValue::NextAttemptId(next_id + 1));
+        batch.commit();
+        next_id
+    }
+
+    fn get_attempt(&self, payment_hash: Hash256, attempt_id: u64) -> Option<Attempt> {
+        let key = [
+            &[ATTEMPT_PREFIX],
+            payment_hash.as_ref(),
+            &attempt_id.to_le_bytes(),
+        ]
+        .concat();
+        self.get(key)
+            .map(|v| deserialize_from(v.as_ref(), "Attempt"))
+    }
+
+    fn insert_attempt(&self, attempt: Attempt) {
+        assert_ne!(attempt.id, 0, "Attempt ID should not be zero");
+        let mut batch = self.batch();
+        batch.put_kv(KeyValue::Attempt(
+            (attempt.payment_hash, attempt.id),
+            attempt,
+        ));
+        batch.commit();
+    }
+
+    fn get_attempts(&self, payment_hash: Hash256) -> Vec<Attempt> {
+        let prefix = [&[ATTEMPT_PREFIX], payment_hash.as_ref()].concat();
+        self.prefix_iterator(&prefix)
+            .map(|(_key, value)| deserialize_from(value.as_ref(), "Attempt"))
+            .collect()
+    }
+
+    fn get_attempts_with_status(&self, status: PaymentSessionStatus) -> Vec<Attempt> {
+        let prefix = [ATTEMPT_PREFIX];
+        self.prefix_iterator(&prefix)
+            .filter_map(|(_key, value)| {
+                let attempt: Attempt = deserialize_from(value.as_ref(), "Attempt");
+                if attempt.status == status {
+                    Some(attempt)
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 
     fn insert_payment_history_result(
