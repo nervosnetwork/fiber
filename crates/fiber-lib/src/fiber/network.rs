@@ -2038,23 +2038,19 @@ where
         }
     }
 
-    async fn build_payment_route(
+    async fn rebuild_payment_route(
         &self,
         session: &mut PaymentSession,
         attempt: &mut Attempt,
-        retry: bool,
     ) -> Result<Vec<PaymentHopData>, Error> {
+        assert!(attempt.is_retryable());
         let graph = self.network_graph.read().await;
         let source = graph.get_source_pubkey();
-        let max_amount = if retry {
-            attempt.route.receiver_amount()
-        } else {
-            session.remain_amount()
-        };
+        let amount = session.remain_amount() + attempt.route.receiver_amount();
         let max_fee = session.remain_fee_amount();
 
         session.request.channel_stats = graph.channel_stats.clone();
-        match graph.build_route(max_amount, max_fee, &session.request) {
+        match graph.build_route(amount, max_fee, &session.request) {
             Err(e) => {
                 let error = format!("Failed to build route, {}", e);
                 self.set_attempt_fail_with_error(session, attempt, &error, false);
@@ -2063,12 +2059,6 @@ where
             }
             Ok(hops) => {
                 attempt.route = SessionRoute::new(source, session.request.target_pubkey, &hops);
-                dbg!(
-                    "build route success",
-                    attempt.id,
-                    attempt.route.receiver_amount(),
-                    attempt.route.fee()
-                );
                 assert_ne!(hops[0].funding_tx_hash, Hash256::default());
                 return Ok(hops);
             }
@@ -2323,19 +2313,35 @@ where
         }
     }
 
+    async fn retry_attempt(
+        &self,
+        myself: ActorRef<NetworkActorMessage>,
+        state: &mut NetworkActorState<S>,
+        session: &mut PaymentSession,
+        attempt: &mut Attempt,
+    ) -> Result<(), Error> {
+        if !attempt.is_retryable() {
+            return Err(Error::SendPaymentError(
+                "Retry attempts are not allowed".to_string(),
+            ));
+        }
+        let hops_info = self.rebuild_payment_route(session, attempt).await?;
+        let _ = self
+            .send_attempt(myself.clone(), state, session, attempt, hops_info)
+            .await?;
+        Ok(())
+    }
+
     async fn send_attempt(
         &self,
         myself: ActorRef<NetworkActorMessage>,
         state: &mut NetworkActorState<S>,
         session: &mut PaymentSession,
         attempt: &mut Attempt,
-        retry: bool,
+        route: Vec<PaymentHopData>,
     ) -> Result<Option<SessionRoute>, Error> {
-        let hops_info = self.build_payment_route(session, attempt, retry).await?;
-
-        // send attempt
         if let Err(err) = self
-            .send_payment_onion_packet(state, session, attempt, hops_info)
+            .send_payment_onion_packet(state, session, attempt, route)
             .await
         {
             let need_retry = matches!(err, Error::SendPaymentFirstHopError(_, true));
@@ -2378,41 +2384,53 @@ where
 
         if let Some(attempt_id) = attempt_id {
             if let Some(mut attempt) = self.store.get_attempt(payment_hash, attempt_id) {
-                if attempt.is_retryable() {
-                    self.send_attempt(
-                        myself.clone(),
-                        state,
-                        &mut payment_session,
-                        &mut attempt,
-                        true,
-                    )
+                self.retry_attempt(myself.clone(), state, &mut payment_session, &mut attempt)
                     .await?;
-                }
             };
         }
 
         if !payment_session.allow_more_attempts() {
             if payment_session.remain_amount() > 0 {
-                let err = "No more attempts allowed";
+                let err = "Can not send payment with limited attempts";
                 self.set_payment_fail_with_error(&mut payment_session, err);
                 return Err(Error::SendPaymentError(err.to_string()));
             }
             return Ok(());
         }
 
-        // build route
-        let attempt_id = self.store.next_attempt_id();
-        let mut attempt = payment_session.new_attempt(attempt_id);
+        // here we begin to create attempts and routes for the payment session,
+        // it depends on the path finding algorithm to create how many of attempts,
+        // if a payment can not be met in the network graph, an build path error will be returned
+        // and no attempts be stored in the payment session and db.
+        let attempts_with_route = self
+            .build_payment_routes(&mut payment_session)
+            .await
+            .inspect_err(|e| {
+                self.set_payment_fail_with_error(&mut payment_session, &e.to_string());
+            })?;
 
-        self.send_attempt(
-            myself.clone(),
-            state,
-            &mut payment_session,
-            &mut attempt,
-            false,
-        )
-        .await?;
+        for (mut attempt, route) in attempts_with_route {
+            if let Err(e) = self
+                .send_attempt(
+                    myself.clone(),
+                    state,
+                    &mut payment_session,
+                    &mut attempt,
+                    route,
+                )
+                .await
+            {
+                self.set_attempt_fail_with_error(
+                    &mut payment_session,
+                    &mut attempt,
+                    &e.to_string(),
+                    false,
+                );
+                return Err(e);
+            }
+        }
 
+        // do we need more attempts?
         let payment_session = self
             .store
             .get_payment_session(payment_hash)

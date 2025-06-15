@@ -373,6 +373,10 @@ async fn test_send_mpp_amount_split_with_one_extra_direct_channel() {
         let res = node_0
             .send_mpp_payment(&mut node_2, amount, max_parts)
             .await;
+        if expect_status == "build_error" {
+            assert!(res.is_err(), "should fail to build payment");
+            return;
+        }
         let payment_hash = res.unwrap().payment_hash;
         if expect_status == "success" {
             node_0.wait_until_success(payment_hash).await;
@@ -387,7 +391,7 @@ async fn test_send_mpp_amount_split_with_one_extra_direct_channel() {
     test_with_params(300000, Some(2), "success", 1).await;
     // need to split into 2 parts
     test_with_params(400001, Some(2), "success", 2).await;
-    test_with_params(800000, None, "fail", 5).await;
+    test_with_params(800000, None, "build_error", 5).await;
     test_with_params(700000 - 5000, Some(4), "success", 4).await;
 }
 
