@@ -1,4 +1,5 @@
 pub struct Store {}
+pub struct StoreWithPubSub {}
 pub struct Batch {}
 pub enum IteratorMode<'a> {
     Start,
