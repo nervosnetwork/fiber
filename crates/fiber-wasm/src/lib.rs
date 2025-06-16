@@ -1,5 +1,6 @@
 use std::{str::FromStr, sync::Arc};
 
+use api::{FIBER_WASM, WrappedFiberWasm};
 use ckb_chain_spec::ChainSpec;
 use ckb_resource::Resource;
 use fnn::{
@@ -10,10 +11,18 @@ use fnn::{
         contracts::{TypeIDResolver, try_init_contracts_context},
     },
     fiber::{KeyPair, channel::ChannelSubscribers, graph::NetworkGraph, network::init_chain_hash},
-    rpc::watchtower::{
-        CreatePreimageParams, CreateWatchChannelParams, RemovePreimageParams,
-        RemoveWatchChannelParams, UpdateLocalSettlementParams, UpdateRevocationParams,
-        WatchtowerRpcClient,
+    rpc::{
+        channel::ChannelRpcServerImpl,
+        graph::GraphRpcServerImpl,
+        info::InfoRpcServerImpl,
+        invoice::InvoiceRpcServerImpl,
+        payment::PaymentRpcServerImpl,
+        peer::PeerRpcServerImpl,
+        watchtower::{
+            CreatePreimageParams, CreateWatchChannelParams, RemovePreimageParams,
+            RemoveWatchChannelParams, UpdateLocalSettlementParams, UpdateRevocationParams,
+            WatchtowerRpcClient,
+        },
     },
     start_network,
     store::Store,
@@ -29,6 +38,8 @@ use tokio::{
 };
 use tracing::{debug, info, trace};
 use wasm_bindgen::{JsValue, prelude::wasm_bindgen};
+
+pub mod api;
 
 pub struct ExitMessage(String);
 impl Debug for ExitMessage {
@@ -234,7 +245,18 @@ pub async fn fiber(
         }
         None => (None, None, None),
     };
-
+    let network_actor = network_actor.unwrap();
+    let network_graph = network_graph.unwrap();
+    if let Err(_) = FIBER_WASM.set(WrappedFiberWasm {
+        channel: ChannelRpcServerImpl::new(network_actor.clone(), store.clone()),
+        graph: GraphRpcServerImpl::new(network_graph.clone(), store.clone()),
+        info: InfoRpcServerImpl::new(network_actor.clone(), config.ckb.unwrap_or_default()),
+        invoice: InvoiceRpcServerImpl::new(store.clone(), config.fiber),
+        payment: PaymentRpcServerImpl::new(network_actor.clone(), store.clone()),
+        peer: PeerRpcServerImpl::new(network_actor.clone()),
+    }) {
+        panic!("FIBER_WASM is already set!");
+    }
     Ok(())
 }
 

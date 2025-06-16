@@ -18,6 +18,8 @@ jsonrpsee = { version = "0.22", features = ["wasm-client"] }
 wasm-bindgen = "0.2.100"
 wasm-bindgen-futures = "0.4.50"
 secp256k1 = { version = "0.28.0", features = ["serde", "recovery", "rand-std"] }
+serde-wasm-bindgen = "0.6.5"
+serde = "1.0.219"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
