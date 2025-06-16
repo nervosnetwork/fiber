@@ -151,6 +151,7 @@ impl Actor for StoreTestSubscriber {
 pub fn mock_invoice(amount: u128) -> CkbInvoice {
     InvoiceBuilder::new(Currency::Fibb)
         .amount(Some(amount))
+        .payment_hash(gen_rand_sha256_hash())
         .build()
         .expect("mock invoice")
 }

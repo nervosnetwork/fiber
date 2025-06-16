@@ -48,6 +48,9 @@ pub enum InvoiceError {
     /// Both set payment_hash and payment_preimage
     #[error("Both payment_hash and payment_preimage are set")]
     BothPaymenthashAndPreimage,
+    /// Neither payment_hash nor payment_preimage is set
+    #[error("Neither payment_hash nor payment_preimage is set")]
+    NeitherPaymenthashNorPreimage,
     /// An error occurred during signing
     #[error("Sign error")]
     SignError,
