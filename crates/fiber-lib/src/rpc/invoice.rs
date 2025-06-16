@@ -6,7 +6,7 @@ use crate::fiber::{NetworkActorCommand, NetworkActorMessage};
 use crate::invoice::{
     add_invoice, CkbInvoice, CkbInvoiceStatus, Currency, InvoiceBuilder, InvoiceStore,
 };
-use crate::{handle_actor_call, log_and_error, FiberConfig};
+use crate::{gen_rand_sha256_hash, handle_actor_call, log_and_error, FiberConfig};
 use ckb_jsonrpc_types::Script;
 #[cfg(not(target_arch = "wasm32"))]
 use jsonrpsee::{
@@ -31,9 +31,9 @@ pub struct NewInvoiceParams {
     pub description: Option<String>,
     /// The currency of the invoice.
     pub currency: Currency,
-    /// The payment preimage of the invoice, may be empty for a hold invoice.
+    /// The preimage to settle an incoming TLC payable to this invoice. If preimage is set, hash must be absent. If both preimage and hash are absent, a random preimage is generated.
     pub payment_preimage: Option<Hash256>,
-    /// The payment hash of the invoice, must be given when payment_preimage is empty.
+    /// The hash of the preimage. If hash is set, preimage must be absent. This condition indicates a 'hold invoice' for which the tlc must be accepted and held until the preimage becomes known.
     pub payment_hash: Option<Hash256>,
     /// The expiry time of the invoice, in seconds.
     #[serde_as(as = "Option<U64Hex>")]
@@ -198,9 +198,15 @@ where
                 ));
             }
         }
+
         let mut invoice_builder = InvoiceBuilder::new(params.currency).amount(Some(params.amount));
 
-        if let Some(preimage) = params.payment_preimage {
+        // If both preimage and hash are absent, a random preimage is generated.
+        let preimage_opt = params
+            .payment_preimage
+            .or_else(|| params.payment_hash.is_none().then(gen_rand_sha256_hash));
+
+        if let Some(preimage) = preimage_opt {
             invoice_builder = invoice_builder.payment_preimage(preimage);
         }
         if let Some(hash) = params.payment_hash {
@@ -245,8 +251,7 @@ where
         };
 
         match invoice {
-            Ok(invoice) => match add_invoice(&self.store, invoice.clone(), params.payment_preimage)
-            {
+            Ok(invoice) => match add_invoice(&self.store, invoice.clone(), preimage_opt) {
                 Ok(_) => Ok(InvoiceResult {
                     invoice_address: invoice.to_string(),
                     invoice,
