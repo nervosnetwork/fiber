@@ -1,6 +1,7 @@
 const path = require('path');
 const WasmPackPlugin = require("@wasm-tool/wasm-pack-plugin");
 const webpack = require("webpack");
+const isDev = process.env.NODE_ENV === 'development'
 module.exports = {
     entry: './index.ts',
     target: "webworker",
@@ -17,7 +18,7 @@ module.exports = {
         new WasmPackPlugin({
             crateDirectory: path.resolve(__dirname, "."),
             outName: "fiber-wasm-db-worker",
-            extraArgs: "--target web --dev"
+            extraArgs: "--target web" + (isDev ? " --dev" : "")
         }),
         new webpack.ProvidePlugin({
             Buffer: ['buffer', 'Buffer'],

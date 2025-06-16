@@ -108,7 +108,7 @@ pub async fn fiber(
         .store_path();
 
     let store = Store::new(store_path).map_err(|err| ExitMessage(err.to_string()))?;
-
+    debug!("Store initialized");
     let tracker = new_tokio_task_tracker();
     let token = new_tokio_cancellation_token();
     let root_actor = RootActor::start(tracker, token).await;
@@ -245,6 +245,7 @@ pub async fn fiber(
         }
         None => (None, None, None),
     };
+    debug!("Network actor is_none = {}", network_actor.is_none());
     let network_actor = network_actor.unwrap();
     let network_graph = network_graph.unwrap();
     if let Err(_) = FIBER_WASM.set(WrappedFiberWasm {
@@ -256,6 +257,8 @@ pub async fn fiber(
         peer: PeerRpcServerImpl::new(network_actor.clone()),
     }) {
         panic!("FIBER_WASM is already set!");
+    } else {
+        debug!("WrappedFiberWasm set");
     }
     Ok(())
 }
