@@ -2123,9 +2123,7 @@ impl PaymentSession {
     }
 
     pub fn retry_times(&self) -> u32 {
-        self.cached_attempts
-            .iter()
-            .fold(0, |acc, a| acc + a.tried_times)
+        self.attempts().map(|a| a.tried_times).sum()
     }
 
     pub fn allow_mpp(&self) -> bool {
@@ -2152,7 +2150,7 @@ impl PaymentSession {
         self.cached_attempts.len()
     }
 
-    pub fn max_parts(&self) -> u64 {
+    pub fn max_parts(&self) -> usize {
         if self.allow_mpp() {
             self.request.max_parts()
         } else {
@@ -2160,30 +2158,23 @@ impl PaymentSession {
         }
     }
 
-    pub fn active_attempts(&self) -> Vec<Attempt> {
-        self.cached_attempts
-            .iter()
-            .filter(|a| a.is_active())
-            .cloned()
-            .collect()
+    pub fn active_attempts(&self) -> impl Iterator<Item = &Attempt> {
+        self.attempts().filter(|a| a.is_active())
     }
 
     pub fn fee_paid(&self) -> u128 {
-        self.active_attempts().iter().map(|a| a.route.fee()).sum()
-    }
-
-    pub fn success_attempts(&self) -> Vec<Attempt> {
-        self.cached_attempts
-            .iter()
-            .filter(|a| a.is_settled())
-            .cloned()
-            .collect()
+        self.active_attempts().map(|a| a.route.fee()).sum()
     }
 
     pub fn success_attempts_amount(&self) -> u128 {
-        self.success_attempts()
-            .iter()
-            .map(|a| a.route.receiver_amount())
+        self.attempts()
+            .filter_map(|a| {
+                if a.is_settled() {
+                    Some(a.route.receiver_amount())
+                } else {
+                    None
+                }
+            })
             .sum()
     }
 
@@ -2196,7 +2187,6 @@ impl PaymentSession {
     pub fn remain_amount(&self) -> u128 {
         let sent_amount = self
             .active_attempts()
-            .iter()
             .map(|a| a.route.receiver_amount())
             .sum::<u128>();
         self.request.amount.saturating_sub(sent_amount)
@@ -2249,7 +2239,7 @@ impl PaymentSession {
             return false;
         }
 
-        if self.active_attempts().len() >= self.max_parts() as usize {
+        if self.active_attempts().count() >= self.max_parts() {
             return false;
         }
 
@@ -2258,16 +2248,11 @@ impl PaymentSession {
     }
 
     pub fn calc_payment_session_status(&self) -> PaymentSessionStatus {
-        for a in &self.cached_attempts {
-            dbg!(a.last_error.as_ref());
+        for attempt in self.attempts() {
+            dbg!(attempt);
         }
 
-        if self.cached_attempts.is_empty() {
-            // no attempts, the payment is created
-            return self.status;
-        }
-
-        if self.status.is_final() {
+        if self.cached_attempts.is_empty() || self.status.is_final() {
             return self.status;
         }
 

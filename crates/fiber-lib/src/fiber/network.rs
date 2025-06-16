@@ -664,8 +664,8 @@ impl SendPaymentData {
         })
     }
 
-    pub fn max_parts(&self) -> u64 {
-        self.max_parts.unwrap_or(DEFAULT_MAX_PARTS)
+    pub fn max_parts(&self) -> usize {
+        self.max_parts.unwrap_or(DEFAULT_MAX_PARTS) as usize
     }
 
     pub fn allow_mpp(&self) -> bool {
@@ -2081,7 +2081,7 @@ where
 
         session.request.channel_stats = GraphChannelStat::new(Some(graph.channel_stats()));
         let mut attempt_id = session.attempts_count() as u64;
-        while (result.len() < session.max_parts() as usize - active_parts) && remain_amount > 0 {
+        while (result.len() < session.max_parts() - active_parts) && remain_amount > 0 {
             match graph.build_route(remain_amount, max_fee, &session.request) {
                 Err(e) => {
                     let error = format!("Failed to build route, {}", e);
