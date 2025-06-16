@@ -44,7 +44,7 @@ async fn test_send_mpp_basic_two_channels() {
     node_0.wait_until_success(payment_hash).await;
 
     let payment_session = node_0.get_payment_session(payment_hash).unwrap();
-    dbg!(&payment_session.status, &payment_session.attempts().len());
+    dbg!(&payment_session.status, &payment_session.attempts_count());
 
     let node_0_balance = node_0.get_local_balance_from_channel(channels[0]);
     let node_1_balance = node_1.get_local_balance_from_channel(channels[0]);
@@ -211,8 +211,8 @@ async fn test_send_mpp_amount_choose_single_path() {
     let payment_hash = res.unwrap().payment_hash;
     node_0.wait_until_success(payment_hash).await;
     let payment_session = node_0.get_payment_session(payment_hash).unwrap();
-    dbg!(&payment_session.status, &payment_session.attempts().len());
-    assert_eq!(payment_session.attempts().len(), 1);
+    dbg!(&payment_session.status, &payment_session.attempts_count());
+    assert_eq!(payment_session.attempts_count(), 1);
     assert_eq!(payment_session.retry_times(), 1);
 }
 
@@ -245,10 +245,10 @@ async fn test_send_mpp_amount_3_splits() {
     let payment_session = node_0.get_payment_session(payment_hash).unwrap();
     dbg!(
         &payment_session.status,
-        &payment_session.attempts().len(),
+        &payment_session.attempts_count(),
         &payment_session.retry_times()
     );
-    assert_eq!(payment_session.attempts().len(), 3);
+    assert_eq!(payment_session.attempts_count(), 3);
     assert_eq!(payment_session.retry_times(), 3);
 }
 
@@ -274,7 +274,7 @@ async fn test_send_mpp_amount_split() {
     node_0.wait_until_success(payment_hash).await;
 
     let payment_session = node_0.get_payment_session(payment_hash).unwrap();
-    dbg!(&payment_session.status, &payment_session.attempts().len());
+    dbg!(&payment_session.status, &payment_session.attempts_count());
 
     // Spent the half of amount in the first channel
     let node_0_balance = node_0.get_local_balance_from_channel(channels[0]);
@@ -384,7 +384,7 @@ async fn test_send_mpp_amount_split_with_one_extra_direct_channel() {
             node_0.wait_until_failed(payment_hash).await;
         }
         let payment_session = node_0.get_payment_session(payment_hash).unwrap();
-        assert_eq!(payment_session.attempts().len(), expect_attempts_count);
+        assert_eq!(payment_session.attempts_count(), expect_attempts_count);
     }
 
     test_with_params(400000, Some(2), "success", 1).await;

@@ -1110,8 +1110,10 @@ impl NetworkNode {
         let funding_tx_hash = self.get_channel_funding_tx(&channel_id).unwrap();
         let channel_outpoint = OutPoint::new(funding_tx_hash.into(), 0);
         let payment_session = self.get_payment_session(payment_hash).unwrap();
-        let attempts = payment_session.attempts();
-        let first_attempt = attempts.first().expect("at least one attempt");
+        let first_attempt = payment_session
+            .attempts()
+            .next()
+            .expect("at least one attempt");
         assert_eq!(
             first_attempt.route.nodes[index].channel_outpoint,
             channel_outpoint
@@ -1162,15 +1164,15 @@ impl NetworkNode {
         .expect("start mock chain actor")
         .0;
 
-        let secret_key: Privkey = fiber_config
+        let private_key: Privkey = fiber_config
             .read_or_generate_secret_key()
             .expect("must generate key")
             .into();
-        let public_key = secret_key.pubkey();
+        let pubkey = private_key.pubkey();
 
         let network_graph = Arc::new(TokioRwLock::new(NetworkGraph::new(
             store.clone(),
-            public_key,
+            pubkey,
             true,
         )));
 
@@ -1254,7 +1256,7 @@ impl NetworkNode {
             .expect("gossip actor should have been started")
             .into();
 
-        let rpc_handler = if let Some(rpc_config) = rpc_config.clone() {
+        let rpc_server = if let Some(rpc_config) = rpc_config.clone() {
             Some(
                 start_rpc(
                     rpc_config,
@@ -1289,13 +1291,13 @@ impl NetworkNode {
             network_graph,
             chain_actor,
             gossip_actor,
-            private_key: secret_key,
+            private_key,
             peer_id,
             event_emitter: self_event_receiver,
-            pubkey: public_key,
+            pubkey,
             unexpected_events,
             triggered_unexpected_events,
-            rpc_server: rpc_handler,
+            rpc_server,
         }
     }
 

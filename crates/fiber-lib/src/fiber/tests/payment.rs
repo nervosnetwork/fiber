@@ -1654,7 +1654,7 @@ async fn test_send_payment_with_route_with_invalid_parameters() {
         .get_payment_session(payment_hash)
         .expect("get payment");
     eprintln!("result: {:?}", result.status);
-    assert_eq!(result.attempts().len(), 1);
+    assert_eq!(result.attempts_count(), 1);
 }
 
 #[tokio::test]
@@ -1720,7 +1720,7 @@ async fn test_send_payment_with_router_with_multiple_channels() {
     eprintln!("payment_session: {:?}", &payment_session);
     let used_channels: Vec<Hash256> = payment_session
         .attempts()
-        .first()
+        .next()
         .unwrap()
         .route
         .nodes
@@ -1779,7 +1779,7 @@ async fn test_send_payment_with_router_with_multiple_channels() {
     eprintln!("payment_session: {:?}", &payment_session);
     let used_channels: Vec<Hash256> = payment_session
         .attempts()
-        .first()
+        .next()
         .unwrap()
         .route
         .nodes
@@ -1877,7 +1877,7 @@ async fn test_send_payment_two_nodes_with_router_and_multiple_channels() {
 
     let used_channels: Vec<Hash256> = payment_session
         .attempts()
-        .first()
+        .next()
         .unwrap()
         .route
         .nodes
@@ -4611,7 +4611,7 @@ async fn test_send_payment_with_mixed_channel_hops() {
         "IncorrectOrUnknownPaymentDetails"
     );
     let payment_session = node0.get_payment_session(payment_hash).unwrap();
-    assert_eq!(payment_session.attempts().len(), 1);
+    assert_eq!(payment_session.attempts_count(), 1);
     assert_eq!(payment_session.retry_times(), 1);
 }
 
@@ -4717,8 +4717,11 @@ async fn test_send_payment_with_reconnect_two_times() {
                     payments.remove(payment_hash);
                 } else if status == PaymentSessionStatus::Created {
                     // wait for the payment to be retried
-                    let pss = node0.get_payment_session(*payment_hash).unwrap();
-                    eprintln!("payment_session attempts: {:?}", pss.attempts().len());
+                    let payment_session = node0.get_payment_session(*payment_hash).unwrap();
+                    eprintln!(
+                        "payment_session attempts: {:?}",
+                        payment_session.attempts_count()
+                    );
                 }
                 tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
             }

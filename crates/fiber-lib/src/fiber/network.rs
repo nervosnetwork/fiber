@@ -2074,13 +2074,13 @@ where
     ) -> Result<Vec<(Attempt, Vec<PaymentHopData>)>, Error> {
         let graph = self.network_graph.read().await;
         let source = graph.get_source_pubkey();
-        let active_parts = session.attempts().iter().filter(|a| a.is_active()).count();
+        let active_parts = session.attempts().filter(|a| a.is_active()).count();
         let mut remain_amount = session.remain_amount();
         let mut max_fee = session.remain_fee_amount();
         let mut result = vec![];
 
         session.request.channel_stats = GraphChannelStat::new(Some(graph.channel_stats()));
-        let mut attempt_id = session.attempts().len() as u64;
+        let mut attempt_id = session.attempts_count() as u64;
         while (result.len() < session.max_parts() as usize - active_parts) && remain_amount > 0 {
             match graph.build_route(remain_amount, max_fee, &session.request) {
                 Err(e) => {
@@ -2106,14 +2106,14 @@ where
                         max_fee = Some(fee - route.fee());
                     }
 
-                    let attempt_id = if session.is_dry_run() {
+                    let new_attempt_id = if session.is_dry_run() {
                         0
                     } else {
                         attempt_id += 1;
                         attempt_id
                     };
 
-                    let mut attempt = session.new_attempt(attempt_id);
+                    let mut attempt = session.new_attempt(new_attempt_id);
                     attempt.route = route;
 
                     result.push((attempt, hops));

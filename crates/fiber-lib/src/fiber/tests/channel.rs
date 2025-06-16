@@ -5105,7 +5105,7 @@ async fn test_send_payment_with_channel_balance_error() {
     // because there is only one path for the payment, the payment will fail in the second try
     // this assertion make sure we didn't do meaningless retry
     let payment_session = source_node.get_payment_session(payment_hash).unwrap();
-    assert_eq!(payment_session.attempts().len(), 1);
+    assert_eq!(payment_session.attempts_count(), 1);
     assert_eq!(payment_session.retry_times(), 2);
 }
 
@@ -5188,7 +5188,7 @@ async fn test_send_payment_with_multiple_edges_in_middle_hops() {
     // this assertion make sure we didn't do meaningless retry
     let payment_session = source_node.get_payment_session(payment_hash).unwrap();
     assert_eq!(payment_session.retry_times(), 1);
-    assert_eq!(payment_session.attempts().len(), 1);
+    assert_eq!(payment_session.attempts_count(), 1);
 }
 
 #[tokio::test]
@@ -5234,7 +5234,7 @@ async fn test_send_payment_with_all_failed_middle_hops() {
     // this assertion make sure we didn't do meaningless retry
     assert!(node_0.get_triggered_unexpected_events().await.is_empty());
     let payment_session = source_node.get_payment_session(payment_hash).unwrap();
-    assert_eq!(payment_session.attempts().len(), 1);
+    assert_eq!(payment_session.attempts_count(), 1);
     assert_eq!(payment_session.retry_times(), 3);
 }
 
@@ -5281,7 +5281,7 @@ async fn test_send_payment_with_multiple_edges_can_succeed_in_retry() {
     // because there is only one path for the payment, the payment will fail in the second try
     // this assertion make sure we didn't do meaningless retry
     let payment_session = source_node.get_payment_session(payment_hash).unwrap();
-    assert_eq!(payment_session.attempts().len(), 1);
+    assert_eq!(payment_session.attempts_count(), 1);
     assert_eq!(payment_session.retry_times(), 2);
 }
 
@@ -5327,7 +5327,7 @@ async fn test_send_payment_with_final_hop_multiple_edges_in_middle_hops() {
     // because there is only one path for the payment, the payment will fail in the second try
     // this assertion make sure we didn't do meaningless retry
     let payment_session = source_node.get_payment_session(payment_hash).unwrap();
-    assert_eq!(payment_session.attempts().len(), 1);
+    assert_eq!(payment_session.attempts_count(), 1);
     assert_eq!(payment_session.retry_times(), 1);
 }
 

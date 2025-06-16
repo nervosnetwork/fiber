@@ -2144,8 +2144,12 @@ impl PaymentSession {
         self.request.dry_run
     }
 
-    pub fn attempts(&self) -> Vec<Attempt> {
-        self.cached_attempts.clone()
+    pub fn attempts(&self) -> impl Iterator<Item = &Attempt> {
+        self.cached_attempts.iter()
+    }
+
+    pub fn attempts_count(&self) -> usize {
+        self.cached_attempts.len()
     }
 
     pub fn max_parts(&self) -> u64 {
@@ -2166,6 +2170,21 @@ impl PaymentSession {
 
     pub fn fee_paid(&self) -> u128 {
         self.active_attempts().iter().map(|a| a.route.fee()).sum()
+    }
+
+    pub fn success_attempts(&self) -> Vec<Attempt> {
+        self.cached_attempts
+            .iter()
+            .filter(|a| a.is_settled())
+            .cloned()
+            .collect()
+    }
+
+    pub fn success_attempts_amount(&self) -> u128 {
+        self.success_attempts()
+            .iter()
+            .map(|a| a.route.receiver_amount())
+            .sum()
     }
 
     pub fn remain_fee_amount(&self) -> Option<u128> {
@@ -2239,77 +2258,33 @@ impl PaymentSession {
     }
 
     pub fn calc_payment_session_status(&self) -> PaymentSessionStatus {
-        if self.cached_attempts.is_empty() {
-            // no attempts, the payment is created
-            return self.status;
-        }
-        // if last error is not none, the payment is failed
-        let payment_failed = self.last_error.is_some();
-        // no settled htlc, the payment is failed
-        if payment_failed {
-            return PaymentSessionStatus::Failed;
-        }
-
-        let mut htlc_inflight = false;
-        let mut htlc_failed = false;
-        let mut htlc_settled = false;
-
-        // check the status of the htlc
-        for a in &self.cached_attempts {
-            if a.is_failed() {
-                htlc_failed = true;
-                continue;
-            }
-            if a.is_settled() {
-                htlc_settled = true;
-                continue;
-            }
-            if a.is_inflight() {
-                htlc_inflight = true;
-            }
-        }
-
-        dbg!(
-            htlc_inflight,
-            htlc_failed,
-            htlc_settled,
-            payment_failed,
-            self.cached_attempts.len(),
-            self.cached_attempts
-                .iter()
-                .filter(|a| a.is_settled())
-                .count(),
-            self.cached_attempts
-                .iter()
-                .map(|a| a.tried_times)
-                .collect::<Vec<_>>(),
-            &self.cached_attempts,
-            &self.last_error
-        );
-
         for a in &self.cached_attempts {
             dbg!(a.last_error.as_ref());
         }
 
-        // no matter the payment status, if the htlc is inflight, the payment is inflight
-        if htlc_inflight {
+        if self.cached_attempts.is_empty() {
+            // no attempts, the payment is created
+            return self.status;
+        }
+
+        if self.status.is_final() {
+            return self.status;
+        }
+
+        if self.attempts().any(|a| a.is_inflight()) {
+            // if any attempt is created or inflight, the payment is inflight
             return PaymentSessionStatus::Inflight;
         }
-        // if at least one htlc is settled, and no htlc is inflight, the payment is successful
-        if htlc_settled {
+
+        if self.attempts().all(|a| a.is_failed()) && !self.allow_more_attempts() {
+            return PaymentSessionStatus::Failed;
+        }
+
+        if self.success_attempts_amount() >= self.request.amount {
             return PaymentSessionStatus::Success;
         }
 
-        // if htlc is failed but the payment is not failed, the payment is inflight
-        if htlc_failed {
-            if self.allow_more_attempts() {
-                return PaymentSessionStatus::Inflight;
-            } else {
-                return PaymentSessionStatus::Failed;
-            }
-        } else {
-            return PaymentSessionStatus::Created;
-        }
+        return PaymentSessionStatus::Created;
     }
 
     fn set_status(&mut self, status: PaymentSessionStatus) {
@@ -2336,9 +2311,8 @@ impl From<PaymentSession> for SendPaymentResponse {
     fn from(session: PaymentSession) -> Self {
         let status = session.calc_payment_session_status();
         let fee = session.fee_paid();
-        let all_attempts = session.attempts();
-        let attempts = all_attempts
-            .iter()
+        let attempts = session
+            .attempts()
             .filter(|a| !a.is_failed())
             .collect::<Vec<_>>();
 
@@ -2346,10 +2320,10 @@ impl From<PaymentSession> for SendPaymentResponse {
         Self {
             payment_hash: session.request.payment_hash,
             status,
-            failed_error: session.last_error,
+            failed_error: session.last_error.clone(),
             created_at: session.created_at,
             last_updated_at: session.last_updated_at,
-            custom_records: session.request.custom_records,
+            custom_records: session.request.custom_records.clone(),
             fee,
             #[cfg(any(debug_assertions, feature = "bench"))]
             routers: attempts.iter().map(|a| a.route.clone()).collect::<Vec<_>>(),
@@ -2407,7 +2381,11 @@ impl Attempt {
     }
 
     pub fn is_inflight(&self) -> bool {
-        self.status == PaymentSessionStatus::Inflight
+        matches!(self.status, PaymentSessionStatus::Inflight)
+    }
+
+    pub fn is_created(&self) -> bool {
+        self.status == PaymentSessionStatus::Created
     }
 
     pub fn is_failed(&self) -> bool {
