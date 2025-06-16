@@ -48,11 +48,11 @@ use super::channel::{
     get_funding_and_reserved_amount, occupied_capacity, AcceptChannelParameter,
     AwaitingTxSignaturesFlags, ChannelActor, ChannelActorMessage, ChannelActorStateStore,
     ChannelCommand, ChannelCommandWithId, ChannelEvent, ChannelInitializationParameter,
-    ChannelState, ChannelSubscribers, ChannelTlcInfo, OpenChannelParameter, PrevTlcInfo,
-    ProcessingChannelError, ProcessingChannelResult, PublicChannelInfo, RemoveTlcCommand,
-    RevocationData, SettlementData, ShuttingDownFlags, StopReason, DEFAULT_COMMITMENT_FEE_RATE,
-    DEFAULT_FEE_RATE, DEFAULT_MAX_TLC_VALUE_IN_FLIGHT, MAX_COMMITMENT_DELAY_EPOCHS,
-    MAX_TLC_NUMBER_IN_FLIGHT, MIN_COMMITMENT_DELAY_EPOCHS, SYS_MAX_TLC_NUMBER_IN_FLIGHT,
+    ChannelState, ChannelTlcInfo, OpenChannelParameter, PrevTlcInfo, ProcessingChannelError,
+    ProcessingChannelResult, PublicChannelInfo, RemoveTlcCommand, RevocationData, SettlementData,
+    ShuttingDownFlags, StopReason, DEFAULT_COMMITMENT_FEE_RATE, DEFAULT_FEE_RATE,
+    DEFAULT_MAX_TLC_VALUE_IN_FLIGHT, MAX_COMMITMENT_DELAY_EPOCHS, MAX_TLC_NUMBER_IN_FLIGHT,
+    MIN_COMMITMENT_DELAY_EPOCHS, SYS_MAX_TLC_NUMBER_IN_FLIGHT,
 };
 use super::config::{AnnouncedNodeName, MIN_TLC_EXPIRY_DELTA};
 use super::fee::calculate_commitment_tx_fee;
@@ -85,7 +85,10 @@ use crate::fiber::types::{
     FiberChannelMessage, PaymentOnionPacket, PeeledPaymentOnionPacket, TxSignatures,
 };
 use crate::fiber::KeyPair;
-use crate::invoice::{CkbInvoice, CkbInvoiceStatus, InvoiceStore, PreimageStore};
+use crate::invoice::{
+    add_invoice, CkbInvoice, CkbInvoiceStatus, InvoiceError, InvoiceStore, PreimageStore,
+    SettleInvoiceError,
+};
 use crate::{now_timestamp_as_millis_u64, unwrap_or_return, Error};
 
 pub const FIBER_PROTOCOL_ID: ProtocolId = ProtocolId::new(42);
@@ -277,6 +280,18 @@ pub enum NetworkActorCommand {
     BuildPaymentRouter(
         BuildRouterCommand,
         RpcReplyPort<Result<PaymentRouter, String>>,
+    ),
+
+    AddInvoice(
+        CkbInvoice,
+        Option<Hash256>,
+        RpcReplyPort<Result<(), InvoiceError>>,
+    ),
+
+    SettleInvoice(
+        Hash256,
+        Hash256,
+        RpcReplyPort<Result<(), SettleInvoiceError>>,
     ),
 
     NodeInfo((), RpcReplyPort<Result<NodeInfoResponse, String>>),
@@ -1671,7 +1686,57 @@ where
                     .collect::<Vec<_>>();
                 let _ = rpc.send(Ok(peers));
             }
+            NetworkActorCommand::SettleInvoice(hash, preimage, reply) => {
+                let _ = reply.send(self.settle_invoice(&myself, &hash, &preimage));
+            }
+            NetworkActorCommand::AddInvoice(invoice, preimage, reply) => {
+                let _ = reply.send(add_invoice(&self.store, invoice, preimage));
+            }
         };
+        Ok(())
+    }
+
+    pub(crate) fn settle_invoice(
+        &self,
+        myself: &ActorRef<NetworkActorMessage>,
+        payment_hash: &Hash256,
+        payment_preimage: &Hash256,
+    ) -> Result<(), SettleInvoiceError> {
+        let invoice = self
+            .store
+            .get_invoice(payment_hash)
+            .ok_or(SettleInvoiceError::InvoiceNotFound)?;
+
+        let hash_algorithm = invoice.hash_algorithm().copied().unwrap_or_default();
+        let hash = hash_algorithm.hash(payment_preimage);
+        if hash.as_slice() != payment_hash.as_ref() {
+            return Err(SettleInvoiceError::HashMismatch);
+        }
+
+        self.store.insert_preimage(*payment_hash, *payment_preimage);
+
+        // We will send network actor a message to settle the invoice immediately if possible.
+        if let Some(CkbInvoiceStatus::Received) = self.store.get_invoice_status(payment_hash) {
+            let channels = self.store.get_invoice_channel_info(payment_hash);
+            let total_amount: u128 = channels.iter().map(|c| c.amount).sum();
+            match invoice.amount() {
+                Some(amount) if total_amount < amount => {
+                    return Ok(());
+                }
+                _ => {
+                    // Only settle the invoice if the client has paid the full amount.
+                    for channel in channels {
+                        let _ = myself.send_message(NetworkActorMessage::new_command(
+                            NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
+                                channel_id: channel.channel_id,
+                                command: ChannelCommand::SettleHeldTlc(*payment_hash),
+                            }),
+                        ));
+                    }
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -2103,6 +2168,7 @@ where
         state: &mut NetworkActorState<S>,
         payment_request: SendPaymentCommand,
     ) -> Result<SendPaymentResponse, Error> {
+        debug!("Received send payment request: {:?}", payment_request);
         let payment_data = SendPaymentData::new(payment_request.clone()).map_err(|e| {
             error!("Failed to validate payment request: {:?}", e);
             Error::InvalidParameter(format!("Failed to validate payment request: {:?}", e))
@@ -2256,7 +2322,6 @@ pub struct NetworkActorState<S> {
     tlc_fee_proportional_millionths: u128,
     // The gossip messages actor to process and send gossip messages.
     gossip_actor: ActorRef<GossipActorMessage>,
-    channel_subscribers: ChannelSubscribers,
     max_inbound_peers: usize,
     min_outbound_peers: usize,
 }
@@ -2335,6 +2400,23 @@ impl PersistentNetworkActorState {
 pub trait NetworkActorStateStore {
     fn get_network_actor_state(&self, id: &PeerId) -> Option<PersistentNetworkActorState>;
     fn insert_network_actor_state(&self, id: &PeerId, state: PersistentNetworkActorState);
+}
+
+/// Used for delegating the store trait
+pub trait NetworkActorStateStoreDeref {
+    type Target: NetworkActorStateStore;
+    fn network_actor_state_store_deref(&self) -> &Self::Target;
+}
+
+impl<T: NetworkActorStateStoreDeref> NetworkActorStateStore for T {
+    fn get_network_actor_state(&self, id: &PeerId) -> Option<PersistentNetworkActorState> {
+        self.network_actor_state_store_deref()
+            .get_network_actor_state(id)
+    }
+    fn insert_network_actor_state(&self, id: &PeerId, state: PersistentNetworkActorState) {
+        self.network_actor_state_store_deref()
+            .insert_network_actor_state(id, state);
+    }
 }
 
 static CHANNEL_ACTOR_NAME_PREFIX: AtomicU64 = AtomicU64::new(0u64);
@@ -2469,13 +2551,7 @@ where
         let (tx, rx) = oneshot::channel::<Hash256>();
         let channel = Actor::spawn_linked(
             Some(generate_channel_actor_name(&self.peer_id, &peer_id)),
-            ChannelActor::new(
-                self.get_public_key(),
-                remote_pubkey,
-                network.clone(),
-                store,
-                self.channel_subscribers.clone(),
-            ),
+            ChannelActor::new(self.get_public_key(), remote_pubkey, network.clone(), store),
             ChannelInitializationParameter::OpenChannel(OpenChannelParameter {
                 funding_amount,
                 seed,
@@ -2556,13 +2632,7 @@ where
         let (tx, rx) = oneshot::channel::<Hash256>();
         let channel = Actor::spawn_linked(
             Some(generate_channel_actor_name(&self.peer_id, &peer_id)),
-            ChannelActor::new(
-                self.get_public_key(),
-                remote_pubkey,
-                network.clone(),
-                store,
-                self.channel_subscribers.clone(),
-            ),
+            ChannelActor::new(self.get_public_key(), remote_pubkey, network.clone(), store),
             ChannelInitializationParameter::AcceptChannel(AcceptChannelParameter {
                 funding_amount,
                 reserved_ckb_amount,
@@ -3010,7 +3080,6 @@ where
                 remote_pubkey,
                 self.network.clone(),
                 self.store.clone(),
-                self.channel_subscribers.clone(),
             ),
             ChannelInitializationParameter::ReestablishChannel(channel_id),
             self.network.get_cell(),
@@ -3373,7 +3442,6 @@ where
 pub struct NetworkActorStartArguments {
     pub config: FiberConfig,
     pub tracker: TaskTracker,
-    pub channel_subscribers: ChannelSubscribers,
     pub default_shutdown_script: Script,
 }
 
@@ -3403,7 +3471,6 @@ where
         let NetworkActorStartArguments {
             config,
             tracker,
-            channel_subscribers,
             default_shutdown_script,
         } = args;
         let now = SystemTime::now()
@@ -3562,7 +3629,6 @@ where
             tlc_min_value: config.tlc_min_value(),
             tlc_fee_proportional_millionths: config.tlc_fee_proportional_millionths(),
             gossip_actor,
-            channel_subscribers,
             max_inbound_peers: config.max_inbound_peers(),
             min_outbound_peers: config.min_outbound_peers(),
         };
@@ -3819,7 +3885,6 @@ pub async fn start_network<
     tracker: TaskTracker,
     root_actor: ActorCell,
     store: S,
-    channel_subscribers: ChannelSubscribers,
     network_graph: Arc<RwLock<NetworkGraph<S>>>,
     default_shutdown_script: Script,
 ) -> ActorRef<NetworkActorMessage> {
@@ -3832,7 +3897,6 @@ pub async fn start_network<
         NetworkActorStartArguments {
             config,
             tracker,
-            channel_subscribers,
             default_shutdown_script,
         },
         root_actor,

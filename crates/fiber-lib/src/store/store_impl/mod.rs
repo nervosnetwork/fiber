@@ -1,19 +1,25 @@
 #[cfg(not(target_arch = "wasm32"))]
 mod native;
 #[cfg(not(target_arch = "wasm32"))]
-pub use native::{Batch, DbDirection, IteratorMode, Store};
+pub use native::{Batch, DbDirection, IteratorMode, Store, StoreWithPubSub};
 
 #[cfg(target_arch = "wasm32")]
 mod browser;
 #[cfg(target_arch = "wasm32")]
-pub use browser::{Batch, DbDirection, IteratorMode, Store};
+pub use browser::{Batch, DbDirection, IteratorMode, Store, StoreWithPubSub};
 
 use std::path::Path;
 
 use super::db_migrate::DbMigrate;
 use super::schema::*;
-use crate::fiber::gossip::GossipMessageStore;
+use crate::fiber::gossip::GossipMessageStoreDeref;
+use crate::fiber::network::NetworkActorStateStoreDeref;
 use crate::fiber::types::CURSOR_SIZE;
+use crate::fiber::{channel::ChannelActorStateStoreDeref, gossip::GossipMessageStore};
+use crate::invoice::InvoiceChannelInfo;
+use crate::store::subscription::{InvoiceUpdatedPayload, PaymentUpdatedPayload, StoreUpdatedEvent};
+#[cfg(feature = "watchtower")]
+use crate::watchtower::WatchtowerStoreDeref;
 #[cfg(feature = "watchtower")]
 use crate::{
     fiber::channel::{RevocationData, SettlementData},
@@ -37,7 +43,7 @@ use ckb_types::prelude::Entity;
 use serde::Serialize;
 use std::collections::HashSet;
 use tentacle::secio::PeerId;
-use tracing::info;
+use tracing::{error, info, info_span};
 
 #[derive(Copy, Clone)]
 enum ChannelTimestamp {
@@ -185,6 +191,7 @@ pub enum KeyValue {
     CkbInvoice(Hash256, CkbInvoice),
     Preimage(Hash256, Hash256),
     CkbInvoiceStatus(Hash256, CkbInvoiceStatus),
+    CkbInvoiceChannels(Hash256, Vec<InvoiceChannelInfo>),
     PeerIdChannelId((PeerId, Hash256), ChannelState),
     OutPointChannelId(OutPoint, Hash256),
     BroadcastMessageTimestamp(BroadcastMessageID, u64),
@@ -212,6 +219,9 @@ impl StoreKeyValue for KeyValue {
             KeyValue::Preimage(id, _) => [&[PREIMAGE_PREFIX], id.as_ref()].concat(),
             KeyValue::CkbInvoiceStatus(id, _) => {
                 [&[CKB_INVOICE_STATUS_PREFIX], id.as_ref()].concat()
+            }
+            KeyValue::CkbInvoiceChannels(id, _) => {
+                [&[CKB_INVOICE_CHANNELS_PREFIX], id.as_ref()].concat()
             }
             KeyValue::PeerIdChannelId((peer_id, channel_id), _) => [
                 &[PEER_ID_CHANNEL_ID_PREFIX],
@@ -258,6 +268,9 @@ impl StoreKeyValue for KeyValue {
             KeyValue::CkbInvoice(_, invoice) => serialize_to_vec(invoice, "CkbInvoice"),
             KeyValue::Preimage(_, preimage) => serialize_to_vec(preimage, "Hash256"),
             KeyValue::CkbInvoiceStatus(_, status) => serialize_to_vec(status, "CkbInvoiceStatus"),
+            KeyValue::CkbInvoiceChannels(_, channel) => {
+                serialize_to_vec(channel, "CkbInvoiceChannels")
+            }
             KeyValue::PeerIdChannelId(_, state) => serialize_to_vec(state, "ChannelState"),
             KeyValue::OutPointChannelId(_, channel_id) => serialize_to_vec(channel_id, "ChannelId"),
             KeyValue::PaymentSession(_, payment_session) => {
@@ -296,6 +309,14 @@ impl NetworkActorStateStore for Store {
         let mut batch = self.batch();
         batch.put_kv(KeyValue::NetworkActorState(id.clone(), state));
         batch.commit();
+    }
+}
+
+impl<T: NetworkActorStateStore> NetworkActorStateStoreDeref for StoreWithPubSub<T> {
+    type Target = T;
+
+    fn network_actor_state_store_deref(&self) -> &Self::Target {
+        &self.inner
     }
 }
 
@@ -394,6 +415,14 @@ impl ChannelActorStateStore for Store {
     }
 }
 
+impl<T: ChannelActorStateStore> ChannelActorStateStoreDeref for StoreWithPubSub<T> {
+    type Target = T;
+
+    fn channel_actor_state_store_deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
 impl InvoiceStore for Store {
     fn get_invoice(&self, id: &Hash256) -> Option<CkbInvoice> {
         let key = [&[CKB_INVOICE_PREFIX], id.as_ref()].concat();
@@ -426,7 +455,7 @@ impl InvoiceStore for Store {
     fn update_invoice_status(
         &self,
         id: &Hash256,
-        status: crate::invoice::CkbInvoiceStatus,
+        status: CkbInvoiceStatus,
     ) -> Result<(), InvoiceError> {
         self.get_invoice(id).ok_or(InvoiceError::InvoiceNotFound)?;
         let mut batch = self.batch();
@@ -439,6 +468,120 @@ impl InvoiceStore for Store {
         let key = [&[CKB_INVOICE_STATUS_PREFIX], id.as_ref()].concat();
         self.get(key)
             .map(|v| deserialize_from(v.as_ref(), "CkbInvoiceStatus"))
+    }
+
+    fn get_invoice_channel_info(&self, payment_hash: &Hash256) -> Vec<InvoiceChannelInfo> {
+        let key = [&[CKB_INVOICE_CHANNELS_PREFIX], payment_hash.as_ref()].concat();
+        self.get(key)
+            .map(|v| deserialize_from(&v, "CkbInvoiceChannels"))
+            .unwrap_or_default()
+    }
+
+    fn add_invoice_channel_info(
+        &self,
+        id: &Hash256,
+        channel_info: InvoiceChannelInfo,
+    ) -> Result<Vec<InvoiceChannelInfo>, InvoiceError> {
+        let mut batch = self.batch();
+        let key = [&[CKB_INVOICE_CHANNELS_PREFIX], id.as_ref()].concat();
+        let mut channels: Vec<InvoiceChannelInfo> = batch
+            .get(&key)
+            .map(|v| deserialize_from(&v, "CkbInvoiceChannels"))
+            .unwrap_or_default();
+        match channels
+            .iter_mut()
+            .find(|info| info.channel_id == channel_info.channel_id)
+        {
+            Some(info) => {
+                info.amount += channel_info.amount;
+            }
+            None => {
+                channels.push(channel_info);
+            }
+        }
+        batch.put_kv(KeyValue::CkbInvoiceChannels(*id, channels.clone()));
+        batch.commit();
+        Ok(channels)
+    }
+}
+
+impl<S> InvoiceStore for StoreWithPubSub<S>
+where
+    S: InvoiceStore,
+{
+    fn get_invoice(&self, id: &Hash256) -> Option<CkbInvoice> {
+        self.inner.get_invoice(id)
+    }
+
+    fn insert_invoice(
+        &self,
+        invoice: CkbInvoice,
+        preimage: Option<Hash256>,
+    ) -> Result<(), InvoiceError> {
+        let invoice_hash = *invoice.payment_hash();
+        self.inner.insert_invoice(invoice, preimage)?;
+
+        self.publish(StoreUpdatedEvent::new_invoice_updated_event(
+            invoice_hash,
+            InvoiceUpdatedPayload::Open,
+        ));
+        Ok(())
+    }
+
+    fn update_invoice_status(
+        &self,
+        id: &Hash256,
+        status: CkbInvoiceStatus,
+    ) -> Result<(), InvoiceError> {
+        let _span = info_span!("update_invoice_status", invoice_hash = ?id).entered();
+
+        self.inner.update_invoice_status(id, status)?;
+        let payload_opt = status.try_into().ok().or_else(|| match status {
+            CkbInvoiceStatus::Received => {
+                // TODO: We should save received amount to the store. This is useful to
+                // determine if the invoice is fully paid.
+                // Currently we assume that the invoice is fully paid if the status is
+                // Received.
+                let payload_opt =
+                    self.get_invoice(id)
+                        .and_then(|invoice| invoice.amount)
+                        .map(|amount| InvoiceUpdatedPayload::Received {
+                            amount,
+                            is_finished: true,
+                        });
+                if payload_opt.is_none() {
+                    error!("Fail to get payment amount for a received invoice");
+                }
+                payload_opt
+            }
+            _ => {
+                error!(
+                    "Expect convert CkbInvoiceStatus {} to InvoiceUpdatedPayload",
+                    status
+                );
+                None
+            }
+        });
+        if let Some(payload) = payload_opt {
+            self.publish(StoreUpdatedEvent::new_invoice_updated_event(*id, payload))
+        }
+        Ok(())
+    }
+
+    fn get_invoice_status(&self, id: &Hash256) -> Option<CkbInvoiceStatus> {
+        self.inner.get_invoice_status(id)
+    }
+
+    fn get_invoice_channel_info(&self, payment_hash: &Hash256) -> Vec<InvoiceChannelInfo> {
+        self.inner.get_invoice_channel_info(payment_hash)
+    }
+
+    fn add_invoice_channel_info(
+        &self,
+        id: &Hash256,
+        channel_info: InvoiceChannelInfo,
+    ) -> Result<Vec<InvoiceChannelInfo>, InvoiceError> {
+        self.inner.add_invoice_channel_info(id, channel_info)
     }
 }
 
@@ -466,6 +609,91 @@ impl PreimageStore for Store {
         let mut iter = self.prefix_iterator(prefix.as_slice());
         iter.next()
             .map(|(_key, value)| deserialize_from(value.as_ref(), "Preimage"))
+    }
+}
+
+// The PaymentUpdatedEvent requires preimage when the payment status is Received. Hooks are added
+// in both `insert_preimage` and `insert_payment_session` so App does not need to worry about
+// sequence to update the store.
+impl<S> StoreWithPubSub<S>
+where
+    S: NetworkGraphStateStore + PreimageStore,
+{
+    fn publish_payment_updated_event_when_inserting_payment_session(
+        &self,
+        payment_hash: Hash256,
+        status: PaymentSessionStatus,
+    ) {
+        let payload_opt = status.try_into().ok().or_else(|| match status {
+            // If preimage is not available, defer the notification on `insert_preimage`.
+            // See `publish_payment_updated_event_when_removing_preimage`.
+            PaymentSessionStatus::Success => self
+                .get_preimage(&payment_hash)
+                .map(|preimage| PaymentUpdatedPayload::Success { preimage }),
+            _ => {
+                error!(
+                    "Expect convert PaymentSessionStatus {:?} to PaymentUpdatedPayload",
+                    status
+                );
+                None
+            }
+        });
+        if let Some(payload) = payload_opt {
+            self.publish(StoreUpdatedEvent::new_payment_updated_event(
+                payment_hash,
+                payload,
+            ))
+        }
+    }
+
+    fn publish_payment_updated_event_when_removing_preimage(
+        &self,
+        payment_hash: Hash256,
+        preimage: Hash256,
+    ) {
+        // Check whether the payment session status is Success or Inflight.
+        // TODO: It is tricky to publish the success payment session status event when removing the
+        // preimage from the store. This is the last chance since channel actor automatically clean the preimage before the
+        // payment session is marked as success.
+        if self
+            .inner
+            .get_payment_session(payment_hash)
+            .is_some_and(|session| {
+                matches!(
+                    session.status,
+                    PaymentSessionStatus::Inflight | PaymentSessionStatus::Success
+                )
+            })
+        {
+            self.publish(StoreUpdatedEvent::new_payment_updated_event(
+                payment_hash,
+                PaymentUpdatedPayload::Success { preimage },
+            ))
+        }
+    }
+}
+
+impl<T> PreimageStore for StoreWithPubSub<T>
+where
+    T: NetworkGraphStateStore + PreimageStore,
+{
+    fn insert_preimage(&self, payment_hash: Hash256, preimage: Hash256) {
+        self.inner.insert_preimage(payment_hash, preimage);
+    }
+
+    fn remove_preimage(&self, payment_hash: &Hash256) {
+        if let Some(preimage) = self.inner.get_preimage(payment_hash) {
+            self.publish_payment_updated_event_when_removing_preimage(*payment_hash, preimage);
+        }
+        self.inner.remove_preimage(payment_hash);
+    }
+
+    fn get_preimage(&self, payment_hash: &Hash256) -> Option<Hash256> {
+        self.inner.get_preimage(payment_hash)
+    }
+
+    fn search_preimage(&self, payment_hash_prefix: &[u8]) -> Option<Hash256> {
+        self.inner.search_preimage(payment_hash_prefix)
     }
 }
 
@@ -524,6 +752,44 @@ impl NetworkGraphStateStore for Store {
             (channel_outpoint, direction, result)
         })
         .collect()
+    }
+}
+
+impl<S> NetworkGraphStateStore for StoreWithPubSub<S>
+where
+    S: NetworkGraphStateStore + PreimageStore,
+{
+    fn get_payment_session(&self, payment_hash: Hash256) -> Option<PaymentSession> {
+        self.inner.get_payment_session(payment_hash)
+    }
+
+    fn get_payment_sessions_with_status(
+        &self,
+        status: PaymentSessionStatus,
+    ) -> Vec<PaymentSession> {
+        self.inner.get_payment_sessions_with_status(status)
+    }
+
+    fn insert_payment_session(&self, session: PaymentSession) {
+        let payment_hash = session.payment_hash();
+        let status = session.status;
+
+        self.inner.insert_payment_session(session);
+        self.publish_payment_updated_event_when_inserting_payment_session(payment_hash, status);
+    }
+
+    fn insert_payment_history_result(
+        &mut self,
+        channel_outpoint: OutPoint,
+        direction: Direction,
+        result: TimedResult,
+    ) {
+        self.inner
+            .insert_payment_history_result(channel_outpoint, direction, result)
+    }
+
+    fn get_payment_history_results(&self) -> Vec<(OutPoint, Direction, TimedResult)> {
+        self.inner.get_payment_history_results()
     }
 }
 
@@ -593,6 +859,15 @@ impl WatchtowerStore for Store {
             batch.put_kv(KeyValue::WatchtowerChannel(channel_id, channel_data));
             batch.commit();
         }
+    }
+}
+
+#[cfg(feature = "watchtower")]
+impl<T: WatchtowerStore> WatchtowerStoreDeref for StoreWithPubSub<T> {
+    type Target = T;
+
+    fn watchtower_store_deref(&self) -> &Self::Target {
+        &self.inner
     }
 }
 
@@ -855,6 +1130,14 @@ impl GossipMessageStore for Store {
         let mut batch = self.batch();
         batch.delete([&[BROADCAST_MESSAGE_TIMESTAMP_PREFIX], key.as_slice()].concat());
         batch.commit();
+    }
+}
+
+impl<T: GossipMessageStore> GossipMessageStoreDeref for StoreWithPubSub<T> {
+    type Target = T;
+
+    fn gossip_message_store_deref(&self) -> &Self::Target {
+        &self.inner
     }
 }
 
