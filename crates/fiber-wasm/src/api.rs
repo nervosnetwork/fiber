@@ -115,10 +115,10 @@ pub mod channel {
 }
 
 pub mod graph {
-    use wasm_bindgen::JsValue;
+    use wasm_bindgen::{JsValue, prelude::wasm_bindgen};
 
     use super::{error, fiber_wasm, param, result};
-
+    #[wasm_bindgen]
     pub async fn graph_nodes(params: JsValue) -> Result<JsValue, JsValue> {
         fiber_wasm()?
             .graph
@@ -127,7 +127,7 @@ pub mod graph {
             .map_err(error)
             .map(result)
     }
-
+    #[wasm_bindgen]
     pub async fn graph_channels(params: JsValue) -> Result<JsValue, JsValue> {
         fiber_wasm()?
             .graph
@@ -138,7 +138,129 @@ pub mod graph {
     }
 }
 
-pub mod info {}
-pub mod invoice {}
-pub mod payment {}
-pub mod peer {}
+pub mod info {
+    use wasm_bindgen::{JsValue, prelude::wasm_bindgen};
+
+    use super::{error, fiber_wasm, result};
+    #[wasm_bindgen]
+    pub async fn node_info() -> Result<JsValue, JsValue> {
+        fiber_wasm()?
+            .info
+            .node_info()
+            .await
+            .map(result)
+            .map_err(error)
+    }
+}
+pub mod invoice {
+    use wasm_bindgen::{JsValue, prelude::wasm_bindgen};
+
+    use super::{error, fiber_wasm, param, result};
+    #[wasm_bindgen]
+    pub async fn new_invoice(params: JsValue) -> Result<JsValue, JsValue> {
+        fiber_wasm()?
+            .invoice
+            .new_invoice(param(params)?)
+            .await
+            .map(result)
+            .map_err(error)
+    }
+    #[wasm_bindgen]
+    pub async fn parse_invoice(params: JsValue) -> Result<JsValue, JsValue> {
+        fiber_wasm()?
+            .invoice
+            .parse_invoice(param(params)?)
+            .await
+            .map(result)
+            .map_err(error)
+    }
+    #[wasm_bindgen]
+    pub async fn get_invoice(payment_hash: JsValue) -> Result<JsValue, JsValue> {
+        fiber_wasm()?
+            .invoice
+            .get_invoice(param(payment_hash)?)
+            .await
+            .map(result)
+            .map_err(error)
+    }
+    #[wasm_bindgen]
+    pub async fn cancel_invoice(payment_hash: JsValue) -> Result<JsValue, JsValue> {
+        fiber_wasm()?
+            .invoice
+            .cancel_invoice(param(payment_hash)?)
+            .await
+            .map(result)
+            .map_err(error)
+    }
+}
+pub mod payment {
+    use wasm_bindgen::{JsValue, prelude::wasm_bindgen};
+
+    use super::{error, fiber_wasm, param, result};
+    #[wasm_bindgen]
+    pub async fn send_payment(params: JsValue) -> Result<JsValue, JsValue> {
+        fiber_wasm()?
+            .payment
+            .send_payment(param(params)?)
+            .await
+            .map(result)
+            .map_err(error)
+    }
+    #[wasm_bindgen]
+    pub async fn get_payment(params: JsValue) -> Result<JsValue, JsValue> {
+        fiber_wasm()?
+            .payment
+            .get_payment(param(params)?)
+            .await
+            .map(result)
+            .map_err(error)
+    }
+    #[wasm_bindgen]
+    pub async fn build_router(params: JsValue) -> Result<JsValue, JsValue> {
+        fiber_wasm()?
+            .payment
+            .build_router(param(params)?)
+            .await
+            .map(result)
+            .map_err(error)
+    }
+    #[wasm_bindgen]
+    pub async fn send_payment_with_router(params: JsValue) -> Result<JsValue, JsValue> {
+        fiber_wasm()?
+            .payment
+            .send_payment_with_router(param(params)?)
+            .await
+            .map(result)
+            .map_err(error)
+    }
+}
+pub mod peer {
+    use wasm_bindgen::{JsValue, prelude::wasm_bindgen};
+
+    use super::{error, fiber_wasm, param, result};
+    #[wasm_bindgen]
+    pub async fn connect_peer(params: JsValue) -> Result<(), JsValue> {
+        fiber_wasm()?
+            .peer
+            .connect_peer(param(params)?)
+            .await
+            .map_err(error)
+    }
+    #[wasm_bindgen]
+    pub async fn disconnect_peer(params: JsValue) -> Result<(), JsValue> {
+        fiber_wasm()?
+            .peer
+            .disconnect_peer(param(params)?)
+            .await
+            .map_err(error)
+    }
+    #[wasm_bindgen]
+    pub async fn list_peers() -> Result<JsValue, JsValue> {
+        fiber_wasm()?
+            .peer
+            .list_peers()
+            .await
+            .map_err(error)
+            .map(result)
+    }
+}
