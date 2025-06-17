@@ -82,18 +82,19 @@ where
         .unwrap();
         if skip_while(&key) {
             debug!("Skip while returns true, skipping");
-            continue;
-        }
-        if key.starts_with(prefix) {
+        } else if key.starts_with(prefix) {
             result.push(KV { key, value });
         } else {
             debug!("Prefix ended, breaking..");
             break;
         }
         match cursor.next(None).await {
-            Ok(_) => continue,
+            Ok(_) => {
+                debug!("Cursor next..");
+                continue;
+            }
             Err(idb::Error::CursorFinished) => {
-                debug!("Cursoefinished, exiting..");
+                debug!("Cursor finished, exiting..");
                 break;
             }
             Err(e) => {
