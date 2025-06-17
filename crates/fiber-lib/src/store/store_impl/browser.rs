@@ -332,7 +332,8 @@ impl CommunicationChannel {
 
                     trace!(
                         "Received take while request with args {:?}, result {}",
-                        arg, ok
+                        arg,
+                        ok
                     );
                     write_command_with_payload(
                         InputCommand::PrefixIteratorResponse as i32,

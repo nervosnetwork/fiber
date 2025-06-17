@@ -42,7 +42,10 @@ pub fn encrypt_to_file<P: AsRef<Path>>(
     fs::write(file, file_bytes).map_err(|err| format!("failed to write to file: {}", err))
 }
 
-pub fn decrypt_from_file<P: AsRef<Path> + Debug>(file: P, password: &[u8]) -> Result<Vec<u8>, String> {
+pub fn decrypt_from_file<P: AsRef<Path> + Debug>(
+    file: P,
+    password: &[u8],
+) -> Result<Vec<u8>, String> {
     debug!("Decrypting key from file {:?}", file);
     let file_bytes = fs::read(file).unwrap();
     let salt = &file_bytes[1..SALT_LEN + 1];
