@@ -838,7 +838,10 @@ where
         if let Some(tlc) = state.get_received_tlc_with_hash(hash) {
             let tlc_id = tlc.tlc_id;
             // Only settle down this TLC if it is not already settled down.
-            if state.tlc_state.applied_add_tlcs.insert(tlc_id) {
+            let status = self.store.get_invoice_status(&hash);
+            if tlc.status == TlcStatus::Inbound(InboundTlcStatus::Committed)
+                && status == Some(CkbInvoiceStatus::Received)
+            {
                 self.try_to_settle_down_tlc(myself, state, tlc_id).await;
             }
         };
@@ -991,15 +994,6 @@ where
                                 .get_invoice_status(&payment_hash)
                                 // The sender sent a TLC with no invoice associated with it.
                                 .ok_or(ProcessingChannelError::FinalIncorrectPaymentHash)?;
-                            let is_active = status == CkbInvoiceStatus::Open
-                                || status == CkbInvoiceStatus::Received;
-                            if is_active {
-                                // This TLC is added to applied_add_tlcs in above, but
-                                // TLCs in the list applied_add_tlcs wouldn't be processed again.
-                                // For the unsettled active hold invoice TLCs, we should process them indefinitely
-                                // until they expire or are settled.
-                                state.tlc_state.applied_add_tlcs.remove(&add_tlc.tlc_id);
-                            }
                             if status == CkbInvoiceStatus::Open {
                                 self.store
                                     .update_invoice_status(
