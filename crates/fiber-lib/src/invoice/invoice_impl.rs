@@ -289,7 +289,7 @@ impl CkbInvoice {
                 .timestamp
                 .checked_add(expiry.as_millis())
                 .is_some_and(|expiry_time| {
-                    let now = std::time::UNIX_EPOCH
+                    let now = crate::time::UNIX_EPOCH
                         .elapsed()
                         .expect("Duration since unix epoch")
                         .as_millis();
@@ -676,7 +676,7 @@ impl InvoiceBuilder {
         };
 
         self.check_attrs_valid()?;
-        let timestamp = std::time::UNIX_EPOCH
+        let timestamp = crate::time::UNIX_EPOCH
             .elapsed()
             .expect("Duration since unix epoch")
             .as_millis();

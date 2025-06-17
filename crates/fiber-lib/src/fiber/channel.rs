@@ -76,7 +76,6 @@ use std::{
     collections::HashSet,
     fmt::{self, Debug, Display},
     sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 use super::types::{ChannelUpdateChannelFlags, ChannelUpdateMessageFlags, UpdateTlcInfo};
@@ -3505,7 +3504,7 @@ pub struct ChannelActorState {
     pub reestablishing: bool,
     pub last_revoke_ack_msg: Option<RevokeAndAck>,
 
-    pub created_at: SystemTime,
+    pub created_at: crate::time::SystemTime,
 
     // the time stamp we last sent an message to the peer, used to check if the peer is still alive
     // we will disconnect the peer if we haven't sent any message to the peer for a long time
@@ -4369,7 +4368,7 @@ impl ChannelActorState {
             latest_commitment_transaction: None,
             reestablishing: false,
             last_revoke_ack_msg: None,
-            created_at: SystemTime::now(),
+            created_at: crate::time::SystemTime::now(),
             waiting_peer_response: None,
             network: Some(network),
             scheduled_channel_update_handle: None,
@@ -4442,7 +4441,7 @@ impl ChannelActorState {
             latest_commitment_transaction: None,
             reestablishing: false,
             last_revoke_ack_msg: None,
-            created_at: SystemTime::now(),
+            created_at: crate::time::SystemTime::now(),
             waiting_peer_response: None,
             network: Some(network),
             scheduled_channel_update_handle: None,
@@ -4635,7 +4634,7 @@ impl ChannelActorState {
 
     pub fn get_created_at_in_millis(&self) -> u64 {
         self.created_at
-            .duration_since(UNIX_EPOCH)
+            .duration_since(crate::time::UNIX_EPOCH)
             .expect("Duration since unix epoch")
             .as_millis() as u64
     }
