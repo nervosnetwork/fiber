@@ -1925,6 +1925,18 @@ where
         }
     }
 
+    fn get_payment_session_with_attempt(
+        &self,
+        payment_hash: Hash256,
+        attempt_id: Option<u64>,
+    ) -> (Option<PaymentSession>, Option<Attempt>) {
+        let payment_session = self.store.get_payment_session(payment_hash);
+        let attempt =
+            attempt_id.and_then(|attempt_id| self.store.get_attempt(payment_hash, attempt_id));
+
+        (payment_session, attempt)
+    }
+
     async fn on_remove_tlc_event(
         &self,
         myself: ActorRef<NetworkActorMessage>,
@@ -1933,54 +1945,58 @@ where
         attempt_id: Option<u64>,
         reason: RemoveTlcReason,
     ) {
-        // return if not associate with attempt
-        let Some(attempt_id) = attempt_id else {
+        let (Some(mut session), Some(mut attempt)) =
+            self.get_payment_session_with_attempt(payment_hash, attempt_id)
+        else {
+            error!(
+                "Payment session or attempt not found for payment hash: {:?}, attempt id: {:?}",
+                payment_hash, attempt_id
+            );
             return;
         };
-        let Some(mut payment_session) = self.store.get_payment_session(payment_hash) else {
-            error!("Payment session not found: {:?}", payment_hash);
-            return;
-        };
-        if payment_session.status.is_final() {
-            dbg!("payment session already in final status: {:?payment_status}, skip remove tlc");
-            return;
-        }
-        if let Some(mut attempt) = self.store.get_attempt(payment_hash, attempt_id) {
-            match reason {
-                RemoveTlcReason::RemoveTlcFulfill(_) => {
-                    dbg!("record attempt fulfilled", &reason);
-                    self.network_graph
-                        .write()
-                        .await
-                        .record_attempt_success(attempt);
+
+        match reason {
+            RemoveTlcReason::RemoveTlcFulfill(_) => {
+                dbg!("record attempt fulfilled", &reason);
+                self.network_graph
+                    .write()
+                    .await
+                    .record_attempt_success(&attempt);
+                attempt.set_success_status();
+                self.store.insert_attempt(attempt.clone());
+
+                // the payment session status maybe changed into Success
+                session.update_with_attempt(attempt);
+                if !session.is_dry_run() {
+                    self.store.insert_payment_session(session);
                 }
-                RemoveTlcReason::RemoveTlcFail(reason) => {
-                    let error_detail = reason
-                        .decode(&attempt.session_key, attempt.hops_public_keys())
-                        .unwrap_or_else(|| {
-                            debug_event!(myself, "InvalidOnionError");
-                            TlcErr::new(TlcErrorCode::InvalidOnionError)
-                        });
+            }
+            RemoveTlcReason::RemoveTlcFail(reason) => {
+                let error_detail = reason
+                    .decode(&attempt.session_key, attempt.hops_public_keys())
+                    .unwrap_or_else(|| {
+                        debug_event!(myself, "InvalidOnionError");
+                        TlcErr::new(TlcErrorCode::InvalidOnionError)
+                    });
 
-                    self.update_graph_with_tlc_fail(&state.network, &error_detail)
-                        .await;
-                    let need_to_retry = self.network_graph.write().await.record_attempt_fail(
-                        &attempt,
-                        error_detail.clone(),
-                        false,
-                    );
-                    dbg!("set attempt failed to ", error_detail.error_code.as_ref());
+                self.update_graph_with_tlc_fail(&state.network, &error_detail)
+                    .await;
+                let need_to_retry = self.network_graph.write().await.record_attempt_fail(
+                    &attempt,
+                    error_detail.clone(),
+                    false,
+                );
+                dbg!("set attempt failed to ", error_detail.error_code.as_ref());
 
-                    self.set_attempt_fail_with_error(
-                        &mut payment_session,
-                        &mut attempt,
-                        error_detail.error_code.as_ref(),
-                        need_to_retry,
-                    );
+                self.set_attempt_fail_with_error(
+                    &mut session,
+                    &mut attempt,
+                    error_detail.error_code.as_ref(),
+                    need_to_retry,
+                );
 
-                    if need_to_retry {
-                        self.register_payment_retry(myself, payment_hash, Some(attempt.id));
-                    }
+                if need_to_retry {
+                    self.register_payment_retry(myself, payment_hash, Some(attempt.id));
                 }
             }
         }
@@ -2225,55 +2241,43 @@ where
             return;
         }
 
-        eprintln!(
-            "on_add_tlc_result_event: {:?} {:?} {:?}",
-            payment_hash, attempt_id, &error_info
-        );
-
-        // Handle attempt result if attempt_id exist
-        let Some(attempt_id) = attempt_id else {
+        let (Some(mut session), Some(mut attempt)) =
+            self.get_payment_session_with_attempt(payment_hash, attempt_id)
+        else {
             return;
         };
 
-        let Some(mut session) = self.store.get_payment_session(payment_hash) else {
-            return;
-        };
+        match error_info {
+            None => {
+                // attempt is inflight
+                attempt.set_inflight_status();
+                self.network_graph
+                    .write()
+                    .await
+                    .track_attempt_router(&attempt);
+                self.store.insert_attempt(attempt.clone());
+            }
+            Some((ProcessingChannelError::RepeatedProcessing(_), _)) => {
+                // do nothing
+            }
+            Some((error, tlc_err)) => {
+                let (error, need_to_retry) =
+                    if matches!(error, ProcessingChannelError::WaitingTlcAck) {
+                        ("WaitingTlcAck".to_string(), true)
+                    } else {
+                        let need_to_retry = self.network_graph.write().await.record_attempt_fail(
+                            &attempt,
+                            tlc_err.clone(),
+                            true,
+                        );
+                        (error.to_string(), need_to_retry)
+                    };
 
-        let Some(mut attempt) = self.store.get_attempt(payment_hash, attempt_id) else {
-            eprintln!("attempt not found: {:?} {:?}", payment_hash, attempt_id);
-            return;
-        };
-
-        let Some((channel_error, tlc_err)) = error_info else {
-            // attempt is inflight
-            attempt.set_inflight_status();
-            self.network_graph
-                .write()
-                .await
-                .track_attempt_router(&attempt);
-            dbg!("now track attempt router", attempt.id);
-            self.store.insert_attempt(attempt.clone());
-            return;
-        };
-        if matches!(channel_error, ProcessingChannelError::RepeatedProcessing(_)) {
-            return;
+                self.set_attempt_fail_with_error(&mut session, &mut attempt, &error, need_to_retry);
+                // retry the current attempt if it is retryable
+                self.register_payment_retry(myself, payment_hash, Some(attempt.id));
+            }
         }
-
-        let (error, need_to_retry) =
-            if matches!(channel_error, ProcessingChannelError::WaitingTlcAck) {
-                ("WaitingTlcAck".to_string(), true)
-            } else {
-                let need_to_retry = self.network_graph.write().await.record_attempt_fail(
-                    &attempt,
-                    tlc_err.clone(),
-                    true,
-                );
-                (channel_error.to_string(), need_to_retry)
-            };
-
-        self.set_attempt_fail_with_error(&mut session, &mut attempt, &error, need_to_retry);
-        // retry the current attempt if it is retryable
-        self.register_payment_retry(myself, payment_hash, Some(attempt.id));
     }
 
     fn set_payment_fail_with_error(&self, session: &mut PaymentSession, error: &str) {
@@ -2290,29 +2294,15 @@ where
         error: &str,
         retryable: bool,
     ) {
-        let mut payment_failed = false;
-        let dry_run = session.is_dry_run();
         if (!session.allow_mpp() || !session.allow_more_attempts()) && !retryable {
             // if mpp is not allowed, or mpp is allowed but attempt is not retryable
             // we will set the session status to failed
-            dbg!("now set session failed", &error);
             self.set_payment_fail_with_error(session, error);
-            payment_failed = true;
         }
 
         attempt.set_failed_status(error, retryable);
-        if !dry_run {
+        if !session.is_dry_run() {
             self.store.insert_attempt(attempt.clone());
-        }
-
-        if !payment_failed {
-            let payment_session_status = session.calc_payment_session_status();
-            if payment_session_status != session.status {
-                session.status = payment_session_status;
-                if !dry_run {
-                    self.store.insert_payment_session(session.clone());
-                }
-            }
         }
     }
 
@@ -2329,8 +2319,7 @@ where
             ));
         }
         let hops_info = self.rebuild_payment_route(session, attempt).await?;
-        let _ = self
-            .send_attempt(myself.clone(), state, session, attempt, hops_info)
+        self.send_attempt(myself.clone(), state, session, attempt, hops_info)
             .await?;
         Ok(())
     }
@@ -2342,7 +2331,7 @@ where
         session: &mut PaymentSession,
         attempt: &mut Attempt,
         route: Vec<PaymentHopData>,
-    ) -> Result<Option<SessionRoute>, Error> {
+    ) -> Result<(), Error> {
         if let Err(err) = self
             .send_payment_onion_packet(state, session, attempt, route)
             .await
@@ -2353,18 +2342,16 @@ where
                 // we will just retry later, return Ok here for letting endpoint user
                 // know payment session is created successfully
                 self.register_payment_retry(myself, session.payment_hash(), Some(attempt.id));
-                return Ok(None);
+                return Ok(());
             } else {
                 self.set_attempt_fail_with_error(session, attempt, &err.to_string(), false);
                 return Err(err);
             }
         }
-        Ok(Some(attempt.route.clone()))
+        Ok(())
     }
 
     /// Resume the payment session
-    /// this function kicks the payment session lifecycle
-    /// TODO this function should be async without a return value
     async fn resume_payment_session(
         &self,
         myself: ActorRef<NetworkActorMessage>,
@@ -2378,10 +2365,6 @@ where
         };
 
         if payment_session.status.is_final() {
-            warn!(
-                "Payment session {:?} already in final status: {:?}",
-                payment_hash, payment_session.status
-            );
             return Ok(());
         }
 
@@ -2392,6 +2375,10 @@ where
             };
         }
 
+        let mut payment_session = self
+            .store
+            .get_payment_session(payment_hash)
+            .expect("get payment session");
         if !payment_session.allow_more_attempts() {
             if payment_session.remain_amount() > 0 {
                 let err = "Can not send payment with limited attempts";
@@ -2405,32 +2392,22 @@ where
         // it depends on the path finding algorithm to create how many of attempts,
         // if a payment can not be met in the network graph, an build path error will be returned
         // and no attempts be stored in the payment session and db.
-        let attempts_with_route = self
+        let attempts_with_routes = self
             .build_payment_routes(&mut payment_session)
             .await
             .inspect_err(|e| {
                 self.set_payment_fail_with_error(&mut payment_session, &e.to_string());
             })?;
 
-        for (mut attempt, route) in attempts_with_route {
-            if let Err(e) = self
-                .send_attempt(
-                    myself.clone(),
-                    state,
-                    &mut payment_session,
-                    &mut attempt,
-                    route,
-                )
-                .await
-            {
-                self.set_attempt_fail_with_error(
-                    &mut payment_session,
-                    &mut attempt,
-                    &e.to_string(),
-                    false,
-                );
-                return Err(e);
-            }
+        for (mut attempt, route) in attempts_with_routes {
+            self.send_attempt(
+                myself.clone(),
+                state,
+                &mut payment_session,
+                &mut attempt,
+                route,
+            )
+            .await?;
         }
 
         // do we need more attempts?

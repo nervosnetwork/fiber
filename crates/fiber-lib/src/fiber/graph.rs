@@ -1060,14 +1060,12 @@ where
         }
     }
 
-    pub(crate) fn record_attempt_success(&mut self, mut attempt: Attempt) {
-        self.untrack_attempt_router(&attempt, true);
+    pub(crate) fn record_attempt_success(&mut self, attempt: &Attempt) {
+        self.untrack_attempt_router(attempt, true);
         let session_route = &attempt.route.nodes;
         let mut result = InternalResult::default();
         result.succeed_range_pairs(session_route, 0, session_route.len() - 1);
         self.history.apply_internal_result(result);
-        attempt.set_success_status();
-        self.store.insert_attempt(attempt);
     }
 
     pub(crate) fn record_attempt_fail(
@@ -2094,7 +2092,7 @@ pub struct PaymentSession {
     pub created_at: u64,
     pub last_updated_at: u64,
     #[serde(skip)]
-    cached_attempts: Vec<Attempt>, // Add a cache for attempts
+    pub cached_attempts: Vec<Attempt>, // Add a cache for attempts
 }
 
 impl PaymentSession {
@@ -2120,6 +2118,13 @@ impl PaymentSession {
         self.cached_attempts = store.get_attempts(self.request.payment_hash);
         self.status = self.calc_payment_session_status();
         self
+    }
+
+    pub fn update_with_attempt(&mut self, attempt: Attempt) {
+        if let Some(a) = self.cached_attempts.iter_mut().find(|a| a.id == attempt.id) {
+            *a = attempt;
+        }
+        self.status = self.calc_payment_session_status();
     }
 
     pub fn retry_times(&self) -> u32 {
@@ -2166,8 +2171,9 @@ impl PaymentSession {
         self.active_attempts().map(|a| a.route.fee()).sum()
     }
 
-    pub fn success_attempts_amount(&self) -> u128 {
-        self.attempts()
+    pub fn success_attempts_amount_is_enough(&self) -> bool {
+        let success_amount: u128 = self
+            .attempts()
             .filter_map(|a| {
                 if a.is_settled() {
                     Some(a.route.receiver_amount())
@@ -2175,7 +2181,8 @@ impl PaymentSession {
                     None
                 }
             })
-            .sum()
+            .sum();
+        success_amount >= self.request.amount
     }
 
     pub fn remain_fee_amount(&self) -> Option<u128> {
@@ -2265,7 +2272,7 @@ impl PaymentSession {
             return PaymentSessionStatus::Failed;
         }
 
-        if self.success_attempts_amount() >= self.request.amount {
+        if self.success_attempts_amount_is_enough() {
             return PaymentSessionStatus::Success;
         }
 
@@ -2294,7 +2301,7 @@ impl PaymentSession {
 
 impl From<PaymentSession> for SendPaymentResponse {
     fn from(session: PaymentSession) -> Self {
-        let status = session.calc_payment_session_status();
+        let status = session.status;
         let fee = session.fee_paid();
         let attempts = session
             .attempts()
