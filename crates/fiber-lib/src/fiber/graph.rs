@@ -2199,7 +2199,7 @@ impl PaymentSession {
         self.request.amount.saturating_sub(sent_amount)
     }
 
-    pub fn new_attempt(&self, attempt_id: u64) -> Attempt {
+    pub fn new_attempt(&self, attempt_id: u64, route: SessionRoute) -> Attempt {
         let now = now_timestamp_as_millis_u64();
         let payment_hash = self.payment_hash();
         // For HTLC, the attempt hash is the payment hash
@@ -2216,7 +2216,7 @@ impl PaymentSession {
             try_limit,
             tried_times: 1,
             payment_hash,
-            route: Default::default(),
+            route,
             session_key: [0; 32],
             preimage: None,
             created_at: now,

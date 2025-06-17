@@ -2061,7 +2061,6 @@ where
     ) -> Result<Vec<PaymentHopData>, Error> {
         assert!(attempt.is_retryable());
         let graph = self.network_graph.read().await;
-        let source = graph.get_source_pubkey();
         // now the current attempt is retryable,
         // `session.remain_amount()` will not contains this part of amount,
         // so we need to add the receiver amount to it.
@@ -2072,11 +2071,11 @@ where
         match graph.build_route(amount, max_fee, &session.request) {
             Err(e) => {
                 let error = format!("Failed to build route, {}", e);
-                self.set_attempt_fail_with_error(session, attempt, &error, false);
                 self.set_payment_fail_with_error(session, &error);
                 return Err(Error::SendPaymentError(error));
             }
             Ok(hops) => {
+                let source = graph.get_source_pubkey();
                 attempt.route = SessionRoute::new(source, session.request.target_pubkey, &hops);
                 assert_ne!(hops[0].funding_tx_hash, Hash256::default());
                 return Ok(hops);
@@ -2129,9 +2128,7 @@ where
                         attempt_id
                     };
 
-                    let mut attempt = session.new_attempt(new_attempt_id);
-                    attempt.route = route;
-
+                    let attempt = session.new_attempt(new_attempt_id, route);
                     result.push((attempt, hops));
                 }
             };
@@ -2294,7 +2291,7 @@ where
         error: &str,
         retryable: bool,
     ) {
-        if (!session.allow_mpp() || !session.allow_more_attempts()) && !retryable {
+        if !retryable && !session.allow_more_attempts() {
             // if mpp is not allowed, or mpp is allowed but attempt is not retryable
             // we will set the session status to failed
             self.set_payment_fail_with_error(session, error);
