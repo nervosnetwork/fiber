@@ -61,7 +61,8 @@ pub enum InFlightCkbTxActorMessage {
     Internal(InternalMessage),
 }
 
-#[ractor::async_trait]
+#[cfg_attr(target_arch="wasm32",async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl Actor for InFlightCkbTxActor {
     type Msg = InFlightCkbTxActorMessage;
     type State = InFlightCkbTxActorState;
@@ -171,6 +172,7 @@ impl InFlightCkbTxActor {
         &self,
         myself: ActorRef<InFlightCkbTxActorMessage>,
     ) -> Result<(), ActorProcessingErr> {
+        tracing::debug!("Executing send_tx_interval...");
         let message = InFlightCkbTxActorMessage::Internal(InternalMessage::SendTx);
 
         // send once immediately
@@ -194,7 +196,7 @@ impl InFlightCkbTxActor {
             Some(tx) => tx,
             None => return Ok(()),
         };
-
+        tracing::debug!("Executing send_tx...");
         match ractor::call_t!(
             self.chain_actor,
             CkbChainMessage::SendTx,
