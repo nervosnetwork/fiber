@@ -16,7 +16,7 @@ use crate::{
         types::Hash256,
     },
     gen_rand_sha256_hash,
-    invoice::{CkbInvoice, CkbInvoiceStatus, Currency, InvoiceBuilder},
+    invoice::{CkbInvoiceStatus, Currency, InvoiceBuilder},
     test_utils::{
         establish_channel_between_nodes, init_tracing, NetworkNode, NetworkNodeConfigBuilder,
         HUGE_CKB_AMOUNT,
@@ -148,8 +148,7 @@ async fn do_test_cross_chain_payment_hub_send_btc(udt_script: Script, multiple_h
     .expect("send btc actor call")
     .expect("send btc result");
 
-    let fiber_invoice =
-        CkbInvoice::from_str(&send_btc_result.fiber_pay_req).expect("valid invoice");
+    let fiber_invoice = send_btc_result.fiber_pay_invoice.expect("valid invoice");
     assert_eq!(fiber_invoice.payment_hash(), &hash);
     assert_eq!(fiber_invoice.hash_algorithm(), Some(&HashAlgorithm::Sha256));
 
@@ -163,7 +162,7 @@ async fn do_test_cross_chain_payment_hub_send_btc(udt_script: Script, multiple_h
 
     let res = fiber_node
         .send_payment(SendPaymentCommand {
-            invoice: Some(send_btc_result.fiber_pay_req.clone()),
+            invoice: Some(fiber_invoice.to_string()),
             ..Default::default()
         })
         .await;

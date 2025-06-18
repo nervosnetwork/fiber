@@ -41,8 +41,8 @@ pub struct SendBTCResponse {
 
     /// Payment request for BTC
     pub btc_pay_req: String,
-    /// Payment request for CKB
-    pub fiber_pay_req: String,
+    /// Generated invoice for CKB
+    pub fiber_pay_invoice: String,
     /// Payment hash for the HTLC for both CKB and BTC.
     pub payment_hash: String,
     /// Amount required to pay in Satoshis, including fee
@@ -162,7 +162,11 @@ impl CchRpcServer for CchRpcServerImpl {
                 currency: order.currency,
                 wrapped_btc_type_script: order.wrapped_btc_type_script,
                 btc_pay_req: order.btc_pay_req,
-                fiber_pay_req: order.fiber_pay_req,
+                fiber_pay_invoice: order
+                    .fiber_pay_invoice
+                    .as_ref()
+                    .map(ToString::to_string)
+                    .unwrap_or_default(),
                 payment_hash: order.payment_hash,
                 amount_sats: order.amount_sats,
                 fee_sats: order.fee_sats,
