@@ -118,7 +118,7 @@ Send BTC to a address.
 * `currency` - <em>[Currency](#type-currency)</em>, Request currency
 * `wrapped_btc_type_script` - <em>`ckb_jsonrpc_types::Script`</em>, Wrapped BTC type script
 * `btc_pay_req` - <em>`String`</em>, Payment request for BTC
-* `fiber_pay_req` - <em>`String`</em>, Payment request for CKB
+* `fiber_pay_invoice` - <em>`String`</em>, Generated invoice for CKB
 * `payment_hash` - <em>`String`</em>, Payment hash for the HTLC for both CKB and BTC.
 * `amount_sats` - <em>`u128`</em>, Amount required to pay in Satoshis, including fee
 * `fee_sats` - <em>`u128`</em>, Fee in Satoshis
