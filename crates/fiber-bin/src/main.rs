@@ -312,6 +312,7 @@ pub async fn main() -> Result<(), ExitMessage> {
                 Ok(actor) => {
                     // Subscribe the actor to the store so it can receive updates
                     store.subscribe(Box::new(actor.clone()));
+                    info!("Cross-chain service started");
                     Some(actor)
                 }
             }
