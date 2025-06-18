@@ -58,7 +58,7 @@ use musig2::{
     PubNonce, SecNonce,
 };
 use ractor::{
-    async_trait as rasync_trait, call,
+    call,
     concurrency::{Duration, JoinHandle},
     Actor, ActorProcessingErr, ActorRef, MessagingErr, OutputPort, RpcReplyPort,
 };
@@ -76,7 +76,6 @@ use std::{
     collections::HashSet,
     fmt::{self, Debug, Display},
     sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 use super::types::{ChannelUpdateChannelFlags, ChannelUpdateMessageFlags, UpdateTlcInfo};
@@ -449,7 +448,7 @@ where
                 state.handle_tx_collaboration_msg(TxCollaborationMsg::TxComplete(tx))?;
                 if let ChannelState::CollaboratingFundingTx(flags) = state.state {
                     if flags.contains(CollaboratingFundingTxFlags::COLLABORATION_COMPLETED) {
-                        self.handle_commitment_signed_command(myself, state)?;
+                        self.handle_commitment_signed_command(myself, state).await?;
                     }
                 }
                 Ok(())
@@ -504,7 +503,7 @@ where
                 state.handle_revoke_and_ack_peer_message(myself, revoke_and_ack)?;
                 self.update_tlc_status_on_ack(myself, state).await;
                 if state.tlc_state.need_another_commitment_signed() {
-                    self.handle_commitment_signed_command(myself, state)?;
+                    self.handle_commitment_signed_command(myself, state).await?;
                 }
                 Ok(())
             }
@@ -568,7 +567,7 @@ where
                     shutdown_info.signature = Some(partial_signature);
                 }
 
-                state.maybe_transfer_to_shutdown()?;
+                state.maybe_transfer_to_shutdown().await?;
                 Ok(())
             }
             FiberChannelMessage::ReestablishChannel(ref reestablish_channel) => {
@@ -688,10 +687,10 @@ where
         // when we transfer to shutdown state, we need to build shutdown transaction
         // here `maybe_transfer_to_shutdown` must be called after `apply_settled_remove_tlcs`
         // so the closing transaction is symmetric with peer
-        state.maybe_transfer_to_shutdown()?;
+        state.maybe_transfer_to_shutdown().await?;
 
         if need_commitment_signed && !state.tlc_state.waiting_ack {
-            self.handle_commitment_signed_command(myself, state)?;
+            self.handle_commitment_signed_command(myself, state).await?;
         }
 
         Ok(())
@@ -1179,7 +1178,7 @@ where
         // we need to check if we need to trigger remove tlc for previous channel
         // maybe could be done in cron task from network actor.
         state.update_state(ChannelState::ShuttingDown(flags));
-        state.maybe_transfer_to_shutdown()?;
+        state.maybe_transfer_to_shutdown().await?;
 
         Ok(())
     }
@@ -1254,7 +1253,7 @@ where
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
     }
 
-    pub fn handle_commitment_signed_command(
+    pub async fn handle_commitment_signed_command(
         &self,
         myself: &ActorRef<ChannelActorMessage>,
         state: &mut ChannelActorState,
@@ -1342,14 +1341,14 @@ where
             }
             CommitmentSignedFlags::PendingShutdown() => {
                 state.set_waiting_ack(myself, true);
-                state.maybe_transfer_to_shutdown()?;
+                state.maybe_transfer_to_shutdown().await?;
             }
         }
         state.update_last_commitment_signed_remote_nonce();
         Ok(())
     }
 
-    pub fn handle_add_tlc_command(
+    pub async fn handle_add_tlc_command(
         &self,
         myself: &ActorRef<ChannelActorMessage>,
         state: &mut ChannelActorState,
@@ -1391,11 +1390,11 @@ where
             ))
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
 
-        self.handle_commitment_signed_command(myself, state)?;
+        self.handle_commitment_signed_command(myself, state).await?;
         Ok(tlc_id.into())
     }
 
-    pub fn handle_remove_tlc_command(
+    pub async fn handle_remove_tlc_command(
         &self,
         myself: &ActorRef<ChannelActorMessage>,
         state: &mut ChannelActorState,
@@ -1425,12 +1424,12 @@ where
             ))
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
 
-        state.maybe_transfer_to_shutdown()?;
-        self.handle_commitment_signed_command(myself, state)?;
+        state.maybe_transfer_to_shutdown().await?;
+        self.handle_commitment_signed_command(myself, state).await?;
         Ok(())
     }
 
-    pub fn handle_shutdown_command(
+    pub async fn handle_shutdown_command(
         &self,
         state: &mut ChannelActorState,
         command: ShutdownCommand,
@@ -1457,7 +1456,7 @@ where
                 }
             };
 
-            let transaction = state.get_latest_commitment_transaction()?;
+            let transaction = state.get_latest_commitment_transaction().await?;
 
             self.network
                 .send_message(NetworkActorMessage::new_event(
@@ -1527,7 +1526,7 @@ where
                 "Channel state updated to {:?} after processing shutdown command",
                 &state.state
             );
-            state.maybe_transfer_to_shutdown()
+            state.maybe_transfer_to_shutdown().await
         }
     }
 
@@ -1667,18 +1666,21 @@ where
             });
             return;
         }
-        let mut pending_tlc_ops = state.tlc_state.get_pending_operations();
-        pending_tlc_ops.retain_mut(|retryable_operation| {
+        let pending_tlc_ops = state.tlc_state.get_pending_operations();
+        let mut check = async |retryable_operation: &mut RetryableTlcOperation| {
             match retryable_operation {
                 RetryableTlcOperation::RemoveTlc(tlc_id, ref reason) => {
-                    match self.handle_remove_tlc_command(
-                        myself,
-                        state,
-                        RemoveTlcCommand {
-                            id: u64::from(*tlc_id),
-                            reason: reason.clone(),
-                        },
-                    ) {
+                    match self
+                        .handle_remove_tlc_command(
+                            myself,
+                            state,
+                            RemoveTlcCommand {
+                                id: u64::from(*tlc_id),
+                                reason: reason.clone(),
+                            },
+                        )
+                        .await
+                    {
                         Ok(_) | Err(ProcessingChannelError::RepeatedProcessing(_)) => false,
                         Err(ProcessingChannelError::WaitingTlcAck) => true,
                         Err(_err) => false,
@@ -1766,9 +1768,14 @@ where
                     }
                 }
             }
-        });
-
-        state.tlc_state.retryable_tlc_operations = pending_tlc_ops;
+        };
+        let mut new_pending_tlc_ops = vec![];
+        for mut item in pending_tlc_ops.into_iter() {
+            if check(&mut item).await {
+                new_pending_tlc_ops.push(item);
+            }
+        }
+        state.tlc_state.retryable_tlc_operations = new_pending_tlc_ops;
         if state.tlc_state.has_pending_operations() {
             myself.send_after(RETRYABLE_TLC_OPS_INTERVAL, || {
                 ChannelActorMessage::Event(ChannelEvent::CheckTlcRetryOperation)
@@ -1936,10 +1943,12 @@ where
                 self.handle_tx_collaboration_command(state, tx_collaboration_command)
             }
             ChannelCommand::CommitmentSigned() => {
-                self.handle_commitment_signed_command(myself, state)
+                self.handle_commitment_signed_command(myself, state).await
             }
             ChannelCommand::AddTlc(command, reply) => {
-                let res = self.handle_add_tlc_command(myself, state, command.clone());
+                let res = self
+                    .handle_add_tlc_command(myself, state, command.clone())
+                    .await;
                 let error_info = if let Err(ref err) = res {
                     Some((err.clone(), self.get_tlc_error(state, err).await))
                 } else {
@@ -1969,7 +1978,10 @@ where
                 }
             }
             ChannelCommand::RemoveTlc(command, reply) => {
-                match self.handle_remove_tlc_command(myself, state, command.clone()) {
+                match self
+                    .handle_remove_tlc_command(myself, state, command.clone())
+                    .await
+                {
                     Ok(_) => {
                         let _ = reply.send(Ok(()));
                         Ok(())
@@ -1990,7 +2002,7 @@ where
                 }
             }
             ChannelCommand::Shutdown(command, reply) => {
-                match self.handle_shutdown_command(state, command) {
+                match self.handle_shutdown_command(state, command).await {
                     Ok(_) => {
                         debug!("Shutdown command processed successfully");
                         let _ = reply.send(Ok(()));
@@ -2201,7 +2213,8 @@ where
     }
 }
 
-#[rasync_trait]
+#[cfg_attr(target_arch="wasm32",async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl<S> Actor for ChannelActor<S>
 where
     S: ChannelActorStateStore + InvoiceStore + PreimageStore + Send + Sync + 'static,
@@ -3491,7 +3504,7 @@ pub struct ChannelActorState {
     pub reestablishing: bool,
     pub last_revoke_ack_msg: Option<RevokeAndAck>,
 
-    pub created_at: SystemTime,
+    pub created_at: crate::time::SystemTime,
 
     // the time stamp we last sent an message to the peer, used to check if the peer is still alive
     // we will disconnect the peer if we haven't sent any message to the peer for a long time
@@ -4355,7 +4368,7 @@ impl ChannelActorState {
             latest_commitment_transaction: None,
             reestablishing: false,
             last_revoke_ack_msg: None,
-            created_at: SystemTime::now(),
+            created_at: crate::time::SystemTime::now(),
             waiting_peer_response: None,
             network: Some(network),
             scheduled_channel_update_handle: None,
@@ -4428,7 +4441,7 @@ impl ChannelActorState {
             latest_commitment_transaction: None,
             reestablishing: false,
             last_revoke_ack_msg: None,
-            created_at: SystemTime::now(),
+            created_at: crate::time::SystemTime::now(),
             waiting_peer_response: None,
             network: Some(network),
             scheduled_channel_update_handle: None,
@@ -4621,7 +4634,7 @@ impl ChannelActorState {
 
     pub fn get_created_at_in_millis(&self) -> u64 {
         self.created_at
-            .duration_since(UNIX_EPOCH)
+            .duration_since(crate::time::UNIX_EPOCH)
             .expect("Duration since unix epoch")
             .as_millis() as u64
     }
@@ -5776,7 +5789,7 @@ impl ChannelActorState {
         Ok((completed_commitment_tx, settlement_data))
     }
 
-    fn maybe_transfer_to_shutdown(&mut self) -> ProcessingChannelResult {
+    async fn maybe_transfer_to_shutdown(&mut self) -> ProcessingChannelResult {
         // This function will also be called when we resolve all pending tlcs.
         // If we are not in the ShuttingDown state, we should not do anything.
         let flags = match self.state {
@@ -5800,7 +5813,7 @@ impl ChannelActorState {
         self.clear_waiting_peer_response();
 
         if self.local_shutdown_info.is_some() && self.remote_shutdown_info.is_some() {
-            let shutdown_tx = self.build_shutdown_tx()?;
+            let shutdown_tx = self.build_shutdown_tx().await?;
             let deterministic_sign_ctx = self.get_deterministic_sign_context();
 
             let local_shutdown_info = self
@@ -6994,7 +7007,7 @@ impl ChannelActorState {
                 && self.should_local_go_first_in_musig2()
     }
 
-    fn build_shutdown_tx(&self) -> Result<TransactionView, ProcessingChannelError> {
+    async fn build_shutdown_tx(&self) -> Result<TransactionView, ProcessingChannelError> {
         let local_shutdown_info = self
             .local_shutdown_info
             .as_ref()
@@ -7029,6 +7042,7 @@ impl ChannelActorState {
         );
 
         let cell_deps = get_cell_deps(vec![Contract::FundingLock], &self.funding_udt_type_script)
+            .await
             .map_err(|e| ProcessingChannelError::InternalError(e.to_string()))?;
         let tx_builder = TransactionBuilder::default().cell_deps(cell_deps).input(
             CellInput::new_builder()
@@ -7504,7 +7518,7 @@ impl ChannelActorState {
     }
 
     /// Get the latest commitment transaction with updated cell deps
-    pub fn get_latest_commitment_transaction(
+    pub async fn get_latest_commitment_transaction(
         &self,
     ) -> Result<TransactionView, ProcessingChannelError> {
         let tx = self
@@ -7512,6 +7526,7 @@ impl ChannelActorState {
             .clone()
             .expect("latest_commitment_transaction should exist");
         let cell_deps = get_cell_deps(vec![Contract::FundingLock], &self.funding_udt_type_script)
+            .await
             .map_err(|e| ProcessingChannelError::InternalError(e.to_string()))?;
         let raw_tx = tx.raw().as_builder().cell_deps(cell_deps).build();
         let tx = tx.as_builder().raw(raw_tx).build();
