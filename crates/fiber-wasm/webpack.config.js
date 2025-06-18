@@ -4,7 +4,7 @@ const webpack = require("webpack");
 const isDev = process.env.NODE_ENV === 'development'
 module.exports = {
     entry: './index.ts',
-    target: "webworker",
+    target: "es2017",
     output: {
         path: path.resolve(__dirname, 'dist'),
         filename: 'index.js',

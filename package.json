@@ -2,6 +2,7 @@
     "private": true,
     "workspaces": [
         "./crates/fiber-wasm",
-        "./crates/fiber-db-worker"
+        "./crates/fiber-wasm-db-worker",
+        "./fiber-js"
     ]
 }
