@@ -2251,7 +2251,7 @@ pub struct NetworkActorState<S> {
     outpoint_channel_map: HashMap<OutPoint, Hash256>,
     // Channels in this hashmap are pending for acceptance. The user needs to
     // issue an AcceptChannelCommand with the amount of funding to accept the channel.
-    to_be_accepted_channels: HashMap<Hash256, (PeerId, OpenChannel)>,
+    to_be_accepted_channels: ToBeAcceptedChannels,
     // Channels in this hashmap are pending for funding transaction confirmation.
     pending_channels: HashMap<OutPoint, Hash256>,
     // Used to broadcast and query network info.
@@ -3179,22 +3179,8 @@ where
         )?;
 
         let id = open_channel.channel_id;
-        if let Some(channel) = self.to_be_accepted_channels.get(&id) {
-            warn!(
-                "A channel from {:?} of id {:?} is already awaiting to be accepted: {:?}",
-                &peer_id, &id, channel
-            );
-            return Err(ProcessingChannelError::InvalidParameter(format!(
-                "A channel from {:?} of id {:?} is already awaiting to be accepted",
-                &peer_id, &id,
-            )));
-        }
-        debug!(
-            "Channel from {:?} of id {:?} is now awaiting to be accepted: {:?}",
-            &peer_id, &id, &open_channel
-        );
         self.to_be_accepted_channels
-            .insert(id, (peer_id.clone(), open_channel));
+            .try_insert(id, peer_id.clone(), open_channel)?;
         // Notify outside observers.
         self.network
             .clone()
@@ -3790,4 +3776,39 @@ pub async fn start_network<
     .expect("Failed to start network actor");
 
     actor
+}
+
+#[derive(Default)]
+struct ToBeAcceptedChannels {
+    map: HashMap<Hash256, (PeerId, OpenChannel)>,
+}
+
+impl ToBeAcceptedChannels {
+    fn remove(&mut self, id: &Hash256) -> Option<(PeerId, OpenChannel)> {
+        self.map.remove(id)
+    }
+
+    // insert and apply throttle control
+    fn try_insert(
+        &mut self,
+        id: Hash256,
+        peer_id: PeerId,
+        open_channel: OpenChannel,
+    ) -> ProcessingChannelResult {
+        if let Some(existing_value) = self.map.get(&id) {
+            let err_message = format!(
+                "A channel from {:?} of id {:?} is already awaiting to be accepted",
+                &peer_id, &id,
+            );
+            warn!("{}: {:?}", err_message, existing_value);
+            return Err(ProcessingChannelError::InvalidParameter(err_message));
+        }
+
+        debug!(
+            "Channel from {:?} of id {:?} is now awaiting to be accepted: {:?}",
+            &peer_id, &id, &open_channel
+        );
+        self.map.insert(id, (peer_id, open_channel));
+        Ok(())
+    }
 }
