@@ -248,14 +248,17 @@ pub async fn fiber(
     debug!("Network actor is_none = {}", network_actor.is_none());
     let network_actor = network_actor.unwrap();
     let network_graph = network_graph.unwrap();
-    if let Err(_) = FIBER_WASM.set(WrappedFiberWasm {
-        channel: ChannelRpcServerImpl::new(network_actor.clone(), store.clone()),
-        graph: GraphRpcServerImpl::new(network_graph.clone(), store.clone()),
-        info: InfoRpcServerImpl::new(network_actor.clone(), config.ckb.unwrap_or_default()),
-        invoice: InvoiceRpcServerImpl::new(store.clone(), config.fiber),
-        payment: PaymentRpcServerImpl::new(network_actor.clone(), store.clone()),
-        peer: PeerRpcServerImpl::new(network_actor.clone()),
-    }) {
+    if FIBER_WASM
+        .set(WrappedFiberWasm {
+            channel: ChannelRpcServerImpl::new(network_actor.clone(), store.clone()),
+            graph: GraphRpcServerImpl::new(network_graph.clone(), store.clone()),
+            info: InfoRpcServerImpl::new(network_actor.clone(), config.ckb.unwrap_or_default()),
+            invoice: InvoiceRpcServerImpl::new(store.clone(), config.fiber),
+            payment: PaymentRpcServerImpl::new(network_actor.clone(), store.clone()),
+            peer: PeerRpcServerImpl::new(network_actor.clone()),
+        })
+        .is_err()
+    {
         panic!("FIBER_WASM is already set!");
     } else {
         debug!("WrappedFiberWasm set");
