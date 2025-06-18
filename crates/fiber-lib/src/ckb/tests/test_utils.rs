@@ -799,6 +799,17 @@ pub fn create_deterministic_outpoint_from_seed<S: AsRef<[u8]>>(seed: S) -> OutPo
     let hash = ckb_hash::blake2b_256(seed.as_ref());
     OutPoint::new_builder().tx_hash(hash.pack()).build()
 }
+
+pub fn get_simple_udt_script() -> Script {
+    let args =
+        hex::decode("32e555f3ff8e135cece1351a6a2971518392c1e30375c1e006ad0ce8eac07947").unwrap();
+    get_script_by_contract(Contract::SimpleUDT, &args)
+}
+
+pub fn get_always_success_script() -> Script {
+    get_script_by_contract(Contract::AlwaysSuccess, &[])
+}
+
 fn allow_all_for_script(script: &Script) -> UdtScript {
     UdtScript {
         code_hash: H256(script.code_hash().as_slice().try_into().expect("32 bytes")),

@@ -1,5 +1,4 @@
-use crate::ckb::contracts::get_script_by_contract;
-use crate::ckb::tests::test_utils::complete_commitment_tx;
+use crate::ckb::tests::test_utils::{complete_commitment_tx, get_simple_udt_script};
 use crate::fiber::channel::{ChannelState, CloseFlags, UpdateCommand, XUDT_COMPATIBLE_WITNESS};
 use crate::fiber::config::{DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT};
 use crate::fiber::graph::{ChannelInfo, PaymentSessionStatus};
@@ -293,9 +292,7 @@ async fn test_create_channel_with_too_large_amounts() {
         "The total funding amount (18446744069509551614) should be less than 18446744065309551615"
     ));
 
-    let udt_args =
-        hex::decode("32e555f3ff8e135cece1351a6a2971518392c1e30375c1e006ad0ce8eac07947").unwrap();
-    let udt_script = get_script_by_contract(Contract::SimpleUDT, &udt_args);
+    let udt_script = get_simple_udt_script();
 
     let params = ChannelParameters {
         node_a_funding_amount: u128::MAX - 100,
