@@ -1,6 +1,5 @@
 #![allow(clippy::needless_range_loop)]
-use crate::ckb::contracts::get_script_by_contract;
-use crate::ckb::contracts::Contract;
+use crate::ckb::tests::test_utils::get_simple_udt_script;
 use crate::fiber::channel::*;
 use crate::fiber::config::DEFAULT_TLC_EXPIRY_DELTA;
 use crate::fiber::config::DEFAULT_TLC_FEE_PROPORTIONAL_MILLIONTHS;
@@ -22,7 +21,6 @@ use crate::now_timestamp_as_millis_u64;
 use crate::test_utils::init_tracing;
 use crate::tests::test_utils::*;
 use crate::NetworkServiceEvent;
-use ckb_types::packed::Script;
 use ckb_types::{core::tx_pool::TxStatus, packed::OutPoint};
 use ractor::call;
 use std::collections::HashMap;
@@ -30,12 +28,6 @@ use std::collections::HashSet;
 use std::time::SystemTime;
 use tracing::debug;
 use tracing::error;
-
-fn get_simple_udt_script() -> Script {
-    let args =
-        hex::decode("32e555f3ff8e135cece1351a6a2971518392c1e30375c1e006ad0ce8eac07947").unwrap();
-    get_script_by_contract(Contract::SimpleUDT, &args)
-}
 
 #[tokio::test]
 async fn test_send_payment_custom_records() {

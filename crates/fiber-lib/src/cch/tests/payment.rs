@@ -10,7 +10,7 @@ use crate::{
         tests::lnd_test_utils::{LndBitcoinDConf, LndNode},
         CchMessage, ReceiveBTC, ReceiveBTCOrder, SendBTC, SendBTCOrder,
     },
-    ckb::contracts::{get_script_by_contract, Contract},
+    ckb::tests::test_utils::{get_always_success_script, get_simple_udt_script},
     fiber::{
         graph::PaymentSessionStatus, hash_algorithm::HashAlgorithm, network::SendPaymentCommand,
         types::Hash256,
@@ -25,16 +25,6 @@ use crate::{
 };
 
 pub const CALL_ACTOR_TIMEOUT_MS: u64 = 3 * 1000;
-
-fn get_simple_udt_script() -> Script {
-    let args =
-        hex::decode("32e555f3ff8e135cece1351a6a2971518392c1e30375c1e006ad0ce8eac07947").unwrap();
-    get_script_by_contract(Contract::SimpleUDT, &args)
-}
-
-fn get_always_success_script() -> Script {
-    get_script_by_contract(Contract::AlwaysSuccess, &[])
-}
 
 async fn do_test_cross_chain_payment_hub_send_btc(udt_script: Script, multiple_hops: bool) {
     init_tracing();
