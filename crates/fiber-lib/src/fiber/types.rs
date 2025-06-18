@@ -573,6 +573,17 @@ impl OpenChannel {
     pub fn is_public(&self) -> bool {
         self.channel_flags.contains(ChannelFlags::PUBLIC)
     }
+
+    pub fn mem_size(&self) -> usize {
+        let static_size = std::mem::size_of_val(self);
+        let funding_udt_type_script_size = self
+            .funding_udt_type_script
+            .as_ref()
+            .map(|script| script.total_size())
+            .unwrap_or_default();
+        let shutdown_script_size = self.shutdown_script.total_size();
+        static_size + funding_udt_type_script_size + shutdown_script_size
+    }
 }
 
 impl From<OpenChannel> for molecule_fiber::OpenChannel {

@@ -3778,9 +3778,20 @@ pub async fn start_network<
     actor
 }
 
-#[derive(Default)]
 struct ToBeAcceptedChannels {
+    total_number_limit: usize,
+    total_bytes_limit: usize,
     map: HashMap<Hash256, (PeerId, OpenChannel)>,
+}
+
+impl Default for ToBeAcceptedChannels {
+    fn default() -> Self {
+        Self {
+            total_number_limit: usize::MAX,
+            total_bytes_limit: usize::MAX,
+            map: HashMap::default(),
+        }
+    }
 }
 
 impl ToBeAcceptedChannels {
@@ -3802,6 +3813,30 @@ impl ToBeAcceptedChannels {
             );
             warn!("{}: {:?}", err_message, existing_value);
             return Err(ProcessingChannelError::InvalidParameter(err_message));
+        }
+
+        // The map should be small because of the flow control, so calculate the total number and
+        // bytes on the fly.
+        let (total_number, total_bytes) = self
+            .map
+            .values()
+            .filter(|(saved_peer_id, _)| *saved_peer_id == peer_id)
+            .fold(
+                (1, open_channel.mem_size()),
+                |(count, size), (_, saved_open_channel)| {
+                    (count + 1, size + saved_open_channel.mem_size())
+                },
+            );
+
+        if total_number > self.total_number_limit {
+            return Err(ProcessingChannelError::ToBeAcceptedChannelsExceedLimit(
+                format!("Total number exceeds the limit {}", self.total_number_limit),
+            ));
+        }
+        if total_bytes > self.total_bytes_limit {
+            return Err(ProcessingChannelError::ToBeAcceptedChannelsExceedLimit(
+                format!("Total bytes exceeds the limit {}", self.total_bytes_limit),
+            ));
         }
 
         debug!(
