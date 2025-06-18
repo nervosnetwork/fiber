@@ -647,7 +647,7 @@ where
                 ChannelState::ChannelReady => {
                     if !state.local_tlc_info.enabled {
                         // channel is disabled
-                        TlcErrorCode::TemporaryChannelFailure
+                        TlcErrorCode::ChannelDisabled
                     } else {
                         // we expect `ChannelReady` will be both OK for tlc forwarding,
                         // so here are the unreachable point in normal workflow,

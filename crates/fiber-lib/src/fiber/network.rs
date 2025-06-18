@@ -2071,7 +2071,7 @@ where
         match graph.build_route(amount, max_fee, &session.request) {
             Err(e) => {
                 let error = format!("Failed to build route, {}", e);
-                self.set_payment_fail_with_error(session, &error);
+                self.set_attempt_fail_with_error(session, attempt, &error, false);
                 return Err(Error::SendPaymentError(error));
             }
             Ok(hops) => {
@@ -2258,6 +2258,7 @@ where
                 // do nothing
             }
             Some((error, tlc_err)) => {
+                self.update_graph_with_tlc_fail(&myself, &tlc_err).await;
                 let (error, need_to_retry) =
                     if matches!(error, ProcessingChannelError::WaitingTlcAck) {
                         ("WaitingTlcAck".to_string(), true)
@@ -2303,24 +2304,6 @@ where
         }
     }
 
-    async fn retry_attempt(
-        &self,
-        myself: ActorRef<NetworkActorMessage>,
-        state: &mut NetworkActorState<S>,
-        session: &mut PaymentSession,
-        attempt: &mut Attempt,
-    ) -> Result<(), Error> {
-        if !attempt.is_retryable() {
-            return Err(Error::SendPaymentError(
-                "Retry attempts are not allowed".to_string(),
-            ));
-        }
-        let hops_info = self.rebuild_payment_route(session, attempt).await?;
-        self.send_attempt(myself.clone(), state, session, attempt, hops_info)
-            .await?;
-        Ok(())
-    }
-
     async fn send_attempt(
         &self,
         myself: ActorRef<NetworkActorMessage>,
@@ -2357,29 +2340,34 @@ where
         attempt_id: Option<u64>,
     ) -> Result<(), Error> {
         self.update_graph().await;
-        let Some(mut payment_session) = self.store.get_payment_session(payment_hash) else {
+        let Some(mut session) = self.store.get_payment_session(payment_hash) else {
             return Err(Error::InvalidParameter(payment_hash.to_string()));
         };
 
-        if payment_session.status.is_final() {
+        if session.status.is_final() {
             return Ok(());
         }
 
         if let Some(attempt_id) = attempt_id {
             if let Some(mut attempt) = self.store.get_attempt(payment_hash, attempt_id) {
-                self.retry_attempt(myself.clone(), state, &mut payment_session, &mut attempt)
-                    .await?;
+                if attempt.is_retryable() {
+                    let hops_info = self
+                        .rebuild_payment_route(&mut session, &mut attempt)
+                        .await?;
+                    self.send_attempt(myself.clone(), state, &mut session, &mut attempt, hops_info)
+                        .await?;
+                }
             };
         }
 
-        let mut payment_session = self
+        let mut session = self
             .store
             .get_payment_session(payment_hash)
             .expect("get payment session");
-        if !payment_session.allow_more_attempts() {
-            if payment_session.remain_amount() > 0 {
+        if !session.allow_more_attempts() {
+            if session.remain_amount() > 0 {
                 let err = "Can not send payment with limited attempts";
-                self.set_payment_fail_with_error(&mut payment_session, err);
+                self.set_payment_fail_with_error(&mut session, err);
                 return Err(Error::SendPaymentError(err.to_string()));
             }
             return Ok(());
@@ -2389,31 +2377,16 @@ where
         // it depends on the path finding algorithm to create how many of attempts,
         // if a payment can not be met in the network graph, an build path error will be returned
         // and no attempts be stored in the payment session and db.
-        let attempts_with_routes = self
-            .build_payment_routes(&mut payment_session)
-            .await
-            .inspect_err(|e| {
-                self.set_payment_fail_with_error(&mut payment_session, &e.to_string());
-            })?;
+        let attempts_with_routes =
+            self.build_payment_routes(&mut session)
+                .await
+                .inspect_err(|e| {
+                    self.set_payment_fail_with_error(&mut session, &e.to_string());
+                })?;
 
         for (mut attempt, route) in attempts_with_routes {
-            self.send_attempt(
-                myself.clone(),
-                state,
-                &mut payment_session,
-                &mut attempt,
-                route,
-            )
-            .await?;
-        }
-
-        // do we need more attempts?
-        let payment_session = self
-            .store
-            .get_payment_session(payment_hash)
-            .expect("get payment session");
-        if payment_session.remain_amount() > 0 {
-            self.register_payment_retry(myself, payment_hash, None);
+            self.send_attempt(myself.clone(), state, &mut session, &mut attempt, route)
+                .await?;
         }
 
         Ok(())

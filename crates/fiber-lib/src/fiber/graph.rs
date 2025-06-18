@@ -1148,21 +1148,21 @@ where
                     // - The requested amount is greater than the minimum allowed for a part.
                     if allow_mpp && amount > min_amount_for_a_part =>
                 {
-                if let Ok(res) = self.binary_find_path_in_range(
-                        source,
-                        amount.saturating_sub(1),
-                        min_amount_for_a_part,
-                        max_fee_amount,
-                        payment_data
-                    ) {
-                        res
-                    } else {
-                        return Err(PathFindError::PathFind(orig_err));
+                    if let Ok(res) = self.binary_find_path_in_range(
+                            source,
+                            amount.saturating_sub(1),
+                            min_amount_for_a_part,
+                            max_fee_amount,
+                            payment_data
+                        ) {
+                            res
+                        } else {
+                            return Err(PathFindError::PathFind(orig_err));
+                        }
                     }
-                }
-                // Initial find_path failed with a non-PathFind error,
-                // or conditions for trying smaller amounts were not met.
-                Err(err) => return Err(err),
+                    // Initial find_path failed with a non-PathFind error,
+                    // or conditions for trying smaller amounts were not met.
+                    Err(err) => return Err(err),
             }
         };
 
@@ -1255,7 +1255,7 @@ where
             iterations += 1;
 
             let mid = low + (high - low) / 2;
-            dbg!("iterations: {}", iterations, mid);
+            debug!("iterations: {} mid: {}", iterations, mid);
 
             match self.find_path_with_payment_data(source, mid, max_fee_amount, payment_data) {
                 Ok(route) => {
@@ -1448,6 +1448,10 @@ where
         hop_hints: &[HopHint],
         channel_stats: &GraphChannelStat,
     ) -> Result<Vec<RouterHop>, PathFindError> {
+        debug!(
+            "begin find_path from {:?} to {:?} amount: {:?}",
+            source, target, amount
+        );
         let started_time = std::time::Instant::now();
         let nodes_len = self.nodes.len();
         let route_to_self = source == target;
@@ -2255,10 +2259,6 @@ impl PaymentSession {
     }
 
     pub fn calc_payment_session_status(&self) -> PaymentSessionStatus {
-        for attempt in self.attempts() {
-            dbg!(attempt);
-        }
-
         if self.cached_attempts.is_empty() || self.status.is_final() {
             return self.status;
         }
@@ -2303,12 +2303,35 @@ impl From<PaymentSession> for SendPaymentResponse {
     fn from(session: PaymentSession) -> Self {
         let status = session.status;
         let fee = session.fee_paid();
+        let mut all_attempts = session
+            .attempts()
+            .map(|a| {
+                (
+                    a.id,
+                    a.status,
+                    a.last_error.clone(),
+                    a.tried_times,
+                    a.route.receiver_amount(),
+                )
+            })
+            .collect::<Vec<_>>();
+        all_attempts.sort_by_key(|a| a.0);
+        dbg!(&all_attempts);
+        dbg!(
+            fee,
+            &status,
+            all_attempts.len(),
+            session.try_limit,
+            &session.last_error
+        );
+
         let attempts = session
             .attempts()
             .filter(|a| !a.is_failed())
             .collect::<Vec<_>>();
 
-        dbg!(fee, &status, attempts.len(), session.try_limit);
+        let more_attempts = session.allow_more_attempts();
+        dbg!(more_attempts);
         Self {
             payment_hash: session.request.payment_hash,
             status,
@@ -2342,6 +2365,7 @@ pub struct Attempt {
 impl Attempt {
     pub fn set_inflight_status(&mut self) {
         self.status = PaymentSessionStatus::Inflight;
+        self.last_error = None;
     }
 
     pub fn set_failed_status(&mut self, error: &str, retryable: bool) {
@@ -2366,6 +2390,7 @@ impl Attempt {
 
     pub fn set_success_status(&mut self) {
         self.status = PaymentSessionStatus::Success;
+        self.last_error = None;
     }
 
     pub fn is_settled(&self) -> bool {

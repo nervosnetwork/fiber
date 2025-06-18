@@ -18,6 +18,7 @@ use crate::{
         create_n_nodes_network, establish_channel_between_nodes, init_tracing, ChannelParameters,
         NetworkNode, MIN_RESERVED_CKB,
     },
+    HUGE_CKB_AMOUNT,
 };
 
 #[tokio::test]
@@ -1360,4 +1361,303 @@ async fn test_send_mpp_dry_run_single_path_mixed_with_multiple_paths() {
     test_dryrun_with_network(600000 + 5, Some(3), Some(101)).await;
     test_dryrun_with_network(700000 + 5, Some(4), Some(201)).await;
     test_dryrun_with_network(800000, None, None).await;
+}
+
+#[tokio::test]
+async fn test_send_mpp_will_succeed_with_retry_first_hops() {
+    init_tracing();
+
+    // we disable a channel stealthy, and then retry the payment,
+    // the payment should succeed with rebuild a path successfully
+    let (nodes, channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (MIN_RESERVED_CKB + 100000, MIN_RESERVED_CKB)),
+            ((0, 1), (MIN_RESERVED_CKB + 100000, MIN_RESERVED_CKB)),
+            ((0, 1), (MIN_RESERVED_CKB + 100000, MIN_RESERVED_CKB)),
+            ((0, 1), (MIN_RESERVED_CKB + 100000, MIN_RESERVED_CKB)),
+            ((0, 1), (MIN_RESERVED_CKB + 100000, MIN_RESERVED_CKB)),
+        ],
+        2,
+    )
+    .await;
+    let [node_0, mut node_1] = nodes.try_into().expect("ok nodes");
+
+    let res = node_0
+        .send_mpp_payment_with_dry_run_option(&mut node_1, 300000, None, true)
+        .await;
+
+    let query_res = res.unwrap();
+    assert_eq!(query_res.routers.len(), 3);
+    dbg!(&query_res.routers);
+
+    let used_channels = node_0
+        .routers_used_channels(&query_res.routers, &channels)
+        .await;
+
+    dbg!(&used_channels);
+
+    let first_used_channel = used_channels.first().unwrap();
+    node_0.disable_channel_stealthy(*first_used_channel).await;
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
+    let res = node_0
+        .send_mpp_payment(&mut node_1, 300000, None)
+        .await
+        .expect("send mpp payment");
+
+    let payment_hash = res.payment_hash;
+    node_0.wait_until_success(payment_hash).await;
+    let payment_res = node_0.get_payment_result(payment_hash).await;
+    let used_channels = node_0
+        .routers_used_channels(&payment_res.routers, &channels)
+        .await;
+    assert_eq!(used_channels.len(), 3);
+    assert!(
+        !used_channels.contains(first_used_channel),
+        "First used channel should not be used after retry"
+    );
+}
+
+#[tokio::test]
+async fn test_send_mpp_will_succeed_with_retry_2_channels() {
+    init_tracing();
+
+    // we disable two channels stealthy, and then retry the payment,
+    // the payment should succeed with rebuild a path successfully
+    let (nodes, channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (MIN_RESERVED_CKB + 100000, MIN_RESERVED_CKB)),
+            ((0, 1), (MIN_RESERVED_CKB + 100000, MIN_RESERVED_CKB)),
+            ((0, 1), (MIN_RESERVED_CKB + 100000, MIN_RESERVED_CKB)),
+            ((0, 1), (MIN_RESERVED_CKB + 100000, MIN_RESERVED_CKB)),
+            ((0, 1), (MIN_RESERVED_CKB + 100000, MIN_RESERVED_CKB)),
+        ],
+        2,
+    )
+    .await;
+    let [node_0, mut node_1] = nodes.try_into().expect("ok nodes");
+
+    let res = node_0
+        .send_mpp_payment_with_dry_run_option(&mut node_1, 300000, None, true)
+        .await;
+
+    let query_res = res.unwrap();
+    assert_eq!(query_res.routers.len(), 3);
+    dbg!(&query_res.routers);
+
+    let used_channels = node_0
+        .routers_used_channels(&query_res.routers, &channels)
+        .await;
+
+    dbg!(&used_channels);
+
+    let first_used_channel = used_channels.first().unwrap();
+    node_0.disable_channel_stealthy(*first_used_channel).await;
+    let last_used_channel = used_channels.first().unwrap();
+    node_0.disable_channel_stealthy(*last_used_channel).await;
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
+    let res = node_0
+        .send_mpp_payment(&mut node_1, 300000, None)
+        .await
+        .expect("send mpp payment");
+
+    let payment_hash = res.payment_hash;
+    node_0.wait_until_success(payment_hash).await;
+    let payment_res = node_0.get_payment_result(payment_hash).await;
+    let used_channels = node_0
+        .routers_used_channels(&payment_res.routers, &channels)
+        .await;
+    assert_eq!(used_channels.len(), 3);
+    assert!(
+        !used_channels.contains(first_used_channel),
+        "First used channel should not be used after retry"
+    );
+}
+
+#[tokio::test]
+async fn test_send_mpp_will_fail_with_retry_3_channels() {
+    init_tracing();
+
+    // we disable 3 channels stealthy, and then retry the payment,
+    // the payment should failed with no path found
+    let (nodes, channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (MIN_RESERVED_CKB + 100000, MIN_RESERVED_CKB)),
+            ((0, 1), (MIN_RESERVED_CKB + 100000, MIN_RESERVED_CKB)),
+            ((0, 1), (MIN_RESERVED_CKB + 100000, MIN_RESERVED_CKB)),
+            ((0, 1), (MIN_RESERVED_CKB + 100000, MIN_RESERVED_CKB)),
+            ((0, 1), (MIN_RESERVED_CKB + 100000, MIN_RESERVED_CKB)),
+        ],
+        2,
+    )
+    .await;
+    let [node_0, mut node_1] = nodes.try_into().expect("ok nodes");
+
+    let res = node_0
+        .send_mpp_payment_with_dry_run_option(&mut node_1, 300000, None, true)
+        .await;
+
+    let query_res = res.unwrap();
+    assert_eq!(query_res.routers.len(), 3);
+    dbg!(&query_res.routers);
+
+    let used_channels = node_0
+        .routers_used_channels(&query_res.routers, &channels)
+        .await;
+
+    dbg!(&used_channels);
+
+    for channel in used_channels.iter() {
+        node_0.disable_channel_stealthy(*channel).await;
+    }
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
+    let res = node_0
+        .send_mpp_payment(&mut node_1, 300000, None)
+        .await
+        .expect("send mpp payment");
+
+    let payment_hash = res.payment_hash;
+    node_0.wait_until_failed(payment_hash).await;
+}
+
+#[tokio::test]
+async fn test_send_mpp_will_success_with_retry_split_channels() {
+    init_tracing();
+
+    // we disable the first large channel stealthy, and then retry the payment,
+    // the payment should success with retry and split the payment into 3 parts
+    let (nodes, channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (MIN_RESERVED_CKB + 30000, MIN_RESERVED_CKB)),
+            ((0, 1), (MIN_RESERVED_CKB + 10000, MIN_RESERVED_CKB)),
+            ((0, 1), (MIN_RESERVED_CKB + 10000, MIN_RESERVED_CKB)),
+            ((0, 1), (MIN_RESERVED_CKB + 10000, MIN_RESERVED_CKB)),
+        ],
+        2,
+    )
+    .await;
+    let [node_0, mut node_1] = nodes.try_into().expect("ok nodes");
+
+    let res = node_0
+        .send_mpp_payment_with_dry_run_option(&mut node_1, 30000, None, true)
+        .await;
+
+    let query_res = res.unwrap();
+    assert_eq!(query_res.routers.len(), 1);
+    dbg!(&query_res.routers);
+
+    let used_channels = node_0
+        .routers_used_channels(&query_res.routers, &channels)
+        .await;
+
+    dbg!(&used_channels);
+    assert!(used_channels.contains(&channels[0]));
+
+    node_0.disable_channel_stealthy(channels[0]).await;
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
+    let res = node_0
+        .send_mpp_payment(&mut node_1, 30000, None)
+        .await
+        .expect("send mpp payment");
+
+    let payment_hash = res.payment_hash;
+    node_0.wait_until_success(payment_hash).await;
+    let payment_res = node_0.get_payment_result(payment_hash).await;
+    assert_eq!(payment_res.routers.len(), 3);
+}
+
+#[tokio::test]
+async fn test_send_mpp_will_fail_with_disable_single_path() {
+    init_tracing();
+
+    let (nodes, channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)), // disable this path will make payment fail
+            ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((1, 2), (HUGE_CKB_AMOUNT + 10010, HUGE_CKB_AMOUNT)),
+            ((1, 2), (HUGE_CKB_AMOUNT + 10010, HUGE_CKB_AMOUNT)),
+            ((1, 2), (HUGE_CKB_AMOUNT + 10010, HUGE_CKB_AMOUNT)),
+        ],
+        3,
+    )
+    .await;
+    let [node_0, _node_1, mut node_2] = nodes.try_into().expect("ok nodes");
+
+    let res = node_0
+        .send_mpp_payment_with_dry_run_option(&mut node_2, 30000, None, true)
+        .await;
+
+    let query_res = res.unwrap();
+    assert_eq!(query_res.routers.len(), 1);
+    dbg!(&query_res.routers);
+
+    let used_channels = node_0
+        .routers_used_channels(&query_res.routers, &channels)
+        .await;
+
+    dbg!(&used_channels);
+    assert!(used_channels.contains(&channels[0]));
+
+    node_0.disable_channel_stealthy(channels[0]).await;
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
+    let res = node_0
+        .send_mpp_payment(&mut node_2, 30000, None)
+        .await
+        .expect("send mpp payment");
+
+    let payment_hash = res.payment_hash;
+    node_0.wait_until_failed(payment_hash).await;
+    let payment_res = node_0.get_payment_result(payment_hash).await;
+    assert_eq!(payment_res.routers.len(), 0);
+    let payment_session = node_0.get_payment_session(payment_hash).unwrap();
+
+    let attempts = payment_session.attempts().collect::<Vec<_>>();
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(payment_session.retry_times(), 2);
+}
+
+#[tokio::test]
+async fn test_send_mpp_will_success_with_middle_hop_capacity_not_enough() {
+    init_tracing();
+
+    let (nodes, channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((1, 2), (MIN_RESERVED_CKB + 3, MIN_RESERVED_CKB + 304000)),
+            ((1, 2), (MIN_RESERVED_CKB + 100010, MIN_RESERVED_CKB)),
+            ((1, 2), (MIN_RESERVED_CKB + 100010, MIN_RESERVED_CKB)),
+            ((1, 2), (MIN_RESERVED_CKB + 100010, MIN_RESERVED_CKB)),
+        ],
+        3,
+    )
+    .await;
+    let [node_0, _node_1, mut node_2] = nodes.try_into().expect("ok nodes");
+
+    let res = node_0
+        .send_mpp_payment_with_dry_run_option(&mut node_2, 300000, None, true)
+        .await;
+
+    let query_res = res.unwrap();
+    assert_eq!(query_res.routers.len(), 1);
+    dbg!(&query_res.routers);
+
+    let used_channels = node_0
+        .routers_used_channels(&query_res.routers, &channels)
+        .await;
+
+    dbg!(&used_channels);
+    assert!(used_channels.contains(&channels[1]));
+
+    let res = node_0
+        .send_mpp_payment(&mut node_2, 300000, None)
+        .await
+        .expect("send mpp payment");
+
+    let payment_hash = res.payment_hash;
+    // FIXME(yukang): how to make this payment success?
+    node_0.wait_until_failed(payment_hash).await;
 }

@@ -7,6 +7,7 @@ use crate::fiber::gossip::GossipActorMessage;
 use crate::fiber::graph::NetworkGraphStateStore;
 use crate::fiber::graph::PaymentSession;
 use crate::fiber::graph::PaymentSessionStatus;
+use crate::fiber::graph::SessionRoute;
 use crate::fiber::network::*;
 use crate::fiber::types::EcdsaSignature;
 use crate::fiber::types::FiberMessage;
@@ -954,6 +955,34 @@ impl NetworkNode {
             .expect("funding tx");
         let channel_outpoint = OutPoint::new(funding_tx.into(), 0);
         assert!(used_channels.contains(&channel_outpoint));
+    }
+
+    pub async fn routers_used_channels(
+        &self,
+        routers: &[SessionRoute],
+        channel_ids: &[Hash256],
+    ) -> Vec<Hash256> {
+        let mut routers_channel_outpoints = vec![];
+        for route in routers {
+            let channel_outpoints = route
+                .nodes
+                .iter()
+                .map(|r| r.channel_outpoint.clone())
+                .collect::<Vec<_>>();
+            for outpoint in channel_outpoints {
+                routers_channel_outpoints.push(outpoint.clone());
+            }
+        }
+
+        channel_ids
+            .iter()
+            .filter(|id| {
+                let funding_tx = self.get_channel_funding_tx(id).expect("funding tx");
+                let channel_outpoint = OutPoint::new(funding_tx.into(), 0);
+                routers_channel_outpoints.contains(&channel_outpoint)
+            })
+            .copied()
+            .collect::<Vec<_>>()
     }
 
     pub async fn wait_until_success(&self, payment_hash: Hash256) {
