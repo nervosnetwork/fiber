@@ -1,4 +1,5 @@
-use crate::test_utils::*;
+use crate::fiber::channel::ChannelFlags;
+use crate::fiber::types::OpenChannel;
 use crate::{
     ckb::{
         tests::test_utils::{
@@ -11,7 +12,10 @@ use crate::{
         config::DEFAULT_TLC_EXPIRY_DELTA,
         gossip::{GossipActorMessage, GossipMessageStore},
         graph::ChannelUpdateInfo,
-        network::{NetworkActorStateStore, SendPaymentCommand, SendPaymentData},
+        network::{
+            AcceptChannelCommand, NetworkActorStateStore, OpenChannelCommand, SendPaymentCommand,
+            SendPaymentData,
+        },
         types::{
             BroadcastMessage, BroadcastMessageWithTimestamp, BroadcastMessagesFilterResult,
             ChannelAnnouncement, ChannelUpdateChannelFlags, Cursor, GossipMessage,
@@ -23,13 +27,14 @@ use crate::{
     invoice::InvoiceBuilder,
     now_timestamp_as_millis_u64, ChannelTestContext, NetworkServiceEvent,
 };
+use crate::{gen_rand_fiber_private_key, test_utils::*};
 use ckb_hash::blake2b_256;
 use ckb_types::{
     core::{tx_pool::TxStatus, TransactionView},
     packed::{CellOutput, OutPoint, ScriptBuilder},
     prelude::{Builder, Entity, Pack},
 };
-use musig2::PartialSignature;
+use musig2::{PartialSignature, SecNonce};
 use ractor::{call, ActorProcessingErr, ActorRef};
 use std::{borrow::Cow, str::FromStr, time::Duration};
 use tentacle::{
@@ -974,7 +979,6 @@ fn test_send_payment_validate_htlc_expiry_delta() {
 #[tokio::test]
 async fn test_abort_funding_on_building_funding_tx() {
     init_tracing();
-    use crate::fiber::network::{AcceptChannelCommand, OpenChannelCommand};
 
     let funding_amount_a = 4_200_000_000u128;
     let funding_amount_b: u128 = u64::MAX as u128 + 1 - funding_amount_a;
@@ -1065,8 +1069,6 @@ impl MockChainActorMiddleware for CkbTxFailureMockMiddleware {
 
 #[tokio::test]
 async fn test_abort_funding_on_committing_funding_tx_on_chain() {
-    use crate::fiber::network::{AcceptChannelCommand, OpenChannelCommand};
-
     let funding_amount_a = 4_200_000_000u128;
     let funding_amount_b: u128 = funding_amount_a;
     let middleware = Box::new(CkbTxFailureMockMiddleware);
@@ -1152,4 +1154,180 @@ async fn test_abort_funding_on_committing_funding_tx_on_chain() {
             )
         })
         .await;
+}
+
+#[tokio::test]
+async fn test_to_be_accepted_channels_number_limit() {
+    let funding_amount = 4_200_000_000u128;
+    let open_channel_auto_accept_min_ckb_funding_amount = Some(funding_amount as u64 + 1);
+    let mut node = NetworkNode::new_with_config(
+        NetworkNodeConfigBuilder::new()
+            .fiber_config_updater(move |config| {
+                config.to_be_accepted_channels_number_limit = Some(2);
+                // Ensure channel is not accepted automatically
+                config.open_channel_auto_accept_min_ckb_funding_amount =
+                    open_channel_auto_accept_min_ckb_funding_amount;
+            })
+            .build(),
+    )
+    .await;
+    let peer = NetworkNode::new().await;
+    node.connect_to(&peer).await;
+
+    let node_peer_id = node.peer_id.clone();
+
+    let message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
+            OpenChannelCommand {
+                peer_id: node_peer_id.clone(),
+                public: true,
+                shutdown_script: None,
+                funding_amount,
+                funding_udt_type_script: None,
+                commitment_fee_rate: None,
+                commitment_delay_epoch: None,
+                funding_fee_rate: None,
+                tlc_expiry_delta: None,
+                tlc_min_value: None,
+                tlc_fee_proportional_millionths: None,
+                max_tlc_number_in_flight: None,
+                max_tlc_value_in_flight: None,
+            },
+            rpc_reply,
+        ))
+    };
+
+    call!(peer.network_actor, message)
+        .expect("peer alive")
+        .expect("open channel");
+    node.expect_event(|event| match event {
+        NetworkServiceEvent::ChannelPendingToBeAccepted(peer_id, _channel_id) => {
+            assert_eq!(peer_id, &peer.peer_id);
+            true
+        }
+        _ => false,
+    })
+    .await;
+
+    call!(peer.network_actor, message)
+        .expect("peer alive")
+        .expect("open channel");
+    node.expect_event(|event| match event {
+        NetworkServiceEvent::ChannelPendingToBeAccepted(peer_id, _channel_id) => {
+            assert_eq!(peer_id, &peer.peer_id);
+            true
+        }
+        _ => false,
+    })
+    .await;
+
+    call!(peer.network_actor, message)
+        .expect("peer alive")
+        .expect("open channel");
+    node.expect_debug_event("ChannelPendingToBeRejected").await;
+}
+
+#[tokio::test]
+async fn test_to_be_accepted_channels_bytes_limit() {
+    init_tracing();
+
+    let rand_privkey = gen_rand_fiber_private_key();
+    let rand_nonce = SecNonce::build(rand_privkey.as_ref())
+        .build()
+        .public_nonce();
+    // Create an OpenChannel instance that has the same size as the once created by node
+    let open_channel = OpenChannel {
+        chain_hash: gen_rand_sha256_hash(),
+        channel_id: gen_rand_sha256_hash(),
+        funding_udt_type_script: None,
+        funding_amount: 0,
+        shutdown_script: Default::default(),
+        reserved_ckb_amount: 0,
+        funding_fee_rate: 0,
+        commitment_fee_rate: 0,
+        commitment_delay_epoch: 0,
+        max_tlc_value_in_flight: 0,
+        max_tlc_number_in_flight: 0,
+        channel_flags: ChannelFlags::empty(),
+        first_per_commitment_point: gen_rand_fiber_public_key(),
+        second_per_commitment_point: gen_rand_fiber_public_key(),
+        funding_pubkey: gen_rand_fiber_public_key(),
+        tlc_basepoint: gen_rand_fiber_public_key(),
+        next_local_nonce: rand_nonce.clone(),
+        // public channel must set this
+        channel_announcement_nonce: Some(rand_nonce.clone()),
+    };
+    let single_open_channel_size = open_channel.mem_size();
+    tracing::info!(
+        "single open_channel mem size is {}",
+        single_open_channel_size
+    );
+
+    let funding_amount = 4_200_000_000u128;
+    let open_channel_auto_accept_min_ckb_funding_amount = Some(funding_amount as u64 + 1);
+    let mut node = NetworkNode::new_with_config(
+        NetworkNodeConfigBuilder::new()
+            .fiber_config_updater(move |config| {
+                config.to_be_accepted_channels_bytes_limit = Some(single_open_channel_size * 2);
+                // Ensure channel is not accepted automatically
+                config.open_channel_auto_accept_min_ckb_funding_amount =
+                    open_channel_auto_accept_min_ckb_funding_amount;
+            })
+            .build(),
+    )
+    .await;
+    let peer = NetworkNode::new().await;
+    node.connect_to(&peer).await;
+
+    let node_peer_id = node.peer_id.clone();
+
+    let message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
+            OpenChannelCommand {
+                peer_id: node_peer_id.clone(),
+                public: true,
+                shutdown_script: None,
+                funding_amount,
+                funding_udt_type_script: None,
+                commitment_fee_rate: None,
+                commitment_delay_epoch: None,
+                funding_fee_rate: None,
+                tlc_expiry_delta: None,
+                tlc_min_value: None,
+                tlc_fee_proportional_millionths: None,
+                max_tlc_number_in_flight: None,
+                max_tlc_value_in_flight: None,
+            },
+            rpc_reply,
+        ))
+    };
+
+    call!(peer.network_actor, message)
+        .expect("peer alive")
+        .expect("open channel");
+    node.expect_event(|event| match event {
+        NetworkServiceEvent::ChannelPendingToBeAccepted(peer_id, _channel_id) => {
+            assert_eq!(peer_id, &peer.peer_id);
+            true
+        }
+        _ => false,
+    })
+    .await;
+
+    call!(peer.network_actor, message)
+        .expect("peer alive")
+        .expect("open channel");
+    node.expect_event(|event| match event {
+        NetworkServiceEvent::ChannelPendingToBeAccepted(peer_id, _channel_id) => {
+            assert_eq!(peer_id, &peer.peer_id);
+            true
+        }
+        _ => false,
+    })
+    .await;
+
+    call!(peer.network_actor, message)
+        .expect("peer alive")
+        .expect("open channel");
+    node.expect_debug_event("ChannelPendingToBeRejected").await;
 }
