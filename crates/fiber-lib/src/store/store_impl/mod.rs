@@ -429,8 +429,7 @@ impl ChannelActorStateStore for Store {
             .map(|v| deserialize_from(v.as_ref(), "HoldTlc"))
             .unwrap_or_default();
         hold_tlcs.retain(|hold_tlc| {
-            let removed =
-                hold_tlc.channel_actor_state_id == *channel_id && hold_tlc.tlc_id == tlc_id;
+            let removed = hold_tlc.channel_id == *channel_id && hold_tlc.tlc_id == tlc_id;
             !removed
         });
         batch.put_kv(KeyValue::HoldTlcs(*payment_hash, hold_tlcs));

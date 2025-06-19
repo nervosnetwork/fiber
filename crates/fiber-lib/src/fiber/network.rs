@@ -1366,7 +1366,7 @@ where
                             for hold_tlc in all_hold_tlcs
                                 .values()
                                 .flatten()
-                                .filter(|hold_tlc| hold_tlc.channel_actor_state_id == channel_id)
+                                .filter(|hold_tlc| hold_tlc.channel_id == channel_id)
                             {
                                 let Some(tlc) =
                                     actor_state.tlc_state.get(&TLCId::Received(hold_tlc.tlc_id))
@@ -1384,7 +1384,7 @@ where
                                     );
                                     self.store.remove_hold_tlc(
                                         &tlc.payment_hash,
-                                        &hold_tlc.channel_actor_state_id,
+                                        &hold_tlc.channel_id,
                                         hold_tlc.tlc_id,
                                     );
                                     let (send, _recv) = oneshot::channel();

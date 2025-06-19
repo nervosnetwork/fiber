@@ -2427,7 +2427,7 @@ impl Attempt {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HoldTlc {
-    pub channel_actor_state_id: Hash256,
+    pub channel_id: Hash256,
     pub tlc_id: u64,
     pub hold_expire_at: u64,
 }

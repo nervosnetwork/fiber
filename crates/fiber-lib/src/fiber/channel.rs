@@ -856,9 +856,7 @@ where
         let mut tlcs: Vec<_> = hold_tlcs
             .iter()
             .filter_map(|hold_tlc| {
-                let state = self
-                    .store
-                    .get_channel_actor_state(&hold_tlc.channel_actor_state_id)?;
+                let state = self.store.get_channel_actor_state(&hold_tlc.channel_id)?;
                 let tlc_id = TLCId::Received(hold_tlc.tlc_id);
                 state.get_received_tlc(tlc_id).cloned()
             })
@@ -941,7 +939,7 @@ where
                             self.store.insert_hold_tlc(
                                 tlc.payment_hash,
                                 HoldTlc {
-                                    channel_actor_state_id: state.get_id(),
+                                    channel_id: state.get_id(),
                                     tlc_id: tlc.tlc_id.into(),
                                     hold_expire_at: now_timestamp_as_millis_u64()
                                         + DEFAULT_HOLD_TLC_TIMEOUT,
