@@ -15,7 +15,7 @@ class Fiber {
     private outputBuffer: SharedArrayBuffer
     private commandInvokeLock: Mutex;
     /**
-     * Construct a Fiber Wasm  instance.
+     * Construct a Fiber Wasm instance.
      * inputBuffer and outputBuffer are buffers used for transporting data between database and fiber wasm. Set them to appropriate sizes.
      * @param inputBufferSize Size of inputBuffer
      * @param outputBufferSize Size of outputBuffer
