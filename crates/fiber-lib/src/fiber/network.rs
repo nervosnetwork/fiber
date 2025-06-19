@@ -1418,7 +1418,7 @@ where
 
                             for tlc in actor_state.tlc_state.received_tlcs.get_committed_tlcs() {
                                 // skip if tlc amount is not fulfilled invoice
-                                // this may happend if payment is mpp
+                                // this may happened if payment is mpp
                                 if let Some(invoice) = self.store.get_invoice(&tlc.payment_hash) {
                                     if let Some(amount) = invoice.amount() {
                                         if tlc.amount < amount {
