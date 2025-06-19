@@ -678,7 +678,7 @@ pub enum NetworkServiceEvent {
     PeerDisConnected(PeerId, Multiaddr),
     // An incoming/outgoing channel is created.
     ChannelCreated(PeerId, Hash256),
-    // A outgoing channel is pending to be accepted.
+    // An incoming channel is pending to be accepted.
     ChannelPendingToBeAccepted(PeerId, Hash256),
     // A funding tx is completed. The watch tower may use this to monitor the channel.
     RemoteTxComplete(PeerId, Hash256, Script, SettlementData),
@@ -3168,7 +3168,8 @@ where
         peer_id: PeerId,
         open_channel: OpenChannel,
     ) -> ProcessingChannelResult {
-        check_open_channel_parameters(
+        let id = open_channel.channel_id;
+        let result = check_open_channel_parameters(
             &open_channel.funding_udt_type_script,
             &open_channel.shutdown_script,
             open_channel.reserved_ckb_amount,
@@ -3176,19 +3177,30 @@ where
             open_channel.commitment_fee_rate,
             open_channel.commitment_delay_epoch,
             open_channel.max_tlc_number_in_flight,
-        )?;
+        )
+        .and_then(|_| {
+            self.to_be_accepted_channels
+                .try_insert(id, peer_id.clone(), open_channel)
+        });
 
-        let id = open_channel.channel_id;
-        self.to_be_accepted_channels
-            .try_insert(id, peer_id.clone(), open_channel)?;
-        // Notify outside observers.
-        self.network
-            .clone()
-            .send_message(NetworkActorMessage::new_notification(
-                NetworkServiceEvent::ChannelPendingToBeAccepted(peer_id, id),
-            ))
-            .expect(ASSUME_NETWORK_MYSELF_ALIVE);
-        Ok(())
+        match result {
+            Ok(_) => {
+                // Notify outside observers.
+                self.network
+                    .send_message(NetworkActorMessage::new_notification(
+                        NetworkServiceEvent::ChannelPendingToBeAccepted(peer_id, id),
+                    ))
+                    .expect(ASSUME_NETWORK_MYSELF_ALIVE);
+            }
+            Err(ProcessingChannelError::RepeatedProcessing(_)) => {
+                // ignore duplicated open channel request
+            }
+            Err(_) => {
+                debug_event!(self.network, "ChannelPendingToBeRejected");
+            }
+        };
+
+        result
     }
 
     async fn on_funding_transaction_pending(
@@ -3481,7 +3493,7 @@ where
             channels: Default::default(),
             ckb_txs_in_flight: Default::default(),
             outpoint_channel_map: Default::default(),
-            to_be_accepted_channels: Default::default(),
+            to_be_accepted_channels: ToBeAcceptedChannels::new_with_config(&config),
             pending_channels: Default::default(),
             chain_actor,
             open_channel_auto_accept_min_ckb_funding_amount: config
@@ -3794,7 +3806,24 @@ impl Default for ToBeAcceptedChannels {
     }
 }
 
+// Remember to sync fiber/config.rs
+const DEFAULT_TO_BE_ACCEPTED_CHANNELS_NUMBER_LIMIT: usize = 20;
+// Remember to sync fiber/config.rs
+const DEFAULT_TO_BE_ACCEPTED_CHANNELS_BYTES_LIMIT: usize = 51200; // 50KB
+
 impl ToBeAcceptedChannels {
+    fn new_with_config(config: &FiberConfig) -> Self {
+        Self {
+            total_number_limit: config
+                .to_be_accepted_channels_number_limit
+                .unwrap_or(DEFAULT_TO_BE_ACCEPTED_CHANNELS_NUMBER_LIMIT),
+            total_bytes_limit: config
+                .to_be_accepted_channels_bytes_limit
+                .unwrap_or(DEFAULT_TO_BE_ACCEPTED_CHANNELS_BYTES_LIMIT),
+            map: HashMap::default(),
+        }
+    }
+
     fn remove(&mut self, id: &Hash256) -> Option<(PeerId, OpenChannel)> {
         self.map.remove(id)
     }
@@ -3812,7 +3841,7 @@ impl ToBeAcceptedChannels {
                 &peer_id, &id,
             );
             warn!("{}: {:?}", err_message, existing_value);
-            return Err(ProcessingChannelError::InvalidParameter(err_message));
+            return Err(ProcessingChannelError::RepeatedProcessing(err_message));
         }
 
         // The map should be small because of the flow control, so calculate the total number and
