@@ -13,7 +13,7 @@ use super::types::{
 };
 use super::types::{Cursor, Pubkey, TlcErr};
 use crate::ckb::config::UdtCfgInfos;
-use crate::fiber::config::{DEFAULT_MPP_MIN_AMOUNT, DEFAULT_TLC_EXPIRY_DELTA};
+use crate::fiber::config::DEFAULT_TLC_EXPIRY_DELTA;
 use crate::fiber::fee::calculate_tlc_forward_fee;
 use crate::fiber::history::SentNode;
 use crate::fiber::network::DEFAULT_PAYMENT_MPP_ATTEMPT_TRY_LIMIT;
@@ -1107,6 +1107,7 @@ where
     pub fn build_route(
         &self,
         amount: u128,
+        amount_low_bound: Option<u128>,
         max_fee_amount: Option<u128>,
         payment_data: &SendPaymentData,
     ) -> Result<Vec<PaymentHopData>, PathFindError> {
@@ -1114,13 +1115,6 @@ where
         let target = payment_data.target_pubkey;
         let allow_self_payment = payment_data.allow_self_payment;
         let allow_mpp = payment_data.allow_mpp();
-
-        let min_amount_for_a_part = if allow_mpp {
-            DEFAULT_MPP_MIN_AMOUNT
-        } else {
-            // If not MPP, this part must carry the full amount
-            amount
-        };
 
         if source == target && !allow_self_payment {
             return Err(PathFindError::FeatureNotEnabled(
@@ -1146,12 +1140,12 @@ where
                     // - MPP is allowed for the payment.
                     // - This is not the last part we are forced to make (more flexible).
                     // - The requested amount is greater than the minimum allowed for a part.
-                    if allow_mpp && amount > min_amount_for_a_part =>
+                    if allow_mpp && amount_low_bound.is_some() =>
                 {
                     if let Ok(res) = self.binary_find_path_in_range(
                             source,
                             amount.saturating_sub(1),
-                            min_amount_for_a_part,
+                            amount_low_bound.unwrap(),
                             max_fee_amount,
                             payment_data
                         ) {
@@ -2025,7 +2019,7 @@ impl SessionRoute {
     // the `payment_hops` is [B, C, D], which is a convenient way for onion routing.
     // here we need to create a session route with source, which is A -> B -> C -> D
     pub fn new(source: Pubkey, target: Pubkey, payment_hops: &[PaymentHopData]) -> Self {
-        dbg!(payment_hops);
+        //dbg!(payment_hops);
         let nodes = std::iter::once(source)
             .chain(
                 payment_hops

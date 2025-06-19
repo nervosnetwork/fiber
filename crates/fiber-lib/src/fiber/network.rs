@@ -80,7 +80,8 @@ use crate::fiber::channel::{
     AddTlcCommand, AddTlcResponse, ShutdownCommand, TxCollaborationCommand, TxUpdateCommand,
 };
 use crate::fiber::config::{
-    DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT, PAYMENT_MAX_PARTS_LIMIT,
+    DEFAULT_MPP_MIN_AMOUNT, DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT,
+    PAYMENT_MAX_PARTS_LIMIT,
 };
 use crate::fiber::gossip::{GossipConfig, GossipService, SubscribableGossipMessageStore};
 use crate::fiber::graph::{GraphChannelStat, PaymentSession, PaymentSessionStatus};
@@ -671,6 +672,14 @@ impl SendPaymentData {
     pub fn allow_mpp(&self) -> bool {
         // only allow mpp if max_parts is greater than 1 and not keysend
         self.allow_mpp && self.max_parts() > 1 && !self.keysend
+    }
+
+    pub fn allow_minimal_amount(&self) -> u128 {
+        if self.allow_mpp() {
+            DEFAULT_MPP_MIN_AMOUNT
+        } else {
+            self.amount
+        }
     }
 }
 
@@ -2066,9 +2075,14 @@ where
         // so we need to add the receiver amount to it.
         let amount = session.remain_amount() + attempt.route.receiver_amount();
         let max_fee = session.remain_fee_amount();
+        let amount_low_bound = if session.allow_mpp() {
+            Some(session.request.allow_minimal_amount())
+        } else {
+            None
+        };
 
         session.request.channel_stats = GraphChannelStat::new(Some(graph.channel_stats()));
-        match graph.build_route(amount, max_fee, &session.request) {
+        match graph.build_route(amount, amount_low_bound, max_fee, &session.request) {
             Err(e) => {
                 let error = format!("Failed to build route, {}", e);
                 self.set_attempt_fail_with_error(session, attempt, &error, false);
@@ -2093,11 +2107,34 @@ where
         let mut remain_amount = session.remain_amount();
         let mut max_fee = session.remain_fee_amount();
         let mut result = vec![];
+        let minimal_amount = session.request.allow_minimal_amount();
+
+        if remain_amount < minimal_amount {
+            let error = format!(
+                "Send amount {} is less than minimal amount {}",
+                remain_amount, minimal_amount
+            );
+            self.set_payment_fail_with_error(session, &error);
+            return Err(Error::SendPaymentError(error));
+        }
 
         session.request.channel_stats = GraphChannelStat::new(Some(graph.channel_stats()));
         let mut attempt_id = session.attempts_count() as u64;
+        let mut target_amount = remain_amount;
+        let mut amount_low_bound = Some(minimal_amount);
+        let mut split_count = 2;
+        let mut iteration = 0;
+
         while (result.len() < session.max_parts() - active_parts) && remain_amount > 0 {
-            match graph.build_route(remain_amount, max_fee, &session.request) {
+            iteration += 1;
+            dbg!(
+                "build route iteration {}",
+                iteration,
+                target_amount,
+                amount_low_bound,
+                split_count
+            );
+            match graph.build_route(target_amount, amount_low_bound, max_fee, &session.request) {
                 Err(e) => {
                     let error = format!("Failed to build route, {}", e);
                     self.set_payment_fail_with_error(session, &error);
@@ -2106,6 +2143,26 @@ where
                 Ok(hops) => {
                     assert_ne!(hops[0].funding_tx_hash, Hash256::default());
                     let route = SessionRoute::new(source, session.request.target_pubkey, &hops);
+
+                    let left_amount = remain_amount - route.receiver_amount();
+                    dbg!(
+                        "left amount: {}, target amount: {}",
+                        left_amount,
+                        target_amount,
+                        route.receiver_amount()
+                    );
+                    if left_amount < minimal_amount && left_amount > 0 {
+                        if remain_amount >= split_count * minimal_amount {
+                            target_amount -= minimal_amount;
+                            split_count += 1;
+                            amount_low_bound = Some(minimal_amount);
+                        } else {
+                            target_amount = remain_amount;
+                            amount_low_bound = None;
+                        }
+                        continue;
+                    }
+
                     for (from, channel_outpoint, amount) in route.channel_outpoints() {
                         if let Some(sent_node) = graph.get_channel_sent_node(channel_outpoint, from)
                         {
@@ -2117,6 +2174,7 @@ where
                         }
                     }
                     remain_amount -= route.receiver_amount();
+                    target_amount = remain_amount;
                     if let Some(fee) = max_fee {
                         max_fee = Some(fee - route.fee());
                     }

@@ -206,7 +206,7 @@ async fn test_send_mpp_amount_choose_single_path() {
     .await;
     let [node_0, mut node_1] = nodes.try_into().expect("2 nodes");
 
-    let res = node_0.send_mpp_payment(&mut node_1, 1000, Some(3)).await;
+    let res = node_0.send_mpp_payment(&mut node_1, 10000, Some(3)).await;
     eprintln!("res: {:?}", res);
     assert!(res.is_ok());
     let payment_hash = res.unwrap().payment_hash;
@@ -1268,7 +1268,8 @@ async fn test_send_mpp_dry_run_will_be_ok_with_single_path() {
         }
     }
 
-    test_dryrun_with_network(5000, Some(1), Some(5)).await;
+    // too small
+    test_dryrun_with_network(5000, None, None).await;
     test_dryrun_with_network(300000, None, None).await;
     test_dryrun_with_network(300000 - 200, None, None).await;
     test_dryrun_with_network(300000 - 300, Some(3), Some(300)).await;
@@ -1354,10 +1355,11 @@ async fn test_send_mpp_dry_run_single_path_mixed_with_multiple_paths() {
         }
     }
 
-    test_dryrun_with_network(1000, Some(1), Some(0)).await;
+    // too small
+    test_dryrun_with_network(1000, None, None).await;
     test_dryrun_with_network(500000, Some(1), Some(0)).await;
     test_dryrun_with_network(300000, Some(1), None).await;
-    test_dryrun_with_network(500000 + 5, Some(2), Some(1)).await;
+    test_dryrun_with_network(500000 + 5, Some(2), Some(10)).await;
     test_dryrun_with_network(600000 + 5, Some(3), Some(101)).await;
     test_dryrun_with_network(700000 + 5, Some(4), Some(201)).await;
     test_dryrun_with_network(800000, None, None).await;
@@ -1530,10 +1532,10 @@ async fn test_send_mpp_will_success_with_retry_split_channels() {
     // the payment should success with retry and split the payment into 3 parts
     let (nodes, channels) = create_n_nodes_network(
         &[
-            ((0, 1), (MIN_RESERVED_CKB + 30000, MIN_RESERVED_CKB)),
-            ((0, 1), (MIN_RESERVED_CKB + 10000, MIN_RESERVED_CKB)),
-            ((0, 1), (MIN_RESERVED_CKB + 10000, MIN_RESERVED_CKB)),
-            ((0, 1), (MIN_RESERVED_CKB + 10000, MIN_RESERVED_CKB)),
+            ((0, 1), (MIN_RESERVED_CKB + 300000, MIN_RESERVED_CKB)),
+            ((0, 1), (MIN_RESERVED_CKB + 100000, MIN_RESERVED_CKB)),
+            ((0, 1), (MIN_RESERVED_CKB + 100000, MIN_RESERVED_CKB)),
+            ((0, 1), (MIN_RESERVED_CKB + 100000, MIN_RESERVED_CKB)),
         ],
         2,
     )
@@ -1541,7 +1543,7 @@ async fn test_send_mpp_will_success_with_retry_split_channels() {
     let [node_0, mut node_1] = nodes.try_into().expect("ok nodes");
 
     let res = node_0
-        .send_mpp_payment_with_dry_run_option(&mut node_1, 30000, None, true)
+        .send_mpp_payment_with_dry_run_option(&mut node_1, 300000, None, true)
         .await;
 
     let query_res = res.unwrap();
@@ -1559,7 +1561,7 @@ async fn test_send_mpp_will_success_with_retry_split_channels() {
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
     let res = node_0
-        .send_mpp_payment(&mut node_1, 30000, None)
+        .send_mpp_payment(&mut node_1, 300000, None)
         .await
         .expect("send mpp payment");
 
