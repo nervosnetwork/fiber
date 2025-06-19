@@ -36,8 +36,16 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: nextest
+      - name: Install dependencies
+        run: |
+          wget "https://bitcoin.org/bin/bitcoin-core-27.0/bitcoin-27.0-x86_64-linux-gnu.tar.gz"
+          tar -xvaf "bitcoin-27.0-x86_64-linux-gnu.tar.gz"
+          echo "$(pwd)/bitcoin-27.0/bin" >> $GITHUB_PATH
+          wget "https://github.com/lightningnetwork/lnd/releases/download/v0.18.0-beta/lnd-linux-amd64-v0.18.0-beta.tar.gz"
+          tar -xvaf "lnd-linux-amd64-v0.18.0-beta.tar.gz"
+          echo "$(pwd)/lnd-linux-amd64-v0.18.0-beta" >> $GITHUB_PATH
       - run: |
-          RUST_BACKTRACE=full RUST_LOG=trace,fnn=trace,fnn::cch::actor::tracker=off,fnn::fiber::gossip=off,tentacle=off,tokio_yamux=off,tentacle_secio=off cargo nextest run --no-fail-fast
+          RUST_BACKTRACE=full RUST_LOG=trace,fnn=trace,fnn::cch::actor::tracker=off,fnn::fiber::gossip=off,tentacle=off,tokio_yamux=off,tentacle_secio=off cargo nextest run --no-fail-fast --features lnd-tests
 
   fmt:
     name: Rustfmt
