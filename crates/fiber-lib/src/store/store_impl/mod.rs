@@ -421,14 +421,30 @@ impl ChannelActorStateStore for Store {
         batch.commit();
     }
 
-    fn get_hold_tlcs(&self, payment_hash: Hash256) -> Vec<HoldTlc> {
+    fn remove_hold_tlc(&self, payment_hash: &Hash256, channel_id: &Hash256, tlc_id: u64) {
+        let prefix = [&[HOLD_TLC_PREFIX], payment_hash.as_ref()].concat();
+        let mut batch = self.batch();
+        let mut hold_tlcs: Vec<HoldTlc> = batch
+            .get(&prefix)
+            .map(|v| deserialize_from(v.as_ref(), "HoldTlc"))
+            .unwrap_or_default();
+        hold_tlcs.retain(|hold_tlc| {
+            let removed =
+                hold_tlc.channel_actor_state_id == *channel_id && hold_tlc.tlc_id == tlc_id;
+            !removed
+        });
+        batch.put_kv(KeyValue::HoldTlcs(*payment_hash, hold_tlcs));
+        batch.commit();
+    }
+
+    fn get_hold_tlc_set(&self, payment_hash: Hash256) -> Vec<HoldTlc> {
         let prefix = [&[HOLD_TLC_PREFIX], payment_hash.as_ref()].concat();
         self.get(&prefix)
             .map(|v| deserialize_from(v.as_ref(), "HoldTlc"))
             .unwrap_or_default()
     }
 
-    fn remove_hold_tlcs(&self, payment_hash: &Hash256) {
+    fn remove_hold_tlc_set(&self, payment_hash: &Hash256) {
         let prefix = [&[HOLD_TLC_PREFIX], payment_hash.as_ref()].concat();
         let mut batch = self.batch();
         for (key, _) in self.prefix_iterator(&prefix) {

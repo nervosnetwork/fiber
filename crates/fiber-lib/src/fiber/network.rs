@@ -1350,7 +1350,7 @@ where
                             | CkbInvoiceStatus::Expired
                             | CkbInvoiceStatus::Paid
                     ) {
-                        self.store.remove_hold_tlcs(payment_hash);
+                        self.store.remove_hold_tlc_set(payment_hash);
                     }
                 }
 
@@ -1382,7 +1382,11 @@ where
                                         tlc.payment_hash,
                                         tlc.id()
                                     );
-                                    self.store.remove_hold_tlcs(&tlc.payment_hash);
+                                    self.store.remove_hold_tlc(
+                                        &tlc.payment_hash,
+                                        &hold_tlc.channel_actor_state_id,
+                                        hold_tlc.tlc_id,
+                                    );
                                     let (send, _recv) = oneshot::channel();
                                     let rpc_reply = RpcReplyPort::from(send);
                                     if let Err(err) = state
@@ -1441,6 +1445,7 @@ where
                                     {
                                         continue;
                                     }
+
                                     let (send, _recv) = oneshot::channel();
                                     let rpc_reply = RpcReplyPort::from(send);
 

@@ -852,7 +852,7 @@ where
     /// - `Failed(tlcs, reason)` means tlc is failed to settle down
     fn settle_down_tlc(&self, state: &mut ChannelActorState, tlc: &TlcInfo) -> TlcSettleDownResult {
         // load hold tlcs
-        let hold_tlcs = self.store.get_hold_tlcs(tlc.payment_hash);
+        let hold_tlcs = self.store.get_hold_tlc_set(tlc.payment_hash);
         let mut tlcs: Vec<_> = hold_tlcs
             .iter()
             .filter_map(|hold_tlc| {
@@ -7750,9 +7750,10 @@ pub trait ChannelActorStateStore {
     );
     fn get_payment_custom_records(&self, payment_hash: &Hash256) -> Option<PaymentCustomRecords>;
     fn insert_hold_tlc(&self, payment_hash: Hash256, hold_tlc: HoldTlc);
-    fn get_hold_tlcs(&self, payment_hash: Hash256) -> Vec<HoldTlc>;
+    fn get_hold_tlc_set(&self, payment_hash: Hash256) -> Vec<HoldTlc>;
+    fn remove_hold_tlc_set(&self, payment_hash: &Hash256);
     fn list_all_hold_tlcs(&self) -> HashMap<Hash256, Vec<HoldTlc>>;
-    fn remove_hold_tlcs(&self, payment_hash: &Hash256);
+    fn remove_hold_tlc(&self, payment_hash: &Hash256, channel_id: &Hash256, tlc_id: u64);
 }
 
 /// A wrapper on CommitmentTransaction that has a partial signature along with
