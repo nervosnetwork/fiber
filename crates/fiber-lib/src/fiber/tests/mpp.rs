@@ -1862,4 +1862,8 @@ async fn test_send_mpp_will_success_with_middle_hop_capacity_not_enough() {
     let payment_hash = res.payment_hash;
     // FIXME(yukang): how to make this payment success?
     node_0.wait_until_failed(payment_hash).await;
+
+    let payment_session = node_0.get_payment_session(payment_hash).unwrap();
+    let attempts = payment_session.attempts().collect::<Vec<_>>();
+    assert!(!attempts.iter().any(|a| a.is_settled()));
 }

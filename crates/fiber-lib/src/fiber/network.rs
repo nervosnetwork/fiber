@@ -2071,11 +2071,13 @@ where
         }
     }
 
-    async fn rebuild_payment_route(
+    async fn resend_payment_route(
         &self,
+        myself: ActorRef<NetworkActorMessage>,
+        state: &mut NetworkActorState<S>,
         session: &mut PaymentSession,
         attempt: &mut Attempt,
-    ) -> Result<Vec<PaymentHopData>, Error> {
+    ) -> Result<(), Error> {
         assert!(attempt.is_retryable());
         let graph = self.network_graph.read().await;
         // now the current attempt is retryable,
@@ -2083,26 +2085,22 @@ where
         // so we need to add the receiver amount to it.
         let amount = session.remain_amount() + attempt.route.receiver_amount();
         let max_fee = session.remain_fee_amount();
-        let amount_low_bound = if session.allow_mpp() {
-            Some(session.request.allow_minimal_amount())
-        } else {
-            None
-        };
 
         session.request.channel_stats = GraphChannelStat::new(Some(graph.channel_stats()));
-        match graph.build_route(amount, amount_low_bound, max_fee, &session.request) {
+        match graph.build_route(amount, None, max_fee, &session.request) {
             Err(e) => {
                 let error = format!("Failed to build route, {}", e);
-                self.set_attempt_fail_with_error(session, attempt, &error, false);
-                return Err(Error::SendPaymentError(error));
+                return Err(Error::BuildPaymentRouteError(error));
             }
             Ok(hops) => {
                 let source = graph.get_source_pubkey();
                 attempt.route = SessionRoute::new(source, session.request.target_pubkey, &hops);
                 assert_ne!(hops[0].funding_tx_hash, Hash256::default());
-                return Ok(hops);
+                self.send_attempt(myself, state, session, attempt, hops)
+                    .await?;
             }
         };
+        Ok(())
     }
 
     async fn build_payment_routes(
@@ -2417,13 +2415,29 @@ where
         if let Some(attempt_id) = attempt_id {
             if let Some(mut attempt) = self.store.get_attempt(payment_hash, attempt_id) {
                 if attempt.is_retryable() {
-                    let hops_info = self
-                        .rebuild_payment_route(&mut session, &mut attempt)
-                        .await?;
-                    self.send_attempt(myself.clone(), state, &mut session, &mut attempt, hops_info)
-                        .await?;
+                    if let Err(err) = self
+                        .resend_payment_route(myself.clone(), state, &mut session, &mut attempt)
+                        .await
+                    {
+                        if session.allow_mpp() {
+                            // usually `resend_payment_route` will only try build a route with same amount,
+                            // because most of the time, resend payment because of the first hop
+                            // error with WaitingTlcAck, if resend failed we should try more attempts in MPP,
+                            // so we may create more attempts with different split amounts
+                            attempt.set_failed_status(&err.to_string(), false);
+                            self.store.insert_attempt(attempt);
+                        } else {
+                            self.set_attempt_fail_with_error(
+                                &mut session,
+                                &mut attempt,
+                                &err.to_string(),
+                                false,
+                            );
+                            return Err(err);
+                        }
+                    }
                 }
-            };
+            }
         }
 
         let mut session = self
