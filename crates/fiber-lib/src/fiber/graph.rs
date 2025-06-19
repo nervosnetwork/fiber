@@ -1140,7 +1140,7 @@ where
                     // - MPP is allowed for the payment.
                     // - This is not the last part we are forced to make (more flexible).
                     // - The requested amount is greater than the minimum allowed for a part.
-                    if allow_mpp && amount_low_bound.is_some() =>
+                    if allow_mpp && amount_low_bound.is_some_and(|low| low < amount) =>
                 {
                     if let Ok(res) = self.binary_find_path_in_range(
                             source,
@@ -2050,7 +2050,6 @@ impl SessionRoute {
     pub fn fee(&self) -> u128 {
         let first_amount = self.nodes.first().map_or(0, |s| s.amount);
         let last_amount = self.receiver_amount();
-        dbg!(first_amount, last_amount);
         assert!(first_amount >= last_amount);
         first_amount - last_amount
     }
@@ -2317,6 +2316,20 @@ impl From<PaymentSession> for SendPaymentResponse {
             all_attempts.len(),
             session.try_limit,
             &session.last_error
+        );
+
+        let active_amount = session
+            .active_attempts()
+            .map(|a| a.route.receiver_amount())
+            .sum::<u128>();
+        let active_count = session.active_attempts().count();
+
+        dbg!(
+            active_amount,
+            session.request.amount,
+            active_count,
+            session.max_parts(),
+            session.remain_amount(),
         );
 
         let attempts = session

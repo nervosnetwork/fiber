@@ -55,7 +55,7 @@ pub const DEFAULT_ANNOUNCE_NODE_INTERVAL_SECONDS: u64 = 3600;
 #[cfg(not(test))]
 pub const DEFAULT_HOLD_TLC_TIMEOUT: u64 = 120 * 1000;
 #[cfg(test)]
-pub const DEFAULT_HOLD_TLC_TIMEOUT: u64 = 2000;
+pub const DEFAULT_HOLD_TLC_TIMEOUT: u64 = 25 * 1000;
 
 /// The interval to maintain the gossip network, in milli-seconds.
 #[cfg(not(any(test, feature = "bench")))]

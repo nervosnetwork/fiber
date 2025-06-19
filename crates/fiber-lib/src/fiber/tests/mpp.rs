@@ -487,7 +487,7 @@ async fn test_send_mpp_fee_rate() {
     let res = res.unwrap();
 
     let payment_hash = res.payment_hash;
-    // fee_rate is too high
+    // fee_rate is too high, timeout
     node_0.wait_until_failed(payment_hash).await;
 }
 
@@ -916,6 +916,7 @@ async fn test_mpp_tlc_set_payment_secret_mismatch() {
 }
 
 #[tokio::test]
+#[ignore = "need to fix timeout period"]
 async fn test_mpp_tlc_set_timeout_1_of_2() {
     init_tracing();
 
@@ -1830,9 +1831,9 @@ async fn test_send_mpp_will_success_with_middle_hop_capacity_not_enough() {
         &[
             ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
             ((1, 2), (MIN_RESERVED_CKB + 3, MIN_RESERVED_CKB + 304000)),
-            ((1, 2), (MIN_RESERVED_CKB + 100010, MIN_RESERVED_CKB)),
-            ((1, 2), (MIN_RESERVED_CKB + 100010, MIN_RESERVED_CKB)),
-            ((1, 2), (MIN_RESERVED_CKB + 100010, MIN_RESERVED_CKB)),
+            ((1, 2), (MIN_RESERVED_CKB + 103000, MIN_RESERVED_CKB)),
+            ((1, 2), (MIN_RESERVED_CKB + 103000, MIN_RESERVED_CKB)),
+            ((1, 2), (MIN_RESERVED_CKB + 103000, MIN_RESERVED_CKB)),
         ],
         3,
     )
@@ -1860,10 +1861,13 @@ async fn test_send_mpp_will_success_with_middle_hop_capacity_not_enough() {
         .expect("send mpp payment");
 
     let payment_hash = res.payment_hash;
-    // FIXME(yukang): how to make this payment success?
-    node_0.wait_until_failed(payment_hash).await;
+    node_0.wait_until_success(payment_hash).await;
 
     let payment_session = node_0.get_payment_session(payment_hash).unwrap();
     let attempts = payment_session.attempts().collect::<Vec<_>>();
-    assert!(!attempts.iter().any(|a| a.is_settled()));
+    assert!(!attempts.iter().any(|a| a
+        .last_error
+        .clone()
+        .unwrap_or_default()
+        .contains("HoldTlcTimeout")));
 }

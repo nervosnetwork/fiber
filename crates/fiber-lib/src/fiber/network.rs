@@ -2128,7 +2128,6 @@ where
         let mut attempt_id = session.attempts_count() as u64;
         let mut target_amount = remain_amount;
         let mut amount_low_bound = Some(minimal_amount);
-        let mut split_count = 2;
         let mut iteration = 0;
 
         while (result.len() < session.max_parts() - active_parts) && remain_amount > 0 {
@@ -2138,7 +2137,6 @@ where
                 iteration,
                 target_amount,
                 amount_low_bound,
-                split_count
             );
             match graph.build_route(target_amount, amount_low_bound, max_fee, &session.request) {
                 Err(e) => {
@@ -2158,9 +2156,8 @@ where
                         route.receiver_amount()
                     );
                     if left_amount < minimal_amount && left_amount > 0 {
-                        if remain_amount >= split_count * minimal_amount {
+                        if remain_amount >= 2 * minimal_amount {
                             target_amount -= minimal_amount;
-                            split_count += 1;
                             amount_low_bound = Some(minimal_amount);
                         } else {
                             target_amount = remain_amount;
@@ -2421,7 +2418,7 @@ where
                     {
                         if session.allow_mpp() {
                             // usually `resend_payment_route` will only try build a route with same amount,
-                            // because most of the time, resend payment because of the first hop
+                            // because most of the time, resend payment caused by the first hop
                             // error with WaitingTlcAck, if resend failed we should try more attempts in MPP,
                             // so we may create more attempts with different split amounts
                             attempt.set_failed_status(&err.to_string(), false);
@@ -2440,19 +2437,14 @@ where
             }
         }
 
+        if !self.payment_need_more_retry(payment_hash)? {
+            return Ok(());
+        }
+
         let mut session = self
             .store
             .get_payment_session(payment_hash)
             .expect("get payment session");
-        if !session.allow_more_attempts() {
-            if session.remain_amount() > 0 {
-                let err = "Can not send payment with limited attempts";
-                self.set_payment_fail_with_error(&mut session, err);
-                return Err(Error::SendPaymentError(err.to_string()));
-            }
-            return Ok(());
-        }
-
         // here we begin to create attempts and routes for the payment session,
         // it depends on the path finding algorithm to create how many of attempts,
         // if a payment can not be met in the network graph, an build path error will be returned
@@ -2469,7 +2461,30 @@ where
                 .await?;
         }
 
+        if let Ok(true) = self.payment_need_more_retry(payment_hash) {
+            // if we still have more attempts to retry, we will register a retry task
+            // to send the payment again later
+            self.register_payment_retry(myself, payment_hash, None);
+        }
+
         Ok(())
+    }
+
+    pub fn payment_need_more_retry(&self, payment_hash: Hash256) -> Result<bool, Error> {
+        let mut session = self
+            .store
+            .get_payment_session(payment_hash)
+            .expect("get payment session");
+        if !session.allow_more_attempts() {
+            if session.remain_amount() > 0 {
+                let err = "Can not send payment with limited attempts";
+                self.set_payment_fail_with_error(&mut session, err);
+                return Err(Error::SendPaymentError(err.to_string()));
+            }
+            return Ok(false);
+        } else {
+            return Ok(true);
+        }
     }
 
     fn register_payment_retry(
