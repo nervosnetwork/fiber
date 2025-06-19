@@ -897,13 +897,27 @@ where
                     }
                 }
             }
-            FiberMessage::ChannelNormalOperation(m) => {
-                let channel_id = m.get_channel_id();
+            FiberMessage::ChannelNormalOperation(msg) => {
+                let channel_id = msg.get_channel_id();
+
+                let found = state
+                    .peer_session_map
+                    .get(&peer_id)
+                    .and_then(|(session, ..)| state.session_channels_map.get(session))
+                    .is_some_and(|channels| channels.contains(&channel_id));
+
+                if !found {
+                    error!(
+                            "Received a channel message for a channel that is not created with peer: {:?}",
+                            channel_id
+                        );
+                    return Err(Error::ChannelNotFound(channel_id));
+                }
                 state
                     .send_message_to_channel_actor(
                         channel_id,
                         Some(&peer_id),
-                        ChannelActorMessage::PeerMessage(m),
+                        ChannelActorMessage::PeerMessage(msg),
                     )
                     .await;
             }
