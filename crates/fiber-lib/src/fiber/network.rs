@@ -2071,7 +2071,7 @@ where
         }
     }
 
-    async fn resend_payment_route(
+    async fn resend_payment_attempt(
         &self,
         myself: ActorRef<NetworkActorMessage>,
         state: &mut NetworkActorState<S>,
@@ -2080,9 +2080,9 @@ where
     ) -> Result<(), Error> {
         assert!(attempt.is_retryable());
         let graph = self.network_graph.read().await;
-        // now the current attempt is retryable,
-        // `session.remain_amount()` will not contains this part of amount,
-        // so we need to add the receiver amount to it.
+        // `session.remain_amount()` do not contains this part of amount,
+        // so we need to add the receiver amount to it, so we may make fewer
+        // attempts to send the payment.
         let amount = session.remain_amount() + attempt.route.receiver_amount();
         let max_fee = session.remain_fee_amount();
 
@@ -2196,9 +2196,6 @@ where
         }
 
         for (attempt, _) in &result {
-            if !session.is_dry_run() {
-                self.store.insert_attempt(attempt.clone());
-            }
             session.append_attempt(attempt.clone());
         }
 
@@ -2211,7 +2208,7 @@ where
         session: &mut PaymentSession,
         attempt: &mut Attempt,
         hops: Vec<PaymentHopData>,
-    ) -> Result<Attempt, Error> {
+    ) -> Result<(), Error> {
         let session_key = Privkey::from_slice(KeyPair::generate_random_key().as_ref());
         assert_ne!(hops[0].funding_tx_hash, Hash256::default());
 
@@ -2264,7 +2261,7 @@ where
             }
             Ok(_) => {
                 self.store.insert_attempt(attempt.clone());
-                return Ok(attempt.clone());
+                return Ok(());
             }
         }
     }
@@ -2313,7 +2310,7 @@ where
                     .write()
                     .await
                     .track_attempt_router(&attempt);
-                self.store.insert_attempt(attempt.clone());
+                self.store.insert_attempt(attempt);
             }
             Some((ProcessingChannelError::RepeatedProcessing(_), _)) => {
                 // do nothing
@@ -2409,33 +2406,8 @@ where
             return Ok(());
         }
 
-        if let Some(attempt_id) = attempt_id {
-            if let Some(mut attempt) = self.store.get_attempt(payment_hash, attempt_id) {
-                if attempt.is_retryable() {
-                    if let Err(err) = self
-                        .resend_payment_route(myself.clone(), state, &mut session, &mut attempt)
-                        .await
-                    {
-                        if session.allow_mpp() {
-                            // usually `resend_payment_route` will only try build a route with same amount,
-                            // because most of the time, resend payment caused by the first hop
-                            // error with WaitingTlcAck, if resend failed we should try more attempts in MPP,
-                            // so we may create more attempts with different split amounts
-                            attempt.set_failed_status(&err.to_string(), false);
-                            self.store.insert_attempt(attempt);
-                        } else {
-                            self.set_attempt_fail_with_error(
-                                &mut session,
-                                &mut attempt,
-                                &err.to_string(),
-                                false,
-                            );
-                            return Err(err);
-                        }
-                    }
-                }
-            }
-        }
+        self.retry_payment_attempt(myself.clone(), state, &mut session, attempt_id)
+            .await?;
 
         if !self.payment_need_more_retry(payment_hash)? {
             return Ok(());
@@ -2445,6 +2417,7 @@ where
             .store
             .get_payment_session(payment_hash)
             .expect("get payment session");
+
         // here we begin to create attempts and routes for the payment session,
         // it depends on the path finding algorithm to create how many of attempts,
         // if a payment can not be met in the network graph, an build path error will be returned
@@ -2462,9 +2435,59 @@ where
         }
 
         if let Ok(true) = self.payment_need_more_retry(payment_hash) {
-            // if we still have more attempts to retry, we will register a retry task
-            // to send the payment again later
             self.register_payment_retry(myself, payment_hash, None);
+        }
+
+        Ok(())
+    }
+
+    async fn retry_payment_attempt(
+        &self,
+        myself: ActorRef<NetworkActorMessage>,
+        state: &mut NetworkActorState<S>,
+        session: &mut PaymentSession,
+        attempt_id: Option<u64>,
+    ) -> Result<(), Error> {
+        let Some(attempt_id) = attempt_id else {
+            return Ok(());
+        };
+
+        match self.store.get_attempt(session.payment_hash(), attempt_id) {
+            Some(mut attempt) if attempt.is_retryable() => {
+                match self
+                    .resend_payment_attempt(myself, state, session, &mut attempt)
+                    .await
+                {
+                    Err(err) if session.allow_mpp() => {
+                        // usually `resend_payment_route` will only try build a route with same amount,
+                        // because most of the time, resend payment caused by the first hop
+                        // error with WaitingTlcAck, if resend failed we should try more attempts in MPP,
+                        // so we may create more attempts with different split amounts
+                        attempt.set_failed_status(&err.to_string(), false);
+                        self.store.insert_attempt(attempt);
+                    }
+                    Err(err) => {
+                        self.set_attempt_fail_with_error(
+                            session,
+                            &mut attempt,
+                            &err.to_string(),
+                            false,
+                        );
+                        return Err(err);
+                    }
+                    _ => {}
+                }
+            }
+            Some(_) => {
+                // no retry for non-retryable attempts
+            }
+            None => {
+                return Err(Error::InvalidParameter(format!(
+                    "Attempt with id {:?} not found for payment hash: {:?}",
+                    attempt_id,
+                    session.payment_hash()
+                )));
+            }
         }
 
         Ok(())
@@ -2475,16 +2498,13 @@ where
             .store
             .get_payment_session(payment_hash)
             .expect("get payment session");
-        if !session.allow_more_attempts() {
-            if session.remain_amount() > 0 {
-                let err = "Can not send payment with limited attempts";
-                self.set_payment_fail_with_error(&mut session, err);
-                return Err(Error::SendPaymentError(err.to_string()));
-            }
-            return Ok(false);
-        } else {
-            return Ok(true);
+        let more_attempt = session.allow_more_attempts();
+        if !more_attempt && session.remain_amount() > 0 {
+            let err = "Can not send payment with limited attempts";
+            self.set_payment_fail_with_error(&mut session, err);
+            return Err(Error::SendPaymentError(err.to_string()));
         }
+        Ok(more_attempt)
     }
 
     fn register_payment_retry(
@@ -2567,7 +2587,7 @@ where
         // will not store the payment session and send the onion packet
         if payment_data.dry_run {
             let mut payment_session = PaymentSession::new(&self.store, payment_data, 0);
-            let _hops = self.build_payment_routes(&mut payment_session).await?;
+            self.build_payment_routes(&mut payment_session).await?;
             return Ok(payment_session.into());
         }
 
