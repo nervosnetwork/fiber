@@ -1361,8 +1361,6 @@ where
                                 continue;
                             }
 
-                            // collect hold tlcs for this channel
-                            let mut hold_tlcs: HashSet<u64> = HashSet::default();
                             for hold_tlc in all_hold_tlcs
                                 .values()
                                 .flatten()
@@ -1373,7 +1371,6 @@ where
                                 else {
                                     continue;
                                 };
-                                hold_tlcs.insert(hold_tlc.tlc_id);
 
                                 // check hold timeout
                                 if hold_tlc.hold_expire_at < now {
@@ -1420,57 +1417,63 @@ where
                             }
 
                             for tlc in actor_state.tlc_state.received_tlcs.get_committed_tlcs() {
-                                // skip if tlc is in hold
-                                if hold_tlcs.contains(&tlc.id()) {
+                                // skip if tlc amount is not fulfilled invoice
+                                // this may happend if payment is mpp
+                                if let Some(invoice) = self.store.get_invoice(&tlc.payment_hash) {
+                                    if let Some(amount) = invoice.amount() {
+                                        if tlc.amount < amount {
+                                            continue;
+                                        }
+                                    }
+                                }
+
+                                let Some(payment_preimage) =
+                                    self.store.get_preimage(&tlc.payment_hash)
+                                else {
+                                    continue;
+                                };
+                                debug!(
+                                    "Found payment preimage for channel {:?} tlc {:?}",
+                                    channel_id,
+                                    tlc.id()
+                                );
+                                if self
+                                    .store
+                                    .get_invoice_status(&tlc.payment_hash)
+                                    .is_some_and(|s| {
+                                        !matches!(
+                                            s,
+                                            CkbInvoiceStatus::Open | CkbInvoiceStatus::Received
+                                        )
+                                    })
+                                {
                                     continue;
                                 }
 
-                                if let Some(payment_preimage) =
-                                    self.store.get_preimage(&tlc.payment_hash)
-                                {
-                                    debug!(
-                                        "Found payment preimage for channel {:?} tlc {:?}",
+                                let (send, _recv) = oneshot::channel();
+                                let rpc_reply = RpcReplyPort::from(send);
+
+                                if let Err(err) = state
+                                    .send_command_to_channel(
                                         channel_id,
-                                        tlc.id()
+                                        ChannelCommand::RemoveTlc(
+                                            RemoveTlcCommand {
+                                                id: tlc.id(),
+                                                reason: RemoveTlcReason::RemoveTlcFulfill(
+                                                    RemoveTlcFulfill { payment_preimage },
+                                                ),
+                                            },
+                                            rpc_reply,
+                                        ),
+                                    )
+                                    .await
+                                {
+                                    error!(
+                                        "Failed to remove tlc {:?} for channel {:?}: {}",
+                                        tlc.id(),
+                                        channel_id,
+                                        err
                                     );
-                                    if self
-                                        .store
-                                        .get_invoice_status(&tlc.payment_hash)
-                                        .is_some_and(|s| {
-                                            !matches!(
-                                                s,
-                                                CkbInvoiceStatus::Open | CkbInvoiceStatus::Received
-                                            )
-                                        })
-                                    {
-                                        continue;
-                                    }
-
-                                    let (send, _recv) = oneshot::channel();
-                                    let rpc_reply = RpcReplyPort::from(send);
-
-                                    if let Err(err) = state
-                                        .send_command_to_channel(
-                                            channel_id,
-                                            ChannelCommand::RemoveTlc(
-                                                RemoveTlcCommand {
-                                                    id: tlc.id(),
-                                                    reason: RemoveTlcReason::RemoveTlcFulfill(
-                                                        RemoveTlcFulfill { payment_preimage },
-                                                    ),
-                                                },
-                                                rpc_reply,
-                                            ),
-                                        )
-                                        .await
-                                    {
-                                        error!(
-                                            "Failed to remove tlc {:?} for channel {:?}: {}",
-                                            tlc.id(),
-                                            channel_id,
-                                            err
-                                        );
-                                    }
                                 }
                             }
 
