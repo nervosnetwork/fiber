@@ -1594,6 +1594,10 @@ impl NetworkNode {
         &self.network_graph
     }
 
+    pub async fn clear_history(&self) {
+        self.network_graph.write().await.clear_history();
+    }
+
     pub async fn with_network_graph<F, T>(&self, f: F) -> T
     where
         F: FnOnce(&NetworkGraph<Store>) -> T,

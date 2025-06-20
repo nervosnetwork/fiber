@@ -1144,14 +1144,8 @@ where
             }
             NetworkActorEvent::TlcRemoveReceived(payment_hash, attempt_id, remove_tlc_reason) => {
                 // When a node is restarted, RemoveTLC will also be resent if necessary
-                self.on_remove_tlc_event(
-                    myself,
-                    state,
-                    payment_hash,
-                    attempt_id,
-                    remove_tlc_reason,
-                )
-                .await;
+                self.on_remove_tlc_event(myself, payment_hash, attempt_id, remove_tlc_reason)
+                    .await;
             }
             NetworkActorEvent::RetrySendPayment(payment_hash, attempt_id) => {
                 let _ = self
@@ -1957,7 +1951,6 @@ where
     async fn on_remove_tlc_event(
         &self,
         myself: ActorRef<NetworkActorMessage>,
-        state: &mut NetworkActorState<S>,
         payment_hash: Hash256,
         attempt_id: Option<u64>,
         reason: RemoveTlcReason,
@@ -1995,9 +1988,7 @@ where
                         debug_event!(myself, "InvalidOnionError");
                         TlcErr::new(TlcErrorCode::InvalidOnionError)
                     });
-
-                self.update_graph_with_tlc_fail(&state.network, &error_detail)
-                    .await;
+                debug!("on_remove_tlc: {:?}", error_detail.error_code);
                 let need_to_retry = self.network_graph.write().await.record_attempt_fail(
                     &attempt,
                     error_detail.clone(),
@@ -2050,6 +2041,7 @@ where
                     .error_channel_outpoint()
                     .expect("expect channel outpoint");
                 let mut graph = self.network_graph.write().await;
+                debug!("debug mark channel failed: {:?}", channel_outpoint);
                 graph.mark_channel_failed(&channel_outpoint);
             }
             TlcErrorCode::PermanentNodeFailure => {

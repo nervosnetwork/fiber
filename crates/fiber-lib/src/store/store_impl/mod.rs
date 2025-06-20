@@ -643,6 +643,19 @@ impl NetworkGraphStateStore for Store {
         batch.commit();
     }
 
+    fn remove_channel_history(&mut self, channel_outpoint: &OutPoint) {
+        let prefix = [
+            &[PAYMENT_HISTORY_TIMED_RESULT_PREFIX],
+            channel_outpoint.as_slice(),
+        ]
+        .concat();
+        let mut batch = self.batch();
+        for (key, _) in self.prefix_iterator(&prefix) {
+            batch.delete(key);
+        }
+        batch.commit();
+    }
+
     fn get_payment_history_results(&self) -> Vec<(OutPoint, Direction, TimedResult)> {
         let prefix = vec![PAYMENT_HISTORY_TIMED_RESULT_PREFIX];
         let iter = self.prefix_iterator(&prefix);

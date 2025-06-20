@@ -588,6 +588,7 @@ where
                     self.process_channel_announcement(timestamp, channel_announcement);
                 }
                 BroadcastMessageWithTimestamp::ChannelUpdate(channel_update) => {
+                    debug!("process channel update: {:?}", &channel_update);
                     self.process_channel_update(channel_update);
                 }
                 BroadcastMessageWithTimestamp::NodeAnnouncement(node_announcement) => {
@@ -604,6 +605,8 @@ where
             OwnedChannelUpdateEvent::Up(channel_info) => {
                 // Normally the channel_info passed here is the latest channel info,
                 // so we can just overwrite the old channel info.
+                self.history
+                    .remove_channel_history(&channel_info.channel_outpoint);
                 self.channels
                     .insert(channel_info.channel_outpoint.clone(), channel_info);
             }
@@ -645,6 +648,11 @@ where
     pub(crate) fn reload_from_store(&mut self) {
         self.reset();
         self.load_from_store();
+    }
+
+    #[cfg(any(test, feature = "bench"))]
+    pub(crate) fn clear_history(&mut self) {
+        self.history.reset();
     }
 
     fn load_channel_updates_from_store(&self, channel_info: &mut ChannelInfo) {
@@ -1912,6 +1920,11 @@ where
                     channel_info.capacity(),
                 );
 
+                debug!(
+                    "probability: {} for channel_outpoint: {:?} from: {:?} => to: {:?}",
+                    probability, channel_outpoint, from, to
+                );
+
                 let weight = self.edge_weight(amount_to_send, fee, current_incoming_tlc_expiry);
                 let distance = self.calculate_distance_based_probability(probability, weight);
 
@@ -1955,6 +1968,7 @@ pub trait NetworkGraphStateStore {
         direction: Direction,
         result: TimedResult,
     );
+    fn remove_channel_history(&mut self, channel_outpoint: &OutPoint);
     fn get_payment_history_results(&self) -> Vec<(OutPoint, Direction, TimedResult)>;
     fn get_attempt(&self, payment_hash: Hash256, attempt_id: u64) -> Option<Attempt>;
     fn insert_attempt(&self, attempt: Attempt);

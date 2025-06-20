@@ -382,6 +382,12 @@ where
         }
     }
 
+    pub(crate) fn remove_channel_history(&mut self, channel_outpoint: &OutPoint) {
+        self.store.remove_channel_history(channel_outpoint);
+        self.inner
+            .retain(|(outpoint, _), _| outpoint != channel_outpoint);
+    }
+
     pub(crate) fn apply_pair_result(
         &mut self,
         channel: OutPoint,

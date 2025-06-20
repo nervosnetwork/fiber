@@ -1,4 +1,5 @@
 use secp256k1::Secp256k1;
+use tracing::debug;
 
 use crate::{
     fiber::{
@@ -1914,6 +1915,7 @@ async fn test_send_mpp_will_success_with_same_payment_after_restarted() {
     target_node.insert_invoice(ckb_invoice.clone(), Some(preimage));
 
     node_1.stop().await;
+    debug!("node_1 stopped");
 
     let res = node_0
         .send_payment(SendPaymentCommand {
@@ -1925,13 +1927,21 @@ async fn test_send_mpp_will_success_with_same_payment_after_restarted() {
         .unwrap();
 
     node_0.wait_until_failed(res.payment_hash).await;
+    debug!("node_0 payment failed, res: {:?}", res);
 
     assert_eq!(res.routers.len(), 3);
 
+    tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
+
     // restart node_1
     node_1.start().await;
+    debug!("node_1 restarted");
     tokio::time::sleep(tokio::time::Duration::from_millis(5000)).await;
 
+    // the remove_tlc may come after the node_1 restarted,
+    // this may comes from the background task of node_1
+    // so we need to clear the history of node_0
+    node_0.clear_history().await;
     // retry the payment
     let res = node_0
         .send_payment(SendPaymentCommand {
@@ -1941,9 +1951,9 @@ async fn test_send_mpp_will_success_with_same_payment_after_restarted() {
         })
         .await;
 
-    // FIXME(yukang): the payment should be success, but now it will fail
-    assert!(res.is_err(), "Payment should fail after retrying");
-    // node_0.wait_until_failed(res.payment_hash).await;
-    // assert_eq!(res.routers.len(), 3);
+    assert!(res.is_ok());
+    let res = res.unwrap();
+    node_0.wait_until_success(res.payment_hash).await;
+    assert_eq!(res.routers.len(), 3);
     // dbg!(&res.routers);
 }
