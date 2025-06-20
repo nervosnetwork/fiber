@@ -416,6 +416,11 @@ impl ChannelActorStateStore for Store {
             .get(&prefix)
             .map(|v| deserialize_from(v.as_ref(), "HoldTlc"))
             .unwrap_or_default();
+        // remove the duplicated tlc
+        hold_tlcs.retain(|tlc| {
+            let is_same = tlc.channel_id == hold_tlc.channel_id && tlc.tlc_id == hold_tlc.tlc_id;
+            !is_same
+        });
         hold_tlcs.push(hold_tlc);
         batch.put_kv(KeyValue::HoldTlcs(payment_hash, hold_tlcs));
         batch.commit();

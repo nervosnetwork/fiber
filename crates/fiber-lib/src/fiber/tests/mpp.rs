@@ -5,7 +5,7 @@ use crate::{
         channel::{
             AddTlcCommand, ChannelActorStateStore, ChannelCommand, ChannelCommandWithId, TLCId,
         },
-        config::{DEFAULT_HOLD_TLC_TIMEOUT, DEFAULT_TLC_EXPIRY_DELTA, PAYMENT_MAX_PARTS_LIMIT},
+        config::{DEFAULT_TLC_EXPIRY_DELTA, PAYMENT_MAX_PARTS_LIMIT},
         hash_algorithm::HashAlgorithm,
         network::SendPaymentCommand,
         types::{Hash256, PaymentDataRecord, PaymentHopData, PeeledOnionPacket, RemoveTlcReason},
@@ -916,7 +916,6 @@ async fn test_mpp_tlc_set_payment_secret_mismatch() {
 }
 
 #[tokio::test]
-#[ignore = "need to fix timeout period"]
 async fn test_mpp_tlc_set_timeout_1_of_2() {
     init_tracing();
 
@@ -1012,8 +1011,11 @@ async fn test_mpp_tlc_set_timeout_1_of_2() {
         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
     }
 
-    // sleep some time
-    tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
+    // update tlc1 expire to a shorter time
+    for mut hold_tlc in node_1.store.get_hold_tlc_set(payment_hash) {
+        hold_tlc.hold_expire_at = now_timestamp_as_millis_u64() + 500;
+        node_1.store.insert_hold_tlc(payment_hash, hold_tlc);
+    }
 
     let add_tlc_result_2 = ractor::call!(source_node.network_actor, |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
@@ -1038,8 +1040,8 @@ async fn test_mpp_tlc_set_timeout_1_of_2() {
     .expect("node alive")
     .expect("tlc");
 
-    // here is tricky, sleep enough time to timeout hold tlc 1, but not tlc 2
-    tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
+    // sleep enough time to timeout hold tlc 1, but not tlc 2
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
     // check channels
     ractor::cast!(
@@ -1073,11 +1075,16 @@ async fn test_mpp_tlc_set_timeout_1_of_2() {
     // tlc 2 is still in hold
     assert!(tlc2.unwrap().removed_reason.is_none());
 
+    // update tlc2 expire to a shorter time
+    for mut hold_tlc in node_1.store.get_hold_tlc_set(payment_hash) {
+        if hold_tlc.channel_id == channels[1] && hold_tlc.tlc_id == add_tlc_result_2.tlc_id {
+            hold_tlc.hold_expire_at = now_timestamp_as_millis_u64() + 500;
+            node_1.store.insert_hold_tlc(payment_hash, hold_tlc);
+        }
+    }
+
     // wait until tlc 2 is timeout
-    tokio::time::sleep(tokio::time::Duration::from_millis(
-        DEFAULT_HOLD_TLC_TIMEOUT + 500,
-    ))
-    .await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
     // check channels again
     ractor::cast!(
@@ -1209,11 +1216,14 @@ async fn test_mpp_tlc_set_timeout() {
         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
     }
 
+    // update hold_expire_at to now
+    for mut hold_tlc in node_1.store.get_hold_tlc_set(payment_hash) {
+        hold_tlc.hold_expire_at = now_timestamp_as_millis_u64();
+        node_1.store.insert_hold_tlc(payment_hash, hold_tlc);
+    }
+
     // sleep enough time to timeout hold tlc
-    tokio::time::sleep(tokio::time::Duration::from_millis(
-        DEFAULT_HOLD_TLC_TIMEOUT + 500,
-    ))
-    .await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
     // check channels
     ractor::cast!(
