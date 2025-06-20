@@ -2409,14 +2409,9 @@ where
         self.retry_payment_attempt(myself.clone(), state, &mut session, attempt_id)
             .await?;
 
-        if !self.payment_need_more_retry(payment_hash)? {
+        if !self.payment_need_more_retry(&mut session)? {
             return Ok(());
         }
-
-        let mut session = self
-            .store
-            .get_payment_session(payment_hash)
-            .expect("get payment session");
 
         // here we begin to create attempts and routes for the payment session,
         // it depends on the path finding algorithm to create how many of attempts,
@@ -2434,7 +2429,7 @@ where
                 .await?;
         }
 
-        if let Ok(true) = self.payment_need_more_retry(payment_hash) {
+        if let Ok(true) = self.payment_need_more_retry(&mut session) {
             self.register_payment_retry(myself, payment_hash, None);
         }
 
@@ -2493,15 +2488,12 @@ where
         Ok(())
     }
 
-    pub fn payment_need_more_retry(&self, payment_hash: Hash256) -> Result<bool, Error> {
-        let mut session = self
-            .store
-            .get_payment_session(payment_hash)
-            .expect("get payment session");
+    pub fn payment_need_more_retry(&self, session: &mut PaymentSession) -> Result<bool, Error> {
+        session.flush_attempts(&self.store);
         let more_attempt = session.allow_more_attempts();
         if !more_attempt && session.remain_amount() > 0 {
             let err = "Can not send payment with limited attempts";
-            self.set_payment_fail_with_error(&mut session, err);
+            self.set_payment_fail_with_error(session, err);
             return Err(Error::SendPaymentError(err.to_string()));
         }
         Ok(more_attempt)
@@ -2594,12 +2586,14 @@ where
         // initialize the payment session in db and begin the payment process lifecycle
         if let Some(payment_session) = self.store.get_payment_session(payment_data.payment_hash) {
             // we only allow retrying payment session with status failed
-            debug!("Payment session already exists: {:?}", payment_session);
             if payment_session.status != PaymentSessionStatus::Failed {
                 return Err(Error::InvalidParameter(format!(
                     "Payment session already exists: {} with payment session status: {:?}",
                     payment_data.payment_hash, payment_session.status
                 )));
+            } else {
+                // cleanup all the previous attempts
+                self.store.delete_attempts(payment_data.payment_hash);
             }
         }
 
@@ -2608,14 +2602,13 @@ where
         } else {
             DEFAULT_PAYMENT_TRY_LIMIT
         };
-        let payment_session = PaymentSession::new(&self.store, payment_data, try_limit);
+        let mut payment_session = PaymentSession::new(&self.store, payment_data, try_limit);
+        assert!(payment_session.attempts_count() == 0);
         self.store.insert_payment_session(payment_session.clone());
+
         self.resume_payment_session(myself, state, payment_session.payment_hash(), None)
             .await?;
-        let payment_session = self
-            .store
-            .get_payment_session(payment_session.payment_hash())
-            .expect("payment session should exist after updated");
+        payment_session.flush_attempts(&self.store);
         return Ok(payment_session.into());
     }
 

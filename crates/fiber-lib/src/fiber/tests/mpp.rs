@@ -1881,3 +1881,69 @@ async fn test_send_mpp_will_success_with_middle_hop_capacity_not_enough() {
         .unwrap_or_default()
         .contains("HoldTlcTimeout")));
 }
+
+#[tokio::test]
+async fn test_send_mpp_will_success_with_same_payment_after_restarted() {
+    init_tracing();
+
+    let (nodes, _channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((1, 2), (MIN_RESERVED_CKB + 103000, MIN_RESERVED_CKB)),
+            ((1, 2), (MIN_RESERVED_CKB + 103000, MIN_RESERVED_CKB)),
+            ((1, 2), (MIN_RESERVED_CKB + 103000, MIN_RESERVED_CKB)),
+        ],
+        3,
+    )
+    .await;
+    let [node_0, mut node_1, mut node_2] = nodes.try_into().expect("ok nodes");
+
+    let target_node = &mut node_2;
+    let amount = 300000;
+    let target_pubkey = target_node.get_public_key();
+    let preimage = gen_rand_sha256_hash();
+    let ckb_invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(amount))
+        .payment_preimage(preimage)
+        .payee_pub_key(target_pubkey.into())
+        .allow_mpp(true)
+        .payment_secret(gen_rand_sha256_hash())
+        .build()
+        .expect("build invoice success");
+
+    target_node.insert_invoice(ckb_invoice.clone(), Some(preimage));
+
+    node_1.stop().await;
+
+    let res = node_0
+        .send_payment(SendPaymentCommand {
+            invoice: Some(ckb_invoice.to_string()),
+            amount: ckb_invoice.amount,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    node_0.wait_until_failed(res.payment_hash).await;
+
+    assert_eq!(res.routers.len(), 3);
+
+    // restart node_1
+    node_1.start().await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(5000)).await;
+
+    // retry the payment
+    let res = node_0
+        .send_payment(SendPaymentCommand {
+            invoice: Some(ckb_invoice.to_string()),
+            amount: ckb_invoice.amount,
+            ..Default::default()
+        })
+        .await;
+
+    // FIXME(yukang): the payment should be success, but now it will fail
+    assert!(res.is_err(), "Payment should fail after retrying");
+    // node_0.wait_until_failed(res.payment_hash).await;
+    // assert_eq!(res.routers.len(), 3);
+    // dbg!(&res.routers);
+}

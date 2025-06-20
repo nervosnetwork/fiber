@@ -1084,8 +1084,7 @@ where
         let is_send_payment_with_router = self
             .store
             .get_payment_session(attempt.payment_hash)
-            .map(|p| p.is_send_payment_with_router())
-            .unwrap_or_default();
+            .is_some_and(|p| p.is_send_payment_with_router());
         return need_to_retry && !is_send_payment_with_router;
     }
 
@@ -1960,6 +1959,7 @@ pub trait NetworkGraphStateStore {
     fn get_attempt(&self, payment_hash: Hash256, attempt_id: u64) -> Option<Attempt>;
     fn insert_attempt(&self, attempt: Attempt);
     fn get_attempts(&self, payment_hash: Hash256) -> Vec<Attempt>;
+    fn delete_attempts(&self, payment_hash: Hash256);
     fn get_attempts_with_status(&self, status: PaymentSessionStatus) -> Vec<Attempt>;
 }
 
@@ -2111,9 +2111,13 @@ impl PaymentSession {
     }
 
     pub fn init_attempts(mut self, store: &impl NetworkGraphStateStore) -> Self {
+        self.flush_attempts(store);
+        self
+    }
+
+    pub fn flush_attempts(&mut self, store: &impl NetworkGraphStateStore) {
         self.cached_attempts = store.get_attempts(self.request.payment_hash);
         self.status = self.calc_payment_session_status();
-        self
     }
 
     pub fn update_with_attempt(&mut self, attempt: Attempt) {
