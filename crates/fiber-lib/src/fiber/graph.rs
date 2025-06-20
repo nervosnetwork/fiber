@@ -1961,7 +1961,6 @@ pub trait NetworkGraphStateStore {
     fn insert_attempt(&self, attempt: Attempt);
     fn get_attempts(&self, payment_hash: Hash256) -> Vec<Attempt>;
     fn get_attempts_with_status(&self, status: PaymentSessionStatus) -> Vec<Attempt>;
-    fn next_attempt_id(&self) -> u64;
 }
 
 /// The status of a payment, will update as the payment progresses.

@@ -196,7 +196,6 @@ pub enum KeyValue {
     PaymentCustomRecord(Hash256, PaymentCustomRecords),
     NetworkActorState(PeerId, PersistentNetworkActorState),
     Attempt((Hash256, u64), Attempt),
-    NextAttemptId(u64),
     HoldTlcs(Hash256, Vec<HoldTlc>),
 }
 
@@ -234,7 +233,6 @@ impl StoreKeyValue for KeyValue {
                 &attempt_id.to_le_bytes(),
             ]
             .concat(),
-            KeyValue::NextAttemptId(_id) => vec![NEXT_ATTEMPT_ID],
             #[cfg(feature = "watchtower")]
             KeyValue::WatchtowerChannel(channel_id, _) => {
                 [&[WATCHTOWER_CHANNEL_PREFIX], channel_id.as_ref()].concat()
@@ -277,7 +275,6 @@ impl StoreKeyValue for KeyValue {
                 serialize_to_vec(payment_session, "PaymentSession")
             }
             KeyValue::Attempt(_, attempt) => serialize_to_vec(attempt, "Attempt"),
-            KeyValue::NextAttemptId(id) => serialize_to_vec(&id, "u64"),
             #[cfg(feature = "watchtower")]
             KeyValue::WatchtowerChannel(_, channel_data) => {
                 serialize_to_vec(channel_data, "ChannelData")
@@ -579,17 +576,6 @@ impl NetworkGraphStateStore for Store {
         let mut batch = self.batch();
         batch.put_kv(KeyValue::PaymentSession(session.payment_hash(), session));
         batch.commit();
-    }
-
-    fn next_attempt_id(&self) -> u64 {
-        let mut batch = self.batch();
-        let next_id = batch
-            .get([NEXT_ATTEMPT_ID])
-            .map(|v| deserialize_from(v.as_ref(), "u64"))
-            .unwrap_or(1);
-        batch.put_kv(KeyValue::NextAttemptId(next_id + 1));
-        batch.commit();
-        next_id
     }
 
     fn get_attempt(&self, payment_hash: Hash256, attempt_id: u64) -> Option<Attempt> {
