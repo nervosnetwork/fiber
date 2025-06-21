@@ -4079,3 +4079,10 @@ fn get_hop_data_len(buf: &[u8]) -> Option<usize> {
             + HOP_DATA_HEAD_LEN,
     )
 }
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct HoldTlc {
+    pub channel_id: Hash256,
+    pub tlc_id: u64,
+    pub hold_expire_at: u64,
+}

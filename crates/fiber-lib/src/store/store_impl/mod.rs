@@ -12,9 +12,9 @@ use std::path::Path;
 
 use super::db_migrate::DbMigrate;
 use super::schema::*;
+use crate::fiber::gossip::GossipMessageStore;
 use crate::fiber::graph::AttemptStatus;
-use crate::fiber::types::CURSOR_SIZE;
-use crate::fiber::{gossip::GossipMessageStore, graph::HoldTlc};
+use crate::fiber::types::{HoldTlc, CURSOR_SIZE};
 #[cfg(feature = "watchtower")]
 use crate::{
     fiber::channel::{RevocationData, SettlementData},

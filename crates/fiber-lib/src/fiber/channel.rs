@@ -1,8 +1,7 @@
 #[cfg(any(debug_assertions, feature = "bench"))]
 use crate::fiber::network::DebugEvent;
 use crate::fiber::network::PaymentCustomRecords;
-use crate::fiber::types::BroadcastMessageWithTimestamp;
-use crate::{debug_event, fiber::types::TxAbort, utils::tx::compute_tx_message};
+use crate::{debug_event, utils::tx::compute_tx_message};
 use bitflags::bitflags;
 use futures::future::OptionFuture;
 use secp256k1::XOnlyPublicKey;
@@ -26,12 +25,13 @@ use crate::{
         },
         serde_utils::{CompactSignatureAsBytes, EntityHex, PubNonceAsBytes},
         types::{
-            AcceptChannel, AddTlc, AnnouncementSignatures, ChannelAnnouncement, ChannelReady,
-            ChannelUpdate, ClosingSigned, CommitmentSigned, EcdsaSignature, FiberChannelMessage,
-            FiberMessage, Hash256, OpenChannel, PaymentOnionPacket, PeeledPaymentOnionPacket,
-            Privkey, Pubkey, ReestablishChannel, RemoveTlc, RemoveTlcFulfill, RemoveTlcReason,
-            RevokeAndAck, Shutdown, TlcErr, TlcErrPacket, TlcErrorCode, TxCollaborationMsg,
-            TxComplete, TxUpdate, NO_SHARED_SECRET,
+            AcceptChannel, AddTlc, AnnouncementSignatures, BroadcastMessageWithTimestamp,
+            ChannelAnnouncement, ChannelReady, ChannelUpdate, ClosingSigned, CommitmentSigned,
+            EcdsaSignature, FiberChannelMessage, FiberMessage, Hash256, HoldTlc, OpenChannel,
+            PaymentOnionPacket, PeeledPaymentOnionPacket, Privkey, Pubkey, ReestablishChannel,
+            RemoveTlc, RemoveTlcFulfill, RemoveTlcReason, RevokeAndAck, Shutdown, TlcErr,
+            TlcErrPacket, TlcErrorCode, TxAbort, TxCollaborationMsg, TxComplete, TxUpdate,
+            NO_SHARED_SECRET,
         },
         NetworkActorCommand, NetworkActorEvent, NetworkActorMessage, ASSUME_NETWORK_ACTOR_ALIVE,
     },
@@ -69,7 +69,7 @@ use thiserror::Error;
 use tokio::sync::oneshot;
 
 use super::config::DEFAULT_HOLD_TLC_TIMEOUT;
-use super::graph::HoldTlc;
+
 use super::{
     gossip::SOFT_BROADCAST_MESSAGES_CONSIDERED_STALE_DURATION, graph::ChannelUpdateInfo,
     types::ForwardTlcResult,
@@ -863,48 +863,65 @@ where
             .collect();
         tlcs.push(tlc.clone());
 
-        // check invoice status
-        if let Some(invoice) = self.store.get_invoice(&tlc.payment_hash) {
-            let status = self.get_invoice_status(&invoice);
-            match status {
-                CkbInvoiceStatus::Expired => {
+        let Some(invoice) = self.store.get_invoice(&tlc.payment_hash) else {
+            // if invoice is not found, maybe keysend
+            return TlcSettleDownResult::Fulfilled(tlcs);
+        };
+
+        match self.get_invoice_status(&invoice) {
+            CkbInvoiceStatus::Expired => {
+                return TlcSettleDownResult::Failed(
+                    tlcs,
+                    RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
+                        TlcErr::new(TlcErrorCode::InvoiceExpired),
+                        &tlc.shared_secret,
+                    )),
+                );
+            }
+            CkbInvoiceStatus::Cancelled => {
+                return TlcSettleDownResult::Failed(
+                    tlcs,
+                    RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
+                        TlcErr::new(TlcErrorCode::InvoiceCancelled),
+                        &tlc.shared_secret,
+                    )),
+                );
+            }
+            CkbInvoiceStatus::Paid => {
+                // we have already checked invoice status in apply_add_tlc_operation_with_peeled_onion_packet
+                // this maybe happened when process is killed and restart
+                error!("invoice already paid, ignore");
+                return TlcSettleDownResult::Fulfilled(tlcs);
+            }
+            _ => {
+                let total_amount = tlc.total_amount.unwrap_or(tlc.amount);
+
+                if total_amount < invoice.amount.unwrap_or_default() {
                     return TlcSettleDownResult::Failed(
                         tlcs,
                         RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
-                            TlcErr::new(TlcErrorCode::InvoiceExpired),
+                            TlcErr::new(TlcErrorCode::AmountBelowMinimum),
                             &tlc.shared_secret,
                         )),
                     );
                 }
-                CkbInvoiceStatus::Cancelled => {
+
+                if tlcs.iter().any(|t| t.total_amount != tlc.total_amount) {
                     return TlcSettleDownResult::Failed(
                         tlcs,
                         RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
-                            TlcErr::new(TlcErrorCode::InvoiceCancelled),
+                            TlcErr::new(TlcErrorCode::IncorrectOrUnknownPaymentDetails),
                             &tlc.shared_secret,
                         )),
                     );
                 }
-                CkbInvoiceStatus::Paid => {
-                    // we have already checked invoice status in apply_add_tlc_operation_with_peeled_onion_packet
-                    // this maybe happened when process is killed and restart
-                    error!("invoice already paid, ignore");
-                    return TlcSettleDownResult::Fulfilled(tlcs);
-                }
-                _ => {
-                    let total_amount = tlc.total_amount.unwrap_or(tlc.amount);
 
-                    if total_amount < invoice.amount.unwrap_or_default() {
-                        return TlcSettleDownResult::Failed(
-                            tlcs,
-                            RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
-                                TlcErr::new(TlcErrorCode::AmountBelowMinimum),
-                                &tlc.shared_secret,
-                            )),
-                        );
-                    }
-
-                    if tlcs.iter().any(|t| t.total_amount != tlc.total_amount) {
+                let total_tlc_amount = tlcs.iter().map(|tlc| tlc.amount).sum::<u128>();
+                let is_fulfilled = total_tlc_amount >= total_amount;
+                if invoice.allow_mpp() {
+                    // check payment secret for MPP payment
+                    let payment_secret = invoice.payment_secret();
+                    if payment_secret.is_none() || tlc.payment_secret.as_ref() != payment_secret {
                         return TlcSettleDownResult::Failed(
                             tlcs,
                             RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
@@ -914,60 +931,36 @@ where
                         );
                     }
 
-                    let total_tlc_amount = tlcs.iter().map(|tlc| tlc.amount).sum::<u128>();
-                    let is_fulfilled = total_tlc_amount >= total_amount;
-                    let allow_mpp = invoice.allow_mpp();
-
-                    if allow_mpp {
-                        // multi path payment
-
-                        // check payment secret
-                        let payment_secret = invoice.payment_secret();
-                        if payment_secret.is_none() || tlc.payment_secret.as_ref() != payment_secret
-                        {
-                            return TlcSettleDownResult::Failed(
-                                tlcs,
-                                RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
-                                    TlcErr::new(TlcErrorCode::IncorrectOrUnknownPaymentDetails),
-                                    &tlc.shared_secret,
-                                )),
-                            );
-                        }
-
-                        // hold the tlc if support MPP and invoice is not fulfilled
-                        if !is_fulfilled {
-                            self.store.insert_hold_tlc(
-                                tlc.payment_hash,
-                                HoldTlc {
-                                    channel_id: state.get_id(),
-                                    tlc_id: tlc.tlc_id.into(),
-                                    hold_expire_at: now_timestamp_as_millis_u64()
-                                        + DEFAULT_HOLD_TLC_TIMEOUT,
-                                },
-                            );
-                            return TlcSettleDownResult::Hold;
-                        }
-                    } else {
-                        // single path payment
-                        // fail tlc if invoice is not fulfilled
-                        if !is_fulfilled {
-                            return TlcSettleDownResult::Failed(
-                                tlcs,
-                                RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
-                                    TlcErr::new(TlcErrorCode::AmountBelowMinimum),
-                                    &tlc.shared_secret,
-                                )),
-                            );
-                        }
+                    // hold the tlc if support MPP and invoice is not fulfilled
+                    if !is_fulfilled {
+                        self.store.insert_hold_tlc(
+                            tlc.payment_hash,
+                            HoldTlc {
+                                channel_id: state.get_id(),
+                                tlc_id: tlc.tlc_id.into(),
+                                hold_expire_at: now_timestamp_as_millis_u64()
+                                    + DEFAULT_HOLD_TLC_TIMEOUT,
+                            },
+                        );
+                        return TlcSettleDownResult::Hold;
                     }
-
-                    // invoice status will be updated to paid after apply remove tlc operation
-                    return TlcSettleDownResult::Fulfilled(tlcs);
+                } else {
+                    // single path payment
+                    // fail tlc if invoice is not fulfilled
+                    if !is_fulfilled {
+                        return TlcSettleDownResult::Failed(
+                            tlcs,
+                            RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
+                                TlcErr::new(TlcErrorCode::AmountBelowMinimum),
+                                &tlc.shared_secret,
+                            )),
+                        );
+                    }
                 }
+
+                // invoice status will be updated to paid after apply remove tlc operation
+                return TlcSettleDownResult::Fulfilled(tlcs);
             }
-        } else {
-            // if invoice is not found, maybe keysend
-            TlcSettleDownResult::Fulfilled(tlcs)
         }
     }
 

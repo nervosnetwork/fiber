@@ -1092,7 +1092,7 @@ where
         let is_send_payment_with_router = self
             .store
             .get_payment_session(attempt.payment_hash)
-            .is_some_and(|p| p.is_send_payment_with_router());
+            .is_some_and(|p| p.is_payment_with_router());
         return need_to_retry && !is_send_payment_with_router;
     }
 
@@ -2128,14 +2128,14 @@ impl PaymentSession {
 
     pub fn flush_attempts(&mut self, store: &impl NetworkGraphStateStore) {
         self.cached_attempts = store.get_attempts(self.request.payment_hash);
-        self.status = self.calc_payment_session_status();
+        self.status = self.calc_payment_status();
     }
 
     pub fn update_with_attempt(&mut self, attempt: Attempt) {
         if let Some(a) = self.cached_attempts.iter_mut().find(|a| a.id == attempt.id) {
             *a = attempt;
         }
-        self.status = self.calc_payment_session_status();
+        self.status = self.calc_payment_status();
     }
 
     pub fn retry_times(&self) -> u32 {
@@ -2150,7 +2150,7 @@ impl PaymentSession {
         self.request.payment_hash
     }
 
-    pub fn is_send_payment_with_router(&self) -> bool {
+    pub fn is_payment_with_router(&self) -> bool {
         !self.request.router.is_empty()
     }
 
@@ -2253,7 +2253,6 @@ impl PaymentSession {
         }
     }
 
-    // FIXME: we may need to remove this
     pub fn append_attempt(&mut self, attempt: Attempt) {
         self.cached_attempts.push(attempt);
     }
@@ -2281,7 +2280,7 @@ impl PaymentSession {
         true
     }
 
-    pub fn calc_payment_session_status(&self) -> PaymentStatus {
+    pub fn calc_payment_status(&self) -> PaymentStatus {
         if self.cached_attempts.is_empty() || self.status.is_final() {
             return self.status;
         }
@@ -2437,6 +2436,11 @@ impl Attempt {
         self.last_error = None;
     }
 
+    pub fn set_success_status(&mut self) {
+        self.status = AttemptStatus::Success;
+        self.last_error = None;
+    }
+
     pub fn set_failed_status(&mut self, error: &str, retryable: bool) {
         self.last_error = Some(error.to_string());
 
@@ -2451,29 +2455,12 @@ impl Attempt {
         }
     }
 
-    pub fn hops_public_keys(&self) -> Vec<Pubkey> {
-        // Skip the first node, which is the sender.
-        self.route.nodes.iter().skip(1).map(|x| x.pubkey).collect()
-    }
-
-    pub fn set_success_status(&mut self) {
-        self.status = AttemptStatus::Success;
-        self.last_error = None;
-    }
-
     pub fn is_success(&self) -> bool {
         self.status == AttemptStatus::Success
     }
 
     pub fn is_inflight(&self) -> bool {
         self.status == AttemptStatus::Inflight
-    }
-
-    pub fn is_created(&self) -> bool {
-        matches!(
-            self.status,
-            AttemptStatus::Created | AttemptStatus::Retrying
-        )
     }
 
     pub fn is_failed(&self) -> bool {
@@ -2484,7 +2471,6 @@ impl Attempt {
         self.status != AttemptStatus::Failed
     }
 
-    // The attempt is considered as inflight if error can be retried immediately
     pub fn is_retrying(&self) -> bool {
         self.status == AttemptStatus::Retrying
     }
@@ -2500,11 +2486,9 @@ impl Attempt {
     pub(crate) fn channel_outpoints(&self) -> impl Iterator<Item = (Pubkey, &OutPoint, u128)> {
         self.route.channel_outpoints()
     }
-}
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct HoldTlc {
-    pub channel_id: Hash256,
-    pub tlc_id: u64,
-    pub hold_expire_at: u64,
+    pub fn hops_public_keys(&self) -> Vec<Pubkey> {
+        // Skip the first node, which is the sender.
+        self.route.nodes.iter().skip(1).map(|x| x.pubkey).collect()
+    }
 }
