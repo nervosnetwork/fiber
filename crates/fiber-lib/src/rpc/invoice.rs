@@ -41,6 +41,8 @@ pub struct NewInvoiceParams {
     pub udt_type_script: Option<Script>,
     /// The hash algorithm of the invoice.
     pub hash_algorithm: Option<HashAlgorithm>,
+    /// Whether allow payment to use MPP
+    pub allow_mpp: Option<bool>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -180,6 +182,9 @@ where
         };
         if let Some(fallback_address) = params.fallback_address.clone() {
             invoice_builder = invoice_builder.fallback_address(fallback_address);
+        };
+        if let Some(allow_mpp) = params.allow_mpp {
+            invoice_builder = invoice_builder.allow_mpp(allow_mpp);
         };
         if let Some(final_expiry_delta) = params.final_expiry_delta {
             if final_expiry_delta < MIN_TLC_EXPIRY_DELTA {
