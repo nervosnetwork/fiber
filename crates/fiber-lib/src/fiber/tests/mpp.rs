@@ -1938,6 +1938,12 @@ async fn test_send_mpp_will_success_with_same_payment_after_restarted() {
     debug!("node_1 restarted");
     tokio::time::sleep(tokio::time::Duration::from_millis(5000)).await;
 
+    let session = node_0
+        .get_payment_session(res.payment_hash)
+        .expect("get payment session");
+    let attempts = session.all_attempts_with_status();
+    dbg!(&attempts);
+
     // the remove_tlc may come after the node_1 restarted,
     // this may comes from the background task of node_1
     // so we need to clear the history of node_0
@@ -1955,5 +1961,5 @@ async fn test_send_mpp_will_success_with_same_payment_after_restarted() {
     let res = res.unwrap();
     node_0.wait_until_success(res.payment_hash).await;
     assert_eq!(res.routers.len(), 3);
-    // dbg!(&res.routers);
+    dbg!(&res.routers);
 }

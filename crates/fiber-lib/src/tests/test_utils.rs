@@ -5,8 +5,8 @@ use crate::fiber::channel::*;
 use crate::fiber::gossip::get_gossip_actor_name;
 use crate::fiber::gossip::GossipActorMessage;
 use crate::fiber::graph::NetworkGraphStateStore;
+use crate::fiber::graph::PayStatus;
 use crate::fiber::graph::PaymentSession;
-use crate::fiber::graph::PaymentSessionStatus;
 use crate::fiber::graph::SessionRoute;
 use crate::fiber::network::*;
 use crate::fiber::types::EcdsaSignature;
@@ -909,7 +909,7 @@ impl NetworkNode {
     pub async fn assert_payment_status(
         &self,
         payment_hash: Hash256,
-        expected_status: PaymentSessionStatus,
+        expected_status: PayStatus,
         expected_retried: Option<u32>,
     ) {
         let status = self.get_payment_status(payment_hash).await;
@@ -921,7 +921,7 @@ impl NetworkNode {
         }
     }
 
-    pub async fn get_payment_status(&self, payment_hash: Hash256) -> PaymentSessionStatus {
+    pub async fn get_payment_status(&self, payment_hash: Hash256) -> PayStatus {
         self.get_payment_result(payment_hash).await.status
     }
 
@@ -990,13 +990,13 @@ impl NetworkNode {
             assert!(self.get_triggered_unexpected_events().await.is_empty());
             let status = self.get_payment_status(payment_hash).await;
             eprintln!("Payment status: {:?}", status);
-            if status == PaymentSessionStatus::Success {
+            if status == PayStatus::Success {
                 error!("Payment success: {:?}\n\n", payment_hash);
                 break;
-            } else if status == PaymentSessionStatus::Failed {
+            } else if status == PayStatus::Failed {
                 error!("Payment failed: {:?}\n\n", payment_hash);
                 // report error
-                assert_eq!(status, PaymentSessionStatus::Success);
+                assert_eq!(status, PayStatus::Success);
             }
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
@@ -1006,13 +1006,13 @@ impl NetworkNode {
         loop {
             assert!(self.get_triggered_unexpected_events().await.is_empty());
             let status = self.get_payment_status(payment_hash).await;
-            if status == PaymentSessionStatus::Failed {
+            if status == PayStatus::Failed {
                 error!("Payment failed: {:?}\n\n", payment_hash);
                 break;
-            } else if status == PaymentSessionStatus::Success {
+            } else if status == PayStatus::Success {
                 error!("Payment success: {:?}\n\n", payment_hash);
                 // report error
-                assert_eq!(status, PaymentSessionStatus::Failed);
+                assert_eq!(status, PayStatus::Failed);
             }
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
@@ -1022,7 +1022,7 @@ impl NetworkNode {
         loop {
             assert!(self.get_triggered_unexpected_events().await.is_empty());
             let status = self.get_payment_status(payment_hash).await;
-            if status != PaymentSessionStatus::Created {
+            if status != PayStatus::Created {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(500)).await;

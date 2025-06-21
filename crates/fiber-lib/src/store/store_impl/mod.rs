@@ -22,7 +22,7 @@ use crate::{
 use crate::{
     fiber::{
         channel::{ChannelActorState, ChannelActorStateStore, ChannelState},
-        graph::{Attempt, NetworkGraphStateStore, PaymentSession, PaymentSessionStatus},
+        graph::{Attempt, NetworkGraphStateStore, PayStatus, PaymentSession},
         history::{Direction, TimedResult},
         network::{NetworkActorStateStore, PaymentCustomRecords, PersistentNetworkActorState},
         types::{BroadcastMessage, BroadcastMessageID, Cursor, Hash256},
@@ -414,10 +414,8 @@ impl ChannelActorStateStore for Store {
             .map(|v| deserialize_from(v.as_ref(), "HoldTlc"))
             .unwrap_or_default();
         // remove the duplicated tlc
-        hold_tlcs.retain(|tlc| {
-            let is_same = tlc.channel_id == hold_tlc.channel_id && tlc.tlc_id == hold_tlc.tlc_id;
-            !is_same
-        });
+        hold_tlcs
+            .retain(|tlc| tlc.channel_id != hold_tlc.channel_id || tlc.tlc_id != hold_tlc.tlc_id);
         hold_tlcs.push(hold_tlc);
         batch.put_kv(KeyValue::HoldTlcs(payment_hash, hold_tlcs));
         batch.commit();
@@ -430,10 +428,8 @@ impl ChannelActorStateStore for Store {
             .get(&prefix)
             .map(|v| deserialize_from(v.as_ref(), "HoldTlc"))
             .unwrap_or_default();
-        hold_tlcs.retain(|hold_tlc| {
-            let removed = hold_tlc.channel_id == *channel_id && hold_tlc.tlc_id == tlc_id;
-            !removed
-        });
+        hold_tlcs
+            .retain(|hold_tlc| hold_tlc.channel_id != *channel_id || hold_tlc.tlc_id != tlc_id);
         batch.put_kv(KeyValue::HoldTlcs(*payment_hash, hold_tlcs));
         batch.commit();
     }
@@ -555,10 +551,7 @@ impl NetworkGraphStateStore for Store {
             .map(|session: PaymentSession| session.init_attempts(self))
     }
 
-    fn get_payment_sessions_with_status(
-        &self,
-        status: PaymentSessionStatus,
-    ) -> Vec<PaymentSession> {
+    fn get_payment_sessions_with_status(&self, status: PayStatus) -> Vec<PaymentSession> {
         let prefix = [PAYMENT_SESSION_PREFIX];
         self.prefix_iterator(&prefix)
             .filter_map(|(_key, value)| {
@@ -615,7 +608,7 @@ impl NetworkGraphStateStore for Store {
         batch.commit();
     }
 
-    fn get_attempts_with_status(&self, status: PaymentSessionStatus) -> Vec<Attempt> {
+    fn get_attempts_with_status(&self, status: PayStatus) -> Vec<Attempt> {
         let prefix = [ATTEMPT_PREFIX];
         self.prefix_iterator(&prefix)
             .filter_map(|(_key, value)| {

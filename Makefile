@@ -23,6 +23,7 @@ clippy:
 .PHONY: bless
 bless:
 	cargo clippy --fix --allow-dirty --allow-staged --all --all-targets --all-features
+	cargo fmt --all
 
 .PHONY: fmt
 fmt:

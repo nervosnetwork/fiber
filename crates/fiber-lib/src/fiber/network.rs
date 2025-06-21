@@ -84,7 +84,7 @@ use crate::fiber::config::{
     PAYMENT_MAX_PARTS_LIMIT,
 };
 use crate::fiber::gossip::{GossipConfig, GossipService, SubscribableGossipMessageStore};
-use crate::fiber::graph::{GraphChannelStat, PaymentSession, PaymentSessionStatus};
+use crate::fiber::graph::{GraphChannelStat, PayStatus, PaymentSession};
 use crate::fiber::serde_utils::EntityHex;
 use crate::fiber::types::{
     FiberChannelMessage, PaymentOnionPacket, PeeledPaymentOnionPacket, TlcErrPacket, TxSignatures,
@@ -169,7 +169,7 @@ pub struct AcceptChannelResponse {
 #[derive(Debug)]
 pub struct SendPaymentResponse {
     pub payment_hash: Hash256,
-    pub status: PaymentSessionStatus,
+    pub status: PayStatus,
     pub created_at: u64,
     pub last_updated_at: u64,
     pub failed_error: Option<String>,
@@ -1085,10 +1085,7 @@ where
                     .expect(ASSUME_NETWORK_MYSELF_ALIVE);
 
                 // retry related payment attempts for this channel
-                for attempt in self
-                    .store
-                    .get_attempts_with_status(PaymentSessionStatus::Created)
-                {
+                for attempt in self.store.get_attempts_with_status(PayStatus::Created) {
                     if attempt.first_hop_channel_outpoint_eq(&channel_outpoint) {
                         debug!(
                             "Now retrying payment attempt {:?} for channel {:?} reestablished",
@@ -2578,13 +2575,22 @@ where
         // initialize the payment session in db and begin the payment process lifecycle
         if let Some(payment_session) = self.store.get_payment_session(payment_data.payment_hash) {
             // we only allow retrying payment session with status failed
-            if payment_session.status != PaymentSessionStatus::Failed {
+            if payment_session.status != PayStatus::Failed {
                 return Err(Error::InvalidParameter(format!(
                     "Payment session already exists: {} with payment session status: {:?}",
                     payment_data.payment_hash, payment_session.status
                 )));
             } else {
-                // cleanup all the previous attempts
+                // even if the payment session is failed, we still need to check whether
+                // some attempts are still flight state, this means some middle hops
+                // haven't send back the result of the onion packet, so we can not retry the payment session
+                // otherwise, we are sure it's safe to cleanup all the previous attempts
+                if payment_session.attempts().any(|a| a.is_inflight()) {
+                    return Err(Error::InvalidParameter(format!(
+                        "Payment session {} has attempts that are in flight state, can not retry",
+                        payment_data.payment_hash
+                    )));
+                }
                 self.store.delete_attempts(payment_data.payment_hash);
             }
         }

@@ -8,7 +8,7 @@ use crate::fiber::serde_utils::SliceHex;
 use crate::fiber::serde_utils::U32Hex;
 use crate::fiber::{
     channel::ChannelActorStateStore,
-    graph::PaymentSessionStatus,
+    graph::PayStatus,
     network::{HopHint as NetworkHopHint, SendPaymentCommand},
     serde_utils::{EntityHex, U128Hex, U64Hex},
     types::{Hash256, Pubkey},
@@ -42,7 +42,7 @@ pub struct GetPaymentCommandResult {
     /// The payment hash of the payment
     pub payment_hash: Hash256,
     /// The status of the payment
-    pub status: PaymentSessionStatus,
+    pub status: PayStatus,
     #[serde_as(as = "U64Hex")]
     /// The time the payment was created at, in milliseconds from UNIX epoch
     created_at: u64,

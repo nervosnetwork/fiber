@@ -74,8 +74,8 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
     * [Type `InvoiceData`](#type-invoicedata)
     * [Type `InvoiceSignature`](#type-invoicesignature)
     * [Type `NodeInfo`](#type-nodeinfo)
+    * [Type `PayStatus`](#type-paystatus)
     * [Type `PaymentCustomRecords`](#type-paymentcustomrecords)
-    * [Type `PaymentSessionStatus`](#type-paymentsessionstatus)
     * [Type `PeerInfo`](#type-peerinfo)
     * [Type `Privkey`](#type-privkey)
     * [Type `Pubkey`](#type-pubkey)
@@ -648,7 +648,7 @@ Sends a payment to a peer.
 ##### Returns
 
 * `payment_hash` - <em>[Hash256](#type-hash256)</em>, The payment hash of the payment
-* `status` - <em>[PaymentSessionStatus](#type-paymentsessionstatus)</em>, The status of the payment
+* `status` - <em>[PayStatus](#type-paystatus)</em>, The status of the payment
 * `created_at` - <em>`u64`</em>, The time the payment was created at, in milliseconds from UNIX epoch
 * `last_updated_at` - <em>`u64`</em>, The time the payment was last updated at, in milliseconds from UNIX epoch
 * `failed_error` - <em>`Option<String>`</em>, The error message if the payment failed
@@ -678,7 +678,7 @@ Retrieves a payment.
 ##### Returns
 
 * `payment_hash` - <em>[Hash256](#type-hash256)</em>, The payment hash of the payment
-* `status` - <em>[PaymentSessionStatus](#type-paymentsessionstatus)</em>, The status of the payment
+* `status` - <em>[PayStatus](#type-paystatus)</em>, The status of the payment
 * `created_at` - <em>`u64`</em>, The time the payment was created at, in milliseconds from UNIX epoch
 * `last_updated_at` - <em>`u64`</em>, The time the payment was last updated at, in milliseconds from UNIX epoch
 * `failed_error` - <em>`Option<String>`</em>, The error message if the payment failed
@@ -758,7 +758,7 @@ Sends a payment to a peer with specified router
 ##### Returns
 
 * `payment_hash` - <em>[Hash256](#type-hash256)</em>, The payment hash of the payment
-* `status` - <em>[PaymentSessionStatus](#type-paymentsessionstatus)</em>, The status of the payment
+* `status` - <em>[PayStatus](#type-paystatus)</em>, The status of the payment
 * `created_at` - <em>`u64`</em>, The time the payment was created at, in milliseconds from UNIX epoch
 * `last_updated_at` - <em>`u64`</em>, The time the payment was last updated at, in milliseconds from UNIX epoch
 * `failed_error` - <em>`Option<String>`</em>, The error message if the payment failed
@@ -1207,6 +1207,21 @@ The Node information.
 * `udt_cfg_infos` - <em>[UdtCfgInfos](#type-udtcfginfos)</em>, The UDT configuration infos of the node.
 ---
 
+<a id="#type-paystatus"></a>
+### Type `PayStatus`
+
+The status of a payment, will update as the payment progresses.
+
+
+#### Enum with values of
+
+* `Created` - initial status, a payment session/attempt is created,
+ no HTLC is sent or the related HTLC has received RemoveTLC and waiting for retry
+* `Inflight` - the first hop AddTlc is sent successfully and waiting for the response
+* `Success` - related HTLC is successfully settled
+* `Failed` - related HTLC is failed
+---
+
 <a id="#type-paymentcustomrecords"></a>
 ### Type `PaymentCustomRecords`
 
@@ -1226,20 +1241,6 @@ The custom records to be included in the payment.
 #### Fields
 
 * `data` - <em>HashMap<u32::Vec<u8>></em>, The custom records to be included in the payment.
----
-
-<a id="#type-paymentsessionstatus"></a>
-### Type `PaymentSessionStatus`
-
-The status of a payment, will update as the payment progresses.
-
-
-#### Enum with values of
-
-* `Created` - initial status, payment session is created, no HTLC is sent
-* `Inflight` - the first hop AddTlc is sent successfully and waiting for the response
-* `Success` - related HTLC is successfully settled
-* `Failed` - related HTLC is failed
 ---
 
 <a id="#type-peerinfo"></a>

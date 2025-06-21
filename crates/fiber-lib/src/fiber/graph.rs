@@ -1959,8 +1959,7 @@ where
 
 pub trait NetworkGraphStateStore {
     fn get_payment_session(&self, payment_hash: Hash256) -> Option<PaymentSession>;
-    fn get_payment_sessions_with_status(&self, status: PaymentSessionStatus)
-        -> Vec<PaymentSession>;
+    fn get_payment_sessions_with_status(&self, status: PayStatus) -> Vec<PaymentSession>;
     fn insert_payment_session(&self, session: PaymentSession);
     fn insert_payment_history_result(
         &mut self,
@@ -1974,13 +1973,14 @@ pub trait NetworkGraphStateStore {
     fn insert_attempt(&self, attempt: Attempt);
     fn get_attempts(&self, payment_hash: Hash256) -> Vec<Attempt>;
     fn delete_attempts(&self, payment_hash: Hash256);
-    fn get_attempts_with_status(&self, status: PaymentSessionStatus) -> Vec<Attempt>;
+    fn get_attempts_with_status(&self, status: PayStatus) -> Vec<Attempt>;
 }
 
 /// The status of a payment, will update as the payment progresses.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
-pub enum PaymentSessionStatus {
-    /// initial status, payment session is created, no HTLC is sent
+pub enum PayStatus {
+    /// initial status, a payment session/attempt is created,
+    /// no HTLC is sent or the related HTLC has received RemoveTLC and waiting for retry
     Created,
     /// the first hop AddTlc is sent successfully and waiting for the response
     Inflight,
@@ -1990,12 +1990,9 @@ pub enum PaymentSessionStatus {
     Failed,
 }
 
-impl PaymentSessionStatus {
+impl PayStatus {
     pub fn is_final(&self) -> bool {
-        matches!(
-            self,
-            PaymentSessionStatus::Success | PaymentSessionStatus::Failed
-        )
+        matches!(self, PayStatus::Success | PayStatus::Failed)
     }
 }
 
@@ -2098,7 +2095,7 @@ pub struct PaymentSession {
     // For non-MPP, this is the maximum number of single attempt retry limit
     // For MPP, this is the sum limit of all parts' retry times.
     pub try_limit: u32,
-    pub status: PaymentSessionStatus,
+    pub status: PayStatus,
     pub created_at: u64,
     pub last_updated_at: u64,
     #[serde(skip)]
@@ -2116,7 +2113,7 @@ impl PaymentSession {
             request,
             last_error: None,
             try_limit,
-            status: PaymentSessionStatus::Created,
+            status: PayStatus::Created,
             created_at: now,
             last_updated_at: now,
             cached_attempts: vec![],
@@ -2163,6 +2160,22 @@ impl PaymentSession {
 
     pub fn attempts(&self) -> impl Iterator<Item = &Attempt> {
         self.cached_attempts.iter()
+    }
+
+    #[cfg(test)]
+    pub fn all_attempts_with_status(&self) -> Vec<(u64, PayStatus, Option<String>, u32, u128)> {
+        self.cached_attempts
+            .iter()
+            .map(|a| {
+                (
+                    a.id,
+                    a.status,
+                    a.last_error.clone(),
+                    a.tried_times,
+                    a.route.receiver_amount(),
+                )
+            })
+            .collect()
     }
 
     pub fn attempts_count(&self) -> usize {
@@ -2236,7 +2249,7 @@ impl PaymentSession {
             created_at: now,
             last_updated_at: now,
             last_error: None,
-            status: PaymentSessionStatus::Created,
+            status: PayStatus::Created,
         }
     }
 
@@ -2268,43 +2281,43 @@ impl PaymentSession {
         true
     }
 
-    pub fn calc_payment_session_status(&self) -> PaymentSessionStatus {
+    pub fn calc_payment_session_status(&self) -> PayStatus {
         if self.cached_attempts.is_empty() || self.status.is_final() {
             return self.status;
         }
 
         if self.attempts().any(|a| a.is_inflight()) {
             // if any attempt is created or inflight, the payment is inflight
-            return PaymentSessionStatus::Inflight;
+            return PayStatus::Inflight;
         }
 
         if self.attempts().all(|a| a.is_failed()) && !self.allow_more_attempts() {
-            return PaymentSessionStatus::Failed;
+            return PayStatus::Failed;
         }
 
         if self.success_attempts_amount_is_enough() {
-            return PaymentSessionStatus::Success;
+            return PayStatus::Success;
         }
 
-        return PaymentSessionStatus::Created;
+        return PayStatus::Created;
     }
 
-    fn set_status(&mut self, status: PaymentSessionStatus) {
+    fn set_status(&mut self, status: PayStatus) {
         self.status = status;
         self.last_updated_at = now_timestamp_as_millis_u64();
     }
 
     pub fn set_inflight_status(&mut self) {
-        self.set_status(PaymentSessionStatus::Inflight);
+        self.set_status(PayStatus::Inflight);
     }
 
     pub fn set_success_status(&mut self) {
-        self.set_status(PaymentSessionStatus::Success);
+        self.set_status(PayStatus::Success);
         self.last_error = None;
     }
 
     pub fn set_failed_status(&mut self, error: &str) {
-        self.set_status(PaymentSessionStatus::Failed);
+        self.set_status(PayStatus::Failed);
         self.last_error = Some(error.to_string());
     }
 }
@@ -2376,7 +2389,7 @@ pub struct Attempt {
     pub try_limit: u32,
     pub tried_times: u32,
     pub hash: Hash256,
-    pub status: PaymentSessionStatus,
+    pub status: PayStatus,
     pub payment_hash: Hash256,
     pub route: SessionRoute,
     pub session_key: [u8; 32],
@@ -2388,7 +2401,7 @@ pub struct Attempt {
 
 impl Attempt {
     pub fn set_inflight_status(&mut self) {
-        self.status = PaymentSessionStatus::Inflight;
+        self.status = PayStatus::Inflight;
         self.last_error = None;
     }
 
@@ -2401,10 +2414,12 @@ impl Attempt {
             }
             if self.tried_times < self.try_limit {
                 self.tried_times += 1;
+                self.status = PayStatus::Created;
+                self.last_updated_at = now_timestamp_as_millis_u64();
                 return;
             }
         }
-        self.status = PaymentSessionStatus::Failed;
+        self.status = PayStatus::Failed;
     }
 
     pub fn hops_public_keys(&self) -> Vec<Pubkey> {
@@ -2413,28 +2428,28 @@ impl Attempt {
     }
 
     pub fn set_success_status(&mut self) {
-        self.status = PaymentSessionStatus::Success;
+        self.status = PayStatus::Success;
         self.last_error = None;
     }
 
     pub fn is_settled(&self) -> bool {
-        self.status == PaymentSessionStatus::Success
+        self.status == PayStatus::Success
     }
 
     pub fn is_inflight(&self) -> bool {
-        matches!(self.status, PaymentSessionStatus::Inflight)
+        matches!(self.status, PayStatus::Inflight)
     }
 
     pub fn is_created(&self) -> bool {
-        self.status == PaymentSessionStatus::Created
+        self.status == PayStatus::Created
     }
 
     pub fn is_failed(&self) -> bool {
-        self.status == PaymentSessionStatus::Failed
+        self.status == PayStatus::Failed
     }
 
     pub fn is_active(&self) -> bool {
-        !matches!(self.status, PaymentSessionStatus::Failed)
+        !matches!(self.status, PayStatus::Failed)
     }
 
     // The attempt is considered as inflight if error can be retried immediately
