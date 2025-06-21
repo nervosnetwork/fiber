@@ -517,13 +517,15 @@ fn test_store_payment_session() {
         dry_run: false,
         custom_records: None,
         router: vec![],
+        allow_mpp: false,
+        channel_stats: Default::default(),
     };
-    let payment_session = PaymentSession::new(payment_data.clone(), 10);
+    let payment_session = PaymentSession::new(&store, payment_data.clone(), 10);
     store.insert_payment_session(payment_session.clone());
     let res = store.get_payment_session(payment_hash).unwrap();
     assert_eq!(res.payment_hash(), payment_hash);
     assert_eq!(res.request.max_fee_amount, Some(1000));
-    assert_eq!(res.status, PaymentSessionStatus::Created);
+    assert_eq!(res.status, PaymentStatus::Created);
 }
 
 #[test]
@@ -548,8 +550,10 @@ fn test_store_payment_sessions_with_status() {
         dry_run: false,
         custom_records: None,
         router: vec![],
+        allow_mpp: false,
+        channel_stats: Default::default(),
     };
-    let payment_session = PaymentSession::new(payment_data.clone(), 10);
+    let payment_session = PaymentSession::new(&store, payment_data.clone(), 10);
     store.insert_payment_session(payment_session.clone());
 
     let payment_hash1 = gen_rand_sha256_hash();
@@ -571,21 +575,23 @@ fn test_store_payment_sessions_with_status() {
         dry_run: false,
         custom_records: None,
         router: vec![],
+        allow_mpp: false,
+        channel_stats: Default::default(),
     };
-    let mut payment_session = PaymentSession::new(payment_data.clone(), 10);
+    let mut payment_session = PaymentSession::new(&store, payment_data.clone(), 10);
     payment_session.set_success_status();
     store.insert_payment_session(payment_session.clone());
 
-    let res = store.get_payment_sessions_with_status(PaymentSessionStatus::Created);
+    let res = store.get_payment_sessions_with_status(PaymentStatus::Created);
     assert_eq!(res.len(), 1);
     assert_eq!(res[0].payment_hash(), payment_hash0);
 
-    let res = store.get_payment_sessions_with_status(PaymentSessionStatus::Success);
+    let res = store.get_payment_sessions_with_status(PaymentStatus::Success);
     assert_eq!(res.len(), 1);
     assert_eq!(res[0].payment_hash(), payment_hash1);
-    assert_eq!(res[0].status, PaymentSessionStatus::Success);
+    assert_eq!(res[0].status, PaymentStatus::Success);
 
-    let res = store.get_payment_sessions_with_status(PaymentSessionStatus::Failed);
+    let res = store.get_payment_sessions_with_status(PaymentStatus::Failed);
     assert_eq!(res.len(), 0);
 }
 
