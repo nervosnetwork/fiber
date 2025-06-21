@@ -1,6 +1,12 @@
 use super::channel::FUNDING_CELL_WITNESS_LEN;
-use crate::ckb::contracts::{get_cell_deps_count, get_script_by_contract, Contract};
-use ckb_types::core::TransactionBuilder;
+use crate::ckb::contracts::{
+    check_udt_script, get_cell_deps_count, get_script_by_contract, Contract,
+};
+use crate::fiber::channel::{
+    occupied_capacity, ProcessingChannelError, DEFAULT_COMMITMENT_FEE_RATE, DEFAULT_FEE_RATE,
+    MAX_COMMITMENT_DELAY_EPOCHS, MIN_COMMITMENT_DELAY_EPOCHS, SYS_MAX_TLC_NUMBER_IN_FLIGHT,
+};
+use ckb_types::core::{EpochNumberWithFraction, TransactionBuilder};
 use ckb_types::packed::{Bytes, CellDep, Script};
 use ckb_types::prelude::{Builder, PackVec};
 use ckb_types::{
@@ -125,4 +131,91 @@ pub(crate) fn calculate_tlc_forward_fee(
     } else {
         Ok(base_fee)
     }
+}
+
+pub(crate) fn check_open_channel_parameters(
+    udt_type_script: &Option<Script>,
+    shutdown_script: &Script,
+    reserved_ckb_amount: u64,
+    funding_fee_rate: u64,
+    commitment_fee_rate: u64,
+    commitment_delay_epoch: u64,
+    max_tlc_number_in_flight: u64,
+) -> Result<(), ProcessingChannelError> {
+    if let Some(udt_type_script) = udt_type_script {
+        if !check_udt_script(udt_type_script) {
+            return Err(ProcessingChannelError::InvalidParameter(format!(
+                "Invalid UDT type script: {:?}",
+                udt_type_script
+            )));
+        }
+    }
+
+    // reserved_ckb_amount
+    let occupied_capacity = occupied_capacity(shutdown_script, udt_type_script)?.as_u64();
+    if reserved_ckb_amount < occupied_capacity {
+        return Err(ProcessingChannelError::InvalidParameter(format!(
+            "Reserved CKB amount {} is less than {}",
+            reserved_ckb_amount, occupied_capacity,
+        )));
+    }
+
+    // funding_fee_rate
+    if funding_fee_rate < DEFAULT_FEE_RATE {
+        return Err(ProcessingChannelError::InvalidParameter(format!(
+            "Funding fee rate is less than {}",
+            DEFAULT_FEE_RATE,
+        )));
+    }
+
+    // commitment_fee_rate
+    if commitment_fee_rate < DEFAULT_COMMITMENT_FEE_RATE {
+        return Err(ProcessingChannelError::InvalidParameter(format!(
+            "Commitment fee rate is less than {}",
+            DEFAULT_COMMITMENT_FEE_RATE,
+        )));
+    }
+    let commitment_fee = calculate_commitment_tx_fee(commitment_fee_rate, udt_type_script);
+    let reserved_fee = reserved_ckb_amount - occupied_capacity;
+    if commitment_fee * 2 > reserved_fee {
+        return Err(ProcessingChannelError::InvalidParameter(format!(
+                "Commitment fee {} which calculated by commitment fee rate {} is larger than half of reserved fee {}",
+                commitment_fee, commitment_fee_rate, reserved_fee
+            )));
+    }
+
+    // commitment_delay_epoch
+    let epoch = EpochNumberWithFraction::from_full_value_unchecked(commitment_delay_epoch);
+    if !epoch.is_well_formed() {
+        return Err(ProcessingChannelError::InvalidParameter(format!(
+            "Commitment delay epoch {} is not a valid value",
+            commitment_delay_epoch,
+        )));
+    }
+
+    let min = EpochNumberWithFraction::new(MIN_COMMITMENT_DELAY_EPOCHS, 0, 1);
+    if epoch < min {
+        return Err(ProcessingChannelError::InvalidParameter(format!(
+            "Commitment delay epoch {} is less than the minimal value {}",
+            epoch, min
+        )));
+    }
+
+    let max = EpochNumberWithFraction::new(MAX_COMMITMENT_DELAY_EPOCHS, 0, 1);
+    if epoch > max {
+        return Err(ProcessingChannelError::InvalidParameter(format!(
+            "Commitment delay epoch {} is greater than the maximal value {}",
+            epoch, max
+        )));
+    }
+
+    // max_tlc_number_in_flight
+    if max_tlc_number_in_flight > SYS_MAX_TLC_NUMBER_IN_FLIGHT {
+        return Err(ProcessingChannelError::InvalidParameter(format!(
+            "Max TLC number in flight {} is greater than the system maximal value {}",
+            max_tlc_number_in_flight, SYS_MAX_TLC_NUMBER_IN_FLIGHT
+        )));
+    }
+
+    Ok(())
 }

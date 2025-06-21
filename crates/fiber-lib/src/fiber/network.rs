@@ -45,17 +45,14 @@ use tokio_util::task::TaskTracker;
 use tracing::{debug, error, info, trace, warn};
 
 use super::channel::{
-    get_funding_and_reserved_amount, occupied_capacity, AcceptChannelParameter,
-    AwaitingTxSignaturesFlags, ChannelActor, ChannelActorMessage, ChannelActorStateStore,
-    ChannelCommand, ChannelCommandWithId, ChannelEvent, ChannelInitializationParameter,
-    ChannelState, ChannelSubscribers, ChannelTlcInfo, OpenChannelParameter, PrevTlcInfo,
-    ProcessingChannelError, ProcessingChannelResult, PublicChannelInfo, RemoveTlcCommand,
-    RevocationData, SettlementData, ShuttingDownFlags, StopReason, DEFAULT_COMMITMENT_FEE_RATE,
-    DEFAULT_FEE_RATE, DEFAULT_MAX_TLC_VALUE_IN_FLIGHT, MAX_COMMITMENT_DELAY_EPOCHS,
-    MAX_TLC_NUMBER_IN_FLIGHT, MIN_COMMITMENT_DELAY_EPOCHS, SYS_MAX_TLC_NUMBER_IN_FLIGHT,
+    get_funding_and_reserved_amount, AcceptChannelParameter, AwaitingTxSignaturesFlags,
+    ChannelActor, ChannelActorMessage, ChannelActorStateStore, ChannelCommand,
+    ChannelCommandWithId, ChannelEvent, ChannelInitializationParameter, ChannelState,
+    ChannelSubscribers, ChannelTlcInfo, OpenChannelParameter, PrevTlcInfo, ProcessingChannelError,
+    ProcessingChannelResult, PublicChannelInfo, RemoveTlcCommand, RevocationData, SettlementData,
+    ShuttingDownFlags, StopReason, DEFAULT_MAX_TLC_VALUE_IN_FLIGHT, MAX_TLC_NUMBER_IN_FLIGHT,
 };
 use super::config::{AnnouncedNodeName, MIN_TLC_EXPIRY_DELTA};
-use super::fee::calculate_commitment_tx_fee;
 use super::gossip::{GossipActorMessage, GossipMessageStore, GossipMessageUpdates};
 use super::graph::{
     NetworkGraph, NetworkGraphStateStore, OwnedChannelUpdateEvent, RouterHop, SessionRoute,
@@ -78,6 +75,7 @@ use crate::fiber::channel::{
     AddTlcCommand, AddTlcResponse, ShutdownCommand, TxCollaborationCommand, TxUpdateCommand,
 };
 use crate::fiber::config::{DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT};
+use crate::fiber::fee::check_open_channel_parameters;
 use crate::fiber::gossip::{GossipConfig, GossipService, SubscribableGossipMessageStore};
 use crate::fiber::graph::{PaymentSession, PaymentSessionStatus};
 use crate::fiber::serde_utils::EntityHex;
@@ -2441,12 +2439,14 @@ where
             max_tlc_value_in_flight,
             max_tlc_number_in_flight,
         } = open_channel;
+
         let remote_pubkey =
             self.get_peer_pubkey(&peer_id)
                 .ok_or(ProcessingChannelError::InvalidParameter(format!(
                     "Peer {:?} pubkey not found",
                     &peer_id
                 )))?;
+
         if let Some(udt_type_script) = funding_udt_type_script.as_ref() {
             if !check_udt_script(udt_type_script) {
                 return Err(ProcessingChannelError::InvalidParameter(
@@ -2788,85 +2788,6 @@ where
 
     fn get_peer_pubkey(&self, peer_id: &PeerId) -> Option<Pubkey> {
         self.state_to_be_persisted.get_peer_pubkey(peer_id)
-    }
-
-    // TODO: this fn is duplicated with ChannelActorState::check_open_channel_parameters, but is not easy to refactor, just keep it for now.
-    fn check_open_channel_parameters(
-        &self,
-        open_channel: &OpenChannel,
-    ) -> Result<(), ProcessingChannelError> {
-        let udt_type_script = &open_channel.funding_udt_type_script;
-
-        // reserved_ckb_amount
-        let occupied_capacity =
-            occupied_capacity(&open_channel.shutdown_script, udt_type_script)?.as_u64();
-        if open_channel.reserved_ckb_amount < occupied_capacity {
-            return Err(ProcessingChannelError::InvalidParameter(format!(
-                "Reserved CKB amount {} is less than {}",
-                open_channel.reserved_ckb_amount, occupied_capacity,
-            )));
-        }
-
-        // funding_fee_rate
-        if open_channel.funding_fee_rate < DEFAULT_FEE_RATE {
-            return Err(ProcessingChannelError::InvalidParameter(format!(
-                "Funding fee rate is less than {}",
-                DEFAULT_FEE_RATE,
-            )));
-        }
-
-        // commitment_fee_rate
-        if open_channel.commitment_fee_rate < DEFAULT_COMMITMENT_FEE_RATE {
-            return Err(ProcessingChannelError::InvalidParameter(format!(
-                "Commitment fee rate is less than {}",
-                DEFAULT_COMMITMENT_FEE_RATE,
-            )));
-        }
-        let commitment_fee =
-            calculate_commitment_tx_fee(open_channel.commitment_fee_rate, udt_type_script);
-        let reserved_fee = open_channel.reserved_ckb_amount - occupied_capacity;
-        if commitment_fee * 2 > reserved_fee {
-            return Err(ProcessingChannelError::InvalidParameter(format!(
-                "Commitment fee {} which calculated by commitment fee rate {} is larger than half of reserved fee {}",
-                commitment_fee, open_channel.commitment_fee_rate, reserved_fee
-            )));
-        }
-
-        // commitment_delay_epoch
-        let epoch =
-            EpochNumberWithFraction::from_full_value_unchecked(open_channel.commitment_delay_epoch);
-        if !epoch.is_well_formed() {
-            return Err(ProcessingChannelError::InvalidParameter(format!(
-                "Commitment delay epoch {} is not a valid value",
-                open_channel.commitment_delay_epoch,
-            )));
-        }
-
-        let min = EpochNumberWithFraction::new(MIN_COMMITMENT_DELAY_EPOCHS, 0, 1);
-        if epoch < min {
-            return Err(ProcessingChannelError::InvalidParameter(format!(
-                "Commitment delay epoch {} is less than the minimal value {}",
-                epoch, min
-            )));
-        }
-
-        let max = EpochNumberWithFraction::new(MAX_COMMITMENT_DELAY_EPOCHS, 0, 1);
-        if epoch > max {
-            return Err(ProcessingChannelError::InvalidParameter(format!(
-                "Commitment delay epoch {} is greater than the maximal value {}",
-                epoch, max
-            )));
-        }
-
-        // max_tlc_number_in_flight
-        if open_channel.max_tlc_number_in_flight > SYS_MAX_TLC_NUMBER_IN_FLIGHT {
-            return Err(ProcessingChannelError::InvalidParameter(format!(
-                "Max TLC number in flight {} is greater than the system maximal value {}",
-                open_channel.max_tlc_number_in_flight, SYS_MAX_TLC_NUMBER_IN_FLIGHT
-            )));
-        }
-
-        Ok(())
     }
 
     async fn send_fiber_message_to_session(
@@ -3233,16 +3154,15 @@ where
         peer_id: PeerId,
         open_channel: OpenChannel,
     ) -> ProcessingChannelResult {
-        self.check_open_channel_parameters(&open_channel)?;
-
-        if let Some(udt_type_script) = &open_channel.funding_udt_type_script {
-            if !check_udt_script(udt_type_script) {
-                return Err(ProcessingChannelError::InvalidParameter(format!(
-                    "Invalid UDT type script: {:?}",
-                    udt_type_script
-                )));
-            }
-        }
+        check_open_channel_parameters(
+            &open_channel.funding_udt_type_script,
+            &open_channel.shutdown_script,
+            open_channel.reserved_ckb_amount,
+            open_channel.funding_fee_rate,
+            open_channel.commitment_fee_rate,
+            open_channel.commitment_delay_epoch,
+            open_channel.max_tlc_number_in_flight,
+        )?;
 
         let id = open_channel.channel_id;
         if let Some(channel) = self.to_be_accepted_channels.get(&id) {
