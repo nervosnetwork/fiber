@@ -12,6 +12,7 @@ use std::path::Path;
 
 use super::db_migrate::DbMigrate;
 use super::schema::*;
+use crate::fiber::graph::AttemptStatus;
 use crate::fiber::types::CURSOR_SIZE;
 use crate::fiber::{gossip::GossipMessageStore, graph::HoldTlc};
 #[cfg(feature = "watchtower")]
@@ -22,7 +23,7 @@ use crate::{
 use crate::{
     fiber::{
         channel::{ChannelActorState, ChannelActorStateStore, ChannelState},
-        graph::{Attempt, NetworkGraphStateStore, PayStatus, PaymentSession},
+        graph::{Attempt, NetworkGraphStateStore, PaymentSession, PaymentStatus},
         history::{Direction, TimedResult},
         network::{NetworkActorStateStore, PaymentCustomRecords, PersistentNetworkActorState},
         types::{BroadcastMessage, BroadcastMessageID, Cursor, Hash256},
@@ -551,7 +552,7 @@ impl NetworkGraphStateStore for Store {
             .map(|session: PaymentSession| session.init_attempts(self))
     }
 
-    fn get_payment_sessions_with_status(&self, status: PayStatus) -> Vec<PaymentSession> {
+    fn get_payment_sessions_with_status(&self, status: PaymentStatus) -> Vec<PaymentSession> {
         let prefix = [PAYMENT_SESSION_PREFIX];
         self.prefix_iterator(&prefix)
             .filter_map(|(_key, value)| {
@@ -608,12 +609,12 @@ impl NetworkGraphStateStore for Store {
         batch.commit();
     }
 
-    fn get_attempts_with_status(&self, status: PayStatus) -> Vec<Attempt> {
+    fn get_attempts_with_statuses(&self, status: &[AttemptStatus]) -> Vec<Attempt> {
         let prefix = [ATTEMPT_PREFIX];
         self.prefix_iterator(&prefix)
             .filter_map(|(_key, value)| {
                 let attempt: Attempt = deserialize_from(value.as_ref(), "Attempt");
-                if attempt.status == status {
+                if status.contains(&attempt.status) {
                     Some(attempt)
                 } else {
                     None

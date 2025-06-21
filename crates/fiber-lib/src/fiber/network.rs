@@ -84,7 +84,7 @@ use crate::fiber::config::{
     PAYMENT_MAX_PARTS_LIMIT,
 };
 use crate::fiber::gossip::{GossipConfig, GossipService, SubscribableGossipMessageStore};
-use crate::fiber::graph::{GraphChannelStat, PayStatus, PaymentSession};
+use crate::fiber::graph::{AttemptStatus, GraphChannelStat, PaymentSession, PaymentStatus};
 use crate::fiber::serde_utils::EntityHex;
 use crate::fiber::types::{
     FiberChannelMessage, PaymentOnionPacket, PeeledPaymentOnionPacket, TlcErrPacket, TxSignatures,
@@ -169,7 +169,7 @@ pub struct AcceptChannelResponse {
 #[derive(Debug)]
 pub struct SendPaymentResponse {
     pub payment_hash: Hash256,
-    pub status: PayStatus,
+    pub status: PaymentStatus,
     pub created_at: u64,
     pub last_updated_at: u64,
     pub failed_error: Option<String>,
@@ -1085,7 +1085,10 @@ where
                     .expect(ASSUME_NETWORK_MYSELF_ALIVE);
 
                 // retry related payment attempts for this channel
-                for attempt in self.store.get_attempts_with_status(PayStatus::Created) {
+                for attempt in self
+                    .store
+                    .get_attempts_with_statuses(&[AttemptStatus::Created, AttemptStatus::Retrying])
+                {
                     if attempt.first_hop_channel_outpoint_eq(&channel_outpoint) {
                         debug!(
                             "Now retrying payment attempt {:?} for channel {:?} reestablished",
@@ -2067,7 +2070,7 @@ where
         session: &mut PaymentSession,
         attempt: &mut Attempt,
     ) -> Result<(), Error> {
-        assert!(attempt.is_retryable());
+        assert!(attempt.is_retrying());
         let graph = self.network_graph.read().await;
         // `session.remain_amount()` do not contains this part of amount,
         // so we need to add the receiver amount to it, so we may make fewer
@@ -2437,7 +2440,7 @@ where
         };
 
         match self.store.get_attempt(session.payment_hash(), attempt_id) {
-            Some(mut attempt) if attempt.is_retryable() => {
+            Some(mut attempt) if attempt.is_retrying() => {
                 match self
                     .resend_payment_attempt(myself, state, session, &mut attempt)
                     .await
@@ -2575,7 +2578,7 @@ where
         // initialize the payment session in db and begin the payment process lifecycle
         if let Some(payment_session) = self.store.get_payment_session(payment_data.payment_hash) {
             // we only allow retrying payment session with status failed
-            if payment_session.status != PayStatus::Failed {
+            if payment_session.status != PaymentStatus::Failed {
                 return Err(Error::InvalidParameter(format!(
                     "Payment session already exists: {} with payment session status: {:?}",
                     payment_data.payment_hash, payment_session.status

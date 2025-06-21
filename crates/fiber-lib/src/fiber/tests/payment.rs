@@ -4,7 +4,7 @@ use crate::fiber::config::DEFAULT_TLC_EXPIRY_DELTA;
 use crate::fiber::config::DEFAULT_TLC_FEE_PROPORTIONAL_MILLIONTHS;
 use crate::fiber::config::MAX_PAYMENT_TLC_EXPIRY_LIMIT;
 use crate::fiber::config::MIN_TLC_EXPIRY_DELTA;
-use crate::fiber::graph::PayStatus;
+use crate::fiber::graph::PaymentStatus;
 use crate::fiber::graph::SessionRoute;
 use crate::fiber::hash_algorithm::HashAlgorithm;
 use crate::fiber::network::*;
@@ -75,7 +75,7 @@ async fn test_send_payment_custom_records() {
         .expect("node_a alive")
         .unwrap();
 
-    assert_eq!(res.status, PayStatus::Success);
+    assert_eq!(res.status, PaymentStatus::Success);
     let got_custom_records = node_1
         .get_payment_custom_records(&payment_hash)
         .expect("custom records");
@@ -402,7 +402,7 @@ async fn test_send_payment_for_pay_self() {
     let payment_hash = res.payment_hash;
     node_0.wait_until_success(payment_hash).await;
     node_0
-        .assert_payment_status(payment_hash, PayStatus::Success, Some(1))
+        .assert_payment_status(payment_hash, PaymentStatus::Success, Some(1))
         .await;
 
     let node_0_balance1 = node_0.get_local_balance_from_channel(channels[0]);
@@ -468,7 +468,7 @@ async fn test_send_payment_for_pay_self_with_two_nodes() {
     let payment_hash = res.payment_hash;
     node_0.wait_until_success(payment_hash).await;
     node_0
-        .assert_payment_status(payment_hash, PayStatus::Success, Some(1))
+        .assert_payment_status(payment_hash, PaymentStatus::Success, Some(1))
         .await;
 
     let node_0_balance1 = node_0.get_local_balance_from_channel(channels[0]);
@@ -537,7 +537,7 @@ async fn test_send_payment_with_more_capacity_for_payself() {
     let payment_hash = res.payment_hash;
     node_0.wait_until_success(payment_hash).await;
     node_0
-        .assert_payment_status(payment_hash, PayStatus::Success, Some(1))
+        .assert_payment_status(payment_hash, PaymentStatus::Success, Some(1))
         .await;
 
     let node_0_balance1 = node_0.get_local_balance_from_channel(channels[0]);
@@ -882,7 +882,7 @@ async fn test_send_payment_with_private_channel_hints_fallback() {
     // will first use the private channel, then send payment retry will fallback to public channel
     source_node.wait_until_success(payment_hash).await;
     source_node
-        .assert_payment_status(payment_hash, PayStatus::Success, Some(2))
+        .assert_payment_status(payment_hash, PaymentStatus::Success, Some(2))
         .await;
 }
 
@@ -1509,7 +1509,7 @@ async fn test_send_payment_with_route_to_self_with_specified_router() {
     let payment_hash = res.payment_hash;
     node_0.wait_until_success(payment_hash).await;
     node_0
-        .assert_payment_status(payment_hash, PayStatus::Success, Some(1))
+        .assert_payment_status(payment_hash, PaymentStatus::Success, Some(1))
         .await;
 
     let node_0_balance1 = node_0.get_local_balance_from_channel(channels[0]);
@@ -2068,10 +2068,10 @@ async fn test_network_send_payment_randomly_send_each_other() {
             &node_b.network_actor
         };
         let res = call!(network, message).expect("node_a alive").unwrap();
-        if res.status == PayStatus::Success {
+        if res.status == PaymentStatus::Success {
             assert!(matches!(
                 create_status,
-                PayStatus::Created | PayStatus::Inflight
+                PaymentStatus::Created | PaymentStatus::Inflight
             ));
             eprintln!(
                 "{} payment_hash: {:?} success with amount: {} create_status: {:?}",
@@ -2299,7 +2299,7 @@ async fn test_send_payment_bench_test() {
         for payment_hash in all_sent.clone().iter() {
             let status = node_0.get_payment_status(*payment_hash).await;
             eprintln!("got payment: {:?} status: {:?}", payment_hash, status);
-            if status == PayStatus::Success {
+            if status == PaymentStatus::Success {
                 eprintln!("payment_hash: {:?} success", payment_hash);
                 all_sent.remove(payment_hash);
             }
@@ -2943,7 +2943,7 @@ async fn test_send_payment_middle_hop_update_fee_multiple_payments() {
         for payment_hash in all_sent.clone().iter() {
             let status = nodes[0].get_payment_status(*payment_hash).await;
             //eprintln!("got payment: {:?} status: {:?}", payment_hash, status);
-            if status == PayStatus::Failed || status == PayStatus::Success {
+            if status == PaymentStatus::Failed || status == PaymentStatus::Success {
                 eprintln!("payment_hash: {:?} got status : {:?}", payment_hash, status);
                 all_sent.remove(payment_hash);
             }
@@ -3011,10 +3011,10 @@ async fn test_send_payment_middle_hop_update_fee_should_recovery() {
 
         for payment_hash in all_sent.clone().iter() {
             let status = nodes[0].get_payment_status(*payment_hash).await;
-            if status == PayStatus::Success || status == PayStatus::Failed {
+            if status == PaymentStatus::Success || status == PaymentStatus::Failed {
                 eprintln!("payment_hash: {:?} got status : {:?}", payment_hash, status);
                 all_sent.remove(payment_hash);
-                if status == PayStatus::Success {
+                if status == PaymentStatus::Success {
                     succ_count += 1;
                 }
             }
@@ -3034,7 +3034,7 @@ async fn test_send_payment_middle_hop_update_fee_should_recovery() {
 async fn run_complex_network_with_params(
     funding_amount: u128,
     payment_amount_gen: impl Fn() -> u128,
-) -> Vec<(Hash256, PayStatus)> {
+) -> Vec<(Hash256, PaymentStatus)> {
     init_tracing();
 
     let nodes_num = 6;
@@ -3079,7 +3079,7 @@ async fn run_complex_network_with_params(
         for (i, payment_hash) in all_sent.clone().into_iter() {
             let status = nodes[i].get_payment_status(payment_hash).await;
             eprintln!("payment_hash: {:?} got status : {:?}", payment_hash, status);
-            if matches!(status, PayStatus::Success | PayStatus::Failed) {
+            if matches!(status, PaymentStatus::Success | PaymentStatus::Failed) {
                 result.push((payment_hash, status));
                 all_sent.remove(&(i, payment_hash));
             }
@@ -3499,7 +3499,7 @@ async fn test_send_payment_complex_network_payself_all_succeed() {
     let res = run_complex_network_with_params(MIN_RESERVED_CKB + 100000000, || 1000).await;
     let failed_count = res
         .iter()
-        .filter(|(_, status)| *status == PayStatus::Failed)
+        .filter(|(_, status)| *status == PaymentStatus::Failed)
         .count();
 
     assert_eq!(failed_count, 0);
@@ -3518,12 +3518,12 @@ async fn test_send_payment_complex_network_payself_amount_exceeded() {
     // some may failed and some may success
     let failed_count = res
         .iter()
-        .filter(|(_, status)| *status == PayStatus::Failed)
+        .filter(|(_, status)| *status == PaymentStatus::Failed)
         .count();
     assert!(failed_count > 0);
     let succ_count = res
         .iter()
-        .filter(|(_, status)| *status == PayStatus::Success)
+        .filter(|(_, status)| *status == PaymentStatus::Success)
         .count();
     assert!(succ_count > 0);
 }
@@ -3565,7 +3565,7 @@ async fn test_send_payment_with_one_node_stop() {
         for payment_hash in all_sent.clone().iter() {
             let res = nodes[0].get_payment_result(*payment_hash).await;
             eprintln!("payment_hash: {:?} status: {:?}", payment_hash, res.status);
-            if res.status == PayStatus::Failed {
+            if res.status == PaymentStatus::Failed {
                 failed_count += 1;
                 all_sent.remove(payment_hash);
             }
@@ -3632,7 +3632,7 @@ async fn test_send_payment_shutdown_with_force() {
                 "payment_hash: {:?} status: {:?} failed_count: {:?}",
                 payment_hash, res.status, failed_count
             );
-            if res.status == PayStatus::Failed {
+            if res.status == PaymentStatus::Failed {
                 failed_count += 1;
                 all_sent.remove(payment_hash);
             }
@@ -3707,7 +3707,7 @@ async fn test_send_payment_shutdown_cooperative() {
                 "payment_hash: {:?} status: {:?} failed_count: {:?}",
                 payment_hash, res.status, failed_count
             );
-            if res.status == PayStatus::Failed || res.status == PayStatus::Success {
+            if res.status == PaymentStatus::Failed || res.status == PaymentStatus::Success {
                 failed_count += 1;
                 all_sent.remove(payment_hash);
             }
@@ -3800,10 +3800,10 @@ async fn test_send_payment_shutdown_cooperative_sender_sent() {
                 "payment_hash: {:?} status: {:?} failed_count: {:?}",
                 payment_hash, res.status, failed_count
             );
-            if res.status == PayStatus::Failed {
+            if res.status == PaymentStatus::Failed {
                 failed_count += 1;
                 all_sent.remove(payment_hash);
-            } else if res.status == PayStatus::Success {
+            } else if res.status == PaymentStatus::Success {
                 succ_count += 1;
                 all_sent.remove(payment_hash);
             }
@@ -4144,7 +4144,7 @@ async fn test_send_payment_middle_hop_restart_will_be_ok() {
 
         nodes[0].wait_until_success(payment_hash).await;
         let status = nodes[0].get_payment_status(payment_hash).await;
-        assert_eq!(status, PayStatus::Success);
+        assert_eq!(status, PaymentStatus::Success);
 
         nodes[restart_node_index].restart().await;
 
@@ -4160,7 +4160,7 @@ async fn test_send_payment_middle_hop_restart_will_be_ok() {
 
         nodes[0].wait_until_success(payment_hash).await;
         let status = nodes[0].get_payment_status(payment_hash).await;
-        assert_eq!(status, PayStatus::Success);
+        assert_eq!(status, PaymentStatus::Success);
     }
     for restart_index in 1..=3 {
         let _ = inner_run_restart_test(restart_index).await;
@@ -4193,7 +4193,7 @@ async fn test_send_payment_middle_hop_stop_send_payment_then_start() {
 
         nodes[0].wait_until_success(payment_hash).await;
         let status = nodes[0].get_payment_status(payment_hash).await;
-        assert_eq!(status, PayStatus::Success);
+        assert_eq!(status, PaymentStatus::Success);
 
         nodes[restart_node_index].stop().await;
         tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
@@ -4207,7 +4207,7 @@ async fn test_send_payment_middle_hop_stop_send_payment_then_start() {
 
         nodes[0].wait_until_failed(payment_hash).await;
         let status = nodes[0].get_payment_status(payment_hash).await;
-        assert_eq!(status, PayStatus::Failed);
+        assert_eq!(status, PaymentStatus::Failed);
 
         tokio::time::sleep(tokio::time::Duration::from_millis(4 * 1000)).await;
 
@@ -4357,7 +4357,7 @@ async fn test_send_payment_remove_tlc_with_preimage_will_retry() {
             assert!(node_2.get_triggered_unexpected_events().await.is_empty());
             let status = node_0.get_payment_status(*payment_hash).await;
             eprintln!("payment_hash: {:?} got status : {:?}", payment_hash, status);
-            if status == PayStatus::Success {
+            if status == PaymentStatus::Success {
                 payments.remove(payment_hash);
             }
             tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
@@ -4447,10 +4447,10 @@ async fn test_send_payment_invoice_cancel_multiple_ops() {
         for payment_hash in payments.clone().iter() {
             let status = node_0.get_payment_status(*payment_hash).await;
             eprintln!("payment_hash: {:?} got status : {:?}", payment_hash, status);
-            if status == PayStatus::Failed {
+            if status == PaymentStatus::Failed {
                 payments.remove(payment_hash);
             }
-            assert_ne!(status, PayStatus::Success);
+            assert_ne!(status, PaymentStatus::Success);
             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         }
         if payments.is_empty() {
@@ -4707,9 +4707,9 @@ async fn test_send_payment_with_reconnect_two_times() {
             for payment_hash in payments.clone().iter() {
                 let status = node0.get_payment_status(*payment_hash).await;
                 eprintln!("payment_hash: {:?} got status : {:?}", payment_hash, status);
-                if status == PayStatus::Success || status == PayStatus::Failed {
+                if status == PaymentStatus::Success || status == PaymentStatus::Failed {
                     payments.remove(payment_hash);
-                } else if status == PayStatus::Created {
+                } else if status == PaymentStatus::Created {
                     // wait for the payment to be retried
                     let payment_session = node0.get_payment_session(*payment_hash).unwrap();
                     eprintln!(
