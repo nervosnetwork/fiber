@@ -1044,7 +1044,7 @@ where
                     return Err(ProcessingChannelError::PeelingOnionPacketError(
                         "TLC with no onion packet is not supported".to_string(),
                     )
-                    .into());
+                    .without_shared_secret());
                 }
             }
         }

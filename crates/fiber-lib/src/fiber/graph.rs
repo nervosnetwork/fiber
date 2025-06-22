@@ -2361,6 +2361,7 @@ impl From<PaymentSession> for SendPaymentResponse {
             session.remain_amount(),
         );
 
+        #[cfg(debug_assertions)]
         let attempts = session
             .attempts()
             .filter(|a| !a.is_failed())
