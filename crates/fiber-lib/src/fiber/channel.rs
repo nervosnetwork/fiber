@@ -1017,21 +1017,36 @@ where
     ) -> Result<(), ProcessingChannelErrorWithSharedSecret> {
         // If needed, shared secret also get be extracted from the encrypted onion packet:
         // - Extract public key from onion_packet[1..34]
-        // - Obtain share secret using DH Key Exchange from the public key and the network private key stored in the network actor state.
-        if let Some(peeled_onion_packet) = self
-            .try_add_tlc_peel_onion_packet(state, add_tlc)
+        // - Obtain share secret using DH Key Exchange from the public key
+        // and the network private key stored in the network actor state.
+        match self
+            .try_tlc_peel_onion_packet(state, add_tlc)
             .await
             .map_err(ProcessingChannelError::without_shared_secret)?
         {
-            let shared_secret = peeled_onion_packet.shared_secret;
-            self.apply_add_tlc_operation_with_peeled_onion_packet(
-                myself,
-                state,
-                add_tlc,
-                peeled_onion_packet,
-            )
-            .await
-            .map_err(move |err| err.with_shared_secret(shared_secret))?;
+            Some(peeled_onion_packet) => {
+                let shared_secret = peeled_onion_packet.shared_secret;
+                self.apply_add_tlc_operation_with_peeled_onion_packet(
+                    myself,
+                    state,
+                    add_tlc,
+                    peeled_onion_packet,
+                )
+                .await
+                .map_err(move |err| err.with_shared_secret(shared_secret))?;
+            }
+            None => {
+                // The TLC is with a NO_SHARED_SECRET and no onion packet.
+                // this may only happen in testing or development environment.
+                debug_assert!(add_tlc.onion_packet.is_none());
+                #[cfg(not(debug_assertions))]
+                {
+                    return Err(ProcessingChannelError::PeelingOnionPacketError(
+                        "TLC with no onion packet is not supported".to_string(),
+                    )
+                    .into());
+                }
+            }
         }
 
         if let Some(ref udt_type_script) = state.funding_udt_type_script {
@@ -1053,7 +1068,7 @@ where
         Ok(())
     }
 
-    async fn try_add_tlc_peel_onion_packet(
+    async fn try_tlc_peel_onion_packet(
         &self,
         state: &mut ChannelActorState,
         add_tlc: &TlcInfo,
@@ -1096,7 +1111,7 @@ where
                 return Err(ProcessingChannelError::TlcExpirySoon);
             }
 
-            // extract fields from onion packet
+            // extract MPP total payment fields from onion packet
             if let Some(tlc) = state.tlc_state.get_mut(&add_tlc.tlc_id) {
                 if let Some(record) = peeled_onion_packet
                     .current
