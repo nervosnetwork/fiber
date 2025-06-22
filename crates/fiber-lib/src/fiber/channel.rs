@@ -840,19 +840,10 @@ where
         .await;
     }
 
-    async fn try_to_settle_down_tlc(
-        &self,
-        myself: &ActorRef<ChannelActorMessage>,
-        state: &mut ChannelActorState,
-        tlc_id: TLCId,
-    ) {
+    async fn try_to_settle_down_tlc(&self, state: &mut ChannelActorState, tlc_id: TLCId) {
         let tlc_info = state.get_received_tlc(tlc_id).expect("expect tlc").clone();
 
-        let preimage = self.store.get_preimage(&tlc_info.payment_hash);
-
-        let preimage = if let Some(preimage) = preimage {
-            preimage
-        } else {
+        let Some(preimage) = self.store.get_preimage(&tlc_info.payment_hash) else {
             return;
         };
 
@@ -861,6 +852,19 @@ where
         });
 
         let tlc = tlc_info.clone();
+        // load hold tlcs
+        let mut tlcs: Vec<_> = self
+            .store
+            .get_hold_tlc_set(tlc.payment_hash)
+            .iter()
+            .filter_map(|hold_tlc| {
+                let state = self.store.get_channel_actor_state(&hold_tlc.channel_id)?;
+                let tlc_id = TLCId::Received(hold_tlc.tlc_id);
+                state.get_received_tlc(tlc_id).cloned()
+            })
+            .collect();
+        tlcs.push(tlc.clone());
+
         if let Some(invoice) = self.store.get_invoice(&tlc.payment_hash) {
             let status = self.get_invoice_status(&invoice);
             match status {
@@ -880,32 +884,14 @@ where
                     // we have already checked invoice status in apply_add_tlc_operation_with_peeled_onion_packet
                     // this maybe happened when process is killed and restart
                     error!("invoice already paid, ignore");
+                    return;
                 }
                 _ if invoice.allow_mpp() => {
-                    // load hold tlcs
-                    let mut tlcs: Vec<_> = self
-                        .store
-                        .get_hold_tlc_set(tlc.payment_hash)
-                        .iter()
-                        .filter_map(|hold_tlc| {
-                            let state = self.store.get_channel_actor_state(&hold_tlc.channel_id)?;
-                            let tlc_id = TLCId::Received(hold_tlc.tlc_id);
-                            state.get_received_tlc(tlc_id).cloned()
-                        })
-                        .collect();
-                    tlcs.push(tlc.clone());
-
                     // invoice status will be updated to paid after apply remove tlc operation
                     let total_amount = tlc.total_amount.unwrap_or(tlc.amount);
                     let total_tlc_amount = tlcs.iter().map(|tlc| tlc.amount).sum::<u128>();
                     let is_fulfilled = total_tlc_amount >= total_amount;
-                    debug!(
-                        "yukang invoice.allow_mpp() = {}, is_fulfilled = {}",
-                        invoice.allow_mpp(),
-                        is_fulfilled
-                    );
-
-                    if is_fulfilled {
+                    if !is_fulfilled {
                         // hold the tlc if support MPP and invoice is not fulfilled
                         self.store.insert_hold_tlc(
                             tlc.payment_hash,
@@ -916,38 +902,32 @@ where
                                     + DEFAULT_HOLD_TLC_TIMEOUT,
                             },
                         );
-                    } else {
-                        for tlc in tlcs {
-                            let (send, _recv) =
-                                oneshot::channel::<Result<(), ProcessingChannelError>>();
-                            let port = RpcReplyPort::from(send);
-                            self.network
-                                .send_message(NetworkActorMessage::new_command(
-                                    NetworkActorCommand::ControlFiberChannel(
-                                        ChannelCommandWithId {
-                                            channel_id: tlc.channel_id,
-                                            command: ChannelCommand::RemoveTlc(
-                                                RemoveTlcCommand {
-                                                    id: tlc.tlc_id.into(),
-                                                    reason: remove_reason.clone(),
-                                                },
-                                                port,
-                                            ),
-                                        },
-                                    ),
-                                ))
-                                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-                        }
+                        return;
                     }
-                    return;
                 }
                 _ => {
                     // single path payment
                 }
             }
         }
-        self.register_retryable_tlc_remove(myself, state, tlc.tlc_id, remove_reason.clone())
-            .await;
+        for tlc in tlcs {
+            let (send, _recv) = oneshot::channel::<Result<(), ProcessingChannelError>>();
+            let port = RpcReplyPort::from(send);
+            self.network
+                .send_message(NetworkActorMessage::new_command(
+                    NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
+                        channel_id: tlc.channel_id,
+                        command: ChannelCommand::RemoveTlc(
+                            RemoveTlcCommand {
+                                id: tlc.tlc_id.into(),
+                                reason: remove_reason.clone(),
+                            },
+                            port,
+                        ),
+                    }),
+                ))
+                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+        }
     }
 
     async fn apply_add_tlc_operation(
@@ -961,7 +941,7 @@ where
         // - Obtain share secret using DH Key Exchange from the public key
         // and the network private key stored in the network actor state.
         match self
-            .try_tlc_peel_onion_packet(state, add_tlc)
+            .try_peel_tlc_onion_packet(state, add_tlc)
             .await
             .map_err(ProcessingChannelError::without_shared_secret)?
         {
@@ -1003,14 +983,13 @@ where
         // we don't need to settle down the tlc if it is not the last hop here,
         // some e2e tests are calling AddTlc manually, so we can not use onion packet to
         // check whether it's the last hop here, maybe need to revisit in future.
-        self.try_to_settle_down_tlc(myself, state, add_tlc.tlc_id)
-            .await;
+        self.try_to_settle_down_tlc(state, add_tlc.tlc_id).await;
 
         warn!("finished check tlc for peer message: {:?}", &add_tlc.tlc_id);
         Ok(())
     }
 
-    async fn try_tlc_peel_onion_packet(
+    async fn try_peel_tlc_onion_packet(
         &self,
         state: &mut ChannelActorState,
         add_tlc: &TlcInfo,
@@ -1054,7 +1033,7 @@ where
 
             let invoice = self.store.get_invoice(&payment_hash);
             if let Some(ref invoice) = invoice {
-                let invoice_status = self.get_invoice_status(&invoice);
+                let invoice_status = self.get_invoice_status(invoice);
                 if !matches!(
                     invoice_status,
                     CkbInvoiceStatus::Open | CkbInvoiceStatus::Received
@@ -1064,27 +1043,39 @@ where
             }
 
             // extract MPP total payment fields from onion packet
-            if let Some(tlc) = state.tlc_state.get_mut(&add_tlc.tlc_id) {
-                if let Some(record) = peeled_onion_packet
-                    .current
-                    .custom_records
-                    .as_ref()
-                    .and_then(PaymentDataRecord::read)
-                {
-                    if let Some(ref invoice) = invoice {
-                        if record.total_amount < invoice.amount.unwrap_or_default() {
-                            return Err(ProcessingChannelError::FinalIncorrectHTLCAmount);
-                        }
-                        if invoice.allow_mpp() {
-                            let payment_secret = invoice.payment_secret();
-                            if payment_secret.is_some_and(|s| s != &record.payment_secret) {
+            if invoice.as_ref().is_some_and(|invoice| invoice.allow_mpp()) {
+                if let Some(tlc) = state.tlc_state.get_mut(&add_tlc.tlc_id) {
+                    match peeled_onion_packet
+                        .current
+                        .custom_records
+                        .as_ref()
+                        .and_then(PaymentDataRecord::read)
+                    {
+                        Some(record) => {
+                            if let Some(ref invoice) = invoice {
+                                if record.total_amount < invoice.amount.unwrap_or_default() {
+                                    return Err(ProcessingChannelError::FinalIncorrectHTLCAmount);
+                                }
+
+                                let payment_secret = invoice.payment_secret();
+                                if payment_secret.is_some_and(|s| s != &record.payment_secret) {
+                                    return Err(ProcessingChannelError::FinalIncorrectPreimage);
+                                }
+
+                                tlc.payment_secret = Some(record.payment_secret);
+                                tlc.total_amount = Some(record.total_amount);
+                            } else {
+                                // if the onion packet contains MPP total payment fields,
+                                // but the invoice is not found, return proper error
                                 return Err(ProcessingChannelError::FinalIncorrectPreimage);
                             }
                         }
+                        None => {
+                            // if the onion packet doesn't contain MPP total payment fields,
+                            // return proper error
+                            return Err(ProcessingChannelError::FinalIncorrectPreimage);
+                        }
                     }
-
-                    tlc.payment_secret = Some(record.payment_secret);
-                    tlc.total_amount = Some(record.total_amount);
                 }
             }
 
