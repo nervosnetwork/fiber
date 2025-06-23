@@ -898,15 +898,17 @@ where
                     } else {
                         let total_amount = tlc.total_amount.unwrap_or(tlc.amount);
                         let total_tlc_amount = tlcs.iter().map(|tlc| tlc.amount).sum::<u128>();
-                        debug!(
-                            "checking total_tlc_amount: {}, total_amount: {}",
-                            total_tlc_amount, total_amount
-                        );
                         let is_fulfilled = total_tlc_amount >= total_amount;
                         if !is_fulfilled {
                             // hold the tlc if support MPP and invoice is not fulfilled
-                            debug!("hold tlc for MPP: channel_id: {:?} tlc_id: {:?} payment_hash: {:?}",
-                                    state.get_id(), tlc.tlc_id, tlc.payment_hash);
+                            debug!(
+                                "hold tlc for MPP: channel_id: {:?} tlc_id: {:?} payment_hash: {:?} total_tlc_amount: {:?} total_amount: {:?}",
+                                state.get_id(),
+                                tlc.tlc_id,
+                                tlc.payment_hash,
+                                total_tlc_amount,
+                                total_amount
+                            );
                             self.store.insert_hold_tlc(
                                 tlc.payment_hash,
                                 HoldTlc {
