@@ -905,6 +905,8 @@ where
                         let is_fulfilled = total_tlc_amount >= total_amount;
                         if !is_fulfilled {
                             // hold the tlc if support MPP and invoice is not fulfilled
+                            debug!("hold tlc for MPP: channel_id: {:?} tlc_id: {:?} payment_hash: {:?}",
+                                    state.get_id(), tlc.tlc_id, tlc.payment_hash);
                             self.store.insert_hold_tlc(
                                 tlc.payment_hash,
                                 HoldTlc {
