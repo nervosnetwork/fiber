@@ -236,6 +236,10 @@ pub enum NetworkActorCommand {
     MaintainConnections,
     // Check all channels and see if we need to force close any of them or settle down tlc with preimage.
     CheckChannels,
+    // Timeout a hold tlc
+    TimeoutHoldTlc(Hash256, Hash256, u64),
+    // Settle MPP tlc set
+    SettleMPPTlcSet(Hash256),
     // For internal use and debugging only. Most of the messages requires some
     // changes to local state. Even if we can send a message to a peer, some
     // part of the local state is not changed.
@@ -1330,88 +1334,11 @@ where
             NetworkActorCommand::CheckChannels => {
                 let now = now_timestamp_as_millis_u64();
 
-                // group hold tlcs by channel id
-                let mut hold_tlcs_by_channel = HashMap::new();
-                for (payment_hash, hold_tlcs) in self.store.list_all_hold_tlcs() {
-                    for hold_tlc in hold_tlcs {
-                        hold_tlcs_by_channel
-                            .entry(hold_tlc.channel_id)
-                            .or_insert_with(Vec::new)
-                            .push((payment_hash, hold_tlc));
-                    }
-                }
-
                 for (_peer_id, channel_id, channel_state) in self.store.get_channel_states(None) {
                     if matches!(channel_state, ChannelState::ChannelReady) {
                         if let Some(actor_state) = self.store.get_channel_actor_state(&channel_id) {
                             if actor_state.reestablishing {
                                 continue;
-                            }
-
-                            // get hold tlcs for this channel
-                            let hold_tlcs =
-                                hold_tlcs_by_channel.remove(&channel_id).unwrap_or_default();
-
-                            for (payment_hash, hold_tlc) in hold_tlcs {
-                                let Some(tlc) =
-                                    actor_state.tlc_state.get(&TLCId::Received(hold_tlc.tlc_id))
-                                else {
-                                    // unhold if tlc not found
-                                    // this should not happen, but even it happens, we can handle it
-                                    warn!(
-                                        "Hold tlc {:?} (payment hash {:?}) for channel {:?} not found, unhold",
-                                        hold_tlc.tlc_id, payment_hash, channel_id
-                                    );
-                                    self.store.remove_hold_tlc(
-                                        &payment_hash,
-                                        &hold_tlc.channel_id,
-                                        hold_tlc.tlc_id,
-                                    );
-                                    continue;
-                                };
-
-                                // check hold timeout
-                                if hold_tlc.hold_expire_at < now {
-                                    debug!(
-                                        "Remove timeout hold tlc payment hash {:?} tlc id {:?}",
-                                        tlc.payment_hash,
-                                        tlc.id()
-                                    );
-                                    self.store.remove_hold_tlc(
-                                        &tlc.payment_hash,
-                                        &hold_tlc.channel_id,
-                                        hold_tlc.tlc_id,
-                                    );
-                                    let (send, _recv) = oneshot::channel();
-                                    let rpc_reply = RpcReplyPort::from(send);
-                                    if let Err(err) = state
-                                        .send_command_to_channel(
-                                            channel_id,
-                                            ChannelCommand::RemoveTlc(
-                                                RemoveTlcCommand {
-                                                    id: tlc.id(),
-                                                    reason: RemoveTlcReason::RemoveTlcFail(
-                                                        TlcErrPacket::new(
-                                                            TlcErr::new(
-                                                                TlcErrorCode::HoldTlcTimeout,
-                                                            ),
-                                                            &tlc.shared_secret,
-                                                        ),
-                                                    ),
-                                                },
-                                                rpc_reply,
-                                            ),
-                                        )
-                                        .await
-                                    {
-                                        error!(
-                                            "Failed to remove tlc {:?} for channel {:?}: {}",
-                                            tlc.id(),
-                                            channel_id,
-                                            err
-                                        );
-                                    }
-                                }
                             }
 
                             for tlc in actor_state.tlc_state.received_tlcs.get_committed_tlcs() {
@@ -1509,6 +1436,147 @@ where
                                 }
                             }
                         }
+                    }
+                }
+            }
+            NetworkActorCommand::SettleMPPTlcSet(payment_hash) => {
+                // load hold tlcs
+                let tlcs: Vec<_> = self
+                    .store
+                    .get_hold_tlc_set(payment_hash)
+                    .iter()
+                    .filter_map(|hold_tlc| {
+                        let state = self.store.get_channel_actor_state(&hold_tlc.channel_id)?;
+                        let tlc_id = TLCId::Received(hold_tlc.tlc_id);
+                        state.get_received_tlc(tlc_id).cloned()
+                    })
+                    .collect();
+
+                let Some(first_tlc) = tlcs.first() else {
+                    // no tlcs to settle
+                    return Ok(());
+                };
+
+                let mut tlc_fail = None;
+
+                // check if all tlcs have the same total amount
+                // if yes, check if tlc set are fulfilled
+                if tlcs
+                    .iter()
+                    .any(|t| t.total_amount != first_tlc.total_amount)
+                {
+                    error!("one tlc total_amount is not equal to current tlc total_amount");
+                    tlc_fail = Some(TlcErr::new(TlcErrorCode::IncorrectOrUnknownPaymentDetails));
+                } else {
+                    let total_amount = first_tlc.total_amount.unwrap_or(first_tlc.amount);
+                    let total_tlc_amount = tlcs.iter().map(|tlc| tlc.amount).sum::<u128>();
+                    debug!(
+                        "checking total_tlc_amount: {}, total_amount: {}",
+                        total_tlc_amount, total_amount
+                    );
+                    let is_fulfilled = total_tlc_amount >= total_amount;
+                    // wait for all tlcs to be fulfilled
+                    if !is_fulfilled {
+                        return Ok(());
+                    }
+                }
+
+                let Some(preimage) = self.store.get_preimage(&payment_hash) else {
+                    return Ok(());
+                };
+
+                // remove tlcs
+                for tlc in tlcs {
+                    let (send, _recv) = oneshot::channel();
+                    let rpc_reply = RpcReplyPort::from(send);
+                    let remove_reason = match tlc_fail.clone() {
+                        Some(tlc_fail) => RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
+                            tlc_fail,
+                            &tlc.shared_secret,
+                        )),
+                        None => RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+                            payment_preimage: preimage,
+                        }),
+                    };
+                    match state
+                        .send_command_to_channel(
+                            tlc.channel_id,
+                            ChannelCommand::RemoveTlc(
+                                RemoveTlcCommand {
+                                    id: tlc.id(),
+                                    reason: remove_reason,
+                                },
+                                rpc_reply,
+                            ),
+                        )
+                        .await
+                    {
+                        Ok(_) => {}
+                        Err(err) => {
+                            error!(
+                                "Failed to remove tlc {:?} for channel {:?}: {}",
+                                tlc.id(),
+                                tlc.channel_id,
+                                err
+                            );
+                        }
+                    }
+                }
+
+                // remove settled hold tlcs
+                self.store.remove_hold_tlc_set(&payment_hash);
+            }
+            NetworkActorCommand::TimeoutHoldTlc(payment_hash, channel_id, tlc_id) => {
+                debug!(
+                    "Remove timeout hold tlc payment hash {:?} tlc id {:?}",
+                    payment_hash, tlc_id
+                );
+                let channel_actor_state = self.store.get_channel_actor_state(&channel_id);
+                let tlc = channel_actor_state
+                    .as_ref()
+                    .and_then(|state| state.tlc_state.get(&TLCId::Received(tlc_id)));
+                let Some(tlc) = tlc else {
+                    warn!(
+                        "Failed to timeout tlc {:?} (payment hash {:?}) for channel {:?}: tlc not found",
+
+                        tlc_id, payment_hash, channel_id
+                    );
+                    // remove hold tlc from store
+                    self.store
+                        .remove_hold_tlc(&payment_hash, &channel_id, tlc_id);
+                    return Ok(());
+                };
+
+                let (send, _recv) = oneshot::channel();
+                let rpc_reply = RpcReplyPort::from(send);
+                match state
+                    .send_command_to_channel(
+                        channel_id,
+                        ChannelCommand::RemoveTlc(
+                            RemoveTlcCommand {
+                                id: tlc.id(),
+                                reason: RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
+                                    TlcErr::new(TlcErrorCode::HoldTlcTimeout),
+                                    &tlc.shared_secret,
+                                )),
+                            },
+                            rpc_reply,
+                        ),
+                    )
+                    .await
+                {
+                    Ok(_) => {
+                        // remove hold tlc from store
+                        self.store
+                            .remove_hold_tlc(&payment_hash, &channel_id, tlc_id);
+                    }
+                    Err(err) => {
+                        error!(
+                            "Failed to remove tlc {:?} for channel {:?}: {}",
+                            tlc.id(),
+                            channel_id,
+                            err
+                        );
                     }
                 }
             }
@@ -4134,6 +4202,27 @@ where
         myself.send_interval(CHECK_CHANNELS_INTERVAL, || {
             NetworkActorMessage::new_command(NetworkActorCommand::CheckChannels)
         });
+
+        // Trigger mmp tlc set fulfill check and hold tlc timeout
+        let now = now_timestamp_as_millis_u64();
+        for (payment_hash, hold_tlcs) in self.store.list_all_hold_tlcs() {
+            // timeout hold tlc
+            for hold_tlc in hold_tlcs {
+                let timeout = hold_tlc.hold_expire_at.saturating_sub(now).max(1000);
+                myself.send_after(Duration::from_millis(timeout), move || {
+                    NetworkActorMessage::new_command(NetworkActorCommand::TimeoutHoldTlc(
+                        payment_hash,
+                        hold_tlc.channel_id,
+                        hold_tlc.tlc_id,
+                    ))
+                });
+            }
+
+            // try settle mpp tlc set
+            myself.send_after(Duration::from_millis(1000), move || {
+                NetworkActorMessage::new_command(NetworkActorCommand::SettleMPPTlcSet(payment_hash))
+            });
+        }
         Ok(())
     }
 

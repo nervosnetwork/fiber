@@ -555,7 +555,7 @@ async fn test_mpp_tlc_set() {
     )
     .expect("create peeled packet");
 
-    let _add_tlc_result_1 = ractor::call!(source_node.network_actor, |rpc_reply| {
+    let add_tlc_result_1 = ractor::call!(source_node.network_actor, |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: channels[0],
@@ -578,7 +578,7 @@ async fn test_mpp_tlc_set() {
     .expect("node alive")
     .expect("tlc");
 
-    let _add_tlc_result_2 = ractor::call!(source_node.network_actor, |rpc_reply| {
+    let add_tlc_result_2 = ractor::call!(source_node.network_actor, |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: channels[1],
@@ -602,6 +602,21 @@ async fn test_mpp_tlc_set() {
     .expect("tlc");
 
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+    // wait tlc 1 is removed
+    while source_node
+        .get_tlc(channels[0], TLCId::Offered(add_tlc_result_1.tlc_id))
+        .is_some()
+    {
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    }
+    // wait tlc 2 is removed
+    while source_node
+        .get_tlc(channels[1], TLCId::Offered(add_tlc_result_2.tlc_id))
+        .is_some()
+    {
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    }
 
     let node_0_balance = source_node.get_local_balance_from_channel(channels[0]);
     let node_1_balance = node_1.get_local_balance_from_channel(channels[0]);
@@ -890,7 +905,20 @@ async fn test_mpp_tlc_set_total_amount_should_be_consistent() {
     .expect("node alive")
     .expect("tlc");
 
-    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+    // wait tlc 1 is fail
+    while source_node
+        .get_tlc(channels[0], TLCId::Offered(add_tlc_result_1.tlc_id))
+        .is_some_and(|tlc| tlc.removed_reason.is_none())
+    {
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    }
+    // wait tlc 2 is fail
+    while source_node
+        .get_tlc(channels[1], TLCId::Offered(add_tlc_result_2.tlc_id))
+        .is_some_and(|tlc| tlc.removed_reason.is_none())
+    {
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    }
 
     // check offered tlcs should be fail
     let tlc1 = source_node.get_tlc(channels[0], TLCId::Offered(add_tlc_result_1.tlc_id));
@@ -1174,12 +1202,6 @@ async fn test_mpp_tlc_set_timeout_1_of_2() {
         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
     }
 
-    // update tlc1 expire to a shorter time
-    for mut hold_tlc in node_1.store.get_hold_tlc_set(payment_hash) {
-        hold_tlc.hold_expire_at = now_timestamp_as_millis_u64() + 500;
-        node_1.store.insert_hold_tlc(payment_hash, hold_tlc);
-    }
-
     let add_tlc_result_2 = ractor::call!(source_node.network_actor, |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
@@ -1203,17 +1225,24 @@ async fn test_mpp_tlc_set_timeout_1_of_2() {
     .expect("node alive")
     .expect("tlc");
 
-    // sleep enough time to timeout hold tlc 1, but not tlc 2
-    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+    // wait tlc2 is hold
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
-    // check channels
-    ractor::cast!(
-        node_1.network_actor,
-        NetworkActorMessage::Command(NetworkActorCommand::CheckChannels)
-    )
-    .expect("node alive");
+    // timeout tlc 1, but not 2
+    for hold_tlc in node_1.store.get_hold_tlc_set(payment_hash) {
+        if hold_tlc.channel_id == channels[0] && hold_tlc.tlc_id == add_tlc_result_1.tlc_id {
+            ractor::cast!(
+                node_1.network_actor,
+                NetworkActorMessage::Command(NetworkActorCommand::TimeoutHoldTlc(
+                    payment_hash,
+                    hold_tlc.channel_id,
+                    hold_tlc.tlc_id,
+                ))
+            )
+            .expect("node alive");
+        }
+    }
 
-    // ensure check channels is done
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
     // check offered tlcs should be fail
@@ -1238,11 +1267,18 @@ async fn test_mpp_tlc_set_timeout_1_of_2() {
     // tlc 2 is still in hold
     assert!(tlc2.unwrap().removed_reason.is_none());
 
-    // update tlc2 expire to a shorter time
-    for mut hold_tlc in node_1.store.get_hold_tlc_set(payment_hash) {
+    // timout tlc2 expire to a shorter time
+    for hold_tlc in node_1.store.get_hold_tlc_set(payment_hash) {
         if hold_tlc.channel_id == channels[1] && hold_tlc.tlc_id == add_tlc_result_2.tlc_id {
-            hold_tlc.hold_expire_at = now_timestamp_as_millis_u64() + 500;
-            node_1.store.insert_hold_tlc(payment_hash, hold_tlc);
+            ractor::cast!(
+                node_1.network_actor,
+                NetworkActorMessage::Command(NetworkActorCommand::TimeoutHoldTlc(
+                    payment_hash,
+                    hold_tlc.channel_id,
+                    hold_tlc.tlc_id,
+                ))
+            )
+            .expect("node alive");
         }
     }
 
@@ -1379,10 +1415,17 @@ async fn test_mpp_tlc_set_timeout() {
         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
     }
 
-    // update hold_expire_at to now
-    for mut hold_tlc in node_1.store.get_hold_tlc_set(payment_hash) {
-        hold_tlc.hold_expire_at = now_timestamp_as_millis_u64();
-        node_1.store.insert_hold_tlc(payment_hash, hold_tlc);
+    // timeout hold tlc
+    for hold_tlc in node_1.store.get_hold_tlc_set(payment_hash) {
+        ractor::cast!(
+            node_1.network_actor,
+            NetworkActorMessage::Command(NetworkActorCommand::TimeoutHoldTlc(
+                payment_hash,
+                hold_tlc.channel_id,
+                hold_tlc.tlc_id,
+            ))
+        )
+        .expect("node alive");
     }
 
     // sleep enough time to timeout hold tlc
