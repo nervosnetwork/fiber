@@ -222,8 +222,6 @@ async fn test_send_mpp_amount_choose_single_path() {
 async fn test_send_mpp_amount_3_splits() {
     init_tracing();
 
-    // FIXME: our path-finding algorithm should handle this case better
-    // currently, it will try to split the payment into 3 parts, but it will fail
     // we should split the payment into 3 parts with equally amount
     let (nodes, _channels) = create_n_nodes_network(
         &[
