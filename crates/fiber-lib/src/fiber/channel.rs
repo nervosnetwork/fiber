@@ -888,21 +888,29 @@ where
                 }
                 _ if invoice.allow_mpp() => {
                     // invoice status will be updated to paid after apply remove tlc operation
-                    let total_amount = tlc.total_amount.unwrap_or(tlc.amount);
-                    let total_tlc_amount = tlcs.iter().map(|tlc| tlc.amount).sum::<u128>();
-                    let is_fulfilled = total_tlc_amount >= total_amount;
-                    if !is_fulfilled {
-                        // hold the tlc if support MPP and invoice is not fulfilled
-                        self.store.insert_hold_tlc(
-                            tlc.payment_hash,
-                            HoldTlc {
-                                channel_id: state.get_id(),
-                                tlc_id: tlc.tlc_id.into(),
-                                hold_expire_at: now_timestamp_as_millis_u64()
-                                    + DEFAULT_HOLD_TLC_TIMEOUT,
-                            },
-                        );
-                        return;
+                    // TODO: add unit test for this case
+                    if tlcs.iter().any(|t| t.total_amount != tlc.total_amount) {
+                        remove_reason = RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
+                            TlcErr::new(TlcErrorCode::IncorrectOrUnknownPaymentDetails),
+                            &tlc.shared_secret,
+                        ));
+                    } else {
+                        let total_amount = tlc.total_amount.unwrap_or(tlc.amount);
+                        let total_tlc_amount = tlcs.iter().map(|tlc| tlc.amount).sum::<u128>();
+                        let is_fulfilled = total_tlc_amount >= total_amount;
+                        if !is_fulfilled {
+                            // hold the tlc if support MPP and invoice is not fulfilled
+                            self.store.insert_hold_tlc(
+                                tlc.payment_hash,
+                                HoldTlc {
+                                    channel_id: state.get_id(),
+                                    tlc_id: tlc.tlc_id.into(),
+                                    hold_expire_at: now_timestamp_as_millis_u64()
+                                        + DEFAULT_HOLD_TLC_TIMEOUT,
+                                },
+                            );
+                            return;
+                        }
                     }
                 }
                 _ => {
