@@ -1267,7 +1267,7 @@ async fn test_mpp_tlc_set_timeout_1_of_2() {
     // tlc 2 is still in hold
     assert!(tlc2.unwrap().removed_reason.is_none());
 
-    // timout tlc2 expire to a shorter time
+    // timeout tlc2
     for hold_tlc in node_1.store.get_hold_tlc_set(payment_hash) {
         if hold_tlc.channel_id == channels[1] && hold_tlc.tlc_id == add_tlc_result_2.tlc_id {
             ractor::cast!(
