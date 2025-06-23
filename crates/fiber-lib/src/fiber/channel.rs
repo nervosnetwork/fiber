@@ -898,6 +898,10 @@ where
                     } else {
                         let total_amount = tlc.total_amount.unwrap_or(tlc.amount);
                         let total_tlc_amount = tlcs.iter().map(|tlc| tlc.amount).sum::<u128>();
+                        debug!(
+                            "checking total_tlc_amount: {}, total_amount: {}",
+                            total_tlc_amount, total_amount
+                        );
                         let is_fulfilled = total_tlc_amount >= total_amount;
                         if !is_fulfilled {
                             // hold the tlc if support MPP and invoice is not fulfilled
@@ -1061,36 +1065,31 @@ where
                         .and_then(PaymentDataRecord::read)
                     {
                         Some(record) => {
-                            if let Some(ref invoice) = invoice {
-                                if record.total_amount < invoice.amount.unwrap_or_default() {
-                                    error!(
-                                        "total amount is less than invoice amount: {:?}",
-                                        payment_hash
-                                    );
-                                    return Err(ProcessingChannelError::FinalIncorrectMPPInfo(
-                                        "total amount in records is less than invoice amount"
-                                            .to_string(),
-                                    ));
-                                }
-
-                                let payment_secret = invoice.payment_secret();
-                                if payment_secret.is_some_and(|s| s != &record.payment_secret) {
-                                    error!("payment secret is not equal to invoice payment secret: {:?}", payment_hash);
-                                    return Err(ProcessingChannelError::FinalIncorrectMPPInfo(
-                                        "payment secret mismatch".to_string(),
-                                    ));
-                                }
-
-                                tlc.payment_secret = Some(record.payment_secret);
-                                tlc.total_amount = Some(record.total_amount);
-                            } else {
-                                // if the onion packet contains MPP total payment fields,
-                                // but the invoice is not found, return proper error
-                                error!("MPP invoice is not found: {:?}", payment_hash);
+                            let invoice = invoice.as_ref().expect("invoice exists for MPP payment");
+                            if record.total_amount < invoice.amount.unwrap_or_default() {
+                                error!(
+                                    "total amount is less than invoice amount: {:?}",
+                                    payment_hash
+                                );
                                 return Err(ProcessingChannelError::FinalIncorrectMPPInfo(
-                                    "no invoice found for MPP".to_string(),
+                                    "total amount in records is less than invoice amount"
+                                        .to_string(),
                                 ));
                             }
+
+                            let payment_secret = invoice.payment_secret();
+                            if payment_secret.is_some_and(|s| s != &record.payment_secret) {
+                                error!(
+                                    "payment secret is not equal to invoice payment secret: {:?}",
+                                    payment_hash
+                                );
+                                return Err(ProcessingChannelError::FinalIncorrectMPPInfo(
+                                    "payment secret mismatch".to_string(),
+                                ));
+                            }
+
+                            tlc.payment_secret = Some(record.payment_secret);
+                            tlc.total_amount = Some(record.total_amount);
                         }
                         None => {
                             // if the onion packet doesn't contain MPP total payment fields, return proper error
