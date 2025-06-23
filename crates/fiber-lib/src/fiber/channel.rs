@@ -615,7 +615,8 @@ where
                 _ => TlcErrorCode::IncorrectOrUnknownPaymentDetails,
             },
             ProcessingChannelError::FinalIncorrectPreimage
-            | ProcessingChannelError::FinalIncorrectPaymentHash => {
+            | ProcessingChannelError::FinalIncorrectPaymentHash
+            | ProcessingChannelError::FinalIncorrectMPPInfo(_) => {
                 TlcErrorCode::IncorrectOrUnknownPaymentDetails
             }
             ProcessingChannelError::FinalIncorrectHTLCAmount => {
@@ -890,6 +891,7 @@ where
                     // invoice status will be updated to paid after apply remove tlc operation
                     // TODO: add unit test for this case
                     if tlcs.iter().any(|t| t.total_amount != tlc.total_amount) {
+                        error!("one tlc total_amount is not equal to current tlc total_amount");
                         remove_reason = RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
                             TlcErr::new(TlcErrorCode::IncorrectOrUnknownPaymentDetails),
                             &tlc.shared_secret,
@@ -1062,12 +1064,22 @@ where
                         Some(record) => {
                             if let Some(ref invoice) = invoice {
                                 if record.total_amount < invoice.amount.unwrap_or_default() {
-                                    return Err(ProcessingChannelError::FinalIncorrectHTLCAmount);
+                                    error!(
+                                        "total amount is less than invoice amount: {:?}",
+                                        payment_hash
+                                    );
+                                    return Err(ProcessingChannelError::FinalIncorrectMPPInfo(
+                                        "total amount in records is less than invoice amount"
+                                            .to_string(),
+                                    ));
                                 }
 
                                 let payment_secret = invoice.payment_secret();
                                 if payment_secret.is_some_and(|s| s != &record.payment_secret) {
-                                    return Err(ProcessingChannelError::FinalIncorrectPreimage);
+                                    error!("payment secret is not equal to invoice payment secret: {:?}", payment_hash);
+                                    return Err(ProcessingChannelError::FinalIncorrectMPPInfo(
+                                        "payment secret mismatch".to_string(),
+                                    ));
                                 }
 
                                 tlc.payment_secret = Some(record.payment_secret);
@@ -1075,13 +1087,21 @@ where
                             } else {
                                 // if the onion packet contains MPP total payment fields,
                                 // but the invoice is not found, return proper error
-                                return Err(ProcessingChannelError::FinalIncorrectPreimage);
+                                error!("MPP invoice is not found: {:?}", payment_hash);
+                                return Err(ProcessingChannelError::FinalIncorrectMPPInfo(
+                                    "no invoice found for MPP".to_string(),
+                                ));
                             }
                         }
                         None => {
-                            // if the onion packet doesn't contain MPP total payment fields,
-                            // return proper error
-                            return Err(ProcessingChannelError::FinalIncorrectPreimage);
+                            // if the onion packet doesn't contain MPP total payment fields, return proper error
+                            error!(
+                                "onion packet doesn't contain MPP total payment fields: {:?}",
+                                payment_hash
+                            );
+                            return Err(ProcessingChannelError::FinalIncorrectMPPInfo(
+                                "no custom records for MPP".to_string(),
+                            ));
                         }
                     }
                 }
@@ -1098,6 +1118,10 @@ where
             if let Some(preimage) = preimage {
                 let filled_payment_hash: Hash256 = add_tlc.hash_algorithm.hash(preimage).into();
                 if add_tlc.payment_hash != filled_payment_hash {
+                    error!(
+                        "preimage is not matched for payment hash: {:?}",
+                        payment_hash
+                    );
                     return Err(ProcessingChannelError::FinalIncorrectPreimage);
                 }
                 // update invoice status to received only all the error checking passed
@@ -1114,6 +1138,7 @@ where
 
                 self.store_preimage(payment_hash, preimage);
             } else {
+                error!("preimage is not found for payment hash: {:?}", payment_hash);
                 return Err(ProcessingChannelError::FinalIncorrectPaymentHash);
             }
         } else {
@@ -3762,6 +3787,8 @@ pub enum ProcessingChannelError {
     FinalIncorrectPaymentHash,
     #[error("The payment_hash and preimage does not match for final hop")]
     FinalIncorrectPreimage,
+    #[error("The payment does not contain expected MPP info: {0}")]
+    FinalIncorrectMPPInfo(String),
     #[error("The tlc forward fee is tow low")]
     TlcForwardFeeIsTooLow,
     #[error("The invoice status is invalid")]
