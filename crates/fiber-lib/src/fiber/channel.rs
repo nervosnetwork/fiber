@@ -331,12 +331,6 @@ impl Default for ChannelSubscribers {
     }
 }
 
-enum TlcSettleDownResult {
-    Fulfilled(Vec<TlcInfo>),
-    Hold,
-    Failed(Vec<TlcInfo>, RemoveTlcReason),
-}
-
 pub struct ChannelActor<S> {
     local_pubkey: Pubkey,
     remote_pubkey: Pubkey,
@@ -846,14 +840,22 @@ where
         .await;
     }
 
-    /// settle down tlc and return the result
-    /// - `Fulfilled(tlcs)` means payment is fulfilled
-    /// - `Hold` means tlc is hold
-    /// - `Failed(tlcs, reason)` means tlc is failed to settle down
-    fn settle_down_tlc(&self, state: &mut ChannelActorState, tlc: &TlcInfo) -> TlcSettleDownResult {
+    async fn try_to_settle_down_tlc(&self, state: &mut ChannelActorState, tlc_id: TLCId) {
+        let tlc_info = state.get_received_tlc(tlc_id).expect("expect tlc").clone();
+
+        let Some(preimage) = self.store.get_preimage(&tlc_info.payment_hash) else {
+            return;
+        };
+
+        let mut remove_reason = RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+            payment_preimage: preimage,
+        });
+
+        let tlc = tlc_info.clone();
         // load hold tlcs
-        let hold_tlcs = self.store.get_hold_tlc_set(tlc.payment_hash);
-        let mut tlcs: Vec<_> = hold_tlcs
+        let mut tlcs: Vec<_> = self
+            .store
+            .get_hold_tlc_set(tlc.payment_hash)
             .iter()
             .filter_map(|hold_tlc| {
                 let state = self.store.get_channel_actor_state(&hold_tlc.channel_id)?;
@@ -863,132 +865,59 @@ where
             .collect();
         tlcs.push(tlc.clone());
 
-        let Some(invoice) = self.store.get_invoice(&tlc.payment_hash) else {
-            // if invoice is not found, maybe keysend
-            return TlcSettleDownResult::Fulfilled(tlcs);
-        };
-
-        match self.get_invoice_status(&invoice) {
-            CkbInvoiceStatus::Expired => {
-                return TlcSettleDownResult::Failed(
-                    tlcs,
-                    RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
+        if let Some(invoice) = self.store.get_invoice(&tlc.payment_hash) {
+            let status = self.get_invoice_status(&invoice);
+            match status {
+                CkbInvoiceStatus::Expired => {
+                    remove_reason = RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
                         TlcErr::new(TlcErrorCode::InvoiceExpired),
                         &tlc.shared_secret,
-                    )),
-                );
-            }
-            CkbInvoiceStatus::Cancelled => {
-                return TlcSettleDownResult::Failed(
-                    tlcs,
-                    RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
+                    ));
+                }
+                CkbInvoiceStatus::Cancelled => {
+                    remove_reason = RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
                         TlcErr::new(TlcErrorCode::InvoiceCancelled),
                         &tlc.shared_secret,
-                    )),
-                );
-            }
-            CkbInvoiceStatus::Paid => {
-                // we have already checked invoice status in apply_add_tlc_operation_with_peeled_onion_packet
-                // this maybe happened when process is killed and restart
-                error!("invoice already paid, ignore");
-                return TlcSettleDownResult::Fulfilled(tlcs);
-            }
-            _ => {
-                let total_amount = tlc.total_amount.unwrap_or(tlc.amount);
-
-                if total_amount < invoice.amount.unwrap_or_default() {
-                    return TlcSettleDownResult::Failed(
-                        tlcs,
-                        RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
-                            TlcErr::new(TlcErrorCode::AmountBelowMinimum),
-                            &tlc.shared_secret,
-                        )),
-                    );
+                    ));
                 }
-
-                if tlcs.iter().any(|t| t.total_amount != tlc.total_amount) {
-                    return TlcSettleDownResult::Failed(
-                        tlcs,
-                        RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
+                CkbInvoiceStatus::Paid => {
+                    // we have already checked invoice status in apply_add_tlc_operation_with_peeled_onion_packet
+                    // this maybe happened when process is killed and restart
+                    error!("invoice already paid, ignore");
+                    return;
+                }
+                _ if invoice.allow_mpp() => {
+                    // invoice status will be updated to paid after apply remove tlc operation
+                    // TODO: add unit test for this case
+                    if tlcs.iter().any(|t| t.total_amount != tlc.total_amount) {
+                        remove_reason = RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
                             TlcErr::new(TlcErrorCode::IncorrectOrUnknownPaymentDetails),
                             &tlc.shared_secret,
-                        )),
-                    );
+                        ));
+                    } else {
+                        let total_amount = tlc.total_amount.unwrap_or(tlc.amount);
+                        let total_tlc_amount = tlcs.iter().map(|tlc| tlc.amount).sum::<u128>();
+                        let is_fulfilled = total_tlc_amount >= total_amount;
+                        if !is_fulfilled {
+                            // hold the tlc if support MPP and invoice is not fulfilled
+                            self.store.insert_hold_tlc(
+                                tlc.payment_hash,
+                                HoldTlc {
+                                    channel_id: state.get_id(),
+                                    tlc_id: tlc.tlc_id.into(),
+                                    hold_expire_at: now_timestamp_as_millis_u64()
+                                        + DEFAULT_HOLD_TLC_TIMEOUT,
+                                },
+                            );
+                            return;
+                        }
+                    }
                 }
-
-                let total_tlc_amount = tlcs.iter().map(|tlc| tlc.amount).sum::<u128>();
-                let is_fulfilled = total_tlc_amount >= total_amount;
-                if invoice.allow_mpp() {
-                    // check payment secret for MPP payment
-                    let payment_secret = invoice.payment_secret();
-                    if payment_secret.is_none() || tlc.payment_secret.as_ref() != payment_secret {
-                        return TlcSettleDownResult::Failed(
-                            tlcs,
-                            RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
-                                TlcErr::new(TlcErrorCode::IncorrectOrUnknownPaymentDetails),
-                                &tlc.shared_secret,
-                            )),
-                        );
-                    }
-
-                    // hold the tlc if support MPP and invoice is not fulfilled
-                    if !is_fulfilled {
-                        self.store.insert_hold_tlc(
-                            tlc.payment_hash,
-                            HoldTlc {
-                                channel_id: state.get_id(),
-                                tlc_id: tlc.tlc_id.into(),
-                                hold_expire_at: now_timestamp_as_millis_u64()
-                                    + DEFAULT_HOLD_TLC_TIMEOUT,
-                            },
-                        );
-                        return TlcSettleDownResult::Hold;
-                    }
-                } else {
+                _ => {
                     // single path payment
-                    // fail tlc if invoice is not fulfilled
-                    if !is_fulfilled {
-                        return TlcSettleDownResult::Failed(
-                            tlcs,
-                            RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
-                                TlcErr::new(TlcErrorCode::AmountBelowMinimum),
-                                &tlc.shared_secret,
-                            )),
-                        );
-                    }
                 }
-
-                // invoice status will be updated to paid after apply remove tlc operation
-                return TlcSettleDownResult::Fulfilled(tlcs);
             }
         }
-    }
-
-    async fn try_to_settle_down_tlc(&self, state: &mut ChannelActorState, tlc_id: TLCId) {
-        let tlc_info = state.get_received_tlc(tlc_id).expect("expect tlc").clone();
-
-        let preimage = self.store.get_preimage(&tlc_info.payment_hash);
-
-        let preimage = if let Some(preimage) = preimage {
-            preimage
-        } else {
-            return;
-        };
-
-        let (tlcs, remove_reason) = match self.settle_down_tlc(state, &tlc_info) {
-            TlcSettleDownResult::Fulfilled(tlcs) => {
-                let remove_reason = RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
-                    payment_preimage: preimage,
-                });
-                (tlcs, remove_reason)
-            }
-            TlcSettleDownResult::Hold => {
-                // just return, the tlc will be settled once the invoice is fulfilled
-                return;
-            }
-            TlcSettleDownResult::Failed(tlcs, remove_reason) => (tlcs, remove_reason),
-        };
-
         for tlc in tlcs {
             let (send, _recv) = oneshot::channel::<Result<(), ProcessingChannelError>>();
             let port = RpcReplyPort::from(send);
@@ -1020,7 +949,7 @@ where
         // - Obtain share secret using DH Key Exchange from the public key
         // and the network private key stored in the network actor state.
         match self
-            .try_tlc_peel_onion_packet(state, add_tlc)
+            .try_peel_tlc_onion_packet(state, add_tlc)
             .await
             .map_err(ProcessingChannelError::without_shared_secret)?
         {
@@ -1068,7 +997,7 @@ where
         Ok(())
     }
 
-    async fn try_tlc_peel_onion_packet(
+    async fn try_peel_tlc_onion_packet(
         &self,
         state: &mut ChannelActorState,
         add_tlc: &TlcInfo,
@@ -1095,7 +1024,6 @@ where
         peeled_onion_packet: PeeledPaymentOnionPacket,
     ) -> Result<(), ProcessingChannelError> {
         let payment_hash = add_tlc.payment_hash;
-        let received_amount = add_tlc.amount;
         let forward_amount = peeled_onion_packet.current.amount;
 
         state.tlc_state.applied_add_tlcs.insert(add_tlc.tlc_id);
@@ -1111,26 +1039,51 @@ where
                 return Err(ProcessingChannelError::TlcExpirySoon);
             }
 
-            // extract MPP total payment fields from onion packet
-            if let Some(tlc) = state.tlc_state.get_mut(&add_tlc.tlc_id) {
-                if let Some(record) = peeled_onion_packet
-                    .current
-                    .custom_records
-                    .as_ref()
-                    .and_then(PaymentDataRecord::read)
-                {
-                    tlc.payment_secret = Some(record.payment_secret);
-                    tlc.total_amount = Some(record.total_amount);
-                }
-            }
-
-            if let Some(invoice) = self.store.get_invoice(&payment_hash) {
-                let invoice_status = self.get_invoice_status(&invoice);
+            let invoice = self.store.get_invoice(&payment_hash);
+            if let Some(ref invoice) = invoice {
+                let invoice_status = self.get_invoice_status(invoice);
                 if !matches!(
                     invoice_status,
                     CkbInvoiceStatus::Open | CkbInvoiceStatus::Received
                 ) {
                     return Err(ProcessingChannelError::FinalInvoiceInvalid(invoice_status));
+                }
+            }
+
+            // extract MPP total payment fields from onion packet
+            if invoice.as_ref().is_some_and(|invoice| invoice.allow_mpp()) {
+                if let Some(tlc) = state.tlc_state.get_mut(&add_tlc.tlc_id) {
+                    match peeled_onion_packet
+                        .current
+                        .custom_records
+                        .as_ref()
+                        .and_then(PaymentDataRecord::read)
+                    {
+                        Some(record) => {
+                            if let Some(ref invoice) = invoice {
+                                if record.total_amount < invoice.amount.unwrap_or_default() {
+                                    return Err(ProcessingChannelError::FinalIncorrectHTLCAmount);
+                                }
+
+                                let payment_secret = invoice.payment_secret();
+                                if payment_secret.is_some_and(|s| s != &record.payment_secret) {
+                                    return Err(ProcessingChannelError::FinalIncorrectPreimage);
+                                }
+
+                                tlc.payment_secret = Some(record.payment_secret);
+                                tlc.total_amount = Some(record.total_amount);
+                            } else {
+                                // if the onion packet contains MPP total payment fields,
+                                // but the invoice is not found, return proper error
+                                return Err(ProcessingChannelError::FinalIncorrectPreimage);
+                            }
+                        }
+                        None => {
+                            // if the onion packet doesn't contain MPP total payment fields,
+                            // return proper error
+                            return Err(ProcessingChannelError::FinalIncorrectPreimage);
+                        }
+                    }
                 }
             }
 
@@ -1148,7 +1101,7 @@ where
                     return Err(ProcessingChannelError::FinalIncorrectPreimage);
                 }
                 // update invoice status to received only all the error checking passed
-                if let Some(_invoice) = self.store.get_invoice(&payment_hash) {
+                if invoice.is_some() {
                     self.store
                         .update_invoice_status(&payment_hash, CkbInvoiceStatus::Received)
                         .expect("update invoice status failed");
@@ -1173,6 +1126,7 @@ where
                 return Err(ProcessingChannelError::IncorrectTlcExpiry);
             }
 
+            let received_amount = add_tlc.amount;
             if received_amount < forward_amount {
                 return Err(ProcessingChannelError::InvalidParameter(
                     "received_amount is less than forward_amount".to_string(),
