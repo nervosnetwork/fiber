@@ -889,7 +889,6 @@ where
                 }
                 _ if invoice.allow_mpp() => {
                     // invoice status will be updated to paid after apply remove tlc operation
-                    // TODO: add unit test for this case
                     if tlcs.iter().any(|t| t.total_amount != tlc.total_amount) {
                         error!("one tlc total_amount is not equal to current tlc total_amount");
                         remove_reason = RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
@@ -2940,7 +2939,9 @@ impl Debug for TlcInfo {
         f.debug_struct("TlcInfo")
             .field("tlc_id", &self.tlc_id)
             .field("status", &self.status)
+            .field("channel_id", &self.channel_id)
             .field("amount", &self.amount)
+            .field("total_amount", &self.total_amount)
             .field("removed_reason", &self.removed_reason)
             .field("payment_hash", &self.payment_hash)
             .field("removed_confirmed_at", &self.removed_confirmed_at)
