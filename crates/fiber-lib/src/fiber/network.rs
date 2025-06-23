@@ -1330,21 +1330,14 @@ where
             NetworkActorCommand::CheckChannels => {
                 let now = now_timestamp_as_millis_u64();
 
-                let all_hold_tlcs = self.store.list_all_hold_tlcs();
-
-                // remove settled hold tlcs
-                for payment_hash in all_hold_tlcs.keys() {
-                    let Some(status) = self.store.get_invoice_status(payment_hash) else {
-                        continue;
-                    };
-
-                    if matches!(
-                        status,
-                        CkbInvoiceStatus::Cancelled
-                            | CkbInvoiceStatus::Expired
-                            | CkbInvoiceStatus::Paid
-                    ) {
-                        self.store.remove_hold_tlc_set(payment_hash);
+                // group hold tlcs by channel id
+                let mut hold_tlcs_by_channel = HashMap::new();
+                for (payment_hash, hold_tlcs) in self.store.list_all_hold_tlcs() {
+                    for hold_tlc in hold_tlcs {
+                        hold_tlcs_by_channel
+                            .entry(hold_tlc.channel_id)
+                            .or_insert_with(Vec::new)
+                            .push((payment_hash, hold_tlc));
                     }
                 }
 
@@ -1355,14 +1348,25 @@ where
                                 continue;
                             }
 
-                            for hold_tlc in all_hold_tlcs
-                                .values()
-                                .flatten()
-                                .filter(|hold_tlc| hold_tlc.channel_id == channel_id)
-                            {
+                            // get hold tlcs for this channel
+                            let hold_tlcs =
+                                hold_tlcs_by_channel.remove(&channel_id).unwrap_or_default();
+
+                            for (payment_hash, hold_tlc) in hold_tlcs {
                                 let Some(tlc) =
                                     actor_state.tlc_state.get(&TLCId::Received(hold_tlc.tlc_id))
                                 else {
+                                    // unhold if tlc not found
+                                    // this should not happen, but even it happens, we can handle it
+                                    warn!(
+                                        "Hold tlc {:?} (payment hash {:?}) for channel {:?} not found, unhold",
+                                        hold_tlc.tlc_id, payment_hash, channel_id
+                                    );
+                                    self.store.remove_hold_tlc(
+                                        &payment_hash,
+                                        &hold_tlc.channel_id,
+                                        hold_tlc.tlc_id,
+                                    );
                                     continue;
                                 };
 

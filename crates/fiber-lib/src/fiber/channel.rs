@@ -941,6 +941,9 @@ where
                 ))
                 .expect(ASSUME_NETWORK_ACTOR_ALIVE);
         }
+
+        // remove settled hold tlcs
+        self.store.remove_hold_tlc_set(&tlc.payment_hash);
     }
 
     async fn apply_add_tlc_operation(

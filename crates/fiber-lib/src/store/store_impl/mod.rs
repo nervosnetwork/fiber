@@ -431,7 +431,11 @@ impl ChannelActorStateStore for Store {
             .unwrap_or_default();
         hold_tlcs
             .retain(|hold_tlc| hold_tlc.channel_id != *channel_id || hold_tlc.tlc_id != tlc_id);
-        batch.put_kv(KeyValue::HoldTlcs(*payment_hash, hold_tlcs));
+        if hold_tlcs.is_empty() {
+            batch.delete(prefix);
+        } else {
+            batch.put_kv(KeyValue::HoldTlcs(*payment_hash, hold_tlcs));
+        }
         batch.commit();
     }
 
