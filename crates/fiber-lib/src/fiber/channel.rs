@@ -1157,7 +1157,7 @@ where
                 state,
                 add_tlc.tlc_id,
                 add_tlc.payment_hash,
-                peeled_onion_packet.clone(),
+                peeled_onion_packet,
                 forward_fee,
             )
             .await;
