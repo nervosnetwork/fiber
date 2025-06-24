@@ -425,10 +425,12 @@ impl ChannelActorStateStore for Store {
     fn remove_hold_tlc(&self, payment_hash: &Hash256, channel_id: &Hash256, tlc_id: u64) {
         let prefix = [&[HOLD_TLC_PREFIX], payment_hash.as_ref()].concat();
         let mut batch = self.batch();
-        let mut hold_tlcs: Vec<HoldTlc> = batch
+        let Some(mut hold_tlcs): Option<Vec<HoldTlc>> = batch
             .get(&prefix)
             .map(|v| deserialize_from(v.as_ref(), "HoldTlc"))
-            .unwrap_or_default();
+        else {
+            return;
+        };
         hold_tlcs
             .retain(|hold_tlc| hold_tlc.channel_id != *channel_id || hold_tlc.tlc_id != tlc_id);
         if hold_tlcs.is_empty() {

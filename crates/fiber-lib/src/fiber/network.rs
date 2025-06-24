@@ -1536,9 +1536,8 @@ where
                     .as_ref()
                     .and_then(|state| state.tlc_state.get(&TLCId::Received(tlc_id)));
                 let Some(tlc) = tlc else {
-                    warn!(
-                        "Failed to timeout tlc {:?} (payment hash {:?}) for channel {:?}: tlc not found",
-
+                    debug!(
+                        "Timeout tlc {:?} (payment hash {:?}) for channel {:?}: tlc is settled or not found, just unhold it",
                         tlc_id, payment_hash, channel_id
                     );
                     // remove hold tlc from store
