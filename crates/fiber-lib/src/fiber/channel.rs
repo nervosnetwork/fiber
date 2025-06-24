@@ -1,6 +1,7 @@
 #[cfg(any(debug_assertions, feature = "bench"))]
 use crate::fiber::network::DebugEvent;
 use crate::fiber::network::PaymentCustomRecords;
+use crate::utils::payment::is_invoice_fulfilled;
 use crate::{debug_event, utils::tx::compute_tx_message};
 use bitflags::bitflags;
 use futures::future::OptionFuture;
@@ -916,6 +917,12 @@ where
                 }
                 _ => {
                     // single path payment
+                    if !is_invoice_fulfilled(&invoice, std::slice::from_ref(&tlc)) {
+                        remove_reason = RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
+                            TlcErr::new(TlcErrorCode::AmountBelowMinimum),
+                            &tlc.shared_secret,
+                        ));
+                    }
                 }
             }
         }
@@ -1039,43 +1046,46 @@ where
             }
 
             // extract MPP total payment fields from onion packet
-            if invoice.as_ref().is_some_and(|invoice| invoice.allow_mpp()) {
-                if let Some(tlc) = state.tlc_state.get_mut(&add_tlc.tlc_id) {
-                    match peeled_onion_packet
-                        .current
-                        .custom_records
-                        .as_ref()
-                        .and_then(PaymentDataRecord::read)
-                    {
-                        Some(record) => {
-                            let invoice = invoice.as_ref().expect("invoice exists for MPP payment");
-                            if record.total_amount < invoice.amount.unwrap_or_default() {
-                                error!(
-                                    "total amount is less than invoice amount: {:?}",
-                                    payment_hash
-                                );
-                                return Err(ProcessingChannelError::FinalIncorrectMPPInfo(
-                                    "total amount in records is less than invoice amount"
-                                        .to_string(),
-                                ));
-                            }
-
-                            let payment_secret = invoice.payment_secret();
-                            if payment_secret.is_some_and(|s| s != &record.payment_secret) {
-                                error!(
-                                    "payment secret is not equal to invoice payment secret: {:?}",
-                                    payment_hash
-                                );
-                                return Err(ProcessingChannelError::FinalIncorrectMPPInfo(
-                                    "payment secret mismatch".to_string(),
-                                ));
-                            }
-
-                            tlc.payment_secret = Some(record.payment_secret);
-                            tlc.total_amount = Some(record.total_amount);
+            if let Some(tlc) = state.tlc_state.get_mut(&add_tlc.tlc_id) {
+                match peeled_onion_packet
+                    .current
+                    .custom_records
+                    .as_ref()
+                    .and_then(PaymentDataRecord::read)
+                {
+                    Some(record) => {
+                        let invoice = invoice.as_ref().expect("invoice exists for MPP payment");
+                        if record.total_amount < invoice.amount.unwrap_or_default() {
+                            error!(
+                                "total amount is less than invoice amount: {:?}",
+                                payment_hash
+                            );
+                            return Err(ProcessingChannelError::FinalIncorrectMPPInfo(
+                                "total amount in records is less than invoice amount".to_string(),
+                            ));
                         }
-                        None => {
-                            // if the onion packet doesn't contain MPP total payment fields, return proper error
+
+                        let payment_secret = invoice.payment_secret();
+                        if payment_secret.is_some_and(|s| s != &record.payment_secret) {
+                            error!(
+                                "payment secret is not equal to invoice payment secret: {:?}",
+                                payment_hash
+                            );
+                            return Err(ProcessingChannelError::FinalIncorrectMPPInfo(
+                                "payment secret mismatch".to_string(),
+                            ));
+                        }
+
+                        tlc.payment_secret = Some(record.payment_secret);
+                        tlc.total_amount = Some(record.total_amount);
+                    }
+                    None => {
+                        // the onion packet doesn't contain MPP total payment fields
+                        // check if the invoice is fulfilled
+                        if invoice.as_ref().is_some_and(|inv| {
+                            !is_invoice_fulfilled(inv, std::slice::from_ref(tlc))
+                        }) {
+                            // return proper error if invoice not fulfilled
                             error!(
                                 "onion packet doesn't contain MPP total payment fields: {:?}",
                                 payment_hash

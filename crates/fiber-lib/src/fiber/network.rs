@@ -91,6 +91,7 @@ use crate::fiber::types::{
 };
 use crate::fiber::KeyPair;
 use crate::invoice::{CkbInvoice, CkbInvoiceStatus, InvoiceStore, PreimageStore};
+use crate::utils::payment::is_invoice_fulfilled;
 use crate::{now_timestamp_as_millis_u64, unwrap_or_return, Error};
 
 pub const FIBER_PROTOCOL_ID: ProtocolId = ProtocolId::new(42);
@@ -1345,10 +1346,8 @@ where
                                 // skip if tlc amount is not fulfilled invoice
                                 // this may happened if payment is mpp
                                 if let Some(invoice) = self.store.get_invoice(&tlc.payment_hash) {
-                                    if let Some(amount) = invoice.amount() {
-                                        if tlc.amount < amount {
-                                            continue;
-                                        }
+                                    if !is_invoice_fulfilled(&invoice, std::slice::from_ref(&tlc)) {
+                                        continue;
                                     }
                                 }
 
@@ -1468,15 +1467,15 @@ where
                     error!("one tlc total_amount is not equal to current tlc total_amount");
                     tlc_fail = Some(TlcErr::new(TlcErrorCode::IncorrectOrUnknownPaymentDetails));
                 } else {
-                    let total_amount = first_tlc.total_amount.unwrap_or(first_tlc.amount);
-                    let total_tlc_amount = tlcs.iter().map(|tlc| tlc.amount).sum::<u128>();
-                    debug!(
-                        "checking total_tlc_amount: {}, total_amount: {}",
-                        total_tlc_amount, total_amount
-                    );
-                    let is_fulfilled = total_tlc_amount >= total_amount;
-                    // wait for all tlcs to be fulfilled
-                    if !is_fulfilled {
+                    let Some(invoice) = self.store.get_invoice(&payment_hash) else {
+                        error!(
+                            "Try to settle mpp tlc set, but invoice not found for payment hash {:?}",
+                            payment_hash
+                        );
+                        return Ok(());
+                    };
+                    // just return if invoice is not fulfilled
+                    if !is_invoice_fulfilled(&invoice, &tlcs) {
                         return Ok(());
                     }
                 }
