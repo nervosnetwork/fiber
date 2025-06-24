@@ -4207,21 +4207,32 @@ where
         let now = now_timestamp_as_millis_u64();
         for (payment_hash, hold_tlcs) in self.store.list_all_hold_tlcs() {
             // timeout hold tlc
+            let already_timeout = hold_tlcs
+                .iter()
+                .map(|hold_tlc| hold_tlc.hold_expire_at)
+                .min()
+                .is_some_and(|expire_at| expire_at <= now);
+
             for hold_tlc in hold_tlcs {
-                let timeout = hold_tlc.hold_expire_at.saturating_sub(now).max(1000);
-                myself.send_after(Duration::from_millis(timeout), move || {
-                    NetworkActorMessage::new_command(NetworkActorCommand::TimeoutHoldTlc(
-                        payment_hash,
-                        hold_tlc.channel_id,
-                        hold_tlc.tlc_id,
+                myself
+                    .send_message(NetworkActorMessage::new_command(
+                        NetworkActorCommand::TimeoutHoldTlc(
+                            payment_hash,
+                            hold_tlc.channel_id,
+                            hold_tlc.tlc_id,
+                        ),
                     ))
-                });
+                    .expect(ASSUME_NETWORK_MYSELF_ALIVE);
             }
 
             // try settle mpp tlc set
-            myself.send_after(Duration::from_millis(1000), move || {
-                NetworkActorMessage::new_command(NetworkActorCommand::SettleMPPTlcSet(payment_hash))
-            });
+            if !already_timeout {
+                myself
+                    .send_message(NetworkActorMessage::new_command(
+                        NetworkActorCommand::SettleMPPTlcSet(payment_hash),
+                    ))
+                    .expect(ASSUME_NETWORK_MYSELF_ALIVE);
+            }
         }
         Ok(())
     }

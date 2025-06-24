@@ -841,7 +841,12 @@ where
         .await;
     }
 
-    async fn try_to_settle_down_tlc(&self, state: &mut ChannelActorState, tlc_id: TLCId) {
+    async fn try_to_settle_down_tlc(
+        &self,
+        myself: &ActorRef<ChannelActorMessage>,
+        state: &mut ChannelActorState,
+        tlc_id: TLCId,
+    ) {
         let tlc_info = state.get_received_tlc(tlc_id).expect("expect tlc").clone();
 
         let Some(preimage) = self.store.get_preimage(&tlc_info.payment_hash) else {
@@ -889,7 +894,7 @@ where
 
                     // set timeout for hold tlc
                     self.network.send_after(
-                        Duration::from_millis(DEFAULT_HOLD_TLC_TIMEOUT),
+                        Duration::from_millis(DEFAULT_HOLD_TLC_TIMEOUT + 10),
                         move || {
                             NetworkActorMessage::new_command(NetworkActorCommand::TimeoutHoldTlc(
                                 tlc.payment_hash,
@@ -901,11 +906,10 @@ where
 
                     // try settle down tlc set with 1s delay
                     self.network
-                        .send_after(Duration::from_millis(1000), move || {
-                            NetworkActorMessage::new_command(NetworkActorCommand::SettleMPPTlcSet(
-                                tlc.payment_hash,
-                            ))
-                        });
+                        .send_message(NetworkActorMessage::new_command(
+                            NetworkActorCommand::SettleMPPTlcSet(tlc.payment_hash),
+                        ))
+                        .expect(ASSUME_NETWORK_ACTOR_ALIVE);
 
                     // just return, the tlc set will be settled by network actor
                     return;
@@ -917,22 +921,8 @@ where
         }
 
         // remove tlc
-        let (send, _recv) = oneshot::channel::<Result<(), ProcessingChannelError>>();
-        let port = RpcReplyPort::from(send);
-        self.network
-            .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
-                    channel_id: tlc.channel_id,
-                    command: ChannelCommand::RemoveTlc(
-                        RemoveTlcCommand {
-                            id: tlc.tlc_id.into(),
-                            reason: remove_reason.clone(),
-                        },
-                        port,
-                    ),
-                }),
-            ))
-            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+        self.register_retryable_tlc_remove(myself, state, tlc.tlc_id, remove_reason)
+            .await;
     }
 
     async fn apply_add_tlc_operation(
@@ -988,7 +978,8 @@ where
         // we don't need to settle down the tlc if it is not the last hop here,
         // some e2e tests are calling AddTlc manually, so we can not use onion packet to
         // check whether it's the last hop here, maybe need to revisit in future.
-        self.try_to_settle_down_tlc(state, add_tlc.tlc_id).await;
+        self.try_to_settle_down_tlc(myself, state, add_tlc.tlc_id)
+            .await;
 
         warn!("finished check tlc for peer message: {:?}", &add_tlc.tlc_id);
         Ok(())
