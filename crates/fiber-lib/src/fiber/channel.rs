@@ -1050,48 +1050,55 @@ where
             };
 
             // extract MPP total payment fields from onion packet
-            if let Some(invoice) = &invoice {
-                match peeled_onion_packet.mpp_custom_records() {
-                    Some(record) => {
-                        if record.total_amount < invoice.amount.unwrap_or_default() {
-                            error!(
-                                "total amount is less than invoice amount: {:?}",
-                                payment_hash
-                            );
-                            return Err(ProcessingChannelError::FinalIncorrectMPPInfo(
-                                "total amount in records is less than invoice amount".to_string(),
-                            ));
-                        }
-
-                        let payment_secret = invoice.payment_secret();
-                        if payment_secret.is_some_and(|s| s != &record.payment_secret) {
-                            error!(
-                                "payment secret is not equal to invoice payment secret: {:?}",
-                                payment_hash
-                            );
-                            return Err(ProcessingChannelError::FinalIncorrectMPPInfo(
-                                "payment secret mismatch".to_string(),
-                            ));
-                        }
-
-                        tlc.payment_secret = Some(record.payment_secret);
-                        tlc.total_amount = Some(record.total_amount);
+            match (&invoice, peeled_onion_packet.mpp_custom_records()) {
+                (Some(invoice), Some(record)) => {
+                    if record.total_amount < invoice.amount.unwrap_or_default() {
+                        error!(
+                            "total amount is less than invoice amount: {:?}",
+                            payment_hash
+                        );
+                        return Err(ProcessingChannelError::FinalIncorrectMPPInfo(
+                            "total amount in records is less than invoice amount".to_string(),
+                        ));
                     }
-                    None => {
-                        if invoice.allow_mpp() {
-                            // FIXME: whether we allow MPP without MPP records in onion packet?
-                            // currently we allow it pay with enough amount
-                            // TODO: add a unit test of using single path payment pay MPP invoice successfully
-                            warn!(
-                                "invoice allows MPP but no MPP records in onion packet: {:?}",
-                                payment_hash
-                            );
-                        }
-                        if !is_invoice_fulfilled(invoice, std::slice::from_ref(tlc)) {
-                            error!("invoice is not fulfilled for payment: {:?}", payment_hash);
-                            return Err(ProcessingChannelError::FinalIncorrectHTLCAmount);
-                        }
+
+                    let payment_secret = invoice.payment_secret();
+                    if payment_secret.is_some_and(|s| s != &record.payment_secret) {
+                        error!(
+                            "payment secret is not equal to invoice payment secret: {:?}",
+                            payment_hash
+                        );
+                        return Err(ProcessingChannelError::FinalIncorrectMPPInfo(
+                            "payment secret mismatch".to_string(),
+                        ));
                     }
+
+                    tlc.payment_secret = Some(record.payment_secret);
+                    tlc.total_amount = Some(record.total_amount);
+                }
+                (Some(invoice), None) => {
+                    if invoice.allow_mpp() {
+                        // FIXME: whether we allow MPP without MPP records in onion packet?
+                        // currently we allow it pay with enough amount
+                        // TODO: add a unit test of using single path payment pay MPP invoice successfully
+                        warn!(
+                            "invoice allows MPP but no MPP records in onion packet: {:?}",
+                            payment_hash
+                        );
+                    }
+                    if !is_invoice_fulfilled(invoice, std::slice::from_ref(tlc)) {
+                        error!("invoice is not fulfilled for payment: {:?}", payment_hash);
+                        return Err(ProcessingChannelError::FinalIncorrectHTLCAmount);
+                    }
+                }
+                (None, Some(_record)) => {
+                    error!("invoice not found for MPP payment: {:?}", payment_hash);
+                    return Err(ProcessingChannelError::FinalIncorrectMPPInfo(
+                        "invoice not found".to_string(),
+                    ));
+                }
+                _ => {
+                    // single path payment with keysend
                 }
             }
 
