@@ -1054,7 +1054,12 @@ where
                     .and_then(PaymentDataRecord::read)
                 {
                     Some(record) => {
-                        let invoice = invoice.as_ref().expect("invoice exists for MPP payment");
+                        let Some(invoice) = invoice.as_ref() else {
+                            error!("invoice not found for MPP payment: {:?}", payment_hash);
+                            return Err(ProcessingChannelError::FinalIncorrectMPPInfo(
+                                "invoice not found".to_string(),
+                            ));
+                        };
                         if record.total_amount < invoice.amount.unwrap_or_default() {
                             error!(
                                 "total amount is less than invoice amount: {:?}",
