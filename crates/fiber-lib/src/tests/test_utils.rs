@@ -989,12 +989,11 @@ impl NetworkNode {
         loop {
             assert!(self.get_triggered_unexpected_events().await.is_empty());
             let status = self.get_payment_status(payment_hash).await;
-            eprintln!("Payment status: {:?}", status);
             if status == PaymentStatus::Success {
-                error!("Payment success: {:?}\n\n", payment_hash);
+                info!("Payment success: {:?}\n\n", payment_hash);
                 break;
             } else if status == PaymentStatus::Failed {
-                error!("Payment failed: {:?}\n\n", payment_hash);
+                error!("Unexpected payment failed: {:?}\n\n", payment_hash);
                 // report error
                 assert_eq!(status, PaymentStatus::Success);
             }
@@ -1007,10 +1006,10 @@ impl NetworkNode {
             assert!(self.get_triggered_unexpected_events().await.is_empty());
             let status = self.get_payment_status(payment_hash).await;
             if status == PaymentStatus::Failed {
-                error!("Payment failed: {:?}\n\n", payment_hash);
+                info!("Payment failed: {:?}\n\n", payment_hash);
                 break;
             } else if status == PaymentStatus::Success {
-                error!("Payment success: {:?}\n\n", payment_hash);
+                error!("Unexpected payment success: {:?}\n\n", payment_hash);
                 // report error
                 assert_eq!(status, PaymentStatus::Failed);
             }

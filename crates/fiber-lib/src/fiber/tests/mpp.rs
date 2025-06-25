@@ -25,7 +25,7 @@ use crate::{
 };
 
 #[tokio::test]
-async fn test_send_mpp_basic_two_channels() {
+async fn test_send_mpp_basic_two_channels_one_time() {
     init_tracing();
 
     let (nodes, channels) = create_n_nodes_network(
@@ -2771,4 +2771,73 @@ async fn test_mpp_tlc_with_invoice_not_allow_mpp_should_not_be_accepted() {
     let node_1_balance = node_1.get_local_balance_from_channel(channels[0]);
     assert_eq!(node_0_balance, 10000000000);
     assert_eq!(node_1_balance, 0);
+}
+
+#[tokio::test]
+async fn test_send_mpp_basic_two_channels_send_each_other_multiple_time() {
+    init_tracing();
+
+    let (nodes, channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+            ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+        ],
+        2,
+    )
+    .await;
+    let [mut node_0, mut node_1] = nodes.try_into().expect("2 nodes");
+    for _i in 0..2 {
+        let res = node_0
+            .send_mpp_payment(&mut node_1, 20000000000, Some(2))
+            .await;
+
+        assert!(res.is_ok());
+        let payment_hash = res.unwrap().payment_hash;
+        eprintln!("begin to wait for payment: {} success ...", payment_hash);
+        node_0.wait_until_success(payment_hash).await;
+
+        let payment_session = node_0.get_payment_session(payment_hash).unwrap();
+        dbg!(&payment_session.status, &payment_session.attempts_count());
+
+        tokio::time::sleep(Duration::from_secs(2)).await;
+
+        let res = node_1
+            .send_mpp_payment(&mut node_0, 20000000000, Some(2))
+            .await;
+
+        eprintln!("res: {:?}", res);
+        assert!(res.is_ok());
+        let payment_hash = res.unwrap().payment_hash;
+        eprintln!("begin to wait for payment: {} success ...", payment_hash);
+        node_1.wait_until_success(payment_hash).await;
+
+        let payment_session = node_1.get_payment_session(payment_hash).unwrap();
+        dbg!(&payment_session.status, &payment_session.attempts_count());
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+
+    let res = node_0
+        .send_mpp_payment(&mut node_1, 20000000000, Some(2))
+        .await;
+
+    eprintln!("res: {:?}", res);
+    assert!(res.is_ok());
+    let payment_hash = res.unwrap().payment_hash;
+    eprintln!("begin to wait for payment: {} success ...", payment_hash);
+    node_0.wait_until_success(payment_hash).await;
+
+    let payment_session = node_0.get_payment_session(payment_hash).unwrap();
+    dbg!(&payment_session.status, &payment_session.attempts_count());
+
+    let node_0_balance = node_0.get_local_balance_from_channel(channels[0]);
+    let node_1_balance = node_1.get_local_balance_from_channel(channels[0]);
+    dbg!(node_0_balance, node_1_balance);
+    assert_eq!(node_0_balance, 0);
+    assert_eq!(node_1_balance, 10000000000);
+
+    let node_0_balance = node_0.get_local_balance_from_channel(channels[1]);
+    let node_1_balance = node_1.get_local_balance_from_channel(channels[1]);
+    dbg!(node_0_balance, node_1_balance);
+    assert_eq!(node_0_balance, 0);
+    assert_eq!(node_1_balance, 10000000000);
 }

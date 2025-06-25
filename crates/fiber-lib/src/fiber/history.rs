@@ -594,7 +594,7 @@ where
         if fail_amount == success_amount {
             // if the graph has latest information
             // we don't continue to calculate the probability
-            if amount < capacity {
+            if amount <= capacity {
                 return 1.0;
             }
             return 0.0;
