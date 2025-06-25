@@ -5328,7 +5328,7 @@ async fn test_payment_with_insufficient_amount_with_payment_data() {
         .amount(Some(10000000000))
         .payment_preimage(preimage)
         .payee_pub_key(target_pubkey.into())
-        .allow_mpp(true)
+        .allow_mpp(false)
         .payment_secret(payment_secret)
         .build()
         .expect("build invoice success");
@@ -5441,7 +5441,7 @@ async fn test_payment_with_insufficient_amount_without_payment_data() {
         .amount(Some(10000000000))
         .payment_preimage(preimage)
         .payee_pub_key(target_pubkey.into())
-        .allow_mpp(true)
+        .allow_mpp(false)
         .payment_secret(payment_secret)
         .build()
         .expect("build invoice success");
