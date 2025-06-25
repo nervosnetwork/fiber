@@ -1,4 +1,4 @@
-import { DbWorkerInitializationOptions } from "./types.js";
+import { DbWorkerInitializationOptions } from "./types/general.js";
 
 onerror = (err) => {
     console.error(err)

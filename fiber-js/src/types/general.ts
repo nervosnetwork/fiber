@@ -19,9 +19,12 @@ interface FiberInvokeRequest {
 };
 type FiberInvokeResponse = { ok: true; data: any; } | { ok: false; error: string };
 
+type HexString = `0x${string}`;
+
 export type {
     DbWorkerInitializationOptions,
     FiberWorkerInitializationOptions,
     FiberInvokeRequest,
-    FiberInvokeResponse
+    FiberInvokeResponse,
+    HexString
 }

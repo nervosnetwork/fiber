@@ -1,4 +1,4 @@
-import { FiberInvokeRequest, FiberWorkerInitializationOptions } from "./types";
+import { FiberInvokeRequest, FiberWorkerInitializationOptions } from "./types/general";
 
 onerror = (err) => {
     console.error(err)

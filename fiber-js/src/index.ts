@@ -2,7 +2,7 @@
 import DbWorker from "./db.worker.ts";
 import FiberWorker from "./fiber.worker.ts";
 import { Mutex } from "async-mutex";
-import { DbWorkerInitializationOptions, FiberInvokeRequest, FiberInvokeResponse, FiberWorkerInitializationOptions } from "./types.ts";
+import { DbWorkerInitializationOptions, FiberInvokeRequest, FiberInvokeResponse, FiberWorkerInitializationOptions } from "./types/general.ts";
 
 const DEFAULT_BUFFER_SIZE = 50 * (1 << 20);
 /**
@@ -261,4 +261,4 @@ export { Fiber };
 //     return hexFrom(arr);
 // }
 
-export * from "./types.ts";
+export * from "./types/general.ts";
