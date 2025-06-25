@@ -301,6 +301,16 @@ pub struct FiberConfig {
         help = "Disable built-in watchtower actor. [default: false]"
     )]
     pub disable_built_in_watchtower: Option<bool>,
+
+    /// Default timeout to auto close a funding channel. [default: 1 day]
+    #[arg(
+        name = "FIBER_FUNDING_TIMEOUT_SECONDS",
+        long = "fiber-funding-timeout-seconds",
+        env,
+        help = "Default timeout to auto close a funding channel. [default: 1 day]"
+    )]
+    #[default(DEFAULT_FUNDING_TIMEOUT_SECONDS)]
+    pub funding_timeout_seconds: u64,
 }
 
 /// Must be a valid utf-8 string of length maximal length 32 bytes.

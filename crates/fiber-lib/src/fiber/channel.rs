@@ -295,7 +295,22 @@ pub struct AcceptChannelParameter {
     pub max_tlc_number_in_flight: u64,
 }
 
-pub enum ChannelInitializationParameter {
+// Ephemeral config for channel which does not need to persist.
+#[derive(Clone, Debug)]
+pub struct ChannelEphemeralConfig {
+    // Timeout to auto close a funding channel
+    pub funding_timeout_seconds: u64,
+}
+
+impl Default for ChannelEphemeralConfig {
+    fn default() -> Self {
+        Self {
+            funding_timeout_seconds: DEFAULT_FUNDING_TIMEOUT_SECONDS,
+        }
+    }
+}
+
+pub enum ChannelInitializationOperation {
     /// To open a new channel to another peer, the funding amount,
     /// the temporary channel id a unique channel seed to generate
     /// channel secrets must be given.
@@ -307,6 +322,11 @@ pub enum ChannelInitializationParameter {
     AcceptChannel(AcceptChannelParameter),
     /// Reestablish a channel with given channel id.
     ReestablishChannel(Hash256),
+}
+
+pub struct ChannelInitializationParameter {
+    pub operation: ChannelInitializationOperation,
+    pub ephemeral_config: ChannelEphemeralConfig,
 }
 
 #[derive(Clone)]
@@ -2157,6 +2177,7 @@ where
             }
             ChannelEvent::CheckFundingTimeout => {
                 if state.can_abort_funding_on_timeout() {
+                    info!("Abort funding on timeout for channel {}", state.get_id());
                     myself
                         .send_message(ChannelActorMessage::Event(ChannelEvent::Stop(
                             StopReason::AbortFunding,
@@ -2226,8 +2247,8 @@ where
         args: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
         // startup the event processing
-        match args {
-            ChannelInitializationParameter::AcceptChannel(AcceptChannelParameter {
+        let mut state = match args.operation {
+            ChannelInitializationOperation::AcceptChannel(AcceptChannelParameter {
                 funding_amount: local_funding_amount,
                 reserved_ckb_amount: local_reserved_ckb_amount,
                 shutdown_script: local_shutdown_script,
@@ -2361,9 +2382,9 @@ where
                 if let Some(sender) = channel_id_sender {
                     sender.send(state.get_id()).expect("Receive not dropped");
                 }
-                Ok(state)
+                state
             }
-            ChannelInitializationParameter::OpenChannel(OpenChannelParameter {
+            ChannelInitializationOperation::OpenChannel(OpenChannelParameter {
                 funding_amount,
                 seed,
                 tlc_info,
@@ -2480,9 +2501,9 @@ where
                 channel_id_sender
                     .send(channel.get_id())
                     .expect("Receive not dropped");
-                Ok(channel)
+                channel
             }
-            ChannelInitializationParameter::ReestablishChannel(channel_id) => {
+            ChannelInitializationOperation::ReestablishChannel(channel_id) => {
                 let mut channel = self
                     .store
                     .get_channel_actor_state(&channel_id)
@@ -2505,9 +2526,12 @@ where
                     ))
                     .expect(ASSUME_NETWORK_ACTOR_ALIVE);
 
-                Ok(channel)
+                channel
             }
-        }
+        };
+
+        state.ephemeral_config = args.ephemeral_config;
+        Ok(state)
     }
 
     async fn handle(
@@ -2578,7 +2602,7 @@ where
         if state.can_abort_funding_on_timeout() {
             let event_factory = || ChannelActorMessage::Event(ChannelEvent::CheckFundingTimeout);
 
-            match Duration::from_secs(DEFAULT_FUNDING_TIMEOUT_SECONDS)
+            match Duration::from_secs(state.ephemeral_config.funding_timeout_seconds)
                 .checked_sub(state.created_at.elapsed().unwrap_or_default())
             {
                 Some(timeout) => {
@@ -3536,6 +3560,9 @@ pub struct ChannelActorState {
     // The arc here is only used to implement the clone trait for the ChannelActorState.
     #[serde(skip)]
     pub scheduled_channel_update_handle: ScheduledChannelUpdateHandle,
+
+    #[serde(skip)]
+    pub ephemeral_config: ChannelEphemeralConfig,
 }
 
 #[serde_as]
@@ -4388,6 +4415,7 @@ impl ChannelActorState {
             waiting_peer_response: None,
             network: Some(network),
             scheduled_channel_update_handle: None,
+            ephemeral_config: Default::default(),
         };
         if let Some(nonce) = remote_channel_announcement_nonce {
             state.update_remote_channel_announcement_nonce(&nonce);
@@ -4461,6 +4489,7 @@ impl ChannelActorState {
             waiting_peer_response: None,
             network: Some(network),
             scheduled_channel_update_handle: None,
+            ephemeral_config: Default::default(),
         }
     }
 
