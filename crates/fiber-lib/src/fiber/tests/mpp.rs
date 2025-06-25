@@ -2608,3 +2608,47 @@ async fn test_mpp_tlc_set_without_invoice_should_not_be_accepted() {
     assert_eq!(node_0_balance, 10000000000);
     assert_eq!(node_1_balance, 0);
 }
+
+#[tokio::test]
+async fn test_send_payment_with_invoice_removed_from_last_hop() {
+    init_tracing();
+
+    let (nodes, _channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+        ],
+        3,
+    )
+    .await;
+    let [node_0, _node_1, mut node_2] = nodes.try_into().expect("ok nodes");
+
+    let target_node = &mut node_2;
+    let amount = 300000;
+    let target_pubkey = target_node.get_public_key();
+    let preimage = gen_rand_sha256_hash();
+    let ckb_invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(amount))
+        .payment_preimage(preimage)
+        .payee_pub_key(target_pubkey.into())
+        .allow_mpp(true)
+        .payment_secret(gen_rand_sha256_hash())
+        .build()
+        .expect("build invoice success");
+
+    //target_node.insert_invoice(ckb_invoice.clone(), Some(preimage));
+
+    let res = node_0
+        .send_payment(SendPaymentCommand {
+            invoice: Some(ckb_invoice.to_string()),
+            amount: ckb_invoice.amount,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    node_0.wait_until_failed(res.payment_hash).await;
+    debug!("node_0 payment failed, res: {:?}", res);
+
+    assert_eq!(res.routers.len(), 1);
+}

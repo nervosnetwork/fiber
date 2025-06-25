@@ -83,9 +83,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use super::types::{
-    ChannelUpdateChannelFlags, ChannelUpdateMessageFlags, PaymentDataRecord, UpdateTlcInfo,
-};
+use super::types::{ChannelUpdateChannelFlags, ChannelUpdateMessageFlags, UpdateTlcInfo};
 
 // - `empty_witness_args`: 16 bytes, fixed to 0x10000000100000001000000010000000, for compatibility with the xudt
 // - `pubkey`: 32 bytes, x only aggregated public key
@@ -919,7 +917,7 @@ where
                     // single path payment
                     if !is_invoice_fulfilled(&invoice, std::slice::from_ref(&tlc)) {
                         remove_reason = RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
-                            TlcErr::new(TlcErrorCode::AmountBelowMinimum),
+                            TlcErr::new(TlcErrorCode::IncorrectOrUnknownPaymentDetails),
                             &tlc.shared_secret,
                         ));
                     }
@@ -1045,21 +1043,16 @@ where
                 }
             }
 
+            let Some(tlc) = state.tlc_state.get_mut(&add_tlc.tlc_id) else {
+                return Err(ProcessingChannelError::InternalError(
+                    "TLC not found in state".to_string(),
+                ));
+            };
+
             // extract MPP total payment fields from onion packet
-            if let Some(tlc) = state.tlc_state.get_mut(&add_tlc.tlc_id) {
-                match peeled_onion_packet
-                    .current
-                    .custom_records
-                    .as_ref()
-                    .and_then(PaymentDataRecord::read)
-                {
+            if let Some(invoice) = &invoice {
+                match peeled_onion_packet.mpp_custom_records() {
                     Some(record) => {
-                        let Some(invoice) = invoice.as_ref() else {
-                            error!("invoice not found for MPP payment: {:?}", payment_hash);
-                            return Err(ProcessingChannelError::FinalIncorrectMPPInfo(
-                                "invoice not found".to_string(),
-                            ));
-                        };
                         if record.total_amount < invoice.amount.unwrap_or_default() {
                             error!(
                                 "total amount is less than invoice amount: {:?}",
@@ -1085,19 +1078,18 @@ where
                         tlc.total_amount = Some(record.total_amount);
                     }
                     None => {
-                        // the onion packet doesn't contain MPP total payment fields
-                        // check if the invoice is fulfilled
-                        if invoice.as_ref().is_some_and(|inv| {
-                            !is_invoice_fulfilled(inv, std::slice::from_ref(tlc))
-                        }) {
-                            // return proper error if invoice not fulfilled
-                            error!(
-                                "onion packet doesn't contain MPP total payment fields: {:?}",
+                        if invoice.allow_mpp() {
+                            // FIXME: whether we allow MPP without MPP records in onion packet?
+                            // currently we allow it pay with enough amount
+                            // TODO: add a unit test of using single path payment pay MPP invoice successfully
+                            warn!(
+                                "invoice allows MPP but no MPP records in onion packet: {:?}",
                                 payment_hash
                             );
-                            return Err(ProcessingChannelError::FinalIncorrectMPPInfo(
-                                "no custom records for MPP".to_string(),
-                            ));
+                        }
+                        if !is_invoice_fulfilled(invoice, std::slice::from_ref(tlc)) {
+                            error!("invoice is not fulfilled for payment: {:?}", payment_hash);
+                            return Err(ProcessingChannelError::FinalIncorrectHTLCAmount);
                         }
                     }
                 }

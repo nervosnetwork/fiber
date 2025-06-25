@@ -3875,6 +3875,15 @@ pub struct PeeledOnionPacket<T> {
 pub type PaymentOnionPacket = OnionPacket<PaymentHopData>;
 pub type PeeledPaymentOnionPacket = PeeledOnionPacket<PaymentHopData>;
 
+impl PeeledOnionPacket<PaymentHopData> {
+    pub fn mpp_custom_records(&self) -> Option<PaymentDataRecord> {
+        self.current
+            .custom_records
+            .as_ref()
+            .and_then(PaymentDataRecord::read)
+    }
+}
+
 impl<T> OnionPacket<T> {
     pub fn new(data: Vec<u8>) -> Self {
         OnionPacket {
