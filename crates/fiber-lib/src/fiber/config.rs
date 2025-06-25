@@ -318,6 +318,16 @@ pub struct FiberConfig {
         help = "Max allowed bytes of channels to be accepted from one peer. [default: 50KB]"
     )]
     pub to_be_accepted_channels_bytes_limit: Option<usize>,
+
+    /// Default timeout to auto close a funding channel. [default: 1 day]
+    #[arg(
+        name = "FIBER_FUNDING_TIMEOUT_SECONDS",
+        long = "fiber-funding-timeout-seconds",
+        env,
+        help = "Default timeout to auto close a funding channel. [default: 1 day]"
+    )]
+    #[default(DEFAULT_FUNDING_TIMEOUT_SECONDS)]
+    pub funding_timeout_seconds: u64,
 }
 
 /// Must be a valid utf-8 string of length maximal length 32 bytes.
