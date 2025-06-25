@@ -3,9 +3,10 @@ use crate::fiber::channel::{ChannelState, CloseFlags, UpdateCommand, XUDT_COMPAT
 use crate::fiber::config::{DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT};
 use crate::fiber::features::FeatureVector;
 use crate::fiber::graph::{ChannelInfo, PaymentStatus};
-use crate::fiber::network::{DebugEvent, SendPaymentCommand};
+use crate::fiber::network::{DebugEvent, FiberMessageWithPeerId, SendPaymentCommand};
 use crate::fiber::types::{
-    Hash256, Init, PaymentHopData, PeeledOnionPacket, Pubkey, TlcErrorCode, NO_SHARED_SECRET,
+    AddTlc, FiberMessage, Hash256, Init, PaymentHopData, PeeledOnionPacket, Pubkey, TlcErrorCode,
+    NO_SHARED_SECRET,
 };
 use crate::invoice::{CkbInvoiceStatus, Currency, InvoiceBuilder};
 use crate::test_utils::{init_tracing, NetworkNode};
@@ -6130,4 +6131,56 @@ async fn test_abandon_channel_with_peer_accept() {
     // make sure the channel actor is stopped
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
     node_b.expect_debug_event("ChannelActorStopped").await;
+}
+
+#[tokio::test]
+async fn test_channel_with_malicious_peer_send_channel_msg() {
+    init_tracing();
+
+    let (nodes, channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((0, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+        ],
+        3,
+    )
+    .await;
+
+    let [node_0, node_1, node_2] = nodes.try_into().expect("expected nodes");
+
+    let test_with_node = async |target_node: &NetworkNode| {
+        // channels[0] is between node_0 and node_1,
+        let wrong_channel_id = channels[0];
+
+        let preimage_a = [1; 32];
+        let algorithm = HashAlgorithm::Sha256;
+        let digest = algorithm.hash(preimage_a);
+
+        node_2
+            .network_actor
+            .send_message(NetworkActorMessage::Command(
+                NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId {
+                    peer_id: target_node.peer_id.clone(),
+                    message: FiberMessage::add_tlc(AddTlc {
+                        channel_id: wrong_channel_id,
+                        amount: 1000,
+                        tlc_id: 0,
+                        hash_algorithm: algorithm,
+                        payment_hash: digest.into(),
+                        expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+                        onion_packet: None,
+                    }),
+                }),
+            ))
+            .expect("send message");
+        tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+        let channel_state = target_node
+            .get_channel_actor_state_unchecked(wrong_channel_id)
+            .expect("channel actor state");
+        assert_eq!(channel_state.tlc_state.all_tlcs().count(), 0);
+    };
+
+    test_with_node(&node_0).await;
+    test_with_node(&node_1).await;
 }
