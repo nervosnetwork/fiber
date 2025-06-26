@@ -75,13 +75,14 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
     * [Type `InvoiceSignature`](#type-invoicesignature)
     * [Type `NodeInfo`](#type-nodeinfo)
     * [Type `PaymentCustomRecords`](#type-paymentcustomrecords)
-    * [Type `PaymentSessionStatus`](#type-paymentsessionstatus)
+    * [Type `PaymentStatus`](#type-paymentstatus)
     * [Type `PeerInfo`](#type-peerinfo)
     * [Type `Privkey`](#type-privkey)
     * [Type `Pubkey`](#type-pubkey)
     * [Type `RemoveTlcReason`](#type-removetlcreason)
     * [Type `RevocationData`](#type-revocationdata)
     * [Type `RouterHop`](#type-routerhop)
+    * [Type `SessionRoute`](#type-sessionroute)
     * [Type `SessionRouteNode`](#type-sessionroutenode)
     * [Type `SettlementData`](#type-settlementdata)
     * [Type `SettlementTlc`](#type-settlementtlc)
@@ -483,6 +484,7 @@ Get the node information.
 * `version` - <em>`String`</em>, The version of the node software.
 * `commit_hash` - <em>`String`</em>, The commit hash of the node software.
 * `node_id` - <em>[Pubkey](#type-pubkey)</em>, The identity public key of the node.
+* `features` - <em>`Vec<String>`</em>, The features supported by the node.
 * `node_name` - <em>`Option<String>`</em>, The optional name of the node.
 * `addresses` - <em>`Vec<MultiAddr>`</em>, A list of multi-addresses associated with the node.
 * `chain_hash` - <em>[Hash256](#type-hash256)</em>, The hash of the blockchain that the node is connected to.
@@ -522,6 +524,7 @@ Generates a new invoice.
 * `final_expiry_delta` - <em>`Option<u64>`</em>, The final HTLC timeout of the invoice, in milliseconds.
 * `udt_type_script` - <em>`Option<Script>`</em>, The UDT type script of the invoice.
 * `hash_algorithm` - <em>Option<[HashAlgorithm](#type-hashalgorithm)></em>, The hash algorithm of the invoice.
+* `allow_mpp` - <em>`Option<bool>`</em>, Whether allow payment to use MPP
 
 ##### Returns
 
@@ -645,15 +648,16 @@ Sends a payment to a peer.
 ##### Returns
 
 * `payment_hash` - <em>[Hash256](#type-hash256)</em>, The payment hash of the payment
-* `status` - <em>[PaymentSessionStatus](#type-paymentsessionstatus)</em>, The status of the payment
+* `status` - <em>[PaymentStatus](#type-paymentstatus)</em>, The status of the payment
 * `created_at` - <em>`u64`</em>, The time the payment was created at, in milliseconds from UNIX epoch
 * `last_updated_at` - <em>`u64`</em>, The time the payment was last updated at, in milliseconds from UNIX epoch
 * `failed_error` - <em>`Option<String>`</em>, The error message if the payment failed
 * `fee` - <em>`u128`</em>, fee paid for the payment
 * `custom_records` - <em>Option<[PaymentCustomRecords](#type-paymentcustomrecords)></em>, The custom records to be included in the payment.
-* `router` - <em>Vec<[SessionRouteNode](#type-sessionroutenode)></em>, The router is a list of nodes that the payment will go through.
+* `routers` - <em>Vec<[SessionRoute](#type-sessionroute)></em>, The router is a list of nodes that the payment will go through.
  We store in the payment session and then will use it to track the payment history.
  The router is a list of nodes that the payment will go through.
+ If the payment adapted MPP (multi-part payment), the routers will be a list of nodes
  For example:
     `A(amount, channel) -> B -> C -> D`
  means A will send `amount` with `channel` to B.
@@ -674,15 +678,16 @@ Retrieves a payment.
 ##### Returns
 
 * `payment_hash` - <em>[Hash256](#type-hash256)</em>, The payment hash of the payment
-* `status` - <em>[PaymentSessionStatus](#type-paymentsessionstatus)</em>, The status of the payment
+* `status` - <em>[PaymentStatus](#type-paymentstatus)</em>, The status of the payment
 * `created_at` - <em>`u64`</em>, The time the payment was created at, in milliseconds from UNIX epoch
 * `last_updated_at` - <em>`u64`</em>, The time the payment was last updated at, in milliseconds from UNIX epoch
 * `failed_error` - <em>`Option<String>`</em>, The error message if the payment failed
 * `fee` - <em>`u128`</em>, fee paid for the payment
 * `custom_records` - <em>Option<[PaymentCustomRecords](#type-paymentcustomrecords)></em>, The custom records to be included in the payment.
-* `router` - <em>Vec<[SessionRouteNode](#type-sessionroutenode)></em>, The router is a list of nodes that the payment will go through.
+* `routers` - <em>Vec<[SessionRoute](#type-sessionroute)></em>, The router is a list of nodes that the payment will go through.
  We store in the payment session and then will use it to track the payment history.
  The router is a list of nodes that the payment will go through.
+ If the payment adapted MPP (multi-part payment), the routers will be a list of nodes
  For example:
     `A(amount, channel) -> B -> C -> D`
  means A will send `amount` with `channel` to B.
@@ -753,15 +758,16 @@ Sends a payment to a peer with specified router
 ##### Returns
 
 * `payment_hash` - <em>[Hash256](#type-hash256)</em>, The payment hash of the payment
-* `status` - <em>[PaymentSessionStatus](#type-paymentsessionstatus)</em>, The status of the payment
+* `status` - <em>[PaymentStatus](#type-paymentstatus)</em>, The status of the payment
 * `created_at` - <em>`u64`</em>, The time the payment was created at, in milliseconds from UNIX epoch
 * `last_updated_at` - <em>`u64`</em>, The time the payment was last updated at, in milliseconds from UNIX epoch
 * `failed_error` - <em>`Option<String>`</em>, The error message if the payment failed
 * `fee` - <em>`u128`</em>, fee paid for the payment
 * `custom_records` - <em>Option<[PaymentCustomRecords](#type-paymentcustomrecords)></em>, The custom records to be included in the payment.
-* `router` - <em>Vec<[SessionRouteNode](#type-sessionroutenode)></em>, The router is a list of nodes that the payment will go through.
+* `routers` - <em>Vec<[SessionRoute](#type-sessionroute)></em>, The router is a list of nodes that the payment will go through.
  We store in the payment session and then will use it to track the payment history.
  The router is a list of nodes that the payment will go through.
+ If the payment adapted MPP (multi-part payment), the routers will be a list of nodes
  For example:
     `A(amount, channel) -> B -> C -> D`
  means A will send `amount` with `channel` to B.
@@ -959,7 +965,8 @@ The attributes of the invoice
 * `UdtScript` - <em>[CkbScript](#type-ckbscript)</em>, The udt type script of the invoice
 * `PayeePublicKey` - <em>PublicKey</em>, The payee public key of the invoice
 * `HashAlgorithm` - <em>[HashAlgorithm](#type-hashalgorithm)</em>, The hash algorithm of the invoice
-* `Feature` - <em>u64</em>, The feature flags of the invoice
+* `Feature` - <em>[FeatureVector](#type-featurevector)</em>, The feature flags of the invoice
+* `PaymentSecret` - <em>[Hash256](#type-hash256)</em>, The payment secret of the invoice
 ---
 
 <a id="#type-cchorderstatus"></a>
@@ -1191,6 +1198,7 @@ The Node information.
 
 * `node_name` - <em>String</em>, The name of the node.
 * `addresses` - <em>Vec<MultiAddr></em>, The addresses of the node.
+* `features` - <em>Vec<String></em>, The node features supported by the node.
 * `node_id` - <em>[Pubkey](#type-pubkey)</em>, The identity public key of the node.
 * `timestamp` - <em>u64</em>, The latest timestamp set by the owner for the node announcement.
  When a Node is online this timestamp will be updated to the latest value.
@@ -1220,15 +1228,16 @@ The custom records to be included in the payment.
 * `data` - <em>HashMap<u32::Vec<u8>></em>, The custom records to be included in the payment.
 ---
 
-<a id="#type-paymentsessionstatus"></a>
-### Type `PaymentSessionStatus`
+<a id="#type-paymentstatus"></a>
+### Type `PaymentStatus`
 
 The status of a payment, will update as the payment progresses.
+ The transfer path for payment status is `Created -> Inflight -> Success | Failed`.
 
 
 #### Enum with values of
 
-* `Created` - initial status, payment session is created, no HTLC is sent
+* `Created` - initial status, a payment session is created, no HTLC is sent
 * `Inflight` - the first hop AddTlc is sent successfully and waiting for the response
 * `Success` - related HTLC is successfully settled
 * `Failed` - related HTLC is failed
@@ -1309,6 +1318,22 @@ A router hop information for a payment, a paymenter router is an array of Router
 * `incoming_tlc_expiry` - <em>u64</em>, The expiry for the TLC that the source node sends to the target node.
  We have already added up all the expiry deltas along the path,
  the only thing missing is current time. So the expiry is the current time plus the expiry delta.
+---
+
+<a id="#type-sessionroute"></a>
+### Type `SessionRoute`
+
+The router is a list of nodes that the payment will go through.
+ We store in the payment session and then will use it to track the payment history.
+ The router is a list of nodes that the payment will go through.
+ For example:
+    `A(amount, channel) -> B -> C -> D`
+ means A will send `amount` with `channel` to B.
+
+
+#### Fields
+
+* `nodes` - <em>Vec<[SessionRouteNode](#type-sessionroutenode)></em>, the nodes in the route
 ---
 
 <a id="#type-sessionroutenode"></a>

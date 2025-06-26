@@ -541,3 +541,47 @@ fn test_check_signature_should_not_panic() {
     // check signature should not panic
     assert!(invoice.check_signature().is_err());
 }
+
+#[test]
+fn test_invoice_with_mpp_option() {
+    let private_key = gen_rand_secp256k1_private_key();
+    let invoice = InvoiceBuilder::new(Currency::Fibb)
+        .amount(Some(1280))
+        .payment_hash(gen_rand_sha256_hash())
+        .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))
+        .unwrap();
+
+    assert!(!invoice.allow_mpp());
+
+    let invoice = InvoiceBuilder::new(Currency::Fibb)
+        .amount(Some(1280))
+        .payment_hash(gen_rand_sha256_hash())
+        .allow_mpp(true)
+        .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))
+        .unwrap();
+
+    assert!(invoice.allow_mpp());
+
+    let serialized_invoice = serde_json::to_string(&invoice).unwrap();
+    eprintln!("Serialized invoice: {}", serialized_invoice);
+    let deserialized_invoice: CkbInvoice =
+        serde_json::from_str(&serialized_invoice).expect("Failed to deserialize invoice");
+    assert_eq!(deserialized_invoice, invoice);
+    assert!(deserialized_invoice.allow_mpp());
+
+    let human_readable_invoice = invoice.to_string();
+    let parsed_invoice: CkbInvoice = human_readable_invoice
+        .parse()
+        .expect("Failed to parse invoice");
+    assert_eq!(parsed_invoice, invoice);
+    assert!(parsed_invoice.allow_mpp());
+
+    let invoice = InvoiceBuilder::new(Currency::Fibb)
+        .amount(Some(1280))
+        .payment_hash(gen_rand_sha256_hash())
+        .allow_mpp(false)
+        .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))
+        .unwrap();
+
+    assert!(!invoice.allow_mpp());
+}

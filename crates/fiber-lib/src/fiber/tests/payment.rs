@@ -4,7 +4,7 @@ use crate::fiber::config::DEFAULT_TLC_EXPIRY_DELTA;
 use crate::fiber::config::DEFAULT_TLC_FEE_PROPORTIONAL_MILLIONTHS;
 use crate::fiber::config::MAX_PAYMENT_TLC_EXPIRY_LIMIT;
 use crate::fiber::config::MIN_TLC_EXPIRY_DELTA;
-use crate::fiber::graph::PaymentSessionStatus;
+use crate::fiber::graph::PaymentStatus;
 use crate::fiber::graph::SessionRoute;
 use crate::fiber::hash_algorithm::HashAlgorithm;
 use crate::fiber::network::*;
@@ -23,8 +23,10 @@ use crate::NetworkServiceEvent;
 use ckb_types::packed::Script;
 use ckb_types::{core::tx_pool::TxStatus, packed::OutPoint};
 use ractor::call;
+use secp256k1::Secp256k1;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::time::Duration;
 use std::time::SystemTime;
 use tracing::debug;
 use tracing::error;
@@ -75,7 +77,7 @@ async fn test_send_payment_custom_records() {
         .expect("node_a alive")
         .unwrap();
 
-    assert_eq!(res.status, PaymentSessionStatus::Success);
+    assert_eq!(res.status, PaymentStatus::Success);
     let got_custom_records = node_1
         .get_payment_custom_records(&payment_hash)
         .expect("custom records");
@@ -289,7 +291,7 @@ async fn test_send_payment_fee_rate() {
     assert!(res.is_ok(), "Send payment failed: {:?}", res);
     let res = res.unwrap();
     assert!(res.fee > 0);
-    let nodes = res.router.nodes;
+    let nodes = &res.routers[0].nodes;
     assert_eq!(nodes.len(), 3);
     assert_eq!(nodes[2].amount, 10_000_000);
     assert_eq!(nodes[1].amount, 10_000_000);
@@ -302,7 +304,7 @@ async fn test_send_payment_fee_rate() {
     assert!(res.is_ok(), "Send payment failed: {:?}", res);
     let res = res.unwrap();
     assert!(res.fee > 0);
-    let nodes = res.router.nodes;
+    let nodes = &res.routers[0].nodes;
     assert_eq!(nodes.len(), 3);
     assert_eq!(nodes[2].amount, 1_000_000);
     assert_eq!(nodes[1].amount, 1_000_000);
@@ -402,7 +404,7 @@ async fn test_send_payment_for_pay_self() {
     let payment_hash = res.payment_hash;
     node_0.wait_until_success(payment_hash).await;
     node_0
-        .assert_payment_status(payment_hash, PaymentSessionStatus::Success, Some(1))
+        .assert_payment_status(payment_hash, PaymentStatus::Success, Some(1))
         .await;
 
     let node_0_balance1 = node_0.get_local_balance_from_channel(channels[0]);
@@ -468,7 +470,7 @@ async fn test_send_payment_for_pay_self_with_two_nodes() {
     let payment_hash = res.payment_hash;
     node_0.wait_until_success(payment_hash).await;
     node_0
-        .assert_payment_status(payment_hash, PaymentSessionStatus::Success, Some(1))
+        .assert_payment_status(payment_hash, PaymentStatus::Success, Some(1))
         .await;
 
     let node_0_balance1 = node_0.get_local_balance_from_channel(channels[0]);
@@ -537,7 +539,7 @@ async fn test_send_payment_with_more_capacity_for_payself() {
     let payment_hash = res.payment_hash;
     node_0.wait_until_success(payment_hash).await;
     node_0
-        .assert_payment_status(payment_hash, PaymentSessionStatus::Success, Some(1))
+        .assert_payment_status(payment_hash, PaymentStatus::Success, Some(1))
         .await;
 
     let node_0_balance1 = node_0.get_local_balance_from_channel(channels[0]);
@@ -745,7 +747,7 @@ async fn test_send_payment_hophint_for_middle_channels_does_not_work() {
     // the router is wrong with node1 -> node2 -> node4
     // the second channel is private_channel_outpoint
     assert_eq!(
-        res.router.nodes[1].channel_outpoint,
+        res.routers[0].nodes[1].channel_outpoint,
         private_channel_outpoint
     );
     let payment_hash = res.payment_hash;
@@ -882,7 +884,7 @@ async fn test_send_payment_with_private_channel_hints_fallback() {
     // will first use the private channel, then send payment retry will fallback to public channel
     source_node.wait_until_success(payment_hash).await;
     source_node
-        .assert_payment_status(payment_hash, PaymentSessionStatus::Success, Some(2))
+        .assert_payment_status(payment_hash, PaymentStatus::Success, Some(2))
         .await;
 }
 
@@ -1008,7 +1010,7 @@ async fn test_send_payment_with_private_multiple_channel_hints_fallback() {
     let payment_hash = res.payment_hash;
     source_node.wait_until_success(payment_hash).await;
     let payment_session = source_node.get_payment_session(payment_hash).unwrap();
-    assert_eq!(payment_session.retried_times, 2);
+    assert_eq!(payment_session.retry_times(), 2);
 }
 
 #[tokio::test]
@@ -1509,7 +1511,7 @@ async fn test_send_payment_with_route_to_self_with_specified_router() {
     let payment_hash = res.payment_hash;
     node_0.wait_until_success(payment_hash).await;
     node_0
-        .assert_payment_status(payment_hash, PaymentSessionStatus::Success, Some(1))
+        .assert_payment_status(payment_hash, PaymentStatus::Success, Some(1))
         .await;
 
     let node_0_balance1 = node_0.get_local_balance_from_channel(channels[0]);
@@ -1631,7 +1633,7 @@ async fn test_send_payment_with_route_with_invalid_parameters() {
     let result = node_0
         .get_payment_session(payment_hash)
         .expect("get payment");
-    assert_eq!(result.retried_times, 1);
+    assert_eq!(result.retry_times(), 1);
 
     // ================================================================
     // now we change the expiry delta in the middle hop
@@ -1653,8 +1655,8 @@ async fn test_send_payment_with_route_with_invalid_parameters() {
     let result = node_0
         .get_payment_session(payment_hash)
         .expect("get payment");
-    eprintln!("result: {:?}", result);
-    assert_eq!(result.retried_times, 1);
+    eprintln!("result: {:?}", result.status);
+    assert_eq!(result.attempts_count(), 1);
 }
 
 #[tokio::test]
@@ -1717,8 +1719,11 @@ async fn test_send_payment_with_router_with_multiple_channels() {
     let payment_session = node_0
         .get_payment_session(payment_hash)
         .expect("get payment");
-    eprintln!("payment_session: {:?}", payment_session);
+    eprintln!("payment_session: {:?}", &payment_session);
     let used_channels: Vec<Hash256> = payment_session
+        .attempts()
+        .next()
+        .unwrap()
         .route
         .nodes
         .iter()
@@ -1772,11 +1777,12 @@ async fn test_send_payment_with_router_with_multiple_channels() {
     assert!(res.is_ok());
     let payment_hash = res.unwrap().payment_hash;
     eprintln!("payment_hash: {:?}", payment_hash);
-    let payment_session = node_0
-        .get_payment_session(payment_hash)
-        .expect("get payment");
-    eprintln!("payment_session: {:?}", payment_session);
+    let payment_session = node_0.get_payment_session(payment_hash).unwrap();
+    eprintln!("payment_session: {:?}", &payment_session);
     let used_channels: Vec<Hash256> = payment_session
+        .attempts()
+        .next()
+        .unwrap()
         .route
         .nodes
         .iter()
@@ -1872,6 +1878,9 @@ async fn test_send_payment_two_nodes_with_router_and_multiple_channels() {
         .expect("get payment");
 
     let used_channels: Vec<Hash256> = payment_session
+        .attempts()
+        .next()
+        .unwrap()
         .route
         .nodes
         .iter()
@@ -2061,10 +2070,10 @@ async fn test_network_send_payment_randomly_send_each_other() {
             &node_b.network_actor
         };
         let res = call!(network, message).expect("node_a alive").unwrap();
-        if res.status == PaymentSessionStatus::Success {
+        if res.status == PaymentStatus::Success {
             assert!(matches!(
                 create_status,
-                PaymentSessionStatus::Created | PaymentSessionStatus::Inflight
+                PaymentStatus::Created | PaymentStatus::Inflight
             ));
             eprintln!(
                 "{} payment_hash: {:?} success with amount: {} create_status: {:?}",
@@ -2292,7 +2301,7 @@ async fn test_send_payment_bench_test() {
         for payment_hash in all_sent.clone().iter() {
             let status = node_0.get_payment_status(*payment_hash).await;
             eprintln!("got payment: {:?} status: {:?}", payment_hash, status);
-            if status == PaymentSessionStatus::Success {
+            if status == PaymentStatus::Success {
                 eprintln!("payment_hash: {:?} success", payment_hash);
                 all_sent.remove(payment_hash);
             }
@@ -2680,6 +2689,7 @@ async fn test_send_payment_middle_hop_stopped_retry_longer_path() {
     assert_eq!(res.fee, 3);
 
     node_0.wait_until_success(res.payment_hash).await;
+
     let payment = node_0.get_payment_result(res.payment_hash).await;
     eprintln!("payment: {:?}", payment);
 
@@ -2935,7 +2945,7 @@ async fn test_send_payment_middle_hop_update_fee_multiple_payments() {
         for payment_hash in all_sent.clone().iter() {
             let status = nodes[0].get_payment_status(*payment_hash).await;
             //eprintln!("got payment: {:?} status: {:?}", payment_hash, status);
-            if status == PaymentSessionStatus::Failed || status == PaymentSessionStatus::Success {
+            if status == PaymentStatus::Failed || status == PaymentStatus::Success {
                 eprintln!("payment_hash: {:?} got status : {:?}", payment_hash, status);
                 all_sent.remove(payment_hash);
             }
@@ -3003,10 +3013,10 @@ async fn test_send_payment_middle_hop_update_fee_should_recovery() {
 
         for payment_hash in all_sent.clone().iter() {
             let status = nodes[0].get_payment_status(*payment_hash).await;
-            if status == PaymentSessionStatus::Success || status == PaymentSessionStatus::Failed {
+            if status == PaymentStatus::Success || status == PaymentStatus::Failed {
                 eprintln!("payment_hash: {:?} got status : {:?}", payment_hash, status);
                 all_sent.remove(payment_hash);
-                if status == PaymentSessionStatus::Success {
+                if status == PaymentStatus::Success {
                     succ_count += 1;
                 }
             }
@@ -3026,7 +3036,7 @@ async fn test_send_payment_middle_hop_update_fee_should_recovery() {
 async fn run_complex_network_with_params(
     funding_amount: u128,
     payment_amount_gen: impl Fn() -> u128,
-) -> Vec<(Hash256, PaymentSessionStatus)> {
+) -> Vec<(Hash256, PaymentStatus)> {
     init_tracing();
 
     let nodes_num = 6;
@@ -3071,10 +3081,7 @@ async fn run_complex_network_with_params(
         for (i, payment_hash) in all_sent.clone().into_iter() {
             let status = nodes[i].get_payment_status(payment_hash).await;
             eprintln!("payment_hash: {:?} got status : {:?}", payment_hash, status);
-            if matches!(
-                status,
-                PaymentSessionStatus::Success | PaymentSessionStatus::Failed
-            ) {
+            if matches!(status, PaymentStatus::Success | PaymentStatus::Failed) {
                 result.push((payment_hash, status));
                 all_sent.remove(&(i, payment_hash));
             }
@@ -3494,7 +3501,7 @@ async fn test_send_payment_complex_network_payself_all_succeed() {
     let res = run_complex_network_with_params(MIN_RESERVED_CKB + 100000000, || 1000).await;
     let failed_count = res
         .iter()
-        .filter(|(_, status)| *status == PaymentSessionStatus::Failed)
+        .filter(|(_, status)| *status == PaymentStatus::Failed)
         .count();
 
     assert_eq!(failed_count, 0);
@@ -3513,12 +3520,12 @@ async fn test_send_payment_complex_network_payself_amount_exceeded() {
     // some may failed and some may success
     let failed_count = res
         .iter()
-        .filter(|(_, status)| *status == PaymentSessionStatus::Failed)
+        .filter(|(_, status)| *status == PaymentStatus::Failed)
         .count();
     assert!(failed_count > 0);
     let succ_count = res
         .iter()
-        .filter(|(_, status)| *status == PaymentSessionStatus::Success)
+        .filter(|(_, status)| *status == PaymentStatus::Success)
         .count();
     assert!(succ_count > 0);
 }
@@ -3560,7 +3567,7 @@ async fn test_send_payment_with_one_node_stop() {
         for payment_hash in all_sent.clone().iter() {
             let res = nodes[0].get_payment_result(*payment_hash).await;
             eprintln!("payment_hash: {:?} status: {:?}", payment_hash, res.status);
-            if res.status == PaymentSessionStatus::Failed {
+            if res.status == PaymentStatus::Failed {
                 failed_count += 1;
                 all_sent.remove(payment_hash);
             }
@@ -3627,7 +3634,7 @@ async fn test_send_payment_shutdown_with_force() {
                 "payment_hash: {:?} status: {:?} failed_count: {:?}",
                 payment_hash, res.status, failed_count
             );
-            if res.status == PaymentSessionStatus::Failed {
+            if res.status == PaymentStatus::Failed {
                 failed_count += 1;
                 all_sent.remove(payment_hash);
             }
@@ -3702,9 +3709,7 @@ async fn test_send_payment_shutdown_cooperative() {
                 "payment_hash: {:?} status: {:?} failed_count: {:?}",
                 payment_hash, res.status, failed_count
             );
-            if res.status == PaymentSessionStatus::Failed
-                || res.status == PaymentSessionStatus::Success
-            {
+            if res.status == PaymentStatus::Failed || res.status == PaymentStatus::Success {
                 failed_count += 1;
                 all_sent.remove(payment_hash);
             }
@@ -3797,10 +3802,10 @@ async fn test_send_payment_shutdown_cooperative_sender_sent() {
                 "payment_hash: {:?} status: {:?} failed_count: {:?}",
                 payment_hash, res.status, failed_count
             );
-            if res.status == PaymentSessionStatus::Failed {
+            if res.status == PaymentStatus::Failed {
                 failed_count += 1;
                 all_sent.remove(payment_hash);
-            } else if res.status == PaymentSessionStatus::Success {
+            } else if res.status == PaymentStatus::Success {
                 succ_count += 1;
                 all_sent.remove(payment_hash);
             }
@@ -4052,6 +4057,7 @@ async fn test_shutdown_with_pending_tlc() {
                         onion_packet: None,
                         shared_secret: NO_SHARED_SECRET,
                         previous_tlc: None,
+                        attempt_id: None,
                     },
                     rpc_reply,
                 ),
@@ -4140,7 +4146,7 @@ async fn test_send_payment_middle_hop_restart_will_be_ok() {
 
         nodes[0].wait_until_success(payment_hash).await;
         let status = nodes[0].get_payment_status(payment_hash).await;
-        assert_eq!(status, PaymentSessionStatus::Success);
+        assert_eq!(status, PaymentStatus::Success);
 
         nodes[restart_node_index].restart().await;
 
@@ -4156,7 +4162,7 @@ async fn test_send_payment_middle_hop_restart_will_be_ok() {
 
         nodes[0].wait_until_success(payment_hash).await;
         let status = nodes[0].get_payment_status(payment_hash).await;
-        assert_eq!(status, PaymentSessionStatus::Success);
+        assert_eq!(status, PaymentStatus::Success);
     }
     for restart_index in 1..=3 {
         let _ = inner_run_restart_test(restart_index).await;
@@ -4189,7 +4195,7 @@ async fn test_send_payment_middle_hop_stop_send_payment_then_start() {
 
         nodes[0].wait_until_success(payment_hash).await;
         let status = nodes[0].get_payment_status(payment_hash).await;
-        assert_eq!(status, PaymentSessionStatus::Success);
+        assert_eq!(status, PaymentStatus::Success);
 
         nodes[restart_node_index].stop().await;
         tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
@@ -4203,7 +4209,7 @@ async fn test_send_payment_middle_hop_stop_send_payment_then_start() {
 
         nodes[0].wait_until_failed(payment_hash).await;
         let status = nodes[0].get_payment_status(payment_hash).await;
-        assert_eq!(status, PaymentSessionStatus::Failed);
+        assert_eq!(status, PaymentStatus::Failed);
 
         tokio::time::sleep(tokio::time::Duration::from_millis(4 * 1000)).await;
 
@@ -4353,7 +4359,7 @@ async fn test_send_payment_remove_tlc_with_preimage_will_retry() {
             assert!(node_2.get_triggered_unexpected_events().await.is_empty());
             let status = node_0.get_payment_status(*payment_hash).await;
             eprintln!("payment_hash: {:?} got status : {:?}", payment_hash, status);
-            if status == PaymentSessionStatus::Success {
+            if status == PaymentStatus::Success {
                 payments.remove(payment_hash);
             }
             tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
@@ -4443,10 +4449,10 @@ async fn test_send_payment_invoice_cancel_multiple_ops() {
         for payment_hash in payments.clone().iter() {
             let status = node_0.get_payment_status(*payment_hash).await;
             eprintln!("payment_hash: {:?} got status : {:?}", payment_hash, status);
-            if status == PaymentSessionStatus::Failed {
+            if status == PaymentStatus::Failed {
                 payments.remove(payment_hash);
             }
-            assert_ne!(status, PaymentSessionStatus::Success);
+            assert_ne!(status, PaymentStatus::Success);
             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         }
         if payments.is_empty() {
@@ -4602,7 +4608,8 @@ async fn test_send_payment_with_mixed_channel_hops() {
         "IncorrectOrUnknownPaymentDetails"
     );
     let payment_session = node0.get_payment_session(payment_hash).unwrap();
-    assert_eq!(payment_session.retried_times, 1);
+    assert_eq!(payment_session.attempts_count(), 1);
+    assert_eq!(payment_session.retry_times(), 1);
 }
 
 #[tokio::test]
@@ -4646,7 +4653,7 @@ async fn test_send_payment_with_first_channel_retry_will_be_ok() {
     node0
         .expect_payment_used_channel(payment.payment_hash, channels[1])
         .await;
-    assert_eq!(payment_session.retried_times, 2);
+    assert_eq!(payment_session.retry_times(), 2);
 }
 
 #[tokio::test]
@@ -4702,16 +4709,14 @@ async fn test_send_payment_with_reconnect_two_times() {
             for payment_hash in payments.clone().iter() {
                 let status = node0.get_payment_status(*payment_hash).await;
                 eprintln!("payment_hash: {:?} got status : {:?}", payment_hash, status);
-                if status == PaymentSessionStatus::Success || status == PaymentSessionStatus::Failed
-                {
+                if status == PaymentStatus::Success || status == PaymentStatus::Failed {
                     payments.remove(payment_hash);
-                } else if status == PaymentSessionStatus::Created {
+                } else if status == PaymentStatus::Created {
                     // wait for the payment to be retried
                     let payment_session = node0.get_payment_session(*payment_hash).unwrap();
                     eprintln!(
-                        "payment_session can_retry: {:?} retry_times: {:?}",
-                        payment_session.can_retry(),
-                        payment_session.retried_times
+                        "payment_session attempts: {:?}",
+                        payment_session.attempts_count()
                     );
                 }
                 tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
@@ -4756,7 +4761,7 @@ async fn test_send_payment_pending_count_on_find_path() {
             .unwrap();
 
         let payment_hash = res.payment_hash;
-        let second_hop_channel = res.router.nodes[1].channel_outpoint.clone();
+        let second_hop_channel = res.routers[0].nodes[1].channel_outpoint.clone();
         channel_stats_map
             .entry(second_hop_channel)
             .and_modify(|e| *e += 1)
@@ -4811,14 +4816,14 @@ async fn test_send_payment_check_router_always_the_right_one() {
             .send_payment_keysend(&nodes[2], 100, false)
             .await
             .unwrap();
-        check_router(&res.router);
+        check_router(&res.routers[0]);
     }
 
     let res = nodes[0]
         .send_payment_keysend(&nodes[2], 100, false)
         .await
         .unwrap();
-    check_router(&res.router);
+    check_router(&res.routers[0]);
 }
 
 #[tokio::test]
@@ -4860,14 +4865,727 @@ async fn test_send_payment_with_reverse_channel_of_capaicity_not_enough() {
     for payment_hash in payments.iter() {
         nodes[0].wait_until_success(*payment_hash).await;
         let session = nodes[0].get_payment_session(*payment_hash).unwrap();
+        let retry_times = session.retry_times();
         statistic
-            .entry(session.retried_times)
+            .entry(retry_times)
             .and_modify(|e| *e += 1)
             .or_insert(1);
     }
 
     // assert only one payment session will try 2 times
-    eprintln!("result: {:?}", statistic);
     assert_eq!(statistic[&2], 1);
     assert_eq!(statistic[&1], count - 1);
+}
+
+#[tokio::test]
+async fn test_send_payment_will_use_sent_amount_for_better_path_finding() {
+    init_tracing();
+    let _span = tracing::info_span!("node", node = "test").entered();
+    let (nodes, _channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((1, 2), (105 + MIN_RESERVED_CKB, MIN_RESERVED_CKB)),
+            ((1, 2), (105 + MIN_RESERVED_CKB, MIN_RESERVED_CKB)),
+            ((1, 2), (105 + MIN_RESERVED_CKB, MIN_RESERVED_CKB)),
+            ((2, 3), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+        ],
+        4,
+    )
+    .await;
+
+    let [node0, _node1, _node2, node3] = nodes.try_into().expect("4 nodes");
+
+    let payment0 = node0
+        .send_payment_keysend(&node3, 100, false)
+        .await
+        .unwrap()
+        .payment_hash;
+    let payment0_retry_times = node0.get_payment_session(payment0).unwrap().retry_times();
+    node0.wait_until_success(payment0).await;
+    assert_eq!(payment0_retry_times, 1);
+
+    let payment1 = node0
+        .send_payment_keysend(&node3, 100, false)
+        .await
+        .unwrap()
+        .payment_hash;
+
+    node0.wait_until_success(payment1).await;
+    let payment1_retry_times = node0.get_payment_session(payment1).unwrap().retry_times();
+    assert_eq!(payment1_retry_times, 1);
+
+    let payment2 = node0
+        .send_payment_keysend(&node3, 100, false)
+        .await
+        .unwrap()
+        .payment_hash;
+
+    node0.wait_until_success(payment2).await;
+    let payment2_retry_times = node0.get_payment_session(payment2).unwrap().retry_times();
+    assert_eq!(payment2_retry_times, 1);
+}
+
+#[tokio::test]
+async fn test_send_payment_dry_run_will_not_create_payment_session() {
+    init_tracing();
+
+    let (nodes, _channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (MIN_RESERVED_CKB + 400000, MIN_RESERVED_CKB)),
+            ((1, 2), (MIN_RESERVED_CKB + 100000, MIN_RESERVED_CKB)),
+        ],
+        4,
+    )
+    .await;
+    let [node_0, _node_1, node_2, node_3] = nodes.try_into().expect("4 nodes");
+
+    let payment_hash = gen_rand_sha256_hash();
+    let res = node_0
+        .send_payment(SendPaymentCommand {
+            payment_hash: Some(payment_hash),
+            amount: Some(1000),
+            dry_run: true,
+            target_pubkey: node_3.pubkey.into(),
+            ..Default::default()
+        })
+        .await;
+    eprintln!("res: {:?}", res);
+    let payment = node_0.get_payment_session(payment_hash);
+    assert!(payment.is_none(), "Payment session should not be created");
+
+    let payment_hash = gen_rand_sha256_hash();
+    let res = node_0
+        .send_payment(SendPaymentCommand {
+            payment_hash: Some(payment_hash),
+            amount: Some(1000),
+            dry_run: true,
+            target_pubkey: node_2.pubkey.into(),
+            ..Default::default()
+        })
+        .await;
+    assert!(res.is_ok(), "Send payment query failed: {:?}", res);
+    let payment = node_0.get_payment_session(payment_hash);
+    assert!(payment.is_none(), "Payment session should not be created");
+}
+
+#[tokio::test]
+async fn test_payment_with_payment_data_record() {
+    init_tracing();
+
+    let (nodes, channels) = create_n_nodes_network(
+        &[((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB))],
+        2,
+    )
+    .await;
+    let [mut node_0, mut node_1] = nodes.try_into().expect("2 nodes");
+    let source_node = &mut node_0;
+    let target_pubkey = node_1.pubkey;
+
+    let preimage = gen_rand_sha256_hash();
+    let payment_secret = gen_rand_sha256_hash();
+    let ckb_invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(10000000000))
+        .payment_preimage(preimage)
+        .payee_pub_key(target_pubkey.into())
+        .allow_mpp(false)
+        .payment_secret(payment_secret)
+        .build()
+        .expect("build invoice success");
+
+    node_1.insert_invoice(ckb_invoice.clone(), Some(preimage));
+
+    let payment_hash = *ckb_invoice.payment_hash();
+    let hash_algorithm = HashAlgorithm::CkbHash;
+
+    let secp = Secp256k1::new();
+    let mut custom_records = PaymentCustomRecords::default();
+    let record = PaymentDataRecord::new(payment_secret, 10000000000);
+    record.write(&mut custom_records);
+    let hops_infos = vec![
+        PaymentHopData {
+            amount: 10000000000,
+            expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+            next_hop: Some(target_pubkey),
+            funding_tx_hash: Hash256::default(),
+            hash_algorithm,
+            payment_preimage: None,
+            custom_records: Some(custom_records.clone()),
+        },
+        PaymentHopData {
+            amount: 10000000000,
+            expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+            next_hop: None,
+            funding_tx_hash: Hash256::default(),
+            hash_algorithm,
+            payment_preimage: None,
+            custom_records: Some(custom_records.clone()),
+        },
+    ];
+
+    let packet = PeeledOnionPacket::create(
+        source_node.get_private_key().clone(),
+        hops_infos.clone(),
+        Some(payment_hash.as_ref().to_vec()),
+        &secp,
+    )
+    .expect("create peeled packet");
+
+    let add_tlc_result_1 = ractor::call!(source_node.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id: channels[0],
+                command: ChannelCommand::AddTlc(
+                    AddTlcCommand {
+                        amount: 10000000000,
+                        hash_algorithm,
+                        payment_hash,
+                        expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+                        onion_packet: packet.next.clone(),
+                        shared_secret: packet.shared_secret,
+                        previous_tlc: None,
+                        attempt_id: None,
+                    },
+                    rpc_reply,
+                ),
+            },
+        ))
+    })
+    .expect("node alive")
+    .expect("tlc");
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+    // wait tlc 1 is removed
+    while source_node
+        .get_tlc(channels[0], TLCId::Offered(add_tlc_result_1.tlc_id))
+        .is_some()
+    {
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    }
+
+    let node_0_balance = source_node.get_local_balance_from_channel(channels[0]);
+    let node_1_balance = node_1.get_local_balance_from_channel(channels[0]);
+    assert_eq!(node_0_balance, 0);
+    assert_eq!(node_1_balance, 10000000000);
+}
+
+#[tokio::test]
+async fn test_payment_with_insufficient_total_amount() {
+    init_tracing();
+
+    let (nodes, channels) = create_n_nodes_network(
+        &[((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB))],
+        2,
+    )
+    .await;
+    let [mut node_0, mut node_1] = nodes.try_into().expect("2 nodes");
+    let source_node = &mut node_0;
+    let target_pubkey = node_1.pubkey;
+
+    let preimage = gen_rand_sha256_hash();
+    let payment_secret = gen_rand_sha256_hash();
+    let ckb_invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(10000000000))
+        .payment_preimage(preimage)
+        .payee_pub_key(target_pubkey.into())
+        .allow_mpp(false)
+        .payment_secret(payment_secret)
+        .build()
+        .expect("build invoice success");
+
+    node_1.insert_invoice(ckb_invoice.clone(), Some(preimage));
+
+    let payment_hash = *ckb_invoice.payment_hash();
+    let hash_algorithm = HashAlgorithm::CkbHash;
+
+    let secp = Secp256k1::new();
+    let mut custom_records = PaymentCustomRecords::default();
+    // set total amount to 20000000000, but pay only 10000000000
+    let record = PaymentDataRecord::new(payment_secret, 20000000000);
+    record.write(&mut custom_records);
+    let hops_infos = vec![
+        PaymentHopData {
+            amount: 10000000000,
+            expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+            next_hop: Some(target_pubkey),
+            funding_tx_hash: Hash256::default(),
+            hash_algorithm,
+            payment_preimage: None,
+            custom_records: Some(custom_records.clone()),
+        },
+        PaymentHopData {
+            amount: 10000000000,
+            expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+            next_hop: None,
+            funding_tx_hash: Hash256::default(),
+            hash_algorithm,
+            payment_preimage: None,
+            custom_records: Some(custom_records.clone()),
+        },
+    ];
+
+    let packet = PeeledOnionPacket::create(
+        source_node.get_private_key().clone(),
+        hops_infos.clone(),
+        Some(payment_hash.as_ref().to_vec()),
+        &secp,
+    )
+    .expect("create peeled packet");
+
+    let add_tlc_result_1 = ractor::call!(source_node.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id: channels[0],
+                command: ChannelCommand::AddTlc(
+                    AddTlcCommand {
+                        amount: 10000000000,
+                        hash_algorithm,
+                        payment_hash,
+                        expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+                        onion_packet: packet.next.clone(),
+                        shared_secret: packet.shared_secret,
+                        previous_tlc: None,
+                        attempt_id: None,
+                    },
+                    rpc_reply,
+                ),
+            },
+        ))
+    })
+    .expect("node alive")
+    .expect("tlc");
+
+    // timeout hold tlc after 5 seconds
+    let channel_id = channels[0];
+    let tlc_id = add_tlc_result_1.tlc_id;
+    node_1
+        .network_actor
+        .send_after(Duration::from_secs(5), move || {
+            NetworkActorMessage::Command(NetworkActorCommand::TimeoutHoldTlc(
+                payment_hash,
+                channel_id,
+                tlc_id,
+            ))
+        });
+
+    // because tlc is not fulfilled, it should be removed after 5 seconds instead of settling
+    while source_node
+        .get_tlc(channels[0], TLCId::Offered(add_tlc_result_1.tlc_id))
+        .unwrap()
+        .removed_reason
+        .is_none()
+    {
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    }
+
+    // tlc should be removed after 5 seconds
+    let tlc_result = source_node
+        .get_tlc(channels[0], TLCId::Offered(add_tlc_result_1.tlc_id))
+        .unwrap()
+        .removed_reason;
+    assert!(matches!(
+        tlc_result,
+        Some(RemoveTlcReason::RemoveTlcFail(..))
+    ));
+
+    // balance should not change
+    let node_0_balance = source_node.get_local_balance_from_channel(channels[0]);
+    let node_1_balance = node_1.get_local_balance_from_channel(channels[0]);
+    assert_eq!(node_0_balance, 10000000000);
+    assert_eq!(node_1_balance, 0);
+}
+
+#[tokio::test]
+async fn test_payment_with_wrong_payment_secret() {
+    init_tracing();
+
+    let (nodes, channels) = create_n_nodes_network(
+        &[((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB))],
+        2,
+    )
+    .await;
+    let [mut node_0, mut node_1] = nodes.try_into().expect("2 nodes");
+    let source_node = &mut node_0;
+    let target_pubkey = node_1.pubkey;
+
+    let preimage = gen_rand_sha256_hash();
+    let payment_secret = gen_rand_sha256_hash();
+    let ckb_invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(10000000000))
+        .payment_preimage(preimage)
+        .payee_pub_key(target_pubkey.into())
+        .allow_mpp(false)
+        .payment_secret(payment_secret)
+        .build()
+        .expect("build invoice success");
+
+    node_1.insert_invoice(ckb_invoice.clone(), Some(preimage));
+
+    let payment_hash = *ckb_invoice.payment_hash();
+    let hash_algorithm = HashAlgorithm::CkbHash;
+
+    let wrong_payment_secret = gen_rand_sha256_hash();
+    let secp = Secp256k1::new();
+    let mut custom_records = PaymentCustomRecords::default();
+    let record = PaymentDataRecord::new(wrong_payment_secret, 10000000000);
+    record.write(&mut custom_records);
+    let hops_infos = vec![
+        PaymentHopData {
+            amount: 10000000000,
+            expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+            next_hop: Some(target_pubkey),
+            funding_tx_hash: Hash256::default(),
+            hash_algorithm,
+            payment_preimage: None,
+            custom_records: Some(custom_records.clone()),
+        },
+        PaymentHopData {
+            amount: 10000000000,
+            expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+            next_hop: None,
+            funding_tx_hash: Hash256::default(),
+            hash_algorithm,
+            payment_preimage: None,
+            custom_records: Some(custom_records.clone()),
+        },
+    ];
+
+    let packet = PeeledOnionPacket::create(
+        source_node.get_private_key().clone(),
+        hops_infos.clone(),
+        Some(payment_hash.as_ref().to_vec()),
+        &secp,
+    )
+    .expect("create peeled packet");
+
+    let add_tlc_result_1 = ractor::call!(source_node.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id: channels[0],
+                command: ChannelCommand::AddTlc(
+                    AddTlcCommand {
+                        amount: 10000000000,
+                        hash_algorithm,
+                        payment_hash,
+                        expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+                        onion_packet: packet.next.clone(),
+                        shared_secret: packet.shared_secret,
+                        previous_tlc: None,
+                        attempt_id: None,
+                    },
+                    rpc_reply,
+                ),
+            },
+        ))
+    })
+    .expect("node alive")
+    .expect("tlc");
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+    // wait tlc 1 is removed
+    while source_node
+        .get_tlc(channels[0], TLCId::Offered(add_tlc_result_1.tlc_id))
+        .is_some_and(|t| t.removed_reason.is_none())
+    {
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    }
+
+    let tlc_result = source_node
+        .get_tlc(channels[0], TLCId::Offered(add_tlc_result_1.tlc_id))
+        .unwrap()
+        .removed_reason;
+    assert!(matches!(
+        tlc_result,
+        Some(RemoveTlcReason::RemoveTlcFail(..))
+    ));
+
+    let node_0_balance = source_node.get_local_balance_from_channel(channels[0]);
+    let node_1_balance = node_1.get_local_balance_from_channel(channels[0]);
+    assert_eq!(node_0_balance, 10000000000);
+    assert_eq!(node_1_balance, 0);
+}
+
+#[tokio::test]
+async fn test_payment_with_insufficient_amount_with_payment_data() {
+    init_tracing();
+
+    let (nodes, channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+            ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+        ],
+        2,
+    )
+    .await;
+    let [mut node_0, mut node_1] = nodes.try_into().expect("2 nodes");
+    let source_node = &mut node_0;
+    let target_pubkey = node_1.pubkey;
+
+    let preimage = gen_rand_sha256_hash();
+    let payment_secret = gen_rand_sha256_hash();
+    let ckb_invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(10000000000))
+        .payment_preimage(preimage)
+        .payee_pub_key(target_pubkey.into())
+        .allow_mpp(false)
+        .payment_secret(payment_secret)
+        .build()
+        .expect("build invoice success");
+
+    node_1.insert_invoice(ckb_invoice.clone(), Some(preimage));
+
+    let payment_hash = *ckb_invoice.payment_hash();
+    let hash_algorithm = HashAlgorithm::CkbHash;
+
+    let secp = Secp256k1::new();
+    let mut custom_records = PaymentCustomRecords::default();
+    let record = PaymentDataRecord::new(payment_secret, 9000000000);
+    record.write(&mut custom_records);
+    let hops_infos = vec![
+        PaymentHopData {
+            amount: 9000000000,
+            expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+            next_hop: Some(target_pubkey),
+            funding_tx_hash: Hash256::default(),
+            hash_algorithm,
+            payment_preimage: None,
+            custom_records: Some(custom_records.clone()),
+        },
+        PaymentHopData {
+            amount: 9000000000,
+            expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+            next_hop: None,
+            funding_tx_hash: Hash256::default(),
+            hash_algorithm,
+            payment_preimage: None,
+            custom_records: Some(custom_records.clone()),
+        },
+    ];
+
+    let packet = PeeledOnionPacket::create(
+        source_node.get_private_key().clone(),
+        hops_infos.clone(),
+        Some(payment_hash.as_ref().to_vec()),
+        &secp,
+    )
+    .expect("create peeled packet");
+
+    let add_tlc_result_1 = ractor::call!(source_node.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id: channels[0],
+                command: ChannelCommand::AddTlc(
+                    AddTlcCommand {
+                        amount: 9000000000,
+                        hash_algorithm,
+                        payment_hash,
+                        expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+                        onion_packet: packet.next.clone(),
+                        shared_secret: packet.shared_secret,
+                        previous_tlc: None,
+                        attempt_id: None,
+                    },
+                    rpc_reply,
+                ),
+            },
+        ))
+    })
+    .expect("node alive")
+    .expect("tlc");
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+    // wait tlc 1 is removed
+    while source_node
+        .get_tlc(channels[0], TLCId::Offered(add_tlc_result_1.tlc_id))
+        .is_some_and(|t| t.removed_reason.is_none())
+    {
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    }
+
+    let tlc_result = source_node
+        .get_tlc(channels[0], TLCId::Offered(add_tlc_result_1.tlc_id))
+        .unwrap()
+        .removed_reason;
+    assert!(matches!(
+        tlc_result,
+        Some(RemoveTlcReason::RemoveTlcFail(..))
+    ));
+
+    let node_0_balance = source_node.get_local_balance_from_channel(channels[0]);
+    let node_1_balance = node_1.get_local_balance_from_channel(channels[0]);
+    assert_eq!(node_0_balance, 10000000000);
+    assert_eq!(node_1_balance, 0);
+}
+
+#[tokio::test]
+async fn test_payment_with_insufficient_amount_without_payment_data() {
+    init_tracing();
+
+    let (nodes, channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+            ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+        ],
+        2,
+    )
+    .await;
+    let [mut node_0, mut node_1] = nodes.try_into().expect("2 nodes");
+    let source_node = &mut node_0;
+    let target_pubkey = node_1.pubkey;
+
+    let preimage = gen_rand_sha256_hash();
+    let payment_secret = gen_rand_sha256_hash();
+    let ckb_invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(10000000000))
+        .payment_preimage(preimage)
+        .payee_pub_key(target_pubkey.into())
+        .allow_mpp(false)
+        .payment_secret(payment_secret)
+        .build()
+        .expect("build invoice success");
+
+    node_1.insert_invoice(ckb_invoice.clone(), Some(preimage));
+
+    let payment_hash = *ckb_invoice.payment_hash();
+    let hash_algorithm = HashAlgorithm::CkbHash;
+
+    let secp = Secp256k1::new();
+    let hops_infos = vec![
+        PaymentHopData {
+            amount: 9000000000,
+            expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+            next_hop: Some(target_pubkey),
+            funding_tx_hash: Hash256::default(),
+            hash_algorithm,
+            payment_preimage: None,
+            custom_records: None,
+        },
+        PaymentHopData {
+            amount: 9000000000,
+            expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+            next_hop: None,
+            funding_tx_hash: Hash256::default(),
+            hash_algorithm,
+            payment_preimage: None,
+            custom_records: None,
+        },
+    ];
+
+    let packet = PeeledOnionPacket::create(
+        source_node.get_private_key().clone(),
+        hops_infos.clone(),
+        Some(payment_hash.as_ref().to_vec()),
+        &secp,
+    )
+    .expect("create peeled packet");
+
+    let add_tlc_result_1 = ractor::call!(source_node.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id: channels[0],
+                command: ChannelCommand::AddTlc(
+                    AddTlcCommand {
+                        amount: 9000000000,
+                        hash_algorithm,
+                        payment_hash,
+                        expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+                        onion_packet: packet.next.clone(),
+                        shared_secret: packet.shared_secret,
+                        previous_tlc: None,
+                        attempt_id: None,
+                    },
+                    rpc_reply,
+                ),
+            },
+        ))
+    })
+    .expect("node alive")
+    .expect("tlc");
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+    // wait tlc 1 is removed
+    while source_node
+        .get_tlc(channels[0], TLCId::Offered(add_tlc_result_1.tlc_id))
+        .is_some_and(|t| t.removed_reason.is_none())
+    {
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    }
+
+    let tlc_result = source_node
+        .get_tlc(channels[0], TLCId::Offered(add_tlc_result_1.tlc_id))
+        .unwrap()
+        .removed_reason;
+    assert!(matches!(
+        tlc_result,
+        Some(RemoveTlcReason::RemoveTlcFail(..))
+    ));
+
+    let node_0_balance = source_node.get_local_balance_from_channel(channels[0]);
+    let node_1_balance = node_1.get_local_balance_from_channel(channels[0]);
+    assert_eq!(node_0_balance, 10000000000);
+    assert_eq!(node_1_balance, 0);
+}
+
+#[tokio::test]
+async fn test_send_two_node_send_each_other_multiple_time() {
+    init_tracing();
+
+    let (nodes, channels) = create_n_nodes_network(
+        &[((0, 1), (MIN_RESERVED_CKB + 20000000000, MIN_RESERVED_CKB))],
+        2,
+    )
+    .await;
+    let [node_0, node_1] = nodes.try_into().expect("2 nodes");
+    for _i in 0..3 {
+        let res = node_0
+            .send_payment_keysend(&node_1, 20000000000, false)
+            .await;
+
+        eprintln!("res: {:?}", res);
+        assert!(res.is_ok());
+        let payment_hash = res.unwrap().payment_hash;
+        eprintln!("begin to wait for payment: {} success ...", payment_hash);
+        node_0.wait_until_success(payment_hash).await;
+
+        let payment_session = node_0.get_payment_session(payment_hash).unwrap();
+        dbg!(&payment_session.status, &payment_session.attempts_count());
+
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
+        let res = node_1
+            .send_payment_keysend(&node_0, 20000000000, false)
+            .await;
+
+        eprintln!("res: {:?}", res);
+        assert!(res.is_ok());
+        let payment_hash = res.unwrap().payment_hash;
+        eprintln!("begin to wait for payment: {} success ...", payment_hash);
+        node_1.wait_until_success(payment_hash).await;
+
+        let payment_session = node_1.get_payment_session(payment_hash).unwrap();
+        dbg!(&payment_session.status, &payment_session.attempts_count());
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+
+    let res = node_0
+        .send_payment_keysend(&node_1, 20000000000, false)
+        .await;
+
+    eprintln!("res: {:?}", res);
+    assert!(res.is_ok());
+    let payment_hash = res.unwrap().payment_hash;
+    eprintln!("begin to wait for payment: {} success ...", payment_hash);
+    node_0.wait_until_success(payment_hash).await;
+
+    let payment_session = node_0.get_payment_session(payment_hash).unwrap();
+    dbg!(&payment_session.status, &payment_session.attempts_count());
+
+    let node_0_balance = node_0.get_local_balance_from_channel(channels[0]);
+    let node_1_balance = node_1.get_local_balance_from_channel(channels[0]);
+    dbg!(node_0_balance, node_1_balance);
+    assert_eq!(node_0_balance, 0);
+    assert_eq!(node_1_balance, 20000000000);
 }

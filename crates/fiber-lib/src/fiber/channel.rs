@@ -2,8 +2,8 @@ use crate::fiber::fee::check_open_channel_parameters;
 #[cfg(any(debug_assertions, feature = "bench"))]
 use crate::fiber::network::DebugEvent;
 use crate::fiber::network::PaymentCustomRecords;
-use crate::fiber::types::BroadcastMessageWithTimestamp;
-use crate::{debug_event, fiber::types::TxAbort, utils::tx::compute_tx_message};
+use crate::utils::payment::is_invoice_fulfilled;
+use crate::{debug_event, utils::tx::compute_tx_message};
 use bitflags::bitflags;
 use futures::future::OptionFuture;
 use secp256k1::XOnlyPublicKey;
@@ -27,12 +27,13 @@ use crate::{
         },
         serde_utils::{CompactSignatureAsBytes, EntityHex, PubNonceAsBytes},
         types::{
-            AcceptChannel, AddTlc, AnnouncementSignatures, ChannelAnnouncement, ChannelReady,
-            ChannelUpdate, ClosingSigned, CommitmentSigned, EcdsaSignature, FiberChannelMessage,
-            FiberMessage, Hash256, OpenChannel, PaymentOnionPacket, PeeledPaymentOnionPacket,
-            Privkey, Pubkey, ReestablishChannel, RemoveTlc, RemoveTlcFulfill, RemoveTlcReason,
-            RevokeAndAck, Shutdown, TlcErr, TlcErrPacket, TlcErrorCode, TxCollaborationMsg,
-            TxComplete, TxUpdate, NO_SHARED_SECRET,
+            AcceptChannel, AddTlc, AnnouncementSignatures, BroadcastMessageWithTimestamp,
+            ChannelAnnouncement, ChannelReady, ChannelUpdate, ClosingSigned, CommitmentSigned,
+            EcdsaSignature, FiberChannelMessage, FiberMessage, Hash256, HoldTlc, OpenChannel,
+            PaymentOnionPacket, PeeledPaymentOnionPacket, Privkey, Pubkey, ReestablishChannel,
+            RemoveTlc, RemoveTlcFulfill, RemoveTlcReason, RevokeAndAck, Shutdown, TlcErr,
+            TlcErrPacket, TlcErrorCode, TxAbort, TxCollaborationMsg, TxComplete, TxUpdate,
+            NO_SHARED_SECRET,
         },
         NetworkActorCommand, NetworkActorEvent, NetworkActorMessage, ASSUME_NETWORK_ACTOR_ALIVE,
     },
@@ -69,10 +70,13 @@ use tentacle::secio::PeerId;
 use thiserror::Error;
 use tokio::sync::oneshot;
 
+use super::config::DEFAULT_HOLD_TLC_TIMEOUT;
+
 use super::{
     gossip::SOFT_BROADCAST_MESSAGES_CONSIDERED_STALE_DURATION, graph::ChannelUpdateInfo,
     types::ForwardTlcResult,
 };
+use std::collections::HashMap;
 use std::{
     collections::HashSet,
     fmt::{self, Debug, Display},
@@ -198,6 +202,8 @@ pub enum TxCollaborationCommand {
 pub struct AddTlcCommand {
     pub amount: u128,
     pub payment_hash: Hash256,
+    /// The attempt id associate with the tlc
+    pub attempt_id: Option<u64>,
     pub expiry: u64,
     pub hash_algorithm: HashAlgorithm,
     /// Onion packet for the next node
@@ -215,6 +221,7 @@ impl Debug for AddTlcCommand {
         f.debug_struct("AddTlcCommand")
             .field("amount", &self.amount)
             .field("payment_hash", &self.payment_hash)
+            .field("attempt_id", &self.attempt_id)
             .field("expiry", &self.expiry)
             .field("hash_algorithm", &self.hash_algorithm)
             .field("previous_tlc", &self.previous_tlc)
@@ -608,7 +615,8 @@ where
                 _ => TlcErrorCode::IncorrectOrUnknownPaymentDetails,
             },
             ProcessingChannelError::FinalIncorrectPreimage
-            | ProcessingChannelError::FinalIncorrectPaymentHash => {
+            | ProcessingChannelError::FinalIncorrectPaymentHash
+            | ProcessingChannelError::FinalIncorrectMPPInfo(_) => {
                 TlcErrorCode::IncorrectOrUnknownPaymentDetails
             }
             ProcessingChannelError::FinalIncorrectHTLCAmount => {
@@ -634,7 +642,7 @@ where
                 ChannelState::ChannelReady => {
                     if !state.local_tlc_info.enabled {
                         // channel is disabled
-                        TlcErrorCode::TemporaryChannelFailure
+                        TlcErrorCode::ChannelDisabled
                     } else {
                         // we expect `ChannelReady` will be both OK for tlc forwarding,
                         // so here are the unreachable point in normal workflow,
@@ -839,19 +847,18 @@ where
         state: &mut ChannelActorState,
         tlc_id: TLCId,
     ) {
-        let tlc_info = state.get_received_tlc(tlc_id).expect("expect tlc");
-        let preimage = self.store.get_preimage(&tlc_info.payment_hash);
+        let tlc_info = state.get_received_tlc(tlc_id).expect("expect tlc").clone();
 
-        let preimage = if let Some(preimage) = preimage {
-            preimage
-        } else {
+        let Some(preimage) = self.store.get_preimage(&tlc_info.payment_hash) else {
             return;
         };
 
         let mut remove_reason = RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
             payment_preimage: preimage,
         });
+
         let tlc = tlc_info.clone();
+
         if let Some(invoice) = self.store.get_invoice(&tlc.payment_hash) {
             let status = self.get_invoice_status(&invoice);
             match status {
@@ -871,14 +878,52 @@ where
                     // we have already checked invoice status in apply_add_tlc_operation_with_peeled_onion_packet
                     // this maybe happened when process is killed and restart
                     error!("invoice already paid, ignore");
+                    return;
+                }
+                _ if invoice.allow_mpp() => {
+                    // hold the tlc
+                    self.store.insert_hold_tlc(
+                        tlc.payment_hash,
+                        HoldTlc {
+                            channel_id: state.get_id(),
+                            tlc_id: tlc.tlc_id.into(),
+                            hold_expire_at: now_timestamp_as_millis_u64()
+                                + DEFAULT_HOLD_TLC_TIMEOUT,
+                        },
+                    );
+
+                    // set timeout for hold tlc
+                    self.network.send_after(
+                        Duration::from_millis(DEFAULT_HOLD_TLC_TIMEOUT),
+                        move || {
+                            NetworkActorMessage::new_command(NetworkActorCommand::TimeoutHoldTlc(
+                                tlc.payment_hash,
+                                tlc.channel_id,
+                                tlc.tlc_id.into(),
+                            ))
+                        },
+                    );
+
+                    // add to pending settlement tlc set
+                    // the tlc set will be settled by network actor
+                    state.pending_notify_mpp_tcls.push(tlc.payment_hash);
+
+                    // just return, the tlc set will be settled by network actor
+                    return;
                 }
                 _ => {
-                    // do nothing
-                    // invoice status will be updated to paid after apply remove tlc operation
+                    // single path payment
+                    if !is_invoice_fulfilled(&invoice, std::slice::from_ref(&tlc)) {
+                        remove_reason = RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
+                            TlcErr::new(TlcErrorCode::IncorrectOrUnknownPaymentDetails),
+                            &tlc.shared_secret,
+                        ));
+                    }
                 }
             }
         }
 
+        // remove tlc
         self.register_retryable_tlc_remove(myself, state, tlc.tlc_id, remove_reason)
             .await;
     }
@@ -891,21 +936,36 @@ where
     ) -> Result<(), ProcessingChannelErrorWithSharedSecret> {
         // If needed, shared secret also get be extracted from the encrypted onion packet:
         // - Extract public key from onion_packet[1..34]
-        // - Obtain share secret using DH Key Exchange from the public key and the network private key stored in the network actor state.
-        if let Some(peeled_onion_packet) = self
-            .try_add_tlc_peel_onion_packet(state, add_tlc)
+        // - Obtain share secret using DH Key Exchange from the public key
+        // and the network private key stored in the network actor state.
+        match self
+            .try_peel_tlc_onion_packet(state, add_tlc)
             .await
             .map_err(ProcessingChannelError::without_shared_secret)?
         {
-            let shared_secret = peeled_onion_packet.shared_secret;
-            self.apply_add_tlc_operation_with_peeled_onion_packet(
-                myself,
-                state,
-                add_tlc,
-                peeled_onion_packet,
-            )
-            .await
-            .map_err(move |err| err.with_shared_secret(shared_secret))?;
+            Some(peeled_onion_packet) => {
+                let shared_secret = peeled_onion_packet.shared_secret;
+                self.apply_add_tlc_operation_with_peeled_onion_packet(
+                    myself,
+                    state,
+                    add_tlc,
+                    peeled_onion_packet,
+                )
+                .await
+                .map_err(move |err| err.with_shared_secret(shared_secret))?;
+            }
+            None => {
+                // The TLC is with a NO_SHARED_SECRET and no onion packet.
+                // this may only happen in testing or development environment.
+                debug_assert!(add_tlc.onion_packet.is_none());
+                #[cfg(not(debug_assertions))]
+                {
+                    return Err(ProcessingChannelError::PeelingOnionPacketError(
+                        "TLC with no onion packet is not supported".to_string(),
+                    )
+                    .without_shared_secret());
+                }
+            }
         }
 
         if let Some(ref udt_type_script) = state.funding_udt_type_script {
@@ -928,7 +988,7 @@ where
         Ok(())
     }
 
-    async fn try_add_tlc_peel_onion_packet(
+    async fn try_peel_tlc_onion_packet(
         &self,
         state: &mut ChannelActorState,
         add_tlc: &TlcInfo,
@@ -955,7 +1015,6 @@ where
         peeled_onion_packet: PeeledPaymentOnionPacket,
     ) -> Result<(), ProcessingChannelError> {
         let payment_hash = add_tlc.payment_hash;
-        let received_amount = add_tlc.amount;
         let forward_amount = peeled_onion_packet.current.amount;
 
         state.tlc_state.applied_add_tlcs.insert(add_tlc.tlc_id);
@@ -971,10 +1030,73 @@ where
                 return Err(ProcessingChannelError::TlcExpirySoon);
             }
 
-            if let Some(invoice) = self.store.get_invoice(&payment_hash) {
-                let invoice_status = self.get_invoice_status(&invoice);
-                if invoice_status != CkbInvoiceStatus::Open {
+            let invoice = self.store.get_invoice(&payment_hash);
+            if let Some(ref invoice) = invoice {
+                let invoice_status = self.get_invoice_status(invoice);
+                if !matches!(
+                    invoice_status,
+                    CkbInvoiceStatus::Open | CkbInvoiceStatus::Received
+                ) {
                     return Err(ProcessingChannelError::FinalInvoiceInvalid(invoice_status));
+                }
+            }
+
+            let Some(tlc) = state.tlc_state.get_mut(&add_tlc.tlc_id) else {
+                return Err(ProcessingChannelError::InternalError(
+                    "TLC not found in state".to_string(),
+                ));
+            };
+
+            // extract MPP total payment fields from onion packet
+            match (&invoice, peeled_onion_packet.mpp_custom_records()) {
+                (Some(invoice), Some(record)) => {
+                    if record.total_amount < invoice.amount.unwrap_or_default() {
+                        error!(
+                            "total amount is less than invoice amount: {:?}",
+                            payment_hash
+                        );
+                        return Err(ProcessingChannelError::FinalIncorrectMPPInfo(
+                            "total amount in records is less than invoice amount".to_string(),
+                        ));
+                    }
+
+                    let payment_secret = invoice.payment_secret();
+                    if payment_secret.is_some_and(|s| s != &record.payment_secret) {
+                        error!(
+                            "payment secret is not equal to invoice payment secret: {:?}",
+                            payment_hash
+                        );
+                        return Err(ProcessingChannelError::FinalIncorrectMPPInfo(
+                            "payment secret mismatch".to_string(),
+                        ));
+                    }
+
+                    tlc.payment_secret = Some(record.payment_secret);
+                    tlc.total_amount = Some(record.total_amount);
+                }
+                (Some(invoice), None) => {
+                    if invoice.allow_mpp() {
+                        // FIXME: whether we allow MPP without MPP records in onion packet?
+                        // currently we allow it pay with enough amount
+                        // TODO: add a unit test of using single path payment pay MPP invoice successfully
+                        warn!(
+                            "invoice allows MPP but no MPP records in onion packet: {:?}",
+                            payment_hash
+                        );
+                    }
+                    if !is_invoice_fulfilled(invoice, std::slice::from_ref(tlc)) {
+                        error!("invoice is not fulfilled for payment: {:?}", payment_hash);
+                        return Err(ProcessingChannelError::FinalIncorrectHTLCAmount);
+                    }
+                }
+                (None, Some(_record)) => {
+                    error!("invoice not found for MPP payment: {:?}", payment_hash);
+                    return Err(ProcessingChannelError::FinalIncorrectMPPInfo(
+                        "invoice not found".to_string(),
+                    ));
+                }
+                _ => {
+                    // single path payment with keysend
                 }
             }
 
@@ -989,10 +1111,14 @@ where
             if let Some(preimage) = preimage {
                 let filled_payment_hash: Hash256 = add_tlc.hash_algorithm.hash(preimage).into();
                 if add_tlc.payment_hash != filled_payment_hash {
+                    error!(
+                        "preimage is not matched for payment hash: {:?}",
+                        payment_hash
+                    );
                     return Err(ProcessingChannelError::FinalIncorrectPreimage);
                 }
                 // update invoice status to received only all the error checking passed
-                if let Some(_invoice) = self.store.get_invoice(&payment_hash) {
+                if invoice.is_some() {
                     self.store
                         .update_invoice_status(&payment_hash, CkbInvoiceStatus::Received)
                         .expect("update invoice status failed");
@@ -1005,6 +1131,7 @@ where
 
                 self.store_preimage(payment_hash, preimage);
             } else {
+                error!("preimage is not found for payment hash: {:?}", payment_hash);
                 return Err(ProcessingChannelError::FinalIncorrectPaymentHash);
             }
         } else {
@@ -1017,6 +1144,7 @@ where
                 return Err(ProcessingChannelError::IncorrectTlcExpiry);
             }
 
+            let received_amount = add_tlc.amount;
             if received_amount < forward_amount {
                 return Err(ProcessingChannelError::InvalidParameter(
                     "received_amount is less than forward_amount".to_string(),
@@ -1032,7 +1160,7 @@ where
                 state,
                 add_tlc.tlc_id,
                 add_tlc.payment_hash,
-                peeled_onion_packet.clone(),
+                peeled_onion_packet,
                 forward_fee,
             )
             .await;
@@ -1233,6 +1361,7 @@ where
                     .send_message(NetworkActorMessage::new_event(
                         NetworkActorEvent::TlcRemoveReceived(
                             tlc_info.payment_hash,
+                            tlc_info.attempt_id,
                             remove_reason.clone(),
                         ),
                     ))
@@ -1750,6 +1879,7 @@ where
                                     *forward_fee,
                                 )),
                                 payment_hash: *payment_hash,
+                                attempt_id: None,
                             }),
                         )) {
                             Ok(_) => {
@@ -1951,6 +2081,7 @@ where
                     .send_message(NetworkActorMessage::new_event(
                         NetworkActorEvent::AddTlcResult(
                             command.payment_hash,
+                            command.attempt_id,
                             error_info,
                             command.previous_tlc,
                         ),
@@ -2556,7 +2687,20 @@ where
             }
         }
 
+        // take the pending settlement tlc set
+        let pending_settlement_tlc_set = std::mem::take(&mut state.pending_notify_mpp_tcls);
+
         self.store.insert_channel_actor_state(state.clone());
+
+        // try to settle down tlc set
+        for payment_hash in pending_settlement_tlc_set {
+            self.network
+                .send_message(NetworkActorMessage::new_command(
+                    NetworkActorCommand::SettleMPPTlcSet(payment_hash),
+                ))
+                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+        }
+
         Ok(())
     }
 
@@ -2757,6 +2901,12 @@ pub struct TlcInfo {
     pub tlc_id: TLCId,
     pub amount: u128,
     pub payment_hash: Hash256,
+    /// bolt04 total amount of the payment, must exist if payment secret is set
+    pub total_amount: Option<u128>,
+    /// bolt04 payment secret
+    pub payment_secret: Option<Hash256>,
+    /// The attempt id associate with the tlc, only on outbound tlc
+    pub attempt_id: Option<u64>,
     pub expiry: u64,
     pub hash_algorithm: HashAlgorithm,
     // the onion packet for multi-hop payment
@@ -2804,7 +2954,9 @@ impl Debug for TlcInfo {
         f.debug_struct("TlcInfo")
             .field("tlc_id", &self.tlc_id)
             .field("status", &self.status)
+            .field("channel_id", &self.channel_id)
             .field("amount", &self.amount)
+            .field("total_amount", &self.total_amount)
             .field("removed_reason", &self.removed_reason)
             .field("payment_hash", &self.payment_hash)
             .field("removed_confirmed_at", &self.removed_confirmed_at)
@@ -3517,6 +3669,10 @@ pub struct ChannelActorState {
     // The arc here is only used to implement the clone trait for the ChannelActorState.
     #[serde(skip)]
     pub scheduled_channel_update_handle: ScheduledChannelUpdateHandle,
+
+    // The TLC set ready to be settled
+    #[serde(skip)]
+    pub pending_notify_mpp_tcls: Vec<Hash256>,
 }
 
 #[serde_as]
@@ -3651,6 +3807,8 @@ pub enum ProcessingChannelError {
     FinalIncorrectPaymentHash,
     #[error("The payment_hash and preimage does not match for final hop")]
     FinalIncorrectPreimage,
+    #[error("The payment does not contain expected MPP info: {0}")]
+    FinalIncorrectMPPInfo(String),
     #[error("The tlc forward fee is tow low")]
     TlcForwardFeeIsTooLow,
     #[error("The invoice status is invalid")]
@@ -3928,7 +4086,6 @@ pub(crate) fn occupied_capacity(
 }
 
 // Constructors for the channel actor state.
-#[allow(clippy::too_many_arguments)]
 impl ChannelActorState {
     pub fn network(&self) -> ActorRef<NetworkActorMessage> {
         self.network
@@ -4277,6 +4434,7 @@ impl ChannelActorState {
         ))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn new_inbound_channel(
         temp_channel_id: Hash256,
         public_channel_info: Option<PublicChannelInfo>,
@@ -4368,6 +4526,7 @@ impl ChannelActorState {
             waiting_peer_response: None,
             network: Some(network),
             scheduled_channel_update_handle: None,
+            pending_notify_mpp_tcls: vec![],
         };
         if let Some(nonce) = remote_channel_announcement_nonce {
             state.update_remote_channel_announcement_nonce(&nonce);
@@ -4441,6 +4600,7 @@ impl ChannelActorState {
             waiting_peer_response: None,
             network: Some(network),
             scheduled_channel_update_handle: None,
+            pending_notify_mpp_tcls: vec![],
         }
     }
 
@@ -4960,20 +5120,6 @@ impl ChannelActorState {
             return Err(ProcessingChannelError::InvalidParameter(format!(
                 "Received tlc id {:?} is not the expected next id {:?}",
                 tlc.tlc_id, next_tlc_id
-            )));
-        }
-        let payment_hash = tlc.payment_hash;
-
-        // If all the tlcs with the same payment hash are confirmed to be failed,
-        // then it's safe to insert the new tlc, the old tlcs will be removed later.
-        if self
-            .tlc_state
-            .all_tlcs()
-            .any(|tlc| tlc.payment_hash == payment_hash && !tlc.is_fail_remove_confirmed())
-        {
-            return Err(ProcessingChannelError::RepeatedProcessing(format!(
-                "Trying to insert tlc with duplicate payment hash {:?}",
-                payment_hash
             )));
         }
 
@@ -5577,6 +5723,7 @@ impl ChannelActorState {
             channel_id: self.get_id(),
             status: TlcStatus::Outbound(OutboundTlcStatus::LocalAnnounced),
             tlc_id,
+            attempt_id: command.attempt_id,
             amount: command.amount,
             payment_hash: command.payment_hash,
             expiry: command.expiry,
@@ -5592,6 +5739,8 @@ impl ChannelActorState {
                 )
             }),
             removed_confirmed_at: None,
+            total_amount: None,
+            payment_secret: None,
         }
     }
 
@@ -5602,6 +5751,7 @@ impl ChannelActorState {
             channel_id: self.get_id(),
             amount: message.amount,
             payment_hash: message.payment_hash,
+            attempt_id: None,
             expiry: message.expiry,
             hash_algorithm: message.hash_algorithm,
             // will be set when apply AddTlc operations after the signature is checked
@@ -5612,6 +5762,8 @@ impl ChannelActorState {
             removed_reason: None,
             previous_tlc: None,
             removed_confirmed_at: None,
+            total_amount: None,
+            payment_secret: None,
         };
         Ok(tlc_info)
     }
@@ -7532,6 +7684,11 @@ pub trait ChannelActorStateStore {
         custom_records: PaymentCustomRecords,
     );
     fn get_payment_custom_records(&self, payment_hash: &Hash256) -> Option<PaymentCustomRecords>;
+    fn insert_hold_tlc(&self, payment_hash: Hash256, hold_tlc: HoldTlc);
+    fn get_hold_tlc_set(&self, payment_hash: Hash256) -> Vec<HoldTlc>;
+    fn remove_hold_tlc_set(&self, payment_hash: &Hash256);
+    fn list_all_hold_tlcs(&self) -> HashMap<Hash256, Vec<HoldTlc>>;
+    fn remove_hold_tlc(&self, payment_hash: &Hash256, channel_id: &Hash256, tlc_id: u64);
 }
 
 /// A wrapper on CommitmentTransaction that has a partial signature along with
