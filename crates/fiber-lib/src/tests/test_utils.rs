@@ -457,6 +457,9 @@ pub(crate) async fn create_channel_with_nodes(
     let funding_tx_hash = funding_tx_outpoint.tx_hash().into();
     node_a.add_channel_tx(new_channel_id, funding_tx_hash);
     node_b.add_channel_tx(new_channel_id, funding_tx_hash);
+
+    wait_for_network_graph_update(node_a, 1).await;
+
     Ok((new_channel_id, funding_tx_hash))
 }
 
@@ -566,25 +569,7 @@ pub(crate) async fn create_n_nodes_network_with_params(
             assert!(matches!(res, TxStatus::Committed(..)));
         }
     }
-    // sleep for a while to make sure network graph is updated
-    for _ in 0..50 {
-        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-        if nodes[0].get_network_graph_channels().await.len() >= amounts.len() {
-            break;
-        }
-    }
-    let graph_channels = nodes[0].get_network_graph_channels().await;
-    if graph_channels.len() < amounts.len() {
-        use tracing::error;
-        error!(
-            "failed to sync all graph channels, expect {} got {}",
-            amounts.len(),
-            graph_channels.len()
-        );
-        for (i, chan) in graph_channels.into_iter().enumerate() {
-            error!(">>> channel {}: {:?}", i, chan);
-        }
-    }
+    wait_for_network_graph_update(&nodes[0], amounts.len()).await;
     (nodes, channels)
 }
 
@@ -943,6 +928,20 @@ impl NetworkNode {
             assert!(self.get_triggered_unexpected_events().await.is_empty());
             let status = self.get_payment_status(payment_hash).await;
             if status != PaymentSessionStatus::Created {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    }
+
+    pub async fn wait_until_final_status(&self, payment_hash: Hash256) {
+        loop {
+            assert!(self.get_triggered_unexpected_events().await.is_empty());
+            let status = self.get_payment_status(payment_hash).await;
+            if matches!(
+                status,
+                PaymentSessionStatus::Success | PaymentSessionStatus::Failed
+            ) {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(500)).await;
@@ -1559,4 +1558,42 @@ pub async fn create_mock_chain_actor() -> ActorRef<CkbChainMessage> {
         .await
         .expect("start mock chain actor")
         .0
+}
+
+async fn wait_for_network_graph_update(node: &NetworkNode, channels: usize) {
+    // sleep for a while to make sure network graph is updated
+    for _ in 0..50 {
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        if node.get_network_graph_channels().await.len() >= channels {
+            break;
+        }
+    }
+    let graph_channels = node.get_network_graph_channels().await;
+    if graph_channels.len() < channels {
+        use tracing::error;
+        error!(
+            "failed to sync all graph channels, expect {} got {}",
+            channels,
+            graph_channels.len()
+        );
+        for (i, chan) in graph_channels.into_iter().enumerate() {
+            error!(">>> channel {}: {:?}", i, chan);
+        }
+    }
+}
+
+pub async fn wait_until_timeout<F: Fn() -> bool>(max_wait_time: u64, f: F) {
+    let start = tokio::time::Instant::now();
+    while !f() {
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        if start.elapsed().as_millis() > max_wait_time as u128 {
+            panic!("Wait timeout after {}ms", max_wait_time);
+        }
+    }
+}
+
+pub async fn wait_until<F: Fn() -> bool>(f: F) {
+    const MAX_WAIT_TIME: u64 = 120_000;
+
+    wait_until_timeout(MAX_WAIT_TIME, f).await;
 }
