@@ -894,7 +894,7 @@ where
 
                     // set timeout for hold tlc
                     self.network.send_after(
-                        Duration::from_millis(DEFAULT_HOLD_TLC_TIMEOUT + 10),
+                        Duration::from_millis(DEFAULT_HOLD_TLC_TIMEOUT),
                         move || {
                             NetworkActorMessage::new_command(NetworkActorCommand::TimeoutHoldTlc(
                                 tlc.payment_hash,
@@ -904,12 +904,9 @@ where
                         },
                     );
 
-                    // try settle down tlc set with 1s delay
-                    self.network
-                        .send_message(NetworkActorMessage::new_command(
-                            NetworkActorCommand::SettleMPPTlcSet(tlc.payment_hash),
-                        ))
-                        .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                    // add to pending settlement tlc set
+                    // the tlc set will be settled by network actor
+                    state.pending_settlement_tlc_set.push(tlc.payment_hash);
 
                     // just return, the tlc set will be settled by network actor
                     return;
@@ -2690,7 +2687,20 @@ where
             }
         }
 
+        // take the pending settlement tlc set
+        let pending_settlement_tlc_set = std::mem::take(&mut state.pending_settlement_tlc_set);
+
         self.store.insert_channel_actor_state(state.clone());
+
+        // try to settle down tlc set
+        for payment_hash in pending_settlement_tlc_set {
+            self.network
+                .send_message(NetworkActorMessage::new_command(
+                    NetworkActorCommand::SettleMPPTlcSet(payment_hash),
+                ))
+                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+        }
+
         Ok(())
     }
 
@@ -3659,6 +3669,10 @@ pub struct ChannelActorState {
     // The arc here is only used to implement the clone trait for the ChannelActorState.
     #[serde(skip)]
     pub scheduled_channel_update_handle: ScheduledChannelUpdateHandle,
+
+    // The TLC set ready to be settled
+    #[serde(skip)]
+    pub pending_settlement_tlc_set: Vec<Hash256>,
 }
 
 #[serde_as]
@@ -4512,6 +4526,7 @@ impl ChannelActorState {
             waiting_peer_response: None,
             network: Some(network),
             scheduled_channel_update_handle: None,
+            pending_settlement_tlc_set: vec![],
         };
         if let Some(nonce) = remote_channel_announcement_nonce {
             state.update_remote_channel_announcement_nonce(&nonce);
@@ -4585,6 +4600,7 @@ impl ChannelActorState {
             waiting_peer_response: None,
             network: Some(network),
             scheduled_channel_update_handle: None,
+            pending_settlement_tlc_set: vec![],
         }
     }
 
