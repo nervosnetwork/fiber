@@ -906,7 +906,7 @@ where
 
                     // add to pending settlement tlc set
                     // the tlc set will be settled by network actor
-                    state.pending_settlement_tlc_set.push(tlc.payment_hash);
+                    state.pending_notify_mpp_tcls.push(tlc.payment_hash);
 
                     // just return, the tlc set will be settled by network actor
                     return;
@@ -2688,7 +2688,7 @@ where
         }
 
         // take the pending settlement tlc set
-        let pending_settlement_tlc_set = std::mem::take(&mut state.pending_settlement_tlc_set);
+        let pending_settlement_tlc_set = std::mem::take(&mut state.pending_notify_mpp_tcls);
 
         self.store.insert_channel_actor_state(state.clone());
 
@@ -3672,7 +3672,7 @@ pub struct ChannelActorState {
 
     // The TLC set ready to be settled
     #[serde(skip)]
-    pub pending_settlement_tlc_set: Vec<Hash256>,
+    pub pending_notify_mpp_tcls: Vec<Hash256>,
 }
 
 #[serde_as]
@@ -4526,7 +4526,7 @@ impl ChannelActorState {
             waiting_peer_response: None,
             network: Some(network),
             scheduled_channel_update_handle: None,
-            pending_settlement_tlc_set: vec![],
+            pending_notify_mpp_tcls: vec![],
         };
         if let Some(nonce) = remote_channel_announcement_nonce {
             state.update_remote_channel_announcement_nonce(&nonce);
@@ -4600,7 +4600,7 @@ impl ChannelActorState {
             waiting_peer_response: None,
             network: Some(network),
             scheduled_channel_update_handle: None,
-            pending_settlement_tlc_set: vec![],
+            pending_notify_mpp_tcls: vec![],
         }
     }
 

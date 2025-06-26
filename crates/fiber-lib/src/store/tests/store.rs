@@ -373,7 +373,7 @@ fn test_channel_actor_state_store() {
         waiting_peer_response: None,
         network: None,
         scheduled_channel_update_handle: None,
-        pending_settlement_tlc_set: vec![],
+        pending_notify_mpp_tcls: vec![],
     };
 
     let bincode_encoded = bincode::serialize(&state).unwrap();
@@ -488,7 +488,7 @@ fn test_serde_channel_actor_state_ciborium() {
         waiting_peer_response: None,
         network: None,
         scheduled_channel_update_handle: None,
-        pending_settlement_tlc_set: vec![],
+        pending_notify_mpp_tcls: vec![],
     };
 
     let mut serialized = Vec::new();
