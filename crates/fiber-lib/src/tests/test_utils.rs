@@ -1560,3 +1560,19 @@ pub async fn create_mock_chain_actor() -> ActorRef<CkbChainMessage> {
         .expect("start mock chain actor")
         .0
 }
+
+pub async fn wait_until_timeout<F: Fn() -> bool>(max_wait_time: u64, f: F) {
+    let start = tokio::time::Instant::now();
+    while !f() {
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        if start.elapsed().as_millis() > max_wait_time as u128 {
+            panic!("Wait timeout after {}ms", max_wait_time);
+        }
+    }
+}
+
+pub async fn wait_until<F: Fn() -> bool>(f: F) {
+    const MAX_WAIT_TIME: u64 = 120_000;
+
+    wait_until_timeout(MAX_WAIT_TIME, f).await;
+}

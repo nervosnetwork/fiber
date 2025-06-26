@@ -580,8 +580,8 @@ async fn do_test_update_graph_balance_after_payment(public: bool) {
     assert_eq!(res2.status, PaymentSessionStatus::Created);
     let payment_hash2 = res2.payment_hash;
 
-    // sleep for 2 seconds to make sure the payment is processed
-    tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
+    // make sure the payment is processed
+    node_a.wait_until_success(payment_hash1).await;
 
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::GetPayment(payment_hash1, rpc_reply))
@@ -1594,8 +1594,8 @@ async fn test_send_payment_with_rev_3_nodes() {
     let res = res.unwrap();
     assert_eq!(res.status, PaymentSessionStatus::Created);
     assert!(res.fee > 0);
-    // sleep for 2 seconds to make sure the payment is sent
-    tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
+    // make sure the payment is sent
+    node_c.wait_until_success(res.payment_hash).await;
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::GetPayment(res.payment_hash, rpc_reply))
     };
@@ -1655,8 +1655,8 @@ async fn test_send_payment_with_max_nodes() {
     assert_eq!(res.status, PaymentSessionStatus::Created);
     assert!(res.fee > 0);
 
-    // sleep for 8 seconds to make sure the payment is sent
-    tokio::time::sleep(tokio::time::Duration::from_millis(8000)).await;
+    // make sure the payment is sent
+    nodes[0].wait_until_success(res.payment_hash).await;
 
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::GetPayment(res.payment_hash, rpc_reply))
@@ -1747,8 +1747,9 @@ async fn test_send_payment_fail_with_3_nodes_invalid_hash() {
     let res = res.unwrap();
     assert_eq!(res.status, PaymentSessionStatus::Created);
     assert!(res.fee > 0);
-    // sleep for 2 seconds to make sure the payment is sent
-    tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
+    // make sure the payment is sent
+    node_a.wait_until_failed(res.payment_hash).await;
+
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::GetPayment(res.payment_hash, rpc_reply))
     };
@@ -2056,7 +2057,6 @@ async fn test_network_send_payment_dry_run_will_not_create_payment_session() {
         ))
     };
     let res = call!(node_a.network_actor, message).expect("node_a alive");
-    dbg!(&res);
     assert!(res.is_ok());
 
     // make sure we can send the same payment after dry run query
@@ -5792,6 +5792,7 @@ async fn test_send_payment_will_fail_with_no_invoice_preimage() {
     let payment_hash = res.unwrap().payment_hash;
     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 
+    source_node.wait_until_failed(payment_hash).await;
     source_node
         .assert_payment_status(payment_hash, PaymentSessionStatus::Failed, Some(1))
         .await;
@@ -5852,6 +5853,7 @@ async fn test_send_payment_will_fail_with_cancelled_invoice() {
     let payment_hash = res.unwrap().payment_hash;
     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 
+    source_node.wait_until_failed(payment_hash).await;
     source_node
         .assert_payment_status(payment_hash, PaymentSessionStatus::Failed, Some(1))
         .await;
@@ -5915,6 +5917,7 @@ async fn test_send_payment_will_succeed_with_large_tlc_expiry_limit() {
     let payment_hash = res.unwrap().payment_hash;
     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 
+    source_node.wait_until_success(payment_hash).await;
     source_node
         .assert_payment_status(payment_hash, PaymentSessionStatus::Success, Some(1))
         .await;

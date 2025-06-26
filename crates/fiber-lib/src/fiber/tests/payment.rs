@@ -1882,7 +1882,7 @@ async fn test_send_payment_two_nodes_with_router_and_multiple_channels() {
     assert_eq!(used_channels[0], channel_1_funding_tx);
     assert_eq!(used_channels[1], channel_3_funding_tx);
 
-    tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
+    node_0.wait_until_success(payment_hash).await;
 
     let balance = node_0.get_local_balance_from_channel(channels[1]);
     assert_eq!(balance, old_balance - 60000000 - res.fee);
@@ -2050,7 +2050,12 @@ async fn test_network_send_payment_randomly_send_each_other() {
         }
     }
 
-    tokio::time::sleep(tokio::time::Duration::from_millis(4000)).await;
+    // wait for all payments to be settled
+    for (a_send, _, payment_hash, _) in all_sent.iter() {
+        let sender = if *a_send { &node_a } else { &node_b };
+        sender.wait_until_success(*payment_hash).await;
+    }
+
     for (a_sent, amount, payment_hash, create_status) in all_sent {
         let message = |rpc_reply| -> NetworkActorMessage {
             NetworkActorMessage::Command(NetworkActorCommand::GetPayment(payment_hash, rpc_reply))
@@ -3638,7 +3643,7 @@ async fn test_send_payment_shutdown_with_force() {
             .duration_since(started)
             .expect("time passed")
             .as_secs();
-        if elapsed > 60 {
+        if elapsed > 180 {
             error!("timeout, failed_count: {:?}", failed_count);
             break;
         }
@@ -3940,13 +3945,28 @@ async fn test_send_payment_shutdown_under_send_each_other() {
         }
     }
 
-    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+    wait_until(|| {
+        matches!(
+            nodes[3].get_channel_actor_state(channels[2]).state,
+            ChannelState::Closed(..)
+        )
+    })
+    .await;
 
     let node_3_channel_actor_state = nodes[3].get_channel_actor_state(channels[2]);
     assert_eq!(
         node_3_channel_actor_state.state,
         ChannelState::Closed(CloseFlags::COOPERATIVE)
     );
+
+    wait_until(|| {
+        matches!(
+            nodes[2].get_channel_actor_state(channels[2]).state,
+            ChannelState::Closed(..)
+        )
+    })
+    .await;
+
     let node_2_channel_actor_state = nodes[2].get_channel_actor_state(channels[2]);
     assert_eq!(
         node_2_channel_actor_state.state,
