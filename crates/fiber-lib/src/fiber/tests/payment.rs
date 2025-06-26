@@ -64,14 +64,10 @@ async fn test_send_payment_custom_records() {
     let payment_hash = res.unwrap().payment_hash;
     source_node.wait_until_final_status(payment_hash).await;
 
-    let message = |rpc_reply| -> NetworkActorMessage {
-        NetworkActorMessage::Command(NetworkActorCommand::GetPayment(payment_hash, rpc_reply))
-    };
-    let res = call!(source_node.network_actor, message)
-        .expect("node_a alive")
-        .unwrap();
-
-    assert_eq!(res.status, PaymentSessionStatus::Success);
+    assert_eq!(
+        source_node.get_payment_status(payment_hash).await,
+        PaymentSessionStatus::Success
+    );
     let got_custom_records = node_1
         .get_payment_custom_records(&payment_hash)
         .expect("custom records");
@@ -2029,15 +2025,8 @@ async fn test_network_send_payment_randomly_send_each_other() {
     }
 
     for (a_sent, amount, payment_hash, create_status) in all_sent {
-        let message = |rpc_reply| -> NetworkActorMessage {
-            NetworkActorMessage::Command(NetworkActorCommand::GetPayment(payment_hash, rpc_reply))
-        };
-        let network = if a_sent {
-            &node_a.network_actor
-        } else {
-            &node_b.network_actor
-        };
-        let res = call!(network, message).expect("node_a alive").unwrap();
+        let node = if a_sent { &node_a } else { &node_b };
+        let res = node.get_payment_result(payment_hash).await;
         if res.status == PaymentSessionStatus::Success {
             assert!(matches!(
                 create_status,

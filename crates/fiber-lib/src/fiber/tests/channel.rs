@@ -575,24 +575,14 @@ async fn do_test_update_graph_balance_after_payment(public: bool) {
     // make sure the payment is processed
     node_a.wait_until_success(payment_hash1).await;
 
-    let message = |rpc_reply| -> NetworkActorMessage {
-        NetworkActorMessage::Command(NetworkActorCommand::GetPayment(payment_hash1, rpc_reply))
-    };
-    let res = call!(node_a.network_actor, message)
-        .expect("node_a alive")
-        .unwrap();
-    assert_eq!(res.status, PaymentSessionStatus::Success);
-    assert_eq!(res.failed_error, None);
-
-    let message = |rpc_reply| -> NetworkActorMessage {
-        NetworkActorMessage::Command(NetworkActorCommand::GetPayment(payment_hash2, rpc_reply))
-    };
-    let res = call!(node_b.network_actor, message)
-        .expect("node_a alive")
-        .unwrap();
-
-    assert_eq!(res.status, PaymentSessionStatus::Success);
-    assert_eq!(res.failed_error, None);
+    assert_eq!(
+        node_a.get_payment_status(payment_hash1).await,
+        PaymentSessionStatus::Success
+    );
+    assert_eq!(
+        node_b.get_payment_status(payment_hash2).await,
+        PaymentSessionStatus::Success
+    );
 
     let node_a_new_balance = node_a.get_local_balance_from_channel(new_channel_id);
     let node_b_new_balance = node_b.get_local_balance_from_channel(new_channel_id);
@@ -737,21 +727,15 @@ async fn test_network_send_payment_normal_keysend_workflow() {
 
     node_a.wait_until_success(payment_hash).await;
 
-    let message = |rpc_reply| -> NetworkActorMessage {
-        NetworkActorMessage::Command(NetworkActorCommand::GetPayment(payment_hash, rpc_reply))
-    };
-    let res = call!(node_a.network_actor, message)
-        .expect("node_a alive")
-        .unwrap();
-
     let new_balance_node_a = node_a.get_local_balance_from_channel(channel_id);
     let new_balance_node_b = node_b.get_local_balance_from_channel(channel_id);
 
     assert_eq!(node_a_local_balance - new_balance_node_a, 10000);
     assert_eq!(new_balance_node_b - node_b_local_balance, 10000);
-
-    assert_eq!(res.status, PaymentSessionStatus::Success);
-    assert_eq!(res.failed_error, None);
+    assert_eq!(
+        node_a.get_payment_status(payment_hash).await,
+        PaymentSessionStatus::Success
+    );
 
     // we can make the same payment again, since payment_hash will be generated randomly
     let message = |rpc_reply| -> NetworkActorMessage {
@@ -833,24 +817,14 @@ async fn test_network_send_payment_send_each_other() {
 
     node_a.wait_until_success(payment_hash1).await;
 
-    let message = |rpc_reply| -> NetworkActorMessage {
-        NetworkActorMessage::Command(NetworkActorCommand::GetPayment(payment_hash1, rpc_reply))
-    };
-    let res = call!(node_a.network_actor, message)
-        .expect("node_a alive")
-        .unwrap();
-    assert_eq!(res.status, PaymentSessionStatus::Success);
-    assert_eq!(res.failed_error, None);
-
-    let message = |rpc_reply| -> NetworkActorMessage {
-        NetworkActorMessage::Command(NetworkActorCommand::GetPayment(payment_hash2, rpc_reply))
-    };
-    let res = call!(node_b.network_actor, message)
-        .expect("node_a alive")
-        .unwrap();
-
-    assert_eq!(res.status, PaymentSessionStatus::Success);
-    assert_eq!(res.failed_error, None);
+    assert_eq!(
+        node_a.get_payment_status(payment_hash1).await,
+        PaymentSessionStatus::Success
+    );
+    assert_eq!(
+        node_b.get_payment_status(payment_hash2).await,
+        PaymentSessionStatus::Success
+    );
 
     let node_a_new_balance = node_a.get_local_balance_from_channel(new_channel_id);
     let node_b_new_balance = node_b.get_local_balance_from_channel(new_channel_id);
@@ -1315,20 +1289,14 @@ async fn test_network_send_payment_final_incorrect_hash() {
     let res = call!(node_a.network_actor, message).expect("node_a alive");
     assert!(res.is_ok());
 
-    let message = |rpc_reply| -> NetworkActorMessage {
-        NetworkActorMessage::Command(NetworkActorCommand::GetPayment(payment_hash, rpc_reply))
-    };
-    let res = call!(node_a.network_actor, message).expect("node_a alive");
-    assert!(res.is_ok());
-    assert_eq!(res.unwrap().status, PaymentSessionStatus::Inflight);
+    assert_eq!(
+        node_a.get_payment_status(payment_hash).await,
+        PaymentSessionStatus::Inflight
+    );
 
     node_a.wait_until_failed(payment_hash).await;
 
-    let message = |rpc_reply| -> NetworkActorMessage {
-        NetworkActorMessage::Command(NetworkActorCommand::GetPayment(payment_hash, rpc_reply))
-    };
-    let res = call!(node_a.network_actor, message).expect("node_a alive");
-    let res = res.unwrap();
+    let res = node_a.get_payment_result(payment_hash).await;
     assert_eq!(res.status, PaymentSessionStatus::Failed);
     assert_eq!(
         res.failed_error,
@@ -1555,14 +1523,10 @@ async fn test_send_payment_with_rev_3_nodes() {
     assert!(res.fee > 0);
     // make sure the payment is sent
     node_c.wait_until_success(res.payment_hash).await;
-    let message = |rpc_reply| -> NetworkActorMessage {
-        NetworkActorMessage::Command(NetworkActorCommand::GetPayment(res.payment_hash, rpc_reply))
-    };
-    let res = call!(node_c.network_actor, message)
-        .expect("node_a alive")
-        .unwrap();
-    assert_eq!(res.status, PaymentSessionStatus::Success);
-    assert_eq!(res.failed_error, None);
+    assert_eq!(
+        node_c.get_payment_status(res.payment_hash).await,
+        PaymentSessionStatus::Success
+    );
 
     let new_node_c_local = node_c.get_local_balance_from_channel(channel_1);
     let new_node_b_right = node_b.get_local_balance_from_channel(channel_1);
@@ -1615,14 +1579,10 @@ async fn test_send_payment_with_max_nodes() {
     // make sure the payment is sent
     nodes[0].wait_until_success(res.payment_hash).await;
 
-    let message = |rpc_reply| -> NetworkActorMessage {
-        NetworkActorMessage::Command(NetworkActorCommand::GetPayment(res.payment_hash, rpc_reply))
-    };
-    let res = call!(nodes[0].network_actor, message)
-        .expect("node_a alive")
-        .unwrap();
-    assert_eq!(res.status, PaymentSessionStatus::Success);
-    assert_eq!(res.failed_error, None);
+    assert_eq!(
+        nodes[0].get_payment_status(res.payment_hash).await,
+        PaymentSessionStatus::Success
+    );
     nodes[0].wait_until_success(res.payment_hash).await;
 
     let sender_local_new = nodes[0].get_local_balance_from_channel(channels[0]);
@@ -1703,12 +1663,7 @@ async fn test_send_payment_fail_with_3_nodes_invalid_hash() {
     // make sure the payment is sent
     node_a.wait_until_failed(res.payment_hash).await;
 
-    let message = |rpc_reply| -> NetworkActorMessage {
-        NetworkActorMessage::Command(NetworkActorCommand::GetPayment(res.payment_hash, rpc_reply))
-    };
-    let res = call!(node_a.network_actor, message)
-        .expect("node_a alive")
-        .unwrap();
+    let res = node_a.get_payment_result(res.payment_hash).await;
     assert_eq!(res.status, PaymentSessionStatus::Failed);
     assert_eq!(
         res.failed_error,
