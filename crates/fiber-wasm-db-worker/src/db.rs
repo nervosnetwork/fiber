@@ -67,17 +67,23 @@ where
     let mut result = vec![];
     loop {
         let key: Vec<u8> = serde_wasm_bindgen::from_value(
-            cursor
+            match cursor
                 .key()
                 .map_err(|e| anyhow!("Unable to read key from cursor: {}", e))?
-                .expect("Expect non-null key"),
+            {
+                Some(v) => v,
+                None => {
+                    debug!("Empty cursor encountered, breaking..");
+                    break;
+                }
+            },
         )
         .unwrap();
         let value: Vec<u8> = serde_wasm_bindgen::from_value(
             cursor
                 .value()
                 .map_err(|e| anyhow!("Unable to read value from cursor: {}", e))?
-                .expect("Expect non-null value"),
+                .expect("Value cursor must exist"),
         )
         .unwrap();
         if skip_while(&key) {

@@ -11,7 +11,6 @@ type DepType = "code" | "dep_group";
 interface UdtCellDep {
     out_point: OutPoint;
     dep_type: DepType;
-
 }
 
 interface OutPoint {
