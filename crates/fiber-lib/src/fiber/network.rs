@@ -3582,9 +3582,14 @@ where
 
     async fn post_stop(
         &self,
-        _myself: ActorRef<Self::Msg>,
+        myself: ActorRef<Self::Msg>,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
+        myself
+            .get_cell()
+            .stop_children_and_wait(Some("Network actor stopped".to_string()), None)
+            .await;
+
         if let Err(err) = state.control.close().await {
             error!("Failed to close tentacle service: {}", err);
         }
@@ -3597,6 +3602,7 @@ where
             .event_sender
             .send(NetworkServiceEvent::NetworkStopped(state.peer_id.clone()))
             .await;
+
         Ok(())
     }
 
