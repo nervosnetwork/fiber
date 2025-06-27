@@ -1,0 +1,6 @@
+/dist
+/yarn.lock
+/pkg
+/node_modules
+/index.d.ts
+/package-lock.json

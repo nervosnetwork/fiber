@@ -1,8 +1,13 @@
 [workspace]
-members = ["crates/fiber-lib", "crates/fiber-bin"]
+members = [
+    "crates/fiber-lib",
+    "crates/fiber-bin",
+    "crates/fiber-wasm",
+    "crates/fiber-wasm-db-worker",
+    "crates/fiber-wasm-db-common",
+]
 resolver = "2"
 default-members = ["crates/fiber-bin", "crates/fiber-lib"]
-
 [profile.release]
 panic = "abort"
 overflow-checks = true
@@ -14,3 +19,6 @@ panic = "abort"
 inherits = "test"
 opt-level = 3
 debug = false
+
+[patch.crates-io]
+tokio_with_wasm = { git = "https://github.com/Officeyutong/tokio-with-wasm", rev = "60f495c" }

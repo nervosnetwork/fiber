@@ -7,7 +7,7 @@ GRCOV_EXCL_LINE = ^\s*(\})*(\))*(;)*$$|\s*((log::|tracing::)?(trace|debug|info|w
 
 .PHONY: test
 test:
-	RUST_LOG=off cargo nextest run --no-fail-fast
+	RUST_LOG=off cargo nextest run --no-fail-fast -p fnn -p fiber-bin
 
 .PHONY: check
 check:
@@ -18,7 +18,9 @@ check:
 
 .PHONY: clippy
 clippy:
-	cargo clippy --all --all-targets --all-features -- -D warnings -A clippy::module-inception
+	cargo clippy --all-targets --all-features -p fnn -p fiber-bin -- -D warnings -A clippy::module-inception
+	cargo clippy -p fiber-wasm -p fiber-wasm-db-worker  -p fiber-wasm-db-common --target wasm32-unknown-unknown -- -D warnings -A clippy::module-inception
+	
 
 .PHONY: bless
 bless:
@@ -41,7 +43,7 @@ coverage-run-unittests:
 	RUSTFLAGS="${RUSTFLAGS} -Cinstrument-coverage" \
 		RUST_LOG=off \
 		LLVM_PROFILE_FILE="${COVERAGE_PROFRAW_DIR}/unittests-%p-%m.profraw" \
-			cargo test --all
+			cargo test -p fnn -p fiber-bin
 
 coverage-collect-data:
 	grcov "${COVERAGE_PROFRAW_DIR}" --binary-path "${CARGO_TARGET_DIR}/debug/" \
