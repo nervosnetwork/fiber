@@ -373,6 +373,7 @@ fn test_channel_actor_state_store() {
         waiting_peer_response: None,
         network: None,
         scheduled_channel_update_handle: None,
+        ephemeral_config: Default::default(),
     };
 
     let bincode_encoded = bincode::serialize(&state).unwrap();
@@ -487,6 +488,7 @@ fn test_serde_channel_actor_state_ciborium() {
         waiting_peer_response: None,
         network: None,
         scheduled_channel_update_handle: None,
+        ephemeral_config: Default::default(),
     };
 
     let mut serialized = Vec::new();
