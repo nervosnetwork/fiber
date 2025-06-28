@@ -3298,7 +3298,16 @@ where
                 }
             },
             Some(actor) => {
-                actor.send_message(message).expect("channel actor alive");
+                // There is a possibility that the channel actor is not alive, but we assume it is
+                // alive for this moment. For example, in force shutdown case, the ChannelActor received
+                // ClosingTransactionConfirmed event then stopped after processing the message,
+                // NetworkActor will remove it from `channels` when receiving ChannelActorStopped from it,
+                // but at the same time, NetworkActor received another ClosingTransactionConfirmed,
+                // we will try to send another event message to the stopped ChannelActor here.
+                //
+                // In short, it's safer to ignore sending message failure from NetworkActor
+                // to ChannelActor, since NetworkActor is responsible for multiple channels and a lot of stuff.
+                let _ = actor.send_message(message);
             }
         }
     }
