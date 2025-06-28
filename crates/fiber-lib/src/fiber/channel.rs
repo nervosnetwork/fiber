@@ -2598,6 +2598,11 @@ where
             },
             _ => StopReason::PeerDisConnected,
         };
+        debug!(
+            "ChannelActor stopped: {:?} with reason: {:?}",
+            state.get_id(),
+            stop_reason
+        );
         self.network
             .send_message(NetworkActorMessage::new_event(
                 NetworkActorEvent::ChannelActorStopped(state.get_id(), stop_reason),

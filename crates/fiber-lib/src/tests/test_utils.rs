@@ -38,6 +38,7 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::net::SocketAddr;
+use std::time::Instant;
 use std::{
     env,
     ffi::OsStr,
@@ -80,6 +81,7 @@ use crate::{
 static RETAIN_VAR: &str = "TEST_TEMP_RETAIN";
 pub const MIN_RESERVED_CKB: u128 = 4200000000;
 pub const HUGE_CKB_AMOUNT: u128 = MIN_RESERVED_CKB + 1000000000000_u128;
+const DEFAULT_WAIT_UNTIL_TIME: u64 = 60; // seconds
 
 #[derive(Debug)]
 pub struct TempDir(ManuallyDrop<OldTempDir>);
@@ -891,61 +893,87 @@ impl NetworkNode {
         assert!(used_channels.contains(&channel_outpoint));
     }
 
-    pub async fn wait_until_success(&self, payment_hash: Hash256) {
-        loop {
+    async fn wait_until_status<F, E>(
+        &self,
+        payment_hash: Hash256,
+        check: F,
+        on_unexpected: E,
+        err_msg: &str,
+    ) where
+        F: Fn(PaymentSessionStatus) -> bool,
+        E: Fn(PaymentSessionStatus),
+    {
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_secs(DEFAULT_WAIT_UNTIL_TIME) {
             assert!(self.get_triggered_unexpected_events().await.is_empty());
             let status = self.get_payment_status(payment_hash).await;
-            if status == PaymentSessionStatus::Success {
-                error!("Payment success: {:?}\n\n", payment_hash);
-                break;
-            } else if status == PaymentSessionStatus::Failed {
-                error!("Payment failed: {:?}\n\n", payment_hash);
-                // report error
-                assert_eq!(status, PaymentSessionStatus::Success);
+            if check(status) {
+                return;
             }
+            on_unexpected(status);
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
+        panic!(
+            "{}: {:?}, current status: {:?}",
+            err_msg,
+            payment_hash,
+            self.get_payment_status(payment_hash).await
+        );
+    }
+
+    pub async fn wait_until_success(&self, payment_hash: Hash256) {
+        self.wait_until_status(
+            payment_hash,
+            |status| status == PaymentSessionStatus::Success,
+            |status| {
+                if status == PaymentSessionStatus::Failed {
+                    error!("Payment failed: {:?}\n\n", payment_hash);
+                    assert_eq!(status, PaymentSessionStatus::Success);
+                }
+            },
+            "Payment did not succeed within the expected time",
+        )
+        .await;
     }
 
     pub async fn wait_until_failed(&self, payment_hash: Hash256) {
-        loop {
-            assert!(self.get_triggered_unexpected_events().await.is_empty());
-            let status = self.get_payment_status(payment_hash).await;
-            if status == PaymentSessionStatus::Failed {
-                error!("Payment failed: {:?}\n\n", payment_hash);
-                break;
-            } else if status == PaymentSessionStatus::Success {
-                error!("Payment success: {:?}\n\n", payment_hash);
-                // report error
-                assert_eq!(status, PaymentSessionStatus::Failed);
-            }
-            tokio::time::sleep(Duration::from_millis(500)).await;
-        }
+        self.wait_until_status(
+            payment_hash,
+            |status| status == PaymentSessionStatus::Failed,
+            |status| {
+                if status == PaymentSessionStatus::Success {
+                    error!("Payment success: {:?}\n\n", payment_hash);
+                    assert_eq!(status, PaymentSessionStatus::Failed);
+                }
+            },
+            "Payment did not fail within the expected time",
+        )
+        .await;
     }
 
     pub async fn wait_until_created(&self, payment_hash: Hash256) {
-        loop {
-            assert!(self.get_triggered_unexpected_events().await.is_empty());
-            let status = self.get_payment_status(payment_hash).await;
-            if status != PaymentSessionStatus::Created {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(500)).await;
-        }
+        self.wait_until_status(
+            payment_hash,
+            |status| status != PaymentSessionStatus::Created,
+            |_status| {},
+            "Payment did not reach the created status within the expected time",
+        )
+        .await;
     }
 
     pub async fn wait_until_final_status(&self, payment_hash: Hash256) {
-        loop {
-            assert!(self.get_triggered_unexpected_events().await.is_empty());
-            let status = self.get_payment_status(payment_hash).await;
-            if matches!(
-                status,
-                PaymentSessionStatus::Success | PaymentSessionStatus::Failed
-            ) {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(500)).await;
-        }
+        self.wait_until_status(
+            payment_hash,
+            |status| {
+                matches!(
+                    status,
+                    PaymentSessionStatus::Success | PaymentSessionStatus::Failed
+                )
+            },
+            |_status| {},
+            "Payment did not reach final status within the expected time",
+        )
+        .await;
     }
 
     pub async fn node_info(&self) -> NodeInfoResponse {

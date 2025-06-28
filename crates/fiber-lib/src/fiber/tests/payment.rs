@@ -3467,6 +3467,8 @@ async fn test_send_payment_complex_network_payself_amount_exceeded() {
 async fn test_send_payment_with_one_node_stop() {
     // make sure part of the payments will fail, since the node is stopped
     // TLC forwarding will fail and proper error will be returned
+    // There is also a probability that RemoveTlc can not be passed backwardly,
+    // since the node is stopped, so the payment will be Inflight state.
     init_tracing();
 
     let (mut nodes, _channels) = create_n_nodes_network(
@@ -3497,7 +3499,6 @@ async fn test_send_payment_with_one_node_stop() {
     let mut check_count = 0;
     while check_count < 100 {
         for payment_hash in all_sent.clone().iter() {
-            nodes[0].wait_until_final_status(*payment_hash).await;
             let res = nodes[0].get_payment_result(*payment_hash).await;
             eprintln!("payment_hash: {:?} status: {:?}", payment_hash, res.status);
             if res.status == PaymentSessionStatus::Failed {
@@ -3506,11 +3507,12 @@ async fn test_send_payment_with_one_node_stop() {
             }
         }
         check_count += 1;
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
         if all_sent.is_empty() {
             break;
         }
     }
-    assert_eq!(failed_count, 4);
+    assert!(failed_count >= 4);
 }
 
 #[tokio::test]
@@ -3538,7 +3540,6 @@ async fn test_send_payment_shutdown_with_force() {
 
         if i == 5 {
             let _ = nodes[3].send_shutdown(channels[2], true).await;
-
             tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
             nodes[3]
                 .send_channel_shutdown_tx_confirmed_event(
@@ -3548,6 +3549,11 @@ async fn test_send_payment_shutdown_with_force() {
                 )
                 .await;
             tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+            let channel_actor_state = nodes[3].get_channel_actor_state(channels[2]);
+            assert_eq!(
+                channel_actor_state.state,
+                ChannelState::Closed(CloseFlags::UNCOOPERATIVE)
+            );
         }
     }
 
@@ -3560,7 +3566,6 @@ async fn test_send_payment_shutdown_with_force() {
 
     while !all_sent.is_empty() {
         for payment_hash in all_sent.clone().iter() {
-            nodes[0].wait_until_final_status(*payment_hash).await;
             let res = nodes[0].get_payment_result(*payment_hash).await;
             eprintln!(
                 "payment_hash: {:?} status: {:?} failed_count: {:?}",
@@ -3600,6 +3605,43 @@ async fn test_send_payment_shutdown_with_force() {
         node_2_channel_actor_state.state
     );
     assert_eq!(node_2_channel_actor_state.state, ChannelState::ChannelReady);
+}
+
+#[tokio::test]
+async fn test_send_payment_shutdown_channel_actor_may_already_stopped() {
+    init_tracing();
+
+    let (nodes, channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((2, 3), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+        ],
+        4,
+    )
+    .await;
+
+    for i in 0..2 {
+        let _ = nodes[i].send_shutdown(channels[i], true).await;
+
+        // send multiple shutdown transaction confirmed events
+        for _k in 0..5 {
+            nodes[i]
+                .send_channel_shutdown_tx_confirmed_event(
+                    nodes[i + 1].peer_id.clone(),
+                    channels[i],
+                    true,
+                )
+                .await;
+        }
+        let channel_actor_state = nodes[i].get_channel_actor_state(channels[i]);
+        assert_eq!(
+            channel_actor_state.state,
+            ChannelState::Closed(CloseFlags::UNCOOPERATIVE)
+        );
+    }
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 }
 
 #[tokio::test]
