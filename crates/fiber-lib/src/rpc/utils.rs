@@ -2,7 +2,7 @@
 macro_rules! log_and_error {
     ($params:expr, $err:expr) => {{
         tracing::error!("channel request params {:?} => error: {:?}", $params, $err);
-        Err(ErrorObjectOwned::owned(
+        Err(jsonrpsee::types::ErrorObjectOwned::owned(
             CALL_EXECUTION_FAILED_CODE,
             $err,
             Some($params),
