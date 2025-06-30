@@ -17,6 +17,7 @@ use crate::invoice::CkbInvoice;
 use crate::invoice::Currency;
 use crate::invoice::InvoiceBuilder;
 use crate::now_timestamp_as_millis_u64;
+use crate::tasks::cancel_tasks_and_wait_for_completion;
 use crate::test_utils::init_tracing;
 use crate::tests::test_utils::*;
 use crate::NetworkServiceEvent;
@@ -25,6 +26,7 @@ use ckb_types::{core::tx_pool::TxStatus, packed::OutPoint};
 use ractor::call;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::panic;
 use std::time::SystemTime;
 use tracing::debug;
 use tracing::error;
@@ -4840,4 +4842,54 @@ async fn test_send_payment_with_reverse_channel_of_capaicity_not_enough() {
     eprintln!("result: {:?}", statistic);
     assert_eq!(statistic[&2], 1);
     assert_eq!(statistic[&1], count - 1);
+}
+
+#[tokio::test]
+async fn test_network_cancel_error_handling() {
+    use ractor::registry;
+    init_tracing();
+    let _span = tracing::info_span!("node", node = "test").entered();
+    let (nodes, _channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (13900000000 + MIN_RESERVED_CKB, MIN_RESERVED_CKB)),
+            ((1, 2), (14000000000 + MIN_RESERVED_CKB, MIN_RESERVED_CKB)),
+            ((2, 1), (14100000000 + MIN_RESERVED_CKB, MIN_RESERVED_CKB)),
+        ],
+        3,
+    )
+    .await;
+
+    let all_actors = registry::registered();
+
+    for i in 0..6 {
+        let channel_prefix = format!("Channel-{}", i);
+        assert!(
+            all_actors
+                .iter()
+                .any(|actor| { actor.starts_with(&channel_prefix) }),
+            "Channel actor should be registered with prefix {}",
+            channel_prefix
+        );
+    }
+
+    for i in 0..3 {
+        let network_name = format!("network actor at {}", nodes[i].base_dir.to_str());
+        assert!(
+            registry::where_is(network_name).is_some(),
+            "Network actor should be registered"
+        );
+    }
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    cancel_tasks_and_wait_for_completion().await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+    for i in 0..3 {
+        let network_name = format!("network actor at {}", nodes[i].base_dir.to_str());
+        assert!(
+            registry::where_is(network_name).is_none(),
+            "Network actor should be removed"
+        );
+    }
+    assert!(registry::registered().is_empty());
 }
