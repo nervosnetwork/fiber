@@ -574,6 +574,7 @@ async fn do_test_update_graph_balance_after_payment(public: bool) {
 
     // make sure the payment is processed
     node_a.wait_until_success(payment_hash1).await;
+    node_b.wait_until_success(payment_hash2).await;
 
     assert_eq!(
         node_a.get_payment_status(payment_hash1).await,
