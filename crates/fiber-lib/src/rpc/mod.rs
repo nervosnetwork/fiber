@@ -216,6 +216,25 @@ pub mod server {
         }))
     }
 
+    fn is_public_addr(addr: &str) -> Result<bool> {
+        let addrs = addr.to_socket_addrs()?;
+        Ok(addrs.into_iter().any(|addr| {
+            let ip = addr.ip();
+            if ip.is_unspecified() {
+                return true;
+            }
+            match ip {
+                IpAddr::V4(ip) => {
+                    !(ip.is_private()
+                        || ip.is_loopback()
+                        || ip.is_link_local()
+                        || ip.is_documentation())
+                }
+                IpAddr::V6(ip) => !(ip.is_loopback() || ip.is_unique_local()),
+            }
+        }))
+    }
+
     #[allow(clippy::type_complexity)]
     #[allow(clippy::too_many_arguments)]
     pub async fn start_rpc<S: RpcServerStore + Clone + Send + Sync + 'static>(
