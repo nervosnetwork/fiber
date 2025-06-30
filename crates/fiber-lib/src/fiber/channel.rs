@@ -2581,14 +2581,13 @@ where
         _myself: ActorRef<Self::Msg>,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
+        // ignore send message failure here, because network actor may already be stopped.
         if let Some(outpoint) = state.get_funding_transaction_outpoint() {
-            self.network
-                .send_message(NetworkActorMessage::new_event(
-                    NetworkActorEvent::OwnedChannelUpdateEvent(
-                        super::graph::OwnedChannelUpdateEvent::Down(outpoint),
-                    ),
-                ))
-                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+            let _ = self.network.send_message(NetworkActorMessage::new_event(
+                NetworkActorEvent::OwnedChannelUpdateEvent(
+                    super::graph::OwnedChannelUpdateEvent::Down(outpoint),
+                ),
+            ));
         }
         let stop_reason = match state.state {
             ChannelState::Closed(flags) => match flags {
@@ -2603,11 +2602,9 @@ where
             state.get_id(),
             stop_reason
         );
-        self.network
-            .send_message(NetworkActorMessage::new_event(
-                NetworkActorEvent::ChannelActorStopped(state.get_id(), stop_reason),
-            ))
-            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+        let _ = self.network.send_message(NetworkActorMessage::new_event(
+            NetworkActorEvent::ChannelActorStopped(state.get_id(), stop_reason),
+        ));
         Ok(())
     }
 }
