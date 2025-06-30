@@ -46,6 +46,7 @@ pub mod server {
         rpc::watchtower::{WatchtowerRpcServer, WatchtowerRpcServerImpl},
         watchtower::WatchtowerStore,
     };
+    use anyhow::{bail, Result};
     #[cfg(debug_assertions)]
     use ckb_types::core::TransactionView;
     use jsonrpsee::server::{Server, ServerHandle};
@@ -53,7 +54,7 @@ pub mod server {
     use ractor::ActorRef;
     #[cfg(debug_assertions)]
     use std::collections::HashMap;
-    use std::net::SocketAddr;
+    use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
     use std::sync::Arc;
     use tokio::sync::RwLock;
 
@@ -121,6 +122,25 @@ pub mod server {
         }
     }
 
+    fn is_public_addr(addr: &str) -> Result<bool> {
+        let addrs = addr.to_socket_addrs()?;
+        Ok(addrs.into_iter().any(|addr| {
+            let ip = addr.ip();
+            if ip.is_unspecified() {
+                return true;
+            }
+            match ip {
+                IpAddr::V4(ip) => {
+                    !(ip.is_private()
+                        || ip.is_loopback()
+                        || ip.is_link_local()
+                        || ip.is_documentation())
+                }
+                IpAddr::V6(ip) => !(ip.is_loopback() || ip.is_unique_local()),
+            }
+        }))
+    }
+
     #[allow(clippy::type_complexity)]
     #[allow(clippy::too_many_arguments)]
     pub async fn start_rpc<S: RpcServerStore + Clone + Send + Sync + 'static>(
@@ -135,8 +155,11 @@ pub mod server {
         #[cfg(debug_assertions)] rpc_dev_module_commitment_txs: Option<
             Arc<RwLock<HashMap<(Hash256, u64), TransactionView>>>,
         >,
-    ) -> (ServerHandle, SocketAddr) {
+    ) -> Result<(ServerHandle, SocketAddr)> {
         let listening_addr = config.listening_addr.as_deref().unwrap_or("[::]:0");
+        if config.biscuit_public_key.is_none() && is_public_addr(listening_addr)? {
+            bail!("Cannot listen on a public address without a biscuit public key set in the config. Please set rpc.biscuit_public_key or listen on a private interface.");
+        }
         let server = build_server(listening_addr).await;
         let sockaddr = server.local_addr().expect("local addr");
 
@@ -215,6 +238,6 @@ pub mod server {
                     .unwrap();
             }
         }
-        (server.start(modules), sockaddr)
+        Ok((server.start(modules), sockaddr))
     }
 }

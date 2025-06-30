@@ -313,6 +313,7 @@ impl NetworkNodeConfigBuilder {
         let rpc_config = if self.enable_rpc_server {
             Some(RpcConfig {
                 listening_addr: None,
+                biscuit_public_key: None,
                 enabled_modules: vec![
                     "channel".to_string(),
                     "info".to_string(),
@@ -1263,7 +1264,8 @@ impl NetworkNode {
                     #[cfg(debug_assertions)]
                     None,
                 )
-                .await,
+                .await
+                .unwrap(),
             )
         } else {
             None
