@@ -1,12 +1,13 @@
+mod biscuit;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod cch;
 pub mod channel;
 pub mod config;
-#[cfg(debug_assertions)]
 pub mod dev;
 pub mod graph;
 pub mod info;
 pub mod invoice;
+mod middleware;
 pub mod payment;
 pub mod peer;
 pub mod utils;
@@ -26,6 +27,7 @@ pub mod server {
     use crate::rpc::info::InfoRpcServer;
     use crate::rpc::info::InfoRpcServerImpl;
     use crate::rpc::invoice::{InvoiceRpcServer, InvoiceRpcServerImpl};
+    use crate::rpc::middleware::{BiscuitAuthMiddleware, Identity};
     use crate::rpc::payment::PaymentRpcServer;
     use crate::rpc::payment::PaymentRpcServerImpl;
     use crate::rpc::peer::{PeerRpcServer, PeerRpcServerImpl};
@@ -49,14 +51,22 @@ pub mod server {
     use anyhow::{bail, Result};
     #[cfg(debug_assertions)]
     use ckb_types::core::TransactionView;
-    use jsonrpsee::server::{Server, ServerHandle};
-    use jsonrpsee::RpcModule;
+    use jsonrpsee::core::middleware::layer;
+    use jsonrpsee::server::{
+        serve_with_graceful_shutdown, stop_channel, ServerHandle, StopHandle, TowerServiceBuilder,
+    };
+    use jsonrpsee::ws_client::RpcServiceBuilder;
+    use jsonrpsee::{Methods, RpcModule};
     use ractor::ActorRef;
     #[cfg(debug_assertions)]
     use std::collections::HashMap;
     use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
     use std::sync::Arc;
+    use tokio::net::TcpSocket;
     use tokio::sync::RwLock;
+    use tower::Service;
+
+    use super::biscuit::BiscuitAuth;
 
     #[cfg(feature = "watchtower")]
     pub trait RpcServerStore:
@@ -89,37 +99,118 @@ pub mod server {
     {
     }
 
-    async fn build_server(addr: &str) -> Server {
+    async fn start_server(
+        addr: &str,
+        auth: Option<BiscuitAuth>,
+        methods: impl Into<Methods>,
+    ) -> Result<(ServerHandle, SocketAddr)> {
+        let addr: SocketAddr = addr.parse().expect("valid address");
+        let socket = if addr.is_ipv6() {
+            TcpSocket::new_v6()
+        } else {
+            TcpSocket::new_v4()
+        }
+        .expect("new socket");
+
         #[cfg(debug_assertions)]
         {
-            // Use socket2 to set reuse address and reuse port,
+            // Set reuse address and reuse port,
             // so that we can restart the server without waiting for the port to be released.
             // it will avoid the error: "Address already in use" in CI.
-            use socket2::{Domain, Socket, Type};
-            let addr = addr.parse().expect("valid address");
-            let domain = Domain::for_address(addr);
-            let socket = Socket::new(domain, Type::STREAM, None).expect("new socket");
-            socket
-                .set_nonblocking(true)
-                .expect("set socket nonblocking");
-            socket.set_reuse_address(true).expect("set reuse address");
+            socket.set_reuseaddr(true).expect("set reuse address");
             #[cfg(all(unix, not(any(target_os = "solaris", target_os = "illumos"))))]
-            socket.set_reuse_port(true).expect("set reuse port");
-
-            socket.bind(&addr.into()).expect("bind socket to address");
-            socket.listen(4096).expect("listen socket at the port");
-
-            jsonrpsee::server::Server::builder()
-                .build_from_tcp(socket)
-                .expect("JsonRPC server built from TCP")
+            socket.set_reuseport(true).expect("set reuse port");
         }
-        #[cfg(not(debug_assertions))]
-        {
-            Server::builder()
-                .build(addr)
-                .await
-                .expect("JsonRPC server built")
+
+        socket.bind(addr).expect("bind socket to address");
+        let listener = socket.listen(4096).expect("listen socket at the port");
+        let listen_addr = listener.local_addr().expect("get local address");
+
+        // From this example
+        // https://github.com/paritytech/jsonrpsee/blob/d3d9fa8553756751ad913830e7d0d0faca614cb5/examples/examples/jsonrpsee_as_service.rs
+
+        // This state is cloned for every connection
+        // all these types based on Arcs and it should
+        // be relatively cheap to clone them.
+        //
+        // Make sure that nothing expensive is cloned here
+        // when doing this or use an `Arc`.
+        #[derive(Clone)]
+        struct PerConnection<RpcMiddlewave, HttpMiddlewave> {
+            methods: Methods,
+            stop_handle: StopHandle,
+            svc_builder: TowerServiceBuilder<RpcMiddlewave, HttpMiddlewave>,
         }
+
+        // Each RPC call/connection get its own `stop_handle`
+        // to able to determine whether the server has been stopped or not.
+        //
+        // To keep the server running the `server_handle`
+        // must be kept and it can also be used to stop the server.
+        let (stop_handle, server_handle) = stop_channel();
+
+        let per_conn = PerConnection {
+            methods: methods.into(),
+            stop_handle: stop_handle.clone(),
+            svc_builder: jsonrpsee::server::Server::builder().to_service_builder(),
+        };
+        let auth = auth.map(Arc::new);
+
+        tokio::spawn(async move {
+            loop {
+                // accept connection or stop
+                let sock = tokio::select! {
+                    res = listener.accept() => {
+                        match res {
+                            Ok((stream, _remote_addr)) => stream,
+                            Err(e) => {
+                                tracing::error!("failed to accept connection: {e:?}");
+                                continue;
+                            }
+                        }
+                    }
+                    _ = per_conn.stop_handle.clone().shutdown() => break,
+                };
+
+                let per_conn2 = per_conn.clone();
+                let auth = auth.clone();
+
+                let svc = tower::service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
+                    let PerConnection {
+                        methods,
+                        stop_handle,
+                        svc_builder,
+                    } = per_conn2.clone();
+
+                    let headers = req.headers().clone();
+                    let auth = auth.clone();
+                    let rpc_middleware =
+                        RpcServiceBuilder::new().layer_fn(move |service| match auth.as_ref() {
+                            Some(auth) => layer::Either::Left(BiscuitAuthMiddleware {
+                                headers: headers.clone(),
+                                inner: service,
+                                auth: auth.clone(),
+                            }),
+
+                            None => {
+                                // an no-op middleware
+                                layer::Either::Right(Identity(service))
+                            }
+                        });
+                    let mut svc = svc_builder
+                        .set_rpc_middleware(rpc_middleware)
+                        .build(methods, stop_handle);
+                    async move { svc.call(req).await }
+                });
+                tokio::spawn(serve_with_graceful_shutdown(
+                    sock,
+                    svc,
+                    stop_handle.clone().shutdown(),
+                ));
+            }
+        });
+
+        Ok((server_handle, listen_addr))
     }
 
     fn is_public_addr(addr: &str) -> Result<bool> {
@@ -156,12 +247,15 @@ pub mod server {
             Arc<RwLock<HashMap<(Hash256, u64), TransactionView>>>,
         >,
     ) -> Result<(ServerHandle, SocketAddr)> {
-        let listening_addr = config.listening_addr.as_deref().unwrap_or("[::]:0");
+        let listening_addr = config.listening_addr.as_deref().unwrap_or("[::1]:0");
         if config.biscuit_public_key.is_none() && is_public_addr(listening_addr)? {
             bail!("Cannot listen on a public address without a biscuit public key set in the config. Please set rpc.biscuit_public_key or listen on a private interface.");
         }
-        let server = build_server(listening_addr).await;
-        let sockaddr = server.local_addr().expect("local addr");
+
+        let auth = match config.biscuit_public_key.as_ref() {
+            Some(key) => Some(BiscuitAuth::from_pubkey(key.to_string())?),
+            None => None,
+        };
 
         let mut modules = RpcModule::new(());
         if config.is_module_enabled("invoice") {
@@ -238,6 +332,16 @@ pub mod server {
                     .unwrap();
             }
         }
-        Ok((server.start(modules), sockaddr))
+
+        let (handle, addr) = start_server(listening_addr, auth, modules).await?;
+        Ok((handle, addr))
+    }
+
+    #[test]
+    fn test_is_public_addr() {
+        assert!(is_public_addr("[::]:0").unwrap());
+        assert!(!is_public_addr("[::1]:0").unwrap());
+        assert!(is_public_addr("0.0.0.0:0").unwrap());
+        assert!(!is_public_addr("127.0.0.1:0").unwrap());
     }
 }

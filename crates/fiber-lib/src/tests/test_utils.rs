@@ -787,6 +787,7 @@ impl NetworkNode {
         params: P,
     ) -> Result<serde_json::Value, String> {
         if let Some((_server, socket_addr)) = &self.rpc_server {
+            dbg!(socket_addr);
             let client = HttpClient::<HttpBackend>::builder()
                 .build(format!("http://{}", socket_addr))
                 .expect("build client");
