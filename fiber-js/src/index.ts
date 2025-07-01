@@ -3,6 +3,9 @@ import DbWorker from "./db.worker.ts";
 import FiberWorker from "./fiber.worker.ts";
 import { Mutex } from "async-mutex";
 import { DbWorkerInitializationOptions, FiberInvokeRequest, FiberInvokeResponse, FiberWorkerInitializationOptions } from "./types/general.ts";
+import { AbandonChannelParams, AcceptChannelParams, AcceptChannelResult, ListChannelsParams, ListChannelsResult, OpenchannelParams, OpenChannelResult, ShutdownChannelParams, UpdateChannelParams } from "./types/channel.ts";
+import { GraphChannelsParams, GraphChannelsResult, GraphNodesParams, GraphNodesResult } from "./types/graph.ts";
+import { NodeInfoResult } from "./types/info.ts";
 
 const DEFAULT_BUFFER_SIZE = 50 * (1 << 20);
 /**
@@ -101,6 +104,33 @@ class Fiber {
     async stop() {
         this.dbWorker.terminate();
         this.fiberWorker.terminate();
+    }
+    async openChannel(params: OpenchannelParams): Promise<OpenChannelResult> {
+        return await this.invokeCommand("open_channel", [params]);
+    }
+    async acceptChannel(params: AcceptChannelParams): Promise<AcceptChannelResult> {
+        return await this.invokeCommand("accept_channel", [params]);
+    }
+    async abandonChannel(params: AbandonChannelParams): Promise<void> {
+        await this.invokeCommand("abandon_channel", [params]);
+    }
+    async listChannels(params: ListChannelsParams): Promise<ListChannelsResult> {
+        return await this.invokeCommand("list_channels", [params]);
+    }
+    async shutdownChannel(params: ShutdownChannelParams): Promise<void> {
+        await this.invokeCommand("shutdown_channel", [params]);
+    }
+    async updateChannel(params: UpdateChannelParams): Promise<void> {
+        await this.invokeCommand("update_channel", [params]);
+    }
+    async graphNodes(params: GraphNodesParams): Promise<GraphNodesResult> {
+        return await this.invokeCommand("graph_nodes", [params]);
+    }
+    async graphChannels(params: GraphChannelsParams): Promise<GraphChannelsResult> {
+        return await this.invokeCommand("graph_channels", [params]);
+    }
+    async nodeInfo(): Promise<NodeInfoResult> {
+        return await this.invokeCommand("node_info");
     }
     // /**
     //  * Returns the header with the highest block number in the canonical chain
@@ -252,13 +282,13 @@ class Fiber {
 export { Fiber };
 
 /**
- * Generate a random network secret key.
+ * Generate a random 32-byte secret key.
  * @returns The secret key.
  */
-// export function randomSecretKey(): Hex {
-//     const arr = new Uint8Array(32);
-//     crypto.getRandomValues(arr);
-//     return hexFrom(arr);
-// }
+export function randomSecretKey(): Uint8Array {
+    const arr = new Uint8Array(32);
+    crypto.getRandomValues(arr);
+    return arr;
+}
 
 export * from "./types/general.ts";

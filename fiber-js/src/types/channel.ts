@@ -81,7 +81,9 @@ interface UpdateChannelParams {
     tlc_minimum_value?: HexString;
     tlc_fee_proportional_millionths?: HexString;
 }
-
+interface ListChannelsResult {
+    channels: Channel[];
+}
 export type {
     OpenchannelParams,
     Script,
@@ -93,5 +95,6 @@ export type {
     Channel,
     ChannelState,
     ShutdownChannelParams,
-    UpdateChannelParams
+    UpdateChannelParams,
+    ListChannelsResult
 }
