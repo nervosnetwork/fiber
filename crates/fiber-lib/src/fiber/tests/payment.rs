@@ -4308,8 +4308,6 @@ async fn test_send_payment_sync_up_new_channel_is_added() {
 }
 
 #[tokio::test]
-// This test implies a bug when reconnecting a peer under the condition of multiple TLC operation
-// skip temporarily until the bug is fixed
 async fn test_send_payment_remove_tlc_with_preimage_will_retry() {
     init_tracing();
     let _span = tracing::info_span!("node", node = "test").entered();
@@ -4325,14 +4323,23 @@ async fn test_send_payment_remove_tlc_with_preimage_will_retry() {
 
     let mut payments = HashSet::new();
 
-    for _i in 0..5 {
-        let amount = rand::random::<u128>() % 1000 + 1;
-        let res = node_0
-            .send_payment_keysend(&node_2, amount, false)
-            .await
-            .unwrap();
-        payments.insert(res.payment_hash);
-        node_0.wait_until_created(res.payment_hash).await;
+    for i in 0..10 {
+        if i % 2 == 0 {
+            let amount = rand::random::<u128>() % 1000 + 1;
+            let res = node_0
+                .send_payment_keysend(&node_2, amount, false)
+                .await
+                .unwrap();
+            payments.insert(res.payment_hash);
+            node_0.wait_until_created(res.payment_hash).await;
+        } else {
+            let amount = rand::random::<u128>() % 1000 + 1;
+            let res = node_2
+                .send_payment_keysend(&node_0, amount, false)
+                .await
+                .unwrap();
+            node_2.wait_until_created(res.payment_hash).await;
+        }
     }
 
     let node1_id = node_1.peer_id.clone();
@@ -4354,7 +4361,7 @@ async fn test_send_payment_remove_tlc_with_preimage_will_retry() {
         })
         .await;
 
-    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
     // reconnect node_0 and node_1
     node_0.connect_to_nonblocking(&node_1).await;
@@ -4399,6 +4406,100 @@ async fn test_send_payment_remove_tlc_with_preimage_will_retry() {
             let node2_state = node_2.get_channel_actor_state(channels[1]);
             eprintln!("peer {:?} node_2_state:", node_2.get_peer_id());
             node2_state.tlc_state.debug();
+
+            panic!("timeout");
+        }
+    }
+}
+
+#[tokio::test]
+#[ignore]
+// FIXME: there is a bug in reestablishing channel.
+async fn test_send_payment_send_each_other_reestablishing() {
+    init_tracing();
+    let _span = tracing::info_span!("node", node = "test").entered();
+    let (nodes, channels) =
+        create_n_nodes_network(&[((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT))], 2).await;
+    let [mut node_0, mut node_1] = nodes.try_into().expect("2 nodes");
+
+    let mut payments = HashSet::new();
+
+    for i in 0..20 {
+        if i % 2 == 0 {
+            let amount = rand::random::<u128>() % 1000 + 1;
+            let res = node_0
+                .send_payment_keysend(&node_1, amount, false)
+                .await
+                .unwrap();
+            payments.insert(res.payment_hash);
+        } else {
+            let amount = rand::random::<u128>() % 1000 + 1;
+            let _res = node_1
+                .send_payment_keysend(&node_0, amount, false)
+                .await
+                .unwrap();
+        }
+    }
+
+    let node1_id = node_1.peer_id.clone();
+    let node0_id = node_0.peer_id.clone();
+    node_0
+        .network_actor
+        .send_message(NetworkActorMessage::new_command(
+            NetworkActorCommand::DisconnectPeer(node1_id.clone()),
+        ))
+        .expect("node_a alive");
+
+    node_1
+        .expect_event(|event| match event {
+            NetworkServiceEvent::PeerDisConnected(peer_id, _) => {
+                assert_eq!(peer_id, &node0_id);
+                true
+            }
+            _ => false,
+        })
+        .await;
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+    // reconnect node_0 and node_1
+    node_0.connect_to_nonblocking(&node_1).await;
+
+    // the CheckChannels in network actor will continue to retry RemoveTlc for tlc already with preimage
+    // so all the payments should be succeeded after all
+    let started = SystemTime::now();
+
+    loop {
+        for payment_hash in payments.clone().iter() {
+            assert!(node_0.get_triggered_unexpected_events().await.is_empty());
+            assert!(node_1.get_triggered_unexpected_events().await.is_empty());
+
+            node_0.wait_until_final_status(*payment_hash).await;
+            let status = node_0.get_payment_status(*payment_hash).await;
+            eprintln!("payment_hash: {:?} got status : {:?}", payment_hash, status);
+            if status == PaymentSessionStatus::Success || status == PaymentSessionStatus::Failed {
+                payments.remove(payment_hash);
+            }
+        }
+        if payments.is_empty() {
+            break;
+        }
+        let elapsed = SystemTime::now()
+            .duration_since(started)
+            .expect("time passed")
+            .as_secs();
+        if elapsed > 50 {
+            let node0_state = node_0.get_channel_actor_state(channels[0]);
+            eprintln!("peer {:?} node_0_state:", node_0.get_peer_id());
+            node0_state.tlc_state.debug();
+
+            let node1_state = node_1.get_channel_actor_state(channels[0]);
+            eprintln!("peer {:?} node1_left_actor_state:", node_1.get_peer_id());
+            node1_state.tlc_state.debug();
+
+            let node1_right_state = node_1.get_channel_actor_state(channels[1]);
+            eprintln!("peer {:?} node1_right_actor_state:", node_1.get_peer_id());
+            node1_right_state.tlc_state.debug();
 
             panic!("timeout");
         }
