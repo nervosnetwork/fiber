@@ -36,6 +36,9 @@ interface RouterHop {
     amount_received: HexString;
     incoming_tlc_expiry: HexString;
 }
+interface GetPaymentCommandParams {
+    payment_hash: HexString;
+}
 interface SendPaymentCommandParams {
     target_pubkey?: HexString;
     amount?: HexString;
@@ -83,5 +86,5 @@ export type {
     SendPaymentCommandParams,
     SendPaymentWithRouterParams,
     SessionRouteNode,
-
+    GetPaymentCommandParams
 }
