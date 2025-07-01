@@ -20,48 +20,19 @@ impl AuthRule {
     }
 
     /// build rule
-    ///
-    /// - req_params RPC method parameters
-    fn build_rule(&self, req_params: serde_json::Value) -> Result<AuthorizerBuilder> {
-        let mut params = HashMap::new();
-        if let Some(object) = req_params.as_object() {
-            for (param, value) in object {
-                // the req_params is from client, may contains unexpected injection,
-                // but it will fail when parse parameter to concrete type in RPC methods
-
-                // we only support simple types
-                match value {
-                    serde_json::Value::String(s) => {
-                        params.insert(param.to_string(), Term::Str(s.to_owned()));
-                    }
-                    serde_json::Value::Number(n) => {
-                        if let Some(i) = n.as_i64() {
-                            params.insert(param.to_string(), Term::Integer(i));
-                        }
-                    }
-                    serde_json::Value::Bool(b) => {
-                        params.insert(param.to_string(), Term::Bool(*b));
-                    }
-                    _ => {
-                        tracing::debug!("unsupported parameter type: {param}: {value:?}");
-                    }
-                }
-            }
-        }
-        let scope_params = HashMap::new();
+    fn build_rule(&self) -> Result<AuthorizerBuilder> {
         let authorizer = AuthorizerBuilder::new()
-            .code_with_params(self.code, params, scope_params)
+            .code(self.code)
             .context("build authorizer code")?;
         Ok(authorizer)
     }
 
     /// authorize
     ///
-    /// - params RPC method parameters
     /// - token biscuit token
     /// - time_in_ms time in milliseconds since UNIX_EPOCH
-    fn authorize(&self, params: serde_json::Value, token: Biscuit, time_in_ms: u64) -> Result<()> {
-        self.build_rule(params)?
+    fn authorize(&self, token: Biscuit, time_in_ms: u64) -> Result<()> {
+        self.build_rule()?
             .fact(Fact::new(
                 "time".to_string(),
                 &[Term::Date(time_in_ms / 1000)],
@@ -126,28 +97,24 @@ fn build_rules() -> HashMap<&'static str, AuthRule> {
         "create_watch_channel",
         r#"
         allow if write("watchtower");
-        allow if right({channel_id}, "watchtower");
         "#,
     );
     rule(
         "remove_watch_channel",
         r#"
         allow if write("watchtower");
-        allow if right({channel_id}, "watchtower");
         "#,
     );
     rule(
         "update_revocation",
         r#"
         allow if write("watchtower");
-        allow if right({channel_id}, "watchtower");
         "#,
     );
     rule(
         "update_local_settlement",
         r#"
         allow if write("watchtower");
-        allow if right({channel_id}, "watchtower");
         "#,
     );
     rule("create_preimage", r#"allow if write("watchtower");"#);
@@ -186,13 +153,11 @@ impl BiscuitAuth {
     /// check permission with time
     ///
     /// - method RPC method
-    /// - params RPC method parameters
     /// - token biscuit token
     /// - time_in_ms time in milliseconds since UNIX_EPOCH
     pub fn check_permission_with_time(
         &self,
         method: &str,
-        params: serde_json::Value,
         token: &str,
         time_in_ms: u64,
     ) -> Result<()> {
@@ -209,7 +174,7 @@ impl BiscuitAuth {
         let Some(rule) = self.rules.get(method) else {
             return Err(anyhow::anyhow!("no rules for method: {method}"));
         };
-        if let Err(err) = rule.authorize(params, b, time_in_ms) {
+        if let Err(err) = rule.authorize(b, time_in_ms) {
             tracing::debug!("authorize failed: {err}");
             return Err(err);
         }
@@ -219,15 +184,9 @@ impl BiscuitAuth {
     /// check permission
     ///
     /// - method RPC method
-    /// - params RPC method parameters
     /// - token biscuit token
-    pub fn check_permission(
-        &self,
-        method: &str,
-        params: serde_json::Value,
-        token: &str,
-    ) -> Result<()> {
-        self.check_permission_with_time(method, params, token, now_timestamp_as_millis_u64())
+    pub fn check_permission(&self, method: &str, token: &str) -> Result<()> {
+        self.check_permission_with_time(method, token, now_timestamp_as_millis_u64())
     }
 }
 
@@ -435,10 +394,10 @@ mod tests {
             .as_millis() as u64;
         let past_time = Duration::from_millis(10).as_millis() as u64;
         assert!(auth
-            .check_permission_with_time("send_payment", json!({}), &token, future_time)
+            .check_permission_with_time("send_payment", &token, future_time)
             .is_err());
         assert!(auth
-            .check_permission_with_time("send_payment", json!({}), &token, past_time)
+            .check_permission_with_time("send_payment", &token, past_time)
             .is_ok());
     }
 
@@ -480,27 +439,17 @@ mod tests {
         auth.extend_revocation_list(&[rev_id]).unwrap();
 
         // check permission
-        assert!(auth
-            .check_permission("send_payment", json!({}), &token,)
-            .is_ok());
+        assert!(auth.check_permission("send_payment", &token,).is_ok());
         // write permission do not implies read
-        assert!(auth
-            .check_permission("list_peers", json!({}), &token)
-            .is_ok());
+        assert!(auth.check_permission("list_peers", &token).is_ok());
 
         // check revoked token
-        assert!(auth
-            .check_permission("send_payment", json!({}), &rev_token,)
-            .is_err());
+        assert!(auth.check_permission("send_payment", &rev_token,).is_err());
         // write permission do not implies read
-        assert!(auth
-            .check_permission("list_peers", json!({}), &rev_token)
-            .is_err());
+        assert!(auth.check_permission("list_peers", &rev_token).is_err());
 
         // if not match any rule, it should be denied
-        assert!(auth.check_permission("unknown", json!({}), &token).is_err());
-        assert!(auth
-            .check_permission("unknown", json!({}), &rev_token)
-            .is_err());
+        assert!(auth.check_permission("unknown", &token).is_err());
+        assert!(auth.check_permission("unknown", &rev_token).is_err());
     }
 }

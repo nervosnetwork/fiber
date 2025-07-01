@@ -1,6 +1,5 @@
 #[cfg(not(target_arch = "wasm32"))]
 pub mod biscuit;
-#[cfg(not(target_arch = "wasm32"))]
 pub mod cch;
 pub mod channel;
 pub mod config;
@@ -195,25 +194,6 @@ pub mod server {
         });
 
         Ok((server_handle, listen_addr))
-    }
-
-    fn is_public_addr(addr: &str) -> Result<bool> {
-        let addrs = addr.to_socket_addrs()?;
-        Ok(addrs.into_iter().any(|addr| {
-            let ip = addr.ip();
-            if ip.is_unspecified() {
-                return true;
-            }
-            match ip {
-                IpAddr::V4(ip) => {
-                    !(ip.is_private()
-                        || ip.is_loopback()
-                        || ip.is_link_local()
-                        || ip.is_documentation())
-                }
-                IpAddr::V6(ip) => !(ip.is_loopback() || ip.is_unique_local()),
-            }
-        }))
     }
 
     fn is_public_addr(addr: &str) -> Result<bool> {

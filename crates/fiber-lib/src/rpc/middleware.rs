@@ -47,14 +47,7 @@ impl<S> BiscuitAuthMiddleware<S> {
             }
         };
 
-        let body = req
-            .params()
-            .parse::<serde_json::Value>()
-            .unwrap_or_default();
-
-        let params = self.extract_params(body).unwrap_or_default();
-
-        let res = self.auth.check_permission(&req.method, params, &auth_token);
+        let res = self.auth.check_permission(&req.method, &auth_token);
         res.is_ok()
     }
 
@@ -68,16 +61,9 @@ impl<S> BiscuitAuthMiddleware<S> {
             }
         };
 
-        let body = notify
-            .params()
-            .as_ref()
-            .and_then(|p| serde_json::from_str(p.as_ref().get()).ok())
-            .unwrap_or_default();
-        let params = self.extract_params(body).unwrap_or_default();
-
         let res = self
             .auth
-            .check_permission(notify.method_name(), params, &auth_token);
+            .check_permission(notify.method_name(), &auth_token);
         res.is_ok()
     }
 }
