@@ -2768,6 +2768,8 @@ async fn do_test_add_tlc_waiting_ack() {
         }
     }
 
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
     // send from b to a
     for i in 1..=2 {
         let add_tlc_command = AddTlcCommand {
