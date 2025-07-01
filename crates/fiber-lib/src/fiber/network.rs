@@ -7,8 +7,8 @@ use either::Either;
 use once_cell::sync::OnceCell;
 use ractor::concurrency::Duration;
 use ractor::{
-    async_trait as rasync_trait, call, call_t, Actor, ActorCell, ActorProcessingErr, ActorRef,
-    RactorErr, RpcReplyPort, SupervisionEvent,
+    call, call_t, Actor, ActorCell, ActorProcessingErr, ActorRef, RactorErr, RpcReplyPort,
+    SupervisionEvent,
 };
 use rand::Rng;
 use secp256k1::Secp256k1;
@@ -17,10 +17,10 @@ use serde_with::{serde_as, DisplayFromStr};
 use std::borrow::Cow;
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
+
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::SystemTime;
 use tentacle::multiaddr::{MultiAddr, Protocol};
 use tentacle::service::SessionType;
 use tentacle::utils::{extract_peer_id, is_reachable, multiaddr_to_socketaddr};
@@ -672,7 +672,10 @@ macro_rules! debug_event {
 
 #[derive(Clone, Debug)]
 pub enum NetworkServiceEvent {
+    #[cfg(not(target_arch = "wasm32"))]
     NetworkStarted(PeerId, MultiAddr, Vec<Multiaddr>),
+    #[cfg(target_arch = "wasm32")]
+    NetworkStarted(PeerId, Vec<Multiaddr>),
     NetworkStopped(PeerId),
     PeerConnected(PeerId, Multiaddr),
     PeerDisConnected(PeerId, Multiaddr),
@@ -1034,6 +1037,7 @@ where
                             session.payment_hash(),
                             channel_id
                         );
+                        info!("Call register payment retry from ChannelReady");
                         self.register_payment_retry(myself.clone(), session.payment_hash());
                     }
                 }
@@ -1083,6 +1087,7 @@ where
                     .await;
             }
             NetworkActorEvent::RetrySendPayment(payment_hash) => {
+                info!("Calling try_payment_session from RetrySendPayment");
                 let _ = self.try_payment_session(myself, state, payment_hash).await;
             }
             NetworkActorEvent::AddTlcResult(payment_hash, error_info, previous_tlc) => {
@@ -1127,7 +1132,7 @@ where
             NetworkActorCommand::ConnectPeer(addr) => {
                 // TODO: It is more than just dialing a peer. We need to exchange capabilities of the peer,
                 // e.g. whether the peer support some specific feature.
-
+                debug!("Received ConnectPeer for connecting to {:?}", addr);
                 if let Some(peer_id) = extract_peer_id(&addr) {
                     if state.is_connected(&peer_id) {
                         debug!("Peer {:?} already connected, ignoring...", peer_id);
@@ -1241,6 +1246,7 @@ where
                         .chain(graph_nodes_to_connect.into_iter())
                 };
                 for (peer_id, addresses) in peers_to_connect {
+                    debug!("Peer to connect: {:?}, {:?}", peer_id, addresses);
                     if let Some(session) = state.get_peer_session(&peer_id) {
                         debug!(
                             "Randomly selected peer {:?} already connected with session id {:?}, skipping connection",
@@ -1814,6 +1820,7 @@ where
                             false,
                         );
                         if need_to_retry {
+                            info!("Call register payment retry from on_remove_tle_event");
                             self.register_payment_retry(myself, payment_hash);
                         } else {
                             self.set_payment_fail_with_error(
@@ -1884,6 +1891,7 @@ where
         &self,
         payment_session: &mut PaymentSession,
     ) -> Result<Vec<PaymentHopData>, Error> {
+        info!("Entered build_payment_route");
         let graph = self.network_graph.read().await;
         let source = graph.get_source_pubkey();
         match graph.build_route(payment_session.request.clone()) {
@@ -1981,6 +1989,10 @@ where
         error_info: Option<(ProcessingChannelError, TlcErr)>,
         previous_tlc: Option<PrevTlcInfo>,
     ) {
+        info!(
+            "Entered on_add_tlc_result_event, error_info = {:?}",
+            error_info
+        );
         if let Some(PrevTlcInfo {
             prev_channel_id: channel_id,
             prev_tlc_id: tlc_id,
@@ -2034,10 +2046,14 @@ where
                 );
                 (retry, channel_error.to_string())
             };
-        payment_session.last_error = Some(error);
+        payment_session.last_error = Some(error.clone());
         self.store.insert_payment_session(payment_session);
 
         if need_to_retry {
+            info!(
+                "Calling try_payment_session from on_add_tlc_result_event, error = {}",
+                error
+            );
             let _ = self.try_payment_session(myself, state, payment_hash).await;
         }
     }
@@ -2053,6 +2069,7 @@ where
         state: &mut NetworkActorState<S>,
         payment_hash: Hash256,
     ) -> Result<PaymentSession, Error> {
+        info!("Entered try_payment_session");
         self.update_graph().await;
         let Some(mut payment_session) = self.store.get_payment_session(payment_hash) else {
             return Err(Error::InvalidParameter(payment_hash.to_string()));
@@ -2080,11 +2097,14 @@ where
             {
                 Ok(payment_session) => return Ok(payment_session),
                 Err(err) => {
+                    info!("Send payment onion packet error: {:?}", err);
                     let need_retry = matches!(err, Error::SendPaymentFirstHopError(_, true));
                     if need_retry {
                         // If this is the first hop error, such as the WaitingTlcAck error,
                         // we will just retry later, return Ok here for letting endpoint user
                         // know payment session is created successfully
+
+                        info!("Call register payment retry from try_payment_session");
                         self.register_payment_retry(myself, payment_hash);
                         return Ok(payment_session);
                     } else {
@@ -2104,6 +2124,7 @@ where
     }
 
     fn register_payment_retry(&self, myself: ActorRef<NetworkActorMessage>, payment_hash: Hash256) {
+        info!("Called register_payment_retry");
         myself.send_after(Duration::from_millis(500), move || {
             NetworkActorMessage::new_event(NetworkActorEvent::RetrySendPayment(payment_hash))
         });
@@ -2171,6 +2192,7 @@ where
         state: &mut NetworkActorState<S>,
         payment_data: SendPaymentData,
     ) -> Result<SendPaymentResponse, Error> {
+        info!("Entered send_payment_with_payment_data");
         // for dry run, we only build the route and return the hops info,
         // will not store the payment session and send the onion packet
         if payment_data.dry_run {
@@ -2862,7 +2884,8 @@ where
                                 }
                             };
 
-                            let transaction = match state.get_latest_commitment_transaction() {
+                            let transaction = match state.get_latest_commitment_transaction().await
+                            {
                                 Ok(tx) => tx,
                                 Err(e) => {
                                     let error = Error::ChannelError(e);
@@ -3320,7 +3343,8 @@ pub struct NetworkActorStartArguments {
     pub default_shutdown_script: Script,
 }
 
-#[rasync_trait]
+#[cfg_attr(target_arch="wasm32",async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl<S> Actor for NetworkActor<S>
 where
     S: NetworkActorStateStore
@@ -3345,12 +3369,14 @@ where
     ) -> Result<Self::State, ActorProcessingErr> {
         let NetworkActorStartArguments {
             config,
+            #[cfg(not(target_arch = "wasm32"))]
             tracker,
             channel_subscribers,
             default_shutdown_script,
+            ..
         } = args;
-        let now = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
+        let now = crate::time::SystemTime::now()
+            .duration_since(crate::time::SystemTime::UNIX_EPOCH)
             .expect("SystemTime::now() should after UNIX_EPOCH");
         let kp = config
             .read_or_generate_secret_key()
@@ -3393,24 +3419,39 @@ where
             .await
             .expect("subscribe to gossip store updates");
         let gossip_actor = gossip_handle.actor().clone();
+        #[cfg(not(target_arch = "wasm32"))]
         let mut service = ServiceBuilder::default()
             .insert_protocol(fiber_handle.create_meta())
             .insert_protocol(gossip_handle.create_meta())
             .handshake_type(secio_kp.into())
             .build(handle);
-        let mut listening_addr = service
-            .listen(
-                MultiAddr::from_str(config.listening_addr())
-                    .expect("valid tentacle listening address"),
-            )
-            .await
-            .expect("listen tentacle");
+        #[cfg(target_arch = "wasm32")]
+        let mut service = ServiceBuilder::default()
+            .insert_protocol(fiber_handle.create_meta())
+            .insert_protocol(gossip_handle.create_meta())
+            .handshake_type(secio_kp.into())
+            // Sets forever to true so the network service won't be shutdown due to no incoming connections
+            .forever(true)
+            .build(handle);
 
-        listening_addr.push(Protocol::P2P(Cow::Owned(my_peer_id.clone().into_bytes())));
         let mut announced_addrs = Vec::with_capacity(config.announced_addrs.len() + 1);
-        if config.announce_listening_addr() {
-            announced_addrs.push(listening_addr.clone());
-        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        let listening_addr = {
+            let mut listening_addr = service
+                .listen(
+                    MultiAddr::from_str(config.listening_addr())
+                        .expect("valid tentacle listening address"),
+                )
+                .await
+                .expect("listen tentacle");
+
+            listening_addr.push(Protocol::P2P(Cow::Owned(my_peer_id.clone().into_bytes())));
+            if config.announce_listening_addr() {
+                announced_addrs.push(listening_addr.clone());
+            }
+            listening_addr
+        };
         for announced_addr in &config.announced_addrs {
             let mut multiaddr =
                 MultiAddr::from_str(announced_addr.as_str()).expect("valid announced listen addr");
@@ -3441,14 +3482,19 @@ where
                     .unwrap_or_default()
             });
         }
-
+        #[cfg(not(target_arch = "wasm32"))]
         info!(
             "Started listening tentacle on {:?}, peer id {:?}, announced addresses {:?}",
             &listening_addr, &my_peer_id, &announced_addrs
         );
 
+        #[cfg(target_arch = "wasm32")]
+        info!(
+            "Started fiber network service peer id {:?}, announced addresses {:?}",
+            &my_peer_id, &announced_addrs
+        );
         let control = service.control().to_owned();
-
+        #[cfg(not(target_arch = "wasm32"))]
         myself
             .send_message(NetworkActorMessage::new_notification(
                 NetworkServiceEvent::NetworkStarted(
@@ -3459,11 +3505,22 @@ where
             ))
             .expect(ASSUME_NETWORK_MYSELF_ALIVE);
 
+        #[cfg(target_arch = "wasm32")]
+        myself
+            .send_message(NetworkActorMessage::new_notification(
+                NetworkServiceEvent::NetworkStarted(my_peer_id.clone(), announced_addrs.clone()),
+            ))
+            .expect(ASSUME_NETWORK_MYSELF_ALIVE);
+        #[cfg(not(target_arch = "wasm32"))]
         tracker.spawn(async move {
             service.run().await;
             debug!("Tentacle service stopped");
         });
-
+        #[cfg(target_arch = "wasm32")]
+        ractor::concurrency::spawn(async move {
+            service.run().await;
+            debug!("Tentacle service stopped");
+        });
         let mut state_to_be_persisted = self
             .store
             .get_network_actor_state(&my_peer_id)
@@ -3562,7 +3619,6 @@ where
         });
         Ok(())
     }
-
     async fn handle(
         &self,
         myself: ActorRef<Self::Msg>,
@@ -3731,7 +3787,7 @@ impl From<&NetworkServiceHandle> for FiberProtocolHandle {
 #[async_trait]
 impl ServiceHandle for NetworkServiceHandle {
     async fn handle_error(&mut self, _context: &mut ServiceContext, error: ServiceError) {
-        trace!("Service error: {:?}", error);
+        debug!("Service error: {:?}", error);
         // TODO
         // ServiceError::DialerError => remove address from peer store
         // ServiceError::ProtocolError => ban peer

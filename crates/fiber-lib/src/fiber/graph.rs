@@ -889,6 +889,7 @@ where
         &self,
         payment_data: SendPaymentData,
     ) -> Result<Vec<PaymentHopData>, PathFindError> {
+        info!("Entered build_route");
         let source = self.get_source_pubkey();
         let target = payment_data.target_pubkey;
         let amount = payment_data.amount;
@@ -1090,7 +1091,8 @@ where
         allow_self: bool,
         hop_hints: &[HopHint],
     ) -> Result<Vec<RouterHop>, PathFindError> {
-        let started_time = std::time::Instant::now();
+        info!("Entered find_path");
+        let started_time = crate::time::Instant::now();
         let nodes_len = self.nodes.len();
         let route_to_self = source == target;
 

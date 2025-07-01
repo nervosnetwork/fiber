@@ -1,3 +1,5 @@
+#[cfg(target_arch = "wasm32")]
+use crate::fiber::KeyPair;
 use crate::{ckb::contracts::Contract, Result};
 use ckb_jsonrpc_types::{CellDep, Script};
 use clap_serde_derive::{
@@ -298,6 +300,9 @@ pub struct FiberConfig {
         help = "Disable built-in watchtower actor. [default: false]"
     )]
     pub disable_built_in_watchtower: Option<bool>,
+    #[cfg(target_arch = "wasm32")]
+    #[arg(skip)]
+    pub wasm_key_pair: Option<KeyPair>,
 }
 
 /// Must be a valid utf-8 string of length maximal length 32 bytes.
@@ -387,9 +392,18 @@ impl FiberConfig {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn inner_read_or_generate_secret_key(&self) -> Result<super::KeyPair> {
         self.create_base_dir()?;
         super::key::KeyPair::read_or_generate(&self.base_dir().join("sk")).map_err(Into::into)
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn inner_read_or_generate_secret_key(&self) -> Result<super::KeyPair> {
+        return Ok(self
+            .wasm_key_pair
+            .clone()
+            .expect("SecretKey on wasm not found!"));
     }
 
     // `OnceCell` will make all actors in UI tests use the same secret key.
@@ -408,6 +422,7 @@ impl FiberConfig {
 
     pub fn store_path(&self) -> PathBuf {
         let path = self.base_dir().join("store");
+        #[cfg(not(target_arch = "wasm32"))]
         if !path.exists() {
             fs::create_dir_all(&path).expect("create store directory");
         }

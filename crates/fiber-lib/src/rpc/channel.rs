@@ -20,11 +20,9 @@ use ckb_types::{
     H256,
 };
 #[cfg(not(target_arch = "wasm32"))]
-use jsonrpsee::{
-    core::async_trait,
-    proc_macros::rpc,
-    types::{error::CALL_EXECUTION_FAILED_CODE, ErrorObjectOwned},
-};
+use jsonrpsee::proc_macros::rpc;
+
+use jsonrpsee::types::{error::CALL_EXECUTION_FAILED_CODE, ErrorObjectOwned};
 use ractor::{call, ActorRef};
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
@@ -308,6 +306,7 @@ pub struct UpdateChannelParams {
 }
 
 /// RPC module for channel management.
+#[cfg(not(target_arch = "wasm32"))]
 #[rpc(server)]
 trait ChannelRpc {
     /// Attempts to open a channel with a peer.
@@ -356,13 +355,60 @@ impl<S> ChannelRpcServerImpl<S> {
         ChannelRpcServerImpl { actor, store }
     }
 }
-
-#[async_trait]
+#[cfg(not(target_arch = "wasm32"))]
+#[async_trait::async_trait]
 impl<S> ChannelRpcServer for ChannelRpcServerImpl<S>
 where
     S: ChannelActorStateStore + Send + Sync + 'static,
 {
+    /// Attempts to open a channel with a peer.
     async fn open_channel(
+        &self,
+        params: OpenChannelParams,
+    ) -> Result<OpenChannelResult, ErrorObjectOwned> {
+        self.open_channel(params).await
+    }
+
+    /// Accepts a channel opening request from a peer.
+    async fn accept_channel(
+        &self,
+        params: AcceptChannelParams,
+    ) -> Result<AcceptChannelResult, ErrorObjectOwned> {
+        self.accept_channel(params).await
+    }
+
+    /// Abandon a channel, this will remove the channel from the channel manager and DB.
+    /// Only channels not in Ready or Closed state can be abandoned.
+    async fn abandon_channel(&self, params: AbandonChannelParams) -> Result<(), ErrorObjectOwned> {
+        self.abandon_channel(params).await
+    }
+
+    /// Lists all channels.
+    async fn list_channels(
+        &self,
+        params: ListChannelsParams,
+    ) -> Result<ListChannelsResult, ErrorObjectOwned> {
+        self.list_channels(params).await
+    }
+
+    /// Shuts down a channel.
+    async fn shutdown_channel(
+        &self,
+        params: ShutdownChannelParams,
+    ) -> Result<(), ErrorObjectOwned> {
+        self.shutdown_channel(params).await
+    }
+
+    /// Updates a channel.
+    async fn update_channel(&self, params: UpdateChannelParams) -> Result<(), ErrorObjectOwned> {
+        self.update_channel(params).await
+    }
+}
+impl<S> ChannelRpcServerImpl<S>
+where
+    S: ChannelActorStateStore + Send + Sync + 'static,
+{
+    pub async fn open_channel(
         &self,
         params: OpenChannelParams,
     ) -> Result<OpenChannelResult, ErrorObjectOwned> {
@@ -396,7 +442,7 @@ where
         })
     }
 
-    async fn accept_channel(
+    pub async fn accept_channel(
         &self,
         params: AcceptChannelParams,
     ) -> Result<AcceptChannelResult, ErrorObjectOwned> {
@@ -421,7 +467,10 @@ where
         })
     }
 
-    async fn abandon_channel(&self, params: AbandonChannelParams) -> Result<(), ErrorObjectOwned> {
+    pub async fn abandon_channel(
+        &self,
+        params: AbandonChannelParams,
+    ) -> Result<(), ErrorObjectOwned> {
         let message = |rpc_reply| {
             NetworkActorMessage::Command(NetworkActorCommand::AbandonChannel(
                 params.channel_id,
@@ -431,7 +480,7 @@ where
         handle_actor_call!(self.actor, message, params)
     }
 
-    async fn list_channels(
+    pub async fn list_channels(
         &self,
         params: ListChannelsParams,
     ) -> Result<ListChannelsResult, ErrorObjectOwned> {
@@ -477,7 +526,7 @@ where
         Ok(ListChannelsResult { channels })
     }
 
-    async fn shutdown_channel(
+    pub async fn shutdown_channel(
         &self,
         params: ShutdownChannelParams,
     ) -> Result<(), ErrorObjectOwned> {
@@ -519,7 +568,10 @@ where
         handle_actor_call!(self.actor, message, params)
     }
 
-    async fn update_channel(&self, params: UpdateChannelParams) -> Result<(), ErrorObjectOwned> {
+    pub async fn update_channel(
+        &self,
+        params: UpdateChannelParams,
+    ) -> Result<(), ErrorObjectOwned> {
         let message = |rpc_reply| -> NetworkActorMessage {
             NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
                 ChannelCommandWithId {

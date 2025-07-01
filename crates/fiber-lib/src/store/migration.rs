@@ -1,7 +1,9 @@
 use crate::Error;
+#[cfg(not(target_arch = "wasm32"))]
 use console::Term;
 use indicatif::MultiProgress;
 use indicatif::ProgressBar;
+#[cfg(not(target_arch = "wasm32"))]
 use indicatif::ProgressDrawTarget;
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
@@ -91,6 +93,7 @@ impl Migrations {
             let mpbc = Arc::clone(&mpb);
             let pb = move |count: u64| -> ProgressBar {
                 let pb = mpbc.add(ProgressBar::new(count));
+                #[cfg(not(target_arch = "wasm32"))]
                 pb.set_draw_target(ProgressDrawTarget::term(Term::stdout(), None));
                 pb.set_prefix(format!("[{}/{}]", idx + 1, migrations_count));
                 pb
