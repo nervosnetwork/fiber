@@ -609,6 +609,9 @@ async fn do_test_update_graph_balance_after_payment(public: bool) {
         node_a_new_balance,
         node_b_new_balance,
     );
+
+    assert!(node_a.get_triggered_unexpected_events().await.is_empty());
+    assert!(node_b.get_triggered_unexpected_events().await.is_empty());
 }
 
 #[tokio::test]
@@ -4312,6 +4315,8 @@ async fn test_connect_to_peers_with_mutual_channel_on_restart_1() {
     node_b
         .expect_debug_event("Reestablished channel in ChannelReady")
         .await;
+    assert!(node_a.get_triggered_unexpected_events().await.is_empty());
+    assert!(node_b.get_triggered_unexpected_events().await.is_empty());
 }
 
 #[tokio::test]
@@ -4404,6 +4409,8 @@ async fn test_send_payment_with_node_restart_then_resend_add_tlc() {
     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
     let payment_status = node_a.get_payment_status(payment_hash).await;
     assert_eq!(payment_status, PaymentSessionStatus::Success);
+    assert!(node_a.get_triggered_unexpected_events().await.is_empty());
+    assert!(node_b.get_triggered_unexpected_events().await.is_empty());
 }
 
 #[tokio::test]
@@ -4503,6 +4510,8 @@ async fn test_node_reestablish_resend_remove_tlc() {
         "node_b_balance: {}, new_node_b_balance: {}",
         node_b_balance, new_node_b_balance
     );
+    assert!(node_a.get_triggered_unexpected_events().await.is_empty());
+    assert!(node_b.get_triggered_unexpected_events().await.is_empty());
 }
 
 #[tokio::test]
