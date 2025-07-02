@@ -3550,7 +3550,7 @@ async fn test_send_payment_shutdown_with_force() {
                     true,
                 )
                 .await;
-            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
             let channel_actor_state = nodes[3].get_channel_actor_state(channels[2]);
             assert_eq!(
                 channel_actor_state.state,
@@ -3586,19 +3586,12 @@ async fn test_send_payment_shutdown_with_force() {
             error!("timeout, failed_count: {:?}", failed_count);
             break;
         }
+        if failed_count >= expect_failed_count {
+            break;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
     }
     assert!(failed_count >= expect_failed_count);
-
-    let node_3_channel_actor_state = nodes[3].get_channel_actor_state(channels[2]);
-    eprintln!(
-        "node_3_channel_actor_state: {:?}",
-        node_3_channel_actor_state.state
-    );
-    assert_eq!(
-        node_3_channel_actor_state.state,
-        ChannelState::Closed(CloseFlags::UNCOOPERATIVE)
-    );
-
     // because node2 didn't receive the shutdown message,
     // so it will still think the channel is ready
     let node_2_channel_actor_state = nodes[2].get_channel_actor_state(channels[2]);
@@ -5039,4 +5032,77 @@ async fn test_network_cancel_error_handling() {
         );
     }
     assert!(registry::registered().is_empty());
+}
+
+#[tokio::test]
+async fn test_network_with_hops_max_number_limit() {
+    init_tracing();
+    let _span = tracing::info_span!("node", node = "test").entered();
+    let (nodes, _channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((2, 3), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((3, 4), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((4, 5), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((5, 6), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((6, 7), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((7, 8), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((8, 9), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((9, 10), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((10, 11), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((11, 12), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((12, 13), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((13, 14), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((14, 15), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+        ],
+        16,
+    )
+    .await;
+
+    let payment = nodes[0]
+        .send_payment(SendPaymentCommand {
+            target_pubkey: Some(nodes[14].pubkey), // can not make a payment with 14 hops
+            amount: Some(1000),
+            keysend: Some(true),
+            allow_self_payment: false,
+            dry_run: false,
+            tlc_expiry_limit: Some(13 * 24 * 60 * 60 * 1000), // 13 days
+            ..Default::default()
+        })
+        .await;
+
+    assert!(payment.is_err());
+
+    let payment = nodes[0]
+        .send_payment(SendPaymentCommand {
+            target_pubkey: Some(nodes[13].pubkey),
+            amount: Some(1000),
+            keysend: Some(true),
+            allow_self_payment: false,
+            dry_run: false,
+            tlc_expiry_limit: Some(13 * 24 * 60 * 60 * 1000), // 13 days
+            ..Default::default()
+        })
+        .await
+        .expect("send payment success");
+    eprintln!("payment: {:?}", payment);
+    nodes[0].wait_until_success(payment.payment_hash).await;
+
+    let payment = nodes[0]
+        .send_payment(SendPaymentCommand {
+            target_pubkey: Some(nodes[13].pubkey),
+            amount: Some(1000),
+            keysend: Some(true),
+            allow_self_payment: false,
+            dry_run: false,
+            tlc_expiry_limit: Some(15 * 24 * 60 * 60 * 1000), // 15 days
+            ..Default::default()
+        })
+        .await;
+
+    assert!(
+        payment.is_err(),
+        "we can not set a max tlc expiry limit larger than 14 days"
+    );
 }

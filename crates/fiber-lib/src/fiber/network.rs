@@ -41,6 +41,7 @@ use tentacle::{
     ProtocolId, SessionId,
 };
 use tokio::sync::{mpsc, oneshot, RwLock};
+use tokio_util::codec::length_delimited;
 use tokio_util::task::TaskTracker;
 use tracing::{debug, error, info, trace, warn};
 
@@ -94,6 +95,8 @@ pub const DEFAULT_CHAIN_ACTOR_TIMEOUT: u64 = 300000;
 
 // TODO: make it configurable
 pub const CKB_TX_TRACING_CONFIRMATIONS: u64 = 4;
+
+pub const MAX_SERVICE_PROTOCOAL_DATA_SIZE: usize = 1024 * 64; // 64 KB
 
 // This is a temporary way to document that we assume the chain actor is always alive.
 // We may later relax this assumption. At the moment, if the chain actor fails, we
@@ -3643,6 +3646,13 @@ impl FiberProtocolHandle {
     fn create_meta(self) -> ProtocolMeta {
         MetaBuilder::new()
             .id(FIBER_PROTOCOL_ID)
+            .codec(move || {
+                Box::new(
+                    length_delimited::Builder::new()
+                        .max_frame_length(MAX_SERVICE_PROTOCOAL_DATA_SIZE)
+                        .new_codec(),
+                )
+            })
             .service_handle(move || {
                 let handle = Box::new(self);
                 ProtocolHandle::Callback(handle)
