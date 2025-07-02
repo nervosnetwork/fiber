@@ -63,6 +63,9 @@ pub const DEFAULT_MAX_INBOUND_PEERS: usize = 16;
 /// Minimal number of outbound connections.
 pub const DEFAULT_MIN_OUTBOUND_PEERS: usize = 8;
 
+/// Funding timeout in seconds since the channel is created.
+pub const DEFAULT_FUNDING_TIMEOUT_SECONDS: u64 = 60 * 60 * 24; // 1 day
+
 /// The interval to maintain the gossip network, in milli-seconds.
 #[cfg(not(any(test, feature = "bench")))]
 pub const DEFAULT_GOSSIP_STORE_MAINTENANCE_INTERVAL_MS: u64 = 20 * 1000;
@@ -298,6 +301,16 @@ pub struct FiberConfig {
         help = "Disable built-in watchtower actor. [default: false]"
     )]
     pub disable_built_in_watchtower: Option<bool>,
+
+    /// Default timeout to auto close a funding channel. [default: 1 day]
+    #[arg(
+        name = "FIBER_FUNDING_TIMEOUT_SECONDS",
+        long = "fiber-funding-timeout-seconds",
+        env,
+        help = "Default timeout to auto close a funding channel. [default: 1 day]"
+    )]
+    #[default(DEFAULT_FUNDING_TIMEOUT_SECONDS)]
+    pub funding_timeout_seconds: u64,
 }
 
 /// Must be a valid utf-8 string of length maximal length 32 bytes.
