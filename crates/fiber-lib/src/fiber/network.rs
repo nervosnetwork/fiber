@@ -593,6 +593,18 @@ impl SendPaymentData {
             ));
         }
 
+        if let Some(custom_records) = &command.custom_records {
+            if custom_records.data.keys().len() > 32 {
+                return Err("custom_records can not have more than 32 records".to_string());
+            }
+            if custom_records.data.values().map(|v| v.len()).sum::<usize>() > 1024 * 2 {
+                return Err(
+                    "the sum size of custom_records's value can not more than 2048 bytes"
+                        .to_string(),
+                );
+            }
+        }
+
         let hop_hints = command.hop_hints.unwrap_or_default();
 
         Ok(SendPaymentData {

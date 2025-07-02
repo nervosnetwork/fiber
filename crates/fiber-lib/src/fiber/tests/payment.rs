@@ -76,6 +76,77 @@ async fn test_send_payment_custom_records() {
     assert_eq!(got_custom_records, custom_records);
 }
 
+#[tokio::test]
+async fn test_send_payment_custom_records_with_limit_error() {
+    let (nodes, _channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+            ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+        ],
+        2,
+    )
+    .await;
+    let [mut node_0, node_1] = nodes.try_into().expect("2 nodes");
+    let source_node = &mut node_0;
+    let target_pubkey = node_1.pubkey;
+
+    let data: HashMap<_, _> = (0..33)
+        .map(|i| (i, format!("value_{}", i).into_bytes()))
+        .collect();
+
+    let custom_records = PaymentCustomRecords { data };
+    let res = source_node
+        .send_payment(SendPaymentCommand {
+            target_pubkey: Some(target_pubkey),
+            amount: Some(10000000000),
+            keysend: Some(true),
+            custom_records: Some(custom_records.clone()),
+            ..Default::default()
+        })
+        .await;
+
+    let err = res.unwrap_err().to_string();
+    assert!(err.contains("custom_records can not have more than 32 records"));
+
+    let long_value = "a".repeat(1024 * 2 + 1);
+    let data: HashMap<_, _> = vec![(1, long_value.into_bytes())].into_iter().collect();
+    let custom_records = PaymentCustomRecords { data };
+    let res = source_node
+        .send_payment(SendPaymentCommand {
+            target_pubkey: Some(target_pubkey),
+            amount: Some(10000000000),
+            keysend: Some(true),
+            custom_records: Some(custom_records.clone()),
+            ..Default::default()
+        })
+        .await;
+
+    let err = res.unwrap_err().to_string();
+    assert!(err.contains("the sum size of custom_records's value can not more than 2048 bytes"));
+
+    // normal case
+    let long_value = "a".repeat(1024 * 2);
+    let data: HashMap<_, _> = vec![(1, long_value.into_bytes())].into_iter().collect();
+    let custom_records = PaymentCustomRecords { data };
+    let res = source_node
+        .send_payment(SendPaymentCommand {
+            target_pubkey: Some(target_pubkey),
+            amount: Some(10000000000),
+            keysend: Some(true),
+            custom_records: Some(custom_records.clone()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    let payment_hash = res.payment_hash;
+    source_node.wait_until_success(payment_hash).await;
+    let got_custom_records = node_1
+        .get_payment_custom_records(&payment_hash)
+        .expect("custom records");
+    assert_eq!(got_custom_records, custom_records);
+}
+
 // This test will send two payments from node_0 to node_1, the first payment will run
 // with dry_run, the second payment will run without dry_run. Both payments will be successful.
 // But only one payment balance will be deducted from node_0.
