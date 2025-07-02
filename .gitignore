@@ -13,3 +13,4 @@ tests/nodes/.ports
 /*.info
 .vscode
 /migrate/target
+/gui/target
