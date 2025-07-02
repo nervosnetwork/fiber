@@ -221,22 +221,14 @@ mod tests {
         };
 
         // check permission
-        assert!(auth
-            .check_permission("send_payment", json!({}), &token,)
-            .is_ok());
+        assert!(auth.check_permission("send_payment", &token,).is_ok());
         // write permission do not implies read
-        assert!(auth
-            .check_permission("get_payment", json!({}), &token)
-            .is_err());
-        assert!(auth
-            .check_permission("list_peers", json!({}), &token)
-            .is_ok());
-        assert!(auth
-            .check_permission("connect_peer", json!({}), &token)
-            .is_err());
+        assert!(auth.check_permission("get_payment", &token).is_err());
+        assert!(auth.check_permission("list_peers", &token).is_ok());
+        assert!(auth.check_permission("connect_peer", &token).is_err());
 
         // if not match any rule, it should be denied
-        assert!(auth.check_permission("unknown", json!({}), &token).is_err());
+        assert!(auth.check_permission("unknown", &token).is_err());
     }
 
     #[test]
@@ -261,9 +253,7 @@ mod tests {
         };
 
         // check permission
-        assert!(auth
-            .check_permission("send_payment", json!({}), &token)
-            .is_err());
+        assert!(auth.check_permission("send_payment", &token).is_err());
     }
 
     #[test]
@@ -447,6 +437,7 @@ mod tests {
         assert!(auth.check_permission("send_payment", &rev_token,).is_err());
         // write permission do not implies read
         assert!(auth.check_permission("list_peers", &rev_token).is_err());
+        assert!(auth.check_permission("get_payment", &token).is_err());
 
         // if not match any rule, it should be denied
         assert!(auth.check_permission("unknown", &token).is_err());

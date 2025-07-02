@@ -60,7 +60,6 @@ impl<S> BiscuitAuthMiddleware<S> {
                 return false;
             }
         };
-
         let res = self
             .auth
             .check_permission(notify.method_name(), &auth_token);
