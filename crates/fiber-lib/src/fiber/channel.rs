@@ -3541,17 +3541,17 @@ pub struct ChannelTlcInfo {
     // Whether this channel is enabled for TLC forwarding or not.
     pub enabled: bool,
 
-    // The fee rate for tlc transfers. We only have these values set when
+    // The fee rate for TLC transfers. We only have these values set when
     // this is a public channel. Both sides may set this value differently.
-    // This is a fee that is paid by the sender of the tlc.
+    // This is a fee that is paid by the sender of the TLC.
     // The detailed calculation for the fee of forwarding tlcs is
     // `fee = round_above(tlc_fee_proportional_millionths * tlc_value / 1,000,000)`.
     pub tlc_fee_proportional_millionths: u128,
 
-    // The expiry delta timestamp, in milliseconds, for the tlc.
+    // The expiry delta timestamp, in milliseconds, for the TLC.
     pub tlc_expiry_delta: u64,
 
-    /// The minimal tcl value we can receive in relay tlc
+    /// The minimal TLC value we can receive in relay TLC
     pub tlc_minimum_value: u128,
 }
 

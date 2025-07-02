@@ -1830,16 +1830,16 @@ where
     async fn update_graph_with_tlc_fail(
         &self,
         network: &ActorRef<NetworkActorMessage>,
-        tcl_error_detail: &TlcErr,
+        tlc_error_detail: &TlcErr,
     ) {
-        let error_code = tcl_error_detail.error_code();
+        let error_code = tlc_error_detail.error_code();
         // https://github.com/lightning/bolts/blob/master/04-onion-routing.md#rationale-6
         // we now still update the graph, maybe we need to remove it later?
         if error_code.is_update() {
             if let Some(TlcErrData::ChannelFailed {
                 channel_update: Some(channel_update),
                 ..
-            }) = &tcl_error_detail.extra_data
+            }) = &tlc_error_detail.extra_data
             {
                 network
                     .send_message(NetworkActorMessage::new_command(
@@ -1850,11 +1850,11 @@ where
                     .expect(ASSUME_NETWORK_MYSELF_ALIVE);
             }
         }
-        match tcl_error_detail.error_code() {
+        match tlc_error_detail.error_code() {
             TlcErrorCode::PermanentChannelFailure
             | TlcErrorCode::ChannelDisabled
             | TlcErrorCode::UnknownNextPeer => {
-                let channel_outpoint = tcl_error_detail
+                let channel_outpoint = tlc_error_detail
                     .error_channel_outpoint()
                     .expect("expect channel outpoint");
                 debug!("mark channel failed: {:?}", channel_outpoint);
@@ -1862,7 +1862,7 @@ where
                 graph.mark_channel_failed(&channel_outpoint);
             }
             TlcErrorCode::PermanentNodeFailure => {
-                let node_id = tcl_error_detail.error_node_id().expect("expect node id");
+                let node_id = tlc_error_detail.error_node_id().expect("expect node id");
                 let mut graph = self.network_graph.write().await;
                 graph.mark_node_failed(node_id);
             }
