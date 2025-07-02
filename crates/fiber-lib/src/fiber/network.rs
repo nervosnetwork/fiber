@@ -2014,6 +2014,7 @@ where
                 .write()
                 .await
                 .track_payment_router(&payment_session);
+            state.payment_router_map.remove(&payment_hash);
             self.store.insert_payment_session(payment_session);
             return;
         }
@@ -2035,10 +2036,13 @@ where
                 (retry, channel_error.to_string())
             };
         payment_session.last_error = Some(error);
+        if !matches!(channel_error, ProcessingChannelError::WaitingTlcAck) {
+            state.payment_router_map.remove(&payment_hash);
+        }
         self.store.insert_payment_session(payment_session);
 
         if need_to_retry {
-            let _ = self.try_payment_session(myself, state, payment_hash).await;
+            self.register_payment_retry(myself, payment_hash);
         }
     }
 
@@ -2072,7 +2076,16 @@ where
                 payment_session.retried_times += 1;
             }
 
-            let hops_info = self.build_payment_route(&mut payment_session).await?;
+            let hops_info = match state.payment_router_map.get(&payment_hash) {
+                Some(hops) => hops.clone(),
+                None => {
+                    let hops_info = self.build_payment_route(&mut payment_session).await?;
+                    state
+                        .payment_router_map
+                        .insert(payment_hash, hops_info.clone());
+                    hops_info
+                }
+            };
 
             match self
                 .send_payment_onion_packet(state, &mut payment_session, &payment_data, hops_info)
@@ -2104,7 +2117,8 @@ where
     }
 
     fn register_payment_retry(&self, myself: ActorRef<NetworkActorMessage>, payment_hash: Hash256) {
-        myself.send_after(Duration::from_millis(500), move || {
+        let rand_time = rand::thread_rng().gen_range(1000..2000);
+        myself.send_after(Duration::from_millis(rand_time), move || {
             NetworkActorMessage::new_event(NetworkActorEvent::RetrySendPayment(payment_hash))
         });
     }
@@ -2271,6 +2285,8 @@ pub struct NetworkActorState<S> {
     channel_subscribers: ChannelSubscribers,
     max_inbound_peers: usize,
     min_outbound_peers: usize,
+    // the payment router map, only used for avoiding finding the same payment router multiple times
+    payment_router_map: HashMap<Hash256, Vec<PaymentHopData>>,
 }
 
 #[serde_as]
@@ -3508,6 +3524,7 @@ where
             channel_subscribers,
             max_inbound_peers: config.max_inbound_peers(),
             min_outbound_peers: config.min_outbound_peers(),
+            payment_router_map: Default::default(),
         };
 
         let node_announcement = state.get_or_create_new_node_announcement_message();
