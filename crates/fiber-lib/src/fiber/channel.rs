@@ -6561,34 +6561,11 @@ impl ChannelActorState {
                     // peer need ACK, I need to send my revoke_and_ack message
                     // don't clear my waiting_ack flag here, since if i'm waiting for peer ack,
                     // peer will resend commitment_signed message
-                    self.resend_tlcs_on_reestablish(false)?;
-                    if let Some(last_revoke_ack_msg) = self.last_revoke_ack_msg.clone() {
-                        self.network()
-                            .send_message(NetworkActorMessage::new_command(
-                                NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
-                                    self.get_remote_peer_id(),
-                                    FiberMessage::revoke_and_ack(last_revoke_ack_msg),
-                                )),
-                            ))
-                            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-
-                        // this check make sure the two parties make symmetric commitment numbers
-                        // after the peer process the revoke_and_ack message and increased his local number
-                        // otherwise this CommitmentSigned peer message will be verified as invalid
-                        if my_waiting_ack
-                            && my_local_commitment_number == peer_remote_commitment_number
-                        {
-                            self.network()
-                                .send_message(NetworkActorMessage::new_command(
-                                    NetworkActorCommand::ControlFiberChannel(
-                                        ChannelCommandWithId {
-                                            channel_id: self.get_id(),
-                                            command: ChannelCommand::CommitmentSigned(),
-                                        },
-                                    ),
-                                ))
-                                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-                        }
+                    self.send_revoke_and_ack_message()?;
+                    if my_waiting_ack
+                        && my_local_commitment_number == peer_remote_commitment_number
+                    {
+                        self.resend_tlcs_on_reestablish(true)?;
                     }
                 } else if my_waiting_ack
                     && my_local_commitment_number == peer_remote_commitment_number
@@ -6596,10 +6573,7 @@ impl ChannelActorState {
                     // I need to resend my commitment_signed message, don't clear my WaitingTlcAck flag
                     self.resend_tlcs_on_reestablish(true)?;
                 } else {
-                    error!(
-                        "peer: {:?} unexpected_commitnumbers",
-                        self.get_local_peer_id()
-                    );
+                    // ignore, waiting for remote peer to resend revoke_and_ack
                 }
 
                 self.on_reestablished_channel_ready(myself).await;
