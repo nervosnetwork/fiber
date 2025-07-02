@@ -190,6 +190,70 @@ fn test_peeled_onion_packet() {
 }
 
 #[test]
+fn test_peeled_large_onion_packet() {
+    fn build_onion_packet(hops_num: usize) -> Result<(), String> {
+        let secp = Secp256k1::new();
+        let keys: Vec<Privkey> = std::iter::repeat_with(gen_rand_fiber_private_key)
+            .take(hops_num + 1)
+            .collect();
+        let mut hops_infos = vec![];
+
+        for key in keys.iter().take(hops_num) {
+            hops_infos.push(PaymentHopData {
+                amount: 2,
+                expiry: 3,
+                next_hop: Some(key.pubkey()),
+                funding_tx_hash: Hash256::default(),
+                hash_algorithm: HashAlgorithm::Sha256,
+                payment_preimage: None,
+                custom_records: None,
+            });
+        }
+        hops_infos.push(PaymentHopData {
+            amount: 8,
+            expiry: 9,
+            next_hop: None,
+            funding_tx_hash: Hash256::default(),
+            hash_algorithm: HashAlgorithm::Sha256,
+            payment_preimage: None,
+            custom_records: None,
+        });
+
+        let packet = PeeledOnionPacket::create(
+            gen_rand_fiber_private_key(),
+            hops_infos.clone(),
+            None,
+            &secp,
+        )
+        .map_err(|e| format!("create peeled packet error: {}", e))?;
+
+        let serialized = packet.serialize();
+        let deserialized = PeeledOnionPacket::deserialize(&serialized).expect("deserialize");
+
+        assert_eq!(packet, deserialized);
+
+        let mut now = Some(packet);
+        for i in 0..hops_infos.len() - 1 {
+            let packet = now.unwrap().peel(&keys[i], &secp).expect("peel");
+            assert_eq!(packet.current, hops_infos[i + 1]);
+            now = Some(packet.clone());
+        }
+        let last_packet = now.unwrap();
+        assert_eq!(last_packet.current, hops_infos[hops_infos.len() - 1]);
+        assert!(last_packet.is_last());
+        return Ok(());
+    }
+
+    // default PACKET_DATA_LEN is 6500
+    build_onion_packet(40).expect("build onion packet with 40 hops");
+    let res = build_onion_packet(41);
+    assert!(
+        res.is_err(),
+        "should fail to build onion packet with 41 hops"
+    );
+}
+
+#[test]
 fn test_tlc_fail_error() {
     let tlc_fail_detail = TlcErr::new(TlcErrorCode::InvalidOnionVersion);
     assert!(!tlc_fail_detail.error_code.is_node());

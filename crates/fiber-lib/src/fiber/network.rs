@@ -41,6 +41,7 @@ use tentacle::{
     ProtocolId, SessionId,
 };
 use tokio::sync::{mpsc, oneshot, RwLock};
+use tokio_util::codec::length_delimited;
 use tokio_util::task::TaskTracker;
 use tracing::{debug, error, info, trace, warn};
 
@@ -94,6 +95,8 @@ pub const DEFAULT_CHAIN_ACTOR_TIMEOUT: u64 = 300000;
 
 // TODO: make it configurable
 pub const CKB_TX_TRACING_CONFIRMATIONS: u64 = 4;
+
+pub const MAX_SERVICE_PROTOCOAL_DATA_SIZE: usize = 1024 * 64; // 64 KB
 
 // This is a temporary way to document that we assume the chain actor is always alive.
 // We may later relax this assumption. At the moment, if the chain actor fails, we
@@ -588,6 +591,18 @@ impl SendPaymentData {
                 "amount + max_fee_amount overflow: amount = {}, max_fee_amount = {}",
                 amount, max_fee_amount
             ));
+        }
+
+        if let Some(custom_records) = &command.custom_records {
+            if custom_records.data.keys().len() > 32 {
+                return Err("custom_records can not have more than 32 records".to_string());
+            }
+            if custom_records.data.values().map(|v| v.len()).sum::<usize>() > 1024 * 2 {
+                return Err(
+                    "the sum size of custom_records's value can not more than 2048 bytes"
+                        .to_string(),
+                );
+            }
         }
 
         let hop_hints = command.hop_hints.unwrap_or_default();
@@ -3643,6 +3658,13 @@ impl FiberProtocolHandle {
     fn create_meta(self) -> ProtocolMeta {
         MetaBuilder::new()
             .id(FIBER_PROTOCOL_ID)
+            .codec(move || {
+                Box::new(
+                    length_delimited::Builder::new()
+                        .max_frame_length(MAX_SERVICE_PROTOCOAL_DATA_SIZE)
+                        .new_codec(),
+                )
+            })
             .service_handle(move || {
                 let handle = Box::new(self);
                 ProtocolHandle::Callback(handle)

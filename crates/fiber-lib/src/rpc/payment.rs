@@ -279,7 +279,9 @@ pub struct SendPaymentWithRouterParams {
     pub invoice: Option<String>,
 
     /// Some custom records for the payment which contains a map of u32 to Vec<u8>
-    /// The key is the record type, and the value is the serialized data
+    /// The key is the record type, and the value is the serialized data.
+    /// Limits: we allow up to 32 records, and the sum size of values can not exceed 2048 bytes.
+    ///
     /// For example:
     /// ```json
     /// "custom_records": {
