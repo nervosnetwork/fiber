@@ -581,7 +581,7 @@ where
         };
 
         match update_info {
-            Some(old_update) if old_update.timestamp > channel_update.timestamp => {
+            Some(old_update) if old_update.timestamp >= channel_update.timestamp => {
                 trace!(
                     "Ignoring outdated channel update {:?} for channel {:?}",
                     &channel_update,
@@ -622,7 +622,7 @@ where
         }
         let node_info = NodeInfo::from(node_announcement);
         match self.nodes.get(&node_info.node_id) {
-            Some(old_node) if old_node.timestamp > node_info.timestamp => {
+            Some(old_node) if old_node.timestamp >= node_info.timestamp => {
                 trace!(
                     "Ignoring outdated node announcement {:?} for node {:?}",
                     &node_info,
