@@ -1,6 +1,11 @@
 use anyhow::{Context, Result};
-use biscuit_auth::{builder::Term, AuthorizerBuilder, Biscuit, PublicKey};
+use biscuit_auth::{
+    builder::{Fact, Term},
+    AuthorizerBuilder, Biscuit, PublicKey,
+};
 use std::{collections::HashMap, str::FromStr};
+
+use crate::now_timestamp_as_millis_u64;
 
 struct AuthRule {
     code: &'static str,
@@ -11,6 +16,9 @@ impl AuthRule {
         Self { code }
     }
 
+    /// build rule
+    ///
+    /// - req_params RPC method parameters
     fn build_rule(&self, req_params: serde_json::Value) -> Result<AuthorizerBuilder> {
         let mut params = HashMap::new();
         for (param, value) in req_params.as_object().context("invalid parameter")? {
@@ -27,8 +35,19 @@ impl AuthRule {
         Ok(authorizer)
     }
 
-    fn authorize(&self, params: serde_json::Value, token: Biscuit) -> Result<()> {
-        self.build_rule(params)?.build(&token)?.authorize()?;
+    /// authorize
+    ///
+    /// - params RPC method parameters
+    /// - token biscuit token
+    /// - time_in_ms time in milliseconds since UNIX_EPOCH
+    fn authorize(&self, params: serde_json::Value, token: Biscuit, time_in_ms: u64) -> Result<()> {
+        self.build_rule(params)?
+            .fact(Fact::new(
+                "time".to_string(),
+                &[Term::Date(time_in_ms / 1000)],
+            ))?
+            .build(&token)?
+            .authorize()?;
         Ok(())
     }
 }
@@ -129,22 +148,45 @@ impl BiscuitAuth {
         Ok(Self { pubkey, rules })
     }
 
+    /// check permission with time
+    ///
+    /// - method RPC method
+    /// - params RPC method parameters
+    /// - token biscuit token
+    /// - time_in_ms time in milliseconds since UNIX_EPOCH
+    pub fn check_permission_with_time(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+        token: &[u8],
+        time_in_ms: u64,
+    ) -> Result<()> {
+        let b = Biscuit::from(token, self.pubkey).context("invalid token")?;
+        let Some(rule) = self.rules.get(method) else {
+            return Err(anyhow::anyhow!("no rules for method: {method}"));
+        };
+        rule.authorize(params, b, time_in_ms)
+    }
+
+    /// check permission
+    ///
+    /// - method RPC method
+    /// - params RPC method parameters
+    /// - token biscuit token
     pub fn check_permission(
         &self,
         method: &str,
         params: serde_json::Value,
         token: &[u8],
     ) -> Result<()> {
-        let b = Biscuit::from(token, self.pubkey).context("invalid token")?;
-        let Some(rule) = self.rules.get(method) else {
-            return Err(anyhow::anyhow!("no rules for method: {method}"));
-        };
-        rule.authorize(params, b)
+        self.check_permission_with_time(method, params, token, now_timestamp_as_millis_u64())
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
     use biscuit_auth::{macros::biscuit, KeyPair};
     use serde_json::json;
 
@@ -173,7 +215,7 @@ mod tests {
 
         // check permission
         assert!(auth
-            .check_permission("send_payment", json!({}), &token)
+            .check_permission("send_payment", json!({}), &token,)
             .is_ok());
         // write permission do not implies read
         assert!(auth
@@ -273,14 +315,14 @@ mod tests {
             .check_permission(
                 "update_revocation",
                 json!({"channel_id": "a_channel_id"}),
-                &token1
+                &token1,
             )
             .is_ok());
         assert!(auth
             .check_permission(
                 "update_revocation",
                 json!({"channel_id": "b_channel_id"}),
-                &token1
+                &token1,
             )
             .is_ok());
 
@@ -289,14 +331,14 @@ mod tests {
             .check_permission(
                 "update_revocation",
                 json!({"channel_id": "a_channel_id"}),
-                &token2
+                &token2,
             )
             .is_ok());
         assert!(auth
             .check_permission(
                 "update_revocation",
                 json!({"channel_id": "b_channel_id"}),
-                &token2
+                &token2,
             )
             .is_err());
 
@@ -305,15 +347,50 @@ mod tests {
             .check_permission(
                 "update_revocation",
                 json!({"channel_id": "b_channel_id"}),
-                &token3
+                &token3,
             )
             .is_ok());
         assert!(auth
             .check_permission(
                 "update_revocation",
                 json!({"channel_id": "a_channel_id"}),
-                &token3
+                &token3,
             )
             .is_err());
+    }
+
+    #[test]
+    fn test_biscuit_token_timeout() {
+        let root = KeyPair::new();
+
+        // auth
+        let auth = BiscuitAuth::from_pubkey(root.public().to_string()).unwrap();
+
+        // sign a biscuit with timeout
+        let token = {
+            let biscuit = biscuit!(
+                r#"
+                write("payments");
+                check if time($time), $time <= 2022-03-30T20:00:00Z;
+    "#
+            )
+            .build(&root)
+            .unwrap();
+
+            biscuit.to_vec().unwrap()
+        };
+
+        // check permission
+        let future_time = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let past_time = Duration::from_millis(10).as_millis() as u64;
+        assert!(auth
+            .check_permission_with_time("send_payment", json!({}), &token, future_time)
+            .is_err());
+        assert!(auth
+            .check_permission_with_time("send_payment", json!({}), &token, past_time)
+            .is_ok());
     }
 }
