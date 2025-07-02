@@ -4,11 +4,7 @@ resolver = "2"
 default-members = ["crates/fiber-bin", "crates/fiber-lib"]
 
 [profile.release]
-panic = "abort"
 overflow-checks = true
-
-[profile.dev]
-panic = "abort"
 
 [profile.quick_test]
 inherits = "test"
