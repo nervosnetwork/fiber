@@ -276,84 +276,14 @@ mod tests {
             biscuit.to_base64().unwrap()
         };
 
-        let token2 = {
-            let biscuit = biscuit!(
-                r#"
-          right("a_channel_id", "watchtower");
-    "#
-            )
-            .build(&root)
-            .unwrap();
-
-            biscuit.to_base64().unwrap()
-        };
-
-        let token3 = {
-            let biscuit = biscuit!(
-                r#"
-          right("b_channel_id", "watchtower");
-    "#
-            )
-            .build(&root)
-            .unwrap();
-            biscuit.to_base64().unwrap()
-        };
-
         // check permission
 
-        // token1 with write(watchtower) can operate all channels
-        auth.check_permission(
-            "update_revocation",
-            json!({"channel_id": "a_channel_id"}),
-            &token1,
-        )
-        .unwrap();
         assert!(auth
             .check_permission(
                 "update_revocation",
-                json!({"channel_id": "a_channel_id"}),
                 &token1,
             )
             .is_ok());
-        assert!(auth
-            .check_permission(
-                "update_revocation",
-                json!({"channel_id": "b_channel_id"}),
-                &token1,
-            )
-            .is_ok());
-
-        // token2 with write(watchtower/a_channel_id) can only operate a_channel_id
-        assert!(auth
-            .check_permission(
-                "update_revocation",
-                json!({"channel_id": "a_channel_id"}),
-                &token2,
-            )
-            .is_ok());
-        assert!(auth
-            .check_permission(
-                "update_revocation",
-                json!({"channel_id": "b_channel_id"}),
-                &token2,
-            )
-            .is_err());
-
-        // token3 with write(watchtower/b_channel_id) can only operate b_channel_id
-        assert!(auth
-            .check_permission(
-                "update_revocation",
-                json!({"channel_id": "b_channel_id"}),
-                &token3,
-            )
-            .is_ok());
-        assert!(auth
-            .check_permission(
-                "update_revocation",
-                json!({"channel_id": "a_channel_id"}),
-                &token3,
-            )
-            .is_err());
     }
 
     #[test]
@@ -443,4 +373,5 @@ mod tests {
         assert!(auth.check_permission("unknown", &token).is_err());
         assert!(auth.check_permission("unknown", &rev_token).is_err());
     }
+
 }
