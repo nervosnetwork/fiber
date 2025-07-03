@@ -29,7 +29,7 @@ pub struct DisconnectPeerParams {
 }
 
 /// The result of the `list_peers` RPC method.
-#[derive(Clone, Serialize, Deserialize, Debug)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ListPeersResult {
     /// A list of connected peers.
     pub peers: Vec<PeerInfo>,

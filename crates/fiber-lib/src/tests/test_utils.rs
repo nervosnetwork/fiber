@@ -19,12 +19,15 @@ use crate::fiber::ASSUME_NETWORK_ACTOR_ALIVE;
 use crate::invoice::*;
 use crate::rpc::config::RpcConfig;
 use crate::rpc::server::start_rpc;
+use base64::Engine;
 use ckb_sdk::core::TransactionBuilder;
 use ckb_types::core::FeeRate;
 use ckb_types::{
     core::{tx_pool::TxStatus, TransactionView},
     packed::{OutPoint, Script},
 };
+use hyper::header::HeaderValue;
+use hyper::HeaderMap;
 use jsonrpsee::core::client::ClientT;
 use jsonrpsee::http_client::transport::HttpBackend;
 use jsonrpsee::http_client::HttpClient;
@@ -212,6 +215,7 @@ pub struct NetworkNode {
     pub unexpected_events: Arc<TokioRwLock<HashSet<String>>>,
     pub triggered_unexpected_events: Arc<TokioRwLock<Vec<String>>>,
     pub rpc_server: Option<(ServerHandle, SocketAddr)>,
+    pub auth_token: Option<Vec<u8>>,
 }
 
 pub struct NetworkNodeConfig {
@@ -233,7 +237,7 @@ impl NetworkNodeConfig {
 pub struct NetworkNodeConfigBuilder {
     base_dir: Option<Arc<TempDir>>,
     node_name: Option<String>,
-    enable_rpc_server: bool,
+    rpc_config: Option<RpcConfig>,
     // We may generate a FiberConfig based on the base_dir and node_name,
     // but allow user to override it.
     #[allow(clippy::type_complexity)]
@@ -252,7 +256,7 @@ impl NetworkNodeConfigBuilder {
         Self {
             base_dir: None,
             node_name: None,
-            enable_rpc_server: false,
+            rpc_config: None,
             fiber_config_updater: None,
             mock_chain_actor_middleware: None,
         }
@@ -272,9 +276,24 @@ impl NetworkNodeConfigBuilder {
         self
     }
 
-    pub fn enable_rpc_server(mut self, enable: bool) -> Self {
-        self.enable_rpc_server = enable;
+    pub fn rpc_config(mut self, rpc_config: Option<RpcConfig>) -> Self {
+        self.rpc_config = rpc_config;
         self
+    }
+
+    pub fn enable_rpc_server(self) -> Self {
+        self.rpc_config(Some(RpcConfig {
+            listening_addr: None,
+            biscuit_public_key: None,
+            enabled_modules: vec![
+                "channel".to_string(),
+                "graph".to_string(),
+                "payment".to_string(),
+                "invoice".to_string(),
+                "peer".to_string(),
+                "watchtower".to_string(),
+            ],
+        }))
     }
 
     pub fn fiber_config_updater(
@@ -310,23 +329,6 @@ impl NetworkNodeConfigBuilder {
         let rand_db_dir = Path::new(base_dir.to_str()).join(rand_name);
         let store = Store::new(rand_db_dir).expect("create store");
         let fiber_config = get_fiber_config(base_dir.as_ref(), node_name.as_deref());
-        let rpc_config = if self.enable_rpc_server {
-            Some(RpcConfig {
-                listening_addr: None,
-                biscuit_public_key: None,
-                enabled_modules: vec![
-                    "channel".to_string(),
-                    "info".to_string(),
-                    "graph".to_string(),
-                    "payment".to_string(),
-                    "invoice".to_string(),
-                    "peer".to_string(),
-                    "watchtower".to_string(),
-                ],
-            })
-        } else {
-            None
-        };
         let ckb_config = if self.enable_rpc_server {
             let ckb_dir = Path::new(base_dir.to_str()).join("ckb");
             Some(CkbConfig {
@@ -338,6 +340,7 @@ impl NetworkNodeConfigBuilder {
         } else {
             None
         };
+        let rpc_config = self.rpc_config;
         let mut config = NetworkNodeConfig {
             base_dir,
             ckb_config,
@@ -554,10 +557,10 @@ pub(crate) async fn create_n_nodes_with_established_channel(
 pub(crate) async fn create_n_nodes_network_with_params(
     amounts: &[((usize, usize), ChannelParameters)],
     n: usize,
-    enable_rpc: bool,
+    rpc_config: Option<RpcConfig>,
 ) -> (Vec<NetworkNode>, Vec<Hash256>) {
     assert!(n >= 2);
-    let mut nodes = NetworkNode::new_interconnected_nodes(n, enable_rpc).await;
+    let mut nodes = NetworkNode::new_interconnected_nodes(n, rpc_config).await;
     let mut channels = vec![];
 
     for ((i, j), channel_params) in amounts.iter() {
@@ -603,7 +606,7 @@ pub async fn create_n_nodes_network(
         .iter()
         .map(|((i, j), (a, b))| ((*i, *j), ChannelParameters::new(*a, *b)))
         .collect::<Vec<_>>();
-    create_n_nodes_network_with_params(&amounts, n, false).await
+    create_n_nodes_network_with_params(&amounts, n, None).await
 }
 
 impl NetworkNode {
@@ -781,21 +784,31 @@ impl NetworkNode {
         .await
     }
 
+    pub fn set_auth_token(&mut self, token: Vec<u8>) {
+        self.auth_token = Some(token);
+    }
+
     pub async fn send_rpc_request_raw<P: Serialize>(
         &self,
         method: &str,
         params: P,
     ) -> Result<serde_json::Value, String> {
         if let Some((_server, socket_addr)) = &self.rpc_server {
-            dbg!(socket_addr);
+            let mut headers = HeaderMap::new();
+            if let Some(token) = &self.auth_token {
+                let enc_token = base64::prelude::BASE64_STANDARD.encode(token);
+                let value = HeaderValue::from_str(format!("Bearer {enc_token}").as_str()).unwrap();
+                headers.insert("Authorization", value);
+            }
             let client = HttpClient::<HttpBackend>::builder()
+                .set_headers(headers)
                 .build(format!("http://{}", socket_addr))
                 .expect("build client");
             let params = rpc_params![params];
             let response: serde_json::Value = client
                 .request(method, params)
                 .await
-                .expect("request failed");
+                .map_err(|err| err.to_string())?;
             Self::verify_serde_json_value(response.clone()).expect("verify response");
             Ok(response)
         } else {
@@ -1294,6 +1307,7 @@ impl NetworkNode {
             unexpected_events,
             triggered_unexpected_events,
             rpc_server: rpc_handler,
+            auth_token: None,
         }
     }
 
@@ -1379,21 +1393,21 @@ impl NetworkNode {
     }
 
     pub async fn new_n_interconnected_nodes<const N: usize>() -> [Self; N] {
-        let nodes = Self::new_interconnected_nodes(N, false).await;
+        let nodes = Self::new_interconnected_nodes(N, None).await;
         match nodes.try_into() {
             Ok(nodes) => nodes,
             Err(_) => unreachable!(),
         }
     }
 
-    pub async fn new_interconnected_nodes(n: usize, enable_rpc: bool) -> Vec<Self> {
+    pub async fn new_interconnected_nodes(n: usize, rpc_config: Option<RpcConfig>) -> Vec<Self> {
         let mut nodes: Vec<NetworkNode> = Vec::with_capacity(n);
         for i in 0..n {
             let mut new = Self::new_with_config(
                 NetworkNodeConfigBuilder::new()
                     .node_name(Some(format!("node-{}", i)))
                     .base_dir_prefix(&format!("test-fnn-node-{}-", i))
-                    .enable_rpc_server(enable_rpc)
+                    .rpc_config(rpc_config.clone())
                     .build(),
             )
             .await;

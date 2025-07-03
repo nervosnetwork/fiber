@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use anyhow::{anyhow, Result};
+use base64::Engine;
 use hyper::header::AUTHORIZATION;
 use hyper::HeaderMap;
 use jsonrpsee::core::middleware::{Batch, BatchEntry, BatchEntryErr, Notification};
@@ -20,44 +22,64 @@ pub struct BiscuitAuthMiddleware<S> {
 }
 
 impl<S> BiscuitAuthMiddleware<S> {
-    fn auth_token(&self) -> Option<&str> {
-        self.headers
+    fn auth_token(&self) -> Result<Vec<u8>> {
+        let auth_str = self
+            .headers
             .get(AUTHORIZATION)
-            .and_then(|auth| auth.to_str().ok())
-            .and_then(|auth_str| auth_str.strip_prefix(BEARER_PREFIX))
+            .ok_or_else(|| anyhow!("no authorization header"))?
+            .to_str()?;
+        let enc_token = auth_str
+            .strip_prefix(BEARER_PREFIX)
+            .ok_or_else(|| anyhow!("invalid authorization header"))?;
+        let token = base64::prelude::BASE64_STANDARD.decode(enc_token)?;
+        Ok(token)
+    }
+
+    fn extract_params(&self, params: serde_json::Value) -> Option<serde_json::Value> {
+        params.as_array()?.first().cloned()
     }
 
     /// Authorize the request
     fn auth_call(&self, req: &Request<'_>) -> bool {
-        let Some(auth_token) = self.auth_token() else {
-            return false;
+        let auth_token = match self.auth_token() {
+            Ok(token) => token,
+            Err(err) => {
+                tracing::debug!("failed to get auth token: {err}");
+                return false;
+            }
         };
 
-        let params = req
+        let body = req
             .params()
             .parse::<serde_json::Value>()
             .unwrap_or_default();
 
-        let res = self
-            .auth
-            .check_permission(&req.method, params, auth_token.as_bytes());
+        let params = self.extract_params(body).unwrap_or_default();
+
+        let res = self.auth.check_permission(&req.method, params, &auth_token);
         res.is_ok()
     }
 
     /// Authorize the notification
     fn auth_notify(&self, notify: &Notification<'_>) -> bool {
-        let Some(auth_token) = self.auth_token() else {
-            return false;
+        let auth_token = match self.auth_token() {
+            Ok(token) => token,
+            Err(err) => {
+                tracing::debug!("failed to get auth token: {err}");
+                return false;
+            }
         };
-        let params = notify
+
+        let body = notify
             .params()
             .as_ref()
             .and_then(|p| serde_json::from_str(p.as_ref().get()).ok())
             .unwrap_or_default();
+        let params = self.extract_params(body).unwrap_or_default();
 
         let res = self
             .auth
-            .check_permission(notify.method_name(), params, auth_token.as_bytes());
+            .check_permission(notify.method_name(), params, &auth_token);
         res.is_ok()
     }
 }
