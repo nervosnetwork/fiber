@@ -278,12 +278,7 @@ mod tests {
 
         // check permission
 
-        assert!(auth
-            .check_permission(
-                "update_revocation",
-                &token1,
-            )
-            .is_ok());
+        assert!(auth.check_permission("update_revocation", &token1,).is_ok());
     }
 
     #[test]
@@ -373,5 +368,4 @@ mod tests {
         assert!(auth.check_permission("unknown", &token).is_err());
         assert!(auth.check_permission("unknown", &rev_token).is_err());
     }
-
 }
