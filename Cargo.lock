@@ -1996,6 +1996,7 @@ dependencies = [
  "anyhow",
  "arcode",
  "async-trait",
+ "base64 0.22.1",
  "bech32 0.8.1",
  "bincode",
  "biscuit-auth",
