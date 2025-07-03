@@ -22,11 +22,25 @@ impl AuthRule {
     fn build_rule(&self, req_params: serde_json::Value) -> Result<AuthorizerBuilder> {
         let mut params = HashMap::new();
         for (param, value) in req_params.as_object().context("invalid parameter")? {
-            // only support string for now
-            // the value maybe contains unexpected injection,
+            // the req_params is from client, may contains unexpected injection,
             // but it will fail when parse parameter to concrete type in RPC methods
-            if let serde_json::Value::String(s) = value {
-                params.insert(param.to_string(), Term::Str(s.to_owned()));
+
+            // we only support simple types
+            match value {
+                serde_json::Value::String(s) => {
+                    params.insert(param.to_string(), Term::Str(s.to_owned()));
+                }
+                serde_json::Value::Number(n) => {
+                    if let Some(i) = n.as_i64() {
+                        params.insert(param.to_string(), Term::Integer(i));
+                    }
+                }
+                serde_json::Value::Bool(b) => {
+                    params.insert(param.to_string(), Term::Bool(*b));
+                }
+                _ => {
+                    tracing::debug!("unsupported parameter type: {param}: {value:?}");
+                }
             }
         }
         let scope_params = HashMap::new();
