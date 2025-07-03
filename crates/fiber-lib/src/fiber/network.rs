@@ -1025,7 +1025,6 @@ where
                             session.payment_hash(),
                             channel_id
                         );
-                        info!("Call register payment retry from ChannelReady");
                         self.register_payment_retry(myself.clone(), session.payment_hash());
                     }
                 }
@@ -1075,7 +1074,6 @@ where
                     .await;
             }
             NetworkActorEvent::RetrySendPayment(payment_hash) => {
-                info!("Calling try_payment_session from RetrySendPayment");
                 let _ = self.try_payment_session(myself, state, payment_hash).await;
             }
             NetworkActorEvent::AddTlcResult(payment_hash, error_info, previous_tlc) => {
@@ -1390,6 +1388,7 @@ where
             }
 
             NetworkActorCommand::SendPaymentOnionPacket(command) => {
+                trace!("Enter handle command  NetworkActorCommand::SendPaymentOnionPacket");
                 let res = self
                     .handle_send_onion_packet_command(state, command.clone())
                     .await;
@@ -1686,6 +1685,7 @@ where
         state: &mut NetworkActorState<S>,
         command: SendOnionPacketCommand,
     ) -> Result<(), TlcErr> {
+        trace!("Entering handle_send_onion_packet_command");
         let SendOnionPacketCommand {
             peeled_onion_packet,
             previous_tlc,
@@ -1726,7 +1726,11 @@ where
             },
             rpc_reply,
         );
-
+        trace!(
+            "Sending AddTlcCommand to {}, command {:?}",
+            *channel_id,
+            command
+        );
         // we have already checked the channel_id is valid,
         match state.send_command_to_channel(*channel_id, command).await {
             Ok(_) => {
@@ -1808,7 +1812,6 @@ where
                             false,
                         );
                         if need_to_retry {
-                            info!("Call register payment retry from on_remove_tle_event");
                             self.register_payment_retry(myself, payment_hash);
                         } else {
                             self.set_payment_fail_with_error(
@@ -1879,7 +1882,6 @@ where
         &self,
         payment_session: &mut PaymentSession,
     ) -> Result<Vec<PaymentHopData>, Error> {
-        info!("Entered build_payment_route");
         let graph = self.network_graph.read().await;
         let source = graph.get_source_pubkey();
         match graph.build_route(payment_session.request.clone()) {
@@ -1904,6 +1906,7 @@ where
         payment_data: &SendPaymentData,
         hops: Vec<PaymentHopData>,
     ) -> Result<PaymentSession, Error> {
+        trace!("Entering send_payment_onion_packet");
         let session_key = Privkey::from_slice(KeyPair::generate_random_key().as_ref());
         assert_ne!(hops[0].funding_tx_hash, Hash256::default());
 
@@ -1977,10 +1980,6 @@ where
         error_info: Option<(ProcessingChannelError, TlcErr)>,
         previous_tlc: Option<PrevTlcInfo>,
     ) {
-        info!(
-            "Entered on_add_tlc_result_event, error_info = {:?}",
-            error_info
-        );
         if let Some(PrevTlcInfo {
             prev_channel_id: channel_id,
             prev_tlc_id: tlc_id,
@@ -2038,11 +2037,11 @@ where
         self.store.insert_payment_session(payment_session);
 
         if need_to_retry {
-            info!(
+            trace!(
                 "Calling try_payment_session from on_add_tlc_result_event, error = {}",
                 error
             );
-            let _ = self.try_payment_session(myself, state, payment_hash).await;
+            self.register_payment_retry(myself, payment_hash);
         }
     }
 
@@ -2057,7 +2056,7 @@ where
         state: &mut NetworkActorState<S>,
         payment_hash: Hash256,
     ) -> Result<PaymentSession, Error> {
-        info!("Entered try_payment_session");
+        trace!("Entered try_payment_session");
         self.update_graph().await;
         let Some(mut payment_session) = self.store.get_payment_session(payment_hash) else {
             return Err(Error::InvalidParameter(payment_hash.to_string()));
@@ -2066,33 +2065,33 @@ where
         assert!(payment_session.status != PaymentSessionStatus::Failed);
 
         debug!(
-            "try_payment_session: {:?} times: {:?}",
+            "try_payment_session: {:?} times: {:?}, retry limit {}",
             payment_session.payment_hash(),
-            payment_session.retried_times
+            payment_session.retried_times,
+            payment_session.try_limit
         );
 
         let payment_data = payment_session.request.clone();
         if payment_session.can_retry() {
+            trace!("Retrying payment session, {:?}", payment_session);
             if payment_session.last_error != Some("WaitingTlcAck".to_string()) {
                 payment_session.retried_times += 1;
             }
 
             let hops_info = self.build_payment_route(&mut payment_session).await?;
-
+            trace!("Calling send_payment_onion_packet from try payment session");
             match self
                 .send_payment_onion_packet(state, &mut payment_session, &payment_data, hops_info)
                 .await
             {
                 Ok(payment_session) => return Ok(payment_session),
                 Err(err) => {
-                    info!("Send payment onion packet error: {:?}", err);
                     let need_retry = matches!(err, Error::SendPaymentFirstHopError(_, true));
                     if need_retry {
                         // If this is the first hop error, such as the WaitingTlcAck error,
                         // we will just retry later, return Ok here for letting endpoint user
                         // know payment session is created successfully
 
-                        info!("Call register payment retry from try_payment_session");
                         self.register_payment_retry(myself, payment_hash);
                         return Ok(payment_session);
                     } else {
@@ -2112,7 +2111,6 @@ where
     }
 
     fn register_payment_retry(&self, myself: ActorRef<NetworkActorMessage>, payment_hash: Hash256) {
-        info!("Called register_payment_retry");
         myself.send_after(Duration::from_millis(500), move || {
             NetworkActorMessage::new_event(NetworkActorEvent::RetrySendPayment(payment_hash))
         });
@@ -2180,7 +2178,6 @@ where
         state: &mut NetworkActorState<S>,
         payment_data: SendPaymentData,
     ) -> Result<SendPaymentResponse, Error> {
-        info!("Entered send_payment_with_payment_data");
         // for dry run, we only build the route and return the hops info,
         // will not store the payment session and send the onion packet
         if payment_data.dry_run {

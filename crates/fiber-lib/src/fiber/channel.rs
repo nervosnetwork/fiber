@@ -620,13 +620,9 @@ where
             ProcessingChannelError::TlcNumberExceedLimit
             | ProcessingChannelError::TlcAmountExceedLimit
             | ProcessingChannelError::TlcValueInflightExceedLimit => {
-                info!("Generated TemporaryChannelFailure from {:?}", error);
                 TlcErrorCode::TemporaryChannelFailure
             }
-            ProcessingChannelError::WaitingTlcAck => {
-                info!("Generated TemporaryChannelFailure from WaitingTlcAck");
-                TlcErrorCode::TemporaryChannelFailure
-            }
+            ProcessingChannelError::WaitingTlcAck => TlcErrorCode::TemporaryChannelFailure,
             ProcessingChannelError::InternalError(_) => TlcErrorCode::TemporaryNodeFailure,
             ProcessingChannelError::InvalidState(state_error) => match state.state {
                 // we can not revert back up `ChannelReady` after `ShuttingDown`
@@ -635,10 +631,6 @@ where
                 }
                 ChannelState::ChannelReady => {
                     if !state.local_tlc_info.enabled {
-                        info!(
-                            "Generated TemporaryChannelFailure from Invalid state: {}",
-                            state_error
-                        );
                         // channel is disabled
                         TlcErrorCode::TemporaryChannelFailure
                     } else {
@@ -650,16 +642,9 @@ where
                     }
                 }
                 // otherwise, channel maybe not ready
-                _ => {
-                    info!("Generated TlcErrorCode::TemporaryChannelFailure from not-ready channel");
-                    TlcErrorCode::TemporaryChannelFailure
-                }
+                _ => TlcErrorCode::TemporaryChannelFailure,
             },
             ProcessingChannelError::RepeatedProcessing(msg) => {
-                info!(
-                    "Generated TlcErrorCode::TemporaryChannelFailure from RepeatedProcessing: {}",
-                    msg
-                );
                 TlcErrorCode::TemporaryChannelFailure
             }
             ProcessingChannelError::SpawnErr(_)
@@ -1971,7 +1956,10 @@ where
                 } else {
                     None
                 };
-
+                trace!(
+                    "Sending AddTlcResult at AddTlc with error_info {:?}",
+                    error_info
+                );
                 self.network
                     .send_message(NetworkActorMessage::new_event(
                         NetworkActorEvent::AddTlcResult(
