@@ -19,6 +19,7 @@ use crate::fiber::ASSUME_NETWORK_ACTOR_ALIVE;
 use crate::invoice::*;
 use crate::rpc::config::RpcConfig;
 use crate::rpc::server::start_rpc;
+use base64::Engine;
 use ckb_sdk::core::TransactionBuilder;
 use ckb_types::core::FeeRate;
 use ckb_types::{
