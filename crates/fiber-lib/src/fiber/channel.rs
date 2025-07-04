@@ -1879,6 +1879,7 @@ where
                                     *forward_fee,
                                 )),
                                 payment_hash: *payment_hash,
+                                // forward tlc always set attempt_id to None
                                 attempt_id: None,
                             }),
                         )) {
@@ -2905,9 +2906,10 @@ pub struct TlcInfo {
     pub payment_hash: Hash256,
     /// bolt04 total amount of the payment, must exist if payment secret is set
     pub total_amount: Option<u128>,
-    /// bolt04 payment secret
+    /// bolt04 payment secret, only exists for last hop in multi-path payment
     pub payment_secret: Option<Hash256>,
     /// The attempt id associate with the tlc, only on outbound tlc
+    /// only exists for first hop in multi-path payment
     pub attempt_id: Option<u64>,
     pub expiry: u64,
     pub hash_algorithm: HashAlgorithm,

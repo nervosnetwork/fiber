@@ -477,6 +477,76 @@ async fn test_send_payment_for_pay_self_with_two_nodes() {
 }
 
 #[tokio::test]
+async fn test_send_payment_for_pay_self_with_invoice() {
+    init_tracing();
+    let (nodes, channels) = create_n_nodes_network(
+        &[
+            (
+                (0, 1),
+                (
+                    MIN_RESERVED_CKB + 10000000000,
+                    MIN_RESERVED_CKB + 10000000000,
+                ),
+            ),
+            (
+                (1, 2),
+                (
+                    MIN_RESERVED_CKB + 10000000000,
+                    MIN_RESERVED_CKB + 10000000000,
+                ),
+            ),
+            (
+                (2, 0),
+                (
+                    MIN_RESERVED_CKB + 10000000000,
+                    MIN_RESERVED_CKB + 10000000000,
+                ),
+            ),
+        ],
+        3,
+    )
+    .await;
+    let [mut node_0, _node_1, _node_2] = nodes.try_into().expect("3 nodes");
+
+    let old_node_0_balance1 = node_0.get_local_balance_from_channel(channels[0]);
+    let old_node_0_balance2 = node_0.get_local_balance_from_channel(channels[2]);
+    let preimage = gen_rand_sha256_hash();
+    let ckb_invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(100))
+        .payment_preimage(preimage)
+        .payee_pub_key(node_0.pubkey.into())
+        .build()
+        .expect("build invoice success");
+
+    node_0.insert_invoice(ckb_invoice.clone(), Some(preimage));
+
+    // node_0 -> node_0 will be ok for pay_self with invoice
+    let res = node_0
+        .send_payment(SendPaymentCommand {
+            invoice: Some(ckb_invoice.to_string()),
+            amount: None,
+            keysend: None,
+            allow_self_payment: true,
+            ..Default::default()
+        })
+        .await;
+
+    assert!(res.is_ok());
+
+    let res = res.unwrap();
+    let payment_hash = res.payment_hash;
+    node_0.wait_until_success(payment_hash).await;
+    let node_0_sent = old_node_0_balance1 - node_0.get_local_balance_from_channel(channels[0]);
+    let node_0_received = node_0.get_local_balance_from_channel(channels[2]) - old_node_0_balance2;
+    let fee = res.fee;
+    assert_eq!(
+        node_0_sent,
+        node_0_received + fee,
+        "node_0 balance should be changed by fee only"
+    );
+}
+
+#[tokio::test]
 async fn test_send_payment_with_more_capacity_for_payself() {
     init_tracing();
 
