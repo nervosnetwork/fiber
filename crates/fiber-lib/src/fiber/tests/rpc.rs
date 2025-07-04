@@ -940,3 +940,44 @@ async fn test_rpc_auth_with_wrong_permission() {
     assert!(rpc_res.is_err());
     assert!(rpc_res.unwrap_err().to_string().contains("Unauthorized"));
 }
+
+#[tokio::test]
+async fn test_rpc_auth_with_fixed_token() {
+    const PUBLIC_KEY: &str =
+        "ed25519/17b172749be74276f0ed35a5d0685752684a3c5722114bba447a2f301136db79";
+    const PRIVATE_KEY: &str =
+        "ed25519-private/89d6c88919e5ca326fbb8d1cbef406df08c0620575376651d53008762dc81f45";
+
+    let mut rpc_config = rpc_config();
+    rpc_config.biscuit_public_key = Some(PUBLIC_KEY.to_string());
+
+    let pk = PrivateKey::from_str(PRIVATE_KEY).unwrap();
+    let auth_root = KeyPair::from(&pk);
+
+    // sign a token with read node permission
+    let token = {
+        let biscuit = biscuit!(
+            r#"
+                read("peers");
+    "#
+        )
+        .build(&auth_root)
+        .unwrap();
+
+        biscuit.to_vec().unwrap()
+    };
+
+    let mut node_0 = NetworkNode::new_with_config(
+        NetworkNodeConfigBuilder::new()
+            .node_name(Some("node-0".to_string()))
+            .base_dir_prefix("test-fnn-node-0-")
+            .rpc_config(Some(rpc_config))
+            .build(),
+    )
+    .await;
+
+    node_0.set_auth_token(token);
+
+    let rpc_res: ListPeersResult = node_0.send_rpc_request("list_peers", ()).await.unwrap();
+    assert_eq!(rpc_res.peers.len(), 0);
+}
