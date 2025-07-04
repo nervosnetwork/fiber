@@ -62,7 +62,7 @@ pub mod server {
     use std::collections::HashMap;
     use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
     use std::sync::Arc;
-    use tokio::net::TcpSocket;
+    use tokio::net::TcpListener;
     use tokio::sync::RwLock;
     use tower::Service;
 
@@ -104,26 +104,7 @@ pub mod server {
         auth: Option<BiscuitAuth>,
         methods: impl Into<Methods>,
     ) -> Result<(ServerHandle, SocketAddr)> {
-        let addr: SocketAddr = addr.parse().expect("valid address");
-        let socket = if addr.is_ipv6() {
-            TcpSocket::new_v6()
-        } else {
-            TcpSocket::new_v4()
-        }
-        .expect("new socket");
-
-        #[cfg(debug_assertions)]
-        {
-            // Set reuse address and reuse port,
-            // so that we can restart the server without waiting for the port to be released.
-            // it will avoid the error: "Address already in use" in CI.
-            socket.set_reuseaddr(true).expect("set reuse address");
-            #[cfg(all(unix, not(any(target_os = "solaris", target_os = "illumos"))))]
-            socket.set_reuseport(true).expect("set reuse port");
-        }
-
-        socket.bind(addr).expect("bind socket to address");
-        let listener = socket.listen(4096).expect("listen socket at the port");
+        let listener = TcpListener::bind(addr).await?;
         let listen_addr = listener.local_addr().expect("get local address");
 
         // From this example
@@ -333,6 +314,7 @@ pub mod server {
             }
         }
 
+        tracing::debug!("starting listen RPC addr {:?}", &listening_addr);
         let (handle, addr) = start_server(listening_addr, auth, modules).await?;
         Ok((handle, addr))
     }
