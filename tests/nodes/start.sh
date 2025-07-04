@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 export SHELLOPTS
-export RUST_BACKTRACE=full RUST_LOG=info,fnn=debug,fnn::cch::actor::tracker=off,fnn::fiber::gossip=off,fnn::fiber::graph=off
+export RUST_BACKTRACE=full RUST_LOG=debug
 
 should_remove_old_state="${REMOVE_OLD_STATE:-}"
 should_clean_fiber_state="${REMOVE_OLD_FIBER:-}"
@@ -38,7 +38,9 @@ cargo build
 cd "$nodes_dir" || exit 1
 
 start() {
-    ../../target/debug/fnn "$@"
+    log_file="${2}.log"
+    echo "logging to ${log_file}"
+    ../../target/debug/fnn "$@" 2>&1 | tee "$log_file"
 }
 
 if [ "$#" -ne 1 ]; then
