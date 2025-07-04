@@ -582,7 +582,7 @@ where
         };
 
         match update_info {
-            Some(old_update) if old_update.timestamp > channel_update.timestamp => {
+            Some(old_update) if old_update.timestamp >= channel_update.timestamp => {
                 trace!(
                     "Ignoring outdated channel update {:?} for channel {:?}",
                     &channel_update,
@@ -623,7 +623,7 @@ where
         }
         let node_info = NodeInfo::from(node_announcement);
         match self.nodes.get(&node_info.node_id) {
-            Some(old_node) if old_node.timestamp > node_info.timestamp => {
+            Some(old_node) if old_node.timestamp >= node_info.timestamp => {
                 trace!(
                     "Ignoring outdated node announcement {:?} for node {:?}",
                     &node_info,
@@ -1568,7 +1568,7 @@ pub trait NetworkGraphStateStore {
 }
 
 /// The status of a payment, will update as the payment progresses.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Copy)]
 pub enum PaymentSessionStatus {
     /// initial status, payment session is created, no HTLC is sent
     Created,

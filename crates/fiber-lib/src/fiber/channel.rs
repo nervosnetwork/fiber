@@ -1,3 +1,4 @@
+use crate::fiber::fee::check_open_channel_parameters;
 #[cfg(any(debug_assertions, feature = "bench"))]
 use crate::fiber::network::DebugEvent;
 use crate::fiber::network::PaymentCustomRecords;
@@ -2405,7 +2406,15 @@ where
                     self.network.clone(),
                 );
 
-                channel.check_open_channel_parameters()?;
+                check_open_channel_parameters(
+                    &channel.funding_udt_type_script,
+                    &channel.local_shutdown_script,
+                    channel.local_reserved_ckb_amount,
+                    channel.funding_fee_rate,
+                    channel.commitment_fee_rate,
+                    channel.commitment_delay_epoch,
+                    channel.local_constraints.max_tlc_number_in_flight,
+                )?;
 
                 let channel_flags = if public {
                     ChannelFlags::PUBLIC
@@ -2572,14 +2581,13 @@ where
         _myself: ActorRef<Self::Msg>,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
+        // ignore send message failure here, because network actor may already be stopped.
         if let Some(outpoint) = state.get_funding_transaction_outpoint() {
-            self.network
-                .send_message(NetworkActorMessage::new_event(
-                    NetworkActorEvent::OwnedChannelUpdateEvent(
-                        super::graph::OwnedChannelUpdateEvent::Down(outpoint),
-                    ),
-                ))
-                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+            let _ = self.network.send_message(NetworkActorMessage::new_event(
+                NetworkActorEvent::OwnedChannelUpdateEvent(
+                    super::graph::OwnedChannelUpdateEvent::Down(outpoint),
+                ),
+            ));
         }
         let stop_reason = match state.state {
             ChannelState::Closed(flags) => match flags {
@@ -2589,11 +2597,14 @@ where
             },
             _ => StopReason::PeerDisConnected,
         };
-        self.network
-            .send_message(NetworkActorMessage::new_event(
-                NetworkActorEvent::ChannelActorStopped(state.get_id(), stop_reason),
-            ))
-            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+        debug!(
+            "ChannelActor stopped: {:?} with reason: {:?}",
+            state.get_id(),
+            stop_reason
+        );
+        let _ = self.network.send_message(NetworkActorMessage::new_event(
+            NetworkActorEvent::ChannelActorStopped(state.get_id(), stop_reason),
+        ));
         Ok(())
     }
 }
@@ -3530,17 +3541,17 @@ pub struct ChannelTlcInfo {
     // Whether this channel is enabled for TLC forwarding or not.
     pub enabled: bool,
 
-    // The fee rate for tlc transfers. We only have these values set when
+    // The fee rate for TLC transfers. We only have these values set when
     // this is a public channel. Both sides may set this value differently.
-    // This is a fee that is paid by the sender of the tlc.
+    // This is a fee that is paid by the sender of the TLC.
     // The detailed calculation for the fee of forwarding tlcs is
     // `fee = round_above(tlc_fee_proportional_millionths * tlc_value / 1,000,000)`.
     pub tlc_fee_proportional_millionths: u128,
 
-    // The expiry delta timestamp, in milliseconds, for the tlc.
+    // The expiry delta timestamp, in milliseconds, for the TLC.
     pub tlc_expiry_delta: u64,
 
-    /// The minimal tcl value we can receive in relay tlc
+    /// The minimal TLC value we can receive in relay TLC
     pub tlc_minimum_value: u128,
 }
 
@@ -4433,80 +4444,6 @@ impl ChannelActorState {
             network: Some(network),
             scheduled_channel_update_handle: None,
         }
-    }
-
-    // TODO: this fn is duplicated with NetworkActorState::check_open_channel_parameters, but is not easy to refactor, just keep it for now.
-    fn check_open_channel_parameters(&self) -> ProcessingChannelResult {
-        let udt_type_script = &self.funding_udt_type_script;
-
-        // reserved_ckb_amount
-        let occupied_capacity =
-            occupied_capacity(&self.local_shutdown_script, udt_type_script)?.as_u64();
-        if self.local_reserved_ckb_amount < occupied_capacity {
-            return Err(ProcessingChannelError::InvalidParameter(format!(
-                "Reserved CKB amount {} is less than {}",
-                self.local_reserved_ckb_amount, occupied_capacity,
-            )));
-        }
-
-        // funding_fee_rate
-        if self.funding_fee_rate < DEFAULT_FEE_RATE {
-            return Err(ProcessingChannelError::InvalidParameter(format!(
-                "Funding fee rate is less than {}",
-                DEFAULT_FEE_RATE,
-            )));
-        }
-
-        // commitment_fee_rate
-        if self.commitment_fee_rate < DEFAULT_COMMITMENT_FEE_RATE {
-            return Err(ProcessingChannelError::InvalidParameter(format!(
-                "Commitment fee rate is less than {}",
-                DEFAULT_COMMITMENT_FEE_RATE,
-            )));
-        }
-        let commitment_fee = calculate_commitment_tx_fee(self.commitment_fee_rate, udt_type_script);
-        let reserved_fee = self.local_reserved_ckb_amount - occupied_capacity;
-        if commitment_fee * 2 > reserved_fee {
-            return Err(ProcessingChannelError::InvalidParameter(format!(
-                "Commitment fee {} which calculated by commitment fee rate {} is larger than half of reserved fee {}",
-                commitment_fee, self.commitment_fee_rate, reserved_fee
-            )));
-        }
-
-        // commitment_delay_epoch
-        let epoch = EpochNumberWithFraction::from_full_value_unchecked(self.commitment_delay_epoch);
-        if !epoch.is_well_formed() {
-            return Err(ProcessingChannelError::InvalidParameter(format!(
-                "Commitment delay epoch {} is not a valid value",
-                self.commitment_delay_epoch,
-            )));
-        }
-
-        let min = EpochNumberWithFraction::new(MIN_COMMITMENT_DELAY_EPOCHS, 0, 1);
-        if epoch < min {
-            return Err(ProcessingChannelError::InvalidParameter(format!(
-                "Commitment delay epoch {} is less than the minimal value {}",
-                epoch, min
-            )));
-        }
-
-        let max = EpochNumberWithFraction::new(MAX_COMMITMENT_DELAY_EPOCHS, 0, 1);
-        if epoch > max {
-            return Err(ProcessingChannelError::InvalidParameter(format!(
-                "Commitment delay epoch {} is greater than the maximal value {}",
-                epoch, max
-            )));
-        }
-
-        // max_tlc_number_in_flight
-        if self.local_constraints.max_tlc_number_in_flight > SYS_MAX_TLC_NUMBER_IN_FLIGHT {
-            return Err(ProcessingChannelError::InvalidParameter(format!(
-                "Local max TLC number in flight {} is greater than the system maximal value {}",
-                self.local_constraints.max_tlc_number_in_flight, SYS_MAX_TLC_NUMBER_IN_FLIGHT
-            )));
-        }
-
-        Ok(())
     }
 
     fn check_accept_channel_parameters(&self) -> Result<(), ProcessingChannelError> {
