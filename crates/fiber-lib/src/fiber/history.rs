@@ -39,6 +39,12 @@ pub enum Direction {
     Backward,
 }
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SentNode {
+    Node1,
+    Node2,
+}
+
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub(crate) struct InternalPairResult {
     pub(crate) success: bool,
@@ -376,6 +382,12 @@ where
         }
     }
 
+    pub(crate) fn remove_channel_history(&mut self, channel_outpoint: &OutPoint) {
+        self.store.remove_channel_history(channel_outpoint);
+        self.inner
+            .retain(|(outpoint, _), _| outpoint != channel_outpoint);
+    }
+
     pub(crate) fn apply_pair_result(
         &mut self,
         channel: OutPoint,
@@ -582,7 +594,7 @@ where
         if fail_amount == success_amount {
             // if the graph has latest information
             // we don't continue to calculate the probability
-            if amount < capacity {
+            if amount <= capacity {
                 return 1.0;
             }
             return 0.0;

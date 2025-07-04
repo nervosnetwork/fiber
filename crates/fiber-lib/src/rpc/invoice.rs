@@ -10,6 +10,7 @@ use jsonrpsee::{
     core::async_trait, proc_macros::rpc, types::error::CALL_EXECUTION_FAILED_CODE,
     types::ErrorObjectOwned,
 };
+use rand::Rng;
 use secp256k1::{PublicKey, Secp256k1, SecretKey};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
@@ -18,7 +19,7 @@ use tentacle::secio::SecioKeyPair;
 
 /// The parameter struct for generating a new invoice.
 #[serde_as]
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Default)]
 pub struct NewInvoiceParams {
     /// The amount of the invoice.
     #[serde_as(as = "U128Hex")]
@@ -41,9 +42,11 @@ pub struct NewInvoiceParams {
     pub udt_type_script: Option<Script>,
     /// The hash algorithm of the invoice.
     pub hash_algorithm: Option<HashAlgorithm>,
+    /// Whether allow payment to use MPP
+    pub allow_mpp: Option<bool>,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct InvoiceResult {
     /// The encoded invoice address.
     pub invoice_address: String,
@@ -180,6 +183,13 @@ where
         };
         if let Some(fallback_address) = params.fallback_address.clone() {
             invoice_builder = invoice_builder.fallback_address(fallback_address);
+        };
+        if let Some(allow_mpp) = params.allow_mpp {
+            let mut rng = rand::thread_rng();
+            let payment_secret: [u8; 32] = rng.gen();
+            invoice_builder = invoice_builder
+                .allow_mpp(allow_mpp)
+                .payment_secret(payment_secret.into());
         };
         if let Some(final_expiry_delta) = params.final_expiry_delta {
             if final_expiry_delta < MIN_TLC_EXPIRY_DELTA {

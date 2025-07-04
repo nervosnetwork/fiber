@@ -1,5 +1,6 @@
 use super::errors::VerificationError;
 use super::utils::*;
+use crate::fiber::features::FeatureVector;
 use crate::fiber::gen::invoice::{self as gen_invoice, *};
 use crate::fiber::hash_algorithm::HashAlgorithm;
 use crate::fiber::serde_utils::{duration_hex, EntityHex, U128Hex, U64Hex};
@@ -56,13 +57,14 @@ impl Display for CkbInvoiceStatus {
 }
 
 /// The currency of the invoice, can also used to represent the CKB network chain.
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize, Default)]
 pub enum Currency {
     /// The mainnet currency of CKB.
     Fibb,
     /// The testnet currency of the CKB network.
     Fibt,
     /// The devnet currency of the CKB network.
+    #[default]
     Fibd,
 }
 
@@ -130,9 +132,10 @@ pub enum Attribute {
     PayeePublicKey(PublicKey),
     /// The hash algorithm of the invoice
     HashAlgorithm(HashAlgorithm),
-    #[serde(with = "U64Hex")]
     /// The feature flags of the invoice
-    Feature(u64),
+    Feature(FeatureVector),
+    /// The payment secret of the invoice
+    PaymentSecret(Hash256),
 }
 
 /// The metadata of the invoice
@@ -344,6 +347,14 @@ impl CkbInvoice {
     );
     attr_getter!(fallback_address, FallbackAddr, String);
     attr_getter!(hash_algorithm, HashAlgorithm, HashAlgorithm);
+    attr_getter!(payment_secret, PaymentSecret, Hash256);
+
+    pub fn allow_mpp(&self) -> bool {
+        self.data
+            .attrs
+            .iter()
+            .any(|attr| matches!(attr, Attribute::Feature(feature) if feature.supports_basic_mpp()))
+    }
 }
 
 /// Recoverable signature
@@ -515,9 +526,9 @@ impl From<Attribute> for InvoiceAttr {
             Attribute::FallbackAddr(value) => InvoiceAttrUnion::FallbackAddr(
                 FallbackAddr::new_builder().value(value.pack()).build(),
             ),
-            Attribute::Feature(value) => {
-                InvoiceAttrUnion::Feature(Feature::new_builder().value(value.pack()).build())
-            }
+            Attribute::Feature(value) => InvoiceAttrUnion::Feature(
+                Feature::new_builder().value(value.bytes().pack()).build(),
+            ),
             Attribute::UdtScript(script) => {
                 InvoiceAttrUnion::UdtScript(UdtScript::new_builder().value(script.0).build())
             }
@@ -529,6 +540,11 @@ impl From<Attribute> for InvoiceAttr {
             Attribute::HashAlgorithm(hash_algorithm) => InvoiceAttrUnion::HashAlgorithm(
                 gen_invoice::HashAlgorithm::new_builder()
                     .value(Byte::new(hash_algorithm as u8))
+                    .build(),
+            ),
+            Attribute::PaymentSecret(payment_secret) => InvoiceAttrUnion::PaymentSecret(
+                PaymentSecret::new_builder()
+                    .value(payment_secret.into())
                     .build(),
             ),
         };
@@ -561,7 +577,9 @@ impl From<InvoiceAttr> for Attribute {
                     String::from_utf8(value).expect("decode utf8 string from bytes"),
                 )
             }
-            InvoiceAttrUnion::Feature(x) => Attribute::Feature(x.value().unpack()),
+            InvoiceAttrUnion::Feature(x) => {
+                Attribute::Feature(FeatureVector::from(x.value().unpack()))
+            }
             InvoiceAttrUnion::UdtScript(x) => Attribute::UdtScript(CkbScript(x.value())),
             InvoiceAttrUnion::PayeePublicKey(x) => {
                 let value: Vec<u8> = x.value().unpack();
@@ -575,6 +593,7 @@ impl From<InvoiceAttr> for Attribute {
                 let hash_algorithm = value.try_into().unwrap_or_default();
                 Attribute::HashAlgorithm(hash_algorithm)
             }
+            InvoiceAttrUnion::PaymentSecret(x) => Attribute::PaymentSecret(x.value().into()),
         }
     }
 }
@@ -645,11 +664,36 @@ impl InvoiceBuilder {
         self.add_attr(Attribute::HashAlgorithm(algorithm))
     }
 
+    pub fn payment_secret(self, payment_secret: Hash256) -> Self {
+        self.add_attr(Attribute::PaymentSecret(payment_secret))
+    }
+
     attr_setter!(description, Description, String);
     attr_setter!(payee_pub_key, PayeePublicKey, PublicKey);
     attr_setter!(expiry_time, ExpiryTime, Duration);
     attr_setter!(fallback_address, FallbackAddr, String);
     attr_setter!(final_expiry_delta, FinalHtlcMinimumExpiryDelta, u64);
+
+    pub fn allow_mpp(self, value: bool) -> Self {
+        let mut feature_vector = self
+            .attrs
+            .iter()
+            .find_map(|attr| {
+                if let Attribute::Feature(feature) = attr {
+                    Some(feature.clone())
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_default();
+
+        if value {
+            feature_vector.set_basic_mpp_optional();
+        } else {
+            feature_vector.unset_basic_mpp_optional();
+        }
+        self.add_attr(Attribute::Feature(feature_vector))
+    }
 
     pub fn build(self) -> Result<CkbInvoice, InvoiceError> {
         let preimage = self.payment_preimage;
