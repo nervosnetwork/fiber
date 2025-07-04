@@ -150,7 +150,7 @@ Add the public key to your Fiber configuration file (e.g., `config.yml`) under t
 ```yaml
 rpc:
   # ... other rpc settings
-  biscuit_public_key: "ed25519/17b172749be74276f0ed35a5d0685752684a3c5722114bba447a2f301136db79" # Your hex-encoded public key
+  biscuit_public_key: "ed25519/17b172749be74276f0ed35a5d0685752684a3c5722114bba447a2f301136db79" # Your ed25519 public key string
 ```
 
 #### Using Command-Line Arguments
@@ -229,7 +229,7 @@ The file `crates/fiber-lib/src/fiber/tests/rpc.rs` contains integration-style te
 *   `test_rpc_auth_with_invalid_token`: Tests that a token signed by an incorrect private key is rejected.
 *   `test_rpc_auth_with_wrong_permission`: Shows that a valid token with insufficient permissions is correctly denied access.
 
-[Link to file: `crates/fiber-lib/src/fiber/tests/rpc.rs`](crates/fiber-lib/src/fiber/tests/rpc.rs)
+[Link to file: `crates/fiber-lib/src/fiber/tests/rpc.rs`](../crates/fiber-lib/src/fiber/tests/rpc.rs)
 
 ### b. Unit Tests for Authorization Logic
 
