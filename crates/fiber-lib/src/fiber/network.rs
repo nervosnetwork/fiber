@@ -53,6 +53,7 @@ use super::channel::{
     ShuttingDownFlags, StopReason, DEFAULT_MAX_TLC_VALUE_IN_FLIGHT, MAX_TLC_NUMBER_IN_FLIGHT,
 };
 use super::config::{AnnouncedNodeName, MIN_TLC_EXPIRY_DELTA};
+use super::features::FeatureVector;
 use super::gossip::{GossipActorMessage, GossipMessageStore, GossipMessageUpdates};
 use super::graph::{
     NetworkGraph, NetworkGraphStateStore, OwnedChannelUpdateEvent, RouterHop, SessionRoute,
@@ -60,8 +61,8 @@ use super::graph::{
 use super::key::blake2b_hash_with_salt;
 use super::types::{
     BroadcastMessageWithTimestamp, EcdsaSignature, FiberMessage, ForwardTlcResult, GossipMessage,
-    Hash256, NodeAnnouncement, OpenChannel, PaymentHopData, Privkey, Pubkey, RemoveTlcFulfill,
-    RemoveTlcReason, TlcErr, TlcErrData, TlcErrorCode,
+    Hash256, Init, NodeAnnouncement, OpenChannel, PaymentHopData, Privkey, Pubkey,
+    RemoveTlcFulfill, RemoveTlcReason, TlcErr, TlcErrData, TlcErrorCode,
 };
 use super::{
     FiberConfig, InFlightCkbTxActor, InFlightCkbTxActorArguments, InFlightCkbTxActorMessage,
@@ -114,6 +115,9 @@ const MAINTAINING_CONNECTIONS_INTERVAL: Duration = Duration::from_secs(3600);
 const CHECK_CHANNELS_INTERVAL: Duration = Duration::from_secs(3); // use a short interval for debugging build
 #[cfg(not(debug_assertions))]
 const CHECK_CHANNELS_INTERVAL: Duration = Duration::from_secs(60);
+
+// The duration for which we will check peer init messages.
+const CHECK_PEER_INIT_INTERVAL: Duration = Duration::from_secs(20);
 
 // While creating a network graph from the gossip messages, we will load current gossip messages
 // in the store and process them. We will load all current messages and get the latest cursor.
@@ -180,6 +184,7 @@ pub struct NodeInfoResponse {
     pub node_name: Option<AnnouncedNodeName>,
     pub node_id: Pubkey,
     pub addresses: Vec<MultiAddr>,
+    pub features: FeatureVector,
     pub chain_hash: Hash256,
     pub open_channel_auto_accept_min_ckb_funding_amount: u64,
     pub auto_accept_channel_ckb_funding_amount: u64,
@@ -225,6 +230,8 @@ pub enum NetworkActorCommand {
     MaintainConnections,
     // Check all channels and see if we need to force close any of them or settle down tlc with preimage.
     CheckChannels,
+    // Check peer send us Init message in a expected time, otherwise disconnect with the peer.
+    CheckPeerInit(PeerId),
     // For internal use and debugging only. Most of the messages requires some
     // changes to local state. Even if we can send a message to a peer, some
     // part of the local state is not changed.
@@ -849,11 +856,15 @@ where
 
     pub async fn handle_peer_message(
         &self,
+        myself: ActorRef<NetworkActorMessage>,
         state: &mut NetworkActorState<S>,
         peer_id: PeerId,
         message: FiberMessage,
     ) -> crate::Result<()> {
         match message {
+            FiberMessage::Init(init_message) => {
+                state.on_init_msg(myself, peer_id, init_message).await?;
+            }
             // We should process OpenChannel message here because there is no channel corresponding
             // to the channel id in the message yet.
             FiberMessage::ChannelInitialization(open_channel) => {
@@ -901,7 +912,7 @@ where
                 let found = state
                     .peer_session_map
                     .get(&peer_id)
-                    .and_then(|(session, ..)| state.session_channels_map.get(session))
+                    .and_then(|peer| state.session_channels_map.get(&peer.session_id))
                     .is_some_and(|channels| channels.contains(&channel_id));
 
                 if !found {
@@ -1039,7 +1050,8 @@ where
                 }
             }
             NetworkActorEvent::FiberMessage(peer_id, message) => {
-                self.handle_peer_message(state, peer_id, message).await?
+                self.handle_peer_message(myself, state, peer_id, message)
+                    .await?
             }
             NetworkActorEvent::FundingTransactionPending(transaction, outpoint, channel_id) => {
                 state
@@ -1253,6 +1265,19 @@ where
                             .network
                             .send_message(NetworkActorMessage::new_command(
                                 NetworkActorCommand::ConnectPeer(addr.clone()),
+                            ))
+                            .expect(ASSUME_NETWORK_MYSELF_ALIVE);
+                    }
+                }
+            }
+            NetworkActorCommand::CheckPeerInit(peer_id) => {
+                // Check if the peer has sent Init message.
+                if let Some(session) = state.peer_session_map.get(&peer_id) {
+                    if session.features.is_none() {
+                        state
+                            .network
+                            .send_message(NetworkActorMessage::new_command(
+                                NetworkActorCommand::DisconnectPeer(peer_id.clone()),
                             ))
                             .expect(ASSUME_NETWORK_MYSELF_ALIVE);
                     }
@@ -1652,6 +1677,7 @@ where
                 let response = NodeInfoResponse {
                     node_name: state.node_name,
                     node_id: state.get_public_key(),
+                    features: state.features.clone(),
                     addresses: state.announced_addrs.clone(),
                     chain_hash: get_chain_hash(),
                     open_channel_auto_accept_min_ckb_funding_amount: state
@@ -2242,7 +2268,7 @@ pub struct NetworkActorState<S> {
     // This immutable attribute is placed here because we need to create it in
     // the pre_start function.
     control: ServiceAsyncControl,
-    peer_session_map: HashMap<PeerId, (SessionId, SessionType)>,
+    peer_session_map: HashMap<PeerId, Peer>,
     session_channels_map: HashMap<SessionId, HashSet<Hash256>>,
     channels: HashMap<Hash256, ActorRef<ChannelActorMessage>>,
     ckb_txs_in_flight: HashMap<Hash256, ActorRef<InFlightCkbTxActorMessage>>,
@@ -2271,6 +2297,15 @@ pub struct NetworkActorState<S> {
     channel_subscribers: ChannelSubscribers,
     max_inbound_peers: usize,
     min_outbound_peers: usize,
+
+    // The features of the node, used to indicate the capabilities of the node.
+    features: FeatureVector,
+}
+
+pub(crate) struct Peer {
+    pub session_id: SessionId,
+    pub session_type: SessionType,
+    pub features: Option<FeatureVector>,
 }
 
 #[serde_as]
@@ -2453,6 +2488,25 @@ where
             max_tlc_value_in_flight,
             max_tlc_number_in_flight,
         } = open_channel;
+
+        if let Some(Peer {
+            features: Some(peer_features),
+            ..
+        }) = self.peer_session_map.get(&peer_id)
+        {
+            // check peer features
+            if !self.features.compatible_with(peer_features) {
+                return Err(ProcessingChannelError::InvalidParameter(format!(
+                    "Peer {:?} features {:?} are not compatible with our features {:?}",
+                    &peer_id, peer_features, self.features
+                )));
+            }
+        } else {
+            return Err(ProcessingChannelError::InvalidParameter(format!(
+                "Peer {:?}'s feature not found, waiting for peer to send Init message",
+                &peer_id
+            )));
+        }
 
         let remote_pubkey =
             self.get_peer_pubkey(&peer_id)
@@ -2762,20 +2816,20 @@ where
     }
 
     fn get_peer_session(&self, peer_id: &PeerId) -> Option<SessionId> {
-        self.peer_session_map.get(peer_id).map(|s| s.0)
+        self.peer_session_map.get(peer_id).map(|s| s.session_id)
     }
 
     fn inbound_peer_sessions(&self) -> Vec<SessionId> {
         self.peer_session_map
             .values()
-            .filter_map(|s| (s.1 == SessionType::Inbound).then_some(s.0))
+            .filter_map(|s| (s.session_type == SessionType::Inbound).then_some(s.session_id))
             .collect()
     }
 
     fn num_of_outbound_peers(&self) -> usize {
         self.peer_session_map
             .values()
-            .filter(|s| s.1 == SessionType::Outbound)
+            .filter(|s| s.session_type == SessionType::Outbound)
             .count()
     }
 
@@ -2796,7 +2850,7 @@ where
         self.peer_session_map
             .values()
             .take(n)
-            .map(|s| s.0)
+            .map(|s| s.session_id)
             .collect()
     }
 
@@ -2963,9 +3017,14 @@ where
         remote_pubkey: Pubkey,
         session: &SessionContext,
     ) {
-        let store = self.store.clone();
-        self.peer_session_map
-            .insert(remote_peer_id.clone(), (session.id, session.ty));
+        self.peer_session_map.insert(
+            remote_peer_id.clone(),
+            Peer {
+                session_id: session.id,
+                session_type: session.ty,
+                features: None,
+            },
+        );
         if self
             .state_to_be_persisted
             .save_peer_pubkey(remote_peer_id.clone(), remote_pubkey)
@@ -2991,16 +3050,26 @@ where
             );
         }
 
-        for channel_id in store.get_active_channel_ids_by_peer(remote_peer_id) {
-            if let Err(e) = self.reestablish_channel(remote_peer_id, channel_id).await {
-                error!("Failed to reestablish channel {:x}: {:?}", &channel_id, &e);
-            }
-        }
+        // send Init message to the peer
+        self.send_fiber_message_to_peer(
+            remote_peer_id,
+            FiberMessage::init(Init {
+                features: self.features.clone(),
+                chain_hash: get_chain_hash(),
+            }),
+        )
+        .await
+        .expect("send Init message to peer must succeed");
+
+        let remote_peer_id = remote_peer_id.clone();
+        self.network.send_after(CHECK_PEER_INIT_INTERVAL, move || {
+            NetworkActorMessage::new_command(NetworkActorCommand::CheckPeerInit(remote_peer_id))
+        });
     }
 
     fn on_peer_disconnected(&mut self, id: &PeerId) {
-        if let Some(session) = self.peer_session_map.remove(id) {
-            if let Some(channel_ids) = self.session_channels_map.remove(&session.0) {
+        if let Some(peer) = self.peer_session_map.remove(id) {
+            if let Some(channel_ids) = self.session_channels_map.remove(&peer.session_id) {
                 for channel_id in channel_ids {
                     if let Some(channel) = self.channels.get(&channel_id) {
                         let _ = channel.send_message(ChannelActorMessage::Event(
@@ -3122,7 +3191,7 @@ where
     async fn on_channel_actor_stopped(&mut self, channel_id: Hash256, reason: StopReason) {
         // all check passed, now begin to remove from memory and DB
         self.channels.remove(&channel_id);
-        for (_peer_id, (session_id, _)) in self.peer_session_map.iter() {
+        for (_peer_id, Peer { session_id, .. }) in self.peer_session_map.iter() {
             if let Some(session_channels) = self.session_channels_map.get_mut(session_id) {
                 session_channels.remove(&channel_id);
             }
@@ -3161,6 +3230,52 @@ where
             self.pending_channels.remove(outpoint);
         }
         self.outpoint_channel_map.retain(|_, id| *id != channel_id);
+    }
+
+    pub async fn on_init_msg(
+        &mut self,
+        myself: ActorRef<NetworkActorMessage>,
+        peer_id: PeerId,
+        init_msg: Init,
+    ) -> Result<(), ProcessingChannelError> {
+        if !self.is_connected(&peer_id) {
+            return Err(ProcessingChannelError::InvalidParameter(format!(
+                "Peer {:?} is not connected",
+                &peer_id
+            )));
+        }
+
+        check_chain_hash(&init_msg.chain_hash).map_err(|e| {
+            self.network
+                .send_message(NetworkActorMessage::new_command(
+                    NetworkActorCommand::DisconnectPeer(peer_id.clone()),
+                ))
+                .expect(ASSUME_NETWORK_MYSELF_ALIVE);
+
+            error!(
+                "chain hash mismatch with peer {:?}: {:?}, disconnect now...",
+                &peer_id, e
+            );
+            ProcessingChannelError::InvalidParameter(e.to_string())
+        })?;
+
+        if let Some(info) = self.peer_session_map.get_mut(&peer_id) {
+            info.features = Some(init_msg.features);
+            debug_event!(myself, "PeerInit");
+
+            for channel_id in self.store.get_active_channel_ids_by_peer(&peer_id) {
+                if let Err(e) = self.reestablish_channel(&peer_id, channel_id).await {
+                    error!("Failed to reestablish channel {:x}: {:?}", &channel_id, &e);
+                }
+            }
+        } else {
+            return Err(ProcessingChannelError::InvalidParameter(format!(
+                "Peer {:?} session not found",
+                &peer_id
+            )));
+        }
+
+        Ok(())
     }
 
     pub async fn on_open_channel_msg(
@@ -3476,6 +3591,7 @@ where
         }
 
         let chain_actor = self.chain_actor.clone();
+        let features = config.gen_node_features();
 
         let mut state = NetworkActorState {
             store: self.store.clone(),
@@ -3508,6 +3624,7 @@ where
             channel_subscribers,
             max_inbound_peers: config.max_inbound_peers(),
             min_outbound_peers: config.min_outbound_peers(),
+            features,
         };
 
         let node_announcement = state.get_or_create_new_node_announcement_message();
