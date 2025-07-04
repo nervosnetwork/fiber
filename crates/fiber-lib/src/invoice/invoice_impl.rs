@@ -57,13 +57,14 @@ impl Display for CkbInvoiceStatus {
 }
 
 /// The currency of the invoice, can also used to represent the CKB network chain.
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize, Default)]
 pub enum Currency {
     /// The mainnet currency of CKB.
     Fibb,
     /// The testnet currency of the CKB network.
     Fibt,
     /// The devnet currency of the CKB network.
+    #[default]
     Fibd,
 }
 

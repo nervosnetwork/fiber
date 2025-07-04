@@ -19,6 +19,8 @@ use crate::fiber::ASSUME_NETWORK_ACTOR_ALIVE;
 use crate::gen_rand_sha256_hash;
 use crate::invoice::*;
 use crate::rpc::config::RpcConfig;
+use crate::rpc::invoice::InvoiceResult;
+use crate::rpc::invoice::NewInvoiceParams;
 use crate::rpc::server::start_rpc;
 use ckb_sdk::core::TransactionBuilder;
 use ckb_types::core::FeeRate;
@@ -874,6 +876,15 @@ impl NetworkNode {
             }
         }
         Ok(())
+    }
+
+    pub async fn gen_invoice(&self, new_invoice_params: NewInvoiceParams) -> InvoiceResult {
+        let invoice: InvoiceResult = self
+            .send_rpc_request("new_invoice", new_invoice_params)
+            .await
+            .unwrap();
+
+        invoice
     }
 
     pub async fn send_payment_keysend_to_self(

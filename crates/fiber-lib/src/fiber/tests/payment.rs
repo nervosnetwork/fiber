@@ -17,6 +17,7 @@ use crate::invoice::CkbInvoice;
 use crate::invoice::Currency;
 use crate::invoice::InvoiceBuilder;
 use crate::now_timestamp_as_millis_u64;
+use crate::rpc::invoice::NewInvoiceParams;
 use crate::tasks::cancel_tasks_and_wait_for_completion;
 use crate::test_utils::init_tracing;
 use crate::tests::test_utils::*;
@@ -479,51 +480,58 @@ async fn test_send_payment_for_pay_self_with_two_nodes() {
 #[tokio::test]
 async fn test_send_payment_for_pay_self_with_invoice() {
     init_tracing();
-    let (nodes, channels) = create_n_nodes_network(
+    let (nodes, channels) = create_n_nodes_network_with_params(
         &[
             (
                 (0, 1),
-                (
-                    MIN_RESERVED_CKB + 10000000000,
-                    MIN_RESERVED_CKB + 10000000000,
-                ),
+                ChannelParameters {
+                    public: true,
+                    node_a_funding_amount: MIN_RESERVED_CKB + 10000000000,
+                    node_b_funding_amount: MIN_RESERVED_CKB,
+                    ..Default::default()
+                },
             ),
             (
                 (1, 2),
-                (
-                    MIN_RESERVED_CKB + 10000000000,
-                    MIN_RESERVED_CKB + 10000000000,
-                ),
+                ChannelParameters {
+                    public: true,
+                    node_a_funding_amount: MIN_RESERVED_CKB + 10000000000,
+                    node_b_funding_amount: MIN_RESERVED_CKB,
+                    ..Default::default()
+                },
             ),
             (
                 (2, 0),
-                (
-                    MIN_RESERVED_CKB + 10000000000,
-                    MIN_RESERVED_CKB + 10000000000,
-                ),
+                ChannelParameters {
+                    public: true,
+                    node_a_funding_amount: MIN_RESERVED_CKB + 10000000000,
+                    node_b_funding_amount: MIN_RESERVED_CKB,
+                    ..Default::default()
+                },
             ),
         ],
         3,
+        true,
     )
     .await;
-    let [mut node_0, _node_1, _node_2] = nodes.try_into().expect("3 nodes");
+    let [node_0, _node_1, _node_2] = nodes.try_into().expect("3 nodes");
 
     let old_node_0_balance1 = node_0.get_local_balance_from_channel(channels[0]);
     let old_node_0_balance2 = node_0.get_local_balance_from_channel(channels[2]);
-    let preimage = gen_rand_sha256_hash();
-    let ckb_invoice = InvoiceBuilder::new(Currency::Fibd)
-        .amount(Some(100))
-        .payment_preimage(preimage)
-        .payee_pub_key(node_0.pubkey.into())
-        .build()
-        .expect("build invoice success");
 
-    node_0.insert_invoice(ckb_invoice.clone(), Some(preimage));
+    let invoice = node_0
+        .gen_invoice(NewInvoiceParams {
+            amount: 100,
+            description: Some("test invoice".to_string()),
+            expiry: None,
+            ..Default::default()
+        })
+        .await;
 
     // node_0 -> node_0 will be ok for pay_self with invoice
     let res = node_0
         .send_payment(SendPaymentCommand {
-            invoice: Some(ckb_invoice.to_string()),
+            invoice: Some(invoice.invoice_address),
             amount: None,
             keysend: None,
             allow_self_payment: true,
@@ -544,6 +552,52 @@ async fn test_send_payment_for_pay_self_with_invoice() {
         node_0_received + fee,
         "node_0 balance should be changed by fee only"
     );
+}
+
+#[tokio::test]
+async fn test_send_payment_with_normal_invoice_workflow() {
+    init_tracing();
+    let (nodes, _channels) = create_n_nodes_network_with_params(
+        &[(
+            (0, 1),
+            ChannelParameters {
+                public: true,
+                node_a_funding_amount: HUGE_CKB_AMOUNT,
+                node_b_funding_amount: HUGE_CKB_AMOUNT,
+                ..Default::default()
+            },
+        )],
+        2,
+        true,
+    )
+    .await;
+    let [node_0, node_1] = nodes.try_into().expect("2 nodes");
+
+    let invoice = node_1
+        .gen_invoice(NewInvoiceParams {
+            amount: 1000,
+            description: Some("test invoice".to_string()),
+            expiry: None,
+            ..Default::default()
+        })
+        .await;
+
+    // node_0 -> node_1 will be ok for normal invoice
+    let res = node_0
+        .send_payment(SendPaymentCommand {
+            invoice: Some(invoice.invoice_address),
+            amount: None,
+            keysend: None,
+            allow_self_payment: false,
+            ..Default::default()
+        })
+        .await;
+
+    assert!(res.is_ok());
+
+    let res = res.unwrap();
+    let payment_hash = res.payment_hash;
+    node_0.wait_until_success(payment_hash).await;
 }
 
 #[tokio::test]

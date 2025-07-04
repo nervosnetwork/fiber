@@ -19,7 +19,7 @@ use tentacle::secio::SecioKeyPair;
 
 /// The parameter struct for generating a new invoice.
 #[serde_as]
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Default)]
 pub struct NewInvoiceParams {
     /// The amount of the invoice.
     #[serde_as(as = "U128Hex")]
@@ -46,7 +46,7 @@ pub struct NewInvoiceParams {
     pub allow_mpp: Option<bool>,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct InvoiceResult {
     /// The encoded invoice address.
     pub invoice_address: String,
