@@ -12,6 +12,7 @@ pub struct RpcConfig {
     #[arg(name = "RPC_LISTENING_ADDR", long = "rpc-listening-addr", env)]
     pub listening_addr: Option<String>,
 
+    #[default(None)]
     #[arg(name = "RPC_BISCUIT_PUBLIC_KEY", long = "rpc-biscuit-public-key", env)]
     pub biscuit_public_key: Option<String>,
 
