@@ -13,7 +13,7 @@ pub use fiber_v051::fiber::channel::PendingTlcs as OldPendingTlcs;
 pub use fiber_v051::fiber::channel::TlcInfo as OldTlcInfo;
 pub use fiber_v051::fiber::channel::TlcState as OldTlcState;
 pub use fiber_v051::fiber::graph::PaymentSession as OldPaymentSession;
-pub use fiber_v051::fiber::graph::PaymentSessionStatus as OldPaymentSessionStatus;
+pub use fiber_v051::fiber::graph::PaymentStatus as OldPaymentStatus;
 pub use fiber_v051::fiber::graph::SessionRoute as OldSessionRoute;
 pub use fiber_v051::fiber::graph::SessionRouteNode as OldSessionRouteNode;
 pub use fiber_v051::fiber::network::HopHint as OldHopHint;
@@ -26,7 +26,7 @@ pub use fiber_v061::fiber::channel::TlcInfo as NewTlcInfo;
 pub use fiber_v061::fiber::channel::TlcState as NewTlcState;
 pub use fiber_v061::fiber::graph::Attempt;
 pub use fiber_v061::fiber::graph::PaymentSession as NewPaymentSession;
-pub use fiber_v061::fiber::graph::PaymentSessionStatus as NewPaymentSessionStatus;
+pub use fiber_v061::fiber::graph::PaymentStatus as NewPaymentStatus;
 pub use fiber_v061::fiber::graph::SessionRoute as NewSessionRoute;
 pub use fiber_v061::fiber::graph::SessionRouteNode as NewSessionRouteNode;
 pub use fiber_v061::fiber::network::HopHint as NewHopHint;
@@ -101,12 +101,12 @@ fn convert_send_payment_data(request: OldPaymentData) -> NewPaymentData {
     serde_json::from_value(value).unwrap()
 }
 
-fn convert_payment_session_status(status: OldPaymentSessionStatus) -> NewPaymentSessionStatus {
+fn convert_payment_session_status(status: OldPaymentStatus) -> NewPaymentStatus {
     match status {
-        OldPaymentSessionStatus::Created => NewPaymentSessionStatus::Created,
-        OldPaymentSessionStatus::Inflight => NewPaymentSessionStatus::Inflight,
-        OldPaymentSessionStatus::Success => NewPaymentSessionStatus::Success,
-        OldPaymentSessionStatus::Failed => NewPaymentSessionStatus::Failed,
+        OldPaymentStatus::Created => NewPaymentStatus::Created,
+        OldPaymentStatus::Inflight => NewPaymentStatus::Inflight,
+        OldPaymentStatus::Success => NewPaymentStatus::Success,
+        OldPaymentStatus::Failed => NewPaymentStatus::Failed,
     }
 }
 

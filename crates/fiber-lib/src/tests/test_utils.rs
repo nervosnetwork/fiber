@@ -41,6 +41,7 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::net::SocketAddr;
+use std::time::Instant;
 use std::{
     env,
     ffi::OsStr,
@@ -83,6 +84,7 @@ use crate::{
 static RETAIN_VAR: &str = "TEST_TEMP_RETAIN";
 pub const MIN_RESERVED_CKB: u128 = 4200000000;
 pub const HUGE_CKB_AMOUNT: u128 = MIN_RESERVED_CKB + 1000000000000_u128;
+const DEFAULT_WAIT_UNTIL_TIME: u64 = 60; // seconds
 
 #[derive(Debug)]
 pub struct TempDir(ManuallyDrop<OldTempDir>);
@@ -460,6 +462,9 @@ pub(crate) async fn create_channel_with_nodes(
     let funding_tx_hash = funding_tx_outpoint.tx_hash().into();
     node_a.add_channel_tx(new_channel_id, funding_tx_hash);
     node_b.add_channel_tx(new_channel_id, funding_tx_hash);
+
+    wait_for_network_graph_update(node_a, 1).await;
+
     Ok((new_channel_id, funding_tx_hash))
 }
 
@@ -569,25 +574,7 @@ pub(crate) async fn create_n_nodes_network_with_params(
             assert!(matches!(res, TxStatus::Committed(..)));
         }
     }
-    // sleep for a while to make sure network graph is updated
-    for _ in 0..50 {
-        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-        if nodes[0].get_network_graph_channels().await.len() >= amounts.len() {
-            break;
-        }
-    }
-    let graph_channels = nodes[0].get_network_graph_channels().await;
-    if graph_channels.len() < amounts.len() {
-        use tracing::error;
-        error!(
-            "failed to sync all graph channels, expect {} got {}",
-            amounts.len(),
-            graph_channels.len()
-        );
-        for (i, chan) in graph_channels.into_iter().enumerate() {
-            error!(">>> channel {}: {:?}", i, chan);
-        }
-    }
+    wait_for_network_graph_update(&nodes[0], amounts.len()).await;
     (nodes, channels)
 }
 
@@ -985,47 +972,82 @@ impl NetworkNode {
             .collect::<Vec<_>>()
     }
 
-    pub async fn wait_until_success(&self, payment_hash: Hash256) {
-        loop {
+    async fn wait_until_status<F, E>(
+        &self,
+        payment_hash: Hash256,
+        check: F,
+        on_unexpected: E,
+        err_msg: &str,
+    ) where
+        F: Fn(PaymentStatus) -> bool,
+        E: Fn(PaymentStatus),
+    {
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_secs(DEFAULT_WAIT_UNTIL_TIME) {
             assert!(self.get_triggered_unexpected_events().await.is_empty());
             let status = self.get_payment_status(payment_hash).await;
-            if status == PaymentStatus::Success {
-                info!("Payment success: {:?}\n\n", payment_hash);
-                break;
-            } else if status == PaymentStatus::Failed {
-                error!("Unexpected payment failed: {:?}\n\n", payment_hash);
-                // report error
-                assert_eq!(status, PaymentStatus::Success);
+            if check(status) {
+                return;
             }
+            on_unexpected(status);
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
+        panic!(
+            "{}: {:?}, current status: {:?}",
+            err_msg,
+            payment_hash,
+            self.get_payment_status(payment_hash).await
+        );
+    }
+
+    pub async fn wait_until_success(&self, payment_hash: Hash256) {
+        self.wait_until_status(
+            payment_hash,
+            |status| status == PaymentStatus::Success,
+            |status| {
+                if status == PaymentStatus::Failed {
+                    error!("Unexpected payment failed: {:?}\n\n", payment_hash);
+                    assert_eq!(status, PaymentStatus::Success);
+                }
+            },
+            "Payment did not succeed within the expected time",
+        )
+        .await;
     }
 
     pub async fn wait_until_failed(&self, payment_hash: Hash256) {
-        loop {
-            assert!(self.get_triggered_unexpected_events().await.is_empty());
-            let status = self.get_payment_status(payment_hash).await;
-            if status == PaymentStatus::Failed {
-                info!("Payment failed: {:?}\n\n", payment_hash);
-                break;
-            } else if status == PaymentStatus::Success {
-                error!("Unexpected payment success: {:?}\n\n", payment_hash);
-                // report error
-                assert_eq!(status, PaymentStatus::Failed);
-            }
-            tokio::time::sleep(Duration::from_millis(500)).await;
-        }
+        self.wait_until_status(
+            payment_hash,
+            |status| status == PaymentStatus::Failed,
+            |status| {
+                if status == PaymentStatus::Success {
+                    error!("Payment success: {:?}\n\n", payment_hash);
+                    assert_eq!(status, PaymentStatus::Failed);
+                }
+            },
+            "Payment did not fail within the expected time",
+        )
+        .await;
     }
 
     pub async fn wait_until_created(&self, payment_hash: Hash256) {
-        loop {
-            assert!(self.get_triggered_unexpected_events().await.is_empty());
-            let status = self.get_payment_status(payment_hash).await;
-            if status != PaymentStatus::Created {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(500)).await;
-        }
+        self.wait_until_status(
+            payment_hash,
+            |status| status != PaymentStatus::Created,
+            |_status| {},
+            "Payment did not reach the created status within the expected time",
+        )
+        .await;
+    }
+
+    pub async fn wait_until_final_status(&self, payment_hash: Hash256) {
+        self.wait_until_status(
+            payment_hash,
+            |status| matches!(status, PaymentStatus::Success | PaymentStatus::Failed),
+            |_status| {},
+            "Payment did not reach final status within the expected time",
+        )
+        .await;
     }
 
     pub async fn node_info(&self) -> NodeInfoResponse {
@@ -1661,15 +1683,40 @@ pub async fn create_mock_chain_actor() -> ActorRef<CkbChainMessage> {
         .0
 }
 
-#[tokio::test]
-async fn test_connect_to_other_node() {
-    let mut node_a = NetworkNode::new().await;
-    let mut node_b = NetworkNode::new().await;
-    node_a.connect_to(&mut node_b).await;
+async fn wait_for_network_graph_update(node: &NetworkNode, channels: usize) {
+    // sleep for a while to make sure network graph is updated
+    for _ in 0..50 {
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        if node.get_network_graph_channels().await.len() >= channels {
+            break;
+        }
+    }
+    let graph_channels = node.get_network_graph_channels().await;
+    if graph_channels.len() < channels {
+        use tracing::error;
+        error!(
+            "failed to sync all graph channels, expect {} got {}",
+            channels,
+            graph_channels.len()
+        );
+        for (i, chan) in graph_channels.into_iter().enumerate() {
+            error!(">>> channel {}: {:?}", i, chan);
+        }
+    }
 }
 
-#[tokio::test]
-async fn test_restart_network_node() {
-    let mut node = NetworkNode::new().await;
-    node.restart().await;
+pub async fn wait_until_timeout<F: Fn() -> bool>(max_wait_time: u64, f: F) {
+    let start = tokio::time::Instant::now();
+    while !f() {
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        if start.elapsed().as_millis() > max_wait_time as u128 {
+            panic!("Wait timeout after {}ms", max_wait_time);
+        }
+    }
+}
+
+pub async fn wait_until<F: Fn() -> bool>(f: F) {
+    const MAX_WAIT_TIME: u64 = 120_000;
+
+    wait_until_timeout(MAX_WAIT_TIME, f).await;
 }

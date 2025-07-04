@@ -2095,16 +2095,16 @@ where
     async fn update_graph_with_tlc_fail(
         &self,
         network: &ActorRef<NetworkActorMessage>,
-        tcl_error_detail: &TlcErr,
+        tlc_error_detail: &TlcErr,
     ) {
-        let error_code = tcl_error_detail.error_code();
+        let error_code = tlc_error_detail.error_code();
         // https://github.com/lightning/bolts/blob/master/04-onion-routing.md#rationale-6
         // we now still update the graph, maybe we need to remove it later?
         if error_code.is_update() {
             if let Some(TlcErrData::ChannelFailed {
                 channel_update: Some(channel_update),
                 ..
-            }) = &tcl_error_detail.extra_data
+            }) = &tlc_error_detail.extra_data
             {
                 network
                     .send_message(NetworkActorMessage::new_command(
@@ -2115,11 +2115,11 @@ where
                     .expect(ASSUME_NETWORK_MYSELF_ALIVE);
             }
         }
-        match tcl_error_detail.error_code() {
+        match tlc_error_detail.error_code() {
             TlcErrorCode::PermanentChannelFailure
             | TlcErrorCode::ChannelDisabled
             | TlcErrorCode::UnknownNextPeer => {
-                let channel_outpoint = tcl_error_detail
+                let channel_outpoint = tlc_error_detail
                     .error_channel_outpoint()
                     .expect("expect channel outpoint");
                 let mut graph = self.network_graph.write().await;
@@ -2127,7 +2127,7 @@ where
                 graph.mark_channel_failed(&channel_outpoint);
             }
             TlcErrorCode::PermanentNodeFailure => {
-                let node_id = tcl_error_detail.error_node_id().expect("expect node id");
+                let node_id = tlc_error_detail.error_node_id().expect("expect node id");
                 let mut graph = self.network_graph.write().await;
                 graph.mark_node_failed(node_id);
             }
@@ -2649,14 +2649,6 @@ where
         state: &mut NetworkActorState<S>,
         payment_data: SendPaymentData,
     ) -> Result<SendPaymentResponse, Error> {
-        // for dry run, we only build the route and return the hops info,
-        // will not store the payment session and send the onion packet
-        if payment_data.dry_run {
-            let mut payment_session = PaymentSession::new(&self.store, payment_data, 0);
-            self.build_payment_routes(&mut payment_session).await?;
-            return Ok(payment_session.into());
-        }
-
         // initialize the payment session in db and begin the payment process lifecycle
         if let Some(payment_session) = self.store.get_payment_session(payment_data.payment_hash) {
             // we only allow retrying payment session with status failed
@@ -2676,8 +2668,20 @@ where
                         payment_data.payment_hash
                     )));
                 }
-                self.store.delete_attempts(payment_data.payment_hash);
+                if !payment_data.dry_run {
+                    self.store.delete_attempts(payment_data.payment_hash);
+                }
             }
+        }
+
+        // for dry run, we only build the route and return the hops info,
+        // will not store the payment session and send the onion packet
+        if payment_data.dry_run {
+            let mut payment_session = PaymentSession::new(&self.store, payment_data, 0);
+            debug!("now begin to build payment routes for dry run");
+            self.build_payment_routes(&mut payment_session).await?;
+            debug!("dry run payment session: {:?}", payment_session);
+            return Ok(payment_session.into());
         }
 
         let try_limit = if payment_data.allow_mpp() {
@@ -3878,7 +3882,16 @@ where
                 }
             },
             Some(actor) => {
-                actor.send_message(message).expect("channel actor alive");
+                // There is a possibility that the channel actor is not alive, but we assume it is
+                // alive for this moment. For example, in force shutdown case, the ChannelActor received
+                // ClosingTransactionConfirmed event then stopped after processing the message,
+                // NetworkActor will remove it from `channels` when receiving ChannelActorStopped from it,
+                // but at the same time, NetworkActor received another ClosingTransactionConfirmed,
+                // we will try to send another event message to the stopped ChannelActor here.
+                //
+                // In short, it's safer to ignore sending message failure from NetworkActor
+                // to ChannelActor, since NetworkActor is responsible for multiple channels and a lot of stuff.
+                let _ = actor.send_message(message);
             }
         }
     }
@@ -4165,6 +4178,7 @@ where
                     .expect(ASSUME_NETWORK_MYSELF_ALIVE);
             }
         }
+        debug_event!(myself, "network actor started");
         Ok(())
     }
 
@@ -4196,9 +4210,14 @@ where
 
     async fn post_stop(
         &self,
-        _myself: ActorRef<Self::Msg>,
+        myself: ActorRef<Self::Msg>,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
+        myself
+            .get_cell()
+            .stop_children_and_wait(Some("Network actor stopped".to_string()), None)
+            .await;
+
         if let Err(err) = state.control.close().await {
             error!("Failed to close tentacle service: {}", err);
         }
