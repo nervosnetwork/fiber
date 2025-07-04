@@ -2108,7 +2108,7 @@ dependencies = [
 [[package]]
 name = "fnn"
 version = "0.5.1"
-source = "git+https://github.com/nervosnetwork/fiber.git?branch=basic-mpp#19c5008252d5683333af694de6e966c207611c8a"
+source = "git+https://github.com/nervosnetwork/fiber.git?branch=basic-mpp#c19a0ef71525a5b69d14f55aa1c65daf289af72d"
 dependencies = [
  "aes-gcm",
  "anyhow",

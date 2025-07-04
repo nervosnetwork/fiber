@@ -13,7 +13,7 @@ pub use fiber_v051::fiber::channel::PendingTlcs as OldPendingTlcs;
 pub use fiber_v051::fiber::channel::TlcInfo as OldTlcInfo;
 pub use fiber_v051::fiber::channel::TlcState as OldTlcState;
 pub use fiber_v051::fiber::graph::PaymentSession as OldPaymentSession;
-pub use fiber_v051::fiber::graph::PaymentStatus as OldPaymentStatus;
+pub use fiber_v051::fiber::graph::PaymentSessionStatus as OldPaymentStatus;
 pub use fiber_v051::fiber::graph::SessionRoute as OldSessionRoute;
 pub use fiber_v051::fiber::graph::SessionRouteNode as OldSessionRouteNode;
 pub use fiber_v051::fiber::network::HopHint as OldHopHint;
@@ -25,6 +25,7 @@ pub use fiber_v061::fiber::channel::PendingTlcs as NewPendingTlcs;
 pub use fiber_v061::fiber::channel::TlcInfo as NewTlcInfo;
 pub use fiber_v061::fiber::channel::TlcState as NewTlcState;
 pub use fiber_v061::fiber::graph::Attempt;
+pub use fiber_v061::fiber::graph::AttemptStatus;
 pub use fiber_v061::fiber::graph::PaymentSession as NewPaymentSession;
 pub use fiber_v061::fiber::graph::PaymentStatus as NewPaymentStatus;
 pub use fiber_v061::fiber::graph::SessionRoute as NewSessionRoute;
@@ -101,6 +102,15 @@ fn convert_send_payment_data(request: OldPaymentData) -> NewPaymentData {
     serde_json::from_value(value).unwrap()
 }
 
+fn convert_payment_session_status_to_attempt_status(status: OldPaymentStatus) -> AttemptStatus {
+    match status {
+        OldPaymentStatus::Created => AttemptStatus::Created,
+        OldPaymentStatus::Inflight => AttemptStatus::Inflight,
+        OldPaymentStatus::Success => AttemptStatus::Success,
+        OldPaymentStatus::Failed => AttemptStatus::Failed,
+    }
+}
+
 fn convert_payment_session_status(status: OldPaymentStatus) -> NewPaymentStatus {
     match status {
         OldPaymentStatus::Created => NewPaymentStatus::Created,
@@ -145,14 +155,14 @@ fn convert_payment_session(session: OldPaymentSession) -> NewPaymentSession {
 
     let request = convert_send_payment_data(request);
     let route = convert_session_route(route);
-    let status = convert_payment_session_status(status);
+    let attempt_status = convert_payment_session_status_to_attempt_status(status.clone());
 
     let attempt = Attempt {
         id: 1,
         try_limit,
         tried_times: retried_times,
         hash: request.payment_hash,
-        status,
+        status: attempt_status,
         payment_hash: request.payment_hash,
         route,
         session_key,
@@ -162,6 +172,7 @@ fn convert_payment_session(session: OldPaymentSession) -> NewPaymentSession {
         last_error: last_error.clone(),
     };
 
+    let status = convert_payment_session_status(status);
     NewPaymentSession {
         request,
         last_error,
