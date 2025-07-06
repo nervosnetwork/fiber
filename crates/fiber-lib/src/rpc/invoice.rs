@@ -4,7 +4,6 @@
 //! For better separation of concerns, the actual invoice logic is implemented in the `invoice` module.
 //!
 use crate::fiber::config::MIN_TLC_EXPIRY_DELTA;
-use crate::fiber::features::FeatureVector;
 use crate::fiber::hash_algorithm::HashAlgorithm;
 use crate::fiber::serde_utils::{duration_hex, U128Hex, U64Hex};
 use crate::fiber::types::{Hash256, Privkey};
@@ -13,7 +12,6 @@ use crate::invoice::{
     Currency, InvoiceBuilder, InvoiceData as InternalInvoiceData, InvoiceSignature, InvoiceStore,
 };
 
-use crate::fiber::features::human_readable_featurevector;
 use crate::FiberConfig;
 use ckb_jsonrpc_types::Script;
 #[cfg(not(target_arch = "wasm32"))]
@@ -52,8 +50,7 @@ pub enum Attribute {
     /// The hash algorithm of the invoice
     HashAlgorithm(HashAlgorithm),
     /// The feature flags of the invoice
-    #[serde(with = "human_readable_featurevector")]
-    Feature(FeatureVector),
+    Feature(Vec<String>),
 }
 
 /// The metadata of the invoice
@@ -102,7 +99,9 @@ impl From<InternalAttribute> for Attribute {
             InternalAttribute::UdtScript(script) => Attribute::UdtScript(script),
             InternalAttribute::PayeePublicKey(pubkey) => Attribute::PayeePublicKey(pubkey),
             InternalAttribute::HashAlgorithm(alg) => Attribute::HashAlgorithm(alg),
-            InternalAttribute::Feature(feature) => Attribute::Feature(feature),
+            InternalAttribute::Feature(feature) => {
+                Attribute::Feature(feature.enabled_features_names())
+            }
         }
     }
 }

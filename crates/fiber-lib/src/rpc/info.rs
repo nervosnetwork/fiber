@@ -1,6 +1,5 @@
 use super::graph::UdtCfgInfos;
 use crate::ckb::CkbConfig;
-use crate::fiber::features::FeatureVector;
 use crate::fiber::serde_utils::U32Hex;
 use crate::fiber::{
     serde_utils::{U128Hex, U64Hex},
@@ -9,7 +8,6 @@ use crate::fiber::{
 };
 use crate::{handle_actor_call, log_and_error};
 use ckb_jsonrpc_types::Script;
-
 #[cfg(not(target_arch = "wasm32"))]
 use jsonrpsee::{
     core::async_trait,
@@ -34,8 +32,7 @@ pub struct NodeInfoResult {
     pub node_id: Pubkey,
 
     /// The features supported by the node.
-    #[serde_with("human_readable_featurevector")]
-    pub features: FeatureVector,
+    pub features: Vec<String>,
 
     /// The optional name of the node.
     pub node_name: Option<String>,
@@ -123,7 +120,7 @@ impl InfoRpcServer for InfoRpcServerImpl {
         handle_actor_call!(self.actor, message, ()).map(|response| NodeInfoResult {
             version,
             commit_hash,
-            features: response.features,
+            features: response.features.enabled_features_names(),
             node_id: response.node_id,
             node_name: response.node_name.map(|name| name.to_string()),
             addresses: response.addresses,
