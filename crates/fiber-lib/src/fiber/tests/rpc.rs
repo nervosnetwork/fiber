@@ -69,38 +69,54 @@ async fn test_rpc_basic() {
         .unwrap();
     assert_eq!(payment.payment_hash, payment_hash);
 
+    let new_invoice_params = NewInvoiceParams {
+        amount: 1000,
+        description: Some("test".to_string()),
+        currency: Currency::Fibd,
+        expiry: Some(322),
+        fallback_address: None,
+        final_expiry_delta: Some(900000 + 1234),
+        udt_type_script: Some(Script::default().into()),
+        payment_preimage: Hash256::default(),
+        hash_algorithm: Some(crate::fiber::hash_algorithm::HashAlgorithm::CkbHash),
+        allow_mpp: Some(true),
+    };
+
     // node0 generate a invoice
     let invoice_res: InvoiceResult = node_0
-        .send_rpc_request(
-            "new_invoice",
-            NewInvoiceParams {
-                amount: 1000,
-                description: Some("test".to_string()),
-                currency: Currency::Fibd,
-                expiry: Some(322),
-                fallback_address: None,
-                final_expiry_delta: Some(900000 + 1234),
-                udt_type_script: Some(Script::default().into()),
-                payment_preimage: Hash256::default(),
-                hash_algorithm: Some(crate::fiber::hash_algorithm::HashAlgorithm::CkbHash),
-                allow_mpp: None,
-            },
-        )
+        .send_rpc_request("new_invoice", new_invoice_params)
         .await
         .unwrap();
 
-    let invoice_payment_hash = invoice_res.invoice.payment_hash();
+    let ckb_invoice = invoice_res.invoice.clone();
+    let invoice_payment_hash = ckb_invoice.data.payment_hash;
+
     let get_invoice_res: InvoiceResult = node_0
         .send_rpc_request(
             "get_invoice",
             InvoiceParams {
-                payment_hash: *invoice_payment_hash,
+                payment_hash: invoice_payment_hash,
             },
         )
         .await
         .unwrap();
 
-    assert_eq!(get_invoice_res.invoice.payment_hash(), invoice_payment_hash);
+    assert_eq!(
+        get_invoice_res.invoice.data.payment_hash,
+        invoice_payment_hash
+    );
+
+    let raw_response = node_0
+        .send_rpc_request_raw(
+            "get_invoice",
+            InvoiceParams {
+                payment_hash: invoice_payment_hash,
+            },
+        )
+        .await
+        .unwrap();
+    eprintln!("Raw RPC response: {}", raw_response);
+    assert!(raw_response.to_string().contains("BASIC_MPP_OPTIONAL"));
 }
 
 #[tokio::test]

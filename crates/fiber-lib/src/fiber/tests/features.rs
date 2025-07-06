@@ -185,3 +185,19 @@ fn test_featuer_compatibility() {
     vector2.unset_gossip_queries_required();
     assert!(!vector.compatible_with(&vector2));
 }
+
+#[test]
+fn test_feature_serialize_and_deserialize() {
+    let mut vector = FeatureVector::new();
+    vector.set_gossip_queries_required();
+    vector.set_basic_mpp_optional();
+
+    let serialized = bincode::serialize(&vector).expect("Failed to serialize FeatureVector");
+    let deserialized: FeatureVector =
+        bincode::deserialize(&serialized).expect("Failed to deserialize FeatureVector");
+
+    assert_eq!(vector, deserialized);
+    assert!(deserialized.supports_gossip_queries());
+    assert!(deserialized.requires_gossip_queries());
+    assert!(deserialized.supports_basic_mpp());
+}

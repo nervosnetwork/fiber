@@ -79,7 +79,7 @@ pub mod feature_bits {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct FeatureVector {
     inner: Vec<u8>,
 }
@@ -190,5 +190,42 @@ impl fmt::Debug for FeatureVector {
         f.debug_struct("FeatureVector")
             .field("features", &self.enabled_features_names())
             .finish()
+    }
+}
+
+pub mod human_readable_featurevector {
+    use super::FeatureVector;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S>(fv: &FeatureVector, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        fv.enabled_features_names().serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<FeatureVector, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let names = Vec::<String>::deserialize(deserializer)?;
+        let mut fv = FeatureVector::new();
+        for name in names {
+            match name.as_str() {
+                "GOSSIP_QUERIES_REQUIRED" => fv.set_gossip_queries_required(),
+                "GOSSIP_QUERIES_OPTIONAL" => fv.set_gossip_queries_optional(),
+                "TLV_ONION_PAYLOAD_REQUIRED" => fv.set_tlv_onion_payload_required(),
+                "TLV_ONION_PAYLOAD_OPTIONAL" => fv.set_tlv_onion_payload_optional(),
+                "BASIC_MPP_REQUIRED" => fv.set_basic_mpp_required(),
+                "BASIC_MPP_OPTIONAL" => fv.set_basic_mpp_optional(),
+                unknown => {
+                    return Err(serde::de::Error::custom(format!(
+                        "Unknown feature name: {}",
+                        unknown
+                    )))
+                }
+            }
+        }
+        Ok(fv)
     }
 }
