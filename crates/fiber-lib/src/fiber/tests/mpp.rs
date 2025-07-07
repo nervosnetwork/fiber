@@ -4,6 +4,7 @@ use secp256k1::Secp256k1;
 use tracing::debug;
 
 use crate::{
+    create_n_nodes_network_with_params,
     fiber::{
         channel::{
             AddTlcCommand, ChannelActorStateStore, ChannelCommand, ChannelCommandWithId, TLCId,
@@ -17,6 +18,7 @@ use crate::{
     gen_rand_sha256_hash,
     invoice::{Currency, InvoiceBuilder},
     now_timestamp_as_millis_u64,
+    rpc::invoice::NewInvoiceParams,
     test_utils::{
         create_n_nodes_network, establish_channel_between_nodes, init_tracing, ChannelParameters,
         NetworkNode, MIN_RESERVED_CKB,
@@ -2912,4 +2914,133 @@ async fn test_send_mpp_three_channels_send_each_other_multiple_time() {
     dbg!(node_0_balance, node_1_balance);
     assert_eq!(node_0_balance, 1000 * 100000000);
     assert_eq!(node_1_balance, 0);
+}
+
+#[tokio::test]
+async fn test_send_payment_with_two_one_two_network() {
+    init_tracing();
+
+    // build a network with 8 nodes, and 9 channels
+    let (nodes, _channels) = create_n_nodes_network(
+        &[
+            (
+                (0, 1),
+                (MIN_RESERVED_CKB + 1100 * 100000000, MIN_RESERVED_CKB),
+            ),
+            (
+                (0, 2),
+                (MIN_RESERVED_CKB + 1100 * 100000000, MIN_RESERVED_CKB),
+            ),
+            (
+                (1, 3),
+                (MIN_RESERVED_CKB + 1100 * 100000000, MIN_RESERVED_CKB),
+            ),
+            (
+                (2, 3),
+                (MIN_RESERVED_CKB + 1100 * 100000000, MIN_RESERVED_CKB),
+            ),
+            (
+                (3, 4),
+                (MIN_RESERVED_CKB + 3000 * 100000000, MIN_RESERVED_CKB),
+            ),
+            (
+                (4, 5),
+                (MIN_RESERVED_CKB + 1100 * 100000000, MIN_RESERVED_CKB),
+            ),
+            (
+                (4, 6),
+                (MIN_RESERVED_CKB + 1100 * 100000000, MIN_RESERVED_CKB),
+            ),
+            (
+                (5, 7),
+                (MIN_RESERVED_CKB + 1100 * 100000000, MIN_RESERVED_CKB),
+            ),
+            (
+                (6, 7),
+                (MIN_RESERVED_CKB + 1100 * 100000000, MIN_RESERVED_CKB),
+            ),
+        ],
+        8,
+    )
+    .await;
+
+    let [node_0, _node_1, _node_2, _node_3, _node_4, _node_5, _node_6, mut node_7] =
+        nodes.try_into().expect("8 nodes");
+
+    let res = node_0
+        .send_mpp_payment(&mut node_7, 2000 * 100000000, None)
+        .await;
+
+    assert!(res.is_ok());
+    let payment_hash = res.unwrap().payment_hash;
+    node_0.wait_until_success(payment_hash).await;
+}
+
+#[tokio::test]
+async fn test_send_mpp_with_generated_invoice() {
+    init_tracing();
+
+    let (nodes, _channels) = create_n_nodes_network_with_params(
+        &[
+            (
+                (0, 1),
+                ChannelParameters {
+                    node_a_funding_amount: MIN_RESERVED_CKB + 10000000000,
+                    node_b_funding_amount: MIN_RESERVED_CKB,
+                    ..Default::default()
+                },
+            ),
+            (
+                (0, 1),
+                ChannelParameters {
+                    node_a_funding_amount: MIN_RESERVED_CKB + 10000000000,
+                    node_b_funding_amount: MIN_RESERVED_CKB,
+                    ..Default::default()
+                },
+            ),
+        ],
+        2,
+        true,
+    )
+    .await;
+
+    let too_large_amount_invoice = nodes[1]
+        .gen_invoice(NewInvoiceParams {
+            amount: 20000000001,
+            payment_preimage: gen_rand_sha256_hash(),
+            allow_mpp: Some(true),
+            ..Default::default()
+        })
+        .await
+        .invoice;
+
+    let result = nodes[0]
+        .send_payment(SendPaymentCommand {
+            invoice: Some(too_large_amount_invoice.to_string()),
+            ..Default::default()
+        })
+        .await;
+    assert!(result.is_err());
+
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
+    let ok_invoice = nodes[1]
+        .gen_invoice(NewInvoiceParams {
+            amount: 20000000000,
+            payment_preimage: gen_rand_sha256_hash(),
+            allow_mpp: Some(true),
+            ..Default::default()
+        })
+        .await
+        .invoice;
+
+    let result = nodes[0]
+        .send_payment(SendPaymentCommand {
+            invoice: Some(ok_invoice.to_string()),
+            ..Default::default()
+        })
+        .await
+        .expect("send payment");
+
+    nodes[0].wait_until_success(result.payment_hash).await;
 }
