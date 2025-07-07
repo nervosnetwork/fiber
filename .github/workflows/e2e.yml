@@ -93,16 +93,27 @@ jobs:
 
           echo "Checking if all ports are open ... ${ports[@]}"
 
-          try_number=60
+          sudo apt-get install -y curl
+
+          curl -V
+
+          set +e
+          try_number=120
           count=0
           while [ $count -lt $try_number ]; do
             all_open=true
             for port in "${ports[@]}"; do
-              if ! nc -z 127.0.0.1 $port; then
-                echo "Port $port is not open yet ..."
-                all_open=false
-                break
-              fi
+              nc -z 127.0.0.1 $port
+              echo $?
+
+              curl --http0.9 -X --verbose POST http://127.0.0.1:$port \
+              -H 'Content-Type: application/json' \
+              -d '{"jsonrpc":"2.0","method":"node_info","params":[],"id":1}'
+
+              curl --http0.9 -s -X POST http://127.0.0.1:$port \
+              -H 'Content-Type: application/json' \
+              -d '{"jsonrpc":"2.0","method":"node_info","params":[],"id":1}' | grep -q '"result"' \
+              && echo "node_info OK on $port" || { echo "Port $port is not ok yet ..."; all_open=false; break; }
             done
             if $all_open; then
               echo "All ports are open now ..."
@@ -117,7 +128,7 @@ jobs:
               sleep 3
             fi
           done
-
+          set -e
 
           (cd ./tests/bruno; npm exec -- @usebruno/cli@1.20.0 run e2e/${{ matrix.workflow }} -r --env ${{ matrix.test_env }} ${{ matrix.extra_bru_args }} ) &
 
