@@ -567,7 +567,7 @@ where
         // the channel_update RPC has already checked the tlc_expiry_delta is in the range
         // but a malicious node may send a channel update with a too large expiry delta
         // which makes the network graph contains a channel update with a too large expiry delta.
-        // We need to check it again here to avoid the any malicious channel update
+        // We need to check it again here to avoid any malicious channel update
         if channel_update.tlc_expiry_delta > DEFAULT_TLC_EXPIRY_DELTA {
             error!(
                 "Channel update has too large expiry delta: {} > {}, channel update: {:?}",
