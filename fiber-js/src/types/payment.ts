@@ -6,7 +6,7 @@ interface PaymentCustomRecords {
     [k: HexString]: HexString;
 }
 interface SessionRouteNode {
-    pubkey: HexString;
+    pubkey: string;
     amount: HexString;
     channel_outpoint: HexString;
 }
@@ -18,6 +18,8 @@ interface GetPaymentCommandResult {
     failed_error?: string;
     fee: HexString;
     custom_records?: PaymentCustomRecords;
+    /// Only available on debug mode
+    router?: SessionRouteNode[];
 }
 interface HopHint {
     pubkey: string;
