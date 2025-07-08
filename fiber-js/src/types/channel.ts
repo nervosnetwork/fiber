@@ -3,7 +3,7 @@ import { HexString } from "./general";
 interface Script {
     code_hash: HexString;
     hash_type: "data" | "type" | "data1" | "data2";
-    args: HexString;
+    args: string;
 }
 
 interface OpenchannelParams {
@@ -47,7 +47,7 @@ interface ListChannelsParams {
 
 interface ChannelState {
     state_name: string;
-    state_flags: number[];
+    state_flags: string;
 }
 interface Channel {
     channel_id: HexString;
@@ -70,7 +70,7 @@ interface Channel {
 interface ShutdownChannelParams {
     channel_id: HexString;
     close_script?: Script;
-    fee_rate: HexString;
+    fee_rate?: HexString;
     force?: boolean;
 }
 

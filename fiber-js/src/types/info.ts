@@ -7,7 +7,7 @@ interface NodeInfoResult {
     commit_hash: string;
     node_id: HexString;
     node_name?: string;
-    addresses: HexString[];
+    addresses: string[];
     chain_hash: HexString;
     open_channel_auto_accept_min_ckb_funding_amount: HexString;
     auto_accept_channel_ckb_funding_amount: HexString;

@@ -23,7 +23,7 @@ interface UdtDep {
     type_id?: Script;
 }
 
-interface UdpCellDep {
+interface UdtCellDep {
     out_point: OutPoint;
     dep_type: DepType;
 }
@@ -38,7 +38,7 @@ type UdtCfgInfos = UdtArgInfo[];
 
 interface NodeInfo {
     node_name: string;
-    addresses: HexString[];
+    addresses: string[];
     node_id: HexString;
     timestamp: HexString;
     chain_hash: HexString;
@@ -92,9 +92,8 @@ export type {
     NodeInfo,
     OutPoint,
     Script,
-    UdpCellDep,
-    UdtArgInfo,
     UdtCellDep,
+    UdtArgInfo,
     UdtCfgInfos,
     UdtDep,
     UdtScript,
