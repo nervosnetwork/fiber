@@ -3274,7 +3274,7 @@ async fn test_send_payself_with_invalid_tlc_expiry() {
                     public: true,
                     node_a_funding_amount: funding_amount,
                     node_b_funding_amount: funding_amount,
-                    b_tlc_expiry_delta: Some(DEFAULT_TLC_EXPIRY_DELTA + 1), // a large value
+                    b_tlc_expiry_delta: Some(DEFAULT_TLC_EXPIRY_DELTA + 1), // a too large value
                     ..Default::default()
                 },
             ),
@@ -3284,7 +3284,7 @@ async fn test_send_payself_with_invalid_tlc_expiry() {
                     public: true,
                     node_a_funding_amount: funding_amount,
                     node_b_funding_amount: funding_amount,
-                    a_tlc_expiry_delta: Some(DEFAULT_TLC_EXPIRY_DELTA + 1), // a large value
+                    a_tlc_expiry_delta: Some(DEFAULT_TLC_EXPIRY_DELTA + 1), // a too large value
                     ..Default::default()
                 },
             ),
@@ -3294,9 +3294,9 @@ async fn test_send_payself_with_invalid_tlc_expiry() {
     )
     .await;
 
-    // no tlc_expiry_limit will be OK
-    let _res = nodes[0]
-        .assert_send_payment_success(SendPaymentCommand {
+    // no tlc_expiry_limit will also fail
+    let res = nodes[0]
+        .send_payment(SendPaymentCommand {
             target_pubkey: Some(nodes[0].pubkey),
             amount: Some(1000),
             keysend: Some(true),
@@ -3304,6 +3304,7 @@ async fn test_send_payself_with_invalid_tlc_expiry() {
             ..Default::default()
         })
         .await;
+    assert!(res.is_err());
 
     let res = nodes[0]
         .send_payment(SendPaymentCommand {

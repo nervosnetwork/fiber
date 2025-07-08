@@ -574,6 +574,7 @@ async fn do_test_update_graph_balance_after_payment(public: bool) {
 
     // make sure the payment is processed
     node_a.wait_until_success(payment_hash1).await;
+    node_b.wait_until_success(payment_hash2).await;
 
     assert_eq!(
         node_a.get_payment_status(payment_hash1).await,
@@ -3175,6 +3176,30 @@ async fn test_channel_update_tlc_expiry() {
         .unwrap_err()
         .to_string()
         .contains("TLC expiry delta is too small"));
+
+    // update channel with new tlc_expiry_delta which is too large
+    let update_result = call!(node_b.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id: new_channel_id,
+                command: ChannelCommand::Update(
+                    UpdateCommand {
+                        enabled: Some(true),
+                        tlc_expiry_delta: Some(DEFAULT_TLC_EXPIRY_DELTA + 1),
+                        tlc_minimum_value: None,
+                        tlc_fee_proportional_millionths: None,
+                    },
+                    rpc_reply,
+                ),
+            },
+        ))
+    })
+    .unwrap();
+    assert!(update_result.is_err());
+    assert!(update_result
+        .unwrap_err()
+        .to_string()
+        .contains("TLC expiry delta is too large"));
 
     // update channel with new tlc_expiry_delta which is ok
     let update_result = call!(node_b.network_actor, |rpc_reply| {

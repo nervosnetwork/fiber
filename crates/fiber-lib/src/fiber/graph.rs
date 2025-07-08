@@ -564,6 +564,17 @@ where
     }
 
     fn process_channel_update(&mut self, channel_update: ChannelUpdate) -> Option<Cursor> {
+        // the channel_update RPC has already checked the tlc_expiry_delta is in the range
+        // but a malicious node may send a channel update with a too large expiry delta
+        // which makes the network graph contains a channel update with a too large expiry delta.
+        // We need to check it again here to avoid the any malicious channel update
+        if channel_update.tlc_expiry_delta > DEFAULT_TLC_EXPIRY_DELTA {
+            error!(
+                "Channel update has too large expiry delta: {} > {}, channel update: {:?}",
+                channel_update.tlc_expiry_delta, DEFAULT_TLC_EXPIRY_DELTA, &channel_update
+            );
+            return None;
+        }
         match self.get_channel(&channel_update.channel_outpoint) {
             Some(channel)
                 if !self
@@ -1134,8 +1145,8 @@ where
                 tlc_expiry_limit,
             )?;
             target = new_target;
-            expiry += expiry_delta;
-            amount += fee;
+            expiry = expiry.saturating_add(expiry_delta);
+            amount = amount.saturating_add(fee);
             last_edge = Some(edge);
         } else {
             // The calculation of probability and distance requires a capacity of the channel.
@@ -1228,25 +1239,25 @@ where
                 let fee = if is_source {
                     0
                 } else {
-                    calculate_tlc_forward_fee(
+                    match calculate_tlc_forward_fee(
                         next_hop_received_amount,
                         channel_update.fee_rate as u128,
-                    )
-                    .map_err(|err| {
-                        PathFindError::PathFind(format!(
-                            "calculate_tlc_forward_fee error: {:?}",
-                            err
-                        ))
-                    })?
+                    ) {
+                        Ok(fee) => fee,
+                        // skip this edge if the fee calculation fails
+                        Err(_) => {
+                            continue;
+                        }
+                    }
                 };
-                let amount_to_send = next_hop_received_amount + fee;
+                let amount_to_send = next_hop_received_amount.saturating_add(fee);
                 let expiry_delta = if is_source {
                     0
                 } else {
                     channel_update.tlc_expiry_delta
                 };
 
-                let incoming_tlc_expiry = cur_hop.incoming_tlc_expiry + expiry_delta;
+                let incoming_tlc_expiry = cur_hop.incoming_tlc_expiry.saturating_add(expiry_delta);
                 if !self.check_channel_amount_and_expiry(
                     amount_to_send,
                     channel_info,
@@ -1259,7 +1270,7 @@ where
 
                 // if the amount to send is greater than the amount we have, skip this edge
                 if let Some(max_fee_amount) = max_fee_amount {
-                    if amount_to_send > amount + max_fee_amount {
+                    if amount_to_send > amount.saturating_add(max_fee_amount) {
                         debug!(
                             "amount_to_send: {:?} is greater than sum_amount sum_amount: {:?}",
                             amount_to_send,
@@ -1356,6 +1367,7 @@ where
             channels.choose(&mut thread_rng())
         {
             assert_ne!(source, *from);
+            // we have already checked the fee rate and amount in check_channel_amount_and_expiry
             let fee = calculate_tlc_forward_fee(amount, *fee_rate as u128).map_err(|err| {
                 PathFindError::PathFind(format!("calculate_tlc_forward_fee error: {:?}", err))
             })?;
@@ -1381,6 +1393,14 @@ where
         incoming_tlc_expiry: u64,
         tlc_expiry_limit: u64,
     ) -> bool {
+        if calculate_tlc_forward_fee(amount, channel_update.fee_rate as u128).is_err() {
+            return false;
+        }
+
+        if channel_update.tlc_expiry_delta > DEFAULT_TLC_EXPIRY_DELTA {
+            return false;
+        }
+
         if amount > channel_info.capacity() {
             return false;
         }

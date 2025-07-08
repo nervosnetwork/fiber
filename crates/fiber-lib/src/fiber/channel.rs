@@ -1,3 +1,4 @@
+use crate::fiber::config::DEFAULT_TLC_EXPIRY_DELTA;
 use crate::fiber::fee::check_open_channel_parameters;
 #[cfg(any(debug_assertions, feature = "bench"))]
 use crate::fiber::network::DebugEvent;
@@ -1562,6 +1563,12 @@ where
                 return Err(ProcessingChannelError::InvalidParameter(format!(
                     "TLC expiry delta is too small, expect larger than {}",
                     MIN_TLC_EXPIRY_DELTA
+                )));
+            }
+            if delta > DEFAULT_TLC_EXPIRY_DELTA {
+                return Err(ProcessingChannelError::InvalidParameter(format!(
+                    "TLC expiry delta is too large, expect smaller than {}",
+                    DEFAULT_TLC_EXPIRY_DELTA
                 )));
             }
             updated |= state.update_our_tlc_expiry_delta(delta);
@@ -5429,8 +5436,7 @@ impl ChannelActorState {
             }
         };
         let fee_rate = self.local_tlc_info.tlc_fee_proportional_millionths;
-        let expected_fee = calculate_tlc_forward_fee(forward_amount, fee_rate);
-        match expected_fee {
+        match calculate_tlc_forward_fee(forward_amount, fee_rate) {
             Ok(expected_fee) if forward_fee >= expected_fee => Ok(()),
             Ok(fee) => {
                 error!(

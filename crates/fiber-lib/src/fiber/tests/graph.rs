@@ -1693,11 +1693,11 @@ fn test_graph_find_path_source_with_multiple_edges_with_different_fee_rate() {
         1,
         2,
         Some(1002),
+        Some(1005), // high fee rate
+        None,
+        None,
+        None,
         Some(1000),
-        None,
-        None,
-        None,
-        Some(100000000),
     );
     network.add_edge(2, 3, Some(1000), Some(1000));
 
@@ -1719,6 +1719,49 @@ fn test_graph_find_path_source_with_multiple_edges_with_different_fee_rate() {
     eprintln!("router: {:?}", route);
     // source node will not charge fee, even the edges[2] fee rate is high
     assert_eq!(route[0].channel_outpoint, network.edges[2].2);
+}
+
+#[test]
+fn test_graph_find_path_source_with_multiple_edges_with_invalid_tlc_delta() {
+    init_tracing();
+
+    let mut network = MockNetworkGraph::new(6);
+    let node1 = network.keys[1];
+    let node3 = network.keys[3];
+
+    network.add_edge_with_config(1, 2, Some(1000), Some(1000), None, None, None, Some(1000));
+    network.add_edge_with_config(1, 2, Some(1001), Some(1000), None, None, None, Some(1000));
+    network.add_edge_with_config(
+        1,
+        2,
+        Some(1002),
+        Some(1000),
+        None,
+        None,
+        None,
+        Some(10000000000), // invalid tlc expiry delta,
+                           // should not be used in path finding
+    );
+    network.add_edge(2, 3, Some(1000), Some(1000));
+
+    let route = network
+        .graph
+        .find_path(
+            node1.into(),
+            node3.into(),
+            100,
+            Some(1000),
+            None,
+            FINAL_TLC_EXPIRY_DELTA_IN_TESTS,
+            MAX_PAYMENT_TLC_EXPIRY_LIMIT,
+            false,
+            &[],
+        )
+        .unwrap();
+
+    eprintln!("router: {:?}", route);
+    // we will not consider the edge with invalid tlc expiry delta
+    assert_eq!(route[0].channel_outpoint, network.edges[1].2);
 }
 
 #[test]
