@@ -2850,14 +2850,6 @@ impl TlcInfo {
         self.status.as_inbound_status()
     }
 
-    pub fn is_pending_tlc(&self) -> bool {
-        !matches!(
-            self.status,
-            TlcStatus::Outbound(OutboundTlcStatus::RemoveAckConfirmed)
-                | TlcStatus::Inbound(InboundTlcStatus::RemoveAckConfirmed)
-        )
-    }
-
     pub fn is_fail_remove_confirmed(&self) -> bool {
         matches!(self.removed_reason, Some(RemoveTlcReason::RemoveTlcFail(_)))
             && matches!(
@@ -4552,14 +4544,14 @@ impl ChannelActorState {
 
     pub fn get_offered_tlc_balance(&self) -> u128 {
         self.get_all_offer_tlcs()
-            .filter(|tlc| tlc.is_pending_tlc())
+            .filter(|tlc| !tlc.is_fail_remove_confirmed())
             .map(|tlc| tlc.amount)
             .sum::<u128>()
     }
 
     pub fn get_received_tlc_balance(&self) -> u128 {
         self.get_all_received_tlcs()
-            .filter(|tlc| tlc.is_pending_tlc())
+            .filter(|tlc| !tlc.is_fail_remove_confirmed())
             .map(|tlc| tlc.amount)
             .sum::<u128>()
     }
@@ -5017,27 +5009,35 @@ impl ChannelActorState {
 
             // update balance according to the tlc,
             // we already checked the amount is valid in handle_add_tlc_command and handle_add_tlc_peer_message
-            // here we double confirm everything is correct.
+            // here we double confirm everything is correct with `checked_*` methods
             let (mut to_local_amount, mut to_remote_amount) =
                 (self.to_local_amount, self.to_remote_amount);
             if current.is_offered() {
-                if to_local_amount < current.amount {
-                    return Err(ProcessingChannelError::InternalError(format!(
+                to_local_amount = to_local_amount.checked_sub(current.amount).ok_or(
+                    ProcessingChannelError::InternalError(format!(
                         "Cannot remove tlc {:?} with amount {} from local balance {}",
                         tlc_id, current.amount, to_local_amount
-                    )));
-                }
-                to_local_amount -= current.amount;
-                to_remote_amount += current.amount;
-            } else {
-                if to_remote_amount < current.amount {
-                    return Err(ProcessingChannelError::InternalError(format!(
+                    )),
+                )?;
+                to_remote_amount = to_remote_amount.checked_add(current.amount).ok_or(
+                    ProcessingChannelError::InternalError(format!(
                         "Cannot remove tlc {:?} with amount {} from remote balance {}",
                         tlc_id, current.amount, to_remote_amount
-                    )));
-                }
-                to_local_amount += current.amount;
-                to_remote_amount -= current.amount;
+                    )),
+                )?;
+            } else {
+                to_local_amount = to_local_amount.checked_add(current.amount).ok_or(
+                    ProcessingChannelError::InternalError(format!(
+                        "Cannot remove tlc {:?} with amount {} from local balance {}",
+                        tlc_id, current.amount, to_local_amount
+                    )),
+                )?;
+                to_remote_amount = to_remote_amount.checked_sub(current.amount).ok_or(
+                    ProcessingChannelError::InternalError(format!(
+                        "Cannot remove tlc {:?} with amount {} from remote balance {}",
+                        tlc_id, current.amount, to_remote_amount
+                    )),
+                )?;
             }
 
             self.to_local_amount = to_local_amount;
@@ -5548,9 +5548,8 @@ impl ChannelActorState {
         }
         if is_sent {
             // local peer can not sent more tlc amount than they have
-            let sent_tlc_value = self.get_offered_tlc_balance();
-            debug_assert!(self.to_local_amount >= sent_tlc_value);
-            if add_amount > self.to_local_amount - sent_tlc_value {
+            let pending_sent_amount = self.get_offered_tlc_balance();
+            if add_amount > self.to_local_amount.saturating_sub(pending_sent_amount) {
                 return Err(ProcessingChannelError::TlcAmountExceedLimit);
             }
 
@@ -5568,9 +5567,8 @@ impl ChannelActorState {
             }
         } else {
             // remote peer can not sent more tlc amount than they have
-            let received_tlc_value = self.get_received_tlc_balance();
-            debug_assert!(self.to_remote_amount >= received_tlc_value);
-            if add_amount > self.to_remote_amount - received_tlc_value {
+            let pending_recv_amount = self.get_received_tlc_balance();
+            if add_amount > self.to_remote_amount.saturating_sub(pending_recv_amount) {
                 return Err(ProcessingChannelError::TlcAmountExceedLimit);
             }
 
