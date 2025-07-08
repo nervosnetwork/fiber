@@ -1567,7 +1567,7 @@ where
             }
             if delta > DEFAULT_TLC_EXPIRY_DELTA {
                 return Err(ProcessingChannelError::InvalidParameter(format!(
-                    "TLC expiry delta is too large, expect smaller than {}",
+                    "TLC expiry delta is too large, expected to be smaller than {}",
                     DEFAULT_TLC_EXPIRY_DELTA
                 )));
             }
