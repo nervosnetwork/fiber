@@ -18,8 +18,8 @@ pub enum FundingError {
     #[error("Dead cell found in the tx")]
     DeadCell,
 
-    #[error("The channel is invalid to fund")]
-    InvalidChannel,
+    #[error("Get overflow error")]
+    OverflowError,
 }
 
 #[derive(Error, Debug)]
