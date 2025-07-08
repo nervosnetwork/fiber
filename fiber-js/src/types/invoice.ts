@@ -14,14 +14,14 @@ interface NewInvoiceParams {
     udt_type_script?: Script;
     hash_algorithm?: HashAlgorithm;
 }
-type CkbScript = Script;
+type CkbScript = HexString;
 type Attribute = { FinalHtlcTimeout: HexString } |
 { FinalHtlcMinimumExpiryDelta: HexString } |
 { ExpiryTime: HexString } |
 { Description: string } |
 { FallbackAddr: string } |
 { UdtScript: CkbScript } |
-{ PayeePublicKey: HexString } |
+{ PayeePublicKey: string } |
 { HashAlgorithm: number } |
 { Feature: HexString };
 
@@ -34,7 +34,7 @@ interface InvoiceData {
 interface CkbInvoice {
     currency: Currency;
     amount?: HexString;
-    signature?: HexString;
+    signature?: string;
     data: InvoiceData;
 }
 

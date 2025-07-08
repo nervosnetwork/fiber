@@ -3,7 +3,7 @@ import DbWorker from "./db.worker.ts";
 import FiberWorker from "./fiber.worker.ts";
 import { Mutex } from "async-mutex";
 import { DbWorkerInitializationOptions, FiberInvokeRequest, FiberInvokeResponse, FiberWorkerInitializationOptions } from "./types/general.ts";
-import { AbandonChannelParams, AcceptChannelParams, AcceptChannelResult, ListChannelsParams, ListChannelsResult, OpenchannelParams, OpenChannelResult, ShutdownChannelParams, UpdateChannelParams } from "./types/channel.ts";
+import { AbandonChannelParams, AcceptChannelParams, AcceptChannelResult, ListChannelsParams, ListChannelsResult, OpenChannelParams, OpenChannelResult, ShutdownChannelParams, UpdateChannelParams } from "./types/channel.ts";
 import { GraphChannelsParams, GraphChannelsResult, GraphNodesParams, GraphNodesResult } from "./types/graph.ts";
 import { NodeInfoResult } from "./types/info.ts";
 import { GetInvoiceResult, InvoiceParams, InvoiceResult, NewInvoiceParams, ParseInvoiceParams, ParseInvoiceResult } from "./types/invoice.ts";
@@ -108,7 +108,7 @@ class Fiber {
         this.dbWorker.terminate();
         this.fiberWorker.terminate();
     }
-    async openChannel(params: OpenchannelParams): Promise<OpenChannelResult> {
+    async openChannel(params: OpenChannelParams): Promise<OpenChannelResult> {
         return await this.invokeCommand("open_channel", [params]);
     }
     async acceptChannel(params: AcceptChannelParams): Promise<AcceptChannelResult> {

@@ -1,18 +1,18 @@
 import { HexString } from "./general"
 
 interface ConnectPeerParams {
-    address: HexString;
+    address: string;
     save?: boolean;
 
 }
 
 interface DisconnectPeerParams {
-    peer_id: HexString;
+    peer_id: string;
 }
 
 interface PeerInfo {
-    pubkey: HexString;
-    peer_id: HexString;
+    pubkey: string;
+    peer_id: string;
     addresses: string[];
 }
 

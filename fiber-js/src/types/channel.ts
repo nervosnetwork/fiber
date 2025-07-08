@@ -6,7 +6,7 @@ interface Script {
     args: string;
 }
 
-interface OpenchannelParams {
+interface OpenChannelParams {
     peer_id: string;
     funding_amount: HexString;
     public?: boolean;
@@ -85,7 +85,7 @@ interface ListChannelsResult {
     channels: Channel[];
 }
 export type {
-    OpenchannelParams,
+    OpenChannelParams,
     Script,
     OpenChannelResult,
     AbandonChannelParams,

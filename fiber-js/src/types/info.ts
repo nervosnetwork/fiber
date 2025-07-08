@@ -5,7 +5,7 @@ import { UdtCfgInfos } from "./graph";
 interface NodeInfoResult {
     version: string;
     commit_hash: string;
-    node_id: HexString;
+    node_id: string;
     node_name?: string;
     addresses: string[];
     chain_hash: HexString;

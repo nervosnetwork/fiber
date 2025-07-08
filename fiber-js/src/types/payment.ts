@@ -18,16 +18,15 @@ interface GetPaymentCommandResult {
     failed_error?: string;
     fee: HexString;
     custom_records?: PaymentCustomRecords;
-    router: SessionRouteNode[];
 }
 interface HopHint {
-    pubkey: HexString;
+    pubkey: string;
     channel_outpoint: HexString;
     fee_rate: HexString;
     tlc_expiry_delta: HexString;
 }
 interface HopRequire {
-    pubkey: HexString;
+    pubkey: string;
     channel_outpoint: HexString;
 }
 interface RouterHop {
@@ -40,7 +39,7 @@ interface GetPaymentCommandParams {
     payment_hash: HexString;
 }
 interface SendPaymentCommandParams {
-    target_pubkey?: HexString;
+    target_pubkey?: string;
     amount?: HexString;
     payment_hash?: HexString;
     final_tlc_expiry_delta?: HexString;
