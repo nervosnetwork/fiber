@@ -1,5 +1,5 @@
 import { Script } from "./channel";
-import { HexString } from "./general"
+import { HashAlgorithm, HexString } from "./general"
 
 type Currency = "Fibb" | "Fibt" | "Fibd";
 type CkbInvoiceStatus = "Open" | "Cancelled" | "Expired" | "Received" | "Paid";
@@ -12,7 +12,7 @@ interface NewInvoiceParams {
     fallback_address?: string;
     final_expiry_delta?: HexString;
     udt_type_script?: Script;
-    hash_algorithm?: number;
+    hash_algorithm?: HashAlgorithm;
 }
 type CkbScript = Script;
 type Attribute = { FinalHtlcTimeout: HexString } |

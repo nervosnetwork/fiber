@@ -21,10 +21,13 @@ type FiberInvokeResponse = { ok: true; data: any; } | { ok: false; error: string
 
 type HexString = `0x${string}`;
 
+type HashAlgorithm = "ckb_hash" | "sha_256";
+
 export type {
     DbWorkerInitializationOptions,
     FiberWorkerInitializationOptions,
     FiberInvokeRequest,
     FiberInvokeResponse,
-    HexString
+    HexString,
+    HashAlgorithm
 }
