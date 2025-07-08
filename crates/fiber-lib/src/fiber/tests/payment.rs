@@ -90,25 +90,7 @@ async fn test_send_payment_custom_records_with_limit_error() {
     let source_node = &mut node_0;
     let target_pubkey = node_1.pubkey;
 
-    let data: HashMap<_, _> = (0..33)
-        .map(|i| (i, format!("value_{}", i).into_bytes()))
-        .collect();
-
-    let custom_records = PaymentCustomRecords { data };
-    let res = source_node
-        .send_payment(SendPaymentCommand {
-            target_pubkey: Some(target_pubkey),
-            amount: Some(10000000000),
-            keysend: Some(true),
-            custom_records: Some(custom_records.clone()),
-            ..Default::default()
-        })
-        .await;
-
-    let err = res.unwrap_err().to_string();
-    assert!(err.contains("custom_records can not have more than 32 records"));
-
-    let long_value = "a".repeat(1024 * 2 + 1);
+    let long_value = "a".repeat(MAX_CUSTOM_RECORDS_SIZE + 1);
     let data: HashMap<_, _> = vec![(1, long_value.into_bytes())].into_iter().collect();
     let custom_records = PaymentCustomRecords { data };
     let res = source_node
@@ -122,7 +104,7 @@ async fn test_send_payment_custom_records_with_limit_error() {
         .await;
 
     let err = res.unwrap_err().to_string();
-    assert!(err.contains("the sum size of custom_records's value can not more than 2048 bytes"));
+    assert!(err.contains("the sum size of custom_records's value can not more than"));
 
     // normal case
     let long_value = "a".repeat(1024 * 2);
@@ -5145,6 +5127,7 @@ async fn test_network_with_hops_max_number_limit() {
 
     assert!(payment.is_err());
 
+    eprintln!("now test begin to send payment ...");
     let payment = nodes[0]
         .send_payment(SendPaymentCommand {
             target_pubkey: Some(nodes[13].pubkey),

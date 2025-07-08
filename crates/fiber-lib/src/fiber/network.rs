@@ -96,7 +96,9 @@ pub const DEFAULT_CHAIN_ACTOR_TIMEOUT: u64 = 300000;
 // TODO: make it configurable
 pub const CKB_TX_TRACING_CONFIRMATIONS: u64 = 4;
 
-pub const MAX_SERVICE_PROTOCOAL_DATA_SIZE: usize = 1024 * 64; // 64 KB
+// (128 + 2) KB, 2 KB for custom records
+pub const MAX_SERVICE_PROTOCOAL_DATA_SIZE: usize = 1024 * (128 + 2);
+pub const MAX_CUSTOM_RECORDS_SIZE: usize = 2 * 1024; // 2 KB
 
 // This is a temporary way to document that we assume the chain actor is always alive.
 // We may later relax this assumption. At the moment, if the chain actor fails, we
@@ -594,14 +596,13 @@ impl SendPaymentData {
         }
 
         if let Some(custom_records) = &command.custom_records {
-            if custom_records.data.keys().len() > 32 {
-                return Err("custom_records can not have more than 32 records".to_string());
-            }
-            if custom_records.data.values().map(|v| v.len()).sum::<usize>() > 1024 * 2 {
-                return Err(
-                    "the sum size of custom_records's value can not more than 2048 bytes"
-                        .to_string(),
-                );
+            if custom_records.data.values().map(|v| v.len()).sum::<usize>()
+                > MAX_CUSTOM_RECORDS_SIZE
+            {
+                return Err(format!(
+                    "the sum size of custom_records's value can not more than {} bytes",
+                    MAX_CUSTOM_RECORDS_SIZE
+                ));
             }
         }
 

@@ -30,11 +30,15 @@ use tentacle::{
     SessionId,
 };
 use tokio::sync::oneshot;
+use tokio_util::codec::length_delimited;
 use tracing::{debug, error, info, trace, warn};
 
 use crate::{
     ckb::{CkbChainMessage, GetBlockTimestampRequest, GetTxResponse},
-    fiber::{network::DEFAULT_CHAIN_ACTOR_TIMEOUT, types::secp256k1_instance},
+    fiber::{
+        network::{DEFAULT_CHAIN_ACTOR_TIMEOUT, MAX_SERVICE_PROTOCOAL_DATA_SIZE},
+        types::secp256k1_instance,
+    },
     now_timestamp_as_millis_u64, unwrap_or_return, Error,
 };
 
@@ -2368,6 +2372,13 @@ impl GossipProtocolHandle {
     pub(crate) fn create_meta(self) -> ProtocolMeta {
         MetaBuilder::new()
             .id(GOSSIP_PROTOCOL_ID)
+            .codec(move || {
+                Box::new(
+                    length_delimited::Builder::new()
+                        .max_frame_length(MAX_SERVICE_PROTOCOAL_DATA_SIZE)
+                        .new_codec(),
+                )
+            })
             .service_handle(move || {
                 let handle = Box::new(self);
                 ProtocolHandle::Callback(handle)
