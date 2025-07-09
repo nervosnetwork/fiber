@@ -23,7 +23,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tentacle::multiaddr::{MultiAddr, Protocol};
 use tentacle::service::SessionType;
-use tentacle::utils::{extract_peer_id, is_reachable, multiaddr_to_socketaddr};
+use tentacle::utils::{extract_peer_id, is_reachable, multiaddr_to_socketaddr, TransportType};
 use tentacle::{
     async_trait,
     builder::{MetaBuilder, ServiceBuilder},
@@ -675,7 +675,7 @@ macro_rules! debug_event {
 #[derive(Clone, Debug)]
 pub enum NetworkServiceEvent {
     #[cfg(not(target_arch = "wasm32"))]
-    NetworkStarted(PeerId, MultiAddr, Vec<Multiaddr>),
+    NetworkStarted(PeerId, Vec<MultiAddr>, Vec<Multiaddr>),
     #[cfg(target_arch = "wasm32")]
     NetworkStarted(PeerId, Vec<Multiaddr>),
     NetworkStopped(PeerId),
@@ -3492,18 +3492,39 @@ where
 
         #[cfg(not(target_arch = "wasm32"))]
         let listening_addr = {
-            let mut listening_addr = service
-                .listen(
-                    MultiAddr::from_str(config.listening_addr())
-                        .expect("valid tentacle listening address"),
-                )
-                .await
-                .expect("listen tentacle");
-
-            listening_addr.push(Protocol::P2P(Cow::Owned(my_peer_id.clone().into_bytes())));
-            if config.announce_listening_addr() {
-                announced_addrs.push(listening_addr.clone());
+            let mut addresses_to_listen = vec![
+                MultiAddr::from_str(config.listening_addr()).expect("valid tentacle listening address")
+            ];
+            {
+                // Re-use the same port for websocket
+                let ws_listens = addresses_to_listen
+                    .iter()
+                    .cloned()
+                    .filter_map(|mut addr| {
+                        if matches!(find_type(&addr), TransportType::Tcp) {
+                            addr.push(Protocol::Ws);
+                            Some(addr)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                addresses_to_listen.extend(ws_listens);
             }
+            let mut listening_addr = vec![];
+            for addr in addresses_to_listen.into_iter() {
+                let mut current_addr = service
+                    .listen(addr)
+                    .await
+                    .expect("listen tentacle");
+
+                current_addr.push(Protocol::P2P(Cow::Owned(my_peer_id.clone().into_bytes())));
+                if config.announce_listening_addr() {
+                    announced_addrs.push(current_addr.clone());
+                }
+                listening_addr.push(current_addr);
+            }
+
             listening_addr
         };
         for announced_addr in &config.announced_addrs {
@@ -3894,4 +3915,15 @@ pub async fn start_network<
     .expect("Failed to start network actor");
 
     actor
+}
+#[allow(dead_code)]
+pub(crate) fn find_type(addr: &Multiaddr) -> TransportType {
+    let mut iter = addr.iter();
+
+    iter.find_map(|proto| match proto {
+        Protocol::Ws => Some(TransportType::Ws),
+        Protocol::Wss => Some(TransportType::Wss),
+        _ => None,
+    })
+    .unwrap_or(TransportType::Tcp)
 }

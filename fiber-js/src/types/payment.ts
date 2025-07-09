@@ -18,7 +18,7 @@ interface GetPaymentCommandResult {
     failed_error?: string;
     fee: HexString;
     custom_records?: PaymentCustomRecords;
-    /// Only available on debug mode
+    /// Only available in debug mode
     router?: SessionRouteNode[];
 }
 interface HopHint {
