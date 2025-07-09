@@ -1,4 +1,4 @@
-mod biscuit;
+pub mod biscuit;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod cch;
 pub mod channel;

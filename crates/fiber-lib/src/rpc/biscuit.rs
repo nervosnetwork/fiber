@@ -153,7 +153,7 @@ fn build_rules() -> HashMap<&'static str, AuthRule> {
     rules
 }
 
-pub(crate) struct BiscuitAuth {
+pub struct BiscuitAuth {
     pubkey: PublicKey,
     rules: HashMap<&'static str, AuthRule>,
 }
