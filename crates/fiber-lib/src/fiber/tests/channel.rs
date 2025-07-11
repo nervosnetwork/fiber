@@ -1,6 +1,8 @@
 use crate::ckb::tests::test_utils::complete_commitment_tx;
 use crate::fiber::channel::{ChannelState, CloseFlags, UpdateCommand, XUDT_COMPATIBLE_WITNESS};
-use crate::fiber::config::{DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT};
+use crate::fiber::config::{
+    DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT, MIN_TLC_EXPIRY_DELTA,
+};
 use crate::fiber::graph::{ChannelInfo, PaymentSessionStatus};
 use crate::fiber::network::{DebugEvent, FiberMessageWithPeerId, SendPaymentCommand};
 use crate::fiber::types::{
@@ -2665,6 +2667,54 @@ async fn test_remove_tlc_with_expiry_error() {
     .expect("node_b alive");
     assert!(add_tlc_result.is_err());
 
+    // add tlc command with expiry soon
+    let add_tlc_command = AddTlcCommand {
+        amount: tlc_amount,
+        hash_algorithm: HashAlgorithm::CkbHash,
+        payment_hash: digest.into(),
+        expiry: now_timestamp_as_millis_u64() + MIN_TLC_EXPIRY_DELTA - 1000,
+        onion_packet: None,
+        shared_secret: NO_SHARED_SECRET,
+        previous_tlc: None,
+    };
+
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id: new_channel_id,
+                command: ChannelCommand::AddTlc(add_tlc_command, rpc_reply),
+            },
+        ))
+    })
+    .expect("node_b alive");
+    assert!(add_tlc_result.is_err());
+
+    // add tlc command with expiry is OK
+    let add_tlc_command = AddTlcCommand {
+        amount: tlc_amount,
+        hash_algorithm: HashAlgorithm::CkbHash,
+        payment_hash: digest.into(),
+        expiry: now_timestamp_as_millis_u64() + MIN_TLC_EXPIRY_DELTA + 200,
+        onion_packet: None,
+        shared_secret: NO_SHARED_SECRET,
+        previous_tlc: None,
+    };
+
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id: new_channel_id,
+                command: ChannelCommand::AddTlc(add_tlc_command, rpc_reply),
+            },
+        ))
+    })
+    .expect("node_b alive");
+    assert!(add_tlc_result.is_err());
+    let err = add_tlc_result.unwrap_err();
+    assert_eq!(err.error_code, TlcErrorCode::ExpiryTooSoon,);
+
     // add tlc command with expiry in the future too long
     let add_tlc_command = AddTlcCommand {
         amount: tlc_amount,
@@ -2687,6 +2737,8 @@ async fn test_remove_tlc_with_expiry_error() {
     .expect("node_b alive");
 
     assert!(add_tlc_result.is_err());
+    let error_code = add_tlc_result.unwrap_err().error_code;
+    assert_eq!(error_code, TlcErrorCode::ExpiryTooFar);
 }
 
 #[tokio::test]
@@ -2703,12 +2755,11 @@ async fn do_test_add_tlc_duplicated() {
     let tlc_amount = 1000000000;
 
     for i in 1..=2 {
-        // add tlc command with expiry soon
         let add_tlc_command = AddTlcCommand {
             amount: tlc_amount,
             hash_algorithm: HashAlgorithm::CkbHash,
             payment_hash: digest.into(),
-            expiry: now_timestamp_as_millis_u64() + 10,
+            expiry: now_timestamp_as_millis_u64() + MIN_TLC_EXPIRY_DELTA + 1000,
             onion_packet: None,
             shared_secret: NO_SHARED_SECRET,
             previous_tlc: None,

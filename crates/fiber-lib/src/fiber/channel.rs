@@ -967,9 +967,6 @@ where
             if add_tlc.expiry < peeled_onion_packet.current.expiry {
                 return Err(ProcessingChannelError::IncorrectFinalTlcExpiry);
             }
-            if add_tlc.expiry < now_timestamp_as_millis_u64() + MIN_TLC_EXPIRY_DELTA {
-                return Err(ProcessingChannelError::TlcExpirySoon);
-            }
 
             if let Some(invoice) = self.store.get_invoice(&payment_hash) {
                 let invoice_status = self.get_invoice_status(&invoice);
@@ -5394,11 +5391,7 @@ impl ChannelActorState {
 
     fn check_tlc_expiry(&self, expiry: u64) -> ProcessingChannelResult {
         let current_time = now_timestamp_as_millis_u64();
-        if current_time >= expiry {
-            debug!(
-                "TLC expiry {} is already passed, current time: {}",
-                expiry, current_time
-            );
+        if expiry <= current_time + MIN_TLC_EXPIRY_DELTA {
             return Err(ProcessingChannelError::TlcExpirySoon);
         }
         if expiry >= current_time + MAX_PAYMENT_TLC_EXPIRY_LIMIT {
