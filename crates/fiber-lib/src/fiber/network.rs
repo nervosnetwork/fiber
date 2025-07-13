@@ -70,7 +70,7 @@ use super::{
 
 use crate::ckb::config::UdtCfgInfos;
 use crate::ckb::contracts::{check_udt_script, get_udt_whitelist, is_udt_type_auto_accept};
-use crate::ckb::{CkbChainMessage, FundingRequest, FundingTx};
+use crate::ckb::{CkbChainMessage, FundingError, FundingRequest, FundingTx};
 use crate::fiber::channel::{
     AddTlcCommand, AddTlcResponse, ShutdownCommand, TxCollaborationCommand, TxUpdateCommand,
 };
@@ -1426,13 +1426,7 @@ where
                 let old_tx = transaction.into_view();
                 let mut tx = FundingTx::new();
                 tx.update_for_self(old_tx)?;
-                let tx = match call_t!(
-                    self.chain_actor.clone(),
-                    CkbChainMessage::Fund,
-                    DEFAULT_CHAIN_ACTOR_TIMEOUT,
-                    tx,
-                    request
-                ) {
+                let tx = match self.fund(tx, request).await {
                     Ok(Ok(tx)) => match tx.into_inner() {
                         Some(tx) => tx,
                         _ => {
@@ -2218,6 +2212,20 @@ where
             .build_path(source, command)?;
 
         Ok(PaymentRouter { router_hops })
+    }
+
+    async fn fund(
+        &self,
+        tx: FundingTx,
+        request: FundingRequest,
+    ) -> Result<Result<FundingTx, FundingError>, RactorErr<CkbChainMessage>> {
+        call_t!(
+            self.chain_actor.clone(),
+            CkbChainMessage::Fund,
+            DEFAULT_CHAIN_ACTOR_TIMEOUT,
+            tx,
+            request
+        )
     }
 }
 
