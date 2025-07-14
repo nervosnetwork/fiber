@@ -1,6 +1,6 @@
 use std::{
     str::FromStr,
-    sync::{Arc, atomic::AtomicU8},
+    sync::{Arc, OnceLock, atomic::AtomicU8},
 };
 
 use api::{FIBER_WASM, WrappedFiberWasm};
@@ -32,7 +32,7 @@ use fnn::{
     tasks::{new_tokio_cancellation_token, new_tokio_task_tracker},
 };
 use jsonrpsee::wasm_client::WasmClientBuilder;
-use ractor::Actor;
+use ractor::{Actor, ActorRef};
 use secp256k1::{Secp256k1, SecretKey};
 use std::fmt::Debug;
 use tokio::{
@@ -67,14 +67,12 @@ const FIBER_STATE_STARTED: u8 = 1;
 const FIBER_STATE_PANICKED: u8 = 2;
 
 static FIBER_STATE: AtomicU8 = AtomicU8::new(FIBER_STATE_BEFORE_STARTING);
-
+static ROOT_ACTOR: OnceLock<ActorRef<String>> = OnceLock::new();
 pub(crate) fn check_state() -> Result<(), JsValue> {
     match FIBER_STATE.load(std::sync::atomic::Ordering::SeqCst) {
         FIBER_STATE_BEFORE_STARTING => ExitMessage::err("Fiber not started!".to_string()),
         FIBER_STATE_STARTED => Ok(()),
-        FIBER_STATE_PANICKED => {
-            ExitMessage::err("Fiber panicked, please refresh page".to_string())
-        }
+        FIBER_STATE_PANICKED => ExitMessage::err("Fiber panicked, please refresh page".to_string()),
         s => ExitMessage::err(format!("Invalid FIBER_STATE: {}", s)),
     }
     .map_err(|e| e.into())
@@ -91,6 +89,10 @@ pub async fn fiber(
     std::panic::set_hook(Box::new(|info| {
         console_error_panic_hook::hook(info);
         FIBER_STATE.store(FIBER_STATE_PANICKED, std::sync::atomic::Ordering::SeqCst);
+        ROOT_ACTOR
+            .get()
+            .unwrap()
+            .stop(Some("Fiber panicked".to_string()));
     }));
     wasm_logger::init(wasm_logger::Config::new(
         tracing::log::Level::from_str(log_level).expect("Bad log level"),
@@ -136,6 +138,7 @@ pub async fn fiber(
     let tracker = new_tokio_task_tracker();
     let token = new_tokio_cancellation_token();
     let root_actor = RootActor::start(tracker, token).await;
+    ROOT_ACTOR.set(root_actor.clone()).unwrap();
     let subscribers = ChannelSubscribers::default();
 
     #[allow(unused_variables)]
