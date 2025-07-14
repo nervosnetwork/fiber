@@ -80,7 +80,7 @@ use crate::fiber::gossip::{GossipConfig, GossipService, SubscribableGossipMessag
 use crate::fiber::graph::{PaymentSession, PaymentSessionStatus};
 use crate::fiber::serde_utils::EntityHex;
 use crate::fiber::types::{
-    FiberChannelMessage, PaymentOnionPacket, PeeledPaymentOnionPacket, TxSignatures,
+    FiberChannelMessage, PaymentOnionPacket, PeeledPaymentOnionPacket, TlcErrPacket, TxSignatures,
 };
 use crate::fiber::KeyPair;
 use crate::invoice::{CkbInvoice, CkbInvoiceStatus, InvoiceStore, PreimageStore};
@@ -111,7 +111,8 @@ const MAINTAINING_CONNECTIONS_INTERVAL: Duration = Duration::from_secs(3600);
 
 // The duration for which we will check all channels.
 #[cfg(debug_assertions)]
-const CHECK_CHANNELS_INTERVAL: Duration = Duration::from_secs(3); // use a short interval for debugging build
+// use a short interval for debugging build
+const CHECK_CHANNELS_INTERVAL: Duration = Duration::from_secs(3);
 #[cfg(not(debug_assertions))]
 const CHECK_CHANNELS_INTERVAL: Duration = Duration::from_secs(60);
 
@@ -1314,14 +1315,63 @@ where
                                 }
                             }
 
+                            // for received tlcs, check whether the tlc is expired, if so we send RemoveTlc message
+                            // to previous hop, even if later hop send backup RemoveTlc message to us later,
+                            // it will be ignored.
+                            let expired_tlcs = actor_state
+                                .tlc_state
+                                .received_tlcs
+                                .get_committed_tlcs()
+                                .into_iter()
+                                .filter(|tlc| tlc.expiry < now)
+                                .collect::<Vec<_>>();
+                            for tlc in expired_tlcs {
+                                info!(
+                                    "Removing expired tlc {:?} for channel {:?}",
+                                    tlc.id(),
+                                    channel_id
+                                );
+                                let (send, _recv) = oneshot::channel();
+                                let rpc_reply = RpcReplyPort::from(send);
+                                if let Err(err) = state
+                                    .send_command_to_channel(
+                                        channel_id,
+                                        ChannelCommand::RemoveTlc(
+                                            RemoveTlcCommand {
+                                                id: tlc.id(),
+                                                reason: RemoveTlcReason::RemoveTlcFail(
+                                                    TlcErrPacket::new(
+                                                        TlcErr::new(TlcErrorCode::ExpiryTooSoon),
+                                                        &tlc.shared_secret,
+                                                    ),
+                                                ),
+                                            },
+                                            rpc_reply,
+                                        ),
+                                    )
+                                    .await
+                                {
+                                    error!(
+                                        "Failed to remove tlc {:?} for channel {:?}: {}",
+                                        tlc.id(),
+                                        channel_id,
+                                        err
+                                    );
+                                }
+                            }
+
+                            // check whether the next hop have already sent us the RemoveTlc message
+                            // for the offered expired tlc, if not we will force close the channel
                             if actor_state
                                 .tlc_state
                                 .offered_tlcs
                                 .get_committed_tlcs()
                                 .iter()
-                                .any(|tlc| tlc.expiry < now)
+                                .any(|tlc| {
+                                    tlc.expiry + (CHECK_CHANNELS_INTERVAL.as_millis() as u64) < now
+                                })
                             {
-                                debug!(
+                                info!(
                                     "Force closing channel {:?} due to expired offered tlc",
                                     channel_id
                                 );

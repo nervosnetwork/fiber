@@ -1,6 +1,7 @@
 use crate::ckb::tests::test_utils::complete_commitment_tx;
 use crate::fiber::channel::{
-    AddTlcResponse, ChannelState, CloseFlags, UpdateCommand, XUDT_COMPATIBLE_WITNESS,
+    AddTlcResponse, ChannelState, CloseFlags, OutboundTlcStatus, TLCId, TlcStatus, UpdateCommand,
+    XUDT_COMPATIBLE_WITNESS,
 };
 use crate::fiber::config::{
     DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT, MIN_TLC_EXPIRY_DELTA,
@@ -2471,6 +2472,63 @@ async fn test_remove_tlc_with_expiry_error() {
     assert!(add_tlc_result.is_err());
     let error_code = add_tlc_result.unwrap_err().error_code;
     assert_eq!(error_code, TlcErrorCode::ExpiryTooFar);
+}
+
+#[tokio::test]
+async fn test_remove_expired_tlc_in_bacckground() {
+    init_tracing();
+
+    let node_a_funding_amount = 100000000000;
+    let node_b_funding_amount = 6200000000;
+
+    let (node_a, _node_b, new_channel_id) =
+        create_nodes_with_established_channel(node_a_funding_amount, node_b_funding_amount, false)
+            .await;
+
+    let preimage = [1; 32];
+    let digest = HashAlgorithm::CkbHash.hash(preimage);
+    let tlc_amount = 1000000000;
+
+    // add tlc command with expiry soon
+    let add_tlc_command = AddTlcCommand {
+        amount: tlc_amount,
+        hash_algorithm: HashAlgorithm::CkbHash,
+        payment_hash: digest.into(),
+        expiry: now_timestamp_as_millis_u64() + MIN_TLC_EXPIRY_DELTA + 3000,
+        onion_packet: None,
+        shared_secret: NO_SHARED_SECRET,
+        previous_tlc: None,
+    };
+
+    let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id: new_channel_id,
+                command: ChannelCommand::AddTlc(add_tlc_command, rpc_reply),
+            },
+        ))
+    })
+    .expect("node_b alive");
+    assert!(add_tlc_result.is_ok());
+    let tlc_id = add_tlc_result.unwrap().tlc_id;
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(
+        MIN_TLC_EXPIRY_DELTA + 3000 + 3000,
+    ))
+    .await;
+
+    // check if the expired tlc is removed
+    let node_a_channel_state = node_a.get_channel_actor_state(new_channel_id);
+
+    matches!(node_a_channel_state.state, ChannelState::ChannelReady);
+    let tlc = node_a_channel_state
+        .tlc_state
+        .get(&TLCId::Offered(tlc_id))
+        .unwrap();
+    assert_eq!(
+        tlc.status,
+        TlcStatus::Outbound(OutboundTlcStatus::RemoveAckConfirmed)
+    );
 }
 
 #[tokio::test]
