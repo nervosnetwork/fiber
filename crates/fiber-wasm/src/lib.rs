@@ -67,7 +67,10 @@ pub async fn fiber(
     fiber_key_pair: Option<Vec<u8>>,
     ckb_secret_key: Option<Vec<u8>>,
 ) -> Result<(), ExitMessage> {
-    console_error_panic_hook::set_once();
+    std::panic::set_hook(Box::new(|info| {
+        console_error_panic_hook::hook(info);
+        loop {}
+    }));
     wasm_logger::init(wasm_logger::Config::new(
         tracing::log::Level::from_str(log_level).expect("Bad log level"),
     ));
