@@ -1,12 +1,4 @@
-use fiber::{
-    fiber::config::{
-        DEFAULT_TLC_EXPIRY_DELTA, DEFAULT_TLC_FEE_PROPORTIONAL_MILLIONTHS, DEFAULT_TLC_MAX_VALUE,
-        DEFAULT_TLC_MIN_VALUE,
-    },
-    now_timestamp_as_millis_u64,
-    store::migration::Migration,
-    Error,
-};
+use fiber::{now_timestamp_as_millis_u64, store::migration::Migration, Error};
 use indicatif::ProgressBar;
 use std::sync::Arc;
 use tracing::info;
@@ -19,6 +11,10 @@ pub use fiber_v030::fiber::channel::{
 
 pub use fiber_v021::fiber::channel::ChannelActorState as ChannelActorStateV021;
 pub use fiber_v030::fiber::channel::ChannelActorState as ChannelActorStateV030;
+use fiber_v030::fiber::config::{
+    DEFAULT_TLC_EXPIRY_DELTA, DEFAULT_TLC_FEE_PROPORTIONAL_MILLIONTHS, DEFAULT_TLC_MAX_VALUE,
+    DEFAULT_TLC_MIN_VALUE,
+};
 
 use crate::util::convert;
 
