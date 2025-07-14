@@ -1981,9 +1981,6 @@ async fn test_network_send_payment_randomly_send_each_other() {
     let node_a_old_balance = node_a.get_local_balance_from_channel(new_channel_id);
     let node_b_old_balance = node_b.get_local_balance_from_channel(new_channel_id);
 
-    let node_a_pubkey = node_a.pubkey;
-    let node_b_pubkey = node_b.pubkey;
-
     let mut node_a_sent = 0;
     let mut node_b_sent = 0;
     let mut all_sent = vec![];
@@ -1995,23 +1992,15 @@ async fn test_network_send_payment_randomly_send_each_other() {
         let amount = rand::random::<u128>() % 10000 + 1;
         eprintln!("generated amount: {}", amount);
         let (source, target) = if rand_num == 0 {
-            (&node_a.network_actor, node_b_pubkey)
+            (&node_a, &node_b)
         } else {
-            (&node_b.network_actor, node_a_pubkey)
-        };
-        let message = |rpc_reply| -> NetworkActorMessage {
-            NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
-                SendPaymentCommand {
-                    target_pubkey: Some(target),
-                    amount: Some(amount),
-                    keysend: Some(true),
-                    ..Default::default()
-                },
-                rpc_reply,
-            ))
+            (&node_b, &node_a)
         };
 
-        let res = call!(source, message).expect("node_a alive").unwrap();
+        let res = source
+            .send_payment_keysend(target, amount, false)
+            .await
+            .expect("send payment success");
 
         if rand_num == 0 {
             all_sent.push((true, amount, res.payment_hash, res.status));
@@ -2158,45 +2147,20 @@ async fn test_network_three_nodes_send_each_other() {
         node_b_old_balance_channel_2, node_b_old_balance_channel_3
     );
 
-    let node_a_pubkey = node_a.pubkey;
-    let node_c_pubkey = node_c.pubkey;
-
     let amount_a_to_c = 60000;
-    let message = |rpc_reply| -> NetworkActorMessage {
-        NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
-            SendPaymentCommand {
-                target_pubkey: Some(node_c_pubkey),
-                amount: Some(amount_a_to_c),
-                keysend: Some(true),
-                ..Default::default()
-            },
-            rpc_reply,
-        ))
-    };
-
-    let res = call!(node_a.network_actor, message)
-        .expect("node_a alive")
-        .unwrap();
+    let res = node_a
+        .send_payment_keysend(&node_c, amount_a_to_c, false)
+        .await
+        .expect("send payment ok");
     let payment_hash1 = res.payment_hash;
     let fee1 = res.fee;
     eprintln!("payment_hash1: {:?}", payment_hash1);
 
     let amount_c_to_a = 60000;
-    let message = |rpc_reply| -> NetworkActorMessage {
-        NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
-            SendPaymentCommand {
-                target_pubkey: Some(node_a_pubkey),
-                amount: Some(amount_c_to_a),
-                keysend: Some(true),
-                ..Default::default()
-            },
-            rpc_reply,
-        ))
-    };
-
-    let res = call!(node_c.network_actor, message)
-        .expect("node_a alive")
-        .unwrap();
+    let res = node_c
+        .send_payment_keysend(&node_a, amount_c_to_a, false)
+        .await
+        .expect("send payment ok");
 
     let payment_hash2 = res.payment_hash;
     let fee2 = res.fee;
