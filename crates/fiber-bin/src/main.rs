@@ -315,7 +315,7 @@ pub async fn main() -> Result<(), ExitMessage> {
                             Some(CchMessage::SettledTlcNotification(tlc_notification))
                         },
                     );
-
+                    info!("cch started successfully ...");
                     Some(actor)
                 }
             }

@@ -5413,6 +5413,10 @@ impl ChannelActorState {
     fn check_tlc_expiry(&self, expiry: u64) -> ProcessingChannelResult {
         let current_time = now_timestamp_as_millis_u64();
         if expiry <= current_time + MIN_TLC_EXPIRY_DELTA {
+            error!(
+                "TLC expiry {} is too soon, current time: {}",
+                expiry, current_time
+            );
             return Err(ProcessingChannelError::TlcExpirySoon);
         }
         if expiry >= current_time + MAX_PAYMENT_TLC_EXPIRY_LIMIT {
