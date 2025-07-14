@@ -1,4 +1,7 @@
-use std::{str::FromStr, sync::Arc};
+use std::{
+    str::FromStr,
+    sync::{Arc, atomic::AtomicU8},
+};
 
 use api::{FIBER_WASM, WrappedFiberWasm};
 use ckb_chain_spec::ChainSpec;
@@ -59,6 +62,24 @@ impl From<ExitMessage> for JsValue {
     }
 }
 
+const FIBER_STATE_BEFORE_STARTING: u8 = 0;
+const FIBER_STATE_STARTED: u8 = 1;
+const FIBER_STATE_PANICKED: u8 = 2;
+
+static FIBER_STATE: AtomicU8 = AtomicU8::new(FIBER_STATE_BEFORE_STARTING);
+
+pub(crate) fn check_state() -> Result<(), JsValue> {
+    match FIBER_STATE.load(std::sync::atomic::Ordering::SeqCst) {
+        FIBER_STATE_BEFORE_STARTING => ExitMessage::err("Fiber not started!".to_string()),
+        FIBER_STATE_STARTED => Ok(()),
+        FIBER_STATE_PANICKED => {
+            ExitMessage::err("Fiber panicked, please refresh page".to_string())
+        }
+        s => ExitMessage::err(format!("Invalid FIBER_STATE: {}", s)),
+    }
+    .map_err(|e| e.into())
+}
+
 #[wasm_bindgen]
 pub async fn fiber(
     config: &str,
@@ -69,7 +90,7 @@ pub async fn fiber(
 ) -> Result<(), ExitMessage> {
     std::panic::set_hook(Box::new(|info| {
         console_error_panic_hook::hook(info);
-        loop {}
+        FIBER_STATE.store(FIBER_STATE_PANICKED, std::sync::atomic::Ordering::SeqCst);
     }));
     wasm_logger::init(wasm_logger::Config::new(
         tracing::log::Level::from_str(log_level).expect("Bad log level"),
@@ -266,6 +287,7 @@ pub async fn fiber(
     } else {
         debug!("WrappedFiberWasm set");
     }
+    FIBER_STATE.store(FIBER_STATE_STARTED, std::sync::atomic::Ordering::SeqCst);
     Ok(())
 }
 

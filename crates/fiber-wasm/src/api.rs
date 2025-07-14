@@ -15,6 +15,8 @@ use jsonrpsee::{core::Serialize, types::ErrorObjectOwned};
 use serde::de::DeserializeOwned;
 use wasm_bindgen::JsValue;
 
+use crate::check_state;
+
 pub(crate) struct FiberWasm<
     ChannelStoreType: ChannelActorStateStore + Send + Sync + 'static,
     GraphStoreType: NetworkGraphStateStore
@@ -39,6 +41,7 @@ pub(crate) type WrappedFiberWasm = FiberWasm<Store, Store, Store, Store>;
 pub(crate) static FIBER_WASM: OnceLock<WrappedFiberWasm> = OnceLock::new();
 
 fn fiber_wasm() -> Result<&'static WrappedFiberWasm, JsValue> {
+    check_state()?;
     FIBER_WASM
         .get()
         .ok_or_else(|| JsValue::from_str("Fiber wasm not started yet"))
