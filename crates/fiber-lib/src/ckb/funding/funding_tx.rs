@@ -22,7 +22,7 @@ use molecule::{
     bytes::{BufMut as _, BytesMut},
     prelude::*,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use std::collections::{HashMap, HashSet};
 use tracing::debug;
@@ -122,7 +122,7 @@ impl From<Transaction> for FundingTx {
 }
 
 #[serde_as]
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct FundingRequest {
     /// The funding cell lock script args
     #[serde_as(as = "EntityHex")]
@@ -386,8 +386,7 @@ impl FundingTxBuilder {
 
         let ckb_client = CkbRpcClient::new(&self.context.rpc_url);
         let cell_dep_resolver = ckb_client
-            .get_block_by_number(0.into())
-            .map_err(FundingError::CkbRpcError)?
+            .get_block_by_number(0.into())?
             .and_then(|genesis_block| {
                 DefaultCellDepResolver::from_genesis(&BlockView::from(genesis_block)).ok()
             })
