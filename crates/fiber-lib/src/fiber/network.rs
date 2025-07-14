@@ -685,7 +685,7 @@ pub enum NetworkServiceEvent {
     PeerDisConnected(PeerId, Multiaddr),
     // An incoming/outgoing channel is created.
     ChannelCreated(PeerId, Hash256),
-    // A outgoing channel is pending to be accepted.
+    // An incoming channel is pending to be accepted.
     ChannelPendingToBeAccepted(PeerId, Hash256),
     // A funding tx is completed. The watch tower may use this to monitor the channel.
     RemoteTxComplete(PeerId, Hash256, Script, SettlementData),
@@ -2277,7 +2277,7 @@ pub struct NetworkActorState<S> {
     outpoint_channel_map: HashMap<OutPoint, Hash256>,
     // Channels in this hashmap are pending for acceptance. The user needs to
     // issue an AcceptChannelCommand with the amount of funding to accept the channel.
-    to_be_accepted_channels: HashMap<Hash256, (PeerId, OpenChannel)>,
+    to_be_accepted_channels: ToBeAcceptedChannels,
     // Channels in this hashmap are pending for funding transaction confirmation.
     pending_channels: HashMap<OutPoint, Hash256>,
     // Used to broadcast and query network info.
@@ -3283,7 +3283,8 @@ where
         peer_id: PeerId,
         open_channel: OpenChannel,
     ) -> ProcessingChannelResult {
-        check_open_channel_parameters(
+        let id = open_channel.channel_id;
+        let result = check_open_channel_parameters(
             &open_channel.funding_udt_type_script,
             &open_channel.shutdown_script,
             open_channel.reserved_ckb_amount,
@@ -3291,33 +3292,30 @@ where
             open_channel.commitment_fee_rate,
             open_channel.commitment_delay_epoch,
             open_channel.max_tlc_number_in_flight,
-        )?;
+        )
+        .and_then(|_| {
+            self.to_be_accepted_channels
+                .try_insert(id, peer_id.clone(), open_channel)
+        });
 
-        let id = open_channel.channel_id;
-        if let Some(channel) = self.to_be_accepted_channels.get(&id) {
-            warn!(
-                "A channel from {:?} of id {:?} is already awaiting to be accepted: {:?}",
-                &peer_id, &id, channel
-            );
-            return Err(ProcessingChannelError::InvalidParameter(format!(
-                "A channel from {:?} of id {:?} is already awaiting to be accepted",
-                &peer_id, &id,
-            )));
-        }
-        debug!(
-            "Channel from {:?} of id {:?} is now awaiting to be accepted: {:?}",
-            &peer_id, &id, &open_channel
-        );
-        self.to_be_accepted_channels
-            .insert(id, (peer_id.clone(), open_channel));
-        // Notify outside observers.
-        self.network
-            .clone()
-            .send_message(NetworkActorMessage::new_notification(
-                NetworkServiceEvent::ChannelPendingToBeAccepted(peer_id, id),
-            ))
-            .expect(ASSUME_NETWORK_MYSELF_ALIVE);
-        Ok(())
+        match result {
+            Ok(_) => {
+                // Notify outside observers.
+                self.network
+                    .send_message(NetworkActorMessage::new_notification(
+                        NetworkServiceEvent::ChannelPendingToBeAccepted(peer_id, id),
+                    ))
+                    .expect(ASSUME_NETWORK_MYSELF_ALIVE);
+            }
+            Err(ProcessingChannelError::RepeatedProcessing(_)) => {
+                // ignore duplicated open channel request
+            }
+            Err(_) => {
+                debug_event!(self.network, "ChannelPendingToBeRejected");
+            }
+        };
+
+        result
     }
 
     async fn on_funding_transaction_pending(
@@ -3611,7 +3609,7 @@ where
             channels: Default::default(),
             ckb_txs_in_flight: Default::default(),
             outpoint_channel_map: Default::default(),
-            to_be_accepted_channels: Default::default(),
+            to_be_accepted_channels: ToBeAcceptedChannels::new_with_config(&config),
             pending_channels: Default::default(),
             chain_actor,
             open_channel_auto_accept_min_ckb_funding_amount: config
@@ -3907,4 +3905,91 @@ pub async fn start_network<
     .expect("Failed to start network actor");
 
     actor
+}
+
+struct ToBeAcceptedChannels {
+    total_number_limit: usize,
+    total_bytes_limit: usize,
+    map: HashMap<Hash256, (PeerId, OpenChannel)>,
+}
+
+impl Default for ToBeAcceptedChannels {
+    fn default() -> Self {
+        Self {
+            total_number_limit: usize::MAX,
+            total_bytes_limit: usize::MAX,
+            map: HashMap::default(),
+        }
+    }
+}
+
+// Remember to sync fiber/config.rs
+const DEFAULT_TO_BE_ACCEPTED_CHANNELS_NUMBER_LIMIT: usize = 20;
+// Remember to sync fiber/config.rs
+const DEFAULT_TO_BE_ACCEPTED_CHANNELS_BYTES_LIMIT: usize = 51200; // 50KB
+
+impl ToBeAcceptedChannels {
+    fn new_with_config(config: &FiberConfig) -> Self {
+        Self {
+            total_number_limit: config
+                .to_be_accepted_channels_number_limit
+                .unwrap_or(DEFAULT_TO_BE_ACCEPTED_CHANNELS_NUMBER_LIMIT),
+            total_bytes_limit: config
+                .to_be_accepted_channels_bytes_limit
+                .unwrap_or(DEFAULT_TO_BE_ACCEPTED_CHANNELS_BYTES_LIMIT),
+            map: HashMap::default(),
+        }
+    }
+
+    fn remove(&mut self, id: &Hash256) -> Option<(PeerId, OpenChannel)> {
+        self.map.remove(id)
+    }
+
+    // insert and apply throttle control
+    fn try_insert(
+        &mut self,
+        id: Hash256,
+        peer_id: PeerId,
+        open_channel: OpenChannel,
+    ) -> ProcessingChannelResult {
+        if let Some(existing_value) = self.map.get(&id) {
+            let err_message = format!(
+                "A channel from {:?} of id {:?} is already awaiting to be accepted",
+                &peer_id, &id,
+            );
+            warn!("{}: {:?}", err_message, existing_value);
+            return Err(ProcessingChannelError::RepeatedProcessing(err_message));
+        }
+
+        // The map should be small because of the flow control, so calculate the total number and
+        // bytes on the fly.
+        let (total_number, total_bytes) = self
+            .map
+            .values()
+            .filter(|(saved_peer_id, _)| *saved_peer_id == peer_id)
+            .fold(
+                (1, open_channel.mem_size()),
+                |(count, size), (_, saved_open_channel)| {
+                    (count + 1, size + saved_open_channel.mem_size())
+                },
+            );
+
+        if total_number > self.total_number_limit {
+            return Err(ProcessingChannelError::ToBeAcceptedChannelsExceedLimit(
+                format!("Total number exceeds the limit {}", self.total_number_limit),
+            ));
+        }
+        if total_bytes > self.total_bytes_limit {
+            return Err(ProcessingChannelError::ToBeAcceptedChannelsExceedLimit(
+                format!("Total bytes exceeds the limit {}", self.total_bytes_limit),
+            ));
+        }
+
+        debug!(
+            "Channel from {:?} of id {:?} is now awaiting to be accepted: {:?}",
+            &peer_id, &id, &open_channel
+        );
+        self.map.insert(id, (peer_id, open_channel));
+        Ok(())
+    }
 }
