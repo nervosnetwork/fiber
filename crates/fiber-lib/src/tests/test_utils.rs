@@ -1731,3 +1731,16 @@ pub async fn wait_until<F: Fn() -> bool>(f: F) {
 
     wait_until_timeout(MAX_WAIT_TIME, f).await;
 }
+
+#[tokio::test]
+async fn test_connect_to_other_node() {
+    let mut node_a = NetworkNode::new().await;
+    let mut node_b = NetworkNode::new().await;
+    node_a.connect_to(&mut node_b).await;
+}
+
+#[tokio::test]
+async fn test_restart_network_node() {
+    let mut node = NetworkNode::new().await;
+    node.restart().await;
+}

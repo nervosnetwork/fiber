@@ -79,7 +79,7 @@ pub mod feature_bits {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct FeatureVector {
     inner: Vec<u8>,
 }

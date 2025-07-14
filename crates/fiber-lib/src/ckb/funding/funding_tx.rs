@@ -234,10 +234,12 @@ impl FundingTxBuilder {
                 // To make tx building easier, do not include the amount not funded yet in the
                 // funding cell.
                 if remote_funded {
-                    udt_amount += self.request.remote_amount;
+                    udt_amount = udt_amount
+                        .checked_add(self.request.remote_amount)
+                        .ok_or(FundingError::OverflowError)?;
                     ckb_amount = ckb_amount
                         .checked_add(self.request.remote_reserved_ckb_amount)
-                        .ok_or(FundingError::InvalidChannel)?;
+                        .ok_or(FundingError::OverflowError)?;
                 }
 
                 let udt_output = packed::CellOutput::new_builder()
@@ -252,15 +254,16 @@ impl FundingTxBuilder {
                 Ok((udt_output, data.freeze().pack()))
             }
             None => {
-                let mut ckb_amount =
-                    self.request.local_amount as u64 + self.request.local_reserved_ckb_amount;
+                let mut ckb_amount = (self.request.local_amount as u64)
+                    .checked_add(self.request.local_reserved_ckb_amount)
+                    .ok_or(FundingError::OverflowError)?;
                 if remote_funded {
                     ckb_amount = ckb_amount
                         .checked_add(
                             self.request.remote_amount as u64
                                 + self.request.remote_reserved_ckb_amount,
                         )
-                        .ok_or(FundingError::InvalidChannel)?;
+                        .ok_or(FundingError::OverflowError)?;
                 }
                 let ckb_output = packed::CellOutput::new_builder()
                     .capacity(Capacity::shannons(ckb_amount).pack())

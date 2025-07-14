@@ -3012,11 +3012,11 @@ async fn test_send_mpp_with_generated_invoice() {
             ..Default::default()
         })
         .await
-        .invoice;
+        .invoice_address;
 
     let result = nodes[0]
         .send_payment(SendPaymentCommand {
-            invoice: Some(too_large_amount_invoice.to_string()),
+            invoice: Some(too_large_amount_invoice),
             ..Default::default()
         })
         .await;
@@ -3032,11 +3032,11 @@ async fn test_send_mpp_with_generated_invoice() {
             ..Default::default()
         })
         .await
-        .invoice;
+        .invoice_address;
 
     let result = nodes[0]
         .send_payment(SendPaymentCommand {
-            invoice: Some(ok_invoice.to_string()),
+            invoice: Some(ok_invoice),
             ..Default::default()
         })
         .await

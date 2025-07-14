@@ -61,7 +61,7 @@ coverage-generate-report:
 
 coverage: coverage-run-unittests coverage-collect-data coverage-generate-report
 
-RPC_GEN_VERSION = 0.1.11
+RPC_GEN_VERSION = 0.1.15
 .PHONY: gen-rpc-doc
 gen-rpc-doc:
 	@if ! command -v fiber-rpc-gen >/dev/null 2>&1 || [ "$$(fiber-rpc-gen --version | awk '{print $$2}')" != "$(RPC_GEN_VERSION)" ]; then \
@@ -78,7 +78,7 @@ gen-rpc-doc:
 check-dirty-rpc-doc: gen-rpc-doc
 	git diff --exit-code ./crates/fiber-lib/src/rpc/README.md
 
-MIGRATION_CHECK_VERSION := 0.2.4
+MIGRATION_CHECK_VERSION := 0.2.6
 install-migration-check:
 	@if ! command -v migration-check >/dev/null 2>&1 || [ "$$(migration-check --version | awk '{print $$2}')" != "$(MIGRATION_CHECK_VERSION)" ]; then \
 		echo "Installing migration-check $(MIGRATION_CHECK_VERSION)..."; \
