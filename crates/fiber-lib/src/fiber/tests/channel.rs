@@ -1,10 +1,12 @@
 use crate::ckb::tests::test_utils::complete_commitment_tx;
-use crate::fiber::channel::{ChannelState, CloseFlags, UpdateCommand, XUDT_COMPATIBLE_WITNESS};
+use crate::fiber::channel::{
+    AddTlcResponse, ChannelState, CloseFlags, UpdateCommand, XUDT_COMPATIBLE_WITNESS,
+};
 use crate::fiber::config::{DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT};
 use crate::fiber::graph::{ChannelInfo, PaymentSessionStatus};
 use crate::fiber::network::{DebugEvent, FiberMessageWithPeerId, SendPaymentCommand};
 use crate::fiber::types::{
-    AddTlc, FiberMessage, Hash256, PaymentHopData, PeeledOnionPacket, Pubkey, TlcErrorCode,
+    AddTlc, FiberMessage, Hash256, PaymentHopData, PeeledOnionPacket, Pubkey, TlcErr, TlcErrorCode,
     NO_SHARED_SECRET,
 };
 use crate::invoice::{CkbInvoiceStatus, Currency, InvoiceBuilder};
@@ -2143,6 +2145,63 @@ async fn do_test_channel_add_tlc_amount_invalid() {
     run_add_tlc_amount(1000, 100).await;
     run_add_tlc_amount(1000, 1000).await;
     run_add_tlc_amount(1000, 1000 + 1).await;
+}
+
+#[tokio::test]
+async fn test_network_add_tlc_amount_overflow_error() {
+    init_tracing();
+
+    let node_a_funding_amount = 1000 + MIN_RESERVED_CKB;
+    let node_b_funding_amount = 1000 + MIN_RESERVED_CKB;
+
+    let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
+    let (channel_id, _funding_tx_hash) = establish_channel_between_nodes(
+        &mut node_a,
+        &mut node_b,
+        ChannelParameters {
+            public: false,
+            node_a_funding_amount,
+            node_b_funding_amount,
+            ..Default::default()
+        },
+    )
+    .await;
+
+    async fn send_add_tlc(
+        node: &NetworkNode,
+        amount: u128,
+        channel_id: Hash256,
+    ) -> Result<AddTlcResponse, TlcErr> {
+        let preimage: [u8; 32] = gen_rand_sha256_hash().as_ref().try_into().unwrap();
+        // create a new payment hash
+        let hash_algorithm = HashAlgorithm::Sha256;
+        let digest = hash_algorithm.hash(preimage);
+        call!(node.network_actor, |rpc_reply| {
+            NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+                ChannelCommandWithId {
+                    channel_id,
+                    command: ChannelCommand::AddTlc(
+                        AddTlcCommand {
+                            amount,
+                            hash_algorithm,
+                            payment_hash: digest.into(),
+                            expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+                            onion_packet: None,
+                            shared_secret: NO_SHARED_SECRET,
+                            previous_tlc: None,
+                        },
+                        rpc_reply,
+                    ),
+                },
+            ))
+        })
+        .expect("node_b alive")
+    }
+
+    let res = send_add_tlc(&node_a, 10, channel_id).await;
+    assert!(res.is_ok());
+    let res = send_add_tlc(&node_a, u128::MAX, channel_id).await;
+    assert!(res.is_err());
 }
 
 #[tokio::test]
