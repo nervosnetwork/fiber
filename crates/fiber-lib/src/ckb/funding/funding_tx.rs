@@ -22,7 +22,7 @@ use molecule::{
     bytes::{BufMut as _, BytesMut},
     prelude::*,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use std::collections::{HashMap, HashSet};
 use tracing::debug;
@@ -122,7 +122,7 @@ impl From<Transaction> for FundingTx {
 }
 
 #[serde_as]
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct FundingRequest {
     /// The funding cell lock script args
     #[serde_as(as = "EntityHex")]
@@ -394,11 +394,7 @@ impl FundingTxBuilder {
 
         let ckb_client = CkbRpcAsyncClient::new(&self.context.rpc_url);
         let cell_dep_resolver = {
-            match ckb_client
-                .get_block_by_number(0.into())
-                .await
-                .map_err(FundingError::CkbRpcError)?
-            {
+            match ckb_client.get_block_by_number(0.into()).await? {
                 Some(genesis_block) => {
                     match DefaultCellDepResolver::from_genesis_async(&BlockView::from(
                         genesis_block,
@@ -421,6 +417,7 @@ impl FundingTxBuilder {
                 }
             }
         };
+
         let header_dep_resolver = DefaultHeaderDepResolver::new(&self.context.rpc_url);
         let mut cell_collector = DefaultCellCollector::new(&self.context.rpc_url);
         let tx_dep_provider = DefaultTransactionDependencyProvider::new(&self.context.rpc_url, 10);
