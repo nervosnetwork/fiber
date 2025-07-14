@@ -295,6 +295,24 @@ pub struct FiberConfig {
         help = "Disable built-in watchtower actor. [default: false]"
     )]
     pub disable_built_in_watchtower: Option<bool>,
+
+    /// Max allowed number of channels to be accepted from one peer. [default: 20]
+    #[arg(
+        name = "FIBER_TO_BE_ACCEPTED_CHANNELS_NUMBER_LIMIT",
+        long = "fiber-to-be-accepted-channels-number-limit",
+        env,
+        help = "Max allowed number of channels to be accepted from one peer. [default: 20]"
+    )]
+    pub to_be_accepted_channels_number_limit: Option<usize>,
+
+    /// Max allowed storage bytes of channels to be accepted from one peer. [default: 50KB]
+    #[arg(
+        name = "FIBER_TO_BE_ACCEPTED_CHANNELS_BYTESS_LIMIT",
+        long = "fiber-to-be-accepted-channels-bytes-limit",
+        env,
+        help = "Max allowed bytes of channels to be accepted from one peer. [default: 50KB]"
+    )]
+    pub to_be_accepted_channels_bytes_limit: Option<usize>,
 }
 
 /// Must be a valid utf-8 string of length maximal length 32 bytes.

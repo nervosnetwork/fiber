@@ -659,6 +659,9 @@ where
             ProcessingChannelError::TlcForwardingError(_) => {
                 unreachable!("TlcForwardingError should be handled before this point")
             }
+            ProcessingChannelError::ToBeAcceptedChannelsExceedLimit(_) => {
+                unreachable!("ToBeAcceptedChannelsExceedLimit should be handled before this point")
+            }
         };
 
         let channel_update = if error_code.is_update() {
@@ -3678,6 +3681,8 @@ pub enum ProcessingChannelError {
     TlcExpiryTooFar,
     #[error("Tlc forwarding error")]
     TlcForwardingError(TlcErr),
+    #[error("Total number or bytes of to-be-accepted channels exceed the limit: {0}")]
+    ToBeAcceptedChannelsExceedLimit(String),
 }
 
 /// ProcessingChannelError which brings the shared secret used in forwarding onion packet.
