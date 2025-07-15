@@ -3433,9 +3433,8 @@ where
 
         #[cfg(not(target_arch = "wasm32"))]
         let listening_addr = {
-            let mut addresses_to_listen = vec![
-                MultiAddr::from_str(config.listening_addr()).expect("valid tentacle listening address")
-            ];
+            let mut addresses_to_listen = vec![MultiAddr::from_str(config.listening_addr())
+                .expect("valid tentacle listening address")];
             {
                 // Re-use the same port for websocket
                 let ws_listens = addresses_to_listen
@@ -3454,10 +3453,7 @@ where
             }
             let mut listening_addr = vec![];
             for addr in addresses_to_listen.into_iter() {
-                let mut current_addr = service
-                    .listen(addr)
-                    .await
-                    .expect("listen tentacle");
+                let mut current_addr = service.listen(addr).await.expect("listen tentacle");
 
                 current_addr.push(Protocol::P2P(Cow::Owned(my_peer_id.clone().into_bytes())));
                 if config.announce_listening_addr() {

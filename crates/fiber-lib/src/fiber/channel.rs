@@ -646,9 +646,7 @@ where
                 // otherwise, channel maybe not ready
                 _ => TlcErrorCode::TemporaryChannelFailure,
             },
-            ProcessingChannelError::RepeatedProcessing(_) => {
-                TlcErrorCode::TemporaryChannelFailure
-            }
+            ProcessingChannelError::RepeatedProcessing(_) => TlcErrorCode::TemporaryChannelFailure,
             ProcessingChannelError::SpawnErr(_)
             | ProcessingChannelError::Musig2RoundFinalizeError(_)
             | ProcessingChannelError::Musig2SigningError(_)
