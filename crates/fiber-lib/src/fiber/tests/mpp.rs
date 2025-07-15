@@ -3044,3 +3044,39 @@ async fn test_send_mpp_with_generated_invoice() {
 
     nodes[0].wait_until_success(result.payment_hash).await;
 }
+
+#[tokio::test]
+async fn test_mpp_with_need_fee() {
+    init_tracing();
+
+    // with MPP, we can send a payment successfully
+    let (nodes, _channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+            ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+            ((1, 2), (MIN_RESERVED_CKB + 20000000000, MIN_RESERVED_CKB)),
+            ((0, 3), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+            ((0, 3), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+            ((3, 2), (MIN_RESERVED_CKB + 20000000000, MIN_RESERVED_CKB)),
+        ],
+        4,
+    )
+    .await;
+    let [node_0, _node_1, mut node_2, _node_3] = nodes.try_into().expect("2 nodes");
+
+    // query the path without MPP, it will fail with no path found
+    let res = node_0
+        .send_payment_keysend(&node_2, 10000000000, true)
+        .await;
+    eprintln!("query res: {:?}", res);
+    assert!(res.unwrap_err().to_string().contains("no path found"));
+
+    let res = node_0
+        .send_mpp_payment(&mut node_2, 10000000000, Some(16))
+        .await;
+
+    eprintln!("res: {:?}", res);
+    assert!(res.is_ok());
+    let payment_hash = res.unwrap().payment_hash;
+    node_0.wait_until_success(payment_hash).await;
+}
