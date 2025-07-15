@@ -182,8 +182,6 @@ impl Store {
     }
 
     fn parse_hold_tlc(key: &[u8], value: &[u8]) -> (Hash256, HoldTlc) {
-        let expired_at: u64 = deserialize_from(value, "HoldTlc");
-
         let payment_hash: [u8; 32] = key[1..33]
             .try_into()
             .expect("payment_hash should be 32 bytes");
@@ -194,6 +192,8 @@ impl Store {
 
         let tlc_id: u64 =
             u64::from_le_bytes(key[65..].try_into().expect("tlc_id should be 8 bytes"));
+
+        let expired_at: u64 = deserialize_from(value, "HoldTlc");
 
         let hold_tlc = HoldTlc {
             channel_id: channel_id.into(),
@@ -435,7 +435,7 @@ impl ChannelActorStateStore for Store {
             .map(|v| deserialize_from(v.as_ref(), "PaymentCustomRecord"))
     }
 
-    fn insert_hold_tlc(&self, payment_hash: Hash256, hold_tlc: HoldTlc) {
+    fn insert_payment_hold_tlc(&self, payment_hash: Hash256, hold_tlc: HoldTlc) {
         let mut batch = self.batch();
         batch.put_kv(KeyValue::HoldTlc(
             (payment_hash, hold_tlc.channel_id, hold_tlc.tlc_id),
@@ -444,7 +444,7 @@ impl ChannelActorStateStore for Store {
         batch.commit();
     }
 
-    fn remove_hold_tlc(&self, payment_hash: &Hash256, channel_id: &Hash256, tlc_id: u64) {
+    fn remove_payment_hold_tlc(&self, payment_hash: &Hash256, channel_id: &Hash256, tlc_id: u64) {
         let prefix = [
             &[HOLD_TLC_PREFIX],
             payment_hash.as_ref(),
@@ -457,7 +457,7 @@ impl ChannelActorStateStore for Store {
         batch.commit();
     }
 
-    fn get_hold_tlc_set(&self, payment_hash: Hash256) -> Vec<HoldTlc> {
+    fn get_payment_hold_tlcs(&self, payment_hash: Hash256) -> Vec<HoldTlc> {
         let prefix = [&[HOLD_TLC_PREFIX], payment_hash.as_ref()].concat();
         self.prefix_iterator(&prefix)
             .map(|(key, value)| {
@@ -467,16 +467,7 @@ impl ChannelActorStateStore for Store {
             .collect()
     }
 
-    fn remove_hold_tlc_set(&self, payment_hash: &Hash256) {
-        let prefix = [&[HOLD_TLC_PREFIX], payment_hash.as_ref()].concat();
-        let mut batch = self.batch();
-        for (key, _) in self.prefix_iterator(&prefix) {
-            batch.delete(key);
-        }
-        batch.commit();
-    }
-
-    fn get_hold_tlcs_map(&self) -> HashMap<Hash256, Vec<HoldTlc>> {
+    fn get_node_hold_tlcs(&self) -> HashMap<Hash256, Vec<HoldTlc>> {
         let prefix = [HOLD_TLC_PREFIX];
         self.prefix_iterator(&prefix)
             .map(|(key, value)| Self::parse_hold_tlc(&key, &value))

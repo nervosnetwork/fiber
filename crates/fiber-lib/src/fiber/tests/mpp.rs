@@ -1536,7 +1536,7 @@ async fn test_mpp_tlc_set_timeout_1_of_2() {
     .expect("tlc");
 
     // wait until tlc is hold
-    while node_1.store.get_hold_tlc_set(payment_hash).is_empty() {
+    while node_1.store.get_payment_hold_tlcs(payment_hash).is_empty() {
         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
     }
 
@@ -1567,7 +1567,7 @@ async fn test_mpp_tlc_set_timeout_1_of_2() {
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
     // timeout tlc 1, but not 2
-    for hold_tlc in node_1.store.get_hold_tlc_set(payment_hash) {
+    for hold_tlc in node_1.store.get_payment_hold_tlcs(payment_hash) {
         if hold_tlc.channel_id == channels[0] && hold_tlc.tlc_id == add_tlc_result_1.tlc_id {
             ractor::cast!(
                 node_1.network_actor,
@@ -1606,7 +1606,7 @@ async fn test_mpp_tlc_set_timeout_1_of_2() {
     assert!(tlc2.unwrap().removed_reason.is_none());
 
     // timeout tlc2
-    for hold_tlc in node_1.store.get_hold_tlc_set(payment_hash) {
+    for hold_tlc in node_1.store.get_payment_hold_tlcs(payment_hash) {
         if hold_tlc.channel_id == channels[1] && hold_tlc.tlc_id == add_tlc_result_2.tlc_id {
             ractor::cast!(
                 node_1.network_actor,
@@ -1749,12 +1749,12 @@ async fn test_mpp_tlc_set_timeout() {
     .expect("tlc");
 
     // wait until tlc is hold
-    while node_1.store.get_hold_tlc_set(payment_hash).is_empty() {
+    while node_1.store.get_payment_hold_tlcs(payment_hash).is_empty() {
         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
     }
 
     // timeout hold tlc
-    for hold_tlc in node_1.store.get_hold_tlc_set(payment_hash) {
+    for hold_tlc in node_1.store.get_payment_hold_tlcs(payment_hash) {
         ractor::cast!(
             node_1.network_actor,
             NetworkActorMessage::Command(NetworkActorCommand::TimeoutHoldTlc(

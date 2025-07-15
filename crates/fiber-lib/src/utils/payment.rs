@@ -1,5 +1,5 @@
 use crate::{fiber::channel::TlcInfo, invoice::CkbInvoice};
-use tracing::{debug, error};
+use tracing::debug;
 
 /// Check if the invoice is fulfilled by the tlc set
 ///
@@ -21,7 +21,6 @@ pub fn is_invoice_fulfilled(invoice: &CkbInvoice, tlc_set: &[TlcInfo]) -> bool {
     let total_amount = first_tlc.total_amount.unwrap_or(first_tlc.amount);
 
     if total_amount < invoice.amount.unwrap_or_default() {
-        error!("total_amount is less than invoice amount");
         return false;
     }
 

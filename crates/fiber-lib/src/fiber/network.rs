@@ -1472,7 +1472,7 @@ where
                 // load hold tlcs
                 let tlcs: Vec<_> = self
                     .store
-                    .get_hold_tlc_set(payment_hash)
+                    .get_payment_hold_tlcs(payment_hash)
                     .iter()
                     .filter_map(|hold_tlc| {
                         let state = self.store.get_channel_actor_state(&hold_tlc.channel_id)?;
@@ -1540,7 +1540,13 @@ where
                         )
                         .await
                     {
-                        Ok(_) => {}
+                        Ok(_) => {
+                            self.store.remove_payment_hold_tlc(
+                                &payment_hash,
+                                &tlc.channel_id,
+                                tlc.id(),
+                            );
+                        }
                         Err(err) => {
                             error!(
                                 "Failed to remove tlc {:?} for channel {:?}: {}",
@@ -1551,9 +1557,6 @@ where
                         }
                     }
                 }
-
-                // remove settled hold tlcs
-                self.store.remove_hold_tlc_set(&payment_hash);
             }
             NetworkActorCommand::TimeoutHoldTlc(payment_hash, channel_id, tlc_id) => {
                 debug!(
@@ -1571,7 +1574,7 @@ where
                     );
                     // remove hold tlc from store
                     self.store
-                        .remove_hold_tlc(&payment_hash, &channel_id, tlc_id);
+                        .remove_payment_hold_tlc(&payment_hash, &channel_id, tlc_id);
                     return Ok(());
                 };
 
@@ -1596,7 +1599,7 @@ where
                     Ok(_) => {
                         // remove hold tlc from store
                         self.store
-                            .remove_hold_tlc(&payment_hash, &channel_id, tlc_id);
+                            .remove_payment_hold_tlc(&payment_hash, &channel_id, tlc_id);
                     }
                     Err(err) => {
                         error!(
@@ -4170,7 +4173,7 @@ where
 
         // Trigger mmp tlc set fulfill check and hold tlc timeout
         let now = now_timestamp_as_millis_u64();
-        for (payment_hash, hold_tlcs) in self.store.get_hold_tlcs_map() {
+        for (payment_hash, hold_tlcs) in self.store.get_node_hold_tlcs() {
             // timeout hold tlc
             let already_timeout = hold_tlcs
                 .iter()

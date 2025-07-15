@@ -886,7 +886,7 @@ where
                 }
                 _ if invoice.allow_mpp() => {
                     // hold the tlc
-                    self.store.insert_hold_tlc(
+                    self.store.insert_payment_hold_tlc(
                         tlc.payment_hash,
                         HoldTlc {
                             channel_id: state.get_id(),
@@ -7720,11 +7720,10 @@ pub trait ChannelActorStateStore {
         custom_records: PaymentCustomRecords,
     );
     fn get_payment_custom_records(&self, payment_hash: &Hash256) -> Option<PaymentCustomRecords>;
-    fn insert_hold_tlc(&self, payment_hash: Hash256, hold_tlc: HoldTlc);
-    fn get_hold_tlc_set(&self, payment_hash: Hash256) -> Vec<HoldTlc>;
-    fn remove_hold_tlc_set(&self, payment_hash: &Hash256);
-    fn get_hold_tlcs_map(&self) -> HashMap<Hash256, Vec<HoldTlc>>;
-    fn remove_hold_tlc(&self, payment_hash: &Hash256, channel_id: &Hash256, tlc_id: u64);
+    fn insert_payment_hold_tlc(&self, payment_hash: Hash256, hold_tlc: HoldTlc);
+    fn remove_payment_hold_tlc(&self, payment_hash: &Hash256, channel_id: &Hash256, tlc_id: u64);
+    fn get_payment_hold_tlcs(&self, payment_hash: Hash256) -> Vec<HoldTlc>;
+    fn get_node_hold_tlcs(&self) -> HashMap<Hash256, Vec<HoldTlc>>;
 }
 
 /// A wrapper on CommitmentTransaction that has a partial signature along with
