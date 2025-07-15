@@ -38,7 +38,7 @@ use ckb_types::prelude::Entity;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use tentacle::secio::PeerId;
-use tracing::{info, warn};
+use tracing::info;
 
 #[derive(Copy, Clone)]
 enum ChannelTimestamp {
@@ -67,6 +67,7 @@ impl Store {
         migrate.init_or_check(path)?;
         Ok(())
     }
+
     pub fn check_validate<P: AsRef<Path>>(path: P) -> Result<(), String> {
         let db = Self::open_db(path.as_ref())?;
         let mut errors = HashSet::new();
@@ -179,6 +180,29 @@ impl Store {
             Err(errors.join("\n"))
         }
     }
+
+    fn parse_hold_tlc(key: &[u8], value: &[u8]) -> (Hash256, HoldTlc) {
+        let expired_at: u64 = deserialize_from(value, "HoldTlc");
+
+        let payment_hash: [u8; 32] = key[1..33]
+            .try_into()
+            .expect("payment_hash should be 32 bytes");
+
+        let channel_id: [u8; 32] = key[33..65]
+            .try_into()
+            .expect("channel_id should be 32 bytes");
+
+        let tlc_id: u64 =
+            u64::from_le_bytes(key[65..].try_into().expect("tlc_id should be 8 bytes"));
+
+        let hold_tlc = HoldTlc {
+            channel_id: channel_id.into(),
+            tlc_id,
+            hold_expire_at: expired_at,
+        };
+
+        (payment_hash.into(), hold_tlc)
+    }
 }
 
 pub enum KeyValue {
@@ -197,7 +221,7 @@ pub enum KeyValue {
     PaymentCustomRecord(Hash256, PaymentCustomRecords),
     NetworkActorState(PeerId, PersistentNetworkActorState),
     Attempt((Hash256, u64), Attempt),
-    HoldTlcs(Hash256, Vec<HoldTlc>),
+    HoldTlc((Hash256, Hash256, u64), u64),
 }
 
 pub trait StoreKeyValue {
@@ -258,9 +282,13 @@ impl StoreKeyValue for KeyValue {
             KeyValue::PaymentCustomRecord(payment_hash, _data) => {
                 [&[PAYMENT_CUSTOM_RECORD_PREFIX], payment_hash.as_ref()].concat()
             }
-            KeyValue::HoldTlcs(payment_hash, _hold_tlc) => {
-                [&[HOLD_TLC_PREFIX], payment_hash.as_ref()].concat()
-            }
+            KeyValue::HoldTlc((payment_hash, channel_id, tlc_id), _hold_tlc) => [
+                &[HOLD_TLC_PREFIX],
+                payment_hash.as_ref(),
+                channel_id.as_ref(),
+                &tlc_id.to_le_bytes(),
+            ]
+            .concat(),
         }
     }
 
@@ -294,7 +322,7 @@ impl StoreKeyValue for KeyValue {
             KeyValue::PaymentCustomRecord(_, custom_records) => {
                 serialize_to_vec(custom_records, "PaymentCustomRecord")
             }
-            KeyValue::HoldTlcs(_payment_hash, hold_tlc) => serialize_to_vec(hold_tlc, "HoldTlc"),
+            KeyValue::HoldTlc(_, expired_at) => serialize_to_vec(expired_at, "HoldTlc"),
         }
     }
 }
@@ -408,44 +436,35 @@ impl ChannelActorStateStore for Store {
     }
 
     fn insert_hold_tlc(&self, payment_hash: Hash256, hold_tlc: HoldTlc) {
-        let prefix = [&[HOLD_TLC_PREFIX], payment_hash.as_ref()].concat();
         let mut batch = self.batch();
-        let mut hold_tlcs: Vec<HoldTlc> = batch
-            .get(&prefix)
-            .map(|v| deserialize_from(v.as_ref(), "HoldTlc"))
-            .unwrap_or_default();
-        // remove the duplicated tlc
-        hold_tlcs
-            .retain(|tlc| tlc.channel_id != hold_tlc.channel_id || tlc.tlc_id != hold_tlc.tlc_id);
-        hold_tlcs.push(hold_tlc);
-        batch.put_kv(KeyValue::HoldTlcs(payment_hash, hold_tlcs));
+        batch.put_kv(KeyValue::HoldTlc(
+            (payment_hash, hold_tlc.channel_id, hold_tlc.tlc_id),
+            hold_tlc.hold_expire_at,
+        ));
         batch.commit();
     }
 
     fn remove_hold_tlc(&self, payment_hash: &Hash256, channel_id: &Hash256, tlc_id: u64) {
-        let prefix = [&[HOLD_TLC_PREFIX], payment_hash.as_ref()].concat();
+        let prefix = [
+            &[HOLD_TLC_PREFIX],
+            payment_hash.as_ref(),
+            channel_id.as_ref(),
+            &tlc_id.to_le_bytes(),
+        ]
+        .concat();
         let mut batch = self.batch();
-        let Some(mut hold_tlcs): Option<Vec<HoldTlc>> = batch
-            .get(&prefix)
-            .map(|v| deserialize_from(v.as_ref(), "HoldTlc"))
-        else {
-            return;
-        };
-        hold_tlcs
-            .retain(|hold_tlc| hold_tlc.channel_id != *channel_id || hold_tlc.tlc_id != tlc_id);
-        if hold_tlcs.is_empty() {
-            batch.delete(prefix);
-        } else {
-            batch.put_kv(KeyValue::HoldTlcs(*payment_hash, hold_tlcs));
-        }
+        batch.delete(prefix);
         batch.commit();
     }
 
     fn get_hold_tlc_set(&self, payment_hash: Hash256) -> Vec<HoldTlc> {
         let prefix = [&[HOLD_TLC_PREFIX], payment_hash.as_ref()].concat();
-        self.get(&prefix)
-            .map(|v| deserialize_from(v.as_ref(), "HoldTlc"))
-            .unwrap_or_default()
+        self.prefix_iterator(&prefix)
+            .map(|(key, value)| {
+                let (_, hold_tlc) = Self::parse_hold_tlc(&key, &value);
+                hold_tlc
+            })
+            .collect()
     }
 
     fn remove_hold_tlc_set(&self, payment_hash: &Hash256) {
@@ -457,21 +476,14 @@ impl ChannelActorStateStore for Store {
         batch.commit();
     }
 
-    fn list_all_hold_tlcs(&self) -> HashMap<Hash256, Vec<HoldTlc>> {
+    fn get_hold_tlcs_map(&self) -> HashMap<Hash256, Vec<HoldTlc>> {
         let prefix = [HOLD_TLC_PREFIX];
         self.prefix_iterator(&prefix)
-            .filter_map(|(key, value)| {
-                if key.len() != 33 {
-                    warn!("invalid hold tlc key: {}", key.len());
-                    return None;
-                }
-                let payment_hash: [u8; 32] = key[1..33]
-                    .try_into()
-                    .expect("payment_hash should be 32 bytes");
-                let hold_tlcs: Vec<HoldTlc> = deserialize_from(value.as_ref(), "HoldTlc");
-                Some((payment_hash.into(), hold_tlcs))
+            .map(|(key, value)| Self::parse_hold_tlc(&key, &value))
+            .fold(HashMap::new(), |mut acc, (payment_hash, hold_tlc)| {
+                acc.entry(payment_hash).or_default().push(hold_tlc);
+                acc
             })
-            .collect()
     }
 }
 

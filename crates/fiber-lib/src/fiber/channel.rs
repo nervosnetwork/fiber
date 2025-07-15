@@ -7723,7 +7723,7 @@ pub trait ChannelActorStateStore {
     fn insert_hold_tlc(&self, payment_hash: Hash256, hold_tlc: HoldTlc);
     fn get_hold_tlc_set(&self, payment_hash: Hash256) -> Vec<HoldTlc>;
     fn remove_hold_tlc_set(&self, payment_hash: &Hash256);
-    fn list_all_hold_tlcs(&self) -> HashMap<Hash256, Vec<HoldTlc>>;
+    fn get_hold_tlcs_map(&self) -> HashMap<Hash256, Vec<HoldTlc>>;
     fn remove_hold_tlc(&self, payment_hash: &Hash256, channel_id: &Hash256, tlc_id: u64);
 }
 

@@ -4170,7 +4170,7 @@ where
 
         // Trigger mmp tlc set fulfill check and hold tlc timeout
         let now = now_timestamp_as_millis_u64();
-        for (payment_hash, hold_tlcs) in self.store.list_all_hold_tlcs() {
+        for (payment_hash, hold_tlcs) in self.store.get_hold_tlcs_map() {
             // timeout hold tlc
             let already_timeout = hold_tlcs
                 .iter()
