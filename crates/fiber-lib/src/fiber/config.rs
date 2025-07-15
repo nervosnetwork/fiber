@@ -39,9 +39,6 @@ pub const MAX_PAYMENT_TLC_EXPIRY_LIMIT: u64 = 14 * 24 * 60 * 60 * 1000; // 2 wee
 /// The minimal value of a tlc. 0 means no minimal value.
 pub const DEFAULT_TLC_MIN_VALUE: u128 = 0;
 
-/// The maximal value of a tlc. 0 means no maximal value.
-pub const DEFAULT_TLC_MAX_VALUE: u128 = 0;
-
 /// The fee for forwarding peer tlcs. Proportional to the amount of the forwarded tlc. The unit is millionths of the amount. 1000 means 0.1%.
 pub const DEFAULT_TLC_FEE_PROPORTIONAL_MILLIONTHS: u128 = 1000;
 
@@ -303,6 +300,24 @@ pub struct FiberConfig {
     #[cfg(target_arch = "wasm32")]
     #[arg(skip)]
     pub wasm_key_pair: Option<KeyPair>,
+
+    /// Max allowed number of channels to be accepted from one peer. [default: 20]
+    #[arg(
+        name = "FIBER_TO_BE_ACCEPTED_CHANNELS_NUMBER_LIMIT",
+        long = "fiber-to-be-accepted-channels-number-limit",
+        env,
+        help = "Max allowed number of channels to be accepted from one peer. [default: 20]"
+    )]
+    pub to_be_accepted_channels_number_limit: Option<usize>,
+
+    /// Max allowed storage bytes of channels to be accepted from one peer. [default: 50KB]
+    #[arg(
+        name = "FIBER_TO_BE_ACCEPTED_CHANNELS_BYTESS_LIMIT",
+        long = "fiber-to-be-accepted-channels-bytes-limit",
+        env,
+        help = "Max allowed bytes of channels to be accepted from one peer. [default: 50KB]"
+    )]
+    pub to_be_accepted_channels_bytes_limit: Option<usize>,
 }
 
 /// Must be a valid utf-8 string of length maximal length 32 bytes.

@@ -45,17 +45,14 @@ use tokio_util::task::TaskTracker;
 use tracing::{debug, error, info, trace, warn};
 
 use super::channel::{
-    get_funding_and_reserved_amount, occupied_capacity, AcceptChannelParameter,
-    AwaitingTxSignaturesFlags, ChannelActor, ChannelActorMessage, ChannelActorStateStore,
-    ChannelCommand, ChannelCommandWithId, ChannelEvent, ChannelInitializationParameter,
-    ChannelState, ChannelSubscribers, ChannelTlcInfo, OpenChannelParameter, PrevTlcInfo,
-    ProcessingChannelError, ProcessingChannelResult, PublicChannelInfo, RemoveTlcCommand,
-    RevocationData, SettlementData, ShuttingDownFlags, StopReason, DEFAULT_COMMITMENT_FEE_RATE,
-    DEFAULT_FEE_RATE, DEFAULT_MAX_TLC_VALUE_IN_FLIGHT, MAX_COMMITMENT_DELAY_EPOCHS,
-    MAX_TLC_NUMBER_IN_FLIGHT, MIN_COMMITMENT_DELAY_EPOCHS, SYS_MAX_TLC_NUMBER_IN_FLIGHT,
+    get_funding_and_reserved_amount, AcceptChannelParameter, AwaitingTxSignaturesFlags,
+    ChannelActor, ChannelActorMessage, ChannelActorStateStore, ChannelCommand,
+    ChannelCommandWithId, ChannelEvent, ChannelInitializationParameter, ChannelState,
+    ChannelSubscribers, ChannelTlcInfo, OpenChannelParameter, PrevTlcInfo, ProcessingChannelError,
+    ProcessingChannelResult, PublicChannelInfo, RemoveTlcCommand, RevocationData, SettlementData,
+    ShuttingDownFlags, StopReason, DEFAULT_MAX_TLC_VALUE_IN_FLIGHT, MAX_TLC_NUMBER_IN_FLIGHT,
 };
 use super::config::{AnnouncedNodeName, MIN_TLC_EXPIRY_DELTA};
-use super::fee::calculate_commitment_tx_fee;
 use super::gossip::{GossipActorMessage, GossipMessageStore, GossipMessageUpdates};
 use super::graph::{
     NetworkGraph, NetworkGraphStateStore, OwnedChannelUpdateEvent, RouterHop, SessionRoute,
@@ -78,6 +75,7 @@ use crate::fiber::channel::{
     AddTlcCommand, AddTlcResponse, ShutdownCommand, TxCollaborationCommand, TxUpdateCommand,
 };
 use crate::fiber::config::{DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT};
+use crate::fiber::fee::check_open_channel_parameters;
 use crate::fiber::gossip::{GossipConfig, GossipService, SubscribableGossipMessageStore};
 use crate::fiber::graph::{PaymentSession, PaymentSessionStatus};
 use crate::fiber::serde_utils::EntityHex;
@@ -683,7 +681,7 @@ pub enum NetworkServiceEvent {
     PeerDisConnected(PeerId, Multiaddr),
     // An incoming/outgoing channel is created.
     ChannelCreated(PeerId, Hash256),
-    // A outgoing channel is pending to be accepted.
+    // An incoming channel is pending to be accepted.
     ChannelPendingToBeAccepted(PeerId, Hash256),
     // A funding tx is completed. The watch tower may use this to monitor the channel.
     RemoteTxComplete(PeerId, Hash256, Script, SettlementData),
@@ -900,13 +898,27 @@ where
                     }
                 }
             }
-            FiberMessage::ChannelNormalOperation(m) => {
-                let channel_id = m.get_channel_id();
+            FiberMessage::ChannelNormalOperation(msg) => {
+                let channel_id = msg.get_channel_id();
+
+                let found = state
+                    .peer_session_map
+                    .get(&peer_id)
+                    .and_then(|(session, ..)| state.session_channels_map.get(session))
+                    .is_some_and(|channels| channels.contains(&channel_id));
+
+                if !found {
+                    error!(
+                            "Received a channel message for a channel that is not created with peer: {:?}",
+                            channel_id
+                        );
+                    return Err(Error::ChannelNotFound(channel_id));
+                }
                 state
                     .send_message_to_channel_actor(
                         channel_id,
                         Some(&peer_id),
-                        ChannelActorMessage::PeerMessage(m),
+                        ChannelActorMessage::PeerMessage(msg),
                     )
                     .await;
             }
@@ -1828,16 +1840,16 @@ where
     async fn update_graph_with_tlc_fail(
         &self,
         network: &ActorRef<NetworkActorMessage>,
-        tcl_error_detail: &TlcErr,
+        tlc_error_detail: &TlcErr,
     ) {
-        let error_code = tcl_error_detail.error_code();
+        let error_code = tlc_error_detail.error_code();
         // https://github.com/lightning/bolts/blob/master/04-onion-routing.md#rationale-6
         // we now still update the graph, maybe we need to remove it later?
         if error_code.is_update() {
             if let Some(TlcErrData::ChannelFailed {
                 channel_update: Some(channel_update),
                 ..
-            }) = &tcl_error_detail.extra_data
+            }) = &tlc_error_detail.extra_data
             {
                 network
                     .send_message(NetworkActorMessage::new_command(
@@ -1848,11 +1860,11 @@ where
                     .expect(ASSUME_NETWORK_MYSELF_ALIVE);
             }
         }
-        match tcl_error_detail.error_code() {
+        match tlc_error_detail.error_code() {
             TlcErrorCode::PermanentChannelFailure
             | TlcErrorCode::ChannelDisabled
             | TlcErrorCode::UnknownNextPeer => {
-                let channel_outpoint = tcl_error_detail
+                let channel_outpoint = tlc_error_detail
                     .error_channel_outpoint()
                     .expect("expect channel outpoint");
                 debug!("mark channel failed: {:?}", channel_outpoint);
@@ -1860,7 +1872,7 @@ where
                 graph.mark_channel_failed(&channel_outpoint);
             }
             TlcErrorCode::PermanentNodeFailure => {
-                let node_id = tcl_error_detail.error_node_id().expect("expect node id");
+                let node_id = tlc_error_detail.error_node_id().expect("expect node id");
                 let mut graph = self.network_graph.write().await;
                 graph.mark_node_failed(node_id);
             }
@@ -2258,7 +2270,7 @@ pub struct NetworkActorState<S> {
     outpoint_channel_map: HashMap<OutPoint, Hash256>,
     // Channels in this hashmap are pending for acceptance. The user needs to
     // issue an AcceptChannelCommand with the amount of funding to accept the channel.
-    to_be_accepted_channels: HashMap<Hash256, (PeerId, OpenChannel)>,
+    to_be_accepted_channels: ToBeAcceptedChannels,
     // Channels in this hashmap are pending for funding transaction confirmation.
     pending_channels: HashMap<OutPoint, Hash256>,
     // Used to broadcast and query network info.
@@ -2460,12 +2472,14 @@ where
             max_tlc_value_in_flight,
             max_tlc_number_in_flight,
         } = open_channel;
+
         let remote_pubkey =
             self.get_peer_pubkey(&peer_id)
                 .ok_or(ProcessingChannelError::InvalidParameter(format!(
                     "Peer {:?} pubkey not found",
                     &peer_id
                 )))?;
+
         if let Some(udt_type_script) = funding_udt_type_script.as_ref() {
             if !check_udt_script(udt_type_script) {
                 return Err(ProcessingChannelError::InvalidParameter(
@@ -2807,85 +2821,6 @@ where
 
     fn get_peer_pubkey(&self, peer_id: &PeerId) -> Option<Pubkey> {
         self.state_to_be_persisted.get_peer_pubkey(peer_id)
-    }
-
-    // TODO: this fn is duplicated with ChannelActorState::check_open_channel_parameters, but is not easy to refactor, just keep it for now.
-    fn check_open_channel_parameters(
-        &self,
-        open_channel: &OpenChannel,
-    ) -> Result<(), ProcessingChannelError> {
-        let udt_type_script = &open_channel.funding_udt_type_script;
-
-        // reserved_ckb_amount
-        let occupied_capacity =
-            occupied_capacity(&open_channel.shutdown_script, udt_type_script)?.as_u64();
-        if open_channel.reserved_ckb_amount < occupied_capacity {
-            return Err(ProcessingChannelError::InvalidParameter(format!(
-                "Reserved CKB amount {} is less than {}",
-                open_channel.reserved_ckb_amount, occupied_capacity,
-            )));
-        }
-
-        // funding_fee_rate
-        if open_channel.funding_fee_rate < DEFAULT_FEE_RATE {
-            return Err(ProcessingChannelError::InvalidParameter(format!(
-                "Funding fee rate is less than {}",
-                DEFAULT_FEE_RATE,
-            )));
-        }
-
-        // commitment_fee_rate
-        if open_channel.commitment_fee_rate < DEFAULT_COMMITMENT_FEE_RATE {
-            return Err(ProcessingChannelError::InvalidParameter(format!(
-                "Commitment fee rate is less than {}",
-                DEFAULT_COMMITMENT_FEE_RATE,
-            )));
-        }
-        let commitment_fee =
-            calculate_commitment_tx_fee(open_channel.commitment_fee_rate, udt_type_script);
-        let reserved_fee = open_channel.reserved_ckb_amount - occupied_capacity;
-        if commitment_fee * 2 > reserved_fee {
-            return Err(ProcessingChannelError::InvalidParameter(format!(
-                "Commitment fee {} which calculated by commitment fee rate {} is larger than half of reserved fee {}",
-                commitment_fee, open_channel.commitment_fee_rate, reserved_fee
-            )));
-        }
-
-        // commitment_delay_epoch
-        let epoch =
-            EpochNumberWithFraction::from_full_value_unchecked(open_channel.commitment_delay_epoch);
-        if !epoch.is_well_formed() {
-            return Err(ProcessingChannelError::InvalidParameter(format!(
-                "Commitment delay epoch {} is not a valid value",
-                open_channel.commitment_delay_epoch,
-            )));
-        }
-
-        let min = EpochNumberWithFraction::new(MIN_COMMITMENT_DELAY_EPOCHS, 0, 1);
-        if epoch < min {
-            return Err(ProcessingChannelError::InvalidParameter(format!(
-                "Commitment delay epoch {} is less than the minimal value {}",
-                epoch, min
-            )));
-        }
-
-        let max = EpochNumberWithFraction::new(MAX_COMMITMENT_DELAY_EPOCHS, 0, 1);
-        if epoch > max {
-            return Err(ProcessingChannelError::InvalidParameter(format!(
-                "Commitment delay epoch {} is greater than the maximal value {}",
-                epoch, max
-            )));
-        }
-
-        // max_tlc_number_in_flight
-        if open_channel.max_tlc_number_in_flight > SYS_MAX_TLC_NUMBER_IN_FLIGHT {
-            return Err(ProcessingChannelError::InvalidParameter(format!(
-                "Max TLC number in flight {} is greater than the system maximal value {}",
-                open_channel.max_tlc_number_in_flight, SYS_MAX_TLC_NUMBER_IN_FLIGHT
-            )));
-        }
-
-        Ok(())
     }
 
     async fn send_fiber_message_to_session(
@@ -3253,42 +3188,39 @@ where
         peer_id: PeerId,
         open_channel: OpenChannel,
     ) -> ProcessingChannelResult {
-        self.check_open_channel_parameters(&open_channel)?;
-
-        if let Some(udt_type_script) = &open_channel.funding_udt_type_script {
-            if !check_udt_script(udt_type_script) {
-                return Err(ProcessingChannelError::InvalidParameter(format!(
-                    "Invalid UDT type script: {:?}",
-                    udt_type_script
-                )));
-            }
-        }
-
         let id = open_channel.channel_id;
-        if let Some(channel) = self.to_be_accepted_channels.get(&id) {
-            warn!(
-                "A channel from {:?} of id {:?} is already awaiting to be accepted: {:?}",
-                &peer_id, &id, channel
-            );
-            return Err(ProcessingChannelError::InvalidParameter(format!(
-                "A channel from {:?} of id {:?} is already awaiting to be accepted",
-                &peer_id, &id,
-            )));
-        }
-        debug!(
-            "Channel from {:?} of id {:?} is now awaiting to be accepted: {:?}",
-            &peer_id, &id, &open_channel
-        );
-        self.to_be_accepted_channels
-            .insert(id, (peer_id.clone(), open_channel));
-        // Notify outside observers.
-        self.network
-            .clone()
-            .send_message(NetworkActorMessage::new_notification(
-                NetworkServiceEvent::ChannelPendingToBeAccepted(peer_id, id),
-            ))
-            .expect(ASSUME_NETWORK_MYSELF_ALIVE);
-        Ok(())
+        let result = check_open_channel_parameters(
+            &open_channel.funding_udt_type_script,
+            &open_channel.shutdown_script,
+            open_channel.reserved_ckb_amount,
+            open_channel.funding_fee_rate,
+            open_channel.commitment_fee_rate,
+            open_channel.commitment_delay_epoch,
+            open_channel.max_tlc_number_in_flight,
+        )
+        .and_then(|_| {
+            self.to_be_accepted_channels
+                .try_insert(id, peer_id.clone(), open_channel)
+        });
+
+        match result {
+            Ok(_) => {
+                // Notify outside observers.
+                self.network
+                    .send_message(NetworkActorMessage::new_notification(
+                        NetworkServiceEvent::ChannelPendingToBeAccepted(peer_id, id),
+                    ))
+                    .expect(ASSUME_NETWORK_MYSELF_ALIVE);
+            }
+            Err(ProcessingChannelError::RepeatedProcessing(_)) => {
+                // ignore duplicated open channel request
+            }
+            Err(_) => {
+                debug_event!(self.network, "ChannelPendingToBeRejected");
+            }
+        };
+
+        result
     }
 
     async fn on_funding_transaction_pending(
@@ -3384,7 +3316,16 @@ where
                 }
             },
             Some(actor) => {
-                actor.send_message(message).expect("channel actor alive");
+                // There is a possibility that the channel actor is not alive, but we assume it is
+                // alive for this moment. For example, in force shutdown case, the ChannelActor received
+                // ClosingTransactionConfirmed event then stopped after processing the message,
+                // NetworkActor will remove it from `channels` when receiving ChannelActorStopped from it,
+                // but at the same time, NetworkActor received another ClosingTransactionConfirmed,
+                // we will try to send another event message to the stopped ChannelActor here.
+                //
+                // In short, it's safer to ignore sending message failure from NetworkActor
+                // to ChannelActor, since NetworkActor is responsible for multiple channels and a lot of stuff.
+                let _ = actor.send_message(message);
             }
         }
     }
@@ -3627,7 +3568,7 @@ where
             channels: Default::default(),
             ckb_txs_in_flight: Default::default(),
             outpoint_channel_map: Default::default(),
-            to_be_accepted_channels: Default::default(),
+            to_be_accepted_channels: ToBeAcceptedChannels::new_with_config(&config),
             pending_channels: Default::default(),
             chain_actor,
             open_channel_auto_accept_min_ckb_funding_amount: config
@@ -3722,9 +3663,14 @@ where
 
     async fn post_stop(
         &self,
-        _myself: ActorRef<Self::Msg>,
+        myself: ActorRef<Self::Msg>,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
+        myself
+            .get_cell()
+            .stop_children_and_wait(Some("Network actor stopped".to_string()), None)
+            .await;
+
         if let Err(err) = state.control.close().await {
             error!("Failed to close tentacle service: {}", err);
         }
@@ -3737,6 +3683,7 @@ where
             .event_sender
             .send(NetworkServiceEvent::NetworkStopped(state.peer_id.clone()))
             .await;
+
         Ok(())
     }
 
@@ -3926,4 +3873,90 @@ pub(crate) fn find_type(addr: &Multiaddr) -> TransportType {
         _ => None,
     })
     .unwrap_or(TransportType::Tcp)
+}
+struct ToBeAcceptedChannels {
+    total_number_limit: usize,
+    total_bytes_limit: usize,
+    map: HashMap<Hash256, (PeerId, OpenChannel)>,
+}
+
+impl Default for ToBeAcceptedChannels {
+    fn default() -> Self {
+        Self {
+            total_number_limit: usize::MAX,
+            total_bytes_limit: usize::MAX,
+            map: HashMap::default(),
+        }
+    }
+}
+
+// Remember to sync fiber/config.rs
+const DEFAULT_TO_BE_ACCEPTED_CHANNELS_NUMBER_LIMIT: usize = 20;
+// Remember to sync fiber/config.rs
+const DEFAULT_TO_BE_ACCEPTED_CHANNELS_BYTES_LIMIT: usize = 51200; // 50KB
+
+impl ToBeAcceptedChannels {
+    fn new_with_config(config: &FiberConfig) -> Self {
+        Self {
+            total_number_limit: config
+                .to_be_accepted_channels_number_limit
+                .unwrap_or(DEFAULT_TO_BE_ACCEPTED_CHANNELS_NUMBER_LIMIT),
+            total_bytes_limit: config
+                .to_be_accepted_channels_bytes_limit
+                .unwrap_or(DEFAULT_TO_BE_ACCEPTED_CHANNELS_BYTES_LIMIT),
+            map: HashMap::default(),
+        }
+    }
+
+    fn remove(&mut self, id: &Hash256) -> Option<(PeerId, OpenChannel)> {
+        self.map.remove(id)
+    }
+
+    // insert and apply throttle control
+    fn try_insert(
+        &mut self,
+        id: Hash256,
+        peer_id: PeerId,
+        open_channel: OpenChannel,
+    ) -> ProcessingChannelResult {
+        if let Some(existing_value) = self.map.get(&id) {
+            let err_message = format!(
+                "A channel from {:?} of id {:?} is already awaiting to be accepted",
+                &peer_id, &id,
+            );
+            warn!("{}: {:?}", err_message, existing_value);
+            return Err(ProcessingChannelError::RepeatedProcessing(err_message));
+        }
+
+        // The map should be small because of the flow control, so calculate the total number and
+        // bytes on the fly.
+        let (total_number, total_bytes) = self
+            .map
+            .values()
+            .filter(|(saved_peer_id, _)| *saved_peer_id == peer_id)
+            .fold(
+                (1, open_channel.mem_size()),
+                |(count, size), (_, saved_open_channel)| {
+                    (count + 1, size + saved_open_channel.mem_size())
+                },
+            );
+
+        if total_number > self.total_number_limit {
+            return Err(ProcessingChannelError::ToBeAcceptedChannelsExceedLimit(
+                format!("Total number exceeds the limit {}", self.total_number_limit),
+            ));
+        }
+        if total_bytes > self.total_bytes_limit {
+            return Err(ProcessingChannelError::ToBeAcceptedChannelsExceedLimit(
+                format!("Total bytes exceeds the limit {}", self.total_bytes_limit),
+            ));
+        }
+
+        debug!(
+            "Channel from {:?} of id {:?} is now awaiting to be accepted: {:?}",
+            &peer_id, &id, &open_channel
+        );
+        self.map.insert(id, (peer_id, open_channel));
+        Ok(())
+    }
 }
