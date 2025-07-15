@@ -885,32 +885,11 @@ where
                     return;
                 }
                 _ if invoice.allow_mpp() => {
-                    // hold the tlc
-                    self.store.insert_payment_hold_tlc(
-                        tlc.payment_hash,
-                        HoldTlc {
-                            channel_id: state.get_id(),
-                            tlc_id: tlc.tlc_id.into(),
-                            hold_expire_at: now_timestamp_as_millis_u64()
-                                + DEFAULT_HOLD_TLC_TIMEOUT,
-                        },
-                    );
-
-                    // set timeout for hold tlc
-                    self.network.send_after(
-                        Duration::from_millis(DEFAULT_HOLD_TLC_TIMEOUT),
-                        move || {
-                            NetworkActorMessage::new_command(NetworkActorCommand::TimeoutHoldTlc(
-                                tlc.payment_hash,
-                                tlc.channel_id,
-                                tlc.tlc_id.into(),
-                            ))
-                        },
-                    );
-
                     // add to pending settlement tlc set
                     // the tlc set will be settled by network actor
-                    state.pending_notify_mpp_tcls.push(tlc.payment_hash);
+                    state
+                        .pending_notify_mpp_tcls
+                        .push((tlc.payment_hash, tlc.id()));
 
                     // just return, the tlc set will be settled by network actor
                     return;
@@ -2699,12 +2678,33 @@ where
         }
 
         // take the pending settlement tlc set
-        let pending_settlement_tlc_set = std::mem::take(&mut state.pending_notify_mpp_tcls);
+        let pending_notify_mpp_tcls = std::mem::take(&mut state.pending_notify_mpp_tcls);
 
         self.store.insert_channel_actor_state(state.clone());
 
         // try to settle down tlc set
-        for payment_hash in pending_settlement_tlc_set {
+        for (payment_hash, tlc_id) in pending_notify_mpp_tcls {
+            let channel_id = state.get_id();
+            // hold the tlc
+            self.store.insert_payment_hold_tlc(
+                payment_hash,
+                HoldTlc {
+                    channel_id,
+                    tlc_id,
+                    hold_expire_at: now_timestamp_as_millis_u64() + DEFAULT_HOLD_TLC_TIMEOUT,
+                },
+            );
+
+            // set timeout for hold tlc
+            self.network
+                .send_after(Duration::from_millis(DEFAULT_HOLD_TLC_TIMEOUT), move || {
+                    NetworkActorMessage::new_command(NetworkActorCommand::TimeoutHoldTlc(
+                        payment_hash,
+                        channel_id,
+                        tlc_id,
+                    ))
+                });
+
             self.network
                 .send_message(NetworkActorMessage::new_command(
                     NetworkActorCommand::SettleMPPTlcSet(payment_hash),
@@ -3686,7 +3686,7 @@ pub struct ChannelActorState {
 
     // The TLC set ready to be settled
     #[serde(skip)]
-    pub pending_notify_mpp_tcls: Vec<Hash256>,
+    pub pending_notify_mpp_tcls: Vec<(Hash256, u64)>,
 }
 
 #[serde_as]

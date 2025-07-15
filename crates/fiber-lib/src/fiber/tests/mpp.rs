@@ -3045,7 +3045,7 @@ async fn test_send_mpp_with_generated_invoice() {
     nodes[0].wait_until_success(result.payment_hash).await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_mpp_with_need_fee() {
     init_tracing();
 

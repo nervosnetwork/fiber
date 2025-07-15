@@ -1481,22 +1481,18 @@ where
                     })
                     .collect();
 
-                let Some(first_tlc) = tlcs.first() else {
-                    // no tlcs to settle
-                    return Ok(());
-                };
-
                 let mut tlc_fail = None;
 
                 // check if all tlcs have the same total amount
-                // if yes, check if tlc set are fulfilled
-                if tlcs
-                    .iter()
-                    .any(|t| t.total_amount != first_tlc.total_amount)
+                if tlcs.len() > 1
+                    && !tlcs
+                        .windows(2)
+                        .all(|w| w[0].total_amount == w[1].total_amount)
                 {
-                    error!("one tlc total_amount is not equal to current tlc total_amount");
+                    error!("TLCs have inconsistent total_amount: {:?}", tlcs);
                     tlc_fail = Some(TlcErr::new(TlcErrorCode::IncorrectOrUnknownPaymentDetails));
                 } else {
+                    // check if tlc set are fulfilled
                     let Some(invoice) = self.store.get_invoice(&payment_hash) else {
                         error!(
                             "Try to settle mpp tlc set, but invoice not found for payment hash {:?}",
