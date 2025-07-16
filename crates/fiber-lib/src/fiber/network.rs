@@ -2472,6 +2472,9 @@ where
                 self.register_payment_retry(myself, session.payment_hash(), Some(attempt.id));
                 return Ok(());
             } else {
+                state
+                    .payment_router_map
+                    .remove(&(session.payment_hash(), attempt.id));
                 self.set_attempt_fail_with_error(session, attempt, &err.to_string(), false);
                 return Err(err);
             }
@@ -2515,6 +2518,9 @@ where
                 })?;
 
         for (mut attempt, route) in attempts_with_routes {
+            state
+                .payment_router_map
+                .insert((session.payment_hash(), attempt.id), route.clone());
             self.send_attempt(myself.clone(), state, &mut session, &mut attempt, route)
                 .await?;
         }
