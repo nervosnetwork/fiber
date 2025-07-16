@@ -2154,7 +2154,7 @@ where
         attempt: &mut Attempt,
     ) -> Result<(), Error> {
         assert!(attempt.is_retrying());
-        let graph = self.network_graph.read().await;
+
         let hops = match state
             .payment_router_map
             .get(&(attempt.payment_hash, attempt.id))
@@ -2166,6 +2166,7 @@ where
                 // attempts to send the payment.
                 let amount = session.remain_amount() + attempt.route.receiver_amount();
                 let max_fee = session.remain_fee_amount();
+                let graph = self.network_graph.read().await;
 
                 session.request.channel_stats = GraphChannelStat::new(Some(graph.channel_stats()));
 
@@ -2182,7 +2183,7 @@ where
             }
         };
 
-        let source = graph.get_source_pubkey();
+        let source = self.network_graph.read().await.get_source_pubkey();
         attempt.route = SessionRoute::new(source, session.request.target_pubkey, &hops);
         assert_ne!(hops[0].funding_tx_hash, Hash256::default());
         self.send_attempt(myself, state, session, attempt, hops)
