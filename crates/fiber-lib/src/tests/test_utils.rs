@@ -1051,6 +1051,16 @@ impl NetworkNode {
         .await;
     }
 
+    pub async fn wait_until_inflight(&self, payment_hash: Hash256) {
+        self.wait_until_status(
+            payment_hash,
+            |status| status == PaymentStatus::Inflight,
+            |_status| {},
+            "Payment did not reach in-flight status within the expected time",
+        )
+        .await;
+    }
+
     pub async fn wait_until_final_status(&self, payment_hash: Hash256) {
         self.wait_until_status(
             payment_hash,

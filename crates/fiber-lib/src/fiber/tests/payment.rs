@@ -4414,7 +4414,7 @@ async fn test_send_payment_remove_tlc_with_preimage_will_retry() {
         3,
     )
     .await;
-    let [mut node_0, mut node_1, node_2] = nodes.try_into().expect("4 nodes");
+    let [mut node_0, mut node_1, node_2] = nodes.try_into().expect("3 nodes");
 
     let mut payments = HashSet::new();
 
@@ -4426,7 +4426,7 @@ async fn test_send_payment_remove_tlc_with_preimage_will_retry() {
                 .await
                 .unwrap();
             payments.insert(res.payment_hash);
-            node_0.wait_until_created(res.payment_hash).await;
+            node_0.wait_until_inflight(res.payment_hash).await;
         } else {
             let amount = rand::random::<u128>() % 1000 + 1;
             let res = node_2

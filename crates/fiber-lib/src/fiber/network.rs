@@ -2066,7 +2066,6 @@ where
 
         match reason {
             RemoveTlcReason::RemoveTlcFulfill(_) => {
-                dbg!("record attempt fulfilled", &reason);
                 self.network_graph
                     .write()
                     .await
