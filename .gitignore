@@ -20,3 +20,4 @@ tests/nodes/.ports
 /fiber-db-worker.js
 /wasm-config.yml
 /index*.html
+/dump*.txt
