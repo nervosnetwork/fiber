@@ -11,6 +11,7 @@ interface FiberWorkerInitializationOptions {
     ckbSecretKey: Uint8Array;
     config: string;
     chainSpec?: string;
+    databasePrefix?: string;
 }
 
 interface FiberInvokeRequest {

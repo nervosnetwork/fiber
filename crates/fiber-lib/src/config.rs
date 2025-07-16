@@ -232,14 +232,15 @@ mod wasm {
 
     use super::{Config, SerializedConfig, Service};
     impl Config {
-        pub fn parse_from_str(str: impl AsRef<str>) -> Self {
+        pub fn parse_from_str(str: impl AsRef<str>, database_prefix: Option<String>) -> Self {
+            let database_prefix = database_prefix.unwrap_or("/wasm".to_string());
             let mut config_from_file = serde_yaml::from_str::<SerializedConfig>(str.as_ref())
                 .expect("valid config file format");
             if let Some(ref mut ckb) = config_from_file.ckb {
-                ckb.base_dir = Some(Some(PathBuf::from_str("/wasm").unwrap()));
+                ckb.base_dir = Some(Some(PathBuf::from_str(&database_prefix).unwrap()));
             }
             if let Some(ref mut fiber) = config_from_file.fiber {
-                fiber.base_dir = Some(Some(PathBuf::from_str("/wasm").unwrap()));
+                fiber.base_dir = Some(Some(PathBuf::from_str(&database_prefix).unwrap()));
             }
 
             // Services to run can be passed from
@@ -281,7 +282,7 @@ mod wasm {
                 fiber,
                 rpc,
                 ckb,
-                base_dir: PathBuf::from_str("/wasm/").unwrap(),
+                base_dir: PathBuf::from_str(&database_prefix).unwrap(),
             }
         }
     }

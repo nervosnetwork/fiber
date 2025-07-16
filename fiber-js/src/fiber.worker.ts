@@ -13,7 +13,7 @@ onmessage = async (evt) => {
         fiber = await import("fiber-wasm");
         fiber.default.set_shared_array(data.inputBuffer, data.outputBuffer
         );
-        await fiber.default.fiber(data.config, data.logLevel, data.chainSpec, data.fiberKeyPair, data.ckbSecretKey);
+        await fiber.default.fiber(data.config, data.logLevel, data.chainSpec, data.fiberKeyPair, data.ckbSecretKey, data.databasePrefix);
         console.debug("Fiber started..")
         console.debug("fiber=", fiber);
         self.postMessage({})

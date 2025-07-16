@@ -85,6 +85,7 @@ pub async fn fiber(
     spec: Option<String>,
     fiber_key_pair: Option<Vec<u8>>,
     ckb_secret_key: Option<Vec<u8>>,
+    database_prefix: Option<String>,
 ) -> Result<(), ExitMessage> {
     std::panic::set_hook(Box::new(|info| {
         console_error_panic_hook::hook(info);
@@ -104,7 +105,7 @@ pub async fn fiber(
         fnn::get_git_commit_info()
     );
 
-    let mut config = Config::parse_from_str(config);
+    let mut config = Config::parse_from_str(config, database_prefix);
     let fiber_key_pair = match fiber_key_pair.map(|value| KeyPair::try_from(&value[..]).unwrap()) {
         Some(v) => v,
         None => {

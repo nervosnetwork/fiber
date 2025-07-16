@@ -41,9 +41,16 @@ class Fiber {
      * @param ckbSecretKey secret key for CKB
      * @param chainSpec Chain spec if chain is neither testnet nor mainnet
      * @param logLevel log level, such as `trace`, `debug`, `info`, `error`
+     * @param databasePrefix Name prefix of IndexedDB store. Defaults to `/wasm`
      * 
      */
-    async start(config: string, fiberKeyPair: Uint8Array, ckbSecretKey: Uint8Array, chainSpec?: string, logLevel: "trace" | "debug" | "info" | "error" = "info") {
+    async start(
+        config: string,
+        fiberKeyPair: Uint8Array,
+        ckbSecretKey: Uint8Array,
+        chainSpec?: string,
+        logLevel: "trace" | "debug" | "info" | "error" = "info",
+        databasePrefix: string = "/wasm") {
         this.dbWorker.postMessage({
             inputBuffer: this.inputBuffer,
             outputBuffer: this.outputBuffer,
@@ -56,7 +63,8 @@ class Fiber {
             config,
             fiberKeyPair,
             logLevel,
-            chainSpec
+            chainSpec,
+            databasePrefix
         } as FiberWorkerInitializationOptions);
         await new Promise<void>((res, rej) => {
             this.dbWorker.onmessage = () => res();
