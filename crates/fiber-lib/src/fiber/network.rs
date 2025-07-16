@@ -85,7 +85,7 @@ use crate::fiber::gossip::{GossipConfig, GossipService, SubscribableGossipMessag
 use crate::fiber::graph::{AttemptStatus, GraphChannelStat, PaymentSession, PaymentStatus};
 use crate::fiber::serde_utils::EntityHex;
 use crate::fiber::types::{
-    FiberChannelMessage, OnionPeeler, PeeledPaymentOnionPacket, TlcErrPacket, TxSignatures,
+    FiberChannelMessage, PeeledPaymentOnionPacket, TlcErrPacket, TxSignatures,
 };
 use crate::fiber::KeyPair;
 use crate::invoice::{CkbInvoice, CkbInvoiceStatus, InvoiceStore, PreimageStore};
@@ -2731,7 +2731,6 @@ pub struct NetworkActorState<S> {
     last_node_announcement_message: Option<NodeAnnouncement>,
     // We need to keep private key here in order to sign node announcement messages.
     private_key: Privkey,
-    onion_peeler: Arc<OnionPeeler>,
     // This is the entropy used to generate various random values.
     // Must be kept secret.
     // TODO: Maybe we should abstract this into a separate trait.
@@ -3020,7 +3019,7 @@ where
                 network.clone(),
                 store,
                 self.channel_subscribers.clone(),
-                self.onion_peeler.clone(),
+                self.private_key.clone(),
             ),
             ChannelInitializationParameter::OpenChannel(OpenChannelParameter {
                 funding_amount,
@@ -3108,7 +3107,7 @@ where
                 network.clone(),
                 store,
                 self.channel_subscribers.clone(),
-                self.onion_peeler.clone(),
+                self.private_key.clone(),
             ),
             ChannelInitializationParameter::AcceptChannel(AcceptChannelParameter {
                 funding_amount,
@@ -3479,7 +3478,7 @@ where
                 self.network.clone(),
                 self.store.clone(),
                 self.channel_subscribers.clone(),
-                self.onion_peeler.clone(),
+                self.private_key.clone(),
             ),
             ChannelInitializationParameter::ReestablishChannel(channel_id),
             self.network.get_cell(),
@@ -4076,8 +4075,6 @@ where
         let chain_actor = self.chain_actor.clone();
         let features = config.gen_node_features();
 
-        let onion_peeler = Arc::new(OnionPeeler::new(private_key.clone()));
-
         let mut state = NetworkActorState {
             store: self.store.clone(),
             state_to_be_persisted,
@@ -4087,7 +4084,6 @@ where
             auto_announce: config.auto_announce_node(),
             last_node_announcement_message: None,
             private_key,
-            onion_peeler,
             entropy,
             default_shutdown_script,
             network: myself.clone(),

@@ -3,7 +3,6 @@ use crate::fiber::fee::check_open_channel_parameters;
 #[cfg(any(debug_assertions, feature = "bench"))]
 use crate::fiber::network::DebugEvent;
 use crate::fiber::network::PaymentCustomRecords;
-use crate::fiber::types::OnionPeeler;
 use crate::utils::payment::is_invoice_fulfilled;
 use crate::{debug_event, utils::tx::compute_tx_message};
 use bitflags::bitflags;
@@ -338,7 +337,7 @@ pub struct ChannelActor<S> {
     network: ActorRef<NetworkActorMessage>,
     store: S,
     subscribers: ChannelSubscribers,
-    onion_peeler: Arc<OnionPeeler>,
+    private_key: Privkey,
 }
 
 impl<S> ChannelActor<S>
@@ -351,7 +350,7 @@ where
         network: ActorRef<NetworkActorMessage>,
         store: S,
         subscribers: ChannelSubscribers,
-        onion_peeler: Arc<OnionPeeler>,
+        private_key: Privkey,
     ) -> Self {
         Self {
             local_pubkey,
@@ -359,7 +358,7 @@ where
             network,
             store,
             subscribers,
-            onion_peeler,
+            private_key,
         }
     }
 
@@ -928,7 +927,7 @@ where
             Some(onion_packet) => {
                 let peeled = onion_packet
                     .peel(
-                        self.onion_peeler.as_ref(),
+                        &self.private_key,
                         Some(add_tlc.payment_hash.as_ref()),
                         &Secp256k1::new(),
                     )
