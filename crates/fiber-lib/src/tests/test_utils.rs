@@ -1598,7 +1598,7 @@ pub async fn create_mock_chain_actor() -> ActorRef<CkbChainMessage> {
         .0
 }
 
-async fn wait_for_network_graph_update(node: &NetworkNode, channels: usize) {
+pub async fn wait_for_network_graph_update(node: &NetworkNode, channels: usize) {
     // sleep for a while to make sure network graph is updated
     for _ in 0..50 {
         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;

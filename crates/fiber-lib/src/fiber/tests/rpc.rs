@@ -188,6 +188,11 @@ async fn test_rpc_list_peers() {
     node_0.connect_to(&mut node_1).await;
     let list_peers: ListPeersResult = node_0.send_rpc_request("list_peers", ()).await.unwrap();
     assert_eq!(list_peers.peers.len(), 2);
+    dbg!("list_peers: {:?}", &list_peers);
+    assert!(list_peers.peers.iter().any(|p| p.pubkey == node_1.pubkey));
+    assert!(list_peers.peers.iter().any(|p| p.pubkey == node_3.pubkey));
+    assert!(list_peers.peers.iter().any(|p| p.peer_id == node_1.peer_id));
+    assert!(list_peers.peers.iter().any(|p| p.peer_id == node_3.peer_id));
 }
 
 #[tokio::test]
