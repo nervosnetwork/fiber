@@ -5191,9 +5191,14 @@ async fn test_send_payment_with_reverse_channel_of_capaicity_not_enough() {
     let _span = tracing::info_span!("node", node = "test").entered();
     let (nodes, channels) = create_n_nodes_network(
         &[
-            ((0, 1), (13900000000 + MIN_RESERVED_CKB, MIN_RESERVED_CKB)),
-            ((1, 2), (14000000000 + MIN_RESERVED_CKB, MIN_RESERVED_CKB)),
-            ((2, 1), (14100000000 + MIN_RESERVED_CKB, MIN_RESERVED_CKB)),
+            ((0, 1), (16 + MIN_RESERVED_CKB, MIN_RESERVED_CKB)),
+            ((1, 2), (17 + MIN_RESERVED_CKB, MIN_RESERVED_CKB)),
+            // path finding algorighm will choose this channel firstly,
+            // since it has more capacity than the above two channels,
+            // but there capacity from 1->2 is not enough for the payment
+            // so the first payment will retry two times,
+            // and the following payments will only retry once
+            ((2, 1), (18 + MIN_RESERVED_CKB, MIN_RESERVED_CKB)),
         ],
         3,
     )
@@ -5225,6 +5230,10 @@ async fn test_send_payment_with_reverse_channel_of_capaicity_not_enough() {
         nodes[0].wait_until_success(*payment_hash).await;
         let session = nodes[0].get_payment_session(*payment_hash).unwrap();
         let retry_times = session.retry_times();
+        debug!(
+            "payment_hash: {:?} retry_times: {:?}",
+            payment_hash, retry_times
+        );
         statistic
             .entry(retry_times)
             .and_modify(|e| *e += 1)
