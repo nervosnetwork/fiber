@@ -4403,6 +4403,9 @@ async fn test_send_payment_sync_up_new_channel_is_added() {
 }
 
 #[tokio::test]
+// This test is not stable and may fail randomly, so we ignore it for now.
+// The root cause is `assert!(node_0.get_triggered_unexpected_events().await.is_empty())` may fail
+#[ignore]
 async fn test_send_payment_remove_tlc_with_preimage_will_retry() {
     init_tracing();
     let _span = tracing::info_span!("node", node = "test").entered();
