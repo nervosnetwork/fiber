@@ -1986,7 +1986,7 @@ where
     async fn on_add_tlc_result_event(
         &self,
         myself: ActorRef<NetworkActorMessage>,
-        _state: &mut NetworkActorState<S>,
+        state: &mut NetworkActorState<S>,
         payment_hash: Hash256,
         error_info: Option<(ProcessingChannelError, TlcErr)>,
         previous_tlc: Option<PrevTlcInfo>,
