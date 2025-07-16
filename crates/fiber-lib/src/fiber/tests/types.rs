@@ -7,8 +7,8 @@ use crate::{
         hash_algorithm::HashAlgorithm,
         types::{
             pack_hop_data, secp256k1_instance, unpack_hop_data, AddTlc, BroadcastMessageID, Cursor,
-            Hash256, NodeAnnouncement, PaymentHopData, PeeledOnionPacket, Privkey, Pubkey, TlcErr,
-            TlcErrPacket, TlcErrorCode, NO_SHARED_SECRET,
+            Hash256, NodeAnnouncement, OnionPeeler, PaymentHopData, PeeledOnionPacket, Privkey,
+            Pubkey, TlcErr, TlcErrPacket, TlcErrorCode, NO_SHARED_SECRET,
         },
         PaymentCustomRecords,
     },
@@ -181,11 +181,15 @@ fn test_peeled_onion_packet() {
     assert_eq!(packet.current, hops_infos[0]);
     assert!(!packet.is_last());
 
-    let packet = packet.peel(&keys[1], &secp).expect("peel");
+    let packet = packet
+        .peel(&OnionPeeler::new(keys[1].clone()), &secp)
+        .expect("peel");
     assert_eq!(packet.current, hops_infos[1]);
     assert!(!packet.is_last());
 
-    let packet = packet.peel(&keys[2], &secp).expect("peel");
+    let packet = packet
+        .peel(&OnionPeeler::new(keys[2].clone()), &secp)
+        .expect("peel");
     assert_eq!(packet.current, hops_infos[2]);
     assert!(packet.is_last());
 }

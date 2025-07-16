@@ -3,11 +3,11 @@ use crate::fiber::fee::check_open_channel_parameters;
 #[cfg(any(debug_assertions, feature = "bench"))]
 use crate::fiber::network::DebugEvent;
 use crate::fiber::network::PaymentCustomRecords;
+use crate::fiber::types::OnionPeeler;
 use crate::utils::payment::is_invoice_fulfilled;
 use crate::{debug_event, utils::tx::compute_tx_message};
 use bitflags::bitflags;
-use futures::future::OptionFuture;
-use secp256k1::XOnlyPublicKey;
+use secp256k1::{Secp256k1, XOnlyPublicKey};
 use tracing::{debug, error, info, trace, warn};
 
 use crate::{
@@ -61,7 +61,7 @@ use musig2::{
     PubNonce, SecNonce,
 };
 use ractor::{
-    async_trait as rasync_trait, call,
+    async_trait as rasync_trait,
     concurrency::{Duration, JoinHandle},
     Actor, ActorProcessingErr, ActorRef, MessagingErr, OutputPort, RpcReplyPort,
 };
@@ -338,6 +338,7 @@ pub struct ChannelActor<S> {
     network: ActorRef<NetworkActorMessage>,
     store: S,
     subscribers: ChannelSubscribers,
+    onion_peeler: Arc<OnionPeeler>,
 }
 
 impl<S> ChannelActor<S>
@@ -350,6 +351,7 @@ where
         network: ActorRef<NetworkActorMessage>,
         store: S,
         subscribers: ChannelSubscribers,
+        onion_peeler: Arc<OnionPeeler>,
     ) -> Self {
         Self {
             local_pubkey,
@@ -357,6 +359,7 @@ where
             network,
             store,
             subscribers,
+            onion_peeler,
         }
     }
 
@@ -921,18 +924,19 @@ where
         // - Extract public key from onion_packet[1..34]
         // - Obtain share secret using DH Key Exchange from the public key
         // and the network private key stored in the network actor state.
-        match self
-            .try_peel_tlc_onion_packet(state, add_tlc)
-            .await
-            .map_err(ProcessingChannelError::without_shared_secret)?
-        {
-            Some(peeled_onion_packet) => {
-                let shared_secret = peeled_onion_packet.shared_secret;
+        match add_tlc.onion_packet.clone() {
+            Some(onion_packet) => {
+                let peeled = onion_packet
+                    .peel(
+                        self.onion_peeler.as_ref(),
+                        Some(add_tlc.payment_hash.as_ref()),
+                        &Secp256k1::new(),
+                    )
+                    .map_err(|err| ProcessingChannelError::PeelingOnionPacketError(err.to_string()))
+                    .map_err(ProcessingChannelError::without_shared_secret)?;
+                let shared_secret = peeled.shared_secret;
                 self.apply_add_tlc_operation_with_peeled_onion_packet(
-                    myself,
-                    state,
-                    add_tlc,
-                    peeled_onion_packet,
+                    myself, state, add_tlc, peeled,
                 )
                 .await
                 .map_err(move |err| err.with_shared_secret(shared_secret))?;
@@ -969,25 +973,6 @@ where
 
         warn!("finished check tlc for peer message: {:?}", &add_tlc.tlc_id);
         Ok(())
-    }
-
-    async fn try_peel_tlc_onion_packet(
-        &self,
-        state: &mut ChannelActorState,
-        add_tlc: &TlcInfo,
-    ) -> Result<Option<PeeledPaymentOnionPacket>, ProcessingChannelError> {
-        state.check_tlc_expiry(add_tlc.expiry)?;
-
-        assert!(state.get_received_tlc(add_tlc.tlc_id).is_some());
-
-        OptionFuture::from(
-            add_tlc
-                .onion_packet
-                .clone()
-                .map(|onion_packet| self.peel_onion_packet(onion_packet, add_tlc.payment_hash)),
-        )
-        .await
-        .transpose()
     }
 
     async fn apply_add_tlc_operation_with_peeled_onion_packet(
@@ -2289,18 +2274,6 @@ where
             CkbInvoiceStatus::Open if invoice.is_expired() => CkbInvoiceStatus::Expired,
             status => status,
         }
-    }
-
-    async fn peel_onion_packet(
-        &self,
-        onion_packet: PaymentOnionPacket,
-        payment_hash: Hash256,
-    ) -> Result<PeeledPaymentOnionPacket, ProcessingChannelError> {
-        call!(self.network, |tx| NetworkActorMessage::Command(
-            NetworkActorCommand::PeelPaymentOnionPacket(onion_packet, payment_hash, tx)
-        ))
-        .expect(ASSUME_NETWORK_ACTOR_ALIVE)
-        .map_err(ProcessingChannelError::PeelingOnionPacketError)
     }
 
     fn check_add_tlc_consistent(

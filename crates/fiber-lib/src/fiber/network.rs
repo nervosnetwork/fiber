@@ -85,7 +85,7 @@ use crate::fiber::gossip::{GossipConfig, GossipService, SubscribableGossipMessag
 use crate::fiber::graph::{AttemptStatus, GraphChannelStat, PaymentSession, PaymentStatus};
 use crate::fiber::serde_utils::EntityHex;
 use crate::fiber::types::{
-    FiberChannelMessage, PaymentOnionPacket, PeeledPaymentOnionPacket, TlcErrPacket, TxSignatures,
+    FiberChannelMessage, OnionPeeler, PeeledPaymentOnionPacket, TlcErrPacket, TxSignatures,
 };
 use crate::fiber::KeyPair;
 use crate::invoice::{CkbInvoice, CkbInvoiceStatus, InvoiceStore, PreimageStore};
@@ -267,11 +267,6 @@ pub enum NetworkActorCommand {
     // The first parameter is the peeled onion in binary via `PeeledOnionPacket::serialize`. `PeeledOnionPacket::current`
     // is for the current node.
     SendPaymentOnionPacket(SendOnionPacketCommand),
-    PeelPaymentOnionPacket(
-        PaymentOnionPacket, // onion_packet
-        Hash256,            // payment_hash
-        RpcReplyPort<Result<PeeledPaymentOnionPacket, String>>,
-    ),
     UpdateChannelFunding(Hash256, Transaction, FundingRequest),
     SignFundingTx(PeerId, Hash256, Transaction, Option<Vec<Vec<u8>>>),
     NotifyFundingTx(Transaction),
@@ -1665,17 +1660,6 @@ where
                     .await;
                 }
             }
-            NetworkActorCommand::PeelPaymentOnionPacket(onion_packet, payment_hash, reply) => {
-                let response = onion_packet
-                    .peel(
-                        &state.private_key,
-                        Some(payment_hash.as_ref()),
-                        &Secp256k1::new(),
-                    )
-                    .map_err(|err| err.to_string());
-
-                let _ = reply.send(response);
-            }
             NetworkActorCommand::UpdateChannelFunding(channel_id, transaction, request) => {
                 let old_tx = transaction.into_view();
                 let mut tx = FundingTx::new();
@@ -2747,6 +2731,7 @@ pub struct NetworkActorState<S> {
     last_node_announcement_message: Option<NodeAnnouncement>,
     // We need to keep private key here in order to sign node announcement messages.
     private_key: Privkey,
+    onion_peeler: Arc<OnionPeeler>,
     // This is the entropy used to generate various random values.
     // Must be kept secret.
     // TODO: Maybe we should abstract this into a separate trait.
@@ -3035,6 +3020,7 @@ where
                 network.clone(),
                 store,
                 self.channel_subscribers.clone(),
+                self.onion_peeler.clone(),
             ),
             ChannelInitializationParameter::OpenChannel(OpenChannelParameter {
                 funding_amount,
@@ -3122,6 +3108,7 @@ where
                 network.clone(),
                 store,
                 self.channel_subscribers.clone(),
+                self.onion_peeler.clone(),
             ),
             ChannelInitializationParameter::AcceptChannel(AcceptChannelParameter {
                 funding_amount,
@@ -3492,6 +3479,7 @@ where
                 self.network.clone(),
                 self.store.clone(),
                 self.channel_subscribers.clone(),
+                self.onion_peeler.clone(),
             ),
             ChannelInitializationParameter::ReestablishChannel(channel_id),
             self.network.get_cell(),
@@ -3965,7 +3953,7 @@ where
         let kp = config
             .read_or_generate_secret_key()
             .expect("read or generate secret key");
-        let private_key = <[u8; 32]>::try_from(kp.as_ref())
+        let private_key: Privkey = <[u8; 32]>::try_from(kp.as_ref())
             .expect("valid length for key")
             .into();
         let entropy = blake2b_hash_with_salt(
@@ -4088,6 +4076,8 @@ where
         let chain_actor = self.chain_actor.clone();
         let features = config.gen_node_features();
 
+        let onion_peeler = Arc::new(OnionPeeler::new(private_key.clone()));
+
         let mut state = NetworkActorState {
             store: self.store.clone(),
             state_to_be_persisted,
@@ -4097,6 +4087,7 @@ where
             auto_announce: config.auto_announce_node(),
             last_node_announcement_message: None,
             private_key,
+            onion_peeler,
             entropy,
             default_shutdown_script,
             network: myself.clone(),

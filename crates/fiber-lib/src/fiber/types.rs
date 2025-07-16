@@ -3883,6 +3883,17 @@ pub struct PeeledOnionPacket<T> {
     pub next: Option<OnionPacket<T>>,
 }
 
+pub struct OnionPeeler(Privkey);
+impl OnionPeeler {
+    pub fn new(privkey: Privkey) -> Self {
+        Self(privkey)
+    }
+
+    fn privkey(&self) -> &Privkey {
+        &self.0
+    }
+}
+
 pub type PaymentOnionPacket = OnionPacket<PaymentHopData>;
 pub type PeeledPaymentOnionPacket = PeeledOnionPacket<PaymentHopData>;
 
@@ -3925,15 +3936,15 @@ impl<T: HopData> OnionPacket<T> {
     /// - Fail to peel the packet using the given private key.
     pub fn peel<C: Verification>(
         self,
-        privkey: &Privkey,
+        peeler: &OnionPeeler,
         assoc_data: Option<&[u8]>,
         secp_ctx: &Secp256k1<C>,
     ) -> Result<PeeledOnionPacket<T>, Error> {
         let sphinx_packet = self.into_sphinx_onion_packet()?;
-        let shared_secret = sphinx_packet.shared_secret(&privkey.0);
+        let shared_secret = sphinx_packet.shared_secret(&peeler.privkey().0);
 
         let (new_current, new_next) = sphinx_packet
-            .peel(&privkey.0, assoc_data, secp_ctx, get_hop_data_len)
+            .peel(&peeler.privkey().0, assoc_data, secp_ctx, get_hop_data_len)
             .map_err(|err| Error::OnionPacket(err.into()))?;
 
         let current = unpack_hop_data(&new_current)
@@ -4020,14 +4031,14 @@ impl<T: HopData> PeeledOnionPacket<T> {
     /// - Fail to peel the packet using the given private key.
     pub fn peel<C: Verification>(
         self,
-        privkey: &Privkey,
+        peeler: &OnionPeeler,
         secp_ctx: &Secp256k1<C>,
     ) -> Result<Self, Error> {
         let next = self
             .next
             .ok_or_else(|| Error::OnionPacket(OnionPacketError::PeelingLastHop))?;
 
-        next.peel(privkey, self.current.assoc_data().as_deref(), secp_ctx)
+        next.peel(peeler, self.current.assoc_data().as_deref(), secp_ctx)
     }
 
     pub fn serialize(&self) -> Vec<u8> {
