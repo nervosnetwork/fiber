@@ -104,7 +104,7 @@ pub async fn fiber(
         fnn::get_git_version(),
         fnn::get_git_commit_info()
     );
-
+    info!("Database prefix: {:?}", database_prefix);
     let mut config = Config::parse_from_str(config, database_prefix);
     let fiber_key_pair = match fiber_key_pair.map(|value| KeyPair::try_from(&value[..]).unwrap()) {
         Some(v) => v,

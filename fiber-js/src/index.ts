@@ -50,7 +50,7 @@ class Fiber {
         ckbSecretKey: Uint8Array,
         chainSpec?: string,
         logLevel: "trace" | "debug" | "info" | "error" = "info",
-        databasePrefix: string = "/wasm") {
+        databasePrefix?: string) {
         this.dbWorker.postMessage({
             inputBuffer: this.inputBuffer,
             outputBuffer: this.outputBuffer,
