@@ -2464,7 +2464,7 @@ async fn test_send_mpp_will_success_with_same_payment_after_restarted() {
 
     node_1.stop().await;
     debug!("node_1 stopped");
-
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
     let res = node_0
         .send_payment(SendPaymentCommand {
             invoice: Some(ckb_invoice.to_string()),
@@ -2475,6 +2475,7 @@ async fn test_send_mpp_will_success_with_same_payment_after_restarted() {
 
     if let Ok(res) = res {
         assert_eq!(res.routers.len(), 3);
+        debug!("begin to wait for payment failure: {:?}", res.payment_hash);
         node_0.wait_until_failed(res.payment_hash).await;
         debug!("node_0 payment failed, res: {:?}", res);
     } else {
@@ -2503,6 +2504,7 @@ async fn test_send_mpp_will_success_with_same_payment_after_restarted() {
 
     assert!(res.is_ok());
     let res = res.unwrap();
+    debug!("retry payment success: {:?}", res.payment_hash);
     node_0.wait_until_success(res.payment_hash).await;
     assert_eq!(res.routers.len(), 3);
 }

@@ -5223,6 +5223,7 @@ async fn test_send_payment_with_reverse_channel_of_capaicity_not_enough() {
     for _i in 0..count {
         let payment = nodes[0].send_payment_keysend(&nodes[2], 1, false).await;
         let payment_hash = payment.unwrap().payment_hash;
+        nodes[0].wait_until_inflight(payment_hash).await;
         payments.insert(payment_hash);
     }
 
