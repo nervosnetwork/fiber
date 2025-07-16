@@ -1,0 +1,17 @@
+# Make tests more reliable by setting threads-required
+# https://nexte.st/docs/configuration/threads-required/
+
+# heavy tests
+[[profile.default.overrides]]
+filter = 'test(/bench|complex/)'
+threads-required = 2
+
+# channel tests
+[[profile.default.overrides]]
+filter = 'test(/^tests::channel::/)'
+threads-required = 2
+
+# payment tests
+[[profile.default.overrides]]
+filter = 'test(/^tests::payment::/)'
+threads-required = 2
