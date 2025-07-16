@@ -49,7 +49,10 @@ pub const DEFAULT_AUTO_ANNOUNCE_NODE: bool = true;
 pub const DEFAULT_ANNOUNCE_NODE_INTERVAL_SECONDS: u64 = 3600;
 
 /// The maximum time to hold a tlc, in milliseconds.
+#[cfg(not(debug_assertions))]
 pub const DEFAULT_HOLD_TLC_TIMEOUT: u64 = 120 * 1000;
+#[cfg(debug_assertions)]
+pub const DEFAULT_HOLD_TLC_TIMEOUT: u64 = 10 * 1000;
 
 /// The interval to maintain the gossip network, in milli-seconds.
 #[cfg(not(any(test, feature = "bench")))]

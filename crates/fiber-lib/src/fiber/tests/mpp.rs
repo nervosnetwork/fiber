@@ -10,6 +10,7 @@ use crate::{
             AddTlcCommand, ChannelActorStateStore, ChannelCommand, ChannelCommandWithId, TLCId,
         },
         config::{DEFAULT_TLC_EXPIRY_DELTA, PAYMENT_MAX_PARTS_LIMIT},
+        graph::AttemptStatus,
         hash_algorithm::HashAlgorithm,
         network::SendPaymentCommand,
         types::{Hash256, PaymentDataRecord, PaymentHopData, PeeledOnionPacket, RemoveTlcReason},
@@ -3083,4 +3084,64 @@ async fn test_mpp_with_need_fee() {
     assert!(res.is_ok());
     let payment_hash = res.unwrap().payment_hash;
     node_0.wait_until_success(payment_hash).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_mpp_can_not_find_path_with_max_parts() {
+    init_tracing();
+
+    let (nodes, _channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+            ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+            ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+            ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+            ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+        ],
+        2,
+    )
+    .await;
+    let [node_0, mut node_1] = nodes.try_into().expect("2 nodes");
+
+    let res = node_0
+        .send_mpp_payment(&mut node_1, 50000000000, Some(4))
+        .await;
+    eprintln!("query res: {:?}", res);
+
+    let payment_hash = res.unwrap().payment_hash;
+    node_0.wait_until_failed(payment_hash).await;
+    let payment_session = node_0.get_payment_session(payment_hash).unwrap();
+    assert_eq!(payment_session.attempts_count(), 4);
+    debug!(
+        "now attempts: {:?}",
+        payment_session.all_attempts_with_status()
+    );
+
+    // wait all sub attempts failed
+    while node_0
+        .get_payment_session(payment_hash)
+        .unwrap()
+        .all_attempts_with_status()
+        .iter()
+        .any(|a| a.1 != AttemptStatus::Failed)
+    {
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        debug!(
+            "waiting for all sub attempts to be failed ... : {:?}",
+            payment_session.all_attempts_with_status()
+        );
+    }
+
+    node_0.clear_history().await;
+    let res = node_0
+        .send_mpp_payment(&mut node_1, 50000000000, Some(5))
+        .await;
+
+    tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+    eprintln!("second query res: {:?}", res);
+
+    let payment_hash = res.unwrap().payment_hash;
+    node_0.wait_until_success(payment_hash).await;
+
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 }
