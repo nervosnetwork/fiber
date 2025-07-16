@@ -374,6 +374,7 @@ fn test_channel_actor_state_store() {
         network: None,
         scheduled_channel_update_handle: None,
         pending_notify_mpp_tcls: vec![],
+        retryable_task_last_run_at: None,
     };
 
     let bincode_encoded = bincode::serialize(&state).unwrap();
@@ -489,6 +490,7 @@ fn test_serde_channel_actor_state_ciborium() {
         network: None,
         scheduled_channel_update_handle: None,
         pending_notify_mpp_tcls: vec![],
+        retryable_task_last_run_at: None,
     };
 
     let mut serialized = Vec::new();

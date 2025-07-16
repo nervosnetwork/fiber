@@ -1174,6 +1174,7 @@ where
             NetworkActorEvent::AddTlcResult(payment_hash, attempt_id, error_info, previous_tlc) => {
                 self.on_add_tlc_result_event(
                     myself,
+                    state,
                     payment_hash,
                     attempt_id,
                     error_info,
@@ -1652,6 +1653,7 @@ where
                 {
                     self.on_add_tlc_result_event(
                         myself,
+                        state,
                         command.payment_hash,
                         command.attempt_id,
                         Some((ProcessingChannelError::TlcForwardingError(err.clone()), err)),
@@ -2153,26 +2155,38 @@ where
     ) -> Result<(), Error> {
         assert!(attempt.is_retrying());
         let graph = self.network_graph.read().await;
-        // `session.remain_amount()` do not contains this part of amount,
-        // so we need to add the receiver amount to it, so we may make fewer
-        // attempts to send the payment.
-        let amount = session.remain_amount() + attempt.route.receiver_amount();
-        let max_fee = session.remain_fee_amount();
+        let hops = match state
+            .payment_router_map
+            .get(&(attempt.payment_hash, attempt.id))
+        {
+            Some(hops) => hops.clone(),
+            None => {
+                // `session.remain_amount()` do not contains this part of amount,
+                // so we need to add the receiver amount to it, so we may make fewer
+                // attempts to send the payment.
+                let amount = session.remain_amount() + attempt.route.receiver_amount();
+                let max_fee = session.remain_fee_amount();
 
-        session.request.channel_stats = GraphChannelStat::new(Some(graph.channel_stats()));
-        match graph.build_route(amount, None, max_fee, &session.request) {
-            Err(e) => {
-                let error = format!("Failed to build route, {}", e);
-                return Err(Error::BuildPaymentRouteError(error));
-            }
-            Ok(hops) => {
-                let source = graph.get_source_pubkey();
-                attempt.route = SessionRoute::new(source, session.request.target_pubkey, &hops);
-                assert_ne!(hops[0].funding_tx_hash, Hash256::default());
-                self.send_attempt(myself, state, session, attempt, hops)
-                    .await?;
+                session.request.channel_stats = GraphChannelStat::new(Some(graph.channel_stats()));
+
+                let hops = graph
+                    .build_route(amount, None, max_fee, &session.request)
+                    .map_err(|e| {
+                        Error::BuildPaymentRouteError(format!("Failed to build route, {}", e))
+                    })?;
+
+                state
+                    .payment_router_map
+                    .insert((attempt.payment_hash, attempt.id), hops.clone());
+                hops
             }
         };
+
+        let source = graph.get_source_pubkey();
+        attempt.route = SessionRoute::new(source, session.request.target_pubkey, &hops);
+        assert_ne!(hops[0].funding_tx_hash, Hash256::default());
+        self.send_attempt(myself, state, session, attempt, hops)
+            .await?;
         Ok(())
     }
 
@@ -2342,6 +2356,7 @@ where
     async fn on_add_tlc_result_event(
         &self,
         myself: ActorRef<NetworkActorMessage>,
+        state: &mut NetworkActorState<S>,
         payment_hash: Hash256,
         attempt_id: Option<u64>,
         error_info: Option<(ProcessingChannelError, TlcErr)>,
@@ -2383,6 +2398,7 @@ where
                     .write()
                     .await
                     .track_attempt_router(&attempt);
+                state.payment_router_map.remove(&(payment_hash, attempt.id));
                 self.store.insert_attempt(attempt);
             }
             Some((ProcessingChannelError::RepeatedProcessing(_), _)) => {
@@ -2394,6 +2410,7 @@ where
                     if matches!(error, ProcessingChannelError::WaitingTlcAck) {
                         ("WaitingTlcAck".to_string(), true)
                     } else {
+                        state.payment_router_map.remove(&(payment_hash, attempt.id));
                         let need_to_retry = self.network_graph.write().await.record_attempt_fail(
                             &attempt,
                             tlc_err.clone(),
@@ -2578,7 +2595,11 @@ where
         payment_hash: Hash256,
         attempt_id: Option<u64>,
     ) {
-        myself.send_after(Duration::from_millis(500), move || {
+        #[cfg(not(debug_assertions))]
+        let rand_time = rand::thread_rng().gen_range(1000..2000);
+        #[cfg(debug_assertions)]
+        let rand_time = 500;
+        myself.send_after(Duration::from_millis(rand_time), move || {
             NetworkActorMessage::new_event(NetworkActorEvent::RetrySendPayment(
                 payment_hash,
                 attempt_id,
@@ -2773,6 +2794,8 @@ pub struct NetworkActorState<S> {
 
     // The features of the node, used to indicate the capabilities of the node.
     features: FeatureVector,
+    // the payment router map, only used for avoiding finding the same payment router multiple times
+    payment_router_map: HashMap<(Hash256, u64), Vec<PaymentHopData>>,
 }
 
 #[derive(Debug, Clone)]
@@ -4107,6 +4130,7 @@ where
             max_inbound_peers: config.max_inbound_peers(),
             min_outbound_peers: config.min_outbound_peers(),
             features,
+            payment_router_map: Default::default(),
         };
 
         let node_announcement = state.get_or_create_new_node_announcement_message();

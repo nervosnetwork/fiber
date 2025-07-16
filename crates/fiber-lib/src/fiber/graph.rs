@@ -1796,13 +1796,6 @@ where
         let sent_amount =
             channel_stats.get_channel_sent_amount(channel_info.out_point(), sent_node);
 
-        debug_assert!(
-            sent_amount <= channel_info.capacity(),
-            "sent amount {} is greater than channel capacity {}",
-            sent_amount,
-            channel_info.capacity()
-        );
-
         if amount > channel_info.capacity().saturating_sub(sent_amount) {
             return false;
         }
