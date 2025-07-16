@@ -10,7 +10,6 @@ use crate::{
             AddTlcCommand, ChannelActorStateStore, ChannelCommand, ChannelCommandWithId, TLCId,
         },
         config::{DEFAULT_TLC_EXPIRY_DELTA, PAYMENT_MAX_PARTS_LIMIT},
-        graph::AttemptStatus,
         hash_algorithm::HashAlgorithm,
         network::SendPaymentCommand,
         types::{Hash256, PaymentDataRecord, PaymentHopData, PeeledOnionPacket, RemoveTlcReason},
@@ -342,7 +341,7 @@ async fn test_send_mpp_amount_split_with_last_channels() {
         if expect_status == "success" {
             node_0.wait_until_success(res.unwrap().payment_hash).await;
         } else {
-            node_0.wait_until_failed(res.unwrap().payment_hash).await;
+            assert!(res.is_err(), "should fail to build payment");
         }
     }
 
@@ -487,12 +486,8 @@ async fn test_send_mpp_fee_rate() {
         })
         .await;
 
-    assert!(res.is_ok(), "Send payment failed: {:?}", res);
-    let res = res.unwrap();
-
-    let payment_hash = res.payment_hash;
     // fee_rate is too high, timeout
-    node_0.wait_until_failed(payment_hash).await;
+    assert!(res.is_err(), "should fail to build payment");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -3108,31 +3103,12 @@ async fn test_mpp_can_not_find_path_with_max_parts() {
         .await;
     eprintln!("query res: {:?}", res);
 
-    let payment_hash = res.unwrap().payment_hash;
-    node_0.wait_until_failed(payment_hash).await;
-    let payment_session = node_0.get_payment_session(payment_hash).unwrap();
-    assert_eq!(payment_session.attempts_count(), 4);
-    debug!(
-        "now attempts: {:?}",
-        payment_session.all_attempts_with_status()
-    );
+    assert!(res.is_err());
+    let error = res.unwrap_err().to_string();
+    assert!(error.contains("Failed to build enough routes"));
 
-    // wait all sub attempts failed
-    while node_0
-        .get_payment_session(payment_hash)
-        .unwrap()
-        .all_attempts_with_status()
-        .iter()
-        .any(|a| a.1 != AttemptStatus::Failed)
-    {
-        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-        debug!(
-            "waiting for all sub attempts to be failed ... : {:?}",
-            payment_session.all_attempts_with_status()
-        );
-    }
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
-    node_0.clear_history().await;
     let res = node_0
         .send_mpp_payment(&mut node_1, 50000000000, Some(5))
         .await;
@@ -3142,6 +3118,5 @@ async fn test_mpp_can_not_find_path_with_max_parts() {
 
     let payment_hash = res.unwrap().payment_hash;
     node_0.wait_until_success(payment_hash).await;
-
-    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 }

@@ -2283,6 +2283,12 @@ where
             };
         }
 
+        if remain_amount > 0 {
+            let error = "Failed to build enough routes for MPP payment".to_string();
+            self.set_payment_fail_with_error(session, &error);
+            return Err(Error::SendPaymentError(error));
+        }
+
         for (attempt, _) in &result {
             session.append_attempt(attempt.clone());
         }
