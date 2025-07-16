@@ -203,8 +203,10 @@ pub struct PeerInfo {
     #[serde_as(as = "DisplayFromStr")]
     pub peer_id: PeerId,
 
-    /// A list of multi-addresses associated with the peer.
-    pub addresses: Vec<MultiAddr>,
+    /// The multi-address associated with the connecting peer.
+    /// Note: this is only the address which used for connecting to the peer, not all addresses of the peer.
+    /// The `graph_nodes` in Graph rpc module will return all addresses of the peer.
+    pub address: MultiAddr,
 }
 
 /// The struct here is used both internally and as an API to the outside world.
@@ -904,7 +906,7 @@ where
                 let found = state
                     .peer_session_map
                     .get(&peer_id)
-                    .and_then(|(session, ..)| state.session_channels_map.get(session))
+                    .and_then(|peer| state.session_channels_map.get(&peer.session_id))
                     .is_some_and(|channels| channels.contains(&channel_id));
 
                 if !found {
@@ -1676,14 +1678,11 @@ where
             NetworkActorCommand::ListPeers(_, rpc) => {
                 let peers = state
                     .peer_session_map
-                    .keys()
-                    .map(|peer_id| PeerInfo {
+                    .iter()
+                    .map(|(peer_id, peer)| PeerInfo {
                         peer_id: peer_id.clone(),
-                        pubkey: state
-                            .state_to_be_persisted
-                            .get_peer_pubkey(peer_id)
-                            .expect("pubkey not found"),
-                        addresses: state.state_to_be_persisted.get_peer_addresses(peer_id),
+                        pubkey: peer.pubkey,
+                        address: peer.address.clone(),
                     })
                     .collect::<Vec<_>>();
                 let _ = rpc.send(Ok(peers));
@@ -2025,6 +2024,7 @@ where
                 .write()
                 .await
                 .track_payment_router(&payment_session);
+            state.payment_router_map.remove(&payment_hash);
             self.store.insert_payment_session(payment_session);
             return;
         }
@@ -2045,14 +2045,13 @@ where
                 );
                 (retry, channel_error.to_string())
             };
-        payment_session.last_error = Some(error.clone());
+        payment_session.last_error = Some(error);
+        if !matches!(channel_error, ProcessingChannelError::WaitingTlcAck) {
+            state.payment_router_map.remove(&payment_hash);
+        }
         self.store.insert_payment_session(payment_session);
 
         if need_to_retry {
-            trace!(
-                "Calling try_payment_session from on_add_tlc_result_event, error = {}",
-                error
-            );
             self.register_payment_retry(myself, payment_hash);
         }
     }
@@ -2090,8 +2089,17 @@ where
                 payment_session.retried_times += 1;
             }
 
-            let hops_info = self.build_payment_route(&mut payment_session).await?;
-            trace!("Calling send_payment_onion_packet from try payment session");
+            let hops_info = match state.payment_router_map.get(&payment_hash) {
+                Some(hops) => hops.clone(),
+                None => {
+                    let hops_info = self.build_payment_route(&mut payment_session).await?;
+                    state
+                        .payment_router_map
+                        .insert(payment_hash, hops_info.clone());
+                    hops_info
+                }
+            };
+
             match self
                 .send_payment_onion_packet(state, &mut payment_session, &payment_data, hops_info)
                 .await
@@ -2123,7 +2131,8 @@ where
     }
 
     fn register_payment_retry(&self, myself: ActorRef<NetworkActorMessage>, payment_hash: Hash256) {
-        myself.send_after(Duration::from_millis(500), move || {
+        let rand_time = rand::thread_rng().gen_range(1000..2000);
+        myself.send_after(Duration::from_millis(rand_time), move || {
             NetworkActorMessage::new_event(NetworkActorEvent::RetrySendPayment(payment_hash))
         });
     }
@@ -2261,7 +2270,7 @@ pub struct NetworkActorState<S> {
     // This immutable attribute is placed here because we need to create it in
     // the pre_start function.
     control: ServiceAsyncControl,
-    peer_session_map: HashMap<PeerId, (SessionId, SessionType)>,
+    peer_session_map: HashMap<PeerId, ConnectedPeer>,
     session_channels_map: HashMap<SessionId, HashSet<Hash256>>,
     channels: HashMap<Hash256, ActorRef<ChannelActorMessage>>,
     ckb_txs_in_flight: HashMap<Hash256, ActorRef<InFlightCkbTxActorMessage>>,
@@ -2290,6 +2299,16 @@ pub struct NetworkActorState<S> {
     channel_subscribers: ChannelSubscribers,
     max_inbound_peers: usize,
     min_outbound_peers: usize,
+    // the payment router map, only used for avoiding finding the same payment router multiple times
+    payment_router_map: HashMap<Hash256, Vec<PaymentHopData>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ConnectedPeer {
+    pub session_id: SessionId,
+    pub session_type: SessionType,
+    pub address: Multiaddr,
+    pub pubkey: Pubkey,
 }
 
 #[serde_as]
@@ -2781,20 +2800,20 @@ where
     }
 
     fn get_peer_session(&self, peer_id: &PeerId) -> Option<SessionId> {
-        self.peer_session_map.get(peer_id).map(|s| s.0)
+        self.peer_session_map.get(peer_id).map(|s| s.session_id)
     }
 
     fn inbound_peer_sessions(&self) -> Vec<SessionId> {
         self.peer_session_map
             .values()
-            .filter_map(|s| (s.1 == SessionType::Inbound).then_some(s.0))
+            .filter_map(|s| (s.session_type == SessionType::Inbound).then_some(s.session_id))
             .collect()
     }
 
     fn num_of_outbound_peers(&self) -> usize {
         self.peer_session_map
             .values()
-            .filter(|s| s.1 == SessionType::Outbound)
+            .filter(|s| s.session_type == SessionType::Outbound)
             .count()
     }
 
@@ -2815,7 +2834,7 @@ where
         self.peer_session_map
             .values()
             .take(n)
-            .map(|s| s.0)
+            .map(|s| s.session_id)
             .collect()
     }
 
@@ -2984,8 +3003,15 @@ where
         session: &SessionContext,
     ) {
         let store = self.store.clone();
-        self.peer_session_map
-            .insert(remote_peer_id.clone(), (session.id, session.ty));
+        self.peer_session_map.insert(
+            remote_peer_id.clone(),
+            ConnectedPeer {
+                session_id: session.id,
+                session_type: session.ty,
+                pubkey: remote_pubkey,
+                address: session.address.clone(),
+            },
+        );
         if self
             .state_to_be_persisted
             .save_peer_pubkey(remote_peer_id.clone(), remote_pubkey)
@@ -3020,7 +3046,7 @@ where
 
     fn on_peer_disconnected(&mut self, id: &PeerId) {
         if let Some(session) = self.peer_session_map.remove(id) {
-            if let Some(channel_ids) = self.session_channels_map.remove(&session.0) {
+            if let Some(channel_ids) = self.session_channels_map.remove(&session.session_id) {
                 for channel_id in channel_ids {
                     if let Some(channel) = self.channels.get(&channel_id) {
                         let _ = channel.send_message(ChannelActorMessage::Event(
@@ -3142,8 +3168,11 @@ where
     async fn on_channel_actor_stopped(&mut self, channel_id: Hash256, reason: StopReason) {
         // all check passed, now begin to remove from memory and DB
         self.channels.remove(&channel_id);
-        for (_peer_id, (session_id, _)) in self.peer_session_map.iter() {
-            if let Some(session_channels) = self.session_channels_map.get_mut(session_id) {
+        for (_peer_id, connected_peer) in self.peer_session_map.iter() {
+            if let Some(session_channels) = self
+                .session_channels_map
+                .get_mut(&connected_peer.session_id)
+            {
                 session_channels.remove(&channel_id);
             }
         }
@@ -3577,6 +3606,7 @@ where
             channel_subscribers,
             max_inbound_peers: config.max_inbound_peers(),
             min_outbound_peers: config.min_outbound_peers(),
+            payment_router_map: Default::default(),
         };
 
         let node_announcement = state.get_or_create_new_node_announcement_message();

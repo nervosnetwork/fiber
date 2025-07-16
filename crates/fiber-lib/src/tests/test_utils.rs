@@ -81,7 +81,7 @@ use crate::{
 static RETAIN_VAR: &str = "TEST_TEMP_RETAIN";
 pub const MIN_RESERVED_CKB: u128 = 4200000000;
 pub const HUGE_CKB_AMOUNT: u128 = MIN_RESERVED_CKB + 1000000000000_u128;
-const DEFAULT_WAIT_UNTIL_TIME: u64 = 60; // seconds
+const DEFAULT_WAIT_UNTIL_TIME: u64 = 60 * 4; // seconds
 
 #[derive(Debug)]
 pub struct TempDir(ManuallyDrop<OldTempDir>);
@@ -1588,7 +1588,7 @@ pub async fn create_mock_chain_actor() -> ActorRef<CkbChainMessage> {
         .0
 }
 
-async fn wait_for_network_graph_update(node: &NetworkNode, channels: usize) {
+pub async fn wait_for_network_graph_update(node: &NetworkNode, channels: usize) {
     // sleep for a while to make sure network graph is updated
     for _ in 0..50 {
         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;

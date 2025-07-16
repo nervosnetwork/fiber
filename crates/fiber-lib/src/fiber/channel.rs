@@ -1643,11 +1643,7 @@ where
         operation: RetryableTlcOperation,
     ) {
         if state.tlc_state.insert_retryable_tlc_operation(operation) {
-            myself
-                .send_message(ChannelActorMessage::Event(
-                    ChannelEvent::CheckTlcRetryOperation,
-                ))
-                .expect("myself alive");
+            state.trigger_retryable_tasks(myself, true);
         }
     }
 
@@ -1670,13 +1666,25 @@ where
         &self,
         myself: &ActorRef<ChannelActorMessage>,
         state: &mut ChannelActorState,
+        force: bool,
     ) {
         if state.reestablishing {
             myself.send_after(WAITING_REESTABLISH_FINISH_TIMEOUT, || {
-                ChannelActorMessage::Event(ChannelEvent::CheckTlcRetryOperation)
+                ChannelActorMessage::Event(ChannelEvent::CheckTlcRetryOperation(false))
             });
             return;
         }
+        if !force {
+            if let Some(last_time) = state.retryable_task_last_run_at {
+                if last_time + RETRYABLE_TLC_OPS_INTERVAL.as_millis() as u64
+                    > now_timestamp_as_millis_u64()
+                {
+                    // don't run retryable tasks too frequently
+                    return;
+                }
+            }
+        }
+        state.retryable_task_last_run_at = Some(now_timestamp_as_millis_u64());
         let pending_tlc_ops = state.tlc_state.get_pending_operations();
         let mut check = async |retryable_operation: &mut RetryableTlcOperation| {
             match retryable_operation {
@@ -1788,9 +1796,7 @@ where
         }
         state.tlc_state.retryable_tlc_operations = new_pending_tlc_ops;
         if state.tlc_state.has_pending_operations() {
-            myself.send_after(RETRYABLE_TLC_OPS_INTERVAL, || {
-                ChannelActorMessage::Event(ChannelEvent::CheckTlcRetryOperation)
-            });
+            state.trigger_retryable_tasks(myself, false);
         }
     }
 
@@ -2104,8 +2110,9 @@ where
                 state.update_state(ChannelState::AwaitingChannelReady(flags));
                 state.maybe_channel_is_ready(myself).await;
             }
-            ChannelEvent::CheckTlcRetryOperation => {
-                self.apply_retryable_tlc_operations(myself, state).await;
+            ChannelEvent::CheckTlcRetryOperation(force) => {
+                self.apply_retryable_tlc_operations(myself, state, force)
+                    .await;
             }
             ChannelEvent::Stop(reason) => {
                 debug_event!(self.network, "ChannelActorStopped");
@@ -2170,7 +2177,7 @@ where
                     debug!(
                         "Channel {} from peer {:?} is inactive for a time, closing it",
                         state.get_id(),
-                        state.get_remote_peer_id()
+                        state.get_remote_peer_id(),
                     );
                     state
                         .network()
@@ -2592,11 +2599,7 @@ where
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         if state.tlc_state.has_pending_operations() && !state.reestablishing {
-            myself
-                .send_message(ChannelActorMessage::Event(
-                    ChannelEvent::CheckTlcRetryOperation,
-                ))
-                .expect("myself alive");
+            state.trigger_retryable_tasks(&myself, false);
         }
 
         Ok(())
@@ -3545,6 +3548,9 @@ pub struct ChannelActorState {
     // The arc here is only used to implement the clone trait for the ChannelActorState.
     #[serde(skip)]
     pub scheduled_channel_update_handle: ScheduledChannelUpdateHandle,
+
+    #[serde(skip)]
+    pub retryable_task_last_run_at: Option<u64>,
 }
 
 #[serde_as]
@@ -3639,7 +3645,7 @@ pub enum ChannelEvent {
     Stop(StopReason),
     FundingTransactionConfirmed(H256, u32, u64),
     ClosingTransactionConfirmed(bool),
-    CheckTlcRetryOperation,
+    CheckTlcRetryOperation(bool),
     CheckActiveChannel,
 }
 
@@ -4289,6 +4295,24 @@ impl ChannelActorState {
         }
     }
 
+    fn trigger_retryable_tasks(
+        &mut self,
+        myself: &ActorRef<ChannelActorMessage>,
+        first_register: bool,
+    ) {
+        if first_register {
+            myself
+                .send_message(ChannelActorMessage::Event(
+                    ChannelEvent::CheckTlcRetryOperation(true),
+                ))
+                .expect("myself alive");
+        } else {
+            myself.send_after(RETRYABLE_TLC_OPS_INTERVAL, || {
+                ChannelActorMessage::Event(ChannelEvent::CheckTlcRetryOperation(false))
+            });
+        }
+    }
+
     pub fn get_unsigned_channel_update_message(&self) -> Option<ChannelUpdate> {
         let message_flags = if self.local_is_node1() {
             ChannelUpdateMessageFlags::UPDATE_OF_NODE1
@@ -4398,6 +4422,7 @@ impl ChannelActorState {
             waiting_peer_response: None,
             network: Some(network),
             scheduled_channel_update_handle: None,
+            retryable_task_last_run_at: None,
         };
         if let Some(nonce) = remote_channel_announcement_nonce {
             state.update_remote_channel_announcement_nonce(&nonce);
@@ -4471,6 +4496,7 @@ impl ChannelActorState {
             waiting_peer_response: None,
             network: Some(network),
             scheduled_channel_update_handle: None,
+            retryable_task_last_run_at: None,
         }
     }
 
@@ -5302,27 +5328,28 @@ impl ChannelActorState {
         )
     }
 
-    fn get_active_tlcs(&self, for_remote: bool) -> Vec<u8> {
+    fn get_active_tlcs(&self, for_remote: bool) -> Vec<TlcInfo> {
         // Build a sorted array of TLC so that both party can generate the same commitment transaction.
-        let tlcs = {
-            let (mut received_tlcs, mut offered_tlcs) = (
-                self.get_active_received_tlcs(for_remote),
-                self.get_active_offered_tlcs(for_remote),
-            );
-            let (mut a, mut b) = if for_remote {
-                (received_tlcs, offered_tlcs)
-            } else {
-                for tlc in received_tlcs.iter_mut().chain(offered_tlcs.iter_mut()) {
-                    // Need to flip these fields for the counterparty.
-                    tlc.flip_mut();
-                }
-                (offered_tlcs, received_tlcs)
-            };
-            a.sort_by(|x, y| u64::from(x.tlc_id).cmp(&u64::from(y.tlc_id)));
-            b.sort_by(|x, y| u64::from(x.tlc_id).cmp(&u64::from(y.tlc_id)));
-            [a, b].concat()
+        let (mut received_tlcs, mut offered_tlcs) = (
+            self.get_active_received_tlcs(for_remote),
+            self.get_active_offered_tlcs(for_remote),
+        );
+        let (mut a, mut b) = if for_remote {
+            (received_tlcs, offered_tlcs)
+        } else {
+            for tlc in received_tlcs.iter_mut().chain(offered_tlcs.iter_mut()) {
+                // Need to flip these fields for the counterparty.
+                tlc.flip_mut();
+            }
+            (offered_tlcs, received_tlcs)
         };
+        a.sort_by(|x, y| u64::from(x.tlc_id).cmp(&u64::from(y.tlc_id)));
+        b.sort_by(|x, y| u64::from(x.tlc_id).cmp(&u64::from(y.tlc_id)));
+        [a, b].concat()
+    }
 
+    fn get_active_tlcs_for_commitment(&self, for_remote: bool) -> Vec<u8> {
+        let tlcs = self.get_active_tlcs(for_remote);
         if tlcs.is_empty() {
             Vec::new()
         } else {
@@ -5350,24 +5377,8 @@ impl ChannelActorState {
     }
 
     fn get_active_tlcs_for_settlement(&self, for_remote: bool) -> Vec<SettlementTlc> {
-        let (mut received_tlcs, mut offered_tlcs) = (
-            self.get_active_received_tlcs(for_remote),
-            self.get_active_offered_tlcs(for_remote),
-        );
-        let (mut a, mut b) = if for_remote {
-            (received_tlcs, offered_tlcs)
-        } else {
-            for tlc in received_tlcs.iter_mut().chain(offered_tlcs.iter_mut()) {
-                // Need to flip these fields for the counterparty.
-                tlc.flip_mut();
-            }
-            (offered_tlcs, received_tlcs)
-        };
-        a.sort_by(|x, y| u64::from(x.tlc_id).cmp(&u64::from(y.tlc_id)));
-        b.sort_by(|x, y| u64::from(x.tlc_id).cmp(&u64::from(y.tlc_id)));
-        [a, b]
-            .concat()
-            .into_iter()
+        let tlcs = self.get_active_tlcs(for_remote);
+        tlcs.into_iter()
             .map(|tlc| {
                 let (local_key, remote_key) = self.get_tlc_keys(&tlc);
                 SettlementTlc {
@@ -6273,7 +6284,7 @@ impl ChannelActorState {
         }
         if self.tlc_state.has_pending_operations() {
             myself.send_after(WAITING_REESTABLISH_FINISH_TIMEOUT, || {
-                ChannelActorMessage::Event(ChannelEvent::CheckTlcRetryOperation)
+                ChannelActorMessage::Event(ChannelEvent::CheckTlcRetryOperation(true))
             });
         }
         // If the channel is already ready, we should notify the network actor.
@@ -7139,7 +7150,7 @@ impl ChannelActorState {
     fn build_commitment_transaction_output(&self, for_remote: bool) -> (CellOutput, Bytes) {
         let x_only_aggregated_pubkey = self.get_commitment_lock_script_xonly(for_remote);
         let version = self.get_current_commitment_number(for_remote);
-        let tlcs = self.get_active_tlcs(for_remote);
+        let tlcs = self.get_active_tlcs_for_commitment(for_remote);
 
         let mut commitment_lock_script_args = [
             &blake2b_256(x_only_aggregated_pubkey)[0..20],
@@ -7764,7 +7775,7 @@ impl From<&AcceptChannel> for ChannelBasePublicKeys {
 
 type ShortHash = [u8; 20];
 
-pub fn get_tweak_by_commitment_point(commitment_point: &Pubkey) -> [u8; 32] {
+pub(crate) fn get_tweak_by_commitment_point(commitment_point: &Pubkey) -> [u8; 32] {
     let mut hasher = new_blake2b();
     hasher.update(&commitment_point.serialize());
     let mut result = [0u8; 32];
@@ -7780,15 +7791,7 @@ fn derive_public_key(base_key: &Pubkey, commitment_point: &Pubkey) -> Pubkey {
     base_key.tweak(get_tweak_by_commitment_point(commitment_point))
 }
 
-pub fn derive_payment_pubkey(base_key: &Pubkey, commitment_point: &Pubkey) -> Pubkey {
-    derive_public_key(base_key, commitment_point)
-}
-
-pub fn derive_delayed_payment_pubkey(base_key: &Pubkey, commitment_point: &Pubkey) -> Pubkey {
-    derive_public_key(base_key, commitment_point)
-}
-
-pub fn derive_tlc_pubkey(base_key: &Pubkey, commitment_point: &Pubkey) -> Pubkey {
+pub(crate) fn derive_tlc_pubkey(base_key: &Pubkey, commitment_point: &Pubkey) -> Pubkey {
     derive_public_key(base_key, commitment_point)
 }
 

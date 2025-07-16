@@ -30,6 +30,7 @@ use std::panic;
 use std::time::SystemTime;
 use tracing::debug;
 use tracing::error;
+use tracing::info;
 
 #[tokio::test]
 async fn test_send_payment_custom_records() {
@@ -1632,6 +1633,149 @@ async fn test_send_payment_with_route_with_invalid_parameters() {
 }
 
 #[tokio::test]
+async fn test_send_payment_with_route_will_not_consider_prob() {
+    init_tracing();
+
+    let (nodes, channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (MIN_RESERVED_CKB + 90000, HUGE_CKB_AMOUNT)),
+            ((1, 2), (MIN_RESERVED_CKB + 10000, HUGE_CKB_AMOUNT)),
+        ],
+        3,
+    )
+    .await;
+    let [mut node_0, mut node_1, mut node_2] = nodes.try_into().expect("3 nodes");
+
+    let payment = node_0
+        .send_payment_keysend(&node_2, 9000, false)
+        .await
+        .unwrap();
+    node_0.wait_until_success(payment.payment_hash).await;
+
+    let payment = node_0.send_payment_keysend(&node_2, 9000, false).await;
+    node_0
+        .wait_until_failed(payment.unwrap().payment_hash)
+        .await;
+
+    let router = node_0
+        .build_router(BuildRouterCommand {
+            amount: Some(9000),
+            hops_info: vec![
+                HopRequire {
+                    pubkey: node_1.pubkey,
+                    channel_outpoint: None,
+                },
+                HopRequire {
+                    pubkey: node_2.pubkey,
+                    channel_outpoint: None,
+                },
+            ],
+            udt_type_script: None,
+            final_tlc_expiry_delta: None,
+        })
+        .await;
+
+    // we don't consider the probability evaluated result
+    assert!(router.is_ok());
+    eprintln!("result: {:?}", router);
+
+    // if we specify a channel, we will not consider the probability evaluated result
+    // as it's user's responsibility to ensure the channel is available
+    let channel_0_funding_tx = node_0.get_channel_funding_tx(&channels[0]).unwrap();
+    let channel_0_outpoint = OutPoint::new(channel_0_funding_tx.into(), 0);
+    let router = node_0
+        .build_router(BuildRouterCommand {
+            amount: Some(9000),
+            hops_info: vec![
+                HopRequire {
+                    pubkey: node_1.pubkey,
+                    channel_outpoint: Some(channel_0_outpoint.clone()),
+                },
+                HopRequire {
+                    pubkey: node_2.pubkey,
+                    channel_outpoint: None,
+                },
+            ],
+            udt_type_script: None,
+            final_tlc_expiry_delta: None,
+        })
+        .await;
+    eprintln!("result: {:?}", router);
+    assert!(router.is_ok());
+
+    let router = router.unwrap();
+    let res = node_0
+        .send_payment_with_router(SendPaymentWithRouterCommand {
+            router: router.router_hops,
+            keysend: Some(true),
+            ..Default::default()
+        })
+        .await;
+
+    assert!(res.is_ok());
+    let payment_hash = res.unwrap().payment_hash;
+    node_0.wait_until_failed(payment_hash).await;
+
+    // now we build another router from node_1 to node_2, so the capacity
+    // will be enough for the payment in this network, build_router will find correct path
+    let (channel_id, funding_tx_hash) = establish_channel_between_nodes(
+        &mut node_1,
+        &mut node_2,
+        ChannelParameters {
+            public: true,
+            node_a_funding_amount: HUGE_CKB_AMOUNT,
+            node_b_funding_amount: HUGE_CKB_AMOUNT,
+            ..Default::default()
+        },
+    )
+    .await;
+    let funding_tx = node_1
+        .get_transaction_view_from_hash(funding_tx_hash)
+        .await
+        .expect("get funding tx");
+
+    // all the other nodes submit_tx
+    let res = node_0.submit_tx(funding_tx.clone()).await;
+    assert!(matches!(res, TxStatus::Committed(..)));
+    node_0.add_channel_tx(channel_id, funding_tx_hash);
+
+    wait_for_network_graph_update(&node_0, 3).await;
+
+    let router = node_0
+        .build_router(BuildRouterCommand {
+            amount: Some(9000),
+            hops_info: vec![
+                HopRequire {
+                    pubkey: node_1.pubkey,
+                    channel_outpoint: Some(channel_0_outpoint),
+                },
+                HopRequire {
+                    pubkey: node_2.pubkey,
+                    channel_outpoint: None,
+                },
+            ],
+            udt_type_script: None,
+            final_tlc_expiry_delta: None,
+        })
+        .await;
+    eprintln!("result: {:?}", router);
+    assert!(router.is_ok());
+
+    let router = router.unwrap();
+    let res = node_0
+        .send_payment_with_router(SendPaymentWithRouterCommand {
+            router: router.router_hops,
+            keysend: Some(true),
+            ..Default::default()
+        })
+        .await;
+
+    assert!(res.is_ok());
+    let payment_hash = res.unwrap().payment_hash;
+    node_0.wait_until_success(payment_hash).await;
+}
+
+#[tokio::test]
 async fn test_send_payment_with_router_with_multiple_channels() {
     init_tracing();
 
@@ -2195,42 +2339,50 @@ async fn test_send_payment_bench_test() {
         &[
             ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
             ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((2, 3), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
         ],
-        3,
+        4,
     )
     .await;
-    let [node_0, node_1, node_2] = nodes.try_into().expect("3 nodes");
+    let [node_0, node_1, node_2, node_3] = nodes.try_into().expect("3 nodes");
 
     let mut all_sent = HashSet::new();
 
-    for i in 1..=10 {
-        let payment = node_0
-            .send_payment_keysend(&node_2, 1000, false)
-            .await
-            .unwrap();
-        eprintln!("payment: {:?}", payment);
-        all_sent.insert(payment.payment_hash);
-        eprintln!("send: {} payment_hash: {:?} sent", i, payment.payment_hash);
+    for i in 1..=30 {
+        assert!(node_0.get_triggered_unexpected_events().await.is_empty());
+        assert!(node_1.get_triggered_unexpected_events().await.is_empty());
+        assert!(node_2.get_triggered_unexpected_events().await.is_empty());
+        assert!(node_3.get_triggered_unexpected_events().await.is_empty());
+
+        if let Ok(payment) = node_0.send_payment_keysend(&node_3, 100, false).await {
+            eprintln!("payment: {:?}", payment);
+            all_sent.insert(payment.payment_hash);
+            info!("send: {} payment_hash: {:?} sent", i, payment.payment_hash);
+        }
     }
 
+    let time = std::time::Instant::now();
     loop {
+        tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
         for payment_hash in all_sent.clone().iter() {
             node_0.wait_until_final_status(*payment_hash).await;
             let status = node_0.get_payment_status(*payment_hash).await;
             eprintln!("got payment: {:?} status: {:?}", payment_hash, status);
             if status == PaymentSessionStatus::Success {
-                eprintln!("payment_hash: {:?} success", payment_hash);
                 all_sent.remove(payment_hash);
+                info!(
+                    "payment_hash: {:?} success, left: {:?}",
+                    payment_hash,
+                    all_sent.len()
+                );
             }
         }
-        let res = node_0.node_info().await;
-        eprintln!("node0 node_info: {:?}", res);
-        let res = node_1.node_info().await;
-        eprintln!("node1 node_info: {:?}", res);
-        let res = node_2.node_info().await;
-        eprintln!("node2 node_info: {:?}", res);
+
         if all_sent.is_empty() {
             break;
+        }
+        if time.elapsed().as_secs() >= 240 {
+            panic!("timeout, not all payments are settled");
         }
     }
 }
@@ -3547,7 +3699,7 @@ async fn test_send_payment_shutdown_with_force() {
             .duration_since(started)
             .expect("time passed")
             .as_secs();
-        if elapsed > 180 {
+        if elapsed > 180 || failed_count >= expect_failed_count {
             error!("timeout, failed_count: {:?}", failed_count);
             break;
         }
@@ -4256,13 +4408,12 @@ async fn test_send_payment_sync_up_new_channel_is_added() {
         .expect("get funding tx");
 
     // all the other nodes submit_tx
-    for node in [&mut node_0, &mut node_1, &mut node_2, &mut node_3].into_iter() {
+    for node in [&mut node_0, &mut node_1].into_iter() {
         let res = node.submit_tx(funding_tx.clone()).await;
         assert!(matches!(res, TxStatus::Committed(..)));
         node.add_channel_tx(channel_id, funding_tx_hash);
+        wait_for_network_graph_update(node, 3).await;
     }
-
-    tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
 
     let res = node_0
         .send_payment_keysend(&node_3, payment_amount, false)
