@@ -1253,7 +1253,9 @@ The information about a peer connected to the node.
 
 * `pubkey` - <em>[Pubkey](#type-pubkey)</em>, The identity public key of the peer.
 * `peer_id` - <em>`PeerId`</em>, The peer ID of the peer
-* `addresses` - <em>`Vec<MultiAddr>`</em>, A list of multi-addresses associated with the peer.
+* `address` - <em>`MultiAddr`</em>, The multi-address associated with the connecting peer.
+ Note: this is only the address which used for connecting to the peer, not all addresses of the peer.
+ The `graph_nodes` in Graph rpc module will return all addresses of the peer.
 ---
 
 <a id="#type-privkey"></a>

@@ -1936,13 +1936,23 @@ where
                 };
 
                 let current_incoming_tlc_expiry = agg_tlc_expiry + expiry_delta;
-                let probability = self.history.eval_probability(
-                    from,
-                    to,
-                    &channel_outpoint,
-                    amount_to_send,
-                    channel_info.capacity(),
-                );
+                let probability = if cur_hop.channel_outpoint.is_some() {
+                    // If the channel outpoint is specified, we will assume that the channel is routable
+                    // it's user's responsibility to ensure that the channel is routable.
+                    1.0
+                } else {
+                    self.history.eval_probability(
+                        from,
+                        to,
+                        &channel_outpoint,
+                        amount_to_send,
+                        channel_info.capacity(),
+                    )
+                };
+
+                // we don't skip the edge if the probability is too low for build with router
+                // but we can still find a optimimized path if there are multiple channels
+                let probability = probability.max(DEFAULT_MIN_PROBABILITY);
 
                 debug!(
                     "probability: {} for channel_outpoint: {:?} from: {:?} => to: {:?}",

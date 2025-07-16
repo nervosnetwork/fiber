@@ -5434,27 +5434,28 @@ impl ChannelActorState {
         )
     }
 
-    fn get_active_tlcs(&self, for_remote: bool) -> Vec<u8> {
+    fn get_active_tlcs(&self, for_remote: bool) -> Vec<TlcInfo> {
         // Build a sorted array of TLC so that both party can generate the same commitment transaction.
-        let tlcs = {
-            let (mut received_tlcs, mut offered_tlcs) = (
-                self.get_active_received_tlcs(for_remote),
-                self.get_active_offered_tlcs(for_remote),
-            );
-            let (mut a, mut b) = if for_remote {
-                (received_tlcs, offered_tlcs)
-            } else {
-                for tlc in received_tlcs.iter_mut().chain(offered_tlcs.iter_mut()) {
-                    // Need to flip these fields for the counterparty.
-                    tlc.flip_mut();
-                }
-                (offered_tlcs, received_tlcs)
-            };
-            a.sort_by(|x, y| u64::from(x.tlc_id).cmp(&u64::from(y.tlc_id)));
-            b.sort_by(|x, y| u64::from(x.tlc_id).cmp(&u64::from(y.tlc_id)));
-            [a, b].concat()
+        let (mut received_tlcs, mut offered_tlcs) = (
+            self.get_active_received_tlcs(for_remote),
+            self.get_active_offered_tlcs(for_remote),
+        );
+        let (mut a, mut b) = if for_remote {
+            (received_tlcs, offered_tlcs)
+        } else {
+            for tlc in received_tlcs.iter_mut().chain(offered_tlcs.iter_mut()) {
+                // Need to flip these fields for the counterparty.
+                tlc.flip_mut();
+            }
+            (offered_tlcs, received_tlcs)
         };
+        a.sort_by(|x, y| u64::from(x.tlc_id).cmp(&u64::from(y.tlc_id)));
+        b.sort_by(|x, y| u64::from(x.tlc_id).cmp(&u64::from(y.tlc_id)));
+        [a, b].concat()
+    }
 
+    fn get_active_tlcs_for_commitment(&self, for_remote: bool) -> Vec<u8> {
+        let tlcs = self.get_active_tlcs(for_remote);
         if tlcs.is_empty() {
             Vec::new()
         } else {
@@ -5482,24 +5483,8 @@ impl ChannelActorState {
     }
 
     fn get_active_tlcs_for_settlement(&self, for_remote: bool) -> Vec<SettlementTlc> {
-        let (mut received_tlcs, mut offered_tlcs) = (
-            self.get_active_received_tlcs(for_remote),
-            self.get_active_offered_tlcs(for_remote),
-        );
-        let (mut a, mut b) = if for_remote {
-            (received_tlcs, offered_tlcs)
-        } else {
-            for tlc in received_tlcs.iter_mut().chain(offered_tlcs.iter_mut()) {
-                // Need to flip these fields for the counterparty.
-                tlc.flip_mut();
-            }
-            (offered_tlcs, received_tlcs)
-        };
-        a.sort_by(|x, y| u64::from(x.tlc_id).cmp(&u64::from(y.tlc_id)));
-        b.sort_by(|x, y| u64::from(x.tlc_id).cmp(&u64::from(y.tlc_id)));
-        [a, b]
-            .concat()
-            .into_iter()
+        let tlcs = self.get_active_tlcs(for_remote);
+        tlcs.into_iter()
             .map(|tlc| {
                 let (local_key, remote_key) = self.get_tlc_keys(&tlc);
                 SettlementTlc {
@@ -7276,7 +7261,7 @@ impl ChannelActorState {
     fn build_commitment_transaction_output(&self, for_remote: bool) -> (CellOutput, Bytes) {
         let x_only_aggregated_pubkey = self.get_commitment_lock_script_xonly(for_remote);
         let version = self.get_current_commitment_number(for_remote);
-        let tlcs = self.get_active_tlcs(for_remote);
+        let tlcs = self.get_active_tlcs_for_commitment(for_remote);
 
         let mut commitment_lock_script_args = [
             &blake2b_256(x_only_aggregated_pubkey)[0..20],
@@ -7904,7 +7889,7 @@ impl From<&AcceptChannel> for ChannelBasePublicKeys {
 
 type ShortHash = [u8; 20];
 
-pub fn get_tweak_by_commitment_point(commitment_point: &Pubkey) -> [u8; 32] {
+pub(crate) fn get_tweak_by_commitment_point(commitment_point: &Pubkey) -> [u8; 32] {
     let mut hasher = new_blake2b();
     hasher.update(&commitment_point.serialize());
     let mut result = [0u8; 32];
@@ -7920,15 +7905,7 @@ fn derive_public_key(base_key: &Pubkey, commitment_point: &Pubkey) -> Pubkey {
     base_key.tweak(get_tweak_by_commitment_point(commitment_point))
 }
 
-pub fn derive_payment_pubkey(base_key: &Pubkey, commitment_point: &Pubkey) -> Pubkey {
-    derive_public_key(base_key, commitment_point)
-}
-
-pub fn derive_delayed_payment_pubkey(base_key: &Pubkey, commitment_point: &Pubkey) -> Pubkey {
-    derive_public_key(base_key, commitment_point)
-}
-
-pub fn derive_tlc_pubkey(base_key: &Pubkey, commitment_point: &Pubkey) -> Pubkey {
+pub(crate) fn derive_tlc_pubkey(base_key: &Pubkey, commitment_point: &Pubkey) -> Pubkey {
     derive_public_key(base_key, commitment_point)
 }
 
