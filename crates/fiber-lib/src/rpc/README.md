@@ -739,7 +739,9 @@ Sends a payment to a peer with specified router
 * `router` - <em>Vec<[RouterHop](#type-routerhop)></em>, The router to use for the payment
 * `invoice` - <em>`Option<String>`</em>, the encoded invoice to send to the recipient
 * `custom_records` - <em>Option<[PaymentCustomRecords](#type-paymentcustomrecords)></em>, Some custom records for the payment which contains a map of u32 to Vec<u8>
- The key is the record type, and the value is the serialized data
+ The key is the record type, and the value is the serialized data.
+ Limits: the sum size of values can not exceed 2048 bytes.
+
  For example:
  ```json
  "custom_records": {
