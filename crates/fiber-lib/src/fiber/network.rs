@@ -41,6 +41,7 @@ use tentacle::{
     ProtocolId, SessionId,
 };
 use tokio::sync::{mpsc, oneshot, RwLock};
+use tokio_util::codec::length_delimited;
 use tokio_util::task::TaskTracker;
 use tracing::{debug, error, info, trace, warn};
 
@@ -95,6 +96,10 @@ pub const DEFAULT_CHAIN_ACTOR_TIMEOUT: u64 = 300000;
 
 // TODO: make it configurable
 pub const CKB_TX_TRACING_CONFIRMATIONS: u64 = 4;
+
+// (128 + 2) KB, 2 KB for custom records
+pub const MAX_SERVICE_PROTOCOAL_DATA_SIZE: usize = 1024 * (128 + 2);
+pub const MAX_CUSTOM_RECORDS_SIZE: usize = 2 * 1024; // 2 KB
 
 // This is a temporary way to document that we assume the chain actor is always alive.
 // We may later relax this assumption. At the moment, if the chain actor fails, we
@@ -599,6 +604,17 @@ impl SendPaymentData {
             ));
         }
 
+        if let Some(custom_records) = &command.custom_records {
+            if custom_records.data.values().map(|v| v.len()).sum::<usize>()
+                > MAX_CUSTOM_RECORDS_SIZE
+            {
+                return Err(format!(
+                    "the sum size of custom_records's value can not more than {} bytes",
+                    MAX_CUSTOM_RECORDS_SIZE
+                ));
+            }
+        }
+
         let hop_hints = command.hop_hints.unwrap_or_default();
 
         Ok(SendPaymentData {
@@ -865,14 +881,7 @@ where
     ) -> crate::Result<()> {
         match message {
             FiberMessage::Init(init_message) => {
-                state
-                    .on_init_msg(
-                        myself,
-                        #[cfg(debug_assertions)]
-                        peer_id,
-                        init_message,
-                    )
-                    .await?;
+                state.on_init_msg(myself, peer_id, init_message).await?;
             }
             // We should process OpenChannel message here because there is no channel corresponding
             // to the channel id in the message yet.
@@ -3270,7 +3279,7 @@ where
 
     pub async fn on_init_msg(
         &mut self,
-        #[cfg(debug_assertions)] myself: ActorRef<NetworkActorMessage>,
+        _myself: ActorRef<NetworkActorMessage>,
         peer_id: PeerId,
         init_msg: Init,
     ) -> Result<(), ProcessingChannelError> {
@@ -3297,7 +3306,7 @@ where
 
         if let Some(info) = self.peer_session_map.get_mut(&peer_id) {
             info.features = Some(init_msg.features);
-            debug_event!(myself, "PeerInit");
+            debug_event!(_myself, "PeerInit");
 
             for channel_id in self.store.get_active_channel_ids_by_peer(&peer_id) {
                 if let Err(e) = self.reestablish_channel(&peer_id, channel_id).await {
@@ -3795,6 +3804,13 @@ impl FiberProtocolHandle {
     fn create_meta(self) -> ProtocolMeta {
         MetaBuilder::new()
             .id(FIBER_PROTOCOL_ID)
+            .codec(move || {
+                Box::new(
+                    length_delimited::Builder::new()
+                        .max_frame_length(MAX_SERVICE_PROTOCOAL_DATA_SIZE)
+                        .new_codec(),
+                )
+            })
             .service_handle(move || {
                 let handle = Box::new(self);
                 ProtocolHandle::Callback(handle)
