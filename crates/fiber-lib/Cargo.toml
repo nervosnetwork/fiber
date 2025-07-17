@@ -136,3 +136,6 @@ ignored = ["getrandom"]
 [[bench]]
 name = "payment_benchmarks"
 harness = false
+
+[build-dependencies]
+chrono = "0.4.41"
