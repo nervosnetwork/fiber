@@ -1687,7 +1687,7 @@ where
             }
         }
         state.retryable_task_last_run_at = Some(now_timestamp_as_millis_u64());
-        let mut check = async |retryable_operation: &mut RetryableTlcOperation| {
+        let mut apply_tlc_op = async |retryable_operation: &mut RetryableTlcOperation| {
             match retryable_operation {
                 RetryableTlcOperation::RemoveTlc(tlc_id, ref reason) => {
                     match self
@@ -1791,7 +1791,7 @@ where
         };
         let mut new_pending_tlc_ops = vec![];
         for mut item in pending_tlc_ops.into_iter() {
-            if check(&mut item).await {
+            if apply_tlc_op(&mut item).await {
                 new_pending_tlc_ops.push(item);
             }
         }
