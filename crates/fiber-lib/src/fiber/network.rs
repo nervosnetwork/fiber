@@ -232,7 +232,7 @@ pub enum NetworkActorCommand {
     MaintainConnections,
     // Check all channels and see if we need to force close any of them or settle down tlc with preimage.
     CheckChannels,
-    // Check peer send us Init message in a expected time, otherwise disconnect with the peer.
+    // Check peer send us Init message in an expected time, otherwise disconnect with the peer.
     CheckPeerInit(PeerId),
     // For internal use and debugging only. Most of the messages requires some
     // changes to local state. Even if we can send a message to a peer, some
