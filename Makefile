@@ -11,10 +11,10 @@ test:
 
 .PHONY: check
 check:
-	cargo check
-	cargo check --release
+	cargo check --locked
+	cargo check --release --locked
 	cargo check --package fnn --no-default-features
-	cd migrate && cargo check
+	cd migrate && cargo check --locked
 
 .PHONY: clippy
 clippy:
