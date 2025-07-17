@@ -615,17 +615,6 @@ impl SendPaymentData {
             ));
         }
 
-        if let Some(custom_records) = &command.custom_records {
-            if custom_records.data.values().map(|v| v.len()).sum::<usize>()
-                > MAX_CUSTOM_RECORDS_SIZE
-            {
-                return Err(format!(
-                    "the sum size of custom_records's value can not more than {} bytes",
-                    MAX_CUSTOM_RECORDS_SIZE
-                ));
-            }
-        }
-
         let hop_hints = command.hop_hints.unwrap_or_default();
 
         let allow_mpp = invoice.as_ref().is_some_and(|inv| inv.allow_mpp());
@@ -646,21 +635,33 @@ impl SendPaymentData {
             ));
         }
 
-        let mut custom_records = command.custom_records;
+        if let Some(custom_records) = &command.custom_records {
+            if custom_records.data.values().map(|v| v.len()).sum::<usize>()
+                > MAX_CUSTOM_RECORDS_SIZE
+            {
+                return Err(format!(
+                    "the sum size of custom_records's value can not more than {} bytes",
+                    MAX_CUSTOM_RECORDS_SIZE
+                ));
+            }
 
+            if custom_records
+                .data
+                .keys()
+                .any(|k| *k >= PaymentDataRecord::CUSTOM_RECORD_KEY)
+            {
+                return Err(format!(
+                    "custom_records key should in range 0 ~ {:?}",
+                    PaymentDataRecord::CUSTOM_RECORD_KEY - 1
+                ));
+            }
+        }
+
+        let mut custom_records = command.custom_records;
         // bolt04 write payment data record to custom records if payment secret is set
         if let Some(payment_secret) = payment_secret {
-            if custom_records.is_none() {
-                custom_records = Some(PaymentCustomRecords::default());
-            }
-            let records = custom_records.as_mut().unwrap();
-
-            if records.data.contains_key(&PaymentDataRecord::RECORD_TYPE) {
-                return Err("custom_records should not contain payment_data_record".to_string());
-            }
-
-            let payment_data_record = PaymentDataRecord::new(payment_secret, amount);
-            payment_data_record.write(records);
+            let records = custom_records.get_or_insert_with(PaymentCustomRecords::default);
+            PaymentDataRecord::new(payment_secret, amount).write(records);
         }
 
         Ok(SendPaymentData {

@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{collections::HashMap, time::Duration};
 
 use secp256k1::Secp256k1;
 use tracing::debug;
@@ -3121,4 +3121,64 @@ async fn test_mpp_can_not_find_path_with_max_parts() {
     let payment_hash = res.unwrap().payment_hash;
     node_0.wait_until_success(payment_hash).await;
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+}
+
+#[tokio::test]
+async fn test_send_payment_custom_records_not_in_range() {
+    let (nodes, _channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (MIN_RESERVED_CKB + 10000, MIN_RESERVED_CKB)),
+            ((0, 1), (MIN_RESERVED_CKB + 10000, MIN_RESERVED_CKB)),
+        ],
+        2,
+    )
+    .await;
+    let [mut node_0, mut node_1] = nodes.try_into().expect("2 nodes");
+    let source_node = &mut node_0;
+    let target_pubkey = node_1.pubkey;
+
+    let data: HashMap<_, _> = vec![(
+        PaymentDataRecord::CUSTOM_RECORD_KEY,
+        "hello".to_string().into_bytes(),
+    )]
+    .into_iter()
+    .collect();
+    let custom_records = PaymentCustomRecords { data };
+    let res = source_node
+        .send_payment(SendPaymentCommand {
+            target_pubkey: Some(target_pubkey),
+            amount: Some(10000),
+            keysend: Some(true),
+            custom_records: Some(custom_records.clone()),
+            ..Default::default()
+        })
+        .await;
+
+    let error = res.unwrap_err().to_string();
+    assert!(error.contains("custom_records key should in range 0 ~ 65535"));
+
+    let data: HashMap<_, _> = vec![(
+        PaymentDataRecord::CUSTOM_RECORD_KEY - 1,
+        "hello".to_string().into_bytes(),
+    )]
+    .into_iter()
+    .collect();
+    let custom_records = PaymentCustomRecords { data };
+    let payment = source_node
+        .send_mpp_payment_with_command(
+            &mut node_1,
+            20000,
+            SendPaymentCommand {
+                custom_records: Some(custom_records.clone()),
+                max_parts: Some(2),
+                ..Default::default()
+            },
+        )
+        .await;
+
+    eprintln!("payment: {:?}", payment);
+
+    assert!(payment.is_ok());
+    let payment_hash = payment.unwrap().payment_hash;
+    source_node.wait_until_success(payment_hash).await;
 }

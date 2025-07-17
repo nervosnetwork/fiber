@@ -1213,7 +1213,7 @@ The Node information.
 ### Type `PaymentCustomRecords`
 
 The custom records to be included in the payment.
- The key is hex encoded of `u32`, and the value is hex encoded of `Vec<u8>` with `0x` as prefix.
+ The key is hex encoded of `u32`, it's range limited in 0 ~ 65535, and the value is hex encoded of `Vec<u8>` with `0x` as prefix.
  For example:
  ```json
  "custom_records": {

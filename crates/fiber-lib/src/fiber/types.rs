@@ -3702,7 +3702,8 @@ pub struct PaymentDataRecord {
 
 impl PaymentDataRecord {
     // record type for payment data record in bolt04
-    pub const RECORD_TYPE: u32 = 8;
+    // custom records key from 65536 is reserved for internal usage
+    pub const CUSTOM_RECORD_KEY: u32 = 65536;
 
     pub fn new(payment_secret: Hash256, total_amount: u128) -> Self {
         Self {
@@ -3719,13 +3720,15 @@ impl PaymentDataRecord {
     }
 
     pub fn write(self, custom_records: &mut PaymentCustomRecords) {
-        custom_records.data.insert(Self::RECORD_TYPE, self.to_vec());
+        custom_records
+            .data
+            .insert(Self::CUSTOM_RECORD_KEY, self.to_vec());
     }
 
     pub fn read(custom_records: &PaymentCustomRecords) -> Option<Self> {
         custom_records
             .data
-            .get(&Self::RECORD_TYPE)
+            .get(&Self::CUSTOM_RECORD_KEY)
             .and_then(|data| {
                 if data.len() != 32 + 16 {
                     return None;

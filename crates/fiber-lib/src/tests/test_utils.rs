@@ -684,11 +684,14 @@ impl NetworkNode {
         amount: u128,
         max_parts: Option<u64>,
     ) -> Result<SendPaymentResponse, String> {
-        self.send_mpp_payment_with_dry_run_option(
+        self.send_mpp_payment_with_command(
             target_node,
             amount,
-            max_parts,
-            false, // dry_run is false
+            SendPaymentCommand {
+                max_parts,
+                dry_run: false,
+                ..Default::default()
+            },
         )
         .await
     }
@@ -699,6 +702,24 @@ impl NetworkNode {
         amount: u128,
         max_parts: Option<u64>,
         dry_run: bool,
+    ) -> Result<SendPaymentResponse, String> {
+        self.send_mpp_payment_with_command(
+            target_node,
+            amount,
+            SendPaymentCommand {
+                max_parts,
+                dry_run,
+                ..Default::default()
+            },
+        )
+        .await
+    }
+
+    pub async fn send_mpp_payment_with_command(
+        &self,
+        target_node: &mut NetworkNode,
+        amount: u128,
+        command: SendPaymentCommand,
     ) -> Result<SendPaymentResponse, String> {
         let target_pubkey = target_node.get_public_key();
         let preimage = gen_rand_sha256_hash();
@@ -712,15 +733,10 @@ impl NetworkNode {
             .expect("build invoice success");
 
         target_node.insert_invoice(ckb_invoice.clone(), Some(preimage));
+        let mut command = command.clone();
+        command.invoice = Some(ckb_invoice.to_string());
 
-        self.send_payment(SendPaymentCommand {
-            invoice: Some(ckb_invoice.to_string()),
-            amount: ckb_invoice.amount,
-            max_parts,
-            dry_run,
-            ..Default::default()
-        })
-        .await
+        self.send_payment(command).await
     }
 
     pub async fn assert_send_payment_success(
