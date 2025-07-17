@@ -865,7 +865,14 @@ where
     ) -> crate::Result<()> {
         match message {
             FiberMessage::Init(init_message) => {
-                state.on_init_msg(myself, peer_id, init_message).await?;
+                state
+                    .on_init_msg(
+                        myself,
+                        #[cfg(debug_assertions)]
+                        peer_id,
+                        init_message,
+                    )
+                    .await?;
             }
             // We should process OpenChannel message here because there is no channel corresponding
             // to the channel id in the message yet.
@@ -3257,7 +3264,7 @@ where
 
     pub async fn on_init_msg(
         &mut self,
-        myself: ActorRef<NetworkActorMessage>,
+        #[cfg(debug_assertions)] myself: ActorRef<NetworkActorMessage>,
         peer_id: PeerId,
         init_msg: Init,
     ) -> Result<(), ProcessingChannelError> {
