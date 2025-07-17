@@ -109,7 +109,7 @@ fn main() {
             }
         }
     }
-    if latest_db_version == "" {
+    if latest_db_version.is_empty() {
         // If there is no migrations, `latest_db_version` is set to today.
         let now = chrono::Local::now();
         latest_db_version = format!("{:04}{:02}{:02}", now.year(), now.month(), now.day());
