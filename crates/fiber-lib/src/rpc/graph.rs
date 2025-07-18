@@ -139,6 +139,8 @@ impl From<ConfigUdtCfgInfos> for UdtCfgInfos {
 pub struct NodeInfo {
     /// The name of the node.
     pub node_name: String,
+    /// The version of the node.
+    pub version: String,
     /// The addresses of the node.
     pub addresses: Vec<MultiAddr>,
     /// The node features supported by the node.
@@ -162,6 +164,7 @@ impl From<super::super::fiber::graph::NodeInfo> for NodeInfo {
     fn from(value: super::super::fiber::graph::NodeInfo) -> Self {
         NodeInfo {
             node_name: value.node_name.to_string(),
+            version: value.version,
             addresses: value.addresses,
             node_id: value.node_id,
             timestamp: value.timestamp,

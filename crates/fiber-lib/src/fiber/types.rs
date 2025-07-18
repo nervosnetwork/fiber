@@ -1804,6 +1804,7 @@ pub struct NodeAnnouncement {
     // Timestamp for current NodeAnnouncement. Later updates should have larger timestamp.
     pub timestamp: u64,
     pub node_id: Pubkey,
+    pub version: String,
     // Must be a valid utf-8 string of length maximal length 32 bytes.
     // If the length is less than 32 bytes, it will be padded with 0.
     // If the length is more than 32 bytes, it should be truncated.
@@ -1831,6 +1832,7 @@ impl NodeAnnouncement {
             features: Default::default(),
             timestamp,
             node_id,
+            version: env!("CARGO_PKG_VERSION").to_string(),
             node_name,
             chain_hash: get_chain_hash(),
             addresses,
@@ -1863,6 +1865,7 @@ impl NodeAnnouncement {
             features: self.features.clone(),
             timestamp: self.timestamp,
             node_id: self.node_id,
+            version: self.version.clone(),
             node_name: self.node_name,
             chain_hash: self.chain_hash,
             addresses: self.addresses.clone(),
@@ -2047,6 +2050,7 @@ impl From<NodeAnnouncement> for molecule_gossip::NodeAnnouncement {
             .features(node_announcement.features.bytes().pack())
             .timestamp(node_announcement.timestamp.pack())
             .node_id(node_announcement.node_id.into())
+            .version(node_announcement.version.pack())
             .node_name(u8_32_as_byte_32(&node_announcement.node_name.0))
             .chain_hash(node_announcement.chain_hash.into())
             .auto_accept_min_ckb_funding_amount(
@@ -2084,6 +2088,7 @@ impl TryFrom<molecule_gossip::NodeAnnouncement> for NodeAnnouncement {
             features: FeatureVector::from(node_announcement.features().unpack()),
             timestamp: node_announcement.timestamp().unpack(),
             node_id: node_announcement.node_id().try_into()?,
+            version: String::from_utf8(node_announcement.version().unpack()).unwrap_or_default(),
             chain_hash: node_announcement.chain_hash().into(),
             auto_accept_min_ckb_funding_amount: node_announcement
                 .auto_accept_min_ckb_funding_amount()

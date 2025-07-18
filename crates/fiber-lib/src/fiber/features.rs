@@ -73,8 +73,7 @@ pub mod feature_bits {
     use super::*;
     declare_feature_bits_and_methods! {
         GOSSIP_QUERIES, 1;
-        TLV_ONION_PAYLOAD, 3;
-        BASIC_MPP, 5;
+        BASIC_MPP, 3;
         // more features, please note that base bit must be defined as increasing odd numbers
     }
 }
@@ -88,7 +87,6 @@ impl Default for FeatureVector {
     fn default() -> Self {
         let mut feature = Self::new();
         feature.set_gossip_queries_required();
-        feature.set_tlv_onion_payload_required();
 
         // set other default features here
         // ...

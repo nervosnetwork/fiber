@@ -1199,6 +1199,7 @@ The Node information.
 #### Fields
 
 * `node_name` - <em>`String`</em>, The name of the node.
+* `version` - <em>`String`</em>, The version of the node.
 * `addresses` - <em>`Vec<MultiAddr>`</em>, The addresses of the node.
 * `features` - <em>`Vec<String>`</em>, The node features supported by the node.
 * `node_id` - <em>[Pubkey](#type-pubkey)</em>, The identity public key of the node.

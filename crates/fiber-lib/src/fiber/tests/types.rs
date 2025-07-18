@@ -387,6 +387,7 @@ fn test_verify_hard_coded_node_announcement() {
             features: FeatureVector::default(),
             timestamp: 1737451664358,
             node_id,
+            version: "1.0".to_string(),
             node_name: AnnouncedNodeName::from_string("fiber-1").expect("valid name"),
             addresses: vec![MultiAddr::from_str(
                 "/ip4/127.0.0.1/tcp/8344/p2p/QmbvRjJHAQDmj3cgnUBGQ5zVnGxUKwb2qJygwNs2wk41h8",
@@ -457,6 +458,7 @@ fn test_verify_hard_coded_node_announcement() {
             features: FeatureVector::default(),
             timestamp: 1737449487183,
             node_id: privkey.pubkey(),
+            version: "1.0".to_string(),
             node_name: AnnouncedNodeName::default(),
             addresses: vec![MultiAddr::from_str(
                 "/ip4/221.187.61.162/tcp/18228/p2p/QmSr3bkMcG9Fy3PAf3HdrxttAE6EiLxHitKJW6HmiV9o6U",
@@ -498,13 +500,13 @@ fn test_verify_hard_coded_node_announcement() {
 
     for (signature, message, node_announcement) in [
         (
-            "0050f434c38a0ff570c608be7a6e823d6820a8cd9f73e9541fa5299622453ee213d255ee92164b16b5b3ecb892e6dc0d5b571f2821a1377547828773281fe4fa",
-            "f8f9124e028786d7134d475dbb12004d7b717e62df955716d9783f7f00b8dcc5",
+            "c148bbe120594e8d12ab9893a31cf61c1aab7a63004dfa89bc088161375efef56489abf88baa51557bd498cbf16de7311c5ae1e30c0edec44c05088e08606eaf",
+            "f352944950ddf83c5ff886527560762dc4e490cfe2e37ff8e959ad893a3b8d1c",
             node1(),
         ),
         (
-            "0ac46cea0fe3bd1508f6cf7008100849e82efb6106fad8107b579be8b3834ddd0d4b23f231579f6a93c56e3d8dd83ff068a0ddd3ad6b0a67c358627c32f3f915",
-            "bd3dfefec4af70cb2bfac2ff3522eedb880e7030b8c83862c8cc42287a46c5ba",
+            "a0e91d312b265ed621178002e362043a9acf40c2f39d4d94a026c8ef9d2bd91b31d4b3535806568bb9fa73b9b2f7e816a8e7436ca62321e8020e4bc34de943d2",
+            "694d31e82fa7f232d48e23545ad1fbdf62ee9b84d89182513b4a59e872f2f872",
             node2(),
         ),
     ] {

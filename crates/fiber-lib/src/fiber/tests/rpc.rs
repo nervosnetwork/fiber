@@ -234,8 +234,14 @@ async fn test_rpc_graph() {
         )
         .await
         .unwrap();
+
     eprintln!("Graph nodes: {:#?}", graph_nodes);
+
     assert!(!graph_nodes.nodes.is_empty());
     assert!(graph_nodes.nodes.iter().any(|n| n.node_id == node_1.pubkey));
+    assert!(graph_nodes
+        .nodes
+        .iter()
+        .all(|n| n.version == *env!("CARGO_PKG_VERSION")));
     assert!(!graph_nodes.nodes[0].features.is_empty());
 }

@@ -44,7 +44,10 @@ const DEFAULT_MIN_PROBABILITY: f64 = 0.01;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 /// Details about a node in the network, known from the network announcement.
 pub struct NodeInfo {
+    // The node's public key, which is used to identify the node in the network.
     pub node_id: Pubkey,
+    // The node version
+    pub version: String,
     // The timestamp set by the owner for the node announcement.
     pub timestamp: u64,
     // Tentatively using 64 bits for features. May change the type later while developing.
@@ -73,6 +76,7 @@ impl From<NodeAnnouncement> for NodeInfo {
     fn from(value: NodeAnnouncement) -> Self {
         Self {
             node_id: value.node_id,
+            version: value.version,
             timestamp: value.timestamp,
             features: value.features,
             node_name: value.node_name,
@@ -802,6 +806,7 @@ where
         &mut self,
         mut node_announcement: NodeAnnouncement,
     ) -> Option<Cursor> {
+        debug!("Processing node announcement: {:?}", &node_announcement);
         if !self.announce_private_addr {
             node_announcement.addresses.retain(|addr| {
                 multiaddr_to_socketaddr(addr)

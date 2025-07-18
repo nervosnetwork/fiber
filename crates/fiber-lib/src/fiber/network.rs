@@ -249,7 +249,7 @@ pub enum NetworkActorCommand {
     TimeoutHoldTlc(Hash256, Hash256, u64),
     // Settle MPP tlc set
     SettleMPPTlcSet(Hash256),
-    // Check peer send us Init message in a expected time, otherwise disconnect with the peer.
+    // Check peer send us Init message in an expected time, otherwise disconnect with the peer.
     CheckPeerInit(PeerId),
     // For internal use and debugging only. Most of the messages requires some
     // changes to local state. Even if we can send a message to a peer, some
@@ -954,6 +954,7 @@ where
             // We should process OpenChannel message here because there is no channel corresponding
             // to the channel id in the message yet.
             FiberMessage::ChannelInitialization(open_channel) => {
+                state.check_feature_compatibility(&peer_id)?;
                 let temp_channel_id = open_channel.channel_id;
                 match state
                     .on_open_channel_msg(peer_id, open_channel.clone())
@@ -993,8 +994,8 @@ where
                 }
             }
             FiberMessage::ChannelNormalOperation(msg) => {
+                state.check_feature_compatibility(&peer_id)?;
                 let channel_id = msg.get_channel_id();
-
                 let found = state
                     .peer_session_map
                     .get(&peer_id)
@@ -3018,24 +3019,7 @@ where
             max_tlc_number_in_flight,
         } = open_channel;
 
-        if let Some(ConnectedPeer {
-            features: Some(peer_features),
-            ..
-        }) = self.peer_session_map.get(&peer_id)
-        {
-            // check peer features
-            if !self.features.compatible_with(peer_features) {
-                return Err(ProcessingChannelError::InvalidParameter(format!(
-                    "Peer {:?} features {:?} are not compatible with our features {:?}",
-                    &peer_id, peer_features, self.features
-                )));
-            }
-        } else {
-            return Err(ProcessingChannelError::InvalidParameter(format!(
-                "Peer {:?}'s feature not found, waiting for peer to send Init message",
-                &peer_id
-            )));
-        }
+        self.check_feature_compatibility(&peer_id)?;
 
         let remote_pubkey =
             self.get_peer_pubkey(&peer_id)
@@ -3187,6 +3171,28 @@ where
         let new_id = rx.await.expect("msg received");
         self.on_channel_created(new_id, &peer_id, channel.clone());
         Ok((channel, temp_channel_id, new_id))
+    }
+
+    fn check_feature_compatibility(&self, peer_id: &PeerId) -> Result<(), ProcessingChannelError> {
+        if let Some(ConnectedPeer {
+            features: Some(peer_features),
+            ..
+        }) = self.peer_session_map.get(peer_id)
+        {
+            // check peer features
+            if !self.features.compatible_with(peer_features) {
+                return Err(ProcessingChannelError::InvalidParameter(format!(
+                    "Peer {:?} features {:?} are not compatible with our features {:?}",
+                    peer_id, peer_features, self.features
+                )));
+            }
+        } else {
+            return Err(ProcessingChannelError::InvalidParameter(format!(
+                "Peer {:?}'s feature not found, waiting for peer to send Init message",
+                peer_id
+            )));
+        }
+        Ok(())
     }
 
     pub async fn trace_tx(
