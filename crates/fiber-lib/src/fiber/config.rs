@@ -511,10 +511,9 @@ impl FiberConfig {
     }
 
     pub fn gen_node_features(&self) -> FeatureVector {
-        let mut feature = FeatureVector::default();
-        feature.set_gossip_queries_required();
-        // override default features from config settings
-        feature
+        // TODO: override default features from config settings
+        // ...
+        FeatureVector::default()
     }
 }
 

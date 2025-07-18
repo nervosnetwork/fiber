@@ -41,6 +41,7 @@ table NodeAnnouncement {
     // Timestamp to the node announcement update, later update should have larger timestamp.
     timestamp: Uint64,
     node_id: Pubkey,
+    version: Bytes,
     // Must be a valid utf-8 string of length maximal length 32 bytes.
     node_name: Byte32,
     // All the reachable addresses.
