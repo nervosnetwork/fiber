@@ -1,5 +1,6 @@
 #![allow(clippy::needless_range_loop)]
 use crate::fiber::config::MAX_PAYMENT_TLC_EXPIRY_LIMIT;
+use crate::fiber::features::FeatureVector;
 use crate::fiber::gossip::GossipMessageStore;
 use crate::fiber::graph::{PathFindError, SessionRoute};
 use crate::fiber::types::{ChannelUpdateChannelFlags, ChannelUpdateMessageFlags, Pubkey};
@@ -51,6 +52,7 @@ impl MockNetworkGraph {
         let (secret_key1, public_key1) = keypairs[0];
         store.save_node_announcement(NodeAnnouncement::new(
             "node0".into(),
+            FeatureVector::default(),
             vec![],
             &secret_key1.into(),
             now_timestamp_as_millis_u64(),
@@ -60,6 +62,7 @@ impl MockNetworkGraph {
             let (sk, _pk) = keypair;
             store.save_node_announcement(NodeAnnouncement::new(
                 format!("node{i}").as_str().into(),
+                FeatureVector::default(),
                 vec![],
                 &(*sk).into(),
                 now_timestamp_as_millis_u64(),
@@ -232,6 +235,7 @@ impl MockNetworkGraph {
             false,
             &[],
             &Default::default(),
+            true,
         )
     }
 
@@ -256,6 +260,7 @@ impl MockNetworkGraph {
             false,
             &[],
             &Default::default(),
+            true,
         )
     }
 
@@ -728,6 +733,7 @@ fn test_graph_find_path_err() {
         false,
         &[],
         &Default::default(),
+        true,
     );
     assert!(route.is_err());
 
@@ -742,6 +748,7 @@ fn test_graph_find_path_err() {
         false,
         &[],
         &Default::default(),
+        true,
     );
     assert!(route.is_err());
 }
@@ -767,6 +774,7 @@ fn test_graph_find_path_node_order() {
         false,
         &[],
         &Default::default(),
+        true,
     );
     assert!(route.is_ok());
     // check the order of nodes in router is node1 -> node2 -> node3
@@ -794,6 +802,7 @@ fn test_graph_build_route_with_expiry_limit() {
         false,
         &[],
         &Default::default(),
+        true,
     );
     assert!(route.is_ok());
 
@@ -808,6 +817,7 @@ fn test_graph_build_route_with_expiry_limit() {
         false,
         &[],
         &Default::default(),
+        true,
     );
     assert!(route.is_err());
 }
@@ -1784,6 +1794,7 @@ fn test_graph_find_path_source_with_multiple_edges_fee_rate() {
             false,
             &[],
             &Default::default(),
+            true,
         )
         .unwrap();
 
@@ -1827,6 +1838,7 @@ fn test_graph_find_path_source_with_multiple_edges_with_different_fee_rate() {
             false,
             &[],
             &Default::default(),
+            true,
         )
         .unwrap();
 
@@ -1871,6 +1883,7 @@ fn test_graph_find_path_source_with_multiple_edges_with_invalid_tlc_delta() {
             false,
             &[],
             &Default::default(),
+            true,
         )
         .unwrap();
 
@@ -1923,6 +1936,7 @@ fn test_graph_find_path_will_consider_tlc_expiry_delta() {
             false,
             &[],
             &Default::default(),
+            true,
         )
         .unwrap();
 

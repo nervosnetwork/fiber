@@ -1209,6 +1209,7 @@ where
             payment_data.allow_self_payment,
             &payment_data.hop_hints,
             &payment_data.channel_stats,
+            payment_data.allow_mpp(),
         )
     }
 
@@ -1349,6 +1350,12 @@ where
         hops_data
     }
 
+    fn is_node_support_mpp(&self, node: &Pubkey) -> bool {
+        self.nodes
+            .get(node)
+            .is_some_and(|node_info| node_info.features.supports_basic_mpp())
+    }
+
     // A helper function to evaluate whether an edge should be added to the heap of nodes to visit.
     // We will check the accumulated probability of this edge to be a successful payment, and evaluate
     // the distance from the source node to the final payee. If the distance is shorter than the current
@@ -1464,6 +1471,7 @@ where
         allow_self: bool,
         hop_hints: &[HopHint],
         channel_stats: &GraphChannelStat,
+        allow_mpp: bool,
     ) -> Result<Vec<RouterHop>, PathFindError> {
         debug!(
             "begin find_path from {:?} to {:?} amount: {:?}",
@@ -1504,6 +1512,12 @@ where
         let mut amount = amount;
         let mut last_edge = None;
 
+        if allow_mpp && !self.is_node_support_mpp(&target) {
+            return Err(PathFindError::FeatureNotEnabled(
+                "MPP is not supported by the target node".to_string(),
+            ));
+        }
+
         if route_to_self {
             let (edge, new_target, expiry_delta, fee) = self.adjust_target_for_route_self(
                 source,
@@ -1512,6 +1526,7 @@ where
                 &udt_type_script,
                 tlc_expiry_limit,
                 channel_stats,
+                allow_mpp,
             )?;
             target = new_target;
             expiry = expiry.saturating_add(expiry_delta);
@@ -1591,6 +1606,9 @@ where
             for (from, to, channel_info, channel_update) in self.get_node_inbounds(cur_hop.node_id)
             {
                 let is_source = from == source;
+                if allow_mpp && !self.is_node_support_mpp(&from) {
+                    continue;
+                }
 
                 assert_eq!(to, cur_hop.node_id);
                 if &udt_type_script != channel_info.udt_type_script() {
@@ -1710,6 +1728,7 @@ where
     // trying to find a new target which has direct channel to `source` node, then the find_path
     // algorithm can work well to assume the network don't contains a cycle.
     // This may makes the result of find_path is not a global optimimized path.
+    #[allow(clippy::too_many_arguments)]
     fn adjust_target_for_route_self(
         &self,
         source: Pubkey,
@@ -1718,6 +1737,7 @@ where
         udt_type_script: &Option<Script>,
         tlc_expiry_limit: u64,
         channel_stats: &GraphChannelStat,
+        allow_mpp: bool,
     ) -> Result<(RouterHop, Pubkey, u64, u128), PathFindError> {
         let channels: Vec<_> = self
             .get_node_inbounds(source)
@@ -1734,6 +1754,7 @@ where
                             .expect("send_node should exist"),
                         channel_stats,
                     )
+                    && (!allow_mpp || self.is_node_support_mpp(from))
             })
             .map(|(from, _, channel_info, channel_update)| {
                 (

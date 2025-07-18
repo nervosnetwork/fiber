@@ -300,6 +300,8 @@ pub enum NetworkActorCommand {
 
     NodeInfo((), RpcReplyPort<Result<NodeInfoResponse, String>>),
     ListPeers((), RpcReplyPort<Result<Vec<PeerInfo>, String>>),
+    #[cfg(debug_assertions)]
+    UpdateFeatures(FeatureVector),
 }
 
 pub async fn sign_network_message(
@@ -1201,6 +1203,13 @@ where
                 .await;
             }
             NetworkActorEvent::GossipMessageUpdates(gossip_message_updates) => {
+                debug_event!(
+                    myself,
+                    format!(
+                        "Received gossip message updates: {:?}",
+                        gossip_message_updates
+                    )
+                );
                 let mut graph = self.network_graph.write().await;
                 graph.update_for_messages(gossip_message_updates.messages);
             }
@@ -1793,9 +1802,9 @@ where
                     }
                     None => {
                         debug!(
-                                    "Received SignFundingTx request with for transaction {:?} without partial witnesses, so start signing it now",
-                                    &funding_tx,
-                                );
+                                "Received SignFundingTx request with for transaction {:?} without partial witnesses, so start signing it now",
+                                &funding_tx,
+                            );
                         let mut funding_tx = call_t!(
                             self.chain_actor,
                             CkbChainMessage::Sign,
@@ -1938,6 +1947,16 @@ where
                     })
                     .collect::<Vec<_>>();
                 let _ = rpc.send(Ok(peers));
+            }
+            #[cfg(debug_assertions)]
+            NetworkActorCommand::UpdateFeatures(features) => {
+                state.features = features;
+                state.last_node_announcement_message = None;
+                myself
+                    .send_message(NetworkActorMessage::new_command(
+                        NetworkActorCommand::BroadcastLocalInfo(LocalInfoKind::NodeAnnouncement),
+                    ))
+                    .expect(ASSUME_NETWORK_MYSELF_ALIVE);
             }
         };
         Ok(())
@@ -2964,6 +2983,7 @@ where
                 let addresses = self.announced_addrs.clone();
                 let announcement = NodeAnnouncement::new(
                     node_name,
+                    self.features.clone(),
                     addresses,
                     &self.private_key,
                     now,

@@ -2,6 +2,7 @@ use crate::fiber::channel::*;
 use crate::fiber::config::AnnouncedNodeName;
 use crate::fiber::config::DEFAULT_TLC_EXPIRY_DELTA;
 use crate::fiber::config::MAX_PAYMENT_TLC_EXPIRY_LIMIT;
+use crate::fiber::features::FeatureVector;
 use crate::fiber::gossip::GossipMessageStore;
 use crate::fiber::graph::*;
 use crate::fiber::history::Direction;
@@ -47,6 +48,7 @@ fn mock_node() -> (Privkey, NodeAnnouncement) {
         sk.clone(),
         NodeAnnouncement::new(
             AnnouncedNodeName::from_string("node1").expect("invalid name"),
+            FeatureVector::default(),
             vec![],
             &sk,
             now_timestamp_as_millis_u64(),
@@ -684,6 +686,7 @@ fn test_serde_node_announcement_as_broadcast_message() {
     let privkey = gen_rand_fiber_private_key();
     let node_announcement = NodeAnnouncement::new(
         AnnouncedNodeName::from_string("node1").expect("valid name"),
+        FeatureVector::default(),
         vec![],
         &privkey,
         now_timestamp_as_millis_u64(),

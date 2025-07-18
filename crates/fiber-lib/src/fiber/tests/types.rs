@@ -336,6 +336,7 @@ fn test_create_and_verify_node_announcement() {
     let privkey = gen_rand_fiber_private_key();
     let node_announcement = NodeAnnouncement::new(
         AnnouncedNodeName::from_string("node1").expect("valid name"),
+        FeatureVector::default(),
         vec![],
         &privkey,
         now_timestamp_as_millis_u64(),
@@ -353,6 +354,7 @@ fn test_serde_node_announcement() {
     let privkey = gen_rand_fiber_private_key();
     let node_announcement = NodeAnnouncement::new(
         AnnouncedNodeName::from_string("node1").expect("valid name"),
+        FeatureVector::default(),
         vec![],
         &privkey,
         now_timestamp_as_millis_u64(),
@@ -500,13 +502,13 @@ fn test_verify_hard_coded_node_announcement() {
 
     for (signature, message, node_announcement) in [
         (
-            "c148bbe120594e8d12ab9893a31cf61c1aab7a63004dfa89bc088161375efef56489abf88baa51557bd498cbf16de7311c5ae1e30c0edec44c05088e08606eaf",
-            "f352944950ddf83c5ff886527560762dc4e490cfe2e37ff8e959ad893a3b8d1c",
+            "80a0e9d4ed35eb76e086038983dfd2572e7298a795b4cde7b113d805eeb495192cf552e4cc631e73fee76c4f0479a33327488f8a99978a10e2583b7faba2cf61",
+            "044e5172e9a9d7b383c15f40d8dac30f86422e7082af2b4d7db7f5484b4a1701",
             node1(),
         ),
         (
-            "a0e91d312b265ed621178002e362043a9acf40c2f39d4d94a026c8ef9d2bd91b31d4b3535806568bb9fa73b9b2f7e816a8e7436ca62321e8020e4bc34de943d2",
-            "694d31e82fa7f232d48e23545ad1fbdf62ee9b84d89182513b4a59e872f2f872",
+            "3a1eea2e372e5c3bc53d1c283d449afbfff029308fe59e111a23ad32163d2a6f58128e21083e128a05d34fb8c0068a1f4fa6e4ae12e370d3051591df151a957a",
+            "db96ac7278d1db7b03eefdc4d21c952e3aee8a4be87a82c8c0e66a87e8897a81",
             node2(),
         ),
     ] {

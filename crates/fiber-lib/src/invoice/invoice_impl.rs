@@ -685,7 +685,7 @@ impl InvoiceBuilder {
                     None
                 }
             })
-            .unwrap_or_default();
+            .unwrap_or_else(FeatureVector::new);
 
         if value {
             feature_vector.set_basic_mpp_optional();

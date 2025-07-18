@@ -812,6 +812,7 @@ async fn test_network_send_payment_send_each_other() {
     let payment_hash2 = res2.payment_hash;
 
     node_a.wait_until_success(payment_hash1).await;
+    node_b.wait_until_success(payment_hash2).await;
 
     assert_eq!(
         node_a.get_payment_status(payment_hash1).await,
@@ -5142,8 +5143,7 @@ async fn test_send_payment_will_fail_with_last_hop_info_in_add_tlc_peer() {
     node_3
         .expect_event(|event| match event {
             NetworkServiceEvent::DebugEvent(DebugEvent::Common(error)) => {
-                assert!(error.contains("Musig2VerifyError(BadSignature)"));
-                true
+                error.contains("Musig2VerifyError(BadSignature)")
             }
             _ => false,
         })

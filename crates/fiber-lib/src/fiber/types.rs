@@ -1822,6 +1822,7 @@ pub struct NodeAnnouncement {
 impl NodeAnnouncement {
     pub fn new_unsigned(
         node_name: AnnouncedNodeName,
+        features: FeatureVector,
         addresses: Vec<MultiAddr>,
         node_id: Pubkey,
         timestamp: u64,
@@ -1829,7 +1830,7 @@ impl NodeAnnouncement {
     ) -> Self {
         Self {
             signature: None,
-            features: Default::default(),
+            features,
             timestamp,
             node_id,
             version: env!("CARGO_PKG_VERSION").to_string(),
@@ -1843,6 +1844,7 @@ impl NodeAnnouncement {
 
     pub fn new(
         node_name: AnnouncedNodeName,
+        features: FeatureVector,
         addresses: Vec<MultiAddr>,
         private_key: &Privkey,
         timestamp: u64,
@@ -1850,6 +1852,7 @@ impl NodeAnnouncement {
     ) -> NodeAnnouncement {
         let mut unsigned = NodeAnnouncement::new_unsigned(
             node_name,
+            features,
             addresses,
             private_key.pubkey(),
             timestamp,

@@ -10,8 +10,9 @@ use crate::{
             AddTlcCommand, ChannelActorStateStore, ChannelCommand, ChannelCommandWithId, TLCId,
         },
         config::{DEFAULT_TLC_EXPIRY_DELTA, PAYMENT_MAX_PARTS_LIMIT},
+        features::FeatureVector,
         hash_algorithm::HashAlgorithm,
-        network::SendPaymentCommand,
+        network::{DebugEvent, SendPaymentCommand},
         types::{Hash256, PaymentDataRecord, PaymentHopData, PeeledOnionPacket, RemoveTlcReason},
         NetworkActorCommand, NetworkActorMessage, PaymentCustomRecords,
     },
@@ -23,7 +24,7 @@ use crate::{
         create_n_nodes_network, establish_channel_between_nodes, init_tracing, ChannelParameters,
         NetworkNode, MIN_RESERVED_CKB,
     },
-    HUGE_CKB_AMOUNT,
+    NetworkServiceEvent, HUGE_CKB_AMOUNT,
 };
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -3181,4 +3182,95 @@ async fn test_send_payment_custom_records_not_in_range() {
     assert!(payment.is_ok());
     let payment_hash = payment.unwrap().payment_hash;
     source_node.wait_until_success(payment_hash).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_mpp_can_not_find_path_filter_target_node_features() {
+    init_tracing();
+
+    let (nodes, _channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+            ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+        ],
+        2,
+    )
+    .await;
+    let [mut node_0, mut node_1] = nodes.try_into().expect("2 nodes");
+
+    let res = node_0
+        .send_mpp_payment_with_dry_run_option(&mut node_1, 20000000000, Some(2), true)
+        .await;
+    eprintln!("query res: {:?}", res);
+
+    let feature = FeatureVector::new();
+    node_1.update_node_features(feature).await;
+
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    node_0.expect_event(|event| {
+            matches!(event, NetworkServiceEvent::DebugEvent(DebugEvent::Common(msg)) if msg.contains("Received gossip message updates"))
+        })
+        .await;
+
+    let res = node_0
+        .send_mpp_payment_with_dry_run_option(&mut node_1, 20000000000, Some(2), true)
+        .await;
+    eprintln!("query res: {:?}", res);
+
+    let error = res.unwrap_err().to_string();
+    assert!(error.contains("MPP is not supported by the target node"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_mpp_can_not_find_path_filter_middle_node_features() {
+    async fn test_node_feature(update_node_index: usize) {
+        init_tracing();
+        let (nodes, _channels) = create_n_nodes_network(
+            &[
+                ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+                ((1, 2), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+                ((1, 2), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+            ],
+            3,
+        )
+        .await;
+        let [mut node_0, mut node_1, mut node_2] = nodes.try_into().expect("2 nodes");
+
+        let res = node_0
+            .send_mpp_payment_with_dry_run_option(&mut node_2, 20000000000, Some(2), true)
+            .await;
+        eprintln!("query res: {:?}", res);
+
+        let (update_node, wait_node1, wait_node2) = match update_node_index {
+            0 => (&mut node_0, &mut node_1, &mut node_2),
+            1 => (&mut node_1, &mut node_0, &mut node_2),
+            2 => (&mut node_2, &mut node_0, &mut node_1),
+            _ => panic!("Invalid node index"),
+        };
+
+        let feature = FeatureVector::new();
+        update_node.update_node_features(feature).await;
+
+        wait_node1.expect_event(|event| {
+                    matches!(event, NetworkServiceEvent::DebugEvent(DebugEvent::Common(msg)) if msg.contains("Received gossip message updates"))
+                })
+            .await;
+
+        wait_node2.expect_event(|event| {
+                    matches!(event, NetworkServiceEvent::DebugEvent(DebugEvent::Common(msg)) if msg.contains("Received gossip message updates"))
+                })
+            .await;
+
+        let res = node_0
+            .send_mpp_payment_with_dry_run_option(&mut node_2, 20000000000, Some(2), true)
+            .await;
+        eprintln!("query res: {:?}", res);
+
+        let error = res.unwrap_err().to_string();
+        assert!(error.contains("Failed to build enough routes for MPP payment"));
+    }
+
+    test_node_feature(0).await;
+    test_node_feature(1).await;
+    test_node_feature(2).await;
 }

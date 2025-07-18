@@ -2,6 +2,7 @@ use crate::ckb::tests::test_utils::get_tx_from_hash;
 use crate::ckb::tests::test_utils::MockChainActorMiddleware;
 use crate::ckb::GetTxResponse;
 use crate::fiber::channel::*;
+use crate::fiber::features::FeatureVector;
 use crate::fiber::gossip::get_gossip_actor_name;
 use crate::fiber::gossip::GossipActorMessage;
 use crate::fiber::graph::NetworkGraphStateStore;
@@ -1187,6 +1188,14 @@ impl NetworkNode {
         call!(self.network_actor, message)
             .expect("node_a alive")
             .expect("update channel success");
+    }
+
+    pub async fn update_node_features(&self, features: FeatureVector) {
+        let message = NetworkActorMessage::Command(NetworkActorCommand::UpdateFeatures(features));
+
+        self.network_actor
+            .send_message(message)
+            .expect("network actor is live");
     }
 
     pub fn get_payment_session(&self, payment_hash: Hash256) -> Option<PaymentSession> {
