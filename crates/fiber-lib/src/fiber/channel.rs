@@ -1102,9 +1102,6 @@ where
                 return Err(ProcessingChannelError::FinalIncorrectPaymentHash);
             }
         } else {
-            // here we don't need to check current config is public or enabled, because
-            // handle_add_tlc_command will check the channel state before forwarding
-            // and private channel can also forward TLC to public channel
             if add_tlc.expiry
                 < peeled_onion_packet.current.expiry + state.local_tlc_info.tlc_expiry_delta
             {
@@ -5665,6 +5662,8 @@ impl ChannelActorState {
             }
         }
 
+        // don't check whether channel is public,
+        // since private channel could also forward tlc
         if let Some(add_amount) = add_tlc_amount {
             if is_tlc_command_message && !self.local_tlc_info.enabled {
                 return Err(ProcessingChannelError::InvalidState(format!(
