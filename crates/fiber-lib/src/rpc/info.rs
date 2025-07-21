@@ -30,6 +30,9 @@ pub struct NodeInfoResult {
     /// The identity public key of the node.
     pub node_id: Pubkey,
 
+    /// The features supported by the node.
+    pub features: Vec<String>,
+
     /// The optional name of the node.
     pub node_name: Option<String>,
 
@@ -123,6 +126,7 @@ impl InfoRpcServerImpl {
         handle_actor_call!(self.actor, message, ()).map(|response| NodeInfoResult {
             version,
             commit_hash,
+            features: response.features.enabled_features_names(),
             node_id: response.node_id,
             node_name: response.node_name.map(|name| name.to_string()),
             addresses: response.addresses,

@@ -3083,6 +3083,7 @@ impl ::core::fmt::Display for NodeAnnouncement {
         write!(f, ", {}: {}", "features", self.features())?;
         write!(f, ", {}: {}", "timestamp", self.timestamp())?;
         write!(f, ", {}: {}", "node_id", self.node_id())?;
+        write!(f, ", {}: {}", "version", self.version())?;
         write!(f, ", {}: {}", "node_name", self.node_name())?;
         write!(f, ", {}: {}", "address", self.address())?;
         write!(f, ", {}: {}", "chain_hash", self.chain_hash())?;
@@ -3107,17 +3108,18 @@ impl ::core::default::Default for NodeAnnouncement {
     }
 }
 impl NodeAnnouncement {
-    const DEFAULT_VALUE: [u8; 233] = [
-        233, 0, 0, 0, 40, 0, 0, 0, 104, 0, 0, 0, 112, 0, 0, 0, 120, 0, 0, 0, 153, 0, 0, 0, 185, 0,
-        0, 0, 189, 0, 0, 0, 221, 0, 0, 0, 229, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    const DEFAULT_VALUE: [u8; 237] = [
+        237, 0, 0, 0, 44, 0, 0, 0, 108, 0, 0, 0, 112, 0, 0, 0, 120, 0, 0, 0, 153, 0, 0, 0, 157, 0,
+        0, 0, 189, 0, 0, 0, 193, 0, 0, 0, 225, 0, 0, 0, 233, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4,
+        0, 0, 0,
     ];
-    pub const FIELD_COUNT: usize = 9;
+    pub const FIELD_COUNT: usize = 10;
     pub fn total_size(&self) -> usize {
         molecule::unpack_number(self.as_slice()) as usize
     }
@@ -3140,11 +3142,11 @@ impl NodeAnnouncement {
         let end = molecule::unpack_number(&slice[8..]) as usize;
         EcdsaSignature::new_unchecked(self.0.slice(start..end))
     }
-    pub fn features(&self) -> Uint64 {
+    pub fn features(&self) -> Bytes {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[8..]) as usize;
         let end = molecule::unpack_number(&slice[12..]) as usize;
-        Uint64::new_unchecked(self.0.slice(start..end))
+        Bytes::new_unchecked(self.0.slice(start..end))
     }
     pub fn timestamp(&self) -> Uint64 {
         let slice = self.as_slice();
@@ -3158,35 +3160,41 @@ impl NodeAnnouncement {
         let end = molecule::unpack_number(&slice[20..]) as usize;
         Pubkey::new_unchecked(self.0.slice(start..end))
     }
-    pub fn node_name(&self) -> Byte32 {
+    pub fn version(&self) -> Bytes {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[20..]) as usize;
         let end = molecule::unpack_number(&slice[24..]) as usize;
+        Bytes::new_unchecked(self.0.slice(start..end))
+    }
+    pub fn node_name(&self) -> Byte32 {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[24..]) as usize;
+        let end = molecule::unpack_number(&slice[28..]) as usize;
         Byte32::new_unchecked(self.0.slice(start..end))
     }
     pub fn address(&self) -> BytesVec {
         let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[24..]) as usize;
-        let end = molecule::unpack_number(&slice[28..]) as usize;
+        let start = molecule::unpack_number(&slice[28..]) as usize;
+        let end = molecule::unpack_number(&slice[32..]) as usize;
         BytesVec::new_unchecked(self.0.slice(start..end))
     }
     pub fn chain_hash(&self) -> Byte32 {
         let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[28..]) as usize;
-        let end = molecule::unpack_number(&slice[32..]) as usize;
+        let start = molecule::unpack_number(&slice[32..]) as usize;
+        let end = molecule::unpack_number(&slice[36..]) as usize;
         Byte32::new_unchecked(self.0.slice(start..end))
     }
     pub fn auto_accept_min_ckb_funding_amount(&self) -> Uint64 {
         let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[32..]) as usize;
-        let end = molecule::unpack_number(&slice[36..]) as usize;
+        let start = molecule::unpack_number(&slice[36..]) as usize;
+        let end = molecule::unpack_number(&slice[40..]) as usize;
         Uint64::new_unchecked(self.0.slice(start..end))
     }
     pub fn udt_cfg_infos(&self) -> UdtCfgInfos {
         let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[36..]) as usize;
+        let start = molecule::unpack_number(&slice[40..]) as usize;
         if self.has_extra_fields() {
-            let end = molecule::unpack_number(&slice[40..]) as usize;
+            let end = molecule::unpack_number(&slice[44..]) as usize;
             UdtCfgInfos::new_unchecked(self.0.slice(start..end))
         } else {
             UdtCfgInfos::new_unchecked(self.0.slice(start..))
@@ -3223,6 +3231,7 @@ impl molecule::prelude::Entity for NodeAnnouncement {
             .features(self.features())
             .timestamp(self.timestamp())
             .node_id(self.node_id())
+            .version(self.version())
             .node_name(self.node_name())
             .address(self.address())
             .chain_hash(self.chain_hash())
@@ -3253,6 +3262,7 @@ impl<'r> ::core::fmt::Display for NodeAnnouncementReader<'r> {
         write!(f, ", {}: {}", "features", self.features())?;
         write!(f, ", {}: {}", "timestamp", self.timestamp())?;
         write!(f, ", {}: {}", "node_id", self.node_id())?;
+        write!(f, ", {}: {}", "version", self.version())?;
         write!(f, ", {}: {}", "node_name", self.node_name())?;
         write!(f, ", {}: {}", "address", self.address())?;
         write!(f, ", {}: {}", "chain_hash", self.chain_hash())?;
@@ -3271,7 +3281,7 @@ impl<'r> ::core::fmt::Display for NodeAnnouncementReader<'r> {
     }
 }
 impl<'r> NodeAnnouncementReader<'r> {
-    pub const FIELD_COUNT: usize = 9;
+    pub const FIELD_COUNT: usize = 10;
     pub fn total_size(&self) -> usize {
         molecule::unpack_number(self.as_slice()) as usize
     }
@@ -3294,11 +3304,11 @@ impl<'r> NodeAnnouncementReader<'r> {
         let end = molecule::unpack_number(&slice[8..]) as usize;
         EcdsaSignatureReader::new_unchecked(&self.as_slice()[start..end])
     }
-    pub fn features(&self) -> Uint64Reader<'r> {
+    pub fn features(&self) -> BytesReader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[8..]) as usize;
         let end = molecule::unpack_number(&slice[12..]) as usize;
-        Uint64Reader::new_unchecked(&self.as_slice()[start..end])
+        BytesReader::new_unchecked(&self.as_slice()[start..end])
     }
     pub fn timestamp(&self) -> Uint64Reader<'r> {
         let slice = self.as_slice();
@@ -3312,35 +3322,41 @@ impl<'r> NodeAnnouncementReader<'r> {
         let end = molecule::unpack_number(&slice[20..]) as usize;
         PubkeyReader::new_unchecked(&self.as_slice()[start..end])
     }
-    pub fn node_name(&self) -> Byte32Reader<'r> {
+    pub fn version(&self) -> BytesReader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[20..]) as usize;
         let end = molecule::unpack_number(&slice[24..]) as usize;
+        BytesReader::new_unchecked(&self.as_slice()[start..end])
+    }
+    pub fn node_name(&self) -> Byte32Reader<'r> {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[24..]) as usize;
+        let end = molecule::unpack_number(&slice[28..]) as usize;
         Byte32Reader::new_unchecked(&self.as_slice()[start..end])
     }
     pub fn address(&self) -> BytesVecReader<'r> {
         let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[24..]) as usize;
-        let end = molecule::unpack_number(&slice[28..]) as usize;
+        let start = molecule::unpack_number(&slice[28..]) as usize;
+        let end = molecule::unpack_number(&slice[32..]) as usize;
         BytesVecReader::new_unchecked(&self.as_slice()[start..end])
     }
     pub fn chain_hash(&self) -> Byte32Reader<'r> {
         let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[28..]) as usize;
-        let end = molecule::unpack_number(&slice[32..]) as usize;
+        let start = molecule::unpack_number(&slice[32..]) as usize;
+        let end = molecule::unpack_number(&slice[36..]) as usize;
         Byte32Reader::new_unchecked(&self.as_slice()[start..end])
     }
     pub fn auto_accept_min_ckb_funding_amount(&self) -> Uint64Reader<'r> {
         let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[32..]) as usize;
-        let end = molecule::unpack_number(&slice[36..]) as usize;
+        let start = molecule::unpack_number(&slice[36..]) as usize;
+        let end = molecule::unpack_number(&slice[40..]) as usize;
         Uint64Reader::new_unchecked(&self.as_slice()[start..end])
     }
     pub fn udt_cfg_infos(&self) -> UdtCfgInfosReader<'r> {
         let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[36..]) as usize;
+        let start = molecule::unpack_number(&slice[40..]) as usize;
         if self.has_extra_fields() {
-            let end = molecule::unpack_number(&slice[40..]) as usize;
+            let end = molecule::unpack_number(&slice[44..]) as usize;
             UdtCfgInfosReader::new_unchecked(&self.as_slice()[start..end])
         } else {
             UdtCfgInfosReader::new_unchecked(&self.as_slice()[start..])
@@ -3394,23 +3410,25 @@ impl<'r> molecule::prelude::Reader<'r> for NodeAnnouncementReader<'r> {
             return ve!(Self, OffsetsNotMatch);
         }
         EcdsaSignatureReader::verify(&slice[offsets[0]..offsets[1]], compatible)?;
-        Uint64Reader::verify(&slice[offsets[1]..offsets[2]], compatible)?;
+        BytesReader::verify(&slice[offsets[1]..offsets[2]], compatible)?;
         Uint64Reader::verify(&slice[offsets[2]..offsets[3]], compatible)?;
         PubkeyReader::verify(&slice[offsets[3]..offsets[4]], compatible)?;
-        Byte32Reader::verify(&slice[offsets[4]..offsets[5]], compatible)?;
-        BytesVecReader::verify(&slice[offsets[5]..offsets[6]], compatible)?;
-        Byte32Reader::verify(&slice[offsets[6]..offsets[7]], compatible)?;
-        Uint64Reader::verify(&slice[offsets[7]..offsets[8]], compatible)?;
-        UdtCfgInfosReader::verify(&slice[offsets[8]..offsets[9]], compatible)?;
+        BytesReader::verify(&slice[offsets[4]..offsets[5]], compatible)?;
+        Byte32Reader::verify(&slice[offsets[5]..offsets[6]], compatible)?;
+        BytesVecReader::verify(&slice[offsets[6]..offsets[7]], compatible)?;
+        Byte32Reader::verify(&slice[offsets[7]..offsets[8]], compatible)?;
+        Uint64Reader::verify(&slice[offsets[8]..offsets[9]], compatible)?;
+        UdtCfgInfosReader::verify(&slice[offsets[9]..offsets[10]], compatible)?;
         Ok(())
     }
 }
 #[derive(Clone, Debug, Default)]
 pub struct NodeAnnouncementBuilder {
     pub(crate) signature: EcdsaSignature,
-    pub(crate) features: Uint64,
+    pub(crate) features: Bytes,
     pub(crate) timestamp: Uint64,
     pub(crate) node_id: Pubkey,
+    pub(crate) version: Bytes,
     pub(crate) node_name: Byte32,
     pub(crate) address: BytesVec,
     pub(crate) chain_hash: Byte32,
@@ -3418,12 +3436,12 @@ pub struct NodeAnnouncementBuilder {
     pub(crate) udt_cfg_infos: UdtCfgInfos,
 }
 impl NodeAnnouncementBuilder {
-    pub const FIELD_COUNT: usize = 9;
+    pub const FIELD_COUNT: usize = 10;
     pub fn signature(mut self, v: EcdsaSignature) -> Self {
         self.signature = v;
         self
     }
-    pub fn features(mut self, v: Uint64) -> Self {
+    pub fn features(mut self, v: Bytes) -> Self {
         self.features = v;
         self
     }
@@ -3433,6 +3451,10 @@ impl NodeAnnouncementBuilder {
     }
     pub fn node_id(mut self, v: Pubkey) -> Self {
         self.node_id = v;
+        self
+    }
+    pub fn version(mut self, v: Bytes) -> Self {
+        self.version = v;
         self
     }
     pub fn node_name(mut self, v: Byte32) -> Self {
@@ -3465,6 +3487,7 @@ impl molecule::prelude::Builder for NodeAnnouncementBuilder {
             + self.features.as_slice().len()
             + self.timestamp.as_slice().len()
             + self.node_id.as_slice().len()
+            + self.version.as_slice().len()
             + self.node_name.as_slice().len()
             + self.address.as_slice().len()
             + self.chain_hash.as_slice().len()
@@ -3483,6 +3506,8 @@ impl molecule::prelude::Builder for NodeAnnouncementBuilder {
         offsets.push(total_size);
         total_size += self.node_id.as_slice().len();
         offsets.push(total_size);
+        total_size += self.version.as_slice().len();
+        offsets.push(total_size);
         total_size += self.node_name.as_slice().len();
         offsets.push(total_size);
         total_size += self.address.as_slice().len();
@@ -3500,6 +3525,7 @@ impl molecule::prelude::Builder for NodeAnnouncementBuilder {
         writer.write_all(self.features.as_slice())?;
         writer.write_all(self.timestamp.as_slice())?;
         writer.write_all(self.node_id.as_slice())?;
+        writer.write_all(self.version.as_slice())?;
         writer.write_all(self.node_name.as_slice())?;
         writer.write_all(self.address.as_slice())?;
         writer.write_all(self.chain_hash.as_slice())?;
@@ -4045,16 +4071,16 @@ impl ::core::default::Default for BroadcastMessage {
     }
 }
 impl BroadcastMessage {
-    const DEFAULT_VALUE: [u8; 237] = [
-        0, 0, 0, 0, 233, 0, 0, 0, 40, 0, 0, 0, 104, 0, 0, 0, 112, 0, 0, 0, 120, 0, 0, 0, 153, 0, 0,
-        0, 185, 0, 0, 0, 189, 0, 0, 0, 221, 0, 0, 0, 229, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    const DEFAULT_VALUE: [u8; 241] = [
+        0, 0, 0, 0, 237, 0, 0, 0, 44, 0, 0, 0, 108, 0, 0, 0, 112, 0, 0, 0, 120, 0, 0, 0, 153, 0, 0,
+        0, 157, 0, 0, 0, 189, 0, 0, 0, 193, 0, 0, 0, 225, 0, 0, 0, 233, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 0,
-        0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 4, 0, 0, 0,
     ];
     pub const ITEMS_COUNT: usize = 3;
     pub fn item_id(&self) -> molecule::Number {

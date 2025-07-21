@@ -135,12 +135,16 @@ impl From<ConfigUdtCfgInfos> for UdtCfgInfos {
 
 /// The Node information.
 #[serde_as]
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct NodeInfo {
     /// The name of the node.
     pub node_name: String,
+    /// The version of the node.
+    pub version: String,
     /// The addresses of the node.
     pub addresses: Vec<MultiAddr>,
+    /// The node features supported by the node.
+    pub features: Vec<String>,
     /// The identity public key of the node.
     pub node_id: Pubkey,
     #[serde_as(as = "U64Hex")]
@@ -160,9 +164,11 @@ impl From<super::super::fiber::graph::NodeInfo> for NodeInfo {
     fn from(value: super::super::fiber::graph::NodeInfo) -> Self {
         NodeInfo {
             node_name: value.node_name.to_string(),
+            version: value.version,
             addresses: value.addresses,
             node_id: value.node_id,
             timestamp: value.timestamp,
+            features: value.features.enabled_features_names(),
             chain_hash: get_chain_hash(),
             auto_accept_min_ckb_funding_amount: value.auto_accept_min_ckb_funding_amount,
             udt_cfg_infos: value.udt_cfg_infos.clone().into(),
@@ -170,7 +176,7 @@ impl From<super::super::fiber::graph::NodeInfo> for NodeInfo {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct GraphNodesResult {
     /// The list of nodes.
     pub nodes: Vec<NodeInfo>,
