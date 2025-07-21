@@ -32,7 +32,7 @@ echo "Initializing finished, begin to start services ...."
 sleep 1
 
 ckb run -C "$deploy_dir/node-data" --indexer &
-cargo build
+cargo build --locked
 
 # Start the dev node in the background.
 cd "$nodes_dir" || exit 1
