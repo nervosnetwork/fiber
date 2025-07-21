@@ -74,7 +74,8 @@ use crate::ckb::config::UdtCfgInfos;
 use crate::ckb::contracts::{check_udt_script, get_udt_whitelist, is_udt_type_auto_accept};
 use crate::ckb::{CkbChainMessage, FundingRequest, FundingTx};
 use crate::fiber::channel::{
-    AddTlcCommand, AddTlcResponse, ShutdownCommand, TxCollaborationCommand, TxUpdateCommand,
+    AddTlcCommand, AddTlcResponse, ChannelEphemeralConfig, ChannelInitializationOperation,
+    ShutdownCommand, TxCollaborationCommand, TxUpdateCommand,
 };
 use crate::fiber::config::{DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT};
 use crate::fiber::fee::check_open_channel_parameters;
@@ -2327,11 +2328,11 @@ pub struct NetworkActorState<S> {
     channel_subscribers: ChannelSubscribers,
     max_inbound_peers: usize,
     min_outbound_peers: usize,
-
     // The features of the node, used to indicate the capabilities of the node.
     features: FeatureVector,
     // the payment router map, only used for avoiding finding the same payment router multiple times
     payment_router_map: HashMap<Hash256, Vec<PaymentHopData>>,
+    channel_ephemeral_config: ChannelEphemeralConfig,
 }
 
 #[derive(Debug, Clone)]
@@ -2562,26 +2563,30 @@ where
                 store,
                 self.channel_subscribers.clone(),
             ),
-            ChannelInitializationParameter::OpenChannel(OpenChannelParameter {
-                funding_amount,
-                seed,
-                tlc_info: ChannelTlcInfo::new(
-                    tlc_min_value.unwrap_or(self.tlc_min_value),
-                    tlc_expiry_delta.unwrap_or(self.tlc_expiry_delta),
-                    tlc_fee_proportional_millionths.unwrap_or(self.tlc_fee_proportional_millionths),
-                ),
-                public_channel_info: public.then_some(PublicChannelInfo::new()),
-                funding_udt_type_script,
-                shutdown_script,
-                channel_id_sender: tx,
-                commitment_fee_rate,
-                commitment_delay_epoch,
-                funding_fee_rate,
-                max_tlc_value_in_flight: max_tlc_value_in_flight
-                    .unwrap_or(DEFAULT_MAX_TLC_VALUE_IN_FLIGHT),
-                max_tlc_number_in_flight: max_tlc_number_in_flight
-                    .unwrap_or(MAX_TLC_NUMBER_IN_FLIGHT),
-            }),
+            ChannelInitializationParameter {
+                operation: ChannelInitializationOperation::OpenChannel(OpenChannelParameter {
+                    funding_amount,
+                    seed,
+                    tlc_info: ChannelTlcInfo::new(
+                        tlc_min_value.unwrap_or(self.tlc_min_value),
+                        tlc_expiry_delta.unwrap_or(self.tlc_expiry_delta),
+                        tlc_fee_proportional_millionths
+                            .unwrap_or(self.tlc_fee_proportional_millionths),
+                    ),
+                    public_channel_info: public.then_some(PublicChannelInfo::new()),
+                    funding_udt_type_script,
+                    shutdown_script,
+                    channel_id_sender: tx,
+                    commitment_fee_rate,
+                    commitment_delay_epoch,
+                    funding_fee_rate,
+                    max_tlc_value_in_flight: max_tlc_value_in_flight
+                        .unwrap_or(DEFAULT_MAX_TLC_VALUE_IN_FLIGHT),
+                    max_tlc_number_in_flight: max_tlc_number_in_flight
+                        .unwrap_or(MAX_TLC_NUMBER_IN_FLIGHT),
+                }),
+                ephemeral_config: self.channel_ephemeral_config.clone(),
+            },
             network.clone().get_cell(),
         )
         .await
@@ -2649,23 +2654,29 @@ where
                 store,
                 self.channel_subscribers.clone(),
             ),
-            ChannelInitializationParameter::AcceptChannel(AcceptChannelParameter {
-                funding_amount,
-                reserved_ckb_amount,
-                tlc_info: ChannelTlcInfo::new(
-                    min_tlc_value.unwrap_or(self.tlc_min_value),
-                    tlc_expiry_delta.unwrap_or(self.tlc_expiry_delta),
-                    tlc_fee_proportional_millionths.unwrap_or(self.tlc_fee_proportional_millionths),
-                ),
-                public_channel_info: open_channel.is_public().then_some(PublicChannelInfo::new()),
-                seed,
-                open_channel,
-                shutdown_script,
-                channel_id_sender: Some(tx),
-                max_tlc_number_in_flight: max_tlc_number_in_flight
-                    .unwrap_or(MAX_TLC_NUMBER_IN_FLIGHT),
-                max_tlc_value_in_flight: max_tlc_value_in_flight.unwrap_or(u128::MAX),
-            }),
+            ChannelInitializationParameter {
+                operation: ChannelInitializationOperation::AcceptChannel(AcceptChannelParameter {
+                    funding_amount,
+                    reserved_ckb_amount,
+                    tlc_info: ChannelTlcInfo::new(
+                        min_tlc_value.unwrap_or(self.tlc_min_value),
+                        tlc_expiry_delta.unwrap_or(self.tlc_expiry_delta),
+                        tlc_fee_proportional_millionths
+                            .unwrap_or(self.tlc_fee_proportional_millionths),
+                    ),
+                    public_channel_info: open_channel
+                        .is_public()
+                        .then_some(PublicChannelInfo::new()),
+                    seed,
+                    open_channel,
+                    shutdown_script,
+                    channel_id_sender: Some(tx),
+                    max_tlc_number_in_flight: max_tlc_number_in_flight
+                        .unwrap_or(MAX_TLC_NUMBER_IN_FLIGHT),
+                    max_tlc_value_in_flight: max_tlc_value_in_flight.unwrap_or(u128::MAX),
+                }),
+                ephemeral_config: self.channel_ephemeral_config.clone(),
+            },
             network.clone().get_cell(),
         )
         .await
@@ -3041,7 +3052,10 @@ where
                 self.store.clone(),
                 self.channel_subscribers.clone(),
             ),
-            ChannelInitializationParameter::ReestablishChannel(channel_id),
+            ChannelInitializationParameter {
+                operation: ChannelInitializationOperation::ReestablishChannel(channel_id),
+                ephemeral_config: self.channel_ephemeral_config.clone(),
+            },
             self.network.get_cell(),
         )
         .await?;
@@ -3669,6 +3683,9 @@ where
             min_outbound_peers: config.min_outbound_peers(),
             features,
             payment_router_map: Default::default(),
+            channel_ephemeral_config: ChannelEphemeralConfig {
+                funding_timeout_seconds: config.funding_timeout_seconds,
+            },
         };
 
         let node_announcement = state.get_or_create_new_node_announcement_message();
