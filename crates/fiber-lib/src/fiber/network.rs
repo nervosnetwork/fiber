@@ -1208,15 +1208,9 @@ where
                 .await;
             }
             NetworkActorEvent::GossipMessageUpdates(gossip_message_updates) => {
-                debug_event!(
-                    myself,
-                    format!(
-                        "Received gossip message updates: {:?}",
-                        gossip_message_updates
-                    )
-                );
                 let mut graph = self.network_graph.write().await;
                 graph.update_for_messages(gossip_message_updates.messages);
+                debug_event!(myself, "Received gossip message updates");
             }
             NetworkActorEvent::OwnedChannelUpdateEvent(owned_channel_update_event) => {
                 let mut graph = self.network_graph.write().await;

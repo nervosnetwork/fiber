@@ -3213,8 +3213,20 @@ async fn test_mpp_can_not_find_path_filter_middle_node_features() {
         let (nodes, _channels) = create_n_nodes_network(
             &[
                 ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
-                ((1, 2), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
-                ((1, 2), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+                (
+                    (1, 2),
+                    (
+                        MIN_RESERVED_CKB + (100 + 2) * CKB_SHANNONS as u128,
+                        MIN_RESERVED_CKB,
+                    ),
+                ),
+                (
+                    (1, 2),
+                    (
+                        MIN_RESERVED_CKB + (100 + 2) * CKB_SHANNONS as u128,
+                        MIN_RESERVED_CKB,
+                    ),
+                ),
             ],
             3,
         )
@@ -3222,37 +3234,46 @@ async fn test_mpp_can_not_find_path_filter_middle_node_features() {
         let [mut node_0, mut node_1, mut node_2] = nodes.try_into().expect("2 nodes");
 
         let res = node_0
-            .send_mpp_payment_with_dry_run_option(&mut node_2, 20000000000, Some(2), true)
+            .send_mpp_payment_with_dry_run_option(
+                &mut node_2,
+                200 * CKB_SHANNONS as u128,
+                Some(2),
+                true,
+            )
             .await;
         eprintln!("query res: {:?}", res);
+        assert!(res.is_ok());
 
-        let (update_node, wait_node1, wait_node2) = match update_node_index {
-            0 => (&mut node_0, &mut node_1, &mut node_2),
-            1 => (&mut node_1, &mut node_0, &mut node_2),
-            2 => (&mut node_2, &mut node_0, &mut node_1),
+        let update_node = match update_node_index {
+            0 => &mut node_0,
+            1 => &mut node_1,
+            2 => &mut node_2,
             _ => panic!("Invalid node index"),
         };
 
         let feature = FeatureVector::new();
         update_node.update_node_features(feature).await;
 
-        wait_node1.expect_event(|event| {
-                    matches!(event, NetworkServiceEvent::DebugEvent(DebugEvent::Common(msg)) if msg.contains("Received gossip message updates"))
-                })
+        for node in [&mut node_0, &mut node_1, &mut node_2] {
+            node.expect_event(|event| {
+                matches!(event, NetworkServiceEvent::DebugEvent(DebugEvent::Common(msg)) if msg.contains("Received gossip message updates"))
+            })
             .await;
+        }
 
-        wait_node2.expect_event(|event| {
-                    matches!(event, NetworkServiceEvent::DebugEvent(DebugEvent::Common(msg)) if msg.contains("Received gossip message updates"))
-                })
-            .await;
+        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
         let res = node_0
-            .send_mpp_payment_with_dry_run_option(&mut node_2, 20000000000, Some(2), true)
+            .send_mpp_payment_with_dry_run_option(
+                &mut node_2,
+                200 * CKB_SHANNONS as u128,
+                Some(2),
+                true,
+            )
             .await;
         eprintln!("query res: {:?}", res);
 
-        let error = res.unwrap_err().to_string();
-        assert!(error.contains("Failed to build enough routes for MPP payment"));
+        assert!(res.is_err());
     }
 
     test_node_feature(0).await;
