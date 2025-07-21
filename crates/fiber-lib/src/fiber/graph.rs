@@ -177,8 +177,11 @@ impl TryFrom<&ChannelActorState> for ChannelInfo {
             return Err("Channel is not ready".to_string());
         }
 
+        let Some(channel_outpoint) = state.get_funding_transaction_outpoint() else {
+            return Err("Channel outpoint is not set".to_string());
+        };
+
         let timestamp = state.must_get_funding_transaction_timestamp();
-        let channel_outpoint = state.must_get_funding_transaction_outpoint();
         let capacity = state.get_liquid_capacity();
         let udt_type_script = state.funding_udt_type_script.clone();
 
