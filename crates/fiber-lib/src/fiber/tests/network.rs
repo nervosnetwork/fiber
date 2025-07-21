@@ -215,7 +215,7 @@ async fn test_sync_channel_announcement_on_startup() {
     init_tracing();
 
     let mut node1 = NetworkNode::new_with_node_name("node1").await;
-    let node2 = NetworkNode::new_with_node_name("node2").await;
+    let mut node2 = NetworkNode::new_with_node_name("node2").await;
 
     let capacity = 42;
     let priv_key: Privkey = get_test_priv_key();
@@ -250,7 +250,7 @@ async fn test_sync_channel_announcement_on_startup() {
         );
     }
 
-    node1.connect_to(&node2).await;
+    node1.connect_to(&mut node2).await;
 
     assert!(matches!(
         node2.submit_tx(tx.clone()).await,
@@ -426,8 +426,8 @@ async fn test_query_missing_broadcast_message() {
     let node1_channel_info = node1.get_network_graph_channel(&out_point).await.unwrap();
     assert_ne!(node1_channel_info.update_of_node1, None);
 
-    let node2 = NetworkNode::new().await;
-    node1.connect_to(&node2).await;
+    let mut node2 = NetworkNode::new().await;
+    node1.connect_to(&mut node2).await;
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
     // Verify that node2 still does not have channel info after active syncing done.
     let node2_channel_info = node2.get_network_graph_channel(&out_point).await;
@@ -616,7 +616,7 @@ async fn test_sync_node_announcement_on_startup() {
     init_tracing();
 
     let mut node1 = NetworkNode::new_with_node_name("node1").await;
-    let node2 = NetworkNode::new_with_node_name("node2").await;
+    let mut node2 = NetworkNode::new_with_node_name("node2").await;
     let test_pub_key = get_test_pub_key();
     let test_peer_id = get_test_peer_id();
 
@@ -625,7 +625,7 @@ async fn test_sync_node_announcement_on_startup() {
         BroadcastMessage::NodeAnnouncement(create_fake_node_announcement_message())
             .create_broadcast_messages_filter_result(),
     );
-    node1.connect_to(&node2).await;
+    node1.connect_to(&mut node2).await;
 
     // Wait for the broadcast message to be processed.
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
@@ -659,7 +659,7 @@ async fn test_sync_node_announcement_of_connected_nodes() {
 async fn test_sync_node_announcement_after_restart() {
     init_tracing();
 
-    let [node1, mut node2] = NetworkNode::new_n_interconnected_nodes().await;
+    let [mut node1, mut node2] = NetworkNode::new_n_interconnected_nodes().await;
 
     node2.stop().await;
 
@@ -671,7 +671,7 @@ async fn test_sync_node_announcement_after_restart() {
             .create_broadcast_messages_filter_result(),
     );
     node2.start().await;
-    node2.connect_to(&node1).await;
+    node2.connect_to(&mut node1).await;
 
     // Wait for the broadcast message to be processed.
     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
@@ -984,7 +984,7 @@ async fn test_abort_funding_on_building_funding_tx() {
     let funding_amount_b: u128 = u64::MAX as u128 + 1 - funding_amount_a;
     let mut node_a = NetworkNode::new().await;
     let mut node_b = NetworkNode::new().await;
-    node_a.connect_to(&node_b).await;
+    node_a.connect_to(&mut node_b).await;
 
     // Use a huge amount to fail the funding
     let message = |rpc_reply| {
@@ -1084,7 +1084,7 @@ async fn test_abort_funding_on_committing_funding_tx_on_chain() {
             .build(),
     )
     .await;
-    node_a.connect_to(&node_b).await;
+    node_a.connect_to(&mut node_b).await;
 
     let message = |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
@@ -1171,8 +1171,8 @@ async fn test_to_be_accepted_channels_number_limit() {
             .build(),
     )
     .await;
-    let peer = NetworkNode::new().await;
-    node.connect_to(&peer).await;
+    let mut peer = NetworkNode::new().await;
+    node.connect_to(&mut peer).await;
 
     let node_peer_id = node.peer_id.clone();
 
@@ -1276,8 +1276,8 @@ async fn test_to_be_accepted_channels_bytes_limit() {
             .build(),
     )
     .await;
-    let peer = NetworkNode::new().await;
-    node.connect_to(&peer).await;
+    let mut peer = NetworkNode::new().await;
+    node.connect_to(&mut peer).await;
 
     let node_peer_id = node.peer_id.clone();
 
