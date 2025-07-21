@@ -2,6 +2,8 @@ use std::env;
 use std::fs;
 use std::path::Path;
 
+use chrono::Datelike;
+
 fn rerun_if_changed(path_str: &str) -> bool {
     let path = Path::new(path_str);
 
@@ -107,7 +109,11 @@ fn main() {
             }
         }
     }
-
+    if latest_db_version.is_empty() {
+        // If there is no migrations, `latest_db_version` is set to today.
+        let now = chrono::Local::now();
+        latest_db_version = format!("{:04}{:02}{:02}", now.year(), now.month(), now.day());
+    }
     let mut code = String::new();
     code.push_str(&format!(
         "    pub const LATEST_DB_VERSION: &str = \"{}\";\n",

@@ -94,14 +94,14 @@ impl Migrations {
             let pb = move |count: u64| -> ProgressBar {
                 let pb = mpbc.add(ProgressBar::new(count));
                 #[cfg(not(target_arch = "wasm32"))]
-                pb.set_draw_target(ProgressDrawTarget::term(Term::stdout(), None));
+                pb.set_draw_target(ProgressDrawTarget::term(Term::stdout(), 1));
                 pb.set_prefix(format!("[{}/{}]", idx + 1, migrations_count));
                 pb
             };
             db = m.migrate(db, Arc::new(pb))?;
             db.put(MIGRATION_VERSION_KEY, m.version());
         }
-        mpb.join_and_clear().expect("MultiProgress join");
+        mpb.clear().expect("MultiProgress join");
         Ok(db)
     }
 
