@@ -6132,3 +6132,58 @@ async fn test_network_with_hops_max_number_limit() {
         "we can not set a max tlc expiry limit larger than 14 days"
     );
 }
+
+#[tokio::test]
+async fn test_send_payment_with_invalid_amount() {
+    init_tracing();
+    let _span = tracing::info_span!("node", node = "test").entered();
+    let (nodes, _channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((1, 0), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+        ],
+        3,
+    )
+    .await;
+    let [node_0, node_1, mut node_2] = nodes.try_into().expect("3 nodes");
+
+    let payment = node_0
+        .send_payment(SendPaymentCommand {
+            target_pubkey: Some(node_1.pubkey),
+            amount: Some(0),
+            keysend: Some(true),
+            allow_self_payment: true,
+            dry_run: true,
+            ..Default::default()
+        })
+        .await;
+
+    debug!("payment: {:?}", payment);
+    assert!(payment.is_err());
+    let error = payment.unwrap_err();
+    assert!(error.contains("amount must be greater than 0"));
+
+    let router = node_0
+        .build_router(BuildRouterCommand {
+            amount: Some(0),
+            hops_info: vec![HopRequire {
+                pubkey: node_1.pubkey,
+                channel_outpoint: None,
+            }],
+            udt_type_script: None,
+            final_tlc_expiry_delta: None,
+        })
+        .await;
+
+    eprintln!("result: {:?}", router);
+    let error = router.unwrap_err();
+    assert!(error.contains("amount must be greater than 0"));
+
+    let payment = node_0.send_mpp_payment(&mut node_2, 0, Some(2)).await;
+
+    debug!("payment: {:?}", payment);
+
+    let error = payment.unwrap_err();
+    assert!(error.contains("amount must be greater than 0"));
+}

@@ -610,6 +610,10 @@ impl SendPaymentData {
             ));
         }
 
+        if amount == 0 {
+            return Err("amount must be greater than 0".to_string());
+        }
+
         let max_fee_amount = command.max_fee_amount.unwrap_or(0);
         if amount.checked_add(max_fee_amount).is_none() {
             return Err(format!(
