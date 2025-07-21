@@ -11,6 +11,7 @@ use crate::fiber::network::*;
 use crate::fiber::types::EcdsaSignature;
 use crate::fiber::types::FiberMessage;
 use crate::fiber::types::GossipMessage;
+use crate::fiber::types::Init;
 use crate::fiber::types::Pubkey;
 use crate::fiber::types::Shutdown;
 use crate::fiber::ASSUME_NETWORK_ACTOR_ALIVE;
@@ -81,7 +82,7 @@ use crate::{
 static RETAIN_VAR: &str = "TEST_TEMP_RETAIN";
 pub const MIN_RESERVED_CKB: u128 = 4200000000;
 pub const HUGE_CKB_AMOUNT: u128 = MIN_RESERVED_CKB + 1000000000000_u128;
-const DEFAULT_WAIT_UNTIL_TIME: u64 = 60; // seconds
+const DEFAULT_WAIT_UNTIL_TIME: u64 = 60 * 4; // seconds
 
 #[derive(Debug)]
 pub struct TempDir(ManuallyDrop<OldTempDir>);
@@ -686,9 +687,7 @@ impl NetworkNode {
             ))
         };
 
-        let res = call!(self.network_actor, message).expect("source_node alive");
-        eprintln!("result: {:?}", res);
-        res
+        call!(self.network_actor, message).expect("source_node alive")
     }
 
     pub async fn build_router(&self, command: BuildRouterCommand) -> Result<PaymentRouter, String> {
@@ -698,9 +697,7 @@ impl NetworkNode {
             ))
         };
 
-        let res = call!(self.network_actor, message).expect("source_node alive");
-        eprintln!("result: {:?}", res);
-        res
+        call!(self.network_actor, message).expect("source_node alive")
     }
 
     pub async fn send_abandon_channel(&self, channel_id: Hash256) -> Result<(), String> {
@@ -1290,6 +1287,17 @@ impl NetworkNode {
             .expect("send ckb chain message");
     }
 
+    pub fn send_init_peer_message(&self, remote_peer_id: PeerId, message: Init) {
+        self.network_actor
+            .send_message(NetworkActorMessage::new_command(
+                crate::fiber::NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
+                    remote_peer_id,
+                    FiberMessage::Init(message),
+                )),
+            ))
+            .expect("send init peer message");
+    }
+
     pub async fn add_unexpected_events(&self, events: Vec<String>) {
         let mut unexpected_events = self.unexpected_events.write().await;
         for event in events {
@@ -1353,7 +1361,7 @@ impl NetworkNode {
     pub async fn new_interconnected_nodes(n: usize, enable_rpc: bool) -> Vec<Self> {
         let mut nodes: Vec<NetworkNode> = Vec::with_capacity(n);
         for i in 0..n {
-            let new = Self::new_with_config(
+            let mut new = Self::new_with_config(
                 NetworkNodeConfigBuilder::new()
                     .node_name(Some(format!("node-{}", i)))
                     .base_dir_prefix(&format!("test-fnn-node-{}-", i))
@@ -1362,7 +1370,7 @@ impl NetworkNode {
             )
             .await;
             for node in nodes.iter_mut() {
-                node.connect_to(&new).await;
+                node.connect_to(&mut new).await;
             }
             nodes.push(new);
         }
@@ -1408,9 +1416,9 @@ impl NetworkNode {
     ) -> Vec<Self> {
         let mut nodes: Vec<NetworkNode> = Vec::with_capacity(n);
         for i in 0..n {
-            let new = Self::new_with_config(config_gen(i)).await;
+            let mut new = Self::new_with_config(config_gen(i)).await;
             for node in nodes.iter_mut() {
-                node.connect_to(&new).await;
+                node.connect_to(&mut new).await;
             }
             nodes.push(new);
         }
@@ -1431,13 +1439,15 @@ impl NetworkNode {
             .expect("self alive");
     }
 
-    pub async fn connect_to(&mut self, other: &Self) {
+    pub async fn connect_to(&mut self, other: &mut Self) {
         self.connect_to_nonblocking(other).await;
         let peer_id = &other.peer_id;
         self.expect_event(
             |event| matches!(event, NetworkServiceEvent::PeerConnected(id, _addr) if id == peer_id),
         )
         .await;
+        self.expect_debug_event("PeerInit").await;
+        other.expect_debug_event("PeerInit").await;
     }
 
     pub async fn expect_to_process_event<F, T>(&mut self, event_processor: F) -> T
@@ -1588,7 +1598,7 @@ pub async fn create_mock_chain_actor() -> ActorRef<CkbChainMessage> {
         .0
 }
 
-async fn wait_for_network_graph_update(node: &NetworkNode, channels: usize) {
+pub async fn wait_for_network_graph_update(node: &NetworkNode, channels: usize) {
     // sleep for a while to make sure network graph is updated
     for _ in 0..50 {
         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
@@ -1624,4 +1634,17 @@ pub async fn wait_until<F: Fn() -> bool>(f: F) {
     const MAX_WAIT_TIME: u64 = 120_000;
 
     wait_until_timeout(MAX_WAIT_TIME, f).await;
+}
+
+#[tokio::test]
+async fn test_connect_to_other_node() {
+    let mut node_a = NetworkNode::new().await;
+    let mut node_b = NetworkNode::new().await;
+    node_a.connect_to(&mut node_b).await;
+}
+
+#[tokio::test]
+async fn test_restart_network_node() {
+    let mut node = NetworkNode::new().await;
+    node.restart().await;
 }
