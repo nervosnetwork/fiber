@@ -9,7 +9,7 @@ use crate::{
         channel::{
             AddTlcCommand, ChannelActorStateStore, ChannelCommand, ChannelCommandWithId, TLCId,
         },
-        config::{DEFAULT_TLC_EXPIRY_DELTA, PAYMENT_MAX_PARTS_LIMIT},
+        config::{CKB_SHANNONS, DEFAULT_TLC_EXPIRY_DELTA, PAYMENT_MAX_PARTS_LIMIT},
         features::FeatureVector,
         hash_algorithm::HashAlgorithm,
         network::{DebugEvent, SendPaymentCommand},
@@ -3258,4 +3258,50 @@ async fn test_mpp_can_not_find_path_filter_middle_node_features() {
     test_node_feature(0).await;
     test_node_feature(1).await;
     test_node_feature(2).await;
+}
+
+#[tokio::test]
+async fn test_send_mpp_with_large_min_tlc_value_in_channel() {
+    init_tracing();
+    // FIXME: the best find_path for MPP will find a path with 2 channels,
+    // but the current implementation is a greedy algorithm,
+    // it will find a path with 1000 CKB, then another path with 1 CKB
+    // which is less than the min_tlc_value of the channel,
+    // so the payment will fail with "no path found"
+    let (nodes, _channels) = create_n_nodes_network_with_params(
+        &[
+            (
+                (0, 1),
+                ChannelParameters {
+                    public: true,
+                    node_a_funding_amount: 1000 * CKB_SHANNONS as u128 + MIN_RESERVED_CKB,
+                    node_b_funding_amount: MIN_RESERVED_CKB,
+                    a_tlc_min_value: Some(10 * CKB_SHANNONS as u128),
+                    ..Default::default()
+                },
+            ),
+            (
+                (0, 1),
+                ChannelParameters {
+                    public: true,
+                    node_a_funding_amount: 1000 * CKB_SHANNONS as u128 + MIN_RESERVED_CKB,
+                    node_b_funding_amount: MIN_RESERVED_CKB,
+                    a_tlc_min_value: Some(10 * CKB_SHANNONS as u128),
+                    ..Default::default()
+                },
+            ),
+        ],
+        2,
+        true,
+    )
+    .await;
+    let [node_0, mut node_1] = nodes.try_into().expect("2 nodes");
+
+    let res = node_0
+        .send_mpp_payment(&mut node_1, 1001 * CKB_SHANNONS as u128, Some(2))
+        .await;
+
+    debug!("res: {:?}", res);
+    let error = res.unwrap_err();
+    assert!(error.contains("no path found"));
 }
