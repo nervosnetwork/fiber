@@ -1,5 +1,5 @@
 #![allow(clippy::needless_range_loop)]
-use crate::tests::*;
+use crate::invoice::CkbInvoice;
 use crate::{
     fiber::types::Hash256,
     invoice::Currency,
@@ -11,6 +11,7 @@ use crate::{
         peer::ListPeersResult,
     },
 };
+use crate::{gen_rand_sha256_hash, tests::*};
 use ckb_types::packed::Script;
 
 #[tokio::test]
@@ -90,6 +91,8 @@ async fn test_rpc_basic() {
 
     let ckb_invoice = invoice_res.invoice.clone();
     let invoice_payment_hash = ckb_invoice.data.payment_hash;
+    let internal_ckb_invoice: CkbInvoice = invoice_res.invoice_address.parse().unwrap();
+    assert!(internal_ckb_invoice.payment_secret().is_some());
 
     let get_invoice_res: InvoiceResult = node_0
         .send_rpc_request(
@@ -117,6 +120,28 @@ async fn test_rpc_basic() {
         .unwrap();
     eprintln!("Raw RPC response: {}", raw_response);
     assert!(raw_response.to_string().contains("BASIC_MPP_OPTIONAL"));
+
+    let new_invoice_params = NewInvoiceParams {
+        amount: 1000,
+        description: Some("test".to_string()),
+        currency: Currency::Fibd,
+        expiry: Some(322),
+        fallback_address: None,
+        final_expiry_delta: Some(900000 + 1234),
+        udt_type_script: Some(Script::default().into()),
+        payment_preimage: gen_rand_sha256_hash(),
+        hash_algorithm: Some(crate::fiber::hash_algorithm::HashAlgorithm::CkbHash),
+        allow_mpp: Some(false),
+    };
+
+    // node0 generate a invoice
+    let invoice_res: InvoiceResult = node_0
+        .send_rpc_request("new_invoice", new_invoice_params)
+        .await
+        .unwrap();
+
+    let internal_ckb_invoice: CkbInvoice = invoice_res.invoice_address.parse().unwrap();
+    assert!(internal_ckb_invoice.payment_secret().is_none());
 }
 
 #[tokio::test]

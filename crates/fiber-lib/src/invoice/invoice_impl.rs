@@ -660,21 +660,15 @@ impl InvoiceBuilder {
         self.add_attr(Attribute::UdtScript(CkbScript(script)))
     }
 
-    pub fn hash_algorithm(self, algorithm: HashAlgorithm) -> Self {
-        self.add_attr(Attribute::HashAlgorithm(algorithm))
-    }
-
-    pub fn payment_secret(self, payment_secret: Hash256) -> Self {
-        self.add_attr(Attribute::PaymentSecret(payment_secret))
-    }
-
     attr_setter!(description, Description, String);
     attr_setter!(payee_pub_key, PayeePublicKey, PublicKey);
     attr_setter!(expiry_time, ExpiryTime, Duration);
     attr_setter!(fallback_address, FallbackAddr, String);
     attr_setter!(final_expiry_delta, FinalHtlcMinimumExpiryDelta, u64);
+    attr_setter!(payment_secret, PaymentSecret, Hash256);
+    attr_setter!(hash_algorithm, HashAlgorithm, HashAlgorithm);
 
-    pub fn allow_mpp(self, value: bool) -> Self {
+    pub fn allow_mpp(self, allow_mpp: bool) -> Self {
         let mut feature_vector = self
             .attrs
             .iter()
@@ -687,7 +681,7 @@ impl InvoiceBuilder {
             })
             .unwrap_or_else(FeatureVector::new);
 
-        if value {
+        if allow_mpp {
             feature_vector.set_basic_mpp_optional();
         } else {
             feature_vector.unset_basic_mpp_optional();
@@ -746,6 +740,17 @@ impl InvoiceBuilder {
     }
 
     fn check_attrs_valid(&self) -> Result<(), InvoiceError> {
+        let allow_mpp = self.attrs.iter().any(
+            |attr| matches!(attr, Attribute::Feature(feature) if feature.supports_basic_mpp()),
+        );
+        let payment_secret = self.attrs.iter().find_map(|attr| match attr {
+            Attribute::PaymentSecret(secret) => Some(secret),
+            _ => None,
+        });
+
+        if allow_mpp && payment_secret.is_none() {
+            return Err(InvoiceError::PaymentSecretRequiredForMpp);
+        }
         // check is there any duplicate attribute key set
         for (i, attr) in self.attrs.iter().enumerate() {
             for other in self.attrs.iter().skip(i + 1) {

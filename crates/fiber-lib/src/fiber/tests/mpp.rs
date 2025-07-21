@@ -120,8 +120,7 @@ async fn test_send_mpp_without_payment_secret_will_fail() {
         2,
     )
     .await;
-    let [mut node_0, mut node_1] = nodes.try_into().expect("2 nodes");
-    let source_node = &mut node_0;
+    let [_node_0, node_1] = nodes.try_into().expect("2 nodes");
     let target_pubkey = node_1.pubkey;
 
     let preimage = gen_rand_sha256_hash();
@@ -130,28 +129,14 @@ async fn test_send_mpp_without_payment_secret_will_fail() {
         .payment_preimage(preimage)
         .payee_pub_key(target_pubkey.into())
         .allow_mpp(true)
-        .build()
-        .expect("build invoice success");
+        .build();
 
-    node_1.insert_invoice(ckb_invoice.clone(), Some(preimage));
-
-    let res = source_node
-        .send_payment(SendPaymentCommand {
-            invoice: Some(ckb_invoice.to_string()),
-            amount: ckb_invoice.amount,
-            max_parts: Some(2),
-            ..Default::default()
-        })
-        .await;
-
-    eprintln!("res: {:?}", res);
+    let error = ckb_invoice.unwrap_err().to_string();
     assert!(
-        res.is_err(),
-        "should fail because payment secret is missing"
+        error.contains("Payment secret is required for MPP payments"),
+        "should contain error about payment secret: {}",
+        error
     );
-    assert!(res
-        .unwrap_err()
-        .contains("payment secret is required for multi-path payment"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

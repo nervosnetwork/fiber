@@ -298,12 +298,14 @@ where
         if let Some(fallback_address) = params.fallback_address.clone() {
             invoice_builder = invoice_builder.fallback_address(fallback_address);
         };
+
         if let Some(allow_mpp) = params.allow_mpp {
-            let mut rng = rand::thread_rng();
-            let payment_secret: [u8; 32] = rng.gen();
-            invoice_builder = invoice_builder
-                .allow_mpp(allow_mpp)
-                .payment_secret(payment_secret.into());
+            invoice_builder = invoice_builder.allow_mpp(allow_mpp);
+            if allow_mpp {
+                let mut rng = rand::thread_rng();
+                let payment_secret: [u8; 32] = rng.gen();
+                invoice_builder = invoice_builder.payment_secret(payment_secret.into());
+            }
         };
         if let Some(final_expiry_delta) = params.final_expiry_delta {
             if final_expiry_delta < MIN_TLC_EXPIRY_DELTA {
