@@ -2013,6 +2013,7 @@ dependencies = [
  "either",
  "fiber-sphinx",
  "futures",
+ "getrandom 0.2.15",
  "git-version",
  "hex",
  "home",
