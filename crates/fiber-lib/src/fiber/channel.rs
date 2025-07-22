@@ -101,7 +101,6 @@ pub const COMMITMENT_CELL_WITNESS_LEN: usize = 16 + 1 + 32 + 64;
 // is funded or not.
 pub const INITIAL_COMMITMENT_NUMBER: u64 = 0;
 
-const RETRYABLE_TLC_OPS_INTERVAL: Duration = Duration::from_millis(1000);
 const WAITING_REESTABLISH_FINISH_TIMEOUT: Duration = Duration::from_millis(4000);
 
 // if a important TLC operation is not acked in 30 seconds, we will try to disconnect the peer.
@@ -1694,25 +1693,13 @@ where
         &self,
         myself: &ActorRef<ChannelActorMessage>,
         state: &mut ChannelActorState,
-        force: bool,
     ) {
         if state.reestablishing {
             myself.send_after(WAITING_REESTABLISH_FINISH_TIMEOUT, || {
-                ChannelActorMessage::Event(ChannelEvent::CheckTlcRetryOperation(false))
+                ChannelActorMessage::Event(ChannelEvent::CheckTlcRetryOperation)
             });
             return;
         }
-        if !force {
-            if let Some(last_time) = state.retryable_task_last_run_at {
-                if last_time + RETRYABLE_TLC_OPS_INTERVAL.as_millis() as u64
-                    > now_timestamp_as_millis_u64()
-                {
-                    // don't run retryable tasks too frequently
-                    return;
-                }
-            }
-        }
-        state.retryable_task_last_run_at = Some(now_timestamp_as_millis_u64());
         let mut pending_tlc_ops = state.tlc_state.get_pending_operations();
         pending_tlc_ops.retain_mut(|retryable_operation| {
             match retryable_operation {
@@ -1816,7 +1803,7 @@ where
 
         state.tlc_state.retryable_tlc_operations = pending_tlc_ops;
         if state.tlc_state.has_pending_operations() {
-            state.trigger_retryable_tasks(myself, false);
+            state.trigger_retryable_tasks(myself, true);
         }
     }
 
@@ -2122,9 +2109,8 @@ where
                 state.update_state(ChannelState::AwaitingChannelReady(flags));
                 state.maybe_channel_is_ready(myself).await;
             }
-            ChannelEvent::CheckTlcRetryOperation(force) => {
-                self.apply_retryable_tlc_operations(myself, state, force)
-                    .await;
+            ChannelEvent::CheckTlcRetryOperation => {
+                self.apply_retryable_tlc_operations(myself, state).await;
             }
             ChannelEvent::Stop(reason) => {
                 debug_event!(self.network, "ChannelActorStopped");
@@ -2623,7 +2609,7 @@ where
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         if state.tlc_state.has_pending_operations() && !state.reestablishing {
-            state.trigger_retryable_tasks(&myself, false);
+            state.trigger_retryable_tasks(&myself, true);
         }
 
         // handle funding timeout
@@ -3608,10 +3594,6 @@ pub struct ChannelActorState {
     // The arc here is only used to implement the clone trait for the ChannelActorState.
     #[serde(skip)]
     pub scheduled_channel_update_handle: ScheduledChannelUpdateHandle,
-
-    #[serde(skip)]
-    pub retryable_task_last_run_at: Option<u64>,
-
     #[serde(skip)]
     pub ephemeral_config: ChannelEphemeralConfig,
 }
@@ -3708,7 +3690,7 @@ pub enum ChannelEvent {
     Stop(StopReason),
     FundingTransactionConfirmed(H256, u32, u64),
     ClosingTransactionConfirmed(bool),
-    CheckTlcRetryOperation(bool),
+    CheckTlcRetryOperation,
     CheckActiveChannel,
     CheckFundingTimeout,
 }
@@ -4365,19 +4347,13 @@ impl ChannelActorState {
     fn trigger_retryable_tasks(
         &mut self,
         myself: &ActorRef<ChannelActorMessage>,
-        first_register: bool,
+        _first_register: bool,
     ) {
-        if first_register {
-            myself
-                .send_message(ChannelActorMessage::Event(
-                    ChannelEvent::CheckTlcRetryOperation(true),
-                ))
-                .expect("myself alive");
-        } else {
-            myself.send_after(RETRYABLE_TLC_OPS_INTERVAL, || {
-                ChannelActorMessage::Event(ChannelEvent::CheckTlcRetryOperation(false))
-            });
-        }
+        myself
+            .send_message(ChannelActorMessage::Event(
+                ChannelEvent::CheckTlcRetryOperation,
+            ))
+            .expect("myself alive");
     }
 
     pub fn get_unsigned_channel_update_message(&self) -> Option<ChannelUpdate> {
@@ -4489,7 +4465,6 @@ impl ChannelActorState {
             waiting_peer_response: None,
             network: Some(network),
             scheduled_channel_update_handle: None,
-            retryable_task_last_run_at: None,
             ephemeral_config: Default::default(),
         };
         if let Some(nonce) = remote_channel_announcement_nonce {
@@ -4564,7 +4539,6 @@ impl ChannelActorState {
             waiting_peer_response: None,
             network: Some(network),
             scheduled_channel_update_handle: None,
-            retryable_task_last_run_at: None,
             ephemeral_config: Default::default(),
         }
     }
@@ -6359,7 +6333,7 @@ impl ChannelActorState {
         }
         if self.tlc_state.has_pending_operations() {
             myself.send_after(WAITING_REESTABLISH_FINISH_TIMEOUT, || {
-                ChannelActorMessage::Event(ChannelEvent::CheckTlcRetryOperation(true))
+                ChannelActorMessage::Event(ChannelEvent::CheckTlcRetryOperation)
             });
         }
         // If the channel is already ready, we should notify the network actor.

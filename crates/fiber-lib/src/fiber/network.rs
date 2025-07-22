@@ -1065,7 +1065,7 @@ where
                             session.payment_hash(),
                             channel_id
                         );
-                        self.register_payment_retry(myself.clone(), session.payment_hash());
+                        self.register_payment_retry(myself.clone(), session.payment_hash(), 500);
                     }
                 }
             }
@@ -1857,7 +1857,7 @@ where
                             false,
                         );
                         if need_to_retry {
-                            self.register_payment_retry(myself, payment_hash);
+                            self.register_payment_retry(myself, payment_hash, 500);
                         } else {
                             self.set_payment_fail_with_error(
                                 &mut payment_session,
@@ -2085,7 +2085,8 @@ where
         self.store.insert_payment_session(payment_session);
 
         if need_to_retry {
-            self.register_payment_retry(myself, payment_hash);
+            self.register_payment_retry(myself, payment_hash, 10);
+            //let _ = self.try_payment_session(myself, state, payment_hash).await;
         }
     }
 
@@ -2141,7 +2142,7 @@ where
                         // If this is the first hop error, such as the WaitingTlcAck error,
                         // we will just retry later, return Ok here for letting endpoint user
                         // know payment session is created successfully
-                        self.register_payment_retry(myself, payment_hash);
+                        self.register_payment_retry(myself, payment_hash, 10);
                         return Ok(payment_session);
                     } else {
                         return Err(err);
@@ -2159,9 +2160,13 @@ where
         }
     }
 
-    fn register_payment_retry(&self, myself: ActorRef<NetworkActorMessage>, payment_hash: Hash256) {
-        let rand_time = rand::thread_rng().gen_range(1000..2000);
-        myself.send_after(Duration::from_millis(rand_time), move || {
+    fn register_payment_retry(
+        &self,
+        myself: ActorRef<NetworkActorMessage>,
+        payment_hash: Hash256,
+        delay_millis: u64,
+    ) {
+        myself.send_after(Duration::from_millis(delay_millis), move || {
             NetworkActorMessage::new_event(NetworkActorEvent::RetrySendPayment(payment_hash))
         });
     }
