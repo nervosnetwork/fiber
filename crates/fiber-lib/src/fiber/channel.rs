@@ -1765,18 +1765,17 @@ where
     fn set_forward_tlc_status(
         &self,
         state: &mut ChannelActorState,
-        payment_hash: Hash256,
-        last_tlc_id: u64,
-        try_one_time: bool,
+        forward_op: &RetryableTlcOperation,
+        retry: bool,
     ) {
-        // update all pending tlcs which id <= last_tlc_id
-        for  op in
-            state.tlc_state.retryable_tlc_operations.iter_mut().filter(
-                |op| matches!(op, RetryableTlcOperation::ForwardTlc(ph, tlc_id,..) if *ph == payment_hash && u64::from(*tlc_id) <= last_tlc_id)
-            )
+        for op in state
+            .tlc_state
+            .retryable_tlc_operations
+            .iter_mut()
+            .filter(|op| *op == forward_op)
         {
-if let RetryableTlcOperation::ForwardTlc(.., ref mut sent) = op {
-            *sent = try_one_time;
+            if let RetryableTlcOperation::ForwardTlc(.., ref mut sent) = op {
+                *sent = retry;
             }
         }
     }
@@ -1893,7 +1892,6 @@ if let RetryableTlcOperation::ForwardTlc(.., ref mut sent) = op {
                             Ok(_) => {
                                 // here we just make sure the forward tlc is sent, we don't need to wait for the result
                                 // retry it if necessary until we get ForwardTlcResult
-                                // self.set_forward_tlc_status(state, *payment_hash, false);
                                 *try_one_time = false;
                                 true
                             }
@@ -1913,54 +1911,64 @@ if let RetryableTlcOperation::ForwardTlc(.., ref mut sent) = op {
         }
     }
 
+    fn find_matching_forward_tlc_operation(
+        &self,
+        state: &ChannelActorState,
+        result: &ForwardTlcResult,
+    ) -> Option<(RetryableTlcOperation, PeeledPaymentOnionPacket)> {
+        state
+            .tlc_state
+            .get_pending_operations()
+            .iter()
+            .find_map(|op| match op {
+                RetryableTlcOperation::ForwardTlc(payment_hash, tlc_id, peel_packet, ..)
+                    if *payment_hash == result.payment_hash
+                        && u64::from(*tlc_id) == result.tlc_id =>
+                {
+                    Some((op.clone(), peel_packet.clone()))
+                }
+                _ => None,
+            })
+    }
+
     async fn handle_forward_tlc_result(
         &self,
         myself: &ActorRef<ChannelActorMessage>,
         state: &mut ChannelActorState,
         result: ForwardTlcResult,
     ) {
-        let pending_ops = state.tlc_state.get_pending_operations();
-        if let Some((tlc_op, peeled_onion)) = pending_ops.iter().find_map(|op| match op {
-            RetryableTlcOperation::ForwardTlc(payment_hash, _, peel_onion_packet, ..)
-                if *payment_hash == result.payment_hash =>
-            {
-                Some((op, peel_onion_packet))
-            }
-            _ => None,
-        }) {
-            if let Some((channel_err, tlc_err)) = result.error_info {
-                match channel_err {
-                    ProcessingChannelError::WaitingTlcAck => {
-                        // if we get WaitingTlcAck error, we will retry it later
-                        self.set_forward_tlc_status(
-                            state,
-                            result.payment_hash,
-                            result.tlc_id,
-                            true,
-                        );
-                    }
-                    ProcessingChannelError::RepeatedProcessing(_) => {
-                        // ignore repeated processing error, we have already handled it
-                        state.tlc_state.remove_pending_tlc_operation(tlc_op);
-                    }
-                    _ => {
-                        let error = ProcessingChannelError::TlcForwardingError(tlc_err)
-                            .with_shared_secret(peeled_onion.shared_secret);
-                        self.process_add_tlc_error(
-                            myself,
-                            state,
-                            result.payment_hash,
-                            TLCId::Received(result.tlc_id),
-                            error,
-                        )
-                        .await;
-                        state.tlc_state.remove_pending_tlc_operation(tlc_op);
-                    }
+        let Some((tlc_op, peeled_onion)) = self.find_matching_forward_tlc_operation(state, &result)
+        else {
+            return;
+        };
+
+        if let Some((channel_err, tlc_err)) = result.error_info {
+            match channel_err {
+                ProcessingChannelError::WaitingTlcAck => {
+                    // if we get WaitingTlcAck error, we will retry it later
+                    self.set_forward_tlc_status(state, &tlc_op, true);
                 }
-            } else {
-                // if we get success result from AddTlc, we will remove the pending operation
-                state.tlc_state.remove_pending_tlc_operation(tlc_op);
+                ProcessingChannelError::RepeatedProcessing(_) => {
+                    // ignore repeated processing error, we have already handled it
+                    state.tlc_state.remove_pending_tlc_operation(&tlc_op);
+                }
+                _ => {
+                    let error = ProcessingChannelError::TlcForwardingError(tlc_err)
+                        .with_shared_secret(peeled_onion.shared_secret);
+                    self.process_add_tlc_error(
+                        myself,
+                        state,
+                        result.payment_hash,
+                        TLCId::Received(result.tlc_id),
+                        error,
+                    )
+                    .await;
+                    state.tlc_state.remove_pending_tlc_operation(&tlc_op);
+                }
             }
+        } else {
+            // if we get success result from AddTlc, we will remove the pending operation
+            state.tlc_state.remove_pending_tlc_operation(&tlc_op);
         }
     }
 
