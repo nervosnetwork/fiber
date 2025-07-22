@@ -1858,6 +1858,7 @@ dependencies = [
  "either",
  "fiber-sphinx",
  "futures",
+ "getrandom 0.2.16",
  "getrandom 0.3.3",
  "git-version",
  "hex",
