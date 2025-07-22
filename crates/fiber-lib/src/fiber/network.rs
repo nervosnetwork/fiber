@@ -2085,8 +2085,7 @@ where
         self.store.insert_payment_session(payment_session);
 
         if need_to_retry {
-            self.register_payment_retry(myself, payment_hash, 10);
-            //let _ = self.try_payment_session(myself, state, payment_hash).await;
+            self.register_payment_retry(myself, payment_hash, 50);
         }
     }
 
@@ -2142,7 +2141,7 @@ where
                         // If this is the first hop error, such as the WaitingTlcAck error,
                         // we will just retry later, return Ok here for letting endpoint user
                         // know payment session is created successfully
-                        self.register_payment_retry(myself, payment_hash, 10);
+                        self.register_payment_retry(myself, payment_hash, 50);
                         return Ok(payment_session);
                     } else {
                         return Err(err);

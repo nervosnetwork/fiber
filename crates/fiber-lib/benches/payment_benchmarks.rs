@@ -33,6 +33,7 @@ fn bench_payment_path_finding(c: &mut Criterion) {
                     // Create the network
                     let (nodes, _channels) = create_n_nodes_network(&channel_configs, 3).await;
 
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                     // Start timing
                     let start = std::time::Instant::now();
 
@@ -83,7 +84,7 @@ criterion_group! {
     name = benches;
     config = Criterion::default()
         .warm_up_time(std::time::Duration::from_millis(500))
-        .measurement_time(std::time::Duration::from_secs(40)) // Increased from default 5s to 25s
+        .measurement_time(std::time::Duration::from_secs(40))
         .sample_size(10);
     targets = bench_payment_path_finding
 }

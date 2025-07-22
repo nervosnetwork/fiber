@@ -101,6 +101,7 @@ pub const COMMITMENT_CELL_WITNESS_LEN: usize = 16 + 1 + 32 + 64;
 // is funded or not.
 pub const INITIAL_COMMITMENT_NUMBER: u64 = 0;
 
+const RETRYABLE_TLC_OPS_INTERVAL: Duration = Duration::from_millis(1000);
 const WAITING_REESTABLISH_FINISH_TIMEOUT: Duration = Duration::from_millis(4000);
 
 // if a important TLC operation is not acked in 30 seconds, we will try to disconnect the peer.
@@ -1670,7 +1671,7 @@ where
         operation: RetryableTlcOperation,
     ) {
         if state.tlc_state.insert_retryable_tlc_operation(operation) {
-            state.trigger_retryable_tasks(myself, true);
+            state.trigger_retryable_tasks(myself, false);
         }
     }
 
@@ -2609,7 +2610,7 @@ where
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         if state.tlc_state.has_pending_operations() && !state.reestablishing {
-            state.trigger_retryable_tasks(&myself, true);
+            state.trigger_retryable_tasks(&myself, false);
         }
 
         // handle funding timeout
@@ -4344,16 +4345,18 @@ impl ChannelActorState {
         }
     }
 
-    fn trigger_retryable_tasks(
-        &mut self,
-        myself: &ActorRef<ChannelActorMessage>,
-        _first_register: bool,
-    ) {
-        myself
-            .send_message(ChannelActorMessage::Event(
-                ChannelEvent::CheckTlcRetryOperation,
-            ))
-            .expect("myself alive");
+    fn trigger_retryable_tasks(&mut self, myself: &ActorRef<ChannelActorMessage>, delay: bool) {
+        if delay {
+            myself.send_after(RETRYABLE_TLC_OPS_INTERVAL, || {
+                ChannelActorMessage::Event(ChannelEvent::CheckTlcRetryOperation)
+            });
+        } else {
+            myself
+                .send_message(ChannelActorMessage::Event(
+                    ChannelEvent::CheckTlcRetryOperation,
+                ))
+                .expect("myself alive");
+        }
     }
 
     pub fn get_unsigned_channel_update_message(&self) -> Option<ChannelUpdate> {
