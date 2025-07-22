@@ -10,6 +10,7 @@ use crate::fiber::fee::check_open_channel_parameters;
 use crate::fiber::network::DebugEvent;
 use crate::fiber::network::PaymentCustomRecords;
 use crate::utils::payment::is_invoice_fulfilled;
+
 use crate::{
     ckb::{
         contracts::{get_cell_deps, get_script_by_contract, Contract},
@@ -1765,14 +1766,18 @@ where
         &self,
         state: &mut ChannelActorState,
         payment_hash: Hash256,
+        last_tlc_id: u64,
         try_one_time: bool,
     ) {
-        if let Some(RetryableTlcOperation::ForwardTlc(.., ref mut sent)) =
-            state.tlc_state.retryable_tlc_operations.iter_mut().find(
-                |op| matches!(op, RetryableTlcOperation::ForwardTlc(ph,..) if *ph == payment_hash),
+        // update all pending tlcs which id <= last_tlc_id
+        for  op in
+            state.tlc_state.retryable_tlc_operations.iter_mut().filter(
+                |op| matches!(op, RetryableTlcOperation::ForwardTlc(ph, tlc_id,..) if *ph == payment_hash && u64::from(*tlc_id) <= last_tlc_id)
             )
         {
+if let RetryableTlcOperation::ForwardTlc(.., ref mut sent) = op {
             *sent = try_one_time;
+            }
         }
     }
 
@@ -1927,7 +1932,12 @@ where
                 match channel_err {
                     ProcessingChannelError::WaitingTlcAck => {
                         // if we get WaitingTlcAck error, we will retry it later
-                        self.set_forward_tlc_status(state, result.payment_hash, true);
+                        self.set_forward_tlc_status(
+                            state,
+                            result.payment_hash,
+                            result.tlc_id,
+                            true,
+                        );
                     }
                     ProcessingChannelError::RepeatedProcessing(_) => {
                         // ignore repeated processing error, we have already handled it
