@@ -1,6 +1,6 @@
 use crate::ckb::tests::test_utils::complete_commitment_tx;
 use crate::fiber::channel::{
-    AddTlcResponse, ChannelState, CloseFlags, UpdateCommand, XUDT_COMPATIBLE_WITNESS,
+    AddTlcResponse, ChannelState, CloseFlags, TLCId, UpdateCommand, XUDT_COMPATIBLE_WITNESS,
 };
 use crate::fiber::config::{DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT};
 use crate::fiber::features::FeatureVector;
@@ -2334,7 +2334,6 @@ async fn test_network_add_two_tlcs_remove_one() {
 
     eprintln!("add_tlc_result: {:?}", add_tlc_result_b);
 
-    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
     // remove tlc from node_b
     call!(node_b.network_actor, |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
@@ -2355,7 +2354,18 @@ async fn test_network_add_two_tlcs_remove_one() {
     .expect("node_b alive")
     .expect("successfully removed tlc");
     eprintln!("remove tlc result: {:?}", ());
-    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+    loop {
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        let a_tlc_state = node_a.get_channel_actor_state(channel_id);
+        if a_tlc_state
+            .tlc_state
+            .get(&TLCId::Offered(add_tlc_result_a.tlc_id))
+            .is_none()
+        {
+            break;
+        }
+    }
 
     let new_a_balance = node_a.get_local_balance_from_channel(channel_id);
     let new_b_balance = node_b.get_local_balance_from_channel(channel_id);
@@ -2368,13 +2378,14 @@ async fn test_network_add_two_tlcs_remove_one() {
 
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
     // remove the later tlc from node_b
+    let tlc_id_b = add_tlc_result_b.unwrap().tlc_id;
     call!(node_b.network_actor, |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id,
                 command: ChannelCommand::RemoveTlc(
                     RemoveTlcCommand {
-                        id: add_tlc_result_b.unwrap().tlc_id,
+                        id: tlc_id_b,
                         reason: RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
                             payment_preimage: preimage_b.into(),
                         }),
@@ -2387,7 +2398,18 @@ async fn test_network_add_two_tlcs_remove_one() {
     .expect("node_b alive")
     .expect("successfully removed tlc");
     eprintln!("remove tlc result: {:?}", ());
-    tokio::time::sleep(tokio::time::Duration::from_millis(400)).await;
+
+    loop {
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        let a_tlc_state = node_a.get_channel_actor_state(channel_id);
+        if a_tlc_state
+            .tlc_state
+            .get(&TLCId::Offered(tlc_id_b))
+            .is_none()
+        {
+            break;
+        }
+    }
 
     let new_a_balance = node_a.get_local_balance_from_channel(channel_id);
     let new_b_balance = node_b.get_local_balance_from_channel(channel_id);

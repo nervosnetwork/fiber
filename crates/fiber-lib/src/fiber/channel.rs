@@ -7303,7 +7303,9 @@ impl ChannelActorState {
         } else {
             [remote_pubkey, local_pubkey]
         };
-        let key_agg_ctx = KeyAggContext::new(pubkeys).expect("Valid pubkeys");
+        let key_agg_ctx = KeyAggContext::new(pubkeys).map_err(|e| {
+            ProcessingChannelError::InternalError(format!("Failed to create KeyAggContext: {}", e))
+        })?;
         let remote_nonce = if signed_commit_nonce {
             self.get_last_commitment_signed_remote_nonce()
             .ok_or(ProcessingChannelError::InvalidState(
