@@ -466,10 +466,14 @@ where
                 Ok(())
             }
             FiberChannelMessage::TxUpdate(tx) => {
-                state.handle_tx_collaboration_msg(TxCollaborationMsg::TxUpdate(tx))
+                state
+                    .handle_tx_collaboration_msg(TxCollaborationMsg::TxUpdate(tx))
+                    .await
             }
             FiberChannelMessage::TxComplete(tx) => {
-                state.handle_tx_collaboration_msg(TxCollaborationMsg::TxComplete(tx))?;
+                state
+                    .handle_tx_collaboration_msg(TxCollaborationMsg::TxComplete(tx))
+                    .await?;
                 if let ChannelState::CollaboratingFundingTx(flags) = state.state {
                     if flags.contains(CollaboratingFundingTxFlags::COLLABORATION_COMPLETED) {
                         self.handle_commitment_signed_command(myself, state).await?;
@@ -6006,7 +6010,10 @@ impl ChannelActorState {
 
     // This is the dual of `handle_tx_collaboration_command`. Any logic error here is likely
     // to present in the other function as well.
-    fn handle_tx_collaboration_msg(&mut self, msg: TxCollaborationMsg) -> ProcessingChannelResult {
+    async fn handle_tx_collaboration_msg(
+        &mut self,
+        msg: TxCollaborationMsg,
+    ) -> ProcessingChannelResult {
         debug!("Processing tx collaboration message: {:?}", &msg);
         let network = self.network();
         let is_complete_message = matches!(msg, TxCollaborationMsg::TxComplete(_));
@@ -6061,7 +6068,23 @@ impl ChannelActorState {
         };
         match msg {
             TxCollaborationMsg::TxUpdate(msg) => {
-                // TODO check if the tx is valid.
+                if let Err(err) = call!(network, |tx| NetworkActorMessage::Command(
+                    NetworkActorCommand::VerifyFundingTx {
+                        local_tx: self.funding_tx.clone().unwrap_or_default(),
+                        remote_tx: msg.tx.clone(),
+                        reply: tx
+                    }
+                ))
+                .expect(ASSUME_NETWORK_ACTOR_ALIVE)
+                {
+                    error!(
+                        "fails to verify the TxUpdate message from the peer: {}",
+                        err
+                    );
+                    // TODO: abort funding on permanent errors
+                    return Ok(());
+                }
+
                 self.funding_tx = Some(msg.tx.clone());
                 if self.is_tx_final(&msg.tx)? {
                     self.maybe_complete_tx_collaboration(msg.tx)?;

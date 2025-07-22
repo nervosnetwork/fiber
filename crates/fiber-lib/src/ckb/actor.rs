@@ -1,7 +1,8 @@
 use ckb_sdk::{CkbRpcAsyncClient, RpcError};
 use ckb_types::{
     core::{tx_pool::TxStatus, TransactionView},
-    packed,
+    packed::{self, Transaction},
+    prelude::IntoTransactionView as _,
 };
 use ractor::{concurrency::Duration, Actor, ActorProcessingErr, ActorRef, RpcReplyPort};
 use tracing::debug;
@@ -88,6 +89,11 @@ pub enum CkbChainMessage {
         FundingRequest,
         RpcReplyPort<Result<FundingTx, FundingError>>,
     ),
+    VerifyFundingTx {
+        local_tx: Transaction,
+        remote_tx: Transaction,
+        reply: RpcReplyPort<Result<(), FundingError>>,
+    },
     /// Add funding tx. This is used to reestablish a channel that is not ready yet.
     /// Adding a funding tx will add its used input cells to the exclusion list.
     AddFundingTx(FundingTx),
@@ -166,6 +172,15 @@ impl Actor for CkbChainActor {
                         let _ = reply_port.send(result);
                     }
                 }
+            }
+            CkbChainMessage::VerifyFundingTx {
+                local_tx,
+                remote_tx,
+                reply,
+            } => {
+                let mut funding_tx: FundingTx = local_tx.into();
+                let result = funding_tx.update_for_peer(remote_tx.into_view());
+                let _ = reply.send(result);
             }
             CkbChainMessage::AddFundingTx(tx) => {
                 state.live_cells_exclusion_map.add_funding_tx(&tx);
