@@ -4204,7 +4204,7 @@ impl ToBeAcceptedChannels {
         Ok(())
     }
 }
-
+#[cfg(not(target_arch = "wasm32"))]
 async fn fund_via_shell(
     shell_script: String,
     mut tx: FundingTx,
@@ -4255,4 +4255,13 @@ async fn fund_via_shell(
             ckb_sdk::tx_builder::TxBuilderError::Other(anyhow::anyhow!(err)),
         ))
     }
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn fund_via_shell(
+    _shell_script: String,
+    _tx: FundingTx,
+    _request: FundingRequest,
+) -> Result<FundingTx, FundingError> {
+    todo!();
 }

@@ -1,12 +1,12 @@
 use std::path::PathBuf;
 
-use serde::Serialize;
-use serde::Deserialize;
-use clap::Parser;
-use clap_serde_derive::ClapSerde;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::CchConfig;
 use crate::{ckb::CkbConfig, rpc::config::RpcConfig, FiberConfig};
+use clap::Parser;
+use clap_serde_derive::ClapSerde;
+use serde::Deserialize;
+use serde::Serialize;
 
 #[derive(Debug)]
 pub struct Config {
