@@ -10,7 +10,8 @@ use crate::gen_rand_sha256_hash;
 use crate::now_timestamp_as_millis_u64;
 use ckb_hash::new_blake2b;
 use ckb_types::packed::Byte32;
-use ractor::{async_trait as rasync_trait, Actor, ActorProcessingErr, ActorRef};
+
+use ractor::{Actor, ActorProcessingErr, ActorRef};
 use std::collections::HashMap;
 
 fn sign_tlcs<'a>(tlcs: impl Iterator<Item = &'a TlcInfo>) -> Hash256 {
@@ -120,7 +121,8 @@ pub enum NetworkActorMessage {
     PeerMsg(String, TlcActorMessage),
 }
 
-#[rasync_trait]
+#[cfg_attr(target_arch="wasm32",async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl Actor for NetworkActor {
     type Msg = NetworkActorMessage;
     type State = NetworkActorState;
@@ -174,7 +176,8 @@ impl Actor for NetworkActor {
     }
 }
 
-#[rasync_trait]
+#[cfg_attr(target_arch="wasm32",async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl Actor for TlcActor {
     type Msg = TlcActorMessage;
     type State = TlcActorState;

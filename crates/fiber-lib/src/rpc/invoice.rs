@@ -198,6 +198,7 @@ pub struct GetInvoiceResult {
 }
 
 /// RPC module for invoice management.
+#[cfg(not(target_arch = "wasm32"))]
 #[rpc(server)]
 trait InvoiceRpc {
     /// Generates a new invoice.
@@ -266,13 +267,50 @@ impl<S> InvoiceRpcServerImpl<S> {
         }
     }
 }
-
-#[async_trait]
+#[cfg(not(target_arch = "wasm32"))]
+#[async_trait::async_trait]
 impl<S> InvoiceRpcServer for InvoiceRpcServerImpl<S>
 where
     S: InvoiceStore + Send + Sync + 'static,
 {
+    /// Generates a new invoice.
     async fn new_invoice(
+        &self,
+        params: NewInvoiceParams,
+    ) -> Result<InvoiceResult, ErrorObjectOwned> {
+        self.new_invoice(params).await
+    }
+
+    /// Parses a encoded invoice.
+    async fn parse_invoice(
+        &self,
+        params: ParseInvoiceParams,
+    ) -> Result<ParseInvoiceResult, ErrorObjectOwned> {
+        self.parse_invoice(params).await
+    }
+
+    /// Retrieves an invoice.
+    async fn get_invoice(
+        &self,
+        payment_hash: InvoiceParams,
+    ) -> Result<GetInvoiceResult, ErrorObjectOwned> {
+        self.get_invoice(payment_hash).await
+    }
+
+    /// Cancels an invoice, only when invoice is in status `Open` can be canceled.
+    async fn cancel_invoice(
+        &self,
+        payment_hash: InvoiceParams,
+    ) -> Result<GetInvoiceResult, ErrorObjectOwned> {
+        self.cancel_invoice(payment_hash).await
+    }
+}
+
+impl<S> InvoiceRpcServerImpl<S>
+where
+    S: InvoiceStore + Send + Sync + 'static,
+{
+    pub async fn new_invoice(
         &self,
         params: NewInvoiceParams,
     ) -> Result<InvoiceResult, ErrorObjectOwned> {
@@ -360,7 +398,7 @@ where
         }
     }
 
-    async fn parse_invoice(
+    pub async fn parse_invoice(
         &self,
         params: ParseInvoiceParams,
     ) -> Result<ParseInvoiceResult, ErrorObjectOwned> {
@@ -377,7 +415,7 @@ where
         }
     }
 
-    async fn get_invoice(
+    pub async fn get_invoice(
         &self,
         params: InvoiceParams,
     ) -> Result<GetInvoiceResult, ErrorObjectOwned> {
@@ -407,7 +445,7 @@ where
         }
     }
 
-    async fn cancel_invoice(
+    pub async fn cancel_invoice(
         &self,
         params: InvoiceParams,
     ) -> Result<GetInvoiceResult, ErrorObjectOwned> {

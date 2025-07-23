@@ -18,11 +18,10 @@ use crate::{handle_actor_call, log_and_error};
 use ckb_jsonrpc_types::Script;
 use ckb_types::packed::OutPoint;
 #[cfg(not(target_arch = "wasm32"))]
-use jsonrpsee::{
-    core::async_trait,
-    proc_macros::rpc,
-    types::{error::CALL_EXECUTION_FAILED_CODE, ErrorObjectOwned},
-};
+use jsonrpsee::proc_macros::rpc;
+use jsonrpsee::types::error::CALL_EXECUTION_FAILED_CODE;
+use jsonrpsee::types::ErrorObjectOwned;
+
 use serde_with::serde_as;
 use std::collections::HashMap;
 
@@ -281,6 +280,7 @@ pub struct SendPaymentWithRouterParams {
 }
 
 /// RPC module for channel management.
+#[cfg(not(target_arch = "wasm32"))]
 #[rpc(server)]
 trait PaymentRpc {
     /// Sends a payment to a peer.
@@ -324,13 +324,52 @@ impl<S> PaymentRpcServerImpl<S> {
         PaymentRpcServerImpl { actor, _store }
     }
 }
-
-#[async_trait]
+#[cfg(not(target_arch = "wasm32"))]
+#[async_trait::async_trait]
 impl<S> PaymentRpcServer for PaymentRpcServerImpl<S>
 where
     S: ChannelActorStateStore + Send + Sync + 'static,
 {
+    /// Sends a payment to a peer.
     async fn send_payment(
+        &self,
+        params: SendPaymentCommandParams,
+    ) -> Result<GetPaymentCommandResult, ErrorObjectOwned> {
+        self.send_payment(params).await
+    }
+
+    /// Retrieves a payment.
+    async fn get_payment(
+        &self,
+        params: GetPaymentCommandParams,
+    ) -> Result<GetPaymentCommandResult, ErrorObjectOwned> {
+        self.get_payment(params).await
+    }
+
+    /// Builds a router with a list of pubkeys and required channels.
+    async fn build_router(
+        &self,
+        params: BuildRouterParams,
+    ) -> Result<BuildPaymentRouterResult, ErrorObjectOwned> {
+        self.build_router(params).await
+    }
+
+    /// Sends a payment to a peer with specified router
+    /// This method differs from SendPayment in that it allows users to specify a full route manually.
+    /// This can be used for things like rebalancing.
+    async fn send_payment_with_router(
+        &self,
+        params: SendPaymentWithRouterParams,
+    ) -> Result<GetPaymentCommandResult, ErrorObjectOwned> {
+        self.send_payment_with_router(params).await
+    }
+}
+
+impl<S> PaymentRpcServerImpl<S>
+where
+    S: ChannelActorStateStore + Send + Sync + 'static,
+{
+    pub async fn send_payment(
         &self,
         params: SendPaymentCommandParams,
     ) -> Result<GetPaymentCommandResult, ErrorObjectOwned> {
@@ -374,7 +413,7 @@ where
         })
     }
 
-    async fn get_payment(
+    pub async fn get_payment(
         &self,
         params: GetPaymentCommandParams,
     ) -> Result<GetPaymentCommandResult, ErrorObjectOwned> {
@@ -399,7 +438,7 @@ where
         })
     }
 
-    async fn build_router(
+    pub async fn build_router(
         &self,
         params: BuildRouterParams,
     ) -> Result<BuildPaymentRouterResult, ErrorObjectOwned> {
@@ -420,7 +459,7 @@ where
         })
     }
 
-    async fn send_payment_with_router(
+    pub async fn send_payment_with_router(
         &self,
         params: SendPaymentWithRouterParams,
     ) -> Result<GetPaymentCommandResult, ErrorObjectOwned> {

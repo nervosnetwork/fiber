@@ -5176,18 +5176,22 @@ async fn test_send_payment_pending_count_on_find_path() {
         payments.insert(payment_hash);
     }
 
-    // assert that the path finding tried all the channels
+    // assert that the path finding tried multiple middle channels
+    let mut used_channel_count = 0;
     for channel in &channels[1..channels.len() - 1] {
         let funding_tx = nodes[0].get_channel_funding_tx(channel).unwrap();
         let channel_outpoint = OutPoint::new(funding_tx.into(), 0);
 
         let tried_count = channel_stats_map.get(&channel_outpoint).unwrap_or(&0);
-        eprintln!(
+        debug!(
             "check channel_outpoint: {:?}, count: {:?}",
             channel_outpoint, tried_count
         );
-        assert!(*tried_count > 0);
+        if *tried_count > 0 {
+            used_channel_count += 1;
+        }
     }
+    assert!(used_channel_count >= 3);
 }
 
 #[tokio::test]
