@@ -137,6 +137,8 @@ const CHECK_PEER_INIT_INTERVAL: Duration = Duration::from_secs(20);
 const MAX_GRAPH_MISSING_BROADCAST_MESSAGE_TIMESTAMP_DRIFT: Duration =
     Duration::from_secs(60 * 60 * 2);
 
+const MAX_RETRY_SEND_PAYMENTS: usize = 30;
+
 static CHAIN_HASH_INSTANCE: OnceCell<Hash256> = OnceCell::new();
 
 pub fn init_chain_hash(chain_hash: Hash256) {
@@ -1119,6 +1121,12 @@ where
             NetworkActorEvent::RetrySendPayment => {
                 if state.retry_send_payments.is_empty() {
                     return Ok(());
+                }
+                if state.retry_send_payments.len() >= MAX_RETRY_SEND_PAYMENTS - 5 {
+                    eprintln!(
+                        "There are too many payments to retry: {}",
+                        state.retry_send_payments.len()
+                    );
                 }
                 let payment_hash = state.retry_send_payments.remove(0);
                 let _ = self.try_payment_session(myself, state, payment_hash).await;
@@ -2215,15 +2223,11 @@ where
 
     fn register_payment_retry(
         &self,
-        //myself: ActorRef<NetworkActorMessage>,
         state: &mut NetworkActorState<S>,
         payment_hash: Hash256,
         _delay_millis: u64,
     ) {
         state.retry_send_payments.push(payment_hash);
-        // myself.send_after(Duration::from_millis(delay_millis), move || {
-        //     NetworkActorMessage::new_event(NetworkActorEvent::RetrySendPayment(payment_hash))
-        // });
     }
 
     async fn on_send_payment(
@@ -2237,6 +2241,11 @@ where
             Error::InvalidParameter(format!("Failed to validate payment request: {:?}", e))
         })?;
 
+        if !payment_data.dry_run && state.retry_send_payments.len() >= MAX_RETRY_SEND_PAYMENTS {
+            return Err(Error::InvalidParameter(
+                "Too many pending retrying payment requests".to_string(),
+            ));
+        }
         self.send_payment_with_payment_data(myself, state, payment_data)
             .await
     }
@@ -3826,6 +3835,7 @@ where
         });
         Ok(())
     }
+
     async fn handle(
         &self,
         myself: ActorRef<Self::Msg>,
