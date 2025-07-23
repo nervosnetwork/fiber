@@ -2111,6 +2111,7 @@ dependencies = [
  "bitcoin",
  "bitflags 2.9.1",
  "bitmask-enum",
+ "bs58",
  "ciborium",
  "ckb-gen-types",
  "ckb-hash",

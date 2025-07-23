@@ -31,7 +31,7 @@ use crate::{
             SettlementTlc, XUDT_COMPATIBLE_WITNESS,
         },
         hash_algorithm::HashAlgorithm,
-        types::Hash256,
+        types::{Hash256, NodeId},
     },
     invoice::PreimageStore,
     utils::tx::compute_tx_message,
@@ -52,12 +52,12 @@ impl<S: PreimageStore + WatchtowerStore> WatchtowerActor<S> {
 }
 
 pub enum WatchtowerMessage {
-    CreateChannel(Hash256, Script, SettlementData),
-    RemoveChannel(Hash256),
-    UpdateRevocation(Hash256, RevocationData, SettlementData),
-    UpdateLocalSettlement(Hash256, SettlementData),
-    CreatePreimage(Hash256, Hash256),
-    RemovePreimage(Hash256),
+    CreateChannel(NodeId, Hash256, Script, SettlementData),
+    RemoveChannel(NodeId, Hash256),
+    UpdateRevocation(NodeId, Hash256, RevocationData, SettlementData),
+    UpdateLocalSettlement(NodeId, Hash256, SettlementData),
+    CreatePreimage(NodeId, Hash256, Hash256),
+    RemovePreimage(NodeId, Hash256),
     PeriodicCheck,
 }
 
@@ -92,31 +92,42 @@ where
     ) -> Result<(), ActorProcessingErr> {
         match message {
             WatchtowerMessage::CreateChannel(
+                node_id,
                 channel_id,
                 funding_tx_lock,
                 remote_settlement_data,
-            ) => {
-                self.store
-                    .insert_watch_channel(channel_id, funding_tx_lock, remote_settlement_data)
-            }
-            WatchtowerMessage::RemoveChannel(channel_id) => {
-                self.store.remove_watch_channel(channel_id)
+            ) => self.store.insert_watch_channel(
+                node_id,
+                channel_id,
+                funding_tx_lock,
+                remote_settlement_data,
+            ),
+            WatchtowerMessage::RemoveChannel(node_id, channel_id) => {
+                self.store.remove_watch_channel(node_id, channel_id)
             }
             WatchtowerMessage::UpdateRevocation(
+                node_id,
                 channel_id,
                 revocation_data,
                 remote_settlement_data,
+            ) => self.store.update_revocation(
+                node_id,
+                channel_id,
+                revocation_data,
+                remote_settlement_data,
+            ),
+            WatchtowerMessage::UpdateLocalSettlement(
+                node_id,
+                channel_id,
+                local_settlement_data,
             ) => self
                 .store
-                .update_revocation(channel_id, revocation_data, remote_settlement_data),
-            WatchtowerMessage::UpdateLocalSettlement(channel_id, local_settlement_data) => self
-                .store
-                .update_local_settlement(channel_id, local_settlement_data),
-            WatchtowerMessage::CreatePreimage(payment_hash, preimage) => {
-                self.store.insert_preimage(payment_hash, preimage)
+                .update_local_settlement(node_id, channel_id, local_settlement_data),
+            WatchtowerMessage::CreatePreimage(node_id, payment_hash, preimage) => {
+                self.store.insert_watch_preimage(node_id, payment_hash, preimage)
             }
-            WatchtowerMessage::RemovePreimage(payment_hash) => {
-                self.store.remove_preimage(&payment_hash)
+            WatchtowerMessage::RemovePreimage(node_id, payment_hash) => {
+                self.store.remove_watch_preimage(node_id, payment_hash)
             }
             WatchtowerMessage::PeriodicCheck => self.periodic_check(state),
         }

@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use biscuit_auth::{
     builder::{Fact, Term},
     AuthorizerBuilder, Biscuit, PublicKey,
@@ -8,7 +8,7 @@ use std::{
     str::FromStr,
 };
 
-use crate::{fiber::types::Hash256, now_timestamp_as_millis_u64};
+use crate::{fiber::types::NodeId, now_timestamp_as_millis_u64};
 
 pub struct AuthRule {
     pub(crate) code: &'static str,
@@ -237,10 +237,10 @@ impl BiscuitAuth {
 }
 
 /// Extract node id from token
-pub fn extract_node_id(token: &Biscuit) -> Result<Hash256> {
+pub fn extract_node_id(token: &Biscuit) -> Result<NodeId> {
     const QUERY: &str = "data($id) <- node($id)";
     let (id,): (String,) = token.authorizer()?.query_exactly_one(QUERY)?;
-    let node_id = Hash256::from_str(id.as_str())?;
+    let node_id = NodeId::from_str(id.as_str())?;
     Ok(node_id)
 }
 

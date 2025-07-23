@@ -14,11 +14,6 @@ use super::db_migrate::DbMigrate;
 use super::schema::*;
 use crate::fiber::gossip::GossipMessageStore;
 use crate::fiber::types::CURSOR_SIZE;
-#[cfg(feature = "watchtower")]
-use crate::{
-    fiber::channel::{RevocationData, SettlementData},
-    watchtower::{ChannelData, WatchtowerStore},
-};
 use crate::{
     fiber::{
         channel::{ChannelActorState, ChannelActorStateStore, ChannelState},
@@ -28,6 +23,14 @@ use crate::{
         types::{BroadcastMessage, BroadcastMessageID, Cursor, Hash256},
     },
     invoice::{CkbInvoice, CkbInvoiceStatus, InvoiceError, InvoiceStore, PreimageStore},
+};
+#[cfg(feature = "watchtower")]
+use crate::{
+    fiber::{
+        channel::{RevocationData, SettlementData},
+        types::NodeId,
+    },
+    watchtower::{ChannelData, WatchtowerStore},
 };
 use ckb_types::packed::OutPoint;
 #[cfg(feature = "watchtower")]
@@ -190,7 +193,9 @@ pub enum KeyValue {
     BroadcastMessageTimestamp(BroadcastMessageID, u64),
     BroadcastMessage(Cursor, BroadcastMessage),
     #[cfg(feature = "watchtower")]
-    WatchtowerChannel(Hash256, ChannelData),
+    WatchtowerChannel(NodeId, Hash256, ChannelData),
+    #[cfg(feature = "watchtower")]
+    WatchtowerPreimage(NodeId, Hash256, Hash256),
     PaymentSession(Hash256, PaymentSession),
     PaymentHistoryTimedResult((OutPoint, Direction), TimedResult),
     PaymentCustomRecord(Hash256, PaymentCustomRecords),
@@ -226,9 +231,20 @@ impl StoreKeyValue for KeyValue {
                 [&[PAYMENT_SESSION_PREFIX], payment_hash.as_ref()].concat()
             }
             #[cfg(feature = "watchtower")]
-            KeyValue::WatchtowerChannel(channel_id, _) => {
-                [&[WATCHTOWER_CHANNEL_PREFIX], channel_id.as_ref()].concat()
-            }
+            KeyValue::WatchtowerChannel(node_id, channel_id, _) => [
+                &[WATCHTOWER_CHANNEL_PREFIX],
+                node_id.as_ref(),
+                channel_id.as_ref(),
+            ]
+            .concat(),
+
+            #[cfg(feature = "watchtower")]
+            KeyValue::WatchtowerPreimage(node_id, payment_hash, _) => [
+                &[WATCHTOWER_PREIMAGE_PREFIX],
+                node_id.as_ref(),
+                payment_hash.as_ref(),
+            ]
+            .concat(),
             KeyValue::NetworkActorState(peer_id, _) => {
                 [&[PEER_ID_NETWORK_ACTOR_STATE_PREFIX], peer_id.as_bytes()].concat()
             }
@@ -264,9 +280,11 @@ impl StoreKeyValue for KeyValue {
                 serialize_to_vec(payment_session, "PaymentSession")
             }
             #[cfg(feature = "watchtower")]
-            KeyValue::WatchtowerChannel(_, channel_data) => {
+            KeyValue::WatchtowerChannel(_, _, channel_data) => {
                 serialize_to_vec(channel_data, "ChannelData")
             }
+            #[cfg(feature = "watchtower")]
+            KeyValue::WatchtowerPreimage(_, _, preimage) => serialize_to_vec(preimage, "Hash256"),
             KeyValue::NetworkActorState(_, persistent_network_actor_state) => serialize_to_vec(
                 persistent_network_actor_state,
                 "PersistentNetworkActorState",
@@ -538,11 +556,17 @@ impl WatchtowerStore for Store {
 
     fn insert_watch_channel(
         &self,
+        node_id: NodeId,
         channel_id: Hash256,
         funding_tx_lock: Script,
         remote_settlement_data: SettlementData,
     ) {
-        let key = [&[WATCHTOWER_CHANNEL_PREFIX], channel_id.as_ref()].concat();
+        let key = [
+            &[WATCHTOWER_CHANNEL_PREFIX],
+            node_id.as_ref(),
+            channel_id.as_ref(),
+        ]
+        .concat();
         let value = serialize_to_vec(
             &ChannelData {
                 channel_id,
@@ -558,18 +582,29 @@ impl WatchtowerStore for Store {
         batch.commit();
     }
 
-    fn remove_watch_channel(&self, channel_id: Hash256) {
-        let key = [&[WATCHTOWER_CHANNEL_PREFIX], channel_id.as_ref()].concat();
+    fn remove_watch_channel(&self, node_id: NodeId, channel_id: Hash256) {
+        let key = [
+            &[WATCHTOWER_CHANNEL_PREFIX],
+            node_id.as_ref(),
+            channel_id.as_ref(),
+        ]
+        .concat();
         self.delete(key);
     }
 
     fn update_revocation(
         &self,
+        node_id: NodeId,
         channel_id: Hash256,
         revocation_data: RevocationData,
         remote_settlement_data: SettlementData,
     ) {
-        let key = [&[WATCHTOWER_CHANNEL_PREFIX], channel_id.as_ref()].concat();
+        let key = [
+            &[WATCHTOWER_CHANNEL_PREFIX],
+            node_id.as_ref(),
+            channel_id.as_ref(),
+        ]
+        .concat();
         if let Some(mut channel_data) = self
             .get(key)
             .map(|v| deserialize_from::<ChannelData>(v.as_ref(), "ChannelData"))
@@ -577,22 +612,55 @@ impl WatchtowerStore for Store {
             channel_data.remote_settlement_data = remote_settlement_data;
             channel_data.revocation_data = Some(revocation_data);
             let mut batch = self.batch();
-            batch.put_kv(KeyValue::WatchtowerChannel(channel_id, channel_data));
+            batch.put_kv(KeyValue::WatchtowerChannel(node_id, channel_id, channel_data));
             batch.commit();
         }
     }
 
-    fn update_local_settlement(&self, channel_id: Hash256, local_settlement_data: SettlementData) {
-        let key = [&[WATCHTOWER_CHANNEL_PREFIX], channel_id.as_ref()].concat();
+    fn update_local_settlement(
+        &self,
+        node_id: NodeId,
+        channel_id: Hash256,
+        local_settlement_data: SettlementData,
+    ) {
+        let key = [
+            &[WATCHTOWER_CHANNEL_PREFIX],
+            node_id.as_ref(),
+            channel_id.as_ref(),
+        ]
+        .concat();
         if let Some(mut channel_data) = self
             .get(key)
             .map(|v| deserialize_from::<ChannelData>(v.as_ref(), "ChannelData"))
         {
             channel_data.local_settlement_data = Some(local_settlement_data);
             let mut batch = self.batch();
-            batch.put_kv(KeyValue::WatchtowerChannel(channel_id, channel_data));
+            batch.put_kv(KeyValue::WatchtowerChannel(node_id, channel_id, channel_data));
             batch.commit();
         }
+    }
+
+    fn insert_watch_preimage(&self, node_id: NodeId, payment_hash: Hash256, preimage: Hash256) {
+        let mut batch = self.batch();
+        batch.put_kv(KeyValue::WatchtowerPreimage(
+            node_id,
+            payment_hash,
+            preimage,
+        ));
+        batch.commit();
+    }
+
+    fn remove_watch_preimage(&self, node_id: NodeId, payment_hash: Hash256) {
+        let mut batch = self.batch();
+        batch.delete(
+            [
+                &[WATCHTOWER_PREIMAGE_PREFIX],
+                node_id.as_ref(),
+                payment_hash.as_ref(),
+            ]
+            .concat(),
+        );
+        batch.commit();
     }
 }
 

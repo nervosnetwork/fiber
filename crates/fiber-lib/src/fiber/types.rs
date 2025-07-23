@@ -4049,3 +4049,32 @@ fn get_hop_data_len(buf: &[u8]) -> Option<usize> {
             + HOP_DATA_HEAD_LEN,
     )
 }
+
+/// Used as identifier of node.
+#[serde_as]
+#[derive(Clone, Debug, Serialize, Deserialize, Hash, Eq, PartialEq, Default)]
+pub struct NodeId(#[serde_as(as = "SliceHex")] Vec<u8>);
+
+impl NodeId {
+    pub fn from_bytes(bytes: Vec<u8>) -> Self {
+        Self(bytes)
+    }
+}
+
+impl AsRef<[u8]> for NodeId {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl ::std::str::FromStr for NodeId {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let bytes = bs58::decode(s)
+            .into_vec()
+            .map_err(|_| anyhow!("can't parse node_id: {s}"))?;
+
+        Ok(Self::from_bytes(bytes))
+    }
+}

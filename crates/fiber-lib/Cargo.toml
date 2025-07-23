@@ -57,6 +57,7 @@ clap = { version = "4.5.2", features = ["derive", "env", "string"] }
 paste = "1.0"
 getrandom = { version = "0.2", features = ["js"] }
 biscuit-auth = "6.0.0-beta.3"
+bs58 = "0.5.1"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 console = "0.16.0"

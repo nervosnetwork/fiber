@@ -31,6 +31,7 @@ use secp256k1::SecretKey;
 use secp256k1::{Keypair, Secp256k1};
 use std::collections::HashMap;
 use std::time::SystemTime;
+use tentacle::secio::PeerId;
 
 fn gen_rand_key_pair() -> Keypair {
     let secp = Secp256k1::new();
@@ -222,6 +223,7 @@ fn test_store_wacthtower() {
     let path = TempDir::new("test-watchtower-store");
     let store = Store::new(path).expect("created store failed");
 
+    let node_id = NodeId::from_bytes(PeerId::random().into_bytes());
     let channel_id = gen_rand_sha256_hash();
     let funding_tx_lock = Script::default();
 
@@ -235,7 +237,12 @@ fn test_store_wacthtower() {
         tlcs: vec![],
     };
 
-    store.insert_watch_channel(channel_id, funding_tx_lock.clone(), settlement_data.clone());
+    store.insert_watch_channel(
+        node_id.clone(),
+        channel_id,
+        funding_tx_lock.clone(),
+        settlement_data.clone(),
+    );
     assert_eq!(
         store.get_watch_channels(),
         vec![ChannelData {
@@ -255,7 +262,12 @@ fn test_store_wacthtower() {
         output_data: Bytes::default(),
     };
 
-    store.update_revocation(channel_id, revocation_data.clone(), settlement_data.clone());
+    store.update_revocation(
+        node_id.clone(),
+        channel_id,
+        revocation_data.clone(),
+        settlement_data.clone(),
+    );
     assert_eq!(
         store.get_watch_channels(),
         vec![ChannelData {
@@ -267,7 +279,7 @@ fn test_store_wacthtower() {
         }]
     );
 
-    store.remove_watch_channel(channel_id);
+    store.remove_watch_channel(node_id, channel_id);
     assert_eq!(store.get_watch_channels(), vec![]);
 }
 

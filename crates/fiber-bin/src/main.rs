@@ -7,7 +7,9 @@ use fnn::ckb::contracts::TypeIDResolver;
 #[cfg(debug_assertions)]
 use fnn::ckb::contracts::{get_cell_deps, Contract};
 use fnn::ckb::{contracts::try_init_contracts_context, CkbChainActor};
+use fnn::fiber::types::NodeId;
 use fnn::fiber::{channel::ChannelSubscribers, graph::NetworkGraph, network::init_chain_hash};
+use fnn::rpc::peer::PeerId;
 use fnn::rpc::server::start_rpc;
 use fnn::rpc::watchtower::{
     CreatePreimageParams, CreateWatchChannelParams, RemovePreimageParams, RemoveWatchChannelParams,
@@ -159,6 +161,10 @@ pub async fn main() -> Result<(), ExitMessage> {
                 .expect("get default funding lock script should be ok");
 
             info!("Starting fiber");
+
+            let node_id = NodeId::from_bytes(
+                PeerId::from_public_key(&fiber_config.public_key()).into_bytes(),
+            );
             let network_actor = start_network(
                 fiber_config.clone(),
                 ckb_chain_actor.clone(),
@@ -256,7 +262,7 @@ pub async fn main() -> Result<(), ExitMessage> {
                                         forward_event_to_client(event.clone(), watchtower_client).await;
                                     }
                                     if let Some(watchtower_actor) = watchtower_actor.as_ref() {
-                                        forward_event_to_actor(event, watchtower_actor);
+                                        forward_event_to_actor(node_id.clone(), event, watchtower_actor);
                                     }
                                 }
                             }
@@ -365,6 +371,7 @@ pub async fn main() -> Result<(), ExitMessage> {
 }
 
 fn forward_event_to_actor(
+    node_id: NodeId,
     event: NetworkServiceEvent,
     watchtower_actor: &ActorRef<WatchtowerMessage>,
 ) {
@@ -377,6 +384,7 @@ fn forward_event_to_actor(
         ) => {
             watchtower_actor
                 .send_message(WatchtowerMessage::CreateChannel(
+                    node_id,
                     channel_id,
                     funding_tx_lock,
                     remote_settlement_data,
@@ -386,7 +394,7 @@ fn forward_event_to_actor(
         NetworkServiceEvent::ChannelClosed(_, channel_id, _)
         | NetworkServiceEvent::ChannelAbandon(channel_id) => {
             watchtower_actor
-                .send_message(WatchtowerMessage::RemoveChannel(channel_id))
+                .send_message(WatchtowerMessage::RemoveChannel(node_id, channel_id))
                 .expect(ASSUME_WATCHTOWER_ACTOR_ALIVE);
         }
         NetworkServiceEvent::RevokeAndAckReceived(
@@ -397,6 +405,7 @@ fn forward_event_to_actor(
         ) => {
             watchtower_actor
                 .send_message(WatchtowerMessage::UpdateRevocation(
+                    node_id,
                     channel_id,
                     revocation_data,
                     settlement_data,
@@ -411,16 +420,27 @@ fn forward_event_to_actor(
         ) => {
             watchtower_actor
                 .send_message(WatchtowerMessage::UpdateLocalSettlement(
+                    node_id,
                     channel_id,
                     settlement_data,
                 ))
                 .expect(ASSUME_WATCHTOWER_ACTOR_ALIVE);
         }
-        NetworkServiceEvent::PreimageCreated(_payment_hash, _preimage) => {
+        NetworkServiceEvent::PreimageCreated(payment_hash, preimage) => {
             // ignore, the store of channel actor already has stored the preimage
+            watchtower_actor
+                .send_message(WatchtowerMessage::CreatePreimage(
+                    node_id,
+                    payment_hash,
+                    preimage,
+                ))
+                .expect(ASSUME_WATCHTOWER_ACTOR_ALIVE);
         }
-        NetworkServiceEvent::PreimageRemoved(_payment_hash) => {
+        NetworkServiceEvent::PreimageRemoved(payment_hash) => {
             // ignore, the store of channel actor already has removed the preimage
+            watchtower_actor
+                .send_message(WatchtowerMessage::RemovePreimage(node_id, payment_hash))
+                .expect(ASSUME_WATCHTOWER_ACTOR_ALIVE);
         }
         _ => {
             // ignore other non-watchtower related events
