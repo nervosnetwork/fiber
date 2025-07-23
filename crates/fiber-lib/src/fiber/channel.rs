@@ -6051,6 +6051,7 @@ impl ChannelActorState {
                     NetworkActorCommand::VerifyFundingTx {
                         local_tx: self.funding_tx.clone().unwrap_or_default(),
                         remote_tx: msg.tx.clone(),
+                        funding_cell_lock_script: self.get_funding_lock_script(),
                         reply: tx
                     }
                 ))
@@ -6771,7 +6772,6 @@ impl ChannelActorState {
     }
 
     fn is_tx_final(&self, tx: &Transaction) -> Result<bool, ProcessingChannelError> {
-        // TODO: check if the tx is valid
         let tx = tx.clone().into_view();
 
         let first_output = tx
