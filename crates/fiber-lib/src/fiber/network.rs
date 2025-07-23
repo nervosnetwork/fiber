@@ -1069,12 +1069,7 @@ where
                             session.payment_hash(),
                             channel_id
                         );
-                        self.register_payment_retry(
-                            myself.clone(),
-                            state,
-                            session.payment_hash(),
-                            500,
-                        );
+                        self.register_payment_retry(myself.clone(), state, session.payment_hash());
                     }
                 }
             }
@@ -1124,16 +1119,6 @@ where
                     .await;
             }
             NetworkActorEvent::RetrySendPayment(payment_hash) => {
-                // if state.retry_send_payments.is_empty() {
-                //     return Ok(());
-                // }
-                // if state.retry_send_payments.len() >= MAX_RETRY_SEND_PAYMENTS - 5 {
-                //     eprintln!(
-                //         "There are too many payments to retry: {}",
-                //         state.retry_send_payments.len()
-                //     );
-                // }
-                // let payment_hash = state.retry_send_payments.remove(0);
                 state.retry_send_payment_count = state.retry_send_payment_count.saturating_sub(1);
                 let _ = self.try_payment_session(myself, state, payment_hash).await;
             }
@@ -1923,7 +1908,7 @@ where
                             false,
                         );
                         if need_to_retry {
-                            self.register_payment_retry(myself, state, payment_hash, 500);
+                            self.register_payment_retry(myself, state, payment_hash);
                         } else {
                             self.set_payment_fail_with_error(
                                 &mut payment_session,
@@ -2153,7 +2138,7 @@ where
             self.store.insert_payment_session(payment_session);
         }
         if need_to_retry {
-            self.register_payment_retry(myself, state, payment_hash, 50);
+            self.register_payment_retry(myself, state, payment_hash);
         }
     }
 
@@ -2209,7 +2194,7 @@ where
                         // If this is the first hop error, such as the WaitingTlcAck error,
                         // we will just retry later, return Ok here for letting endpoint user
                         // know payment session is created successfully
-                        self.register_payment_retry(myself, state, payment_hash, 50);
+                        self.register_payment_retry(myself, state, payment_hash);
                         return Ok(payment_session);
                     } else {
                         return Err(err);
@@ -2232,7 +2217,6 @@ where
         myself: ActorRef<NetworkActorMessage>,
         state: &mut NetworkActorState<S>,
         payment_hash: Hash256,
-        _delay_millis: u64,
     ) {
         let delay = (state.retry_send_payment_count as u64 + 1) * 50_u64;
         myself.send_after(Duration::from_millis(delay), move || {
@@ -2432,8 +2416,11 @@ pub struct NetworkActorState<S> {
     payment_router_map: HashMap<Hash256, Vec<PaymentHopData>>,
     channel_ephemeral_config: ChannelEphemeralConfig,
     funding_tx_shell_builder: Option<String>,
-    // the queue of retrying send payments
-    //retry_send_payments: Vec<Hash256>,
+
+    // the number of pending retrying send payments, we track it for
+    // set retry delay dynamically, pending too many payments may have a negative impact
+    // on the node performance, which in worst case may lead node not response revoke_and_ack
+    // in expected time, and then the peer will disconnect us.
     retry_send_payment_count: usize,
 }
 
@@ -3841,9 +3828,6 @@ where
         myself.send_interval(CHECK_CHANNELS_INTERVAL, || {
             NetworkActorMessage::new_command(NetworkActorCommand::CheckChannels)
         });
-        // myself.send_interval(Duration::from_millis(50), || {
-        //     NetworkActorMessage::new_event(NetworkActorEvent::RetrySendPayment)
-        // });
         Ok(())
     }
 
