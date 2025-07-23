@@ -117,4 +117,4 @@ jobs:
         run: |
           vcpkg integrate install
           vcpkg install openssl:x64-windows-static-md
-      - run: cargo build --verbose --profile ${{ matrix.profile }}
+      - run: cargo build --locked --verbose --profile ${{ matrix.profile }}

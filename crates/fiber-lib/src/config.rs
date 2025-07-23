@@ -1,9 +1,5 @@
 use std::path::PathBuf;
 
-use clap::Parser;
-use clap_serde_derive::ClapSerde;
-use serde::{Deserialize, Serialize};
-
 #[cfg(not(target_arch = "wasm32"))]
 use crate::CchConfig;
 use crate::{ckb::CkbConfig, rpc::config::RpcConfig, FiberConfig};

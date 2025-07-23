@@ -54,6 +54,8 @@ aes-gcm = "0.10"
 scrypt = "0.11"
 clap-serde-derive = "0.2.1"
 clap = { version = "4.5.2", features = ["derive", "env", "string"] }
+paste = "1.0"
+getrandom = { version = "0.2", features = ["js"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 console = "0.16.0"
@@ -72,6 +74,7 @@ tokio = { version = "1", features = [
     "net",
     "time",
     "signal",
+    "process",
 ] }
 tentacle = { version = "0.6.6", default-features = false, features = [
     "upnp",
@@ -136,6 +139,3 @@ ignored = ["getrandom"]
 [[bench]]
 name = "payment_benchmarks"
 harness = false
-
-[build-dependencies]
-chrono = "0.4.41"

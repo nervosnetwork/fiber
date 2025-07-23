@@ -1,13 +1,17 @@
 use crate::ckb::tests::test_utils::complete_commitment_tx;
 use crate::fiber::channel::{
-    AddTlcResponse, ChannelState, CloseFlags, UpdateCommand, XUDT_COMPATIBLE_WITNESS,
+    AddTlcResponse, ChannelState, CloseFlags, OutboundTlcStatus, TLCId, TlcStatus, UpdateCommand,
+    XUDT_COMPATIBLE_WITNESS,
 };
-use crate::fiber::config::{DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT};
+use crate::fiber::config::{
+    DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT, MIN_TLC_EXPIRY_DELTA,
+};
+use crate::fiber::features::FeatureVector;
 use crate::fiber::graph::{ChannelInfo, PaymentSessionStatus};
 use crate::fiber::network::{DebugEvent, FiberMessageWithPeerId, SendPaymentCommand};
 use crate::fiber::types::{
-    AddTlc, FiberMessage, Hash256, PaymentHopData, PeeledOnionPacket, Pubkey, TlcErr, TlcErrorCode,
-    NO_SHARED_SECRET,
+    AddTlc, FiberMessage, Hash256, Init, PaymentHopData, PeeledOnionPacket, Pubkey, TlcErr,
+    TlcErrorCode, NO_SHARED_SECRET,
 };
 use crate::invoice::{CkbInvoiceStatus, Currency, InvoiceBuilder};
 use crate::test_utils::{init_tracing, NetworkNode};
@@ -173,6 +177,44 @@ async fn test_create_private_channel() {
         false,
     )
     .await;
+}
+
+#[tokio::test]
+async fn test_send_init_msg_with_different_chain_hash() {
+    init_tracing();
+
+    let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
+
+    let dummy_err_chain_hash = Hash256::from([1; 32]);
+    node_a.send_init_peer_message(
+        node_b.peer_id.clone(),
+        Init {
+            features: FeatureVector::default(),
+            chain_hash: dummy_err_chain_hash,
+        },
+    );
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+    node_a
+        .expect_event(|event| match event {
+            NetworkServiceEvent::PeerDisConnected(peer_id, _reason) => {
+                assert_eq!(peer_id, &node_b.peer_id);
+                true
+            }
+            _ => false,
+        })
+        .await;
+
+    node_b
+        .expect_event(|event| match event {
+            NetworkServiceEvent::PeerDisConnected(peer_id, _reason) => {
+                assert_eq!(peer_id, &node_a.peer_id);
+                true
+            }
+            _ => false,
+        })
+        .await;
 }
 
 #[tokio::test]
@@ -2295,7 +2337,6 @@ async fn test_network_add_two_tlcs_remove_one() {
 
     eprintln!("add_tlc_result: {:?}", add_tlc_result_b);
 
-    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
     // remove tlc from node_b
     call!(node_b.network_actor, |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
@@ -2316,7 +2357,18 @@ async fn test_network_add_two_tlcs_remove_one() {
     .expect("node_b alive")
     .expect("successfully removed tlc");
     eprintln!("remove tlc result: {:?}", ());
-    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+    loop {
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        let a_tlc_state = node_a.get_channel_actor_state(channel_id);
+        if a_tlc_state
+            .tlc_state
+            .get(&TLCId::Offered(add_tlc_result_a.tlc_id))
+            .is_none()
+        {
+            break;
+        }
+    }
 
     let new_a_balance = node_a.get_local_balance_from_channel(channel_id);
     let new_b_balance = node_b.get_local_balance_from_channel(channel_id);
@@ -2329,13 +2381,14 @@ async fn test_network_add_two_tlcs_remove_one() {
 
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
     // remove the later tlc from node_b
+    let tlc_id_b = add_tlc_result_b.unwrap().tlc_id;
     call!(node_b.network_actor, |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id,
                 command: ChannelCommand::RemoveTlc(
                     RemoveTlcCommand {
-                        id: add_tlc_result_b.unwrap().tlc_id,
+                        id: tlc_id_b,
                         reason: RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
                             payment_preimage: preimage_b.into(),
                         }),
@@ -2348,7 +2401,18 @@ async fn test_network_add_two_tlcs_remove_one() {
     .expect("node_b alive")
     .expect("successfully removed tlc");
     eprintln!("remove tlc result: {:?}", ());
-    tokio::time::sleep(tokio::time::Duration::from_millis(400)).await;
+
+    loop {
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        let a_tlc_state = node_a.get_channel_actor_state(channel_id);
+        if a_tlc_state
+            .tlc_state
+            .get(&TLCId::Offered(tlc_id_b))
+            .is_none()
+        {
+            break;
+        }
+    }
 
     let new_a_balance = node_a.get_local_balance_from_channel(channel_id);
     let new_b_balance = node_b.get_local_balance_from_channel(channel_id);
@@ -2396,6 +2460,54 @@ async fn test_remove_tlc_with_expiry_error() {
     .expect("node_b alive");
     assert!(add_tlc_result.is_err());
 
+    // add tlc command with expiry soon
+    let add_tlc_command = AddTlcCommand {
+        amount: tlc_amount,
+        hash_algorithm: HashAlgorithm::CkbHash,
+        payment_hash: digest.into(),
+        expiry: now_timestamp_as_millis_u64() + MIN_TLC_EXPIRY_DELTA - 1000,
+        onion_packet: None,
+        shared_secret: NO_SHARED_SECRET,
+        previous_tlc: None,
+    };
+
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id: new_channel_id,
+                command: ChannelCommand::AddTlc(add_tlc_command, rpc_reply),
+            },
+        ))
+    })
+    .expect("node_b alive");
+    assert!(add_tlc_result.is_err());
+
+    // add tlc command with expiry is OK
+    let add_tlc_command = AddTlcCommand {
+        amount: tlc_amount,
+        hash_algorithm: HashAlgorithm::CkbHash,
+        payment_hash: digest.into(),
+        expiry: now_timestamp_as_millis_u64() + MIN_TLC_EXPIRY_DELTA + 200,
+        onion_packet: None,
+        shared_secret: NO_SHARED_SECRET,
+        previous_tlc: None,
+    };
+
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id: new_channel_id,
+                command: ChannelCommand::AddTlc(add_tlc_command, rpc_reply),
+            },
+        ))
+    })
+    .expect("node_b alive");
+    assert!(add_tlc_result.is_err());
+    let err = add_tlc_result.unwrap_err();
+    assert_eq!(err.error_code, TlcErrorCode::ExpiryTooSoon,);
+
     // add tlc command with expiry in the future too long
     let add_tlc_command = AddTlcCommand {
         amount: tlc_amount,
@@ -2418,6 +2530,65 @@ async fn test_remove_tlc_with_expiry_error() {
     .expect("node_b alive");
 
     assert!(add_tlc_result.is_err());
+    let error_code = add_tlc_result.unwrap_err().error_code;
+    assert_eq!(error_code, TlcErrorCode::ExpiryTooFar);
+}
+
+#[tokio::test]
+async fn test_remove_expired_tlc_in_bacckground() {
+    init_tracing();
+
+    let node_a_funding_amount = 100000000000;
+    let node_b_funding_amount = 6200000000;
+
+    let (node_a, _node_b, new_channel_id) =
+        create_nodes_with_established_channel(node_a_funding_amount, node_b_funding_amount, false)
+            .await;
+
+    let preimage = [1; 32];
+    let digest = HashAlgorithm::CkbHash.hash(preimage);
+    let tlc_amount = 1000000000;
+
+    // add tlc command with expiry soon
+    let add_tlc_command = AddTlcCommand {
+        amount: tlc_amount,
+        hash_algorithm: HashAlgorithm::CkbHash,
+        payment_hash: digest.into(),
+        expiry: now_timestamp_as_millis_u64() + MIN_TLC_EXPIRY_DELTA + 3000,
+        onion_packet: None,
+        shared_secret: NO_SHARED_SECRET,
+        previous_tlc: None,
+    };
+
+    let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id: new_channel_id,
+                command: ChannelCommand::AddTlc(add_tlc_command, rpc_reply),
+            },
+        ))
+    })
+    .expect("node_b alive");
+    assert!(add_tlc_result.is_ok());
+    let tlc_id = add_tlc_result.unwrap().tlc_id;
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(
+        MIN_TLC_EXPIRY_DELTA + 3000 + 3000,
+    ))
+    .await;
+
+    // check if the expired tlc is removed
+    let node_a_channel_state = node_a.get_channel_actor_state(new_channel_id);
+
+    matches!(node_a_channel_state.state, ChannelState::ChannelReady);
+    let tlc = node_a_channel_state
+        .tlc_state
+        .get(&TLCId::Offered(tlc_id))
+        .unwrap();
+    assert_eq!(
+        tlc.status,
+        TlcStatus::Outbound(OutboundTlcStatus::RemoveAckConfirmed)
+    );
 }
 
 #[tokio::test]
@@ -2434,12 +2605,11 @@ async fn do_test_add_tlc_duplicated() {
     let tlc_amount = 1000000000;
 
     for i in 1..=2 {
-        // add tlc command with expiry soon
         let add_tlc_command = AddTlcCommand {
             amount: tlc_amount,
             hash_algorithm: HashAlgorithm::CkbHash,
             payment_hash: digest.into(),
-            expiry: now_timestamp_as_millis_u64() + 10,
+            expiry: now_timestamp_as_millis_u64() + MIN_TLC_EXPIRY_DELTA + 1000,
             onion_packet: None,
             shared_secret: NO_SHARED_SECRET,
             previous_tlc: None,
@@ -5527,4 +5697,50 @@ async fn test_channel_with_malicious_peer_send_channel_msg() {
 
     test_with_node(&node_0).await;
     test_with_node(&node_1).await;
+}
+
+#[tokio::test]
+async fn test_funding_timeout() {
+    let funding_amount: u128 = 100000000000;
+    let mut nodes = NetworkNode::new_n_interconnected_nodes_with_config(2, |i| {
+        NetworkNodeConfigBuilder::new()
+            .node_name(Some(format!("node-{}", i)))
+            .base_dir_prefix(&format!("test-fnn-node-{}-", i))
+            .fiber_config_updater(|config| {
+                // funding amount + 1
+                config.open_channel_auto_accept_min_ckb_funding_amount = Some(100000000001);
+                config.funding_timeout_seconds = 1;
+            })
+            .build()
+    })
+    .await;
+
+    let message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
+            OpenChannelCommand {
+                peer_id: nodes[1].peer_id.clone(),
+                public: false,
+                shutdown_script: None,
+                funding_amount,
+                funding_udt_type_script: None,
+                commitment_fee_rate: None,
+                commitment_delay_epoch: None,
+                funding_fee_rate: None,
+                tlc_expiry_delta: None,
+                tlc_min_value: None,
+                tlc_fee_proportional_millionths: None,
+                max_tlc_number_in_flight: None,
+                max_tlc_value_in_flight: None,
+            },
+            rpc_reply,
+        ))
+    };
+    call!(nodes[0].network_actor, message)
+        .expect("node_a alive")
+        .expect("open channel success");
+
+    // Auto closed because of timeout
+    nodes[0]
+        .expect_event(|event| matches!(event, NetworkServiceEvent::ChannelFundingAborted(_)))
+        .await;
 }

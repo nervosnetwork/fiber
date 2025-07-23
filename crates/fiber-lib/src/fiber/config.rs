@@ -12,6 +12,8 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::{fs, path::PathBuf, str::FromStr};
 use tentacle::secio::{PublicKey, SecioKeyPair};
 
+use super::features::FeatureVector;
+
 pub const CKB_SHANNONS: u64 = 100_000_000; // 1 CKB = 10 ^ 8 shannons
 pub const DEFAULT_MIN_SHUTDOWN_FEE: u64 = CKB_SHANNONS; // 1 CKB prepared for shutdown transaction fee
 
@@ -30,8 +32,12 @@ pub const DEFAULT_OPEN_CHANNEL_AUTO_ACCEPT_MIN_CKB_FUNDING_AMOUNT: u64 = 100 * C
 /// The expiry delta to forward a tlc, in milliseconds, default to 1 day.
 pub const DEFAULT_TLC_EXPIRY_DELTA: u64 = 24 * 60 * 60 * 1000;
 
+#[cfg(not(debug_assertions))]
 /// The minimal expiry delta to forward a tlc, in milliseconds. 15 minutes.
 pub const MIN_TLC_EXPIRY_DELTA: u64 = 15 * 60 * 1000; // 15 minutes
+#[cfg(debug_assertions)]
+// 5 seconds for testing environment
+pub const MIN_TLC_EXPIRY_DELTA: u64 = 5 * 1000;
 
 /// The maximum expiry delta for a payment, in milliseconds. 2 weeks
 pub const MAX_PAYMENT_TLC_EXPIRY_LIMIT: u64 = 14 * 24 * 60 * 60 * 1000; // 2 weeks
@@ -61,6 +67,9 @@ pub const DEFAULT_MAX_INBOUND_PEERS: usize = 16;
 
 /// Minimal number of outbound connections.
 pub const DEFAULT_MIN_OUTBOUND_PEERS: usize = 8;
+
+/// Funding timeout in seconds since the channel is created.
+pub const DEFAULT_FUNDING_TIMEOUT_SECONDS: u64 = 60 * 60 * 24; // 1 day
 
 /// The interval to maintain the gossip network, in milli-seconds.
 #[cfg(not(any(test, feature = "bench")))]
@@ -318,6 +327,34 @@ pub struct FiberConfig {
         help = "Max allowed bytes of channels to be accepted from one peer. [default: 50KB]"
     )]
     pub to_be_accepted_channels_bytes_limit: Option<usize>,
+
+    /// Default timeout to auto close a funding channel. [default: 1 day]
+    #[arg(
+        name = "FIBER_FUNDING_TIMEOUT_SECONDS",
+        long = "fiber-funding-timeout-seconds",
+        env,
+        help = "Default timeout to auto close a funding channel. [default: 1 day]"
+    )]
+    #[default(DEFAULT_FUNDING_TIMEOUT_SECONDS)]
+    pub funding_timeout_seconds: u64,
+
+    /// Use an external shell command to build funding tx.
+    ///
+    /// The command is executed by `cmd /C` in Windows, and by `sh -c` in other systems.
+    ///
+    /// The command receives a JSON object from stdin with following keys:
+    /// - `tx`: The current `Transaction`. This can be `null` for the first funding request.
+    /// - `request`: The `FundingRequest` to fulfil.
+    ///
+    /// The command MUST use non-zero exit status to indicate failures and print error message to stderr.
+    /// It MUST print Transaction in JSON to stdout on success building.
+    #[arg(
+        name = "FIBER_FUNDING_TX_SHELL_BUILDER",
+        long = "fiber-funding-tx-shell-builder",
+        env,
+        help = "Use an external shell command to build funding tx. [default: None]"
+    )]
+    pub funding_tx_shell_builder: Option<String>,
 }
 
 /// Must be a valid utf-8 string of length maximal length 32 bytes.
@@ -521,6 +558,12 @@ impl FiberConfig {
     pub fn sync_network_graph(&self) -> bool {
         self.sync_network_graph
             .unwrap_or(DEFAULT_SYNC_NETWORK_GRAPH)
+    }
+
+    pub fn gen_node_features(&self) -> FeatureVector {
+        // TODO: override default features from config settings
+        // ...
+        FeatureVector::default()
     }
 }
 
