@@ -1886,7 +1886,6 @@ async fn do_test_channel_commitment_tx_after_add_tlc(algorithm: HashAlgorithm) {
             _ => None,
         })
         .await;
-
     assert!(matches!(
         node_a.submit_tx(node_a_commitment_tx.clone()).await,
         TxStatus::Committed(..)
@@ -2338,7 +2337,6 @@ async fn test_network_add_two_tlcs_remove_one() {
 
     eprintln!("add_tlc_result: {:?}", add_tlc_result_b);
 
-    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
     // remove tlc from node_b
     call!(node_b.network_actor, |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
@@ -2359,7 +2357,18 @@ async fn test_network_add_two_tlcs_remove_one() {
     .expect("node_b alive")
     .expect("successfully removed tlc");
     eprintln!("remove tlc result: {:?}", ());
-    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+    loop {
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        let a_tlc_state = node_a.get_channel_actor_state(channel_id);
+        if a_tlc_state
+            .tlc_state
+            .get(&TLCId::Offered(add_tlc_result_a.tlc_id))
+            .is_none()
+        {
+            break;
+        }
+    }
 
     let new_a_balance = node_a.get_local_balance_from_channel(channel_id);
     let new_b_balance = node_b.get_local_balance_from_channel(channel_id);
@@ -2372,13 +2381,14 @@ async fn test_network_add_two_tlcs_remove_one() {
 
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
     // remove the later tlc from node_b
+    let tlc_id_b = add_tlc_result_b.unwrap().tlc_id;
     call!(node_b.network_actor, |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id,
                 command: ChannelCommand::RemoveTlc(
                     RemoveTlcCommand {
-                        id: add_tlc_result_b.unwrap().tlc_id,
+                        id: tlc_id_b,
                         reason: RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
                             payment_preimage: preimage_b.into(),
                         }),
@@ -2391,7 +2401,18 @@ async fn test_network_add_two_tlcs_remove_one() {
     .expect("node_b alive")
     .expect("successfully removed tlc");
     eprintln!("remove tlc result: {:?}", ());
-    tokio::time::sleep(tokio::time::Duration::from_millis(400)).await;
+
+    loop {
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        let a_tlc_state = node_a.get_channel_actor_state(channel_id);
+        if a_tlc_state
+            .tlc_state
+            .get(&TLCId::Offered(tlc_id_b))
+            .is_none()
+        {
+            break;
+        }
+    }
 
     let new_a_balance = node_a.get_local_balance_from_channel(channel_id);
     let new_b_balance = node_b.get_local_balance_from_channel(channel_id);
@@ -3620,7 +3641,6 @@ async fn test_revoke_old_commitment_transaction() {
             _ => None,
         })
         .await;
-
     node_a
         .expect_event(|event| match event {
             NetworkServiceEvent::ChannelReady(peer_id, channel_id, _funding_tx_hash) => {
@@ -3687,7 +3707,11 @@ async fn test_revoke_old_commitment_transaction() {
 
     let tx = Transaction::default()
         .as_advanced_builder()
-        .cell_deps(get_cell_deps(vec![Contract::CommitmentLock], &None).expect("get cell deps"))
+        .cell_deps(
+            get_cell_deps(vec![Contract::CommitmentLock], &None)
+                .await
+                .expect("get cell deps"),
+        )
         .input(
             CellInput::new_builder()
                 .previous_output(commitment_tx.output_pts().first().unwrap().clone())
@@ -4127,7 +4151,7 @@ async fn test_commitment_tx_capacity() {
         NetworkNode::new_2_nodes_with_established_channel(amount_a, amount_b, true).await;
 
     let state = node_a.store.get_channel_actor_state(&channel_id).unwrap();
-    let commitment_tx = state.get_latest_commitment_transaction().unwrap();
+    let commitment_tx = state.get_latest_commitment_transaction().await.unwrap();
     let output_capacity: u64 = commitment_tx.output(0).unwrap().capacity().unpack();
 
     // default fee rate is 1000 shannons per kb, and there is a gap of 20 bytes between the mock commitment tx and the real one

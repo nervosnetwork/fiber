@@ -78,7 +78,7 @@ fn main() {
     let migrations_dir = Path::new("../../migrate/src/migrations");
     let mut migrations = Vec::new();
 
-    let mut latest_db_version = "".to_string();
+    let mut latest_db_version = "20250701".to_string();
     for entry in fs::read_dir(migrations_dir).unwrap() {
         let entry = entry.unwrap();
         let path = entry.path();
@@ -107,7 +107,6 @@ fn main() {
             }
         }
     }
-
     let mut code = String::new();
     code.push_str(&format!(
         "    pub const LATEST_DB_VERSION: &str = \"{}\";\n",

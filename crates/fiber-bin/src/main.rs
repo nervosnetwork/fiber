@@ -131,6 +131,7 @@ pub async fn main() -> Result<(), ExitMessage> {
                 ckb_config.udt_whitelist.clone().unwrap_or_default(),
                 Some(type_id_resolver),
             )
+            .await
             .map_err(|err| ExitMessage(format!("failed to init contracts context: {}", err)))?;
 
             let ckb_chain_actor = Actor::spawn_linked(
@@ -234,7 +235,7 @@ pub async fn main() -> Result<(), ExitMessage> {
                                             match get_cell_deps(
                                                 vec![Contract::FundingLock],
                                                 &commitment_tx.outputs().get(0).unwrap().type_().to_opt(),
-                                            ) {
+                                            ).await {
                                                 Ok(cell_deps) => {
                                                     let commitment_tx = commitment_tx
                                                     .as_advanced_builder()

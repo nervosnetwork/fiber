@@ -4,11 +4,12 @@ use ckb_types::packed::{Byte32, OutPoint, Script, Transaction};
 use ckb_types::prelude::{IntoTransactionView, Pack, Unpack};
 use ckb_types::H256;
 use either::Either;
+use getrandom::getrandom;
 use once_cell::sync::OnceCell;
 use ractor::concurrency::Duration;
 use ractor::{
-    async_trait as rasync_trait, call, call_t, Actor, ActorCell, ActorProcessingErr, ActorRef,
-    RactorErr, RpcReplyPort, SupervisionEvent,
+    call, call_t, Actor, ActorCell, ActorProcessingErr, ActorRef, RactorErr, RpcReplyPort,
+    SupervisionEvent,
 };
 use rand::Rng;
 use secp256k1::Secp256k1;
@@ -17,10 +18,10 @@ use serde_with::{serde_as, DisplayFromStr};
 use std::borrow::Cow;
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
+
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::SystemTime;
 use tentacle::multiaddr::{MultiAddr, Protocol};
 use tentacle::service::SessionType;
 use tentacle::utils::{extract_peer_id, is_reachable, multiaddr_to_socketaddr};
@@ -3017,7 +3018,8 @@ where
                                 }
                             };
 
-                            let transaction = match state.get_latest_commitment_transaction() {
+                            let transaction = match state.get_latest_commitment_transaction().await
+                            {
                                 Ok(tx) => tx,
                                 Err(e) => {
                                     let error = Error::ChannelError(e);
@@ -3542,7 +3544,8 @@ pub struct NetworkActorStartArguments {
     pub default_shutdown_script: Script,
 }
 
-#[rasync_trait]
+#[cfg_attr(target_arch="wasm32",async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl<S> Actor for NetworkActor<S>
 where
     S: NetworkActorStateStore
@@ -3571,19 +3574,16 @@ where
             channel_subscribers,
             default_shutdown_script,
         } = args;
-        let now = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .expect("SystemTime::now() should after UNIX_EPOCH");
         let kp = config
             .read_or_generate_secret_key()
             .expect("read or generate secret key");
         let private_key = <[u8; 32]>::try_from(kp.as_ref())
             .expect("valid length for key")
             .into();
+        let mut entropy_rand = [0u8; 32];
+        getrandom(&mut entropy_rand).expect("getrandom should not fail");
         let entropy = blake2b_hash_with_salt(
-            [kp.as_ref(), now.as_nanos().to_le_bytes().as_ref()]
-                .concat()
-                .as_slice(),
+            [kp.as_ref(), entropy_rand.as_slice()].concat().as_slice(),
             b"FIBER_NETWORK_ENTROPY",
         );
         let secio_kp = SecioKeyPair::from(kp);
@@ -3790,7 +3790,6 @@ where
         });
         Ok(())
     }
-
     async fn handle(
         &self,
         myself: ActorRef<Self::Msg>,
