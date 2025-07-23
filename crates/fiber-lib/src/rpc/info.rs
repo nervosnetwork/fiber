@@ -9,11 +9,10 @@ use crate::fiber::{
 use crate::{handle_actor_call, log_and_error};
 use ckb_jsonrpc_types::Script;
 #[cfg(not(target_arch = "wasm32"))]
-use jsonrpsee::{
-    core::async_trait,
-    proc_macros::rpc,
-    types::{error::CALL_EXECUTION_FAILED_CODE, ErrorObjectOwned},
-};
+use jsonrpsee::proc_macros::rpc;
+use jsonrpsee::types::error::CALL_EXECUTION_FAILED_CODE;
+use jsonrpsee::types::ErrorObjectOwned;
+
 use ractor::{call, ActorRef};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
@@ -101,6 +100,7 @@ impl InfoRpcServerImpl {
 }
 
 /// The RPC module for node information.
+#[cfg(not(target_arch = "wasm32"))]
 #[rpc(server)]
 trait InfoRpc {
     /// Get the node information.
@@ -108,9 +108,15 @@ trait InfoRpc {
     async fn node_info(&self) -> Result<NodeInfoResult, ErrorObjectOwned>;
 }
 
-#[async_trait]
+#[async_trait::async_trait]
+#[cfg(not(target_arch = "wasm32"))]
 impl InfoRpcServer for InfoRpcServerImpl {
     async fn node_info(&self) -> Result<NodeInfoResult, ErrorObjectOwned> {
+        self.node_info().await
+    }
+}
+impl InfoRpcServerImpl {
+    pub async fn node_info(&self) -> Result<NodeInfoResult, ErrorObjectOwned> {
         let version = env!("CARGO_PKG_VERSION").to_string();
         let commit_hash = crate::get_git_commit_info();
 

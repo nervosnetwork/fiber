@@ -6,7 +6,7 @@ use ckb_types::{
     prelude::{Builder, Entity},
 };
 use molecule::prelude::Byte;
-use ractor::{async_trait, concurrency::Duration, Actor, ActorProcessingErr, ActorRef};
+use ractor::{concurrency::Duration, Actor, ActorProcessingErr, ActorRef};
 use tentacle::secio::PeerId;
 use tokio::sync::RwLock;
 
@@ -128,7 +128,8 @@ enum SubscriberMessage {
     Update(GossipMessageUpdates),
 }
 
-#[async_trait]
+#[cfg_attr(target_arch="wasm32",async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl Actor for Subscriber {
     type Msg = SubscriberMessage;
     type State = ();
@@ -136,8 +137,8 @@ impl Actor for Subscriber {
 
     async fn pre_start(
         &self,
-        _: ActorRef<Self::Msg>,
-        _: Self::Arguments,
+        _myself: ActorRef<Self::Msg>,
+        _args: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
         Ok(())
     }
@@ -182,7 +183,7 @@ async fn test_save_gossip_message() {
 #[tokio::test]
 async fn test_saving_unconfirmed_channel_announcement() {
     let context = GossipTestingContext::new().await;
-    let channel_context = ChannelTestContext::gen();
+    let channel_context = ChannelTestContext::gen().await;
     context.save_message(BroadcastMessage::ChannelAnnouncement(
         channel_context.channel_announcement.clone(),
     ));
@@ -196,7 +197,7 @@ async fn test_saving_unconfirmed_channel_announcement() {
 #[tokio::test]
 async fn test_saving_confirmed_channel_announcement() {
     let context = GossipTestingContext::new().await;
-    let channel_context = ChannelTestContext::gen();
+    let channel_context = ChannelTestContext::gen().await;
     context.save_message(BroadcastMessage::ChannelAnnouncement(
         channel_context.channel_announcement.clone(),
     ));
@@ -212,7 +213,7 @@ async fn test_saving_confirmed_channel_announcement() {
 #[tokio::test]
 async fn test_saving_invalid_channel_announcement() {
     let context = GossipTestingContext::new().await;
-    let channel_context = ChannelTestContext::gen();
+    let channel_context = ChannelTestContext::gen().await;
     let tx = channel_context.funding_tx.clone();
     context.save_message(BroadcastMessage::ChannelAnnouncement(
         channel_context.channel_announcement.clone(),
@@ -244,7 +245,7 @@ async fn test_saving_invalid_channel_announcement() {
 #[tokio::test]
 async fn test_saving_channel_update_after_saving_channel_announcement() {
     let context = GossipTestingContext::new().await;
-    let channel_context = ChannelTestContext::gen();
+    let channel_context = ChannelTestContext::gen().await;
     context.save_message(BroadcastMessage::ChannelAnnouncement(
         channel_context.channel_announcement.clone(),
     ));
@@ -285,7 +286,7 @@ async fn test_saving_channel_update_after_saving_channel_announcement() {
 #[tokio::test]
 async fn test_saving_channel_update_before_saving_channel_announcement() {
     let context = GossipTestingContext::new().await;
-    let channel_context = ChannelTestContext::gen();
+    let channel_context = ChannelTestContext::gen().await;
 
     for channel_update in [
         channel_context.create_channel_update_of_node1(
@@ -335,7 +336,7 @@ async fn test_saving_channel_update_before_saving_channel_announcement() {
 #[tokio::test]
 async fn test_saving_invalid_channel_update() {
     let context = GossipTestingContext::new().await;
-    let channel_context = ChannelTestContext::gen();
+    let channel_context = ChannelTestContext::gen().await;
     context.save_message(BroadcastMessage::ChannelAnnouncement(
         channel_context.channel_announcement.clone(),
     ));
@@ -378,7 +379,7 @@ async fn test_saving_invalid_channel_update() {
 async fn test_saving_channel_update_independency() {
     async fn test(node1_has_invalid_signature: bool, node2_has_invalid_signature: bool) {
         let context = GossipTestingContext::new().await;
-        let channel_context = ChannelTestContext::gen();
+        let channel_context = ChannelTestContext::gen().await;
         context.save_message(BroadcastMessage::ChannelAnnouncement(
             channel_context.channel_announcement.clone(),
         ));
@@ -443,7 +444,7 @@ async fn test_saving_channel_update_independency() {
 #[tokio::test]
 async fn test_saving_channel_update_with_invalid_channel_announcement() {
     let context = GossipTestingContext::new().await;
-    let channel_context = ChannelTestContext::gen();
+    let channel_context = ChannelTestContext::gen().await;
     context.save_message(BroadcastMessage::ChannelAnnouncement(
         channel_context.channel_announcement.clone(),
     ));
@@ -710,7 +711,7 @@ async fn test_gossip_store_prune_all_messages() {
     let context = GossipTestingContext::new().await;
     let num_messages = 1000usize;
     for _i in 1..=num_messages {
-        let channel_context = ChannelTestContext::gen();
+        let channel_context = ChannelTestContext::gen().await;
         let status = context.submit_tx(channel_context.funding_tx.clone()).await;
         assert!(matches!(status, TxStatus::Committed(..)));
         context.save_message(BroadcastMessage::ChannelAnnouncement(
@@ -749,7 +750,7 @@ async fn test_gossip_store_prune_all_messages() {
 #[tokio::test]
 async fn test_gossip_store_prune_channel_announcement() {
     let context = GossipTestingContext::new().await;
-    let channel_context = ChannelTestContext::gen();
+    let channel_context = ChannelTestContext::gen().await;
     context.save_message(BroadcastMessage::ChannelAnnouncement(
         channel_context.channel_announcement.clone(),
     ));
@@ -809,7 +810,7 @@ async fn test_gossip_store_prune_channel_announcement() {
 #[tokio::test]
 async fn test_gossip_store_prune_channel_update() {
     let context = GossipTestingContext::new().await;
-    let channel_context = ChannelTestContext::gen();
+    let channel_context = ChannelTestContext::gen().await;
     context.save_message(BroadcastMessage::ChannelAnnouncement(
         channel_context.channel_announcement.clone(),
     ));
