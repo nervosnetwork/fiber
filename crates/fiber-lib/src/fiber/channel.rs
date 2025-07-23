@@ -1979,10 +1979,10 @@ where
                 let res = self
                     .handle_add_tlc_command(myself, state, command.clone())
                     .await;
-                let error_info = if let Err(ref err) = res {
-                    Some((err.clone(), self.get_tlc_error(state, err).await))
-                } else {
-                    None
+
+                let error_info = match &res {
+                    Err(err) => Some((err.clone(), self.get_tlc_error(state, err).await)),
+                    Ok(_) => None,
                 };
 
                 self.network
@@ -4058,7 +4058,8 @@ impl ChannelActorState {
             return false;
         }
         if let Some(timestamp) = self.waiting_peer_response {
-            // depends on the system's clock source, not all system clocks are monotonic, using saturating_sub to avoid potential underflow
+            // depends on the system's clock source, not all system clocks are monotonic,
+            // using saturating_sub to avoid potential underflow
             let elapsed = now_timestamp_as_millis_u64().saturating_sub(timestamp);
             elapsed > PEER_CHANNEL_RESPONSE_TIMEOUT && !self.reestablishing
         } else {

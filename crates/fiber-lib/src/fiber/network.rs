@@ -1808,9 +1808,9 @@ where
             Some(channel_id) => channel_id,
             None => {
                 error!(
-                        "Channel id not found in outpoint_channel_map with {:?}, are we connected to the peer?",
-                        channel_outpoint
-                    );
+                    "Channel id not found in outpoint_channel_map with {:?}, are we connected to the peer?",
+                     channel_outpoint
+                );
                 let tlc_err = TlcErr::new_channel_fail(
                     TlcErrorCode::UnknownNextPeer,
                     state.get_public_key(),
