@@ -73,7 +73,7 @@ use super::{
 
 use crate::ckb::config::UdtCfgInfos;
 use crate::ckb::contracts::{check_udt_script, get_udt_whitelist, is_udt_type_auto_accept};
-use crate::ckb::{CkbChainMessage, FundingRequest, FundingTx};
+use crate::ckb::{CkbChainMessage, FundingError, FundingRequest, FundingTx};
 use crate::fiber::channel::{
     AddTlcCommand, AddTlcResponse, ChannelEphemeralConfig, ChannelInitializationOperation,
     ShutdownCommand, TxCollaborationCommand, TxUpdateCommand,
@@ -1522,31 +1522,28 @@ where
                 let old_tx = transaction.into_view();
                 let mut tx = FundingTx::new();
                 tx.update_for_self(old_tx)?;
-                let tx = match call_t!(
-                    self.chain_actor.clone(),
-                    CkbChainMessage::Fund,
-                    DEFAULT_CHAIN_ACTOR_TIMEOUT,
-                    tx,
-                    request
-                ) {
-                    Ok(Ok(tx)) => match tx.into_inner() {
+                let tx = match self.fund(state, tx, request).await {
+                    Ok(tx) => match tx.into_inner() {
                         Some(tx) => tx,
                         _ => {
                             error!("Obtained empty funding tx");
                             return Ok(());
                         }
                     },
-                    Ok(Err(err)) => {
-                        error!("Failed to fund channel: {}", err);
-                        state.abort_funding(Either::Left(channel_id)).await;
-                        return Ok(());
-                    }
                     Err(err) => {
-                        error!("Failed to call chain actor: {}", err);
+                        error!("Failed to fund channel: {}", err);
+                        if !err.is_temporary() {
+                            state.abort_funding(Either::Left(channel_id)).await;
+                        }
                         return Ok(());
                     }
                 };
-                debug!("Funding transaction updated on our part: {:?}", tx);
+                if tracing::enabled!(target: "fnn::fiber::network::funding", tracing::Level::DEBUG)
+                {
+                    let tx_json: ckb_jsonrpc_types::Transaction = tx.data().into();
+                    let tx_json = serde_json::to_string(&tx_json).unwrap_or_default();
+                    debug!(target: "fnn::fiber::network::funding", "Funding transaction updated on our part: {}", tx_json);
+                }
                 state
                     .send_command_to_channel(
                         channel_id,
@@ -2327,6 +2324,24 @@ where
 
         Ok(PaymentRouter { router_hops })
     }
+
+    async fn fund(
+        &self,
+        state: &NetworkActorState<S>,
+        tx: FundingTx,
+        request: FundingRequest,
+    ) -> Result<FundingTx, FundingError> {
+        match &state.funding_tx_shell_builder {
+            None => call_t!(
+                self.chain_actor.clone(),
+                CkbChainMessage::Fund,
+                DEFAULT_CHAIN_ACTOR_TIMEOUT,
+                tx,
+                request
+            )?,
+            Some(shell_script) => fund_via_shell(shell_script.clone(), tx, request).await,
+        }
+    }
 }
 
 pub struct NetworkActorState<S> {
@@ -2384,6 +2399,7 @@ pub struct NetworkActorState<S> {
     // the payment router map, only used for avoiding finding the same payment router multiple times
     payment_router_map: HashMap<Hash256, Vec<PaymentHopData>>,
     channel_ephemeral_config: ChannelEphemeralConfig,
+    funding_tx_shell_builder: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -3736,6 +3752,7 @@ where
             channel_ephemeral_config: ChannelEphemeralConfig {
                 funding_timeout_seconds: config.funding_timeout_seconds,
             },
+            funding_tx_shell_builder: config.funding_tx_shell_builder.clone(),
         };
 
         let node_announcement = state.get_or_create_new_node_announcement_message();
@@ -4110,5 +4127,57 @@ impl ToBeAcceptedChannels {
         );
         self.map.insert(id, (peer_id, open_channel));
         Ok(())
+    }
+}
+
+async fn fund_via_shell(
+    shell_script: String,
+    mut tx: FundingTx,
+    request: FundingRequest,
+) -> Result<FundingTx, FundingError> {
+    use std::process::Stdio;
+    use tokio::{io::AsyncWriteExt, process::Command};
+    let (executable, arg) = if cfg!(target_os = "windows") {
+        ("cmd", "/C")
+    } else {
+        ("sh", "-c")
+    };
+    let mut child = Command::new(executable)
+        .arg(arg)
+        .arg(shell_script)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+
+    let mut stdin = child.stdin.take().expect("failed to get stdin");
+    stdin.write_all(b"{\"tx\":").await?;
+    match tx.take() {
+        Some(tx) => {
+            let tx: ckb_jsonrpc_types::Transaction = tx.data().into();
+            let tx_json = serde_json::to_string(&tx)?;
+            stdin.write_all(tx_json.as_bytes()).await?;
+        }
+        None => {
+            stdin.write_all(b"null").await?;
+        }
+    }
+    stdin.write_all(b",\"request\":").await?;
+    let request_json = serde_json::to_string(&request)?;
+    stdin.write_all(request_json.as_bytes()).await?;
+    stdin.write_all(b"}").await?;
+
+    let output = child.wait_with_output().await?;
+    if output.status.success() {
+        let out_tx_json = String::from_utf8(output.stdout)?;
+        let tx: ckb_jsonrpc_types::Transaction = serde_json::from_str(&out_tx_json)?;
+        let tx: Transaction = tx.into();
+        let tx: FundingTx = tx.into_view().into();
+        Ok(tx)
+    } else {
+        let err = String::from_utf8(output.stderr)?;
+        Err(FundingError::CkbTxBuilderError(
+            ckb_sdk::tx_builder::TxBuilderError::Other(anyhow::anyhow!(err)),
+        ))
     }
 }
