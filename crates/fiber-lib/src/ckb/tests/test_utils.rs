@@ -11,6 +11,7 @@ use ckb_types::{
 };
 use molecule::bytes::BytesMut;
 use once_cell::sync::{Lazy, OnceCell};
+
 use std::{collections::HashMap, sync::Arc, sync::RwLock};
 use tokio::sync::RwLock as TokioRwLock;
 
@@ -211,7 +212,8 @@ impl TraceTxReplier {
     }
 }
 
-#[ractor::async_trait]
+#[cfg_attr(target_arch="wasm32",async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl Actor for TraceTxReplier {
     type Msg = CkbTxTracingResult;
     type Arguments = (
@@ -257,7 +259,8 @@ impl Actor for TraceTxReplier {
     }
 }
 
-#[ractor::async_trait]
+#[cfg_attr(target_arch="wasm32",async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 pub trait MockChainActorMiddleware: Send + std::fmt::Debug {
     /// Returns Ok(None) if the message is handled by the middleware, otherwise the message
     /// will be forwarded to the underlying MockChainActor.
@@ -345,16 +348,15 @@ impl MockChainActor {
         .expect("start trace tx replier");
     }
 }
-
-#[ractor::async_trait]
+#[cfg_attr(target_arch="wasm32",async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl Actor for MockChainActor {
     type Msg = CkbChainMessage;
     type State = MockChainActorState;
     type Arguments = Option<Box<dyn MockChainActorMiddleware>>;
-
     async fn pre_start(
         &self,
-        _: ActorRef<Self::Msg>,
+        _myself: ActorRef<Self::Msg>,
         args: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
         Ok(Self::State::with_optional_middleware(args))
@@ -689,10 +691,10 @@ pub async fn get_tx_from_hash(
 }
 
 pub fn complete_commitment_tx(commitment_tx: &TransactionView) -> TransactionView {
-    let cell_deps = get_cell_deps(
+    let cell_deps = futures::executor::block_on(get_cell_deps(
         vec![Contract::FundingLock],
         &commitment_tx.outputs().get(0).unwrap().type_().to_opt(),
-    )
+    ))
     .expect("get cell deps should be ok");
     commitment_tx
         .as_advanced_builder()

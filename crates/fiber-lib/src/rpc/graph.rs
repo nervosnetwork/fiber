@@ -13,9 +13,9 @@ use ckb_jsonrpc_types::{DepType, JsonBytes, OutPoint as OutPointWrapper, Script,
 use ckb_types::packed::OutPoint;
 use ckb_types::H256;
 #[cfg(not(target_arch = "wasm32"))]
-use jsonrpsee::{
-    core::async_trait, proc_macros::rpc, types::error::INVALID_PARAMS_CODE, types::ErrorObjectOwned,
-};
+use jsonrpsee::proc_macros::rpc;
+use jsonrpsee::{types::error::INVALID_PARAMS_CODE, types::ErrorObjectOwned};
+
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use std::sync::Arc;
@@ -250,6 +250,7 @@ pub struct GraphChannelsResult {
 }
 
 /// RPC module for graph management.
+#[cfg(not(target_arch = "wasm32"))]
 #[rpc(server)]
 trait GraphRpc {
     /// Get the list of nodes in the network graph.
@@ -286,8 +287,8 @@ where
         }
     }
 }
-
-#[async_trait]
+#[cfg(not(target_arch = "wasm32"))]
+#[async_trait::async_trait]
 impl<S> GraphRpcServer for GraphRpcServerImpl<S>
 where
     S: NetworkGraphStateStore
@@ -298,7 +299,33 @@ where
         + Sync
         + 'static,
 {
+    /// Get the list of nodes in the network graph.
     async fn graph_nodes(
+        &self,
+        params: GraphNodesParams,
+    ) -> Result<GraphNodesResult, ErrorObjectOwned> {
+        self.graph_nodes(params).await
+    }
+
+    /// Get the list of channels in the network graph.
+    async fn graph_channels(
+        &self,
+        params: GraphChannelsParams,
+    ) -> Result<GraphChannelsResult, ErrorObjectOwned> {
+        self.graph_channels(params).await
+    }
+}
+impl<S> GraphRpcServerImpl<S>
+where
+    S: NetworkGraphStateStore
+        + ChannelActorStateStore
+        + GossipMessageStore
+        + Clone
+        + Send
+        + Sync
+        + 'static,
+{
+    pub async fn graph_nodes(
         &self,
         params: GraphNodesParams,
     ) -> Result<GraphNodesResult, ErrorObjectOwned> {
@@ -323,7 +350,7 @@ where
         Ok(GraphNodesResult { nodes, last_cursor })
     }
 
-    async fn graph_channels(
+    pub async fn graph_channels(
         &self,
         params: GraphChannelsParams,
     ) -> Result<GraphChannelsResult, ErrorObjectOwned> {

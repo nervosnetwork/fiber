@@ -8,8 +8,8 @@ use getrandom::getrandom;
 use once_cell::sync::OnceCell;
 use ractor::concurrency::Duration;
 use ractor::{
-    async_trait as rasync_trait, call, call_t, Actor, ActorCell, ActorProcessingErr, ActorRef,
-    RactorErr, RpcReplyPort, SupervisionEvent,
+    call, call_t, Actor, ActorCell, ActorProcessingErr, ActorRef, RactorErr, RpcReplyPort,
+    SupervisionEvent,
 };
 use rand::Rng;
 use secp256k1::Secp256k1;
@@ -18,6 +18,7 @@ use serde_with::{serde_as, DisplayFromStr};
 use std::borrow::Cow;
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
+
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -2971,7 +2972,8 @@ where
                                 }
                             };
 
-                            let transaction = match state.get_latest_commitment_transaction() {
+                            let transaction = match state.get_latest_commitment_transaction().await
+                            {
                                 Ok(tx) => tx,
                                 Err(e) => {
                                     let error = Error::ChannelError(e);
@@ -3496,7 +3498,8 @@ pub struct NetworkActorStartArguments {
     pub default_shutdown_script: Script,
 }
 
-#[rasync_trait]
+#[cfg_attr(target_arch="wasm32",async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl<S> Actor for NetworkActor<S>
 where
     S: NetworkActorStateStore
@@ -3741,7 +3744,6 @@ where
         });
         Ok(())
     }
-
     async fn handle(
         &self,
         myself: ActorRef<Self::Msg>,

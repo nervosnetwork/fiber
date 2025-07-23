@@ -14,3 +14,9 @@ tests/nodes/.ports
 .vscode
 /migrate/target
 *.txt
+/node_modules
+/fiber-js/dist
+/crates/fiber-wasm/dist
+/crates/fiber-wasm-db-worker/dist
+/dump*.txt
+package-lock.json
