@@ -2232,9 +2232,10 @@ where
         myself: ActorRef<NetworkActorMessage>,
         state: &mut NetworkActorState<S>,
         payment_hash: Hash256,
-        delay_millis: u64,
+        _delay_millis: u64,
     ) {
-        myself.send_after(Duration::from_millis(delay_millis), move || {
+        let delay = (state.retry_send_payment_count as u64 + 1) * 50_u64;
+        myself.send_after(Duration::from_millis(delay), move || {
             NetworkActorMessage::new_event(NetworkActorEvent::RetrySendPayment(payment_hash))
         });
         state.retry_send_payment_count += 1;
