@@ -1334,3 +1334,38 @@ async fn test_to_be_accepted_channels_bytes_limit() {
         .expect("open channel");
     node.expect_debug_event("ChannelPendingToBeRejected").await;
 }
+
+#[cfg(unix)]
+#[tokio::test]
+#[should_panic]
+async fn test_failed_funding_shell_builder() {
+    init_tracing();
+
+    let funding_amount_a = 4_200_000_000u128;
+    let funding_amount_b: u128 = funding_amount_a;
+    let mut node_a = NetworkNode::new_with_config(
+        NetworkNodeConfig::builder()
+            .fiber_config_updater(|config| {
+                // It's hard to build a valid funding tx using simple shell script since the lock
+                // is derived from public keys of both parties.
+                config.funding_tx_shell_builder = Some(r#"echo '{"version":"0x0","cell_deps":[],"header_deps":[],"inputs":[],"outputs_data":["0x"],"witnesses":[],
+                "outputs":[{"capacity":"0xfa56ea00","lock":{"code_hash":"0x0a792ff1eabfdf90f17c7db3c7984c2a21dee569f4e584f271c3d9ae2addb3ae","hash_type":"data","args":"0x"},"type":null}]}
+                '"#.to_string());
+            })
+            .build()
+    )
+    .await;
+    let mut node_b = NetworkNode::new().await;
+    node_a.connect_to(&mut node_b).await;
+    establish_channel_between_nodes(
+        &mut node_a,
+        &mut node_b,
+        ChannelParameters {
+            public: true,
+            node_a_funding_amount: funding_amount_a,
+            node_b_funding_amount: funding_amount_b,
+            ..Default::default()
+        },
+    )
+    .await;
+}

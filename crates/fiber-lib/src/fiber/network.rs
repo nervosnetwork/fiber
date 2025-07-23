@@ -72,7 +72,7 @@ use super::{
 };
 use crate::ckb::config::UdtCfgInfos;
 use crate::ckb::contracts::{check_udt_script, get_udt_whitelist, is_udt_type_auto_accept};
-use crate::ckb::{CkbChainMessage, FundingRequest, FundingTx};
+use crate::ckb::{CkbChainMessage, FundingError, FundingRequest, FundingTx};
 use crate::fiber::channel::MAX_TLC_NUMBER_IN_FLIGHT;
 use crate::fiber::channel::{
     AddTlcCommand, AddTlcResponse, ChannelEphemeralConfig, ChannelInitializationOperation,
@@ -127,7 +127,8 @@ const MAINTAINING_CONNECTIONS_INTERVAL: Duration = Duration::from_secs(3600);
 
 // The duration for which we will check all channels.
 #[cfg(debug_assertions)]
-const CHECK_CHANNELS_INTERVAL: Duration = Duration::from_secs(3); // use a short interval for debugging build
+// use a short interval for debugging build
+const CHECK_CHANNELS_INTERVAL: Duration = Duration::from_secs(3);
 #[cfg(not(debug_assertions))]
 const CHECK_CHANNELS_INTERVAL: Duration = Duration::from_secs(60);
 
@@ -275,6 +276,11 @@ pub enum NetworkActorCommand {
     // is for the current node.
     SendPaymentOnionPacket(SendOnionPacketCommand),
     UpdateChannelFunding(Hash256, Transaction, FundingRequest),
+    VerifyFundingTx {
+        local_tx: Transaction,
+        remote_tx: Transaction,
+        reply: RpcReplyPort<Result<(), FundingError>>,
+    },
     SignFundingTx(PeerId, Hash256, Transaction, Option<Vec<Vec<u8>>>),
     NotifyFundingTx(Transaction),
     // Broadcast our BroadcastMessage to the network.
@@ -1456,14 +1462,63 @@ where
                                 }
                             }
 
+                            // for received tlcs, check whether the tlc is expired, if so we send RemoveTlc message
+                            // to previous hop, even if later hop send backup RemoveTlc message to us later,
+                            // it will be ignored.
+                            let expired_tlcs = actor_state
+                                .tlc_state
+                                .received_tlcs
+                                .get_committed_tlcs()
+                                .into_iter()
+                                .filter(|tlc| tlc.expiry < now)
+                                .collect::<Vec<_>>();
+                            for tlc in expired_tlcs {
+                                info!(
+                                    "Removing expired tlc {:?} for channel {:?}",
+                                    tlc.id(),
+                                    channel_id
+                                );
+                                let (send, _recv) = oneshot::channel();
+                                let rpc_reply = RpcReplyPort::from(send);
+                                if let Err(err) = state
+                                    .send_command_to_channel(
+                                        channel_id,
+                                        ChannelCommand::RemoveTlc(
+                                            RemoveTlcCommand {
+                                                id: tlc.id(),
+                                                reason: RemoveTlcReason::RemoveTlcFail(
+                                                    TlcErrPacket::new(
+                                                        TlcErr::new(TlcErrorCode::ExpiryTooSoon),
+                                                        &tlc.shared_secret,
+                                                    ),
+                                                ),
+                                            },
+                                            rpc_reply,
+                                        ),
+                                    )
+                                    .await
+                                {
+                                    error!(
+                                        "Failed to remove tlc {:?} for channel {:?}: {}",
+                                        tlc.id(),
+                                        channel_id,
+                                        err
+                                    );
+                                }
+                            }
+
+                            // check whether the next hop have already sent us the RemoveTlc message
+                            // for the offered expired tlc, if not we will force close the channel
                             if actor_state
                                 .tlc_state
                                 .offered_tlcs
                                 .get_committed_tlcs()
                                 .iter()
-                                .any(|tlc| tlc.expiry < now)
+                                .any(|tlc| {
+                                    tlc.expiry + (CHECK_CHANNELS_INTERVAL.as_millis() as u64) < now
+                                })
                             {
-                                debug!(
+                                info!(
                                     "Force closing channel {:?} due to expired offered tlc",
                                     channel_id
                                 );
@@ -1692,32 +1747,29 @@ where
             NetworkActorCommand::UpdateChannelFunding(channel_id, transaction, request) => {
                 let old_tx = transaction.into_view();
                 let mut tx = FundingTx::new();
-                tx.update_for_self(old_tx)?;
-                let tx = match call_t!(
-                    self.chain_actor.clone(),
-                    CkbChainMessage::Fund,
-                    DEFAULT_CHAIN_ACTOR_TIMEOUT,
-                    tx,
-                    request
-                ) {
-                    Ok(Ok(tx)) => match tx.into_inner() {
+                tx.update_for_self(old_tx);
+                let tx = match self.fund(state, tx, request).await {
+                    Ok(tx) => match tx.into_inner() {
                         Some(tx) => tx,
                         _ => {
                             error!("Obtained empty funding tx");
                             return Ok(());
                         }
                     },
-                    Ok(Err(err)) => {
-                        error!("Failed to fund channel: {}", err);
-                        state.abort_funding(Either::Left(channel_id)).await;
-                        return Ok(());
-                    }
                     Err(err) => {
-                        error!("Failed to call chain actor: {}", err);
+                        error!("Failed to fund channel: {}", err);
+                        if !err.is_temporary() {
+                            state.abort_funding(Either::Left(channel_id)).await;
+                        }
                         return Ok(());
                     }
                 };
-                debug!("Funding transaction updated on our part: {:?}", tx);
+                if tracing::enabled!(target: "fnn::fiber::network::funding", tracing::Level::DEBUG)
+                {
+                    let tx_json: ckb_jsonrpc_types::Transaction = tx.data().into();
+                    let tx_json = serde_json::to_string(&tx_json).unwrap_or_default();
+                    debug!(target: "fnn::fiber::network::funding", "Funding transaction updated on our part: {}", tx_json);
+                }
                 state
                     .send_command_to_channel(
                         channel_id,
@@ -1728,6 +1780,19 @@ where
                         )),
                     )
                     .await?
+            }
+            NetworkActorCommand::VerifyFundingTx {
+                local_tx,
+                remote_tx,
+                reply,
+            } => {
+                let _ = self
+                    .chain_actor
+                    .send_message(CkbChainMessage::VerifyFundingTx {
+                        local_tx,
+                        remote_tx,
+                        reply,
+                    });
             }
             NetworkActorCommand::NotifyFundingTx(tx) => {
                 let _ = self
@@ -2789,6 +2854,24 @@ where
 
         Ok(PaymentRouter { router_hops })
     }
+
+    async fn fund(
+        &self,
+        state: &NetworkActorState<S>,
+        tx: FundingTx,
+        request: FundingRequest,
+    ) -> Result<FundingTx, FundingError> {
+        match &state.funding_tx_shell_builder {
+            None => call_t!(
+                self.chain_actor.clone(),
+                CkbChainMessage::Fund,
+                DEFAULT_CHAIN_ACTOR_TIMEOUT,
+                tx,
+                request
+            )?,
+            Some(shell_script) => fund_via_shell(shell_script.clone(), tx, request).await,
+        }
+    }
 }
 
 pub struct NetworkActorState<S> {
@@ -2846,6 +2929,7 @@ pub struct NetworkActorState<S> {
     // the payment router map, only used for avoiding finding the same payment router multiple times
     payment_router_map: HashMap<(Hash256, u64), Vec<PaymentHopData>>,
     channel_ephemeral_config: ChannelEphemeralConfig,
+    funding_tx_shell_builder: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -4202,6 +4286,7 @@ where
             channel_ephemeral_config: ChannelEphemeralConfig {
                 funding_timeout_seconds: config.funding_timeout_seconds,
             },
+            funding_tx_shell_builder: config.funding_tx_shell_builder.clone(),
         };
 
         let node_announcement = state.get_or_create_new_node_announcement_message();
@@ -4608,5 +4693,57 @@ impl ToBeAcceptedChannels {
         );
         self.map.insert(id, (peer_id, open_channel));
         Ok(())
+    }
+}
+
+async fn fund_via_shell(
+    shell_script: String,
+    mut tx: FundingTx,
+    request: FundingRequest,
+) -> Result<FundingTx, FundingError> {
+    use std::process::Stdio;
+    use tokio::{io::AsyncWriteExt, process::Command};
+    let (executable, arg) = if cfg!(target_os = "windows") {
+        ("cmd", "/C")
+    } else {
+        ("sh", "-c")
+    };
+    let mut child = Command::new(executable)
+        .arg(arg)
+        .arg(shell_script)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+
+    let mut stdin = child.stdin.take().expect("failed to get stdin");
+    stdin.write_all(b"{\"tx\":").await?;
+    match tx.take() {
+        Some(tx) => {
+            let tx: ckb_jsonrpc_types::Transaction = tx.data().into();
+            let tx_json = serde_json::to_string(&tx)?;
+            stdin.write_all(tx_json.as_bytes()).await?;
+        }
+        None => {
+            stdin.write_all(b"null").await?;
+        }
+    }
+    stdin.write_all(b",\"request\":").await?;
+    let request_json = serde_json::to_string(&request)?;
+    stdin.write_all(request_json.as_bytes()).await?;
+    stdin.write_all(b"}").await?;
+
+    let output = child.wait_with_output().await?;
+    if output.status.success() {
+        let out_tx_json = String::from_utf8(output.stdout)?;
+        let tx: ckb_jsonrpc_types::Transaction = serde_json::from_str(&out_tx_json)?;
+        let tx: Transaction = tx.into();
+        let tx: FundingTx = tx.into_view().into();
+        Ok(tx)
+    } else {
+        let err = String::from_utf8(output.stderr)?;
+        Err(FundingError::CkbTxBuilderError(
+            ckb_sdk::tx_builder::TxBuilderError::Other(anyhow::anyhow!(err)),
+        ))
     }
 }
