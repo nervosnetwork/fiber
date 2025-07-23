@@ -1134,6 +1134,7 @@ where
                 //     );
                 // }
                 // let payment_hash = state.retry_send_payments.remove(0);
+                state.retry_send_payment_count = state.retry_send_payment_count.saturating_sub(1);
                 let _ = self.try_payment_session(myself, state, payment_hash).await;
             }
             NetworkActorEvent::AddTlcResult(payment_hash, error_info, previous_tlc) => {
@@ -2229,13 +2230,14 @@ where
     fn register_payment_retry(
         &self,
         myself: ActorRef<NetworkActorMessage>,
-        _state: &mut NetworkActorState<S>,
+        state: &mut NetworkActorState<S>,
         payment_hash: Hash256,
         delay_millis: u64,
     ) {
         myself.send_after(Duration::from_millis(delay_millis), move || {
             NetworkActorMessage::new_event(NetworkActorEvent::RetrySendPayment(payment_hash))
         });
+        state.retry_send_payment_count += 1;
     }
 
     async fn on_send_payment(
@@ -2249,7 +2251,7 @@ where
             Error::InvalidParameter(format!("Failed to validate payment request: {:?}", e))
         })?;
 
-        if !payment_data.dry_run && state.payment_router_map.len() >= MAX_RETRY_SEND_PAYMENTS {
+        if !payment_data.dry_run && state.retry_send_payment_count >= MAX_RETRY_SEND_PAYMENTS {
             return Err(Error::InvalidParameter(
                 "Too many pending retrying payment requests".to_string(),
             ));
@@ -2431,6 +2433,7 @@ pub struct NetworkActorState<S> {
     funding_tx_shell_builder: Option<String>,
     // the queue of retrying send payments
     //retry_send_payments: Vec<Hash256>,
+    retry_send_payment_count: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -3783,7 +3786,7 @@ where
             channel_ephemeral_config: ChannelEphemeralConfig {
                 funding_timeout_seconds: config.funding_timeout_seconds,
             },
-
+            retry_send_payment_count: 0,
             funding_tx_shell_builder: config.funding_tx_shell_builder.clone(),
         };
 
