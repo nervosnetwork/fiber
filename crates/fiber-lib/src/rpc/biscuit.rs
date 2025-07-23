@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 use biscuit_auth::{
     builder::{Fact, Term},
     AuthorizerBuilder, Biscuit, PublicKey,

@@ -612,7 +612,11 @@ impl WatchtowerStore for Store {
             channel_data.remote_settlement_data = remote_settlement_data;
             channel_data.revocation_data = Some(revocation_data);
             let mut batch = self.batch();
-            batch.put_kv(KeyValue::WatchtowerChannel(node_id, channel_id, channel_data));
+            batch.put_kv(KeyValue::WatchtowerChannel(
+                node_id,
+                channel_id,
+                channel_data,
+            ));
             batch.commit();
         }
     }
@@ -635,7 +639,11 @@ impl WatchtowerStore for Store {
         {
             channel_data.local_settlement_data = Some(local_settlement_data);
             let mut batch = self.batch();
-            batch.put_kv(KeyValue::WatchtowerChannel(node_id, channel_id, channel_data));
+            batch.put_kv(KeyValue::WatchtowerChannel(
+                node_id,
+                channel_id,
+                channel_data,
+            ));
             batch.commit();
         }
     }

@@ -293,9 +293,15 @@ pub mod server {
 
             #[cfg(feature = "watchtower")]
             if config.is_module_enabled("watchtower") {
-                modules
-                    .merge(WatchtowerRpcServerImpl::new(store.clone()).into_rpc())
-                    .unwrap();
+                if config.biscuit_public_key.is_some() {
+                    modules
+                        .merge(WatchtowerRpcServerImpl::new(store.clone()).into_rpc())
+                        .unwrap();
+                } else {
+                    tracing::warn!(
+                        "Watchtower RPC is not enabled because watchtower RPC requires biscuit_public_key. Please set rpc.biscuit_public_key"
+                    );
+                }
             }
 
             #[cfg(debug_assertions)]

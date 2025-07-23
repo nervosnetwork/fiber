@@ -303,6 +303,15 @@ pub struct FiberConfig {
     )]
     pub standalone_watchtower_rpc_url: Option<String>,
 
+    /// The RPC token of the standalone watchtower. [default: None]
+    #[arg(
+        name = "FIBER_STANDALONE_WATCHTOWER_TOKEN",
+        long = "fiber-standalone-watchtower-token",
+        env,
+        help = "The RPC token of the standalone watchtower. [default: None]"
+    )]
+    pub standalone_watchtower_token: Option<String>,
+
     /// Disable built-in watchtower actor. [default: false]
     #[arg(
         name = "FIBER_DISABLE_BUILT_IN_WATCHTOWER",

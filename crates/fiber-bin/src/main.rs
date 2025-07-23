@@ -24,6 +24,7 @@ use fnn::watchtower::{
 };
 use fnn::{start_cch, start_network, Config, NetworkServiceEvent};
 use jsonrpsee::http_client::HttpClientBuilder;
+use jsonrpsee::ws_client::{HeaderMap, HeaderValue};
 use ractor::{Actor, ActorRef};
 #[cfg(debug_assertions)]
 use std::collections::HashMap;
@@ -188,9 +189,24 @@ pub async fn main() -> Result<(), ExitMessage> {
             }
 
             let watchtower_client = if let Some(url) = fiber_config.standalone_watchtower_rpc_url {
-                let watchtower_client = HttpClientBuilder::default().build(url).map_err(|err| {
-                    ExitMessage(format!("failed to create watchtower rpc client: {}", err))
-                })?;
+                let watchtower_token = fiber_config
+                    .standalone_watchtower_token
+                    .ok_or_else(|| ExitMessage(format!("failed to create watchtower rpc client: require standalone_watchtower_token")))?;
+                let mut headers = HeaderMap::new();
+                headers.insert(
+                    "Authorization",
+                    HeaderValue::from_str(&format!("Bearer {}", watchtower_token)).map_err(
+                        |err| {
+                            ExitMessage(format!("failed to create watchtower rpc client: {err:?}"))
+                        },
+                    )?,
+                );
+                let watchtower_client = HttpClientBuilder::default()
+                    .set_headers(headers)
+                    .build(url)
+                    .map_err(|err| {
+                        ExitMessage(format!("failed to create watchtower rpc client: {}", err))
+                    })?;
                 Some(watchtower_client)
             } else {
                 None

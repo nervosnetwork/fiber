@@ -435,8 +435,6 @@ async fn test_rpc_node_info() {
     assert_eq!(node_info.default_funding_lock_script, Default::default());
 }
 
-
-
 #[tokio::test]
 async fn test_rpc_basic_with_auth() {
     let (rpc_config, auth_root) = rpc_config_with_auth();

@@ -123,9 +123,9 @@ where
             ) => self
                 .store
                 .update_local_settlement(node_id, channel_id, local_settlement_data),
-            WatchtowerMessage::CreatePreimage(node_id, payment_hash, preimage) => {
-                self.store.insert_watch_preimage(node_id, payment_hash, preimage)
-            }
+            WatchtowerMessage::CreatePreimage(node_id, payment_hash, preimage) => self
+                .store
+                .insert_watch_preimage(node_id, payment_hash, preimage),
             WatchtowerMessage::RemovePreimage(node_id, payment_hash) => {
                 self.store.remove_watch_preimage(node_id, payment_hash)
             }
