@@ -795,7 +795,7 @@ pub enum NetworkActorEvent {
     TlcRemoveReceived(Hash256, RemoveTlcReason),
 
     // A payment need to retry
-    RetrySendPayment,
+    RetrySendPayment(Hash256),
 
     // AddTlc result from peer (payment_hash, (process_channel_error, tlc_err), (previous_channel_id, previous_tlc_id))
     AddTlcResult(
@@ -1069,7 +1069,12 @@ where
                             session.payment_hash(),
                             channel_id
                         );
-                        self.register_payment_retry(state, session.payment_hash(), 500);
+                        self.register_payment_retry(
+                            myself.clone(),
+                            state,
+                            session.payment_hash(),
+                            500,
+                        );
                     }
                 }
             }
@@ -1118,17 +1123,17 @@ where
                 self.on_remove_tlc_event(myself, state, payment_hash, remove_tlc_reason)
                     .await;
             }
-            NetworkActorEvent::RetrySendPayment => {
-                if state.retry_send_payments.is_empty() {
-                    return Ok(());
-                }
-                if state.retry_send_payments.len() >= MAX_RETRY_SEND_PAYMENTS - 5 {
-                    eprintln!(
-                        "There are too many payments to retry: {}",
-                        state.retry_send_payments.len()
-                    );
-                }
-                let payment_hash = state.retry_send_payments.remove(0);
+            NetworkActorEvent::RetrySendPayment(payment_hash) => {
+                // if state.retry_send_payments.is_empty() {
+                //     return Ok(());
+                // }
+                // if state.retry_send_payments.len() >= MAX_RETRY_SEND_PAYMENTS - 5 {
+                //     eprintln!(
+                //         "There are too many payments to retry: {}",
+                //         state.retry_send_payments.len()
+                //     );
+                // }
+                // let payment_hash = state.retry_send_payments.remove(0);
                 let _ = self.try_payment_session(myself, state, payment_hash).await;
             }
             NetworkActorEvent::AddTlcResult(payment_hash, error_info, previous_tlc) => {
@@ -1917,7 +1922,7 @@ where
                             false,
                         );
                         if need_to_retry {
-                            self.register_payment_retry(state, payment_hash, 500);
+                            self.register_payment_retry(myself, state, payment_hash, 500);
                         } else {
                             self.set_payment_fail_with_error(
                                 &mut payment_session,
@@ -2147,7 +2152,7 @@ where
             self.store.insert_payment_session(payment_session);
         }
         if need_to_retry {
-            self.register_payment_retry(state, payment_hash, 60);
+            self.register_payment_retry(myself, state, payment_hash, 50);
         }
     }
 
@@ -2158,7 +2163,7 @@ where
 
     async fn try_payment_session(
         &self,
-        _myself: ActorRef<NetworkActorMessage>,
+        myself: ActorRef<NetworkActorMessage>,
         state: &mut NetworkActorState<S>,
         payment_hash: Hash256,
     ) -> Result<PaymentSession, Error> {
@@ -2203,7 +2208,7 @@ where
                         // If this is the first hop error, such as the WaitingTlcAck error,
                         // we will just retry later, return Ok here for letting endpoint user
                         // know payment session is created successfully
-                        self.register_payment_retry(state, payment_hash, 500);
+                        self.register_payment_retry(myself, state, payment_hash, 50);
                         return Ok(payment_session);
                     } else {
                         return Err(err);
@@ -2223,11 +2228,14 @@ where
 
     fn register_payment_retry(
         &self,
-        state: &mut NetworkActorState<S>,
+        myself: ActorRef<NetworkActorMessage>,
+        _state: &mut NetworkActorState<S>,
         payment_hash: Hash256,
-        _delay_millis: u64,
+        delay_millis: u64,
     ) {
-        state.retry_send_payments.push(payment_hash);
+        myself.send_after(Duration::from_millis(delay_millis), move || {
+            NetworkActorMessage::new_event(NetworkActorEvent::RetrySendPayment(payment_hash))
+        });
     }
 
     async fn on_send_payment(
@@ -2241,7 +2249,7 @@ where
             Error::InvalidParameter(format!("Failed to validate payment request: {:?}", e))
         })?;
 
-        if !payment_data.dry_run && state.retry_send_payments.len() >= MAX_RETRY_SEND_PAYMENTS {
+        if !payment_data.dry_run && state.payment_router_map.len() >= MAX_RETRY_SEND_PAYMENTS {
             return Err(Error::InvalidParameter(
                 "Too many pending retrying payment requests".to_string(),
             ));
@@ -2422,7 +2430,7 @@ pub struct NetworkActorState<S> {
     channel_ephemeral_config: ChannelEphemeralConfig,
     funding_tx_shell_builder: Option<String>,
     // the queue of retrying send payments
-    retry_send_payments: Vec<Hash256>,
+    //retry_send_payments: Vec<Hash256>,
 }
 
 #[derive(Debug, Clone)]
@@ -3777,7 +3785,6 @@ where
             },
 
             funding_tx_shell_builder: config.funding_tx_shell_builder.clone(),
-            retry_send_payments: vec![],
         };
 
         let node_announcement = state.get_or_create_new_node_announcement_message();
@@ -3830,9 +3837,9 @@ where
         myself.send_interval(CHECK_CHANNELS_INTERVAL, || {
             NetworkActorMessage::new_command(NetworkActorCommand::CheckChannels)
         });
-        myself.send_interval(Duration::from_millis(50), || {
-            NetworkActorMessage::new_event(NetworkActorEvent::RetrySendPayment)
-        });
+        // myself.send_interval(Duration::from_millis(50), || {
+        //     NetworkActorMessage::new_event(NetworkActorEvent::RetrySendPayment)
+        // });
         Ok(())
     }
 
