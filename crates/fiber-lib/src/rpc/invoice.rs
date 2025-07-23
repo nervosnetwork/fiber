@@ -16,8 +16,7 @@ use crate::FiberConfig;
 use ckb_jsonrpc_types::Script;
 #[cfg(not(target_arch = "wasm32"))]
 use jsonrpsee::{
-    core::async_trait, proc_macros::rpc, types::error::CALL_EXECUTION_FAILED_CODE,
-    types::ErrorObjectOwned,
+    proc_macros::rpc, types::error::CALL_EXECUTION_FAILED_CODE, types::ErrorObjectOwned,
 };
 use rand::Rng;
 use secp256k1::{PublicKey, Secp256k1, SecretKey};
