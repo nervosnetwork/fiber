@@ -1690,69 +1690,10 @@ dependencies = [
  "serde_json",
  "serde_with",
  "serde_yaml",
- "socket2",
+ "socket2 0.5.10",
  "strum",
  "tentacle 0.6.7",
  "tentacle 0.7.1",
- "thiserror 1.0.69",
- "tokio",
- "tokio-util",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "fnn"
-version = "0.5.1"
-source = "git+https://github.com/nervosnetwork/fiber.git?branch=basic-mpp#c19a0ef71525a5b69d14f55aa1c65daf289af72d"
-dependencies = [
- "aes-gcm",
- "anyhow",
- "arcode",
- "async-trait",
- "bech32 0.8.1",
- "bincode",
- "bitcoin",
- "bitflags 2.7.0",
- "bitmask-enum",
- "ckb-gen-types",
- "ckb-hash",
- "ckb-jsonrpc-types",
- "ckb-rocksdb",
- "ckb-sdk",
- "ckb-types",
- "clap",
- "clap-serde-derive",
- "console",
- "either",
- "fiber-sphinx",
- "futures",
- "git-version",
- "hex",
- "home",
- "indicatif",
- "jsonrpsee",
- "lightning-invoice",
- "lnd-grpc-tonic-client",
- "molecule",
- "musig2",
- "nom",
- "num_enum",
- "once_cell",
- "parking_lot",
- "paste",
- "ractor 0.15.6",
- "rand 0.8.5",
- "regex",
- "scrypt",
- "secp256k1 0.28.2",
- "serde",
- "serde_json",
- "serde_with",
- "serde_yaml",
- "socket2",
- "strum",
- "tentacle",
  "thiserror 1.0.69",
  "tokio",
  "tokio-util",
@@ -2277,7 +2218,7 @@ dependencies = [
  "httpdate",
  "itoa",
  "pin-project-lite",
- "socket2",
+ "socket2 0.5.10",
  "tokio",
  "tower-service",
  "tracing",
@@ -2367,9 +2308,9 @@ dependencies = [
 
 [[package]]
 name = "hyper-util"
-version = "0.1.15"
+version = "0.1.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7f66d5bd4c6f02bf0542fad85d626775bab9258cf795a4256dcaf3161114d1df"
+checksum = "8d9b05277c7e8da2c93a568989bb6207bef0112e8d17df7a6eda4a3cf143bc5e"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -2383,7 +2324,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2",
+ "socket2 0.6.0",
  "tokio",
  "tower-service",
  "tracing",
@@ -4613,6 +4554,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "socket2"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "233504af464074f9d066d7b5416c5f9b894a5862a6506e306f7b816cdd6f1807"
+dependencies = [
+ "libc",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
 name = "soketto"
 version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4770,7 +4721,7 @@ dependencies = [
  "nohash-hasher",
  "parking_lot",
  "rand 0.8.5",
- "socket2",
+ "socket2 0.5.10",
  "tentacle-multiaddr",
  "tentacle-secio",
  "thiserror 1.0.69",
@@ -4800,7 +4751,7 @@ dependencies = [
  "molecule",
  "nohash-hasher",
  "rand 0.8.5",
- "socket2",
+ "socket2 0.5.10",
  "tentacle-multiaddr",
  "tentacle-secio",
  "thiserror 1.0.69",
@@ -4984,7 +4935,7 @@ dependencies = [
  "pin-project-lite",
  "signal-hook-registry",
  "slab",
- "socket2",
+ "socket2 0.5.10",
  "tokio-macros",
  "tracing",
  "windows-sys 0.52.0",
