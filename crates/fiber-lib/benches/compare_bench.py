@@ -24,8 +24,8 @@ print("Current benchmarks:")
 for name, time in current.items():
     print(f"  {name}: {time:,} ns/iter")
 
-regression_threshold = 0.05   # 5% 回归阈值
-improvement_threshold = 0.05  # 5% 改进阈值
+regression_threshold = 0.05   # 5% regression threadold
+improvement_threshold = 0.05  # 5% improvement threshold
 
 regressions = []
 improvements = []
