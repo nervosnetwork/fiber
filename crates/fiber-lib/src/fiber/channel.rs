@@ -467,12 +467,12 @@ where
             }
             FiberChannelMessage::TxUpdate(tx) => {
                 state
-                    .handle_tx_collaboration_msg(TxCollaborationMsg::TxUpdate(tx))
+                    .handle_tx_collaboration_msg(myself, TxCollaborationMsg::TxUpdate(tx))
                     .await
             }
             FiberChannelMessage::TxComplete(tx) => {
                 state
-                    .handle_tx_collaboration_msg(TxCollaborationMsg::TxComplete(tx))
+                    .handle_tx_collaboration_msg(myself, TxCollaborationMsg::TxComplete(tx))
                     .await?;
                 if let ChannelState::CollaboratingFundingTx(flags) = state.state {
                     if flags.contains(CollaboratingFundingTxFlags::COLLABORATION_COMPLETED) {
@@ -6012,6 +6012,7 @@ impl ChannelActorState {
     // to present in the other function as well.
     async fn handle_tx_collaboration_msg(
         &mut self,
+        myself: &ActorRef<ChannelActorMessage>,
         msg: TxCollaborationMsg,
     ) -> ProcessingChannelResult {
         debug!("Processing tx collaboration message: {:?}", &msg);
@@ -6081,7 +6082,13 @@ impl ChannelActorState {
                         "fails to verify the TxUpdate message from the peer: {}",
                         err
                     );
-                    // TODO: abort funding on permanent errors
+                    if !err.is_temporary() {
+                        myself
+                            .send_message(ChannelActorMessage::Event(ChannelEvent::Stop(
+                                StopReason::AbortFunding,
+                            )))
+                            .expect("myself alive");
+                    }
                     return Ok(());
                 }
 
