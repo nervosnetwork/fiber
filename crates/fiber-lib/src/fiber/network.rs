@@ -2079,14 +2079,16 @@ where
                 );
                 (retry, channel_error.to_string())
             };
-        payment_session.last_error = Some(error);
+
         if !matches!(channel_error, ProcessingChannelError::WaitingTlcAck) {
             state.payment_router_map.remove(&payment_hash);
         }
-        self.store.insert_payment_session(payment_session);
-
+        if payment_session.last_error.as_deref() != Some(&error) {
+            payment_session.last_error = Some(error);
+            self.store.insert_payment_session(payment_session);
+        }
         if need_to_retry {
-            self.register_payment_retry(myself, payment_hash, 50);
+            self.register_payment_retry(myself, payment_hash, 500);
         }
     }
 
@@ -2142,7 +2144,7 @@ where
                         // If this is the first hop error, such as the WaitingTlcAck error,
                         // we will just retry later, return Ok here for letting endpoint user
                         // know payment session is created successfully
-                        self.register_payment_retry(myself, payment_hash, 50);
+                        self.register_payment_retry(myself, payment_hash, 500);
                         return Ok(payment_session);
                     } else {
                         return Err(err);
