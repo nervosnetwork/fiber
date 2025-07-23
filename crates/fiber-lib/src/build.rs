@@ -2,8 +2,6 @@ use std::env;
 use std::fs;
 use std::path::Path;
 
-use chrono::Datelike;
-
 fn rerun_if_changed(path_str: &str) -> bool {
     let path = Path::new(path_str);
 
