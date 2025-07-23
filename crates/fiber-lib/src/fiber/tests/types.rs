@@ -7,8 +7,8 @@ use crate::{
         hash_algorithm::HashAlgorithm,
         types::{
             pack_hop_data, secp256k1_instance, unpack_hop_data, AddTlc, BroadcastMessageID, Cursor,
-            Hash256, NodeAnnouncement, PaymentHopData, PeeledOnionPacket, Privkey, Pubkey, TlcErr,
-            TlcErrPacket, TlcErrorCode, NO_SHARED_SECRET,
+            Hash256, NodeAnnouncement, NodeId, PaymentHopData, PeeledOnionPacket, Privkey, Pubkey,
+            TlcErr, TlcErrPacket, TlcErrorCode, NO_SHARED_SECRET,
         },
         PaymentCustomRecords,
     },
@@ -27,7 +27,7 @@ use molecule::prelude::{Builder, Byte, Entity};
 use secp256k1::{PublicKey, Secp256k1, SecretKey};
 use serde::Deserialize;
 use serde::Serialize;
-use tentacle::multiaddr::MultiAddr;
+use tentacle::{multiaddr::MultiAddr, secio::PeerId};
 
 use std::str::FromStr;
 
@@ -665,4 +665,18 @@ fn test_convert_payment_hop_data() {
         .build()
         .into();
     assert_eq!(None, payment_hop_data_modified.next_hop);
+}
+
+#[test]
+fn test_serde_node_id() {
+    let peer_id = PeerId::random();
+    let expected_str = serde_json::to_string(&peer_id.to_base58()).expect("serialize");
+    let node_id = NodeId::from_bytes(peer_id.into_bytes());
+    let node_id_str = serde_json::to_string(&node_id).expect("serialize");
+    assert_eq!(node_id_str, expected_str, "to base58");
+    assert_eq!(
+        node_id,
+        serde_json::from_str(&node_id_str).unwrap(),
+        "to NodeId"
+    );
 }

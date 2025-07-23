@@ -9,7 +9,7 @@ use super::gen::gossip::{self as molecule_gossip};
 use super::hash_algorithm::{HashAlgorithm, UnknownHashAlgorithmError};
 use super::network::{get_chain_hash, PaymentCustomRecords};
 use super::r#gen::fiber::PubNonceOpt;
-use super::serde_utils::{EntityHex, SliceHex};
+use super::serde_utils::{EntityHex, SliceBase58, SliceHex};
 use crate::ckb::config::{UdtArgInfo, UdtCellDep, UdtCfgInfos, UdtDep, UdtScript};
 use crate::ckb::contracts::get_udt_whitelist;
 use ckb_jsonrpc_types::CellOutput;
@@ -4053,7 +4053,7 @@ fn get_hop_data_len(buf: &[u8]) -> Option<usize> {
 /// Used as identifier of node.
 #[serde_as]
 #[derive(Clone, Debug, Serialize, Deserialize, Hash, Eq, PartialEq, Default)]
-pub struct NodeId(#[serde_as(as = "SliceHex")] Vec<u8>);
+pub struct NodeId(#[serde_as(as = "SliceBase58")] Vec<u8>);
 
 impl NodeId {
     pub fn from_bytes(bytes: Vec<u8>) -> Self {
