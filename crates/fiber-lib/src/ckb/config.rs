@@ -7,8 +7,8 @@ use std::fs;
 
 #[cfg(not(target_arch = "wasm32"))]
 use crate::utils::encrypt_decrypt_file::{decrypt_from_file, encrypt_to_file};
-#[cfg(not(target_arch = "wasm32"))]
-use crate::{Error, Result};
+
+use crate::Result;
 use std::{path::PathBuf, str::FromStr};
 #[cfg(not(target_arch = "wasm32"))]
 use tracing::info;
@@ -94,7 +94,7 @@ impl CkbConfig {
     pub fn read_secret_key(&self) -> Result<SecretKey> {
         self.create_base_dir()?;
         let password = std::env::var(ENV_FIBER_SECRET_KEY_PASSWORD).map_err(|_| {
-            Error::SecretKeyFileError(format!(
+            crate::Error::SecretKeyFileError(format!(
                 "please set {} environment variable to encrypt and decrypt the secret key",
                 ENV_FIBER_SECRET_KEY_PASSWORD
             ))
@@ -106,15 +106,15 @@ impl CkbConfig {
             if let Ok(plain_key) = hex::decode(plain_key_hex.trim()) {
                 info!("secret key is using plain key format, start migrating to encrypted format");
                 encrypt_to_file(&path, plain_key.as_ref(), password_bytes)
-                    .map_err(Error::SecretKeyFileError)?;
+                    .map_err(crate::Error::SecretKeyFileError)?;
                 info!("secret key migration done");
             }
         }
 
         let key_bin =
-            decrypt_from_file(&path, password_bytes).map_err(Error::SecretKeyFileError)?;
+            decrypt_from_file(&path, password_bytes).map_err(crate::Error::SecretKeyFileError)?;
         SecretKey::from_slice(&key_bin).map_err(|err| {
-            Error::SecretKeyFileError(format!("invalid secret key data, error: {}", err))
+            crate::Error::SecretKeyFileError(format!("invalid secret key data, error: {}", err))
         })
     }
 
