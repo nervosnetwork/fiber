@@ -8,8 +8,7 @@ use std::fs;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::utils::encrypt_decrypt_file::{decrypt_from_file, encrypt_to_file};
 #[cfg(not(target_arch = "wasm32"))]
-use crate::Error;
-use crate::Result;
+use crate::{Error, Result};
 use std::{path::PathBuf, str::FromStr};
 #[cfg(not(target_arch = "wasm32"))]
 use tracing::info;
