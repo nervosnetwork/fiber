@@ -55,6 +55,13 @@ fn run_migrate<P: AsRef<Path>>(
     if let Err(_) = migrate.borrow_migrate().init_or_check(path.as_ref()) {
         let result = migrate.borrow_migrate().check();
         if result == Ordering::Less {
+            if migrate.borrow_migrate().is_any_break_change() {
+                eprintln!("This migration is a breaking change, you need to close all channels with old version of  fiber node and restart with the new version with a new initialized database.\
+                please backup your database before proceeding.");
+                return Err(
+                    "need to shutdown all old channels and restart with a new database".to_string(),
+                );
+            }
             if !skip_confirm {
                 let path_buf = path.as_ref().to_path_buf();
                 let input = prompt(format!("\

@@ -40,6 +40,10 @@ impl<'a> DbMigrate<'a> {
         self.migrations.migrate(self.db)
     }
 
+    pub fn is_any_break_change(&self) -> bool {
+        self.migrations.is_any_break_change(self.db)
+    }
+
     /// Perform init_db_version.
     pub fn init_db_version(&self) -> Result<(), Error> {
         self.migrations.init_db_version(self.db)
@@ -73,6 +77,15 @@ impl<'a> DbMigrate<'a> {
                     return Ok(self.db());
                 }
                 Ordering::Less => {
+                    if self.is_any_break_change() {
+                        eprintln!("There is a breaking change migration, you need to shutdown all channels with \
+                        old version of fiber node and restart with the new version with a new initialized database.\
+                        please backup your database before proceeding.");
+                        return Err(
+                            "need to shutdown all old channels and restart with a new database"
+                                .to_string(),
+                        );
+                    }
                     return Err(format!("Fiber need to run some database migrations, please run `fnn-migrate -p {}` to start migrations.", path.as_ref().display()));
                 }
             }

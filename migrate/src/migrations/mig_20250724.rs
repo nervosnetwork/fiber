@@ -2,8 +2,8 @@ use fiber::{store::migration::Migration, Error};
 use indicatif::ProgressBar;
 use std::sync::Arc;
 
-// Remember to update the version number here, sample `20311116135521`
-const MIGRATION_DB_VERSION: &str = "xxxxxxxxxxxx";
+// Remember to update the version number here
+const MIGRATION_DB_VERSION: &str = "20250724111111";
 
 pub struct MigrationObj {
     version: String,
@@ -29,5 +29,10 @@ impl Migration for MigrationObj {
 
     fn version(&self) -> &str {
         &self.version
+    }
+
+    fn is_break_change(&self) -> bool {
+        // This migration is a breaking change for MPP and security updates
+        true
     }
 }
