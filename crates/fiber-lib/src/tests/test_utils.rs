@@ -1,34 +1,21 @@
 use crate::ckb::tests::test_utils::get_tx_from_hash;
 use crate::ckb::tests::test_utils::MockChainActorMiddleware;
 use crate::ckb::GetTxResponse;
-use crate::fiber::channel::ChannelActorState;
-use crate::fiber::channel::ChannelActorStateStore;
-use crate::fiber::channel::ChannelCommand;
-use crate::fiber::channel::ChannelCommandWithId;
-use crate::fiber::channel::ReloadParams;
-use crate::fiber::channel::ShutdownCommand;
-use crate::fiber::channel::UpdateCommand;
+use crate::fiber::channel::*;
 use crate::fiber::gossip::get_gossip_actor_name;
 use crate::fiber::gossip::GossipActorMessage;
 use crate::fiber::graph::NetworkGraphStateStore;
 use crate::fiber::graph::PaymentSession;
 use crate::fiber::graph::PaymentSessionStatus;
-use crate::fiber::network::BuildRouterCommand;
-use crate::fiber::network::DebugEvent;
-use crate::fiber::network::GossipMessageWithPeerId;
-use crate::fiber::network::NodeInfoResponse;
-use crate::fiber::network::PaymentCustomRecords;
-use crate::fiber::network::PaymentRouter;
-use crate::fiber::network::SendPaymentCommand;
-use crate::fiber::network::SendPaymentResponse;
-use crate::fiber::network::SendPaymentWithRouterCommand;
+use crate::fiber::network::*;
 use crate::fiber::types::EcdsaSignature;
+use crate::fiber::types::FiberMessage;
 use crate::fiber::types::GossipMessage;
+use crate::fiber::types::Init;
 use crate::fiber::types::Pubkey;
-use crate::invoice::CkbInvoice;
-use crate::invoice::CkbInvoiceStatus;
-use crate::invoice::InvoiceStore;
-use crate::invoice::PreimageStore;
+use crate::fiber::types::Shutdown;
+use crate::fiber::ASSUME_NETWORK_ACTOR_ALIVE;
+use crate::invoice::*;
 use crate::rpc::config::RpcConfig;
 use crate::rpc::server::start_rpc;
 use ckb_sdk::core::TransactionBuilder;
@@ -52,6 +39,7 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::net::SocketAddr;
+use std::time::Instant;
 use std::{
     env,
     ffi::OsStr,
@@ -69,6 +57,9 @@ use tokio::{
     time::sleep,
 };
 use tracing::debug;
+use tracing::error;
+use tracing::info;
+use tracing::warn;
 
 use crate::fiber::graph::ChannelInfo;
 use crate::fiber::graph::NodeInfo;
@@ -89,8 +80,9 @@ use crate::{
 };
 
 static RETAIN_VAR: &str = "TEST_TEMP_RETAIN";
-pub(crate) const MIN_RESERVED_CKB: u128 = 4200000000;
-pub(crate) const HUGE_CKB_AMOUNT: u128 = MIN_RESERVED_CKB + 1000000000000_u128;
+pub const MIN_RESERVED_CKB: u128 = 4200000000;
+pub const HUGE_CKB_AMOUNT: u128 = MIN_RESERVED_CKB + 1000000000000_u128;
+const DEFAULT_WAIT_UNTIL_TIME: u64 = 60 * 4; // seconds
 
 #[derive(Debug)]
 pub struct TempDir(ManuallyDrop<OldTempDir>);
@@ -117,11 +109,15 @@ impl Drop for TempDir {
     fn drop(&mut self) {
         let retain = env::var(RETAIN_VAR);
         if retain.is_ok() {
-            println!(
+            warn!(
                 "Keeping temp directory {:?}, as environment variable {RETAIN_VAR} set",
                 self.as_ref()
             );
         } else {
+            warn!(
+                "Deleting temp directory {:?}. To keep this directory, set environment variable {RETAIN_VAR} to anything",
+                self.as_ref()
+            );
             unsafe {
                 ManuallyDrop::drop(&mut self.0);
             }
@@ -464,6 +460,9 @@ pub(crate) async fn create_channel_with_nodes(
     let funding_tx_hash = funding_tx_outpoint.tx_hash().into();
     node_a.add_channel_tx(new_channel_id, funding_tx_hash);
     node_b.add_channel_tx(new_channel_id, funding_tx_hash);
+
+    wait_for_network_graph_update(node_a, 1).await;
+
     Ok((new_channel_id, funding_tx_hash))
 }
 
@@ -477,6 +476,7 @@ pub(crate) async fn establish_channel_between_nodes(
         .expect("create channel between nodes")
 }
 
+#[cfg(test)]
 pub(crate) async fn create_nodes_with_established_channel(
     node_a_funding_amount: u128,
     node_b_funding_amount: u128,
@@ -499,6 +499,7 @@ pub(crate) async fn create_nodes_with_established_channel(
     (node_a, node_b, channel_id)
 }
 
+#[cfg(test)]
 pub(crate) async fn create_3_nodes_with_established_channel(
     (channel_1_amount_a, channel_1_amount_b): (u128, u128),
     (channel_2_amount_b, channel_2_amount_c): (u128, u128),
@@ -515,6 +516,7 @@ pub(crate) async fn create_3_nodes_with_established_channel(
     (node_a, node_b, node_c, channels[0], channels[1])
 }
 
+#[cfg(test)]
 // make a network like A -> B -> C -> D
 pub(crate) async fn create_n_nodes_with_established_channel(
     amounts: &[(u128, u128)],
@@ -570,30 +572,12 @@ pub(crate) async fn create_n_nodes_network_with_params(
             assert!(matches!(res, TxStatus::Committed(..)));
         }
     }
-    // sleep for a while to make sure network graph is updated
-    for _ in 0..50 {
-        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-        if nodes[0].get_network_graph_channels().await.len() >= amounts.len() {
-            break;
-        }
-    }
-    let graph_channels = nodes[0].get_network_graph_channels().await;
-    if graph_channels.len() < amounts.len() {
-        use tracing::error;
-        error!(
-            "failed to sync all graph channels, expect {} got {}",
-            amounts.len(),
-            graph_channels.len()
-        );
-        for (i, chan) in graph_channels.into_iter().enumerate() {
-            error!(">>> channel {}: {:?}", i, chan);
-        }
-    }
+    wait_for_network_graph_update(&nodes[0], amounts.len()).await;
     (nodes, channels)
 }
 
 #[allow(clippy::type_complexity)]
-pub(crate) async fn create_n_nodes_network(
+pub async fn create_n_nodes_network(
     amounts: &[((usize, usize), (u128, u128))],
     n: usize,
 ) -> (Vec<NetworkNode>, Vec<Hash256>) {
@@ -679,9 +663,7 @@ impl NetworkNode {
             NetworkActorMessage::Command(NetworkActorCommand::SendPayment(command, rpc_reply))
         };
 
-        let res = call!(self.network_actor, message).expect("source_node alive");
-        eprintln!("result: {:?}", res);
-        res
+        call!(self.network_actor, message).expect("source_node alive")
     }
 
     pub async fn assert_send_payment_success(
@@ -705,9 +687,7 @@ impl NetworkNode {
             ))
         };
 
-        let res = call!(self.network_actor, message).expect("source_node alive");
-        eprintln!("result: {:?}", res);
-        res
+        call!(self.network_actor, message).expect("source_node alive")
     }
 
     pub async fn build_router(&self, command: BuildRouterCommand) -> Result<PaymentRouter, String> {
@@ -717,9 +697,7 @@ impl NetworkNode {
             ))
         };
 
-        let res = call!(self.network_actor, message).expect("source_node alive");
-        eprintln!("result: {:?}", res);
-        res
+        call!(self.network_actor, message).expect("source_node alive")
     }
 
     pub async fn send_abandon_channel(&self, channel_id: Hash256) -> Result<(), String> {
@@ -912,53 +890,92 @@ impl NetworkNode {
         assert!(used_channels.contains(&channel_outpoint));
     }
 
-    pub async fn wait_until_success(&self, payment_hash: Hash256) {
-        loop {
+    async fn wait_until_status<F, E>(
+        &self,
+        payment_hash: Hash256,
+        check: F,
+        on_unexpected: E,
+        err_msg: &str,
+    ) where
+        F: Fn(PaymentSessionStatus) -> bool,
+        E: Fn(PaymentSessionStatus),
+    {
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_secs(DEFAULT_WAIT_UNTIL_TIME) {
             assert!(self.get_triggered_unexpected_events().await.is_empty());
             let status = self.get_payment_status(payment_hash).await;
-            if status == PaymentSessionStatus::Success {
-                eprintln!("Payment success: {:?}\n\n", payment_hash);
-                break;
-            } else if status == PaymentSessionStatus::Failed {
-                eprintln!("Payment failed: {:?}\n\n", payment_hash);
-                // report error
-                assert_eq!(status, PaymentSessionStatus::Success);
+            if check(status) {
+                return;
             }
+            on_unexpected(status);
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
+        panic!(
+            "{}: {:?}, current status: {:?}",
+            err_msg,
+            payment_hash,
+            self.get_payment_status(payment_hash).await
+        );
+    }
+
+    pub async fn wait_until_success(&self, payment_hash: Hash256) {
+        self.wait_until_status(
+            payment_hash,
+            |status| status == PaymentSessionStatus::Success,
+            |status| {
+                if status == PaymentSessionStatus::Failed {
+                    error!("Payment failed: {:?}\n\n", payment_hash);
+                    assert_eq!(status, PaymentSessionStatus::Success);
+                }
+            },
+            "Payment did not succeed within the expected time",
+        )
+        .await;
     }
 
     pub async fn wait_until_failed(&self, payment_hash: Hash256) {
-        loop {
-            assert!(self.get_triggered_unexpected_events().await.is_empty());
-            let status = self.get_payment_status(payment_hash).await;
-            if status == PaymentSessionStatus::Failed {
-                eprintln!("Payment failed: {:?}\n\n", payment_hash);
-                break;
-            } else if status == PaymentSessionStatus::Success {
-                eprintln!("Payment success: {:?}\n\n", payment_hash);
-                // report error
-                assert_eq!(status, PaymentSessionStatus::Failed);
-            }
-            tokio::time::sleep(Duration::from_millis(500)).await;
-        }
+        self.wait_until_status(
+            payment_hash,
+            |status| status == PaymentSessionStatus::Failed,
+            |status| {
+                if status == PaymentSessionStatus::Success {
+                    error!("Payment success: {:?}\n\n", payment_hash);
+                    assert_eq!(status, PaymentSessionStatus::Failed);
+                }
+            },
+            "Payment did not fail within the expected time",
+        )
+        .await;
     }
 
     pub async fn wait_until_created(&self, payment_hash: Hash256) {
-        loop {
-            assert!(self.get_triggered_unexpected_events().await.is_empty());
-            let status = self.get_payment_status(payment_hash).await;
-            if status != PaymentSessionStatus::Created {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(500)).await;
-        }
+        self.wait_until_status(
+            payment_hash,
+            |status| status != PaymentSessionStatus::Created,
+            |_status| {},
+            "Payment did not reach the created status within the expected time",
+        )
+        .await;
+    }
+
+    pub async fn wait_until_final_status(&self, payment_hash: Hash256) {
+        self.wait_until_status(
+            payment_hash,
+            |status| {
+                matches!(
+                    status,
+                    PaymentSessionStatus::Success | PaymentSessionStatus::Failed
+                )
+            },
+            |_status| {},
+            "Payment did not reach final status within the expected time",
+        )
+        .await;
     }
 
     pub async fn node_info(&self) -> NodeInfoResponse {
         let message =
             |rpc_reply| NetworkActorMessage::Command(NetworkActorCommand::NodeInfo((), rpc_reply));
-        eprintln!("query node_info ...");
 
         call!(self.network_actor, message)
             .expect("node_a alive")
@@ -1024,6 +1041,26 @@ impl NetworkNode {
         .await;
     }
 
+    pub async fn handle_shutdown_command_without_check(
+        &self,
+        channel_id: Hash256,
+        command: ShutdownCommand,
+    ) {
+        let state = self.get_channel_actor_state(channel_id);
+        self.network_actor
+            .send_message(NetworkActorMessage::new_command(
+                NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
+                    state.get_remote_peer_id(),
+                    FiberMessage::shutdown(Shutdown {
+                        channel_id: state.get_id(),
+                        close_script: command.close_script.clone(),
+                        fee_rate: command.fee_rate,
+                    }),
+                )),
+            ))
+            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+    }
+
     pub async fn update_channel_with_command(&self, channel_id: Hash256, command: UpdateCommand) {
         let message = |rpc_reply| -> NetworkActorMessage {
             NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
@@ -1040,6 +1077,16 @@ impl NetworkNode {
 
     pub fn get_payment_session(&self, payment_hash: Hash256) -> Option<PaymentSession> {
         self.store.get_payment_session(payment_hash)
+    }
+
+    pub fn assert_router_used(&self, index: usize, payment_hash: Hash256, channel_id: Hash256) {
+        let funding_tx_hash = self.get_channel_funding_tx(&channel_id).unwrap();
+        let channel_outpoint = OutPoint::new(funding_tx_hash.into(), 0);
+        let payment_session = self.get_payment_session(payment_hash).unwrap();
+        assert_eq!(
+            payment_session.route.nodes[index].channel_outpoint,
+            channel_outpoint
+        );
     }
 
     pub fn get_payment_custom_records(
@@ -1168,7 +1215,7 @@ impl NetworkNode {
             }
         });
 
-        println!(
+        info!(
             "Network node started for peer_id {:?} in directory {:?}",
             &peer_id,
             base_dir.as_ref()
@@ -1188,7 +1235,9 @@ impl NetworkNode {
                     None,
                     store.clone(),
                     network_graph.clone(),
+                    #[cfg(debug_assertions)]
                     None,
+                    #[cfg(debug_assertions)]
                     None,
                 )
                 .await,
@@ -1236,6 +1285,17 @@ impl NetworkNode {
         self.ckb_chain_actor
             .send_message(message)
             .expect("send ckb chain message");
+    }
+
+    pub fn send_init_peer_message(&self, remote_peer_id: PeerId, message: Init) {
+        self.network_actor
+            .send_message(NetworkActorMessage::new_command(
+                crate::fiber::NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
+                    remote_peer_id,
+                    FiberMessage::Init(message),
+                )),
+            ))
+            .expect("send init peer message");
     }
 
     pub async fn add_unexpected_events(&self, events: Vec<String>) {
@@ -1301,7 +1361,7 @@ impl NetworkNode {
     pub async fn new_interconnected_nodes(n: usize, enable_rpc: bool) -> Vec<Self> {
         let mut nodes: Vec<NetworkNode> = Vec::with_capacity(n);
         for i in 0..n {
-            let new = Self::new_with_config(
+            let mut new = Self::new_with_config(
                 NetworkNodeConfigBuilder::new()
                     .node_name(Some(format!("node-{}", i)))
                     .base_dir_prefix(&format!("test-fnn-node-{}-", i))
@@ -1310,7 +1370,7 @@ impl NetworkNode {
             )
             .await;
             for node in nodes.iter_mut() {
-                node.connect_to(&new).await;
+                node.connect_to(&mut new).await;
             }
             nodes.push(new);
         }
@@ -1356,9 +1416,9 @@ impl NetworkNode {
     ) -> Vec<Self> {
         let mut nodes: Vec<NetworkNode> = Vec::with_capacity(n);
         for i in 0..n {
-            let new = Self::new_with_config(config_gen(i)).await;
+            let mut new = Self::new_with_config(config_gen(i)).await;
             for node in nodes.iter_mut() {
-                node.connect_to(&new).await;
+                node.connect_to(&mut new).await;
             }
             nodes.push(new);
         }
@@ -1379,13 +1439,15 @@ impl NetworkNode {
             .expect("self alive");
     }
 
-    pub async fn connect_to(&mut self, other: &Self) {
+    pub async fn connect_to(&mut self, other: &mut Self) {
         self.connect_to_nonblocking(other).await;
         let peer_id = &other.peer_id;
         self.expect_event(
             |event| matches!(event, NetworkServiceEvent::PeerConnected(id, _addr) if id == peer_id),
         )
         .await;
+        self.expect_debug_event("PeerInit").await;
+        other.expect_debug_event("PeerInit").await;
     }
 
     pub async fn expect_to_process_event<F, T>(&mut self, event_processor: F) -> T
@@ -1529,11 +1591,56 @@ impl NetworkNode {
     }
 }
 
+pub async fn create_mock_chain_actor() -> ActorRef<CkbChainMessage> {
+    Actor::spawn(None, MockChainActor::new(), None)
+        .await
+        .expect("start mock chain actor")
+        .0
+}
+
+pub async fn wait_for_network_graph_update(node: &NetworkNode, channels: usize) {
+    // sleep for a while to make sure network graph is updated
+    for _ in 0..50 {
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        if node.get_network_graph_channels().await.len() >= channels {
+            break;
+        }
+    }
+    let graph_channels = node.get_network_graph_channels().await;
+    if graph_channels.len() < channels {
+        use tracing::error;
+        error!(
+            "failed to sync all graph channels, expect {} got {}",
+            channels,
+            graph_channels.len()
+        );
+        for (i, chan) in graph_channels.into_iter().enumerate() {
+            error!(">>> channel {}: {:?}", i, chan);
+        }
+    }
+}
+
+pub async fn wait_until_timeout<F: Fn() -> bool>(max_wait_time: u64, f: F) {
+    let start = tokio::time::Instant::now();
+    while !f() {
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        if start.elapsed().as_millis() > max_wait_time as u128 {
+            panic!("Wait timeout after {}ms", max_wait_time);
+        }
+    }
+}
+
+pub async fn wait_until<F: Fn() -> bool>(f: F) {
+    const MAX_WAIT_TIME: u64 = 120_000;
+
+    wait_until_timeout(MAX_WAIT_TIME, f).await;
+}
+
 #[tokio::test]
 async fn test_connect_to_other_node() {
     let mut node_a = NetworkNode::new().await;
-    let node_b = NetworkNode::new().await;
-    node_a.connect_to(&node_b).await;
+    let mut node_b = NetworkNode::new().await;
+    node_a.connect_to(&mut node_b).await;
 }
 
 #[tokio::test]

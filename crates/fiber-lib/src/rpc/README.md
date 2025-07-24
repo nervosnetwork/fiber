@@ -50,7 +50,12 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
         * [Method `disconnect_peer`](#peer-disconnect_peer)
         * [Method `list_peers`](#peer-list_peers)
     * [Module Watchtower](#module-watchtower)
+        * [Method `create_watch_channel`](#watchtower-create_watch_channel)
         * [Method `remove_watch_channel`](#watchtower-remove_watch_channel)
+        * [Method `update_revocation`](#watchtower-update_revocation)
+        * [Method `update_local_settlement`](#watchtower-update_local_settlement)
+        * [Method `create_preimage`](#watchtower-create_preimage)
+        * [Method `remove_preimage`](#watchtower-remove_preimage)
 * [RPC Types](#rpc-types)
 
     * [Type `Attribute`](#type-attribute)
@@ -72,10 +77,15 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
     * [Type `PaymentCustomRecords`](#type-paymentcustomrecords)
     * [Type `PaymentSessionStatus`](#type-paymentsessionstatus)
     * [Type `PeerInfo`](#type-peerinfo)
+    * [Type `Privkey`](#type-privkey)
     * [Type `Pubkey`](#type-pubkey)
     * [Type `RemoveTlcReason`](#type-removetlcreason)
+    * [Type `RevocationData`](#type-revocationdata)
     * [Type `RouterHop`](#type-routerhop)
     * [Type `SessionRouteNode`](#type-sessionroutenode)
+    * [Type `SettlementData`](#type-settlementdata)
+    * [Type `SettlementTlc`](#type-settlementtlc)
+    * [Type `TLCId`](#type-tlcid)
     * [Type `UdtArgInfo`](#type-udtarginfo)
     * [Type `UdtCellDep`](#type-udtcelldep)
     * [Type `UdtCfgInfos`](#type-udtcfginfos)
@@ -473,6 +483,7 @@ Get the node information.
 * `version` - <em>`String`</em>, The version of the node software.
 * `commit_hash` - <em>`String`</em>, The commit hash of the node software.
 * `node_id` - <em>[Pubkey](#type-pubkey)</em>, The identity public key of the node.
+* `features` - <em>`Vec<String>`</em>, The features supported by the node.
 * `node_name` - <em>`Option<String>`</em>, The optional name of the node.
 * `addresses` - <em>`Vec<MultiAddr>`</em>, A list of multi-addresses associated with the node.
 * `chain_hash` - <em>[Hash256](#type-hash256)</em>, The hash of the blockchain that the node is connected to.
@@ -512,6 +523,7 @@ Generates a new invoice.
 * `final_expiry_delta` - <em>`Option<u64>`</em>, The final HTLC timeout of the invoice, in milliseconds.
 * `udt_type_script` - <em>`Option<Script>`</em>, The UDT type script of the invoice.
 * `hash_algorithm` - <em>Option<[HashAlgorithm](#type-hashalgorithm)></em>, The hash algorithm of the invoice.
+* `allow_mpp` - <em>`Option<bool>`</em>, Whether allow payment to use MPP
 
 ##### Returns
 
@@ -724,7 +736,9 @@ Sends a payment to a peer with specified router
 * `router` - <em>Vec<[RouterHop](#type-routerhop)></em>, The router to use for the payment
 * `invoice` - <em>`Option<String>`</em>, the encoded invoice to send to the recipient
 * `custom_records` - <em>Option<[PaymentCustomRecords](#type-paymentcustomrecords)></em>, Some custom records for the payment which contains a map of u32 to Vec<u8>
- The key is the record type, and the value is the serialized data
+ The key is the record type, and the value is the serialized data.
+ Limits: the sum size of values can not exceed 2048 bytes.
+
  For example:
  ```json
  "custom_records": {
@@ -821,14 +835,105 @@ List connected peers
 RPC module for watchtower related operations
 
 
-<a id="watchtower-remove_watch_channel"></a>
-#### Method `remove_watch_channel`
+<a id="watchtower-create_watch_channel"></a>
+#### Method `create_watch_channel`
 
-Remove a watched channel from the watchtower store
+Create a new watched channel
 
 ##### Params
 
 * `channel_id` - <em>[Hash256](#type-hash256)</em>, Channel ID
+* `funding_tx_lock` - <em>`Script`</em>, Channel funding transaction lock script
+* `remote_settlement_data` - <em>[SettlementData](#type-settlementdata)</em>, Remote settlement data
+
+##### Returns
+
+* None
+
+---
+
+
+
+<a id="watchtower-remove_watch_channel"></a>
+#### Method `remove_watch_channel`
+
+Remove a watched channel
+
+##### Params
+
+* `channel_id` - <em>[Hash256](#type-hash256)</em>, Channel ID
+
+##### Returns
+
+* None
+
+---
+
+
+
+<a id="watchtower-update_revocation"></a>
+#### Method `update_revocation`
+
+Update revocation
+
+##### Params
+
+* `channel_id` - <em>[Hash256](#type-hash256)</em>, Channel ID
+* `revocation_data` - <em>[RevocationData](#type-revocationdata)</em>, Revocation data
+* `settlement_data` - <em>[SettlementData](#type-settlementdata)</em>, Settlement data
+
+##### Returns
+
+* None
+
+---
+
+
+
+<a id="watchtower-update_local_settlement"></a>
+#### Method `update_local_settlement`
+
+Update settlement
+
+##### Params
+
+* `channel_id` - <em>[Hash256](#type-hash256)</em>, Channel ID
+* `settlement_data` - <em>[SettlementData](#type-settlementdata)</em>, Settlement data
+
+##### Returns
+
+* None
+
+---
+
+
+
+<a id="watchtower-create_preimage"></a>
+#### Method `create_preimage`
+
+Create preimage
+
+##### Params
+
+* `payment_hash` - <em>[Hash256](#type-hash256)</em>, Payment hash
+* `preimage` - <em>[Hash256](#type-hash256)</em>, Preimage
+
+##### Returns
+
+* None
+
+---
+
+
+
+<a id="watchtower-remove_preimage"></a>
+#### Method `remove_preimage`
+
+Remove preimage
+
+##### Params
+
+* `payment_hash` - <em>[Hash256](#type-hash256)</em>, Payment hash
 
 ##### Returns
 
@@ -850,15 +955,15 @@ The attributes of the invoice
 
 #### Enum with values of
 
-* `FinalHtlcTimeout` - <em>u64</em>, The final tlc time out, in milliseconds
-* `FinalHtlcMinimumExpiryDelta` - <em>u64</em>, The final tlc minimum expiry delta, in milliseconds, default is 1 day
-* `ExpiryTime` - <em>Duration</em>, The expiry time of the invoice, in seconds
-* `Description` - <em>String</em>, The description of the invoice
-* `FallbackAddr` - <em>String</em>, The fallback address of the invoice
+* `FinalHtlcTimeout` - <em>`u64`</em>, The final tlc time out, in milliseconds
+* `FinalHtlcMinimumExpiryDelta` - <em>`u64`</em>, The final tlc minimum expiry delta, in milliseconds, default is 1 day
+* `ExpiryTime` - <em>`Duration`</em>, The expiry time of the invoice, in seconds
+* `Description` - <em>`String`</em>, The description of the invoice
+* `FallbackAddr` - <em>`String`</em>, The fallback address of the invoice
 * `UdtScript` - <em>[CkbScript](#type-ckbscript)</em>, The udt type script of the invoice
-* `PayeePublicKey` - <em>PublicKey</em>, The payee public key of the invoice
+* `PayeePublicKey` - <em>`PublicKey`</em>, The payee public key of the invoice
 * `HashAlgorithm` - <em>[HashAlgorithm](#type-hashalgorithm)</em>, The hash algorithm of the invoice
-* `Feature` - <em>u64</em>, The feature flags of the invoice
+* `Feature` - <em>`Vec<String>`</em>, The feature flags of the invoice
 ---
 
 <a id="#type-cchorderstatus"></a>
@@ -885,21 +990,21 @@ The channel data structure
 #### Fields
 
 * `channel_id` - <em>[Hash256](#type-hash256)</em>, The channel ID
-* `is_public` - <em>bool</em>, Whether the channel is public
-* `channel_outpoint` - <em>Option<OutPoint></em>, The outpoint of the channel
-* `peer_id` - <em>PeerId</em>, The peer ID of the channel
-* `funding_udt_type_script` - <em>Option<Script></em>, The UDT type script of the channel
+* `is_public` - <em>`bool`</em>, Whether the channel is public
+* `channel_outpoint` - <em>`Option<OutPoint>`</em>, The outpoint of the channel
+* `peer_id` - <em>`PeerId`</em>, The peer ID of the channel
+* `funding_udt_type_script` - <em>`Option<Script>`</em>, The UDT type script of the channel
 * `state` - <em>[ChannelState](#type-channelstate)</em>, The state of the channel
-* `local_balance` - <em>u128</em>, The local balance of the channel
-* `offered_tlc_balance` - <em>u128</em>, The offered balance of the channel
-* `remote_balance` - <em>u128</em>, The remote balance of the channel
-* `received_tlc_balance` - <em>u128</em>, The received balance of the channel
-* `latest_commitment_transaction_hash` - <em>Option<H256></em>, The hash of the latest commitment transaction
-* `created_at` - <em>u64</em>, The time the channel was created at, in milliseconds from UNIX epoch
-* `enabled` - <em>bool</em>, Whether the channel is enabled
-* `tlc_expiry_delta` - <em>u64</em>, The expiry delta to forward a tlc, in milliseconds, default to 1 day, which is 24 * 60 * 60 * 1000 milliseconds
+* `local_balance` - <em>`u128`</em>, The local balance of the channel
+* `offered_tlc_balance` - <em>`u128`</em>, The offered balance of the channel
+* `remote_balance` - <em>`u128`</em>, The remote balance of the channel
+* `received_tlc_balance` - <em>`u128`</em>, The received balance of the channel
+* `latest_commitment_transaction_hash` - <em>`Option<H256>`</em>, The hash of the latest commitment transaction
+* `created_at` - <em>`u64`</em>, The time the channel was created at, in milliseconds from UNIX epoch
+* `enabled` - <em>`bool`</em>, Whether the channel is enabled
+* `tlc_expiry_delta` - <em>`u64`</em>, The expiry delta to forward a tlc, in milliseconds, default to 1 day, which is 24 * 60 * 60 * 1000 milliseconds
  This parameter can be updated with rpc `update_channel` later.
-* `tlc_fee_proportional_millionths` - <em>u128</em>, The fee proportional millionths for a TLC, proportional to the amount of the forwarded tlc.
+* `tlc_fee_proportional_millionths` - <em>`u128`</em>, The fee proportional millionths for a TLC, proportional to the amount of the forwarded tlc.
  The unit is millionths of the amount. default is 1000 which means 0.1%.
  This parameter can be updated with rpc `update_channel` later.
  Not that, we use outbound channel to calculate the fee for TLC forwarding. For example,
@@ -915,16 +1020,16 @@ The Channel information.
 
 #### Fields
 
-* `channel_outpoint` - <em>OutPoint</em>, The outpoint of the channel.
+* `channel_outpoint` - <em>`OutPoint`</em>, The outpoint of the channel.
 * `node1` - <em>[Pubkey](#type-pubkey)</em>, The identity public key of the first node.
 * `node2` - <em>[Pubkey](#type-pubkey)</em>, The identity public key of the second node.
-* `created_timestamp` - <em>u64</em>, The created timestamp of the channel, which is the block header timestamp of the block
+* `created_timestamp` - <em>`u64`</em>, The created timestamp of the channel, which is the block header timestamp of the block
  that contains the channel funding transaction.
 * `update_info_of_node1` - <em>Option<[ChannelUpdateInfo](#type-channelupdateinfo)></em>, The update info from node1 to node2, e.g. timestamp, fee_rate, tlc_expiry_delta, tlc_minimum_value
 * `update_info_of_node2` - <em>Option<[ChannelUpdateInfo](#type-channelupdateinfo)></em>, The update info from node2 to node1, e.g. timestamp, fee_rate, tlc_expiry_delta, tlc_minimum_value
-* `capacity` - <em>u128</em>, The capacity of the channel.
+* `capacity` - <em>`u128`</em>, The capacity of the channel.
 * `chain_hash` - <em>[Hash256](#type-hash256)</em>, The chain hash of the channel.
-* `udt_type_script` - <em>Option<Script></em>, The UDT type script of the channel.
+* `udt_type_script` - <em>`Option<Script>`</em>, The UDT type script of the channel.
 ---
 
 <a id="#type-channelstate"></a>
@@ -935,17 +1040,17 @@ The state of a channel
 
 #### Enum with values of
 
-* `NegotiatingFunding` - <em>NegotiatingFundingFlags</em>, We are negotiating the parameters required for the channel prior to funding it.
-* `CollaboratingFundingTx` - <em>CollaboratingFundingTxFlags</em>, We're collaborating with the other party on the funding transaction.
-* `SigningCommitment` - <em>SigningCommitmentFlags</em>, We have collaborated over the funding and are now waiting for CommitmentSigned messages.
-* `AwaitingTxSignatures` - <em>AwaitingTxSignaturesFlags</em>, We've received and sent `commitment_signed` and are now waiting for both
+* `NegotiatingFunding` - <em>`NegotiatingFundingFlags`</em>, We are negotiating the parameters required for the channel prior to funding it.
+* `CollaboratingFundingTx` - <em>`CollaboratingFundingTxFlags`</em>, We're collaborating with the other party on the funding transaction.
+* `SigningCommitment` - <em>`SigningCommitmentFlags`</em>, We have collaborated over the funding and are now waiting for CommitmentSigned messages.
+* `AwaitingTxSignatures` - <em>`AwaitingTxSignaturesFlags`</em>, We've received and sent `commitment_signed` and are now waiting for both
  party to collaborate on creating a valid funding transaction.
-* `AwaitingChannelReady` - <em>AwaitingChannelReadyFlags</em>, We've received/sent `funding_created` and `funding_signed` and are thus now waiting on the
+* `AwaitingChannelReady` - <em>`AwaitingChannelReadyFlags`</em>, We've received/sent `funding_created` and `funding_signed` and are thus now waiting on the
  funding transaction to confirm.
 * `ChannelReady` - Both we and our counterparty consider the funding transaction confirmed and the channel is
  now operational.
-* `ShuttingDown` - <em>ShuttingDownFlags</em>, We've successfully negotiated a `closing_signed` dance. At this point, the `ChannelManager`
-* `Closed` - <em>CloseFlags</em>, This channel is closed.
+* `ShuttingDown` - <em>`ShuttingDownFlags`</em>, We've successfully negotiated a `closing_signed` dance. At this point, the `ChannelManager`
+* `Closed` - <em>`CloseFlags`</em>, This channel is closed.
 ---
 
 <a id="#type-channelupdateinfo"></a>
@@ -956,12 +1061,12 @@ The channel update info with a single direction of channel
 
 #### Fields
 
-* `timestamp` - <em>u64</em>, The timestamp is the time when the channel update was received by the node.
-* `enabled` - <em>bool</em>, Whether the channel can be currently used for payments (in this one direction).
-* `outbound_liquidity` - <em>Option<u128></em>, The exact amount of balance that we can send to the other party via the channel.
-* `tlc_expiry_delta` - <em>u64</em>, The difference in htlc expiry values that you must have when routing through this channel (in milliseconds).
-* `tlc_minimum_value` - <em>u128</em>, The minimum value, which must be relayed to the next hop via the channel
-* `fee_rate` - <em>u64</em>, The forwarding fee rate for the channel.
+* `timestamp` - <em>`u64`</em>, The timestamp is the time when the channel update was received by the node.
+* `enabled` - <em>`bool`</em>, Whether the channel can be currently used for payments (in this one direction).
+* `outbound_liquidity` - <em>`Option<u128>`</em>, The exact amount of balance that we can send to the other party via the channel.
+* `tlc_expiry_delta` - <em>`u64`</em>, The difference in htlc expiry values that you must have when routing through this channel (in milliseconds).
+* `tlc_minimum_value` - <em>`u128`</em>, The minimum value, which must be relayed to the next hop via the channel
+* `fee_rate` - <em>`u64`</em>, The forwarding fee rate for the channel.
 ---
 
 <a id="#type-ckbinvoice"></a>
@@ -977,7 +1082,7 @@ Represents a syntactically and semantically correct lightning BOLT11 invoice
 #### Fields
 
 * `currency` - <em>[Currency](#type-currency)</em>, The currency of the invoice
-* `amount` - <em>Option<u128></em>, The amount of the invoice
+* `amount` - <em>`Option<u128>`</em>, The amount of the invoice
 * `signature` - <em>Option<[InvoiceSignature](#type-invoicesignature)></em>, The signature of the invoice
 * `data` - <em>[InvoiceData](#type-invoicedata)</em>, The invoice data, including the payment hash, timestamp and other attributes
 ---
@@ -1040,9 +1145,9 @@ A hop hint is a hint for a node to use a specific channel.
 #### Fields
 
 * `pubkey` - <em>[Pubkey](#type-pubkey)</em>, The public key of the node
-* `channel_outpoint` - <em>OutPoint</em>, The outpoint of the channel
-* `fee_rate` - <em>u64</em>, The fee rate to use this hop to forward the payment.
-* `tlc_expiry_delta` - <em>u64</em>, The TLC expiry delta to use this hop to forward the payment.
+* `channel_outpoint` - <em>`OutPoint`</em>, The outpoint of the channel
+* `fee_rate` - <em>`u64`</em>, The fee rate to use this hop to forward the payment.
+* `tlc_expiry_delta` - <em>`u64`</em>, The TLC expiry delta to use this hop to forward the payment.
 ---
 
 <a id="#type-hoprequire"></a>
@@ -1055,7 +1160,7 @@ A hop requirement need to meet when building router, do not including the source
 #### Fields
 
 * `pubkey` - <em>[Pubkey](#type-pubkey)</em>, The public key of the node
-* `channel_outpoint` - <em>Option<OutPoint></em>, The outpoint for the channel, which means use channel with `channel_outpoint` to reach this node
+* `channel_outpoint` - <em>`Option<OutPoint>`</em>, The outpoint for the channel, which means use channel with `channel_outpoint` to reach this node
 ---
 
 <a id="#type-invoicedata"></a>
@@ -1066,7 +1171,7 @@ The metadata of the invoice
 
 #### Fields
 
-* `timestamp` - <em>u128</em>, The timestamp of the invoice
+* `timestamp` - <em>`u128`</em>, The timestamp of the invoice
 * `payment_hash` - <em>[Hash256](#type-hash256)</em>, The payment hash of the invoice
 * `attrs` - <em>Vec<[Attribute](#type-attribute)></em>, The attributes of the invoice, e.g. description, expiry time, etc.
 ---
@@ -1088,13 +1193,15 @@ The Node information.
 
 #### Fields
 
-* `node_name` - <em>String</em>, The name of the node.
-* `addresses` - <em>Vec<MultiAddr></em>, The addresses of the node.
+* `node_name` - <em>`String`</em>, The name of the node.
+* `version` - <em>`String`</em>, The version of the node.
+* `addresses` - <em>`Vec<MultiAddr>`</em>, The addresses of the node.
+* `features` - <em>`Vec<String>`</em>, The node features supported by the node.
 * `node_id` - <em>[Pubkey](#type-pubkey)</em>, The identity public key of the node.
-* `timestamp` - <em>u64</em>, The latest timestamp set by the owner for the node announcement.
+* `timestamp` - <em>`u64`</em>, The latest timestamp set by the owner for the node announcement.
  When a Node is online this timestamp will be updated to the latest value.
 * `chain_hash` - <em>[Hash256](#type-hash256)</em>, The chain hash of the node.
-* `auto_accept_min_ckb_funding_amount` - <em>u64</em>, The minimum CKB funding amount for automatically accepting open channel requests.
+* `auto_accept_min_ckb_funding_amount` - <em>`u64`</em>, The minimum CKB funding amount for automatically accepting open channel requests.
 * `udt_cfg_infos` - <em>[UdtCfgInfos](#type-udtcfginfos)</em>, The UDT configuration infos of the node.
 ---
 
@@ -1116,7 +1223,7 @@ The custom records to be included in the payment.
 
 #### Fields
 
-* `data` - <em>HashMap<u32::Vec<u8>></em>, The custom records to be included in the payment.
+* `data` - <em>`HashMap<u32::Vec<u8>>`</em>, The custom records to be included in the payment.
 ---
 
 <a id="#type-paymentsessionstatus"></a>
@@ -1142,8 +1249,19 @@ The information about a peer connected to the node.
 #### Fields
 
 * `pubkey` - <em>[Pubkey](#type-pubkey)</em>, The identity public key of the peer.
-* `peer_id` - <em>PeerId</em>, The peer ID of the peer
-* `addresses` - <em>Vec<MultiAddr></em>, A list of multi-addresses associated with the peer.
+* `peer_id` - <em>`PeerId`</em>, The peer ID of the peer
+* `address` - <em>`MultiAddr`</em>, The multi-address associated with the connecting peer.
+ Note: this is only the address which used for connecting to the peer, not all addresses of the peer.
+ The `graph_nodes` in Graph rpc module will return all addresses of the peer.
+---
+
+<a id="#type-privkey"></a>
+### Type `Privkey`
+
+A wrapper for secp256k1 secret key
+
+
+
 ---
 
 <a id="#type-pubkey"></a>
@@ -1167,6 +1285,21 @@ The reason for removing a TLC
 * `RemoveTlcFail` - The reason for removing the TLC is that it failed
 ---
 
+<a id="#type-revocationdata"></a>
+### Type `RevocationData`
+
+Data needed to revoke an outdated commitment transaction.
+
+
+#### Fields
+
+* `commitment_number` - <em>`u64`</em>, The commitment transaction version number that was revoked
+* `x_only_aggregated_pubkey` - The x-only aggregated public key used in the multisig for this commitment transaction
+* `aggregated_signature` - <em>`CompactSignature`</em>, The aggregated signature from both parties that authorizes the revocation
+* `output` - <em>`CellOutput`</em>, The output cell from the revoked commitment transaction
+* `output_data` - <em>`Bytes`</em>, The associated data for the output cell (e.g., UDT amount for token transfers)
+---
+
 <a id="#type-routerhop"></a>
 ### Type `RouterHop`
 
@@ -1178,10 +1311,10 @@ A router hop information for a payment, a paymenter router is an array of Router
 #### Fields
 
 * `target` - <em>[Pubkey](#type-pubkey)</em>, The node that is sending the TLC to the next node.
-* `channel_outpoint` - <em>OutPoint</em>, The channel of this hop used to receive TLC
-* `amount_received` - <em>u128</em>, The amount that the source node will transfer to the target node.
+* `channel_outpoint` - <em>`OutPoint`</em>, The channel of this hop used to receive TLC
+* `amount_received` - <em>`u128`</em>, The amount that the source node will transfer to the target node.
  We have already added up all the fees along the path, so this amount can be used directly for the TLC.
-* `incoming_tlc_expiry` - <em>u64</em>, The expiry for the TLC that the source node sends to the target node.
+* `incoming_tlc_expiry` - <em>`u64`</em>, The expiry for the TLC that the source node sends to the target node.
  We have already added up all the expiry deltas along the path,
  the only thing missing is current time. So the expiry is the current time plus the expiry delta.
 ---
@@ -1195,8 +1328,54 @@ The node and channel information in a payment route hop
 #### Fields
 
 * `pubkey` - <em>[Pubkey](#type-pubkey)</em>, the public key of the node
-* `amount` - <em>u128</em>, the amount for this hop
-* `channel_outpoint` - <em>OutPoint</em>, the channel outpoint for this hop
+* `amount` - <em>`u128`</em>, the amount for this hop
+* `channel_outpoint` - <em>`OutPoint`</em>, the channel outpoint for this hop
+---
+
+<a id="#type-settlementdata"></a>
+### Type `SettlementData`
+
+Data needed to authorize and execute a settlement transaction.
+
+
+#### Fields
+
+* `x_only_aggregated_pubkey` - The x-only aggregated public key used in the multi-signature for the settlement transaction
+* `aggregated_signature` - <em>`CompactSignature`</em>, The aggregated signature from both parties that authorizes the settlement transaction
+* `to_local_output` - <em>`CellOutput`</em>, The output cell for the local party (this node's owner) in the settlement transaction
+* `to_local_output_data` - <em>`Bytes`</em>, The associated data for the local output cell (e.g., UDT amount for token transfers)
+* `to_remote_output` - <em>`CellOutput`</em>, The output cell for the remote party (channel partner) in the settlement transaction
+* `to_remote_output_data` - <em>`Bytes`</em>, The associated data for the remote output cell (e.g., UDT amount for token transfers)
+* `tlcs` - <em>Vec<[SettlementTlc](#type-settlementtlc)></em>, The list of Time-Locked Contracts (TLCs) included in this settlement
+---
+
+<a id="#type-settlementtlc"></a>
+### Type `SettlementTlc`
+
+Data needed to authorize and execute a Time-Locked Contract (TLC) settlement transaction.
+
+
+#### Fields
+
+* `tlc_id` - <em>[TLCId](#type-tlcid)</em>, The ID of the TLC (either offered or received)
+* `hash_algorithm` - <em>[HashAlgorithm](#type-hashalgorithm)</em>, The hash algorithm used for the TLC
+* `payment_amount` - <em>`u128`</em>, The amount of CKB/UDT involved in the TLC
+* `payment_hash` - <em>[Hash256](#type-hash256)</em>, The hash of the payment preimage
+* `expiry` - <em>`u64`</em>, The expiry time for the TLC in milliseconds
+* `local_key` - <em>[Privkey](#type-privkey)</em>, The local party's private key used to sign the TLC
+* `remote_key` - <em>[Pubkey](#type-pubkey)</em>, The remote party's public key used to verify the TLC
+---
+
+<a id="#type-tlcid"></a>
+### Type `TLCId`
+
+The id of a tlc, it can be either offered or received.
+
+
+#### Enum with values of
+
+* `Offered` - <em>`u64`</em>, Offered tlc id
+* `Received` - <em>`u64`</em>, Received tlc id
 ---
 
 <a id="#type-udtarginfo"></a>
@@ -1207,9 +1386,9 @@ The UDT argument info which is used to identify the UDT configuration
 
 #### Fields
 
-* `name` - <em>String</em>, The name of the UDT.
+* `name` - <em>`String`</em>, The name of the UDT.
 * `script` - <em>[UdtScript](#type-udtscript)</em>, The script of the UDT.
-* `auto_accept_amount` - <em>Option<u128></em>, The minimum amount of the UDT that can be automatically accepted.
+* `auto_accept_amount` - <em>`Option<u128>`</em>, The minimum amount of the UDT that can be automatically accepted.
 * `cell_deps` - <em>Vec<[UdtDep](#type-udtdep)></em>, The cell deps of the UDT.
 ---
 
@@ -1221,8 +1400,8 @@ The UDT cell dep which is used to identify the UDT configuration for a Fiber Nod
 
 #### Fields
 
-* `out_point` - <em>OutPointWrapper</em>, The out point of the cell dep.
-* `dep_type` - <em>DepType</em>, The type of the cell dep.
+* `out_point` - <em>`OutPointWrapper`</em>, The out point of the cell dep.
+* `dep_type` - <em>`DepType`</em>, The type of the cell dep.
 ---
 
 <a id="#type-udtcfginfos"></a>
@@ -1243,7 +1422,7 @@ Udt script on-chain dependencies.
 #### Fields
 
 * `cell_dep` - <em>Option<[UdtCellDep](#type-udtcelldep)></em>, cell dep described by out_point.
-* `type_id` - <em>Option<Script></em>, cell dep described by type ID.
+* `type_id` - <em>`Option<Script>`</em>, cell dep described by type ID.
 ---
 
 <a id="#type-udtscript"></a>
@@ -1254,8 +1433,8 @@ The UDT script which is used to identify the UDT configuration for a Fiber Node
 
 #### Fields
 
-* `code_hash` - <em>H256</em>, The code hash of the script.
-* `hash_type` - <em>ScriptHashType</em>, The hash type of the script.
-* `args` - <em>String</em>, The arguments of the script.
+* `code_hash` - <em>`H256`</em>, The code hash of the script.
+* `hash_type` - <em>`ScriptHashType`</em>, The hash type of the script.
+* `args` - <em>`String`</em>, The arguments of the script.
 ---
 

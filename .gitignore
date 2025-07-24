@@ -3,7 +3,6 @@
 # direnv related temp files/directories
 .direnv
 /result*
-
 /tests/nodes/*/fiber/store
 /tests/nodes/*/config.yml
 /tests/nodes/*/dev.toml
@@ -14,3 +13,10 @@ tests/nodes/.ports
 .vscode
 /migrate/target
 /gui/target
+/node_modules
+/fiber-js/dist
+/crates/fiber-wasm/dist
+/crates/fiber-wasm-db-worker/dist
+/dump*.txt
+package-lock.json
+

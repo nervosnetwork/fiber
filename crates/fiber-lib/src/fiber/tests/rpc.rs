@@ -1,17 +1,17 @@
 #![allow(clippy::needless_range_loop)]
-
-use ckb_types::packed::Script;
-
+use crate::tests::*;
 use crate::{
-    fiber::{tests::test_utils::*, types::Hash256},
+    fiber::types::Hash256,
     invoice::Currency,
     rpc::{
         channel::{ListChannelsParams, ListChannelsResult},
+        graph::{GraphNodesParams, GraphNodesResult},
         invoice::{InvoiceParams, InvoiceResult, NewInvoiceParams},
         payment::{GetPaymentCommandParams, GetPaymentCommandResult},
         peer::ListPeersResult,
     },
 };
+use ckb_types::packed::Script;
 
 #[tokio::test]
 async fn test_rpc_basic() {
@@ -69,37 +69,54 @@ async fn test_rpc_basic() {
         .unwrap();
     assert_eq!(payment.payment_hash, payment_hash);
 
+    let new_invoice_params = NewInvoiceParams {
+        amount: 1000,
+        description: Some("test".to_string()),
+        currency: Currency::Fibd,
+        expiry: Some(322),
+        fallback_address: None,
+        final_expiry_delta: Some(900000 + 1234),
+        udt_type_script: Some(Script::default().into()),
+        payment_preimage: Hash256::default(),
+        hash_algorithm: Some(crate::fiber::hash_algorithm::HashAlgorithm::CkbHash),
+        allow_mpp: Some(true),
+    };
+
     // node0 generate a invoice
     let invoice_res: InvoiceResult = node_0
-        .send_rpc_request(
-            "new_invoice",
-            NewInvoiceParams {
-                amount: 1000,
-                description: Some("test".to_string()),
-                currency: Currency::Fibd,
-                expiry: Some(322),
-                fallback_address: None,
-                final_expiry_delta: Some(900000 + 1234),
-                udt_type_script: Some(Script::default().into()),
-                payment_preimage: Hash256::default(),
-                hash_algorithm: Some(crate::fiber::hash_algorithm::HashAlgorithm::CkbHash),
-            },
-        )
+        .send_rpc_request("new_invoice", new_invoice_params)
         .await
         .unwrap();
 
-    let invoice_payment_hash = invoice_res.invoice.payment_hash();
+    let ckb_invoice = invoice_res.invoice.clone();
+    let invoice_payment_hash = ckb_invoice.data.payment_hash;
+
     let get_invoice_res: InvoiceResult = node_0
         .send_rpc_request(
             "get_invoice",
             InvoiceParams {
-                payment_hash: *invoice_payment_hash,
+                payment_hash: invoice_payment_hash,
             },
         )
         .await
         .unwrap();
 
-    assert_eq!(get_invoice_res.invoice.payment_hash(), invoice_payment_hash);
+    assert_eq!(
+        get_invoice_res.invoice.data.payment_hash,
+        invoice_payment_hash
+    );
+
+    let raw_response = node_0
+        .send_rpc_request_raw(
+            "get_invoice",
+            InvoiceParams {
+                payment_hash: invoice_payment_hash,
+            },
+        )
+        .await
+        .unwrap();
+    eprintln!("Raw RPC response: {}", raw_response);
+    assert!(raw_response.to_string().contains("BASIC_MPP_OPTIONAL"));
 }
 
 #[tokio::test]
@@ -129,7 +146,7 @@ async fn test_rpc_list_peers() {
         true,
     )
     .await;
-    let [mut node_0, node_1] = nodes.try_into().expect("2 nodes");
+    let [mut node_0, mut node_1] = nodes.try_into().expect("2 nodes");
 
     let list_peers: ListPeersResult = node_0.send_rpc_request("list_peers", ()).await.unwrap();
     assert_eq!(list_peers.peers.len(), 1);
@@ -151,7 +168,7 @@ async fn test_rpc_list_peers() {
     let list_peers: ListPeersResult = node_0.send_rpc_request("list_peers", ()).await.unwrap();
     assert_eq!(list_peers.peers.len(), 0);
 
-    let node_3 = NetworkNode::new_with_config(
+    let mut node_3 = NetworkNode::new_with_config(
         NetworkNodeConfigBuilder::new()
             .node_name(Some(format!("node-{}", 3)))
             .base_dir_prefix(&format!("test-fnn-node-{}-", 3))
@@ -163,12 +180,68 @@ async fn test_rpc_list_peers() {
     let list_peers: ListPeersResult = node_3.send_rpc_request("list_peers", ()).await.unwrap();
     assert_eq!(list_peers.peers.len(), 0);
 
-    node_0.connect_to(&node_3).await;
+    node_0.connect_to(&mut node_3).await;
     let list_peers: ListPeersResult = node_3.send_rpc_request("list_peers", ()).await.unwrap();
     assert_eq!(list_peers.peers.len(), 1);
     assert_eq!(list_peers.peers[0].pubkey, node_0.pubkey);
 
-    node_0.connect_to(&node_1).await;
+    node_0.connect_to(&mut node_1).await;
     let list_peers: ListPeersResult = node_0.send_rpc_request("list_peers", ()).await.unwrap();
     assert_eq!(list_peers.peers.len(), 2);
+    dbg!("list_peers: {:?}", &list_peers);
+    assert!(list_peers.peers.iter().any(|p| p.pubkey == node_1.pubkey));
+    assert!(list_peers.peers.iter().any(|p| p.pubkey == node_3.pubkey));
+    assert!(list_peers.peers.iter().any(|p| p.peer_id == node_1.peer_id));
+    assert!(list_peers.peers.iter().any(|p| p.peer_id == node_3.peer_id));
+}
+
+#[tokio::test]
+async fn test_rpc_graph() {
+    let (nodes, _channels) = create_n_nodes_network_with_params(
+        &[
+            (
+                (0, 1),
+                ChannelParameters {
+                    public: true,
+                    node_a_funding_amount: MIN_RESERVED_CKB + 10000000000,
+                    node_b_funding_amount: MIN_RESERVED_CKB,
+                    ..Default::default()
+                },
+            ),
+            (
+                (0, 1),
+                ChannelParameters {
+                    public: true,
+                    node_a_funding_amount: MIN_RESERVED_CKB + 10000000000,
+                    node_b_funding_amount: MIN_RESERVED_CKB,
+                    ..Default::default()
+                },
+            ),
+        ],
+        2,
+        true,
+    )
+    .await;
+    let [node_0, node_1] = nodes.try_into().expect("2 nodes");
+
+    let graph_nodes: GraphNodesResult = node_0
+        .send_rpc_request(
+            "graph_nodes",
+            GraphNodesParams {
+                limit: None,
+                after: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    eprintln!("Graph nodes: {:#?}", graph_nodes);
+
+    assert!(!graph_nodes.nodes.is_empty());
+    assert!(graph_nodes.nodes.iter().any(|n| n.node_id == node_1.pubkey));
+    assert!(graph_nodes
+        .nodes
+        .iter()
+        .all(|n| n.version == *env!("CARGO_PKG_VERSION")));
+    assert!(!graph_nodes.nodes[0].features.is_empty());
 }

@@ -4,11 +4,13 @@ use clap_serde_derive::{
     clap::{self},
     ClapSerde,
 };
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "bench")))]
 use once_cell::sync::OnceCell;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::{fs, path::PathBuf, str::FromStr};
 use tentacle::secio::{PublicKey, SecioKeyPair};
+
+use super::features::FeatureVector;
 
 pub const CKB_SHANNONS: u64 = 100_000_000; // 1 CKB = 10 ^ 8 shannons
 pub const DEFAULT_MIN_SHUTDOWN_FEE: u64 = CKB_SHANNONS; // 1 CKB prepared for shutdown transaction fee
@@ -28,17 +30,18 @@ pub const DEFAULT_OPEN_CHANNEL_AUTO_ACCEPT_MIN_CKB_FUNDING_AMOUNT: u64 = 100 * C
 /// The expiry delta to forward a tlc, in milliseconds, default to 1 day.
 pub const DEFAULT_TLC_EXPIRY_DELTA: u64 = 24 * 60 * 60 * 1000;
 
+#[cfg(not(debug_assertions))]
 /// The minimal expiry delta to forward a tlc, in milliseconds. 15 minutes.
 pub const MIN_TLC_EXPIRY_DELTA: u64 = 15 * 60 * 1000; // 15 minutes
+#[cfg(debug_assertions)]
+// 5 seconds for testing environment
+pub const MIN_TLC_EXPIRY_DELTA: u64 = 5 * 1000;
 
 /// The maximum expiry delta for a payment, in milliseconds. 2 weeks
 pub const MAX_PAYMENT_TLC_EXPIRY_LIMIT: u64 = 14 * 24 * 60 * 60 * 1000; // 2 weeks
 
 /// The minimal value of a tlc. 0 means no minimal value.
 pub const DEFAULT_TLC_MIN_VALUE: u128 = 0;
-
-/// The maximal value of a tlc. 0 means no maximal value.
-pub const DEFAULT_TLC_MAX_VALUE: u128 = 0;
 
 /// The fee for forwarding peer tlcs. Proportional to the amount of the forwarded tlc. The unit is millionths of the amount. 1000 means 0.1%.
 pub const DEFAULT_TLC_FEE_PROPORTIONAL_MILLIONTHS: u128 = 1000;
@@ -50,9 +53,9 @@ pub const DEFAULT_AUTO_ANNOUNCE_NODE: bool = true;
 pub const DEFAULT_ANNOUNCE_NODE_INTERVAL_SECONDS: u64 = 3600;
 
 /// The interval to maintain the gossip network, in milli-seconds.
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "bench")))]
 pub const DEFAULT_GOSSIP_NETWORK_MAINTENANCE_INTERVAL_MS: u64 = 1000 * 60;
-#[cfg(test)]
+#[cfg(any(test, feature = "bench"))]
 // This config is needed for the timely processing of gossip messages.
 // Without this, some tests may fail due to the delay in processing gossip messages.
 pub const DEFAULT_GOSSIP_NETWORK_MAINTENANCE_INTERVAL_MS: u64 = 50;
@@ -63,10 +66,13 @@ pub const DEFAULT_MAX_INBOUND_PEERS: usize = 16;
 /// Minimal number of outbound connections.
 pub const DEFAULT_MIN_OUTBOUND_PEERS: usize = 8;
 
+/// Funding timeout in seconds since the channel is created.
+pub const DEFAULT_FUNDING_TIMEOUT_SECONDS: u64 = 60 * 60 * 24; // 1 day
+
 /// The interval to maintain the gossip network, in milli-seconds.
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "bench")))]
 pub const DEFAULT_GOSSIP_STORE_MAINTENANCE_INTERVAL_MS: u64 = 20 * 1000;
-#[cfg(test)]
+#[cfg(any(test, feature = "bench"))]
 // This config is needed for the timely processing of gossip messages.
 // Without this, some tests may fail due to the delay in processing gossip messages.
 pub const DEFAULT_GOSSIP_STORE_MAINTENANCE_INTERVAL_MS: u64 = 50;
@@ -280,6 +286,70 @@ pub struct FiberConfig {
         help = "The interval to check watchtower, in seconds. 0 means never check. [default: 60 (1 minute)]"
     )]
     pub watchtower_check_interval_seconds: Option<u64>,
+
+    /// The url of the standalone watchtower rpc server. [default: None]
+    #[arg(
+        name = "FIBER_STANDALONE_WATCHTOWER_RPC_URL",
+        long = "fiber-standalone-watchtower-rpc-url",
+        env,
+        help = "The url of the standalone watchtower rpc server. [default: None]"
+    )]
+    pub standalone_watchtower_rpc_url: Option<String>,
+
+    /// Disable built-in watchtower actor. [default: false]
+    #[arg(
+        name = "FIBER_DISABLE_BUILT_IN_WATCHTOWER",
+        long = "fiber-disable-built-in-watchtower",
+        env,
+        help = "Disable built-in watchtower actor. [default: false]"
+    )]
+    pub disable_built_in_watchtower: Option<bool>,
+
+    /// Max allowed number of channels to be accepted from one peer. [default: 20]
+    #[arg(
+        name = "FIBER_TO_BE_ACCEPTED_CHANNELS_NUMBER_LIMIT",
+        long = "fiber-to-be-accepted-channels-number-limit",
+        env,
+        help = "Max allowed number of channels to be accepted from one peer. [default: 20]"
+    )]
+    pub to_be_accepted_channels_number_limit: Option<usize>,
+
+    /// Max allowed storage bytes of channels to be accepted from one peer. [default: 50KB]
+    #[arg(
+        name = "FIBER_TO_BE_ACCEPTED_CHANNELS_BYTESS_LIMIT",
+        long = "fiber-to-be-accepted-channels-bytes-limit",
+        env,
+        help = "Max allowed bytes of channels to be accepted from one peer. [default: 50KB]"
+    )]
+    pub to_be_accepted_channels_bytes_limit: Option<usize>,
+
+    /// Default timeout to auto close a funding channel. [default: 1 day]
+    #[arg(
+        name = "FIBER_FUNDING_TIMEOUT_SECONDS",
+        long = "fiber-funding-timeout-seconds",
+        env,
+        help = "Default timeout to auto close a funding channel. [default: 1 day]"
+    )]
+    #[default(DEFAULT_FUNDING_TIMEOUT_SECONDS)]
+    pub funding_timeout_seconds: u64,
+
+    /// Use an external shell command to build funding tx.
+    ///
+    /// The command is executed by `cmd /C` in Windows, and by `sh -c` in other systems.
+    ///
+    /// The command receives a JSON object from stdin with following keys:
+    /// - `tx`: The current `Transaction`. This can be `null` for the first funding request.
+    /// - `request`: The `FundingRequest` to fulfil.
+    ///
+    /// The command MUST use non-zero exit status to indicate failures and print error message to stderr.
+    /// It MUST print Transaction in JSON to stdout on success building.
+    #[arg(
+        name = "FIBER_FUNDING_TX_SHELL_BUILDER",
+        long = "fiber-funding-tx-shell-builder",
+        env,
+        help = "Use an external shell command to build funding tx. [default: None]"
+    )]
+    pub funding_tx_shell_builder: Option<String>,
 }
 
 /// Must be a valid utf-8 string of length maximal length 32 bytes.
@@ -353,7 +423,7 @@ impl<'de> serde::Deserialize<'de> for AnnouncedNodeName {
     }
 }
 
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "bench")))]
 static FIBER_SECRET_KEY: OnceCell<super::KeyPair> = OnceCell::new();
 
 impl FiberConfig {
@@ -376,12 +446,12 @@ impl FiberConfig {
 
     // `OnceCell` will make all actors in UI tests use the same secret key.
     // which is not what we want. So we disable it in tests.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "bench"))]
     pub fn read_or_generate_secret_key(&self) -> Result<super::KeyPair> {
         self.inner_read_or_generate_secret_key()
     }
 
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "bench")))]
     pub fn read_or_generate_secret_key(&self) -> Result<super::KeyPair> {
         FIBER_SECRET_KEY
             .get_or_try_init(|| self.inner_read_or_generate_secret_key())
@@ -473,6 +543,12 @@ impl FiberConfig {
     pub fn sync_network_graph(&self) -> bool {
         self.sync_network_graph
             .unwrap_or(DEFAULT_SYNC_NETWORK_GRAPH)
+    }
+
+    pub fn gen_node_features(&self) -> FeatureVector {
+        // TODO: override default features from config settings
+        // ...
+        FeatureVector::default()
     }
 }
 

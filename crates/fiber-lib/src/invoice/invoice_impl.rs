@@ -1,5 +1,6 @@
 use super::errors::VerificationError;
 use super::utils::*;
+use crate::fiber::features::FeatureVector;
 use crate::fiber::gen::invoice::{self as gen_invoice, *};
 use crate::fiber::hash_algorithm::HashAlgorithm;
 use crate::fiber::serde_utils::{duration_hex, EntityHex, U128Hex, U64Hex};
@@ -130,9 +131,8 @@ pub enum Attribute {
     PayeePublicKey(PublicKey),
     /// The hash algorithm of the invoice
     HashAlgorithm(HashAlgorithm),
-    #[serde(with = "U64Hex")]
     /// The feature flags of the invoice
-    Feature(u64),
+    Feature(FeatureVector),
 }
 
 /// The metadata of the invoice
@@ -265,17 +265,14 @@ impl CkbInvoice {
         let hash = Message::from_digest_slice(&self.hash()[..])
             .expect("Hash is 32 bytes long, same as MESSAGE_SIZE");
 
-        let res = secp256k1::Secp256k1::new()
-            .recover_ecdsa(
-                &hash,
-                &self
-                    .signature
-                    .as_ref()
-                    .expect("signature must be present")
-                    .0,
-            )
-            .expect("payee pub key recovered");
-        Ok(res)
+        secp256k1::Secp256k1::new().recover_ecdsa(
+            &hash,
+            &self
+                .signature
+                .as_ref()
+                .expect("signature must be present")
+                .0,
+        )
     }
 
     pub fn is_signed(&self) -> bool {
@@ -288,11 +285,16 @@ impl CkbInvoice {
 
     pub fn is_expired(&self) -> bool {
         self.expiry_time().is_some_and(|expiry| {
-            self.data.timestamp + expiry.as_millis()
-                < std::time::UNIX_EPOCH
-                    .elapsed()
-                    .expect("Duration since unix epoch")
-                    .as_millis()
+            self.data
+                .timestamp
+                .checked_add(expiry.as_millis())
+                .is_some_and(|expiry_time| {
+                    let now = std::time::UNIX_EPOCH
+                        .elapsed()
+                        .expect("Duration since unix epoch")
+                        .as_millis();
+                    expiry_time < now
+                })
         })
     }
 
@@ -342,6 +344,13 @@ impl CkbInvoice {
     );
     attr_getter!(fallback_address, FallbackAddr, String);
     attr_getter!(hash_algorithm, HashAlgorithm, HashAlgorithm);
+
+    pub fn allow_mpp(&self) -> bool {
+        self.data
+            .attrs
+            .iter()
+            .any(|attr| matches!(attr, Attribute::Feature(feature) if feature.supports_basic_mpp()))
+    }
 }
 
 /// Recoverable signature
@@ -513,9 +522,9 @@ impl From<Attribute> for InvoiceAttr {
             Attribute::FallbackAddr(value) => InvoiceAttrUnion::FallbackAddr(
                 FallbackAddr::new_builder().value(value.pack()).build(),
             ),
-            Attribute::Feature(value) => {
-                InvoiceAttrUnion::Feature(Feature::new_builder().value(value.pack()).build())
-            }
+            Attribute::Feature(value) => InvoiceAttrUnion::Feature(
+                Feature::new_builder().value(value.bytes().pack()).build(),
+            ),
             Attribute::UdtScript(script) => {
                 InvoiceAttrUnion::UdtScript(UdtScript::new_builder().value(script.0).build())
             }
@@ -559,7 +568,9 @@ impl From<InvoiceAttr> for Attribute {
                     String::from_utf8(value).expect("decode utf8 string from bytes"),
                 )
             }
-            InvoiceAttrUnion::Feature(x) => Attribute::Feature(x.value().unpack()),
+            InvoiceAttrUnion::Feature(x) => {
+                Attribute::Feature(FeatureVector::from(x.value().unpack()))
+            }
             InvoiceAttrUnion::UdtScript(x) => Attribute::UdtScript(CkbScript(x.value())),
             InvoiceAttrUnion::PayeePublicKey(x) => {
                 let value: Vec<u8> = x.value().unpack();
@@ -648,6 +659,27 @@ impl InvoiceBuilder {
     attr_setter!(expiry_time, ExpiryTime, Duration);
     attr_setter!(fallback_address, FallbackAddr, String);
     attr_setter!(final_expiry_delta, FinalHtlcMinimumExpiryDelta, u64);
+
+    pub fn allow_mpp(self, value: bool) -> Self {
+        let mut feature_vector = self
+            .attrs
+            .iter()
+            .find_map(|attr| {
+                if let Attribute::Feature(feature) = attr {
+                    Some(feature.clone())
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_default();
+
+        if value {
+            feature_vector.set_basic_mpp_optional();
+        } else {
+            feature_vector.unset_basic_mpp_optional();
+        }
+        self.add_attr(Attribute::Feature(feature_vector))
+    }
 
     pub fn build(self) -> Result<CkbInvoice, InvoiceError> {
         let preimage = self.payment_preimage;

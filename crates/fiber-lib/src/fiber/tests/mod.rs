@@ -1,4 +1,5 @@
 mod channel;
+mod features;
 mod gossip;
 mod graph;
 mod hash_algorithm;
@@ -8,6 +9,5 @@ mod path;
 mod payment;
 mod rpc;
 mod serde_utils;
-pub mod test_utils;
 mod tlc_op;
 mod types;

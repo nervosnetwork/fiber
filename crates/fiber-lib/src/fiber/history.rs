@@ -4,8 +4,10 @@
 
 use super::{
     graph::{NetworkGraphStateStore, SessionRouteNode},
-    types::{Pubkey, TlcErr},
+    types::{ChannelUpdate, Pubkey, TlcErr},
 };
+#[cfg(test)]
+use crate::mock_timestamp_as_millis_u64;
 use crate::{fiber::types::TlcErrorCode, now_timestamp_as_millis_u64};
 use ckb_types::packed::OutPoint;
 use serde::{Deserialize, Serialize};
@@ -26,7 +28,7 @@ const DEFAULT_MIN_FAIL_RELAX_INTERVAL: u64 = 60 * 1000;
 // lnd use 300_000_000 mili satoshis, we use shannons as the unit in fiber
 // we need to find a better way to set this value for UDT
 const DEFAULT_BIMODAL_SCALE_SHANNONS: f64 = 800_000_000.0;
-pub(crate) const DEFAULT_BIMODAL_DECAY_TIME: u64 = 6 * 60 * 60 * 1000; // 6 hours
+pub(crate) const DEFAULT_BIMODAL_DECAY_TIME: u64 = 30 * 60 * 1000; // 30 minutes
 
 // The direction of the channel,
 // Forward means from node_a to node_b
@@ -339,7 +341,7 @@ where
         s
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "bench"))]
     pub(crate) fn reset(&mut self) {
         self.inner.clear();
         self.nodes_to_channel_map.clear();
@@ -498,7 +500,7 @@ where
                 fail_amount = self.cannot_send(result.fail_amount, result.fail_time, capacity);
             }
             if result.success_time != 0 {
-                success_amount = self.can_send(result.success_amount, result.success_time);
+                success_amount = result.success_amount;
             }
         } else {
             // if we don't have the history, we assume the probability is 1.0
@@ -509,19 +511,20 @@ where
         ret
     }
 
-    // The factor approaches 0 for success_time a long time in the past,
+    // This factor approaches from 1 to 0 with time_elapsed getting larger,
     // is 1 when the success_time is now.
     fn time_factor(&self, time: u64) -> f64 {
-        let time_ago = now_timestamp_as_millis_u64() - time;
-        // if time_ago is less than 1 second, we treat it as 0, this makes the factor 1
-        // this is to avoid the factor is too small when the time is very close to now,
-        // this will make the probability calculation more stable
-        let time_ago = if time_ago < 1000 { 0 } else { time_ago };
-        let exponent = -(time_ago as f64) / (DEFAULT_BIMODAL_DECAY_TIME as f64);
-
+        #[cfg(not(test))]
+        let cur_time = now_timestamp_as_millis_u64();
+        #[cfg(test)]
+        let cur_time = mock_timestamp_as_millis_u64();
+        let time_elapsed = cur_time - time;
+        let exponent = -(time_elapsed as f64) / (DEFAULT_BIMODAL_DECAY_TIME as f64);
         exponent.exp()
     }
 
+    // with time passing, cannot_send return amount increasing, until it reach capacity
+    // implies a channel marked with failed status will increasing it's probability gradually
     pub(crate) fn cannot_send(&self, fail_amount: u128, time: u64, capacity: u128) -> u128 {
         let mut fail_amount = fail_amount;
 
@@ -530,14 +533,8 @@ where
         }
 
         let factor = self.time_factor(time);
-
-        capacity - (factor * (capacity - fail_amount) as f64) as u128
-    }
-
-    pub(crate) fn can_send(&self, amount: u128, time: u64) -> u128 {
-        let factor = self.time_factor(time);
-
-        (amount as f64 * factor) as u128
+        let fail_amount = fail_amount.max(1);
+        (fail_amount * (1.0 / factor) as u128).min(capacity)
     }
 
     // Get the probability of a payment success through a direct channel,
@@ -662,5 +659,24 @@ where
         }
 
         self.primitive(capacity, upper) - self.primitive(capacity, lower)
+    }
+
+    pub(crate) fn process_channel_update(&mut self, channel_update: &ChannelUpdate) {
+        if channel_update.is_disabled() {
+            return;
+        }
+
+        let channel_outpoint = channel_update.channel_outpoint.clone();
+        let direction = if channel_update.is_update_of_node_1() {
+            Direction::Forward
+        } else {
+            Direction::Backward
+        };
+
+        if let Some(record) = self.get_result(&channel_outpoint, direction) {
+            if record.fail_amount == 0 && record.success_amount == 0 {
+                self.inner.remove(&(channel_outpoint, direction));
+            }
+        }
     }
 }

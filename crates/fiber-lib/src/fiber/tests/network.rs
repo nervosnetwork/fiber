@@ -1,4 +1,5 @@
-use super::test_utils::{init_tracing, NetworkNode};
+use crate::fiber::channel::ChannelFlags;
+use crate::fiber::types::OpenChannel;
 use crate::{
     ckb::{
         tests::test_utils::{
@@ -11,8 +12,10 @@ use crate::{
         config::DEFAULT_TLC_EXPIRY_DELTA,
         gossip::{GossipActorMessage, GossipMessageStore},
         graph::ChannelUpdateInfo,
-        network::{NetworkActorStateStore, SendPaymentCommand, SendPaymentData},
-        tests::test_utils::{NetworkNodeConfig, NetworkNodeConfigBuilder},
+        network::{
+            AcceptChannelCommand, NetworkActorStateStore, OpenChannelCommand, SendPaymentCommand,
+            SendPaymentData,
+        },
         types::{
             BroadcastMessage, BroadcastMessageWithTimestamp, BroadcastMessagesFilterResult,
             ChannelAnnouncement, ChannelUpdateChannelFlags, Cursor, GossipMessage,
@@ -24,13 +27,14 @@ use crate::{
     invoice::InvoiceBuilder,
     now_timestamp_as_millis_u64, ChannelTestContext, NetworkServiceEvent,
 };
+use crate::{gen_rand_fiber_private_key, test_utils::*};
 use ckb_hash::blake2b_256;
 use ckb_types::{
     core::{tx_pool::TxStatus, TransactionView},
     packed::{CellOutput, OutPoint, ScriptBuilder},
     prelude::{Builder, Entity, Pack},
 };
-use musig2::PartialSignature;
+use musig2::{PartialSignature, SecNonce};
 use ractor::{call, ActorProcessingErr, ActorRef};
 use std::{borrow::Cow, str::FromStr, time::Duration};
 use tentacle::{
@@ -211,7 +215,7 @@ async fn test_sync_channel_announcement_on_startup() {
     init_tracing();
 
     let mut node1 = NetworkNode::new_with_node_name("node1").await;
-    let node2 = NetworkNode::new_with_node_name("node2").await;
+    let mut node2 = NetworkNode::new_with_node_name("node2").await;
 
     let capacity = 42;
     let priv_key: Privkey = get_test_priv_key();
@@ -246,7 +250,7 @@ async fn test_sync_channel_announcement_on_startup() {
         );
     }
 
-    node1.connect_to(&node2).await;
+    node1.connect_to(&mut node2).await;
 
     assert!(matches!(
         node2.submit_tx(tx.clone()).await,
@@ -260,7 +264,7 @@ async fn test_sync_channel_announcement_on_startup() {
 
 #[tokio::test]
 async fn test_node1_node2_channel_update() {
-    let channel_context = ChannelTestContext::gen();
+    let channel_context = ChannelTestContext::gen().await;
     let funding_tx = channel_context.funding_tx.clone();
     let out_point = channel_context.channel_outpoint().clone();
     let channel_announcement = channel_context.channel_announcement.clone();
@@ -320,7 +324,7 @@ async fn test_node1_node2_channel_update() {
 
 #[tokio::test]
 async fn test_channel_update_version() {
-    let channel_context = ChannelTestContext::gen();
+    let channel_context = ChannelTestContext::gen().await;
     let funding_tx = channel_context.funding_tx.clone();
     let out_point = channel_context.channel_outpoint().clone();
     let node = NetworkNode::new().await;
@@ -388,7 +392,7 @@ async fn test_channel_update_version() {
 
 #[tokio::test]
 async fn test_query_missing_broadcast_message() {
-    let channel_context = ChannelTestContext::gen();
+    let channel_context = ChannelTestContext::gen().await;
     let funding_tx = channel_context.funding_tx.clone();
     let out_point = channel_context.channel_outpoint().clone();
     let channel_announcement = channel_context.channel_announcement.clone();
@@ -422,8 +426,8 @@ async fn test_query_missing_broadcast_message() {
     let node1_channel_info = node1.get_network_graph_channel(&out_point).await.unwrap();
     assert_ne!(node1_channel_info.update_of_node1, None);
 
-    let node2 = NetworkNode::new().await;
-    node1.connect_to(&node2).await;
+    let mut node2 = NetworkNode::new().await;
+    node1.connect_to(&mut node2).await;
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
     // Verify that node2 still does not have channel info after active syncing done.
     let node2_channel_info = node2.get_network_graph_channel(&out_point).await;
@@ -445,7 +449,7 @@ async fn test_query_missing_broadcast_message() {
 
 #[tokio::test]
 async fn test_prune_channel_announcement_and_receive_channel_update() {
-    let channel_context = ChannelTestContext::gen();
+    let channel_context = ChannelTestContext::gen().await;
     let funding_tx = channel_context.funding_tx.clone();
     let out_point = channel_context.channel_outpoint().clone();
     let channel_announcement = channel_context.channel_announcement.clone();
@@ -612,7 +616,7 @@ async fn test_sync_node_announcement_on_startup() {
     init_tracing();
 
     let mut node1 = NetworkNode::new_with_node_name("node1").await;
-    let node2 = NetworkNode::new_with_node_name("node2").await;
+    let mut node2 = NetworkNode::new_with_node_name("node2").await;
     let test_pub_key = get_test_pub_key();
     let test_peer_id = get_test_peer_id();
 
@@ -621,7 +625,7 @@ async fn test_sync_node_announcement_on_startup() {
         BroadcastMessage::NodeAnnouncement(create_fake_node_announcement_message())
             .create_broadcast_messages_filter_result(),
     );
-    node1.connect_to(&node2).await;
+    node1.connect_to(&mut node2).await;
 
     // Wait for the broadcast message to be processed.
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
@@ -655,7 +659,7 @@ async fn test_sync_node_announcement_of_connected_nodes() {
 async fn test_sync_node_announcement_after_restart() {
     init_tracing();
 
-    let [node1, mut node2] = NetworkNode::new_n_interconnected_nodes().await;
+    let [mut node1, mut node2] = NetworkNode::new_n_interconnected_nodes().await;
 
     node2.stop().await;
 
@@ -667,7 +671,7 @@ async fn test_sync_node_announcement_after_restart() {
             .create_broadcast_messages_filter_result(),
     );
     node2.start().await;
-    node2.connect_to(&node1).await;
+    node2.connect_to(&mut node1).await;
 
     // Wait for the broadcast message to be processed.
     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
@@ -975,13 +979,12 @@ fn test_send_payment_validate_htlc_expiry_delta() {
 #[tokio::test]
 async fn test_abort_funding_on_building_funding_tx() {
     init_tracing();
-    use crate::fiber::network::{AcceptChannelCommand, OpenChannelCommand};
 
     let funding_amount_a = 4_200_000_000u128;
     let funding_amount_b: u128 = u64::MAX as u128 + 1 - funding_amount_a;
     let mut node_a = NetworkNode::new().await;
     let mut node_b = NetworkNode::new().await;
-    node_a.connect_to(&node_b).await;
+    node_a.connect_to(&mut node_b).await;
 
     // Use a huge amount to fail the funding
     let message = |rpc_reply| {
@@ -1039,7 +1042,8 @@ async fn test_abort_funding_on_building_funding_tx() {
 
 #[derive(Clone, Debug)]
 struct CkbTxFailureMockMiddleware;
-#[ractor::async_trait]
+#[cfg_attr(target_arch="wasm32",async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl MockChainActorMiddleware for CkbTxFailureMockMiddleware {
     async fn handle(
         &mut self,
@@ -1066,8 +1070,6 @@ impl MockChainActorMiddleware for CkbTxFailureMockMiddleware {
 
 #[tokio::test]
 async fn test_abort_funding_on_committing_funding_tx_on_chain() {
-    use crate::fiber::network::{AcceptChannelCommand, OpenChannelCommand};
-
     let funding_amount_a = 4_200_000_000u128;
     let funding_amount_b: u128 = funding_amount_a;
     let middleware = Box::new(CkbTxFailureMockMiddleware);
@@ -1083,7 +1085,7 @@ async fn test_abort_funding_on_committing_funding_tx_on_chain() {
             .build(),
     )
     .await;
-    node_a.connect_to(&node_b).await;
+    node_a.connect_to(&mut node_b).await;
 
     let message = |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
@@ -1153,4 +1155,215 @@ async fn test_abort_funding_on_committing_funding_tx_on_chain() {
             )
         })
         .await;
+}
+
+#[tokio::test]
+async fn test_to_be_accepted_channels_number_limit() {
+    let funding_amount = 4_200_000_000u128;
+    let open_channel_auto_accept_min_ckb_funding_amount = Some(funding_amount as u64 + 1);
+    let mut node = NetworkNode::new_with_config(
+        NetworkNodeConfigBuilder::new()
+            .fiber_config_updater(move |config| {
+                config.to_be_accepted_channels_number_limit = Some(2);
+                // Ensure channel is not accepted automatically
+                config.open_channel_auto_accept_min_ckb_funding_amount =
+                    open_channel_auto_accept_min_ckb_funding_amount;
+            })
+            .build(),
+    )
+    .await;
+    let mut peer = NetworkNode::new().await;
+    node.connect_to(&mut peer).await;
+
+    let node_peer_id = node.peer_id.clone();
+
+    let message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
+            OpenChannelCommand {
+                peer_id: node_peer_id.clone(),
+                public: true,
+                shutdown_script: None,
+                funding_amount,
+                funding_udt_type_script: None,
+                commitment_fee_rate: None,
+                commitment_delay_epoch: None,
+                funding_fee_rate: None,
+                tlc_expiry_delta: None,
+                tlc_min_value: None,
+                tlc_fee_proportional_millionths: None,
+                max_tlc_number_in_flight: None,
+                max_tlc_value_in_flight: None,
+            },
+            rpc_reply,
+        ))
+    };
+
+    call!(peer.network_actor, message)
+        .expect("peer alive")
+        .expect("open channel");
+    node.expect_event(|event| match event {
+        NetworkServiceEvent::ChannelPendingToBeAccepted(peer_id, _channel_id) => {
+            assert_eq!(peer_id, &peer.peer_id);
+            true
+        }
+        _ => false,
+    })
+    .await;
+
+    call!(peer.network_actor, message)
+        .expect("peer alive")
+        .expect("open channel");
+    node.expect_event(|event| match event {
+        NetworkServiceEvent::ChannelPendingToBeAccepted(peer_id, _channel_id) => {
+            assert_eq!(peer_id, &peer.peer_id);
+            true
+        }
+        _ => false,
+    })
+    .await;
+
+    call!(peer.network_actor, message)
+        .expect("peer alive")
+        .expect("open channel");
+    node.expect_debug_event("ChannelPendingToBeRejected").await;
+}
+
+#[tokio::test]
+async fn test_to_be_accepted_channels_bytes_limit() {
+    init_tracing();
+
+    let rand_privkey = gen_rand_fiber_private_key();
+    let rand_nonce = SecNonce::build(rand_privkey.as_ref())
+        .build()
+        .public_nonce();
+    // Create an OpenChannel instance that has the same size as the once created by node
+    let open_channel = OpenChannel {
+        chain_hash: gen_rand_sha256_hash(),
+        channel_id: gen_rand_sha256_hash(),
+        funding_udt_type_script: None,
+        funding_amount: 0,
+        shutdown_script: Default::default(),
+        reserved_ckb_amount: 0,
+        funding_fee_rate: 0,
+        commitment_fee_rate: 0,
+        commitment_delay_epoch: 0,
+        max_tlc_value_in_flight: 0,
+        max_tlc_number_in_flight: 0,
+        channel_flags: ChannelFlags::empty(),
+        first_per_commitment_point: gen_rand_fiber_public_key(),
+        second_per_commitment_point: gen_rand_fiber_public_key(),
+        funding_pubkey: gen_rand_fiber_public_key(),
+        tlc_basepoint: gen_rand_fiber_public_key(),
+        next_local_nonce: rand_nonce.clone(),
+        // public channel must set this
+        channel_announcement_nonce: Some(rand_nonce.clone()),
+    };
+    let single_open_channel_size = open_channel.mem_size();
+    tracing::info!(
+        "single open_channel mem size is {}",
+        single_open_channel_size
+    );
+
+    let funding_amount = 4_200_000_000u128;
+    let open_channel_auto_accept_min_ckb_funding_amount = Some(funding_amount as u64 + 1);
+    let mut node = NetworkNode::new_with_config(
+        NetworkNodeConfigBuilder::new()
+            .fiber_config_updater(move |config| {
+                config.to_be_accepted_channels_bytes_limit = Some(single_open_channel_size * 2);
+                // Ensure channel is not accepted automatically
+                config.open_channel_auto_accept_min_ckb_funding_amount =
+                    open_channel_auto_accept_min_ckb_funding_amount;
+            })
+            .build(),
+    )
+    .await;
+    let mut peer = NetworkNode::new().await;
+    node.connect_to(&mut peer).await;
+
+    let node_peer_id = node.peer_id.clone();
+
+    let message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
+            OpenChannelCommand {
+                peer_id: node_peer_id.clone(),
+                public: true,
+                shutdown_script: None,
+                funding_amount,
+                funding_udt_type_script: None,
+                commitment_fee_rate: None,
+                commitment_delay_epoch: None,
+                funding_fee_rate: None,
+                tlc_expiry_delta: None,
+                tlc_min_value: None,
+                tlc_fee_proportional_millionths: None,
+                max_tlc_number_in_flight: None,
+                max_tlc_value_in_flight: None,
+            },
+            rpc_reply,
+        ))
+    };
+
+    call!(peer.network_actor, message)
+        .expect("peer alive")
+        .expect("open channel");
+    node.expect_event(|event| match event {
+        NetworkServiceEvent::ChannelPendingToBeAccepted(peer_id, _channel_id) => {
+            assert_eq!(peer_id, &peer.peer_id);
+            true
+        }
+        _ => false,
+    })
+    .await;
+
+    call!(peer.network_actor, message)
+        .expect("peer alive")
+        .expect("open channel");
+    node.expect_event(|event| match event {
+        NetworkServiceEvent::ChannelPendingToBeAccepted(peer_id, _channel_id) => {
+            assert_eq!(peer_id, &peer.peer_id);
+            true
+        }
+        _ => false,
+    })
+    .await;
+
+    call!(peer.network_actor, message)
+        .expect("peer alive")
+        .expect("open channel");
+    node.expect_debug_event("ChannelPendingToBeRejected").await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[should_panic]
+async fn test_failed_funding_shell_builder() {
+    init_tracing();
+
+    let funding_amount_a = 4_200_000_000u128;
+    let funding_amount_b: u128 = funding_amount_a;
+    let mut node_a = NetworkNode::new_with_config(
+        NetworkNodeConfig::builder()
+            .fiber_config_updater(|config| {
+                // It's hard to build a valid funding tx using simple shell script since the lock
+                // is derived from public keys of both parties.
+                config.funding_tx_shell_builder = Some(r#"echo '{"version":"0x0","cell_deps":[],"header_deps":[],"inputs":[],"outputs_data":["0x"],"witnesses":[],
+                "outputs":[{"capacity":"0xfa56ea00","lock":{"code_hash":"0x0a792ff1eabfdf90f17c7db3c7984c2a21dee569f4e584f271c3d9ae2addb3ae","hash_type":"data","args":"0x"},"type":null}]}
+                '"#.to_string());
+            })
+            .build()
+    )
+    .await;
+    let mut node_b = NetworkNode::new().await;
+    node_a.connect_to(&mut node_b).await;
+    establish_channel_between_nodes(
+        &mut node_a,
+        &mut node_b,
+        ChannelParameters {
+            public: true,
+            node_a_funding_amount: funding_amount_a,
+            node_b_funding_amount: funding_amount_b,
+            ..Default::default()
+        },
+    )
+    .await;
 }

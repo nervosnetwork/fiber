@@ -9,9 +9,9 @@ use ckb_sdk::{
         DefaultCellDepResolver, DefaultHeaderDepResolver, DefaultTransactionDependencyProvider,
         HeaderDepResolver, SecpCkbRawKeySigner, TransactionDependencyProvider, ValueRangeOption,
     },
-    tx_builder::{unlock_tx, CapacityBalancer, TxBuilder, TxBuilderError},
+    tx_builder::{unlock_tx_async, CapacityBalancer, TxBuilder, TxBuilderError},
     unlock::{ScriptUnlocker, SecpSighashUnlocker},
-    CkbRpcClient, ScriptId,
+    CkbRpcAsyncClient, ScriptId,
 };
 use ckb_types::{
     core::{BlockView, Capacity, TransactionView},
@@ -22,7 +22,7 @@ use molecule::{
     bytes::{BufMut as _, BytesMut},
     prelude::*,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use std::collections::{HashMap, HashSet};
 use tracing::debug;
@@ -122,7 +122,7 @@ impl From<Transaction> for FundingTx {
 }
 
 #[serde_as]
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct FundingRequest {
     /// The funding cell lock script args
     #[serde_as(as = "EntityHex")]
@@ -157,7 +157,8 @@ struct FundingTxBuilder {
     context: FundingContext,
 }
 
-#[async_trait::async_trait]
+#[cfg_attr(target_arch="wasm32",async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl TxBuilder for FundingTxBuilder {
     async fn build_base_async(
         &self,
@@ -187,7 +188,8 @@ impl TxBuilder for FundingTxBuilder {
             &mut outputs,
             &mut outputs_data,
             &mut cell_deps,
-        )?;
+        )
+        .await?;
         if let Some(ref tx) = self.funding_tx.tx {
             for (i, output) in tx.outputs().into_iter().enumerate().skip(1) {
                 outputs.push(output.clone());
@@ -234,10 +236,12 @@ impl FundingTxBuilder {
                 // To make tx building easier, do not include the amount not funded yet in the
                 // funding cell.
                 if remote_funded {
-                    udt_amount += self.request.remote_amount;
+                    udt_amount = udt_amount
+                        .checked_add(self.request.remote_amount)
+                        .ok_or(FundingError::OverflowError)?;
                     ckb_amount = ckb_amount
                         .checked_add(self.request.remote_reserved_ckb_amount)
-                        .ok_or(FundingError::InvalidChannel)?;
+                        .ok_or(FundingError::OverflowError)?;
                 }
 
                 let udt_output = packed::CellOutput::new_builder()
@@ -252,15 +256,16 @@ impl FundingTxBuilder {
                 Ok((udt_output, data.freeze().pack()))
             }
             None => {
-                let mut ckb_amount =
-                    self.request.local_amount as u64 + self.request.local_reserved_ckb_amount;
+                let mut ckb_amount = (self.request.local_amount as u64)
+                    .checked_add(self.request.local_reserved_ckb_amount)
+                    .ok_or(FundingError::OverflowError)?;
                 if remote_funded {
                     ckb_amount = ckb_amount
                         .checked_add(
                             self.request.remote_amount as u64
                                 + self.request.remote_reserved_ckb_amount,
                         )
-                        .ok_or(FundingError::InvalidChannel)?;
+                        .ok_or(FundingError::OverflowError)?;
                 }
                 let ckb_output = packed::CellOutput::new_builder()
                     .capacity(Capacity::shannons(ckb_amount).pack())
@@ -271,7 +276,7 @@ impl FundingTxBuilder {
         }
     }
 
-    fn build_udt_inputs_outputs(
+    async fn build_udt_inputs_outputs(
         &self,
         cell_collector: &mut dyn CellCollector,
         inputs: &mut Vec<CellInput>,
@@ -289,7 +294,7 @@ impl FundingTxBuilder {
             TxBuilderError::InvalidParameter(anyhow!("UDT type script not configured"))
         })?;
         let owner = self.context.funding_source_lock_script.clone();
-        let mut found_udt_amount = 0;
+        let mut found_udt_amount: u128 = 0;
 
         let mut query = CellQueryOptions::new_lock(owner.clone());
         query.script_search_mode = Some(SearchMode::Exact);
@@ -298,7 +303,9 @@ impl FundingTxBuilder {
 
         loop {
             // each query will found at most one cell because of `min_total_capacity == 1` in CellQueryOptions
-            let (udt_cells, _) = cell_collector.collect_live_cells(&query, true)?;
+            let (udt_cells, _) = cell_collector
+                .collect_live_cells_async(&query, true)
+                .await?;
             if udt_cells.is_empty() {
                 break;
             }
@@ -311,35 +318,41 @@ impl FundingTxBuilder {
                     "found udt cell ckb_amount: {:?} udt_amount: {:?} cell: {:?}",
                     ckb_amount, cell_udt_amount, cell
                 );
-                found_udt_amount += cell_udt_amount;
+
+                found_udt_amount = found_udt_amount
+                    .checked_add(cell_udt_amount)
+                    .ok_or_else(|| TxBuilderError::Other(anyhow!("UDT amount overflow")))?;
+
                 inputs.push(CellInput::new(cell.out_point.clone(), 0));
 
                 if found_udt_amount >= udt_amount {
-                    let change_output_data: Bytes =
-                        (found_udt_amount - udt_amount).to_le_bytes().pack();
+                    let change_amount = found_udt_amount - udt_amount;
+                    if change_amount > 0 {
+                        let change_output_data: Bytes = change_amount.to_le_bytes().pack();
+                        let dummy_output = CellOutput::new_builder()
+                            .lock(owner)
+                            .type_(Some(udt_type_script.clone()).pack())
+                            .build();
+                        let required_capacity = dummy_output
+                            .occupied_capacity(
+                                Capacity::bytes(change_output_data.len())
+                                    .map_err(|err| TxBuilderError::Other(err.into()))?,
+                            )
+                            .map_err(|err| TxBuilderError::Other(err.into()))?
+                            .pack();
+                        let change_output = dummy_output
+                            .as_builder()
+                            .capacity(required_capacity)
+                            .build();
 
-                    let dummy_output = CellOutput::new_builder()
-                        .lock(owner)
-                        .type_(Some(udt_type_script.clone()).pack())
-                        .build();
-                    let required_capacity = dummy_output
-                        .occupied_capacity(
-                            Capacity::bytes(change_output_data.len())
-                                .map_err(|err| TxBuilderError::Other(err.into()))?,
-                        )
-                        .map_err(|err| TxBuilderError::Other(err.into()))?
-                        .pack();
-                    let change_output = dummy_output
-                        .as_builder()
-                        .capacity(required_capacity)
-                        .build();
-
-                    outputs.push(change_output);
-                    outputs_data.push(change_output_data);
+                        outputs.push(change_output);
+                        outputs_data.push(change_output_data);
+                    }
 
                     debug!("find proper UDT owner cells: {:?}", inputs);
                     // we need to filter the cell deps by the contracts_context
                     let udt_cell_deps = get_udt_cell_deps(&udt_type_script)
+                        .await
                         .map_err(|_| TxBuilderError::ResolveCellDepFailed(udt_type_script))?;
                     for cell_dep in udt_cell_deps {
                         cell_deps.insert(cell_dep);
@@ -353,7 +366,7 @@ impl FundingTxBuilder {
         )));
     }
 
-    fn build(
+    async fn build(
         self,
         live_cells_exclusion_map: &mut LiveCellsExclusionMap,
     ) -> Result<FundingTx, FundingError> {
@@ -379,27 +392,42 @@ impl FundingTxBuilder {
             self.request.funding_fee_rate,
         );
 
-        let ckb_client = CkbRpcClient::new(&self.context.rpc_url);
-        let cell_dep_resolver = ckb_client
-            .get_block_by_number(0.into())
-            .map_err(FundingError::CkbRpcError)?
-            .and_then(|genesis_block| {
-                DefaultCellDepResolver::from_genesis(&BlockView::from(genesis_block)).ok()
-            })
-            .ok_or_else(|| {
-                FundingError::CkbTxBuilderError(TxBuilderError::ResolveCellDepFailed(sender))
-            })?;
+        let ckb_client = CkbRpcAsyncClient::new(&self.context.rpc_url);
+        let cell_dep_resolver = {
+            match ckb_client.get_block_by_number(0.into()).await? {
+                Some(genesis_block) => {
+                    match DefaultCellDepResolver::from_genesis_async(&BlockView::from(
+                        genesis_block,
+                    ))
+                    .await
+                    .ok()
+                    {
+                        Some(ret) => ret,
+                        None => {
+                            return Err(FundingError::CkbTxBuilderError(
+                                TxBuilderError::ResolveCellDepFailed(sender),
+                            ))
+                        }
+                    }
+                }
+                None => {
+                    return Err(FundingError::CkbTxBuilderError(
+                        TxBuilderError::ResolveCellDepFailed(sender),
+                    ))
+                }
+            }
+        };
 
         let header_dep_resolver = DefaultHeaderDepResolver::new(&self.context.rpc_url);
         let mut cell_collector = DefaultCellCollector::new(&self.context.rpc_url);
         let tx_dep_provider = DefaultTransactionDependencyProvider::new(&self.context.rpc_url, 10);
 
-        let tip_block_number: u64 = ckb_client.get_tip_block_number()?.into();
+        let tip_block_number: u64 = ckb_client.get_tip_block_number().await?.into();
         live_cells_exclusion_map.truncate(tip_block_number);
         live_cells_exclusion_map
             .apply(&mut cell_collector)
             .map_err(|err| FundingError::CkbTxBuilderError(TxBuilderError::Other(err.into())))?;
-
+        #[cfg(not(target_arch = "wasm32"))]
         let (tx, _) = self.build_unlocked(
             &mut cell_collector,
             &cell_dep_resolver,
@@ -408,13 +436,24 @@ impl FundingTxBuilder {
             &balancer,
             &unlockers,
         )?;
+        #[cfg(target_arch = "wasm32")]
+        let (tx, _) = self
+            .build_unlocked_async(
+                &mut cell_collector,
+                &cell_dep_resolver,
+                &header_dep_resolver,
+                &tx_dep_provider,
+                &balancer,
+                &unlockers,
+            )
+            .await?;
 
         let old_tx_hash = self.funding_tx.tx.as_ref().map(|tx| tx.hash());
         let mut funding_tx = self.funding_tx;
         let tx_builder = tx.as_advanced_builder();
         debug!("final tx_builder: {:?}", tx_builder);
 
-        funding_tx.update_for_self(tx)?;
+        funding_tx.update_for_self(tx);
 
         // Replace the old tx with the new one in the exclusion map
         if let Some(tx_hash) = old_tx_hash {
@@ -443,7 +482,7 @@ impl FundingTx {
         self.tx
     }
 
-    pub fn fulfill(
+    pub async fn fulfill(
         self,
         request: FundingRequest,
         context: FundingContext,
@@ -454,10 +493,10 @@ impl FundingTx {
             request,
             context,
         };
-        builder.build(live_cells_exclusion_map)
+        builder.build(live_cells_exclusion_map).await
     }
 
-    pub fn sign(
+    pub async fn sign(
         mut self,
         secret_key: secp256k1::SecretKey,
         rpc_url: String,
@@ -487,15 +526,13 @@ impl FundingTx {
         let tx = self.take().ok_or(FundingError::AbsentTx)?;
         let tx_dep_provider = DefaultTransactionDependencyProvider::new(&rpc_url, 10);
 
-        let (tx, _) = unlock_tx(tx, &tx_dep_provider, &unlockers)?;
-        self.update_for_self(tx)?;
+        let (tx, _) = unlock_tx_async(tx, &tx_dep_provider, &unlockers).await?;
+        self.update_for_self(tx);
         Ok(self)
     }
 
-    // TODO: verify the transaction
-    pub fn update_for_self(&mut self, tx: TransactionView) -> Result<(), FundingError> {
+    pub fn update_for_self(&mut self, tx: TransactionView) {
         self.tx = Some(tx);
-        Ok(())
     }
 
     // TODO: verify the transaction

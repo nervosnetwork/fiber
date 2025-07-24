@@ -1,5 +1,6 @@
 use super::channel::{ChannelFlags, ChannelTlcInfo, ProcessingChannelError};
 use super::config::AnnouncedNodeName;
+use super::features::FeatureVector;
 use super::gen::fiber::{
     self as molecule_fiber, ChannelUpdateOpt, CustomRecordsOpt, PaymentPreimageOpt,
     PubNonce as Byte66, PubkeyOpt, TlcErrDataOpt, UdtCellDeps, Uint128Opt,
@@ -80,6 +81,7 @@ impl From<&PubNonce> for Byte66 {
     }
 }
 
+/// A wrapper for secp256k1 secret key
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Privkey(pub SecretKey);
 
@@ -547,6 +549,31 @@ impl TryFrom<Byte66> for PubNonce {
 }
 
 #[derive(Clone, Debug)]
+pub struct Init {
+    pub features: FeatureVector,
+    pub chain_hash: Hash256,
+}
+
+impl From<Init> for molecule_fiber::Init {
+    fn from(init: Init) -> Self {
+        molecule_fiber::Init::new_builder()
+            .features(init.features.bytes().pack())
+            .chain_hash(init.chain_hash.into())
+            .build()
+    }
+}
+impl TryFrom<molecule_fiber::Init> for Init {
+    type Error = Error;
+
+    fn try_from(init: molecule_fiber::Init) -> Result<Self, Self::Error> {
+        Ok(Init {
+            features: FeatureVector::from(init.features().unpack()),
+            chain_hash: init.chain_hash().into(),
+        })
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct OpenChannel {
     pub chain_hash: Hash256,
     pub channel_id: Hash256,
@@ -579,6 +606,17 @@ impl OpenChannel {
 
     pub fn is_public(&self) -> bool {
         self.channel_flags.contains(ChannelFlags::PUBLIC)
+    }
+
+    pub fn mem_size(&self) -> usize {
+        let static_size = std::mem::size_of_val(self);
+        let funding_udt_type_script_size = self
+            .funding_udt_type_script
+            .as_ref()
+            .map(|script| script.total_size())
+            .unwrap_or_default();
+        let shutdown_script_size = self.shutdown_script.total_size();
+        static_size + funding_udt_type_script_size + shutdown_script_size
     }
 }
 
@@ -1768,12 +1806,12 @@ pub struct ForwardTlcResult {
 pub struct NodeAnnouncement {
     // Signature to this message, may be empty the message is not signed yet.
     pub signature: Option<EcdsaSignature>,
-    // Tentatively using 64 bits for features. May change the type later while developing.
-    // rust-lightning uses a Vec<u8> here.
-    pub features: u64,
+    // Features of the node, see `FeatureVector`.
+    pub features: FeatureVector,
     // Timestamp for current NodeAnnouncement. Later updates should have larger timestamp.
     pub timestamp: u64,
     pub node_id: Pubkey,
+    pub version: String,
     // Must be a valid utf-8 string of length maximal length 32 bytes.
     // If the length is less than 32 bytes, it will be padded with 0.
     // If the length is more than 32 bytes, it should be truncated.
@@ -1801,6 +1839,7 @@ impl NodeAnnouncement {
             features: Default::default(),
             timestamp,
             node_id,
+            version: env!("CARGO_PKG_VERSION").to_string(),
             node_name,
             chain_hash: get_chain_hash(),
             addresses,
@@ -1830,9 +1869,10 @@ impl NodeAnnouncement {
     pub fn message_to_sign(&self) -> [u8; 32] {
         let unsigned_announcement = NodeAnnouncement {
             signature: None,
-            features: self.features,
+            features: self.features.clone(),
             timestamp: self.timestamp,
             node_id: self.node_id,
+            version: self.version.clone(),
             node_name: self.node_name,
             chain_hash: self.chain_hash,
             addresses: self.addresses.clone(),
@@ -2014,9 +2054,10 @@ impl From<molecule_fiber::UdtCfgInfos> for UdtCfgInfos {
 impl From<NodeAnnouncement> for molecule_gossip::NodeAnnouncement {
     fn from(node_announcement: NodeAnnouncement) -> Self {
         let builder = molecule_gossip::NodeAnnouncement::new_builder()
-            .features(node_announcement.features.pack())
+            .features(node_announcement.features.bytes().pack())
             .timestamp(node_announcement.timestamp.pack())
             .node_id(node_announcement.node_id.into())
+            .version(node_announcement.version.pack())
             .node_name(u8_32_as_byte_32(&node_announcement.node_name.0))
             .chain_hash(node_announcement.chain_hash.into())
             .auto_accept_min_ckb_funding_amount(
@@ -2051,9 +2092,10 @@ impl TryFrom<molecule_gossip::NodeAnnouncement> for NodeAnnouncement {
     fn try_from(node_announcement: molecule_gossip::NodeAnnouncement) -> Result<Self, Self::Error> {
         Ok(NodeAnnouncement {
             signature: Some(node_announcement.signature().try_into()?),
-            features: node_announcement.features().unpack(),
+            features: FeatureVector::from(node_announcement.features().unpack()),
             timestamp: node_announcement.timestamp().unpack(),
             node_id: node_announcement.node_id().try_into()?,
+            version: String::from_utf8(node_announcement.version().unpack()).unwrap_or_default(),
             chain_hash: node_announcement.chain_hash().into(),
             auto_accept_min_ckb_funding_amount: node_announcement
                 .auto_accept_min_ckb_funding_amount()
@@ -2346,11 +2388,16 @@ pub enum FiberQueryInformation {
 
 #[derive(Debug, Clone)]
 pub enum FiberMessage {
+    Init(Init),
     ChannelInitialization(OpenChannel),
     ChannelNormalOperation(FiberChannelMessage),
 }
 
 impl FiberMessage {
+    pub fn init(init_message: Init) -> Self {
+        FiberMessage::Init(init_message)
+    }
+
     pub fn open_channel(open_channel: OpenChannel) -> Self {
         FiberMessage::ChannelInitialization(open_channel)
     }
@@ -3456,6 +3503,7 @@ impl TryFrom<molecule_gossip::QueryBroadcastMessagesResult> for QueryBroadcastMe
 impl From<FiberMessage> for molecule_fiber::FiberMessageUnion {
     fn from(fiber_message: FiberMessage) -> Self {
         match fiber_message {
+            FiberMessage::Init(init) => molecule_fiber::FiberMessageUnion::Init(init.into()),
             FiberMessage::ChannelInitialization(open_channel) => {
                 molecule_fiber::FiberMessageUnion::OpenChannel(open_channel.into())
             }
@@ -3525,6 +3573,7 @@ impl TryFrom<molecule_fiber::FiberMessageUnion> for FiberMessage {
 
     fn try_from(fiber_message: molecule_fiber::FiberMessageUnion) -> Result<Self, Self::Error> {
         Ok(match fiber_message {
+            molecule_fiber::FiberMessageUnion::Init(init) => FiberMessage::Init(init.try_into()?),
             molecule_fiber::FiberMessageUnion::OpenChannel(open_channel) => {
                 FiberMessage::ChannelInitialization(open_channel.try_into()?)
             }

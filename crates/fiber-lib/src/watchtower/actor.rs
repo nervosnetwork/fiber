@@ -17,11 +17,11 @@ use ckb_types::{
 use molecule::prelude::Entity;
 use ractor::{Actor, ActorProcessingErr, ActorRef};
 use secp256k1::{Message, PublicKey, Secp256k1, SecretKey};
-use tracing::{debug, error, info, trace, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::{
     ckb::{
-        contracts::{get_cell_deps, get_script_by_contract, Contract},
+        contracts::{get_cell_deps_sync, get_script_by_contract, Contract},
         CkbConfig,
     },
     fiber::{
@@ -35,7 +35,6 @@ use crate::{
     },
     invoice::PreimageStore,
     utils::tx::compute_tx_message,
-    NetworkServiceEvent,
 };
 
 use super::WatchtowerStore;
@@ -53,7 +52,12 @@ impl<S: PreimageStore + WatchtowerStore> WatchtowerActor<S> {
 }
 
 pub enum WatchtowerMessage {
-    NetworkServiceEvent(NetworkServiceEvent),
+    CreateChannel(Hash256, Script, SettlementData),
+    RemoveChannel(Hash256),
+    UpdateRevocation(Hash256, RevocationData, SettlementData),
+    UpdateLocalSettlement(Hash256, SettlementData),
+    CreatePreimage(Hash256, Hash256),
+    RemovePreimage(Hash256),
     PeriodicCheck,
 }
 
@@ -62,7 +66,7 @@ pub struct WatchtowerState {
     secret_key: SecretKey,
 }
 
-#[ractor::async_trait]
+#[async_trait::async_trait]
 impl<S> Actor for WatchtowerActor<S>
 where
     S: PreimageStore + WatchtowerStore + Send + Sync + 'static,
@@ -87,49 +91,32 @@ where
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
-            WatchtowerMessage::NetworkServiceEvent(event) => {
-                trace!("Received NetworkServiceEvent: {:?}", event);
-                match event {
-                    NetworkServiceEvent::RemoteTxComplete(
-                        _peer_id,
-                        channel_id,
-                        funding_tx_lock,
-                        settlement_data,
-                    ) => {
-                        self.store.insert_watch_channel(
-                            channel_id,
-                            funding_tx_lock,
-                            settlement_data,
-                        );
-                    }
-                    NetworkServiceEvent::ChannelClosed(_peer_id, channel_id, _close_tx_hash) => {
-                        self.store.remove_watch_channel(channel_id);
-                    }
-                    NetworkServiceEvent::ChannelAbandon(channel_id) => {
-                        self.store.remove_watch_channel(channel_id);
-                    }
-                    NetworkServiceEvent::RevokeAndAckReceived(
-                        _peer_id,
-                        channel_id,
-                        revocation_data,
-                        settlement_data,
-                    ) => {
-                        self.store
-                            .update_revocation(channel_id, revocation_data, settlement_data);
-                    }
-                    NetworkServiceEvent::RemoteCommitmentSigned(
-                        _peer_id,
-                        channel_id,
-                        _commitment_tx,
-                        settlement_data,
-                    ) => {
-                        self.store
-                            .update_local_settlement(channel_id, settlement_data);
-                    }
-                    _ => {
-                        // ignore
-                    }
-                }
+            WatchtowerMessage::CreateChannel(
+                channel_id,
+                funding_tx_lock,
+                remote_settlement_data,
+            ) => {
+                self.store
+                    .insert_watch_channel(channel_id, funding_tx_lock, remote_settlement_data)
+            }
+            WatchtowerMessage::RemoveChannel(channel_id) => {
+                self.store.remove_watch_channel(channel_id)
+            }
+            WatchtowerMessage::UpdateRevocation(
+                channel_id,
+                revocation_data,
+                remote_settlement_data,
+            ) => self
+                .store
+                .update_revocation(channel_id, revocation_data, remote_settlement_data),
+            WatchtowerMessage::UpdateLocalSettlement(channel_id, local_settlement_data) => self
+                .store
+                .update_local_settlement(channel_id, local_settlement_data),
+            WatchtowerMessage::CreatePreimage(payment_hash, preimage) => {
+                self.store.insert_preimage(payment_hash, preimage)
+            }
+            WatchtowerMessage::RemovePreimage(payment_hash) => {
+                self.store.remove_preimage(&payment_hash)
             }
             WatchtowerMessage::PeriodicCheck => self.periodic_check(state),
         }
@@ -348,7 +335,7 @@ fn build_revocation_tx(
 
     let mut tx_builder = Transaction::default()
         .as_advanced_builder()
-        .cell_deps(get_cell_deps(
+        .cell_deps(get_cell_deps_sync(
             vec![Contract::CommitmentLock, Contract::Secp256k1Lock],
             &revocation_data.output.type_().to_opt(),
         )?)
@@ -787,7 +774,7 @@ fn build_settlement_tx(
 
     let mut tx_builder = Transaction::default()
         .as_advanced_builder()
-        .cell_deps(get_cell_deps(
+        .cell_deps(get_cell_deps_sync(
             vec![Contract::CommitmentLock, Contract::Secp256k1Lock],
             &to_local_output.type_().to_opt(),
         )?)
@@ -1112,7 +1099,7 @@ fn build_settlement_tx_for_pending_tlcs<S: PreimageStore>(
             };
             let mut tx_builder = Transaction::default()
                 .as_advanced_builder()
-                .cell_deps(get_cell_deps(
+                .cell_deps(get_cell_deps_sync(
                     vec![Contract::CommitmentLock, Contract::Secp256k1Lock],
                     &None,
                 )?)
@@ -1234,7 +1221,7 @@ fn build_settlement_tx_for_pending_tlcs<S: PreimageStore>(
             };
             let mut tx_builder = Transaction::default()
                 .as_advanced_builder()
-                .cell_deps(get_cell_deps(
+                .cell_deps(get_cell_deps_sync(
                     vec![Contract::CommitmentLock, Contract::Secp256k1Lock],
                     &commitment_tx_cell.output.type_.map(|script| script.into()),
                 )?)

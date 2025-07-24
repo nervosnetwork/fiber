@@ -2,6 +2,7 @@ use crate::{
     ckb::config::{UdtArgInfo, UdtCellDep, UdtCfgInfos, UdtDep, UdtScript},
     fiber::{
         config::AnnouncedNodeName,
+        features::FeatureVector,
         gen::{fiber as molecule_fiber, gossip},
         hash_algorithm::HashAlgorithm,
         types::{
@@ -190,6 +191,70 @@ fn test_peeled_onion_packet() {
 }
 
 #[test]
+fn test_peeled_large_onion_packet() {
+    fn build_onion_packet(hops_num: usize) -> Result<(), String> {
+        let secp = Secp256k1::new();
+        let keys: Vec<Privkey> = std::iter::repeat_with(gen_rand_fiber_private_key)
+            .take(hops_num + 1)
+            .collect();
+        let mut hops_infos = vec![];
+
+        for key in keys.iter().take(hops_num) {
+            hops_infos.push(PaymentHopData {
+                amount: 2,
+                expiry: 3,
+                next_hop: Some(key.pubkey()),
+                funding_tx_hash: Hash256::default(),
+                hash_algorithm: HashAlgorithm::Sha256,
+                payment_preimage: None,
+                custom_records: None,
+            });
+        }
+        hops_infos.push(PaymentHopData {
+            amount: 8,
+            expiry: 9,
+            next_hop: None,
+            funding_tx_hash: Hash256::default(),
+            hash_algorithm: HashAlgorithm::Sha256,
+            payment_preimage: None,
+            custom_records: None,
+        });
+
+        let packet = PeeledOnionPacket::create(
+            gen_rand_fiber_private_key(),
+            hops_infos.clone(),
+            None,
+            &secp,
+        )
+        .map_err(|e| format!("create peeled packet error: {}", e))?;
+
+        let serialized = packet.serialize();
+        let deserialized = PeeledOnionPacket::deserialize(&serialized).expect("deserialize");
+
+        assert_eq!(packet, deserialized);
+
+        let mut now = Some(packet);
+        for i in 0..hops_infos.len() - 1 {
+            let packet = now.unwrap().peel(&keys[i], &secp).expect("peel");
+            assert_eq!(packet.current, hops_infos[i + 1]);
+            now = Some(packet.clone());
+        }
+        let last_packet = now.unwrap();
+        assert_eq!(last_packet.current, hops_infos[hops_infos.len() - 1]);
+        assert!(last_packet.is_last());
+        return Ok(());
+    }
+
+    // default PACKET_DATA_LEN is 6500
+    build_onion_packet(40).expect("build onion packet with 40 hops");
+    let res = build_onion_packet(41);
+    assert!(
+        res.is_err(),
+        "should fail to build onion packet with 41 hops"
+    );
+}
+
+#[test]
 fn test_tlc_fail_error() {
     let tlc_fail_detail = TlcErr::new(TlcErrorCode::InvalidOnionVersion);
     assert!(!tlc_fail_detail.error_code.is_node());
@@ -319,9 +384,10 @@ fn test_verify_hard_coded_node_announcement() {
         let node_id = privkey.pubkey();
         let mut node_announcement = NodeAnnouncement {
             signature: None,
-            features: 0,
+            features: FeatureVector::default(),
             timestamp: 1737451664358,
             node_id,
+            version: "1.0".to_string(),
             node_name: AnnouncedNodeName::from_string("fiber-1").expect("valid name"),
             addresses: vec![MultiAddr::from_str(
                 "/ip4/127.0.0.1/tcp/8344/p2p/QmbvRjJHAQDmj3cgnUBGQ5zVnGxUKwb2qJygwNs2wk41h8",
@@ -389,9 +455,10 @@ fn test_verify_hard_coded_node_announcement() {
         let privkey = gen_deterministic_fiber_private_key();
         let mut node_announcement = NodeAnnouncement {
             signature: None,
-            features: 0,
+            features: FeatureVector::default(),
             timestamp: 1737449487183,
             node_id: privkey.pubkey(),
+            version: "1.0".to_string(),
             node_name: AnnouncedNodeName::default(),
             addresses: vec![MultiAddr::from_str(
                 "/ip4/221.187.61.162/tcp/18228/p2p/QmSr3bkMcG9Fy3PAf3HdrxttAE6EiLxHitKJW6HmiV9o6U",
@@ -433,13 +500,13 @@ fn test_verify_hard_coded_node_announcement() {
 
     for (signature, message, node_announcement) in [
         (
-            "75a5419da26e24eace8426ed84180d7c340001c99f94e2657330361126d4f6854cf3c72c2632bf103361fbf3149535077d99e24833164d54b217e4daa2b4def5",
-            "8eea99f1c1a541b89c3ea84b5fed1a1311cd9c9e6490c9f9a1393348cf337855",
+            "c148bbe120594e8d12ab9893a31cf61c1aab7a63004dfa89bc088161375efef56489abf88baa51557bd498cbf16de7311c5ae1e30c0edec44c05088e08606eaf",
+            "f352944950ddf83c5ff886527560762dc4e490cfe2e37ff8e959ad893a3b8d1c",
             node1(),
         ),
         (
-            "6bcab4422ae8bf96db20089c04e41d5ba2726bc60ef1c5bc10f3aea7e9f2d30c1f9d3e64a65bdb4878f0953de93c4b4a622bc2e82d37d833472dfe04ecbd56e2",
-            "a71050674b30dc5c0355d83f210ccce4ff07a8c4412142659817b0ae2308bd71",
+            "a0e91d312b265ed621178002e362043a9acf40c2f39d4d94a026c8ef9d2bd91b31d4b3535806568bb9fa73b9b2f7e816a8e7436ca62321e8020e4bc34de943d2",
+            "694d31e82fa7f232d48e23545ad1fbdf62ee9b84d89182513b4a59e872f2f872",
             node2(),
         ),
     ] {

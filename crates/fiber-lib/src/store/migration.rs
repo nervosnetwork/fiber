@@ -1,7 +1,9 @@
 use crate::Error;
+#[cfg(not(target_arch = "wasm32"))]
 use console::Term;
 use indicatif::MultiProgress;
 use indicatif::ProgressBar;
+#[cfg(not(target_arch = "wasm32"))]
 use indicatif::ProgressDrawTarget;
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
@@ -91,14 +93,15 @@ impl Migrations {
             let mpbc = Arc::clone(&mpb);
             let pb = move |count: u64| -> ProgressBar {
                 let pb = mpbc.add(ProgressBar::new(count));
-                pb.set_draw_target(ProgressDrawTarget::term(Term::stdout(), None));
+                #[cfg(not(target_arch = "wasm32"))]
+                pb.set_draw_target(ProgressDrawTarget::term(Term::stdout(), 1));
                 pb.set_prefix(format!("[{}/{}]", idx + 1, migrations_count));
                 pb
             };
             db = m.migrate(db, Arc::new(pb))?;
             db.put(MIGRATION_VERSION_KEY, m.version());
         }
-        mpb.join_and_clear().expect("MultiProgress join");
+        mpb.clear().expect("MultiProgress join");
         Ok(db)
     }
 
@@ -113,7 +116,7 @@ impl Migrations {
     /// Initial db version
     pub fn init_db_version(&self, db: &Store) -> Result<(), Error> {
         if self.need_init(db) {
-            eprintln!("Init database version {}", LATEST_DB_VERSION);
+            info!("Init database version {}", LATEST_DB_VERSION);
             db.put(MIGRATION_VERSION_KEY, LATEST_DB_VERSION);
         }
         Ok(())

@@ -8,7 +8,6 @@ use crate::fiber::history::Direction;
 use crate::fiber::history::TimedResult;
 use crate::fiber::network::PaymentCustomRecords;
 use crate::fiber::network::SendPaymentData;
-use crate::fiber::tests::test_utils::*;
 use crate::fiber::types::*;
 use crate::gen_rand_fiber_private_key;
 use crate::gen_rand_fiber_public_key;
@@ -18,6 +17,7 @@ use crate::now_timestamp_as_millis_u64;
 use crate::store::store_impl::deserialize_from;
 use crate::store::store_impl::serialize_to_vec;
 use crate::store::Store;
+use crate::tests::test_utils::*;
 use crate::watchtower::*;
 use ckb_hash::new_blake2b;
 use ckb_types::packed::*;
@@ -373,6 +373,8 @@ fn test_channel_actor_state_store() {
         waiting_peer_response: None,
         network: None,
         scheduled_channel_update_handle: None,
+        retryable_task_last_run_at: None,
+        ephemeral_config: Default::default(),
     };
 
     let bincode_encoded = bincode::serialize(&state).unwrap();
@@ -487,6 +489,8 @@ fn test_serde_channel_actor_state_ciborium() {
         waiting_peer_response: None,
         network: None,
         scheduled_channel_update_handle: None,
+        retryable_task_last_run_at: None,
+        ephemeral_config: Default::default(),
     };
 
     let mut serialized = Vec::new();

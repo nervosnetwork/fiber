@@ -2,10 +2,10 @@ use crate::fiber::network::PeerInfo;
 use crate::fiber::{NetworkActorCommand, NetworkActorMessage};
 use crate::log_and_error;
 #[cfg(not(target_arch = "wasm32"))]
-use jsonrpsee::{
-    core::async_trait, proc_macros::rpc, types::error::CALL_EXECUTION_FAILED_CODE,
-    types::ErrorObjectOwned,
-};
+use jsonrpsee::proc_macros::rpc;
+use jsonrpsee::types::error::CALL_EXECUTION_FAILED_CODE;
+use jsonrpsee::types::ErrorObjectOwned;
+
 use ractor::call;
 use ractor::ActorRef;
 use serde::{Deserialize, Serialize};
@@ -29,13 +29,14 @@ pub struct DisconnectPeerParams {
 }
 
 /// The result of the `list_peers` RPC method.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct ListPeersResult {
     /// A list of connected peers.
     pub peers: Vec<PeerInfo>,
 }
 
 /// RPC module for peer management.
+#[cfg(not(target_arch = "wasm32"))]
 #[rpc(server)]
 trait PeerRpc {
     /// Connect to a peer.
@@ -60,10 +61,27 @@ impl PeerRpcServerImpl {
         PeerRpcServerImpl { actor }
     }
 }
-
-#[async_trait]
+#[cfg(not(target_arch = "wasm32"))]
+#[async_trait::async_trait]
 impl PeerRpcServer for PeerRpcServerImpl {
+    /// Connect to a peer.
     async fn connect_peer(&self, params: ConnectPeerParams) -> Result<(), ErrorObjectOwned> {
+        self.connect_peer(params).await
+    }
+
+    /// Disconnect from a peer.
+    async fn disconnect_peer(&self, params: DisconnectPeerParams) -> Result<(), ErrorObjectOwned> {
+        self.disconnect_peer(params).await
+    }
+
+    /// List connected peers
+    async fn list_peers(&self) -> Result<ListPeersResult, ErrorObjectOwned> {
+        self.list_peers().await
+    }
+}
+
+impl PeerRpcServerImpl {
+    pub async fn connect_peer(&self, params: ConnectPeerParams) -> Result<(), ErrorObjectOwned> {
         let message =
             NetworkActorMessage::Command(NetworkActorCommand::ConnectPeer(params.address.clone()));
         if params.save.unwrap_or(true) {
@@ -78,14 +96,17 @@ impl PeerRpcServer for PeerRpcServerImpl {
         crate::handle_actor_cast!(self.actor, message, params)
     }
 
-    async fn disconnect_peer(&self, params: DisconnectPeerParams) -> Result<(), ErrorObjectOwned> {
+    pub async fn disconnect_peer(
+        &self,
+        params: DisconnectPeerParams,
+    ) -> Result<(), ErrorObjectOwned> {
         let message = NetworkActorMessage::Command(NetworkActorCommand::DisconnectPeer(
             params.peer_id.clone(),
         ));
         crate::handle_actor_cast!(self.actor, message, params)
     }
 
-    async fn list_peers(&self) -> Result<ListPeersResult, ErrorObjectOwned> {
+    pub async fn list_peers(&self) -> Result<ListPeersResult, ErrorObjectOwned> {
         let message =
             |rpc_reply| NetworkActorMessage::Command(NetworkActorCommand::ListPeers((), rpc_reply));
 

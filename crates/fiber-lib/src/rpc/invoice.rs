@@ -1,20 +1,131 @@
+//! This module provides the RPC interface for creating, parsing, and retrieving invoices.
+//!
+//! We define CkbInvoice and its related types here only for the RPC interface.
+//! For better separation of concerns, the actual invoice logic is implemented in the `invoice` module.
+//!
 use crate::fiber::config::MIN_TLC_EXPIRY_DELTA;
 use crate::fiber::hash_algorithm::HashAlgorithm;
-use crate::fiber::serde_utils::{U128Hex, U64Hex};
+use crate::fiber::serde_utils::{duration_hex, U128Hex, U64Hex};
 use crate::fiber::types::{Hash256, Privkey};
-use crate::invoice::{CkbInvoice, CkbInvoiceStatus, Currency, InvoiceBuilder, InvoiceStore};
+use crate::invoice::{
+    Attribute as InternalAttribute, CkbInvoice as InternalCkbInvoice, CkbInvoiceStatus, CkbScript,
+    Currency, InvoiceBuilder, InvoiceData as InternalInvoiceData, InvoiceSignature, InvoiceStore,
+};
+
 use crate::FiberConfig;
 use ckb_jsonrpc_types::Script;
 #[cfg(not(target_arch = "wasm32"))]
-use jsonrpsee::{
-    core::async_trait, proc_macros::rpc, types::error::CALL_EXECUTION_FAILED_CODE,
-    types::ErrorObjectOwned,
-};
+use jsonrpsee::proc_macros::rpc;
+use jsonrpsee::types::error::CALL_EXECUTION_FAILED_CODE;
+use jsonrpsee::types::ErrorObjectOwned;
+
 use secp256k1::{PublicKey, Secp256k1, SecretKey};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use std::time::Duration;
 use tentacle::secio::SecioKeyPair;
+
+/// The attributes of the invoice
+#[serde_as]
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Attribute {
+    #[serde(with = "U64Hex")]
+    /// The final tlc time out, in milliseconds
+    FinalHtlcTimeout(u64),
+    #[serde(with = "U64Hex")]
+    /// The final tlc minimum expiry delta, in milliseconds, default is 1 day
+    FinalHtlcMinimumExpiryDelta(u64),
+    #[serde(with = "duration_hex")]
+    /// The expiry time of the invoice, in seconds
+    ExpiryTime(Duration),
+    /// The description of the invoice
+    Description(String),
+    /// The fallback address of the invoice
+    FallbackAddr(String),
+    /// The udt type script of the invoice
+    UdtScript(CkbScript),
+    /// The payee public key of the invoice
+    PayeePublicKey(PublicKey),
+    /// The hash algorithm of the invoice
+    HashAlgorithm(HashAlgorithm),
+    /// The feature flags of the invoice
+    Feature(Vec<String>),
+}
+
+/// The metadata of the invoice
+#[serde_as]
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct InvoiceData {
+    /// The timestamp of the invoice
+    #[serde_as(as = "U128Hex")]
+    pub timestamp: u128,
+    /// The payment hash of the invoice
+    pub payment_hash: Hash256,
+    /// The attributes of the invoice, e.g. description, expiry time, etc.
+    pub attrs: Vec<Attribute>,
+}
+
+/// Represents a syntactically and semantically correct lightning BOLT11 invoice
+///
+/// There are three ways to construct a `CkbInvoice`:
+///  1. using [`CkbInvoiceBuilder`]
+///  2. using `str::parse::<CkbInvoice>(&str)` (see [`CkbInvoice::from_str`])
+///
+#[serde_as]
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CkbInvoice {
+    /// The currency of the invoice
+    pub currency: Currency,
+    #[serde_as(as = "Option<U128Hex>")]
+    /// The amount of the invoice
+    pub amount: Option<u128>,
+    /// The signature of the invoice
+    pub signature: Option<InvoiceSignature>,
+    /// The invoice data, including the payment hash, timestamp and other attributes
+    pub data: InvoiceData,
+}
+
+impl From<InternalAttribute> for Attribute {
+    fn from(attr: InternalAttribute) -> Self {
+        match attr {
+            InternalAttribute::FinalHtlcTimeout(timeout) => Attribute::FinalHtlcTimeout(timeout),
+            InternalAttribute::FinalHtlcMinimumExpiryDelta(delta) => {
+                Attribute::FinalHtlcMinimumExpiryDelta(delta)
+            }
+            InternalAttribute::ExpiryTime(duration) => Attribute::ExpiryTime(duration),
+            InternalAttribute::Description(desc) => Attribute::Description(desc),
+            InternalAttribute::FallbackAddr(addr) => Attribute::FallbackAddr(addr),
+            InternalAttribute::UdtScript(script) => Attribute::UdtScript(script),
+            InternalAttribute::PayeePublicKey(pubkey) => Attribute::PayeePublicKey(pubkey),
+            InternalAttribute::HashAlgorithm(alg) => Attribute::HashAlgorithm(alg),
+            InternalAttribute::Feature(feature) => {
+                Attribute::Feature(feature.enabled_features_names())
+            }
+        }
+    }
+}
+
+impl From<InternalInvoiceData> for InvoiceData {
+    fn from(data: InternalInvoiceData) -> Self {
+        InvoiceData {
+            timestamp: data.timestamp,
+            payment_hash: data.payment_hash,
+            attrs: data.attrs.into_iter().map(|a| a.into()).collect(),
+        }
+    }
+}
+
+impl From<InternalCkbInvoice> for CkbInvoice {
+    fn from(inv: InternalCkbInvoice) -> Self {
+        CkbInvoice {
+            currency: inv.currency,
+            amount: inv.amount,
+            signature: inv.signature,
+            data: inv.data.into(),
+        }
+    }
+}
 
 /// The parameter struct for generating a new invoice.
 #[serde_as]
@@ -41,6 +152,8 @@ pub struct NewInvoiceParams {
     pub udt_type_script: Option<Script>,
     /// The hash algorithm of the invoice.
     pub hash_algorithm: Option<HashAlgorithm>,
+    /// Whether allow payment to use MPP
+    pub allow_mpp: Option<bool>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -81,6 +194,7 @@ pub struct GetInvoiceResult {
 }
 
 /// RPC module for invoice management.
+#[cfg(not(target_arch = "wasm32"))]
 #[rpc(server)]
 trait InvoiceRpc {
     /// Generates a new invoice.
@@ -149,13 +263,50 @@ impl<S> InvoiceRpcServerImpl<S> {
         }
     }
 }
-
-#[async_trait]
+#[cfg(not(target_arch = "wasm32"))]
+#[async_trait::async_trait]
 impl<S> InvoiceRpcServer for InvoiceRpcServerImpl<S>
 where
     S: InvoiceStore + Send + Sync + 'static,
 {
+    /// Generates a new invoice.
     async fn new_invoice(
+        &self,
+        params: NewInvoiceParams,
+    ) -> Result<InvoiceResult, ErrorObjectOwned> {
+        self.new_invoice(params).await
+    }
+
+    /// Parses a encoded invoice.
+    async fn parse_invoice(
+        &self,
+        params: ParseInvoiceParams,
+    ) -> Result<ParseInvoiceResult, ErrorObjectOwned> {
+        self.parse_invoice(params).await
+    }
+
+    /// Retrieves an invoice.
+    async fn get_invoice(
+        &self,
+        payment_hash: InvoiceParams,
+    ) -> Result<GetInvoiceResult, ErrorObjectOwned> {
+        self.get_invoice(payment_hash).await
+    }
+
+    /// Cancels an invoice, only when invoice is in status `Open` can be canceled.
+    async fn cancel_invoice(
+        &self,
+        payment_hash: InvoiceParams,
+    ) -> Result<GetInvoiceResult, ErrorObjectOwned> {
+        self.cancel_invoice(payment_hash).await
+    }
+}
+
+impl<S> InvoiceRpcServerImpl<S>
+where
+    S: InvoiceStore + Send + Sync + 'static,
+{
+    pub async fn new_invoice(
         &self,
         params: NewInvoiceParams,
     ) -> Result<InvoiceResult, ErrorObjectOwned> {
@@ -180,6 +331,9 @@ where
         };
         if let Some(fallback_address) = params.fallback_address.clone() {
             invoice_builder = invoice_builder.fallback_address(fallback_address);
+        };
+        if let Some(allow_mpp) = params.allow_mpp {
+            invoice_builder = invoice_builder.allow_mpp(allow_mpp);
         };
         if let Some(final_expiry_delta) = params.final_expiry_delta {
             if final_expiry_delta < MIN_TLC_EXPIRY_DELTA {
@@ -216,7 +370,7 @@ where
             {
                 Ok(_) => Ok(InvoiceResult {
                     invoice_address: invoice.to_string(),
-                    invoice,
+                    invoice: invoice.into(),
                 }),
                 Err(e) => {
                     return Err(ErrorObjectOwned::owned(
@@ -234,13 +388,15 @@ where
         }
     }
 
-    async fn parse_invoice(
+    pub async fn parse_invoice(
         &self,
         params: ParseInvoiceParams,
     ) -> Result<ParseInvoiceResult, ErrorObjectOwned> {
-        let result: Result<CkbInvoice, _> = params.invoice.parse();
+        let result: Result<InternalCkbInvoice, _> = params.invoice.parse();
         match result {
-            Ok(invoice) => Ok(ParseInvoiceResult { invoice }),
+            Ok(invoice) => Ok(ParseInvoiceResult {
+                invoice: invoice.into(),
+            }),
             Err(e) => Err(ErrorObjectOwned::owned(
                 CALL_EXECUTION_FAILED_CODE,
                 e.to_string(),
@@ -249,7 +405,7 @@ where
         }
     }
 
-    async fn get_invoice(
+    pub async fn get_invoice(
         &self,
         params: InvoiceParams,
     ) -> Result<GetInvoiceResult, ErrorObjectOwned> {
@@ -267,7 +423,7 @@ where
 
                 Ok(GetInvoiceResult {
                     invoice_address: invoice.to_string(),
-                    invoice,
+                    invoice: invoice.into(),
                     status,
                 })
             }
@@ -279,7 +435,7 @@ where
         }
     }
 
-    async fn cancel_invoice(
+    pub async fn cancel_invoice(
         &self,
         params: InvoiceParams,
     ) -> Result<GetInvoiceResult, ErrorObjectOwned> {
@@ -316,7 +472,7 @@ where
                     })?;
                 Ok(GetInvoiceResult {
                     invoice_address: invoice.to_string(),
-                    invoice,
+                    invoice: invoice.into(),
                     status: new_status,
                 })
             }
