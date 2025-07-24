@@ -82,7 +82,7 @@ impl<'a> DbMigrate<'a> {
                         old version of fiber node and restart with the new version with a new initialized database.\
                         please backup your database before proceeding.");
                         return Err(
-                            "need to shutdown all old channels and restart with a new database"
+                            "need to shutdown all old channels with old version of fiber node, and then restart latest fiber node with a new database"
                                 .to_string(),
                         );
                     }
