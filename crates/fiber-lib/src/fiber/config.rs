@@ -355,6 +355,16 @@ pub struct FiberConfig {
         help = "Use an external shell command to build funding tx. [default: None]"
     )]
     pub funding_tx_shell_builder: Option<String>,
+
+    /// Listen to WebSocket on the same TCP port
+    #[arg(
+        name = "FIBER_REUSE_PORT_FOR_WEBSOCKET",
+        long = "fiber-reuse-port-for-websocket",
+        env,
+        help = "Whether to re-use the same TCP port to listen for WebSocket [default: true]"
+    )]
+    #[default(true)]
+    pub reuse_port_for_websocket: bool,
 }
 
 /// Must be a valid utf-8 string of length maximal length 32 bytes.

@@ -3669,7 +3669,7 @@ where
         let listening_addr = {
             let mut addresses_to_listen = vec![MultiAddr::from_str(config.listening_addr())
                 .expect("valid tentacle listening address")];
-            {
+            if config.reuse_port_for_websocket {
                 // Re-use the same port for websocket
                 let ws_listens = addresses_to_listen
                     .iter()
