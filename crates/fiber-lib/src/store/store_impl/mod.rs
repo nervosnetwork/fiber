@@ -195,7 +195,11 @@ pub enum KeyValue {
     #[cfg(feature = "watchtower")]
     WatchtowerChannel(NodeId, Hash256, ChannelData),
     #[cfg(feature = "watchtower")]
-    WatchtowerPreimage(NodeId, Hash256, Hash256),
+    // Preimage record, the payment_hash in first position to allow fast retrieve
+    WatchtowerPreimage(Hash256, NodeId, Hash256),
+    #[cfg(feature = "watchtower")]
+    // Index of NodeId -> Preimage PaymentHash, which allows we query preimages of a node
+    WatchtowerNodePaymentHash(NodeId, Hash256),
     PaymentSession(Hash256, PaymentSession),
     PaymentHistoryTimedResult((OutPoint, Direction), TimedResult),
     PaymentCustomRecord(Hash256, PaymentCustomRecords),
@@ -239,8 +243,15 @@ impl StoreKeyValue for KeyValue {
             .concat(),
 
             #[cfg(feature = "watchtower")]
-            KeyValue::WatchtowerPreimage(node_id, payment_hash, _) => [
+            KeyValue::WatchtowerPreimage(payment_hash, node_id, _) => [
                 &[WATCHTOWER_PREIMAGE_PREFIX],
+                payment_hash.as_ref(),
+                node_id.as_ref(),
+            ]
+            .concat(),
+            #[cfg(feature = "watchtower")]
+            KeyValue::WatchtowerNodePaymentHash(node_id, payment_hash) => [
+                &[WATCHTOWER_NODE_PAYMENTHASH_PREFIX],
                 node_id.as_ref(),
                 payment_hash.as_ref(),
             ]
@@ -285,6 +296,8 @@ impl StoreKeyValue for KeyValue {
             }
             #[cfg(feature = "watchtower")]
             KeyValue::WatchtowerPreimage(_, _, preimage) => serialize_to_vec(preimage, "Hash256"),
+            #[cfg(feature = "watchtower")]
+            KeyValue::WatchtowerNodePaymentHash(..) => Vec::new(),
             KeyValue::NetworkActorState(_, persistent_network_actor_state) => serialize_to_vec(
                 persistent_network_actor_state,
                 "PersistentNetworkActorState",
@@ -478,13 +491,6 @@ impl PreimageStore for Store {
         self.get(key)
             .map(|v| deserialize_from(v.as_ref(), "Preimage"))
     }
-
-    fn search_preimage(&self, payment_hash_prefix: &[u8]) -> Option<Hash256> {
-        let prefix = [&[PREIMAGE_PREFIX], payment_hash_prefix].concat();
-        let mut iter = self.prefix_iterator(prefix.as_slice());
-        iter.next()
-            .map(|(_key, value)| deserialize_from(value.as_ref(), "Preimage"))
-    }
 }
 
 impl NetworkGraphStateStore for Store {
@@ -649,12 +655,18 @@ impl WatchtowerStore for Store {
     }
 
     fn insert_watch_preimage(&self, node_id: NodeId, payment_hash: Hash256, preimage: Hash256) {
+        debug_assert_eq!(
+            payment_hash,
+            ckb_hash::blake2b_256(preimage).into(),
+            "wrong preimage"
+        );
         let mut batch = self.batch();
         batch.put_kv(KeyValue::WatchtowerPreimage(
-            node_id,
             payment_hash,
+            node_id.clone(),
             preimage,
         ));
+        batch.put_kv(KeyValue::WatchtowerNodePaymentHash(node_id, payment_hash));
         batch.commit();
     }
 
@@ -663,12 +675,35 @@ impl WatchtowerStore for Store {
         batch.delete(
             [
                 &[WATCHTOWER_PREIMAGE_PREFIX],
+                payment_hash.as_ref(),
+                node_id.as_ref(),
+            ]
+            .concat(),
+        );
+        batch.delete(
+            [
+                &[WATCHTOWER_NODE_PAYMENTHASH_PREFIX],
                 node_id.as_ref(),
                 payment_hash.as_ref(),
             ]
             .concat(),
         );
         batch.commit();
+    }
+
+    fn get_watch_preimage(&self, payment_hash: &Hash256) -> Option<Hash256> {
+        // The preimage is verified before insert_watch_preimage, so we can just pick one.
+        let prefix = [&[WATCHTOWER_PREIMAGE_PREFIX], payment_hash.as_ref()].concat();
+        let mut iter = self.prefix_iterator(prefix.as_slice());
+        iter.next()
+            .map(|(_key, value)| deserialize_from(value.as_ref(), "Preimage"))
+    }
+
+    fn search_preimage(&self, payment_hash_prefix: &[u8]) -> Option<Hash256> {
+        let prefix = [&[WATCHTOWER_PREIMAGE_PREFIX], payment_hash_prefix].concat();
+        let mut iter = self.prefix_iterator(prefix.as_slice());
+        iter.next()
+            .map(|(_key, value)| deserialize_from(value.as_ref(), "Preimage"))
     }
 }
 

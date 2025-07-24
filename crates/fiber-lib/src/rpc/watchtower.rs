@@ -255,6 +255,13 @@ where
         let Some(node_id) = ctx.node_id else {
             return Err(requrie_node_id_err());
         };
+        if params.payment_hash != ckb_hash::blake2b_256(params.preimage).into() {
+            return Err(ErrorObjectOwned::owned(
+                CALL_EXECUTION_FAILED_CODE,
+                "Wrong preimage",
+                Option::<()>::None,
+            ));
+        }
         self.store
             .insert_watch_preimage(node_id, params.payment_hash, params.preimage);
         Ok(())

@@ -43,6 +43,12 @@ pub trait WatchtowerStore {
 
     /// Remove a watch preimage from the store.
     fn remove_watch_preimage(&self, node_id: NodeId, payment_hash: Hash256);
+
+    /// Insert a watch preimage into the store, the payment hash should be a 32 bytes hash result of the preimage after `HashAlgorithm` is applied.
+    fn get_watch_preimage(&self, payment_hash: &Hash256) -> Option<Hash256>;
+
+    /// Search for the stored preimage with the given payment hash prefix, should be the first 20 bytes of the payment hash.
+    fn search_preimage(&self, payment_hash_prefix: &[u8]) -> Option<Hash256>;
 }
 
 /// The data of a channel that the watchtower is monitoring

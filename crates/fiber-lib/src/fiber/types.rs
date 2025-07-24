@@ -4052,8 +4052,14 @@ fn get_hop_data_len(buf: &[u8]) -> Option<usize> {
 
 /// Used as identifier of node.
 #[serde_as]
-#[derive(Clone, Debug, Serialize, Deserialize, Hash, Eq, PartialEq, Default)]
+#[derive(Clone, Debug, Serialize, Deserialize, Hash, Eq, PartialEq)]
 pub struct NodeId(#[serde_as(as = "SliceBase58")] Vec<u8>);
+
+impl Default for NodeId {
+    fn default() -> Self {
+        Self(vec![0u8; 34])
+    }
+}
 
 impl NodeId {
     pub fn from_bytes(bytes: Vec<u8>) -> Self {

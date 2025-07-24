@@ -33,7 +33,6 @@ use crate::{
         hash_algorithm::HashAlgorithm,
         types::{Hash256, NodeId},
     },
-    invoice::PreimageStore,
     utils::tx::compute_tx_message,
 };
 
@@ -43,11 +42,14 @@ pub const DEFAULT_WATCHTOWER_CHECK_INTERVAL_SECONDS: u64 = 60;
 
 pub struct WatchtowerActor<S> {
     store: S,
+    // a node_id represent the watchtower itself
+    node_id: NodeId,
 }
 
-impl<S: PreimageStore + WatchtowerStore> WatchtowerActor<S> {
+impl<S: WatchtowerStore> WatchtowerActor<S> {
     pub fn new(store: S) -> Self {
-        Self { store }
+        let node_id = NodeId::default();
+        Self { store, node_id }
     }
 }
 
@@ -69,7 +71,7 @@ pub struct WatchtowerState {
 #[async_trait::async_trait]
 impl<S> Actor for WatchtowerActor<S>
 where
-    S: PreimageStore + WatchtowerStore + Send + Sync + 'static,
+    S: WatchtowerStore + Send + Sync + 'static,
 {
     type Msg = WatchtowerMessage;
     type State = WatchtowerState;
@@ -123,9 +125,14 @@ where
             ) => self
                 .store
                 .update_local_settlement(node_id, channel_id, local_settlement_data),
-            WatchtowerMessage::CreatePreimage(node_id, payment_hash, preimage) => self
-                .store
-                .insert_watch_preimage(node_id, payment_hash, preimage),
+            WatchtowerMessage::CreatePreimage(node_id, payment_hash, preimage) => {
+                if payment_hash == ckb_hash::blake2b_256(preimage).into() {
+                    self.store
+                        .insert_watch_preimage(node_id, payment_hash, preimage);
+                } else {
+                    tracing::error!("CreatePreimage with wrong preimage, payment_hash: {payment_hash:?} preimage: {preimage:?}");
+                }
+            }
             WatchtowerMessage::RemovePreimage(node_id, payment_hash) => {
                 self.store.remove_watch_preimage(node_id, payment_hash)
             }
@@ -137,7 +144,7 @@ where
 
 impl<S> WatchtowerActor<S>
 where
-    S: PreimageStore + WatchtowerStore,
+    S: WatchtowerStore,
 {
     fn periodic_check(&self, state: &WatchtowerState) {
         let secret_key = state.secret_key;
@@ -263,6 +270,7 @@ where
                                                                         secret_key,
                                                                         &mut cell_collector,
                                                                         &self.store,
+                                                                        self.node_id.clone(),
                                                                     );
                                                                 }
                                                             }
@@ -280,6 +288,7 @@ where
                                                                 secret_key,
                                                                 &mut cell_collector,
                                                                 &self.store,
+                                                                self.node_id.clone(),
                                                             );
                                                         }
                                                     } else {
@@ -414,7 +423,8 @@ fn build_revocation_tx(
     Err(Box::new(RpcError::Other(anyhow!("Not enough capacity"))))
 }
 
-fn try_settle_commitment_tx<S: PreimageStore>(
+#[allow(clippy::too_many_arguments)]
+fn try_settle_commitment_tx<S: WatchtowerStore>(
     commitment_lock: Script,
     ckb_client: CkbRpcClient,
     settlement_data: SettlementData,
@@ -422,6 +432,7 @@ fn try_settle_commitment_tx<S: PreimageStore>(
     secret_key: SecretKey,
     cell_collector: &mut DefaultCellCollector,
     store: &S,
+    self_node_id: NodeId,
 ) {
     let lock_args = commitment_lock.args().raw_data();
     let script = commitment_lock
@@ -437,7 +448,7 @@ fn try_settle_commitment_tx<S: PreimageStore>(
         group_by_transaction: Some(true),
     };
 
-    find_preimages(search_key.clone(), &ckb_client, store);
+    find_preimages(search_key.clone(), &ckb_client, store, self_node_id);
 
     let (current_epoch, current_time) = match ckb_client.get_tip_header() {
         Ok(tip_header) => match ckb_client.get_block_median_time(tip_header.hash.clone()) {
@@ -668,7 +679,12 @@ fn try_settle_commitment_tx<S: PreimageStore>(
 }
 
 // find all on-chain transactions with the preimage and store them
-fn find_preimages<S: PreimageStore>(search_key: SearchKey, ckb_client: &CkbRpcClient, store: &S) {
+fn find_preimages<S: WatchtowerStore>(
+    search_key: SearchKey,
+    ckb_client: &CkbRpcClient,
+    store: &S,
+    self_node_id: NodeId,
+) {
     let mut after = None;
     loop {
         match ckb_client.get_transactions(
@@ -715,7 +731,8 @@ fn find_preimages<S: PreimageStore>(search_key: SearchKey, ckb_client: &CkbRpcCl
                                                     if payment_hash.starts_with(tlc.payment_hash())
                                                     {
                                                         info!("Found a preimage for payment hash: {:?}", payment_hash);
-                                                        store.insert_preimage(
+                                                        store.insert_watch_preimage(
+                                                            self_node_id.clone(),
                                                             payment_hash.into(),
                                                             preimage.into(),
                                                         );
@@ -938,7 +955,7 @@ fn sign_tx_with_settlement(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn build_settlement_tx_for_pending_tlcs<S: PreimageStore>(
+fn build_settlement_tx_for_pending_tlcs<S: WatchtowerStore>(
     commitment_tx_cell: Cell,
     cell_header: HeaderView,
     delay_epoch: EpochNumberWithFraction,
@@ -1001,7 +1018,7 @@ fn build_settlement_tx_for_pending_tlcs<S: PreimageStore>(
                         None
                     } else {
                         store
-                            .get_preimage(&settlement_tlc.payment_hash)
+                            .get_watch_preimage(&settlement_tlc.payment_hash)
                             .map(|preimage| (index, settlement_tlc.clone(), Some(preimage)))
                     }
                 } else if settlement_tlc.expiry < current_time {
@@ -1012,7 +1029,7 @@ fn build_settlement_tx_for_pending_tlcs<S: PreimageStore>(
                     }
                 } else if for_remote {
                     store
-                        .get_preimage(&settlement_tlc.payment_hash)
+                        .get_watch_preimage(&settlement_tlc.payment_hash)
                         .map(|preimage| (index, settlement_tlc.clone(), Some(preimage)))
                 } else {
                     None

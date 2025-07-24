@@ -19,6 +19,7 @@ use crate::store::store_impl::serialize_to_vec;
 use crate::store::Store;
 use crate::tests::test_utils::*;
 use crate::watchtower::*;
+use ckb_hash::blake2b_256;
 use ckb_hash::new_blake2b;
 use ckb_types::packed::*;
 use ckb_types::prelude::*;
@@ -94,7 +95,6 @@ fn test_store_invoice() {
         .unwrap();
     assert_eq!(store.get_invoice(hash), Some(invoice.clone()));
     assert_eq!(store.get_preimage(hash), Some(preimage));
-    assert_eq!(store.search_preimage(&hash.as_ref()[0..20]), Some(preimage));
 
     let invalid_hash = gen_rand_sha256_hash();
     assert_eq!(store.get_preimage(&invalid_hash), None);
@@ -219,7 +219,7 @@ fn test_store_save_node_announcement() {
 }
 
 #[test]
-fn test_store_wacthtower() {
+fn test_store_watchtower() {
     let path = TempDir::new("test-watchtower-store");
     let store = Store::new(path).expect("created store failed");
 
@@ -278,6 +278,129 @@ fn test_store_wacthtower() {
             remote_settlement_data: settlement_data,
         }]
     );
+
+    store.remove_watch_channel(node_id, channel_id);
+    assert_eq!(store.get_watch_channels(), vec![]);
+}
+
+#[test]
+fn test_store_watchtower_preimage() {
+    let path = TempDir::new("test-watchtower-store");
+    let store = Store::new(path).expect("created store failed");
+
+    let node_id_a = NodeId::from_bytes(PeerId::random().into_bytes());
+    let preimage_a = gen_rand_sha256_hash();
+    let payment_hash_a = blake2b_256(preimage_a).into();
+
+    let node_id_b = NodeId::from_bytes(PeerId::random().into_bytes());
+    let preimage_b = gen_rand_sha256_hash();
+    let payment_hash_b = blake2b_256(preimage_b).into();
+
+    let preimage_c = gen_rand_sha256_hash();
+    let payment_hash_c = blake2b_256(preimage_c).into();
+
+    store.insert_watch_preimage(node_id_a.clone(), payment_hash_a, preimage_a);
+    store.insert_watch_preimage(node_id_b.clone(), payment_hash_b, preimage_b);
+
+    // this interface should not return a watch preimage
+    assert!(
+        store.get_preimage(&payment_hash_a).is_none(),
+        "should not return a watch preimage"
+    );
+    assert_eq!(
+        store.get_watch_preimage(&payment_hash_a).unwrap(),
+        preimage_a,
+        "query watch preimage"
+    );
+
+    // watch preimage should not return a node preimage
+    store.insert_preimage(payment_hash_c, preimage_c);
+    assert!(
+        store.get_watch_preimage(&payment_hash_c).is_none(),
+        "query non exist watch preimage"
+    );
+
+    assert!(
+        store
+            .search_preimage(&payment_hash_c.as_ref()[..20])
+            .is_none(),
+        "search a non exist watch preimage"
+    );
+    // search preimage only returns watch preimage
+    assert_eq!(
+        store
+            .search_preimage(&payment_hash_a.as_ref()[..20])
+            .unwrap(),
+        preimage_a,
+        "search"
+    );
+
+    // delete preimage with wrong node
+    store.remove_watch_preimage(node_id_a, payment_hash_b);
+    assert!(store.get_watch_preimage(&payment_hash_b).is_some(), "exist");
+
+    store.remove_watch_preimage(node_id_b, payment_hash_b);
+    assert!(
+        store.get_watch_preimage(&payment_hash_b).is_none(),
+        "removed"
+    );
+}
+
+#[test]
+fn test_store_watchtower_with_wrong_node_id() {
+    let path = TempDir::new("test-watchtower-store");
+    let store = Store::new(path).expect("created store failed");
+
+    let node_id = NodeId::from_bytes(PeerId::random().into_bytes());
+    let wrong_node_id = NodeId::from_bytes(PeerId::random().into_bytes());
+    let channel_id = gen_rand_sha256_hash();
+    let funding_tx_lock = Script::default();
+
+    let settlement_data = SettlementData {
+        x_only_aggregated_pubkey: [0u8; 32],
+        aggregated_signature: CompactSignature::from_bytes(&[0u8; 64]).unwrap(),
+        to_local_output: CellOutput::default(),
+        to_local_output_data: Bytes::default(),
+        to_remote_output: CellOutput::default(),
+        to_remote_output_data: Bytes::default(),
+        tlcs: vec![],
+    };
+
+    store.insert_watch_channel(
+        node_id.clone(),
+        channel_id,
+        funding_tx_lock.clone(),
+        settlement_data.clone(),
+    );
+    let expected_value = vec![ChannelData {
+        channel_id,
+        funding_tx_lock: funding_tx_lock.clone(),
+        revocation_data: None,
+        local_settlement_data: None,
+        remote_settlement_data: settlement_data.clone(),
+    }];
+    assert_eq!(store.get_watch_channels(), expected_value);
+
+    // update with wrong node_id
+    let revocation_data = RevocationData {
+        commitment_number: 0,
+        x_only_aggregated_pubkey: [0u8; 32],
+        aggregated_signature: CompactSignature::from_bytes(&[0u8; 64]).unwrap(),
+        output: CellOutput::default(),
+        output_data: Bytes::default(),
+    };
+
+    store.update_revocation(
+        wrong_node_id.clone(),
+        channel_id,
+        revocation_data.clone(),
+        settlement_data.clone(),
+    );
+    assert_eq!(store.get_watch_channels(), expected_value);
+
+    // remove wrong_node_id
+    store.remove_watch_channel(wrong_node_id, channel_id);
+    assert_eq!(store.get_watch_channels(), expected_value);
 
     store.remove_watch_channel(node_id, channel_id);
     assert_eq!(store.get_watch_channels(), vec![]);

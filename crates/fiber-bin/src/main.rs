@@ -191,7 +191,7 @@ pub async fn main() -> Result<(), ExitMessage> {
             let watchtower_client = if let Some(url) = fiber_config.standalone_watchtower_rpc_url {
                 let watchtower_token = fiber_config
                     .standalone_watchtower_token
-                    .ok_or_else(|| ExitMessage(format!("failed to create watchtower rpc client: require standalone_watchtower_token")))?;
+                    .ok_or_else(|| ExitMessage("failed to create watchtower rpc client: require standalone_watchtower_token".to_string()))?;
                 let mut headers = HeaderMap::new();
                 headers.insert(
                     "Authorization",

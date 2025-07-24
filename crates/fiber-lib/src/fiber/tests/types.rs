@@ -680,3 +680,19 @@ fn test_serde_node_id() {
         "to NodeId"
     );
 }
+
+#[test]
+fn test_serde_default_node_id() {
+    let peer_id = PeerId::random();
+    let node_id = NodeId::default();
+    let node_id_str = serde_json::to_string(&node_id).expect("serialize");
+    assert_eq!(
+        node_id_str, "\"1111111111111111111111111111111111\"",
+        "default node_id"
+    );
+    assert_eq!(
+        node_id.as_ref().len(),
+        peer_id.as_bytes().len(),
+        "inner length"
+    );
+}
