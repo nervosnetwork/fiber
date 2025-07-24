@@ -271,6 +271,11 @@ pub enum NetworkActorCommand {
         RpcReplyPort<Result<PeeledPaymentOnionPacket, String>>,
     ),
     UpdateChannelFunding(Hash256, Transaction, FundingRequest),
+    VerifyFundingTx {
+        local_tx: Transaction,
+        remote_tx: Transaction,
+        reply: RpcReplyPort<Result<(), FundingError>>,
+    },
     SignFundingTx(PeerId, Hash256, Transaction, Option<Vec<Vec<u8>>>),
     NotifyFundingTx(Transaction),
     // Broadcast our BroadcastMessage to the network.
@@ -1524,7 +1529,7 @@ where
             NetworkActorCommand::UpdateChannelFunding(channel_id, transaction, request) => {
                 let old_tx = transaction.into_view();
                 let mut tx = FundingTx::new();
-                tx.update_for_self(old_tx)?;
+                tx.update_for_self(old_tx);
                 let tx = match self.fund(state, tx, request).await {
                     Ok(tx) => match tx.into_inner() {
                         Some(tx) => tx,
@@ -1557,6 +1562,19 @@ where
                         )),
                     )
                     .await?
+            }
+            NetworkActorCommand::VerifyFundingTx {
+                local_tx,
+                remote_tx,
+                reply,
+            } => {
+                let _ = self
+                    .chain_actor
+                    .send_message(CkbChainMessage::VerifyFundingTx {
+                        local_tx,
+                        remote_tx,
+                        reply,
+                    });
             }
             NetworkActorCommand::NotifyFundingTx(tx) => {
                 let _ = self
