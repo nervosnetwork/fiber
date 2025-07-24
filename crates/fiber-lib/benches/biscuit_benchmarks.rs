@@ -33,7 +33,7 @@ fn bench_group(group: &mut BenchmarkGroup<'_, WallTime>, auth_ok: bool) {
                     .build(&root)
                     .unwrap();
 
-                    biscuit.to_vec().unwrap()
+                    biscuit.to_base64().unwrap()
                 };
 
                 // Start timing

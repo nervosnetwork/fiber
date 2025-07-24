@@ -19,7 +19,6 @@ use crate::fiber::ASSUME_NETWORK_ACTOR_ALIVE;
 use crate::invoice::*;
 use crate::rpc::config::RpcConfig;
 use crate::rpc::server::start_rpc;
-use base64::Engine;
 use ckb_sdk::core::TransactionBuilder;
 use ckb_types::core::FeeRate;
 use ckb_types::{
@@ -215,7 +214,7 @@ pub struct NetworkNode {
     pub unexpected_events: Arc<TokioRwLock<HashSet<String>>>,
     pub triggered_unexpected_events: Arc<TokioRwLock<Vec<String>>>,
     pub rpc_server: Option<(ServerHandle, SocketAddr)>,
-    pub auth_token: Option<Vec<u8>>,
+    pub auth_token: Option<String>,
 }
 
 pub struct NetworkNodeConfig {
@@ -784,7 +783,7 @@ impl NetworkNode {
         .await
     }
 
-    pub fn set_auth_token(&mut self, token: Vec<u8>) {
+    pub fn set_auth_token(&mut self, token: String) {
         self.auth_token = Some(token);
     }
 
@@ -796,8 +795,7 @@ impl NetworkNode {
         if let Some((_server, socket_addr)) = &self.rpc_server {
             let mut headers = HeaderMap::new();
             if let Some(token) = &self.auth_token {
-                let enc_token = base64::prelude::BASE64_STANDARD.encode(token);
-                let value = HeaderValue::from_str(format!("Bearer {enc_token}").as_str()).unwrap();
+                let value = HeaderValue::from_str(format!("Bearer {token}").as_str()).unwrap();
                 headers.insert("Authorization", value);
             }
             let client = HttpClient::<HttpBackend>::builder()

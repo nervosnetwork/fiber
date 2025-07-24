@@ -175,10 +175,10 @@ impl BiscuitAuth {
         &self,
         method: &str,
         params: serde_json::Value,
-        token: &[u8],
+        token: &str,
         time_in_ms: u64,
     ) -> Result<()> {
-        let b = Biscuit::from(token, self.pubkey).context("invalid token")?;
+        let b = Biscuit::from_base64(token, self.pubkey).context("invalid token")?;
         let Some(rule) = self.rules.get(method) else {
             return Err(anyhow::anyhow!("no rules for method: {method}"));
         };
@@ -198,7 +198,7 @@ impl BiscuitAuth {
         &self,
         method: &str,
         params: serde_json::Value,
-        token: &[u8],
+        token: &str,
     ) -> Result<()> {
         self.check_permission_with_time(method, params, token, now_timestamp_as_millis_u64())
     }
@@ -231,7 +231,7 @@ mod tests {
             .build(&root)
             .unwrap();
 
-            biscuit.to_vec().unwrap()
+            biscuit.to_base64().unwrap()
         };
 
         // check permission
@@ -271,7 +271,7 @@ mod tests {
             .build(&invalid_root)
             .unwrap();
 
-            biscuit.to_vec().unwrap()
+            biscuit.to_base64().unwrap()
         };
 
         // check permission
@@ -297,7 +297,7 @@ mod tests {
             .build(&root)
             .unwrap();
 
-            biscuit.to_vec().unwrap()
+            biscuit.to_base64().unwrap()
         };
 
         let token2 = {
@@ -309,7 +309,7 @@ mod tests {
             .build(&root)
             .unwrap();
 
-            biscuit.to_vec().unwrap()
+            biscuit.to_base64().unwrap()
         };
 
         let token3 = {
@@ -320,7 +320,7 @@ mod tests {
             )
             .build(&root)
             .unwrap();
-            biscuit.to_vec().unwrap()
+            biscuit.to_base64().unwrap()
         };
 
         // check permission
@@ -398,7 +398,7 @@ mod tests {
             .build(&root)
             .unwrap();
 
-            biscuit.to_vec().unwrap()
+            biscuit.to_base64().unwrap()
         };
 
         // check permission

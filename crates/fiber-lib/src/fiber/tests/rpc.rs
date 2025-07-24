@@ -478,7 +478,7 @@ async fn test_rpc_basic_with_auth() {
         .build(&auth_root)
         .unwrap();
 
-        biscuit.to_vec().unwrap()
+        biscuit.to_base64().unwrap()
     };
 
     node_0.set_auth_token(token.clone());
@@ -576,7 +576,7 @@ async fn test_rpc_auth_with_token() {
         .build(&auth_root)
         .unwrap();
 
-        biscuit.to_vec().unwrap()
+        biscuit.to_base64().unwrap()
     };
 
     let mut node_0 = NetworkNode::new_with_config(
@@ -588,7 +588,6 @@ async fn test_rpc_auth_with_token() {
     )
     .await;
 
-    dbg!(hex::encode(&token));
     node_0.set_auth_token(token);
 
     let rpc_res: ListPeersResult = node_0.send_rpc_request("list_peers", ()).await.unwrap();
@@ -610,7 +609,7 @@ async fn test_rpc_auth_with_invalid_token() {
         .build(&invalid_root)
         .unwrap();
 
-        biscuit.to_vec().unwrap()
+        biscuit.to_base64().unwrap()
     };
 
     let mut node_0 = NetworkNode::new_with_config(
@@ -622,7 +621,6 @@ async fn test_rpc_auth_with_invalid_token() {
     )
     .await;
 
-    dbg!(hex::encode(&token));
     node_0.set_auth_token(token);
 
     let rpc_res: Result<ListPeersResult, String> = node_0.send_rpc_request("list_peers", ()).await;
@@ -644,7 +642,7 @@ async fn test_rpc_auth_with_wrong_permission() {
         .build(&auth_root)
         .unwrap();
 
-        biscuit.to_vec().unwrap()
+        biscuit.to_base64().unwrap()
     };
 
     let mut node_0 = NetworkNode::new_with_config(
@@ -686,7 +684,7 @@ async fn test_rpc_auth_with_fixed_token() {
         .build(&auth_root)
         .unwrap();
 
-        biscuit.to_vec().unwrap()
+        biscuit.to_base64().unwrap()
     };
 
     let mut node_0 = NetworkNode::new_with_config(

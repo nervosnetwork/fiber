@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
-use base64::Engine;
 use hyper::header::AUTHORIZATION;
 use hyper::HeaderMap;
 use jsonrpsee::core::middleware::{Batch, BatchEntry, BatchEntryErr, Notification};
@@ -22,17 +21,16 @@ pub struct BiscuitAuthMiddleware<S> {
 }
 
 impl<S> BiscuitAuthMiddleware<S> {
-    fn auth_token(&self) -> Result<Vec<u8>> {
+    fn auth_token(&self) -> Result<String> {
         let auth_str = self
             .headers
             .get(AUTHORIZATION)
             .ok_or_else(|| anyhow!("no authorization header"))?
             .to_str()?;
-        let enc_token = auth_str
+        let token = auth_str
             .strip_prefix(BEARER_PREFIX)
             .ok_or_else(|| anyhow!("invalid authorization header"))?;
-        let token = base64::prelude::BASE64_STANDARD.decode(enc_token)?;
-        Ok(token)
+        Ok(token.to_string())
     }
 
     fn extract_params(&self, params: serde_json::Value) -> Option<serde_json::Value> {
