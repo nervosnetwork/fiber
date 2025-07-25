@@ -118,3 +118,49 @@ jobs:
           vcpkg integrate install
           vcpkg install openssl:x64-windows-static-md
       - run: cargo build --locked --verbose --profile ${{ matrix.profile }}
+
+
+  benchmark:
+    name: Benchmark
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v2
+        with:
+          fetch-depth: 0
+
+      - uses: dsherret/rust-toolchain-file@v1
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.x'
+
+      - name: Install cargo-criterion
+        run: cargo install cargo-criterion --locked --force
+
+      - name: Get baseline benchmark
+        run: |
+          echo "PR target branch: ${{ github.base_ref }}"
+          echo "Comparing against: origin/${{ github.base_ref }}"
+          git checkout origin/${{ github.base_ref }}
+          cargo criterion --manifest-path crates/fiber-lib/Cargo.toml --features bench --output-format bencher 2>&1 | tee baseline.txt
+
+      - name: Run current benchmark
+        run: |
+          echo "Running benchmark on current PR commit: ${{ github.sha }}"
+          git checkout ${{ github.sha }}
+          cargo criterion --manifest-path crates/fiber-lib/Cargo.toml --features bench --output-format bencher 2>&1 | tee current.txt
+
+      - name: Compare benchmark results
+        run: |
+          python3 crates/fiber-lib/benches/compare_bench.py
+
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: |
+            baseline.txt
+            current.txt

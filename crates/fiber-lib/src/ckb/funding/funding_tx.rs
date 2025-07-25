@@ -453,7 +453,7 @@ impl FundingTxBuilder {
         let tx_builder = tx.as_advanced_builder();
         debug!("final tx_builder: {:?}", tx_builder);
 
-        funding_tx.update_for_self(tx)?;
+        funding_tx.update_for_self(tx);
 
         // Replace the old tx with the new one in the exclusion map
         if let Some(tx_hash) = old_tx_hash {
@@ -527,14 +527,12 @@ impl FundingTx {
         let tx_dep_provider = DefaultTransactionDependencyProvider::new(&rpc_url, 10);
 
         let (tx, _) = unlock_tx_async(tx, &tx_dep_provider, &unlockers).await?;
-        self.update_for_self(tx)?;
+        self.update_for_self(tx);
         Ok(self)
     }
 
-    // TODO: verify the transaction
-    pub fn update_for_self(&mut self, tx: TransactionView) -> Result<(), FundingError> {
+    pub fn update_for_self(&mut self, tx: TransactionView) {
         self.tx = Some(tx);
-        Ok(())
     }
 
     // TODO: verify the transaction

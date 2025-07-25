@@ -472,14 +472,12 @@ impl Actor for MockChainActor {
                     .map(|x| x.as_advanced_builder())
                     .unwrap_or_default();
 
-                fulfilled_tx
-                    .update_for_self(
-                        tx_builder
-                            .set_outputs(outputs.into_iter().collect())
-                            .set_outputs_data(outputs_data.into_iter().collect())
-                            .build(),
-                    )
-                    .expect("update tx");
+                fulfilled_tx.update_for_self(
+                    tx_builder
+                        .set_outputs(outputs.into_iter().collect())
+                        .set_outputs_data(outputs_data.into_iter().collect())
+                        .build(),
+                );
 
                 debug!(
                     "Fulfilling funding request: request: {:?}, original tx: {:?}, fulfilled tx: {:?}",
@@ -493,6 +491,9 @@ impl Actor for MockChainActor {
                         e
                     );
                 }
+            }
+            VerifyFundingTx { reply, .. } => {
+                let _ = reply.send(Ok(()));
             }
             AddFundingTx(_) | RemoveFundingTx(_) | CommitFundingTx(..) => {
                 // ignore

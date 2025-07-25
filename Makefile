@@ -94,3 +94,6 @@ check-migrate: install-migration-check
 update-migrate-check: install-migration-check
 	migration-check -s ./crates/fiber-lib/src -o ./crates/fiber-lib/src/store/.schema.json -u
 
+.PHONY: benchmark-test
+benchmark-test:
+	cargo criterion --features bench

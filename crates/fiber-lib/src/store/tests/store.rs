@@ -373,7 +373,6 @@ fn test_channel_actor_state_store() {
         waiting_peer_response: None,
         network: None,
         scheduled_channel_update_handle: None,
-        retryable_task_last_run_at: None,
         ephemeral_config: Default::default(),
     };
 
@@ -489,7 +488,6 @@ fn test_serde_channel_actor_state_ciborium() {
         waiting_peer_response: None,
         network: None,
         scheduled_channel_update_handle: None,
-        retryable_task_last_run_at: None,
         ephemeral_config: Default::default(),
     };
 
