@@ -3784,7 +3784,7 @@ where
                     my_peer_id.clone(),
                     listening_addr.clone(),
                     if cfg!(target_arch = "wasm32") {
-                        // There is no annouced_addrs on wasm, since it can't listen to anything
+                        // There is no announced_addrs on wasm, since it can't listen to anything
                         vec![]
                     } else {
                         announced_addrs.clone()
