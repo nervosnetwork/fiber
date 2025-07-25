@@ -51,7 +51,7 @@ pub(crate) fn serialize_to_vec<T: ?Sized + Serialize>(value: &T, field_name: &st
         .unwrap_or_else(|e| panic!("serialization of {} failed: {}", field_name, e))
 }
 
-pub(crate) fn deserialize_from<'a, T>(slice: &'a [u8], field_name: &str) -> T
+pub fn deserialize_from<'a, T>(slice: &'a [u8], field_name: &str) -> T
 where
     T: serde::Deserialize<'a>,
 {
