@@ -4,12 +4,7 @@ use crate::fiber::fee::check_open_channel_parameters;
 use crate::fiber::network::DebugEvent;
 use crate::fiber::network::PaymentCustomRecords;
 use crate::fiber::types::BroadcastMessageWithTimestamp;
-use crate::{debug_event, fiber::types::TxAbort, utils::tx::compute_tx_message};
-use bitflags::bitflags;
-use futures::future::OptionFuture;
-use secp256k1::XOnlyPublicKey;
-use tracing::{debug, error, info, trace, warn};
-
+use crate::time::{SystemTime, UNIX_EPOCH};
 use crate::{
     ckb::{
         contracts::{get_cell_deps, get_script_by_contract, Contract},
@@ -40,6 +35,8 @@ use crate::{
     invoice::{CkbInvoice, CkbInvoiceStatus, InvoiceStore, PreimageStore},
     now_timestamp_as_millis_u64, NetworkServiceEvent,
 };
+use crate::{debug_event, fiber::types::TxAbort, utils::tx::compute_tx_message};
+use bitflags::bitflags;
 use ckb_hash::{blake2b_256, new_blake2b};
 use ckb_sdk::{util::blake160, Since, SinceType};
 use ckb_types::{
@@ -51,6 +48,7 @@ use ckb_types::{
     prelude::{AsTransactionBuilder, IntoTransactionView, Pack, Unpack},
     H256,
 };
+use futures::future::OptionFuture;
 use molecule::prelude::{Builder, Entity};
 use musig2::{
     aggregate_partial_signatures,
@@ -64,11 +62,13 @@ use ractor::{
     concurrency::{Duration, JoinHandle},
     Actor, ActorProcessingErr, ActorRef, MessagingErr, OutputPort, RpcReplyPort,
 };
+use secp256k1::XOnlyPublicKey;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use tentacle::secio::PeerId;
 use thiserror::Error;
 use tokio::sync::oneshot;
+use tracing::{debug, error, info, trace, warn};
 
 use super::config::DEFAULT_FUNDING_TIMEOUT_SECONDS;
 use super::{
@@ -3600,7 +3600,7 @@ pub struct ChannelActorState {
     pub reestablishing: bool,
     pub last_revoke_ack_msg: Option<RevokeAndAck>,
 
-    pub created_at: crate::time::SystemTime,
+    pub created_at: SystemTime,
 
     // the time stamp we last sent an message to the peer, used to check if the peer is still alive
     // we will disconnect the peer if we haven't sent any message to the peer for a long time
@@ -4494,7 +4494,7 @@ impl ChannelActorState {
             latest_commitment_transaction: None,
             reestablishing: false,
             last_revoke_ack_msg: None,
-            created_at: crate::time::SystemTime::now(),
+            created_at: SystemTime::now(),
             waiting_peer_response: None,
             network: Some(network),
             scheduled_channel_update_handle: None,
@@ -4569,7 +4569,7 @@ impl ChannelActorState {
             latest_commitment_transaction: None,
             reestablishing: false,
             last_revoke_ack_msg: None,
-            created_at: crate::time::SystemTime::now(),
+            created_at: SystemTime::now(),
             waiting_peer_response: None,
             network: Some(network),
             scheduled_channel_update_handle: None,
@@ -4690,7 +4690,7 @@ impl ChannelActorState {
 
     pub fn get_created_at_in_millis(&self) -> u64 {
         self.created_at
-            .duration_since(crate::time::UNIX_EPOCH)
+            .duration_since(UNIX_EPOCH)
             .expect("Duration since unix epoch")
             .as_millis() as u64
     }

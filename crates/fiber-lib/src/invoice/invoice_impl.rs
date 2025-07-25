@@ -23,9 +23,9 @@ use secp256k1::{
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
 
+use crate::time::UNIX_EPOCH;
 use serde_with::serde_as;
 use std::{cmp::Ordering, str::FromStr};
-
 pub(crate) const SIGNATURE_U5_SIZE: usize = 104;
 pub(crate) const MAX_DESCRIPTION_LENGTH: usize = 639;
 
@@ -289,7 +289,7 @@ impl CkbInvoice {
                 .timestamp
                 .checked_add(expiry.as_millis())
                 .is_some_and(|expiry_time| {
-                    let now = crate::time::UNIX_EPOCH
+                    let now = UNIX_EPOCH
                         .elapsed()
                         .expect("Duration since unix epoch")
                         .as_millis();
@@ -706,7 +706,7 @@ impl InvoiceBuilder {
         };
 
         self.check_attrs_valid()?;
-        let timestamp = crate::time::UNIX_EPOCH
+        let timestamp = UNIX_EPOCH
             .elapsed()
             .expect("Duration since unix epoch")
             .as_millis();

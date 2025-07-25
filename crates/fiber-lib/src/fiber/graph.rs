@@ -21,6 +21,7 @@ use crate::fiber::serde_utils::{U128Hex, U64Hex};
 use crate::fiber::types::PaymentHopData;
 use crate::invoice::CkbInvoice;
 use crate::now_timestamp_as_millis_u64;
+use crate::time::Instant;
 use ckb_types::packed::{OutPoint, Script};
 use rand::seq::SliceRandom;
 use rand::thread_rng;
@@ -33,7 +34,6 @@ use tentacle::utils::{is_reachable, multiaddr_to_socketaddr};
 use thiserror::Error;
 use tracing::log::error;
 use tracing::{debug, info, trace};
-
 const DEFAULT_MIN_PROBABILITY: f64 = 0.01;
 
 #[serde_as]
@@ -1112,7 +1112,7 @@ where
         hop_hints: &[HopHint],
     ) -> Result<Vec<RouterHop>, PathFindError> {
         info!("Entered find_path");
-        let started_time = crate::time::Instant::now();
+        let started_time = Instant::now();
         let nodes_len = self.nodes.len();
         let route_to_self = source == target;
 

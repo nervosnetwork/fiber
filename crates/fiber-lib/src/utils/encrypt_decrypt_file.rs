@@ -5,7 +5,6 @@ use scrypt::{scrypt, Params};
 use std::fmt::Debug;
 use std::fs;
 use std::path::Path;
-use tracing::debug;
 
 const VERSION: u8 = 0;
 const NONCE_LEN: usize = 12;
