@@ -3736,6 +3736,9 @@ where
 
             listening_addr
         };
+        #[cfg(target_arch = "wasm32")]
+        // There is no listening_addr on wasm, since it can't listen to anything
+        let listening_addr = vec![];
         for announced_addr in &config.announced_addrs {
             let mut multiaddr =
                 MultiAddr::from_str(announced_addr.as_str()).expect("valid announced listen addr");
@@ -3783,12 +3786,7 @@ where
                 NetworkServiceEvent::NetworkStarted(
                     my_peer_id.clone(),
                     listening_addr.clone(),
-                    if cfg!(target_arch = "wasm32") {
-                        // There is no announced_addrs on wasm, since it can't listen to anything
-                        vec![]
-                    } else {
-                        announced_addrs.clone()
-                    },
+                    announced_addrs.clone(),
                 ),
             ))
             .expect(ASSUME_NETWORK_MYSELF_ALIVE);
