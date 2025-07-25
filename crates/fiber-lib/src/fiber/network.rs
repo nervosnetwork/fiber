@@ -700,10 +700,7 @@ macro_rules! debug_event {
 
 #[derive(Clone, Debug)]
 pub enum NetworkServiceEvent {
-    #[cfg(not(target_arch = "wasm32"))]
     NetworkStarted(PeerId, Vec<MultiAddr>, Vec<Multiaddr>),
-    #[cfg(target_arch = "wasm32")]
-    NetworkStarted(PeerId, Vec<Multiaddr>),
     NetworkStopped(PeerId),
     PeerConnected(PeerId, Multiaddr),
     PeerDisConnected(PeerId, Multiaddr),
@@ -3739,23 +3736,21 @@ where
             &my_peer_id, &announced_addrs
         );
         let control = service.control().to_owned();
-        #[cfg(not(target_arch = "wasm32"))]
         myself
             .send_message(NetworkActorMessage::new_notification(
                 NetworkServiceEvent::NetworkStarted(
                     my_peer_id.clone(),
                     listening_addr.clone(),
-                    announced_addrs.clone(),
+                    if cfg!(target_arch = "wasm32") {
+                        // There is no annouced_addrs on wasm, since it can't listen to anything
+                        vec![]
+                    } else {
+                        announced_addrs.clone()
+                    },
                 ),
             ))
             .expect(ASSUME_NETWORK_MYSELF_ALIVE);
 
-        #[cfg(target_arch = "wasm32")]
-        myself
-            .send_message(NetworkActorMessage::new_notification(
-                NetworkServiceEvent::NetworkStarted(my_peer_id.clone(), announced_addrs.clone()),
-            ))
-            .expect(ASSUME_NETWORK_MYSELF_ALIVE);
         #[cfg(not(target_arch = "wasm32"))]
         tracker.spawn(async move {
             service.run().await;
