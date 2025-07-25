@@ -2236,6 +2236,9 @@ where
         state: &mut NetworkActorState<S>,
         payment_hash: Hash256,
     ) {
+        // This is a performance tuning result, the basic idea is when there are more pending
+        // retrying payment in ractor framework, we will increase the delay time to avoid
+        // flooding the network actor with too many retrying payments.
         let delay = (state.retry_send_payment_count as u64 + 1) * 50_u64;
         myself.send_after(Duration::from_millis(delay), move || {
             NetworkActorMessage::new_event(NetworkActorEvent::RetrySendPayment(payment_hash))
