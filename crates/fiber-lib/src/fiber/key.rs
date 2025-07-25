@@ -1,11 +1,12 @@
 use ckb_hash::new_blake2b;
+use serde::{Deserialize, Serialize};
 use std::{fs, path::Path};
 use tracing::warn;
 
 // TODO: we need to securely erase the key.
 // We wrap the key in a struct to obtain create a function to obtain secret entropy from this key.
 // Unfortunately, SecioKeyPair does not allow us to obtain the secret key from the key pair.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct KeyPair([u8; 32]);
 
 use tentacle::secio::SecioKeyPair;
