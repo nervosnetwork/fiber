@@ -22,7 +22,7 @@ pub mod native {
     const DEFAULT_CONFIG_FILE_NAME: &str = "config.yml";
     const DEFAULT_FIBER_DIR_NAME: &str = "fiber";
     const DEFAULT_CCH_DIR_NAME: &str = "cch";
-    use std::{fs::File, io::BufReader, path::PathBuf, str::FromStr};
+    use std::{fs::File, io::BufReader, path::PathBuf, process::exit, str::FromStr};
 
     use clap::CommandFactory;
     use clap_serde_derive::{
@@ -152,6 +152,11 @@ pub mod native {
                 serde_yaml::from_reader::<_, SerializedConfig>(f).expect("valid config file format")
             });
 
+            if let Err(err) = config_from_file {
+                error!("Failed to read config file: {}", err);
+                exit(1);
+            }
+
             // Services to run can be passed from
             // 1. command line
             // 2. config file
@@ -169,7 +174,7 @@ pub mod native {
 
             if services.is_empty() {
                 error!("Must run at least one service. Specifying services to run by command line or config file.");
-                print_help_and_exit(1)
+                print_help_and_exit(1);
             };
 
             // Set default fiber/ckb base directory. These may be overridden by values explicitly set by the user.
