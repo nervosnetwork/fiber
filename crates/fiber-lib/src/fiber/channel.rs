@@ -1995,10 +1995,6 @@ where
                 } else {
                     None
                 };
-                trace!(
-                    "Sending AddTlcResult at AddTlc with error_info {:?}",
-                    error_info
-                );
                 self.network
                     .send_message(NetworkActorMessage::new_event(
                         NetworkActorEvent::AddTlcResult(

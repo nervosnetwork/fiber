@@ -1164,7 +1164,6 @@ where
             NetworkActorCommand::ConnectPeer(addr) => {
                 // TODO: It is more than just dialing a peer. We need to exchange capabilities of the peer,
                 // e.g. whether the peer support some specific feature.
-                debug!("Received ConnectPeer for connecting to {:?}", addr);
                 if let Some(peer_id) = extract_peer_id(&addr) {
                     if state.is_connected(&peer_id) {
                         debug!("Peer {:?} already connected, ignoring...", peer_id);

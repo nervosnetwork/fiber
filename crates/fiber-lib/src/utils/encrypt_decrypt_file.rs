@@ -46,7 +46,6 @@ pub fn decrypt_from_file<P: AsRef<Path> + Debug>(
     file: P,
     password: &[u8],
 ) -> Result<Vec<u8>, String> {
-    debug!("Decrypting key from file {:?}", file);
     let file_bytes = fs::read(file).unwrap();
     let salt = &file_bytes[1..SALT_LEN + 1];
     let nonce = &file_bytes[SALT_LEN + 1..SALT_LEN + NONCE_LEN + 1];
