@@ -165,7 +165,7 @@ pub struct ListChannelsParams {
     pub include_closed: Option<bool>,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct ListChannelsResult {
     /// The list of channels
     pub channels: Vec<Channel>,
@@ -225,7 +225,7 @@ impl From<RawChannelState> for ChannelState {
 
 /// The channel data structure
 #[serde_as]
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct Channel {
     /// The channel ID
     pub channel_id: Hash256,
