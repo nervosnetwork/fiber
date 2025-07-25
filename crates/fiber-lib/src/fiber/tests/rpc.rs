@@ -1,6 +1,7 @@
 #![allow(clippy::needless_range_loop)]
 use crate::fiber::channel::CloseFlags;
 use crate::rpc::channel::{ChannelState, ShutdownChannelParams};
+use crate::rpc::info::NodeInfoResult;
 use crate::tests::*;
 use crate::{
     fiber::types::Hash256,
@@ -369,4 +370,39 @@ async fn test_rpc_shutdown_channels() {
         status,
         ChannelState::Closed(CloseFlags::UNCOOPERATIVE)
     ));
+}
+
+#[tokio::test]
+async fn test_rpc_node_info() {
+    let (nodes, _channels) = create_n_nodes_network_with_params(
+        &[
+            (
+                (0, 1),
+                ChannelParameters {
+                    public: true,
+                    node_a_funding_amount: MIN_RESERVED_CKB + 10000000000,
+                    node_b_funding_amount: MIN_RESERVED_CKB,
+                    ..Default::default()
+                },
+            ),
+            (
+                (0, 1),
+                ChannelParameters {
+                    public: true,
+                    node_a_funding_amount: MIN_RESERVED_CKB + 10000000000,
+                    node_b_funding_amount: MIN_RESERVED_CKB,
+                    ..Default::default()
+                },
+            ),
+        ],
+        2,
+        true,
+    )
+    .await;
+    let [node_0, _node_1] = nodes.try_into().expect("2 nodes");
+
+    let node_info: NodeInfoResult = node_0.send_rpc_request("node_info", ()).await.unwrap();
+    eprintln!("Node info: {:#?}", node_info);
+    let version = env!("CARGO_PKG_VERSION").to_string();
+    assert_eq!(node_info.version, version);
 }

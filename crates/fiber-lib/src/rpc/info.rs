@@ -19,7 +19,7 @@ use serde_with::serde_as;
 use tentacle::multiaddr::MultiAddr;
 
 #[serde_as]
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct NodeInfoResult {
     /// The version of the node software.
     pub version: String,

@@ -314,7 +314,7 @@ impl NetworkNodeConfigBuilder {
                 listening_addr: None,
                 enabled_modules: vec![
                     "channel".to_string(),
-                    "node_info".to_string(),
+                    "info".to_string(),
                     "graph".to_string(),
                     "payment".to_string(),
                     "invoice".to_string(),

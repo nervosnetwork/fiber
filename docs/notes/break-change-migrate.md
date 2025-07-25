@@ -4,9 +4,10 @@
 
 ## Why
 
-Fiber requires a breaking change migration due to significant modifications in the database schema that are incompatible with previous versions. Our first breaking change was introduced because of the new basic MPP feature and security fixes.
+Fiber's got some big updates, including changes to the database schema that don't play nice with older versions. We introduced our first breaking change to roll out the cool new basic MPP feature and some security patches.
 
-To upgrade to the latest Fiber version, a clean migration process is required to ensure data integrity and system stability.
+To jump to the latest Fiber version, you'll need to follow a straightforward migration process to keep your data safe and your system humming.
+
 
 ## Prerequisites
 
@@ -38,31 +39,31 @@ tar -zcvf backup-fiber-dir.tar.gz fiber-dir
 
 ## Close All Channels
 
-We plan to drop the old database, but we don't want to lose any funds.
+We’re clearing out the old database, but don’t worry—we’ll make sure your funds are safe!To free up funds locked in open channels, we’ll first try a friendly (cooperative) shutdown, which needs the other party to be online. If that doesn’t work, we’ll switch to a forceful shutdown.
 
-To unlock the funds locked in currently open channels, we need to close all channels from the old database. First, we try to shut them down cooperatively (which requires the channel peer to be online at the moment), then if that is not successful, we continue to try to shut down channels forcefully.
 
 ### 1. List Active Channels
 
 ```bash
 # Check all channels from the Fiber node
 
-curl -X POST http://127.0.0.1:21714 \
+curl -X POST http://127.0.0.1:8228 \
   -H "Content-Type: application/json" \
   -H "Accept: application/json" \
   -d '{"id": "42", "jsonrpc": "2.0", "method": "list_channels", "params": [{}]}' | jq '.result.channels'
 ```
 
-This will return all channels (not including closed channels):
+This will show all your active channels (closed ones won’t appear).
+
 
 ### 2. Cooperative Shutdown Channel
 
-For each active channel, initiate a cooperative shutdown. Please note we use `default_funding_lock_script` as the shutdown script here:
+Let’s try closing each active channel nicely. We’re using `default_funding_lock_script` as the close script here:
 
 
 ```bash
 #!/bin/bash
-default_funding_lock_script=$(curl -s -X POST http://127.0.0.1:21714 \
+default_funding_lock_script=$(curl -s -X POST http://127.0.0.1:8228 \
   -H "Content-Type: application/json" \
   -H "Accept: application/json" \
   -d '{"id": "42", "jsonrpc": "2.0", "method": "node_info", "params": [{}]}' | jq -r '.result.default_funding_lock_script')
@@ -73,7 +74,7 @@ script_args=$(echo "$default_funding_lock_script" | jq -r '.args')
 
 
 # First, get all channel IDs as a string
-channel_ids=$(curl -s -X POST http://127.0.0.1:21714 \
+channel_ids=$(curl -s -X POST http://127.0.0.1:8228 \
   -H "Content-Type: application/json" \
   -H "Accept: application/json" \
   -d '{"id": "42", "jsonrpc": "2.0", "method": "list_channels", "params": [{}]}' \
@@ -87,7 +88,7 @@ for channel_id in "${channel_array[@]}"; do
   echo "Shutting down channel: $channel_id"
 
   # Send shutdown request for each channel
-  curl -X POST http://127.0.0.1:21714 \
+  curl -X POST http://127.0.0.1:8228 \
     -H "Content-Type: application/json" \
     -H "Accept: application/json" \
     -d "{\"id\": \"42\", \"jsonrpc\": \"2.0\", \"method\": \"shutdown_channel\", \"params\": [{\"channel_id\": \"$channel_id\", \"close_script\": { \"code_hash\": \"$code_hash\", \"hash_type\": \"$hash_type\", \"args\": \"$script_args\" }, \"fee_rate\": \"0x3E8\", \"force\": false}] }" | jq .
@@ -99,7 +100,7 @@ done
 Wait for a while to make sure the shutdown transaction is submitted to the chain, and channel statuses are changed to `Closed`:
 
 ```bash
-curl -s -X POST http://127.0.0.1:21714 \
+curl -s -X POST http://127.0.0.1:8228 \
   -H "Content-Type: application/json" \
   -H "Accept: application/json" \
   -d '{"id": "42", "jsonrpc": "2.0", "method": "list_channels", "params": [{ "include_closed": true }]}' | jq '.result.channels[].state'
@@ -118,18 +119,17 @@ This will return:
 }
 ```
 
-If all your channels are closed by cooperative shutdown, you don't need to continue to shut down channels forcefully.
+If all your channels are closed cooperatively, you’re good to go—no need for the forceful shutdown!
 
 ### 3. Uncooperative Shutdown Channel
 
-If some channel peers are not online at the moment, you may need to shut down channels forcefully.
+If some channel peers are offline, you might need to take the forceful route. Here’s a script to handle that (no `close_script` needed):
 
-Use this bash script to achieve it. Note that we don't need to specify `close_script` here:
 
 ```bash
 #!/bin/bash
 # First, get all channel IDs as a string
-channel_ids=$(curl -s -X POST http://127.0.0.1:21714 \
+channel_ids=$(curl -s -X POST http://127.0.0.1:8228 \
   -H "Content-Type: application/json" \
   -H "Accept: application/json" \
   -d '{"id": "42", "jsonrpc": "2.0", "method": "list_channels", "params": [{}]}' \
@@ -143,7 +143,7 @@ for channel_id in "${channel_array[@]}"; do
   echo "Shutting down channel: $channel_id"
 
   # Send shutdown request for each channel
-  curl -X POST http://127.0.0.1:21714 \
+  curl -X POST http://127.0.0.1:8228 \
     -H "Content-Type: application/json" \
     -H "Accept: application/json" \
     -d "{\"id\": \"42\", \"jsonrpc\": \"2.0\", \"method\": \"shutdown_channel\", \"params\": [{\"channel_id\": \"$channel_id\", \"force\": true}] }" | jq .
@@ -155,7 +155,7 @@ done
 Double-check that all channels are `Closed`:
 
 ```bash
-curl -s -X POST http://127.0.0.1:21714 \
+curl -s -X POST http://127.0.0.1:8228 \
   -H "Content-Type: application/json" \
   -H "Accept: application/json" \
   -d '{"id": "42", "jsonrpc": "2.0", "method": "list_channels", "params": [{ "include_closed": true }]}' | jq '.result.channels[].state'
@@ -174,4 +174,7 @@ This will return:
 }
 ```
 
-Now you have finished the breaking change migration and are ready to upgrade to the latest Fiber node.
+And that’s it! You’ve nailed the migration and are ready to upgrade to the latest Fiber node.
+
+- [Download latest version of Fiber](https://github.com/nervosnetwork/fiber/releases)
+- [Start run a Fiber node with new database](https://docs.fiber.world/docs/quick-start/run-a-node)
