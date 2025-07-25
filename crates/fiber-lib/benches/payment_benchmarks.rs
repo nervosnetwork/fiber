@@ -33,6 +33,7 @@ fn bench_payment_path_finding(c: &mut Criterion) {
                     // Create the network
                     let (nodes, _channels) = create_n_nodes_network(&channel_configs, 3).await;
 
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                     // Start timing
                     let start = std::time::Instant::now();
 

@@ -13,6 +13,7 @@ tests/nodes/.ports
 /*.info
 .vscode
 /migrate/target
+*.txt
 /node_modules
 /fiber-js/dist
 /crates/fiber-wasm/dist
