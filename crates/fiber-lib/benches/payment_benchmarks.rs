@@ -1,7 +1,7 @@
 #![cfg(feature = "bench")]
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use fnn::{tests::create_n_nodes_network, MIN_RESERVED_CKB};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use tokio::runtime::Runtime;
 
 fn bench_payment_path_finding(c: &mut Criterion) {
@@ -40,9 +40,8 @@ fn bench_payment_path_finding(c: &mut Criterion) {
                     // Run the benchmark iterations
                     for _ in 0..iters {
                         let mut payments = HashSet::new();
-                        let mut channel_stats_map = HashMap::new();
 
-                        for _i in 0..7 {
+                        for _i in 0..5 {
                             let payment_amount = 10;
                             let res = nodes[0]
                                 .send_payment_keysend(&nodes[2], payment_amount, false)
@@ -50,12 +49,6 @@ fn bench_payment_path_finding(c: &mut Criterion) {
                                 .unwrap();
 
                             let payment_hash = res.payment_hash;
-                            let second_hop_channel = res.router.nodes[1].channel_outpoint.clone();
-                            channel_stats_map
-                                .entry(second_hop_channel)
-                                .and_modify(|e| *e += 1)
-                                .or_insert(1);
-
                             payments.insert(payment_hash);
                         }
 
@@ -83,8 +76,8 @@ fn bench_payment_path_finding(c: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = Criterion::default()
-        .warm_up_time(std::time::Duration::from_millis(500))
-        .measurement_time(std::time::Duration::from_secs(40))
+        .warm_up_time(std::time::Duration::from_millis(1500))
+        .measurement_time(std::time::Duration::from_secs(100))
         .sample_size(10);
     targets = bench_payment_path_finding
 }
