@@ -4,9 +4,9 @@
 
 ## Why
 
-Fiber requires a breaking change migration due to significant modifications in the database schema that are incompatible with previous versions. Our first break change introduced because the new feature of basic MPP and security fix.
+Fiber requires a breaking change migration due to significant modifications in the database schema that are incompatible with previous versions. Our first breaking change was introduced because of the new basic MPP feature and security fixes.
 
-To upgrade to latest fiber version, a clean migration process is required to ensure data integrity and system stability.
+To upgrade to the latest Fiber version, a clean migration process is required to ensure data integrity and system stability.
 
 ## Prerequisites
 
@@ -18,11 +18,11 @@ Before starting the migration process, ensure you have:
 
 ## Backup Old Database
 
-Creating a backup is crucial before starting the migration process. For steps of backup, please refer to [backup-guide](https://github.com/nervosnetwork/fiber/blob/develop/docs/notes/backup-guide.md#2-backing-up-node-data)
+Creating a backup is crucial before starting the migration process. For backup steps, please refer to the [backup-guide](https://github.com/nervosnetwork/fiber/blob/develop/docs/notes/backup-guide.md#2-backing-up-node-data).
 
-The simplest way to create a backup is making a copy of fiber running directory:
+The simplest way to create a backup is to make a copy of the Fiber running directory:
 
-Stop the Node, suppose `fiber` is running base on directory `fiber-dir`:
+Stop the Node. Suppose `fiber` is running based on directory `fiber-dir`:
 ```bash
 # Check for running node processes
 ps aux | grep fnn
@@ -38,14 +38,14 @@ tar -zcvf backup-fiber-dir.tar.gz fiber-dir
 
 ## Close All Channels
 
-We plan to drop old database, but we don't need to lose any funding.
+We plan to drop the old database, but we don't want to lose any funds.
 
-For unlokcing the funds locked in current opening channels, we need to close all channels from old database, first we try to shutdown them cooperatively(which require the peer of channel online at the moment), then if not success, we continue try to shutdown channel forcely.
+To unlock the funds locked in currently open channels, we need to close all channels from the old database. First, we try to shut them down cooperatively (which requires the channel peer to be online at the moment), then if that is not successful, we continue to try to shut down channels forcefully.
 
 ### 1. List Active Channels
 
 ```bash
-# Check all channels from fiber node
+# Check all channels from the Fiber node
 
 curl -X POST http://127.0.0.1:21714 \
   -H "Content-Type: application/json" \
@@ -53,11 +53,11 @@ curl -X POST http://127.0.0.1:21714 \
   -d '{"id": "42", "jsonrpc": "2.0", "method": "list_channels", "params": [{}]}' | jq '.result.channels'
 ```
 
-will return all channels(not include closed channels):
+This will return all channels (not including closed channels):
 
 ### 2. Cooperative Shutdown Channel
 
-For each active channel, initiate a cooperative shutdown, please note we use `default_funding_lock_script` as the shutdown script here:
+For each active channel, initiate a cooperative shutdown. Please note we use `default_funding_lock_script` as the shutdown script here:
 
 
 ```bash
@@ -96,7 +96,7 @@ for channel_id in "${channel_array[@]}"; do
 done
 ```
 
-wait for a while to make sure shutdown transaction is submitted onto chain, and channel statuses are turned into `Closed`:
+Wait for a while to make sure the shutdown transaction is submitted to the chain, and channel statuses are changed to `Closed`:
 
 ```bash
 curl -s -X POST http://127.0.0.1:21714 \
@@ -105,7 +105,7 @@ curl -s -X POST http://127.0.0.1:21714 \
   -d '{"id": "42", "jsonrpc": "2.0", "method": "list_channels", "params": [{ "include_closed": true }]}' | jq '.result.channels[].state'
 ```
 
-will returns:
+This will return:
 
 ```json
 {
@@ -118,13 +118,13 @@ will returns:
 }
 ```
 
-If all your channels are closed by cooperative shutdown, you don't need to continue to shutdown channels forcely.
+If all your channels are closed by cooperative shutdown, you don't need to continue to shut down channels forcefully.
 
-### 3. Uncooperatively Shutdown Channel
+### 3. Uncooperative Shutdown Channel
 
-If some peers of channels does not online at the moment, you may need to shutdown channels forcely.
+If some channel peers are not online at the moment, you may need to shut down channels forcefully.
 
-Use this bash script to achieve it, note that we don't need to specify `shutdown_script` here:
+Use this bash script to achieve it. Note that we don't need to specify `close_script` here:
 
 ```bash
 #!/bin/bash
@@ -152,7 +152,7 @@ for channel_id in "${channel_array[@]}"; do
 done
 ```
 
-Double check all the channels are `Closed`:
+Double-check that all channels are `Closed`:
 
 ```bash
 curl -s -X POST http://127.0.0.1:21714 \
@@ -161,7 +161,7 @@ curl -s -X POST http://127.0.0.1:21714 \
   -d '{"id": "42", "jsonrpc": "2.0", "method": "list_channels", "params": [{ "include_closed": true }]}' | jq '.result.channels[].state'
 ```
 
-will return:
+This will return:
 
 ```json
 {
@@ -174,4 +174,4 @@ will return:
 }
 ```
 
-Now you have finished all the break change migration and ready to upgrade to latest fiber node.
+Now you have finished the breaking change migration and are ready to upgrade to the latest Fiber node.

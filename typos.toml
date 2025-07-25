@@ -8,4 +8,3 @@ ignore-hidden = false
 
 [default.extend-identifiers]
 ba = "ba"
-forcely = "forcely"
