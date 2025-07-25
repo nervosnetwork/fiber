@@ -159,7 +159,7 @@ pub mod server {
                     .merge(
                         InfoRpcServerImpl::new(
                             network_actor.clone(),
-                            ckb_config.expect("ckb config should be set"),
+                            ckb_config.clone().expect("ckb config should be set"),
                         )
                         .into_rpc(),
                     )
@@ -175,7 +175,12 @@ pub mod server {
             if config.is_module_enabled("channel") {
                 modules
                     .merge(
-                        ChannelRpcServerImpl::new(network_actor.clone(), store.clone()).into_rpc(),
+                        ChannelRpcServerImpl::new(
+                            network_actor.clone(),
+                            store.clone(),
+                            ckb_config.expect("ckb config should be set"),
+                        )
+                        .into_rpc(),
                     )
                     .unwrap();
             }
