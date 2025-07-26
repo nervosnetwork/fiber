@@ -145,6 +145,8 @@ const CHECK_PEER_INIT_INTERVAL: Duration = Duration::from_secs(20);
 const MAX_GRAPH_MISSING_BROADCAST_MESSAGE_TIMESTAMP_DRIFT: Duration =
     Duration::from_secs(60 * 60 * 2);
 
+const MAX_RETRY_SEND_PAYMENTS: usize = 30;
+
 static CHAIN_HASH_INSTANCE: OnceCell<Hash256> = OnceCell::new();
 
 pub fn init_chain_hash(chain_hash: Hash256) {
@@ -1147,6 +1149,7 @@ where
                         );
                         self.register_payment_retry(
                             myself.clone(),
+                            state,
                             attempt.payment_hash,
                             Some(attempt.id),
                         );
@@ -1195,8 +1198,14 @@ where
             }
             NetworkActorEvent::TlcRemoveReceived(payment_hash, attempt_id, remove_tlc_reason) => {
                 // When a node is restarted, RemoveTLC will also be resent if necessary
-                self.on_remove_tlc_event(myself, payment_hash, attempt_id, remove_tlc_reason)
-                    .await;
+                self.on_remove_tlc_event(
+                    myself,
+                    state,
+                    payment_hash,
+                    attempt_id,
+                    remove_tlc_reason,
+                )
+                .await;
             }
             NetworkActorEvent::RetrySendPayment(payment_hash, attempt_id) => {
                 let _ = self
@@ -2046,9 +2055,9 @@ where
             Some(channel_id) => channel_id,
             None => {
                 error!(
-                        "Channel id not found in outpoint_channel_map with {:?}, are we connected to the peer?",
-                        channel_outpoint
-                    );
+                    "Channel id not found in outpoint_channel_map with {:?}, are we connected to the peer?",
+                     channel_outpoint
+                );
                 let tlc_err = TlcErr::new_channel_fail(
                     TlcErrorCode::UnknownNextPeer,
                     state.get_public_key(),
@@ -2137,6 +2146,7 @@ where
     async fn on_remove_tlc_event(
         &self,
         myself: ActorRef<NetworkActorMessage>,
+        state: &mut NetworkActorState<S>,
         payment_hash: Hash256,
         attempt_id: Option<u64>,
         reason: RemoveTlcReason,
@@ -2189,7 +2199,7 @@ where
                 );
 
                 if need_to_retry {
-                    self.register_payment_retry(myself, payment_hash, Some(attempt.id));
+                    self.register_payment_retry(myself, state, payment_hash, Some(attempt.id));
                 }
             }
         }
@@ -2532,7 +2542,7 @@ where
 
                 self.set_attempt_fail_with_error(&mut session, &mut attempt, &error, need_to_retry);
                 // retry the current attempt if it is retryable
-                self.register_payment_retry(myself, payment_hash, Some(attempt.id));
+                self.register_payment_retry(myself, state, payment_hash, Some(attempt.id));
             }
         }
     }
@@ -2580,7 +2590,12 @@ where
                 // If this is the first hop error, such as the WaitingTlcAck error,
                 // we will just retry later, return Ok here for letting endpoint user
                 // know payment session is created successfully
-                self.register_payment_retry(myself, session.payment_hash(), Some(attempt.id));
+                self.register_payment_retry(
+                    myself,
+                    state,
+                    session.payment_hash(),
+                    Some(attempt.id),
+                );
                 return Ok(());
             } else {
                 state
@@ -2637,7 +2652,7 @@ where
         }
 
         if let Ok(true) = self.payment_need_more_retry(&mut session) {
-            self.register_payment_retry(myself, payment_hash, None);
+            self.register_payment_retry(myself, state, payment_hash, None);
         }
 
         Ok(())
@@ -2709,19 +2724,21 @@ where
     fn register_payment_retry(
         &self,
         myself: ActorRef<NetworkActorMessage>,
+        state: &mut NetworkActorState<S>,
         payment_hash: Hash256,
         attempt_id: Option<u64>,
     ) {
-        #[cfg(not(debug_assertions))]
-        let rand_time = rand::thread_rng().gen_range(1000..2000);
-        #[cfg(debug_assertions)]
-        let rand_time = 500;
-        myself.send_after(Duration::from_millis(rand_time), move || {
+        // This is a performance tuning result, the basic idea is when there are more pending
+        // retrying payment in ractor framework, we will increase the delay time to avoid
+        // flooding the network actor with too many retrying payments.
+        let delay = (state.retry_send_payment_count as u64 + 1) * 50_u64;
+        myself.send_after(Duration::from_millis(delay), move || {
             NetworkActorMessage::new_event(NetworkActorEvent::RetrySendPayment(
                 payment_hash,
                 attempt_id,
             ))
         });
+        state.retry_send_payment_count += 1;
     }
 
     async fn on_send_payment(
@@ -2735,6 +2752,11 @@ where
             Error::InvalidParameter(format!("Failed to validate payment request: {:?}", e))
         })?;
 
+        if !payment_data.dry_run && state.retry_send_payment_count >= MAX_RETRY_SEND_PAYMENTS {
+            return Err(Error::InvalidParameter(
+                "Too many pending retrying payment requests".to_string(),
+            ));
+        }
         self.send_payment_with_payment_data(myself, state, payment_data)
             .await
     }
@@ -2932,6 +2954,12 @@ pub struct NetworkActorState<S> {
     payment_router_map: HashMap<(Hash256, u64), Vec<PaymentHopData>>,
     channel_ephemeral_config: ChannelEphemeralConfig,
     funding_tx_shell_builder: Option<String>,
+
+    // the number of pending retrying send payments, we track it for
+    // set retry delay dynamically, pending too many payments may have a negative impact
+    // on the node performance, which in worst case may lead node not response revoke_and_ack
+    // in expected time, and then the peer will disconnect us.
+    retry_send_payment_count: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -4288,6 +4316,7 @@ where
             channel_ephemeral_config: ChannelEphemeralConfig {
                 funding_timeout_seconds: config.funding_timeout_seconds,
             },
+            retry_send_payment_count: 0,
             funding_tx_shell_builder: config.funding_tx_shell_builder.clone(),
         };
 
@@ -4376,6 +4405,7 @@ where
         debug_event!(myself, "network actor started");
         Ok(())
     }
+
     async fn handle(
         &self,
         myself: ActorRef<Self::Msg>,

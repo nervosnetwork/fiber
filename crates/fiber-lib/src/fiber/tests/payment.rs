@@ -2568,7 +2568,7 @@ async fn test_send_payment_bench_test() {
         if all_sent.is_empty() {
             break;
         }
-        if time.elapsed().as_secs() >= 240 {
+        if time.elapsed().as_secs() >= 300 {
             panic!("timeout, not all payments are settled");
         }
     }
