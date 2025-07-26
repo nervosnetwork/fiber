@@ -3326,3 +3326,66 @@ async fn test_send_mpp_with_large_min_tlc_value_in_channel() {
     let error = res.unwrap_err();
     assert!(error.contains("no path found"));
 }
+
+#[tokio::test]
+async fn test_send_mpp_with_reverse_node_send_back() {
+    init_tracing();
+
+    let (nodes, _channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+            ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+            ((1, 2), (MIN_RESERVED_CKB + 20000000000, MIN_RESERVED_CKB)),
+            ((0, 3), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+            ((0, 3), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+            ((3, 2), (MIN_RESERVED_CKB + 20000000000, MIN_RESERVED_CKB)),
+        ],
+        4,
+    )
+    .await;
+    let [mut node_0, _node_1, mut node_2, _node_3] = nodes.try_into().expect("2 nodes");
+
+    // node 0 send to node 2 with 30000000000 CKB
+    for _ in 0..3 {
+        let res = node_0
+            .send_mpp_payment(&mut node_2, 10000000000, Some(16))
+            .await;
+
+        eprintln!("res: {:?}", res);
+        assert!(res.is_ok());
+        let payment_hash = res.unwrap().payment_hash;
+        eprintln!("begin to wait for payment: {} success ...", payment_hash);
+        node_0.wait_until_success(payment_hash).await;
+    }
+
+    // node 0 does not have enough balance to send node 2 now
+    let res = node_0
+        .send_mpp_payment(&mut node_2, 20000000000, Some(16))
+        .await;
+    eprintln!("res: {:?}", res);
+    assert!(res.unwrap_err().contains("no path found"));
+
+    // now node 2 send back to node 0 20000000000 CKB
+    for _ in 0..2 {
+        let res = node_2
+            .send_mpp_payment(&mut node_0, 10000000000, Some(16))
+            .await;
+
+        eprintln!("res: {:?}", res);
+        assert!(res.is_ok());
+        let payment_hash = res.unwrap().payment_hash;
+        eprintln!("begin to wait for payment: {} success ...", payment_hash);
+        node_2.wait_until_success(payment_hash).await;
+    }
+
+    // now node 0 should have enough balance to send node 2 again
+    let res = node_0
+        .send_mpp_payment(&mut node_2, 10000000000, Some(16))
+        .await;
+
+    assert!(res.is_ok());
+
+    let payment_hash = res.unwrap().payment_hash;
+    eprintln!("begin to wait for payment: {} success ...", payment_hash);
+    node_0.wait_until_success(payment_hash).await;
+}

@@ -2327,6 +2327,7 @@ where
                 iteration,
                 target_amount,
                 amount_low_bound,
+                remain_amount,
             );
             match graph.build_route(target_amount, amount_low_bound, max_fee, &session.request) {
                 Err(e) => {
@@ -2340,8 +2341,9 @@ where
 
                     let left_amount = remain_amount - route.receiver_amount();
                     dbg!(
-                        "left amount: {}, target amount: {}",
+                        "left amount: {}, minimal_amount: {} target amount: {}",
                         left_amount,
+                        minimal_amount,
                         target_amount,
                         route.receiver_amount()
                     );

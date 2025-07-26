@@ -344,14 +344,12 @@ impl ChannelStatElem {
         }
     }
 
-    pub fn set_attempt_result(&mut self, send_node: SentNode, amount: u128, success: bool) {
+    pub fn untrack_attempt(&mut self, send_node: SentNode, amount: u128) {
         self.pending_count = self.pending_count.saturating_sub(1);
-        if !success {
-            if send_node == SentNode::Node1 {
-                self.node1_sent_amount = self.node1_sent_amount.saturating_sub(amount);
-            } else {
-                self.node2_sent_amount = self.node2_sent_amount.saturating_sub(amount);
-            }
+        if send_node == SentNode::Node1 {
+            self.node1_sent_amount = self.node1_sent_amount.saturating_sub(amount);
+        } else {
+            self.node2_sent_amount = self.node2_sent_amount.saturating_sub(amount);
         }
     }
 
@@ -430,11 +428,10 @@ impl GraphChannelStat {
         channel_outpoint: &OutPoint,
         sent_node: SentNode,
         amount: u128,
-        success: bool,
     ) {
         self.inner
             .entry(channel_outpoint.clone())
-            .and_modify(|e| e.set_attempt_result(sent_node, amount, success));
+            .and_modify(|e| e.untrack_attempt(sent_node, amount));
     }
 }
 
@@ -456,7 +453,7 @@ pub struct NetworkGraph<S> {
     // Channel stats map, used to track the attempts for each channel,
     // this information is used to HELP the path finding algorithm for better routing in two ways:
     // 1. If a channel has more pending payment attempts, it may be overloaded and should not be used for routing.
-    // 2. For middle hops, network graph can only get the channel capacity,
+    // 2. For middle hops, network graph can only get the channel capacity, track the balance of channel will be helpful
     channel_stats: Arc<Mutex<GraphChannelStat>>,
 
     // The latest cursor we read from the GossipMessageStore. When we need to refresh our view of the
@@ -1074,21 +1071,18 @@ where
         }
     }
 
-    pub(crate) fn untrack_attempt_router(&mut self, attempt: &Attempt, success: bool) {
+    pub(crate) fn untrack_attempt_router(&mut self, attempt: &Attempt) {
         for (from, channel_outpoint, amount) in attempt.channel_outpoints() {
             if let Some(sent_node) = self.get_channel_sent_node(channel_outpoint, from) {
-                self.channel_stats.lock().untrack_channel(
-                    channel_outpoint,
-                    sent_node,
-                    amount,
-                    success,
-                );
+                self.channel_stats
+                    .lock()
+                    .untrack_channel(channel_outpoint, sent_node, amount);
             }
         }
     }
 
     pub(crate) fn record_attempt_success(&mut self, attempt: &Attempt) {
-        self.untrack_attempt_router(attempt, true);
+        self.untrack_attempt_router(attempt);
         let session_route = &attempt.route.nodes;
         let mut result = InternalResult::default();
         result.succeed_range_pairs(session_route, 0, session_route.len() - 1);
@@ -1102,7 +1096,7 @@ where
         first_hop_error: bool,
     ) -> bool {
         if !first_hop_error {
-            self.untrack_attempt_router(attempt, false);
+            self.untrack_attempt_router(attempt);
         }
         let mut internal_result = InternalResult::default();
         let nodes = &attempt.route.nodes;

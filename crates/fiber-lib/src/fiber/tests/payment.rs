@@ -5385,7 +5385,10 @@ async fn test_send_payment_will_use_sent_amount_for_better_path_finding() {
 
     node0.wait_until_success(payment1).await;
     let payment1_retry_times = node0.get_payment_session(payment1).unwrap().retry_times();
-    assert_eq!(payment1_retry_times, 1);
+
+    // sent_amount only track the amount inflight.
+    // so here we will retry the payment once
+    assert_eq!(payment1_retry_times, 2);
 
     let payment2 = node0
         .send_payment_keysend(&node3, 100, false)
@@ -5395,7 +5398,8 @@ async fn test_send_payment_will_use_sent_amount_for_better_path_finding() {
 
     node0.wait_until_success(payment2).await;
     let payment2_retry_times = node0.get_payment_session(payment2).unwrap().retry_times();
-    assert_eq!(payment2_retry_times, 1);
+    // sent_amount only track the amount inflight.
+    assert_eq!(payment2_retry_times, 2);
 }
 
 #[tokio::test]
