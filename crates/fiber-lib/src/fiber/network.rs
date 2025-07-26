@@ -187,7 +187,7 @@ pub struct SendPaymentResponse {
     pub failed_error: Option<String>,
     pub custom_records: Option<PaymentCustomRecords>,
     pub fee: u128,
-    #[cfg(any(debug_assertions, feature = "bench"))]
+    #[cfg(any(debug_assertions, test, feature = "bench"))]
     pub routers: Vec<SessionRoute>,
 }
 
@@ -310,7 +310,8 @@ pub enum NetworkActorCommand {
 
     NodeInfo((), RpcReplyPort<Result<NodeInfoResponse, String>>),
     ListPeers((), RpcReplyPort<Result<Vec<PeerInfo>, String>>),
-    #[cfg(debug_assertions)]
+
+    #[cfg(any(debug_assertions, feature = "bench"))]
     UpdateFeatures(FeatureVector),
 }
 
@@ -2022,7 +2023,8 @@ where
                     .collect::<Vec<_>>();
                 let _ = rpc.send(Ok(peers));
             }
-            #[cfg(debug_assertions)]
+
+            #[cfg(any(debug_assertions, feature = "bench"))]
             NetworkActorCommand::UpdateFeatures(features) => {
                 state.features = features;
                 state.last_node_announcement_message = None;
@@ -2189,7 +2191,10 @@ where
                     error_detail.clone(),
                     false,
                 );
-                dbg!("set attempt failed to ", error_detail.error_code.as_ref());
+                debug!(
+                    "set attempt failed to : {:?}",
+                    error_detail.error_code.as_ref()
+                );
 
                 self.set_attempt_fail_with_error(
                     &mut session,
@@ -2332,8 +2337,9 @@ where
 
         while (result.len() < session.max_parts() - active_parts) && remain_amount > 0 {
             iteration += 1;
-            dbg!(
-                "build route iteration {}",
+
+            debug!(
+                "build route iteration {}, target_amount: {} amount_low_bound: {:?} remain_amount: {}",
                 iteration,
                 target_amount,
                 amount_low_bound,
@@ -2348,8 +2354,8 @@ where
                 Ok(hops) => {
                     assert_ne!(hops[0].funding_tx_hash, Hash256::default());
                     let route = SessionRoute::new(source, session.request.target_pubkey, &hops);
-
                     let left_amount = remain_amount - route.receiver_amount();
+                    #[cfg(debug_assertions)]
                     dbg!(
                         "left amount: {}, minimal_amount: {} target amount: {}",
                         left_amount,
@@ -2434,7 +2440,6 @@ where
                     "Failed to create onion packet: {:?}, error: {:?}",
                     attempt.hash, e
                 );
-                dbg!("set attempt failed to ", &err);
                 self.set_attempt_fail_with_error(session, attempt, &err, false);
                 return Err(Error::SendPaymentFirstHopError(err, false));
             }

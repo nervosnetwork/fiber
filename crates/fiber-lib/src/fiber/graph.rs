@@ -2388,37 +2388,38 @@ impl From<PaymentSession> for SendPaymentResponse {
             })
             .collect::<Vec<_>>();
         all_attempts.sort_by_key(|a| a.0);
-        dbg!(&all_attempts);
-        dbg!(
-            fee,
-            &status,
-            all_attempts.len(),
-            session.try_limit,
-            &session.last_error
-        );
-
-        let active_amount = session
-            .active_attempts()
-            .map(|a| a.route.receiver_amount())
-            .sum::<u128>();
-        let active_count = session.active_attempts().count();
-
-        dbg!(
-            active_amount,
-            session.request.amount,
-            active_count,
-            session.max_parts(),
-            session.remain_amount(),
-        );
 
         #[cfg(debug_assertions)]
+        {
+            dbg!(&all_attempts);
+            dbg!(
+                fee,
+                &status,
+                all_attempts.len(),
+                session.try_limit,
+                &session.last_error
+            );
+
+            let active_count = session.active_attempts().count();
+            let active_amount = session
+                .active_attempts()
+                .map(|a| a.route.receiver_amount())
+                .sum::<u128>();
+            dbg!(
+                active_amount,
+                session.request.amount,
+                active_count,
+                session.max_parts(),
+                session.remain_amount(),
+            );
+        }
+
+        #[cfg(any(debug_assertions, test, feature = "bench"))]
         let attempts = session
             .attempts()
             .filter(|a| !a.is_failed())
             .collect::<Vec<_>>();
 
-        let more_attempts = session.allow_more_attempts();
-        dbg!(more_attempts);
         Self {
             payment_hash: session.request.payment_hash,
             status,
@@ -2427,7 +2428,7 @@ impl From<PaymentSession> for SendPaymentResponse {
             last_updated_at: session.last_updated_at,
             custom_records: session.request.custom_records.clone(),
             fee,
-            #[cfg(any(debug_assertions, feature = "bench"))]
+            #[cfg(any(debug_assertions, test, feature = "bench"))]
             routers: attempts.iter().map(|a| a.route.clone()).collect::<Vec<_>>(),
         }
     }
@@ -2443,6 +2444,7 @@ impl From<PaymentSession> for SendPaymentResponse {
 ///               \    |
 ///                \  retry
 ///                 \  |
+///                  \ |
 ///                  Retrying
 ///
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
