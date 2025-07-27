@@ -3047,7 +3047,8 @@ where
         command: ChannelCommand,
     ) -> crate::Result<()> {
         match command {
-            // Need to handle the force shutdown command specially because the ChannelActor may not exist when remote peer is disconnected.
+            // Need to handle the force shutdown command specially because the ChannelActor
+            // may not exist when remote peer is disconnected.
             ChannelCommand::Shutdown(shutdown, rpc_reply) if shutdown.force => {
                 if let Some(actor) = self.channels.get(&channel_id) {
                     actor.send_message(ChannelActorMessage::Command(ChannelCommand::Shutdown(

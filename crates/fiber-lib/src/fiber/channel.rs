@@ -5511,6 +5511,14 @@ impl ChannelActorState {
             );
             return Err(ProcessingChannelError::TlcExpirySoon);
         }
+        let delay_epoch_info =
+            EpochNumberWithFraction::from_full_value(self.commitment_delay_epoch);
+        let delay_epoch_number = delay_epoch_info.number();
+        if expiry
+            < current_time + ((delay_epoch_number * 4 * 60 * 60 * 1000) as f64 * 2.0 / 3.0) as u64
+        {
+            return Err(ProcessingChannelError::TlcExpirySoon);
+        }
         if expiry >= current_time + MAX_PAYMENT_TLC_EXPIRY_LIMIT {
             debug!(
                 "TLC expiry {} is too far in the future, current time: {}",
