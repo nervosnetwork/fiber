@@ -3036,7 +3036,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "07033963ba89ebaf1584d767badaa2e8fcec21aedea6b8c0346d487d49c28667"
 dependencies = [
  "cfg-if",
- "windows-targets 0.52.6",
+ "windows-targets 0.53.2",
 ]
 
 [[package]]
@@ -3852,7 +3852,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "22505a5c94da8e3b7c2996394d1c933236c4d743e81a410bcca4e6989fc066a4"
 dependencies = [
  "bytes",
- "heck 0.5.0",
+ "heck 0.4.1",
  "itertools 0.12.1",
  "log",
  "multimap",
@@ -3919,7 +3919,7 @@ checksum = "74765f6d916ee2faa39bc8e68e4f3ed8949b48cccdac59983d287a7cb71ce9c5"
 [[package]]
 name = "ractor"
 version = "0.15.6"
-source = "git+https://github.com/officeyutong/ractor?branch=use-non-send-future-in-wasm#861fa545f8ce0321458342c881b0abd8a60c013a"
+source = "git+https://github.com/officeyutong/ractor?branch=use-non-send-future-in-wasm#29a2a3c72b489fdff1b740db6036a22083a449e0"
 dependencies = [
  "async-trait",
  "bon",
@@ -3937,8 +3937,9 @@ dependencies = [
 [[package]]
 name = "ractor_async_trait_decl"
 version = "0.15.6"
-source = "git+https://github.com/officeyutong/ractor?branch=use-non-send-future-in-wasm#861fa545f8ce0321458342c881b0abd8a60c013a"
+source = "git+https://github.com/officeyutong/ractor?branch=use-non-send-future-in-wasm#29a2a3c72b489fdff1b740db6036a22083a449e0"
 dependencies = [
+ "proc-macro2",
  "quote",
  "syn 2.0.101",
 ]
