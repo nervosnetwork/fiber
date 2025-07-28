@@ -542,8 +542,8 @@ where
             ));
         }
 
-        let close_script = params.close_script.clone().map(|s| s.into()).unwrap();
-        let fee_rate = params.fee_rate.map(FeeRate::from_u64).unwrap();
+        let close_script = params.close_script.clone().map(|s| s.into());
+        let fee_rate = params.fee_rate.map(FeeRate::from_u64);
 
         let message = |rpc_reply| -> NetworkActorMessage {
             NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(

@@ -734,8 +734,8 @@ impl NetworkNode {
                     channel_id,
                     command: ChannelCommand::Shutdown(
                         ShutdownCommand {
-                            close_script: Script::default(),
-                            fee_rate: FeeRate::from_u64(1000000000),
+                            close_script: None,
+                            fee_rate: Some(FeeRate::from_u64(1000000000)),
                             force,
                         },
                         rpc_reply,
@@ -1069,8 +1069,13 @@ impl NetworkNode {
                     state.get_remote_peer_id(),
                     FiberMessage::shutdown(Shutdown {
                         channel_id: state.get_id(),
-                        close_script: command.close_script.clone(),
-                        fee_rate: command.fee_rate,
+                        close_script: command
+                            .close_script
+                            .clone()
+                            .unwrap_or(state.local_shutdown_script),
+                        fee_rate: command
+                            .fee_rate
+                            .unwrap_or(FeeRate::from_u64(state.commitment_fee_rate)),
                     }),
                 )),
             ))
