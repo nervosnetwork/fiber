@@ -1,5 +1,5 @@
 {
-  "name": "@nervosnetwork/fiber-js__test",
+  "name": "@nervosnetwork/fiber-js",
   "version": "0.5.1",
   "main": "dist/index.js",
   "license": "MIT",
@@ -25,6 +25,6 @@
   },
   "type": "module",
   "repository": {
-    "url": "https://github.com/Officeyutong/fiber"
+    "url": "https://github.com/nervosnetwork/fiber"
   }
 }
