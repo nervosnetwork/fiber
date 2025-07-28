@@ -8,6 +8,7 @@ env:
   RUST_TOOLCHAIN: 1.84.0
 permissions:
   contents: write
+  id-token: write
 jobs:
   release-npm:
     name: Build & Release fiber-js
