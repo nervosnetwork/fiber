@@ -1,0 +1,34 @@
+{
+  "compilerOptions": {
+    "outDir": "./dist/",
+    "noImplicitAny": true,
+    "module": "ESNext",
+    "target": "es2020",
+    "allowJs": true,
+    "mapRoot": "dist",
+    "sourceMap": true,
+    "declaration": true,
+    "declarationDir": "dist",
+    "rootDir": "src",
+    "declarationMap": true,
+    "typeRoots": [
+      "/src"
+    ],
+    "allowSyntheticDefaultImports": true,
+    "lib": [
+      "ES2024",
+      "WebWorker",
+      "ESNext"
+    ],
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "emitDeclarationOnly": true
+  },
+  "exclude": [
+    "webpack.config.js",
+    "dist/**",
+    "node_modules/**",
+    "jest.config.js",
+    "esbuild.config.*"
+  ]
+}

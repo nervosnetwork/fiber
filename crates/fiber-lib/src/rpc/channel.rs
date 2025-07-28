@@ -1,5 +1,3 @@
-use crate::ckb::CkbConfig;
-use crate::fiber::channel::DEFAULT_COMMITMENT_FEE_RATE;
 use crate::fiber::serde_utils::EntityHex;
 use crate::fiber::{
     channel::{
@@ -352,20 +350,11 @@ trait ChannelRpc {
 pub struct ChannelRpcServerImpl<S> {
     actor: ActorRef<NetworkActorMessage>,
     store: S,
-    default_funding_lock_script: Script,
 }
 
 impl<S> ChannelRpcServerImpl<S> {
-    pub fn new(actor: ActorRef<NetworkActorMessage>, store: S, config: CkbConfig) -> Self {
-        let default_funding_lock_script = config
-            .get_default_funding_lock_script()
-            .expect("get default funding lock script should be ok")
-            .into();
-        ChannelRpcServerImpl {
-            actor,
-            store,
-            default_funding_lock_script,
-        }
+    pub fn new(actor: ActorRef<NetworkActorMessage>, store: S) -> Self {
+        ChannelRpcServerImpl { actor, store }
     }
 }
 #[cfg(not(target_arch = "wasm32"))]
@@ -553,16 +542,8 @@ where
             ));
         }
 
-        let close_script = params
-            .close_script
-            .clone()
-            .map(|s| s.into())
-            .unwrap_or_else(|| self.default_funding_lock_script.clone().into());
-
-        let fee_rate = params
-            .fee_rate
-            .map(FeeRate::from_u64)
-            .unwrap_or_else(|| FeeRate::from_u64(DEFAULT_COMMITMENT_FEE_RATE));
+        let close_script = params.close_script.clone().map(|s| s.into()).unwrap();
+        let fee_rate = params.fee_rate.map(FeeRate::from_u64).unwrap();
 
         let message = |rpc_reply| -> NetworkActorMessage {
             NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
