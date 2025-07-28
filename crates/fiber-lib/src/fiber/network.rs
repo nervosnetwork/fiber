@@ -1557,6 +1557,35 @@ where
                         }
                     }
                 }
+
+                // Retry TimeoutHoldTlc
+                // Due to channel offline or network issues, remove hold tlc maybe failed, we retry
+                // timeout these tlcs.
+                let now = now_timestamp_as_millis_u64();
+                tracing::debug!("Check expired hold tlcs");
+                for (payment_hash, hold_tlcs) in self.store.get_node_hold_tlcs() {
+                    // timeout hold tlc
+                    let already_timeout = hold_tlcs
+                        .iter()
+                        .map(|hold_tlc| hold_tlc.hold_expire_at)
+                        .min()
+                        .is_some_and(|expire_at| expire_at <= now);
+                    if already_timeout {
+                        tracing::debug!("Timeout {payment_hash} hold tlcs {}", hold_tlcs.len());
+                        for hold_tlc in hold_tlcs {
+                            myself
+                                .send_message(NetworkActorMessage::new_command(
+                                    NetworkActorCommand::TimeoutHoldTlc(
+                                        payment_hash,
+                                        hold_tlc.channel_id,
+                                        hold_tlc.tlc_id,
+                                    ),
+                                ))
+                                .expect(ASSUME_NETWORK_MYSELF_ALIVE);
+                        }
+                    }
+                }
+                tracing::debug!("Done check expired hold tlcs");
             }
             NetworkActorCommand::SettleMPPTlcSet(payment_hash) => {
                 // load hold tlcs
@@ -1646,8 +1675,8 @@ where
             }
             NetworkActorCommand::TimeoutHoldTlc(payment_hash, channel_id, tlc_id) => {
                 debug!(
-                    "Remove timeout hold tlc payment hash {:?} tlc id {:?}",
-                    payment_hash, tlc_id
+                    "Remove timeout hold tlc payment hash {:?} channel_id {:?} tlc id {:?}",
+                    payment_hash, channel_id, tlc_id
                 );
                 let channel_actor_state = self.store.get_channel_actor_state(&channel_id);
                 let tlc = channel_actor_state
@@ -1683,6 +1712,11 @@ where
                     .await
                 {
                     Ok(_) => {
+                        debug!(
+                            "Succeeded to remove tlc {:?} for channel {:?}",
+                            tlc.id(),
+                            channel_id,
+                        );
                         // remove hold tlc from store
                         self.store
                             .remove_payment_hold_tlc(&payment_hash, &channel_id, tlc_id);
@@ -4431,22 +4465,21 @@ where
         let now = now_timestamp_as_millis_u64();
         for (payment_hash, hold_tlcs) in self.store.get_node_hold_tlcs() {
             // timeout hold tlc
-            let already_timeout = hold_tlcs
-                .iter()
-                .map(|hold_tlc| hold_tlc.hold_expire_at)
-                .min()
-                .is_some_and(|expire_at| expire_at <= now);
+            let mut already_timeout = false;
 
             for hold_tlc in hold_tlcs {
-                myself
-                    .send_message(NetworkActorMessage::new_command(
-                        NetworkActorCommand::TimeoutHoldTlc(
-                            payment_hash,
-                            hold_tlc.channel_id,
-                            hold_tlc.tlc_id,
-                        ),
+                if hold_tlc.hold_expire_at < now {
+                    already_timeout = true;
+                }
+                let delay = hold_tlc.hold_expire_at.saturating_sub(now);
+
+                myself.send_after(Duration::from_millis(delay), move || {
+                    NetworkActorMessage::new_command(NetworkActorCommand::TimeoutHoldTlc(
+                        payment_hash,
+                        hold_tlc.channel_id,
+                        hold_tlc.tlc_id,
                     ))
-                    .expect(ASSUME_NETWORK_MYSELF_ALIVE);
+                });
             }
 
             // try settle mpp tlc set

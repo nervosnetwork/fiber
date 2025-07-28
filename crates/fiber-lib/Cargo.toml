@@ -77,7 +77,7 @@ tokio = { version = "1", features = [
     "signal",
     "process",
 ] }
-tentacle = { version = "0.6.6", default-features = false, features = [
+tentacle = { version = "0.7", default-features = false, features = [
     "upnp",
     "parking_lot",
     "openssl-vendored",
