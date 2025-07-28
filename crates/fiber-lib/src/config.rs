@@ -240,9 +240,9 @@ mod wasm {
 
     use super::{Config, SerializedConfig, Service};
     impl Config {
-        pub fn parse_from_str(str: impl AsRef<str>, database_prefix: Option<String>) -> Self {
+        pub fn parse_from_str(config: impl AsRef<str>, database_prefix: Option<String>) -> Self {
             let database_prefix = database_prefix.unwrap_or("/wasm".to_string());
-            let mut config_from_file = serde_yaml::from_str::<SerializedConfig>(str.as_ref())
+            let mut config_from_file = serde_yaml::from_str::<SerializedConfig>(config.as_ref())
                 .expect("valid config file format");
             if let Some(ref mut ckb) = config_from_file.ckb {
                 ckb.base_dir = Some(Some(PathBuf::from_str(&database_prefix).unwrap()));
