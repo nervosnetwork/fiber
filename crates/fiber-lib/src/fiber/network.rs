@@ -1558,20 +1558,17 @@ where
                     }
                 }
 
-                // Retry TimeoutHoldTlc
-                // Due to channel offline or network issues, remove hold tlc maybe failed, we retry
-                // timeout these tlcs.
+                // Due to channel offline or network issues, remove hold tlc maybe failed,
+                // we retry timeout these tlcs.
                 let now = now_timestamp_as_millis_u64();
-                tracing::debug!("Check expired hold tlcs");
+                debug!("Check expired hold tlcs");
                 for (payment_hash, hold_tlcs) in self.store.get_node_hold_tlcs() {
                     // timeout hold tlc
                     let already_timeout = hold_tlcs
                         .iter()
-                        .map(|hold_tlc| hold_tlc.hold_expire_at)
-                        .min()
-                        .is_some_and(|expire_at| expire_at <= now);
+                        .any(|hold_tlc| now >= hold_tlc.hold_expire_at);
                     if already_timeout {
-                        tracing::debug!("Timeout {payment_hash} hold tlcs {}", hold_tlcs.len());
+                        debug!("Timeout {payment_hash} hold tlcs {}", hold_tlcs.len());
                         for hold_tlc in hold_tlcs {
                             myself
                                 .send_message(NetworkActorMessage::new_command(
@@ -1585,7 +1582,7 @@ where
                         }
                     }
                 }
-                tracing::debug!("Done check expired hold tlcs");
+                debug!("Done check expired hold tlcs");
             }
             NetworkActorCommand::SettleMPPTlcSet(payment_hash) => {
                 // load hold tlcs
@@ -4465,25 +4462,21 @@ where
         let now = now_timestamp_as_millis_u64();
         for (payment_hash, hold_tlcs) in self.store.get_node_hold_tlcs() {
             // timeout hold tlc
-            let mut already_timeout = false;
-
-            for hold_tlc in hold_tlcs {
-                if hold_tlc.hold_expire_at < now {
-                    already_timeout = true;
+            let already_timeout = hold_tlcs
+                .iter()
+                .any(|hold_tlc| now >= hold_tlc.hold_expire_at);
+            if already_timeout {
+                for hold_tlc in hold_tlcs {
+                    let delay = hold_tlc.hold_expire_at.saturating_sub(now);
+                    myself.send_after(Duration::from_millis(delay), move || {
+                        NetworkActorMessage::new_command(NetworkActorCommand::TimeoutHoldTlc(
+                            payment_hash,
+                            hold_tlc.channel_id,
+                            hold_tlc.tlc_id,
+                        ))
+                    });
                 }
-                let delay = hold_tlc.hold_expire_at.saturating_sub(now);
-
-                myself.send_after(Duration::from_millis(delay), move || {
-                    NetworkActorMessage::new_command(NetworkActorCommand::TimeoutHoldTlc(
-                        payment_hash,
-                        hold_tlc.channel_id,
-                        hold_tlc.tlc_id,
-                    ))
-                });
-            }
-
-            // try settle mpp tlc set
-            if !already_timeout {
+            } else {
                 myself
                     .send_message(NetworkActorMessage::new_command(
                         NetworkActorCommand::SettleMPPTlcSet(payment_hash),
