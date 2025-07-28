@@ -4465,18 +4465,7 @@ where
             let already_timeout = hold_tlcs
                 .iter()
                 .any(|hold_tlc| now >= hold_tlc.hold_expire_at);
-            if already_timeout {
-                for hold_tlc in hold_tlcs {
-                    let delay = hold_tlc.hold_expire_at.saturating_sub(now);
-                    myself.send_after(Duration::from_millis(delay), move || {
-                        NetworkActorMessage::new_command(NetworkActorCommand::TimeoutHoldTlc(
-                            payment_hash,
-                            hold_tlc.channel_id,
-                            hold_tlc.tlc_id,
-                        ))
-                    });
-                }
-            } else {
+            if !already_timeout {
                 myself
                     .send_message(NetworkActorMessage::new_command(
                         NetworkActorCommand::SettleMPPTlcSet(payment_hash),
