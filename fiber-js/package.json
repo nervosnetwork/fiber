@@ -1,5 +1,5 @@
 {
-  "name": "@nervosnetwork/fiber-js",
+  "name": "@nervosnetwork/fiber-js__test",
   "version": "0.5.1",
   "main": "dist/index.js",
   "license": "MIT",
