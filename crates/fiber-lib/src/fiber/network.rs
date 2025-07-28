@@ -24,7 +24,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tentacle::multiaddr::{MultiAddr, Protocol};
 use tentacle::service::SessionType;
-use tentacle::utils::{extract_peer_id, is_reachable, multiaddr_to_socketaddr};
+use tentacle::utils::{extract_peer_id, is_reachable, multiaddr_to_socketaddr, TransportType};
 use tentacle::{
     async_trait,
     builder::{MetaBuilder, ServiceBuilder},
@@ -707,7 +707,7 @@ macro_rules! debug_event {
 
 #[derive(Clone, Debug)]
 pub enum NetworkServiceEvent {
-    NetworkStarted(PeerId, MultiAddr, Vec<Multiaddr>),
+    NetworkStarted(PeerId, Vec<MultiAddr>, Vec<Multiaddr>),
     NetworkStopped(PeerId),
     PeerConnected(PeerId, Multiaddr),
     PeerDisConnected(PeerId, Multiaddr),
@@ -1169,7 +1169,6 @@ where
             NetworkActorCommand::ConnectPeer(addr) => {
                 // TODO: It is more than just dialing a peer. We need to exchange capabilities of the peer,
                 // e.g. whether the peer support some specific feature.
-
                 if let Some(peer_id) = extract_peer_id(&addr) {
                     if state.is_connected(&peer_id) {
                         debug!("Peer {:?} already connected, ignoring...", peer_id);
@@ -1283,6 +1282,7 @@ where
                         .chain(graph_nodes_to_connect.into_iter())
                 };
                 for (peer_id, addresses) in peers_to_connect {
+                    debug!("Peer to connect: {:?}, {:?}", peer_id, addresses);
                     if let Some(session) = state.get_peer_session(&peer_id) {
                         debug!(
                             "Randomly selected peer {:?} already connected with session id {:?}, skipping connection",
@@ -1500,6 +1500,7 @@ where
             }
 
             NetworkActorCommand::SendPaymentOnionPacket(command) => {
+                trace!("Enter handle command  NetworkActorCommand::SendPaymentOnionPacket");
                 let res = self
                     .handle_send_onion_packet_command(state, command.clone())
                     .await;
@@ -1804,6 +1805,7 @@ where
         state: &mut NetworkActorState<S>,
         command: SendOnionPacketCommand,
     ) -> Result<(), TlcErr> {
+        trace!("Entering handle_send_onion_packet_command");
         let SendOnionPacketCommand {
             peeled_onion_packet,
             previous_tlc,
@@ -1844,7 +1846,11 @@ where
             },
             rpc_reply,
         );
-
+        trace!(
+            "Sending AddTlcCommand to {}, command {:?}",
+            *channel_id,
+            command
+        );
         // we have already checked the channel_id is valid,
         match state.send_command_to_channel(*channel_id, command).await {
             Ok(_) => {
@@ -2020,6 +2026,7 @@ where
         payment_data: &SendPaymentData,
         hops: Vec<PaymentHopData>,
     ) -> Result<PaymentSession, Error> {
+        trace!("Entering send_payment_onion_packet");
         let session_key = Privkey::from_slice(KeyPair::generate_random_key().as_ref());
         assert_ne!(hops[0].funding_tx_hash, Hash256::default());
 
@@ -2171,6 +2178,7 @@ where
         state: &mut NetworkActorState<S>,
         payment_hash: Hash256,
     ) -> Result<PaymentSession, Error> {
+        trace!("Entered try_payment_session");
         self.update_graph().await;
         let Some(mut payment_session) = self.store.get_payment_session(payment_hash) else {
             return Err(Error::InvalidParameter(payment_hash.to_string()));
@@ -2179,13 +2187,15 @@ where
         assert!(payment_session.status != PaymentSessionStatus::Failed);
 
         debug!(
-            "try_payment_session: {:?} times: {:?}",
+            "try_payment_session: {:?} times: {:?}, retry limit {}",
             payment_session.payment_hash(),
-            payment_session.retried_times
+            payment_session.retried_times,
+            payment_session.try_limit
         );
 
         let payment_data = payment_session.request.clone();
         if payment_session.can_retry() {
+            trace!("Retrying payment session, {:?}", payment_session);
             if payment_session.last_error != Some("WaitingTlcAck".to_string()) {
                 payment_session.retried_times += 1;
             }
@@ -3629,9 +3639,11 @@ where
     ) -> Result<Self::State, ActorProcessingErr> {
         let NetworkActorStartArguments {
             config,
+            #[cfg(not(target_arch = "wasm32"))]
             tracker,
             channel_subscribers,
             default_shutdown_script,
+            ..
         } = args;
         let kp = config
             .read_or_generate_secret_key()
@@ -3674,24 +3686,59 @@ where
             .await
             .expect("subscribe to gossip store updates");
         let gossip_actor = gossip_handle.actor().clone();
+        #[cfg(not(target_arch = "wasm32"))]
         let mut service = ServiceBuilder::default()
             .insert_protocol(fiber_handle.create_meta())
             .insert_protocol(gossip_handle.create_meta())
             .handshake_type(secio_kp.into())
             .build(handle);
-        let mut listening_addr = service
-            .listen(
-                MultiAddr::from_str(config.listening_addr())
-                    .expect("valid tentacle listening address"),
-            )
-            .await
-            .expect("listen tentacle");
+        #[cfg(target_arch = "wasm32")]
+        let mut service = ServiceBuilder::default()
+            .insert_protocol(fiber_handle.create_meta())
+            .insert_protocol(gossip_handle.create_meta())
+            .handshake_type(secio_kp.into())
+            // Sets forever to true so the network service won't be shutdown due to no incoming connections
+            .forever(true)
+            .build(handle);
 
-        listening_addr.push(Protocol::P2P(Cow::Owned(my_peer_id.clone().into_bytes())));
         let mut announced_addrs = Vec::with_capacity(config.announced_addrs.len() + 1);
-        if config.announce_listening_addr() {
-            announced_addrs.push(listening_addr.clone());
-        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        let listening_addr = {
+            let mut addresses_to_listen = vec![MultiAddr::from_str(config.listening_addr())
+                .expect("valid tentacle listening address")];
+            if config.reuse_port_for_websocket {
+                // Re-use the same port for websocket
+                let ws_listens = addresses_to_listen
+                    .iter()
+                    .cloned()
+                    .filter_map(|mut addr| {
+                        if matches!(find_type(&addr), TransportType::Tcp) {
+                            addr.push(Protocol::Ws);
+                            Some(addr)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                addresses_to_listen.extend(ws_listens);
+            }
+            let mut listening_addr = vec![];
+            for addr in addresses_to_listen.into_iter() {
+                let mut current_addr = service.listen(addr).await.expect("listen tentacle");
+
+                current_addr.push(Protocol::P2P(Cow::Owned(my_peer_id.clone().into_bytes())));
+                if config.announce_listening_addr() {
+                    announced_addrs.push(current_addr.clone());
+                }
+                listening_addr.push(current_addr);
+            }
+
+            listening_addr
+        };
+        #[cfg(target_arch = "wasm32")]
+        // There is no listening_addr on wasm, since it can't listen to anything
+        let listening_addr = vec![];
         for announced_addr in &config.announced_addrs {
             let mut multiaddr =
                 MultiAddr::from_str(announced_addr.as_str()).expect("valid announced listen addr");
@@ -3722,14 +3769,18 @@ where
                     .unwrap_or_default()
             });
         }
-
+        #[cfg(not(target_arch = "wasm32"))]
         info!(
             "Started listening tentacle on {:?}, peer id {:?}, announced addresses {:?}",
             &listening_addr, &my_peer_id, &announced_addrs
         );
 
+        #[cfg(target_arch = "wasm32")]
+        info!(
+            "Started fiber network service peer id {:?}, announced addresses {:?}",
+            &my_peer_id, &announced_addrs
+        );
         let control = service.control().to_owned();
-
         myself
             .send_message(NetworkActorMessage::new_notification(
                 NetworkServiceEvent::NetworkStarted(
@@ -3740,11 +3791,16 @@ where
             ))
             .expect(ASSUME_NETWORK_MYSELF_ALIVE);
 
+        #[cfg(not(target_arch = "wasm32"))]
         tracker.spawn(async move {
             service.run().await;
             debug!("Tentacle service stopped");
         });
-
+        #[cfg(target_arch = "wasm32")]
+        ractor::concurrency::spawn(async move {
+            service.run().await;
+            debug!("Tentacle service stopped");
+        });
         let mut state_to_be_persisted = self
             .store
             .get_network_actor_state(&my_peer_id)
@@ -4027,7 +4083,7 @@ impl From<&NetworkServiceHandle> for FiberProtocolHandle {
 #[async_trait]
 impl ServiceHandle for NetworkServiceHandle {
     async fn handle_error(&mut self, _context: &mut ServiceContext, error: ServiceError) {
-        trace!("Service error: {:?}", error);
+        debug!("Service error: {:?}", error);
         // TODO
         // ServiceError::DialerError => remove address from peer store
         // ServiceError::ProtocolError => ban peer
@@ -4087,7 +4143,17 @@ pub async fn start_network<
 
     actor
 }
+#[allow(dead_code)]
+pub(crate) fn find_type(addr: &Multiaddr) -> TransportType {
+    let mut iter = addr.iter();
 
+    iter.find_map(|proto| match proto {
+        Protocol::Ws => Some(TransportType::Ws),
+        Protocol::Wss => Some(TransportType::Wss),
+        _ => None,
+    })
+    .unwrap_or(TransportType::Tcp)
+}
 struct ToBeAcceptedChannels {
     total_number_limit: usize,
     total_bytes_limit: usize,
@@ -4174,7 +4240,7 @@ impl ToBeAcceptedChannels {
         Ok(())
     }
 }
-
+#[cfg(not(target_arch = "wasm32"))]
 async fn fund_via_shell(
     shell_script: String,
     mut tx: FundingTx,
@@ -4225,4 +4291,13 @@ async fn fund_via_shell(
             ckb_sdk::tx_builder::TxBuilderError::Other(anyhow::anyhow!(err)),
         ))
     }
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn fund_via_shell(
+    _shell_script: String,
+    _tx: FundingTx,
+    _request: FundingRequest,
+) -> Result<FundingTx, FundingError> {
+    todo!();
 }
