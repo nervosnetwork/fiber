@@ -2,11 +2,16 @@ use ckb_hash::blake2b_256;
 use clap_serde_derive::ClapSerde;
 use secp256k1::{Secp256k1, SecretKey};
 use serde_with::serde_as;
-use std::{fs, path::PathBuf, str::FromStr};
-use tracing::info;
+#[cfg(not(target_arch = "wasm32"))]
+use std::fs;
 
+#[cfg(not(target_arch = "wasm32"))]
 use crate::utils::encrypt_decrypt_file::{decrypt_from_file, encrypt_to_file};
-use crate::{Error, Result};
+
+use crate::Result;
+use std::{path::PathBuf, str::FromStr};
+#[cfg(not(target_arch = "wasm32"))]
+use tracing::info;
 
 use ckb_jsonrpc_types::{OutPoint as OutPointWrapper, Script as ScriptWrapper};
 use ckb_types::core::ScriptHashType;
@@ -24,6 +29,7 @@ use super::contracts::{get_script_by_contract, Contract};
 
 pub const DEFAULT_CKB_BASE_DIR_NAME: &str = "ckb";
 const DEFAULT_CKB_NODE_RPC_URL: &str = "http://127.0.0.1:8114";
+#[cfg(not(target_arch = "wasm32"))]
 const ENV_FIBER_SECRET_KEY_PASSWORD: &str = "FIBER_SECRET_KEY_PASSWORD";
 
 #[derive(ClapSerde, Debug, Clone)]
@@ -62,6 +68,10 @@ pub struct CkbConfig {
         help = "polling interval for ckb tx tracing actor in milliseconds [default: 4000]"
     )]
     pub tx_tracing_polling_interval_ms: u64,
+
+    #[arg(skip)]
+    #[cfg(target_arch = "wasm32")]
+    pub wasm_secret_key: Option<SecretKey>,
 }
 
 impl CkbConfig {
@@ -76,11 +86,15 @@ impl CkbConfig {
             Ok(())
         }
     }
-
+    #[cfg(target_arch = "wasm32")]
+    pub fn read_secret_key(&self) -> Result<SecretKey> {
+        Ok(self.wasm_secret_key.expect("SecretKey not found on wasm"))
+    }
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn read_secret_key(&self) -> Result<SecretKey> {
         self.create_base_dir()?;
         let password = std::env::var(ENV_FIBER_SECRET_KEY_PASSWORD).map_err(|_| {
-            Error::SecretKeyFileError(format!(
+            crate::Error::SecretKeyFileError(format!(
                 "please set {} environment variable to encrypt and decrypt the secret key",
                 ENV_FIBER_SECRET_KEY_PASSWORD
             ))
@@ -92,15 +106,15 @@ impl CkbConfig {
             if let Ok(plain_key) = hex::decode(plain_key_hex.trim()) {
                 info!("secret key is using plain key format, start migrating to encrypted format");
                 encrypt_to_file(&path, plain_key.as_ref(), password_bytes)
-                    .map_err(Error::SecretKeyFileError)?;
+                    .map_err(crate::Error::SecretKeyFileError)?;
                 info!("secret key migration done");
             }
         }
 
         let key_bin =
-            decrypt_from_file(&path, password_bytes).map_err(Error::SecretKeyFileError)?;
+            decrypt_from_file(&path, password_bytes).map_err(crate::Error::SecretKeyFileError)?;
         SecretKey::from_slice(&key_bin).map_err(|err| {
-            Error::SecretKeyFileError(format!("invalid secret key data, error: {}", err))
+            crate::Error::SecretKeyFileError(format!("invalid secret key data, error: {}", err))
         })
     }
 

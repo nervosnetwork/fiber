@@ -14,10 +14,10 @@ use crate::invoice::{
 
 use crate::FiberConfig;
 use ckb_jsonrpc_types::Script;
+use jsonrpsee::types::{error::CALL_EXECUTION_FAILED_CODE, ErrorObjectOwned};
+
 #[cfg(not(target_arch = "wasm32"))]
-use jsonrpsee::{
-    proc_macros::rpc, types::error::CALL_EXECUTION_FAILED_CODE, types::ErrorObjectOwned,
-};
+use jsonrpsee::proc_macros::rpc;
 use rand::Rng;
 use secp256k1::{PublicKey, Secp256k1, SecretKey};
 use serde::{Deserialize, Serialize};

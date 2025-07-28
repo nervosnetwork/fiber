@@ -9,8 +9,8 @@ use crate::fiber::fee::check_open_channel_parameters;
 #[cfg(any(debug_assertions, feature = "bench"))]
 use crate::fiber::network::DebugEvent;
 use crate::fiber::network::PaymentCustomRecords;
+use crate::time::{SystemTime, UNIX_EPOCH};
 use crate::utils::payment::is_invoice_fulfilled;
-
 use crate::{
     ckb::{
         contracts::{get_cell_deps, get_script_by_contract, Contract},
@@ -76,7 +76,6 @@ use std::{
     collections::HashSet,
     fmt::{self, Debug, Display},
     sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
 };
 use tentacle::secio::PeerId;
 use thiserror::Error;
@@ -666,7 +665,7 @@ where
             }
             ProcessingChannelError::WaitingTlcAck => TlcErrorCode::TemporaryChannelFailure,
             ProcessingChannelError::InternalError(_) => TlcErrorCode::TemporaryNodeFailure,
-            ProcessingChannelError::InvalidState(_error) => match state.state {
+            ProcessingChannelError::InvalidState(_) => match state.state {
                 // we can not revert back up `ChannelReady` after `ShuttingDown`
                 ChannelState::Closed(_) | ChannelState::ShuttingDown(_) => {
                     TlcErrorCode::PermanentChannelFailure
@@ -2094,7 +2093,6 @@ where
                     Err(err) => Some((err.clone(), self.get_tlc_error(state, err).await)),
                     Ok(_) => None,
                 };
-
                 self.network
                     .send_message(NetworkActorMessage::new_event(
                         NetworkActorEvent::AddTlcResult(

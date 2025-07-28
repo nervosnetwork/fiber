@@ -37,7 +37,6 @@ use tentacle::utils::{is_reachable, multiaddr_to_socketaddr};
 use thiserror::Error;
 use tracing::log::error;
 use tracing::{debug, info, trace};
-
 const DEFAULT_MIN_PROBABILITY: f64 = 0.01;
 
 #[serde_as]
@@ -1131,6 +1130,7 @@ where
         max_fee_amount: Option<u128>,
         payment_data: &SendPaymentData,
     ) -> Result<Vec<PaymentHopData>, PathFindError> {
+        info!("Entered build_route");
         let source = self.get_source_pubkey();
         let target = payment_data.target_pubkey;
         let allow_self_payment = payment_data.allow_self_payment;

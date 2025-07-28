@@ -1,8 +1,13 @@
 [workspace]
-members = ["crates/fiber-lib", "crates/fiber-bin"]
+members = [
+    "crates/fiber-lib",
+    "crates/fiber-bin",
+    "crates/fiber-wasm",
+    "crates/fiber-wasm-db-worker",
+    "crates/fiber-wasm-db-common",
+]
 resolver = "2"
 default-members = ["crates/fiber-bin", "crates/fiber-lib"]
-
 [profile.release]
 overflow-checks = true
 
@@ -10,3 +15,4 @@ overflow-checks = true
 inherits = "test"
 opt-level = 3
 debug = false
+
