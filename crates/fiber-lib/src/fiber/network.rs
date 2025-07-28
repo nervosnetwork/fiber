@@ -1209,6 +1209,7 @@ where
                 .await;
             }
             NetworkActorEvent::RetrySendPayment(payment_hash, attempt_id) => {
+                state.retry_send_payment_count = state.retry_send_payment_count.saturating_sub(1);
                 let _ = self
                     .resume_payment_session(myself, state, payment_hash, attempt_id)
                     .await;
@@ -2751,7 +2752,7 @@ where
         Ok(())
     }
 
-    pub fn payment_need_more_retry(&self, session: &mut PaymentSession) -> Result<bool, Error> {
+    fn payment_need_more_retry(&self, session: &mut PaymentSession) -> Result<bool, Error> {
         session.flush_attempts(&self.store);
         let more_attempt = session.allow_more_attempts();
         if !more_attempt && session.remain_amount() > 0 {
@@ -2772,14 +2773,14 @@ where
         // This is a performance tuning result, the basic idea is when there are more pending
         // retrying payment in ractor framework, we will increase the delay time to avoid
         // flooding the network actor with too many retrying payments.
-        let delay = (state.retry_send_payment_count as u64 + 1) * 50_u64;
+        state.retry_send_payment_count += 1;
+        let delay = (state.retry_send_payment_count as u64) * 50_u64;
         myself.send_after(Duration::from_millis(delay), move || {
             NetworkActorMessage::new_event(NetworkActorEvent::RetrySendPayment(
                 payment_hash,
                 attempt_id,
             ))
         });
-        state.retry_send_payment_count += 1;
     }
 
     async fn on_send_payment(
