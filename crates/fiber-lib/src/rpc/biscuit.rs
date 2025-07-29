@@ -171,6 +171,11 @@ impl BiscuitAuth {
         Ok(())
     }
 
+    pub fn extract_biscuit(&self, token: &str) -> Result<Biscuit> {
+        let b = Biscuit::from_base64(token, self.pubkey).context("invalid token")?;
+        Ok(b)
+    }
+
     /// check permission with time
     ///
     /// - method RPC method
@@ -216,6 +221,7 @@ pub fn extract_node_id(token: &Biscuit) -> Result<NodeId> {
     const QUERY: &str = "data($id) <- node($id)";
     let (id,): (String,) = token.authorizer()?.query_exactly_one(QUERY)?;
     let node_id = NodeId::from_str(id.as_str())?;
+    tracing::warn!("fetch {id:?} {node_id:?}");
     Ok(node_id)
 }
 
@@ -224,6 +230,8 @@ mod tests {
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use biscuit_auth::{macros::biscuit, KeyPair};
+
+    use crate::rpc::biscuit::extract_node_id;
 
     use super::BiscuitAuth;
 
@@ -395,7 +403,7 @@ mod tests {
         // Pubkey
         let pubkey = "ed25519/17b172749be74276f0ed35a5d0685752684a3c5722114bba447a2f301136db79";
         // token with all permission
-        let token = "EpwDCrECCjBsc3pOcUdRaFU0YVJ2TzhOdENOcXg5QU4wbHJKaTV4WXVvYjMyNmFnWWVNSGtRPT0KA2NjaAoIY2hhbm5lbHMKCG1lc3NhZ2VzCgVjaGFpbgoFZ3JhcGgKCGludm9pY2VzCghwYXltZW50cwoFcGVlcnMKCndhdGNodG93ZXIYAyIJCgcIGBIDGIAIIgkKBwgBEgMYgQgiCQoHCAASAxiBCCIJCgcIARIDGIIIIgkKBwgAEgMYgggiCQoHCAESAxiDCCIJCgcIARIDGIQIIgkKBwgAEgMYhQgiCAoGCAASAhgYIgkKBwgBEgMYhggiCQoHCAASAxiGCCIJCgcIARIDGIcIIgkKBwgAEgMYhwgiCQoHCAESAxiICCIJCgcIABIDGIgIIgkKBwgBEgMYiQgSJAgAEiDMxeZGUMiwW6H8RxMFT2KRScYvhsguZU-SKmgghuLbqxpAKBh52G4E4SmbPqwCt3kqvjq3kVVC9TnbSU3h04dm3i_0ha7spIxkAgMtW-wFvYinJd4ELXyqpAqauQbF3tqjCiIiCiCouqkTeI9Ft8Fd27j6vQ7FsBO_tb6_QXuOnoaxG-k3xg==";
+        let token = "EpoDCq8CCi5RbWJ2UmpKSEFRRG1qM2NnblVCR1E1elZuR3hVS3diMnFKeWd3TnMyd2s0MWg4CgNjY2gKCGNoYW5uZWxzCghtZXNzYWdlcwoFY2hhaW4KBWdyYXBoCghpbnZvaWNlcwoIcGF5bWVudHMKBXBlZXJzCgp3YXRjaHRvd2VyGAMiCQoHCBgSAxiACCIJCgcIARIDGIEIIgkKBwgAEgMYgQgiCQoHCAESAxiCCCIJCgcIABIDGIIIIgkKBwgBEgMYgwgiCQoHCAESAxiECCIJCgcIABIDGIUIIggKBggAEgIYGCIJCgcIARIDGIYIIgkKBwgAEgMYhggiCQoHCAESAxiHCCIJCgcIABIDGIcIIgkKBwgBEgMYiAgiCQoHCAASAxiICCIJCgcIARIDGIkIEiQIABIgdmX3T0R0Fu6vXZUeVD21AZU7K85xSAmsFAOQSqBd1aYaQNdmA5kqLQ6qNVmOxB0uiEFjUq_OQ0DkZgtYt0mSHktbpubKHzJo-imaFx6Pz7f4NzkOvcLLLFUwBlyHxGyEkQAiIgogAEX-eNhS6VprsYL7moBGaJeVUAnn5VzKLr77Rz9y3AI=";
         // auth
         let auth = BiscuitAuth::from_pubkey(pubkey.to_string()).unwrap();
 
@@ -408,5 +416,10 @@ mod tests {
 
         // if not match any rule, it should be denied
         assert!(auth.check_permission("unknown", &token).is_err());
+
+        let b = auth.extract_biscuit(token).unwrap();
+        let node_id = extract_node_id(&b).unwrap();
+        assert!(node_id.as_ref().len() > 0);
+        println!("node_id: {node_id:?}");
     }
 }

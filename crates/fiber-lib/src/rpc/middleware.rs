@@ -64,11 +64,11 @@ impl<S> BiscuitAuthMiddleware<S> {
 
                     // Inject RpcContext as first param
                     let ctx = RpcContext { node_id };
-                    let injected_params = serde_json::json!(vec![serde_json::json!(ctx), params]);
                     req.params = Some(Cow::Owned(
-                        serde_json::value::to_raw_value(&[injected_params])
+                        serde_json::value::to_raw_value(&[serde_json::json!(ctx), params])
                             .expect("serialize injected params"),
                     ));
+                    tracing::trace!("Injected req params {:?}", &req.params);
                 }
                 return true;
             }
