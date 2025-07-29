@@ -216,7 +216,47 @@ Authorization: Bearer ErsBClEKBXBlZXJzCghwYXltZW50cxgDIgkKBwgAEgMYgAgiCQoHCAESAx
 
 This token grants exactly the permissions you defined and will be successfully verified by a Fiber server configured with the corresponding public key.
 
-## 5. Test Examples
+
+## 5. How to revoke a token
+
+You can set the `rpc.revocation_list` option in the fiber config file to revoke issued tokens. Check the document [Biscuit Revocation][biscuit-revocation] for more.
+
+### a. List the revocation id of a token
+
+Use the following command to inspect the token.
+
+```bash
+echo ErsBClEKBXBlZXJzCghwYXltZW50cxgDIgkKBwgAEgMYgAgiCQoHCAESAxiBCDImCiQKAggbEgYIBRICCAUaFgoECgIIBQoICgYggIvSuwYKBBoCCAISJAgAEiDAjoKKNTZpA61ImgoD5Q2sSbBjA3ixK1R2M65a2TOxbRpA4SF04LS5zD6OempqQObA2TTlTCANI7bZkDpl7JIecjR59GFoNtyKYak-_jXq2gDUHadj2I8SbJ0N-vN1RPslDSIiCiBR7VZ7ZJaPE4nhxUUpgpd5MXr3hqi0RfNERy3NE4KjaQ== > token.bc
+
+biscuit inspect token.bc
+```
+
+```
+Open biscuit
+Authority block:
+== Datalog v3.0 ==
+read("peers");
+write("payments");
+check if time($time), $time <= 2025-01-01T00:00:00Z;
+
+== Revocation id ==
+e12174e0b4b9cc3e8e7a6a6a40e6c0d934e54c200d23b6d9903a65ec921e723479f4616836dc8a61a93efe35eada00d41da763d88f126c9d0dfaf37544fb250d
+
+==========
+
+🙈 Public key check skipped 🔑
+🙈 Datalog check skipped 🛡️
+```
+
+### b. Config revocation list
+
+Set the revocation id to the `rpc.revocation_list` to revoke the token.
+
+```bash
+fiber-bin --rpc-biscuit-public-key "ed25519/17b172749be74276f0ed35a5d0685752684a3c5722114bba447a2f301136db79" --rpc-revocation-list "e12174e0b4b9cc3e8e7a6a6a40e6c0d934e54c200d23b6d9903a65ec921e723479f4616836dc8a61a93efe35eada00d41da763d88f126c9d0dfaf37544fb250d"
+```
+
+## 6. Test Examples
 
 The Fiber codebase contains numerous tests that demonstrate the usage of Biscuit tokens. These are excellent resources for understanding the system.
 
@@ -243,3 +283,4 @@ The file `crates/fiber-lib/src/rpc/biscuit.rs` contains unit tests that focus sp
 
 [biscuit]: https://www.biscuitsec.org/
 [biscuit-doc]: https://doc.biscuitsec.org/usage/command-line
+[biscuit-revocation]: https://www.biscuitsec.org/docs/guides/revocation/
