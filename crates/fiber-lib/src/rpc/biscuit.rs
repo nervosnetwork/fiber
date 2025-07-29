@@ -171,11 +171,6 @@ impl BiscuitAuth {
         Ok(())
     }
 
-    pub fn parse_token(&self, token: &[u8]) -> Result<Biscuit> {
-        let b = Biscuit::from(token, self.pubkey).context("invalid token")?;
-        Ok(b)
-    }
-
     /// check permission with time
     ///
     /// - method RPC method
@@ -287,7 +282,7 @@ mod tests {
     }
 
     #[test]
-    fn test_biscuit_auth_channel() {
+    fn test_biscuit_auth_watchtower() {
         let root = KeyPair::new();
 
         // auth
