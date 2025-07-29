@@ -49,7 +49,7 @@ pub struct OpenChannelParams {
     /// The script used to receive the channel balance, an optional parameter, default value is the secp256k1_blake160_sighash_all script corresponding to the configured private key.
     pub shutdown_script: Option<Script>,
 
-    /// The delay time for the commitment transaction, must be an [EpochNumberWithFraction](https://github.com/nervosnetwork/rfcs/blob/master/rfcs/0017-tx-valid-since/e-i-l-encoding.png) in u64 format, an optional parameter, default value is 24 hours.
+    /// The delay time for the commitment transaction, must be an [EpochNumberWithFraction](https://github.com/nervosnetwork/rfcs/blob/master/rfcs/0017-tx-valid-since/e-i-l-encoding.png) in u64 format, an optional parameter, default value is 24 hours, which is 6 epochs.
     pub commitment_delay_epoch: Option<EpochNumberWithFraction>,
 
     /// The fee rate for the commitment transaction, an optional parameter.
@@ -61,6 +61,7 @@ pub struct OpenChannelParams {
     pub funding_fee_rate: Option<u64>,
 
     /// The expiry delta to forward a tlc, in milliseconds, default to 1 day, which is 24 * 60 * 60 * 1000 milliseconds
+    /// Expect it >= 2/3 commitment_delay_epoch, minimum is 16 hours.
     /// This parameter can be updated with rpc `update_channel` later.
     #[serde_as(as = "Option<U64Hex>")]
     pub tlc_expiry_delta: Option<u64>,

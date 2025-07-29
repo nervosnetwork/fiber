@@ -1,10 +1,11 @@
 use crate::ckb::tests::test_utils::complete_commitment_tx;
 use crate::fiber::channel::{
     AddTlcResponse, ChannelState, CloseFlags, OutboundTlcStatus, TLCId, TlcStatus, UpdateCommand,
-    XUDT_COMPATIBLE_WITNESS,
+    MAX_COMMITMENT_DELAY_EPOCHS, MIN_COMMITMENT_DELAY_EPOCHS, XUDT_COMPATIBLE_WITNESS,
 };
 use crate::fiber::config::{
-    DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT, MIN_TLC_EXPIRY_DELTA,
+    DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT, MILLI_SECONDS_PER_EPOCH,
+    MIN_TLC_EXPIRY_DELTA,
 };
 use crate::fiber::features::FeatureVector;
 use crate::fiber::graph::{ChannelInfo, PaymentSessionStatus};
@@ -33,6 +34,7 @@ use crate::{
     gen_rand_fiber_private_key, gen_rand_fiber_public_key, gen_rand_sha256_hash,
     now_timestamp_as_millis_u64, NetworkServiceEvent,
 };
+use ckb_types::core::EpochNumberWithFraction;
 use ckb_types::{
     core::{tx_pool::TxStatus, FeeRate},
     packed::{CellInput, Script, Transaction},
@@ -2535,7 +2537,7 @@ async fn test_remove_tlc_with_expiry_error() {
 }
 
 #[tokio::test]
-async fn test_remove_expired_tlc_in_bacckground() {
+async fn test_remove_expired_tlc_in_background() {
     init_tracing();
 
     let node_a_funding_amount = 100000000000;
@@ -5546,6 +5548,120 @@ async fn test_abandon_failed_channel_without_accept() {
     assert!(res.is_ok());
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
     node_a.expect_debug_event("ChannelActorStopped").await;
+}
+
+#[tokio::test]
+async fn test_open_channel_with_invalid_commitment_delay() {
+    async fn test_with_commitment_delay_epoch(
+        commitment_delay_epoch: Option<EpochNumberWithFraction>,
+        expected_error: &str,
+    ) {
+        let [node_a, node_b] = NetworkNode::new_n_interconnected_nodes().await;
+
+        let message = |rpc_reply| {
+            NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
+                OpenChannelCommand {
+                    peer_id: node_b.peer_id.clone(),
+                    public: false,
+                    shutdown_script: None,
+                    funding_amount: 100000000000,
+                    funding_udt_type_script: None,
+                    commitment_fee_rate: None,
+                    commitment_delay_epoch,
+                    funding_fee_rate: None,
+                    tlc_expiry_delta: None,
+                    tlc_min_value: None,
+                    tlc_fee_proportional_millionths: None,
+                    max_tlc_number_in_flight: None,
+                    max_tlc_value_in_flight: None,
+                },
+                rpc_reply,
+            ))
+        };
+        let open_channel_result = call!(node_a.network_actor, message).expect("node_a alive");
+
+        eprintln!("open_channel_result: {:?}", open_channel_result);
+        let error = open_channel_result.unwrap_err().to_string();
+        assert!(error.contains(expected_error));
+    }
+
+    test_with_commitment_delay_epoch(
+        Some(EpochNumberWithFraction::new(
+            MIN_COMMITMENT_DELAY_EPOCHS - 1,
+            0,
+            1,
+        )),
+        "is less than the minimal value Epoch",
+    )
+    .await;
+    test_with_commitment_delay_epoch(
+        Some(EpochNumberWithFraction::new(
+            MAX_COMMITMENT_DELAY_EPOCHS + 1,
+            0,
+            1,
+        )),
+        "is greater than the maximal value Epoch",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn test_open_channel_tlc_expiry_is_smaller_than_commitment_delay() {
+    let [node_a, node_b] = NetworkNode::new_n_interconnected_nodes().await;
+
+    let message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
+            OpenChannelCommand {
+                peer_id: node_b.peer_id.clone(),
+                public: false,
+                shutdown_script: None,
+                funding_amount: 100000000000,
+                funding_udt_type_script: None,
+                commitment_fee_rate: None,
+                commitment_delay_epoch: Some(EpochNumberWithFraction::new(10, 0, 1)),
+                funding_fee_rate: None,
+                tlc_expiry_delta: Some(
+                    (10.0 * MILLI_SECONDS_PER_EPOCH as f64 * 2.0 / 3.0) as u64 - 1,
+                ),
+                tlc_min_value: None,
+                tlc_fee_proportional_millionths: None,
+                max_tlc_number_in_flight: None,
+                max_tlc_value_in_flight: None,
+            },
+            rpc_reply,
+        ))
+    };
+    let open_channel_result = call!(node_a.network_actor, message).expect("node_a alive");
+
+    eprintln!("open_channel_result: {:?}", open_channel_result);
+    let error = open_channel_result.unwrap_err().to_string();
+    assert!(error.contains(
+        "TLC expiry delta 95999999 is smaller than 2/3 commitment_delay_epoch delay 9600000"
+    ));
+
+    let message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
+            OpenChannelCommand {
+                peer_id: node_b.peer_id.clone(),
+                public: false,
+                shutdown_script: None,
+                funding_amount: 100000000000,
+                funding_udt_type_script: None,
+                commitment_fee_rate: None,
+                commitment_delay_epoch: Some(EpochNumberWithFraction::new(10, 0, 1)),
+                funding_fee_rate: None,
+                tlc_expiry_delta: Some((10.0 * MILLI_SECONDS_PER_EPOCH as f64 * 2.0 / 3.0) as u64),
+                tlc_min_value: None,
+                tlc_fee_proportional_millionths: None,
+                max_tlc_number_in_flight: None,
+                max_tlc_value_in_flight: None,
+            },
+            rpc_reply,
+        ))
+    };
+    let open_channel_result = call!(node_a.network_actor, message).expect("node_a alive");
+
+    assert!(open_channel_result.is_ok(), "open channel should succeed");
 }
 
 #[tokio::test]

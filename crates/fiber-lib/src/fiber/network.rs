@@ -78,7 +78,9 @@ use crate::fiber::channel::{
     AddTlcCommand, AddTlcResponse, ChannelEphemeralConfig, ChannelInitializationOperation,
     ShutdownCommand, TxCollaborationCommand, TxUpdateCommand,
 };
-use crate::fiber::config::{DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT};
+use crate::fiber::config::{
+    DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT, MILLI_SECONDS_PER_EPOCH,
+};
 use crate::fiber::fee::check_open_channel_parameters;
 use crate::fiber::gossip::{GossipConfig, GossipService, SubscribableGossipMessageStore};
 use crate::fiber::graph::{PaymentSession, PaymentSessionStatus};
@@ -2662,11 +2664,24 @@ where
             }
         }
 
-        if let Some(_delta) = tlc_expiry_delta.filter(|&d| d < MIN_TLC_EXPIRY_DELTA) {
+        if tlc_expiry_delta.is_some_and(|d| d < MIN_TLC_EXPIRY_DELTA) {
             return Err(ProcessingChannelError::InvalidParameter(format!(
                 "TLC expiry delta is too small, expect larger than {}",
                 MIN_TLC_EXPIRY_DELTA
             )));
+        }
+
+        if let (Some(tlc_expiry_delta), Some(delay_epoch)) =
+            (tlc_expiry_delta, commitment_delay_epoch)
+        {
+            let epoch_delay_milliseconds =
+                (delay_epoch.number() as f64 * MILLI_SECONDS_PER_EPOCH as f64 * 2.0 / 3.0) as u64;
+            if tlc_expiry_delta < epoch_delay_milliseconds {
+                return Err(ProcessingChannelError::InvalidParameter(format!(
+                    "TLC expiry delta {} is smaller than 2/3 commitment_delay_epoch delay {}",
+                    tlc_expiry_delta, epoch_delay_milliseconds
+                )));
+            }
         }
 
         let shutdown_script =
