@@ -405,4 +405,5 @@ async fn test_rpc_node_info() {
     eprintln!("Node info: {:#?}", node_info);
     let version = env!("CARGO_PKG_VERSION").to_string();
     assert_eq!(node_info.version, version);
+    assert_eq!(node_info.default_funding_lock_script, Default::default());
 }

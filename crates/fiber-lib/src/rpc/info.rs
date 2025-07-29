@@ -87,11 +87,19 @@ pub struct InfoRpcServerImpl {
 }
 
 impl InfoRpcServerImpl {
+    #[allow(unused_variables)]
     pub fn new(actor: ActorRef<NetworkActorMessage>, config: CkbConfig) -> Self {
+        #[cfg(not(test))]
         let default_funding_lock_script = config
             .get_default_funding_lock_script()
             .expect("get default funding lock script should be ok")
             .into();
+
+        // `decrypt_from_file` is invoked in `get_default_funding_lock_script`,
+        // which will cost more than 30 seconds, so we mock it in tests.
+        #[cfg(test)]
+        let default_funding_lock_script = Default::default();
+
         InfoRpcServerImpl {
             actor,
             default_funding_lock_script,

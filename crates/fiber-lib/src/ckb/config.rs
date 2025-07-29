@@ -1,13 +1,6 @@
+use super::contracts::{get_script_by_contract, Contract};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::utils::encrypt_decrypt_file::{decrypt_from_file, encrypt_to_file};
-use clap_serde_derive::ClapSerde;
-use secp256k1::SecretKey;
-use serde_with::serde_as;
-#[cfg(not(target_arch = "wasm32"))]
-use std::fs;
-#[cfg(not(target_arch = "wasm32"))]
-use tracing::info;
-
 use crate::Result;
 use ckb_jsonrpc_types::{OutPoint as OutPointWrapper, Script as ScriptWrapper};
 use ckb_types::core::ScriptHashType;
@@ -18,13 +11,16 @@ use ckb_types::{
     packed::{CellDep, Script},
 };
 use clap_serde_derive::clap::{self};
+use clap_serde_derive::ClapSerde;
 use molecule::prelude::Entity;
+use secp256k1::SecretKey;
 use serde::{Deserialize, Serialize};
-#[cfg(not(test))]
+use serde_with::serde_as;
+#[cfg(not(target_arch = "wasm32"))]
+use std::fs;
+#[cfg(not(target_arch = "wasm32"))]
+use tracing::info;
 use {ckb_hash::blake2b_256, secp256k1::Secp256k1};
-
-#[cfg(not(test))]
-use super::contracts::{get_script_by_contract, Contract};
 
 use std::{path::PathBuf, str::FromStr};
 
@@ -119,7 +115,6 @@ impl CkbConfig {
         })
     }
 
-    #[cfg(not(test))]
     pub fn get_default_funding_lock_script(&self) -> Result<Script> {
         let secret_key = self.read_secret_key()?;
         let secp = Secp256k1::new();
@@ -128,11 +123,6 @@ impl CkbConfig {
             Contract::Secp256k1Lock,
             &pubkey_hash[0..20],
         ))
-    }
-
-    #[cfg(test)]
-    pub fn get_default_funding_lock_script(&self) -> Result<Script> {
-        Ok(Default::default())
     }
 }
 
