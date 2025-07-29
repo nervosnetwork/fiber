@@ -118,39 +118,19 @@ fn build_rules() -> HashMap<&'static str, AuthRule> {
     // watchtower
     b.with_rule(
         "create_watch_channel",
-        AuthRule::new(
-            r#"
-        allow if write("watchtower");
-        "#,
-        )
-        .with_require_rpc_context(true),
+        AuthRule::new(r#"allow if write("watchtower");"#).with_require_rpc_context(true),
     );
     b.with_rule(
         "remove_watch_channel",
-        AuthRule::new(
-            r#"
-        allow if write("watchtower");
-        "#,
-        )
-        .with_require_rpc_context(true),
+        AuthRule::new(r#"allow if write("watchtower");"#).with_require_rpc_context(true),
     );
     b.with_rule(
         "update_revocation",
-        AuthRule::new(
-            r#"
-        allow if write("watchtower");
-        "#,
-        )
-        .with_require_rpc_context(true),
+        AuthRule::new(r#"allow if write("watchtower");"#).with_require_rpc_context(true),
     );
     b.with_rule(
         "update_local_settlement",
-        AuthRule::new(
-            r#"
-        allow if write("watchtower");
-        "#,
-        )
-        .with_require_rpc_context(true),
+        AuthRule::new(r#"allow if write("watchtower");"#).with_require_rpc_context(true),
     );
     b.with_rule(
         "create_preimage",
