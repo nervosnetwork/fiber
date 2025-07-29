@@ -8,7 +8,7 @@ use indicatif::ProgressDrawTarget;
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use tracing::{debug, error, info};
+use tracing::{error, info};
 
 use super::Store;
 
@@ -49,7 +49,7 @@ impl Migrations {
             }
         };
 
-        debug!(
+        eprintln!(
             "Current database version: [{}], latest db version: [{}]",
             db_version, LATEST_DB_VERSION
         );
@@ -156,7 +156,7 @@ impl Migrations {
         match db_version {
             Some(ref v) => {
                 info!("Current database version {}", v);
-                self.check_migration_downgrade(v)?;
+                self.check_valid_to_migrate(v, db)?;
                 let db = self.run_migrate(db, v.as_str())?;
                 Ok(db)
             }
@@ -164,7 +164,7 @@ impl Migrations {
         }
     }
 
-    fn check_migration_downgrade(&self, cur_version: &str) -> Result<(), Error> {
+    fn check_valid_to_migrate(&self, cur_version: &str, db: &Store) -> Result<(), Error> {
         if let Some(m) = self.migrations.values().last() {
             if m.version() < cur_version {
                 error!(
@@ -176,6 +176,11 @@ impl Migrations {
                     "Database downgrade is not supported".to_string(),
                 ));
             }
+        }
+        if self.is_any_break_change(db) {
+            return Err(internal_error(
+                "There is a breaking change migration".to_string(),
+            ));
         }
         Ok(())
     }

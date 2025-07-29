@@ -56,8 +56,9 @@ fn run_migrate<P: AsRef<Path>>(
         let result = migrate.borrow_migrate().check();
         if result == Ordering::Less {
             if migrate.borrow_migrate().is_any_break_change() {
-                eprintln!("This migration is a breaking change, you need to shutdown all channels with old version of  fiber node and restart with the new version with a new initialized database.\
-                please backup your database before proceeding.");
+                eprintln!("There is a breaking change migration, you need to shutdown all channels \
+                        and restart new version fiber node with a new initialized database.\
+                        You can find more information in the migration document: https://github.com/nervosnetwork/fiber/wiki/Fiber-Breaking-Change-Migration-Guide");
                 return Err(
                     "need to shutdown all old channels with old version of fiber node, and then restart latest fiber node with a new database".to_string(),
                 );
