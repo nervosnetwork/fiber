@@ -231,8 +231,8 @@ pub struct RemoveTlcCommand {
 
 #[derive(Debug)]
 pub struct ShutdownCommand {
-    pub close_script: Script,
-    pub fee_rate: FeeRate,
+    pub close_script: Option<Script>,
+    pub fee_rate: Option<FeeRate>,
     pub force: bool,
 }
 
@@ -1532,23 +1532,31 @@ where
                 }
             };
 
-            state.check_shutdown_fee_rate(command.fee_rate, &command.close_script)?;
+            let shutdown_fee_rate = command
+                .fee_rate
+                .unwrap_or(FeeRate::from_u64(state.commitment_fee_rate));
+            let close_script = command
+                .close_script
+                .clone()
+                .unwrap_or(state.get_local_shutdown_script());
+
+            state.check_shutdown_fee_rate(shutdown_fee_rate, &close_script)?;
             self.network
                 .send_message(NetworkActorMessage::new_command(
                     NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
                         self.get_remote_peer_id(),
                         FiberMessage::shutdown(Shutdown {
                             channel_id: state.get_id(),
-                            close_script: command.close_script.clone(),
-                            fee_rate: command.fee_rate,
+                            close_script: close_script.clone(),
+                            fee_rate: shutdown_fee_rate,
                         }),
                     )),
                 ))
                 .expect(ASSUME_NETWORK_ACTOR_ALIVE);
 
             state.local_shutdown_info = Some(ShutdownInfo {
-                close_script: command.close_script,
-                fee_rate: command.fee_rate.as_u64(),
+                close_script,
+                fee_rate: shutdown_fee_rate.as_u64(),
                 signature: None,
             });
             state.update_state(ChannelState::ShuttingDown(
