@@ -23,5 +23,8 @@
   "exports": {
     ".": "./dist/index.js"
   },
-  "type": "module"
+  "type": "module",
+  "repository": {
+    "url": "https://github.com/nervosnetwork/fiber"
+  }
 }
