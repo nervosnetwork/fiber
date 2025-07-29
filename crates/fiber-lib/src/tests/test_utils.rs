@@ -1,5 +1,6 @@
 use crate::ckb::tests::test_utils::get_tx_from_hash;
 use crate::ckb::tests::test_utils::MockChainActorMiddleware;
+use crate::ckb::CkbConfig;
 use crate::ckb::GetTxResponse;
 use crate::fiber::channel::*;
 use crate::fiber::config::CKB_SHANNONS;
@@ -202,6 +203,7 @@ pub struct NetworkNode {
     pub channels_tx_map: HashMap<Hash256, Hash256>,
     pub fiber_config: FiberConfig,
     pub rpc_config: Option<RpcConfig>,
+    pub ckb_config: Option<CkbConfig>,
     pub listening_addrs: Vec<MultiAddr>,
     pub network_actor: ActorRef<NetworkActorMessage>,
     pub ckb_chain_actor: ActorRef<CkbChainMessage>,
@@ -224,6 +226,7 @@ pub struct NetworkNodeConfig {
     store: Store,
     fiber_config: FiberConfig,
     rpc_config: Option<RpcConfig>,
+    ckb_config: Option<CkbConfig>,
     mock_chain_actor_middleware: Option<Box<dyn MockChainActorMiddleware>>,
 }
 
@@ -318,6 +321,7 @@ impl NetworkNodeConfigBuilder {
                 listening_addr: None,
                 enabled_modules: vec![
                     "channel".to_string(),
+                    "info".to_string(),
                     "graph".to_string(),
                     "payment".to_string(),
                     "invoice".to_string(),
@@ -328,8 +332,20 @@ impl NetworkNodeConfigBuilder {
         } else {
             None
         };
+        let ckb_config = if self.enable_rpc_server {
+            let ckb_dir = Path::new(base_dir.to_str()).join("ckb");
+            Some(CkbConfig {
+                base_dir: Some(ckb_dir),
+                rpc_url: "http://localhost:8114".to_string(),
+                tx_tracing_polling_interval_ms: 4000,
+                udt_whitelist: None,
+            })
+        } else {
+            None
+        };
         let mut config = NetworkNodeConfig {
             base_dir,
+            ckb_config,
             node_name,
             store,
             fiber_config,
@@ -794,8 +810,8 @@ impl NetworkNode {
                     channel_id,
                     command: ChannelCommand::Shutdown(
                         ShutdownCommand {
-                            close_script: Script::default(),
-                            fee_rate: FeeRate::from_u64(1000000000),
+                            close_script: None,
+                            fee_rate: Some(FeeRate::from_u64(1000000000)),
                             force,
                         },
                         rpc_reply,
@@ -1170,8 +1186,13 @@ impl NetworkNode {
                     state.get_remote_peer_id(),
                     FiberMessage::shutdown(Shutdown {
                         channel_id: state.get_id(),
-                        close_script: command.close_script.clone(),
-                        fee_rate: command.fee_rate,
+                        close_script: command
+                            .close_script
+                            .clone()
+                            .unwrap_or(state.local_shutdown_script),
+                        fee_rate: command
+                            .fee_rate
+                            .unwrap_or(FeeRate::from_u64(state.commitment_fee_rate)),
                     }),
                 )),
             ))
@@ -1243,6 +1264,7 @@ impl NetworkNode {
             node_name,
             store,
             fiber_config,
+            ckb_config,
             rpc_config,
             mock_chain_actor_middleware,
         } = config;
@@ -1358,7 +1380,7 @@ impl NetworkNode {
             Some(
                 start_rpc(
                     rpc_config,
-                    None,
+                    ckb_config.clone(),
                     Some(fiber_config.clone()),
                     Some(network_actor.clone()),
                     None,
@@ -1380,6 +1402,7 @@ impl NetworkNode {
             node_name,
             store,
             fiber_config,
+            ckb_config,
             rpc_config,
             channels_tx_map: Default::default(),
             listening_addrs: announced_addrs,
@@ -1404,6 +1427,7 @@ impl NetworkNode {
             base_dir: self.base_dir.clone(),
             node_name: self.node_name.clone(),
             store: self.store.clone(),
+            ckb_config: self.ckb_config.clone(),
             fiber_config: self.fiber_config.clone(),
             rpc_config: self.rpc_config.clone(),
             mock_chain_actor_middleware: self.mock_chain_actor_middleware.clone(),

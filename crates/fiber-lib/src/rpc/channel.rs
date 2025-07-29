@@ -163,7 +163,7 @@ pub struct ListChannelsParams {
     pub include_closed: Option<bool>,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct ListChannelsResult {
     /// The list of channels
     pub channels: Vec<Channel>,
@@ -223,7 +223,7 @@ impl From<RawChannelState> for ChannelState {
 
 /// The channel data structure
 #[serde_as]
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct Channel {
     /// The channel ID
     pub channel_id: Hash256,
@@ -278,8 +278,10 @@ pub struct ShutdownChannelParams {
     /// The channel ID of the channel to shut down
     pub channel_id: Hash256,
     /// The script used to receive the channel balance, only support secp256k1_blake160_sighash_all script for now
+    /// default is `default_funding_lock_script` in `CkbConfig`
     pub close_script: Option<Script>,
     /// The fee rate for the closing transaction, the fee will be deducted from the closing initiator's channel balance
+    /// default is 1000 shannons/KW
     #[serde_as(as = "Option<U64Hex>")]
     pub fee_rate: Option<u64>,
     /// Whether to force the channel to close, when set to false, `close_script` and `fee_rate` should be set, default is false.
@@ -530,21 +532,18 @@ where
         &self,
         params: ShutdownChannelParams,
     ) -> Result<(), ErrorObjectOwned> {
-        if params.force.unwrap_or_default() {
-            if params.close_script.is_some() || params.fee_rate.is_some() {
-                return Err(ErrorObjectOwned::owned(
-                    CALL_EXECUTION_FAILED_CODE,
-                    "close_script and fee_rate should not be set when force is true",
-                    Some(params),
-                ));
-            }
-        } else if params.close_script.is_none() || params.fee_rate.is_none() {
+        if params.force.unwrap_or_default()
+            && (params.close_script.is_some() || params.fee_rate.is_some())
+        {
             return Err(ErrorObjectOwned::owned(
                 CALL_EXECUTION_FAILED_CODE,
-                "close_script and fee_rate should be set when force is false",
+                "close_script and fee_rate should not be set when force is true",
                 Some(params),
             ));
         }
+
+        let close_script = params.close_script.clone().map(|s| s.into());
+        let fee_rate = params.fee_rate.map(FeeRate::from_u64);
 
         let message = |rpc_reply| -> NetworkActorMessage {
             NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
@@ -552,12 +551,8 @@ where
                     channel_id: params.channel_id,
                     command: ChannelCommand::Shutdown(
                         ShutdownCommand {
-                            close_script: params
-                                .close_script
-                                .clone()
-                                .map(Into::into)
-                                .unwrap_or_default(),
-                            fee_rate: params.fee_rate.map(FeeRate::from_u64).unwrap_or_default(),
+                            close_script,
+                            fee_rate,
                             force: params.force.unwrap_or_default(),
                         },
                         rpc_reply,

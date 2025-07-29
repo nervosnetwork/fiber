@@ -1,5 +1,10 @@
 #![allow(clippy::needless_range_loop)]
+use crate::fiber::channel::CloseFlags;
+use crate::gen_rand_sha256_hash;
 use crate::invoice::CkbInvoice;
+use crate::rpc::channel::{ChannelState, ShutdownChannelParams};
+use crate::rpc::info::NodeInfoResult;
+use crate::tests::*;
 use crate::{
     fiber::types::Hash256,
     invoice::Currency,
@@ -11,7 +16,6 @@ use crate::{
         peer::ListPeersResult,
     },
 };
-use crate::{gen_rand_sha256_hash, tests::*};
 use ckb_types::packed::Script;
 
 #[tokio::test]
@@ -269,4 +273,163 @@ async fn test_rpc_graph() {
         .iter()
         .all(|n| n.version == *env!("CARGO_PKG_VERSION")));
     assert!(!graph_nodes.nodes[0].features.is_empty());
+}
+
+#[tokio::test]
+async fn test_rpc_shutdown_channels() {
+    let (nodes, _channels) = create_n_nodes_network_with_params(
+        &[
+            (
+                (0, 1),
+                ChannelParameters {
+                    public: true,
+                    node_a_funding_amount: MIN_RESERVED_CKB + 10000000000,
+                    node_b_funding_amount: MIN_RESERVED_CKB,
+                    ..Default::default()
+                },
+            ),
+            (
+                (0, 1),
+                ChannelParameters {
+                    public: true,
+                    node_a_funding_amount: MIN_RESERVED_CKB + 10000000000,
+                    node_b_funding_amount: MIN_RESERVED_CKB,
+                    ..Default::default()
+                },
+            ),
+        ],
+        2,
+        true,
+    )
+    .await;
+    let [node_0, _node_1] = nodes.try_into().expect("2 nodes");
+
+    let list_channels: ListChannelsResult = node_0
+        .send_rpc_request(
+            "list_channels",
+            ListChannelsParams {
+                peer_id: None,
+                include_closed: None,
+            },
+        )
+        .await
+        .unwrap();
+    eprintln!("List channels: {:#?}", list_channels);
+    assert_eq!(list_channels.channels.len(), 2);
+    let channel_id = list_channels.channels[0].channel_id;
+
+    let _res: () = node_0
+        .send_rpc_request(
+            "shutdown_channel",
+            ShutdownChannelParams {
+                channel_id,
+                close_script: None,
+                fee_rate: None,
+                force: None,
+            },
+        )
+        .await
+        .unwrap();
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+    let list_channels: ListChannelsResult = node_0
+        .send_rpc_request(
+            "list_channels",
+            ListChannelsParams {
+                peer_id: None,
+                include_closed: Some(true),
+            },
+        )
+        .await
+        .unwrap();
+    eprintln!("List channels: {:#?}", list_channels);
+    assert_eq!(list_channels.channels.len(), 2);
+    let status = list_channels
+        .channels
+        .iter()
+        .find(|c| c.channel_id == channel_id)
+        .expect("channel should exist")
+        .state;
+    eprintln!("Channel status: {:?}", status);
+    assert!(matches!(
+        status,
+        ChannelState::Closed(CloseFlags::COOPERATIVE)
+    ));
+
+    // test force close
+
+    let channel_id = list_channels.channels[1].channel_id;
+    let _res: () = node_0
+        .send_rpc_request(
+            "shutdown_channel",
+            ShutdownChannelParams {
+                channel_id,
+                close_script: None,
+                fee_rate: None,
+                force: Some(true),
+            },
+        )
+        .await
+        .unwrap();
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+    let list_channels: ListChannelsResult = node_0
+        .send_rpc_request(
+            "list_channels",
+            ListChannelsParams {
+                peer_id: None,
+                include_closed: Some(true),
+            },
+        )
+        .await
+        .unwrap();
+    eprintln!("List channels: {:#?}", list_channels);
+    assert_eq!(list_channels.channels.len(), 2);
+    let status = list_channels
+        .channels
+        .iter()
+        .find(|c| c.channel_id == channel_id)
+        .expect("channel should exist")
+        .state;
+    eprintln!("Channel status: {:?}", status);
+    assert!(matches!(
+        status,
+        ChannelState::Closed(CloseFlags::UNCOOPERATIVE)
+    ));
+}
+
+#[tokio::test]
+async fn test_rpc_node_info() {
+    let (nodes, _channels) = create_n_nodes_network_with_params(
+        &[
+            (
+                (0, 1),
+                ChannelParameters {
+                    public: true,
+                    node_a_funding_amount: MIN_RESERVED_CKB + 10000000000,
+                    node_b_funding_amount: MIN_RESERVED_CKB,
+                    ..Default::default()
+                },
+            ),
+            (
+                (0, 1),
+                ChannelParameters {
+                    public: true,
+                    node_a_funding_amount: MIN_RESERVED_CKB + 10000000000,
+                    node_b_funding_amount: MIN_RESERVED_CKB,
+                    ..Default::default()
+                },
+            ),
+        ],
+        2,
+        true,
+    )
+    .await;
+    let [node_0, _node_1] = nodes.try_into().expect("2 nodes");
+
+    let node_info: NodeInfoResult = node_0.send_rpc_request("node_info", ()).await.unwrap();
+    eprintln!("Node info: {:#?}", node_info);
+    let version = env!("CARGO_PKG_VERSION").to_string();
+    assert_eq!(node_info.version, version);
+    assert_eq!(node_info.default_funding_lock_script, Default::default());
 }

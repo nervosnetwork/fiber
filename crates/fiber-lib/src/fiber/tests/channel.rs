@@ -3532,8 +3532,8 @@ async fn do_test_channel_with_simple_update_operation(algorithm: HashAlgorithm) 
                 channel_id: new_channel_id,
                 command: ChannelCommand::Shutdown(
                     ShutdownCommand {
-                        close_script: Script::default(),
-                        fee_rate,
+                        close_script: None,
+                        fee_rate: Some(fee_rate),
                         force: false,
                     },
                     rpc_reply,
@@ -4089,8 +4089,8 @@ async fn test_force_close_channel_when_remote_is_offline() {
                 channel_id,
                 command: ChannelCommand::Shutdown(
                     ShutdownCommand {
-                        close_script: Script::default(),
-                        fee_rate: FeeRate::from_u64(1000),
+                        close_script: None,
+                        fee_rate: Some(FeeRate::from_u64(1000)),
                         force: true,
                     },
                     rpc_reply,
@@ -4154,8 +4154,8 @@ async fn test_normal_shutdown_with_remove_tlc() {
                 channel_id,
                 command: ChannelCommand::Shutdown(
                     ShutdownCommand {
-                        close_script: Script::default(),
-                        fee_rate: FeeRate::from_u64(1000),
+                        close_script: None,
+                        fee_rate: Some(FeeRate::from_u64(1000)),
                         force: false,
                     },
                     rpc_reply,
@@ -4552,8 +4552,8 @@ async fn test_shutdown_channel_with_large_size_shutdown_script_should_fail() {
                 channel_id: new_channel_id,
                 command: ChannelCommand::Shutdown(
                     ShutdownCommand {
-                        close_script: Script::new_builder().args([0u8; 21].pack()).build(),
-                        fee_rate: FeeRate::from_u64(DEFAULT_COMMITMENT_FEE_RATE),
+                        close_script: Some(Script::new_builder().args([0u8; 21].pack()).build()),
+                        fee_rate: Some(FeeRate::from_u64(DEFAULT_COMMITMENT_FEE_RATE)),
                         force: false,
                     },
                     rpc_reply,
@@ -4574,8 +4574,8 @@ async fn test_shutdown_channel_with_large_size_shutdown_script_should_fail() {
                 channel_id: new_channel_id,
                 command: ChannelCommand::Shutdown(
                     ShutdownCommand {
-                        close_script: Script::new_builder().args([0u8; 21].pack()).build(),
-                        fee_rate: FeeRate::from_u64(u64::MAX),
+                        close_script: Some(Script::new_builder().args([0u8; 21].pack()).build()),
+                        fee_rate: Some(FeeRate::from_u64(u64::MAX)),
                         force: false,
                     },
                     rpc_reply,
@@ -4603,8 +4603,8 @@ async fn test_shutdown_channel_with_invalid_feerate_peer_message() {
             .await;
 
     let command = ShutdownCommand {
-        close_script: Script::new_builder().args([0u8; 21].pack()).build(),
-        fee_rate: FeeRate::from_u64(u64::MAX),
+        close_script: Some(Script::new_builder().args([0u8; 21].pack()).build()),
+        fee_rate: Some(FeeRate::from_u64(u64::MAX)),
         force: false,
     };
 
@@ -4636,8 +4636,8 @@ async fn test_shutdown_channel_with_different_size_shutdown_script() {
                 channel_id: new_channel_id,
                 command: ChannelCommand::Shutdown(
                     ShutdownCommand {
-                        close_script: Script::new_builder().args([0u8; 19].pack()).build(),
-                        fee_rate: FeeRate::from_u64(DEFAULT_COMMITMENT_FEE_RATE),
+                        close_script: None,
+                        fee_rate: Some(FeeRate::from_u64(DEFAULT_COMMITMENT_FEE_RATE)),
                         force: false,
                     },
                     rpc_reply,
@@ -4748,8 +4748,8 @@ async fn test_shutdown_channel_network_graph_with_sync_up() {
                 channel_id,
                 command: ChannelCommand::Shutdown(
                     ShutdownCommand {
-                        close_script: Script::new_builder().args([0u8; 19].pack()).build(),
-                        fee_rate: FeeRate::from_u64(DEFAULT_COMMITMENT_FEE_RATE),
+                        close_script: Some(Script::new_builder().args([0u8; 19].pack()).build()),
+                        fee_rate: Some(FeeRate::from_u64(DEFAULT_COMMITMENT_FEE_RATE)),
                         force: false,
                     },
                     rpc_reply,
