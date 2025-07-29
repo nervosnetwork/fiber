@@ -1,5 +1,5 @@
 use ckb_hash::blake2b_256;
-use ckb_types::core::{EpochNumberWithFraction, FeeRate, TransactionView};
+use ckb_types::core::{EpochNumberWithFraction, TransactionView};
 use ckb_types::packed::{Byte32, OutPoint, Script, Transaction};
 use ckb_types::prelude::{IntoTransactionView, Pack, Unpack};
 use ckb_types::H256;
@@ -1436,8 +1436,8 @@ where
                                         channel_id,
                                         ChannelCommand::Shutdown(
                                             ShutdownCommand {
-                                                close_script: Script::default(),
-                                                fee_rate: FeeRate::default(),
+                                                close_script: None,
+                                                fee_rate: None,
                                                 force: true,
                                             },
                                             rpc_reply,
