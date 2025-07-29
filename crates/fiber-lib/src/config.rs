@@ -3,6 +3,10 @@ use std::path::PathBuf;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::CchConfig;
 use crate::{ckb::CkbConfig, rpc::config::RpcConfig, FiberConfig};
+use clap::Parser;
+use clap_serde_derive::ClapSerde;
+use serde::Deserialize;
+use serde::Serialize;
 
 #[derive(Debug)]
 pub struct Config {
@@ -17,12 +21,37 @@ pub struct Config {
     pub ckb: Option<CkbConfig>,
     pub base_dir: PathBuf,
 }
+
+#[derive(Serialize, Deserialize, Parser, Copy, Clone, Debug, PartialEq)]
+pub enum Service {
+    #[serde(alias = "fiber", alias = "FIBER")]
+    FIBER,
+    #[cfg(not(target_arch = "wasm32"))]
+    #[serde(alias = "cch", alias = "CCH")]
+    CCH,
+    #[serde(alias = "rpc", alias = "RPC")]
+    RPC,
+    #[serde(alias = "ckb", alias = "CKB")]
+    CkbChain,
+}
+
+#[derive(Deserialize)]
+struct SerializedConfig {
+    services: Option<Vec<Service>>,
+    fiber: Option<<FiberConfig as ClapSerde>::Opt>,
+    #[cfg(not(target_arch = "wasm32"))]
+    cch: Option<<CchConfig as ClapSerde>::Opt>,
+    rpc: Option<<RpcConfig as ClapSerde>::Opt>,
+    ckb: Option<<CkbConfig as ClapSerde>::Opt>,
+}
 #[cfg(not(target_arch = "wasm32"))]
 pub mod native {
     const DEFAULT_CONFIG_FILE_NAME: &str = "config.yml";
     const DEFAULT_FIBER_DIR_NAME: &str = "fiber";
     const DEFAULT_CCH_DIR_NAME: &str = "cch";
-    use std::{fs::File, io::BufReader, path::PathBuf, str::FromStr};
+    use crate::config::SerializedConfig;
+    use crate::config::Service;
+    use std::{fs::File, io::BufReader, path::PathBuf, process::exit, str::FromStr};
 
     use clap::CommandFactory;
     use clap_serde_derive::{
@@ -30,7 +59,6 @@ pub mod native {
         ClapSerde,
     };
     use home::home_dir;
-    use serde::{Deserialize, Serialize};
     use tracing::error;
 
     use crate::{ckb::CkbConfig, rpc::config::RpcConfig, CchConfig, FiberConfig};
@@ -88,18 +116,6 @@ pub mod native {
         pub ckb: <CkbConfig as ClapSerde>::Opt,
     }
 
-    #[derive(Serialize, Deserialize, Parser, Copy, Clone, Debug, PartialEq)]
-    pub enum Service {
-        #[serde(alias = "fiber", alias = "FIBER")]
-        FIBER,
-        #[serde(alias = "cch", alias = "CCH")]
-        CCH,
-        #[serde(alias = "rpc", alias = "RPC")]
-        RPC,
-        #[serde(alias = "ckb", alias = "CKB")]
-        CkbChain,
-    }
-
     impl FromStr for Service {
         type Err = String;
         fn from_str(s: &str) -> Result<Self, Self::Err> {
@@ -111,14 +127,6 @@ pub mod native {
                 _ => Err(format!("invalid service {}", s)),
             }
         }
-    }
-    #[derive(Deserialize)]
-    struct SerializedConfig {
-        services: Option<Vec<Service>>,
-        fiber: Option<<FiberConfig as ClapSerde>::Opt>,
-        cch: Option<<CchConfig as ClapSerde>::Opt>,
-        rpc: Option<<RpcConfig as ClapSerde>::Opt>,
-        ckb: Option<<CkbConfig as ClapSerde>::Opt>,
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -148,9 +156,22 @@ pub mod native {
                 .or(args.base_dir.map(|x| x.join(DEFAULT_CONFIG_FILE_NAME)))
                 .unwrap_or(get_default_config_file());
 
-            let config_from_file = File::open(config_file).map(BufReader::new).map(|f| {
-                serde_yaml::from_reader::<_, SerializedConfig>(f).expect("valid config file format")
-            });
+            let config_from_file = match File::open(config_file) {
+                Ok(file) => {
+                    let reader = BufReader::new(file);
+                    match serde_yaml::from_reader::<_, SerializedConfig>(reader) {
+                        Ok(config) => config,
+                        Err(err) => {
+                            error!("Failed to parse config file: {}", err);
+                            exit(1);
+                        }
+                    }
+                }
+                Err(err) => {
+                    error!("Failed to read config file: {}", err);
+                    exit(1);
+                }
+            };
 
             // Services to run can be passed from
             // 1. command line
@@ -158,18 +179,14 @@ pub mod native {
             // If command line arguments contain services, then don't read config file
             // for services to run any more, otherwise use config file for that.
             let services = if args.services.is_empty() {
-                config_from_file
-                    .as_ref()
-                    .ok()
-                    .and_then(|x| x.services.clone())
-                    .unwrap_or_default()
+                config_from_file.services.clone().unwrap_or_default()
             } else {
                 args.services
             };
 
             if services.is_empty() {
                 error!("Must run at least one service. Specifying services to run by command line or config file.");
-                print_help_and_exit(1)
+                print_help_and_exit(1);
             };
 
             // Set default fiber/ckb base directory. These may be overridden by values explicitly set by the user.
@@ -177,24 +194,22 @@ pub mod native {
             args.ckb.base_dir = Some(Some(base_dir.join(crate::ckb::DEFAULT_CKB_BASE_DIR_NAME)));
             args.cch.base_dir = Some(Some(base_dir.join(DEFAULT_CCH_DIR_NAME)));
 
-            let (fiber, cch, rpc, ckb) = config_from_file
-                .map(|x| {
-                    let SerializedConfig {
-                        services: _,
-                        fiber,
-                        cch,
-                        rpc,
-                        ckb,
-                    } = x;
-                    (
-                        // Successfully read config file, merging these options with the default ones.
-                        fiber.map(|c| FiberConfig::from(c).merge(&mut args.fiber)),
-                        cch.map(|c| CchConfig::from(c).merge(&mut args.cch)),
-                        rpc.map(|c| RpcConfig::from(c).merge(&mut args.rpc)),
-                        ckb.map(|c| CkbConfig::from(c).merge(&mut args.ckb)),
-                    )
-                })
-                .unwrap_or((None, None, None, None));
+            let (fiber, cch, rpc, ckb) = {
+                let SerializedConfig {
+                    services: _,
+                    fiber,
+                    cch,
+                    rpc,
+                    ckb,
+                } = config_from_file;
+                (
+                    // Successfully read config file, merging these options with the default ones.
+                    fiber.map(|c| FiberConfig::from(c).merge(&mut args.fiber)),
+                    cch.map(|c| CchConfig::from(c).merge(&mut args.cch)),
+                    rpc.map(|c| RpcConfig::from(c).merge(&mut args.rpc)),
+                    ckb.map(|c| CkbConfig::from(c).merge(&mut args.ckb)),
+                )
+            };
             let (fiber, cch, rpc, ckb) = (
                 fiber.unwrap_or(FiberConfig::from(&mut args.fiber)),
                 cch.unwrap_or(CchConfig::from(&mut args.cch)),
@@ -213,6 +228,69 @@ pub mod native {
                 rpc,
                 ckb,
                 base_dir,
+            }
+        }
+    }
+}
+#[cfg(target_arch = "wasm32")]
+mod wasm {
+    use std::{path::PathBuf, str::FromStr};
+
+    use crate::{ckb::CkbConfig, rpc::config::RpcConfig, FiberConfig};
+
+    use super::{Config, SerializedConfig, Service};
+    impl Config {
+        pub fn parse_from_str(config: impl AsRef<str>, database_prefix: Option<String>) -> Self {
+            let database_prefix = database_prefix.unwrap_or("/wasm".to_string());
+            let mut config_from_file = serde_yaml::from_str::<SerializedConfig>(config.as_ref())
+                .expect("valid config file format");
+            if let Some(ref mut ckb) = config_from_file.ckb {
+                ckb.base_dir = Some(Some(PathBuf::from_str(&database_prefix).unwrap()));
+            }
+            if let Some(ref mut fiber) = config_from_file.fiber {
+                fiber.base_dir = Some(Some(PathBuf::from_str(&database_prefix).unwrap()));
+            }
+
+            // Services to run can be passed from
+            // 1. command line
+            // 2. config file
+            // If command line arguments contain services, then don't read config file
+            // for services to run any more, otherwise use config file for that.
+            let services = config_from_file.services.clone().unwrap_or_default();
+
+            if services.is_empty() {
+                panic!("Must run at least one service. Specifying services to run by command line or config file.");
+            };
+
+            let (fiber, rpc, ckb) = {
+                let SerializedConfig {
+                    fiber, rpc, ckb, ..
+                } = config_from_file;
+                (
+                    fiber.unwrap_or_default(),
+                    rpc.unwrap_or_default(),
+                    ckb.unwrap_or_default(),
+                )
+            };
+
+            let fiber = services
+                .contains(&Service::FIBER)
+                .then_some(fiber)
+                .map(FiberConfig::from);
+            let rpc = services
+                .contains(&Service::RPC)
+                .then_some(rpc)
+                .map(RpcConfig::from);
+            let ckb = services
+                .contains(&Service::CkbChain)
+                .then_some(ckb)
+                .map(CkbConfig::from);
+
+            Self {
+                fiber,
+                rpc,
+                ckb,
+                base_dir: PathBuf::from_str(&database_prefix).unwrap(),
             }
         }
     }

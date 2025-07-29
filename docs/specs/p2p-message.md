@@ -75,7 +75,7 @@ table OpenChannel {
 - max_tlc_value_in_flight: The maximum total value of unconfirmed TLCs (Time Locked Contracts) that the channel initiator can accept in this channel.
 - max_tlc_number_in_flight: The maximum number of unconfirmed TLCs that the channel initiator can accept in this channel.
 - min_tlc_value: The minimum value of TLCs that the channel initiator can accept.
-- to_self_delay: The delay time for the channel initiator to unlock the outputs from the commitment transaction, in EpochNumberWithFraction.
+- commitment_delay_epoch: The delay time for the channel initiator to unlock the outputs from the commitment transaction, in EpochNumberWithFraction.
 - funding_pubkey: The pubkey of the channel initiator, used for generating 2-2 multisig contracts.
 - tlc_basepoint: The master key used to derive child keys required for tlcs, we will use the same method as lightning network to derive these keys, see [Secret Derivations] for more details.
 - first_per_commitment_point:
@@ -94,7 +94,6 @@ table AcceptChannel {
     max_tlc_value_in_flight:     Uint128,
     max_tlc_number_in_flight:    Uint64,
     min_tlc_value:               Uint128,
-    to_self_delay:               Uint64,
     funding_pubkey:              Byte33,
     tlc_basepoint:               Byte33,
     payment_basepoint:           Byte33,
@@ -110,7 +109,6 @@ table AcceptChannel {
 - max_tlc_value_in_flight: The maximum total value of unconfirmed TLCs that the channel receiver can accept in this channel.
 - max_tlc_number_in_flight: The maximum number of unconfirmed TLCs that the channel receiver can accept in this channel.
 - min_tlc_value: The minimum value of TLCs that the channel receiver can accept.
-- to_self_delay: The delay time for the channel receiver to unlock the outputs from the commitment transaction, in EpochNumberWithFraction.
 - funding_pubkey: The pubkey of the channel receiver, used for generating 2-2 multisig contracts.
 - tlc_basepoint: See the description in `OpenChannel` message.
 - first_per_commitment_point:

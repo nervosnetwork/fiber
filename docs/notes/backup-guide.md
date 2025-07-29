@@ -19,7 +19,7 @@ Backups protect:
 
 ## 2. Backing Up Node Data
 
-Back up the entire node directory (`node1`), which includes:
+Back up the entire node directory (`fiber-dir`), which includes:
 - `ckb/key` (encrypted private key)
 - `fiber/sk` (network ID key)
 - `fiber/store` (database files)
@@ -30,15 +30,15 @@ Back up the entire node directory (`node1`), which includes:
    ```bash
    # Check for running node processes
    ps aux | grep fnn
-   # Example output: ckb 3585187 0.7 2.4 756932 194052 ? Sl May07 71:52 ./fnn -c ./node1/config.yml -d ./node1
+   # Example output: ckb 3585187 0.7 2.4 756932 194052 ? Sl May07 71:52 ./fnn -c ./fiber-dir/config.yml -d ./fiber-dir
    # Terminate it (replace 3585187 with your process ID)
    kill 3585187
    ```
 2. **Create Backup**:
    ```bash
-   tar -zcvf node1.tar.gz node1
+   tar -zcvf fiber-dir.tar.gz fiber-dir
    ```
-3. **Store Securely**: Save `node1.tar.gz` and the `FIBER_SECRET_KEY_PASSWORD` in an offline, encrypted environment (e.g., an encrypted drive or password manager).
+3. **Store Securely**: Save `fiber-dir.tar.gz` and the `FIBER_SECRET_KEY_PASSWORD` in an offline, encrypted environment (e.g., an encrypted drive or password manager).
 
 **Note**: A future update will allow backups without stopping the node. Check release notes for updates.
 
@@ -47,11 +47,11 @@ Back up the entire node directory (`node1`), which includes:
 **Steps**:
 1. **Extract Backup**:
    ```bash
-   tar -zxvf node1.tar.gz
+   tar -zxvf fiber-dir.tar.gz
    ```
 2. **Start Node**:
    ```bash
-   FIBER_SECRET_KEY_PASSWORD='YOUR_PASSWORD' ./fnn -c ./node1/config.yml -d ./node1
+   FIBER_SECRET_KEY_PASSWORD='YOUR_PASSWORD' ./fnn -c ./fiber-dir/config.yml -d ./fiber-dir
    ```
 
 **Warning**: Using the wrong password will trigger a startup error (`Secret key file error: decryption failed`). Double-check the password before starting.
@@ -63,19 +63,19 @@ If you lose the `FIBER_SECRET_KEY_PASSWORD` but have a plaintext private key (no
 **Steps**:
 1. **Extract Backup**:
    ```bash
-   tar -zxvf node1.tar.gz
+   tar -zxvf fiber-dir.tar.gz
    ```
 2. **Remove Encrypted Key**:
    ```bash
-   rm -rf node1/ckb
+   rm -rf fiber-dir/ckb
    ```
 3. **Add Plaintext Key**:
    ```bash
-   mkdir node1/ckb
-   echo "YOUR_PLAINTEXT_KEY" > node1/ckb/key
+   mkdir fiber-dir/ckb
+   echo "YOUR_PLAINTEXT_KEY" > fiber-dir/ckb/key
    ```
 4. **Start Node with New Password**:
    ```bash
-   FIBER_SECRET_KEY_PASSWORD='NEW_PASSWORD' ./fnn -c ./node1/config.yml -d ./node1
+   FIBER_SECRET_KEY_PASSWORD='NEW_PASSWORD' ./fnn -c ./fiber-dir/config.yml -d ./fiber-dir
    ```
 5. **Secure the Key**: The `ckb/key` file will be re-encrypted with the new password. Store the new password securely.

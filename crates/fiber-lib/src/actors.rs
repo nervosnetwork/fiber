@@ -32,11 +32,13 @@ impl Actor for RootActor {
 
     /// Spawn a thread that waits for token to be cancelled,
     /// after that kill all sub actors.
+    #[allow(unused)]
     async fn pre_start(
         &self,
         myself: ActorRef<Self::Msg>,
         (tracker, token): Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
+        #[cfg(not(target_arch = "wasm32"))]
         tracker.spawn(async move {
             token.cancelled().await;
             debug!("Shutting down root actor due to cancellation token");

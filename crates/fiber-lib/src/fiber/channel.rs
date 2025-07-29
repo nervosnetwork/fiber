@@ -4,12 +4,7 @@ use crate::fiber::fee::check_open_channel_parameters;
 use crate::fiber::network::DebugEvent;
 use crate::fiber::network::PaymentCustomRecords;
 use crate::fiber::types::BroadcastMessageWithTimestamp;
-use crate::{debug_event, fiber::types::TxAbort, utils::tx::compute_tx_message};
-use bitflags::bitflags;
-use futures::future::OptionFuture;
-use secp256k1::XOnlyPublicKey;
-use tracing::{debug, error, info, trace, warn};
-
+use crate::time::{SystemTime, UNIX_EPOCH};
 use crate::{
     ckb::{
         contracts::{get_cell_deps, get_script_by_contract, Contract},
@@ -40,6 +35,8 @@ use crate::{
     invoice::{CkbInvoice, CkbInvoiceStatus, InvoiceStore, PreimageStore},
     now_timestamp_as_millis_u64, NetworkServiceEvent,
 };
+use crate::{debug_event, fiber::types::TxAbort, utils::tx::compute_tx_message};
+use bitflags::bitflags;
 use ckb_hash::{blake2b_256, new_blake2b};
 use ckb_sdk::{util::blake160, Since, SinceType};
 use ckb_types::{
@@ -51,6 +48,7 @@ use ckb_types::{
     prelude::{AsTransactionBuilder, IntoTransactionView, Pack, Unpack},
     H256,
 };
+use futures::future::OptionFuture;
 use molecule::prelude::{Builder, Entity};
 use musig2::{
     aggregate_partial_signatures,
@@ -64,11 +62,13 @@ use ractor::{
     concurrency::{Duration, JoinHandle},
     Actor, ActorProcessingErr, ActorRef, MessagingErr, OutputPort, RpcReplyPort,
 };
+use secp256k1::XOnlyPublicKey;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use tentacle::secio::PeerId;
 use thiserror::Error;
 use tokio::sync::oneshot;
+use tracing::{debug, error, info, trace, warn};
 
 use super::config::DEFAULT_FUNDING_TIMEOUT_SECONDS;
 use super::{
@@ -79,7 +79,6 @@ use std::{
     collections::HashSet,
     fmt::{self, Debug, Display},
     sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 use super::types::{ChannelUpdateChannelFlags, ChannelUpdateMessageFlags, UpdateTlcInfo};
@@ -232,8 +231,8 @@ pub struct RemoveTlcCommand {
 
 #[derive(Debug)]
 pub struct ShutdownCommand {
-    pub close_script: Script,
-    pub fee_rate: FeeRate,
+    pub close_script: Option<Script>,
+    pub fee_rate: Option<FeeRate>,
     pub force: bool,
 }
 
@@ -658,7 +657,7 @@ where
             }
             ProcessingChannelError::WaitingTlcAck => TlcErrorCode::TemporaryChannelFailure,
             ProcessingChannelError::InternalError(_) => TlcErrorCode::TemporaryNodeFailure,
-            ProcessingChannelError::InvalidState(_error) => match state.state {
+            ProcessingChannelError::InvalidState(_) => match state.state {
                 // we can not revert back up `ChannelReady` after `ShuttingDown`
                 ChannelState::Closed(_) | ChannelState::ShuttingDown(_) => {
                     TlcErrorCode::PermanentChannelFailure
@@ -1533,23 +1532,31 @@ where
                 }
             };
 
-            state.check_shutdown_fee_rate(command.fee_rate, &command.close_script)?;
+            let shutdown_fee_rate = command
+                .fee_rate
+                .unwrap_or(FeeRate::from_u64(state.commitment_fee_rate));
+            let close_script = command
+                .close_script
+                .clone()
+                .unwrap_or(state.get_local_shutdown_script());
+
+            state.check_shutdown_fee_rate(shutdown_fee_rate, &close_script)?;
             self.network
                 .send_message(NetworkActorMessage::new_command(
                     NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
                         self.get_remote_peer_id(),
                         FiberMessage::shutdown(Shutdown {
                             channel_id: state.get_id(),
-                            close_script: command.close_script.clone(),
-                            fee_rate: command.fee_rate,
+                            close_script: close_script.clone(),
+                            fee_rate: shutdown_fee_rate,
                         }),
                     )),
                 ))
                 .expect(ASSUME_NETWORK_ACTOR_ALIVE);
 
             state.local_shutdown_info = Some(ShutdownInfo {
-                close_script: command.close_script,
-                fee_rate: command.fee_rate.as_u64(),
+                close_script,
+                fee_rate: shutdown_fee_rate.as_u64(),
                 signature: None,
             });
             state.update_state(ChannelState::ShuttingDown(
@@ -1988,7 +1995,6 @@ where
                     Err(err) => Some((err.clone(), self.get_tlc_error(state, err).await)),
                     Ok(_) => None,
                 };
-
                 self.network
                     .send_message(NetworkActorMessage::new_event(
                         NetworkActorEvent::AddTlcResult(

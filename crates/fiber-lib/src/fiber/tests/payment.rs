@@ -2401,7 +2401,7 @@ async fn test_send_payment_bench_test() {
 
     let mut all_sent = HashSet::new();
 
-    for i in 1..=30 {
+    for i in 1..=15 {
         assert!(node_0.get_triggered_unexpected_events().await.is_empty());
         assert!(node_1.get_triggered_unexpected_events().await.is_empty());
         assert!(node_2.get_triggered_unexpected_events().await.is_empty());

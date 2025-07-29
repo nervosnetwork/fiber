@@ -10,11 +10,9 @@ pub mod invoice;
 pub mod payment;
 pub mod peer;
 pub mod utils;
-#[cfg(feature = "watchtower")]
 pub mod watchtower;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod server {
-
     use crate::ckb::CkbConfig;
     use crate::fiber::gossip::GossipMessageStore;
     #[cfg(feature = "watchtower")]
@@ -159,7 +157,7 @@ pub mod server {
                     .merge(
                         InfoRpcServerImpl::new(
                             network_actor.clone(),
-                            ckb_config.expect("ckb config should be set"),
+                            ckb_config.clone().expect("ckb config should be set"),
                         )
                         .into_rpc(),
                     )
