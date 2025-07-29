@@ -3,7 +3,10 @@ use biscuit_auth::{
     builder::{Fact, Term},
     AuthorizerBuilder, Biscuit, PublicKey,
 };
-use std::{collections::HashMap, str::FromStr};
+use std::{
+    collections::{HashMap, HashSet},
+    str::FromStr,
+};
 
 use crate::now_timestamp_as_millis_u64;
 
@@ -155,14 +158,29 @@ fn build_rules() -> HashMap<&'static str, AuthRule> {
 
 pub struct BiscuitAuth {
     pubkey: PublicKey,
+    revocation_list: HashSet<Vec<u8>>,
     rules: HashMap<&'static str, AuthRule>,
 }
 
 impl BiscuitAuth {
     pub fn from_pubkey(pubkey: String) -> Result<Self> {
         let pubkey = PublicKey::from_str(&pubkey).context("invalid biscuit public key")?;
+        let revocation_list = Default::default();
         let rules = build_rules();
-        Ok(Self { pubkey, rules })
+        Ok(Self {
+            pubkey,
+            rules,
+            revocation_list,
+        })
+    }
+
+    pub fn extend_revocation_list(&mut self, list: &[String]) -> Result<()> {
+        for rev_id in list {
+            let bin_rev_id =
+                hex::decode(rev_id.trim_start_matches("0x")).context("Invalid revocation ID")?;
+            self.revocation_list.insert(bin_rev_id);
+        }
+        Ok(())
     }
 
     /// check permission with time
@@ -179,6 +197,15 @@ impl BiscuitAuth {
         time_in_ms: u64,
     ) -> Result<()> {
         let b = Biscuit::from_base64(token, self.pubkey).context("invalid token")?;
+        // check revocation
+        if b.revocation_identifiers()
+            .iter()
+            .any(|rev_id| self.revocation_list.contains(rev_id))
+        {
+            tracing::debug!("revoked token: {token}");
+            return Err(anyhow::anyhow!("Token is in revocation list: {token}"));
+        }
+        // check permission
         let Some(rule) = self.rules.get(method) else {
             return Err(anyhow::anyhow!("no rules for method: {method}"));
         };
@@ -413,5 +440,67 @@ mod tests {
         assert!(auth
             .check_permission_with_time("send_payment", json!({}), &token, past_time)
             .is_ok());
+    }
+
+    #[test]
+    fn test_biscuit_revocation() {
+        let root = KeyPair::new();
+
+        // auth
+        let mut auth = BiscuitAuth::from_pubkey(root.public().to_string()).unwrap();
+
+        // sign a biscuit
+        let token = {
+            let biscuit = biscuit!(
+                r#"
+          write("payments");
+          read("peers");
+    "#
+            )
+            .build(&root)
+            .unwrap();
+
+            biscuit.to_base64().unwrap()
+        };
+
+        // sign a exactly same content revoked token
+        let (rev_token, rev_id) = {
+            let biscuit = biscuit!(
+                r#"
+          write("payments");
+          read("peers");
+    "#
+            )
+            .build(&root)
+            .unwrap();
+            let rev_id = hex::encode(&biscuit.revocation_identifiers()[0]);
+
+            (biscuit.to_base64().unwrap(), rev_id)
+        };
+        auth.extend_revocation_list(&[rev_id]).unwrap();
+
+        // check permission
+        assert!(auth
+            .check_permission("send_payment", json!({}), &token,)
+            .is_ok());
+        // write permission do not implies read
+        assert!(auth
+            .check_permission("list_peers", json!({}), &token)
+            .is_ok());
+
+        // check revoked token
+        assert!(auth
+            .check_permission("send_payment", json!({}), &rev_token,)
+            .is_err());
+        // write permission do not implies read
+        assert!(auth
+            .check_permission("list_peers", json!({}), &rev_token)
+            .is_err());
+
+        // if not match any rule, it should be denied
+        assert!(auth.check_permission("unknown", json!({}), &token).is_err());
+        assert!(auth
+            .check_permission("unknown", json!({}), &rev_token)
+            .is_err());
     }
 }

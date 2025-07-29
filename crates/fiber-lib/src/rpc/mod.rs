@@ -234,8 +234,22 @@ pub mod server {
         }
 
         let auth = match config.biscuit_public_key.as_ref() {
-            Some(key) => Some(BiscuitAuth::from_pubkey(key.to_string())?),
-            None => None,
+            Some(key) => {
+                let mut auth = BiscuitAuth::from_pubkey(key.to_string())?;
+                auth.extend_revocation_list(&config.revocation_list)?;
+                tracing::info!(
+                    "Enable RPC auth, revocations {}",
+                    config.revocation_list.len()
+                );
+                Some(auth)
+            }
+            None => {
+                if !config.revocation_list.is_empty() {
+                    tracing::warn!("RPC revocation list will not work without a biscuit public key set in the config.");
+                }
+
+                None
+            }
         };
 
         let mut modules = RpcModule::new(());

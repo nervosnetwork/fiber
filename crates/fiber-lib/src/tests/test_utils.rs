@@ -284,6 +284,7 @@ impl NetworkNodeConfigBuilder {
         self.rpc_config(Some(RpcConfig {
             listening_addr: None,
             biscuit_public_key: None,
+            revocation_list: Default::default(),
             enabled_modules: vec![
                 "channel".to_string(),
                 "graph".to_string(),
