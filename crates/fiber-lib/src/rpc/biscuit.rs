@@ -335,6 +335,7 @@ mod tests {
             .check_permission_with_time("send_payment", &token, past_time)
             .is_ok());
     }
+<<<<<<< HEAD
 
     #[test]
     fn test_biscuit_revocation() {
@@ -387,5 +388,25 @@ mod tests {
         // if not match any rule, it should be denied
         assert!(auth.check_permission("unknown", &token).is_err());
         assert!(auth.check_permission("unknown", &rev_token).is_err());
+    }
+
+    #[test]
+    fn test_parse_biscuit_token() {
+        // Pubkey
+        let pubkey = "ed25519/17b172749be74276f0ed35a5d0685752684a3c5722114bba447a2f301136db79";
+        // token with all permission
+        let token = "EpwDCrECCjBsc3pOcUdRaFU0YVJ2TzhOdENOcXg5QU4wbHJKaTV4WXVvYjMyNmFnWWVNSGtRPT0KA2NjaAoIY2hhbm5lbHMKCG1lc3NhZ2VzCgVjaGFpbgoFZ3JhcGgKCGludm9pY2VzCghwYXltZW50cwoFcGVlcnMKCndhdGNodG93ZXIYAyIJCgcIGBIDGIAIIgkKBwgBEgMYgQgiCQoHCAASAxiBCCIJCgcIARIDGIIIIgkKBwgAEgMYgggiCQoHCAESAxiDCCIJCgcIARIDGIQIIgkKBwgAEgMYhQgiCAoGCAASAhgYIgkKBwgBEgMYhggiCQoHCAASAxiGCCIJCgcIARIDGIcIIgkKBwgAEgMYhwgiCQoHCAESAxiICCIJCgcIABIDGIgIIgkKBwgBEgMYiQgSJAgAEiDMxeZGUMiwW6H8RxMFT2KRScYvhsguZU-SKmgghuLbqxpAKBh52G4E4SmbPqwCt3kqvjq3kVVC9TnbSU3h04dm3i_0ha7spIxkAgMtW-wFvYinJd4ELXyqpAqauQbF3tqjCiIiCiCouqkTeI9Ft8Fd27j6vQ7FsBO_tb6_QXuOnoaxG-k3xg==";
+        // auth
+        let auth = BiscuitAuth::from_pubkey(pubkey.to_string()).unwrap();
+
+        // check permission
+        assert!(auth.check_permission("send_payment", &token,).is_ok());
+        // write permission do not implies read
+        assert!(auth.check_permission("get_payment", &token).is_ok());
+        assert!(auth.check_permission("list_peers", &token).is_ok());
+        assert!(auth.check_permission("connect_peer", &token).is_ok());
+
+        // if not match any rule, it should be denied
+        assert!(auth.check_permission("unknown", &token).is_err());
     }
 }
