@@ -1211,16 +1211,16 @@ where
         &self,
         source: Pubkey,
         amount: u128,
-        min_amount_for_a_part: u128,
+        amount_low_bound: u128,
         max_fee_amount: Option<u128>,
         payment_data: &SendPaymentData,
     ) -> Result<(Vec<RouterHop>, u128), PathFindError> {
         debug!(
-            "find_path for amount {}. Trying to find largest feasible sub-amount.",
-            amount,
+            "binary_find_path_in_range for amount: {} low_bound: {} max_fee_amount: {:?}",
+            amount, amount_low_bound, max_fee_amount
         );
 
-        let mut low = min_amount_for_a_part;
+        let mut low = amount_low_bound;
         let mut high = amount;
 
         let direct_channel_amounts: Vec<_> = self
@@ -1234,13 +1234,8 @@ where
             })
             .collect::<Vec<_>>();
 
-        dbg!("direct_channel_amounts: {:?}", &direct_channel_amounts);
         let max_liquidity = direct_channel_amounts.iter().max().copied().unwrap_or(0);
         high = high.min(max_liquidity);
-
-        if low > high {
-            return Err(PathFindError::PathFind("can not found".to_string()));
-        }
 
         const MAX_BINARY_SEARCH_ITERATIONS: usize = 50;
         let mut best_route_found: Option<Vec<RouterHop>> = None;
@@ -1256,8 +1251,10 @@ where
             match self.find_path_with_payment_data(source, mid, max_fee_amount, payment_data) {
                 Ok(route) => {
                     // Found a path for `mid`. Store it and try for a larger amount.
-                    best_route_found = Some(route);
-                    amount_for_best_route = mid;
+                    if mid > amount_for_best_route {
+                        best_route_found = Some(route);
+                        amount_for_best_route = mid;
+                    }
                     low = mid.saturating_add(1);
                 }
                 Err(PathFindError::PathFind(_)) => {
@@ -1274,7 +1271,6 @@ where
         if let Some(route) = best_route_found {
             Ok((route, amount_for_best_route))
         } else {
-            // No path found even with binary search. Return the initial error.
             return Err(PathFindError::PathFind("can not found".to_string()));
         }
     }
@@ -2447,7 +2443,7 @@ impl From<PaymentSession> for SendPaymentResponse {
 ///    Created --> Inflight ----> Success
 //                 /   |
 ///               /    |
-///              |     | ----- no retry ------> Failed
+///              |     | ----- no retry ----> Failed
 ///               \    |
 ///                \  retry
 ///                 \  |
