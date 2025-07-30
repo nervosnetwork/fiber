@@ -327,7 +327,7 @@ pub async fn main() -> Result<(), ExitMessage> {
     // Start rpc service
     let rpc_server_handle = match (config.rpc, network_graph) {
         (Some(rpc_config), Some(network_graph)) => {
-            let handle = start_rpc(
+            match start_rpc(
                 rpc_config,
                 config.ckb,
                 config.fiber,
@@ -338,8 +338,12 @@ pub async fn main() -> Result<(), ExitMessage> {
                 #[cfg(debug_assertions)] ckb_chain_actor,
                 #[cfg(debug_assertions)] rpc_dev_module_commitment_txs,
             )
-            .await;
-            Some(handle)
+            .await {
+                Ok(handle) => Some(handle),
+                Err(err) => {
+                    return ExitMessage::err(format!("rpc server failed to start: {}", err));
+                }
+            }
         },
         (Some(_), None) => return ExitMessage::err(
             "RPC requires network graph in the fiber service which is not enabled in the config file"

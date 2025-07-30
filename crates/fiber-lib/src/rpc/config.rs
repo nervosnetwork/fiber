@@ -12,6 +12,9 @@ pub struct RpcConfig {
     #[arg(name = "RPC_LISTENING_ADDR", long = "rpc-listening-addr", env)]
     pub listening_addr: Option<String>,
 
+    #[arg(name = "RPC_BISCUIT_PUBLIC_KEY", long = "rpc-biscuit-public-key", env)]
+    pub biscuit_public_key: Option<String>,
+
     #[default(DEFAULT_ENABLED_MODULES.split(',').map(ToString::to_string).collect())]
     #[arg(name = "RPC_ENABLED_MODULES", long = "rpc-enabled-modules", env, value_parser, num_args = 0.., value_delimiter = ',')]
     pub enabled_modules: Vec<String>,

@@ -828,7 +828,7 @@ async fn test_send_payment_hophint_for_mixed_channels_with_udt() {
             ),
         ],
         4,
-        false,
+        None,
     )
     .await;
     let [node1, _node2, node3, node4] = nodes.try_into().expect("4 nodes");
@@ -2828,7 +2828,7 @@ async fn test_send_payment_max_value_in_flight_in_first_hop() {
 
     init_tracing();
 
-    let nodes = NetworkNode::new_interconnected_nodes(2, false).await;
+    let nodes = NetworkNode::new_interconnected_nodes(2, None).await;
     let [mut node_0, mut node_1] = nodes.try_into().expect("2 nodes");
     let (_channel_id, _funding_tx_hash) = {
         establish_channel_between_nodes(
@@ -3271,7 +3271,7 @@ async fn test_send_payment_self_with_mixed_channel() {
             ),
         ],
         2,
-        false,
+        None,
     )
     .await;
 
@@ -3310,7 +3310,7 @@ async fn test_send_payment_self_with_mixed_channel() {
             ),
         ],
         2,
-        false,
+        None,
     )
     .await;
 
@@ -3353,7 +3353,7 @@ async fn test_send_payment_self_with_mixed_channel() {
             ),
         ],
         2,
-        false,
+        None,
     )
     .await;
 
@@ -3385,7 +3385,7 @@ async fn test_send_payment_with_invalid_tlc_expiry() {
             },
         )],
         2,
-        false,
+        None,
     )
     .await;
 
@@ -3459,7 +3459,7 @@ async fn test_send_payself_with_invalid_tlc_expiry() {
             ),
         ],
         2,
-        false,
+        None,
     )
     .await;
 
@@ -3520,7 +3520,7 @@ async fn test_send_payself_with_single_limit_tlc_expiry() {
             ),
         ],
         2,
-        false,
+        None,
     )
     .await;
 
@@ -3566,7 +3566,7 @@ async fn test_send_payself_with_small_min_tlc_value() {
             ),
         ],
         2,
-        false,
+        None,
     )
     .await;
 
