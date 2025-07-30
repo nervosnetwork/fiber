@@ -80,9 +80,9 @@ use crate::fiber::channel::{
 };
 use crate::fiber::config::{
     DEFAULT_MAX_PARTS, DEFAULT_MPP_MIN_AMOUNT, DEFAULT_TLC_EXPIRY_DELTA,
-    MAX_PAYMENT_TLC_EXPIRY_LIMIT, MIN_TLC_EXPIRY_DELTA, PAYMENT_MAX_PARTS_LIMIT,
+    MAX_PAYMENT_TLC_EXPIRY_LIMIT, MILLI_SECONDS_PER_EPOCH, MIN_TLC_EXPIRY_DELTA,
+    PAYMENT_MAX_PARTS_LIMIT,
 };
-
 use crate::fiber::fee::check_open_channel_parameters;
 use crate::fiber::gossip::{GossipConfig, GossipService, SubscribableGossipMessageStore};
 use crate::fiber::graph::{AttemptStatus, GraphChannelStat, PaymentSession, PaymentStatus};
@@ -1272,15 +1272,25 @@ where
                         debug!("Trying to connect to self {:?}, ignoring...", addr);
                         return Ok(());
                     }
+
+                    if state.dialed_peers.contains(&peer_id) {
+                        debug!("Peer {:?} already dialed, ignoring...", peer_id);
+                        return Ok(());
+                    }
+                    state.dialed_peers.insert(peer_id.clone());
+                    debug!(
+                        "debug tentacle dialing peer {:?} with address {:?}",
+                        &peer_id, &addr
+                    );
+                    state
+                        .control
+                        .dial(addr.clone(), TargetProtocol::All)
+                        .await?
                 } else {
                     error!("Failed to extract peer id from address: {:?}", addr);
                     return Ok(());
                 }
 
-                state
-                    .control
-                    .dial(addr.clone(), TargetProtocol::All)
-                    .await?
                 // TODO: note that the dial function does not return error immediately even if dial fails.
                 // Tentacle sends an event by calling handle_error function instead, which
                 // may receive errors like DialerError.
@@ -2971,6 +2981,8 @@ pub struct NetworkActorState<S> {
     // the pre_start function.
     control: ServiceAsyncControl,
     peer_session_map: HashMap<PeerId, ConnectedPeer>,
+    // Duplicated dial to the same peer is not allowed in tentacle, maybe tentacle bug?
+    dialed_peers: HashSet<PeerId>,
     session_channels_map: HashMap<SessionId, HashSet<Hash256>>,
     channels: HashMap<Hash256, ActorRef<ChannelActorMessage>>,
     ckb_txs_in_flight: HashMap<Hash256, ActorRef<InFlightCkbTxActorMessage>>,
@@ -3221,11 +3233,24 @@ where
             }
         }
 
-        if let Some(_delta) = tlc_expiry_delta.filter(|&d| d < MIN_TLC_EXPIRY_DELTA) {
+        if tlc_expiry_delta.is_some_and(|d| d < MIN_TLC_EXPIRY_DELTA) {
             return Err(ProcessingChannelError::InvalidParameter(format!(
                 "TLC expiry delta is too small, expect larger than {}",
                 MIN_TLC_EXPIRY_DELTA
             )));
+        }
+
+        if let (Some(tlc_expiry_delta), Some(delay_epoch)) =
+            (tlc_expiry_delta, commitment_delay_epoch)
+        {
+            let epoch_delay_milliseconds =
+                (delay_epoch.number() as f64 * MILLI_SECONDS_PER_EPOCH as f64 * 2.0 / 3.0) as u64;
+            if tlc_expiry_delta < epoch_delay_milliseconds {
+                return Err(ProcessingChannelError::InvalidParameter(format!(
+                    "TLC expiry delta {} is smaller than 2/3 commitment_delay_epoch delay {}",
+                    tlc_expiry_delta, epoch_delay_milliseconds
+                )));
+            }
         }
 
         let shutdown_script =
@@ -3618,7 +3643,8 @@ where
         command: ChannelCommand,
     ) -> crate::Result<()> {
         match command {
-            // Need to handle the force shutdown command specially because the ChannelActor may not exist when remote peer is disconnected.
+            // Need to handle the force shutdown command specially because the ChannelActor
+            // may not exist when remote peer is disconnected.
             ChannelCommand::Shutdown(shutdown, rpc_reply) if shutdown.force => {
                 if let Some(actor) = self.channels.get(&channel_id) {
                     actor.send_message(ChannelActorMessage::Command(ChannelCommand::Shutdown(
@@ -3817,6 +3843,7 @@ where
                     }
                 }
             }
+            self.dialed_peers.remove(id);
         }
     }
 
@@ -4392,6 +4419,7 @@ where
             control,
             peer_session_map: Default::default(),
             session_channels_map: Default::default(),
+            dialed_peers: Default::default(),
             channels: Default::default(),
             ckb_txs_in_flight: Default::default(),
             outpoint_channel_map: Default::default(),
@@ -4666,6 +4694,7 @@ impl ServiceHandle for NetworkServiceHandle {
         // ServiceError::DialerError => remove address from peer store
         // ServiceError::ProtocolError => ban peer
     }
+
     async fn handle_event(&mut self, _context: &mut ServiceContext, event: ServiceEvent) {
         trace!("Service event: {:?}", event);
     }
