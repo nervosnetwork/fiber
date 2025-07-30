@@ -1,20 +1,19 @@
 use ckb_jsonrpc_types::Script;
-use jsonrpsee::{
-    proc_macros::rpc,
-    types::{error::CALL_EXECUTION_FAILED_CODE, ErrorObjectOwned},
-};
+use jsonrpsee::proc_macros::rpc;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 
-use crate::{
-    fiber::{
-        channel::{RevocationData, SettlementData},
-        types::Hash256,
-    },
-    invoice::PreimageStore,
-    rpc::context::RpcContext,
-    watchtower::WatchtowerStore,
+#[cfg(feature = "watchtower")]
+use jsonrpsee::types::error::{ErrorObjectOwned, CALL_EXECUTION_FAILED_CODE};
+
+use crate::fiber::{
+    channel::{RevocationData, SettlementData},
+    types::Hash256,
 };
+#[cfg(feature = "watchtower")]
+use crate::rpc::context::RpcContext;
+#[cfg(feature = "watchtower")]
+use crate::watchtower::WatchtowerStore;
 
 /// RPC module for watchtower related operations
 #[cfg(feature = "watchtower")]
@@ -176,6 +175,7 @@ impl<S> WatchtowerRpcServerImpl<S> {
     }
 }
 
+#[cfg(feature = "watchtower")]
 fn requrie_node_id_err() -> ErrorObjectOwned {
     ErrorObjectOwned::owned(
         CALL_EXECUTION_FAILED_CODE,
@@ -188,7 +188,7 @@ fn requrie_node_id_err() -> ErrorObjectOwned {
 #[async_trait::async_trait]
 impl<S> WatchtowerRpcServer for WatchtowerRpcServerImpl<S>
 where
-    S: PreimageStore + WatchtowerStore + Send + Sync + 'static,
+    S: WatchtowerStore + Send + Sync + 'static,
 {
     async fn create_watch_channel(
         &self,

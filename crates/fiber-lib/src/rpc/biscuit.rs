@@ -187,7 +187,7 @@ impl BiscuitAuth {
         token: &str,
         time_in_ms: u64,
     ) -> Result<(Biscuit, &AuthRule)> {
-        let b = Biscuit::from_base64(token, &self.pubkey).context("invalid token")?;
+        let b = Biscuit::from_base64(token, self.pubkey).context("invalid token")?;
         // check revocation
         if b.revocation_identifiers()
             .iter()
