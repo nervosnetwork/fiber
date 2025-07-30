@@ -343,7 +343,6 @@ mod tests {
             .check_permission_with_time("send_payment", &token, past_time)
             .is_ok());
     }
-<<<<<<< HEAD
 
     #[test]
     fn test_biscuit_revocation() {

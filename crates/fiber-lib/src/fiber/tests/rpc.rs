@@ -532,18 +532,21 @@ async fn test_rpc_basic_with_auth() {
         .await
         .unwrap();
 
-    let invoice_payment_hash = invoice_res.invoice.payment_hash();
+    let invoice_payment_hash = invoice_res.invoice.data.payment_hash;
     let get_invoice_res: InvoiceResult = node_0
         .send_rpc_request(
             "get_invoice",
             InvoiceParams {
-                payment_hash: *invoice_payment_hash,
+                payment_hash: invoice_payment_hash,
             },
         )
         .await
         .unwrap();
 
-    assert_eq!(get_invoice_res.invoice.payment_hash(), invoice_payment_hash);
+    assert_eq!(
+        get_invoice_res.invoice.data.payment_hash,
+        invoice_payment_hash
+    );
 }
 
 #[tokio::test]
