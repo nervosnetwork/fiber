@@ -25,6 +25,7 @@ fn rpc_config() -> RpcConfig {
         listening_addr: None,
         biscuit_public_key: None,
         enabled_modules: vec![
+            "info".to_string(),
             "channel".to_string(),
             "graph".to_string(),
             "payment".to_string(),
@@ -248,7 +249,7 @@ async fn test_rpc_graph() {
             ),
         ],
         2,
-        true,
+        Some(rpc_config()),
     )
     .await;
     let [node_0, node_1] = nodes.try_into().expect("2 nodes");
@@ -299,7 +300,7 @@ async fn test_rpc_shutdown_channels() {
             ),
         ],
         2,
-        true,
+        Some(rpc_config()),
     )
     .await;
     let [node_0, _node_1] = nodes.try_into().expect("2 nodes");
@@ -422,7 +423,7 @@ async fn test_rpc_node_info() {
             ),
         ],
         2,
-        true,
+        Some(rpc_config()),
     )
     .await;
     let [node_0, _node_1] = nodes.try_into().expect("2 nodes");
@@ -525,23 +526,27 @@ async fn test_rpc_basic_with_auth() {
                 udt_type_script: Some(Script::default().into()),
                 payment_preimage: Hash256::default(),
                 hash_algorithm: Some(crate::fiber::hash_algorithm::HashAlgorithm::CkbHash),
+                allow_mpp: None,
             },
         )
         .await
         .unwrap();
 
-    let invoice_payment_hash = invoice_res.invoice.payment_hash();
+    let invoice_payment_hash = invoice_res.invoice.data.payment_hash;
     let get_invoice_res: InvoiceResult = node_0
         .send_rpc_request(
             "get_invoice",
             InvoiceParams {
-                payment_hash: *invoice_payment_hash,
+                payment_hash: invoice_payment_hash,
             },
         )
         .await
         .unwrap();
 
-    assert_eq!(get_invoice_res.invoice.payment_hash(), invoice_payment_hash);
+    assert_eq!(
+        get_invoice_res.invoice.data.payment_hash,
+        invoice_payment_hash
+    );
 }
 
 #[tokio::test]
