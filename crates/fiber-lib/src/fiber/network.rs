@@ -1264,15 +1264,6 @@ where
                         return Ok(());
                     }
 
-                    if state.dialed_peers.contains(&peer_id) {
-                        debug!("Peer {:?} already dialed, ignoring...", peer_id);
-                        return Ok(());
-                    }
-                    state.dialed_peers.insert(peer_id.clone());
-                    debug!(
-                        "debug tentacle dialing peer {:?} with address {:?}",
-                        &peer_id, &addr
-                    );
                     state
                         .control
                         .dial(addr.clone(), TargetProtocol::All)
@@ -2397,11 +2388,10 @@ where
                 Ok(hops) => {
                     assert_ne!(hops[0].funding_tx_hash, Hash256::default());
                     let route = SessionRoute::new(source, session.request.target_pubkey, &hops);
-                    let left_amount = remain_amount - route.receiver_amount();
                     #[cfg(debug_assertions)]
                     dbg!(
                         "left amount: {}, minimal_amount: {} target amount: {}",
-                        left_amount,
+                        remain_amount - route.receiver_amount(),
                         target_amount,
                         route.receiver_amount()
                     );
@@ -2955,8 +2945,6 @@ pub struct NetworkActorState<S> {
     // the pre_start function.
     control: ServiceAsyncControl,
     peer_session_map: HashMap<PeerId, ConnectedPeer>,
-    // Duplicated dial to the same peer is not allowed in tentacle, maybe tentacle bug?
-    dialed_peers: HashSet<PeerId>,
     session_channels_map: HashMap<SessionId, HashSet<Hash256>>,
     channels: HashMap<Hash256, ActorRef<ChannelActorMessage>>,
     ckb_txs_in_flight: HashMap<Hash256, ActorRef<InFlightCkbTxActorMessage>>,
@@ -3817,7 +3805,6 @@ where
                     }
                 }
             }
-            self.dialed_peers.remove(id);
         }
     }
 
@@ -4393,7 +4380,6 @@ where
             control,
             peer_session_map: Default::default(),
             session_channels_map: Default::default(),
-            dialed_peers: Default::default(),
             channels: Default::default(),
             ckb_txs_in_flight: Default::default(),
             outpoint_channel_map: Default::default(),

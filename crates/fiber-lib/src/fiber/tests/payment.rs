@@ -565,7 +565,7 @@ async fn test_send_payment_for_pay_self_with_invoice() {
             ),
         ],
         3,
-        true,
+        Some(gen_rpc_config()),
     )
     .await;
     let [node_0, _node_1, _node_2] = nodes.try_into().expect("3 nodes");
@@ -622,7 +622,7 @@ async fn test_send_payment_with_normal_invoice_workflow() {
             },
         )],
         2,
-        true,
+        Some(gen_rpc_config()),
     )
     .await;
     let [node_0, node_1] = nodes.try_into().expect("2 nodes");
@@ -954,7 +954,7 @@ async fn test_send_payment_hophint_for_mixed_channels_with_udt() {
             ),
         ],
         4,
-        false,
+        None,
     )
     .await;
     let [node1, _node2, node3, node4] = nodes.try_into().expect("4 nodes");
@@ -2963,7 +2963,7 @@ async fn test_send_payment_max_value_in_flight_in_first_hop() {
 
     init_tracing();
 
-    let nodes = NetworkNode::new_interconnected_nodes(2, false).await;
+    let nodes = NetworkNode::new_interconnected_nodes(2, None).await;
     let [mut node_0, mut node_1] = nodes.try_into().expect("2 nodes");
     let (_channel_id, _funding_tx_hash) = {
         establish_channel_between_nodes(
@@ -3403,7 +3403,7 @@ async fn test_send_payment_self_with_mixed_channel() {
             ),
         ],
         2,
-        false,
+        None,
     )
     .await;
 
@@ -3442,7 +3442,7 @@ async fn test_send_payment_self_with_mixed_channel() {
             ),
         ],
         2,
-        false,
+        None,
     )
     .await;
 
@@ -3485,7 +3485,7 @@ async fn test_send_payment_self_with_mixed_channel() {
             ),
         ],
         2,
-        false,
+        None,
     )
     .await;
 
@@ -3517,7 +3517,7 @@ async fn test_send_payment_with_invalid_tlc_expiry() {
             },
         )],
         2,
-        false,
+        None,
     )
     .await;
 
@@ -3591,7 +3591,7 @@ async fn test_send_payself_with_invalid_tlc_expiry() {
             ),
         ],
         2,
-        false,
+        None,
     )
     .await;
 
@@ -3652,7 +3652,7 @@ async fn test_send_payself_with_single_limit_tlc_expiry() {
             ),
         ],
         2,
-        false,
+        None,
     )
     .await;
 
@@ -3698,7 +3698,7 @@ async fn test_send_payself_with_small_min_tlc_value() {
             ),
         ],
         2,
-        false,
+        None,
     )
     .await;
 
@@ -3760,7 +3760,7 @@ async fn test_send_payment_with_middle_hop_with_min_tlc_value() {
             ),
         ],
         3,
-        false,
+        None,
     )
     .await;
 

@@ -38,7 +38,9 @@ cargo build --locked
 cd "$nodes_dir" || exit 1
 
 start() {
-    ../../target/debug/fnn "$@"
+    log_file="${2}.log"
+    echo "logging to ${log_file}"
+    ../../target/debug/fnn "$@" 2>&1 | tee "$log_file"
 }
 
 if [ "$#" -ne 1 ]; then

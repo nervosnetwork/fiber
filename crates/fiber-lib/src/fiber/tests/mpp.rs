@@ -16,7 +16,7 @@ use crate::{
         types::{Hash256, PaymentDataRecord, PaymentHopData, PeeledOnionPacket, RemoveTlcReason},
         NetworkActorCommand, NetworkActorMessage, PaymentCustomRecords,
     },
-    gen_rand_sha256_hash,
+    gen_rand_sha256_hash, gen_rpc_config,
     invoice::{Currency, InvoiceBuilder},
     now_timestamp_as_millis_u64,
     rpc::invoice::NewInvoiceParams,
@@ -2990,7 +2990,7 @@ async fn test_send_mpp_with_generated_invoice() {
             ),
         ],
         2,
-        true,
+        Some(gen_rpc_config()),
     )
     .await;
 
@@ -3315,7 +3315,7 @@ async fn test_send_mpp_with_large_min_tlc_value_in_channel() {
             ),
         ],
         2,
-        true,
+        Some(gen_rpc_config()),
     )
     .await;
     let [node_0, mut node_1] = nodes.try_into().expect("2 nodes");
@@ -3439,7 +3439,7 @@ async fn test_send_mpp_respect_min_tlc_value() {
             ),
         ],
         3,
-        false,
+        None,
     )
     .await;
 

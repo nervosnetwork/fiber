@@ -65,7 +65,9 @@ rocksdb = { package = "ckb-rocksdb", version = "=0.21.1", features = [
 ], default-features = false }
 clap = { version = "4.5.2", features = ["derive", "env", "string"] }
 clap-serde-derive = "0.2.1"
-jsonrpsee = { version = "0.22", features = ["client", "server", "macros"] }
+jsonrpsee = { version = "0.25.1", features = ["client", "server", "macros"] }
+tower = { version = "0.5" }
+hyper = { version = "1.5" }
 tokio = { version = "1", features = [
     "io-util",
     "macros",
@@ -77,7 +79,7 @@ tokio = { version = "1", features = [
     "signal",
     "process",
 ] }
-tentacle = { version = "0.7", default-features = false, features = [
+tentacle = { version = "0.7.2", default-features = false, features = [
     "upnp",
     "parking_lot",
     "openssl-vendored",
@@ -85,21 +87,21 @@ tentacle = { version = "0.7", default-features = false, features = [
     "tokio-timer",
     "ws",
 ] }
-socket2 = "0.5.7"
 lnd-grpc-tonic-client = "0.3.0"
 home = "0.5.9"
 ckb-hash = "0.202.0"
+biscuit-auth = "6.0.0-beta.3"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 tokio = { version = "1", features = ["io-util", "macros", "rt", "sync"] }
-tentacle = { version = "0.7", default-features = false, features = [
+tentacle = { version = "0.7.2", default-features = false, features = [
     "wasm-timer",
 ] }
 ckb-hash = { version = "0.202.0", features = [
     "blake2b-ref",
 ], default-features = false }
 tracing = { version = "0.1", features = ["log"] }
-jsonrpsee = { version = "0.22", features = [
+jsonrpsee = { version = "0.25.1", features = [
     "macros",
     "server-core",
     "wasm-client",
@@ -121,7 +123,7 @@ bench = ["tempfile", "ckb-testtool"]
 tempfile = "3.10.1"
 ckb-testtool = "0.16.0"
 ciborium = "0.2.2"
-jsonrpsee = { version = "0.22", features = ["server", "macros", "http-client"] }
+jsonrpsee = { version = "0.25.1", features = ["server", "macros", "http-client"] }
 ouroboros = "0.18.5"
 futures = "0.3.31"
 criterion = { version = "0.5", features = ["html_reports"] }
@@ -139,4 +141,8 @@ ignored = ["getrandom"]
 
 [[bench]]
 name = "payment_benchmarks"
+harness = false
+
+[[bench]]
+name = "biscuit_benchmarks"
 harness = false

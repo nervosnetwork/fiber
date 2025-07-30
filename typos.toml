@@ -8,3 +8,8 @@ ignore-hidden = false
 
 [default.extend-identifiers]
 ba = "ba"
+
+[default]
+extend-ignore-re = [
+  ".*==" # ignore base64 string
+]
