@@ -1924,8 +1924,7 @@ dependencies = [
  "serde_with",
  "serde_yaml",
  "strum",
- "tentacle 0.6.7",
- "tentacle 0.7.1",
+ "tentacle",
  "thiserror 1.0.69",
  "tokio",
  "tokio-util",
@@ -5127,13 +5126,15 @@ dependencies = [
 
 [[package]]
 name = "tentacle"
-version = "0.6.7"
+version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7a3374cb0b9cf25499dcb2e9ecf199af2f778b8d40dd01c413536de5b1574a2b"
+checksum = "f506abf5f90f9a082c8368b34bc62026bfc9138c6e6e706c3ea3e9906dc34564"
 dependencies = [
  "async-trait",
  "bytes",
+ "fast-socks5",
  "futures",
+ "futures-timer",
  "httparse",
  "igd-next",
  "js-sys",
@@ -5149,35 +5150,6 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tokio-tungstenite",
- "tokio-util",
- "tokio-yamux",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "winapi",
-]
-
-[[package]]
-name = "tentacle"
-version = "0.7.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c93437528aede81cca2ad8e41569d988b8ca2f13e50a03864f772d1b148314ea"
-dependencies = [
- "async-trait",
- "bytes",
- "fast-socks5",
- "futures",
- "futures-timer",
- "js-sys",
- "libc",
- "log",
- "molecule",
- "nohash-hasher",
- "rand 0.8.5",
- "socket2 0.5.10",
- "tentacle-multiaddr",
- "tentacle-secio",
- "thiserror 1.0.69",
- "tokio",
  "tokio-util",
  "tokio-yamux",
  "url",
@@ -5429,9 +5401,9 @@ dependencies = [
 
 [[package]]
 name = "tokio-tungstenite"
-version = "0.26.2"
+version = "0.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7a9daff607c6d2bf6c16fd681ccb7eecc83e4e2cdc1ca067ffaadfca5de7f084"
+checksum = "489a59b6730eda1b0171fcfda8b121f4bee2b35cba8645ca35c5f7ba3eb736c1"
 dependencies = [
  "futures-util",
  "log",
@@ -5771,9 +5743,9 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
 name = "tungstenite"
-version = "0.26.2"
+version = "0.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4793cb5e56680ecbb1d843515b23b6de9a75eb04b66643e256a396d43be33c13"
+checksum = "eadc29d668c91fcc564941132e17b28a7ceb2f3ebf0b9dae3e03fd7a6748eb0d"
 dependencies = [
  "bytes",
  "data-encoding",

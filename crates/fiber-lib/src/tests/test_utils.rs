@@ -169,7 +169,6 @@ pub fn get_fiber_config<P: AsRef<Path>>(base_dir: P, node_name: Option<&str>) ->
         base_dir: Some(PathBuf::from(base_dir)),
         auto_accept_channel_ckb_funding_amount: Some(0), // Disable auto accept for unit tests
         announce_private_addr: Some(true),               // Announce private address for unit tests
-        reuse_port_for_websocket: true, // FIXME: use `reuse_port_for_websocket` in tests is not stable now
         ..Default::default()
     }
 }
