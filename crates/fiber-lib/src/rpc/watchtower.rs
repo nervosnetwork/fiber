@@ -24,16 +24,16 @@ trait WatchtowerRpc {
     #[method(name = "create_watch_channel")]
     async fn create_watch_channel(
         &self,
-        /// ignore rpc-doc-gen
+        // ignore rpc-doc-gen
         ctx: RpcContext,
         params: CreateWatchChannelParams,
     ) -> Result<(), ErrorObjectOwned>;
 
-    /// Remove a watched channel
+    // Remove a watched channel
     #[method(name = "remove_watch_channel")]
     async fn remove_watch_channel(
         &self,
-        /// ignore rpc-doc-gen
+        // ignore rpc-doc-gen
         ctx: RpcContext,
         params: RemoveWatchChannelParams,
     ) -> Result<(), ErrorObjectOwned>;
@@ -42,7 +42,7 @@ trait WatchtowerRpc {
     #[method(name = "update_revocation")]
     async fn update_revocation(
         &self,
-        /// ignore rpc-doc-gen
+        // ignore rpc-doc-gen
         ctx: RpcContext,
         params: UpdateRevocationParams,
     ) -> Result<(), ErrorObjectOwned>;
@@ -51,7 +51,7 @@ trait WatchtowerRpc {
     #[method(name = "update_local_settlement")]
     async fn update_local_settlement(
         &self,
-        /// ignore rpc-doc-gen
+        // ignore rpc-doc-gen
         ctx: RpcContext,
         params: UpdateLocalSettlementParams,
     ) -> Result<(), ErrorObjectOwned>;
@@ -60,7 +60,7 @@ trait WatchtowerRpc {
     #[method(name = "create_preimage")]
     async fn create_preimage(
         &self,
-        /// ignore rpc-doc-gen
+        // ignore rpc-doc-gen
         ctx: RpcContext,
         params: CreatePreimageParams,
     ) -> Result<(), ErrorObjectOwned>;
@@ -69,7 +69,7 @@ trait WatchtowerRpc {
     #[method(name = "remove_preimage")]
     async fn remove_preimage(
         &self,
-        /// ignore rpc-doc-gen
+        // ignore rpc-doc-gen
         ctx: RpcContext,
         params: RemovePreimageParams,
     ) -> Result<(), ErrorObjectOwned>;
