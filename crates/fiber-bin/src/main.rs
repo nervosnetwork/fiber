@@ -217,7 +217,7 @@ pub async fn main() -> Result<(), ExitMessage> {
             } else {
                 let watchtower_actor = Actor::spawn_linked(
                     Some("watchtower".to_string()),
-                    WatchtowerActor::new(store.clone()),
+                    WatchtowerActor::new(node_id.clone(), store.clone()),
                     ckb_config,
                     root_actor.get_cell(),
                 )

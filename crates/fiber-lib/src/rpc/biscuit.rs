@@ -408,18 +408,18 @@ mod tests {
         let auth = BiscuitAuth::from_pubkey(pubkey.to_string()).unwrap();
 
         // check permission
-        assert!(auth.check_permission("send_payment", &token,).is_ok());
+        assert!(auth.check_permission("send_payment", token).is_ok());
         // write permission do not implies read
-        assert!(auth.check_permission("get_payment", &token).is_ok());
-        assert!(auth.check_permission("list_peers", &token).is_ok());
-        assert!(auth.check_permission("connect_peer", &token).is_ok());
+        assert!(auth.check_permission("get_payment", token).is_ok());
+        assert!(auth.check_permission("list_peers", token).is_ok());
+        assert!(auth.check_permission("connect_peer", token).is_ok());
 
         // if not match any rule, it should be denied
-        assert!(auth.check_permission("unknown", &token).is_err());
+        assert!(auth.check_permission("unknown", token).is_err());
 
         let b = auth.extract_biscuit(token).unwrap();
         let node_id = extract_node_id(&b).unwrap();
-        assert!(node_id.as_ref().len() > 0);
+        assert!(!node_id.as_ref().is_empty());
         println!("node_id: {node_id:?}");
     }
 }

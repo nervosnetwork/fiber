@@ -47,8 +47,7 @@ pub struct WatchtowerActor<S> {
 }
 
 impl<S: WatchtowerStore> WatchtowerActor<S> {
-    pub fn new(store: S) -> Self {
-        let node_id = NodeId::default();
+    pub fn new(node_id: NodeId, store: S) -> Self {
         Self { store, node_id }
     }
 }
