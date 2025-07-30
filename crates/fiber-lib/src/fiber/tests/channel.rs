@@ -4209,15 +4209,22 @@ async fn test_connect_to_peers_with_mutual_channel_on_restart_2() {
             true,
         )
         .await;
+    debug!("debug tentacle node_a and node_b connected");
 
+    debug!("debug tentacle before stop node_a");
     node_a.stop().await;
+    debug!("debug tentacle after stop node_a");
 
     node_b.expect_event(
         |event| matches!(event, NetworkServiceEvent::PeerDisConnected(id, _addr) if id == &node_a.peer_id),
     )
     .await;
 
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
+    debug!("debug tentacle before restart node_a");
     node_a.start().await;
+    debug!("debug tentacle after restart node_a");
 
     node_a.expect_event(
         |event| matches!(event, NetworkServiceEvent::PeerConnected(id, _addr) if id == &node_b.peer_id),

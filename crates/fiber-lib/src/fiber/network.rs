@@ -1180,15 +1180,25 @@ where
                         debug!("Trying to connect to self {:?}, ignoring...", addr);
                         return Ok(());
                     }
+
+                    if state.dialed_peers.contains(&peer_id) {
+                        debug!("Peer {:?} already dialed, ignoring...", peer_id);
+                        return Ok(());
+                    }
+                    state.dialed_peers.insert(peer_id.clone());
+                    debug!(
+                        "debug tentacle dialing peer {:?} with address {:?}",
+                        &peer_id, &addr
+                    );
+                    state
+                        .control
+                        .dial(addr.clone(), TargetProtocol::All)
+                        .await?
                 } else {
                     error!("Failed to extract peer id from address: {:?}", addr);
                     return Ok(());
                 }
 
-                state
-                    .control
-                    .dial(addr.clone(), TargetProtocol::All)
-                    .await?
                 // TODO: note that the dial function does not return error immediately even if dial fails.
                 // Tentacle sends an event by calling handle_error function instead, which
                 // may receive errors like DialerError.
@@ -2415,6 +2425,8 @@ pub struct NetworkActorState<S> {
     // the pre_start function.
     control: ServiceAsyncControl,
     peer_session_map: HashMap<PeerId, ConnectedPeer>,
+    // Duplicated dial to the same peer is not allowed in tentacle, maybe tentacle bug?
+    dialed_peers: HashSet<PeerId>,
     session_channels_map: HashMap<SessionId, HashSet<Hash256>>,
     channels: HashMap<Hash256, ActorRef<ChannelActorMessage>>,
     ckb_txs_in_flight: HashMap<Hash256, ActorRef<InFlightCkbTxActorMessage>>,
@@ -3271,6 +3283,7 @@ where
                     }
                 }
             }
+            self.dialed_peers.remove(id);
         }
     }
 
@@ -3846,6 +3859,7 @@ where
             control,
             peer_session_map: Default::default(),
             session_channels_map: Default::default(),
+            dialed_peers: Default::default(),
             channels: Default::default(),
             ckb_txs_in_flight: Default::default(),
             outpoint_channel_map: Default::default(),
@@ -4104,6 +4118,7 @@ impl ServiceHandle for NetworkServiceHandle {
         // ServiceError::DialerError => remove address from peer store
         // ServiceError::ProtocolError => ban peer
     }
+
     async fn handle_event(&mut self, _context: &mut ServiceContext, event: ServiceEvent) {
         trace!("Service event: {:?}", event);
     }
