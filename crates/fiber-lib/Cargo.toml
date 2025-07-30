@@ -56,7 +56,6 @@ clap-serde-derive = "0.2.1"
 clap = { version = "4.5.2", features = ["derive", "env", "string"] }
 paste = "1.0"
 getrandom = { version = "0.2", features = ["js"] }
-biscuit-auth = "6.0.0-beta.3"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 console = "0.16.0"
@@ -90,6 +89,7 @@ tentacle = { version = "0.6.6", default-features = false, features = [
 lnd-grpc-tonic-client = "0.3.0"
 home = "0.5.9"
 ckb-hash = "0.202.0"
+biscuit-auth = "6.0.0-beta.3"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 tokio = { version = "1", features = ["io-util", "macros", "rt", "sync"] }
@@ -100,7 +100,7 @@ ckb-hash = { version = "0.202.0", features = [
     "blake2b-ref",
 ], default-features = false }
 tracing = { version = "0.1", features = ["log"] }
-jsonrpsee = { version = "0.22", features = [
+jsonrpsee = { version = "0.25.1", features = [
     "macros",
     "server-core",
     "wasm-client",

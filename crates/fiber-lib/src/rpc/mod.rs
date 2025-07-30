@@ -1,3 +1,4 @@
+#[cfg(not(target_arch = "wasm32"))]
 pub mod biscuit;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod cch;
@@ -8,6 +9,7 @@ pub mod dev;
 pub mod graph;
 pub mod info;
 pub mod invoice;
+#[cfg(not(target_arch = "wasm32"))]
 mod middleware;
 pub mod payment;
 pub mod peer;
