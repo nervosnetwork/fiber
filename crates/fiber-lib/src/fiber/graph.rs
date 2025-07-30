@@ -481,6 +481,8 @@ pub enum PathFindError {
     FeatureNotEnabled(String),
     #[error("Insufficient balance: {0}")]
     InsufficientBalance(String),
+    #[error("TLC min_tlc_value error: {0}")]
+    TlcMinValue(u128),
     #[error("Graph other error: {0}")]
     Other(String),
 }
@@ -1148,35 +1150,26 @@ where
             (payment_data.router.clone(), amount)
         } else {
             // Attempt to find a path for the requested `amount`.
-            match self.find_path_with_payment_data(
-                source,
-                amount,
-                max_fee_amount,
-                payment_data,
-            ) {
+            match self.find_path_with_payment_data(source, amount, max_fee_amount, payment_data) {
                 Ok(route) => (route, amount),
-                Err(PathFindError::PathFind(orig_err))
-                    // Condition to attempt finding a smaller amount:
-                    // - MPP is allowed for the payment.
-                    // - This is not the last part we are forced to make (more flexible).
-                    // - The requested amount is greater than the minimum allowed for a part.
+                Err(PathFindError::PathFind(_)) | Err(PathFindError::TlcMinValue(_))
                     if allow_mpp && amount_low_bound.is_some_and(|low| low < amount) =>
                 {
                     if let Ok(res) = self.binary_find_path_in_range(
-                            source,
-                            amount.saturating_sub(1),
-                            amount_low_bound.unwrap(),
-                            max_fee_amount,
-                            payment_data
-                        ) {
-                            res
-                        } else {
-                            return Err(PathFindError::PathFind(orig_err));
-                        }
+                        source,
+                        amount.saturating_sub(1),
+                        amount_low_bound.unwrap(),
+                        max_fee_amount,
+                        payment_data,
+                    ) {
+                        res
+                    } else {
+                        return Err(PathFindError::PathFind("no path found".to_string()));
                     }
-                    // Initial find_path failed with a non-PathFind error,
-                    // or conditions for trying smaller amounts were not met.
-                    Err(err) => return Err(err),
+                }
+                // Initial find_path failed with a non-PathFind error,
+                // or conditions for trying smaller amounts were not met.
+                Err(err) => return Err(err),
             }
         };
 
@@ -1249,18 +1242,6 @@ where
             return Err(PathFindError::PathFind("can not found".to_string()));
         }
 
-        if self
-            .find_path_with_payment_data(source, low, max_fee_amount, payment_data)
-            .is_err()
-        {
-            return Err(PathFindError::PathFind("can not found".to_string()));
-        }
-        if let Ok(router) =
-            self.find_path_with_payment_data(source, high, max_fee_amount, payment_data)
-        {
-            return Ok((router, high));
-        }
-
         const MAX_BINARY_SEARCH_ITERATIONS: usize = 50;
         let mut best_route_found: Option<Vec<RouterHop>> = None;
         let mut amount_for_best_route: u128 = 0;
@@ -1283,7 +1264,10 @@ where
                     // `mid` is too high, try smaller.
                     high = mid.saturating_sub(1);
                 }
-                Err(non_pathfind_err) => return Err(non_pathfind_err),
+                Err(PathFindError::TlcMinValue(tlc_min_value)) => {
+                    low = tlc_min_value;
+                }
+                Err(other_error) => return Err(other_error),
             }
         }
 
@@ -1366,6 +1350,8 @@ where
         channel_outpoint: &OutPoint,
         // The capacity of the channel.
         channel_capacity: u128,
+        // The tlc min value of the channel.
+        tlc_min_value: u128,
         // The source node of the edge.
         from: Pubkey,
         // The target node of the edge.
@@ -1431,6 +1417,7 @@ where
             weight,
             distance,
             amount_to_send: next_hop_received_amount + fee,
+            tlc_min_value,
             incoming_tlc_expiry: incoming_tlc_expiry + tlc_expiry_delta,
             fee_charged: fee,
             probability,
@@ -1560,8 +1547,11 @@ where
                             err
                         ))
                     })?;
+                // hop hint is only used for private channels, we assume there is no tlc_min_value limit
+                let tlc_min_val = 0;
                 self.eval_and_update(
                     &hint.channel_outpoint,
+                    tlc_min_val,
                     sufficiently_large_capacity,
                     hint.pubkey,
                     target,
@@ -1583,6 +1573,7 @@ where
         // initialize the target node
         nodes_heap.push(NodeHeapElement {
             node_id: target,
+            tlc_min_value: 0,
             weight: 0,
             distance: 0,
             amount_to_send: amount,
@@ -1648,6 +1639,7 @@ where
                     .get_send_node(from)
                     .expect("send_node should exist");
 
+                let tlc_min_value = channel_update.tlc_minimum_value;
                 if !self.check_channel_amount_and_expiry(
                     amount_to_send,
                     channel_info,
@@ -1656,6 +1648,7 @@ where
                     tlc_expiry_limit,
                     send_node,
                     channel_stats,
+                    allow_mpp,
                 ) {
                     continue;
                 }
@@ -1675,6 +1668,7 @@ where
                 self.eval_and_update(
                     channel_info.out_point(),
                     channel_info.capacity(),
+                    tlc_min_value,
                     from,
                     to,
                     next_hop_received_amount,
@@ -1692,8 +1686,12 @@ where
         }
 
         let mut current = source;
+        let mut max_min_tlc_value = 0;
         while let Some(elem) = distances.remove(&current) {
             let edge = elem.next_hop.expect("next_hop is none");
+            if elem.amount_to_send < elem.tlc_min_value {
+                max_min_tlc_value = max_min_tlc_value.max(elem.tlc_min_value);
+            }
             current = edge.target;
             result.push(edge);
             if current == target {
@@ -1709,6 +1707,12 @@ where
         }
         if let Some(edge) = last_edge {
             result.push(edge)
+        }
+
+        // check the router meets tlc_min_val requirements, otherwise return proper error
+        // only do this for mpp payments, because for single payment we already checked the amount
+        if allow_mpp && max_min_tlc_value > 0 {
+            return Err(PathFindError::TlcMinValue(max_min_tlc_value));
         }
 
         info!(
@@ -1750,6 +1754,7 @@ where
                             .get_send_node(*from)
                             .expect("send_node should exist"),
                         channel_stats,
+                        allow_mpp,
                     )
                     && (!allow_mpp || self.is_node_support_mpp(from))
             })
@@ -1799,6 +1804,7 @@ where
         tlc_expiry_limit: u64,
         sent_node: SentNode,
         channel_stats: &GraphChannelStat,
+        allow_mpp: bool,
     ) -> bool {
         if calculate_tlc_forward_fee(amount, channel_update.fee_rate as u128).is_err() {
             return false;
@@ -1811,8 +1817,9 @@ where
         if amount > channel_info.capacity() {
             return false;
         }
-        // We should use amount_to_send because that is the amount to be sent over the channel.
-        if amount < channel_update.tlc_minimum_value {
+        // We are finding path for a amount range for mpp, we don't check the tlc_minimum_value here,
+        // but return proper error after the path is found
+        if amount < channel_update.tlc_minimum_value && !allow_mpp {
             return false;
         }
 

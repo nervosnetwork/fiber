@@ -2015,9 +2015,9 @@ async fn test_send_mpp_dry_run_will_be_ok_with_single_path() {
     }
 
     // too small
-    test_dryrun_with_network(5000, None, None).await;
+    test_dryrun_with_network(0, None, None).await;
     test_dryrun_with_network(300000, None, None).await;
-    test_dryrun_with_network(300000 - 200, None, None).await;
+    test_dryrun_with_network(300000 - 200, Some(5), Some(302)).await;
     test_dryrun_with_network(300000 - 300, Some(3), Some(300)).await;
 }
 
@@ -2097,15 +2097,17 @@ async fn test_send_mpp_dry_run_single_path_mixed_with_multiple_paths() {
                 assert_eq!(fee, expect_fee);
             }
         } else {
+            debug!("send payment: {:?} failed: {:?}", amount, res);
             assert!(res.is_err());
         }
     }
 
     // too small
-    test_dryrun_with_network(1000, None, None).await;
+    test_dryrun_with_network(0, None, None).await;
+    test_dryrun_with_network(1000, Some(1), Some(0)).await;
     test_dryrun_with_network(500000, Some(1), Some(0)).await;
     test_dryrun_with_network(300000, Some(1), None).await;
-    test_dryrun_with_network(500000 + 5, Some(2), Some(10)).await;
+    test_dryrun_with_network(500000 + 5, Some(2), Some(1)).await;
     test_dryrun_with_network(600000 + 5, Some(3), Some(101)).await;
     test_dryrun_with_network(700000 + 5, Some(4), Some(201)).await;
     test_dryrun_with_network(800000, None, None).await;
@@ -3388,4 +3390,74 @@ async fn test_send_mpp_with_reverse_node_send_back() {
     let payment_hash = res.unwrap().payment_hash;
     eprintln!("begin to wait for payment: {} success ...", payment_hash);
     node_0.wait_until_success(payment_hash).await;
+}
+
+#[tokio::test]
+async fn test_send_mpp_respect_min_tlc_value() {
+    init_tracing();
+
+    let (nodes, _channels) = create_n_nodes_network_with_params(
+        &[
+            (
+                (0, 1),
+                ChannelParameters {
+                    public: true,
+                    node_a_funding_amount: 50000 + MIN_RESERVED_CKB,
+                    node_b_funding_amount: MIN_RESERVED_CKB,
+                    ..Default::default()
+                },
+            ),
+            (
+                (1, 2),
+                ChannelParameters {
+                    public: true,
+                    node_a_funding_amount: 10100 + MIN_RESERVED_CKB,
+                    node_b_funding_amount: MIN_RESERVED_CKB,
+                    a_tlc_min_value: Some(9000), // with a min_tlc value
+                    ..Default::default()
+                },
+            ),
+            (
+                (1, 2),
+                ChannelParameters {
+                    public: true,
+                    node_a_funding_amount: 10100 + MIN_RESERVED_CKB,
+                    node_b_funding_amount: MIN_RESERVED_CKB,
+                    a_tlc_min_value: Some(9000), // with a min_tlc value
+                    ..Default::default()
+                },
+            ),
+            (
+                (1, 2),
+                ChannelParameters {
+                    public: true,
+                    node_a_funding_amount: 10100 + MIN_RESERVED_CKB,
+                    node_b_funding_amount: MIN_RESERVED_CKB,
+                    a_tlc_min_value: Some(9000), // with a min_tlc value
+                    ..Default::default()
+                },
+            ),
+        ],
+        3,
+        false,
+    )
+    .await;
+
+    let [node_0, _node_1, mut node_2] = nodes.try_into().expect("3 nodes");
+
+    let res = node_0.send_payment_keysend(&node_2, 10000, true).await;
+    assert!(res.is_ok());
+
+    let res = node_0
+        .send_mpp_payment_with_dry_run_option(&mut node_2, 28000, Some(3), true)
+        .await;
+
+    eprintln!("res: {:?}", res);
+    assert!(res.is_err());
+
+    let res = node_0
+        .send_mpp_payment_with_dry_run_option(&mut node_2, 30000, None, true)
+        .await;
+    debug!("res: {:?}", res);
+    assert!(res.is_ok());
 }

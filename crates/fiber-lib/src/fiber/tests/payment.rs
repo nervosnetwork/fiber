@@ -3732,6 +3732,76 @@ async fn test_send_payself_with_small_min_tlc_value() {
 }
 
 #[tokio::test]
+async fn test_send_payment_with_middle_hop_with_min_tlc_value() {
+    init_tracing();
+
+    let funding_amount = HUGE_CKB_AMOUNT;
+    let (nodes, _channels) = create_n_nodes_network_with_params(
+        &[
+            (
+                (0, 1),
+                ChannelParameters {
+                    public: true,
+                    node_a_funding_amount: funding_amount,
+                    node_b_funding_amount: funding_amount,
+                    a_tlc_min_value: Some(100),
+                    ..Default::default()
+                },
+            ),
+            (
+                (1, 2),
+                ChannelParameters {
+                    public: true,
+                    node_a_funding_amount: funding_amount,
+                    node_b_funding_amount: funding_amount,
+                    a_tlc_min_value: Some(50),
+                    ..Default::default()
+                },
+            ),
+        ],
+        3,
+        false,
+    )
+    .await;
+
+    // too small amount will fail
+    let res = nodes[0]
+        .send_payment(SendPaymentCommand {
+            target_pubkey: Some(nodes[2].pubkey),
+            amount: Some(40),
+            keysend: Some(true),
+            dry_run: true,
+            ..Default::default()
+        })
+        .await;
+    assert!(res.is_err());
+
+    // too small amount will fail
+    let res = nodes[0]
+        .send_payment(SendPaymentCommand {
+            target_pubkey: Some(nodes[2].pubkey),
+            amount: Some(60),
+            keysend: Some(true),
+            dry_run: true,
+            ..Default::default()
+        })
+        .await;
+    assert!(res.is_err());
+
+    // normal amount will success
+    let res = nodes[0]
+        .send_payment(SendPaymentCommand {
+            target_pubkey: Some(nodes[2].pubkey),
+            amount: Some(110),
+            keysend: Some(true),
+            dry_run: true,
+            ..Default::default()
+        })
+        .await;
+    assert!(res.is_ok());
+}
+
+#[tokio::test]
 async fn test_send_payment_complex_network_payself_all_succeed() {
     // from issue 475
     // channel amount is enough, so all payments should success
