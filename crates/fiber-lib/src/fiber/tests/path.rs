@@ -1,7 +1,8 @@
 use crate::fiber::path::{NodeHeap, NodeHeapElement};
 use secp256k1::{PublicKey, Secp256k1, SecretKey};
 
-#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
 fn test_node_heap() {
     let secp = Secp256k1::new();
     let secret_key1 = SecretKey::from_slice(&[0xcd; 32]).expect("32 bytes, within curve order");
@@ -43,7 +44,8 @@ fn test_node_heap() {
     assert!(heap.is_empty());
 }
 
-#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
 fn test_node_heap_probability() {
     let secp = Secp256k1::new();
     let secret_key1 = SecretKey::from_slice(&[0xcd; 32]).expect("32 bytes, within curve order");
@@ -82,7 +84,8 @@ fn test_node_heap_probability() {
     assert_eq!(heap.pop(), None);
 }
 
-#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
 fn test_node_heap_distance() {
     let secp = Secp256k1::new();
     let secret_key1 = SecretKey::from_slice(&[0xcd; 32]).expect("32 bytes, within curve order");
@@ -121,7 +124,8 @@ fn test_node_heap_distance() {
     assert_eq!(heap.pop(), None);
 }
 
-#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
 fn test_node_heap_push_or_fix() {
     let secp = Secp256k1::new();
     let secret_key1 = SecretKey::from_slice(&[0xcd; 32]).expect("32 bytes, within curve order");

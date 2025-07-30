@@ -18,6 +18,7 @@ use crate::fiber::types::Shutdown;
 use crate::fiber::ASSUME_NETWORK_ACTOR_ALIVE;
 use crate::invoice::*;
 use crate::rpc::config::RpcConfig;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::rpc::server::start_rpc;
 use ckb_sdk::core::TransactionBuilder;
 use ckb_types::core::FeeRate;
@@ -25,10 +26,14 @@ use ckb_types::{
     core::{tx_pool::TxStatus, TransactionView},
     packed::{OutPoint, Script},
 };
+#[cfg(not(target_arch = "wasm32"))]
 use jsonrpsee::core::client::ClientT;
+#[cfg(not(target_arch = "wasm32"))]
 use jsonrpsee::http_client::transport::HttpBackend;
+#[cfg(not(target_arch = "wasm32"))]
 use jsonrpsee::http_client::HttpClient;
 use jsonrpsee::rpc_params;
+#[cfg(not(target_arch = "wasm32"))]
 use jsonrpsee::server::ServerHandle;
 use ractor::{call, Actor, ActorRef};
 use rand::distributions::Alphanumeric;
@@ -211,6 +216,7 @@ pub struct NetworkNode {
     pub pubkey: Pubkey,
     pub unexpected_events: Arc<TokioRwLock<HashSet<String>>>,
     pub triggered_unexpected_events: Arc<TokioRwLock<Vec<String>>>,
+    #[cfg(not(target_arch = "wasm32"))]
     pub rpc_server: Option<(ServerHandle, SocketAddr)>,
 }
 
@@ -333,6 +339,8 @@ impl NetworkNodeConfigBuilder {
                 rpc_url: "http://localhost:8114".to_string(),
                 tx_tracing_polling_interval_ms: 4000,
                 udt_whitelist: None,
+                #[cfg(target_arch = "wasm32")]
+                wasm_secret_key: None,
             })
         } else {
             None
@@ -779,7 +787,7 @@ impl NetworkNode {
         })
         .await
     }
-
+    #[cfg(not(target_arch = "wasm32"))]
     pub async fn send_rpc_request_raw<P: Serialize>(
         &self,
         method: &str,
@@ -800,7 +808,7 @@ impl NetworkNode {
             Err("RPC server not started".to_string())
         }
     }
-
+    #[cfg(not(target_arch = "wasm32"))]
     pub async fn send_rpc_request<P: Serialize, R: DeserializeOwned>(
         &self,
         method: &str,
@@ -1247,7 +1255,7 @@ impl NetworkNode {
         let gossip_actor = ractor::registry::where_is(get_gossip_actor_name(&peer_id))
             .expect("gossip actor should have been started")
             .into();
-
+        #[cfg(not(target_arch = "wasm32"))]
         let rpc_handler = if let Some(rpc_config) = rpc_config.clone() {
             Some(
                 start_rpc(
@@ -1290,6 +1298,7 @@ impl NetworkNode {
             pubkey: public_key,
             unexpected_events,
             triggered_unexpected_events,
+            #[cfg(not(target_arch = "wasm32"))]
             rpc_server: rpc_handler,
         }
     }

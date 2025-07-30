@@ -454,7 +454,8 @@ async fn test_tlc_actor() {
     tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
 }
 
-#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
 fn test_tlc_state_v2() {
     let mut tlc_state = TlcState::default();
     let mut add_tlc1 = TlcInfo {

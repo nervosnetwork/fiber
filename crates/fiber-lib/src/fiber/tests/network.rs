@@ -783,7 +783,8 @@ async fn test_saving_and_connecting_to_node() {
     .await;
 }
 
-#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
 fn test_announcement_message_serialize() {
     let capacity = 42;
     let priv_key: Privkey = get_test_priv_key();
@@ -818,7 +819,8 @@ fn test_announcement_message_serialize() {
     assert_eq!(shutdown_info, deserialized);
 }
 
-#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
 fn test_send_payment_validate_payment_hash() {
     let send_command = SendPaymentCommand {
         target_pubkey: Some(gen_rand_fiber_public_key()),
@@ -831,7 +833,8 @@ fn test_send_payment_validate_payment_hash() {
     assert!(result.unwrap_err().contains("payment_hash is missing"));
 }
 
-#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
 fn test_send_payment_validate_amount() {
     let send_command = SendPaymentCommand {
         target_pubkey: Some(gen_rand_fiber_public_key()),
@@ -843,7 +846,8 @@ fn test_send_payment_validate_amount() {
     assert!(result.unwrap_err().contains("amount is missing"));
 }
 
-#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
 fn test_send_payment_validate_invoice() {
     use crate::invoice::Attribute;
     use crate::invoice::Currency;
@@ -959,7 +963,8 @@ fn test_send_payment_validate_invoice() {
         .contains("invalid final_tlc_expiry_delta"));
 }
 
-#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
 fn test_send_payment_validate_htlc_expiry_delta() {
     let send_command = SendPaymentCommand {
         target_pubkey: Some(gen_rand_fiber_public_key()),

@@ -3,7 +3,8 @@ use crate::fiber::features::{
     *,
 };
 
-#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
 fn test_feature_bits() {
     let mut vector = FeatureVector::new();
 
@@ -30,7 +31,8 @@ fn test_feature_bits() {
     assert!(vector.requires_basic_mpp());
 }
 
-#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
 fn test_feature_support_and_requires() {
     let mut vector = FeatureVector::new();
 
@@ -52,7 +54,8 @@ fn test_feature_support_and_requires() {
     assert!(!vector.requires_basic_mpp());
 }
 
-#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
 fn test_feature_vector_names() {
     let mut vector = FeatureVector::new();
     let debug_str = format!("{:?}", vector);
@@ -104,7 +107,8 @@ fn test_feature_vector_names() {
     );
 }
 
-#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
 fn test_serialize() {
     let mut vector = FeatureVector::new();
     vector.set_basic_mpp_optional();
@@ -119,7 +123,8 @@ fn test_serialize() {
     assert_eq!(vector, deserialized);
 }
 
-#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
 fn test_feature_default() {
     let vector = FeatureVector::default();
     assert!(vector.requires_gossip_queries());
@@ -128,7 +133,8 @@ fn test_feature_default() {
     assert!(!vector.requires_basic_mpp());
 }
 
-#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
 fn test_feature_random() {
     let mut vector = FeatureVector::new();
 
@@ -162,7 +168,8 @@ fn test_feature_random() {
     assert!(vector.is_empty());
 }
 
-#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
 fn test_featuer_compatibility() {
     let mut vector = FeatureVector::new();
     let mut vector2 = FeatureVector::new();
@@ -184,7 +191,8 @@ fn test_featuer_compatibility() {
     assert!(!vector.compatible_with(&vector2));
 }
 
-#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
 fn test_feature_serialize_and_deserialize() {
     let mut vector = FeatureVector::new();
     vector.set_gossip_queries_required();

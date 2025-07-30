@@ -18,6 +18,7 @@ use crate::store::store_impl::deserialize_from;
 use crate::store::store_impl::serialize_to_vec;
 use crate::store::Store;
 use crate::tests::test_utils::*;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::watchtower::*;
 use ckb_hash::new_blake2b;
 use ckb_types::packed::*;
@@ -30,7 +31,7 @@ use musig2::SecNonce;
 use secp256k1::SecretKey;
 use secp256k1::{Keypair, Secp256k1};
 use std::collections::HashMap;
-use std::time::SystemTime;
+use crate::time::SystemTime;
 
 fn gen_rand_key_pair() -> Keypair {
     let secp = Secp256k1::new();
@@ -217,6 +218,7 @@ fn test_store_save_node_announcement() {
     assert_eq!(new_node_announcement, Some(node_announcement));
 }
 
+#[cfg(not(target_arch="wasm32"))]
 #[test]
 fn test_store_wacthtower() {
     let path = TempDir::new("test-watchtower-store");
