@@ -2588,8 +2588,11 @@ where
         error: &str,
         retryable: bool,
     ) {
-        if !retryable && !session.allow_more_attempts() {
-            // if mpp is not allowed, or mpp is allowed but attempt is not retryable
+        if !retryable
+            && !session.allow_more_attempts()
+            && !session.active_attempts().any(|a| a.id != attempt.id)
+        {
+            // if mpp is not allowed, or mpp is allowed but no other active attempts
             // we will set the session status to failed
             self.set_payment_fail_with_error(session, error);
         }

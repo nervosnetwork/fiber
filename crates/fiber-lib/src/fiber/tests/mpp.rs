@@ -3209,6 +3209,32 @@ async fn test_mpp_can_not_find_path_filter_target_node_features() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_mpp_fail_on_attempt_in_multiple_attempts() {
+    init_tracing();
+
+    let (nodes, _channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (MIN_RESERVED_CKB + 10000, MIN_RESERVED_CKB)),
+            ((0, 1), (MIN_RESERVED_CKB + 10000, MIN_RESERVED_CKB)),
+            ((1, 2), (MIN_RESERVED_CKB + 10000, MIN_RESERVED_CKB)),
+            ((1, 2), (MIN_RESERVED_CKB + 10000, MIN_RESERVED_CKB)),
+        ],
+        3,
+    )
+    .await;
+    let [node_0, _node_1, mut node_2] = nodes.try_into().expect("3 nodes");
+
+    let res = node_0
+        .send_mpp_payment_with_dry_run_option(&mut node_2, 15000, Some(2), true)
+        .await;
+    eprintln!("query res: {:?}", res);
+
+    assert!(res.is_ok());
+
+    // TODO: add more tests for multiple attempts
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_mpp_can_not_find_path_filter_middle_node_features() {
     async fn test_node_feature(update_node_index: usize) {
         init_tracing();

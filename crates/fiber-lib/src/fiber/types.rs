@@ -1599,19 +1599,6 @@ impl TlcErrorCode {
     pub fn is_update(&self) -> bool {
         *self as u16 & UPDATE != 0
     }
-
-    pub fn payment_failed(&self) -> bool {
-        matches!(
-            self,
-            TlcErrorCode::IncorrectOrUnknownPaymentDetails
-                | TlcErrorCode::FinalIncorrectExpiryDelta
-                | TlcErrorCode::FinalIncorrectTlcAmount
-                | TlcErrorCode::InvoiceExpired
-                | TlcErrorCode::InvoiceCancelled
-                | TlcErrorCode::ExpiryTooFar
-                | TlcErrorCode::ExpiryTooSoon
-        )
-    }
 }
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]

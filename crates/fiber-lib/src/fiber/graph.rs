@@ -2221,7 +2221,7 @@ impl PaymentSession {
         self.active_attempts().map(|a| a.route.fee()).sum()
     }
 
-    pub fn success_attempts_amount_is_enough(&self) -> bool {
+    fn success_attempts_amount_is_enough(&self) -> bool {
         let success_amount: u128 = self
             .attempts()
             .filter_map(|a| {

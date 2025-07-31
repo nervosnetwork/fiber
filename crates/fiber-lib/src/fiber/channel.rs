@@ -3733,7 +3733,8 @@ pub struct ChannelActorState {
     pub local_shutdown_info: Option<ShutdownInfo>,
     pub remote_shutdown_info: Option<ShutdownInfo>,
 
-    // A flag to indicate whether the channel is reestablishing, we won't process any messages until the channel is reestablished.
+    // A flag to indicate whether the channel is reestablishing,
+    // we won't process any messages until the channel is reestablished.
     pub reestablishing: bool,
     pub last_revoke_ack_msg: Option<RevokeAndAck>,
 
