@@ -11,7 +11,6 @@ fiber:
 
 rpc:
   listening_addr: 127.0.0.1:41716
-  biscuit_public_key: "ed25519/17b172749be74276f0ed35a5d0685752684a3c5722114bba447a2f301136db79"
   enabled_modules:
     - cch
     - channel
