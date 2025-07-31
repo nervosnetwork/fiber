@@ -473,8 +473,8 @@ pub struct NetworkGraph<S> {
 pub enum PathFindError {
     #[error("Graph error: {0}")]
     Amount(String),
-    #[error("PathFind error: {0}")]
-    PathFind(String),
+    #[error("PathFind error: no path found")]
+    NoPathFound,
     #[error("Overflow error: {0}")]
     Overflow(String),
     #[error("Feature not enabled: {0}")]
@@ -1146,7 +1146,7 @@ where
             let amount_low_bound = amount_low_bound.unwrap_or(u128::MAX);
             match self.find_path_with_payment_data(source, amount, max_fee_amount, payment_data) {
                 Ok(route) => (route, amount),
-                Err(PathFindError::PathFind(_)) | Err(PathFindError::TlcMinValue(_))
+                Err(PathFindError::NoPathFound) | Err(PathFindError::TlcMinValue(_))
                     if payment_data.allow_mpp() && amount_low_bound < amount =>
                 {
                     let Ok(res) = self.binary_find_path_in_range(
@@ -1156,7 +1156,7 @@ where
                         max_fee_amount,
                         payment_data,
                     ) else {
-                        return Err(PathFindError::PathFind("no path found".to_string()));
+                        return Err(PathFindError::NoPathFound);
                     };
                     res
                 }
@@ -1164,7 +1164,7 @@ where
             }
         };
 
-        assert!(
+        debug_assert!(
             !route_hops.is_empty(),
             "Route hops should not be empty if Ok"
         );
@@ -1248,7 +1248,7 @@ where
                     }
                     low = mid.saturating_add(1);
                 }
-                Err(PathFindError::PathFind(_)) => {
+                Err(PathFindError::NoPathFound) => {
                     // `mid` is too high, try smaller.
                     high = mid.saturating_sub(1);
                 }
@@ -1262,7 +1262,7 @@ where
         if let Some(route) = best_route_found {
             Ok((route, amount_for_best_route))
         } else {
-            return Err(PathFindError::PathFind("can not found".to_string()));
+            return Err(PathFindError::NoPathFound);
         }
     }
 
@@ -1585,7 +1585,7 @@ where
                     continue;
                 }
 
-                assert_eq!(to, cur_hop.node_id);
+                debug_assert_eq!(to, cur_hop.node_id);
                 if &udt_type_script != channel_info.udt_type_script() {
                     continue;
                 }
@@ -1690,7 +1690,7 @@ where
             // TODO check total outbound balance and return error if it's not enough
             // this can help us early return if the payment is not possible to be sent
             // otherwise when PathFind error is returned, we need to retry with half amount
-            return Err(PathFindError::PathFind("no path found".to_string()));
+            return Err(PathFindError::NoPathFound);
         }
         if let Some(edge) = last_edge {
             result.push(edge)
@@ -1762,7 +1762,7 @@ where
         if let Some((from, outpoint, tlc_expiry_delta, fee_rate, ..)) =
             channels.choose(&mut thread_rng())
         {
-            assert_ne!(source, *from);
+            debug_assert_ne!(source, *from);
             // we have already checked the fee rate and amount in check_channel_amount_and_expiry
             let fee = calculate_tlc_forward_fee(amount, *fee_rate as u128).map_err(|err| {
                 PathFindError::Overflow(format!("calculate_tlc_forward_fee error: {:?}", err))
@@ -1775,9 +1775,7 @@ where
             };
             Ok((last_edge, *from, *tlc_expiry_delta, fee))
         } else {
-            return Err(PathFindError::PathFind(
-                "no direct channel found for source node".to_string(),
-            ));
+            return Err(PathFindError::NoPathFound);
         }
     }
 
@@ -1849,7 +1847,7 @@ where
     }
 
     fn calculate_distance_based_probability(&self, probability: f64, weight: u128) -> u128 {
-        assert!(probability > 0.0);
+        debug_assert!(probability > 0.0);
         // FIXME: set this to configurable parameters
         let weight = weight as f64;
         let time_pref = 0.9_f64;
@@ -1988,7 +1986,7 @@ where
                 agg_amount = edge.amount_received + fee;
                 path.push(edge.clone());
             } else {
-                return Err(PathFindError::PathFind("no path found".to_string()));
+                return Err(PathFindError::NoPathFound);
             }
         }
         path.reverse();
@@ -2099,7 +2097,7 @@ impl SessionRoute {
     pub fn fee(&self) -> u128 {
         let first_amount = self.nodes.first().map_or(0, |s| s.amount);
         let last_amount = self.receiver_amount();
-        assert!(first_amount >= last_amount);
+        debug_assert!(first_amount >= last_amount);
         first_amount - last_amount
     }
 

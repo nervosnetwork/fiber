@@ -3618,10 +3618,7 @@ async fn test_send_payself_with_invalid_tlc_expiry() {
         })
         .await;
 
-    assert!(res
-        .unwrap_err()
-        .to_string()
-        .contains("no direct channel found for source node"));
+    assert!(res.unwrap_err().to_string().contains("no path found"));
 }
 
 #[tokio::test]
@@ -3713,10 +3710,7 @@ async fn test_send_payself_with_small_min_tlc_value() {
         })
         .await;
 
-    assert!(res
-        .unwrap_err()
-        .to_string()
-        .contains("no direct channel found for source node"));
+    assert!(res.unwrap_err().to_string().contains("no path found"));
 
     let res = nodes[0]
         .send_payment(SendPaymentCommand {
