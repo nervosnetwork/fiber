@@ -36,7 +36,7 @@ use tentacle::secio::PeerId;
 use tentacle::utils::{is_reachable, multiaddr_to_socketaddr};
 use thiserror::Error;
 use tracing::log::error;
-use tracing::{debug, info, trace};
+use tracing::{debug, info, trace, warn};
 const DEFAULT_MIN_PROBABILITY: f64 = 0.01;
 
 #[serde_as]
@@ -481,7 +481,7 @@ pub enum PathFindError {
     FeatureNotEnabled(String),
     #[error("Insufficient balance: {0}")]
     InsufficientBalance(String),
-    #[error("TLC min_tlc_value error: {0}")]
+    #[error("Path find failed for min_tlc_value error: {0}")]
     TlcMinValue(u128),
     #[error("Graph other error: {0}")]
     Other(String),
@@ -571,13 +571,10 @@ where
         if messages.is_empty() {
             return false;
         }
-        debug!("Updating network graph with {} messages", messages.len());
-        debug!("Latest cursor: {:?}", self.latest_cursor);
         for message in messages {
-            debug!("Processing message: {:?}", &message);
             self.update_latest_cursor(message.cursor());
             if message.chain_hash() != get_chain_hash() {
-                tracing::warn!(
+                warn!(
                     "Chain hash mismatch: having {:?}, expecting {:?}, full message {:?}",
                     message.chain_hash(),
                     get_chain_hash(),
@@ -678,10 +675,6 @@ where
             if let Some((timestamp, channel_announcement)) =
                 self.store.get_latest_channel_announcement(channel_outpoint)
             {
-                debug!(
-                    "Loading channel announcement: timestamp {}, channel announcement {:?}",
-                    timestamp, &channel_announcement
-                );
                 self.process_channel_announcement(timestamp, channel_announcement);
             }
         }
@@ -1132,43 +1125,41 @@ where
         max_fee_amount: Option<u128>,
         payment_data: &SendPaymentData,
     ) -> Result<Vec<PaymentHopData>, PathFindError> {
-        info!("Entered build_route");
+        info!(
+            "entered build_route: amount: {}, amount_low_bound: {:?}",
+            amount, amount_low_bound
+        );
         let source = self.get_source_pubkey();
         let target = payment_data.target_pubkey;
-        let allow_self_payment = payment_data.allow_self_payment;
-        let allow_mpp = payment_data.allow_mpp();
 
-        if source == target && !allow_self_payment {
+        if source == target && !payment_data.allow_self_payment {
             return Err(PathFindError::FeatureNotEnabled(
                 "allow_self_payment is not enabled, can not pay to self".to_string(),
             ));
         }
 
-        let (route_hops, actual_amount_for_route) = if !payment_data.router.is_empty() {
+        let (route_hops, route_amount) = if !payment_data.router.is_empty() {
             // If a router is explicitly provided, use it.
             // Assume it's valid for the requested `amount`.
             (payment_data.router.clone(), amount)
         } else {
-            // Attempt to find a path for the requested `amount`.
+            let amount_low_bound = amount_low_bound.unwrap_or(u128::MAX);
             match self.find_path_with_payment_data(source, amount, max_fee_amount, payment_data) {
                 Ok(route) => (route, amount),
                 Err(PathFindError::PathFind(_)) | Err(PathFindError::TlcMinValue(_))
-                    if allow_mpp && amount_low_bound.is_some_and(|low| low < amount) =>
+                    if payment_data.allow_mpp() && amount_low_bound < amount =>
                 {
-                    if let Ok(res) = self.binary_find_path_in_range(
+                    let Ok(res) = self.binary_find_path_in_range(
                         source,
                         amount.saturating_sub(1),
-                        amount_low_bound.unwrap(),
+                        amount_low_bound,
                         max_fee_amount,
                         payment_data,
-                    ) {
-                        res
-                    } else {
+                    ) else {
                         return Err(PathFindError::PathFind("no path found".to_string()));
-                    }
+                    };
+                    res
                 }
-                // Initial find_path failed with a non-PathFind error,
-                // or conditions for trying smaller amounts were not met.
                 Err(err) => return Err(err),
             }
         };
@@ -1178,7 +1169,7 @@ where
             "Route hops should not be empty if Ok"
         );
 
-        Ok(self.build_router_from_path(&route_hops, actual_amount_for_route, payment_data))
+        Ok(self.build_router_from_path(&route_hops, route_amount, payment_data))
     }
 
     fn find_path_with_payment_data(
@@ -1724,7 +1715,7 @@ where
     // to resolve the scenario of network with cycle, we use the original `source` node as target,
     // trying to find a new target which has direct channel to `source` node, then the find_path
     // algorithm can work well to assume the network don't contains a cycle.
-    // This may makes the result of find_path is not a global optimimized path.
+    // This may makes the result of find_path is not a global optimized path.
     #[allow(clippy::too_many_arguments)]
     fn adjust_target_for_route_self(
         &self,
@@ -1935,11 +1926,6 @@ where
                 };
                 amount_to_send += fee;
                 if amount_to_send > channel_info.capacity() {
-                    debug!(
-                        "current_amount: {} > channel_info.capacity {}",
-                        amount_to_send,
-                        channel_info.capacity()
-                    );
                     continue;
                 }
                 if let Some(balance) = channel_update.outbound_liquidity {
@@ -1970,7 +1956,7 @@ where
                 };
 
                 // we don't skip the edge if the probability is too low for build with router
-                // but we can still find a optimimized path if there are multiple channels
+                // but we can still find a optimised path if there are multiple channels
                 let probability = probability.max(DEFAULT_MIN_PROBABILITY);
 
                 debug!(
@@ -2121,22 +2107,6 @@ impl SessionRoute {
         self.nodes
             .iter()
             .map(|x| (x.pubkey, &x.channel_outpoint, x.amount))
-    }
-}
-
-#[derive(Error, Debug)]
-pub enum PaymentSessionError {
-    #[error("Over sent: {sent_amount} > {amount}")]
-    OverSent { sent_amount: u128, amount: u128 },
-    #[error("Cannot decide the payment status")]
-    UnknownStatus,
-    #[error("Retry limit exceeded")]
-    RetryLimitExceeded,
-}
-
-impl From<PaymentSessionError> for crate::errors::Error {
-    fn from(error: PaymentSessionError) -> Self {
-        crate::errors::Error::SendPaymentError(error.to_string())
     }
 }
 

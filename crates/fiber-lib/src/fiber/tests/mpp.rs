@@ -3327,6 +3327,16 @@ async fn test_send_mpp_with_large_min_tlc_value_in_channel() {
     debug!("res: {:?}", res);
     let error = res.unwrap_err();
     assert!(error.contains("no path found"));
+
+    let res = node_0
+        .send_mpp_payment(&mut node_1, 1010 * CKB_SHANNONS as u128, Some(2))
+        .await;
+
+    debug!("res: {:?}", res);
+    assert!(res.is_ok());
+    let payment_hash = res.unwrap().payment_hash;
+    eprintln!("begin to wait for payment: {} success ...", payment_hash);
+    node_0.wait_until_success(payment_hash).await;
 }
 
 #[tokio::test]
