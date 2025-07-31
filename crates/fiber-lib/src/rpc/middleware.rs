@@ -10,6 +10,7 @@ use jsonrpsee::types::{ErrorObject, ErrorObjectOwned, Id, Request};
 use jsonrpsee::MethodResponse;
 use std::future::Future;
 
+use crate::fiber::types::NodeId;
 use crate::rpc::biscuit::extract_node_id;
 use crate::rpc::context::RpcContext;
 
@@ -22,6 +23,7 @@ pub struct BiscuitAuthMiddleware<S> {
     pub headers: HeaderMap,
     pub inner: S,
     pub auth: Arc<BiscuitAuth>,
+    pub enable_auth: bool,
 }
 
 impl<S> BiscuitAuthMiddleware<S> {
@@ -41,40 +43,67 @@ impl<S> BiscuitAuthMiddleware<S> {
         params.as_array()?.first().cloned()
     }
 
-    /// Authorize the request
-    fn auth_call(&self, req: &mut Request<'_>) -> bool {
-        let token = match self.auth_token() {
-            Ok(token) => token,
-            Err(err) => {
-                tracing::debug!("failed to get auth token: {err}");
-                return false;
-            }
-        };
+    fn inject_rpc_context(&self, req: &mut Request<'_>, ctx: RpcContext) {
         let body = req
             .params()
             .parse::<serde_json::Value>()
             .unwrap_or_default();
 
         let params = self.extract_params(body).unwrap_or_default();
+        req.params = Some(Cow::Owned(
+            serde_json::value::to_raw_value(&[serde_json::json!(ctx), params])
+                .expect("serialize injected params"),
+        ));
+        tracing::trace!("Injected req params {:?}", &req.params);
+    }
 
-        match self.auth.check_permission(&req.method, &token) {
-            Ok((token, rule)) => {
-                if rule.require_rpc_context {
-                    let node_id = extract_node_id(&token).ok();
-
-                    // Inject RpcContext as first param
-                    let ctx = RpcContext { node_id };
-                    req.params = Some(Cow::Owned(
-                        serde_json::value::to_raw_value(&[serde_json::json!(ctx), params])
-                            .expect("serialize injected params"),
-                    ));
-                    tracing::trace!("Injected req params {:?}", &req.params);
+    /// Authorize the request
+    fn auth_call(&self, req: &mut Request<'_>) -> bool {
+        if self.enable_auth {
+            // extract auth token
+            let token = match self.auth_token() {
+                Ok(token) => token,
+                Err(err) => {
+                    tracing::debug!("failed to get auth token: {err}");
+                    return false;
                 }
-                return true;
+            };
+
+            match self.auth.check_permission(&req.method, &token) {
+                Ok((token, rule)) => {
+                    if rule.require_rpc_context {
+                        let Ok(node_id) = extract_node_id(&token) else {
+                            return false;
+                        };
+
+                        // Inject RpcContext as first param
+                        let ctx = RpcContext { node_id };
+                        self.inject_rpc_context(req, ctx);
+                    }
+                    return true;
+                }
+                Err(err) => {
+                    tracing::debug!("Failed check_permission #{err:?}");
+                    return false;
+                }
             }
-            Err(err) => {
-                tracing::debug!("Failed check_permission #{err:?}");
-                return false;
+        } else {
+            // local rpc, auth token is none
+            match self.auth.get_rule(&req.method) {
+                Ok(rule) => {
+                    if rule.require_rpc_context {
+                        let node_id = NodeId::local();
+
+                        // Inject RpcContext as first param
+                        let ctx = RpcContext { node_id };
+                        self.inject_rpc_context(req, ctx);
+                    }
+                    return true;
+                }
+                Err(err) => {
+                    tracing::debug!("Failed check_permission #{err:?}");
+                    return false;
+                }
             }
         }
     }

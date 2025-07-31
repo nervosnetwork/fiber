@@ -47,18 +47,19 @@ pub struct WatchtowerActor<S> {
 }
 
 impl<S: WatchtowerStore> WatchtowerActor<S> {
-    pub fn new(node_id: NodeId, store: S) -> Self {
+    pub fn new(store: S) -> Self {
+        let node_id = NodeId::local();
         Self { store, node_id }
     }
 }
 
 pub enum WatchtowerMessage {
-    CreateChannel(NodeId, Hash256, Script, SettlementData),
-    RemoveChannel(NodeId, Hash256),
-    UpdateRevocation(NodeId, Hash256, RevocationData, SettlementData),
-    UpdateLocalSettlement(NodeId, Hash256, SettlementData),
-    CreatePreimage(NodeId, Hash256, Hash256),
-    RemovePreimage(NodeId, Hash256),
+    CreateChannel(Hash256, Script, SettlementData),
+    RemoveChannel(Hash256),
+    UpdateRevocation(Hash256, RevocationData, SettlementData),
+    UpdateLocalSettlement(Hash256, SettlementData),
+    CreatePreimage(Hash256, Hash256),
+    RemovePreimage(Hash256),
     PeriodicCheck,
 }
 
@@ -93,48 +94,42 @@ where
     ) -> Result<(), ActorProcessingErr> {
         match message {
             WatchtowerMessage::CreateChannel(
-                node_id,
                 channel_id,
                 funding_tx_lock,
                 remote_settlement_data,
             ) => self.store.insert_watch_channel(
-                node_id,
+                NodeId::local(),
                 channel_id,
                 funding_tx_lock,
                 remote_settlement_data,
             ),
-            WatchtowerMessage::RemoveChannel(node_id, channel_id) => {
-                self.store.remove_watch_channel(node_id, channel_id)
+            WatchtowerMessage::RemoveChannel(channel_id) => {
+                self.store.remove_watch_channel(NodeId::local(), channel_id)
             }
             WatchtowerMessage::UpdateRevocation(
-                node_id,
                 channel_id,
                 revocation_data,
                 remote_settlement_data,
             ) => self.store.update_revocation(
-                node_id,
+                NodeId::local(),
                 channel_id,
                 revocation_data,
                 remote_settlement_data,
             ),
-            WatchtowerMessage::UpdateLocalSettlement(
-                node_id,
-                channel_id,
-                local_settlement_data,
-            ) => self
+            WatchtowerMessage::UpdateLocalSettlement(channel_id, local_settlement_data) => self
                 .store
-                .update_local_settlement(node_id, channel_id, local_settlement_data),
-            WatchtowerMessage::CreatePreimage(node_id, payment_hash, preimage) => {
+                .update_local_settlement(NodeId::local(), channel_id, local_settlement_data),
+            WatchtowerMessage::CreatePreimage(payment_hash, preimage) => {
                 if payment_hash == ckb_hash::blake2b_256(preimage).into() {
                     self.store
-                        .insert_watch_preimage(node_id, payment_hash, preimage);
+                        .insert_watch_preimage(NodeId::local(), payment_hash, preimage);
                 } else {
                     tracing::error!("CreatePreimage with wrong preimage, payment_hash: {payment_hash:?} preimage: {preimage:?}");
                 }
             }
-            WatchtowerMessage::RemovePreimage(node_id, payment_hash) => {
-                self.store.remove_watch_preimage(node_id, payment_hash)
-            }
+            WatchtowerMessage::RemovePreimage(payment_hash) => self
+                .store
+                .remove_watch_preimage(NodeId::local(), payment_hash),
             WatchtowerMessage::PeriodicCheck => self.periodic_check(state),
         }
         Ok(())

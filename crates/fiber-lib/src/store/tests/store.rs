@@ -292,7 +292,7 @@ fn test_store_watchtower_preimage() {
     let preimage_a = gen_rand_sha256_hash();
     let payment_hash_a = blake2b_256(preimage_a).into();
 
-    let node_id_b = NodeId::from_bytes(PeerId::random().into_bytes());
+    let node_id_b = NodeId::local();
     let preimage_b = gen_rand_sha256_hash();
     let payment_hash_b = blake2b_256(preimage_b).into();
 

@@ -176,15 +176,6 @@ impl<S> WatchtowerRpcServerImpl<S> {
 }
 
 #[cfg(feature = "watchtower")]
-fn requrie_node_id_err() -> ErrorObjectOwned {
-    ErrorObjectOwned::owned(
-        CALL_EXECUTION_FAILED_CODE,
-        "Require node_id, please check biscuit token",
-        Option::<()>::None,
-    )
-}
-
-#[cfg(feature = "watchtower")]
 #[async_trait::async_trait]
 impl<S> WatchtowerRpcServer for WatchtowerRpcServerImpl<S>
 where
@@ -195,11 +186,8 @@ where
         ctx: RpcContext,
         params: CreateWatchChannelParams,
     ) -> Result<(), ErrorObjectOwned> {
-        let Some(node_id) = ctx.node_id else {
-            return Err(requrie_node_id_err());
-        };
         self.store.insert_watch_channel(
-            node_id,
+            ctx.node_id,
             params.channel_id,
             params.funding_tx_lock.into(),
             params.remote_settlement_data,
@@ -212,10 +200,8 @@ where
         ctx: RpcContext,
         params: RemoveWatchChannelParams,
     ) -> Result<(), ErrorObjectOwned> {
-        let Some(node_id) = ctx.node_id else {
-            return Err(requrie_node_id_err());
-        };
-        self.store.remove_watch_channel(node_id, params.channel_id);
+        self.store
+            .remove_watch_channel(ctx.node_id, params.channel_id);
         Ok(())
     }
 
@@ -224,11 +210,8 @@ where
         ctx: RpcContext,
         params: UpdateRevocationParams,
     ) -> Result<(), ErrorObjectOwned> {
-        let Some(node_id) = ctx.node_id else {
-            return Err(requrie_node_id_err());
-        };
         self.store.update_revocation(
-            node_id,
+            ctx.node_id,
             params.channel_id,
             params.revocation_data,
             params.settlement_data,
@@ -241,11 +224,8 @@ where
         ctx: RpcContext,
         params: UpdateLocalSettlementParams,
     ) -> Result<(), ErrorObjectOwned> {
-        let Some(node_id) = ctx.node_id else {
-            return Err(requrie_node_id_err());
-        };
         self.store
-            .update_local_settlement(node_id, params.channel_id, params.settlement_data);
+            .update_local_settlement(ctx.node_id, params.channel_id, params.settlement_data);
         Ok(())
     }
 
@@ -254,9 +234,6 @@ where
         ctx: RpcContext,
         params: CreatePreimageParams,
     ) -> Result<(), ErrorObjectOwned> {
-        let Some(node_id) = ctx.node_id else {
-            return Err(requrie_node_id_err());
-        };
         if params.payment_hash != ckb_hash::blake2b_256(params.preimage).into() {
             return Err(ErrorObjectOwned::owned(
                 CALL_EXECUTION_FAILED_CODE,
@@ -265,7 +242,7 @@ where
             ));
         }
         self.store
-            .insert_watch_preimage(node_id, params.payment_hash, params.preimage);
+            .insert_watch_preimage(ctx.node_id, params.payment_hash, params.preimage);
         Ok(())
     }
     async fn remove_preimage(
@@ -273,11 +250,8 @@ where
         ctx: RpcContext,
         params: RemovePreimageParams,
     ) -> Result<(), ErrorObjectOwned> {
-        let Some(node_id) = ctx.node_id else {
-            return Err(requrie_node_id_err());
-        };
         self.store
-            .remove_watch_preimage(node_id, params.payment_hash);
+            .remove_watch_preimage(ctx.node_id, params.payment_hash);
         Ok(())
     }
 }

@@ -4059,6 +4059,11 @@ impl NodeId {
     pub fn from_bytes(bytes: Vec<u8>) -> Self {
         Self(bytes)
     }
+
+    // return a empty node_id represent local node
+    pub fn local() -> Self {
+        Self(Default::default())
+    }
 }
 
 impl AsRef<[u8]> for NodeId {

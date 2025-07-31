@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use biscuit_auth::{
     builder::{Fact, Term},
     AuthorizerBuilder, Biscuit, PublicKey,
@@ -145,7 +145,7 @@ fn build_rules() -> HashMap<&'static str, AuthRule> {
 }
 
 pub struct BiscuitAuth {
-    pubkey: PublicKey,
+    pubkey: Option<PublicKey>,
     revocation_list: HashSet<Vec<u8>>,
     rules: HashMap<&'static str, AuthRule>,
 }
@@ -156,10 +156,27 @@ impl BiscuitAuth {
         let revocation_list = Default::default();
         let rules = build_rules();
         Ok(Self {
-            pubkey,
+            pubkey: Some(pubkey),
             rules,
             revocation_list,
         })
+    }
+
+    pub fn without_pubkey() -> Self {
+        let revocation_list = Default::default();
+        let rules = build_rules();
+        Self {
+            pubkey: None,
+            rules,
+            revocation_list,
+        }
+    }
+
+    pub fn get_rule(&self, method: &str) -> Result<&AuthRule> {
+        let Some(rule) = self.rules.get(method) else {
+            return Err(anyhow::anyhow!("no rules for method: {method}"));
+        };
+        Ok(rule)
     }
 
     pub fn extend_revocation_list(&mut self, list: &[String]) -> Result<()> {
@@ -172,7 +189,11 @@ impl BiscuitAuth {
     }
 
     pub fn extract_biscuit(&self, token: &str) -> Result<Biscuit> {
-        let b = Biscuit::from_base64(token, self.pubkey).context("invalid token")?;
+        let pubkey = self
+            .pubkey
+            .as_ref()
+            .ok_or_else(|| anyhow!("Biscuit pubkey is empty"))?;
+        let b = Biscuit::from_base64(token, pubkey).context("invalid token")?;
         Ok(b)
     }
 
@@ -187,7 +208,7 @@ impl BiscuitAuth {
         token: &str,
         time_in_ms: u64,
     ) -> Result<(Biscuit, &AuthRule)> {
-        let b = Biscuit::from_base64(token, self.pubkey).context("invalid token")?;
+        let b = self.extract_biscuit(token)?;
         // check revocation
         if b.revocation_identifiers()
             .iter()
@@ -197,9 +218,7 @@ impl BiscuitAuth {
             return Err(anyhow::anyhow!("Token is in revocation list: {token}"));
         }
         // check permission
-        let Some(rule) = self.rules.get(method) else {
-            return Err(anyhow::anyhow!("no rules for method: {method}"));
-        };
+        let rule = self.get_rule(method)?;
         if let Err(err) = rule.authorize(&b, time_in_ms) {
             tracing::debug!("authorize failed: {err}");
             return Err(err);

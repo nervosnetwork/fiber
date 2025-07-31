@@ -6,5 +6,5 @@ use serde_with::serde_as;
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct RpcContext {
     /// Node ID, read from user RPC biscuit token
-    pub node_id: Option<NodeId>,
+    pub node_id: NodeId,
 }
