@@ -1,6 +1,5 @@
-use std::{collections::HashMap, time::Duration};
-
 use secp256k1::Secp256k1;
+use std::{collections::HashMap, time::Duration};
 use tracing::debug;
 
 use crate::{
@@ -11,6 +10,7 @@ use crate::{
         },
         config::{CKB_SHANNONS, DEFAULT_TLC_EXPIRY_DELTA, PAYMENT_MAX_PARTS_LIMIT},
         features::FeatureVector,
+        graph::AttemptStatus,
         hash_algorithm::HashAlgorithm,
         network::{DebugEvent, SendPaymentCommand},
         types::{Hash256, PaymentDataRecord, PaymentHopData, PeeledOnionPacket, RemoveTlcReason},
@@ -3209,7 +3209,7 @@ async fn test_mpp_can_not_find_path_filter_target_node_features() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn test_mpp_fail_on_attempt_in_multiple_attempts() {
+async fn test_mpp_fail_on_total_amount_not_match() {
     init_tracing();
 
     let (nodes, _channels) = create_n_nodes_network(
@@ -3222,16 +3222,59 @@ async fn test_mpp_fail_on_attempt_in_multiple_attempts() {
         3,
     )
     .await;
-    let [node_0, _node_1, mut node_2] = nodes.try_into().expect("3 nodes");
+    let [mut node_0, _node_1, mut node_2] = nodes.try_into().expect("3 nodes");
+
+    let target_pubkey = node_2.get_public_key();
+    let preimage = gen_rand_sha256_hash();
+    let ckb_invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(15000))
+        .payment_preimage(preimage)
+        .payee_pub_key(target_pubkey.into())
+        .allow_mpp(true)
+        .payment_secret(gen_rand_sha256_hash())
+        .build()
+        .expect("build invoice success");
+
+    let mut modified_ckb_invoice = ckb_invoice.clone();
+    modified_ckb_invoice.amount = Some(15001);
+
+    node_2.insert_invoice(modified_ckb_invoice, Some(preimage));
 
     let res = node_0
-        .send_mpp_payment_with_dry_run_option(&mut node_2, 15000, Some(2), true)
+        .send_payment(SendPaymentCommand {
+            target_pubkey: Some(target_pubkey),
+            invoice: Some(ckb_invoice.to_string()),
+            amount: Some(15000),
+            max_parts: Some(2),
+            dry_run: false,
+            ..Default::default()
+        })
         .await;
-    eprintln!("query res: {:?}", res);
 
     assert!(res.is_ok());
+    let payment_hash = res.unwrap().payment_hash;
 
-    // TODO: add more tests for multiple attempts
+    node_0
+        .expect_debug_event("after on_remove_tlc_event session_status: Inflight")
+        .await;
+
+    let payment_session = node_0.get_payment_session(payment_hash).unwrap();
+    eprintln!("now payment session status: {:?}", payment_session.status);
+
+    node_0
+        .expect_debug_event("after on_remove_tlc_event session_status: Failed")
+        .await;
+
+    let payment_session = node_0.get_payment_session(payment_hash).unwrap();
+    eprintln!("now payment session status: {:?}", payment_session.status);
+
+    node_0.wait_until_failed(payment_hash).await;
+    let payment_session = node_0.get_payment_session(payment_hash).unwrap();
+    assert_eq!(payment_session.attempts_count(), 2);
+    assert!(payment_session
+        .attempts()
+        .all(|x| x.status == AttemptStatus::Failed
+            && x.last_error == Some("IncorrectOrUnknownPaymentDetails".to_string())));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -18,7 +18,6 @@ use serde_with::{serde_as, DisplayFromStr};
 use std::borrow::Cow;
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
-
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -1191,13 +1190,25 @@ where
             NetworkActorEvent::TlcRemoveReceived(payment_hash, attempt_id, remove_tlc_reason) => {
                 // When a node is restarted, RemoveTLC will also be resent if necessary
                 self.on_remove_tlc_event(
-                    myself,
+                    myself.clone(),
                     state,
                     payment_hash,
                     attempt_id,
                     remove_tlc_reason,
                 )
                 .await;
+                #[cfg(debug_assertions)]
+                {
+                    if let Some(payment_session) = self.store.get_payment_session(payment_hash) {
+                        debug_event!(
+                            myself,
+                            format!(
+                                "after on_remove_tlc_event session_status: {:?}",
+                                payment_session.status
+                            )
+                        );
+                    }
+                }
             }
             NetworkActorEvent::RetrySendPayment(payment_hash, attempt_id) => {
                 state.retry_send_payment_count = state.retry_send_payment_count.saturating_sub(1);
@@ -2588,12 +2599,7 @@ where
         error: &str,
         retryable: bool,
     ) {
-        if !retryable
-            && !session.allow_more_attempts()
-            && !session.active_attempts().any(|a| a.id != attempt.id)
-        {
-            // if mpp is not allowed, or mpp is allowed but no other active attempts
-            // we will set the session status to failed
+        if !retryable && !session.active_attempts().any(|a| a.id != attempt.id) {
             self.set_payment_fail_with_error(session, error);
         }
 
