@@ -530,7 +530,7 @@ where
         let cur_time = now_timestamp_as_millis_u64();
         #[cfg(test)]
         let cur_time = mock_timestamp_as_millis_u64();
-        let time_elapsed = cur_time - time;
+        let time_elapsed = cur_time.saturating_sub(time);
         let exponent = -(time_elapsed as f64) / (DEFAULT_BIMODAL_DECAY_TIME as f64);
         exponent.exp()
     }
@@ -560,8 +560,8 @@ where
         let mut prob = 1.0;
         if let Some(result) = self.get_result(channel, direction) {
             if result.fail_time != 0 {
-                let time_ago = now_timestamp_as_millis_u64() - result.fail_time;
-                let exponent = -(time_ago as f64) / (DEFAULT_BIMODAL_DECAY_TIME as f64);
+                let elapsed = now_timestamp_as_millis_u64().saturating_sub(result.fail_time);
+                let exponent = -(elapsed as f64) / (DEFAULT_BIMODAL_DECAY_TIME as f64);
                 prob -= exponent.exp();
             }
         }
