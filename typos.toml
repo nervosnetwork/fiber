@@ -11,5 +11,5 @@ ba = "ba"
 
 [default]
 extend-ignore-re = [
-  ".*==" # ignore base64 string
+  ".*=" # ignore base64 string
 ]

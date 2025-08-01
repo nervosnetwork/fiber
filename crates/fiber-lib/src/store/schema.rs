@@ -30,4 +30,10 @@ pub(crate) const PAYMENT_SESSION_PREFIX: u8 = 192;
 pub(crate) const PAYMENT_HISTORY_TIMED_RESULT_PREFIX: u8 = 193;
 pub(crate) const PAYMENT_CUSTOM_RECORD_PREFIX: u8 = 194;
 #[cfg(feature = "watchtower")]
-pub(crate) const WATCHTOWER_CHANNEL_PREFIX: u8 = 224;
+mod watchtower {
+    pub(crate) const WATCHTOWER_CHANNEL_PREFIX: u8 = 224;
+    pub(crate) const WATCHTOWER_PREIMAGE_PREFIX: u8 = 225;
+    pub(crate) const WATCHTOWER_NODE_PAYMENTHASH_PREFIX: u8 = 226;
+}
+#[cfg(feature = "watchtower")]
+pub(crate) use watchtower::*;

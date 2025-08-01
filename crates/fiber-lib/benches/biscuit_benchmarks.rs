@@ -6,7 +6,6 @@ use criterion::{
 };
 use fnn::rpc::biscuit::BiscuitAuth;
 use ractor::concurrency::Duration;
-use serde_json::json;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn bench_group(group: &mut BenchmarkGroup<'_, WallTime>, auth_ok: bool) {
@@ -55,13 +54,8 @@ fn bench_group(group: &mut BenchmarkGroup<'_, WallTime>, auth_ok: bool) {
                             Duration::from_millis(10).as_millis() as u64
                         };
                         assert_eq!(
-                            auth.check_permission_with_time(
-                                "send_payment",
-                                json!({}),
-                                &token,
-                                time
-                            )
-                            .is_err(),
+                            auth.check_permission_with_time("send_payment", &token, time)
+                                .is_err(),
                             auth_ok
                         );
                     }

@@ -4,6 +4,7 @@ pub mod biscuit;
 pub mod cch;
 pub mod channel;
 pub mod config;
+pub mod context;
 #[cfg(debug_assertions)]
 pub mod dev;
 pub mod graph;
@@ -30,7 +31,7 @@ pub mod server {
     use crate::rpc::info::InfoRpcServer;
     use crate::rpc::info::InfoRpcServerImpl;
     use crate::rpc::invoice::{InvoiceRpcServer, InvoiceRpcServerImpl};
-    use crate::rpc::middleware::{BiscuitAuthMiddleware, Identity};
+    use crate::rpc::middleware::BiscuitAuthMiddleware;
     use crate::rpc::payment::PaymentRpcServer;
     use crate::rpc::payment::PaymentRpcServerImpl;
     use crate::rpc::peer::{PeerRpcServer, PeerRpcServerImpl};
@@ -54,7 +55,6 @@ pub mod server {
     use anyhow::{bail, Result};
     #[cfg(debug_assertions)]
     use ckb_types::core::TransactionView;
-    use jsonrpsee::core::middleware::layer;
     use jsonrpsee::server::{
         serve_with_graceful_shutdown, stop_channel, ServerHandle, StopHandle, TowerServiceBuilder,
     };
@@ -138,7 +138,8 @@ pub mod server {
             stop_handle: stop_handle.clone(),
             svc_builder: jsonrpsee::server::Server::builder().to_service_builder(),
         };
-        let auth = auth.map(Arc::new);
+        let enable_auth = auth.is_some();
+        let auth = Arc::new(auth.unwrap_or_else(BiscuitAuth::without_pubkey));
 
         tokio::spawn(async move {
             loop {
@@ -169,17 +170,11 @@ pub mod server {
                     let headers = req.headers().clone();
                     let auth = auth.clone();
                     let rpc_middleware =
-                        RpcServiceBuilder::new().layer_fn(move |service| match auth.as_ref() {
-                            Some(auth) => layer::Either::Left(BiscuitAuthMiddleware {
-                                headers: headers.clone(),
-                                inner: service,
-                                auth: auth.clone(),
-                            }),
-
-                            None => {
-                                // an no-op middleware
-                                layer::Either::Right(Identity(service))
-                            }
+                        RpcServiceBuilder::new().layer_fn(move |service| BiscuitAuthMiddleware {
+                            headers: headers.clone(),
+                            inner: service,
+                            auth: auth.clone(),
+                            enable_auth,
                         });
                     let mut svc = svc_builder
                         .set_rpc_middleware(rpc_middleware)

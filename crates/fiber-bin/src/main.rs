@@ -22,6 +22,7 @@ use fnn::watchtower::{
 };
 use fnn::{start_cch, start_network, Config, NetworkServiceEvent};
 use jsonrpsee::http_client::HttpClientBuilder;
+use jsonrpsee::ws_client::{HeaderMap, HeaderValue};
 use ractor::{Actor, ActorRef};
 #[cfg(debug_assertions)]
 use std::collections::HashMap;
@@ -159,6 +160,7 @@ pub async fn main() -> Result<(), ExitMessage> {
                 .expect("get default funding lock script should be ok");
 
             info!("Starting fiber");
+
             let network_actor = start_network(
                 fiber_config.clone(),
                 ckb_chain_actor.clone(),
@@ -182,7 +184,24 @@ pub async fn main() -> Result<(), ExitMessage> {
             }
 
             let watchtower_client = if let Some(url) = fiber_config.standalone_watchtower_rpc_url {
-                let watchtower_client = HttpClientBuilder::default().build(url).map_err(|err| {
+                let mut client_builder = HttpClientBuilder::default();
+
+                if let Some(token) = fiber_config.standalone_watchtower_token.as_ref() {
+                    let mut headers = HeaderMap::new();
+                    headers.insert(
+                        "Authorization",
+                        HeaderValue::from_str(&format!("Bearer {}", token)).map_err(|err| {
+                            ExitMessage(format!("failed to create watchtower rpc client: {err:?}"))
+                        })?,
+                    );
+                    client_builder = client_builder.set_headers(headers);
+                } else {
+                    tracing::debug!(
+                        "create watchtower rpc client without standalone_watchtower_token"
+                    );
+                }
+
+                let watchtower_client = client_builder.build(url).map_err(|err| {
                     ExitMessage(format!("failed to create watchtower rpc client: {}", err))
                 })?;
                 Some(watchtower_client)
@@ -416,11 +435,17 @@ fn forward_event_to_actor(
                 ))
                 .expect(ASSUME_WATCHTOWER_ACTOR_ALIVE);
         }
-        NetworkServiceEvent::PreimageCreated(_payment_hash, _preimage) => {
+        NetworkServiceEvent::PreimageCreated(payment_hash, preimage) => {
             // ignore, the store of channel actor already has stored the preimage
+            watchtower_actor
+                .send_message(WatchtowerMessage::CreatePreimage(payment_hash, preimage))
+                .expect(ASSUME_WATCHTOWER_ACTOR_ALIVE);
         }
-        NetworkServiceEvent::PreimageRemoved(_payment_hash) => {
+        NetworkServiceEvent::PreimageRemoved(payment_hash) => {
             // ignore, the store of channel actor already has removed the preimage
+            watchtower_actor
+                .send_message(WatchtowerMessage::RemovePreimage(payment_hash))
+                .expect(ASSUME_WATCHTOWER_ACTOR_ALIVE);
         }
         _ => {
             // ignore other non-watchtower related events

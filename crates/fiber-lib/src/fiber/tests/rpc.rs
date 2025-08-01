@@ -593,6 +593,7 @@ async fn test_rpc_auth_with_token() {
     )
     .await;
 
+    dbg!(hex::encode(&token));
     node_0.set_auth_token(token);
 
     let rpc_res: ListPeersResult = node_0.send_rpc_request("list_peers", ()).await.unwrap();
@@ -626,6 +627,7 @@ async fn test_rpc_auth_with_invalid_token() {
     )
     .await;
 
+    dbg!(hex::encode(&token));
     node_0.set_auth_token(token);
 
     let rpc_res: Result<ListPeersResult, String> = node_0.send_rpc_request("list_peers", ()).await;
