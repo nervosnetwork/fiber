@@ -184,24 +184,26 @@ pub async fn main() -> Result<(), ExitMessage> {
             }
 
             let watchtower_client = if let Some(url) = fiber_config.standalone_watchtower_rpc_url {
-                let watchtower_token = fiber_config
-                    .standalone_watchtower_token
-                    .ok_or_else(|| ExitMessage("failed to create watchtower rpc client: require standalone_watchtower_token".to_string()))?;
-                let mut headers = HeaderMap::new();
-                headers.insert(
-                    "Authorization",
-                    HeaderValue::from_str(&format!("Bearer {}", watchtower_token)).map_err(
-                        |err| {
+                let mut client_builder = HttpClientBuilder::default();
+
+                if let Some(token) = fiber_config.standalone_watchtower_token.as_ref() {
+                    let mut headers = HeaderMap::new();
+                    headers.insert(
+                        "Authorization",
+                        HeaderValue::from_str(&format!("Bearer {}", token)).map_err(|err| {
                             ExitMessage(format!("failed to create watchtower rpc client: {err:?}"))
-                        },
-                    )?,
-                );
-                let watchtower_client = HttpClientBuilder::default()
-                    .set_headers(headers)
-                    .build(url)
-                    .map_err(|err| {
-                        ExitMessage(format!("failed to create watchtower rpc client: {}", err))
-                    })?;
+                        })?,
+                    );
+                    client_builder = client_builder.set_headers(headers);
+                } else {
+                    tracing::debug!(
+                        "create watchtower rpc client without standalone_watchtower_token"
+                    );
+                }
+
+                let watchtower_client = client_builder.build(url).map_err(|err| {
+                    ExitMessage(format!("failed to create watchtower rpc client: {}", err))
+                })?;
                 Some(watchtower_client)
             } else {
                 None
