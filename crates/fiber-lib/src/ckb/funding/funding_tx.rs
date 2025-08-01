@@ -535,9 +535,179 @@ impl FundingTx {
         self.tx = Some(tx);
     }
 
-    // TODO: verify the transaction
-    pub fn update_for_peer(&mut self, tx: TransactionView) -> Result<(), FundingError> {
-        self.tx = Some(tx);
+    /// Verify the funding tx received from the peer via the message TxUpdate.
+    ///
+    /// Replace the funding tx on success, otherwise return the error and leave the funding tx
+    /// untouched.
+    ///
+    /// The received remote funding tx is verified against the local version. It is assumed that
+    /// the peer only performs necessary operations to fund the channel.
+    pub async fn update_for_peer(
+        &mut self,
+        remote_tx: TransactionView,
+        context: FundingContext,
+    ) -> Result<(), FundingError> {
+        let local_tx = self
+            .tx
+            .clone()
+            .unwrap_or_else(|| Transaction::default().into_view());
+
+        // Version MUST be the same
+        if remote_tx.version() != local_tx.version() {
+            debug!(
+                "invalid remote funding tx (version): remote={} local={}",
+                remote_tx.version(),
+                local_tx.version()
+            );
+            return Err(FundingError::InvalidPeerFundingTx);
+        }
+
+        // Peer SHOULD NOT remove cell_deps
+        if remote_tx.cell_deps().len() < local_tx.cell_deps().len() {
+            debug!(
+                "invalid remote funding tx (cell_deps.len): remote={} local={}",
+                remote_tx.cell_deps().len(),
+                local_tx.cell_deps().len(),
+            );
+            return Err(FundingError::InvalidPeerFundingTx);
+        }
+        let cell_deps_set: HashSet<_> = remote_tx.cell_deps_iter().collect();
+        for cell_dep in local_tx.cell_deps_iter() {
+            if !cell_deps_set.contains(&cell_dep) {
+                debug!(
+                    "invalid remote funding tx (cell_deps), cell dep missing in the remote version: {:?}",
+                    cell_dep
+                );
+                return Err(FundingError::InvalidPeerFundingTx);
+            }
+        }
+
+        // Peer SHOULD NOT remove header_deps
+        if remote_tx.header_deps().len() < local_tx.header_deps().len() {
+            debug!(
+                "invalid remote funding tx (header_deps.len): remote={} local={}",
+                remote_tx.header_deps().len(),
+                local_tx.header_deps().len(),
+            );
+            return Err(FundingError::InvalidPeerFundingTx);
+        }
+        if remote_tx
+            .header_deps()
+            .into_iter()
+            .zip(local_tx.header_deps())
+            .any(|(remote, local)| remote != local)
+        {
+            debug!("invalid remote funding tx (header_deps)");
+            return Err(FundingError::InvalidPeerFundingTx);
+        }
+
+        // Peer SHOULD NOT remove inputs
+        if remote_tx.inputs().len() < local_tx.inputs().len() {
+            debug!(
+                "invalid remote funding tx (inputs.len): remote={} local={}",
+                remote_tx.inputs().len(),
+                local_tx.inputs().len(),
+            );
+            return Err(FundingError::InvalidPeerFundingTx);
+        }
+        // Peer SHOULD NOT modify existing inputs
+        if remote_tx
+            .inputs()
+            .into_iter()
+            .zip(local_tx.inputs())
+            .any(|(remote, local)| remote != local)
+        {
+            debug!("invalid funding tx (inputs)");
+            return Err(FundingError::InvalidPeerFundingTx);
+        }
+        // Peer SHOULD NOT add inputs locked by our lock scripts
+        let ckb_client = CkbRpcAsyncClient::new(&context.rpc_url);
+        for input in remote_tx.input_pts_iter().skip(local_tx.inputs().len()) {
+            match ckb_client.get_live_cell(input.into(), false).await?.cell {
+                Some(cell) => {
+                    let cell_output_lock: packed::Script = cell.output.lock.into();
+                    if cell_output_lock == context.funding_source_lock_script {
+                        debug!(
+                            "invalid funding tx (inputs): peer uses inputs with our lock script"
+                        );
+                        return Err(FundingError::InvalidPeerFundingTx);
+                    }
+                }
+                None => {
+                    debug!("invalid funding tx (inputs): dead input");
+                    return Err(FundingError::InvalidPeerFundingTx);
+                }
+            };
+        }
+
+        // Peer SHOULD NOT remove outputs
+        if remote_tx.outputs().len() < local_tx.outputs().len() {
+            debug!(
+                "invalid funding tx (outputs.len): remote={} local={}",
+                remote_tx.outputs().len(),
+                local_tx.outputs().len(),
+            );
+            return Err(FundingError::InvalidPeerFundingTx);
+        }
+        // The first output MUST be the funding cell
+        if let Some(output) = remote_tx.output(0) {
+            if output.lock() != context.funding_cell_lock_script {
+                debug!("invalid funding tx (outputs[0]): not a funding cell",);
+                return Err(FundingError::InvalidPeerFundingTx);
+            }
+            if let Some(data) = remote_tx.outputs_data().get(0) {
+                if output.type_().is_none() && !data.is_empty() {
+                    debug!(
+                        "invalid funding tx (outputs_data[0]): data is not allowed for CKB channel",
+                    );
+                    return Err(FundingError::InvalidPeerFundingTx);
+                }
+            }
+        }
+        // Peer SHOULD NOT modify existing outputs
+        if let Some((index, (remote_output, local_output))) = remote_tx
+            .outputs()
+            .into_iter()
+            .zip(local_tx.outputs())
+            .enumerate()
+            .skip(1)
+            .find(|(_, (remote, local))| remote != local)
+        {
+            if tracing::enabled!(tracing::Level::DEBUG) {
+                let remote_output: ckb_jsonrpc_types::CellOutput = remote_output.into();
+                let local_output: ckb_jsonrpc_types::CellOutput = local_output.into();
+                debug!(
+                    "invalid funding tx (outputs[{}]): remote={:?} local={:?}",
+                    index, remote_output, local_output
+                );
+            }
+            return Err(FundingError::InvalidPeerFundingTx);
+        }
+
+        // Peer SHOULD NOT modify existing outputs data
+        if remote_tx.outputs_data().len() < local_tx.outputs_data().len() {
+            debug!(
+                "invalid funding tx (outputs_data.len): remote={} local={}",
+                remote_tx.outputs_data().len(),
+                local_tx.outputs_data().len(),
+            );
+            return Err(FundingError::InvalidPeerFundingTx);
+        }
+        // Peer CAN only modify the funding cell.
+        if remote_tx
+            .outputs_data()
+            .into_iter()
+            .zip(local_tx.outputs_data())
+            .skip(1)
+            .any(|(remote, local)| remote != local)
+        {
+            debug!("invalid funding tx (outputs_data)");
+            return Err(FundingError::InvalidPeerFundingTx);
+        }
+
+        // Ignore witnesses
+
+        self.tx = Some(remote_tx);
         Ok(())
     }
 }
