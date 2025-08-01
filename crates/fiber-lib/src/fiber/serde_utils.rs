@@ -195,3 +195,40 @@ pub mod duration_hex {
         Ok(Duration::from_secs(seconds))
     }
 }
+
+pub struct SliceBase58;
+
+impl<T> SerializeAs<T> for SliceBase58
+where
+    T: AsRef<[u8]>,
+{
+    fn serialize_as<S>(source: &T, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&bs58::encode(source).into_string())
+    }
+}
+
+impl<'de, T> DeserializeAs<'de, T> for SliceBase58
+where
+    T: TryFrom<Vec<u8>>,
+    T::Error: core::fmt::Debug,
+{
+    fn deserialize_as<D>(deserializer: D) -> Result<T, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        String::deserialize(deserializer)
+            .and_then(|s| {
+                bs58::decode(&s).into_vec().map_err(|err| {
+                    Error::custom(format!("failed to decode base58 string {}: {:?}", &s, err))
+                })
+            })
+            .and_then(|vec| {
+                vec.try_into().map_err(|err| {
+                    Error::custom(format!("failed to convert vector into type: {:?}", err))
+                })
+            })
+    }
+}

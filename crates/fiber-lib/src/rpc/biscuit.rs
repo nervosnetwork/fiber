@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use biscuit_auth::{
     builder::{Fact, Term},
     AuthorizerBuilder, Biscuit, PublicKey,
@@ -8,156 +8,144 @@ use std::{
     str::FromStr,
 };
 
-use crate::now_timestamp_as_millis_u64;
+use crate::{fiber::types::NodeId, now_timestamp_as_millis_u64};
 
-struct AuthRule {
-    code: &'static str,
+pub struct AuthRule {
+    pub(crate) code: &'static str,
+    pub(crate) require_rpc_context: bool,
 }
 
 impl AuthRule {
     fn new(code: &'static str) -> Self {
-        Self { code }
+        Self {
+            code,
+            require_rpc_context: false,
+        }
+    }
+
+    fn with_require_rpc_context(mut self, require_rpc_context: bool) -> Self {
+        self.require_rpc_context = require_rpc_context;
+        self
     }
 
     /// build rule
-    ///
-    /// - req_params RPC method parameters
-    fn build_rule(&self, req_params: serde_json::Value) -> Result<AuthorizerBuilder> {
-        let mut params = HashMap::new();
-        if let Some(object) = req_params.as_object() {
-            for (param, value) in object {
-                // the req_params is from client, may contains unexpected injection,
-                // but it will fail when parse parameter to concrete type in RPC methods
-
-                // we only support simple types
-                match value {
-                    serde_json::Value::String(s) => {
-                        params.insert(param.to_string(), Term::Str(s.to_owned()));
-                    }
-                    serde_json::Value::Number(n) => {
-                        if let Some(i) = n.as_i64() {
-                            params.insert(param.to_string(), Term::Integer(i));
-                        }
-                    }
-                    serde_json::Value::Bool(b) => {
-                        params.insert(param.to_string(), Term::Bool(*b));
-                    }
-                    _ => {
-                        tracing::debug!("unsupported parameter type: {param}: {value:?}");
-                    }
-                }
-            }
-        }
-        let scope_params = HashMap::new();
+    fn build_rule(&self) -> Result<AuthorizerBuilder> {
         let authorizer = AuthorizerBuilder::new()
-            .code_with_params(self.code, params, scope_params)
+            .code(self.code)
             .context("build authorizer code")?;
         Ok(authorizer)
     }
 
     /// authorize
     ///
-    /// - params RPC method parameters
     /// - token biscuit token
     /// - time_in_ms time in milliseconds since UNIX_EPOCH
-    fn authorize(&self, params: serde_json::Value, token: Biscuit, time_in_ms: u64) -> Result<()> {
-        self.build_rule(params)?
+    fn authorize(&self, token: &Biscuit, time_in_ms: u64) -> Result<()> {
+        self.build_rule()?
             .fact(Fact::new(
                 "time".to_string(),
                 &[Term::Date(time_in_ms / 1000)],
             ))?
-            .build(&token)?
+            .build(token)?
             .authorize()?;
         Ok(())
     }
 }
 
-fn build_rules() -> HashMap<&'static str, AuthRule> {
-    let mut rules = HashMap::new();
-    let rules_mut_ref = &mut rules;
+#[derive(Default)]
+struct RuleBuilder(HashMap<&'static str, AuthRule>);
 
-    let mut rule = move |method: &'static str, code: &'static str| {
-        rules_mut_ref.insert(method, AuthRule::new(code));
-    };
+impl RuleBuilder {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn rule(&mut self, method: &'static str, code: &'static str) -> &mut Self {
+        self.0.insert(method, AuthRule::new(code));
+        self
+    }
+
+    fn with_rule(&mut self, method: &'static str, rule: AuthRule) -> &mut Self {
+        self.0.insert(method, rule);
+        self
+    }
+}
+
+fn build_rules() -> HashMap<&'static str, AuthRule> {
+    let mut b = RuleBuilder::new();
 
     // Cch
-    rule("send_btc", r#"allow if write("cch");"#);
-    rule("receive_btc", r#"allow if read("cch");"#);
-    rule("get_receive_btc_order", r#"allow if read("cch");"#);
+    b.rule("send_btc", r#"allow if write("cch");"#);
+    b.rule("receive_btc", r#"allow if read("cch");"#);
+    b.rule("get_receive_btc_order", r#"allow if read("cch");"#);
     // channels
-    rule("open_channel", r#"allow if write("channels");"#);
-    rule("accept_channel", r#"allow if write("channels");"#);
-    rule("abandon_channel", r#"allow if write("channels");"#);
-    rule("list_channels", r#"allow if read("channels");"#);
-    rule("shutdown_channel", r#"allow if write("channels");"#);
-    rule("update_channel", r#"allow if write("channels");"#);
+    b.rule("open_channel", r#"allow if write("channels");"#);
+    b.rule("accept_channel", r#"allow if write("channels");"#);
+    b.rule("abandon_channel", r#"allow if write("channels");"#);
+    b.rule("list_channels", r#"allow if read("channels");"#);
+    b.rule("shutdown_channel", r#"allow if write("channels");"#);
+    b.rule("update_channel", r#"allow if write("channels");"#);
     // dev
-    rule("commitment_signed", r#"allow if write("messages");"#);
-    rule("add_tlc", r#"allow if write("channels");"#);
-    rule("remove_tlc", r#"allow if write("channels");"#);
-    rule(
+    b.rule("commitment_signed", r#"allow if write("messages");"#);
+    b.rule("add_tlc", r#"allow if write("channels");"#);
+    b.rule("remove_tlc", r#"allow if write("channels");"#);
+    b.rule(
         "submit_commitment_transaction",
         r#"allow if write("chain");"#,
     );
     // graph
-    rule("graph_nodes", r#"allow if read("graph");"#);
-    rule("graph_channels", r#"allow if read("graph");"#);
+    b.rule("graph_nodes", r#"allow if read("graph");"#);
+    b.rule("graph_channels", r#"allow if read("graph");"#);
 
     // info
-    rule("node_info", r#"allow if read("node");"#);
-    rule("new_invoice", r#"allow if write("invoices");"#);
-    rule("parse_invoice", r#"allow if read("invoices");"#);
-    rule("get_invoice", r#"allow if read("invoices");"#);
-    rule("cancel_invoice", r#"allow if write("invoices");"#);
+    b.rule("node_info", r#"allow if read("node");"#);
+    b.rule("new_invoice", r#"allow if write("invoices");"#);
+    b.rule("parse_invoice", r#"allow if read("invoices");"#);
+    b.rule("get_invoice", r#"allow if read("invoices");"#);
+    b.rule("cancel_invoice", r#"allow if write("invoices");"#);
 
     // payment
-    rule("send_payment", r#"allow if write("payments");"#);
-    rule("get_payment", r#"allow if read("payments");"#);
-    rule("build_router", r#"allow if read("payments");"#);
-    rule("send_payment_with_router", r#"allow if write("payments");"#);
+    b.rule("send_payment", r#"allow if write("payments");"#);
+    b.rule("get_payment", r#"allow if read("payments");"#);
+    b.rule("build_router", r#"allow if read("payments");"#);
+    b.rule("send_payment_with_router", r#"allow if write("payments");"#);
 
     // peer
-    rule("connect_peer", r#"allow if write("peers");"#);
-    rule("disconnect_peer", r#"allow if write("peers");"#);
-    rule("list_peers", r#"allow if read("peers");"#);
+    b.rule("connect_peer", r#"allow if write("peers");"#);
+    b.rule("disconnect_peer", r#"allow if write("peers");"#);
+    b.rule("list_peers", r#"allow if read("peers");"#);
 
     // watchtower
-    rule(
+    b.with_rule(
         "create_watch_channel",
-        r#"
-        allow if write("watchtower");
-        allow if right({channel_id}, "watchtower");
-        "#,
+        AuthRule::new(r#"allow if write("watchtower");"#).with_require_rpc_context(true),
     );
-    rule(
+    b.with_rule(
         "remove_watch_channel",
-        r#"
-        allow if write("watchtower");
-        allow if right({channel_id}, "watchtower");
-        "#,
+        AuthRule::new(r#"allow if write("watchtower");"#).with_require_rpc_context(true),
     );
-    rule(
+    b.with_rule(
         "update_revocation",
-        r#"
-        allow if write("watchtower");
-        allow if right({channel_id}, "watchtower");
-        "#,
+        AuthRule::new(r#"allow if write("watchtower");"#).with_require_rpc_context(true),
     );
-    rule(
+    b.with_rule(
         "update_local_settlement",
-        r#"
-        allow if write("watchtower");
-        allow if right({channel_id}, "watchtower");
-        "#,
+        AuthRule::new(r#"allow if write("watchtower");"#).with_require_rpc_context(true),
     );
-    rule("create_preimage", r#"allow if write("watchtower");"#);
-    rule("remove_preimage", r#"allow if write("watchtower");"#);
+    b.with_rule(
+        "create_preimage",
+        AuthRule::new(r#"allow if write("watchtower");"#).with_require_rpc_context(true),
+    );
+    b.with_rule(
+        "remove_preimage",
+        AuthRule::new(r#"allow if write("watchtower");"#).with_require_rpc_context(true),
+    );
 
-    rules
+    b.0
 }
 
 pub struct BiscuitAuth {
-    pubkey: PublicKey,
+    pubkey: Option<PublicKey>,
     revocation_list: HashSet<Vec<u8>>,
     rules: HashMap<&'static str, AuthRule>,
 }
@@ -168,10 +156,27 @@ impl BiscuitAuth {
         let revocation_list = Default::default();
         let rules = build_rules();
         Ok(Self {
-            pubkey,
+            pubkey: Some(pubkey),
             rules,
             revocation_list,
         })
+    }
+
+    pub fn without_pubkey() -> Self {
+        let revocation_list = Default::default();
+        let rules = build_rules();
+        Self {
+            pubkey: None,
+            rules,
+            revocation_list,
+        }
+    }
+
+    pub fn get_rule(&self, method: &str) -> Result<&AuthRule> {
+        let Some(rule) = self.rules.get(method) else {
+            return Err(anyhow::anyhow!("no rules for method: {method}"));
+        };
+        Ok(rule)
     }
 
     pub fn extend_revocation_list(&mut self, list: &[String]) -> Result<()> {
@@ -183,20 +188,27 @@ impl BiscuitAuth {
         Ok(())
     }
 
+    pub fn extract_biscuit(&self, token: &str) -> Result<Biscuit> {
+        let pubkey = self
+            .pubkey
+            .as_ref()
+            .ok_or_else(|| anyhow!("Biscuit pubkey is empty"))?;
+        let b = Biscuit::from_base64(token, pubkey).context("invalid token")?;
+        Ok(b)
+    }
+
     /// check permission with time
     ///
     /// - method RPC method
-    /// - params RPC method parameters
     /// - token biscuit token
     /// - time_in_ms time in milliseconds since UNIX_EPOCH
     pub fn check_permission_with_time(
         &self,
         method: &str,
-        params: serde_json::Value,
         token: &str,
         time_in_ms: u64,
-    ) -> Result<()> {
-        let b = Biscuit::from_base64(token, self.pubkey).context("invalid token")?;
+    ) -> Result<(Biscuit, &AuthRule)> {
+        let b = self.extract_biscuit(token)?;
         // check revocation
         if b.revocation_identifiers()
             .iter()
@@ -206,29 +218,30 @@ impl BiscuitAuth {
             return Err(anyhow::anyhow!("Token is in revocation list: {token}"));
         }
         // check permission
-        let Some(rule) = self.rules.get(method) else {
-            return Err(anyhow::anyhow!("no rules for method: {method}"));
-        };
-        if let Err(err) = rule.authorize(params, b, time_in_ms) {
+        let rule = self.get_rule(method)?;
+        if let Err(err) = rule.authorize(&b, time_in_ms) {
             tracing::debug!("authorize failed: {err}");
             return Err(err);
         }
-        Ok(())
+        Ok((b, rule))
     }
 
     /// check permission
     ///
     /// - method RPC method
-    /// - params RPC method parameters
     /// - token biscuit token
-    pub fn check_permission(
-        &self,
-        method: &str,
-        params: serde_json::Value,
-        token: &str,
-    ) -> Result<()> {
-        self.check_permission_with_time(method, params, token, now_timestamp_as_millis_u64())
+    pub fn check_permission(&self, method: &str, token: &str) -> Result<(Biscuit, &AuthRule)> {
+        self.check_permission_with_time(method, token, now_timestamp_as_millis_u64())
     }
+}
+
+/// Extract node id from token
+pub fn extract_node_id(token: &Biscuit) -> Result<NodeId> {
+    const QUERY: &str = "data($id) <- node($id)";
+    let (id,): (String,) = token.authorizer()?.query_exactly_one(QUERY)?;
+    let node_id = NodeId::from_str(id.as_str())?;
+    tracing::warn!("fetch {id:?} {node_id:?}");
+    Ok(node_id)
 }
 
 #[cfg(test)]
@@ -236,7 +249,8 @@ mod tests {
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use biscuit_auth::{macros::biscuit, KeyPair};
-    use serde_json::json;
+
+    use crate::rpc::biscuit::extract_node_id;
 
     use super::BiscuitAuth;
 
@@ -248,163 +262,72 @@ mod tests {
         let auth = BiscuitAuth::from_pubkey(root.public().to_string()).unwrap();
 
         // sign a biscuit
-        let token = {
-            let biscuit = biscuit!(
-                r#"
+        let token = biscuit!(
+            r#"
           write("payments");
           read("peers");
     "#
-            )
-            .build(&root)
-            .unwrap();
-
-            biscuit.to_base64().unwrap()
-        };
+        )
+        .build(&root)
+        .unwrap()
+        .to_base64()
+        .unwrap();
 
         // check permission
-        assert!(auth
-            .check_permission("send_payment", json!({}), &token,)
-            .is_ok());
+        assert!(auth.check_permission("send_payment", &token,).is_ok());
         // write permission do not implies read
-        assert!(auth
-            .check_permission("get_payment", json!({}), &token)
-            .is_err());
-        assert!(auth
-            .check_permission("list_peers", json!({}), &token)
-            .is_ok());
-        assert!(auth
-            .check_permission("connect_peer", json!({}), &token)
-            .is_err());
+        assert!(auth.check_permission("get_payment", &token).is_err());
+        assert!(auth.check_permission("list_peers", &token).is_ok());
+        assert!(auth.check_permission("connect_peer", &token).is_err());
 
         // if not match any rule, it should be denied
-        assert!(auth.check_permission("unknown", json!({}), &token).is_err());
+        assert!(auth.check_permission("unknown", &token).is_err());
     }
 
     #[test]
     fn test_biscuit_auth_with_wrong_token() {
         let root = KeyPair::new();
         let invalid_root = KeyPair::new();
+        assert_ne!(root.public(), invalid_root.public());
 
         // auth
         let auth = BiscuitAuth::from_pubkey(root.public().to_string()).unwrap();
 
         // sign a biscuit
-        let token = {
-            let biscuit = biscuit!(
-                r#"
+        let token = biscuit!(
+            r#"
           write("payments");
     "#
-            )
-            .build(&invalid_root)
-            .unwrap();
-
-            biscuit.to_base64().unwrap()
-        };
+        )
+        .build(&invalid_root)
+        .unwrap()
+        .to_base64()
+        .unwrap();
 
         // check permission
-        assert!(auth
-            .check_permission("send_payment", json!({}), &token)
-            .is_err());
+        assert!(auth.check_permission("send_payment", &token).is_err());
     }
 
     #[test]
-    fn test_biscuit_auth_channel() {
+    fn test_biscuit_auth_watchtower() {
         let root = KeyPair::new();
 
         // auth
         let auth = BiscuitAuth::from_pubkey(root.public().to_string()).unwrap();
 
         // sign a biscuit
-        let token1 = {
-            let biscuit = biscuit!(
-                r#"
+        let token1 = biscuit!(
+            r#"
           write("watchtower");
     "#
-            )
-            .build(&root)
-            .unwrap();
-
-            biscuit.to_base64().unwrap()
-        };
-
-        let token2 = {
-            let biscuit = biscuit!(
-                r#"
-          right("a_channel_id", "watchtower");
-    "#
-            )
-            .build(&root)
-            .unwrap();
-
-            biscuit.to_base64().unwrap()
-        };
-
-        let token3 = {
-            let biscuit = biscuit!(
-                r#"
-          right("b_channel_id", "watchtower");
-    "#
-            )
-            .build(&root)
-            .unwrap();
-            biscuit.to_base64().unwrap()
-        };
+        )
+        .build(&root)
+        .unwrap()
+        .to_base64()
+        .unwrap();
 
         // check permission
-
-        // token1 with write(watchtower) can operate all channels
-        auth.check_permission(
-            "update_revocation",
-            json!({"channel_id": "a_channel_id"}),
-            &token1,
-        )
-        .unwrap();
-        assert!(auth
-            .check_permission(
-                "update_revocation",
-                json!({"channel_id": "a_channel_id"}),
-                &token1,
-            )
-            .is_ok());
-        assert!(auth
-            .check_permission(
-                "update_revocation",
-                json!({"channel_id": "b_channel_id"}),
-                &token1,
-            )
-            .is_ok());
-
-        // token2 with write(watchtower/a_channel_id) can only operate a_channel_id
-        assert!(auth
-            .check_permission(
-                "update_revocation",
-                json!({"channel_id": "a_channel_id"}),
-                &token2,
-            )
-            .is_ok());
-        assert!(auth
-            .check_permission(
-                "update_revocation",
-                json!({"channel_id": "b_channel_id"}),
-                &token2,
-            )
-            .is_err());
-
-        // token3 with write(watchtower/b_channel_id) can only operate b_channel_id
-        assert!(auth
-            .check_permission(
-                "update_revocation",
-                json!({"channel_id": "b_channel_id"}),
-                &token3,
-            )
-            .is_ok());
-        assert!(auth
-            .check_permission(
-                "update_revocation",
-                json!({"channel_id": "a_channel_id"}),
-                &token3,
-            )
-            .is_err());
+        assert!(auth.check_permission("update_revocation", &token1,).is_ok());
     }
 
     #[test]
@@ -415,18 +338,16 @@ mod tests {
         let auth = BiscuitAuth::from_pubkey(root.public().to_string()).unwrap();
 
         // sign a biscuit with timeout
-        let token = {
-            let biscuit = biscuit!(
-                r#"
+        let token = biscuit!(
+            r#"
                 write("payments");
                 check if time($time), $time <= 2022-03-30T20:00:00Z;
     "#
-            )
-            .build(&root)
-            .unwrap();
-
-            biscuit.to_base64().unwrap()
-        };
+        )
+        .build(&root)
+        .unwrap()
+        .to_base64()
+        .unwrap();
 
         // check permission
         let future_time = SystemTime::now()
@@ -435,10 +356,10 @@ mod tests {
             .as_millis() as u64;
         let past_time = Duration::from_millis(10).as_millis() as u64;
         assert!(auth
-            .check_permission_with_time("send_payment", json!({}), &token, future_time)
+            .check_permission_with_time("send_payment", &token, future_time)
             .is_err());
         assert!(auth
-            .check_permission_with_time("send_payment", json!({}), &token, past_time)
+            .check_permission_with_time("send_payment", &token, past_time)
             .is_ok());
     }
 
@@ -480,27 +401,43 @@ mod tests {
         auth.extend_revocation_list(&[rev_id]).unwrap();
 
         // check permission
-        assert!(auth
-            .check_permission("send_payment", json!({}), &token,)
-            .is_ok());
+        assert!(auth.check_permission("send_payment", &token,).is_ok());
         // write permission do not implies read
-        assert!(auth
-            .check_permission("list_peers", json!({}), &token)
-            .is_ok());
+        assert!(auth.check_permission("list_peers", &token).is_ok());
 
         // check revoked token
-        assert!(auth
-            .check_permission("send_payment", json!({}), &rev_token,)
-            .is_err());
+        assert!(auth.check_permission("send_payment", &rev_token,).is_err());
         // write permission do not implies read
-        assert!(auth
-            .check_permission("list_peers", json!({}), &rev_token)
-            .is_err());
+        assert!(auth.check_permission("list_peers", &rev_token).is_err());
+        assert!(auth.check_permission("get_payment", &token).is_err());
 
         // if not match any rule, it should be denied
-        assert!(auth.check_permission("unknown", json!({}), &token).is_err());
-        assert!(auth
-            .check_permission("unknown", json!({}), &rev_token)
-            .is_err());
+        assert!(auth.check_permission("unknown", &token).is_err());
+        assert!(auth.check_permission("unknown", &rev_token).is_err());
+    }
+
+    #[test]
+    fn test_parse_biscuit_token() {
+        // Pubkey
+        let pubkey = "ed25519/17b172749be74276f0ed35a5d0685752684a3c5722114bba447a2f301136db79";
+        // token with all permission
+        let token = "EpoDCq8CCi5RbWJ2UmpKSEFRRG1qM2NnblVCR1E1elZuR3hVS3diMnFKeWd3TnMyd2s0MWg4CgNjY2gKCGNoYW5uZWxzCghtZXNzYWdlcwoFY2hhaW4KBWdyYXBoCghpbnZvaWNlcwoIcGF5bWVudHMKBXBlZXJzCgp3YXRjaHRvd2VyGAMiCQoHCBgSAxiACCIJCgcIARIDGIEIIgkKBwgAEgMYgQgiCQoHCAESAxiCCCIJCgcIABIDGIIIIgkKBwgBEgMYgwgiCQoHCAESAxiECCIJCgcIABIDGIUIIggKBggAEgIYGCIJCgcIARIDGIYIIgkKBwgAEgMYhggiCQoHCAESAxiHCCIJCgcIABIDGIcIIgkKBwgBEgMYiAgiCQoHCAASAxiICCIJCgcIARIDGIkIEiQIABIgdmX3T0R0Fu6vXZUeVD21AZU7K85xSAmsFAOQSqBd1aYaQNdmA5kqLQ6qNVmOxB0uiEFjUq_OQ0DkZgtYt0mSHktbpubKHzJo-imaFx6Pz7f4NzkOvcLLLFUwBlyHxGyEkQAiIgogAEX-eNhS6VprsYL7moBGaJeVUAnn5VzKLr77Rz9y3AI=";
+        // auth
+        let auth = BiscuitAuth::from_pubkey(pubkey.to_string()).unwrap();
+
+        // check permission
+        assert!(auth.check_permission("send_payment", token).is_ok());
+        // write permission do not implies read
+        assert!(auth.check_permission("get_payment", token).is_ok());
+        assert!(auth.check_permission("list_peers", token).is_ok());
+        assert!(auth.check_permission("connect_peer", token).is_ok());
+
+        // if not match any rule, it should be denied
+        assert!(auth.check_permission("unknown", token).is_err());
+
+        let b = auth.extract_biscuit(token).unwrap();
+        let node_id = extract_node_id(&b).unwrap();
+        assert!(!node_id.as_ref().is_empty());
+        println!("node_id: {node_id:?}");
     }
 }

@@ -9,7 +9,7 @@ use super::gen::gossip::{self as molecule_gossip};
 use super::hash_algorithm::{HashAlgorithm, UnknownHashAlgorithmError};
 use super::network::{get_chain_hash, PaymentCustomRecords};
 use super::r#gen::fiber::PubNonceOpt;
-use super::serde_utils::{EntityHex, SliceHex};
+use super::serde_utils::{EntityHex, SliceBase58, SliceHex};
 use crate::ckb::config::{UdtArgInfo, UdtCellDep, UdtCfgInfos, UdtDep, UdtScript};
 use crate::ckb::contracts::get_udt_whitelist;
 use ckb_jsonrpc_types::CellOutput;
@@ -4096,6 +4096,40 @@ fn get_hop_data_len(buf: &[u8]) -> Option<usize> {
         ) as usize
             + HOP_DATA_HEAD_LEN,
     )
+}
+
+/// Used as identifier of node.
+#[serde_as]
+#[derive(Clone, Debug, Serialize, Deserialize, Hash, Eq, PartialEq)]
+pub struct NodeId(#[serde_as(as = "SliceBase58")] Vec<u8>);
+
+impl NodeId {
+    pub fn from_bytes(bytes: Vec<u8>) -> Self {
+        Self(bytes)
+    }
+
+    // return a empty node_id represent local node
+    pub fn local() -> Self {
+        Self(Default::default())
+    }
+}
+
+impl AsRef<[u8]> for NodeId {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl ::std::str::FromStr for NodeId {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let bytes = bs58::decode(s)
+            .into_vec()
+            .map_err(|_| anyhow!("can't parse node_id: {s}"))?;
+
+        Ok(Self::from_bytes(bytes))
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
