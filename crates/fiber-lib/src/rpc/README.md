@@ -524,6 +524,7 @@ Generates a new invoice.
 * `expiry` - <em>`Option<u64>`</em>, The expiry time of the invoice, in seconds.
 * `fallback_address` - <em>`Option<String>`</em>, The fallback address of the invoice.
 * `final_expiry_delta` - <em>`Option<u64>`</em>, The final HTLC timeout of the invoice, in milliseconds.
+ Minimal value is 16 hours, and maximal value is 14 days.
 * `udt_type_script` - <em>`Option<Script>`</em>, The UDT type script of the invoice.
 * `hash_algorithm` - <em>Option<[HashAlgorithm](#type-hashalgorithm)></em>, The hash algorithm of the invoice.
 * `allow_mpp` - <em>`Option<bool>`</em>, Whether allow payment to use MPP

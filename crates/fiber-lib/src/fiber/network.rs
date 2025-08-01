@@ -76,12 +76,10 @@ use crate::ckb::contracts::{check_udt_script, get_udt_whitelist, is_udt_type_aut
 use crate::ckb::{CkbChainMessage, FundingError, FundingRequest, FundingTx};
 use crate::fiber::channel::{
     AddTlcCommand, AddTlcResponse, ChannelEphemeralConfig, ChannelInitializationOperation,
-    ShutdownCommand, TxCollaborationCommand, TxUpdateCommand,
+    ShutdownCommand, TxCollaborationCommand, TxUpdateCommand, DEFAULT_COMMITMENT_DELAY_EPOCHS,
 };
-use crate::fiber::config::{
-    DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT, MILLI_SECONDS_PER_EPOCH,
-};
-use crate::fiber::fee::check_open_channel_parameters;
+use crate::fiber::config::{DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT};
+use crate::fiber::fee::{check_open_channel_parameters, check_tlc_delta_with_epochs};
 use crate::fiber::gossip::{GossipConfig, GossipService, SubscribableGossipMessageStore};
 use crate::fiber::graph::{PaymentSession, PaymentSessionStatus};
 use crate::fiber::serde_utils::EntityHex;
@@ -2675,18 +2673,12 @@ where
             )));
         }
 
-        if let (Some(tlc_expiry_delta), Some(delay_epoch)) =
-            (tlc_expiry_delta, commitment_delay_epoch)
-        {
-            let epoch_delay_milliseconds =
-                (delay_epoch.number() as f64 * MILLI_SECONDS_PER_EPOCH as f64 * 2.0 / 3.0) as u64;
-            if tlc_expiry_delta < epoch_delay_milliseconds {
-                return Err(ProcessingChannelError::InvalidParameter(format!(
-                    "TLC expiry delta {} is smaller than 2/3 commitment_delay_epoch delay {}",
-                    tlc_expiry_delta, epoch_delay_milliseconds
-                )));
-            }
-        }
+        let tlc_expiry_delta = tlc_expiry_delta.unwrap_or(self.tlc_expiry_delta);
+        let commitment_delay_epochs = commitment_delay_epoch.map_or_else(
+            || EpochNumberWithFraction::new(DEFAULT_COMMITMENT_DELAY_EPOCHS, 0, 1).full_value(),
+            |epochs| epochs.full_value(),
+        );
+        check_tlc_delta_with_epochs(tlc_expiry_delta, commitment_delay_epochs)?;
 
         let shutdown_script =
             shutdown_script.unwrap_or_else(|| self.default_shutdown_script.clone());
@@ -2708,7 +2700,7 @@ where
                     seed,
                     tlc_info: ChannelTlcInfo::new(
                         tlc_min_value.unwrap_or(self.tlc_min_value),
-                        tlc_expiry_delta.unwrap_or(self.tlc_expiry_delta),
+                        tlc_expiry_delta,
                         tlc_fee_proportional_millionths
                             .unwrap_or(self.tlc_fee_proportional_millionths),
                     ),

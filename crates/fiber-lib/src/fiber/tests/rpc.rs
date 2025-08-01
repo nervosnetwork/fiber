@@ -437,6 +437,7 @@ async fn test_rpc_node_info() {
 
 #[tokio::test]
 async fn test_rpc_basic_with_auth() {
+    init_tracing();
     let (rpc_config, auth_root) = rpc_config_with_auth();
     let (nodes, _channels) = create_n_nodes_network_with_params(
         &[
