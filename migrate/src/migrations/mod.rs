@@ -1,3 +1,3 @@
+pub mod mig_20250724;
 // following new migration should be added here ...
 // pub(crate) mod sample;
-

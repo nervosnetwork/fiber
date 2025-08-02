@@ -8,7 +8,7 @@ use indicatif::ProgressDrawTarget;
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use tracing::{debug, error, info};
+use tracing::{error, info};
 
 use super::Store;
 
@@ -49,31 +49,38 @@ impl Migrations {
             }
         };
 
-        debug!(
+        eprintln!(
             "Current database version: [{}], latest db version: [{}]",
             db_version, LATEST_DB_VERSION
         );
         db_version.as_str().cmp(LATEST_DB_VERSION)
     }
 
+    fn latest_migration(&self) -> Option<&Arc<dyn Migration>> {
+        self.migrations.values().last()
+    }
+
     // will only invoked in fnn-migrate binary
-    fn run_migrate<'a>(&self, mut db: &'a Store, v: &str) -> Result<&'a Store, Error> {
+    fn run_migrate<'a>(
+        &self,
+        mut db: &'a Store,
+        current_version: &str,
+    ) -> Result<&'a Store, Error> {
         let mpb = Arc::new(MultiProgress::new());
 
         // make sure the latest migration is the last one
         // this may only happened the fnn-migrate binary is not compiled with
         // the correct fiber code base
         {
-            let migrations = self.migrations.values();
-            let latest_version_from_migratons = migrations
-                .last()
-                .unwrap_or_else(|| panic!("should have at least one version"))
-                .version();
-            if latest_version_from_migratons != LATEST_DB_VERSION {
+            let Some(latest_migration) = self.latest_migration() else {
+                return Err(internal_error("No migrations found".to_string()));
+            };
+            let latest_migration_version = latest_migration.version();
+            if latest_migration_version != LATEST_DB_VERSION {
                 error!(
                     "The latest migration version is not equal to the latest db version, \
                 please check the migration version: {}",
-                    latest_version_from_migratons
+                    latest_migration_version
                 );
                 return Err(internal_error(
                     "The latest migration version is not equal to the latest db version"
@@ -85,7 +92,7 @@ impl Migrations {
         let migrations: BTreeMap<_, _> = self
             .migrations
             .iter()
-            .filter(|(mv, _)| mv.as_str() > v)
+            .filter(|(mv, _)| mv.as_str() > current_version)
             .collect();
         let migrations_count = migrations.len();
 
@@ -128,12 +135,28 @@ impl Migrations {
             .is_none()
     }
 
+    pub fn is_any_break_change(&self, db: &Store) -> bool {
+        let Some(current_version) = self
+            .get_migration_version(db)
+            .expect("get migration failed")
+        else {
+            return false;
+        };
+
+        let migrations: BTreeMap<_, _> = self
+            .migrations
+            .iter()
+            .filter(|(mv, _)| mv.as_str() > current_version.as_str())
+            .collect();
+        migrations.values().any(|m| m.is_break_change())
+    }
+
     pub fn migrate<'a>(&self, db: &'a Store) -> Result<&'a Store, Error> {
         let db_version = self.get_migration_version(db)?;
         match db_version {
             Some(ref v) => {
                 info!("Current database version {}", v);
-                self.check_migration_downgrade(v)?;
+                self.check_valid_to_migrate(v, db)?;
                 let db = self.run_migrate(db, v.as_str())?;
                 Ok(db)
             }
@@ -141,7 +164,7 @@ impl Migrations {
         }
     }
 
-    fn check_migration_downgrade(&self, cur_version: &str) -> Result<(), Error> {
+    fn check_valid_to_migrate(&self, cur_version: &str, db: &Store) -> Result<(), Error> {
         if let Some(m) = self.migrations.values().last() {
             if m.version() < cur_version {
                 error!(
@@ -153,6 +176,11 @@ impl Migrations {
                     "Database downgrade is not supported".to_string(),
                 ));
             }
+        }
+        if self.is_any_break_change(db) {
+            return Err(internal_error(
+                "There is a breaking change migration".to_string(),
+            ));
         }
         Ok(())
     }
@@ -167,6 +195,11 @@ pub trait Migration: Send + Sync {
 
     /// returns migration version, use `date +'%Y%m%d%H%M%S'` timestamp format
     fn version(&self) -> &str;
+
+    /// break change
+    fn is_break_change(&self) -> bool {
+        false
+    }
 }
 
 pub struct DefaultMigration {

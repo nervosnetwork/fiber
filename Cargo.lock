@@ -2145,6 +2145,7 @@ dependencies = [
  "num_enum",
  "once_cell",
  "ouroboros",
+ "parking_lot",
  "paste",
  "ractor",
  "rand 0.8.5",

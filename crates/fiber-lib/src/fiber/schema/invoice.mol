@@ -44,6 +44,10 @@ struct HashAlgorithm {
     value: byte,
 }
 
+struct PaymentSecret {
+    value: Byte32,
+}
+
 union InvoiceAttr {
     ExpiryTime,
     Description,
@@ -54,6 +58,7 @@ union InvoiceAttr {
     UdtScript,
     PayeePublicKey,
     HashAlgorithm,
+    PaymentSecret,
 }
 
 vector InvoiceAttrsVec <InvoiceAttr>;

@@ -18,6 +18,9 @@ pub(crate) struct NodeHeapElement {
     // The amount to send to next node.
     pub amount_to_send: u128,
 
+    // The tlc min value for this edge.
+    pub tlc_min_value: u128,
+
     // The fee charged by this node.
     pub fee_charged: u128,
 
@@ -59,6 +62,7 @@ impl PartialEq for NodeHeapElement {
         self.node_id == other.node_id
             && self.weight == other.weight
             && self.distance == other.distance
+            && self.tlc_min_value == other.tlc_min_value
             && self.amount_to_send == other.amount_to_send
             && self.fee_charged == other.fee_charged
             && self.probability == other.probability

@@ -592,6 +592,7 @@ impl CchActor {
                                 amount: order.amount_sats - order.fee_sats,
                                 payment_hash: Hash256::from_str(&order.payment_hash)
                                     .expect("parse Hash256"),
+                                attempt_id: None,
                                 expiry: now_timestamp_as_millis_u64()
                                     + self.config.ckb_final_tlc_expiry_delta,
                                 hash_algorithm: HashAlgorithm::Sha256,

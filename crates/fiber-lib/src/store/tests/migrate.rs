@@ -11,6 +11,7 @@ use ouroboros::self_referencing;
 use std::cmp::Ordering;
 use std::path::Path;
 use std::sync::{Arc, RwLock};
+
 fn gen_path() -> std::path::PathBuf {
     let tmp_dir = tempfile::Builder::new()
         .prefix("test-store")
@@ -51,40 +52,71 @@ fn test_default_migration() {
     assert_eq!(migrate.borrow_migrate().check(), Ordering::Equal);
 }
 
+pub struct DummyMigration {
+    version: String,
+    run_count: Arc<RwLock<usize>>,
+}
+
+impl DummyMigration {
+    pub fn new(version: &str, run_count: Arc<RwLock<usize>>) -> Self {
+        Self {
+            version: version.to_string(),
+            run_count,
+        }
+    }
+}
+
+impl Migration for DummyMigration {
+    fn migrate<'a>(
+        &self,
+        db: &'a Store,
+        _pb: Arc<dyn Fn(u64) -> ProgressBar + Send + Sync>,
+    ) -> Result<&'a Store, Error> {
+        eprintln!("DummyMigration::migrate {} ... ", self.version);
+        let mut count = self.run_count.write().unwrap();
+        *count += 1;
+        Ok(db)
+    }
+
+    fn version(&self) -> &str {
+        &self.version
+    }
+}
+
+pub struct BreakChangeMigration {
+    version: String,
+}
+
+impl BreakChangeMigration {
+    pub fn new(version: &str) -> Self {
+        Self {
+            version: version.to_string(),
+        }
+    }
+}
+
+impl Migration for BreakChangeMigration {
+    fn migrate<'a>(
+        &self,
+        db: &'a Store,
+        _pb: Arc<dyn Fn(u64) -> ProgressBar + Send + Sync>,
+    ) -> Result<&'a Store, Error> {
+        eprintln!("BreakChangeMigration::migrate {} ... ", self.version);
+        Ok(db)
+    }
+
+    fn version(&self) -> &str {
+        &self.version
+    }
+
+    fn is_break_change(&self) -> bool {
+        true
+    }
+}
+
 #[test]
 fn test_run_migration() {
     let run_count = Arc::new(RwLock::new(0));
-
-    pub struct DummyMigration {
-        version: String,
-        run_count: Arc<RwLock<usize>>,
-    }
-
-    impl DummyMigration {
-        pub fn new(version: &str, run_count: Arc<RwLock<usize>>) -> Self {
-            Self {
-                version: version.to_string(),
-                run_count,
-            }
-        }
-    }
-
-    impl Migration for DummyMigration {
-        fn migrate<'a>(
-            &self,
-            db: &'a Store,
-            _pb: Arc<dyn Fn(u64) -> ProgressBar + Send + Sync>,
-        ) -> Result<&'a Store, Error> {
-            eprintln!("DummyMigration::migrate {} ... ", self.version);
-            let mut count = self.run_count.write().unwrap();
-            *count += 1;
-            Ok(db)
-        }
-
-        fn version(&self) -> &str {
-            &self.version
-        }
-    }
 
     let migrate = gen_migrate();
     migrate.borrow_migrate().init_db_version().unwrap();
@@ -123,4 +155,47 @@ fn test_run_migration() {
     migrations.add_migration(Arc::new(DefaultMigration::new()));
     // checked by the LATEST_DB_VERSION
     assert_eq!(migrations.check(db), Ordering::Equal);
+}
+
+#[test]
+fn test_break_change_migration() {
+    let run_count = Arc::new(RwLock::new(0));
+
+    let migrate = gen_migrate();
+    migrate.borrow_migrate().init_db_version().unwrap();
+    let db = migrate.borrow_store();
+
+    let mut migrations = Migrations::default();
+    migrations.add_migration(Arc::new(DummyMigration::new(
+        "20221116135521",
+        run_count.clone(),
+    )));
+
+    migrations.add_migration(Arc::new(BreakChangeMigration::new(LATEST_DB_VERSION)));
+
+    assert_eq!(migrations.check(db), Ordering::Equal);
+    assert!(!migrations.is_any_break_change(db));
+
+    // now manually set db version to a lower one
+    db.put(MIGRATION_VERSION_KEY, "20221116135521");
+    assert_eq!(migrations.check(db), Ordering::Less);
+    assert!(migrations.is_any_break_change(db));
+
+    let result = migrations.migrate(db);
+    assert!(result.is_err());
+    let error = result.unwrap_err().to_string();
+    eprintln!("Error: {}", error);
+    assert!(error.contains("breaking change migration"));
+
+    let mut db_migrate = DbMigrate::new(db);
+    let result = db_migrate.init_or_check("dummy_path");
+    assert!(result.is_err());
+    let error = result.unwrap_err();
+    assert!(error.contains("Fiber need to run some database migrations"));
+
+    db_migrate.add_migration(Arc::new(BreakChangeMigration::new(LATEST_DB_VERSION)));
+    let result = db_migrate.init_or_check("dummy_path");
+    assert!(result.is_err());
+    let error = result.unwrap_err();
+    assert!(error.contains("need to shutdown all old channels"));
 }
