@@ -5777,7 +5777,7 @@ async fn test_open_channel_tlc_expiry_is_smaller_than_commitment_delay() {
     eprintln!("open_channel_result: {:?}", open_channel_result);
     let error = open_channel_result.unwrap_err().to_string();
     assert!(error
-        .contains("TLC expiry delta 19999 is smaller than 2/3 commitment_delay_epoch delay 20000"));
+        .contains("TLC expiry delta 13332 is smaller than 2/3 commitment_delay_epoch delay 13333"));
 
     let message = |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
