@@ -447,8 +447,8 @@ fn test_invoice_serialize() {
     assert_eq!(decoded, invoice);
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
+
+#[test]
 fn test_invoice_timestamp() {
     let payment_hash = gen_rand_sha256_hash();
     let private_key = gen_rand_secp256k1_private_key();
@@ -523,8 +523,8 @@ fn test_invoice_check_expiry_should_not_overflow() {
     assert!(!invoice.is_expired()); // should not panic
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
+
+#[test]
 fn test_invoice_check_expired() {
     let private_key = gen_rand_secp256k1_private_key();
     let invoice = InvoiceBuilder::new(Currency::Fibb)
