@@ -36,7 +36,7 @@ pub const DEFAULT_TLC_EXPIRY_DELTA: u64 = 24 * 60 * 60 * 1000;
 #[cfg(not(debug_assertions))]
 pub const MILLI_SECONDS_PER_EPOCH: u64 = 4 * 60 * 60 * 1000;
 #[cfg(debug_assertions)]
-// 3 seconds for testing environment, so default 2/3 commitment_delay_epoch is 6 * 2/3 * 3 = 6 seconds
+// 3 seconds for testing environment, so default 2/3 commitment_delay_epoch is 6 * 2/3 * 3 = 12 seconds
 pub const MILLI_SECONDS_PER_EPOCH: u64 = 3 * 1000;
 
 #[cfg(not(debug_assertions))]

@@ -594,6 +594,13 @@ fn try_settle_commitment_tx<S: WatchtowerStore>(
                                                     Ok(tx_hash) => {
                                                         info!("Settlement tx for pending tlcs: {:?} sent, tx_hash: {:#x}", tx, tx_hash);
                                                     }
+                                                    Err(RpcError::Rpc(err)) => {
+                                                        if err.message.contains(
+                                                            "PoolRejectedDuplicatedTransaction",
+                                                        ) {
+                                                            info!("Settlement tx: {:?} already exists", tx.hash());
+                                                        }
+                                                    }
                                                     Err(err) => {
                                                         error!("Failed to send settlement tx for pending tlcs: {:?}, error: {:?}", tx, err);
                                                     }
@@ -649,6 +656,12 @@ fn try_settle_commitment_tx<S: WatchtowerStore>(
                                             "Settlement tx: {:?} sent, tx_hash: {:#x}",
                                             tx, tx_hash
                                         );
+                                    }
+                                    Err(RpcError::Rpc(err)) => {
+                                        if err.message.contains("PoolRejectedDuplicatedTransaction")
+                                        {
+                                            info!("Settlement tx: {:?} already exists", tx.hash());
+                                        }
                                     }
                                     Err(err) => {
                                         error!(

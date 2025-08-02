@@ -1566,7 +1566,6 @@ where
                 // Due to channel offline or network issues, remove hold tlc maybe failed,
                 // we retry timeout these tlcs.
                 let now = now_timestamp_as_millis_u64();
-                debug!("Check expired hold tlcs");
                 for (payment_hash, hold_tlcs) in self.store.get_node_hold_tlcs() {
                     // timeout hold tlc
                     let already_timeout = hold_tlcs
@@ -1587,7 +1586,6 @@ where
                         }
                     }
                 }
-                debug!("Done check expired hold tlcs");
             }
             NetworkActorCommand::SettleMPPTlcSet(payment_hash) => {
                 // load hold tlcs
