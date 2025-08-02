@@ -71,7 +71,6 @@ lnd-grpc-tonic-client = "0.3.0"
 rocksdb = {package = "ckb-rocksdb", version = "=0.21.1", features = [
   "lz4",
 ], default-features = false}
-socket2 = "0.5.7"
 tentacle = {version = "0.6.6", default-features = false, features = [
   "upnp",
   "parking_lot",

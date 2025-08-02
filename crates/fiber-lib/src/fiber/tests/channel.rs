@@ -46,7 +46,6 @@ use std::collections::HashSet;
 use std::time::Duration;
 use tracing::debug;
 
-
 #[tokio::test]
 async fn test_connect_to_other_node() {
     let mut node_a = NetworkNode::new().await;

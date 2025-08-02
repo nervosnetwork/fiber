@@ -17,7 +17,6 @@ async fn test_submit_empty_tx() {
     ));
 }
 
-
 #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 async fn test_submit_one_output_tx() {
@@ -34,7 +33,6 @@ async fn test_submit_one_output_tx() {
         TxStatus::Committed(..),
     ));
 }
-
 
 #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
@@ -84,7 +82,6 @@ async fn test_submit_mocked_secp256k1_tx() {
         TxStatus::Committed(..)
     ));
 }
-
 
 #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
@@ -157,7 +154,6 @@ async fn test_repeatedly_consume_the_same_cell() {
         .build();
     assert!(matches!(submit_tx(actor, tx).await, TxStatus::Rejected(_)));
 }
-
 
 #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
