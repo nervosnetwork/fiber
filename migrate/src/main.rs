@@ -55,6 +55,14 @@ fn run_migrate<P: AsRef<Path>>(
     if let Err(_) = migrate.borrow_migrate().init_or_check(path.as_ref()) {
         let result = migrate.borrow_migrate().check();
         if result == Ordering::Less {
+            if migrate.borrow_migrate().is_any_break_change() {
+                eprintln!("There is a breaking change migration, you need to shutdown all channels \
+                        and restart new version fiber node with a new initialized database.\
+                        You can find more information in the migration document: https://github.com/nervosnetwork/fiber/wiki/Fiber-Breaking-Change-Migration-Guide");
+                return Err(
+                    "need to shutdown all old channels with old version of fiber node, and then restart latest fiber node with a new database".to_string(),
+                );
+            }
             if !skip_confirm {
                 let path_buf = path.as_ref().to_path_buf();
                 let input = prompt(format!("\

@@ -1,7 +1,7 @@
 use ckb_sdk::{CkbRpcAsyncClient, RpcError};
 use ckb_types::{
     core::{tx_pool::TxStatus, TransactionView},
-    packed::{self, Transaction},
+    packed,
     prelude::IntoTransactionView as _,
 };
 use ractor::{concurrency::Duration, Actor, ActorProcessingErr, ActorRef, RpcReplyPort};
@@ -90,8 +90,9 @@ pub enum CkbChainMessage {
         RpcReplyPort<Result<FundingTx, FundingError>>,
     ),
     VerifyFundingTx {
-        local_tx: Transaction,
-        remote_tx: Transaction,
+        local_tx: packed::Transaction,
+        remote_tx: packed::Transaction,
+        funding_cell_lock_script: packed::Script,
         reply: RpcReplyPort<Result<(), FundingError>>,
     },
     /// Add funding tx. This is used to reestablish a channel that is not ready yet.
@@ -164,7 +165,7 @@ impl Actor for CkbChainActor {
         match message {
             CkbChainMessage::Fund(tx, request, reply_port) => {
                 if !reply_port.is_closed() {
-                    let context = state.build_funding_context(&request);
+                    let context = state.build_funding_context(request.script.clone());
                     let exclusion = &mut state.live_cells_exclusion_map;
                     let result = tx.fulfill(request, context, exclusion).await;
                     if !reply_port.is_closed() {
@@ -176,10 +177,14 @@ impl Actor for CkbChainActor {
             CkbChainMessage::VerifyFundingTx {
                 local_tx,
                 remote_tx,
+                funding_cell_lock_script,
                 reply,
             } => {
                 let mut funding_tx: FundingTx = local_tx.into();
-                let result = funding_tx.update_for_peer(remote_tx.into_view());
+                let context = state.build_funding_context(funding_cell_lock_script);
+                let result = funding_tx
+                    .update_for_peer(remote_tx.into_view(), context)
+                    .await;
                 let _ = reply.send(result);
             }
             CkbChainMessage::AddFundingTx(tx) => {
@@ -287,12 +292,12 @@ impl Actor for CkbChainActor {
 }
 
 impl CkbChainState {
-    fn build_funding_context(&self, request: &FundingRequest) -> FundingContext {
+    fn build_funding_context(&self, funding_cell_lock_script: packed::Script) -> FundingContext {
         FundingContext {
             secret_key: self.secret_key,
             rpc_url: self.config.rpc_url.clone(),
             funding_source_lock_script: self.funding_source_lock_script.clone(),
-            funding_cell_lock_script: request.script.clone(),
+            funding_cell_lock_script,
         }
     }
 }

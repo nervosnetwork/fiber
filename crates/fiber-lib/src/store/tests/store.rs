@@ -2,6 +2,7 @@ use crate::fiber::channel::*;
 use crate::fiber::config::AnnouncedNodeName;
 use crate::fiber::config::DEFAULT_TLC_EXPIRY_DELTA;
 use crate::fiber::config::MAX_PAYMENT_TLC_EXPIRY_LIMIT;
+use crate::fiber::features::FeatureVector;
 use crate::fiber::gossip::GossipMessageStore;
 use crate::fiber::graph::*;
 use crate::fiber::history::Direction;
@@ -21,6 +22,7 @@ use crate::tests::test_utils::*;
 use crate::time::SystemTime;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::watchtower::*;
+use ckb_hash::blake2b_256;
 use ckb_hash::new_blake2b;
 use ckb_types::packed::*;
 use ckb_types::prelude::*;
@@ -32,6 +34,8 @@ use musig2::SecNonce;
 use secp256k1::SecretKey;
 use secp256k1::{Keypair, Secp256k1};
 use std::collections::HashMap;
+use std::time::SystemTime;
+use tentacle::secio::PeerId;
 
 fn gen_rand_key_pair() -> Keypair {
     let secp = Secp256k1::new();
@@ -48,6 +52,7 @@ fn mock_node() -> (Privkey, NodeAnnouncement) {
         sk.clone(),
         NodeAnnouncement::new(
             AnnouncedNodeName::from_string("node1").expect("invalid name"),
+            FeatureVector::default(),
             vec![],
             &sk,
             now_timestamp_as_millis_u64(),
@@ -94,7 +99,6 @@ fn test_store_invoice() {
         .unwrap();
     assert_eq!(store.get_invoice(hash), Some(invoice.clone()));
     assert_eq!(store.get_preimage(hash), Some(preimage));
-    assert_eq!(store.search_preimage(&hash.as_ref()[0..20]), Some(preimage));
 
     let invalid_hash = gen_rand_sha256_hash();
     assert_eq!(store.get_preimage(&invalid_hash), None);
@@ -220,10 +224,11 @@ fn test_store_save_node_announcement() {
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
-fn test_store_wacthtower() {
+fn test_store_watchtower() {
     let path = TempDir::new("test-watchtower-store");
     let store = Store::new(path).expect("created store failed");
 
+    let node_id = NodeId::from_bytes(PeerId::random().into_bytes());
     let channel_id = gen_rand_sha256_hash();
     let funding_tx_lock = Script::default();
 
@@ -237,7 +242,12 @@ fn test_store_wacthtower() {
         tlcs: vec![],
     };
 
-    store.insert_watch_channel(channel_id, funding_tx_lock.clone(), settlement_data.clone());
+    store.insert_watch_channel(
+        node_id.clone(),
+        channel_id,
+        funding_tx_lock.clone(),
+        settlement_data.clone(),
+    );
     assert_eq!(
         store.get_watch_channels(),
         vec![ChannelData {
@@ -257,7 +267,12 @@ fn test_store_wacthtower() {
         output_data: Bytes::default(),
     };
 
-    store.update_revocation(channel_id, revocation_data.clone(), settlement_data.clone());
+    store.update_revocation(
+        node_id.clone(),
+        channel_id,
+        revocation_data.clone(),
+        settlement_data.clone(),
+    );
     assert_eq!(
         store.get_watch_channels(),
         vec![ChannelData {
@@ -269,7 +284,130 @@ fn test_store_wacthtower() {
         }]
     );
 
-    store.remove_watch_channel(channel_id);
+    store.remove_watch_channel(node_id, channel_id);
+    assert_eq!(store.get_watch_channels(), vec![]);
+}
+
+#[test]
+fn test_store_watchtower_preimage() {
+    let path = TempDir::new("test-watchtower-store");
+    let store = Store::new(path).expect("created store failed");
+
+    let node_id_a = NodeId::from_bytes(PeerId::random().into_bytes());
+    let preimage_a = gen_rand_sha256_hash();
+    let payment_hash_a = blake2b_256(preimage_a).into();
+
+    let node_id_b = NodeId::local();
+    let preimage_b = gen_rand_sha256_hash();
+    let payment_hash_b = blake2b_256(preimage_b).into();
+
+    let preimage_c = gen_rand_sha256_hash();
+    let payment_hash_c = blake2b_256(preimage_c).into();
+
+    store.insert_watch_preimage(node_id_a.clone(), payment_hash_a, preimage_a);
+    store.insert_watch_preimage(node_id_b.clone(), payment_hash_b, preimage_b);
+
+    // this interface should not return a watch preimage
+    assert!(
+        store.get_preimage(&payment_hash_a).is_none(),
+        "should not return a watch preimage"
+    );
+    assert_eq!(
+        store.get_watch_preimage(&payment_hash_a).unwrap(),
+        preimage_a,
+        "query watch preimage"
+    );
+
+    // watch preimage should not return a node preimage
+    store.insert_preimage(payment_hash_c, preimage_c);
+    assert!(
+        store.get_watch_preimage(&payment_hash_c).is_none(),
+        "query non exist watch preimage"
+    );
+
+    assert!(
+        store
+            .search_preimage(&payment_hash_c.as_ref()[..20])
+            .is_none(),
+        "search a non exist watch preimage"
+    );
+    // search preimage only returns watch preimage
+    assert_eq!(
+        store
+            .search_preimage(&payment_hash_a.as_ref()[..20])
+            .unwrap(),
+        preimage_a,
+        "search"
+    );
+
+    // delete preimage with wrong node
+    store.remove_watch_preimage(node_id_a, payment_hash_b);
+    assert!(store.get_watch_preimage(&payment_hash_b).is_some(), "exist");
+
+    store.remove_watch_preimage(node_id_b, payment_hash_b);
+    assert!(
+        store.get_watch_preimage(&payment_hash_b).is_none(),
+        "removed"
+    );
+}
+
+#[test]
+fn test_store_watchtower_with_wrong_node_id() {
+    let path = TempDir::new("test-watchtower-store");
+    let store = Store::new(path).expect("created store failed");
+
+    let node_id = NodeId::from_bytes(PeerId::random().into_bytes());
+    let wrong_node_id = NodeId::from_bytes(PeerId::random().into_bytes());
+    let channel_id = gen_rand_sha256_hash();
+    let funding_tx_lock = Script::default();
+
+    let settlement_data = SettlementData {
+        x_only_aggregated_pubkey: [0u8; 32],
+        aggregated_signature: CompactSignature::from_bytes(&[0u8; 64]).unwrap(),
+        to_local_output: CellOutput::default(),
+        to_local_output_data: Bytes::default(),
+        to_remote_output: CellOutput::default(),
+        to_remote_output_data: Bytes::default(),
+        tlcs: vec![],
+    };
+
+    store.insert_watch_channel(
+        node_id.clone(),
+        channel_id,
+        funding_tx_lock.clone(),
+        settlement_data.clone(),
+    );
+    let expected_value = vec![ChannelData {
+        channel_id,
+        funding_tx_lock: funding_tx_lock.clone(),
+        revocation_data: None,
+        local_settlement_data: None,
+        remote_settlement_data: settlement_data.clone(),
+    }];
+    assert_eq!(store.get_watch_channels(), expected_value);
+
+    // update with wrong node_id
+    let revocation_data = RevocationData {
+        commitment_number: 0,
+        x_only_aggregated_pubkey: [0u8; 32],
+        aggregated_signature: CompactSignature::from_bytes(&[0u8; 64]).unwrap(),
+        output: CellOutput::default(),
+        output_data: Bytes::default(),
+    };
+
+    store.update_revocation(
+        wrong_node_id.clone(),
+        channel_id,
+        revocation_data.clone(),
+        settlement_data.clone(),
+    );
+    assert_eq!(store.get_watch_channels(), expected_value);
+
+    // remove wrong_node_id
+    store.remove_watch_channel(wrong_node_id, channel_id);
+    assert_eq!(store.get_watch_channels(), expected_value);
+
+    store.remove_watch_channel(node_id, channel_id);
     assert_eq!(store.get_watch_channels(), vec![]);
 }
 
@@ -375,6 +513,7 @@ fn test_channel_actor_state_store() {
         waiting_peer_response: None,
         network: None,
         scheduled_channel_update_handle: None,
+        pending_notify_mpp_tcls: vec![],
         ephemeral_config: Default::default(),
     };
 
@@ -490,6 +629,7 @@ fn test_serde_channel_actor_state_ciborium() {
         waiting_peer_response: None,
         network: None,
         scheduled_channel_update_handle: None,
+        pending_notify_mpp_tcls: vec![],
         ephemeral_config: Default::default(),
     };
 
@@ -521,13 +661,15 @@ fn test_store_payment_session() {
         dry_run: false,
         custom_records: None,
         router: vec![],
+        allow_mpp: false,
+        channel_stats: Default::default(),
     };
-    let payment_session = PaymentSession::new(payment_data.clone(), 10);
+    let payment_session = PaymentSession::new(&store, payment_data.clone(), 10);
     store.insert_payment_session(payment_session.clone());
     let res = store.get_payment_session(payment_hash).unwrap();
     assert_eq!(res.payment_hash(), payment_hash);
     assert_eq!(res.request.max_fee_amount, Some(1000));
-    assert_eq!(res.status, PaymentSessionStatus::Created);
+    assert_eq!(res.status, PaymentStatus::Created);
 }
 
 #[test]
@@ -552,8 +694,10 @@ fn test_store_payment_sessions_with_status() {
         dry_run: false,
         custom_records: None,
         router: vec![],
+        allow_mpp: false,
+        channel_stats: Default::default(),
     };
-    let payment_session = PaymentSession::new(payment_data.clone(), 10);
+    let payment_session = PaymentSession::new(&store, payment_data.clone(), 10);
     store.insert_payment_session(payment_session.clone());
 
     let payment_hash1 = gen_rand_sha256_hash();
@@ -575,21 +719,23 @@ fn test_store_payment_sessions_with_status() {
         dry_run: false,
         custom_records: None,
         router: vec![],
+        allow_mpp: false,
+        channel_stats: Default::default(),
     };
-    let mut payment_session = PaymentSession::new(payment_data.clone(), 10);
+    let mut payment_session = PaymentSession::new(&store, payment_data.clone(), 10);
     payment_session.set_success_status();
     store.insert_payment_session(payment_session.clone());
 
-    let res = store.get_payment_sessions_with_status(PaymentSessionStatus::Created);
+    let res = store.get_payment_sessions_with_status(PaymentStatus::Created);
     assert_eq!(res.len(), 1);
     assert_eq!(res[0].payment_hash(), payment_hash0);
 
-    let res = store.get_payment_sessions_with_status(PaymentSessionStatus::Success);
+    let res = store.get_payment_sessions_with_status(PaymentStatus::Success);
     assert_eq!(res.len(), 1);
     assert_eq!(res[0].payment_hash(), payment_hash1);
-    assert_eq!(res[0].status, PaymentSessionStatus::Success);
+    assert_eq!(res[0].status, PaymentStatus::Success);
 
-    let res = store.get_payment_sessions_with_status(PaymentSessionStatus::Failed);
+    let res = store.get_payment_sessions_with_status(PaymentStatus::Failed);
     assert_eq!(res.len(), 0);
 }
 
@@ -678,6 +824,7 @@ fn test_serde_node_announcement_as_broadcast_message() {
     let privkey = gen_rand_fiber_private_key();
     let node_announcement = NodeAnnouncement::new(
         AnnouncedNodeName::from_string("node1").expect("valid name"),
+        FeatureVector::default(),
         vec![],
         &privkey,
         now_timestamp_as_millis_u64(),

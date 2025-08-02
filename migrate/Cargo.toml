@@ -17,7 +17,6 @@ hex = "0.4.3"
 clap = { version = "4.0", features = ["derive"] }
 fiber = { package = "fnn", path = "../crates/fiber-lib" }
 serde_json = "1.0.135"
-
 ouroboros = "0.18.5"
 
 [features]

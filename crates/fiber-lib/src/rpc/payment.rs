@@ -1,6 +1,6 @@
 use crate::fiber::graph::RouterHop;
 #[cfg(debug_assertions)]
-use crate::fiber::graph::SessionRouteNode as InternalSessionRouteNode;
+use crate::fiber::graph::SessionRoute;
 use crate::fiber::network::BuildRouterCommand;
 use crate::fiber::network::HopRequire;
 use crate::fiber::network::SendPaymentWithRouterCommand;
@@ -8,7 +8,7 @@ use crate::fiber::serde_utils::SliceHex;
 use crate::fiber::serde_utils::U32Hex;
 use crate::fiber::{
     channel::ChannelActorStateStore,
-    graph::PaymentSessionStatus,
+    graph::PaymentStatus,
     network::{HopHint as NetworkHopHint, SendPaymentCommand},
     serde_utils::{EntityHex, U128Hex, U64Hex},
     types::{Hash256, Pubkey},
@@ -41,7 +41,7 @@ pub struct GetPaymentCommandResult {
     /// The payment hash of the payment
     pub payment_hash: Hash256,
     /// The status of the payment
-    pub status: PaymentSessionStatus,
+    pub status: PaymentStatus,
     #[serde_as(as = "U64Hex")]
     /// The time the payment was created at, in milliseconds from UNIX epoch
     created_at: u64,
@@ -61,40 +61,15 @@ pub struct GetPaymentCommandResult {
     /// The router is a list of nodes that the payment will go through.
     /// We store in the payment session and then will use it to track the payment history.
     /// The router is a list of nodes that the payment will go through.
+    /// If the payment adapted MPP (multi-part payment), the routers will be a list of nodes
     /// For example:
     ///    `A(amount, channel) -> B -> C -> D`
     /// means A will send `amount` with `channel` to B.
-    router: Vec<SessionRouteNode>,
-}
-
-/// The node and channel information in a payment route hop
-#[cfg(debug_assertions)]
-#[serde_as]
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct SessionRouteNode {
-    /// the public key of the node
-    pub pubkey: Pubkey,
-    /// the amount for this hop
-    #[serde_as(as = "U128Hex")]
-    pub amount: u128,
-    /// the channel outpoint for this hop
-    #[serde_as(as = "EntityHex")]
-    pub channel_outpoint: OutPoint,
-}
-
-#[cfg(debug_assertions)]
-impl From<InternalSessionRouteNode> for SessionRouteNode {
-    fn from(node: InternalSessionRouteNode) -> Self {
-        SessionRouteNode {
-            pubkey: node.pubkey,
-            amount: node.amount,
-            channel_outpoint: node.channel_outpoint,
-        }
-    }
+    routers: Vec<SessionRoute>,
 }
 
 /// The custom records to be included in the payment.
-/// The key is hex encoded of `u32`, and the value is hex encoded of `Vec<u8>` with `0x` as prefix.
+/// The key is hex encoded of `u32`, it's range limited in 0 ~ 65535, and the value is hex encoded of `Vec<u8>` with `0x` as prefix.
 /// For example:
 /// ```json
 /// "custom_records": {
@@ -434,7 +409,7 @@ where
                 .custom_records
                 .map(|records| PaymentCustomRecords { data: records.data }),
             #[cfg(debug_assertions)]
-            router: response.router.nodes.into_iter().map(Into::into).collect(),
+            routers: response.routers.clone(),
         })
     }
 
@@ -459,7 +434,7 @@ where
                 .custom_records
                 .map(|records| PaymentCustomRecords { data: records.data }),
             #[cfg(debug_assertions)]
-            router: response.router.nodes.into_iter().map(Into::into).collect(),
+            routers: response.routers.clone(),
         })
     }
 
@@ -513,7 +488,7 @@ where
                 .custom_records
                 .map(|records| PaymentCustomRecords { data: records.data }),
             #[cfg(debug_assertions)]
-            router: response.router.nodes.into_iter().map(Into::into).collect(),
+            routers: response.routers.clone(),
         })
     }
 }

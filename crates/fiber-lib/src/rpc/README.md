@@ -75,13 +75,14 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
     * [Type `InvoiceSignature`](#type-invoicesignature)
     * [Type `NodeInfo`](#type-nodeinfo)
     * [Type `PaymentCustomRecords`](#type-paymentcustomrecords)
-    * [Type `PaymentSessionStatus`](#type-paymentsessionstatus)
+    * [Type `PaymentStatus`](#type-paymentstatus)
     * [Type `PeerInfo`](#type-peerinfo)
     * [Type `Privkey`](#type-privkey)
     * [Type `Pubkey`](#type-pubkey)
     * [Type `RemoveTlcReason`](#type-removetlcreason)
     * [Type `RevocationData`](#type-revocationdata)
     * [Type `RouterHop`](#type-routerhop)
+    * [Type `SessionRoute`](#type-sessionroute)
     * [Type `SessionRouteNode`](#type-sessionroutenode)
     * [Type `SettlementData`](#type-settlementdata)
     * [Type `SettlementTlc`](#type-settlementtlc)
@@ -201,10 +202,11 @@ Attempts to open a channel with a peer.
 * `public` - <em>`Option<bool>`</em>, Whether this is a public channel (will be broadcasted to network, and can be used to forward TLCs), an optional parameter, default value is true.
 * `funding_udt_type_script` - <em>`Option<Script>`</em>, The type script of the UDT to fund the channel with, an optional parameter.
 * `shutdown_script` - <em>`Option<Script>`</em>, The script used to receive the channel balance, an optional parameter, default value is the secp256k1_blake160_sighash_all script corresponding to the configured private key.
-* `commitment_delay_epoch` - <em>`Option<EpochNumberWithFraction>`</em>, The delay time for the commitment transaction, must be an [EpochNumberWithFraction](https://github.com/nervosnetwork/rfcs/blob/master/rfcs/0017-tx-valid-since/e-i-l-encoding.png) in u64 format, an optional parameter, default value is 24 hours.
+* `commitment_delay_epoch` - <em>`Option<EpochNumberWithFraction>`</em>, The delay time for the commitment transaction, must be an [EpochNumberWithFraction](https://github.com/nervosnetwork/rfcs/blob/master/rfcs/0017-tx-valid-since/e-i-l-encoding.png) in u64 format, an optional parameter, default value is 24 hours, which is 6 epochs.
 * `commitment_fee_rate` - <em>`Option<u64>`</em>, The fee rate for the commitment transaction, an optional parameter.
 * `funding_fee_rate` - <em>`Option<u64>`</em>, The fee rate for the funding transaction, an optional parameter.
 * `tlc_expiry_delta` - <em>`Option<u64>`</em>, The expiry delta to forward a tlc, in milliseconds, default to 1 day, which is 24 * 60 * 60 * 1000 milliseconds
+ Expect it >= 2/3 commitment_delay_epoch, minimum is 16 hours.
  This parameter can be updated with rpc `update_channel` later.
 * `tlc_min_value` - <em>`Option<u128>`</em>, The minimum value for a TLC our side can send,
  an optional parameter, default is 0, which means we can send any TLC is larger than 0.
@@ -649,15 +651,16 @@ Sends a payment to a peer.
 ##### Returns
 
 * `payment_hash` - <em>[Hash256](#type-hash256)</em>, The payment hash of the payment
-* `status` - <em>[PaymentSessionStatus](#type-paymentsessionstatus)</em>, The status of the payment
+* `status` - <em>[PaymentStatus](#type-paymentstatus)</em>, The status of the payment
 * `created_at` - <em>`u64`</em>, The time the payment was created at, in milliseconds from UNIX epoch
 * `last_updated_at` - <em>`u64`</em>, The time the payment was last updated at, in milliseconds from UNIX epoch
 * `failed_error` - <em>`Option<String>`</em>, The error message if the payment failed
 * `fee` - <em>`u128`</em>, fee paid for the payment
 * `custom_records` - <em>Option<[PaymentCustomRecords](#type-paymentcustomrecords)></em>, The custom records to be included in the payment.
-* `router` - <em>Vec<[SessionRouteNode](#type-sessionroutenode)></em>, The router is a list of nodes that the payment will go through.
+* `routers` - <em>Vec<[SessionRoute](#type-sessionroute)></em>, The router is a list of nodes that the payment will go through.
  We store in the payment session and then will use it to track the payment history.
  The router is a list of nodes that the payment will go through.
+ If the payment adapted MPP (multi-part payment), the routers will be a list of nodes
  For example:
     `A(amount, channel) -> B -> C -> D`
  means A will send `amount` with `channel` to B.
@@ -678,15 +681,16 @@ Retrieves a payment.
 ##### Returns
 
 * `payment_hash` - <em>[Hash256](#type-hash256)</em>, The payment hash of the payment
-* `status` - <em>[PaymentSessionStatus](#type-paymentsessionstatus)</em>, The status of the payment
+* `status` - <em>[PaymentStatus](#type-paymentstatus)</em>, The status of the payment
 * `created_at` - <em>`u64`</em>, The time the payment was created at, in milliseconds from UNIX epoch
 * `last_updated_at` - <em>`u64`</em>, The time the payment was last updated at, in milliseconds from UNIX epoch
 * `failed_error` - <em>`Option<String>`</em>, The error message if the payment failed
 * `fee` - <em>`u128`</em>, fee paid for the payment
 * `custom_records` - <em>Option<[PaymentCustomRecords](#type-paymentcustomrecords)></em>, The custom records to be included in the payment.
-* `router` - <em>Vec<[SessionRouteNode](#type-sessionroutenode)></em>, The router is a list of nodes that the payment will go through.
+* `routers` - <em>Vec<[SessionRoute](#type-sessionroute)></em>, The router is a list of nodes that the payment will go through.
  We store in the payment session and then will use it to track the payment history.
  The router is a list of nodes that the payment will go through.
+ If the payment adapted MPP (multi-part payment), the routers will be a list of nodes
  For example:
     `A(amount, channel) -> B -> C -> D`
  means A will send `amount` with `channel` to B.
@@ -759,15 +763,16 @@ Sends a payment to a peer with specified router
 ##### Returns
 
 * `payment_hash` - <em>[Hash256](#type-hash256)</em>, The payment hash of the payment
-* `status` - <em>[PaymentSessionStatus](#type-paymentsessionstatus)</em>, The status of the payment
+* `status` - <em>[PaymentStatus](#type-paymentstatus)</em>, The status of the payment
 * `created_at` - <em>`u64`</em>, The time the payment was created at, in milliseconds from UNIX epoch
 * `last_updated_at` - <em>`u64`</em>, The time the payment was last updated at, in milliseconds from UNIX epoch
 * `failed_error` - <em>`Option<String>`</em>, The error message if the payment failed
 * `fee` - <em>`u128`</em>, fee paid for the payment
 * `custom_records` - <em>Option<[PaymentCustomRecords](#type-paymentcustomrecords)></em>, The custom records to be included in the payment.
-* `router` - <em>Vec<[SessionRouteNode](#type-sessionroutenode)></em>, The router is a list of nodes that the payment will go through.
+* `routers` - <em>Vec<[SessionRoute](#type-sessionroute)></em>, The router is a list of nodes that the payment will go through.
  We store in the payment session and then will use it to track the payment history.
  The router is a list of nodes that the payment will go through.
+ If the payment adapted MPP (multi-part payment), the routers will be a list of nodes
  For example:
     `A(amount, channel) -> B -> C -> D`
  means A will send `amount` with `channel` to B.
@@ -966,6 +971,7 @@ The attributes of the invoice
 * `PayeePublicKey` - <em>`PublicKey`</em>, The payee public key of the invoice
 * `HashAlgorithm` - <em>[HashAlgorithm](#type-hashalgorithm)</em>, The hash algorithm of the invoice
 * `Feature` - <em>`Vec<String>`</em>, The feature flags of the invoice
+* `PaymentSecret` - <em>[Hash256](#type-hash256)</em>, The payment secret of the invoice
 ---
 
 <a id="#type-cchorderstatus"></a>
@@ -1211,7 +1217,7 @@ The Node information.
 ### Type `PaymentCustomRecords`
 
 The custom records to be included in the payment.
- The key is hex encoded of `u32`, and the value is hex encoded of `Vec<u8>` with `0x` as prefix.
+ The key is hex encoded of `u32`, it's range limited in 0 ~ 65535, and the value is hex encoded of `Vec<u8>` with `0x` as prefix.
  For example:
  ```json
  "custom_records": {
@@ -1228,15 +1234,16 @@ The custom records to be included in the payment.
 * `data` - <em>`HashMap<u32::Vec<u8>>`</em>, The custom records to be included in the payment.
 ---
 
-<a id="#type-paymentsessionstatus"></a>
-### Type `PaymentSessionStatus`
+<a id="#type-paymentstatus"></a>
+### Type `PaymentStatus`
 
 The status of a payment, will update as the payment progresses.
+ The transfer path for payment status is `Created -> Inflight -> Success | Failed`.
 
 
 #### Enum with values of
 
-* `Created` - initial status, payment session is created, no HTLC is sent
+* `Created` - initial status, a payment session is created, no HTLC is sent
 * `Inflight` - the first hop AddTlc is sent successfully and waiting for the response
 * `Success` - related HTLC is successfully settled
 * `Failed` - related HTLC is failed
@@ -1319,6 +1326,22 @@ A router hop information for a payment, a paymenter router is an array of Router
 * `incoming_tlc_expiry` - <em>`u64`</em>, The expiry for the TLC that the source node sends to the target node.
  We have already added up all the expiry deltas along the path,
  the only thing missing is current time. So the expiry is the current time plus the expiry delta.
+---
+
+<a id="#type-sessionroute"></a>
+### Type `SessionRoute`
+
+The router is a list of nodes that the payment will go through.
+ We store in the payment session and then will use it to track the payment history.
+ The router is a list of nodes that the payment will go through.
+ For example:
+    `A(amount, channel) -> B -> C -> D`
+ means A will send `amount` with `channel` to B.
+
+
+#### Fields
+
+* `nodes` - <em>Vec<[SessionRouteNode](#type-sessionroutenode)></em>, the nodes in the route
 ---
 
 <a id="#type-sessionroutenode"></a>

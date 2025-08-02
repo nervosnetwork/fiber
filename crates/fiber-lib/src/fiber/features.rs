@@ -87,6 +87,7 @@ impl Default for FeatureVector {
     fn default() -> Self {
         let mut feature = Self::new();
         feature.set_gossip_queries_required();
+        feature.set_basic_mpp_required();
 
         // set other default features here
         // ...

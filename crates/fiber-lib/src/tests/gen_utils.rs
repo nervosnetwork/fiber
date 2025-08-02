@@ -6,6 +6,7 @@ use ckb_types::{packed::OutPoint, prelude::Pack};
 use secp256k1::{Keypair, PublicKey, Secp256k1, SecretKey, XOnlyPublicKey};
 
 use crate::ckb::contracts::{get_cell_deps_by_contracts, get_script_by_contract, Contract};
+use crate::fiber::features::FeatureVector;
 use crate::fiber::types::{
     ChannelUpdate, ChannelUpdateChannelFlags, ChannelUpdateMessageFlags, EcdsaSignature,
 };
@@ -81,6 +82,7 @@ pub fn gen_rand_node_announcement() -> (Privkey, NodeAnnouncement) {
 pub fn gen_node_announcement_from_privkey(sk: &Privkey) -> NodeAnnouncement {
     NodeAnnouncement::new(
         AnnouncedNodeName::from_string("node1").expect("valid name"),
+        FeatureVector::default(),
         vec![],
         sk,
         now_timestamp_as_millis_u64(),

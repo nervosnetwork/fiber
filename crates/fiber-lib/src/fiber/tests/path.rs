@@ -15,6 +15,7 @@ fn test_node_heap() {
     let node1 = NodeHeapElement {
         node_id: public_key1.into(),
         weight: 0,
+        tlc_min_value: 0,
         distance: 0,
         amount_to_send: 0,
         fee_charged: 0,
@@ -27,6 +28,7 @@ fn test_node_heap() {
         node_id: public_key2.into(),
         weight: 0,
         distance: 0,
+        tlc_min_value: 0,
         amount_to_send: 0,
         fee_charged: 0,
         probability: 0.0,
@@ -57,6 +59,7 @@ fn test_node_heap_probability() {
     let mut heap = NodeHeap::new(10);
     let node1 = NodeHeapElement {
         node_id: public_key1.into(),
+        tlc_min_value: 0,
         weight: 0,
         distance: 0,
         amount_to_send: 0,
@@ -68,6 +71,7 @@ fn test_node_heap_probability() {
     };
     let node2 = NodeHeapElement {
         node_id: public_key2.into(),
+        tlc_min_value: 0,
         weight: 0,
         distance: 0,
         amount_to_send: 0,
@@ -96,6 +100,7 @@ fn test_node_heap_distance() {
 
     let mut heap = NodeHeap::new(10);
     let node1 = NodeHeapElement {
+        tlc_min_value: 0,
         node_id: public_key1.into(),
         weight: 0,
         distance: 10,
@@ -108,6 +113,7 @@ fn test_node_heap_distance() {
     };
     let node2 = NodeHeapElement {
         node_id: public_key2.into(),
+        tlc_min_value: 0,
         weight: 0,
         distance: 2,
         amount_to_send: 0,
@@ -137,6 +143,7 @@ fn test_node_heap_push_or_fix() {
     let mut heap = NodeHeap::new(10);
     let node1 = NodeHeapElement {
         node_id: public_key1.into(),
+        tlc_min_value: 0,
         weight: 0,
         distance: 10,
         amount_to_send: 0,
@@ -148,6 +155,7 @@ fn test_node_heap_push_or_fix() {
     };
     let node2 = NodeHeapElement {
         node_id: public_key2.into(),
+        tlc_min_value: 0,
         weight: 0,
         distance: 2,
         amount_to_send: 0,
@@ -164,6 +172,7 @@ fn test_node_heap_push_or_fix() {
 
     let node1_update = NodeHeapElement {
         node_id: public_key1.into(),
+        tlc_min_value: 0,
         weight: 0,
         distance: 1,
         amount_to_send: 0,

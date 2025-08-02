@@ -129,8 +129,8 @@ fn test_feature_default() {
     let vector = FeatureVector::default();
     assert!(vector.requires_gossip_queries());
     assert!(vector.supports_gossip_queries());
-    assert!(!vector.supports_basic_mpp());
-    assert!(!vector.requires_basic_mpp());
+    assert!(vector.supports_basic_mpp());
+    assert!(vector.requires_basic_mpp());
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]

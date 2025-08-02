@@ -9,7 +9,7 @@ use super::gen::gossip::{self as molecule_gossip};
 use super::hash_algorithm::{HashAlgorithm, UnknownHashAlgorithmError};
 use super::network::{get_chain_hash, PaymentCustomRecords};
 use super::r#gen::fiber::PubNonceOpt;
-use super::serde_utils::{EntityHex, SliceHex};
+use super::serde_utils::{EntityHex, SliceBase58, SliceHex};
 use crate::ckb::config::{UdtArgInfo, UdtCellDep, UdtCfgInfos, UdtDep, UdtScript};
 use crate::ckb::contracts::get_udt_whitelist;
 use ckb_jsonrpc_types::CellOutput;
@@ -1579,6 +1579,7 @@ pub enum TlcErrorCode {
     ChannelDisabled = UPDATE | 20,
     ExpiryTooFar = PERM | 21,
     InvalidOnionPayload = PERM | 22,
+    HoldTlcTimeout = PERM | 23,
     InvalidOnionError = BADONION | PERM | 25,
 }
 
@@ -1597,19 +1598,6 @@ impl TlcErrorCode {
 
     pub fn is_update(&self) -> bool {
         *self as u16 & UPDATE != 0
-    }
-
-    pub fn payment_failed(&self) -> bool {
-        matches!(
-            self,
-            TlcErrorCode::IncorrectOrUnknownPaymentDetails
-                | TlcErrorCode::FinalIncorrectExpiryDelta
-                | TlcErrorCode::FinalIncorrectTlcAmount
-                | TlcErrorCode::InvoiceExpired
-                | TlcErrorCode::InvoiceCancelled
-                | TlcErrorCode::ExpiryTooFar
-                | TlcErrorCode::ExpiryTooSoon
-        )
     }
 }
 
@@ -1821,6 +1809,7 @@ pub struct NodeAnnouncement {
 impl NodeAnnouncement {
     pub fn new_unsigned(
         node_name: AnnouncedNodeName,
+        features: FeatureVector,
         addresses: Vec<MultiAddr>,
         node_id: Pubkey,
         timestamp: u64,
@@ -1828,7 +1817,7 @@ impl NodeAnnouncement {
     ) -> Self {
         Self {
             signature: None,
-            features: Default::default(),
+            features,
             timestamp,
             node_id,
             version: env!("CARGO_PKG_VERSION").to_string(),
@@ -1842,6 +1831,7 @@ impl NodeAnnouncement {
 
     pub fn new(
         node_name: AnnouncedNodeName,
+        features: FeatureVector,
         addresses: Vec<MultiAddr>,
         private_key: &Privkey,
         timestamp: u64,
@@ -1849,6 +1839,7 @@ impl NodeAnnouncement {
     ) -> NodeAnnouncement {
         let mut unsigned = NodeAnnouncement::new_unsigned(
             node_name,
+            features,
             addresses,
             private_key.pubkey(),
             timestamp,
@@ -3698,9 +3689,57 @@ pub(crate) fn deterministically_hash<T: Entity>(v: &T) -> [u8; 32] {
     ckb_hash::blake2b_256(v.as_slice())
 }
 
+/// Bolt04 payment data record
+pub struct PaymentDataRecord {
+    pub payment_secret: Hash256,
+    pub total_amount: u128,
+}
+
+impl PaymentDataRecord {
+    // record type for payment data record in bolt04
+    // custom records key from 65536 is reserved for internal usage
+    pub const CUSTOM_RECORD_KEY: u32 = 65536;
+
+    pub fn new(payment_secret: Hash256, total_amount: u128) -> Self {
+        Self {
+            payment_secret,
+            total_amount,
+        }
+    }
+
+    fn to_vec(&self) -> Vec<u8> {
+        let mut vec = Vec::new();
+        vec.extend_from_slice(self.payment_secret.as_ref());
+        vec.extend_from_slice(&self.total_amount.to_le_bytes());
+        vec
+    }
+
+    pub fn write(self, custom_records: &mut PaymentCustomRecords) {
+        custom_records
+            .data
+            .insert(Self::CUSTOM_RECORD_KEY, self.to_vec());
+    }
+
+    pub fn read(custom_records: &PaymentCustomRecords) -> Option<Self> {
+        custom_records
+            .data
+            .get(&Self::CUSTOM_RECORD_KEY)
+            .and_then(|data| {
+                if data.len() != 32 + 16 {
+                    return None;
+                }
+                let secret: [u8; 32] = data[..32].try_into().unwrap();
+                let payment_secret = Hash256::from(secret);
+                let total_amount = u128::from_le_bytes(data[32..].try_into().unwrap());
+                Some(Self::new(payment_secret, total_amount))
+            })
+    }
+}
+
 #[serde_as]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaymentHopData {
+    /// The amount of the tlc, <= total amount
     pub amount: u128,
     pub expiry: u64,
     pub payment_preimage: Option<Hash256>,
@@ -3845,6 +3884,15 @@ pub struct PeeledOnionPacket<T> {
 pub type PaymentOnionPacket = OnionPacket<PaymentHopData>;
 pub type PeeledPaymentOnionPacket = PeeledOnionPacket<PaymentHopData>;
 
+impl PeeledOnionPacket<PaymentHopData> {
+    pub fn mpp_custom_records(&self) -> Option<PaymentDataRecord> {
+        self.current
+            .custom_records
+            .as_ref()
+            .and_then(PaymentDataRecord::read)
+    }
+}
+
 impl<T> OnionPacket<T> {
     pub fn new(data: Vec<u8>) -> Self {
         OnionPacket {
@@ -3875,15 +3923,15 @@ impl<T: HopData> OnionPacket<T> {
     /// - Fail to peel the packet using the given private key.
     pub fn peel<C: Verification>(
         self,
-        privkey: &Privkey,
+        peeler: &Privkey,
         assoc_data: Option<&[u8]>,
         secp_ctx: &Secp256k1<C>,
     ) -> Result<PeeledOnionPacket<T>, Error> {
         let sphinx_packet = self.into_sphinx_onion_packet()?;
-        let shared_secret = sphinx_packet.shared_secret(&privkey.0);
+        let shared_secret = sphinx_packet.shared_secret(&peeler.0);
 
         let (new_current, new_next) = sphinx_packet
-            .peel(&privkey.0, assoc_data, secp_ctx, get_hop_data_len)
+            .peel(&peeler.0, assoc_data, secp_ctx, get_hop_data_len)
             .map_err(|err| Error::OnionPacket(err.into()))?;
 
         let current = unpack_hop_data(&new_current)
@@ -3970,14 +4018,14 @@ impl<T: HopData> PeeledOnionPacket<T> {
     /// - Fail to peel the packet using the given private key.
     pub fn peel<C: Verification>(
         self,
-        privkey: &Privkey,
+        peeler: &Privkey,
         secp_ctx: &Secp256k1<C>,
     ) -> Result<Self, Error> {
         let next = self
             .next
             .ok_or_else(|| Error::OnionPacket(OnionPacketError::PeelingLastHop))?;
 
-        next.peel(privkey, self.current.assoc_data().as_deref(), secp_ctx)
+        next.peel(peeler, self.current.assoc_data().as_deref(), secp_ctx)
     }
 
     pub fn serialize(&self) -> Vec<u8> {
@@ -4048,4 +4096,45 @@ fn get_hop_data_len(buf: &[u8]) -> Option<usize> {
         ) as usize
             + HOP_DATA_HEAD_LEN,
     )
+}
+
+/// Used as identifier of node.
+#[serde_as]
+#[derive(Clone, Debug, Serialize, Deserialize, Hash, Eq, PartialEq)]
+pub struct NodeId(#[serde_as(as = "SliceBase58")] Vec<u8>);
+
+impl NodeId {
+    pub fn from_bytes(bytes: Vec<u8>) -> Self {
+        Self(bytes)
+    }
+
+    // return a empty node_id represent local node
+    pub fn local() -> Self {
+        Self(Default::default())
+    }
+}
+
+impl AsRef<[u8]> for NodeId {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl ::std::str::FromStr for NodeId {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let bytes = bs58::decode(s)
+            .into_vec()
+            .map_err(|_| anyhow!("can't parse node_id: {s}"))?;
+
+        Ok(Self::from_bytes(bytes))
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct HoldTlc {
+    pub channel_id: Hash256,
+    pub tlc_id: u64,
+    pub hold_expire_at: u64,
 }

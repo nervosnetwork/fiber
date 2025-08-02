@@ -14,7 +14,7 @@ ckb-resource = "0.202.0"
 ractor = { "git" = "https://github.com/officeyutong/ractor", branch = "use-non-send-future-in-wasm", features = [
     "async-trait",
 ] }
-jsonrpsee = { version = "0.22", features = ["http-client"] }
+jsonrpsee = { version = "0.25", features = ["http-client"] }
 tokio = { version = "1", features = [
     "io-util",
     "macros",

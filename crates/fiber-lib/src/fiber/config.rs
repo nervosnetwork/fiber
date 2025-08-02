@@ -32,9 +32,14 @@ pub const DEFAULT_OPEN_CHANNEL_AUTO_ACCEPT_MIN_CKB_FUNDING_AMOUNT: u64 = 100 * C
 /// The expiry delta to forward a tlc, in milliseconds, default to 1 day.
 pub const DEFAULT_TLC_EXPIRY_DELTA: u64 = 24 * 60 * 60 * 1000;
 
+/// 4 hours for each epoch
+pub const MILLI_SECONDS_PER_EPOCH: u64 = 4 * 60 * 60 * 1000;
+
 #[cfg(not(debug_assertions))]
-/// The minimal expiry delta to forward a tlc, in milliseconds. 15 minutes.
-pub const MIN_TLC_EXPIRY_DELTA: u64 = 15 * 60 * 1000; // 15 minutes
+/// The minimal expiry delta to forward a tlc, in milliseconds. 16 hours
+/// expect it >= 2/3 commitment_delay_epoch, default DEFAULT_COMMITMENT_DELAY_EPOCHS is 6 epoch
+/// so 2/3 * 6 = 4 epoch, 4 * 4 hours = 16 hours
+pub const MIN_TLC_EXPIRY_DELTA: u64 = 4 * MILLI_SECONDS_PER_EPOCH;
 #[cfg(debug_assertions)]
 // 5 seconds for testing environment
 pub const MIN_TLC_EXPIRY_DELTA: u64 = 5 * 1000;
@@ -53,6 +58,12 @@ pub const DEFAULT_AUTO_ANNOUNCE_NODE: bool = true;
 
 /// The interval to reannounce NodeAnnouncement, in seconds.
 pub const DEFAULT_ANNOUNCE_NODE_INTERVAL_SECONDS: u64 = 3600;
+
+/// The maximum time to hold a tlc, in milliseconds.
+#[cfg(not(debug_assertions))]
+pub const DEFAULT_HOLD_TLC_TIMEOUT: u64 = 120 * 1000;
+#[cfg(debug_assertions)]
+pub const DEFAULT_HOLD_TLC_TIMEOUT: u64 = 20 * 1000;
 
 /// The interval to maintain the gossip network, in milli-seconds.
 #[cfg(not(any(test, feature = "bench")))]
@@ -81,6 +92,10 @@ pub const DEFAULT_GOSSIP_STORE_MAINTENANCE_INTERVAL_MS: u64 = 50;
 
 /// Whether to sync the network graph from the network. true means syncing.
 pub const DEFAULT_SYNC_NETWORK_GRAPH: bool = true;
+
+/// The maximum number of parts for a multi-part payment.
+pub const DEFAULT_MAX_PARTS: u64 = 16;
+pub const PAYMENT_MAX_PARTS_LIMIT: u64 = 64;
 
 // See comment in `LdkConfig` for why do we need to specify both name and long,
 // and prefix them with `ckb-`/`CKB_`.
@@ -297,6 +312,15 @@ pub struct FiberConfig {
         help = "The url of the standalone watchtower rpc server. [default: None]"
     )]
     pub standalone_watchtower_rpc_url: Option<String>,
+
+    /// The RPC token of the standalone watchtower. [default: None]
+    #[arg(
+        name = "FIBER_STANDALONE_WATCHTOWER_TOKEN",
+        long = "fiber-standalone-watchtower-token",
+        env,
+        help = "The RPC token of the standalone watchtower. [default: None]"
+    )]
+    pub standalone_watchtower_token: Option<String>,
 
     /// Disable built-in watchtower actor. [default: false]
     #[arg(

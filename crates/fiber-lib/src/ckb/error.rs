@@ -21,6 +21,9 @@ pub enum FundingError {
     #[error("Get overflow error")]
     OverflowError,
 
+    #[error("Peer sent us an invalid funding tx")]
+    InvalidPeerFundingTx,
+
     #[error("Failed to call CKB RPC: {0}")]
     CkbRpcError(#[from] RpcError),
 
