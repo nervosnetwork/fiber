@@ -22,9 +22,7 @@ use crate::fiber::ASSUME_NETWORK_ACTOR_ALIVE;
 use crate::gen_rand_sha256_hash;
 use crate::invoice::*;
 use crate::rpc::config::RpcConfig;
-#[cfg(not(target_arch = "wasm32"))]
 use crate::rpc::invoice::InvoiceResult;
-#[cfg(not(target_arch = "wasm32"))]
 use crate::rpc::invoice::NewInvoiceParams;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::rpc::server::start_rpc;
@@ -34,8 +32,8 @@ use ckb_types::{
     core::{tx_pool::TxStatus, TransactionView},
     packed::{OutPoint, Script},
 };
-use hyper::header::HeaderValue;
-use hyper::HeaderMap;
+#[cfg(not(target_arch = "wasm32"))]
+use hyper::{header::HeaderValue, HeaderMap};
 #[cfg(not(target_arch = "wasm32"))]
 use jsonrpsee::core::client::ClientT;
 #[cfg(not(target_arch = "wasm32"))]
@@ -867,11 +865,11 @@ impl NetworkNode {
         })
         .await
     }
-    
+
     pub fn set_auth_token(&mut self, token: String) {
         self.auth_token = Some(token);
     }
-    
+
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn send_rpc_request_raw<P: Serialize>(
         &self,
@@ -936,7 +934,7 @@ impl NetworkNode {
         }
         Ok(())
     }
-
+    #[cfg(not(target_arch = "wasm32"))]
     pub async fn gen_invoice(&self, new_invoice_params: NewInvoiceParams) -> InvoiceResult {
         let invoice: InvoiceResult = self
             .send_rpc_request("new_invoice", new_invoice_params)

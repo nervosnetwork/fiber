@@ -531,6 +531,7 @@ async fn test_send_payment_for_pay_self_with_two_nodes() {
     assert_eq!(node1_fee, res.fee);
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[tokio::test]
 async fn test_send_payment_for_pay_self_with_invoice() {
     init_tracing();
@@ -608,6 +609,7 @@ async fn test_send_payment_for_pay_self_with_invoice() {
     );
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[tokio::test]
 async fn test_send_payment_with_normal_invoice_workflow() {
     init_tracing();
@@ -654,6 +656,7 @@ async fn test_send_payment_with_normal_invoice_workflow() {
     node_0.wait_until_success(payment_hash).await;
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[tokio::test]
 async fn test_send_payment_with_more_capacity_for_payself() {
     init_tracing();
@@ -749,6 +752,7 @@ async fn test_send_payment_with_more_capacity_for_payself() {
     assert_eq!(node1_fee + node2_fee, res.fee);
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[tokio::test]
 async fn test_send_payment_with_private_channel_hints() {
     async fn test(amount_to_send: u128, is_payment_ok: bool) {

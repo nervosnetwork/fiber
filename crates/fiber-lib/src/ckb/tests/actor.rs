@@ -7,7 +7,8 @@ use ckb_types::packed::{CellInput, CellOutput};
 use ckb_types::prelude::{Builder, Pack};
 use molecule::prelude::Entity;
 
-#[tokio::test]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 async fn test_submit_empty_tx() {
     let actor = create_mock_chain_actor().await;
     assert!(matches!(
@@ -16,7 +17,9 @@ async fn test_submit_empty_tx() {
     ));
 }
 
-#[tokio::test]
+
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 async fn test_submit_one_output_tx() {
     let actor = create_mock_chain_actor().await;
     assert!(matches!(
@@ -32,7 +35,9 @@ async fn test_submit_one_output_tx() {
     ));
 }
 
-#[tokio::test]
+
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 async fn test_submit_mocked_secp256k1_tx() {
     let actor = create_mock_chain_actor().await;
     let capacity = 100u64;
@@ -80,7 +85,9 @@ async fn test_submit_mocked_secp256k1_tx() {
     ));
 }
 
-#[tokio::test]
+
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 async fn test_repeatedly_consume_the_same_cell() {
     let actor = create_mock_chain_actor().await;
     let capacity = 100u64;
@@ -151,7 +158,9 @@ async fn test_repeatedly_consume_the_same_cell() {
     assert!(matches!(submit_tx(actor, tx).await, TxStatus::Rejected(_)));
 }
 
-#[tokio::test]
+
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 async fn test_submit_malformed_commitment_tx() {
     let actor = create_mock_chain_actor().await;
     let capacity = 100u64;

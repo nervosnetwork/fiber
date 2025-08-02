@@ -22,6 +22,7 @@ use crate::tests::test_utils::*;
 use crate::time::SystemTime;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::watchtower::*;
+#[cfg(not(target_arch = "wasm32"))]
 use ckb_hash::blake2b_256;
 use ckb_hash::new_blake2b;
 use ckb_types::packed::*;
@@ -29,12 +30,13 @@ use ckb_types::prelude::*;
 use ckb_types::H256;
 use core::cmp::Ordering;
 use musig2::secp::MaybeScalar;
+#[cfg(not(target_arch = "wasm32"))]
 use musig2::CompactSignature;
 use musig2::SecNonce;
 use secp256k1::SecretKey;
 use secp256k1::{Keypair, Secp256k1};
 use std::collections::HashMap;
-use std::time::SystemTime;
+#[cfg(not(target_arch = "wasm32"))]
 use tentacle::secio::PeerId;
 
 fn gen_rand_key_pair() -> Keypair {
@@ -287,7 +289,7 @@ fn test_store_watchtower() {
     store.remove_watch_channel(node_id, channel_id);
     assert_eq!(store.get_watch_channels(), vec![]);
 }
-
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn test_store_watchtower_preimage() {
     let path = TempDir::new("test-watchtower-store");
@@ -351,6 +353,7 @@ fn test_store_watchtower_preimage() {
     );
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn test_store_watchtower_with_wrong_node_id() {
     let path = TempDir::new("test-watchtower-store");
@@ -410,7 +413,7 @@ fn test_store_watchtower_with_wrong_node_id() {
     store.remove_watch_channel(node_id, channel_id);
     assert_eq!(store.get_watch_channels(), vec![]);
 }
-
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn test_channel_state_serialize() {
     let state = ChannelState::AwaitingChannelReady(AwaitingChannelReadyFlags::CHANNEL_READY);
@@ -432,7 +435,7 @@ fn blake2b_hash_with_salt(data: &[u8], salt: &[u8]) -> [u8; 32] {
     hasher.finalize(&mut result);
     result
 }
-
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn test_channel_actor_state_store() {
     let seed = [0u8; 32];
@@ -638,7 +641,7 @@ fn test_serde_channel_actor_state_ciborium() {
     let _new_channel_state: ChannelActorState =
         ciborium::from_reader(serialized.as_slice()).expect("deserialize to new state");
 }
-
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn test_store_payment_session() {
     let (store, _dir) = generate_store();
@@ -671,7 +674,7 @@ fn test_store_payment_session() {
     assert_eq!(res.request.max_fee_amount, Some(1000));
     assert_eq!(res.status, PaymentStatus::Created);
 }
-
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn test_store_payment_sessions_with_status() {
     let (store, _dir) = generate_store();
@@ -738,7 +741,7 @@ fn test_store_payment_sessions_with_status() {
     let res = store.get_payment_sessions_with_status(PaymentStatus::Failed);
     assert_eq!(res.len(), 0);
 }
-
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn test_store_payment_history() {
     let (mut store, _dir) = generate_store();

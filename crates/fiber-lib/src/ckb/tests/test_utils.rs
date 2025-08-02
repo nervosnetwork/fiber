@@ -703,7 +703,9 @@ pub fn complete_commitment_tx(commitment_tx: &TransactionView) -> TransactionVie
         .build()
 }
 
-#[tokio::test]
+
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 async fn test_set_and_get_block_timestamp() {
     let now = now_timestamp_as_millis_u64();
     set_next_block_timestamp(now).await;

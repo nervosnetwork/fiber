@@ -447,7 +447,6 @@ fn test_invoice_serialize() {
     assert_eq!(decoded, invoice);
 }
 
-
 #[test]
 fn test_invoice_timestamp() {
     let payment_hash = gen_rand_sha256_hash();
@@ -522,7 +521,6 @@ fn test_invoice_check_expiry_should_not_overflow() {
     invoice.data.timestamp = u128::MAX;
     assert!(!invoice.is_expired()); // should not panic
 }
-
 
 #[test]
 fn test_invoice_check_expired() {

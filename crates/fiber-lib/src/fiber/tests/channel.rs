@@ -61,8 +61,7 @@ async fn test_restart_network_node() {
     node.expect_debug_event("network actor started").await;
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[test]
 fn test_per_commitment_point_and_secret_consistency() {
     init_tracing();
 
