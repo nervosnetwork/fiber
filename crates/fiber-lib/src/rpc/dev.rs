@@ -202,6 +202,7 @@ impl DevRpcServerImpl {
                         AddTlcCommand {
                             amount: params.amount,
                             payment_hash: params.payment_hash,
+                            attempt_id: None,
                             expiry: params.expiry,
                             hash_algorithm: params.hash_algorithm.unwrap_or_default(),
                             onion_packet: None,

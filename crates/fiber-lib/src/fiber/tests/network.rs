@@ -1,4 +1,5 @@
 use crate::fiber::channel::ChannelFlags;
+use crate::fiber::features::FeatureVector;
 use crate::fiber::types::OpenChannel;
 use crate::{
     ckb::{
@@ -105,6 +106,7 @@ fn create_node_announcement_message_with_priv_key(priv_key: &Privkey) -> NodeAnn
         .collect();
     NodeAnnouncement::new(
         node_name.into(),
+        FeatureVector::default(),
         addresses,
         priv_key,
         now_timestamp_as_millis_u64(),

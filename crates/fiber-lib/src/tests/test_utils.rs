@@ -3,11 +3,14 @@ use crate::ckb::tests::test_utils::MockChainActorMiddleware;
 use crate::ckb::CkbConfig;
 use crate::ckb::GetTxResponse;
 use crate::fiber::channel::*;
+use crate::fiber::config::CKB_SHANNONS;
+use crate::fiber::features::FeatureVector;
 use crate::fiber::gossip::get_gossip_actor_name;
 use crate::fiber::gossip::GossipActorMessage;
 use crate::fiber::graph::NetworkGraphStateStore;
 use crate::fiber::graph::PaymentSession;
-use crate::fiber::graph::PaymentSessionStatus;
+use crate::fiber::graph::PaymentStatus;
+use crate::fiber::graph::SessionRoute;
 use crate::fiber::network::*;
 use crate::fiber::types::EcdsaSignature;
 use crate::fiber::types::FiberMessage;
@@ -16,8 +19,11 @@ use crate::fiber::types::Init;
 use crate::fiber::types::Pubkey;
 use crate::fiber::types::Shutdown;
 use crate::fiber::ASSUME_NETWORK_ACTOR_ALIVE;
+use crate::gen_rand_sha256_hash;
 use crate::invoice::*;
 use crate::rpc::config::RpcConfig;
+use crate::rpc::invoice::InvoiceResult;
+use crate::rpc::invoice::NewInvoiceParams;
 use crate::rpc::server::start_rpc;
 use ckb_sdk::core::TransactionBuilder;
 use ckb_types::core::FeeRate;
@@ -83,8 +89,8 @@ use crate::{
 };
 
 static RETAIN_VAR: &str = "TEST_TEMP_RETAIN";
-pub const MIN_RESERVED_CKB: u128 = 4200000000;
-pub const HUGE_CKB_AMOUNT: u128 = MIN_RESERVED_CKB + 1000000000000_u128;
+pub const MIN_RESERVED_CKB: u128 = 42 * CKB_SHANNONS as u128;
+pub const HUGE_CKB_AMOUNT: u128 = MIN_RESERVED_CKB + 1000000 * CKB_SHANNONS as u128;
 const DEFAULT_WAIT_UNTIL_TIME: u64 = 60 * 5; // seconds
 
 #[derive(Debug)]
@@ -139,6 +145,22 @@ pub fn init_tracing() {
             .pretty()
             .init();
     });
+}
+
+pub fn gen_rpc_config() -> RpcConfig {
+    RpcConfig {
+        listening_addr: None,
+        biscuit_public_key: None,
+        enabled_modules: vec![
+            "info".to_string(),
+            "channel".to_string(),
+            "graph".to_string(),
+            "payment".to_string(),
+            "invoice".to_string(),
+            "peer".to_string(),
+            "watchtower".to_string(),
+        ],
+    }
 }
 
 static ROOT_ACTOR: OnceCell<ActorRef<RootActorMessage>> = OnceCell::const_new();
@@ -277,21 +299,6 @@ impl NetworkNodeConfigBuilder {
     pub fn rpc_config(mut self, rpc_config: Option<RpcConfig>) -> Self {
         self.rpc_config = rpc_config;
         self
-    }
-
-    pub fn enable_rpc_server(self) -> Self {
-        self.rpc_config(Some(RpcConfig {
-            listening_addr: None,
-            biscuit_public_key: None,
-            enabled_modules: vec![
-                "channel".to_string(),
-                "graph".to_string(),
-                "payment".to_string(),
-                "invoice".to_string(),
-                "peer".to_string(),
-                "watchtower".to_string(),
-            ],
-        }))
     }
 
     pub fn fiber_config_updater(
@@ -642,6 +649,14 @@ impl NetworkNode {
             .to_remote_amount
     }
 
+    pub fn get_tlc(&self, channel_id: Hash256, tlc_id: TLCId) -> Option<TlcInfo> {
+        let state = self.get_channel_actor_state(channel_id);
+        match tlc_id {
+            TLCId::Offered(..) => state.get_offered_tlc(tlc_id).cloned(),
+            TLCId::Received(..) => state.get_received_tlc(tlc_id).cloned(),
+        }
+    }
+
     pub fn get_channel_actor_state(&self, channel_id: Hash256) -> ChannelActorState {
         self.get_channel_actor_state_unchecked(channel_id)
             .expect("get channel")
@@ -683,6 +698,67 @@ impl NetworkNode {
         };
 
         call!(self.network_actor, message).expect("source_node alive")
+    }
+
+    pub async fn send_mpp_payment(
+        &self,
+        target_node: &mut NetworkNode,
+        amount: u128,
+        max_parts: Option<u64>,
+    ) -> Result<SendPaymentResponse, String> {
+        self.send_mpp_payment_with_command(
+            target_node,
+            amount,
+            SendPaymentCommand {
+                max_parts,
+                dry_run: false,
+                ..Default::default()
+            },
+        )
+        .await
+    }
+
+    pub async fn send_mpp_payment_with_dry_run_option(
+        &self,
+        target_node: &mut NetworkNode,
+        amount: u128,
+        max_parts: Option<u64>,
+        dry_run: bool,
+    ) -> Result<SendPaymentResponse, String> {
+        self.send_mpp_payment_with_command(
+            target_node,
+            amount,
+            SendPaymentCommand {
+                max_parts,
+                dry_run,
+                ..Default::default()
+            },
+        )
+        .await
+    }
+
+    pub async fn send_mpp_payment_with_command(
+        &self,
+        target_node: &mut NetworkNode,
+        amount: u128,
+        command: SendPaymentCommand,
+    ) -> Result<SendPaymentResponse, String> {
+        let target_pubkey = target_node.get_public_key();
+        let preimage = gen_rand_sha256_hash();
+        let ckb_invoice = InvoiceBuilder::new(Currency::Fibd)
+            .amount(Some(amount))
+            .payment_preimage(preimage)
+            .payee_pub_key(target_pubkey.into())
+            .allow_mpp(true)
+            .payment_secret(gen_rand_sha256_hash())
+            .build()
+            .expect("build invoice success");
+
+        target_node.insert_invoice(ckb_invoice.clone(), Some(preimage));
+        let mut command = command.clone();
+        command.invoice = Some(ckb_invoice.to_string());
+
+        self.send_payment(command).await
     }
 
     pub async fn assert_send_payment_success(
@@ -850,6 +926,15 @@ impl NetworkNode {
         Ok(())
     }
 
+    pub async fn gen_invoice(&self, new_invoice_params: NewInvoiceParams) -> InvoiceResult {
+        let invoice: InvoiceResult = self
+            .send_rpc_request("new_invoice", new_invoice_params)
+            .await
+            .unwrap();
+
+        invoice
+    }
+
     pub async fn send_payment_keysend_to_self(
         &self,
         amount: u128,
@@ -870,7 +955,7 @@ impl NetworkNode {
     pub async fn assert_payment_status(
         &self,
         payment_hash: Hash256,
-        expected_status: PaymentSessionStatus,
+        expected_status: PaymentStatus,
         expected_retried: Option<u32>,
     ) {
         let status = self.get_payment_status(payment_hash).await;
@@ -878,11 +963,11 @@ impl NetworkNode {
 
         if let Some(expected_retried) = expected_retried {
             let payment_session = self.get_payment_session(payment_hash).unwrap();
-            assert_eq!(payment_session.retried_times, expected_retried);
+            assert_eq!(payment_session.retry_times(), expected_retried);
         }
     }
 
-    pub async fn get_payment_status(&self, payment_hash: Hash256) -> PaymentSessionStatus {
+    pub async fn get_payment_status(&self, payment_hash: Hash256) -> PaymentStatus {
         self.get_payment_result(payment_hash).await.status
     }
 
@@ -906,8 +991,7 @@ impl NetworkNode {
         payment_result: &SendPaymentResponse,
         channel_id: Hash256,
     ) {
-        let used_channels = payment_result
-            .router
+        let used_channels = payment_result.routers[0]
             .nodes
             .iter()
             .map(|r| r.channel_outpoint.clone())
@@ -919,6 +1003,34 @@ impl NetworkNode {
         assert!(used_channels.contains(&channel_outpoint));
     }
 
+    pub async fn routers_used_channels(
+        &self,
+        routers: &[SessionRoute],
+        channel_ids: &[Hash256],
+    ) -> Vec<Hash256> {
+        let mut routers_channel_outpoints = vec![];
+        for route in routers {
+            let channel_outpoints = route
+                .nodes
+                .iter()
+                .map(|r| r.channel_outpoint.clone())
+                .collect::<Vec<_>>();
+            for outpoint in channel_outpoints {
+                routers_channel_outpoints.push(outpoint.clone());
+            }
+        }
+
+        channel_ids
+            .iter()
+            .filter(|id| {
+                let funding_tx = self.get_channel_funding_tx(id).expect("funding tx");
+                let channel_outpoint = OutPoint::new(funding_tx.into(), 0);
+                routers_channel_outpoints.contains(&channel_outpoint)
+            })
+            .copied()
+            .collect::<Vec<_>>()
+    }
+
     async fn wait_until_status<F, E>(
         &self,
         payment_hash: Hash256,
@@ -926,8 +1038,8 @@ impl NetworkNode {
         on_unexpected: E,
         err_msg: &str,
     ) where
-        F: Fn(PaymentSessionStatus) -> bool,
-        E: Fn(PaymentSessionStatus),
+        F: Fn(PaymentStatus) -> bool,
+        E: Fn(PaymentStatus),
     {
         let started = Instant::now();
         while started.elapsed() < Duration::from_secs(DEFAULT_WAIT_UNTIL_TIME) {
@@ -950,11 +1062,11 @@ impl NetworkNode {
     pub async fn wait_until_success(&self, payment_hash: Hash256) {
         self.wait_until_status(
             payment_hash,
-            |status| status == PaymentSessionStatus::Success,
+            |status| status == PaymentStatus::Success,
             |status| {
-                if status == PaymentSessionStatus::Failed {
-                    error!("Payment failed: {:?}\n\n", payment_hash);
-                    assert_eq!(status, PaymentSessionStatus::Success);
+                if status == PaymentStatus::Failed {
+                    error!("Unexpected payment failed: {:?}\n\n", payment_hash);
+                    assert_eq!(status, PaymentStatus::Success);
                 }
             },
             "Payment did not succeed within the expected time",
@@ -965,11 +1077,11 @@ impl NetworkNode {
     pub async fn wait_until_failed(&self, payment_hash: Hash256) {
         self.wait_until_status(
             payment_hash,
-            |status| status == PaymentSessionStatus::Failed,
+            |status| status == PaymentStatus::Failed,
             |status| {
-                if status == PaymentSessionStatus::Success {
+                if status == PaymentStatus::Success {
                     error!("Payment success: {:?}\n\n", payment_hash);
-                    assert_eq!(status, PaymentSessionStatus::Failed);
+                    assert_eq!(status, PaymentStatus::Failed);
                 }
             },
             "Payment did not fail within the expected time",
@@ -980,9 +1092,19 @@ impl NetworkNode {
     pub async fn wait_until_created(&self, payment_hash: Hash256) {
         self.wait_until_status(
             payment_hash,
-            |status| status != PaymentSessionStatus::Created,
+            |status| status != PaymentStatus::Created,
             |_status| {},
             "Payment did not reach the created status within the expected time",
+        )
+        .await;
+    }
+
+    pub async fn wait_until_inflight(&self, payment_hash: Hash256) {
+        self.wait_until_status(
+            payment_hash,
+            |status| status == PaymentStatus::Inflight,
+            |_status| {},
+            "Payment did not reach in-flight status within the expected time",
         )
         .await;
     }
@@ -990,12 +1112,7 @@ impl NetworkNode {
     pub async fn wait_until_final_status(&self, payment_hash: Hash256) {
         self.wait_until_status(
             payment_hash,
-            |status| {
-                matches!(
-                    status,
-                    PaymentSessionStatus::Success | PaymentSessionStatus::Failed
-                )
-            },
+            |status| matches!(status, PaymentStatus::Success | PaymentStatus::Failed),
             |_status| {},
             "Payment did not reach final status within the expected time",
         )
@@ -1109,6 +1226,14 @@ impl NetworkNode {
             .expect("update channel success");
     }
 
+    pub async fn update_node_features(&self, features: FeatureVector) {
+        let message = NetworkActorMessage::Command(NetworkActorCommand::UpdateFeatures(features));
+
+        self.network_actor
+            .send_message(message)
+            .expect("network actor is live");
+    }
+
     pub fn get_payment_session(&self, payment_hash: Hash256) -> Option<PaymentSession> {
         self.store.get_payment_session(payment_hash)
     }
@@ -1117,8 +1242,12 @@ impl NetworkNode {
         let funding_tx_hash = self.get_channel_funding_tx(&channel_id).unwrap();
         let channel_outpoint = OutPoint::new(funding_tx_hash.into(), 0);
         let payment_session = self.get_payment_session(payment_hash).unwrap();
+        let first_attempt = payment_session
+            .attempts()
+            .next()
+            .expect("at least one attempt");
         assert_eq!(
-            payment_session.route.nodes[index].channel_outpoint,
+            first_attempt.route.nodes[index].channel_outpoint,
             channel_outpoint
         );
     }
@@ -1168,15 +1297,15 @@ impl NetworkNode {
         .expect("start mock chain actor")
         .0;
 
-        let secret_key: Privkey = fiber_config
+        let private_key: Privkey = fiber_config
             .read_or_generate_secret_key()
             .expect("must generate key")
             .into();
-        let public_key = secret_key.pubkey();
+        let pubkey = private_key.pubkey();
 
         let network_graph = Arc::new(TokioRwLock::new(NetworkGraph::new(
             store.clone(),
-            public_key,
+            pubkey,
             true,
         )));
 
@@ -1260,7 +1389,7 @@ impl NetworkNode {
             .expect("gossip actor should have been started")
             .into();
 
-        let rpc_handler = if let Some(rpc_config) = rpc_config.clone() {
+        let rpc_server = if let Some(rpc_config) = rpc_config.clone() {
             Some(
                 start_rpc(
                     rpc_config,
@@ -1297,13 +1426,13 @@ impl NetworkNode {
             network_graph,
             chain_actor,
             gossip_actor,
-            private_key: secret_key,
+            private_key,
             peer_id,
             event_emitter: self_event_receiver,
-            pubkey: public_key,
+            pubkey,
             unexpected_events,
             triggered_unexpected_events,
-            rpc_server: rpc_handler,
+            rpc_server,
             auth_token: None,
         }
     }
@@ -1571,6 +1700,10 @@ impl NetworkNode {
 
     pub fn get_network_graph(&self) -> &Arc<TokioRwLock<NetworkGraph<Store>>> {
         &self.network_graph
+    }
+
+    pub async fn clear_history(&self) {
+        self.network_graph.write().await.clear_history();
     }
 
     pub async fn with_network_graph<F, T>(&self, f: F) -> T

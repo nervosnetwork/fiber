@@ -2,6 +2,7 @@ use crate::fiber::channel::*;
 use crate::fiber::config::AnnouncedNodeName;
 use crate::fiber::config::DEFAULT_TLC_EXPIRY_DELTA;
 use crate::fiber::config::MAX_PAYMENT_TLC_EXPIRY_LIMIT;
+use crate::fiber::features::FeatureVector;
 use crate::fiber::gossip::GossipMessageStore;
 use crate::fiber::graph::*;
 use crate::fiber::history::Direction;
@@ -49,6 +50,7 @@ fn mock_node() -> (Privkey, NodeAnnouncement) {
         sk.clone(),
         NodeAnnouncement::new(
             AnnouncedNodeName::from_string("node1").expect("invalid name"),
+            FeatureVector::default(),
             vec![],
             &sk,
             now_timestamp_as_millis_u64(),
@@ -508,6 +510,7 @@ fn test_channel_actor_state_store() {
         waiting_peer_response: None,
         network: None,
         scheduled_channel_update_handle: None,
+        pending_notify_mpp_tcls: vec![],
         ephemeral_config: Default::default(),
     };
 
@@ -623,6 +626,7 @@ fn test_serde_channel_actor_state_ciborium() {
         waiting_peer_response: None,
         network: None,
         scheduled_channel_update_handle: None,
+        pending_notify_mpp_tcls: vec![],
         ephemeral_config: Default::default(),
     };
 
@@ -654,13 +658,15 @@ fn test_store_payment_session() {
         dry_run: false,
         custom_records: None,
         router: vec![],
+        allow_mpp: false,
+        channel_stats: Default::default(),
     };
-    let payment_session = PaymentSession::new(payment_data.clone(), 10);
+    let payment_session = PaymentSession::new(&store, payment_data.clone(), 10);
     store.insert_payment_session(payment_session.clone());
     let res = store.get_payment_session(payment_hash).unwrap();
     assert_eq!(res.payment_hash(), payment_hash);
     assert_eq!(res.request.max_fee_amount, Some(1000));
-    assert_eq!(res.status, PaymentSessionStatus::Created);
+    assert_eq!(res.status, PaymentStatus::Created);
 }
 
 #[test]
@@ -685,8 +691,10 @@ fn test_store_payment_sessions_with_status() {
         dry_run: false,
         custom_records: None,
         router: vec![],
+        allow_mpp: false,
+        channel_stats: Default::default(),
     };
-    let payment_session = PaymentSession::new(payment_data.clone(), 10);
+    let payment_session = PaymentSession::new(&store, payment_data.clone(), 10);
     store.insert_payment_session(payment_session.clone());
 
     let payment_hash1 = gen_rand_sha256_hash();
@@ -708,21 +716,23 @@ fn test_store_payment_sessions_with_status() {
         dry_run: false,
         custom_records: None,
         router: vec![],
+        allow_mpp: false,
+        channel_stats: Default::default(),
     };
-    let mut payment_session = PaymentSession::new(payment_data.clone(), 10);
+    let mut payment_session = PaymentSession::new(&store, payment_data.clone(), 10);
     payment_session.set_success_status();
     store.insert_payment_session(payment_session.clone());
 
-    let res = store.get_payment_sessions_with_status(PaymentSessionStatus::Created);
+    let res = store.get_payment_sessions_with_status(PaymentStatus::Created);
     assert_eq!(res.len(), 1);
     assert_eq!(res[0].payment_hash(), payment_hash0);
 
-    let res = store.get_payment_sessions_with_status(PaymentSessionStatus::Success);
+    let res = store.get_payment_sessions_with_status(PaymentStatus::Success);
     assert_eq!(res.len(), 1);
     assert_eq!(res[0].payment_hash(), payment_hash1);
-    assert_eq!(res[0].status, PaymentSessionStatus::Success);
+    assert_eq!(res[0].status, PaymentStatus::Success);
 
-    let res = store.get_payment_sessions_with_status(PaymentSessionStatus::Failed);
+    let res = store.get_payment_sessions_with_status(PaymentStatus::Failed);
     assert_eq!(res.len(), 0);
 }
 
@@ -811,6 +821,7 @@ fn test_serde_node_announcement_as_broadcast_message() {
     let privkey = gen_rand_fiber_private_key();
     let node_announcement = NodeAnnouncement::new(
         AnnouncedNodeName::from_string("node1").expect("valid name"),
+        FeatureVector::default(),
         vec![],
         &privkey,
         now_timestamp_as_millis_u64(),

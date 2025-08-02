@@ -18,13 +18,14 @@ check:
 
 .PHONY: clippy
 clippy:
-	cargo clippy --all-targets --all-features -p fnn -p fiber-bin -- -D warnings -A clippy::module-inception
-	cargo clippy -p fiber-wasm -p fiber-wasm-db-worker  -p fiber-wasm-db-common --target wasm32-unknown-unknown -- -D warnings -A clippy::module-inception
-	
+	cargo clippy --all-targets --all-features -p fnn -p fiber-bin -- -D warnings
+	cargo clippy -p fiber-wasm -p fiber-wasm-db-worker  -p fiber-wasm-db-common --target wasm32-unknown-unknown -- -D warnings
+
 
 .PHONY: bless
 bless:
 	cargo clippy --fix --allow-dirty --allow-staged --all --all-targets --all-features
+	cargo fmt --all
 
 .PHONY: fmt
 fmt:

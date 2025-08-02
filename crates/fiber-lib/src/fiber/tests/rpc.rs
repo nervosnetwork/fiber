@@ -1,5 +1,7 @@
 #![allow(clippy::needless_range_loop)]
 use crate::fiber::channel::CloseFlags;
+use crate::gen_rand_sha256_hash;
+use crate::invoice::CkbInvoice;
 use crate::rpc::channel::{ChannelState, ShutdownChannelParams};
 use crate::rpc::config::RpcConfig;
 use crate::rpc::info::NodeInfoResult;
@@ -20,25 +22,9 @@ use biscuit_auth::{KeyPair, PrivateKey};
 use ckb_types::packed::Script;
 use std::str::FromStr;
 
-fn rpc_config() -> RpcConfig {
-    RpcConfig {
-        listening_addr: None,
-        biscuit_public_key: None,
-        enabled_modules: vec![
-            "info".to_string(),
-            "channel".to_string(),
-            "graph".to_string(),
-            "payment".to_string(),
-            "invoice".to_string(),
-            "peer".to_string(),
-            "watchtower".to_string(),
-        ],
-    }
-}
-
 fn rpc_config_with_auth() -> (RpcConfig, KeyPair) {
     let root = KeyPair::new();
-    let mut config = rpc_config();
+    let mut config = gen_rpc_config();
     config.biscuit_public_key = Some(root.public().to_string());
     (config, root)
 }
@@ -67,7 +53,7 @@ async fn test_rpc_basic() {
             ),
         ],
         2,
-        Some(rpc_config()),
+        Some(gen_rpc_config()),
     )
     .await;
     let [node_0, node_1] = nodes.try_into().expect("2 nodes");
@@ -120,6 +106,8 @@ async fn test_rpc_basic() {
 
     let ckb_invoice = invoice_res.invoice.clone();
     let invoice_payment_hash = ckb_invoice.data.payment_hash;
+    let internal_ckb_invoice: CkbInvoice = invoice_res.invoice_address.parse().unwrap();
+    assert!(internal_ckb_invoice.payment_secret().is_some());
 
     let get_invoice_res: InvoiceResult = node_0
         .send_rpc_request(
@@ -147,6 +135,28 @@ async fn test_rpc_basic() {
         .unwrap();
     eprintln!("Raw RPC response: {}", raw_response);
     assert!(raw_response.to_string().contains("BASIC_MPP_OPTIONAL"));
+
+    let new_invoice_params = NewInvoiceParams {
+        amount: 1000,
+        description: Some("test".to_string()),
+        currency: Currency::Fibd,
+        expiry: Some(322),
+        fallback_address: None,
+        final_expiry_delta: Some(900000 + 1234),
+        udt_type_script: Some(Script::default().into()),
+        payment_preimage: gen_rand_sha256_hash(),
+        hash_algorithm: Some(crate::fiber::hash_algorithm::HashAlgorithm::CkbHash),
+        allow_mpp: Some(false),
+    };
+
+    // node0 generate a invoice
+    let invoice_res: InvoiceResult = node_0
+        .send_rpc_request("new_invoice", new_invoice_params)
+        .await
+        .unwrap();
+
+    let internal_ckb_invoice: CkbInvoice = invoice_res.invoice_address.parse().unwrap();
+    assert!(internal_ckb_invoice.payment_secret().is_none());
 }
 
 #[tokio::test]
@@ -173,7 +183,7 @@ async fn test_rpc_list_peers() {
             ),
         ],
         2,
-        Some(rpc_config()),
+        Some(gen_rpc_config()),
     )
     .await;
     let [mut node_0, mut node_1] = nodes.try_into().expect("2 nodes");
@@ -202,7 +212,7 @@ async fn test_rpc_list_peers() {
         NetworkNodeConfigBuilder::new()
             .node_name(Some(format!("node-{}", 3)))
             .base_dir_prefix(&format!("test-fnn-node-{}-", 3))
-            .enable_rpc_server()
+            .rpc_config(Some(gen_rpc_config()))
             .build(),
     )
     .await;
@@ -249,7 +259,7 @@ async fn test_rpc_graph() {
             ),
         ],
         2,
-        Some(rpc_config()),
+        Some(gen_rpc_config()),
     )
     .await;
     let [node_0, node_1] = nodes.try_into().expect("2 nodes");
@@ -300,7 +310,7 @@ async fn test_rpc_shutdown_channels() {
             ),
         ],
         2,
-        Some(rpc_config()),
+        Some(gen_rpc_config()),
     )
     .await;
     let [node_0, _node_1] = nodes.try_into().expect("2 nodes");
@@ -423,7 +433,7 @@ async fn test_rpc_node_info() {
             ),
         ],
         2,
-        Some(rpc_config()),
+        Some(gen_rpc_config()),
     )
     .await;
     let [node_0, _node_1] = nodes.try_into().expect("2 nodes");
@@ -676,7 +686,7 @@ async fn test_rpc_auth_with_fixed_token() {
     const PRIVATE_KEY: &str =
         "ed25519-private/89d6c88919e5ca326fbb8d1cbef406df08c0620575376651d53008762dc81f45";
 
-    let mut rpc_config = rpc_config();
+    let mut rpc_config = gen_rpc_config();
     rpc_config.biscuit_public_key = Some(PUBLIC_KEY.to_string());
 
     let pk = PrivateKey::from_str(PRIVATE_KEY).unwrap();

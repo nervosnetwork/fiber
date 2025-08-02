@@ -557,6 +557,7 @@ fn test_invoice_with_mpp_option() {
         .amount(Some(1280))
         .payment_hash(gen_rand_sha256_hash())
         .allow_mpp(true)
+        .payment_secret(gen_rand_sha256_hash())
         .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))
         .unwrap();
 
@@ -575,6 +576,7 @@ fn test_invoice_with_mpp_option() {
         .expect("Failed to parse invoice");
     assert_eq!(parsed_invoice, invoice);
     assert!(parsed_invoice.allow_mpp());
+    assert!(parsed_invoice.payment_secret().is_some());
 
     let invoice = InvoiceBuilder::new(Currency::Fibb)
         .amount(Some(1280))
@@ -584,4 +586,6 @@ fn test_invoice_with_mpp_option() {
         .unwrap();
 
     assert!(!invoice.allow_mpp());
+    let payment_secret = invoice.payment_secret();
+    assert!(payment_secret.is_none());
 }

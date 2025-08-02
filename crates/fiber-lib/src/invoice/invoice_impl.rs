@@ -57,13 +57,14 @@ impl Display for CkbInvoiceStatus {
 }
 
 /// The currency of the invoice, can also used to represent the CKB network chain.
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize, Default)]
 pub enum Currency {
     /// The mainnet currency of CKB.
     Fibb,
     /// The testnet currency of the CKB network.
     Fibt,
     /// The devnet currency of the CKB network.
+    #[default]
     Fibd,
 }
 
@@ -133,6 +134,8 @@ pub enum Attribute {
     HashAlgorithm(HashAlgorithm),
     /// The feature flags of the invoice
     Feature(FeatureVector),
+    /// The payment secret of the invoice
+    PaymentSecret(Hash256),
 }
 
 /// The metadata of the invoice
@@ -344,6 +347,7 @@ impl CkbInvoice {
     );
     attr_getter!(fallback_address, FallbackAddr, String);
     attr_getter!(hash_algorithm, HashAlgorithm, HashAlgorithm);
+    attr_getter!(payment_secret, PaymentSecret, Hash256);
 
     pub fn allow_mpp(&self) -> bool {
         self.data
@@ -538,6 +542,11 @@ impl From<Attribute> for InvoiceAttr {
                     .value(Byte::new(hash_algorithm as u8))
                     .build(),
             ),
+            Attribute::PaymentSecret(payment_secret) => InvoiceAttrUnion::PaymentSecret(
+                PaymentSecret::new_builder()
+                    .value(payment_secret.into())
+                    .build(),
+            ),
         };
         InvoiceAttr::new_builder().set(a).build()
     }
@@ -584,6 +593,7 @@ impl From<InvoiceAttr> for Attribute {
                 let hash_algorithm = value.try_into().unwrap_or_default();
                 Attribute::HashAlgorithm(hash_algorithm)
             }
+            InvoiceAttrUnion::PaymentSecret(x) => Attribute::PaymentSecret(x.value().into()),
         }
     }
 }
@@ -650,17 +660,15 @@ impl InvoiceBuilder {
         self.add_attr(Attribute::UdtScript(CkbScript(script)))
     }
 
-    pub fn hash_algorithm(self, algorithm: HashAlgorithm) -> Self {
-        self.add_attr(Attribute::HashAlgorithm(algorithm))
-    }
-
     attr_setter!(description, Description, String);
     attr_setter!(payee_pub_key, PayeePublicKey, PublicKey);
     attr_setter!(expiry_time, ExpiryTime, Duration);
     attr_setter!(fallback_address, FallbackAddr, String);
     attr_setter!(final_expiry_delta, FinalHtlcMinimumExpiryDelta, u64);
+    attr_setter!(payment_secret, PaymentSecret, Hash256);
+    attr_setter!(hash_algorithm, HashAlgorithm, HashAlgorithm);
 
-    pub fn allow_mpp(self, value: bool) -> Self {
+    pub fn allow_mpp(self, allow_mpp: bool) -> Self {
         let mut feature_vector = self
             .attrs
             .iter()
@@ -671,9 +679,9 @@ impl InvoiceBuilder {
                     None
                 }
             })
-            .unwrap_or_default();
+            .unwrap_or_else(FeatureVector::new);
 
-        if value {
+        if allow_mpp {
             feature_vector.set_basic_mpp_optional();
         } else {
             feature_vector.unset_basic_mpp_optional();
@@ -732,6 +740,17 @@ impl InvoiceBuilder {
     }
 
     fn check_attrs_valid(&self) -> Result<(), InvoiceError> {
+        let allow_mpp = self.attrs.iter().any(
+            |attr| matches!(attr, Attribute::Feature(feature) if feature.supports_basic_mpp()),
+        );
+        let payment_secret = self.attrs.iter().find_map(|attr| match attr {
+            Attribute::PaymentSecret(secret) => Some(secret),
+            _ => None,
+        });
+
+        if allow_mpp && payment_secret.is_none() {
+            return Err(InvoiceError::PaymentSecretRequiredForMpp);
+        }
         // check is there any duplicate attribute key set
         for (i, attr) in self.attrs.iter().enumerate() {
             for other in self.attrs.iter().skip(i + 1) {

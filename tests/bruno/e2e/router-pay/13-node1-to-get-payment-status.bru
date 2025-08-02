@@ -1,7 +1,7 @@
 meta {
   name: Node1 send get_payment for query status
   type: http
-  seq: 12
+  seq: 13
 }
 
 post {
@@ -34,7 +34,7 @@ assert {
 
 script:pre-request {
   // sleep for a while
-  await new Promise(r => setTimeout(r, 2000));
+  await new Promise(r => setTimeout(r, 3000));
 }
 
 script:post-response {

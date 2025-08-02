@@ -1914,6 +1914,7 @@ dependencies = [
  "nom",
  "num_enum",
  "once_cell",
+ "parking_lot",
  "paste",
  "ractor",
  "rand 0.8.5",

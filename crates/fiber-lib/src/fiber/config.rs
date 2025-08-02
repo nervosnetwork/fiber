@@ -63,6 +63,12 @@ pub const DEFAULT_AUTO_ANNOUNCE_NODE: bool = true;
 /// The interval to reannounce NodeAnnouncement, in seconds.
 pub const DEFAULT_ANNOUNCE_NODE_INTERVAL_SECONDS: u64 = 3600;
 
+/// The maximum time to hold a tlc, in milliseconds.
+#[cfg(not(debug_assertions))]
+pub const DEFAULT_HOLD_TLC_TIMEOUT: u64 = 120 * 1000;
+#[cfg(debug_assertions)]
+pub const DEFAULT_HOLD_TLC_TIMEOUT: u64 = 20 * 1000;
+
 /// The interval to maintain the gossip network, in milli-seconds.
 #[cfg(not(any(test, feature = "bench")))]
 pub const DEFAULT_GOSSIP_NETWORK_MAINTENANCE_INTERVAL_MS: u64 = 1000 * 60;
@@ -90,6 +96,10 @@ pub const DEFAULT_GOSSIP_STORE_MAINTENANCE_INTERVAL_MS: u64 = 50;
 
 /// Whether to sync the network graph from the network. true means syncing.
 pub const DEFAULT_SYNC_NETWORK_GRAPH: bool = true;
+
+/// The maximum number of parts for a multi-part payment.
+pub const DEFAULT_MAX_PARTS: u64 = 16;
+pub const PAYMENT_MAX_PARTS_LIMIT: u64 = 64;
 
 // See comment in `LdkConfig` for why do we need to specify both name and long,
 // and prefix them with `ckb-`/`CKB_`.

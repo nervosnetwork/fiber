@@ -124,8 +124,8 @@ fn test_feature_default() {
     let vector = FeatureVector::default();
     assert!(vector.requires_gossip_queries());
     assert!(vector.supports_gossip_queries());
-    assert!(!vector.supports_basic_mpp());
-    assert!(!vector.requires_basic_mpp());
+    assert!(vector.supports_basic_mpp());
+    assert!(vector.requires_basic_mpp());
 }
 
 #[test]

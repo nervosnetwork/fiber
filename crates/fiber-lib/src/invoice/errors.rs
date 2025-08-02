@@ -45,6 +45,8 @@ pub enum InvoiceError {
     /// Duplicated attribute key
     #[error("Duplicated attribute key: {0}")]
     DuplicatedAttributeKey(String),
+    #[error("Payment secret is required for MPP payments")]
+    PaymentSecretRequiredForMpp,
     /// Both set payment_hash and payment_preimage
     #[error("Both payment_hash and payment_preimage are set")]
     BothPaymenthashAndPreimage,
