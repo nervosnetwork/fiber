@@ -209,11 +209,17 @@ pub fn mock_ecdsa_signature() -> EcdsaSignature {
     let signature = secp.sign_ecdsa(&message, &secret_key);
     EcdsaSignature(signature)
 }
-
+#[cfg(not(target_arch = "wasm32"))]
 pub fn generate_store() -> (Store, TempDir) {
     let temp_dir = TempDir::new("test-fnn-node");
     let store = Store::new(temp_dir.as_ref());
     (store.expect("create store"), temp_dir)
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn generate_store() -> (Store, ()) {
+    let store = Store::new(&PathBuf::default());
+    (store.expect("create store"), ())
 }
 
 #[derive(Debug)]

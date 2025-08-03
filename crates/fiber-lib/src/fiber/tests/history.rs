@@ -23,15 +23,20 @@ impl Round for f64 {
 
 struct MockHistory {
     pub history: PaymentHistory<Store>,
+    #[cfg(not(target_arch = "wasm32"))]
     #[allow(dead_code)]
     pub temp_dir: TempDir,
 }
 
 impl MockHistory {
     fn new() -> Self {
+        #[allow(dead_code)]
         let (store, temp_dir) = generate_store();
         let history = PaymentHistory::new(gen_rand_fiber_public_key(), None, store);
-        Self { history, temp_dir }
+        #[cfg(not(target_arch = "wasm32"))]
+        return Self { history, temp_dir };
+        #[cfg(target_arch = "wasm32")]
+        return Self { history };
     }
 }
 
