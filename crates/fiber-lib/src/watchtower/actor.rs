@@ -588,16 +588,25 @@ fn try_settle_commitment_tx<S: WatchtowerStore>(
                                                 current_epoch,
                                                 store,
                                             ) {
-                                                Ok(Some(tx)) => match ckb_client
-                                                    .send_transaction(tx.data().into(), None)
-                                                {
-                                                    Ok(tx_hash) => {
-                                                        info!("Settlement tx for pending tlcs: {:?} sent, tx_hash: {:#x}", tx, tx_hash);
+                                                Ok(Some(tx)) => {
+                                                    match ckb_client
+                                                        .send_transaction(tx.data().into(), None)
+                                                    {
+                                                        Ok(tx_hash) => {
+                                                            info!("Settlement tx for pending tlcs: {:?} sent, tx_hash: {:#x}", tx, tx_hash);
+                                                        }
+                                                        // RBF check for duplicate transaction
+                                                        Err(RpcError::Rpc(err))
+                                                            if err.code.code() == -1107
+                                                                || err.code.code() == -1111 =>
+                                                        {
+                                                            info!("Settlement tx: {:?} already exists", tx.hash());
+                                                        }
+                                                        Err(err) => {
+                                                            error!("Failed to send settlement tx for pending tlcs: {:?}, error: {:?}", tx, err);
+                                                        }
                                                     }
-                                                    Err(err) => {
-                                                        error!("Failed to send settlement tx for pending tlcs: {:?}, error: {:?}", tx, err);
-                                                    }
-                                                },
+                                                }
                                                 Ok(None) => {
                                                     info!("No need to settle the commitment tx: {:#x} with pending tlcs", commitment_tx_hash);
                                                 }
@@ -649,6 +658,12 @@ fn try_settle_commitment_tx<S: WatchtowerStore>(
                                             "Settlement tx: {:?} sent, tx_hash: {:#x}",
                                             tx, tx_hash
                                         );
+                                    }
+                                    // RBF check for duplicate transaction
+                                    Err(RpcError::Rpc(err))
+                                        if err.code.code() == -1107 || err.code.code() == -1111 =>
+                                    {
+                                        info!("Settlement tx: {:?} already exists", tx.hash());
                                     }
                                     Err(err) => {
                                         error!(
