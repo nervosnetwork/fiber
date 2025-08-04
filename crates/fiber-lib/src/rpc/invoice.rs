@@ -3,7 +3,7 @@
 //! We define CkbInvoice and its related types here only for the RPC interface.
 //! For better separation of concerns, the actual invoice logic is implemented in the `invoice` module.
 //!
-use crate::fiber::config::MIN_TLC_EXPIRY_DELTA;
+use crate::fiber::config::{MAX_PAYMENT_TLC_EXPIRY_LIMIT, MIN_TLC_EXPIRY_DELTA};
 use crate::fiber::hash_algorithm::HashAlgorithm;
 use crate::fiber::serde_utils::{duration_hex, U128Hex, U64Hex};
 use crate::fiber::types::{Hash256, Privkey};
@@ -149,6 +149,7 @@ pub struct NewInvoiceParams {
     /// The fallback address of the invoice.
     pub fallback_address: Option<String>,
     /// The final HTLC timeout of the invoice, in milliseconds.
+    /// Minimal value is 16 hours, and maximal value is 14 days.
     #[serde_as(as = "Option<U64Hex>")]
     pub final_expiry_delta: Option<u64>,
     /// The UDT type script of the invoice.
@@ -351,6 +352,16 @@ where
                     format!(
                         "final_expiry_delta must be greater than or equal to {}",
                         MIN_TLC_EXPIRY_DELTA
+                    ),
+                    Some(params),
+                ));
+            }
+            if final_expiry_delta > MAX_PAYMENT_TLC_EXPIRY_LIMIT {
+                return Err(ErrorObjectOwned::owned(
+                    CALL_EXECUTION_FAILED_CODE,
+                    format!(
+                        "final_expiry_delta must be less than or equal to {}",
+                        MAX_PAYMENT_TLC_EXPIRY_LIMIT
                     ),
                     Some(params),
                 ));

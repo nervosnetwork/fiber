@@ -33,7 +33,12 @@ pub const DEFAULT_OPEN_CHANNEL_AUTO_ACCEPT_MIN_CKB_FUNDING_AMOUNT: u64 = 100 * C
 pub const DEFAULT_TLC_EXPIRY_DELTA: u64 = 24 * 60 * 60 * 1000;
 
 /// 4 hours for each epoch
+#[cfg(not(debug_assertions))]
 pub const MILLI_SECONDS_PER_EPOCH: u64 = 4 * 60 * 60 * 1000;
+#[cfg(debug_assertions)]
+// 2 seconds for testing environment, so default 2/3 commitment_delay_epoch is 6 * 2/3 * 2 = 8 seconds
+// we need to make sure 2/3 commitment_delay_epoch is greater than MIN_TLC_EXPIRY_DELTA
+pub const MILLI_SECONDS_PER_EPOCH: u64 = 2 * 1000;
 
 #[cfg(not(debug_assertions))]
 /// The minimal expiry delta to forward a tlc, in milliseconds. 16 hours

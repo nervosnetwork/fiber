@@ -4,8 +4,8 @@ use super::{
     gossip::SOFT_BROADCAST_MESSAGES_CONSIDERED_STALE_DURATION, graph::ChannelUpdateInfo,
     types::ForwardTlcResult,
 };
-use crate::fiber::config::DEFAULT_TLC_EXPIRY_DELTA;
-use crate::fiber::fee::check_open_channel_parameters;
+use crate::fiber::config::MILLI_SECONDS_PER_EPOCH;
+use crate::fiber::fee::{check_open_channel_parameters, check_tlc_delta_with_epochs};
 #[cfg(any(debug_assertions, feature = "bench"))]
 use crate::fiber::network::DebugEvent;
 use crate::fiber::network::PaymentCustomRecords;
@@ -1684,18 +1684,7 @@ where
         }
 
         if let Some(delta) = tlc_expiry_delta {
-            if delta < MIN_TLC_EXPIRY_DELTA {
-                return Err(ProcessingChannelError::InvalidParameter(format!(
-                    "TLC expiry delta is too small, expect larger than {}",
-                    MIN_TLC_EXPIRY_DELTA
-                )));
-            }
-            if delta > DEFAULT_TLC_EXPIRY_DELTA {
-                return Err(ProcessingChannelError::InvalidParameter(format!(
-                    "TLC expiry delta is too large, expected to be smaller than {}",
-                    DEFAULT_TLC_EXPIRY_DELTA
-                )));
-            }
+            check_tlc_delta_with_epochs(delta, state.commitment_delay_epoch)?;
             updated |= state.update_our_tlc_expiry_delta(delta);
         }
 
@@ -5651,6 +5640,18 @@ impl ChannelActorState {
             );
             return Err(ProcessingChannelError::TlcExpirySoon);
         }
+        let delay_epoch = EpochNumberWithFraction::from_full_value(self.commitment_delay_epoch);
+        let epoch_delay_milliseconds =
+            (delay_epoch.number() as f64 * MILLI_SECONDS_PER_EPOCH as f64 * 2.0 / 3.0) as u64;
+        let expect_expiry = current_time + epoch_delay_milliseconds;
+        if expiry < expect_expiry {
+            error!(
+                "TLC expiry {} is too soon, current time + epoch delay: {}",
+                expiry, expect_expiry
+            );
+            return Err(ProcessingChannelError::TlcExpirySoon);
+        }
+
         if expiry >= current_time + MAX_PAYMENT_TLC_EXPIRY_LIMIT {
             debug!(
                 "TLC expiry {} is too far in the future, current time: {}",
@@ -5658,6 +5659,7 @@ impl ChannelActorState {
             );
             return Err(ProcessingChannelError::TlcExpiryTooFar);
         }
+
         Ok(())
     }
 
