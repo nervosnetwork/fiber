@@ -46,12 +46,12 @@ use tokio_util::task::TaskTracker;
 use tracing::{debug, error, info, trace, warn};
 
 use super::channel::{
-    get_funding_and_reserved_amount, AcceptChannelParameter, AwaitingTxSignaturesFlags,
-    ChannelActor, ChannelActorMessage, ChannelActorStateStore, ChannelCommand,
-    ChannelCommandWithId, ChannelEvent, ChannelInitializationParameter, ChannelState,
-    ChannelSubscribers, ChannelTlcInfo, OpenChannelParameter, PrevTlcInfo, ProcessingChannelError,
-    ProcessingChannelResult, PublicChannelInfo, RemoveTlcCommand, RevocationData, SettlementData,
-    ShuttingDownFlags, StopReason, TLCId, DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
+    get_funding_and_reserved_amount, AcceptChannelParameter, ChannelActor, ChannelActorMessage,
+    ChannelActorStateStore, ChannelCommand, ChannelCommandWithId, ChannelEvent,
+    ChannelInitializationParameter, ChannelState, ChannelSubscribers, ChannelTlcInfo,
+    OpenChannelParameter, PrevTlcInfo, ProcessingChannelError, ProcessingChannelResult,
+    PublicChannelInfo, RemoveTlcCommand, RevocationData, SettlementData, StopReason, TLCId,
+    DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
 };
 use super::config::AnnouncedNodeName;
 use super::features::FeatureVector;
@@ -72,10 +72,12 @@ use super::{
 use crate::ckb::config::UdtCfgInfos;
 use crate::ckb::contracts::{check_udt_script, get_udt_whitelist, is_udt_type_auto_accept};
 use crate::ckb::{CkbChainMessage, FundingError, FundingRequest, FundingTx};
-use crate::fiber::channel::MAX_TLC_NUMBER_IN_FLIGHT;
 use crate::fiber::channel::{
     AddTlcCommand, AddTlcResponse, ChannelEphemeralConfig, ChannelInitializationOperation,
     ShutdownCommand, TxCollaborationCommand, TxUpdateCommand,
+};
+use crate::fiber::channel::{
+    AwaitingTxSignaturesFlags, ShuttingDownFlags, MAX_TLC_NUMBER_IN_FLIGHT,
 };
 use crate::fiber::config::{
     DEFAULT_MAX_PARTS, DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT,

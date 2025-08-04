@@ -9,7 +9,7 @@ use super::gen::gossip::{self as molecule_gossip};
 use super::hash_algorithm::{HashAlgorithm, UnknownHashAlgorithmError};
 use super::network::{get_chain_hash, PaymentCustomRecords};
 use super::r#gen::fiber::PubNonceOpt;
-use super::serde_utils::{EntityHex, PubNonceAsBytes, SliceHex};
+use super::serde_utils::{EntityHex, PubNonceAsBytes, SliceBase58, SliceHex};
 use crate::ckb::config::{UdtArgInfo, UdtCellDep, UdtCfgInfos, UdtDep, UdtScript};
 use crate::ckb::contracts::get_udt_whitelist;
 use ckb_jsonrpc_types::CellOutput;

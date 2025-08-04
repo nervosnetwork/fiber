@@ -9,22 +9,19 @@ use crate::fiber::fee::check_open_channel_parameters;
 #[cfg(any(debug_assertions, feature = "bench"))]
 use crate::fiber::network::DebugEvent;
 use crate::fiber::network::PaymentCustomRecords;
-use crate::fiber::types::{BroadcastMessageWithTimestamp, RevocationNonce};
 use crate::{debug_event, fiber::types::TxAbort, utils::tx::compute_tx_message};
-use bitflags::bitflags;
-use futures::future::OptionFuture;
 #[cfg(test)]
 use musig2::BinaryEncoding;
 use musig2::SecNonceBuilder;
-use secp256k1::XOnlyPublicKey;
+use secp256k1::{Secp256k1, XOnlyPublicKey};
 #[cfg(test)]
 use std::{
     backtrace::Backtrace,
-    collections::HashMap,
     sync::{LazyLock, Mutex},
 };
 use tracing::{debug, error, info, trace, warn};
 
+use super::types::{ChannelUpdateChannelFlags, ChannelUpdateMessageFlags, UpdateTlcInfo};
 use crate::time::{SystemTime, UNIX_EPOCH};
 use crate::utils::payment::is_invoice_fulfilled;
 use crate::{
@@ -45,19 +42,19 @@ use crate::{
         },
         serde_utils::{CompactSignatureAsBytes, EntityHex, PubNonceAsBytes},
         types::{
-            AcceptChannel, AddTlc, AnnouncementSignatures, ChannelAnnouncement, ChannelReady,
-            ChannelUpdate, ClosingSigned, CommitmentNonce, CommitmentSigned, EcdsaSignature,
-            FiberChannelMessage, FiberMessage, Hash256, OpenChannel, PaymentOnionPacket,
-            PeeledPaymentOnionPacket, Privkey, Pubkey, ReestablishChannel, RemoveTlc,
-            RemoveTlcFulfill, RemoveTlcReason, RevokeAndAck, Shutdown, TlcErr, TlcErrPacket,
-            TlcErrorCode, TxCollaborationMsg, TxComplete, TxUpdate, NO_SHARED_SECRET,
+            AcceptChannel, AddTlc, AnnouncementSignatures, BroadcastMessageWithTimestamp,
+            ChannelAnnouncement, ChannelReady, ChannelUpdate, ClosingSigned, CommitmentNonce,
+            CommitmentSigned, EcdsaSignature, FiberChannelMessage, FiberMessage, Hash256, HoldTlc,
+            OpenChannel, PaymentOnionPacket, PeeledPaymentOnionPacket, Privkey, Pubkey,
+            ReestablishChannel, RemoveTlc, RemoveTlcFulfill, RemoveTlcReason, RevocationNonce,
+            RevokeAndAck, Shutdown, TlcErr, TlcErrPacket, TlcErrorCode, TxCollaborationMsg,
+            TxComplete, TxUpdate, NO_SHARED_SECRET,
         },
         NetworkActorCommand, NetworkActorEvent, NetworkActorMessage, ASSUME_NETWORK_ACTOR_ALIVE,
     },
     invoice::{CkbInvoice, CkbInvoiceStatus, InvoiceStore, PreimageStore},
     now_timestamp_as_millis_u64, NetworkServiceEvent,
 };
-use crate::{debug_event, utils::tx::compute_tx_message};
 use bitflags::bitflags;
 use ckb_hash::{blake2b_256, new_blake2b};
 use ckb_sdk::{util::blake160, Since, SinceType};
@@ -83,7 +80,6 @@ use ractor::{
     concurrency::{Duration, JoinHandle},
     Actor, ActorProcessingErr, ActorRef, MessagingErr, OutputPort, RpcReplyPort,
 };
-use secp256k1::{Secp256k1, XOnlyPublicKey};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use std::collections::HashMap;
@@ -95,9 +91,6 @@ use std::{
 use tentacle::secio::PeerId;
 use thiserror::Error;
 use tokio::sync::oneshot;
-use tracing::{debug, error, info, trace, warn};
-
-use super::types::{ChannelUpdateChannelFlags, ChannelUpdateMessageFlags, UpdateTlcInfo};
 
 // - `empty_witness_args`: 16 bytes, fixed to 0x10000000100000001000000010000000, for compatibility with the xudt
 // - `pubkey`: 32 bytes, x only aggregated public key
@@ -6083,7 +6076,7 @@ impl ChannelActorState {
         self.clear_waiting_peer_response();
 
         if self.local_shutdown_info.is_some() && self.remote_shutdown_info.is_some() {
-            let shutdown_tx = self.build_shutdown_tx()?.await;
+            let shutdown_tx = self.build_shutdown_tx().await?;
             let sign_ctx = self.get_funding_sign_context();
 
             let local_shutdown_info = self
@@ -6875,8 +6868,7 @@ impl ChannelActorState {
                     // don't clear my waiting_ack flag here, since if i'm waiting for peer ack,
                     // peer will resend commitment_signed message
                     self.send_revoke_and_ack_message()?;
-                    if my_waiting_ack
-                        && my_local_commitment_number == peer_remote_commitment_number
+                    if my_waiting_ack && my_local_commitment_number == peer_remote_commitment_number
                     {
                         self.resend_tlcs_on_reestablish(true)?;
                     }
@@ -7577,9 +7569,7 @@ impl ChannelActorState {
         } else {
             [remote_pubkey, local_pubkey]
         };
-        let key_agg_ctx = KeyAggContext::new(pubkeys).map_err(|e| {
-            ProcessingChannelError::InternalError(format!("Failed to create KeyAggContext: {}", e))
-        })?;
+        let key_agg_ctx = KeyAggContext::new(pubkeys).expect("Valid pubkeys");
         key_agg_ctx.aggregated_pubkey::<Point>().serialize_xonly()
     }
 
