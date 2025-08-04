@@ -1,14 +1,17 @@
 use crate::fiber::channel::*;
 use crate::fiber::config::AnnouncedNodeName;
-#[cfg(not(target_arch = "wasm32"))]
-use crate::fiber::config::{
-    graph::*, history::Direction, history::TimedResult, network::SendPaymentData,
-    DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT,
-};
 use crate::fiber::features::FeatureVector;
 use crate::fiber::gossip::GossipMessageStore;
 use crate::fiber::network::PaymentCustomRecords;
 use crate::fiber::types::*;
+#[allow(unused)]
+use crate::fiber::{
+    config::{DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT},
+    graph::*,
+    history::Direction,
+    history::TimedResult,
+    network::SendPaymentData,
+};
 use crate::gen_rand_fiber_private_key;
 use crate::gen_rand_fiber_public_key;
 use crate::gen_rand_sha256_hash;
