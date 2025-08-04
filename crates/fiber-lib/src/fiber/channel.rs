@@ -6870,6 +6870,7 @@ impl ChannelActorState {
                     self.send_revoke_and_ack_message()?;
                     if my_waiting_ack && my_local_commitment_number == peer_remote_commitment_number
                     {
+                        self.set_waiting_ack(myself, false);
                         self.resend_tlcs_on_reestablish(true)?;
                     }
                 } else if my_waiting_ack
