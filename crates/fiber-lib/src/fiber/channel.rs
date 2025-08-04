@@ -9,6 +9,19 @@ use crate::fiber::fee::{check_open_channel_parameters, check_tlc_delta_with_epoc
 #[cfg(any(debug_assertions, feature = "bench"))]
 use crate::fiber::network::DebugEvent;
 use crate::fiber::network::PaymentCustomRecords;
+use crate::{debug_event, fiber::types::TxAbort, utils::tx::compute_tx_message};
+#[cfg(test)]
+use musig2::BinaryEncoding;
+use musig2::SecNonceBuilder;
+use secp256k1::{Secp256k1, XOnlyPublicKey};
+#[cfg(test)]
+use std::{
+    backtrace::Backtrace,
+    sync::{LazyLock, Mutex},
+};
+use tracing::{debug, error, info, trace, warn};
+
+use super::types::{ChannelUpdateChannelFlags, ChannelUpdateMessageFlags, UpdateTlcInfo};
 use crate::time::{SystemTime, UNIX_EPOCH};
 use crate::utils::payment::is_invoice_fulfilled;
 use crate::{
@@ -30,19 +43,18 @@ use crate::{
         serde_utils::{CompactSignatureAsBytes, EntityHex, PubNonceAsBytes},
         types::{
             AcceptChannel, AddTlc, AnnouncementSignatures, BroadcastMessageWithTimestamp,
-            ChannelAnnouncement, ChannelReady, ChannelUpdate, ClosingSigned, CommitmentSigned,
-            EcdsaSignature, FiberChannelMessage, FiberMessage, Hash256, HoldTlc, OpenChannel,
-            PaymentOnionPacket, PeeledPaymentOnionPacket, Privkey, Pubkey, ReestablishChannel,
-            RemoveTlc, RemoveTlcFulfill, RemoveTlcReason, RevokeAndAck, Shutdown, TlcErr,
-            TlcErrPacket, TlcErrorCode, TxAbort, TxCollaborationMsg, TxComplete, TxUpdate,
-            NO_SHARED_SECRET,
+            ChannelAnnouncement, ChannelReady, ChannelUpdate, ClosingSigned, CommitmentNonce,
+            CommitmentSigned, EcdsaSignature, FiberChannelMessage, FiberMessage, Hash256, HoldTlc,
+            OpenChannel, PaymentOnionPacket, PeeledPaymentOnionPacket, Privkey, Pubkey,
+            ReestablishChannel, RemoveTlc, RemoveTlcFulfill, RemoveTlcReason, RevocationNonce,
+            RevokeAndAck, Shutdown, TlcErr, TlcErrPacket, TlcErrorCode, TxCollaborationMsg,
+            TxComplete, TxUpdate, NO_SHARED_SECRET,
         },
         NetworkActorCommand, NetworkActorEvent, NetworkActorMessage, ASSUME_NETWORK_ACTOR_ALIVE,
     },
     invoice::{CkbInvoice, CkbInvoiceStatus, InvoiceStore, PreimageStore},
     now_timestamp_as_millis_u64, NetworkServiceEvent,
 };
-use crate::{debug_event, utils::tx::compute_tx_message};
 use bitflags::bitflags;
 use ckb_hash::{blake2b_256, new_blake2b};
 use ckb_sdk::{util::blake160, Since, SinceType};
@@ -68,7 +80,6 @@ use ractor::{
     concurrency::{Duration, JoinHandle},
     Actor, ActorProcessingErr, ActorRef, MessagingErr, OutputPort, RpcReplyPort,
 };
-use secp256k1::{Secp256k1, XOnlyPublicKey};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use std::collections::HashMap;
@@ -80,9 +91,6 @@ use std::{
 use tentacle::secio::PeerId;
 use thiserror::Error;
 use tokio::sync::oneshot;
-use tracing::{debug, error, info, trace, warn};
-
-use super::types::{ChannelUpdateChannelFlags, ChannelUpdateMessageFlags, UpdateTlcInfo};
 
 // - `empty_witness_args`: 16 bytes, fixed to 0x10000000100000001000000010000000, for compatibility with the xudt
 // - `pubkey`: 32 bytes, x only aggregated public key
@@ -482,6 +490,7 @@ where
                     .await?;
                 if let ChannelState::CollaboratingFundingTx(flags) = state.state {
                     if flags.contains(CollaboratingFundingTxFlags::COLLABORATION_COMPLETED) {
+                        state.increment_local_commitment_number();
                         self.handle_commitment_signed_command(myself, state).await?;
                     }
                 }
@@ -1431,7 +1440,7 @@ where
             channel_id: state.get_id(),
             funding_tx_partial_signature,
             commitment_tx_partial_signature,
-            next_local_nonce: state.get_next_local_nonce(),
+            next_commitment_nonce: state.get_next_commitment_nonce(),
         };
 
         #[cfg(debug_assertions)]
@@ -1464,7 +1473,6 @@ where
                 state.maybe_transfer_to_shutdown().await?;
             }
         }
-        state.update_last_commitment_signed_remote_nonce();
         Ok(())
     }
 
@@ -2048,6 +2056,7 @@ where
                 let commitment_tx_partial_signature = state.build_init_commitment_tx_signature()?;
                 let fiber_message = FiberMessage::tx_complete(TxComplete {
                     channel_id: state.get_id(),
+                    next_commitment_nonce: state.get_next_commitment_nonce(),
                     commitment_tx_partial_signature,
                 });
                 self.network
@@ -2396,7 +2405,8 @@ where
                     reserved_ckb_amount,
                     first_per_commitment_point,
                     second_per_commitment_point,
-                    next_local_nonce,
+                    next_commitment_nonce,
+                    next_revocation_nonce,
                     max_tlc_value_in_flight: remote_max_tlc_value_in_flight,
                     max_tlc_number_in_flight: remote_max_tlc_number_in_flight,
                     channel_announcement_nonce,
@@ -2444,7 +2454,8 @@ where
                     *funding_amount,
                     *reserved_ckb_amount,
                     counterpart_pubkeys,
-                    next_local_nonce.clone(),
+                    next_commitment_nonce.clone(),
+                    next_revocation_nonce.clone(),
                     channel_announcement_nonce.clone(),
                     *first_per_commitment_point,
                     *second_per_commitment_point,
@@ -2463,7 +2474,7 @@ where
                     None
                 };
 
-                let commitment_number = INITIAL_COMMITMENT_NUMBER;
+                let commitment_number = 1; // The first commitment number is 1, as 0 is reserved for the initial state.
                 let accept_channel = AcceptChannel {
                     channel_id: *channel_id,
                     funding_amount: local_funding_amount,
@@ -2480,7 +2491,8 @@ where
                         .signer
                         .get_commitment_point(commitment_number + 1),
                     channel_announcement_nonce,
-                    next_local_nonce: state.get_local_musig2_pubnonce(),
+                    next_commitment_nonce: state.get_commitment_nonce(),
+                    next_revocation_nonce: state.get_init_revocation_nonce(),
                 };
 
                 self.network
@@ -2572,7 +2584,7 @@ where
                 } else {
                     None
                 };
-                let commitment_number = INITIAL_COMMITMENT_NUMBER;
+                let commitment_number = 1; // The first commitment number is 1, as 0 is reserved for the initial state.
                 let message = FiberMessage::ChannelInitialization(OpenChannel {
                     chain_hash: get_chain_hash(),
                     channel_id: channel.get_id(),
@@ -2594,7 +2606,8 @@ where
                         .get_commitment_point(commitment_number + 1),
                     funding_pubkey: channel.get_local_channel_public_keys().funding_pubkey,
                     tlc_basepoint: channel.get_local_channel_public_keys().tlc_base_key,
-                    next_local_nonce: channel.get_local_musig2_pubnonce(),
+                    next_commitment_nonce: channel.get_commitment_nonce(),
+                    next_revocation_nonce: channel.get_init_revocation_nonce(),
                     channel_announcement_nonce,
                 });
 
@@ -2826,8 +2839,8 @@ where
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommitmentNumbers {
-    pub local: u64,
-    pub remote: u64,
+    local: u64,
+    remote: u64,
 }
 
 impl Default for CommitmentNumbers {
@@ -2858,13 +2871,6 @@ impl CommitmentNumbers {
 
     pub fn increment_remote(&mut self) {
         self.remote += 1;
-    }
-
-    pub fn flip(&self) -> Self {
-        Self {
-            local: self.remote,
-            remote: self.local,
-        }
     }
 }
 
@@ -3683,29 +3689,11 @@ pub struct ChannelActorState {
     // but we will only update this field after we have sent a RevokeAndAck to the peer.
     // With above guarantee, we can be sure the results of the sender obtaining its latest local nonce
     // and the receiver obtaining its latest remote nonce are the same.
-    #[serde_as(as = "Option<PubNonceAsBytes>")]
-    pub last_committed_remote_nonce: Option<PubNonce>,
+    pub last_committed_remote_nonce: Option<CommitmentNonce>,
 
-    // While handling peer's CommitmentSigned message, we will build a RevokeAndAck message,
-    // and reply this message to the peer. The nonce used to build the RevokeAndAck message is
-    // an older one sent by the peer. We will read this nonce from the field `last_committed_remote_nonce`
-    // The new nonce contained in the CommitmentSigned message
-    // will be saved to `last_committed_remote_nonce` field when this process finishes successfully.
-    // The problem is in some abnormal cases, the may not be able to successfully send the RevokeAndAck.
-    // But we have overwritten the `last_committed_remote_nonce` field with the new nonce.
-    // While reestablishing the channel, we need to use the old nonce to build the RevokeAndAck message.
-    // This is why we need to save the old nonce in this field.
-    #[serde_as(as = "Option<PubNonceAsBytes>")]
-    pub last_commitment_signed_remote_nonce: Option<PubNonce>,
-
-    // While building a CommitmentSigned message, we use the latest remote nonce (the `last_committed_remote_nonce` above)
-    // to partially sign the commitment transaction. This nonce is also needed for the RevokeAndAck message
-    // returned from the peer. We need to save this nonce because the counterparty may send other nonces during
-    // the period when our CommitmentSigned is sent and the counterparty's RevokeAndAck is received.
-    // This field is used to keep the nonce used by the unconfirmed CommitmentSigned. When we receive a
-    // RevokeAndAck from the peer, we will use this nonce to validate the RevokeAndAck message.
-    #[serde_as(as = "Option<PubNonceAsBytes>")]
-    pub last_revoke_and_ack_remote_nonce: Option<PubNonce>,
+    pub remote_revocation_nonce_for_verify: Option<RevocationNonce>,
+    pub remote_revocation_nonce_for_send: Option<RevocationNonce>,
+    pub remote_revocation_nonce_for_next: Option<RevocationNonce>,
 
     // The latest commitment transaction we're holding,
     // it can be broadcasted to blockchain by us to force close the channel.
@@ -4551,7 +4539,8 @@ impl ChannelActorState {
         remote_value: u128,
         remote_reserved_ckb_amount: u64,
         remote_pubkeys: ChannelBasePublicKeys,
-        remote_nonce: PubNonce,
+        remote_nonce: CommitmentNonce,
+        remote_revocation_nonce: RevocationNonce,
         remote_channel_announcement_nonce: Option<PubNonce>,
         first_commitment_point: Pubkey,
         second_commitment_point: Pubkey,
@@ -4599,12 +4588,13 @@ impl ChannelActorState {
             remote_channel_public_keys: Some(remote_pubkeys),
             commitment_numbers: Default::default(),
             remote_shutdown_script: Some(remote_shutdown_script),
-            last_commitment_signed_remote_nonce: None,
-            last_revoke_and_ack_remote_nonce: None,
             last_committed_remote_nonce: Some(remote_nonce),
+            remote_revocation_nonce_for_send: Some(remote_revocation_nonce.clone()),
+            remote_revocation_nonce_for_verify: Some(remote_revocation_nonce.clone()),
+            remote_revocation_nonce_for_next: None,
             remote_commitment_points: vec![
-                (0, first_commitment_point),
-                (1, second_commitment_point),
+                (1, first_commitment_point),
+                (2, second_commitment_point),
             ],
             local_shutdown_info: None,
             remote_shutdown_info: None,
@@ -4682,9 +4672,10 @@ impl ChannelActorState {
             // these values will update after accept channel peer message handled
             remote_constraints: ChannelConstraints::default(),
             remote_channel_public_keys: None,
-            last_commitment_signed_remote_nonce: None,
-            last_revoke_and_ack_remote_nonce: None,
             last_committed_remote_nonce: None,
+            remote_revocation_nonce_for_send: None,
+            remote_revocation_nonce_for_verify: None,
+            remote_revocation_nonce_for_next: None,
             commitment_numbers: Default::default(),
             remote_commitment_points: vec![],
             local_shutdown_script: shutdown_script,
@@ -4979,7 +4970,29 @@ impl ChannelActorState {
     // Send RevokeAndAck message to the counterparty, and update the
     // channel state accordingly.
     fn send_revoke_and_ack_message(&mut self) -> ProcessingChannelResult {
-        let sign_ctx = self.get_sign_context(false);
+        // special case for reestablishing channel state
+        if self.remote_revocation_nonce_for_send.is_none() {
+            match self.last_revoke_ack_msg {
+                Some(ref revoke_and_ack) => {
+                    self.network()
+                        .send_message(NetworkActorMessage::new_command(
+                            NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
+                                self.get_remote_peer_id(),
+                                FiberMessage::revoke_and_ack(revoke_and_ack.clone()),
+                            )),
+                        ))
+                        .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                    return Ok(());
+                }
+                None => {
+                    let error = "Error reestablishing channel state, RevokeAndAck message not sent, but remote_revocation_nonce_for_send is None";
+                    warn!(error);
+                    return Err(ProcessingChannelError::InvalidState(error.to_string()));
+                }
+            }
+        }
+
+        let sign_ctx = self.get_revoke_sign_context(false);
         let x_only_aggregated_pubkey = sign_ctx.common_ctx.x_only_aggregated_pubkey();
 
         let revocation_partial_signature = {
@@ -5051,9 +5064,11 @@ impl ChannelActorState {
                 ]
                 .concat(),
             );
+            let sign_ctx = self.get_ack_sign_context(false);
             sign_ctx.sign(message.as_slice())?
         };
 
+        let next_revocation_nonce = self.get_next_revocation_nonce();
         // Note that we must update channel state here to update commitment number,
         // so that next step will obtain the correct commitment point.
         self.increment_remote_commitment_number();
@@ -5062,14 +5077,17 @@ impl ChannelActorState {
             channel_id: self.get_id(),
             revocation_partial_signature,
             commitment_tx_partial_signature,
+            next_revocation_nonce,
             next_per_commitment_point: point,
         });
 
-        #[cfg(debug_assertions)]
-        debug!(
-            "Sending RevokeAndAck message with commitment tx partial signature {:?}",
-            commitment_tx_partial_signature
-        );
+        // update the remote_revocation_nonce_for_send and remote_revocation_nonce_for_verify for next round if needed
+        if self.remote_revocation_nonce_for_verify.is_none() {
+            self.remote_revocation_nonce_for_send = self.remote_revocation_nonce_for_next.clone();
+            self.remote_revocation_nonce_for_verify = self.remote_revocation_nonce_for_next.clone();
+        } else {
+            self.remote_revocation_nonce_for_send = None;
+        }
 
         self.network()
             .send_message(NetworkActorMessage::new_command(
@@ -5081,7 +5099,6 @@ impl ChannelActorState {
                 )),
             ))
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-        self.update_last_revoke_and_ack_remote_nonce();
         Ok(())
     }
 
@@ -5121,38 +5138,51 @@ impl ChannelActorState {
         })
     }
 
-    pub fn get_next_local_secnonce(&self) -> SecNonce {
-        self.signer
-            .derive_musig2_nonce(self.get_next_commitment_number(true))
+    pub fn get_next_commitment_nonce(&self) -> CommitmentNonce {
+        let commitment_number = self.get_next_commitment_number(true);
+        let [funding, commitment] = self.signer.derive_musig2_nonce(
+            commitment_number,
+            [Musig2Context::Funding, Musig2Context::Commitment],
+        );
+        CommitmentNonce {
+            funding: funding.public_nonce(),
+            commitment: commitment.public_nonce(),
+        }
     }
 
-    pub fn get_next_local_nonce(&self) -> PubNonce {
-        self.get_next_local_secnonce().public_nonce()
+    pub fn get_next_revocation_nonce(&self) -> RevocationNonce {
+        let commitment_number = self.get_next_commitment_number(false);
+        let [revoke, ack] = self.signer.derive_musig2_nonce(
+            commitment_number,
+            [Musig2Context::Revoke, Musig2Context::Ack],
+        );
+        RevocationNonce {
+            revoke: revoke.public_nonce(),
+            ack: ack.public_nonce(),
+        }
     }
 
-    fn get_last_committed_remote_nonce(&self) -> PubNonce {
+    fn get_last_committed_remote_nonce(&self) -> CommitmentNonce {
         self.last_committed_remote_nonce
             .as_ref()
-            .expect("always have peer's last committed nonce in normal channel operations")
+            .expect("always have peer's last_committed_remote_nonce in normal channel operations")
             .clone()
     }
 
-    fn get_last_commitment_signed_remote_nonce(&self) -> Option<PubNonce> {
-        self.last_commitment_signed_remote_nonce.clone()
+    fn get_remote_revocation_nonce_for_verify(&self) -> RevocationNonce {
+        self.remote_revocation_nonce_for_verify.clone().expect(
+            "always have peer's remote_revocation_nonce_for_verify in normal channel operations",
+        )
     }
 
-    fn commit_remote_nonce(&mut self, nonce: PubNonce) {
+    fn get_remote_revocation_nonce_for_send(&self) -> RevocationNonce {
+        self.remote_revocation_nonce_for_send
+            .clone()
+            .expect("always have our remote_revocation_nonce_for_send in normal channel operations")
+    }
+
+    fn commit_remote_nonce(&mut self, nonce: CommitmentNonce) {
         self.last_committed_remote_nonce = Some(nonce);
-    }
-
-    fn update_last_commitment_signed_remote_nonce(&mut self) {
-        let nonce = self.get_last_committed_remote_nonce();
-        self.last_commitment_signed_remote_nonce = Some(nonce);
-    }
-
-    fn update_last_revoke_and_ack_remote_nonce(&mut self) {
-        let nonce = self.get_last_committed_remote_nonce();
-        self.last_revoke_and_ack_remote_nonce = Some(nonce);
     }
 
     pub fn get_current_commitment_numbers(&self) -> CommitmentNumbers {
@@ -5440,13 +5470,47 @@ impl ChannelActorState {
             .public_nonce()
     }
 
-    pub fn get_local_musig2_secnonce(&self) -> SecNonce {
-        self.signer
-            .derive_musig2_nonce(self.get_local_commitment_number())
+    fn get_init_revocation_nonce(&self) -> RevocationNonce {
+        let [revoke, ack] = self
+            .signer
+            .derive_musig2_nonce(2, [Musig2Context::Revoke, Musig2Context::Ack]);
+        RevocationNonce {
+            revoke: revoke.public_nonce(),
+            ack: ack.public_nonce(),
+        }
     }
 
-    pub fn get_local_musig2_pubnonce(&self) -> PubNonce {
-        self.get_local_musig2_secnonce().public_nonce()
+    fn get_commitment_nonce(&self) -> CommitmentNonce {
+        let [funding, commitment] = self.signer.derive_musig2_nonce(
+            self.get_local_commitment_number(),
+            [Musig2Context::Funding, Musig2Context::Commitment],
+        );
+        CommitmentNonce {
+            funding: funding.public_nonce(),
+            commitment: commitment.public_nonce(),
+        }
+    }
+
+    fn get_revocation_nonce(&self, for_remote: bool) -> RevocationNonce {
+        let commitment_number = if for_remote {
+            self.get_local_commitment_number()
+        } else {
+            self.get_remote_commitment_number()
+        };
+        let [revoke, ack] = self.signer.derive_musig2_nonce(
+            commitment_number,
+            [Musig2Context::Revoke, Musig2Context::Ack],
+        );
+        RevocationNonce {
+            revoke: revoke.public_nonce(),
+            ack: ack.public_nonce(),
+        }
+    }
+
+    fn get_local_nonce_funding(&self) -> PubNonce {
+        self.signer
+            .derive_musig2_nonce(self.get_local_commitment_number(), [Musig2Context::Funding])[0]
+            .public_nonce()
     }
 
     pub fn get_deterministic_musig2_agg_pubnonce(
@@ -5775,11 +5839,17 @@ impl ChannelActorState {
             self.check_tlc_limits(add_amount, is_sent)?;
         }
 
-        if is_tlc_command_message && (self.tlc_state.waiting_ack || self.reestablishing) {
+        if is_tlc_command_message && (self.is_waiting_tlc_ack() || self.reestablishing) {
             return Err(ProcessingChannelError::WaitingTlcAck);
         }
 
         Ok(())
+    }
+
+    fn is_waiting_tlc_ack(&self) -> bool {
+        self.tlc_state.waiting_ack
+            || (self.remote_revocation_nonce_for_send.is_none()
+                || self.remote_revocation_nonce_for_verify.is_none())
     }
 
     fn check_tlc_limits(
@@ -5915,21 +5985,21 @@ impl ChannelActorState {
         psct: &PartiallySignedCommitmentTransaction,
     ) -> Result<(TransactionView, SettlementData), ProcessingChannelError> {
         let completed_commitment_tx = {
-            let deterministic_sign_ctx = self.get_deterministic_sign_context();
-
-            let our_funding_tx_partial_signature =
-                deterministic_sign_ctx.sign(&compute_tx_message(&psct.commitment_tx))?;
-
-            self.aggregate_partial_signatures_to_consume_funding_cell(
-                &deterministic_sign_ctx.common_ctx,
-                our_funding_tx_partial_signature,
+            let sign_ctx = self.get_funding_sign_context();
+            let signature = sign_ctx.sign_and_aggregate(
+                &compute_tx_message(&psct.commitment_tx),
                 psct.funding_tx_partial_signature,
-                &psct.commitment_tx,
-            )?
+            )?;
+            let witness =
+                create_witness_for_funding_cell(self.get_funding_lock_script_xonly(), signature);
+            psct.commitment_tx
+                .as_advanced_builder()
+                .set_witnesses(vec![witness.pack()])
+                .build()
         };
 
         let settlement_data = {
-            let sign_ctx = self.get_sign_context(false);
+            let sign_ctx = self.get_commitment_sign_context(false);
             let x_only_aggregated_pubkey = sign_ctx.common_ctx.x_only_aggregated_pubkey();
 
             let settlement_tx = &psct.settlement_tx;
@@ -6009,7 +6079,7 @@ impl ChannelActorState {
 
         if self.local_shutdown_info.is_some() && self.remote_shutdown_info.is_some() {
             let shutdown_tx = self.build_shutdown_tx().await?;
-            let deterministic_sign_ctx = self.get_deterministic_sign_context();
+            let sign_ctx = self.get_funding_sign_context();
 
             let local_shutdown_info = self
                 .local_shutdown_info
@@ -6026,8 +6096,7 @@ impl ChannelActorState {
             let local_shutdown_signature = match local_shutdown_info.signature {
                 Some(signature) => signature,
                 None => {
-                    let signature =
-                        deterministic_sign_ctx.sign(&compute_tx_message(&shutdown_tx))?;
+                    let signature = sign_ctx.sign(&compute_tx_message(&shutdown_tx))?;
                     local_shutdown_info.signature = Some(signature);
 
                     self.network()
@@ -6048,7 +6117,7 @@ impl ChannelActorState {
             if let Some(remote_shutdown_signature) = remote_shutdown_info.signature {
                 let tx: TransactionView = self
                     .aggregate_partial_signatures_to_consume_funding_cell(
-                        &deterministic_sign_ctx.common_ctx,
+                        &sign_ctx.common_ctx,
                         local_shutdown_signature,
                         remote_shutdown_signature,
                         &shutdown_tx,
@@ -6100,12 +6169,15 @@ impl ChannelActorState {
         self.to_remote_amount = accept_channel.funding_amount;
         self.remote_reserved_ckb_amount = accept_channel.reserved_ckb_amount;
 
-        self.commit_remote_nonce(accept_channel.next_local_nonce.clone());
+        self.commit_remote_nonce(accept_channel.next_commitment_nonce.clone());
+        self.remote_revocation_nonce_for_send = Some(accept_channel.next_revocation_nonce.clone());
+        self.remote_revocation_nonce_for_verify =
+            Some(accept_channel.next_revocation_nonce.clone());
         let remote_pubkeys = (&accept_channel).into();
         self.remote_channel_public_keys = Some(remote_pubkeys);
         self.remote_commitment_points = vec![
-            (0, accept_channel.first_per_commitment_point),
-            (1, accept_channel.second_per_commitment_point),
+            (1, accept_channel.first_per_commitment_point),
+            (2, accept_channel.second_per_commitment_point),
         ];
         self.remote_shutdown_script = Some(accept_channel.shutdown_script.clone());
 
@@ -6255,6 +6327,8 @@ impl ChannelActorState {
                     ))
                     .expect(ASSUME_NETWORK_ACTOR_ALIVE);
                 let flags = flags | CollaboratingFundingTxFlags::THEIR_TX_COMPLETE_SENT;
+                self.commit_remote_nonce(tx_complete.next_commitment_nonce);
+                self.increment_remote_commitment_number();
                 self.update_state(ChannelState::CollaboratingFundingTx(flags));
             }
         }
@@ -6349,7 +6423,7 @@ impl ChannelActorState {
                 self.send_revoke_and_ack_message()?;
             }
         }
-        self.commit_remote_nonce(commitment_signed.next_local_nonce);
+        self.commit_remote_nonce(commitment_signed.next_commitment_nonce);
         self.latest_commitment_transaction = Some(commitment_tx.data());
         Ok(())
     }
@@ -6579,9 +6653,10 @@ impl ChannelActorState {
             revocation_partial_signature,
             commitment_tx_partial_signature,
             next_per_commitment_point,
+            next_revocation_nonce,
         } = revoke_and_ack;
 
-        let sign_ctx = self.get_sign_context_for_revoke_and_ack_message()?;
+        let sign_ctx = self.get_revoke_sign_context(true);
         let x_only_aggregated_pubkey = sign_ctx.common_ctx.x_only_aggregated_pubkey();
 
         let revocation_data = {
@@ -6627,7 +6702,6 @@ impl ChannelActorState {
                 ]
                 .concat(),
             );
-
             let aggregated_signature =
                 sign_ctx.sign_and_aggregate(message.as_slice(), revocation_partial_signature)?;
             RevocationData {
@@ -6661,9 +6735,9 @@ impl ChannelActorState {
                 .concat(),
             );
 
+            let sign_ctx = self.get_ack_sign_context(true);
             let aggregated_signature =
                 sign_ctx.sign_and_aggregate(message.as_slice(), commitment_tx_partial_signature)?;
-
             SettlementData {
                 x_only_aggregated_pubkey,
                 aggregated_signature,
@@ -6677,10 +6751,18 @@ impl ChannelActorState {
 
         self.increment_local_commitment_number();
         self.append_remote_commitment_point(next_per_commitment_point);
-
         self.tlc_state
             .update_for_revoke_and_ack(self.commitment_numbers);
         self.set_waiting_ack(myself, false);
+
+        // update the remote_revocation_nonce_for_send and remote_revocation_nonce_for_verify for next round if needed
+        self.remote_revocation_nonce_for_next = Some(next_revocation_nonce);
+        if self.remote_revocation_nonce_for_send.is_none() {
+            self.remote_revocation_nonce_for_send = self.remote_revocation_nonce_for_next.clone();
+            self.remote_revocation_nonce_for_verify = self.remote_revocation_nonce_for_next.clone();
+        } else {
+            self.remote_revocation_nonce_for_verify = None;
+        }
 
         self.network()
             .send_message(NetworkActorMessage::new_notification(
@@ -6782,54 +6864,16 @@ impl ChannelActorState {
                 {
                     // commitments are the same, sync up the tlcs
                     self.set_waiting_ack(myself, false);
-                    self.resend_tlcs_on_reestablish(false)?;
-
-                    // there is a scenario that two peers are both in WaitingAck state
-                    // and if two parties send CommitmentSigned message to each other there maybe be a Musig2VerifyError
-                    // eventually, we need to keep the linearity of the signing and verification operation
-                    // so here we pick a order that the acceptor will send the CommitmentSigned message first
-                    if self.is_acceptor {
-                        network
-                            .send_message(NetworkActorMessage::new_command(
-                                NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
-                                    channel_id: self.get_id(),
-                                    command: ChannelCommand::CommitmentSigned(),
-                                }),
-                            ))
-                            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-                    }
+                    self.resend_tlcs_on_reestablish(true)?;
                 } else if my_remote_commitment_number == peer_local_commitment_number + 1 {
                     // peer need ACK, I need to send my revoke_and_ack message
                     // don't clear my waiting_ack flag here, since if i'm waiting for peer ack,
                     // peer will resend commitment_signed message
-                    self.resend_tlcs_on_reestablish(false)?;
-                    if let Some(last_revoke_ack_msg) = self.last_revoke_ack_msg.clone() {
-                        self.network()
-                            .send_message(NetworkActorMessage::new_command(
-                                NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
-                                    self.get_remote_peer_id(),
-                                    FiberMessage::revoke_and_ack(last_revoke_ack_msg),
-                                )),
-                            ))
-                            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-
-                        // this check make sure the two parties make symmetric commitment numbers
-                        // after the peer process the revoke_and_ack message and increased his local number
-                        // otherwise this CommitmentSigned peer message will be verified as invalid
-                        if my_waiting_ack
-                            && my_local_commitment_number == peer_remote_commitment_number
-                        {
-                            self.network()
-                                .send_message(NetworkActorMessage::new_command(
-                                    NetworkActorCommand::ControlFiberChannel(
-                                        ChannelCommandWithId {
-                                            channel_id: self.get_id(),
-                                            command: ChannelCommand::CommitmentSigned(),
-                                        },
-                                    ),
-                                ))
-                                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-                        }
+                    self.send_revoke_and_ack_message()?;
+                    if my_waiting_ack && my_local_commitment_number == peer_remote_commitment_number
+                    {
+                        self.set_waiting_ack(myself, false);
+                        self.resend_tlcs_on_reestablish(true)?;
                     }
                 } else if my_waiting_ack
                     && my_local_commitment_number == peer_remote_commitment_number
@@ -6837,10 +6881,7 @@ impl ChannelActorState {
                     // I need to resend my commitment_signed message, don't clear my WaitingTlcAck flag
                     self.resend_tlcs_on_reestablish(true)?;
                 } else {
-                    error!(
-                        "peer: {:?} unexpected_commitnumbers",
-                        self.get_local_peer_id()
-                    );
+                    // ignore, waiting for remote peer to resend revoke_and_ack
                 }
 
                 self.on_reestablished_channel_ready(myself).await;
@@ -6991,6 +7032,7 @@ impl ChannelActorState {
                         self.get_remote_peer_id(),
                         FiberMessage::tx_complete(TxComplete {
                             channel_id: self.get_id(),
+                            next_commitment_nonce: self.get_next_commitment_nonce(),
                             commitment_tx_partial_signature,
                         }),
                     )),
@@ -7012,11 +7054,11 @@ impl ChannelActorState {
     }
 
     fn build_init_commitment_tx_signature(&self) -> Result<PartialSignature, SigningError> {
-        let sign_ctx = self.get_sign_context(false);
+        let sign_ctx = self.get_commitment_sign_context(false);
         let x_only_aggregated_pubkey = sign_ctx.common_ctx.x_only_aggregated_pubkey();
         let ([to_local_output, to_remote_output], [to_local_output_data, to_remote_output_data]) =
             self.build_settlement_transaction_outputs(false);
-        let version = 0u64;
+        let version = 1u64;
         let commitment_lock_script_args = [
             &blake2b_256(x_only_aggregated_pubkey)[0..20],
             self.get_delay_epoch_as_lock_args_bytes().as_slice(),
@@ -7042,12 +7084,12 @@ impl ChannelActorState {
         &self,
         signature: PartialSignature,
     ) -> Result<SettlementData, ProcessingChannelError> {
-        let sign_ctx = self.get_sign_context(true);
+        let sign_ctx = self.get_commitment_sign_context(true);
         let x_only_aggregated_pubkey = sign_ctx.common_ctx.x_only_aggregated_pubkey();
 
         let ([to_local_output, to_remote_output], [to_local_output_data, to_remote_output_data]) =
             self.build_settlement_transaction_outputs(true);
-        let version = 0u64;
+        let version = 1u64;
         let commitment_lock_script_args = [
             &blake2b_256(x_only_aggregated_pubkey)[0..20],
             self.get_delay_epoch_as_lock_args_bytes().as_slice(),
@@ -7132,11 +7174,11 @@ impl ChannelActorState {
         }
     }
 
-    fn get_deterministic_common_context(&self) -> Musig2CommonContext {
+    fn get_funding_common_context(&self) -> Musig2CommonContext {
         let local_first = self.should_local_go_first_in_musig2();
         let key_agg_ctx = self.get_deterministic_musig2_agg_context();
-        let remote_nonce = self.get_last_committed_remote_nonce();
-        let local_nonce = self.get_local_musig2_pubnonce();
+        let remote_nonce = self.get_last_committed_remote_nonce().funding;
+        let local_nonce = self.get_local_nonce_funding();
         let agg_nonce = AggNonce::sum(if local_first {
             [local_nonce, remote_nonce]
         } else {
@@ -7149,81 +7191,163 @@ impl ChannelActorState {
         }
     }
 
-    // A deterministic `Musig2VerifyContext` is a verifying context that has the same basic configuration
-    // for both parties. This is mostly used by us to verify transactions to consume the funding cell,
-    // which uses a deterministic aggregated pubkey for both parties.
-    fn get_deterministic_verify_context(&self) -> Musig2VerifyContext {
-        let common_ctx = self.get_deterministic_common_context();
+    fn get_commitment_common_context(&self, for_remote: bool) -> Musig2CommonContext {
+        let key_agg_ctx = self.get_musig2_agg_context(for_remote);
+        let remote_nonce = self.get_last_committed_remote_nonce().commitment;
+        let local_nonce = self.get_commitment_nonce().commitment;
+        let agg_nonce = AggNonce::sum(if for_remote {
+            [local_nonce, remote_nonce]
+        } else {
+            [remote_nonce, local_nonce]
+        });
+        Musig2CommonContext {
+            local_first: for_remote,
+            key_agg_ctx,
+            agg_nonce,
+        }
+    }
+
+    fn get_revoke_common_context(&self, for_remote: bool) -> Musig2CommonContext {
+        let key_agg_ctx = self.get_musig2_agg_context(for_remote);
+        let remote_nonce = if for_remote {
+            self.get_remote_revocation_nonce_for_verify().revoke
+        } else {
+            self.get_remote_revocation_nonce_for_send().revoke
+        };
+        let local_nonce = self.get_revocation_nonce(for_remote).revoke;
+        let agg_nonce = AggNonce::sum(if for_remote {
+            [local_nonce, remote_nonce]
+        } else {
+            [remote_nonce, local_nonce]
+        });
+        Musig2CommonContext {
+            local_first: for_remote,
+            key_agg_ctx,
+            agg_nonce,
+        }
+    }
+
+    fn get_ack_common_context(&self, for_remote: bool) -> Musig2CommonContext {
+        let key_agg_ctx = self.get_musig2_agg_context(for_remote);
+        let remote_nonce = if for_remote {
+            self.get_remote_revocation_nonce_for_verify().ack
+        } else {
+            self.get_remote_revocation_nonce_for_send().ack
+        };
+        let local_nonce = self.get_revocation_nonce(for_remote).ack;
+        let agg_nonce = AggNonce::sum(if for_remote {
+            [local_nonce, remote_nonce]
+        } else {
+            [remote_nonce, local_nonce]
+        });
+        Musig2CommonContext {
+            local_first: for_remote,
+            key_agg_ctx,
+            agg_nonce,
+        }
+    }
+
+    fn get_musig2_agg_context(&self, for_remote: bool) -> KeyAggContext {
+        let local_pubkey = self.get_local_channel_public_keys().funding_pubkey;
+        let remote_pubkey = self.get_remote_channel_public_keys().funding_pubkey;
+        let pubkeys = if for_remote {
+            [local_pubkey, remote_pubkey]
+        } else {
+            [remote_pubkey, local_pubkey]
+        };
+        KeyAggContext::new(pubkeys).expect("Valid pubkeys")
+    }
+
+    // This is used to verify transactions which consume the funding cell.
+    fn get_funding_verify_context(&self) -> Musig2VerifyContext {
+        let common_ctx = self.get_funding_common_context();
         Musig2VerifyContext {
             common_ctx,
             pubkey: *self.get_remote_funding_pubkey(),
-            pubnonce: self.get_last_committed_remote_nonce(),
+            pubnonce: self.get_last_committed_remote_nonce().funding,
         }
     }
 
-    fn get_verify_context(&self) -> Musig2VerifyContext {
-        // We are always verifying a commitment transaction that is broadcast by us,
-        // so we can always pass false to get_musig2_common_ctx.
-        let common_ctx = self
-            .get_musig2_common_ctx(false, false)
-            .expect("get_musig2_common_ctx error");
+    // This is used to sign transactions which consume the funding cell.
+    fn get_funding_sign_context(&self) -> Musig2SignContext {
+        let common_ctx = self.get_funding_common_context();
+        let seckey = self.signer.funding_key.clone();
+        let [secnonce] = self
+            .signer
+            .derive_musig2_nonce(self.get_local_commitment_number(), [Musig2Context::Funding]);
+
+        Musig2SignContext {
+            common_ctx,
+            seckey,
+            secnonce,
+        }
+    }
+
+    // This is used to verify settlement transaction which consume the commitment cell.
+    fn get_commitment_verify_context(&self) -> Musig2VerifyContext {
+        let common_ctx = self.get_commitment_common_context(false);
 
         Musig2VerifyContext {
             common_ctx,
             pubkey: *self.get_remote_funding_pubkey(),
-            pubnonce: self.get_last_committed_remote_nonce(),
+            pubnonce: self.get_last_committed_remote_nonce().commitment,
         }
     }
 
-    // A deterministic `Musig2SignContext` is a signing context that has the same basic configuration
-    // for both parties. This is mostly used by us to sign transactions to consume the funding cell,
-    // which uses a deterministic aggregated pubkey for both parties.
-    fn get_deterministic_sign_context(&self) -> Musig2SignContext {
-        let common_ctx = self.get_deterministic_common_context();
-        Musig2SignContext {
-            common_ctx,
-            seckey: self.signer.funding_key.clone(),
-            secnonce: self.get_local_musig2_secnonce(),
-        }
-    }
-
-    // This function is used to construct a `Musig2SignContext` with which we can easily sign
-    // and aggregate partial signatures. The parameter for_remote is used to indicate the direction
-    // of commitment transaction (just like the same parameter used in building commitment transactions).
-    // This is also due to the fact commitment transactions are asymmetrical (A's broadcastable commitment
-    // transactions are different from B's broadcastable commitment transactions), sometimes we need to
-    // construct different `Musig2SignContext` depending on the direction of commitment transaction.
-    // For example, the `Musig2SignContext`s used by A to construct `CommitmentSigned` and `RevokeAndAck`
-    // messages to B are different. A needs to build a commitment transaction that is broadcast by B
-    // to construct a `CommitmentSigned` message, but when constructing `RevokeAndAck` A needs to
-    // build an old commitment transaction that is broadcast by himself. This is the reason why
-    // we need a `for_remote` parameter. It serves the same function as `for_remote` in functions
-    // like `build_commitment_and_settlement_tx`.
-    fn get_sign_context(&self, for_remote: bool) -> Musig2SignContext {
-        let common_ctx = self
-            .get_musig2_common_ctx(for_remote, false)
-            .expect("get_musig2_common_ctx error");
+    // This is used to sign settlement transaction which consume the commitment cell.
+    fn get_commitment_sign_context(&self, for_remote: bool) -> Musig2SignContext {
+        let common_ctx = self.get_commitment_common_context(for_remote);
+        let seckey = self.signer.funding_key.clone();
+        let [secnonce] = self.signer.derive_musig2_nonce(
+            self.get_local_commitment_number(),
+            [Musig2Context::Commitment],
+        );
 
         Musig2SignContext {
             common_ctx,
-            seckey: self.signer.funding_key.clone(),
-            secnonce: self.get_local_musig2_secnonce(),
+            seckey,
+            secnonce,
         }
     }
 
-    // As explained in the documentation of `last_used_remote_nonce` field, we need to
-    // use a saved remote nonce because the latest remote nonce may be different from the
-    // one we used while sending CommitmentSigned message.
-    fn get_sign_context_for_revoke_and_ack_message(
-        &self,
-    ) -> Result<Musig2SignContext, ProcessingChannelError> {
-        let common_ctx = self.get_musig2_common_ctx(true, true)?;
+    // This is used to sign revocation transactions which consume the commitment cell.
+    fn get_revoke_sign_context(&self, for_remote: bool) -> Musig2SignContext {
+        let common_ctx = self.get_revoke_common_context(for_remote);
+        let seckey = self.signer.funding_key.clone();
+        let commitment_number = if for_remote {
+            self.get_local_commitment_number()
+        } else {
+            self.get_remote_commitment_number()
+        };
+        let [secnonce] = self
+            .signer
+            .derive_musig2_nonce(commitment_number, [Musig2Context::Revoke]);
 
-        Ok(Musig2SignContext {
+        Musig2SignContext {
             common_ctx,
-            seckey: self.signer.funding_key.clone(),
-            secnonce: self.get_local_musig2_secnonce(),
-        })
+            seckey,
+            secnonce,
+        }
+    }
+
+    // This is used to sign commitment transaction (in RevokeAndAck message) which consume the funding cell.
+    fn get_ack_sign_context(&self, for_remote: bool) -> Musig2SignContext {
+        let common_ctx = self.get_ack_common_context(for_remote);
+        let seckey = self.signer.funding_key.clone();
+        let commitment_number = if for_remote {
+            self.get_local_commitment_number()
+        } else {
+            self.get_remote_commitment_number()
+        };
+        let [secnonce] = self
+            .signer
+            .derive_musig2_nonce(commitment_number, [Musig2Context::Ack]);
+
+        Musig2SignContext {
+            common_ctx,
+            seckey,
+            secnonce,
+        }
     }
 
     // Should the local send tx_signatures first?
@@ -7440,55 +7564,16 @@ impl ChannelActorState {
         }
     }
 
-    // For different directions of commitment transactions, we put pubkeys and nonces
-    // in different order. It is a coincidency that in the current code when we are building
-    // a commitment transaction for the remote, we will put our pubkey/nonce first.
-    // That is to say, `for_remote` is equivalent to this function's parameter `local_first`.
-    // But, the name local_first is more descriptive in the context of ordering musig2-related
-    // stuff.
-    fn get_musig2_common_ctx(
-        &self,
-        local_first: bool,
-        signed_commit_nonce: bool,
-    ) -> Result<Musig2CommonContext, ProcessingChannelError> {
+    fn get_commitment_lock_script_xonly(&self, for_remote: bool) -> [u8; 32] {
         let local_pubkey = self.get_local_channel_public_keys().funding_pubkey;
         let remote_pubkey = self.get_remote_channel_public_keys().funding_pubkey;
-        let pubkeys = if local_first {
+        let pubkeys = if for_remote {
             [local_pubkey, remote_pubkey]
         } else {
             [remote_pubkey, local_pubkey]
         };
-        let key_agg_ctx = KeyAggContext::new(pubkeys).map_err(|e| {
-            ProcessingChannelError::InternalError(format!("Failed to create KeyAggContext: {}", e))
-        })?;
-        let remote_nonce = if signed_commit_nonce {
-            self.get_last_commitment_signed_remote_nonce()
-            .ok_or(ProcessingChannelError::InvalidState(
-                "No last used remote nonce found, has the peer sent a RevokeAndAck without us sending CommitmentSigned"
-                    .to_string(),
-            ))?
-        } else {
-            self.get_last_committed_remote_nonce()
-        };
-        let local_nonce = self.get_local_musig2_pubnonce();
-        let agg_nonce = AggNonce::sum(if local_first {
-            [local_nonce, remote_nonce]
-        } else {
-            [remote_nonce, local_nonce]
-        });
-        Ok(Musig2CommonContext {
-            local_first,
-            key_agg_ctx,
-            agg_nonce,
-        })
-    }
-
-    fn get_commitment_lock_script_xonly(&self, for_remote: bool) -> [u8; 32] {
-        self.get_musig2_common_ctx(for_remote, false)
-            .expect("Valid musig2 common context")
-            .key_agg_ctx
-            .aggregated_pubkey::<Point>()
-            .serialize_xonly()
+        let key_agg_ctx = KeyAggContext::new(pubkeys).expect("Valid pubkeys");
+        key_agg_ctx.aggregated_pubkey::<Point>().serialize_xonly()
     }
 
     fn build_settlement_transaction_outputs(
@@ -7649,8 +7734,8 @@ impl ChannelActorState {
     ) -> Result<PartiallySignedCommitmentTransaction, ProcessingChannelError> {
         let (commitment_tx, settlement_tx) = self.build_commitment_and_settlement_tx(false)?;
 
-        let deterministic_verify_ctx = self.get_deterministic_verify_context();
-        deterministic_verify_ctx.verify(
+        let funding_verify_ctx = self.get_funding_verify_context();
+        funding_verify_ctx.verify(
             funding_tx_partial_signature,
             &compute_tx_message(&commitment_tx),
         )?;
@@ -7688,8 +7773,9 @@ impl ChannelActorState {
             ]
             .concat(),
         );
-        let verify_ctx = self.get_verify_context();
-        verify_ctx.verify(commitment_tx_partial_signature, message.as_slice())?;
+
+        let commitment_verify_ctx = self.get_commitment_verify_context();
+        commitment_verify_ctx.verify(commitment_tx_partial_signature, message.as_slice())?;
 
         Ok(PartiallySignedCommitmentTransaction {
             version: self.get_remote_commitment_number(),
@@ -7704,10 +7790,9 @@ impl ChannelActorState {
         &self,
     ) -> Result<(PartialSignature, PartialSignature), ProcessingChannelError> {
         let (commitment_tx, settlement_tx) = self.build_commitment_and_settlement_tx(true)?;
-
-        let deterministic_sign_ctx = self.get_deterministic_sign_context();
-        let funding_tx_partial_signature =
-            deterministic_sign_ctx.sign(&compute_tx_message(&commitment_tx))?;
+        let funding_tx_partial_signature = self
+            .get_funding_sign_context()
+            .sign(&compute_tx_message(&commitment_tx))?;
 
         let to_local_output = settlement_tx
             .outputs()
@@ -7743,8 +7828,9 @@ impl ChannelActorState {
             .concat(),
         );
 
-        let sign_ctx = self.get_sign_context(true);
-        let commitment_tx_partial_signature = sign_ctx.sign(message.as_slice())?;
+        let commitment_tx_partial_signature = self
+            .get_commitment_sign_context(true)
+            .sign(message.as_slice())?;
 
         Ok((
             funding_tx_partial_signature,
@@ -7994,8 +8080,26 @@ struct Musig2SignContext {
     secnonce: SecNonce,
 }
 
+#[cfg(test)]
+static SECNONCES: LazyLock<Mutex<HashMap<[u8; 64], Vec<u8>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::default()));
+
 impl Musig2SignContext {
     fn sign(&self, message: &[u8]) -> Result<PartialSignature, SigningError> {
+        #[cfg(test)]
+        {
+            // Check if the secnonce is reused for different messages.
+            let mut secnonces = SECNONCES.lock().unwrap();
+            if let Some(old) = secnonces.insert(self.secnonce.to_bytes(), message.to_vec()) {
+                if old.as_slice() != message {
+                    panic!(
+                        "Musig2 secnonce {:?} is reused for different messages: {:?} and {:?} backtrace: {}",
+                        self.secnonce.public_nonce(), old, message, Backtrace::capture()
+                    );
+                }
+            }
+        }
+
         sign_partial(
             &self.common_ctx.key_agg_ctx,
             self.seckey.clone(),
@@ -8010,7 +8114,13 @@ impl Musig2SignContext {
         message: &[u8],
         remote_signature: PartialSignature,
     ) -> Result<CompactSignature, RoundFinalizeError> {
-        let local_signature = self.sign(message)?;
+        let local_signature = sign_partial(
+            &self.common_ctx.key_agg_ctx,
+            self.seckey.clone(),
+            self.secnonce.clone(),
+            &self.common_ctx.agg_nonce,
+            message,
+        )?;
         Ok(self.common_ctx.aggregate_partial_signatures_for_msg(
             local_signature,
             remote_signature,
@@ -8068,6 +8178,25 @@ fn derive_public_key(base_key: &Pubkey, commitment_point: &Pubkey) -> Pubkey {
 
 pub(crate) fn derive_tlc_pubkey(base_key: &Pubkey, commitment_point: &Pubkey) -> Pubkey {
     derive_public_key(base_key, commitment_point)
+}
+
+pub enum Musig2Context {
+    Funding,
+    Commitment,
+    Revoke,
+    Ack,
+}
+
+impl std::fmt::Display for Musig2Context {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let context_str = match self {
+            Musig2Context::Funding => "FUNDING",
+            Musig2Context::Commitment => "COMMITMENT",
+            Musig2Context::Revoke => "REVOKE",
+            Musig2Context::Ack => "ACK",
+        };
+        write!(f, "{}", context_str)
+    }
 }
 
 /// A simple implementation of [`WriteableEcdsaChannelSigner`] that just keeps the private keys in memory.
@@ -8138,10 +8267,18 @@ impl InMemorySigner {
         derive_private_key(&self.tlc_base_key, &per_commitment_point)
     }
 
-    // TODO: Verify that this is a secure way to derive the nonce.
-    pub fn derive_musig2_nonce(&self, commitment_number: u64) -> SecNonce {
+    pub fn derive_musig2_nonce<const N: usize>(
+        &self,
+        commitment_number: u64,
+        contexts: [Musig2Context; N],
+    ) -> [SecNonce; N] {
         let commitment_point = self.get_commitment_point(commitment_number);
         let seckey = derive_private_key(&self.musig2_base_nonce, &commitment_point);
-        SecNonce::build(seckey.as_ref()).build()
+
+        contexts.map(|context| {
+            SecNonceBuilder::new(seckey.as_ref())
+                .with_extra_input(&context.to_string())
+                .build()
+        })
     }
 }

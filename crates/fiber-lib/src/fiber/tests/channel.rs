@@ -3821,7 +3821,7 @@ async fn test_revoke_old_commitment_transaction() {
             ) => {
                 assert_eq!(peer_id, &node_b.peer_id);
                 assert_eq!(channel_id, &new_channel_id);
-                assert_eq!(revocation_data.commitment_number, 0u64);
+                assert_eq!(revocation_data.commitment_number, 1u64);
                 Some(revocation_data.clone())
             }
             _ => None,

@@ -1,6 +1,6 @@
 use crate::fiber::channel::ChannelFlags;
 use crate::fiber::features::FeatureVector;
-use crate::fiber::types::OpenChannel;
+use crate::fiber::types::{CommitmentNonce, OpenChannel, RevocationNonce};
 use crate::{
     ckb::{
         tests::test_utils::{
@@ -1256,9 +1256,16 @@ async fn test_to_be_accepted_channels_bytes_limit() {
         second_per_commitment_point: gen_rand_fiber_public_key(),
         funding_pubkey: gen_rand_fiber_public_key(),
         tlc_basepoint: gen_rand_fiber_public_key(),
-        next_local_nonce: rand_nonce.clone(),
+        next_commitment_nonce: CommitmentNonce {
+            funding: rand_nonce.clone(),
+            commitment: rand_nonce.clone(),
+        },
+        next_revocation_nonce: RevocationNonce {
+            revoke: rand_nonce.clone(),
+            ack: rand_nonce.clone(),
+        },
         // public channel must set this
-        channel_announcement_nonce: Some(rand_nonce.clone()),
+        channel_announcement_nonce: Some(rand_nonce),
     };
     let single_open_channel_size = open_channel.mem_size();
     tracing::info!(

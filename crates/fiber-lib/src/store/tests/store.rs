@@ -491,8 +491,9 @@ fn test_channel_actor_state_store() {
         commitment_numbers: Default::default(),
         remote_shutdown_script: Some(Script::default()),
         last_committed_remote_nonce: None,
-        last_revoke_and_ack_remote_nonce: None,
-        last_commitment_signed_remote_nonce: None,
+        remote_revocation_nonce_for_verify: None,
+        remote_revocation_nonce_for_send: None,
+        remote_revocation_nonce_for_next: None,
         remote_commitment_points: vec![
             (0, gen_rand_fiber_public_key()),
             (1, gen_rand_fiber_public_key()),
@@ -607,8 +608,9 @@ fn test_serde_channel_actor_state_ciborium() {
         commitment_numbers: Default::default(),
         remote_shutdown_script: Some(Script::default()),
         last_committed_remote_nonce: None,
-        last_revoke_and_ack_remote_nonce: None,
-        last_commitment_signed_remote_nonce: None,
+        remote_revocation_nonce_for_verify: None,
+        remote_revocation_nonce_for_send: None,
+        remote_revocation_nonce_for_next: None,
         remote_commitment_points: vec![
             (0, gen_rand_fiber_public_key()),
             (1, gen_rand_fiber_public_key()),
