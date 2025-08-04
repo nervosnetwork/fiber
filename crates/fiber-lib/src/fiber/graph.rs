@@ -1,5 +1,6 @@
 use super::channel::{ChannelActorState, ChannelActorStateStore, ChannelTlcInfo};
 use super::config::AnnouncedNodeName;
+use super::features::FeatureVector;
 use super::gossip::GossipMessageStore;
 use super::history::{Direction, InternalResult, PaymentHistory, TimedResult};
 use super::network::{
@@ -14,6 +15,8 @@ use super::types::{Cursor, Pubkey, TlcErr};
 use crate::ckb::config::UdtCfgInfos;
 use crate::fiber::config::DEFAULT_TLC_EXPIRY_DELTA;
 use crate::fiber::fee::calculate_tlc_forward_fee;
+use crate::fiber::history::SentNode;
+use crate::fiber::network::DEFAULT_PAYMENT_MPP_ATTEMPT_TRY_LIMIT;
 use crate::fiber::path::NodeHeapElement;
 use crate::fiber::serde_utils::EntityHex;
 use crate::fiber::serde_utils::{U128Hex, U64Hex};
@@ -21,30 +24,34 @@ use crate::fiber::types::PaymentHopData;
 use crate::invoice::CkbInvoice;
 use crate::now_timestamp_as_millis_u64;
 use ckb_types::packed::{OutPoint, Script};
+use parking_lot::Mutex;
 use rand::seq::SliceRandom;
 use rand::thread_rng;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use tentacle::multiaddr::MultiAddr;
 use tentacle::secio::PeerId;
 use tentacle::utils::{is_reachable, multiaddr_to_socketaddr};
 use thiserror::Error;
 use tracing::log::error;
-use tracing::{debug, info, trace};
-
+use tracing::{debug, info, trace, warn};
 const DEFAULT_MIN_PROBABILITY: f64 = 0.01;
 
 #[serde_as]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 /// Details about a node in the network, known from the network announcement.
 pub struct NodeInfo {
+    // The node's public key, which is used to identify the node in the network.
     pub node_id: Pubkey,
+    // The node version
+    pub version: String,
     // The timestamp set by the owner for the node announcement.
     pub timestamp: u64,
     // Tentatively using 64 bits for features. May change the type later while developing.
     // rust-lightning uses a Vec<u8> here.
-    pub features: u64,
+    pub features: FeatureVector,
     // The name of the node. This is a human-readable string that is meant to be used for labelling nodes in the UI.
     pub node_name: AnnouncedNodeName,
     // All the reachable addresses.
@@ -68,6 +75,7 @@ impl From<NodeAnnouncement> for NodeInfo {
     fn from(value: NodeAnnouncement) -> Self {
         Self {
             node_id: value.node_id,
+            version: value.version,
             timestamp: value.timestamp,
             features: value.features,
             node_name: value.node_name,
@@ -138,6 +146,16 @@ impl ChannelInfo {
             .max(self.update_of_node1.as_ref().map(|n| n.timestamp))
     }
 
+    pub fn get_send_node(&self, from: Pubkey) -> Option<SentNode> {
+        if self.node1() == from {
+            Some(SentNode::Node1)
+        } else if self.node2() == from {
+            Some(SentNode::Node2)
+        } else {
+            None
+        }
+    }
+
     #[cfg(any(test, feature = "bench"))]
     pub fn get_channel_update_of(&self, node: Pubkey) -> Option<&ChannelUpdateInfo> {
         if self.node1() == node {
@@ -158,8 +176,11 @@ impl TryFrom<&ChannelActorState> for ChannelInfo {
             return Err("Channel is not ready".to_string());
         }
 
+        let Some(channel_outpoint) = state.get_funding_transaction_outpoint() else {
+            return Err("Channel outpoint is not set".to_string());
+        };
+
         let timestamp = state.must_get_funding_transaction_timestamp();
-        let channel_outpoint = state.must_get_funding_transaction_outpoint();
         let capacity = state.get_liquid_capacity();
         let udt_type_script = state.funding_udt_type_script.clone();
 
@@ -284,6 +305,135 @@ pub enum OwnedChannelUpdateEvent {
     Updated(OutPoint, Pubkey, ChannelUpdateInfo),
 }
 
+/// TODO: store this into DB in future?
+#[derive(Clone, Debug, Default)]
+pub struct ChannelStatElem {
+    // The pending payment attempt for a channel,
+    // increase when a payment is sent, decreasing when a payment is succeed or failed.
+    pub pending_count: usize,
+    // The total amount sent through the channel,
+    // increase when a payment is sent, decreasing when a payment is only failed.
+    pub node1_sent_amount: u128,
+    pub node2_sent_amount: u128,
+}
+
+impl ChannelStatElem {
+    pub fn new(pending_count: usize, sent_node: SentNode, amount: u128) -> Self {
+        if sent_node == SentNode::Node1 {
+            Self {
+                pending_count,
+                node1_sent_amount: amount,
+                node2_sent_amount: 0,
+            }
+        } else {
+            Self {
+                pending_count,
+                node1_sent_amount: 0,
+                node2_sent_amount: amount,
+            }
+        }
+    }
+
+    pub fn new_attempt(&mut self, send_node: SentNode, amount: u128) {
+        self.pending_count += 1;
+        if send_node == SentNode::Node1 {
+            self.node1_sent_amount += amount;
+        } else {
+            self.node2_sent_amount += amount;
+        }
+    }
+
+    pub fn untrack_attempt(&mut self, send_node: SentNode, amount: u128) {
+        self.pending_count = self.pending_count.saturating_sub(1);
+        if send_node == SentNode::Node1 {
+            self.node1_sent_amount = self.node1_sent_amount.saturating_sub(amount);
+        } else {
+            self.node2_sent_amount = self.node2_sent_amount.saturating_sub(amount);
+        }
+    }
+
+    // when we cat channel update event from direct channel, the actual channel balance is more accurate
+    // than the amount here, so we need to reset the sent amount to 0.
+    pub fn reset_attempt(&mut self, sent_node: SentNode) {
+        if sent_node == SentNode::Node1 {
+            self.node1_sent_amount = 0;
+        } else {
+            self.node2_sent_amount = 0;
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct GraphChannelStat {
+    base: Option<Arc<Mutex<GraphChannelStat>>>,
+    inner: HashMap<OutPoint, ChannelStatElem>,
+}
+
+impl GraphChannelStat {
+    pub fn new(base: Option<Arc<Mutex<GraphChannelStat>>>) -> Self {
+        Self {
+            inner: HashMap::new(),
+            base,
+        }
+    }
+
+    pub fn get_channel_count(&self, channel_outpoint: &OutPoint) -> usize {
+        self.base
+            .as_ref()
+            .map_or(0, |base| base.lock().get_channel_count(channel_outpoint))
+            + self
+                .inner
+                .get(channel_outpoint)
+                .map_or(0, |stat| stat.pending_count)
+    }
+
+    pub fn get_channel_sent_amount(
+        &self,
+        channel_outpoint: &OutPoint,
+        sent_node: SentNode,
+    ) -> u128 {
+        self.base.as_ref().map_or(0, |base| {
+            base.lock()
+                .get_channel_sent_amount(channel_outpoint, sent_node)
+        }) + self
+            .inner
+            .get(channel_outpoint)
+            .map(|stat| match sent_node {
+                SentNode::Node1 => stat.node1_sent_amount,
+                SentNode::Node2 => stat.node2_sent_amount,
+            })
+            .unwrap_or(0)
+    }
+
+    pub fn add_channel(&mut self, channel_outpoint: &OutPoint, sent_node: SentNode, amount: u128) {
+        self.inner
+            .entry(channel_outpoint.clone())
+            .and_modify(|e| e.new_attempt(sent_node, amount))
+            .or_insert(ChannelStatElem::new(1, sent_node, amount));
+    }
+
+    pub fn remove_channel(&mut self, channel_outpoint: &OutPoint) {
+        self.inner.remove(channel_outpoint);
+    }
+
+    pub fn reset_channel(&mut self, channel_outpoint: &OutPoint, sent_node: SentNode) {
+        self.inner
+            .entry(channel_outpoint.clone())
+            .and_modify(|e| e.reset_attempt(sent_node));
+    }
+
+    pub fn untrack_channel(
+        &mut self,
+        channel_outpoint: &OutPoint,
+        sent_node: SentNode,
+        amount: u128,
+    ) {
+        self.inner
+            .entry(channel_outpoint.clone())
+            .and_modify(|e| e.untrack_attempt(sent_node, amount));
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct NetworkGraph<S> {
     // Whether to always process gossip messages for our own channels.
@@ -299,8 +449,11 @@ pub struct NetworkGraph<S> {
     // All the nodes in the network.
     nodes: HashMap<Pubkey, NodeInfo>,
 
-    // Channel pending stats map
-    channel_pending_stats: HashMap<OutPoint, usize>,
+    // Channel stats map, used to track the attempts for each channel,
+    // this information is used to HELP the path finding algorithm for better routing in two ways:
+    // 1. If a channel has more pending payment attempts, it may be overloaded and should not be used for routing.
+    // 2. For middle hops, network graph can only get the channel capacity, track the balance of channel will be helpful
+    channel_stats: Arc<Mutex<GraphChannelStat>>,
 
     // The latest cursor we read from the GossipMessageStore. When we need to refresh our view of the
     // the network, we need to load all the messages starting from this cursor.
@@ -320,8 +473,16 @@ pub struct NetworkGraph<S> {
 pub enum PathFindError {
     #[error("Graph error: {0}")]
     Amount(String),
-    #[error("PathFind error: {0}")]
-    PathFind(String),
+    #[error("PathFind error: no path found")]
+    NoPathFound,
+    #[error("Overflow error: {0}")]
+    Overflow(String),
+    #[error("Feature not enabled: {0}")]
+    FeatureNotEnabled(String),
+    #[error("Insufficient balance: {0}")]
+    InsufficientBalance(String),
+    #[error("Path find failed for min_tlc_value error: {0}")]
+    TlcMinValue(u128),
     #[error("Graph other error: {0}")]
     Other(String),
 }
@@ -364,7 +525,7 @@ where
             always_process_gossip_message: false,
             source,
             channels: HashMap::new(),
-            channel_pending_stats: HashMap::new(),
+            channel_stats: Default::default(),
             nodes: HashMap::new(),
             latest_cursor: Cursor::default(),
             store: store.clone(),
@@ -385,6 +546,22 @@ where
         }
     }
 
+    pub(crate) fn channel_stats(&self) -> Arc<Mutex<GraphChannelStat>> {
+        self.channel_stats.clone()
+    }
+
+    pub(crate) fn reset_channel_stats_for_direct_channel(
+        &mut self,
+        channel_outpoint: &OutPoint,
+        node: Pubkey,
+    ) {
+        if let Some(sent_node) = self.get_channel_sent_node(channel_outpoint, node) {
+            self.channel_stats
+                .lock()
+                .reset_channel(channel_outpoint, sent_node);
+        }
+    }
+
     // Update the network graph with the messages received from the network.
     // Returns true if the network graph has been updated.
     pub(crate) fn update_for_messages(
@@ -394,13 +571,10 @@ where
         if messages.is_empty() {
             return false;
         }
-        debug!("Updating network graph with {} messages", messages.len());
-        debug!("Latest cursor: {:?}", self.latest_cursor);
         for message in messages {
-            debug!("Processing message: {:?}", &message);
             self.update_latest_cursor(message.cursor());
             if message.chain_hash() != get_chain_hash() {
-                tracing::warn!(
+                warn!(
                     "Chain hash mismatch: having {:?}, expecting {:?}, full message {:?}",
                     message.chain_hash(),
                     get_chain_hash(),
@@ -416,6 +590,7 @@ where
                     self.process_channel_announcement(timestamp, channel_announcement);
                 }
                 BroadcastMessageWithTimestamp::ChannelUpdate(channel_update) => {
+                    debug!("process channel update: {:?}", &channel_update);
                     self.process_channel_update(channel_update);
                 }
                 BroadcastMessageWithTimestamp::NodeAnnouncement(node_announcement) => {
@@ -432,11 +607,14 @@ where
             OwnedChannelUpdateEvent::Up(channel_info) => {
                 // Normally the channel_info passed here is the latest channel info,
                 // so we can just overwrite the old channel info.
+                self.history
+                    .remove_channel_history(&channel_info.channel_outpoint);
                 self.channels
                     .insert(channel_info.channel_outpoint.clone(), channel_info);
             }
             OwnedChannelUpdateEvent::Down(channel_outpoint) => {
                 self.channels.remove(&channel_outpoint);
+                self.channel_stats.lock().remove_channel(&channel_outpoint);
             }
             OwnedChannelUpdateEvent::Updated(channel_outpoint, node, channel_update) => {
                 if let Some(channel) = self.channels.get_mut(&channel_outpoint) {
@@ -447,6 +625,7 @@ where
                         channel.update_of_node1 = Some(channel_update);
                     }
                 }
+                self.reset_channel_stats_for_direct_channel(&channel_outpoint, node);
             }
         }
     }
@@ -473,6 +652,11 @@ where
         self.load_from_store();
     }
 
+    #[cfg(any(test, feature = "bench"))]
+    pub(crate) fn clear_history(&mut self) {
+        self.history.reset();
+    }
+
     fn load_channel_updates_from_store(&self, channel_info: &mut ChannelInfo) {
         let channel_update_of_node1 = self
             .store
@@ -491,10 +675,6 @@ where
             if let Some((timestamp, channel_announcement)) =
                 self.store.get_latest_channel_announcement(channel_outpoint)
             {
-                debug!(
-                    "Loading channel announcement: timestamp {}, channel announcement {:?}",
-                    timestamp, &channel_announcement
-                );
                 self.process_channel_announcement(timestamp, channel_announcement);
             }
         }
@@ -564,6 +744,17 @@ where
     }
 
     fn process_channel_update(&mut self, channel_update: ChannelUpdate) -> Option<Cursor> {
+        // the channel_update RPC has already checked the tlc_expiry_delta is in the range
+        // but a malicious node may send a channel update with a too large expiry delta
+        // which makes the network graph contains a channel update with a too large expiry delta.
+        // We need to check it again here to avoid any malicious channel update
+        if channel_update.tlc_expiry_delta > DEFAULT_TLC_EXPIRY_DELTA {
+            error!(
+                "Channel update has too large expiry delta: {} > {}, channel update: {:?}",
+                channel_update.tlc_expiry_delta, DEFAULT_TLC_EXPIRY_DELTA, &channel_update
+            );
+            return None;
+        }
         match self.get_channel(&channel_update.channel_outpoint) {
             Some(channel)
                 if !self
@@ -581,7 +772,7 @@ where
         };
 
         match update_info {
-            Some(old_update) if old_update.timestamp > channel_update.timestamp => {
+            Some(old_update) if old_update.timestamp >= channel_update.timestamp => {
                 trace!(
                     "Ignoring outdated channel update {:?} for channel {:?}",
                     &channel_update,
@@ -609,6 +800,7 @@ where
         &mut self,
         mut node_announcement: NodeAnnouncement,
     ) -> Option<Cursor> {
+        debug!("Processing node announcement: {:?}", &node_announcement);
         if !self.announce_private_addr {
             node_announcement.addresses.retain(|addr| {
                 multiaddr_to_socketaddr(addr)
@@ -622,7 +814,7 @@ where
         }
         let node_info = NodeInfo::from(node_announcement);
         match self.nodes.get(&node_info.node_id) {
-            Some(old_node) if old_node.timestamp > node_info.timestamp => {
+            Some(old_node) if old_node.timestamp >= node_info.timestamp => {
                 trace!(
                     "Ignoring outdated node announcement {:?} for node {:?}",
                     &node_info,
@@ -688,6 +880,18 @@ where
         self.channels.get(outpoint)
     }
 
+    pub fn get_channel_sent_node(&self, outpoint: &OutPoint, from: Pubkey) -> Option<SentNode> {
+        self.get_channel(outpoint).and_then(|channel_info| {
+            if channel_info.node1() == from {
+                Some(SentNode::Node1)
+            } else if channel_info.node2() == from {
+                Some(SentNode::Node2)
+            } else {
+                None
+            }
+        })
+    }
+
     fn get_outbound_channel_info_and_update(
         &self,
         outpoint: &OutPoint,
@@ -744,6 +948,33 @@ where
         self.channels
             .values_mut()
             .filter(move |channel| channel.node1() == node_id || channel.node2() == node_id)
+    }
+
+    pub fn get_node_outbounds(
+        &self,
+        node_id: Pubkey,
+    ) -> impl Iterator<Item = (Pubkey, &ChannelInfo, &ChannelUpdateInfo)> {
+        let channels: Vec<_> = self
+            .channels
+            .values()
+            .filter_map(move |channel| {
+                match channel.update_of_node1.as_ref() {
+                    Some(info) if node_id == channel.node1() && info.enabled => {
+                        return Some((channel.node2(), channel, info));
+                    }
+                    _ => {}
+                }
+                match channel.update_of_node2.as_ref() {
+                    Some(info) if node_id == channel.node2() && info.enabled => {
+                        return Some((channel.node1(), channel, info));
+                    }
+                    _ => {}
+                }
+                None
+            })
+            .collect();
+
+        channels.into_iter()
     }
 
     pub fn get_node_inbounds(
@@ -824,50 +1055,52 @@ where
         }
     }
 
-    pub(crate) fn track_payment_router(&mut self, payment_session: &PaymentSession) {
-        for channel_outpoint in payment_session.channel_outpoints() {
-            self.channel_pending_stats
-                .entry(channel_outpoint.clone())
-                .and_modify(|e| *e += 1)
-                .or_insert(1);
+    pub(crate) fn track_attempt_router(&mut self, attempt: &Attempt) {
+        for (from, channel_outpoint, amount) in attempt.channel_outpoints() {
+            if let Some(sent_node) = self.get_channel_sent_node(channel_outpoint, from) {
+                self.channel_stats
+                    .lock()
+                    .add_channel(channel_outpoint, sent_node, amount);
+            }
         }
     }
 
-    pub(crate) fn untrack_payment_router(&mut self, payment_session: &PaymentSession) {
-        for channel_outpoint in payment_session.channel_outpoints() {
-            self.channel_pending_stats
-                .entry(channel_outpoint.clone())
-                .and_modify(|e| *e -= 1)
-                .or_insert(0);
+    pub(crate) fn untrack_attempt_router(&mut self, attempt: &Attempt) {
+        for (from, channel_outpoint, amount) in attempt.channel_outpoints() {
+            if let Some(sent_node) = self.get_channel_sent_node(channel_outpoint, from) {
+                self.channel_stats
+                    .lock()
+                    .untrack_channel(channel_outpoint, sent_node, amount);
+            }
         }
     }
 
-    pub(crate) fn record_payment_success(&mut self, mut payment_session: PaymentSession) {
-        self.untrack_payment_router(&payment_session);
-        let session_route = &payment_session.route.nodes;
+    pub(crate) fn record_attempt_success(&mut self, attempt: &Attempt) {
+        self.untrack_attempt_router(attempt);
+        let session_route = &attempt.route.nodes;
         let mut result = InternalResult::default();
         result.succeed_range_pairs(session_route, 0, session_route.len() - 1);
         self.history.apply_internal_result(result);
-        payment_session.set_success_status();
-        self.store.insert_payment_session(payment_session);
     }
 
-    pub(crate) fn record_payment_fail(
+    pub(crate) fn record_attempt_fail(
         &mut self,
-        payment_session: &PaymentSession,
+        attempt: &Attempt,
         tlc_err: TlcErr,
         first_hop_error: bool,
     ) -> bool {
         if !first_hop_error {
-            self.untrack_payment_router(payment_session);
+            self.untrack_attempt_router(attempt);
         }
         let mut internal_result = InternalResult::default();
-        let nodes = &payment_session.route.nodes;
+        let nodes = &attempt.route.nodes;
         let need_to_retry = internal_result.record_payment_fail(nodes, tlc_err);
         self.history.apply_internal_result(internal_result);
-        return need_to_retry
-            && !payment_session.is_send_payment_with_router()
-            && payment_session.can_retry();
+        let is_send_payment_with_router = self
+            .store
+            .get_payment_session(attempt.payment_hash)
+            .is_some_and(|p| p.is_payment_with_router());
+        return need_to_retry && !is_send_payment_with_router;
     }
 
     #[cfg(any(test, feature = "bench"))]
@@ -887,48 +1120,161 @@ where
     /// including the origin and the target node.
     pub fn build_route(
         &self,
-        payment_data: SendPaymentData,
+        amount: u128,
+        amount_low_bound: Option<u128>,
+        max_fee_amount: Option<u128>,
+        payment_data: &SendPaymentData,
     ) -> Result<Vec<PaymentHopData>, PathFindError> {
+        info!(
+            "entered build_route: amount: {}, amount_low_bound: {:?}",
+            amount, amount_low_bound
+        );
         let source = self.get_source_pubkey();
         let target = payment_data.target_pubkey;
-        let amount = payment_data.amount;
-        let final_tlc_expiry_delta = payment_data.final_tlc_expiry_delta;
-        let allow_self_payment = payment_data.allow_self_payment;
 
-        if source == target && !allow_self_payment {
-            return Err(PathFindError::PathFind(
-                "allow_self_payment is not enable, can not pay to self".to_string(),
+        if source == target && !payment_data.allow_self_payment {
+            return Err(PathFindError::FeatureNotEnabled(
+                "allow_self_payment is not enabled, can not pay to self".to_string(),
             ));
         }
 
-        let route = if !payment_data.router.is_empty() {
-            payment_data.router.clone()
+        let (route_hops, route_amount) = if !payment_data.router.is_empty() {
+            // If a router is explicitly provided, use it.
+            // Assume it's valid for the requested `amount`.
+            (payment_data.router.clone(), amount)
         } else {
-            self.find_path(
-                source,
-                target,
-                amount,
-                payment_data.max_fee_amount,
-                payment_data.udt_type_script.clone(),
-                final_tlc_expiry_delta,
-                payment_data.tlc_expiry_limit,
-                allow_self_payment,
-                &payment_data.hop_hints,
-            )?
+            let amount_low_bound = amount_low_bound.unwrap_or(u128::MAX);
+            match self.find_path_with_payment_data(source, amount, max_fee_amount, payment_data) {
+                Ok(route) => (route, amount),
+                Err(PathFindError::NoPathFound) | Err(PathFindError::TlcMinValue(_))
+                    if payment_data.allow_mpp() && amount_low_bound < amount =>
+                {
+                    let Ok(res) = self.binary_find_path_in_range(
+                        source,
+                        amount.saturating_sub(1),
+                        amount_low_bound,
+                        max_fee_amount,
+                        payment_data,
+                    ) else {
+                        return Err(PathFindError::NoPathFound);
+                    };
+                    res
+                }
+                Err(err) => return Err(err),
+            }
         };
 
-        assert!(!route.is_empty());
+        debug_assert!(
+            !route_hops.is_empty(),
+            "Route hops should not be empty if Ok"
+        );
 
-        Ok(self.build_router_from_path(&route, payment_data))
+        Ok(self.build_router_from_path(&route_hops, route_amount, payment_data))
+    }
+
+    fn find_path_with_payment_data(
+        &self,
+        source: Pubkey,
+        amount: u128,
+        max_fee_amount: Option<u128>,
+        payment_data: &SendPaymentData,
+    ) -> Result<Vec<RouterHop>, PathFindError> {
+        self.find_path(
+            source,
+            payment_data.target_pubkey,
+            amount,
+            max_fee_amount,
+            payment_data.udt_type_script.clone(),
+            payment_data.final_tlc_expiry_delta,
+            payment_data.tlc_expiry_limit,
+            payment_data.allow_self_payment,
+            &payment_data.hop_hints,
+            &payment_data.channel_stats,
+            payment_data.allow_mpp(),
+        )
+    }
+
+    // This function attempts to find a path for the given `amount` using binary search.
+    // It will try to find the largest feasible sub-amount that can be sent.
+    // not a efficient algorithm, but it is simple and works for most cases.
+    // maybe we can use a more efficient algorithm in the future.
+    fn binary_find_path_in_range(
+        &self,
+        source: Pubkey,
+        amount: u128,
+        amount_low_bound: u128,
+        max_fee_amount: Option<u128>,
+        payment_data: &SendPaymentData,
+    ) -> Result<(Vec<RouterHop>, u128), PathFindError> {
+        debug!(
+            "binary_find_path_in_range for amount: {} low_bound: {} max_fee_amount: {:?}",
+            amount, amount_low_bound, max_fee_amount
+        );
+
+        let mut low = amount_low_bound;
+        let mut high = amount;
+
+        let direct_channel_amounts: Vec<_> = self
+            .get_node_outbounds(source)
+            .filter_map(|(_, channel_info, update_info)| {
+                if channel_info.udt_type_script == payment_data.udt_type_script {
+                    Some(update_info.outbound_liquidity.unwrap_or(0))
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let max_liquidity = direct_channel_amounts.iter().max().copied().unwrap_or(0);
+        high = high.min(max_liquidity);
+
+        const MAX_BINARY_SEARCH_ITERATIONS: usize = 50;
+        let mut best_route_found: Option<Vec<RouterHop>> = None;
+        let mut amount_for_best_route: u128 = 0;
+        let mut iterations = 0;
+
+        while low <= high && iterations < MAX_BINARY_SEARCH_ITERATIONS {
+            iterations += 1;
+
+            let mid = low + (high - low) / 2;
+            debug!("iterations: {} mid: {}", iterations, mid);
+
+            match self.find_path_with_payment_data(source, mid, max_fee_amount, payment_data) {
+                Ok(route) => {
+                    // Found a path for `mid`. Store it and try for a larger amount.
+                    if mid > amount_for_best_route {
+                        best_route_found = Some(route);
+                        amount_for_best_route = mid;
+                    }
+                    low = mid.saturating_add(1);
+                }
+                Err(PathFindError::NoPathFound) => {
+                    // `mid` is too high, try smaller.
+                    high = mid.saturating_sub(1);
+                }
+                Err(PathFindError::TlcMinValue(tlc_min_value)) => {
+                    low = tlc_min_value;
+                }
+                Err(other_error) => return Err(other_error),
+            }
+        }
+
+        if let Some(route) = best_route_found {
+            Ok((route, amount_for_best_route))
+        } else {
+            return Err(PathFindError::NoPathFound);
+        }
     }
 
     fn build_router_from_path(
         &self,
         route: &Vec<RouterHop>,
-        payment_data: SendPaymentData,
+        max_amount: u128,
+        payment_data: &SendPaymentData,
     ) -> Vec<PaymentHopData> {
         let invoice = payment_data
             .invoice
+            .clone()
             .map(|x| x.parse::<CkbInvoice>().expect("parse CKB invoice"));
         let hash_algorithm = invoice
             .as_ref()
@@ -950,8 +1296,9 @@ where
                 custom_records: None,
             });
         }
+
         hops_data.push(PaymentHopData {
-            amount: payment_data.amount,
+            amount: max_amount,
             next_hop: None,
             hash_algorithm,
             expiry: now + payment_data.final_tlc_expiry_delta,
@@ -971,6 +1318,12 @@ where
         hops_data
     }
 
+    fn is_node_support_mpp(&self, node: &Pubkey) -> bool {
+        self.nodes
+            .get(node)
+            .is_some_and(|node_info| node_info.features.supports_basic_mpp())
+    }
+
     // A helper function to evaluate whether an edge should be added to the heap of nodes to visit.
     // We will check the accumulated probability of this edge to be a successful payment, and evaluate
     // the distance from the source node to the final payee. If the distance is shorter than the current
@@ -984,6 +1337,8 @@ where
         channel_outpoint: &OutPoint,
         // The capacity of the channel.
         channel_capacity: u128,
+        // The tlc min value of the channel.
+        tlc_min_value: u128,
         // The source node of the edge.
         from: Pubkey,
         // The target node of the edge.
@@ -1007,6 +1362,7 @@ where
         distances: &mut HashMap<Pubkey, NodeHeapElement>,
         // The priority queue of nodes to be visited (sorted by distance and probability).
         nodes_heap: &mut NodeHeap,
+        channel_stats: &GraphChannelStat,
     ) {
         let mut probability = cur_probability
             * self.history.eval_probability(
@@ -1017,12 +1373,8 @@ where
                 channel_capacity,
             );
 
-        let pending_count = self
-            .channel_pending_stats
-            .get(channel_outpoint)
-            .copied()
-            .unwrap_or(0)
-            + cur_pending_count;
+        let pending_count = channel_stats.get_channel_count(channel_outpoint) + cur_pending_count;
+
         if pending_count > 0 {
             probability *= (0.95f64).powi(pending_count as i32);
         }
@@ -1046,15 +1398,14 @@ where
                 return;
             }
         }
-        let total_amount = next_hop_received_amount + fee;
-        let total_tlc_expiry = incoming_tlc_expiry + tlc_expiry_delta;
 
         let node = NodeHeapElement {
             node_id: from,
             weight,
             distance,
-            amount_to_send: total_amount,
-            incoming_tlc_expiry: total_tlc_expiry,
+            amount_to_send: next_hop_received_amount + fee,
+            tlc_min_value,
+            incoming_tlc_expiry: incoming_tlc_expiry + tlc_expiry_delta,
             fee_charged: fee,
             probability,
             pending_count,
@@ -1067,8 +1418,9 @@ where
                 amount_received: next_hop_received_amount,
                 // We need to use cur_hop.incoming_tlc_expiry instead of incoming_tlc_expiry here
                 // because we need the expiry for the AddTlc packet sent from source to target.
-                // cur_hop.incoming_tlc_expiry is the expiry time for the TLC that is going to be received by the target,
-                // while incoming_tlc_expiry is the expiry time for the TLC that is going to be received by the source.
+                // cur_hop.incoming_tlc_expiry is the expiry time for the TLC that is going to be
+                // received by the target, while incoming_tlc_expiry is the expiry time for the TLC
+                // that is going to be received by the source.
                 incoming_tlc_expiry,
             }),
         };
@@ -1089,7 +1441,13 @@ where
         tlc_expiry_limit: u64,
         allow_self: bool,
         hop_hints: &[HopHint],
+        channel_stats: &GraphChannelStat,
+        allow_mpp: bool,
     ) -> Result<Vec<RouterHop>, PathFindError> {
+        debug!(
+            "begin find_path from {:?} to {:?} amount: {:?}",
+            source, target, amount
+        );
         let started_time = std::time::Instant::now();
         let nodes_len = self.nodes.len();
         let route_to_self = source == target;
@@ -1115,7 +1473,7 @@ where
         }
 
         if source == target && !allow_self {
-            return Err(PathFindError::PathFind(
+            return Err(PathFindError::FeatureNotEnabled(
                 "allow_self_payment is not enable, can not pay self".to_string(),
             ));
         }
@@ -1125,6 +1483,12 @@ where
         let mut amount = amount;
         let mut last_edge = None;
 
+        if allow_mpp && !self.is_node_support_mpp(&target) {
+            return Err(PathFindError::FeatureNotEnabled(
+                "MPP is not supported by the target node".to_string(),
+            ));
+        }
+
         if route_to_self {
             let (edge, new_target, expiry_delta, fee) = self.adjust_target_for_route_self(
                 source,
@@ -1132,10 +1496,12 @@ where
                 final_tlc_expiry_delta,
                 &udt_type_script,
                 tlc_expiry_limit,
+                channel_stats,
+                allow_mpp,
             )?;
             target = new_target;
-            expiry += expiry_delta;
-            amount += fee;
+            expiry = expiry.saturating_add(expiry_delta);
+            amount = amount.saturating_add(fee);
             last_edge = Some(edge);
         } else {
             // The calculation of probability and distance requires a capacity of the channel.
@@ -1163,13 +1529,16 @@ where
                 // For now, we set the fees to be 0. We may need to change this in the future.
                 let fee =
                     calculate_tlc_forward_fee(amount, hint.fee_rate as u128).map_err(|err| {
-                        PathFindError::PathFind(format!(
+                        PathFindError::Overflow(format!(
                             "calculate_tlc_forward_fee error: {:?}",
                             err
                         ))
                     })?;
+                // hop hint is only used for private channels, we assume there is no tlc_min_value limit
+                let tlc_min_val = 0;
                 self.eval_and_update(
                     &hint.channel_outpoint,
+                    tlc_min_val,
                     sufficiently_large_capacity,
                     hint.pubkey,
                     target,
@@ -1182,6 +1551,7 @@ where
                     0,
                     &mut distances,
                     &mut nodes_heap,
+                    channel_stats,
                 );
             }
         }
@@ -1190,6 +1560,7 @@ where
         // initialize the target node
         nodes_heap.push(NodeHeapElement {
             node_id: target,
+            tlc_min_value: 0,
             weight: 0,
             distance: 0,
             amount_to_send: amount,
@@ -1210,8 +1581,11 @@ where
             for (from, to, channel_info, channel_update) in self.get_node_inbounds(cur_hop.node_id)
             {
                 let is_source = from == source;
+                if allow_mpp && !self.is_node_support_mpp(&from) {
+                    continue;
+                }
 
-                assert_eq!(to, cur_hop.node_id);
+                debug_assert_eq!(to, cur_hop.node_id);
                 if &udt_type_script != channel_info.udt_type_script() {
                     continue;
                 }
@@ -1228,38 +1602,47 @@ where
                 let fee = if is_source {
                     0
                 } else {
-                    calculate_tlc_forward_fee(
+                    match calculate_tlc_forward_fee(
                         next_hop_received_amount,
                         channel_update.fee_rate as u128,
-                    )
-                    .map_err(|err| {
-                        PathFindError::PathFind(format!(
-                            "calculate_tlc_forward_fee error: {:?}",
-                            err
-                        ))
-                    })?
+                    ) {
+                        Ok(fee) => fee,
+                        // skip this edge if the fee calculation fails
+                        Err(_) => {
+                            continue;
+                        }
+                    }
                 };
-                let amount_to_send = next_hop_received_amount + fee;
+                let amount_to_send = next_hop_received_amount.saturating_add(fee);
                 let expiry_delta = if is_source {
                     0
                 } else {
                     channel_update.tlc_expiry_delta
                 };
 
-                let incoming_tlc_expiry = cur_hop.incoming_tlc_expiry + expiry_delta;
+                let incoming_tlc_expiry = cur_hop.incoming_tlc_expiry.saturating_add(expiry_delta);
+
+                let send_node = channel_info
+                    .get_send_node(from)
+                    .expect("send_node should exist");
+
+                let tlc_min_value = channel_update.tlc_minimum_value;
                 if !self.check_channel_amount_and_expiry(
                     amount_to_send,
                     channel_info,
                     channel_update,
                     incoming_tlc_expiry,
                     tlc_expiry_limit,
+                    send_node,
+                    channel_stats,
+                    allow_mpp,
                 ) {
                     continue;
                 }
 
                 // if the amount to send is greater than the amount we have, skip this edge
                 if let Some(max_fee_amount) = max_fee_amount {
-                    if amount_to_send > amount + max_fee_amount {
+                    if amount_to_send > amount.saturating_add(max_fee_amount) {
                         debug!(
                             "amount_to_send: {:?} is greater than sum_amount sum_amount: {:?}",
                             amount_to_send,
@@ -1272,6 +1655,7 @@ where
                 self.eval_and_update(
                     channel_info.out_point(),
                     channel_info.capacity(),
+                    tlc_min_value,
                     from,
                     to,
                     next_hop_received_amount,
@@ -1283,13 +1667,18 @@ where
                     cur_hop.pending_count,
                     &mut distances,
                     &mut nodes_heap,
+                    channel_stats,
                 );
             }
         }
 
         let mut current = source;
+        let mut max_min_tlc_value = 0;
         while let Some(elem) = distances.remove(&current) {
             let edge = elem.next_hop.expect("next_hop is none");
+            if elem.amount_to_send < elem.tlc_min_value {
+                max_min_tlc_value = max_min_tlc_value.max(elem.tlc_min_value);
+            }
             current = edge.target;
             result.push(edge);
             if current == target {
@@ -1298,10 +1687,19 @@ where
         }
 
         if result.is_empty() || current != target {
-            return Err(PathFindError::PathFind("no path found".to_string()));
+            // TODO check total outbound balance and return error if it's not enough
+            // this can help us early return if the payment is not possible to be sent
+            // otherwise when PathFind error is returned, we need to retry with half amount
+            return Err(PathFindError::NoPathFound);
         }
         if let Some(edge) = last_edge {
             result.push(edge)
+        }
+
+        // check the router meets tlc_min_val requirements, otherwise return proper error
+        // only do this for mpp payments, because for single payment we already checked the amount
+        if allow_mpp && max_min_tlc_value > 0 {
+            return Err(PathFindError::TlcMinValue(max_min_tlc_value));
         }
 
         info!(
@@ -1317,7 +1715,8 @@ where
     // to resolve the scenario of network with cycle, we use the original `source` node as target,
     // trying to find a new target which has direct channel to `source` node, then the find_path
     // algorithm can work well to assume the network don't contains a cycle.
-    // This may makes the result of find_path is not a global optimimized path.
+    // This may makes the result of find_path is not a global optimized path.
+    #[allow(clippy::too_many_arguments)]
     fn adjust_target_for_route_self(
         &self,
         source: Pubkey,
@@ -1325,10 +1724,12 @@ where
         expiry: u64,
         udt_type_script: &Option<Script>,
         tlc_expiry_limit: u64,
+        channel_stats: &GraphChannelStat,
+        allow_mpp: bool,
     ) -> Result<(RouterHop, Pubkey, u64, u128), PathFindError> {
         let channels: Vec<_> = self
             .get_node_inbounds(source)
-            .filter(|(_, _, channel_info, channel_update)| {
+            .filter(|(from, _, channel_info, channel_update)| {
                 udt_type_script == channel_info.udt_type_script()
                     && self.check_channel_amount_and_expiry(
                         amount,
@@ -1336,7 +1737,13 @@ where
                         channel_update,
                         channel_update.tlc_expiry_delta,
                         tlc_expiry_limit,
+                        channel_info
+                            .get_send_node(*from)
+                            .expect("send_node should exist"),
+                        channel_stats,
+                        allow_mpp,
                     )
+                    && (!allow_mpp || self.is_node_support_mpp(from))
             })
             .map(|(from, _, channel_info, channel_update)| {
                 (
@@ -1355,9 +1762,10 @@ where
         if let Some((from, outpoint, tlc_expiry_delta, fee_rate, ..)) =
             channels.choose(&mut thread_rng())
         {
-            assert_ne!(source, *from);
+            debug_assert_ne!(source, *from);
+            // we have already checked the fee rate and amount in check_channel_amount_and_expiry
             let fee = calculate_tlc_forward_fee(amount, *fee_rate as u128).map_err(|err| {
-                PathFindError::PathFind(format!("calculate_tlc_forward_fee error: {:?}", err))
+                PathFindError::Overflow(format!("calculate_tlc_forward_fee error: {:?}", err))
             })?;
             let last_edge = RouterHop {
                 target: source,
@@ -1367,12 +1775,11 @@ where
             };
             Ok((last_edge, *from, *tlc_expiry_delta, fee))
         } else {
-            return Err(PathFindError::PathFind(
-                "no direct channel found for source node".to_string(),
-            ));
+            return Err(PathFindError::NoPathFound);
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn check_channel_amount_and_expiry(
         &self,
         amount: u128,
@@ -1380,18 +1787,43 @@ where
         channel_update: &ChannelUpdateInfo,
         incoming_tlc_expiry: u64,
         tlc_expiry_limit: u64,
+        sent_node: SentNode,
+        channel_stats: &GraphChannelStat,
+        allow_mpp: bool,
     ) -> bool {
+        if calculate_tlc_forward_fee(amount, channel_update.fee_rate as u128).is_err() {
+            return false;
+        }
+
+        if channel_update.tlc_expiry_delta > DEFAULT_TLC_EXPIRY_DELTA {
+            return false;
+        }
+
         if amount > channel_info.capacity() {
             return false;
         }
-        // We should use amount_to_send because that is the amount to be sent over the channel.
-        if amount < channel_update.tlc_minimum_value {
+        // We are finding path for a amount range for mpp, we don't check the tlc_minimum_value here,
+        // but return proper error after the path is found
+        if amount < channel_update.tlc_minimum_value && !allow_mpp {
+            return false;
+        }
+
+        let sent_amount =
+            channel_stats.get_channel_sent_amount(channel_info.out_point(), sent_node);
+
+        if amount > channel_info.capacity().saturating_sub(sent_amount) {
             return false;
         }
 
         // If we already know the balance of the channel, check if we can send the amount.
         if let Some(balance) = channel_update.outbound_liquidity {
-            if amount > balance {
+            debug_assert!(
+                balance >= sent_amount,
+                "balance {} is less than sent amount {}",
+                balance,
+                sent_amount
+            );
+            if amount > balance.saturating_sub(sent_amount) {
                 return false;
             }
         }
@@ -1415,7 +1847,7 @@ where
     }
 
     fn calculate_distance_based_probability(&self, probability: f64, weight: u128) -> u128 {
-        assert!(probability > 0.0);
+        debug_assert!(probability > 0.0);
         // FIXME: set this to configurable parameters
         let weight = weight as f64;
         let time_pref = 0.9_f64;
@@ -1484,7 +1916,7 @@ where
                 } else {
                     calculate_tlc_forward_fee(amount_to_send, channel_update.fee_rate as u128)
                         .map_err(|err| {
-                            PathFindError::PathFind(format!(
+                            PathFindError::Overflow(format!(
                                 "calculate_tlc_forward_fee error: {:?}",
                                 err
                             ))
@@ -1492,11 +1924,6 @@ where
                 };
                 amount_to_send += fee;
                 if amount_to_send > channel_info.capacity() {
-                    debug!(
-                        "current_amount: {} > channel_info.capacity {}",
-                        amount_to_send,
-                        channel_info.capacity()
-                    );
                     continue;
                 }
                 if let Some(balance) = channel_update.outbound_liquidity {
@@ -1512,12 +1939,27 @@ where
                 };
 
                 let current_incoming_tlc_expiry = agg_tlc_expiry + expiry_delta;
-                let probability = self.history.eval_probability(
-                    from,
-                    to,
-                    &channel_outpoint,
-                    amount_to_send,
-                    channel_info.capacity(),
+                let probability = if cur_hop.channel_outpoint.is_some() {
+                    // If the channel outpoint is specified, we will assume that the channel is routable
+                    // it's user's responsibility to ensure that the channel is routable.
+                    1.0
+                } else {
+                    self.history.eval_probability(
+                        from,
+                        to,
+                        &channel_outpoint,
+                        amount_to_send,
+                        channel_info.capacity(),
+                    )
+                };
+
+                // we don't skip the edge if the probability is too low for build with router
+                // but we can still find a optimised path if there are multiple channels
+                let probability = probability.max(DEFAULT_MIN_PROBABILITY);
+
+                debug!(
+                    "probability: {} for channel_outpoint: {:?} from: {:?} => to: {:?}",
+                    probability, channel_outpoint, from, to
                 );
 
                 let weight = self.edge_weight(amount_to_send, fee, current_incoming_tlc_expiry);
@@ -1544,7 +1986,7 @@ where
                 agg_amount = edge.amount_received + fee;
                 path.push(edge.clone());
             } else {
-                return Err(PathFindError::PathFind("no path found".to_string()));
+                return Err(PathFindError::NoPathFound);
             }
         }
         path.reverse();
@@ -1554,8 +1996,7 @@ where
 
 pub trait NetworkGraphStateStore {
     fn get_payment_session(&self, payment_hash: Hash256) -> Option<PaymentSession>;
-    fn get_payment_sessions_with_status(&self, status: PaymentSessionStatus)
-        -> Vec<PaymentSession>;
+    fn get_payment_sessions_with_status(&self, status: PaymentStatus) -> Vec<PaymentSession>;
     fn insert_payment_session(&self, session: PaymentSession);
     fn insert_payment_history_result(
         &mut self,
@@ -1563,13 +2004,20 @@ pub trait NetworkGraphStateStore {
         direction: Direction,
         result: TimedResult,
     );
+    fn remove_channel_history(&mut self, channel_outpoint: &OutPoint);
     fn get_payment_history_results(&self) -> Vec<(OutPoint, Direction, TimedResult)>;
+    fn get_attempt(&self, payment_hash: Hash256, attempt_id: u64) -> Option<Attempt>;
+    fn insert_attempt(&self, attempt: Attempt);
+    fn get_attempts(&self, payment_hash: Hash256) -> Vec<Attempt>;
+    fn delete_attempts(&self, payment_hash: Hash256);
+    fn get_attempts_with_statuses(&self, status: &[AttemptStatus]) -> Vec<Attempt>;
 }
 
 /// The status of a payment, will update as the payment progresses.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Copy)]
-pub enum PaymentSessionStatus {
-    /// initial status, payment session is created, no HTLC is sent
+/// The transfer path for payment status is `Created -> Inflight -> Success | Failed`.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub enum PaymentStatus {
+    /// initial status, a payment session is created, no HTLC is sent
     Created,
     /// the first hop AddTlc is sent successfully and waiting for the response
     Inflight,
@@ -1579,6 +2027,12 @@ pub enum PaymentSessionStatus {
     Failed,
 }
 
+impl PaymentStatus {
+    pub fn is_final(&self) -> bool {
+        matches!(self, PaymentStatus::Success | PaymentStatus::Failed)
+    }
+}
+
 /// The node and channel information in a payment route hop
 #[serde_as]
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1586,6 +2040,7 @@ pub struct SessionRouteNode {
     /// the public key of the node
     pub pubkey: Pubkey,
     /// the amount for this hop
+    #[serde_as(as = "U128Hex")]
     pub amount: u128,
     /// the channel outpoint for this hop
     #[serde_as(as = "EntityHex")]
@@ -1611,6 +2066,7 @@ impl SessionRoute {
     // the `payment_hops` is [B, C, D], which is a convenient way for onion routing.
     // here we need to create a session route with source, which is A -> B -> C -> D
     pub fn new(source: Pubkey, target: Pubkey, payment_hops: &[PaymentHopData]) -> Self {
+        //dbg!(payment_hops);
         let nodes = std::iter::once(source)
             .chain(
                 payment_hops
@@ -1634,11 +2090,21 @@ impl SessionRoute {
         Self { nodes }
     }
 
+    pub fn receiver_amount(&self) -> u128 {
+        self.nodes.last().map_or(0, |s| s.amount)
+    }
+
     pub fn fee(&self) -> u128 {
         let first_amount = self.nodes.first().map_or(0, |s| s.amount);
-        let last_amount = self.nodes.last().map_or(0, |s| s.amount);
-        assert!(first_amount >= last_amount);
+        let last_amount = self.receiver_amount();
+        debug_assert!(first_amount >= last_amount);
         first_amount - last_amount
+    }
+
+    pub(crate) fn channel_outpoints(&self) -> impl Iterator<Item = (Pubkey, &OutPoint, u128)> {
+        self.nodes
+            .iter()
+            .map(|x| (x.pubkey, &x.channel_outpoint, x.amount))
     }
 }
 
@@ -1646,39 +2112,391 @@ impl SessionRoute {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PaymentSession {
     pub request: SendPaymentData,
-    pub retried_times: u32,
     pub last_error: Option<String>,
+    // For non-MPP, this is the maximum number of single attempt retry limit
+    // For MPP, this is the sum limit of all parts' retry times.
     pub try_limit: u32,
-    pub status: PaymentSessionStatus,
+    pub status: PaymentStatus,
     pub created_at: u64,
     pub last_updated_at: u64,
-    pub route: SessionRoute,
-    // Session key for onion packet. Save it for decoding the error packet.
-    pub session_key: [u8; 32],
+    #[serde(skip)]
+    pub cached_attempts: Vec<Attempt>, // Add a cache for attempts
 }
 
 impl PaymentSession {
-    pub fn new(request: SendPaymentData, try_limit: u32) -> Self {
+    pub fn new(
+        store: &impl NetworkGraphStateStore,
+        request: SendPaymentData,
+        try_limit: u32,
+    ) -> Self {
         let now = now_timestamp_as_millis_u64();
         Self {
             request,
-            retried_times: 0,
             last_error: None,
             try_limit,
-            status: PaymentSessionStatus::Created,
+            status: PaymentStatus::Created,
             created_at: now,
             last_updated_at: now,
-            route: SessionRoute::default(),
-            session_key: Default::default(),
+            cached_attempts: vec![],
         }
+        .init_attempts(store)
+    }
+
+    pub fn init_attempts(mut self, store: &impl NetworkGraphStateStore) -> Self {
+        self.flush_attempts(store);
+        self
+    }
+
+    pub fn flush_attempts(&mut self, store: &impl NetworkGraphStateStore) {
+        self.cached_attempts = store.get_attempts(self.request.payment_hash);
+        self.status = self.calc_payment_status();
+    }
+
+    pub fn update_with_attempt(&mut self, attempt: Attempt) {
+        if let Some(a) = self.cached_attempts.iter_mut().find(|a| a.id == attempt.id) {
+            *a = attempt;
+        }
+        self.status = self.calc_payment_status();
+    }
+
+    pub fn retry_times(&self) -> u32 {
+        self.attempts().map(|a| a.tried_times).sum()
+    }
+
+    pub fn allow_mpp(&self) -> bool {
+        self.request.allow_mpp()
     }
 
     pub fn payment_hash(&self) -> Hash256 {
         self.request.payment_hash
     }
 
-    pub fn is_send_payment_with_router(&self) -> bool {
+    pub fn is_payment_with_router(&self) -> bool {
         !self.request.router.is_empty()
+    }
+
+    pub fn is_dry_run(&self) -> bool {
+        self.request.dry_run
+    }
+
+    pub fn attempts(&self) -> impl Iterator<Item = &Attempt> {
+        self.cached_attempts.iter()
+    }
+
+    #[cfg(test)]
+    pub fn all_attempts_with_status(&self) -> Vec<(u64, AttemptStatus, Option<String>, u32, u128)> {
+        self.cached_attempts
+            .iter()
+            .map(|a| {
+                (
+                    a.id,
+                    a.status,
+                    a.last_error.clone(),
+                    a.tried_times,
+                    a.route.receiver_amount(),
+                )
+            })
+            .collect()
+    }
+
+    pub fn attempts_count(&self) -> usize {
+        self.cached_attempts.len()
+    }
+
+    pub fn max_parts(&self) -> usize {
+        if self.allow_mpp() {
+            self.request.max_parts()
+        } else {
+            1
+        }
+    }
+
+    pub fn active_attempts(&self) -> impl Iterator<Item = &Attempt> {
+        self.attempts().filter(|a| a.is_active())
+    }
+
+    pub fn fee_paid(&self) -> u128 {
+        self.active_attempts().map(|a| a.route.fee()).sum()
+    }
+
+    fn success_attempts_amount_is_enough(&self) -> bool {
+        let success_amount: u128 = self
+            .attempts()
+            .filter_map(|a| {
+                if a.is_success() {
+                    Some(a.route.receiver_amount())
+                } else {
+                    None
+                }
+            })
+            .sum();
+        success_amount >= self.request.amount
+    }
+
+    pub fn remain_fee_amount(&self) -> Option<u128> {
+        let max_fee_amount = self.request.max_fee_amount?;
+        let remain_fee = max_fee_amount.saturating_sub(self.fee_paid());
+        Some(remain_fee)
+    }
+
+    pub fn remain_amount(&self) -> u128 {
+        let sent_amount = self
+            .active_attempts()
+            .map(|a| a.route.receiver_amount())
+            .sum::<u128>();
+        self.request.amount.saturating_sub(sent_amount)
+    }
+
+    pub fn new_attempt(&self, attempt_id: u64, route: SessionRoute) -> Attempt {
+        let now = now_timestamp_as_millis_u64();
+        let payment_hash = self.payment_hash();
+        // For HTLC, the attempt hash is the payment hash
+        let hash = payment_hash;
+        let try_limit = if self.allow_mpp() {
+            DEFAULT_PAYMENT_MPP_ATTEMPT_TRY_LIMIT
+        } else {
+            self.try_limit
+        };
+
+        Attempt {
+            id: attempt_id,
+            hash,
+            try_limit,
+            tried_times: 1,
+            payment_hash,
+            route,
+            session_key: [0; 32],
+            preimage: None,
+            created_at: now,
+            last_updated_at: now,
+            last_error: None,
+            status: AttemptStatus::Created,
+        }
+    }
+
+    pub fn append_attempt(&mut self, attempt: Attempt) {
+        self.cached_attempts.push(attempt);
+    }
+
+    pub fn allow_more_attempts(&self) -> bool {
+        if self.status.is_final() {
+            return false;
+        }
+
+        if self.remain_amount() == 0 {
+            // no remaining amount, imply no need to retry
+            return false;
+        }
+
+        if self.retry_times() >= self.try_limit {
+            // already reached the retry limit, no more attempts allowed
+            return false;
+        }
+
+        if self.active_attempts().count() >= self.max_parts() {
+            return false;
+        }
+
+        // otherwise, should continue retry
+        true
+    }
+
+    pub fn calc_payment_status(&self) -> PaymentStatus {
+        if self.cached_attempts.is_empty() || self.status.is_final() {
+            return self.status;
+        }
+
+        if self.attempts().any(|a| a.is_inflight()) {
+            // if any attempt is created or inflight, the payment is inflight
+            return PaymentStatus::Inflight;
+        }
+
+        if self.attempts().all(|a| a.is_failed()) && !self.allow_more_attempts() {
+            return PaymentStatus::Failed;
+        }
+
+        if self.success_attempts_amount_is_enough() {
+            return PaymentStatus::Success;
+        }
+
+        return PaymentStatus::Created;
+    }
+
+    fn set_status(&mut self, status: PaymentStatus) {
+        self.status = status;
+        self.last_updated_at = now_timestamp_as_millis_u64();
+    }
+
+    pub fn set_inflight_status(&mut self) {
+        self.set_status(PaymentStatus::Inflight);
+    }
+
+    pub fn set_success_status(&mut self) {
+        self.set_status(PaymentStatus::Success);
+        self.last_error = None;
+    }
+
+    pub fn set_failed_status(&mut self, error: &str) {
+        self.set_status(PaymentStatus::Failed);
+        self.last_error = Some(error.to_string());
+    }
+}
+
+impl From<PaymentSession> for SendPaymentResponse {
+    fn from(session: PaymentSession) -> Self {
+        let status = session.status;
+        let fee = session.fee_paid();
+        let mut all_attempts = session
+            .attempts()
+            .map(|a| {
+                (
+                    a.id,
+                    a.status,
+                    a.last_error.clone(),
+                    a.tried_times,
+                    a.route.receiver_amount(),
+                )
+            })
+            .collect::<Vec<_>>();
+        all_attempts.sort_by_key(|a| a.0);
+
+        #[cfg(debug_assertions)]
+        {
+            dbg!(&all_attempts);
+            dbg!(
+                fee,
+                &status,
+                all_attempts.len(),
+                session.try_limit,
+                &session.last_error
+            );
+
+            let active_count = session.active_attempts().count();
+            let active_amount = session
+                .active_attempts()
+                .map(|a| a.route.receiver_amount())
+                .sum::<u128>();
+            dbg!(
+                active_amount,
+                session.request.amount,
+                active_count,
+                session.max_parts(),
+                session.remain_amount(),
+            );
+        }
+
+        #[cfg(any(debug_assertions, test, feature = "bench"))]
+        let attempts = session
+            .attempts()
+            .filter(|a| !a.is_failed())
+            .collect::<Vec<_>>();
+
+        Self {
+            payment_hash: session.request.payment_hash,
+            status,
+            failed_error: session.last_error.clone(),
+            created_at: session.created_at,
+            last_updated_at: session.last_updated_at,
+            custom_records: session.request.custom_records.clone(),
+            fee,
+            #[cfg(any(debug_assertions, test, feature = "bench"))]
+            routers: attempts.iter().map(|a| a.route.clone()).collect::<Vec<_>>(),
+        }
+    }
+}
+
+/// The status of a payment attempt, will update as the payment progresses.
+/// The transfer path for attempt status is:
+///
+///    Created --> Inflight ----> Success
+//                 /   |
+///               /    |
+///              |     | ----- no retry ----> Failed
+///               \    |
+///                \  retry
+///                 \  |
+///                  \ |
+///                  Retrying
+///
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub enum AttemptStatus {
+    /// initial status, a payment attempt is created, no HTLC is sent
+    Created,
+    /// the first hop AddTlc is sent successfully and waiting for the response
+    Inflight,
+    /// the attempt is retrying after failed
+    Retrying,
+    /// related HTLC is successfully settled
+    Success,
+    /// related HTLC is failed
+    Failed,
+}
+
+impl AttemptStatus {
+    pub fn is_final(&self) -> bool {
+        matches!(self, AttemptStatus::Success | AttemptStatus::Failed)
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug)]
+pub struct Attempt {
+    pub id: u64,
+    pub try_limit: u32,
+    pub tried_times: u32,
+    pub hash: Hash256,
+    pub status: AttemptStatus,
+    pub payment_hash: Hash256,
+    pub route: SessionRoute,
+    pub session_key: [u8; 32],
+    pub preimage: Option<Hash256>,
+    pub created_at: u64,
+    pub last_updated_at: u64,
+    pub last_error: Option<String>,
+}
+
+impl Attempt {
+    pub fn set_inflight_status(&mut self) {
+        self.status = AttemptStatus::Inflight;
+        self.last_error = None;
+    }
+
+    pub fn set_success_status(&mut self) {
+        self.status = AttemptStatus::Success;
+        self.last_error = None;
+    }
+
+    pub fn set_failed_status(&mut self, error: &str, retryable: bool) {
+        self.last_error = Some(error.to_string());
+
+        if retryable {
+            self.status = AttemptStatus::Retrying;
+            if self.tried_times < self.try_limit && !error.to_string().contains("WaitingTlcAck") {
+                self.tried_times += 1;
+                self.last_updated_at = now_timestamp_as_millis_u64();
+            }
+        } else {
+            self.status = AttemptStatus::Failed;
+        }
+    }
+
+    pub fn is_success(&self) -> bool {
+        self.status == AttemptStatus::Success
+    }
+
+    pub fn is_inflight(&self) -> bool {
+        self.status == AttemptStatus::Inflight
+    }
+
+    pub fn is_failed(&self) -> bool {
+        self.status == AttemptStatus::Failed
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.status != AttemptStatus::Failed
+    }
+
+    pub fn is_retrying(&self) -> bool {
+        self.status == AttemptStatus::Retrying
     }
 
     pub fn first_hop_channel_outpoint_eq(&self, out_point: &OutPoint) -> bool {
@@ -1689,56 +2507,12 @@ impl PaymentSession {
             .unwrap_or_default()
     }
 
-    fn set_status(&mut self, status: PaymentSessionStatus) {
-        self.status = status;
-        self.last_updated_at = now_timestamp_as_millis_u64();
-    }
-
-    pub fn set_inflight_status(&mut self) {
-        self.set_status(PaymentSessionStatus::Inflight);
-    }
-
-    pub fn set_success_status(&mut self) {
-        self.set_status(PaymentSessionStatus::Success);
-        self.last_error = None;
-    }
-
-    pub fn set_failed_status(&mut self, error: &str) {
-        self.set_status(PaymentSessionStatus::Failed);
-        self.last_error = Some(error.to_string());
-    }
-
-    pub fn can_retry(&self) -> bool {
-        self.retried_times < self.try_limit
-    }
-
-    pub fn fee(&self) -> u128 {
-        self.route.fee()
+    pub(crate) fn channel_outpoints(&self) -> impl Iterator<Item = (Pubkey, &OutPoint, u128)> {
+        self.route.channel_outpoints()
     }
 
     pub fn hops_public_keys(&self) -> Vec<Pubkey> {
         // Skip the first node, which is the sender.
         self.route.nodes.iter().skip(1).map(|x| x.pubkey).collect()
-    }
-
-    fn channel_outpoints(&self) -> impl Iterator<Item = &OutPoint> {
-        self.route.nodes.iter().map(|x| &x.channel_outpoint)
-    }
-}
-
-impl From<PaymentSession> for SendPaymentResponse {
-    fn from(session: PaymentSession) -> Self {
-        let fee = session.fee();
-        Self {
-            payment_hash: session.request.payment_hash,
-            status: session.status,
-            failed_error: session.last_error,
-            created_at: session.created_at,
-            last_updated_at: session.last_updated_at,
-            custom_records: session.request.custom_records,
-            fee,
-            #[cfg(any(debug_assertions, feature = "bench"))]
-            router: session.route,
-        }
     }
 }

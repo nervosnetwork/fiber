@@ -1,0 +1,28 @@
+[package]
+name = "fiber-wasm"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+console_error_panic_hook = "0.1.7"
+fnn = { path = "../fiber-lib", default-features = false }
+wasm-logger = "0.2.0"
+ckb-chain-spec = "0.202.0"
+ckb-resource = "0.202.0"
+ractor = { "git" = "https://github.com/officeyutong/ractor", branch = "use-non-send-future-in-wasm", features = [
+    "async-trait",
+] }
+tracing = "0.1"
+tokio = { version = "1.45.1", features = ["macros", "rt", "sync", "time"] }
+jsonrpsee = { version = "0.25.1", features = ["wasm-client"] }
+wasm-bindgen = "0.2.100"
+wasm-bindgen-futures = "0.4.50"
+secp256k1 = { version = "0.28.0", features = ["serde", "recovery", "rand-std"] }
+serde-wasm-bindgen = "0.6.5"
+serde = "1.0.219"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[package.metadata.cargo-shear]
+ignored = ["wasm-bindgen-futures"]

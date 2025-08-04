@@ -13,21 +13,25 @@ use std::path::Path;
 use super::db_migrate::DbMigrate;
 use super::schema::*;
 use crate::fiber::gossip::GossipMessageStore;
-use crate::fiber::types::CURSOR_SIZE;
-#[cfg(feature = "watchtower")]
-use crate::{
-    fiber::channel::{RevocationData, SettlementData},
-    watchtower::{ChannelData, WatchtowerStore},
-};
+use crate::fiber::graph::AttemptStatus;
+use crate::fiber::types::{HoldTlc, CURSOR_SIZE};
 use crate::{
     fiber::{
         channel::{ChannelActorState, ChannelActorStateStore, ChannelState},
-        graph::{NetworkGraphStateStore, PaymentSession, PaymentSessionStatus},
+        graph::{Attempt, NetworkGraphStateStore, PaymentSession, PaymentStatus},
         history::{Direction, TimedResult},
         network::{NetworkActorStateStore, PaymentCustomRecords, PersistentNetworkActorState},
         types::{BroadcastMessage, BroadcastMessageID, Cursor, Hash256},
     },
     invoice::{CkbInvoice, CkbInvoiceStatus, InvoiceError, InvoiceStore, PreimageStore},
+};
+#[cfg(feature = "watchtower")]
+use crate::{
+    fiber::{
+        channel::{RevocationData, SettlementData},
+        types::NodeId,
+    },
+    watchtower::{ChannelData, WatchtowerStore},
 };
 use ckb_types::packed::OutPoint;
 #[cfg(feature = "watchtower")]
@@ -35,7 +39,7 @@ use ckb_types::packed::Script;
 use ckb_types::prelude::Entity;
 
 use serde::Serialize;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use tentacle::secio::PeerId;
 use tracing::info;
 
@@ -66,6 +70,7 @@ impl Store {
         migrate.init_or_check(path)?;
         Ok(())
     }
+
     pub fn check_validate<P: AsRef<Path>>(path: P) -> Result<(), String> {
         let db = Self::open_db(path.as_ref())?;
         let mut errors = HashSet::new();
@@ -178,6 +183,29 @@ impl Store {
             Err(errors.join("\n"))
         }
     }
+
+    fn parse_hold_tlc(key: &[u8], value: &[u8]) -> (Hash256, HoldTlc) {
+        let payment_hash: [u8; 32] = key[1..33]
+            .try_into()
+            .expect("payment_hash should be 32 bytes");
+
+        let channel_id: [u8; 32] = key[33..65]
+            .try_into()
+            .expect("channel_id should be 32 bytes");
+
+        let tlc_id: u64 =
+            u64::from_le_bytes(key[65..].try_into().expect("tlc_id should be 8 bytes"));
+
+        let expired_at: u64 = deserialize_from(value, "HoldTlc");
+
+        let hold_tlc = HoldTlc {
+            channel_id: channel_id.into(),
+            tlc_id,
+            hold_expire_at: expired_at,
+        };
+
+        (payment_hash.into(), hold_tlc)
+    }
 }
 
 pub enum KeyValue {
@@ -190,11 +218,19 @@ pub enum KeyValue {
     BroadcastMessageTimestamp(BroadcastMessageID, u64),
     BroadcastMessage(Cursor, BroadcastMessage),
     #[cfg(feature = "watchtower")]
-    WatchtowerChannel(Hash256, ChannelData),
+    WatchtowerChannel(NodeId, Hash256, ChannelData),
+    #[cfg(feature = "watchtower")]
+    // Preimage record, the payment_hash in first position to allow fast retrieve
+    WatchtowerPreimage(Hash256, NodeId, Hash256),
+    #[cfg(feature = "watchtower")]
+    // Index of NodeId -> Preimage PaymentHash, which allows we query preimages of a node
+    WatchtowerNodePaymentHash(NodeId, Hash256),
     PaymentSession(Hash256, PaymentSession),
     PaymentHistoryTimedResult((OutPoint, Direction), TimedResult),
     PaymentCustomRecord(Hash256, PaymentCustomRecords),
     NetworkActorState(PeerId, PersistentNetworkActorState),
+    Attempt((Hash256, u64), Attempt),
+    HoldTlc((Hash256, Hash256, u64), u64),
 }
 
 pub trait StoreKeyValue {
@@ -225,10 +261,34 @@ impl StoreKeyValue for KeyValue {
             KeyValue::PaymentSession(payment_hash, _) => {
                 [&[PAYMENT_SESSION_PREFIX], payment_hash.as_ref()].concat()
             }
+            KeyValue::Attempt((payment_hash, attempt_id), _) => [
+                &[ATTEMPT_PREFIX],
+                payment_hash.as_ref(),
+                &attempt_id.to_le_bytes(),
+            ]
+            .concat(),
             #[cfg(feature = "watchtower")]
-            KeyValue::WatchtowerChannel(channel_id, _) => {
-                [&[WATCHTOWER_CHANNEL_PREFIX], channel_id.as_ref()].concat()
-            }
+            KeyValue::WatchtowerChannel(node_id, channel_id, _) => [
+                &[WATCHTOWER_CHANNEL_PREFIX],
+                node_id.as_ref(),
+                channel_id.as_ref(),
+            ]
+            .concat(),
+
+            #[cfg(feature = "watchtower")]
+            KeyValue::WatchtowerPreimage(payment_hash, node_id, _) => [
+                &[WATCHTOWER_PREIMAGE_PREFIX],
+                payment_hash.as_ref(),
+                node_id.as_ref(),
+            ]
+            .concat(),
+            #[cfg(feature = "watchtower")]
+            KeyValue::WatchtowerNodePaymentHash(node_id, payment_hash) => [
+                &[WATCHTOWER_NODE_PAYMENTHASH_PREFIX],
+                node_id.as_ref(),
+                payment_hash.as_ref(),
+            ]
+            .concat(),
             KeyValue::NetworkActorState(peer_id, _) => {
                 [&[PEER_ID_NETWORK_ACTOR_STATE_PREFIX], peer_id.as_bytes()].concat()
             }
@@ -249,6 +309,13 @@ impl StoreKeyValue for KeyValue {
             KeyValue::PaymentCustomRecord(payment_hash, _data) => {
                 [&[PAYMENT_CUSTOM_RECORD_PREFIX], payment_hash.as_ref()].concat()
             }
+            KeyValue::HoldTlc((payment_hash, channel_id, tlc_id), _hold_tlc) => [
+                &[HOLD_TLC_PREFIX],
+                payment_hash.as_ref(),
+                channel_id.as_ref(),
+                &tlc_id.to_le_bytes(),
+            ]
+            .concat(),
         }
     }
 
@@ -263,10 +330,15 @@ impl StoreKeyValue for KeyValue {
             KeyValue::PaymentSession(_, payment_session) => {
                 serialize_to_vec(payment_session, "PaymentSession")
             }
+            KeyValue::Attempt(_, attempt) => serialize_to_vec(attempt, "Attempt"),
             #[cfg(feature = "watchtower")]
-            KeyValue::WatchtowerChannel(_, channel_data) => {
+            KeyValue::WatchtowerChannel(_, _, channel_data) => {
                 serialize_to_vec(channel_data, "ChannelData")
             }
+            #[cfg(feature = "watchtower")]
+            KeyValue::WatchtowerPreimage(_, _, preimage) => serialize_to_vec(preimage, "Hash256"),
+            #[cfg(feature = "watchtower")]
+            KeyValue::WatchtowerNodePaymentHash(..) => Vec::new(),
             KeyValue::NetworkActorState(_, persistent_network_actor_state) => serialize_to_vec(
                 persistent_network_actor_state,
                 "PersistentNetworkActorState",
@@ -281,6 +353,7 @@ impl StoreKeyValue for KeyValue {
             KeyValue::PaymentCustomRecord(_, custom_records) => {
                 serialize_to_vec(custom_records, "PaymentCustomRecord")
             }
+            KeyValue::HoldTlc(_, expired_at) => serialize_to_vec(expired_at, "HoldTlc"),
         }
     }
 }
@@ -392,6 +465,48 @@ impl ChannelActorStateStore for Store {
         self.get(key)
             .map(|v| deserialize_from(v.as_ref(), "PaymentCustomRecord"))
     }
+
+    fn insert_payment_hold_tlc(&self, payment_hash: Hash256, hold_tlc: HoldTlc) {
+        let mut batch = self.batch();
+        batch.put_kv(KeyValue::HoldTlc(
+            (payment_hash, hold_tlc.channel_id, hold_tlc.tlc_id),
+            hold_tlc.hold_expire_at,
+        ));
+        batch.commit();
+    }
+
+    fn remove_payment_hold_tlc(&self, payment_hash: &Hash256, channel_id: &Hash256, tlc_id: u64) {
+        let prefix = [
+            &[HOLD_TLC_PREFIX],
+            payment_hash.as_ref(),
+            channel_id.as_ref(),
+            &tlc_id.to_le_bytes(),
+        ]
+        .concat();
+        let mut batch = self.batch();
+        batch.delete(prefix);
+        batch.commit();
+    }
+
+    fn get_payment_hold_tlcs(&self, payment_hash: Hash256) -> Vec<HoldTlc> {
+        let prefix = [&[HOLD_TLC_PREFIX], payment_hash.as_ref()].concat();
+        self.prefix_iterator(&prefix)
+            .map(|(key, value)| {
+                let (_, hold_tlc) = Self::parse_hold_tlc(&key, &value);
+                hold_tlc
+            })
+            .collect()
+    }
+
+    fn get_node_hold_tlcs(&self) -> HashMap<Hash256, Vec<HoldTlc>> {
+        let prefix = [HOLD_TLC_PREFIX];
+        self.prefix_iterator(&prefix)
+            .map(|(key, value)| Self::parse_hold_tlc(&key, &value))
+            .fold(HashMap::new(), |mut acc, (payment_hash, hold_tlc)| {
+                acc.entry(payment_hash).or_default().push(hold_tlc);
+                acc
+            })
+    }
 }
 
 impl InvoiceStore for Store {
@@ -460,13 +575,6 @@ impl PreimageStore for Store {
         self.get(key)
             .map(|v| deserialize_from(v.as_ref(), "Preimage"))
     }
-
-    fn search_preimage(&self, payment_hash_prefix: &[u8]) -> Option<Hash256> {
-        let prefix = [&[PREIMAGE_PREFIX], payment_hash_prefix].concat();
-        let mut iter = self.prefix_iterator(prefix.as_slice());
-        iter.next()
-            .map(|(_key, value)| deserialize_from(value.as_ref(), "Preimage"))
-    }
 }
 
 impl NetworkGraphStateStore for Store {
@@ -474,18 +582,16 @@ impl NetworkGraphStateStore for Store {
         let prefix = [&[PAYMENT_SESSION_PREFIX], payment_hash.as_ref()].concat();
         self.get(prefix)
             .map(|v| deserialize_from(v.as_ref(), "PaymentSession"))
+            .map(|session: PaymentSession| session.init_attempts(self))
     }
 
-    fn get_payment_sessions_with_status(
-        &self,
-        status: PaymentSessionStatus,
-    ) -> Vec<PaymentSession> {
+    fn get_payment_sessions_with_status(&self, status: PaymentStatus) -> Vec<PaymentSession> {
         let prefix = [PAYMENT_SESSION_PREFIX];
         self.prefix_iterator(&prefix)
             .filter_map(|(_key, value)| {
                 let session: PaymentSession = deserialize_from(value.as_ref(), "PaymentSession");
                 if session.status == status {
-                    Some(session)
+                    Some(session.init_attempts(self))
                 } else {
                     None
                 }
@@ -499,6 +605,57 @@ impl NetworkGraphStateStore for Store {
         batch.commit();
     }
 
+    fn get_attempt(&self, payment_hash: Hash256, attempt_id: u64) -> Option<Attempt> {
+        let key = [
+            &[ATTEMPT_PREFIX],
+            payment_hash.as_ref(),
+            &attempt_id.to_le_bytes(),
+        ]
+        .concat();
+        self.get(key)
+            .map(|v| deserialize_from(v.as_ref(), "Attempt"))
+    }
+
+    fn insert_attempt(&self, attempt: Attempt) {
+        assert_ne!(attempt.id, 0, "Attempt ID should not be zero");
+        let mut batch = self.batch();
+        batch.put_kv(KeyValue::Attempt(
+            (attempt.payment_hash, attempt.id),
+            attempt,
+        ));
+        batch.commit();
+    }
+
+    fn get_attempts(&self, payment_hash: Hash256) -> Vec<Attempt> {
+        let prefix = [&[ATTEMPT_PREFIX], payment_hash.as_ref()].concat();
+        self.prefix_iterator(&prefix)
+            .map(|(_key, value)| deserialize_from(value.as_ref(), "Attempt"))
+            .collect()
+    }
+
+    fn delete_attempts(&self, payment_hash: Hash256) {
+        let prefix = [&[ATTEMPT_PREFIX], payment_hash.as_ref()].concat();
+        let mut batch = self.batch();
+        for (key, _) in self.prefix_iterator(&prefix) {
+            batch.delete(key);
+        }
+        batch.commit();
+    }
+
+    fn get_attempts_with_statuses(&self, status: &[AttemptStatus]) -> Vec<Attempt> {
+        let prefix = [ATTEMPT_PREFIX];
+        self.prefix_iterator(&prefix)
+            .filter_map(|(_key, value)| {
+                let attempt: Attempt = deserialize_from(value.as_ref(), "Attempt");
+                if status.contains(&attempt.status) {
+                    Some(attempt)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
     fn insert_payment_history_result(
         &mut self,
         channel_outpoint: OutPoint,
@@ -510,6 +667,19 @@ impl NetworkGraphStateStore for Store {
             (channel_outpoint, direction),
             result,
         ));
+        batch.commit();
+    }
+
+    fn remove_channel_history(&mut self, channel_outpoint: &OutPoint) {
+        let prefix = [
+            &[PAYMENT_HISTORY_TIMED_RESULT_PREFIX],
+            channel_outpoint.as_slice(),
+        ]
+        .concat();
+        let mut batch = self.batch();
+        for (key, _) in self.prefix_iterator(&prefix) {
+            batch.delete(key);
+        }
         batch.commit();
     }
 
@@ -538,11 +708,17 @@ impl WatchtowerStore for Store {
 
     fn insert_watch_channel(
         &self,
+        node_id: NodeId,
         channel_id: Hash256,
         funding_tx_lock: Script,
         remote_settlement_data: SettlementData,
     ) {
-        let key = [&[WATCHTOWER_CHANNEL_PREFIX], channel_id.as_ref()].concat();
+        let key = [
+            &[WATCHTOWER_CHANNEL_PREFIX],
+            node_id.as_ref(),
+            channel_id.as_ref(),
+        ]
+        .concat();
         let value = serialize_to_vec(
             &ChannelData {
                 channel_id,
@@ -558,18 +734,29 @@ impl WatchtowerStore for Store {
         batch.commit();
     }
 
-    fn remove_watch_channel(&self, channel_id: Hash256) {
-        let key = [&[WATCHTOWER_CHANNEL_PREFIX], channel_id.as_ref()].concat();
+    fn remove_watch_channel(&self, node_id: NodeId, channel_id: Hash256) {
+        let key = [
+            &[WATCHTOWER_CHANNEL_PREFIX],
+            node_id.as_ref(),
+            channel_id.as_ref(),
+        ]
+        .concat();
         self.delete(key);
     }
 
     fn update_revocation(
         &self,
+        node_id: NodeId,
         channel_id: Hash256,
         revocation_data: RevocationData,
         remote_settlement_data: SettlementData,
     ) {
-        let key = [&[WATCHTOWER_CHANNEL_PREFIX], channel_id.as_ref()].concat();
+        let key = [
+            &[WATCHTOWER_CHANNEL_PREFIX],
+            node_id.as_ref(),
+            channel_id.as_ref(),
+        ]
+        .concat();
         if let Some(mut channel_data) = self
             .get(key)
             .map(|v| deserialize_from::<ChannelData>(v.as_ref(), "ChannelData"))
@@ -577,22 +764,92 @@ impl WatchtowerStore for Store {
             channel_data.remote_settlement_data = remote_settlement_data;
             channel_data.revocation_data = Some(revocation_data);
             let mut batch = self.batch();
-            batch.put_kv(KeyValue::WatchtowerChannel(channel_id, channel_data));
+            batch.put_kv(KeyValue::WatchtowerChannel(
+                node_id,
+                channel_id,
+                channel_data,
+            ));
             batch.commit();
         }
     }
 
-    fn update_local_settlement(&self, channel_id: Hash256, local_settlement_data: SettlementData) {
-        let key = [&[WATCHTOWER_CHANNEL_PREFIX], channel_id.as_ref()].concat();
+    fn update_local_settlement(
+        &self,
+        node_id: NodeId,
+        channel_id: Hash256,
+        local_settlement_data: SettlementData,
+    ) {
+        let key = [
+            &[WATCHTOWER_CHANNEL_PREFIX],
+            node_id.as_ref(),
+            channel_id.as_ref(),
+        ]
+        .concat();
         if let Some(mut channel_data) = self
             .get(key)
             .map(|v| deserialize_from::<ChannelData>(v.as_ref(), "ChannelData"))
         {
             channel_data.local_settlement_data = Some(local_settlement_data);
             let mut batch = self.batch();
-            batch.put_kv(KeyValue::WatchtowerChannel(channel_id, channel_data));
+            batch.put_kv(KeyValue::WatchtowerChannel(
+                node_id,
+                channel_id,
+                channel_data,
+            ));
             batch.commit();
         }
+    }
+
+    fn insert_watch_preimage(&self, node_id: NodeId, payment_hash: Hash256, preimage: Hash256) {
+        debug_assert_eq!(
+            payment_hash,
+            ckb_hash::blake2b_256(preimage).into(),
+            "wrong preimage"
+        );
+        let mut batch = self.batch();
+        batch.put_kv(KeyValue::WatchtowerPreimage(
+            payment_hash,
+            node_id.clone(),
+            preimage,
+        ));
+        batch.put_kv(KeyValue::WatchtowerNodePaymentHash(node_id, payment_hash));
+        batch.commit();
+    }
+
+    fn remove_watch_preimage(&self, node_id: NodeId, payment_hash: Hash256) {
+        let mut batch = self.batch();
+        batch.delete(
+            [
+                &[WATCHTOWER_PREIMAGE_PREFIX],
+                payment_hash.as_ref(),
+                node_id.as_ref(),
+            ]
+            .concat(),
+        );
+        batch.delete(
+            [
+                &[WATCHTOWER_NODE_PAYMENTHASH_PREFIX],
+                node_id.as_ref(),
+                payment_hash.as_ref(),
+            ]
+            .concat(),
+        );
+        batch.commit();
+    }
+
+    fn get_watch_preimage(&self, payment_hash: &Hash256) -> Option<Hash256> {
+        // The preimage is verified before insert_watch_preimage, so we can just pick one.
+        let prefix = [&[WATCHTOWER_PREIMAGE_PREFIX], payment_hash.as_ref()].concat();
+        let mut iter = self.prefix_iterator(prefix.as_slice());
+        iter.next()
+            .map(|(_key, value)| deserialize_from(value.as_ref(), "Preimage"))
+    }
+
+    fn search_preimage(&self, payment_hash_prefix: &[u8]) -> Option<Hash256> {
+        let prefix = [&[WATCHTOWER_PREIMAGE_PREFIX], payment_hash_prefix].concat();
+        let mut iter = self.prefix_iterator(prefix.as_slice());
+        iter.next()
+            .map(|(_key, value)| deserialize_from(value.as_ref(), "Preimage"))
     }
 }
 

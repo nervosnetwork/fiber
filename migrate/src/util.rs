@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::io::{stdin, stdout, Write};
 
+#[allow(dead_code)]
 pub(crate) fn convert<Old, New>(old: Old) -> New
 where
     Old: Serialize,

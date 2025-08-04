@@ -25,7 +25,4 @@ pub trait PreimageStore {
 
     /// Get a preimage from the store.
     fn get_preimage(&self, payment_hash: &Hash256) -> Option<Hash256>;
-
-    /// Search for the stored preimage with the given payment hash prefix, should be the first 20 bytes of the payment hash.
-    fn search_preimage(&self, payment_hash_prefix: &[u8]) -> Option<Hash256>;
 }

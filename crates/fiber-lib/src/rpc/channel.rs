@@ -20,11 +20,9 @@ use ckb_types::{
     H256,
 };
 #[cfg(not(target_arch = "wasm32"))]
-use jsonrpsee::{
-    core::async_trait,
-    proc_macros::rpc,
-    types::{error::CALL_EXECUTION_FAILED_CODE, ErrorObjectOwned},
-};
+use jsonrpsee::proc_macros::rpc;
+
+use jsonrpsee::types::{error::CALL_EXECUTION_FAILED_CODE, ErrorObjectOwned};
 use ractor::{call, ActorRef};
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
@@ -51,7 +49,7 @@ pub struct OpenChannelParams {
     /// The script used to receive the channel balance, an optional parameter, default value is the secp256k1_blake160_sighash_all script corresponding to the configured private key.
     pub shutdown_script: Option<Script>,
 
-    /// The delay time for the commitment transaction, must be an [EpochNumberWithFraction](https://github.com/nervosnetwork/rfcs/blob/master/rfcs/0017-tx-valid-since/e-i-l-encoding.png) in u64 format, an optional parameter, default value is 24 hours.
+    /// The delay time for the commitment transaction, must be an [EpochNumberWithFraction](https://github.com/nervosnetwork/rfcs/blob/master/rfcs/0017-tx-valid-since/e-i-l-encoding.png) in u64 format, an optional parameter, default value is 24 hours, which is 6 epochs.
     pub commitment_delay_epoch: Option<EpochNumberWithFraction>,
 
     /// The fee rate for the commitment transaction, an optional parameter.
@@ -63,6 +61,7 @@ pub struct OpenChannelParams {
     pub funding_fee_rate: Option<u64>,
 
     /// The expiry delta to forward a tlc, in milliseconds, default to 1 day, which is 24 * 60 * 60 * 1000 milliseconds
+    /// Expect it >= 2/3 commitment_delay_epoch, minimum is 16 hours.
     /// This parameter can be updated with rpc `update_channel` later.
     #[serde_as(as = "Option<U64Hex>")]
     pub tlc_expiry_delta: Option<u64>,
@@ -165,7 +164,7 @@ pub struct ListChannelsParams {
     pub include_closed: Option<bool>,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct ListChannelsResult {
     /// The list of channels
     pub channels: Vec<Channel>,
@@ -225,7 +224,7 @@ impl From<RawChannelState> for ChannelState {
 
 /// The channel data structure
 #[serde_as]
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct Channel {
     /// The channel ID
     pub channel_id: Hash256,
@@ -280,8 +279,10 @@ pub struct ShutdownChannelParams {
     /// The channel ID of the channel to shut down
     pub channel_id: Hash256,
     /// The script used to receive the channel balance, only support secp256k1_blake160_sighash_all script for now
+    /// default is `default_funding_lock_script` in `CkbConfig`
     pub close_script: Option<Script>,
     /// The fee rate for the closing transaction, the fee will be deducted from the closing initiator's channel balance
+    /// default is 1000 shannons/KW
     #[serde_as(as = "Option<U64Hex>")]
     pub fee_rate: Option<u64>,
     /// Whether to force the channel to close, when set to false, `close_script` and `fee_rate` should be set, default is false.
@@ -308,6 +309,7 @@ pub struct UpdateChannelParams {
 }
 
 /// RPC module for channel management.
+#[cfg(not(target_arch = "wasm32"))]
 #[rpc(server)]
 trait ChannelRpc {
     /// Attempts to open a channel with a peer.
@@ -356,13 +358,60 @@ impl<S> ChannelRpcServerImpl<S> {
         ChannelRpcServerImpl { actor, store }
     }
 }
-
-#[async_trait]
+#[cfg(not(target_arch = "wasm32"))]
+#[async_trait::async_trait]
 impl<S> ChannelRpcServer for ChannelRpcServerImpl<S>
 where
     S: ChannelActorStateStore + Send + Sync + 'static,
 {
+    /// Attempts to open a channel with a peer.
     async fn open_channel(
+        &self,
+        params: OpenChannelParams,
+    ) -> Result<OpenChannelResult, ErrorObjectOwned> {
+        self.open_channel(params).await
+    }
+
+    /// Accepts a channel opening request from a peer.
+    async fn accept_channel(
+        &self,
+        params: AcceptChannelParams,
+    ) -> Result<AcceptChannelResult, ErrorObjectOwned> {
+        self.accept_channel(params).await
+    }
+
+    /// Abandon a channel, this will remove the channel from the channel manager and DB.
+    /// Only channels not in Ready or Closed state can be abandoned.
+    async fn abandon_channel(&self, params: AbandonChannelParams) -> Result<(), ErrorObjectOwned> {
+        self.abandon_channel(params).await
+    }
+
+    /// Lists all channels.
+    async fn list_channels(
+        &self,
+        params: ListChannelsParams,
+    ) -> Result<ListChannelsResult, ErrorObjectOwned> {
+        self.list_channels(params).await
+    }
+
+    /// Shuts down a channel.
+    async fn shutdown_channel(
+        &self,
+        params: ShutdownChannelParams,
+    ) -> Result<(), ErrorObjectOwned> {
+        self.shutdown_channel(params).await
+    }
+
+    /// Updates a channel.
+    async fn update_channel(&self, params: UpdateChannelParams) -> Result<(), ErrorObjectOwned> {
+        self.update_channel(params).await
+    }
+}
+impl<S> ChannelRpcServerImpl<S>
+where
+    S: ChannelActorStateStore + Send + Sync + 'static,
+{
+    pub async fn open_channel(
         &self,
         params: OpenChannelParams,
     ) -> Result<OpenChannelResult, ErrorObjectOwned> {
@@ -396,7 +445,7 @@ where
         })
     }
 
-    async fn accept_channel(
+    pub async fn accept_channel(
         &self,
         params: AcceptChannelParams,
     ) -> Result<AcceptChannelResult, ErrorObjectOwned> {
@@ -421,7 +470,10 @@ where
         })
     }
 
-    async fn abandon_channel(&self, params: AbandonChannelParams) -> Result<(), ErrorObjectOwned> {
+    pub async fn abandon_channel(
+        &self,
+        params: AbandonChannelParams,
+    ) -> Result<(), ErrorObjectOwned> {
         let message = |rpc_reply| {
             NetworkActorMessage::Command(NetworkActorCommand::AbandonChannel(
                 params.channel_id,
@@ -431,7 +483,7 @@ where
         handle_actor_call!(self.actor, message, params)
     }
 
-    async fn list_channels(
+    pub async fn list_channels(
         &self,
         params: ListChannelsParams,
     ) -> Result<ListChannelsResult, ErrorObjectOwned> {
@@ -477,25 +529,22 @@ where
         Ok(ListChannelsResult { channels })
     }
 
-    async fn shutdown_channel(
+    pub async fn shutdown_channel(
         &self,
         params: ShutdownChannelParams,
     ) -> Result<(), ErrorObjectOwned> {
-        if params.force.unwrap_or_default() {
-            if params.close_script.is_some() || params.fee_rate.is_some() {
-                return Err(ErrorObjectOwned::owned(
-                    CALL_EXECUTION_FAILED_CODE,
-                    "close_script and fee_rate should not be set when force is true",
-                    Some(params),
-                ));
-            }
-        } else if params.close_script.is_none() || params.fee_rate.is_none() {
+        if params.force.unwrap_or_default()
+            && (params.close_script.is_some() || params.fee_rate.is_some())
+        {
             return Err(ErrorObjectOwned::owned(
                 CALL_EXECUTION_FAILED_CODE,
-                "close_script and fee_rate should be set when force is false",
+                "close_script and fee_rate should not be set when force is true",
                 Some(params),
             ));
         }
+
+        let close_script = params.close_script.clone().map(|s| s.into());
+        let fee_rate = params.fee_rate.map(FeeRate::from_u64);
 
         let message = |rpc_reply| -> NetworkActorMessage {
             NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
@@ -503,12 +552,8 @@ where
                     channel_id: params.channel_id,
                     command: ChannelCommand::Shutdown(
                         ShutdownCommand {
-                            close_script: params
-                                .close_script
-                                .clone()
-                                .map(Into::into)
-                                .unwrap_or_default(),
-                            fee_rate: params.fee_rate.map(FeeRate::from_u64).unwrap_or_default(),
+                            close_script,
+                            fee_rate,
                             force: params.force.unwrap_or_default(),
                         },
                         rpc_reply,
@@ -519,7 +564,10 @@ where
         handle_actor_call!(self.actor, message, params)
     }
 
-    async fn update_channel(&self, params: UpdateChannelParams) -> Result<(), ErrorObjectOwned> {
+    pub async fn update_channel(
+        &self,
+        params: UpdateChannelParams,
+    ) -> Result<(), ErrorObjectOwned> {
         let message = |rpc_reply| -> NetworkActorMessage {
             NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
                 ChannelCommandWithId {

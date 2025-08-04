@@ -2,12 +2,13 @@ use crate::{
     ckb::config::{UdtArgInfo, UdtCellDep, UdtCfgInfos, UdtDep, UdtScript},
     fiber::{
         config::AnnouncedNodeName,
+        features::FeatureVector,
         gen::{fiber as molecule_fiber, gossip},
         hash_algorithm::HashAlgorithm,
         types::{
             pack_hop_data, secp256k1_instance, unpack_hop_data, AddTlc, BroadcastMessageID, Cursor,
-            Hash256, NodeAnnouncement, PaymentHopData, PeeledOnionPacket, Privkey, Pubkey, TlcErr,
-            TlcErrPacket, TlcErrorCode, NO_SHARED_SECRET,
+            Hash256, NodeAnnouncement, NodeId, PaymentHopData, PeeledOnionPacket, Privkey, Pubkey,
+            TlcErr, TlcErrPacket, TlcErrorCode, NO_SHARED_SECRET,
         },
         PaymentCustomRecords,
     },
@@ -26,7 +27,7 @@ use molecule::prelude::{Builder, Byte, Entity};
 use secp256k1::{PublicKey, Secp256k1, SecretKey};
 use serde::Deserialize;
 use serde::Serialize;
-use tentacle::multiaddr::MultiAddr;
+use tentacle::{multiaddr::MultiAddr, secio::PeerId};
 
 use std::str::FromStr;
 
@@ -190,6 +191,70 @@ fn test_peeled_onion_packet() {
 }
 
 #[test]
+fn test_peeled_large_onion_packet() {
+    fn build_onion_packet(hops_num: usize) -> Result<(), String> {
+        let secp = Secp256k1::new();
+        let keys: Vec<Privkey> = std::iter::repeat_with(gen_rand_fiber_private_key)
+            .take(hops_num + 1)
+            .collect();
+        let mut hops_infos = vec![];
+
+        for key in keys.iter().take(hops_num) {
+            hops_infos.push(PaymentHopData {
+                amount: 2,
+                expiry: 3,
+                next_hop: Some(key.pubkey()),
+                funding_tx_hash: Hash256::default(),
+                hash_algorithm: HashAlgorithm::Sha256,
+                payment_preimage: None,
+                custom_records: None,
+            });
+        }
+        hops_infos.push(PaymentHopData {
+            amount: 8,
+            expiry: 9,
+            next_hop: None,
+            funding_tx_hash: Hash256::default(),
+            hash_algorithm: HashAlgorithm::Sha256,
+            payment_preimage: None,
+            custom_records: None,
+        });
+
+        let packet = PeeledOnionPacket::create(
+            gen_rand_fiber_private_key(),
+            hops_infos.clone(),
+            None,
+            &secp,
+        )
+        .map_err(|e| format!("create peeled packet error: {}", e))?;
+
+        let serialized = packet.serialize();
+        let deserialized = PeeledOnionPacket::deserialize(&serialized).expect("deserialize");
+
+        assert_eq!(packet, deserialized);
+
+        let mut now = Some(packet);
+        for i in 0..hops_infos.len() - 1 {
+            let packet = now.unwrap().peel(&keys[i], &secp).expect("peel");
+            assert_eq!(packet.current, hops_infos[i + 1]);
+            now = Some(packet.clone());
+        }
+        let last_packet = now.unwrap();
+        assert_eq!(last_packet.current, hops_infos[hops_infos.len() - 1]);
+        assert!(last_packet.is_last());
+        return Ok(());
+    }
+
+    // default PACKET_DATA_LEN is 6500
+    build_onion_packet(40).expect("build onion packet with 40 hops");
+    let res = build_onion_packet(41);
+    assert!(
+        res.is_err(),
+        "should fail to build onion packet with 41 hops"
+    );
+}
+
+#[test]
 fn test_tlc_fail_error() {
     let tlc_fail_detail = TlcErr::new(TlcErrorCode::InvalidOnionVersion);
     assert!(!tlc_fail_detail.error_code.is_node());
@@ -271,6 +336,7 @@ fn test_create_and_verify_node_announcement() {
     let privkey = gen_rand_fiber_private_key();
     let node_announcement = NodeAnnouncement::new(
         AnnouncedNodeName::from_string("node1").expect("valid name"),
+        FeatureVector::default(),
         vec![],
         &privkey,
         now_timestamp_as_millis_u64(),
@@ -288,6 +354,7 @@ fn test_serde_node_announcement() {
     let privkey = gen_rand_fiber_private_key();
     let node_announcement = NodeAnnouncement::new(
         AnnouncedNodeName::from_string("node1").expect("valid name"),
+        FeatureVector::default(),
         vec![],
         &privkey,
         now_timestamp_as_millis_u64(),
@@ -319,9 +386,10 @@ fn test_verify_hard_coded_node_announcement() {
         let node_id = privkey.pubkey();
         let mut node_announcement = NodeAnnouncement {
             signature: None,
-            features: 0,
+            features: FeatureVector::default(),
             timestamp: 1737451664358,
             node_id,
+            version: "1.0".to_string(),
             node_name: AnnouncedNodeName::from_string("fiber-1").expect("valid name"),
             addresses: vec![MultiAddr::from_str(
                 "/ip4/127.0.0.1/tcp/8344/p2p/QmbvRjJHAQDmj3cgnUBGQ5zVnGxUKwb2qJygwNs2wk41h8",
@@ -389,9 +457,10 @@ fn test_verify_hard_coded_node_announcement() {
         let privkey = gen_deterministic_fiber_private_key();
         let mut node_announcement = NodeAnnouncement {
             signature: None,
-            features: 0,
+            features: FeatureVector::default(),
             timestamp: 1737449487183,
             node_id: privkey.pubkey(),
+            version: "1.0".to_string(),
             node_name: AnnouncedNodeName::default(),
             addresses: vec![MultiAddr::from_str(
                 "/ip4/221.187.61.162/tcp/18228/p2p/QmSr3bkMcG9Fy3PAf3HdrxttAE6EiLxHitKJW6HmiV9o6U",
@@ -433,13 +502,13 @@ fn test_verify_hard_coded_node_announcement() {
 
     for (signature, message, node_announcement) in [
         (
-            "75a5419da26e24eace8426ed84180d7c340001c99f94e2657330361126d4f6854cf3c72c2632bf103361fbf3149535077d99e24833164d54b217e4daa2b4def5",
-            "8eea99f1c1a541b89c3ea84b5fed1a1311cd9c9e6490c9f9a1393348cf337855",
+            "80a0e9d4ed35eb76e086038983dfd2572e7298a795b4cde7b113d805eeb495192cf552e4cc631e73fee76c4f0479a33327488f8a99978a10e2583b7faba2cf61",
+            "044e5172e9a9d7b383c15f40d8dac30f86422e7082af2b4d7db7f5484b4a1701",
             node1(),
         ),
         (
-            "6bcab4422ae8bf96db20089c04e41d5ba2726bc60ef1c5bc10f3aea7e9f2d30c1f9d3e64a65bdb4878f0953de93c4b4a622bc2e82d37d833472dfe04ecbd56e2",
-            "a71050674b30dc5c0355d83f210ccce4ff07a8c4412142659817b0ae2308bd71",
+            "3a1eea2e372e5c3bc53d1c283d449afbfff029308fe59e111a23ad32163d2a6f58128e21083e128a05d34fb8c0068a1f4fa6e4ae12e370d3051591df151a957a",
+            "db96ac7278d1db7b03eefdc4d21c952e3aee8a4be87a82c8c0e66a87e8897a81",
             node2(),
         ),
     ] {
@@ -598,4 +667,18 @@ fn test_convert_payment_hop_data() {
         .build()
         .into();
     assert_eq!(None, payment_hop_data_modified.next_hop);
+}
+
+#[test]
+fn test_serde_node_id() {
+    let peer_id = PeerId::random();
+    let expected_str = serde_json::to_string(&peer_id.to_base58()).expect("serialize");
+    let node_id = NodeId::from_bytes(peer_id.into_bytes());
+    let node_id_str = serde_json::to_string(&node_id).expect("serialize");
+    assert_eq!(node_id_str, expected_str, "to base58");
+    assert_eq!(
+        node_id,
+        serde_json::from_str(&node_id_str).unwrap(),
+        "to NodeId"
+    );
 }

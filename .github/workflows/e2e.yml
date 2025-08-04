@@ -1,4 +1,4 @@
-on: [push, pull_request]
+on: [push, pull_request, workflow_dispatch]
 
 name: E2E tests
 
@@ -55,6 +55,7 @@ jobs:
           fi
 
       - name: Run e2e workflow
+        id: e2eTests
         run: |
           set -euo pipefail
           if [ ${{ matrix.workflow }} = "cross-chain-hub" ]; then
@@ -62,8 +63,8 @@ jobs:
           fi
 
           # Prebuild the program so that we can run the following script faster
-          cargo build
-          cd ./tests/deploy/udt-init && cargo build && cd -
+          cargo build --locked
+          cd ./tests/deploy/udt-init && cargo build --locked && cd -
           if [ ${{ matrix.workflow }} = "router-pay" ]; then
             export START_BOOTNODE=y
           fi
@@ -93,7 +94,7 @@ jobs:
 
           echo "Checking if all ports are open ... ${ports[@]}"
 
-          try_number=60
+          try_number=120
           count=0
           while [ $count -lt $try_number ]; do
             all_open=true
@@ -124,3 +125,8 @@ jobs:
           # -n means we will exit when any of the background processes exits.
           # https://www.gnu.org/software/bash/manual/bash.html#index-wait
           wait -n
+      - uses: actions/upload-artifact@v4
+        if: failure() && steps.e2eTests.outcome == 'failure'
+        with:
+          name: e2e-test-${{ matrix.workflow }}-logs
+          path: tests/nodes/*.log

@@ -107,7 +107,6 @@ fn main() {
             }
         }
     }
-
     let mut code = String::new();
     code.push_str(&format!(
         "    pub const LATEST_DB_VERSION: &str = \"{}\";\n",

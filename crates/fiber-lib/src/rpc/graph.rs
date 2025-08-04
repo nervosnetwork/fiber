@@ -13,9 +13,9 @@ use ckb_jsonrpc_types::{DepType, JsonBytes, OutPoint as OutPointWrapper, Script,
 use ckb_types::packed::OutPoint;
 use ckb_types::H256;
 #[cfg(not(target_arch = "wasm32"))]
-use jsonrpsee::{
-    core::async_trait, proc_macros::rpc, types::error::INVALID_PARAMS_CODE, types::ErrorObjectOwned,
-};
+use jsonrpsee::proc_macros::rpc;
+use jsonrpsee::{types::error::INVALID_PARAMS_CODE, types::ErrorObjectOwned};
+
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use std::sync::Arc;
@@ -135,12 +135,16 @@ impl From<ConfigUdtCfgInfos> for UdtCfgInfos {
 
 /// The Node information.
 #[serde_as]
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct NodeInfo {
     /// The name of the node.
     pub node_name: String,
+    /// The version of the node.
+    pub version: String,
     /// The addresses of the node.
     pub addresses: Vec<MultiAddr>,
+    /// The node features supported by the node.
+    pub features: Vec<String>,
     /// The identity public key of the node.
     pub node_id: Pubkey,
     #[serde_as(as = "U64Hex")]
@@ -160,9 +164,11 @@ impl From<super::super::fiber::graph::NodeInfo> for NodeInfo {
     fn from(value: super::super::fiber::graph::NodeInfo) -> Self {
         NodeInfo {
             node_name: value.node_name.to_string(),
+            version: value.version,
             addresses: value.addresses,
             node_id: value.node_id,
             timestamp: value.timestamp,
+            features: value.features.enabled_features_names(),
             chain_hash: get_chain_hash(),
             auto_accept_min_ckb_funding_amount: value.auto_accept_min_ckb_funding_amount,
             udt_cfg_infos: value.udt_cfg_infos.clone().into(),
@@ -170,7 +176,7 @@ impl From<super::super::fiber::graph::NodeInfo> for NodeInfo {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct GraphNodesResult {
     /// The list of nodes.
     pub nodes: Vec<NodeInfo>,
@@ -244,6 +250,7 @@ pub struct GraphChannelsResult {
 }
 
 /// RPC module for graph management.
+#[cfg(not(target_arch = "wasm32"))]
 #[rpc(server)]
 trait GraphRpc {
     /// Get the list of nodes in the network graph.
@@ -280,8 +287,8 @@ where
         }
     }
 }
-
-#[async_trait]
+#[cfg(not(target_arch = "wasm32"))]
+#[async_trait::async_trait]
 impl<S> GraphRpcServer for GraphRpcServerImpl<S>
 where
     S: NetworkGraphStateStore
@@ -292,7 +299,33 @@ where
         + Sync
         + 'static,
 {
+    /// Get the list of nodes in the network graph.
     async fn graph_nodes(
+        &self,
+        params: GraphNodesParams,
+    ) -> Result<GraphNodesResult, ErrorObjectOwned> {
+        self.graph_nodes(params).await
+    }
+
+    /// Get the list of channels in the network graph.
+    async fn graph_channels(
+        &self,
+        params: GraphChannelsParams,
+    ) -> Result<GraphChannelsResult, ErrorObjectOwned> {
+        self.graph_channels(params).await
+    }
+}
+impl<S> GraphRpcServerImpl<S>
+where
+    S: NetworkGraphStateStore
+        + ChannelActorStateStore
+        + GossipMessageStore
+        + Clone
+        + Send
+        + Sync
+        + 'static,
+{
+    pub async fn graph_nodes(
         &self,
         params: GraphNodesParams,
     ) -> Result<GraphNodesResult, ErrorObjectOwned> {
@@ -317,7 +350,7 @@ where
         Ok(GraphNodesResult { nodes, last_cursor })
     }
 
-    async fn graph_channels(
+    pub async fn graph_channels(
         &self,
         params: GraphChannelsParams,
     ) -> Result<GraphChannelsResult, ErrorObjectOwned> {

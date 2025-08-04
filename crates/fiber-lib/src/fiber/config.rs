@@ -1,3 +1,5 @@
+#[cfg(target_arch = "wasm32")]
+use crate::fiber::KeyPair;
 use crate::{ckb::contracts::Contract, Result};
 use ckb_jsonrpc_types::{CellDep, Script};
 use clap_serde_derive::{
@@ -9,6 +11,8 @@ use once_cell::sync::OnceCell;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::{fs, path::PathBuf, str::FromStr};
 use tentacle::secio::{PublicKey, SecioKeyPair};
+
+use super::features::FeatureVector;
 
 pub const CKB_SHANNONS: u64 = 100_000_000; // 1 CKB = 10 ^ 8 shannons
 pub const DEFAULT_MIN_SHUTDOWN_FEE: u64 = CKB_SHANNONS; // 1 CKB prepared for shutdown transaction fee
@@ -28,17 +32,23 @@ pub const DEFAULT_OPEN_CHANNEL_AUTO_ACCEPT_MIN_CKB_FUNDING_AMOUNT: u64 = 100 * C
 /// The expiry delta to forward a tlc, in milliseconds, default to 1 day.
 pub const DEFAULT_TLC_EXPIRY_DELTA: u64 = 24 * 60 * 60 * 1000;
 
-/// The minimal expiry delta to forward a tlc, in milliseconds. 15 minutes.
-pub const MIN_TLC_EXPIRY_DELTA: u64 = 15 * 60 * 1000; // 15 minutes
+/// 4 hours for each epoch
+pub const MILLI_SECONDS_PER_EPOCH: u64 = 4 * 60 * 60 * 1000;
+
+#[cfg(not(debug_assertions))]
+/// The minimal expiry delta to forward a tlc, in milliseconds. 16 hours
+/// expect it >= 2/3 commitment_delay_epoch, default DEFAULT_COMMITMENT_DELAY_EPOCHS is 6 epoch
+/// so 2/3 * 6 = 4 epoch, 4 * 4 hours = 16 hours
+pub const MIN_TLC_EXPIRY_DELTA: u64 = 4 * MILLI_SECONDS_PER_EPOCH;
+#[cfg(debug_assertions)]
+// 5 seconds for testing environment
+pub const MIN_TLC_EXPIRY_DELTA: u64 = 5 * 1000;
 
 /// The maximum expiry delta for a payment, in milliseconds. 2 weeks
 pub const MAX_PAYMENT_TLC_EXPIRY_LIMIT: u64 = 14 * 24 * 60 * 60 * 1000; // 2 weeks
 
 /// The minimal value of a tlc. 0 means no minimal value.
 pub const DEFAULT_TLC_MIN_VALUE: u128 = 0;
-
-/// The maximal value of a tlc. 0 means no maximal value.
-pub const DEFAULT_TLC_MAX_VALUE: u128 = 0;
 
 /// The fee for forwarding peer tlcs. Proportional to the amount of the forwarded tlc. The unit is millionths of the amount. 1000 means 0.1%.
 pub const DEFAULT_TLC_FEE_PROPORTIONAL_MILLIONTHS: u128 = 1000;
@@ -48,6 +58,12 @@ pub const DEFAULT_AUTO_ANNOUNCE_NODE: bool = true;
 
 /// The interval to reannounce NodeAnnouncement, in seconds.
 pub const DEFAULT_ANNOUNCE_NODE_INTERVAL_SECONDS: u64 = 3600;
+
+/// The maximum time to hold a tlc, in milliseconds.
+#[cfg(not(debug_assertions))]
+pub const DEFAULT_HOLD_TLC_TIMEOUT: u64 = 120 * 1000;
+#[cfg(debug_assertions)]
+pub const DEFAULT_HOLD_TLC_TIMEOUT: u64 = 20 * 1000;
 
 /// The interval to maintain the gossip network, in milli-seconds.
 #[cfg(not(any(test, feature = "bench")))]
@@ -63,6 +79,9 @@ pub const DEFAULT_MAX_INBOUND_PEERS: usize = 16;
 /// Minimal number of outbound connections.
 pub const DEFAULT_MIN_OUTBOUND_PEERS: usize = 8;
 
+/// Funding timeout in seconds since the channel is created.
+pub const DEFAULT_FUNDING_TIMEOUT_SECONDS: u64 = 60 * 60 * 24; // 1 day
+
 /// The interval to maintain the gossip network, in milli-seconds.
 #[cfg(not(any(test, feature = "bench")))]
 pub const DEFAULT_GOSSIP_STORE_MAINTENANCE_INTERVAL_MS: u64 = 20 * 1000;
@@ -73,6 +92,10 @@ pub const DEFAULT_GOSSIP_STORE_MAINTENANCE_INTERVAL_MS: u64 = 50;
 
 /// Whether to sync the network graph from the network. true means syncing.
 pub const DEFAULT_SYNC_NETWORK_GRAPH: bool = true;
+
+/// The maximum number of parts for a multi-part payment.
+pub const DEFAULT_MAX_PARTS: u64 = 16;
+pub const PAYMENT_MAX_PARTS_LIMIT: u64 = 64;
 
 // See comment in `LdkConfig` for why do we need to specify both name and long,
 // and prefix them with `ckb-`/`CKB_`.
@@ -290,6 +313,15 @@ pub struct FiberConfig {
     )]
     pub standalone_watchtower_rpc_url: Option<String>,
 
+    /// The RPC token of the standalone watchtower. [default: None]
+    #[arg(
+        name = "FIBER_STANDALONE_WATCHTOWER_TOKEN",
+        long = "fiber-standalone-watchtower-token",
+        env,
+        help = "The RPC token of the standalone watchtower. [default: None]"
+    )]
+    pub standalone_watchtower_token: Option<String>,
+
     /// Disable built-in watchtower actor. [default: false]
     #[arg(
         name = "FIBER_DISABLE_BUILT_IN_WATCHTOWER",
@@ -298,6 +330,65 @@ pub struct FiberConfig {
         help = "Disable built-in watchtower actor. [default: false]"
     )]
     pub disable_built_in_watchtower: Option<bool>,
+    #[cfg(target_arch = "wasm32")]
+    #[arg(skip)]
+    pub wasm_key_pair: Option<KeyPair>,
+
+    /// Max allowed number of channels to be accepted from one peer. [default: 20]
+    #[arg(
+        name = "FIBER_TO_BE_ACCEPTED_CHANNELS_NUMBER_LIMIT",
+        long = "fiber-to-be-accepted-channels-number-limit",
+        env,
+        help = "Max allowed number of channels to be accepted from one peer. [default: 20]"
+    )]
+    pub to_be_accepted_channels_number_limit: Option<usize>,
+
+    /// Max allowed storage bytes of channels to be accepted from one peer. [default: 50KB]
+    #[arg(
+        name = "FIBER_TO_BE_ACCEPTED_CHANNELS_BYTESS_LIMIT",
+        long = "fiber-to-be-accepted-channels-bytes-limit",
+        env,
+        help = "Max allowed bytes of channels to be accepted from one peer. [default: 50KB]"
+    )]
+    pub to_be_accepted_channels_bytes_limit: Option<usize>,
+
+    /// Default timeout to auto close a funding channel. [default: 1 day]
+    #[arg(
+        name = "FIBER_FUNDING_TIMEOUT_SECONDS",
+        long = "fiber-funding-timeout-seconds",
+        env,
+        help = "Default timeout to auto close a funding channel. [default: 1 day]"
+    )]
+    #[default(DEFAULT_FUNDING_TIMEOUT_SECONDS)]
+    pub funding_timeout_seconds: u64,
+
+    /// Use an external shell command to build funding tx.
+    ///
+    /// The command is executed by `cmd /C` in Windows, and by `sh -c` in other systems.
+    ///
+    /// The command receives a JSON object from stdin with following keys:
+    /// - `tx`: The current `Transaction`. This can be `null` for the first funding request.
+    /// - `request`: The `FundingRequest` to fulfil.
+    ///
+    /// The command MUST use non-zero exit status to indicate failures and print error message to stderr.
+    /// It MUST print Transaction in JSON to stdout on success building.
+    #[arg(
+        name = "FIBER_FUNDING_TX_SHELL_BUILDER",
+        long = "fiber-funding-tx-shell-builder",
+        env,
+        help = "Use an external shell command to build funding tx. [default: None]"
+    )]
+    pub funding_tx_shell_builder: Option<String>,
+
+    /// Listen to WebSocket on the same TCP port
+    #[arg(
+        name = "FIBER_REUSE_PORT_FOR_WEBSOCKET",
+        long = "fiber-reuse-port-for-websocket",
+        env,
+        help = "Whether to re-use the same TCP port to listen for WebSocket [default: true]"
+    )]
+    #[default(true)]
+    pub reuse_port_for_websocket: bool,
 }
 
 /// Must be a valid utf-8 string of length maximal length 32 bytes.
@@ -387,9 +478,18 @@ impl FiberConfig {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn inner_read_or_generate_secret_key(&self) -> Result<super::KeyPair> {
         self.create_base_dir()?;
         super::key::KeyPair::read_or_generate(&self.base_dir().join("sk")).map_err(Into::into)
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn inner_read_or_generate_secret_key(&self) -> Result<super::KeyPair> {
+        return Ok(self
+            .wasm_key_pair
+            .clone()
+            .expect("SecretKey on wasm not found!"));
     }
 
     // `OnceCell` will make all actors in UI tests use the same secret key.
@@ -408,6 +508,7 @@ impl FiberConfig {
 
     pub fn store_path(&self) -> PathBuf {
         let path = self.base_dir().join("store");
+        #[cfg(not(target_arch = "wasm32"))]
         if !path.exists() {
             fs::create_dir_all(&path).expect("create store directory");
         }
@@ -491,6 +592,12 @@ impl FiberConfig {
     pub fn sync_network_graph(&self) -> bool {
         self.sync_network_graph
             .unwrap_or(DEFAULT_SYNC_NETWORK_GRAPH)
+    }
+
+    pub fn gen_node_features(&self) -> FeatureVector {
+        // TODO: override default features from config settings
+        // ...
+        FeatureVector::default()
     }
 }
 

@@ -1,4 +1,4 @@
-use ractor::{async_trait as rasync_trait, Actor, ActorProcessingErr, ActorRef, SupervisionEvent};
+use ractor::{Actor, ActorProcessingErr, ActorRef, SupervisionEvent};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::debug;
 
@@ -23,7 +23,8 @@ impl RootActor {
     }
 }
 
-#[rasync_trait]
+#[cfg_attr(target_arch="wasm32",async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl Actor for RootActor {
     type Msg = RootActorMessage;
     type State = ();
@@ -31,11 +32,13 @@ impl Actor for RootActor {
 
     /// Spawn a thread that waits for token to be cancelled,
     /// after that kill all sub actors.
+    #[allow(unused)]
     async fn pre_start(
         &self,
         myself: ActorRef<Self::Msg>,
         (tracker, token): Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
+        #[cfg(not(target_arch = "wasm32"))]
         tracker.spawn(async move {
             token.cancelled().await;
             debug!("Shutting down root actor due to cancellation token");

@@ -1,6 +1,6 @@
 use crate::fiber::graph::RouterHop;
 #[cfg(debug_assertions)]
-use crate::fiber::graph::SessionRouteNode as InternalSessionRouteNode;
+use crate::fiber::graph::SessionRoute;
 use crate::fiber::network::BuildRouterCommand;
 use crate::fiber::network::HopRequire;
 use crate::fiber::network::SendPaymentWithRouterCommand;
@@ -8,7 +8,7 @@ use crate::fiber::serde_utils::SliceHex;
 use crate::fiber::serde_utils::U32Hex;
 use crate::fiber::{
     channel::ChannelActorStateStore,
-    graph::PaymentSessionStatus,
+    graph::PaymentStatus,
     network::{HopHint as NetworkHopHint, SendPaymentCommand},
     serde_utils::{EntityHex, U128Hex, U64Hex},
     types::{Hash256, Pubkey},
@@ -18,11 +18,10 @@ use crate::{handle_actor_call, log_and_error};
 use ckb_jsonrpc_types::Script;
 use ckb_types::packed::OutPoint;
 #[cfg(not(target_arch = "wasm32"))]
-use jsonrpsee::{
-    core::async_trait,
-    proc_macros::rpc,
-    types::{error::CALL_EXECUTION_FAILED_CODE, ErrorObjectOwned},
-};
+use jsonrpsee::proc_macros::rpc;
+use jsonrpsee::types::error::CALL_EXECUTION_FAILED_CODE;
+use jsonrpsee::types::ErrorObjectOwned;
+
 use serde_with::serde_as;
 use std::collections::HashMap;
 
@@ -42,7 +41,7 @@ pub struct GetPaymentCommandResult {
     /// The payment hash of the payment
     pub payment_hash: Hash256,
     /// The status of the payment
-    pub status: PaymentSessionStatus,
+    pub status: PaymentStatus,
     #[serde_as(as = "U64Hex")]
     /// The time the payment was created at, in milliseconds from UNIX epoch
     created_at: u64,
@@ -62,40 +61,15 @@ pub struct GetPaymentCommandResult {
     /// The router is a list of nodes that the payment will go through.
     /// We store in the payment session and then will use it to track the payment history.
     /// The router is a list of nodes that the payment will go through.
+    /// If the payment adapted MPP (multi-part payment), the routers will be a list of nodes
     /// For example:
     ///    `A(amount, channel) -> B -> C -> D`
     /// means A will send `amount` with `channel` to B.
-    router: Vec<SessionRouteNode>,
-}
-
-/// The node and channel information in a payment route hop
-#[cfg(debug_assertions)]
-#[serde_as]
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct SessionRouteNode {
-    /// the public key of the node
-    pub pubkey: Pubkey,
-    /// the amount for this hop
-    #[serde_as(as = "U128Hex")]
-    pub amount: u128,
-    /// the channel outpoint for this hop
-    #[serde_as(as = "EntityHex")]
-    pub channel_outpoint: OutPoint,
-}
-
-#[cfg(debug_assertions)]
-impl From<InternalSessionRouteNode> for SessionRouteNode {
-    fn from(node: InternalSessionRouteNode) -> Self {
-        SessionRouteNode {
-            pubkey: node.pubkey,
-            amount: node.amount,
-            channel_outpoint: node.channel_outpoint,
-        }
-    }
+    routers: Vec<SessionRoute>,
 }
 
 /// The custom records to be included in the payment.
-/// The key is hex encoded of `u32`, and the value is hex encoded of `Vec<u8>` with `0x` as prefix.
+/// The key is hex encoded of `u32`, it's range limited in 0 ~ 65535, and the value is hex encoded of `Vec<u8>` with `0x` as prefix.
 /// For example:
 /// ```json
 /// "custom_records": {
@@ -279,7 +253,9 @@ pub struct SendPaymentWithRouterParams {
     pub invoice: Option<String>,
 
     /// Some custom records for the payment which contains a map of u32 to Vec<u8>
-    /// The key is the record type, and the value is the serialized data
+    /// The key is the record type, and the value is the serialized data.
+    /// Limits: the sum size of values can not exceed 2048 bytes.
+    ///
     /// For example:
     /// ```json
     /// "custom_records": {
@@ -304,6 +280,7 @@ pub struct SendPaymentWithRouterParams {
 }
 
 /// RPC module for channel management.
+#[cfg(not(target_arch = "wasm32"))]
 #[rpc(server)]
 trait PaymentRpc {
     /// Sends a payment to a peer.
@@ -347,13 +324,52 @@ impl<S> PaymentRpcServerImpl<S> {
         PaymentRpcServerImpl { actor, _store }
     }
 }
-
-#[async_trait]
+#[cfg(not(target_arch = "wasm32"))]
+#[async_trait::async_trait]
 impl<S> PaymentRpcServer for PaymentRpcServerImpl<S>
 where
     S: ChannelActorStateStore + Send + Sync + 'static,
 {
+    /// Sends a payment to a peer.
     async fn send_payment(
+        &self,
+        params: SendPaymentCommandParams,
+    ) -> Result<GetPaymentCommandResult, ErrorObjectOwned> {
+        self.send_payment(params).await
+    }
+
+    /// Retrieves a payment.
+    async fn get_payment(
+        &self,
+        params: GetPaymentCommandParams,
+    ) -> Result<GetPaymentCommandResult, ErrorObjectOwned> {
+        self.get_payment(params).await
+    }
+
+    /// Builds a router with a list of pubkeys and required channels.
+    async fn build_router(
+        &self,
+        params: BuildRouterParams,
+    ) -> Result<BuildPaymentRouterResult, ErrorObjectOwned> {
+        self.build_router(params).await
+    }
+
+    /// Sends a payment to a peer with specified router
+    /// This method differs from SendPayment in that it allows users to specify a full route manually.
+    /// This can be used for things like rebalancing.
+    async fn send_payment_with_router(
+        &self,
+        params: SendPaymentWithRouterParams,
+    ) -> Result<GetPaymentCommandResult, ErrorObjectOwned> {
+        self.send_payment_with_router(params).await
+    }
+}
+
+impl<S> PaymentRpcServerImpl<S>
+where
+    S: ChannelActorStateStore + Send + Sync + 'static,
+{
+    pub async fn send_payment(
         &self,
         params: SendPaymentCommandParams,
     ) -> Result<GetPaymentCommandResult, ErrorObjectOwned> {
@@ -393,11 +409,11 @@ where
                 .custom_records
                 .map(|records| PaymentCustomRecords { data: records.data }),
             #[cfg(debug_assertions)]
-            router: response.router.nodes.into_iter().map(Into::into).collect(),
+            routers: response.routers.clone(),
         })
     }
 
-    async fn get_payment(
+    pub async fn get_payment(
         &self,
         params: GetPaymentCommandParams,
     ) -> Result<GetPaymentCommandResult, ErrorObjectOwned> {
@@ -418,11 +434,11 @@ where
                 .custom_records
                 .map(|records| PaymentCustomRecords { data: records.data }),
             #[cfg(debug_assertions)]
-            router: response.router.nodes.into_iter().map(Into::into).collect(),
+            routers: response.routers.clone(),
         })
     }
 
-    async fn build_router(
+    pub async fn build_router(
         &self,
         params: BuildRouterParams,
     ) -> Result<BuildPaymentRouterResult, ErrorObjectOwned> {
@@ -443,7 +459,7 @@ where
         })
     }
 
-    async fn send_payment_with_router(
+    pub async fn send_payment_with_router(
         &self,
         params: SendPaymentWithRouterParams,
     ) -> Result<GetPaymentCommandResult, ErrorObjectOwned> {
@@ -472,7 +488,7 @@ where
                 .custom_records
                 .map(|records| PaymentCustomRecords { data: records.data }),
             #[cfg(debug_assertions)]
-            router: response.router.nodes.into_iter().map(Into::into).collect(),
+            routers: response.routers.clone(),
         })
     }
 }

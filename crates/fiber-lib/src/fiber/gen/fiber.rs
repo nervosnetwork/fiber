@@ -4998,6 +4998,269 @@ impl molecule::prelude::Builder for CustomRecordsBuilder {
     }
 }
 #[derive(Clone)]
+pub struct Init(molecule::bytes::Bytes);
+impl ::core::fmt::LowerHex for Init {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        use molecule::hex_string;
+        if f.alternate() {
+            write!(f, "0x")?;
+        }
+        write!(f, "{}", hex_string(self.as_slice()))
+    }
+}
+impl ::core::fmt::Debug for Init {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{}({:#x})", Self::NAME, self)
+    }
+}
+impl ::core::fmt::Display for Init {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{} {{ ", Self::NAME)?;
+        write!(f, "{}: {}", "features", self.features())?;
+        write!(f, ", {}: {}", "chain_hash", self.chain_hash())?;
+        let extra_count = self.count_extra_fields();
+        if extra_count != 0 {
+            write!(f, ", .. ({} fields)", extra_count)?;
+        }
+        write!(f, " }}")
+    }
+}
+impl ::core::default::Default for Init {
+    fn default() -> Self {
+        let v = molecule::bytes::Bytes::from_static(&Self::DEFAULT_VALUE);
+        Init::new_unchecked(v)
+    }
+}
+impl Init {
+    const DEFAULT_VALUE: [u8; 48] = [
+        48, 0, 0, 0, 12, 0, 0, 0, 16, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ];
+    pub const FIELD_COUNT: usize = 2;
+    pub fn total_size(&self) -> usize {
+        molecule::unpack_number(self.as_slice()) as usize
+    }
+    pub fn field_count(&self) -> usize {
+        if self.total_size() == molecule::NUMBER_SIZE {
+            0
+        } else {
+            (molecule::unpack_number(&self.as_slice()[molecule::NUMBER_SIZE..]) as usize / 4) - 1
+        }
+    }
+    pub fn count_extra_fields(&self) -> usize {
+        self.field_count() - Self::FIELD_COUNT
+    }
+    pub fn has_extra_fields(&self) -> bool {
+        Self::FIELD_COUNT != self.field_count()
+    }
+    pub fn features(&self) -> Bytes {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[4..]) as usize;
+        let end = molecule::unpack_number(&slice[8..]) as usize;
+        Bytes::new_unchecked(self.0.slice(start..end))
+    }
+    pub fn chain_hash(&self) -> Byte32 {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[8..]) as usize;
+        if self.has_extra_fields() {
+            let end = molecule::unpack_number(&slice[12..]) as usize;
+            Byte32::new_unchecked(self.0.slice(start..end))
+        } else {
+            Byte32::new_unchecked(self.0.slice(start..))
+        }
+    }
+    pub fn as_reader<'r>(&'r self) -> InitReader<'r> {
+        InitReader::new_unchecked(self.as_slice())
+    }
+}
+impl molecule::prelude::Entity for Init {
+    type Builder = InitBuilder;
+    const NAME: &'static str = "Init";
+    fn new_unchecked(data: molecule::bytes::Bytes) -> Self {
+        Init(data)
+    }
+    fn as_bytes(&self) -> molecule::bytes::Bytes {
+        self.0.clone()
+    }
+    fn as_slice(&self) -> &[u8] {
+        &self.0[..]
+    }
+    fn from_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
+        InitReader::from_slice(slice).map(|reader| reader.to_entity())
+    }
+    fn from_compatible_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
+        InitReader::from_compatible_slice(slice).map(|reader| reader.to_entity())
+    }
+    fn new_builder() -> Self::Builder {
+        ::core::default::Default::default()
+    }
+    fn as_builder(self) -> Self::Builder {
+        Self::new_builder()
+            .features(self.features())
+            .chain_hash(self.chain_hash())
+    }
+}
+#[derive(Clone, Copy)]
+pub struct InitReader<'r>(&'r [u8]);
+impl<'r> ::core::fmt::LowerHex for InitReader<'r> {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        use molecule::hex_string;
+        if f.alternate() {
+            write!(f, "0x")?;
+        }
+        write!(f, "{}", hex_string(self.as_slice()))
+    }
+}
+impl<'r> ::core::fmt::Debug for InitReader<'r> {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{}({:#x})", Self::NAME, self)
+    }
+}
+impl<'r> ::core::fmt::Display for InitReader<'r> {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{} {{ ", Self::NAME)?;
+        write!(f, "{}: {}", "features", self.features())?;
+        write!(f, ", {}: {}", "chain_hash", self.chain_hash())?;
+        let extra_count = self.count_extra_fields();
+        if extra_count != 0 {
+            write!(f, ", .. ({} fields)", extra_count)?;
+        }
+        write!(f, " }}")
+    }
+}
+impl<'r> InitReader<'r> {
+    pub const FIELD_COUNT: usize = 2;
+    pub fn total_size(&self) -> usize {
+        molecule::unpack_number(self.as_slice()) as usize
+    }
+    pub fn field_count(&self) -> usize {
+        if self.total_size() == molecule::NUMBER_SIZE {
+            0
+        } else {
+            (molecule::unpack_number(&self.as_slice()[molecule::NUMBER_SIZE..]) as usize / 4) - 1
+        }
+    }
+    pub fn count_extra_fields(&self) -> usize {
+        self.field_count() - Self::FIELD_COUNT
+    }
+    pub fn has_extra_fields(&self) -> bool {
+        Self::FIELD_COUNT != self.field_count()
+    }
+    pub fn features(&self) -> BytesReader<'r> {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[4..]) as usize;
+        let end = molecule::unpack_number(&slice[8..]) as usize;
+        BytesReader::new_unchecked(&self.as_slice()[start..end])
+    }
+    pub fn chain_hash(&self) -> Byte32Reader<'r> {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[8..]) as usize;
+        if self.has_extra_fields() {
+            let end = molecule::unpack_number(&slice[12..]) as usize;
+            Byte32Reader::new_unchecked(&self.as_slice()[start..end])
+        } else {
+            Byte32Reader::new_unchecked(&self.as_slice()[start..])
+        }
+    }
+}
+impl<'r> molecule::prelude::Reader<'r> for InitReader<'r> {
+    type Entity = Init;
+    const NAME: &'static str = "InitReader";
+    fn to_entity(&self) -> Self::Entity {
+        Self::Entity::new_unchecked(self.as_slice().to_owned().into())
+    }
+    fn new_unchecked(slice: &'r [u8]) -> Self {
+        InitReader(slice)
+    }
+    fn as_slice(&self) -> &'r [u8] {
+        self.0
+    }
+    fn verify(slice: &[u8], compatible: bool) -> molecule::error::VerificationResult<()> {
+        use molecule::verification_error as ve;
+        let slice_len = slice.len();
+        if slice_len < molecule::NUMBER_SIZE {
+            return ve!(Self, HeaderIsBroken, molecule::NUMBER_SIZE, slice_len);
+        }
+        let total_size = molecule::unpack_number(slice) as usize;
+        if slice_len != total_size {
+            return ve!(Self, TotalSizeNotMatch, total_size, slice_len);
+        }
+        if slice_len < molecule::NUMBER_SIZE * 2 {
+            return ve!(Self, HeaderIsBroken, molecule::NUMBER_SIZE * 2, slice_len);
+        }
+        let offset_first = molecule::unpack_number(&slice[molecule::NUMBER_SIZE..]) as usize;
+        if offset_first % molecule::NUMBER_SIZE != 0 || offset_first < molecule::NUMBER_SIZE * 2 {
+            return ve!(Self, OffsetsNotMatch);
+        }
+        if slice_len < offset_first {
+            return ve!(Self, HeaderIsBroken, offset_first, slice_len);
+        }
+        let field_count = offset_first / molecule::NUMBER_SIZE - 1;
+        if field_count < Self::FIELD_COUNT {
+            return ve!(Self, FieldCountNotMatch, Self::FIELD_COUNT, field_count);
+        } else if !compatible && field_count > Self::FIELD_COUNT {
+            return ve!(Self, FieldCountNotMatch, Self::FIELD_COUNT, field_count);
+        };
+        let mut offsets: Vec<usize> = slice[molecule::NUMBER_SIZE..offset_first]
+            .chunks_exact(molecule::NUMBER_SIZE)
+            .map(|x| molecule::unpack_number(x) as usize)
+            .collect();
+        offsets.push(total_size);
+        if offsets.windows(2).any(|i| i[0] > i[1]) {
+            return ve!(Self, OffsetsNotMatch);
+        }
+        BytesReader::verify(&slice[offsets[0]..offsets[1]], compatible)?;
+        Byte32Reader::verify(&slice[offsets[1]..offsets[2]], compatible)?;
+        Ok(())
+    }
+}
+#[derive(Clone, Debug, Default)]
+pub struct InitBuilder {
+    pub(crate) features: Bytes,
+    pub(crate) chain_hash: Byte32,
+}
+impl InitBuilder {
+    pub const FIELD_COUNT: usize = 2;
+    pub fn features(mut self, v: Bytes) -> Self {
+        self.features = v;
+        self
+    }
+    pub fn chain_hash(mut self, v: Byte32) -> Self {
+        self.chain_hash = v;
+        self
+    }
+}
+impl molecule::prelude::Builder for InitBuilder {
+    type Entity = Init;
+    const NAME: &'static str = "InitBuilder";
+    fn expected_length(&self) -> usize {
+        molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1)
+            + self.features.as_slice().len()
+            + self.chain_hash.as_slice().len()
+    }
+    fn write<W: molecule::io::Write>(&self, writer: &mut W) -> molecule::io::Result<()> {
+        let mut total_size = molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1);
+        let mut offsets = Vec::with_capacity(Self::FIELD_COUNT);
+        offsets.push(total_size);
+        total_size += self.features.as_slice().len();
+        offsets.push(total_size);
+        total_size += self.chain_hash.as_slice().len();
+        writer.write_all(&molecule::pack_number(total_size as molecule::Number))?;
+        for offset in offsets.into_iter() {
+            writer.write_all(&molecule::pack_number(offset as molecule::Number))?;
+        }
+        writer.write_all(self.features.as_slice())?;
+        writer.write_all(self.chain_hash.as_slice())?;
+        Ok(())
+    }
+    fn build(&self) -> Self::Entity {
+        let mut inner = Vec::with_capacity(self.expected_length());
+        self.write(&mut inner)
+            .unwrap_or_else(|_| panic!("{} build should be ok", Self::NAME));
+        Init::new_unchecked(inner.into())
+    }
+}
+#[derive(Clone)]
 pub struct OpenChannel(molecule::bytes::Bytes);
 impl ::core::fmt::LowerHex for OpenChannel {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
@@ -13191,56 +13454,36 @@ impl ::core::default::Default for FiberMessage {
     }
 }
 impl FiberMessage {
-    const DEFAULT_VALUE: [u8; 670] = [
-        0, 0, 0, 0, 154, 2, 0, 0, 80, 0, 0, 0, 112, 0, 0, 0, 144, 0, 0, 0, 144, 0, 0, 0, 160, 0, 0,
-        0, 213, 0, 0, 0, 221, 0, 0, 0, 229, 0, 0, 0, 237, 0, 0, 0, 253, 0, 0, 0, 5, 1, 0, 0, 13, 1,
-        0, 0, 46, 1, 0, 0, 79, 1, 0, 0, 112, 1, 0, 0, 145, 1, 0, 0, 145, 1, 0, 0, 21, 2, 0, 0, 153,
-        2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 53, 0, 0, 0, 16, 0, 0,
-        0, 48, 0, 0, 0, 49, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    const DEFAULT_VALUE: [u8; 52] = [
+        0, 0, 0, 0, 48, 0, 0, 0, 12, 0, 0, 0, 16, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     ];
-    pub const ITEMS_COUNT: usize = 18;
+    pub const ITEMS_COUNT: usize = 19;
     pub fn item_id(&self) -> molecule::Number {
         molecule::unpack_number(self.as_slice())
     }
     pub fn to_enum(&self) -> FiberMessageUnion {
         let inner = self.0.slice(molecule::NUMBER_SIZE..);
         match self.item_id() {
-            0 => OpenChannel::new_unchecked(inner).into(),
-            1 => AcceptChannel::new_unchecked(inner).into(),
-            2 => TxSignatures::new_unchecked(inner).into(),
-            3 => TxUpdate::new_unchecked(inner).into(),
-            4 => TxComplete::new_unchecked(inner).into(),
-            5 => TxAbort::new_unchecked(inner).into(),
-            6 => TxInitRBF::new_unchecked(inner).into(),
-            7 => TxAckRBF::new_unchecked(inner).into(),
-            8 => CommitmentSigned::new_unchecked(inner).into(),
-            9 => ChannelReady::new_unchecked(inner).into(),
-            10 => UpdateTlcInfo::new_unchecked(inner).into(),
-            11 => AddTlc::new_unchecked(inner).into(),
-            12 => RemoveTlc::new_unchecked(inner).into(),
-            13 => RevokeAndAck::new_unchecked(inner).into(),
-            14 => Shutdown::new_unchecked(inner).into(),
-            15 => ClosingSigned::new_unchecked(inner).into(),
-            16 => ReestablishChannel::new_unchecked(inner).into(),
-            17 => AnnouncementSignatures::new_unchecked(inner).into(),
+            0 => Init::new_unchecked(inner).into(),
+            1 => OpenChannel::new_unchecked(inner).into(),
+            2 => AcceptChannel::new_unchecked(inner).into(),
+            3 => TxSignatures::new_unchecked(inner).into(),
+            4 => TxUpdate::new_unchecked(inner).into(),
+            5 => TxComplete::new_unchecked(inner).into(),
+            6 => TxAbort::new_unchecked(inner).into(),
+            7 => TxInitRBF::new_unchecked(inner).into(),
+            8 => TxAckRBF::new_unchecked(inner).into(),
+            9 => CommitmentSigned::new_unchecked(inner).into(),
+            10 => ChannelReady::new_unchecked(inner).into(),
+            11 => UpdateTlcInfo::new_unchecked(inner).into(),
+            12 => AddTlc::new_unchecked(inner).into(),
+            13 => RemoveTlc::new_unchecked(inner).into(),
+            14 => RevokeAndAck::new_unchecked(inner).into(),
+            15 => Shutdown::new_unchecked(inner).into(),
+            16 => ClosingSigned::new_unchecked(inner).into(),
+            17 => ReestablishChannel::new_unchecked(inner).into(),
+            18 => AnnouncementSignatures::new_unchecked(inner).into(),
             _ => panic!("{}: invalid data", Self::NAME),
         }
     }
@@ -13297,31 +13540,32 @@ impl<'r> ::core::fmt::Display for FiberMessageReader<'r> {
     }
 }
 impl<'r> FiberMessageReader<'r> {
-    pub const ITEMS_COUNT: usize = 18;
+    pub const ITEMS_COUNT: usize = 19;
     pub fn item_id(&self) -> molecule::Number {
         molecule::unpack_number(self.as_slice())
     }
     pub fn to_enum(&self) -> FiberMessageUnionReader<'r> {
         let inner = &self.as_slice()[molecule::NUMBER_SIZE..];
         match self.item_id() {
-            0 => OpenChannelReader::new_unchecked(inner).into(),
-            1 => AcceptChannelReader::new_unchecked(inner).into(),
-            2 => TxSignaturesReader::new_unchecked(inner).into(),
-            3 => TxUpdateReader::new_unchecked(inner).into(),
-            4 => TxCompleteReader::new_unchecked(inner).into(),
-            5 => TxAbortReader::new_unchecked(inner).into(),
-            6 => TxInitRBFReader::new_unchecked(inner).into(),
-            7 => TxAckRBFReader::new_unchecked(inner).into(),
-            8 => CommitmentSignedReader::new_unchecked(inner).into(),
-            9 => ChannelReadyReader::new_unchecked(inner).into(),
-            10 => UpdateTlcInfoReader::new_unchecked(inner).into(),
-            11 => AddTlcReader::new_unchecked(inner).into(),
-            12 => RemoveTlcReader::new_unchecked(inner).into(),
-            13 => RevokeAndAckReader::new_unchecked(inner).into(),
-            14 => ShutdownReader::new_unchecked(inner).into(),
-            15 => ClosingSignedReader::new_unchecked(inner).into(),
-            16 => ReestablishChannelReader::new_unchecked(inner).into(),
-            17 => AnnouncementSignaturesReader::new_unchecked(inner).into(),
+            0 => InitReader::new_unchecked(inner).into(),
+            1 => OpenChannelReader::new_unchecked(inner).into(),
+            2 => AcceptChannelReader::new_unchecked(inner).into(),
+            3 => TxSignaturesReader::new_unchecked(inner).into(),
+            4 => TxUpdateReader::new_unchecked(inner).into(),
+            5 => TxCompleteReader::new_unchecked(inner).into(),
+            6 => TxAbortReader::new_unchecked(inner).into(),
+            7 => TxInitRBFReader::new_unchecked(inner).into(),
+            8 => TxAckRBFReader::new_unchecked(inner).into(),
+            9 => CommitmentSignedReader::new_unchecked(inner).into(),
+            10 => ChannelReadyReader::new_unchecked(inner).into(),
+            11 => UpdateTlcInfoReader::new_unchecked(inner).into(),
+            12 => AddTlcReader::new_unchecked(inner).into(),
+            13 => RemoveTlcReader::new_unchecked(inner).into(),
+            14 => RevokeAndAckReader::new_unchecked(inner).into(),
+            15 => ShutdownReader::new_unchecked(inner).into(),
+            16 => ClosingSignedReader::new_unchecked(inner).into(),
+            17 => ReestablishChannelReader::new_unchecked(inner).into(),
+            18 => AnnouncementSignaturesReader::new_unchecked(inner).into(),
             _ => panic!("{}: invalid data", Self::NAME),
         }
     }
@@ -13347,24 +13591,25 @@ impl<'r> molecule::prelude::Reader<'r> for FiberMessageReader<'r> {
         let item_id = molecule::unpack_number(slice);
         let inner_slice = &slice[molecule::NUMBER_SIZE..];
         match item_id {
-            0 => OpenChannelReader::verify(inner_slice, compatible),
-            1 => AcceptChannelReader::verify(inner_slice, compatible),
-            2 => TxSignaturesReader::verify(inner_slice, compatible),
-            3 => TxUpdateReader::verify(inner_slice, compatible),
-            4 => TxCompleteReader::verify(inner_slice, compatible),
-            5 => TxAbortReader::verify(inner_slice, compatible),
-            6 => TxInitRBFReader::verify(inner_slice, compatible),
-            7 => TxAckRBFReader::verify(inner_slice, compatible),
-            8 => CommitmentSignedReader::verify(inner_slice, compatible),
-            9 => ChannelReadyReader::verify(inner_slice, compatible),
-            10 => UpdateTlcInfoReader::verify(inner_slice, compatible),
-            11 => AddTlcReader::verify(inner_slice, compatible),
-            12 => RemoveTlcReader::verify(inner_slice, compatible),
-            13 => RevokeAndAckReader::verify(inner_slice, compatible),
-            14 => ShutdownReader::verify(inner_slice, compatible),
-            15 => ClosingSignedReader::verify(inner_slice, compatible),
-            16 => ReestablishChannelReader::verify(inner_slice, compatible),
-            17 => AnnouncementSignaturesReader::verify(inner_slice, compatible),
+            0 => InitReader::verify(inner_slice, compatible),
+            1 => OpenChannelReader::verify(inner_slice, compatible),
+            2 => AcceptChannelReader::verify(inner_slice, compatible),
+            3 => TxSignaturesReader::verify(inner_slice, compatible),
+            4 => TxUpdateReader::verify(inner_slice, compatible),
+            5 => TxCompleteReader::verify(inner_slice, compatible),
+            6 => TxAbortReader::verify(inner_slice, compatible),
+            7 => TxInitRBFReader::verify(inner_slice, compatible),
+            8 => TxAckRBFReader::verify(inner_slice, compatible),
+            9 => CommitmentSignedReader::verify(inner_slice, compatible),
+            10 => ChannelReadyReader::verify(inner_slice, compatible),
+            11 => UpdateTlcInfoReader::verify(inner_slice, compatible),
+            12 => AddTlcReader::verify(inner_slice, compatible),
+            13 => RemoveTlcReader::verify(inner_slice, compatible),
+            14 => RevokeAndAckReader::verify(inner_slice, compatible),
+            15 => ShutdownReader::verify(inner_slice, compatible),
+            16 => ClosingSignedReader::verify(inner_slice, compatible),
+            17 => ReestablishChannelReader::verify(inner_slice, compatible),
+            18 => AnnouncementSignaturesReader::verify(inner_slice, compatible),
             _ => ve!(Self, UnknownItem, Self::ITEMS_COUNT, item_id),
         }?;
         Ok(())
@@ -13373,7 +13618,7 @@ impl<'r> molecule::prelude::Reader<'r> for FiberMessageReader<'r> {
 #[derive(Clone, Debug, Default)]
 pub struct FiberMessageBuilder(pub(crate) FiberMessageUnion);
 impl FiberMessageBuilder {
-    pub const ITEMS_COUNT: usize = 18;
+    pub const ITEMS_COUNT: usize = 19;
     pub fn set<I>(mut self, v: I) -> Self
     where
         I: ::core::convert::Into<FiberMessageUnion>,
@@ -13401,6 +13646,7 @@ impl molecule::prelude::Builder for FiberMessageBuilder {
 }
 #[derive(Debug, Clone)]
 pub enum FiberMessageUnion {
+    Init(Init),
     OpenChannel(OpenChannel),
     AcceptChannel(AcceptChannel),
     TxSignatures(TxSignatures),
@@ -13422,6 +13668,7 @@ pub enum FiberMessageUnion {
 }
 #[derive(Debug, Clone, Copy)]
 pub enum FiberMessageUnionReader<'r> {
+    Init(InitReader<'r>),
     OpenChannel(OpenChannelReader<'r>),
     AcceptChannel(AcceptChannelReader<'r>),
     TxSignatures(TxSignaturesReader<'r>),
@@ -13443,12 +13690,15 @@ pub enum FiberMessageUnionReader<'r> {
 }
 impl ::core::default::Default for FiberMessageUnion {
     fn default() -> Self {
-        FiberMessageUnion::OpenChannel(::core::default::Default::default())
+        FiberMessageUnion::Init(::core::default::Default::default())
     }
 }
 impl ::core::fmt::Display for FiberMessageUnion {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         match self {
+            FiberMessageUnion::Init(ref item) => {
+                write!(f, "{}::{}({})", Self::NAME, Init::NAME, item)
+            }
             FiberMessageUnion::OpenChannel(ref item) => {
                 write!(f, "{}::{}({})", Self::NAME, OpenChannel::NAME, item)
             }
@@ -13515,6 +13765,9 @@ impl ::core::fmt::Display for FiberMessageUnion {
 impl<'r> ::core::fmt::Display for FiberMessageUnionReader<'r> {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         match self {
+            FiberMessageUnionReader::Init(ref item) => {
+                write!(f, "{}::{}({})", Self::NAME, Init::NAME, item)
+            }
             FiberMessageUnionReader::OpenChannel(ref item) => {
                 write!(f, "{}::{}({})", Self::NAME, OpenChannel::NAME, item)
             }
@@ -13581,6 +13834,7 @@ impl<'r> ::core::fmt::Display for FiberMessageUnionReader<'r> {
 impl FiberMessageUnion {
     pub(crate) fn display_inner(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         match self {
+            FiberMessageUnion::Init(ref item) => write!(f, "{}", item),
             FiberMessageUnion::OpenChannel(ref item) => write!(f, "{}", item),
             FiberMessageUnion::AcceptChannel(ref item) => write!(f, "{}", item),
             FiberMessageUnion::TxSignatures(ref item) => write!(f, "{}", item),
@@ -13605,6 +13859,7 @@ impl FiberMessageUnion {
 impl<'r> FiberMessageUnionReader<'r> {
     pub(crate) fn display_inner(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         match self {
+            FiberMessageUnionReader::Init(ref item) => write!(f, "{}", item),
             FiberMessageUnionReader::OpenChannel(ref item) => write!(f, "{}", item),
             FiberMessageUnionReader::AcceptChannel(ref item) => write!(f, "{}", item),
             FiberMessageUnionReader::TxSignatures(ref item) => write!(f, "{}", item),
@@ -13624,6 +13879,11 @@ impl<'r> FiberMessageUnionReader<'r> {
             FiberMessageUnionReader::ReestablishChannel(ref item) => write!(f, "{}", item),
             FiberMessageUnionReader::AnnouncementSignatures(ref item) => write!(f, "{}", item),
         }
+    }
+}
+impl ::core::convert::From<Init> for FiberMessageUnion {
+    fn from(item: Init) -> Self {
+        FiberMessageUnion::Init(item)
     }
 }
 impl ::core::convert::From<OpenChannel> for FiberMessageUnion {
@@ -13714,6 +13974,11 @@ impl ::core::convert::From<ReestablishChannel> for FiberMessageUnion {
 impl ::core::convert::From<AnnouncementSignatures> for FiberMessageUnion {
     fn from(item: AnnouncementSignatures) -> Self {
         FiberMessageUnion::AnnouncementSignatures(item)
+    }
+}
+impl<'r> ::core::convert::From<InitReader<'r>> for FiberMessageUnionReader<'r> {
+    fn from(item: InitReader<'r>) -> Self {
+        FiberMessageUnionReader::Init(item)
     }
 }
 impl<'r> ::core::convert::From<OpenChannelReader<'r>> for FiberMessageUnionReader<'r> {
@@ -13810,6 +14075,7 @@ impl FiberMessageUnion {
     pub const NAME: &'static str = "FiberMessageUnion";
     pub fn as_bytes(&self) -> molecule::bytes::Bytes {
         match self {
+            FiberMessageUnion::Init(item) => item.as_bytes(),
             FiberMessageUnion::OpenChannel(item) => item.as_bytes(),
             FiberMessageUnion::AcceptChannel(item) => item.as_bytes(),
             FiberMessageUnion::TxSignatures(item) => item.as_bytes(),
@@ -13832,6 +14098,7 @@ impl FiberMessageUnion {
     }
     pub fn as_slice(&self) -> &[u8] {
         match self {
+            FiberMessageUnion::Init(item) => item.as_slice(),
             FiberMessageUnion::OpenChannel(item) => item.as_slice(),
             FiberMessageUnion::AcceptChannel(item) => item.as_slice(),
             FiberMessageUnion::TxSignatures(item) => item.as_slice(),
@@ -13854,28 +14121,30 @@ impl FiberMessageUnion {
     }
     pub fn item_id(&self) -> molecule::Number {
         match self {
-            FiberMessageUnion::OpenChannel(_) => 0,
-            FiberMessageUnion::AcceptChannel(_) => 1,
-            FiberMessageUnion::TxSignatures(_) => 2,
-            FiberMessageUnion::TxUpdate(_) => 3,
-            FiberMessageUnion::TxComplete(_) => 4,
-            FiberMessageUnion::TxAbort(_) => 5,
-            FiberMessageUnion::TxInitRBF(_) => 6,
-            FiberMessageUnion::TxAckRBF(_) => 7,
-            FiberMessageUnion::CommitmentSigned(_) => 8,
-            FiberMessageUnion::ChannelReady(_) => 9,
-            FiberMessageUnion::UpdateTlcInfo(_) => 10,
-            FiberMessageUnion::AddTlc(_) => 11,
-            FiberMessageUnion::RemoveTlc(_) => 12,
-            FiberMessageUnion::RevokeAndAck(_) => 13,
-            FiberMessageUnion::Shutdown(_) => 14,
-            FiberMessageUnion::ClosingSigned(_) => 15,
-            FiberMessageUnion::ReestablishChannel(_) => 16,
-            FiberMessageUnion::AnnouncementSignatures(_) => 17,
+            FiberMessageUnion::Init(_) => 0,
+            FiberMessageUnion::OpenChannel(_) => 1,
+            FiberMessageUnion::AcceptChannel(_) => 2,
+            FiberMessageUnion::TxSignatures(_) => 3,
+            FiberMessageUnion::TxUpdate(_) => 4,
+            FiberMessageUnion::TxComplete(_) => 5,
+            FiberMessageUnion::TxAbort(_) => 6,
+            FiberMessageUnion::TxInitRBF(_) => 7,
+            FiberMessageUnion::TxAckRBF(_) => 8,
+            FiberMessageUnion::CommitmentSigned(_) => 9,
+            FiberMessageUnion::ChannelReady(_) => 10,
+            FiberMessageUnion::UpdateTlcInfo(_) => 11,
+            FiberMessageUnion::AddTlc(_) => 12,
+            FiberMessageUnion::RemoveTlc(_) => 13,
+            FiberMessageUnion::RevokeAndAck(_) => 14,
+            FiberMessageUnion::Shutdown(_) => 15,
+            FiberMessageUnion::ClosingSigned(_) => 16,
+            FiberMessageUnion::ReestablishChannel(_) => 17,
+            FiberMessageUnion::AnnouncementSignatures(_) => 18,
         }
     }
     pub fn item_name(&self) -> &str {
         match self {
+            FiberMessageUnion::Init(_) => "Init",
             FiberMessageUnion::OpenChannel(_) => "OpenChannel",
             FiberMessageUnion::AcceptChannel(_) => "AcceptChannel",
             FiberMessageUnion::TxSignatures(_) => "TxSignatures",
@@ -13898,6 +14167,7 @@ impl FiberMessageUnion {
     }
     pub fn as_reader<'r>(&'r self) -> FiberMessageUnionReader<'r> {
         match self {
+            FiberMessageUnion::Init(item) => item.as_reader().into(),
             FiberMessageUnion::OpenChannel(item) => item.as_reader().into(),
             FiberMessageUnion::AcceptChannel(item) => item.as_reader().into(),
             FiberMessageUnion::TxSignatures(item) => item.as_reader().into(),
@@ -13923,6 +14193,7 @@ impl<'r> FiberMessageUnionReader<'r> {
     pub const NAME: &'r str = "FiberMessageUnionReader";
     pub fn as_slice(&self) -> &'r [u8] {
         match self {
+            FiberMessageUnionReader::Init(item) => item.as_slice(),
             FiberMessageUnionReader::OpenChannel(item) => item.as_slice(),
             FiberMessageUnionReader::AcceptChannel(item) => item.as_slice(),
             FiberMessageUnionReader::TxSignatures(item) => item.as_slice(),
@@ -13945,28 +14216,30 @@ impl<'r> FiberMessageUnionReader<'r> {
     }
     pub fn item_id(&self) -> molecule::Number {
         match self {
-            FiberMessageUnionReader::OpenChannel(_) => 0,
-            FiberMessageUnionReader::AcceptChannel(_) => 1,
-            FiberMessageUnionReader::TxSignatures(_) => 2,
-            FiberMessageUnionReader::TxUpdate(_) => 3,
-            FiberMessageUnionReader::TxComplete(_) => 4,
-            FiberMessageUnionReader::TxAbort(_) => 5,
-            FiberMessageUnionReader::TxInitRBF(_) => 6,
-            FiberMessageUnionReader::TxAckRBF(_) => 7,
-            FiberMessageUnionReader::CommitmentSigned(_) => 8,
-            FiberMessageUnionReader::ChannelReady(_) => 9,
-            FiberMessageUnionReader::UpdateTlcInfo(_) => 10,
-            FiberMessageUnionReader::AddTlc(_) => 11,
-            FiberMessageUnionReader::RemoveTlc(_) => 12,
-            FiberMessageUnionReader::RevokeAndAck(_) => 13,
-            FiberMessageUnionReader::Shutdown(_) => 14,
-            FiberMessageUnionReader::ClosingSigned(_) => 15,
-            FiberMessageUnionReader::ReestablishChannel(_) => 16,
-            FiberMessageUnionReader::AnnouncementSignatures(_) => 17,
+            FiberMessageUnionReader::Init(_) => 0,
+            FiberMessageUnionReader::OpenChannel(_) => 1,
+            FiberMessageUnionReader::AcceptChannel(_) => 2,
+            FiberMessageUnionReader::TxSignatures(_) => 3,
+            FiberMessageUnionReader::TxUpdate(_) => 4,
+            FiberMessageUnionReader::TxComplete(_) => 5,
+            FiberMessageUnionReader::TxAbort(_) => 6,
+            FiberMessageUnionReader::TxInitRBF(_) => 7,
+            FiberMessageUnionReader::TxAckRBF(_) => 8,
+            FiberMessageUnionReader::CommitmentSigned(_) => 9,
+            FiberMessageUnionReader::ChannelReady(_) => 10,
+            FiberMessageUnionReader::UpdateTlcInfo(_) => 11,
+            FiberMessageUnionReader::AddTlc(_) => 12,
+            FiberMessageUnionReader::RemoveTlc(_) => 13,
+            FiberMessageUnionReader::RevokeAndAck(_) => 14,
+            FiberMessageUnionReader::Shutdown(_) => 15,
+            FiberMessageUnionReader::ClosingSigned(_) => 16,
+            FiberMessageUnionReader::ReestablishChannel(_) => 17,
+            FiberMessageUnionReader::AnnouncementSignatures(_) => 18,
         }
     }
     pub fn item_name(&self) -> &str {
         match self {
+            FiberMessageUnionReader::Init(_) => "Init",
             FiberMessageUnionReader::OpenChannel(_) => "OpenChannel",
             FiberMessageUnionReader::AcceptChannel(_) => "AcceptChannel",
             FiberMessageUnionReader::TxSignatures(_) => "TxSignatures",
@@ -13986,6 +14259,11 @@ impl<'r> FiberMessageUnionReader<'r> {
             FiberMessageUnionReader::ReestablishChannel(_) => "ReestablishChannel",
             FiberMessageUnionReader::AnnouncementSignatures(_) => "AnnouncementSignatures",
         }
+    }
+}
+impl From<Init> for FiberMessage {
+    fn from(value: Init) -> Self {
+        Self::new_builder().set(value).build()
     }
 }
 impl From<OpenChannel> for FiberMessage {

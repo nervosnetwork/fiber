@@ -22,6 +22,7 @@ use fnn::watchtower::{
 };
 use fnn::{start_cch, start_network, Config, NetworkServiceEvent};
 use jsonrpsee::http_client::HttpClientBuilder;
+use jsonrpsee::ws_client::{HeaderMap, HeaderValue};
 use ractor::{Actor, ActorRef};
 #[cfg(debug_assertions)]
 use std::collections::HashMap;
@@ -131,6 +132,7 @@ pub async fn main() -> Result<(), ExitMessage> {
                 ckb_config.udt_whitelist.clone().unwrap_or_default(),
                 Some(type_id_resolver),
             )
+            .await
             .map_err(|err| ExitMessage(format!("failed to init contracts context: {}", err)))?;
 
             let ckb_chain_actor = Actor::spawn_linked(
@@ -158,6 +160,7 @@ pub async fn main() -> Result<(), ExitMessage> {
                 .expect("get default funding lock script should be ok");
 
             info!("Starting fiber");
+
             let network_actor = start_network(
                 fiber_config.clone(),
                 ckb_chain_actor.clone(),
@@ -181,7 +184,24 @@ pub async fn main() -> Result<(), ExitMessage> {
             }
 
             let watchtower_client = if let Some(url) = fiber_config.standalone_watchtower_rpc_url {
-                let watchtower_client = HttpClientBuilder::default().build(url).map_err(|err| {
+                let mut client_builder = HttpClientBuilder::default();
+
+                if let Some(token) = fiber_config.standalone_watchtower_token.as_ref() {
+                    let mut headers = HeaderMap::new();
+                    headers.insert(
+                        "Authorization",
+                        HeaderValue::from_str(&format!("Bearer {}", token)).map_err(|err| {
+                            ExitMessage(format!("failed to create watchtower rpc client: {err:?}"))
+                        })?,
+                    );
+                    client_builder = client_builder.set_headers(headers);
+                } else {
+                    tracing::debug!(
+                        "create watchtower rpc client without standalone_watchtower_token"
+                    );
+                }
+
+                let watchtower_client = client_builder.build(url).map_err(|err| {
                     ExitMessage(format!("failed to create watchtower rpc client: {}", err))
                 })?;
                 Some(watchtower_client)
@@ -234,7 +254,7 @@ pub async fn main() -> Result<(), ExitMessage> {
                                             match get_cell_deps(
                                                 vec![Contract::FundingLock],
                                                 &commitment_tx.outputs().get(0).unwrap().type_().to_opt(),
-                                            ) {
+                                            ).await {
                                                 Ok(cell_deps) => {
                                                     let commitment_tx = commitment_tx
                                                     .as_advanced_builder()
@@ -315,7 +335,7 @@ pub async fn main() -> Result<(), ExitMessage> {
                             Some(CchMessage::SettledTlcNotification(tlc_notification))
                         },
                     );
-
+                    info!("cch started successfully ...");
                     Some(actor)
                 }
             }
@@ -326,7 +346,7 @@ pub async fn main() -> Result<(), ExitMessage> {
     // Start rpc service
     let rpc_server_handle = match (config.rpc, network_graph) {
         (Some(rpc_config), Some(network_graph)) => {
-            let handle = start_rpc(
+            match start_rpc(
                 rpc_config,
                 config.ckb,
                 config.fiber,
@@ -337,8 +357,12 @@ pub async fn main() -> Result<(), ExitMessage> {
                 #[cfg(debug_assertions)] ckb_chain_actor,
                 #[cfg(debug_assertions)] rpc_dev_module_commitment_txs,
             )
-            .await;
-            Some(handle)
+            .await {
+                Ok(handle) => Some(handle),
+                Err(err) => {
+                    return ExitMessage::err(format!("rpc server failed to start: {}", err));
+                }
+            }
         },
         (Some(_), None) => return ExitMessage::err(
             "RPC requires network graph in the fiber service which is not enabled in the config file"
@@ -411,11 +435,17 @@ fn forward_event_to_actor(
                 ))
                 .expect(ASSUME_WATCHTOWER_ACTOR_ALIVE);
         }
-        NetworkServiceEvent::PreimageCreated(_payment_hash, _preimage) => {
+        NetworkServiceEvent::PreimageCreated(payment_hash, preimage) => {
             // ignore, the store of channel actor already has stored the preimage
+            watchtower_actor
+                .send_message(WatchtowerMessage::CreatePreimage(payment_hash, preimage))
+                .expect(ASSUME_WATCHTOWER_ACTOR_ALIVE);
         }
-        NetworkServiceEvent::PreimageRemoved(_payment_hash) => {
+        NetworkServiceEvent::PreimageRemoved(payment_hash) => {
             // ignore, the store of channel actor already has removed the preimage
+            watchtower_actor
+                .send_message(WatchtowerMessage::RemovePreimage(payment_hash))
+                .expect(ASSUME_WATCHTOWER_ACTOR_ALIVE);
         }
         _ => {
             // ignore other non-watchtower related events

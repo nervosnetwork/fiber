@@ -1,5 +1,6 @@
 use super::channel::{ChannelFlags, ChannelTlcInfo, ProcessingChannelError};
 use super::config::AnnouncedNodeName;
+use super::features::FeatureVector;
 use super::gen::fiber::{
     self as molecule_fiber, ChannelUpdateOpt, CustomRecordsOpt, PaymentPreimageOpt,
     PubNonce as Byte66, PubkeyOpt, TlcErrDataOpt, UdtCellDeps, Uint128Opt,
@@ -591,6 +592,31 @@ impl From<RevocationNonce> for molecule_fiber::RevocationNonce {
 }
 
 #[derive(Clone, Debug)]
+pub struct Init {
+    pub features: FeatureVector,
+    pub chain_hash: Hash256,
+}
+
+impl From<Init> for molecule_fiber::Init {
+    fn from(init: Init) -> Self {
+        molecule_fiber::Init::new_builder()
+            .features(init.features.bytes().pack())
+            .chain_hash(init.chain_hash.into())
+            .build()
+    }
+}
+impl TryFrom<molecule_fiber::Init> for Init {
+    type Error = Error;
+
+    fn try_from(init: molecule_fiber::Init) -> Result<Self, Self::Error> {
+        Ok(Init {
+            features: FeatureVector::from(init.features().unpack()),
+            chain_hash: init.chain_hash().into(),
+        })
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct OpenChannel {
     pub chain_hash: Hash256,
     pub channel_id: Hash256,
@@ -624,6 +650,17 @@ impl OpenChannel {
 
     pub fn is_public(&self) -> bool {
         self.channel_flags.contains(ChannelFlags::PUBLIC)
+    }
+
+    pub fn mem_size(&self) -> usize {
+        let static_size = std::mem::size_of_val(self);
+        let funding_udt_type_script_size = self
+            .funding_udt_type_script
+            .as_ref()
+            .map(|script| script.total_size())
+            .unwrap_or_default();
+        let shutdown_script_size = self.shutdown_script.total_size();
+        static_size + funding_udt_type_script_size + shutdown_script_size
     }
 }
 
@@ -1592,6 +1629,7 @@ pub enum TlcErrorCode {
     ChannelDisabled = UPDATE | 20,
     ExpiryTooFar = PERM | 21,
     InvalidOnionPayload = PERM | 22,
+    HoldTlcTimeout = PERM | 23,
     InvalidOnionError = BADONION | PERM | 25,
 }
 
@@ -1610,19 +1648,6 @@ impl TlcErrorCode {
 
     pub fn is_update(&self) -> bool {
         *self as u16 & UPDATE != 0
-    }
-
-    pub fn payment_failed(&self) -> bool {
-        matches!(
-            self,
-            TlcErrorCode::IncorrectOrUnknownPaymentDetails
-                | TlcErrorCode::FinalIncorrectExpiryDelta
-                | TlcErrorCode::FinalIncorrectTlcAmount
-                | TlcErrorCode::InvoiceExpired
-                | TlcErrorCode::InvoiceCancelled
-                | TlcErrorCode::ExpiryTooFar
-                | TlcErrorCode::ExpiryTooSoon
-        )
     }
 }
 
@@ -1811,12 +1836,12 @@ pub struct ForwardTlcResult {
 pub struct NodeAnnouncement {
     // Signature to this message, may be empty the message is not signed yet.
     pub signature: Option<EcdsaSignature>,
-    // Tentatively using 64 bits for features. May change the type later while developing.
-    // rust-lightning uses a Vec<u8> here.
-    pub features: u64,
+    // Features of the node, see `FeatureVector`.
+    pub features: FeatureVector,
     // Timestamp for current NodeAnnouncement. Later updates should have larger timestamp.
     pub timestamp: u64,
     pub node_id: Pubkey,
+    pub version: String,
     // Must be a valid utf-8 string of length maximal length 32 bytes.
     // If the length is less than 32 bytes, it will be padded with 0.
     // If the length is more than 32 bytes, it should be truncated.
@@ -1834,6 +1859,7 @@ pub struct NodeAnnouncement {
 impl NodeAnnouncement {
     pub fn new_unsigned(
         node_name: AnnouncedNodeName,
+        features: FeatureVector,
         addresses: Vec<MultiAddr>,
         node_id: Pubkey,
         timestamp: u64,
@@ -1841,9 +1867,10 @@ impl NodeAnnouncement {
     ) -> Self {
         Self {
             signature: None,
-            features: Default::default(),
+            features,
             timestamp,
             node_id,
+            version: env!("CARGO_PKG_VERSION").to_string(),
             node_name,
             chain_hash: get_chain_hash(),
             addresses,
@@ -1854,6 +1881,7 @@ impl NodeAnnouncement {
 
     pub fn new(
         node_name: AnnouncedNodeName,
+        features: FeatureVector,
         addresses: Vec<MultiAddr>,
         private_key: &Privkey,
         timestamp: u64,
@@ -1861,6 +1889,7 @@ impl NodeAnnouncement {
     ) -> NodeAnnouncement {
         let mut unsigned = NodeAnnouncement::new_unsigned(
             node_name,
+            features,
             addresses,
             private_key.pubkey(),
             timestamp,
@@ -1873,9 +1902,10 @@ impl NodeAnnouncement {
     pub fn message_to_sign(&self) -> [u8; 32] {
         let unsigned_announcement = NodeAnnouncement {
             signature: None,
-            features: self.features,
+            features: self.features.clone(),
             timestamp: self.timestamp,
             node_id: self.node_id,
+            version: self.version.clone(),
             node_name: self.node_name,
             chain_hash: self.chain_hash,
             addresses: self.addresses.clone(),
@@ -2057,9 +2087,10 @@ impl From<molecule_fiber::UdtCfgInfos> for UdtCfgInfos {
 impl From<NodeAnnouncement> for molecule_gossip::NodeAnnouncement {
     fn from(node_announcement: NodeAnnouncement) -> Self {
         let builder = molecule_gossip::NodeAnnouncement::new_builder()
-            .features(node_announcement.features.pack())
+            .features(node_announcement.features.bytes().pack())
             .timestamp(node_announcement.timestamp.pack())
             .node_id(node_announcement.node_id.into())
+            .version(node_announcement.version.pack())
             .node_name(u8_32_as_byte_32(&node_announcement.node_name.0))
             .chain_hash(node_announcement.chain_hash.into())
             .auto_accept_min_ckb_funding_amount(
@@ -2094,9 +2125,10 @@ impl TryFrom<molecule_gossip::NodeAnnouncement> for NodeAnnouncement {
     fn try_from(node_announcement: molecule_gossip::NodeAnnouncement) -> Result<Self, Self::Error> {
         Ok(NodeAnnouncement {
             signature: Some(node_announcement.signature().try_into()?),
-            features: node_announcement.features().unpack(),
+            features: FeatureVector::from(node_announcement.features().unpack()),
             timestamp: node_announcement.timestamp().unpack(),
             node_id: node_announcement.node_id().try_into()?,
+            version: String::from_utf8(node_announcement.version().unpack()).unwrap_or_default(),
             chain_hash: node_announcement.chain_hash().into(),
             auto_accept_min_ckb_funding_amount: node_announcement
                 .auto_accept_min_ckb_funding_amount()
@@ -2389,11 +2421,16 @@ pub enum FiberQueryInformation {
 
 #[derive(Debug, Clone)]
 pub enum FiberMessage {
+    Init(Init),
     ChannelInitialization(OpenChannel),
     ChannelNormalOperation(FiberChannelMessage),
 }
 
 impl FiberMessage {
+    pub fn init(init_message: Init) -> Self {
+        FiberMessage::Init(init_message)
+    }
+
     pub fn open_channel(open_channel: OpenChannel) -> Self {
         FiberMessage::ChannelInitialization(open_channel)
     }
@@ -3499,6 +3536,7 @@ impl TryFrom<molecule_gossip::QueryBroadcastMessagesResult> for QueryBroadcastMe
 impl From<FiberMessage> for molecule_fiber::FiberMessageUnion {
     fn from(fiber_message: FiberMessage) -> Self {
         match fiber_message {
+            FiberMessage::Init(init) => molecule_fiber::FiberMessageUnion::Init(init.into()),
             FiberMessage::ChannelInitialization(open_channel) => {
                 molecule_fiber::FiberMessageUnion::OpenChannel(open_channel.into())
             }
@@ -3568,6 +3606,7 @@ impl TryFrom<molecule_fiber::FiberMessageUnion> for FiberMessage {
 
     fn try_from(fiber_message: molecule_fiber::FiberMessageUnion) -> Result<Self, Self::Error> {
         Ok(match fiber_message {
+            molecule_fiber::FiberMessageUnion::Init(init) => FiberMessage::Init(init.try_into()?),
             molecule_fiber::FiberMessageUnion::OpenChannel(open_channel) => {
                 FiberMessage::ChannelInitialization(open_channel.try_into()?)
             }
@@ -3700,9 +3739,57 @@ pub(crate) fn deterministically_hash<T: Entity>(v: &T) -> [u8; 32] {
     ckb_hash::blake2b_256(v.as_slice())
 }
 
+/// Bolt04 payment data record
+pub struct PaymentDataRecord {
+    pub payment_secret: Hash256,
+    pub total_amount: u128,
+}
+
+impl PaymentDataRecord {
+    // record type for payment data record in bolt04
+    // custom records key from 65536 is reserved for internal usage
+    pub const CUSTOM_RECORD_KEY: u32 = 65536;
+
+    pub fn new(payment_secret: Hash256, total_amount: u128) -> Self {
+        Self {
+            payment_secret,
+            total_amount,
+        }
+    }
+
+    fn to_vec(&self) -> Vec<u8> {
+        let mut vec = Vec::new();
+        vec.extend_from_slice(self.payment_secret.as_ref());
+        vec.extend_from_slice(&self.total_amount.to_le_bytes());
+        vec
+    }
+
+    pub fn write(self, custom_records: &mut PaymentCustomRecords) {
+        custom_records
+            .data
+            .insert(Self::CUSTOM_RECORD_KEY, self.to_vec());
+    }
+
+    pub fn read(custom_records: &PaymentCustomRecords) -> Option<Self> {
+        custom_records
+            .data
+            .get(&Self::CUSTOM_RECORD_KEY)
+            .and_then(|data| {
+                if data.len() != 32 + 16 {
+                    return None;
+                }
+                let secret: [u8; 32] = data[..32].try_into().unwrap();
+                let payment_secret = Hash256::from(secret);
+                let total_amount = u128::from_le_bytes(data[32..].try_into().unwrap());
+                Some(Self::new(payment_secret, total_amount))
+            })
+    }
+}
+
 #[serde_as]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaymentHopData {
+    /// The amount of the tlc, <= total amount
     pub amount: u128,
     pub expiry: u64,
     pub payment_preimage: Option<Hash256>,
@@ -3847,6 +3934,15 @@ pub struct PeeledOnionPacket<T> {
 pub type PaymentOnionPacket = OnionPacket<PaymentHopData>;
 pub type PeeledPaymentOnionPacket = PeeledOnionPacket<PaymentHopData>;
 
+impl PeeledOnionPacket<PaymentHopData> {
+    pub fn mpp_custom_records(&self) -> Option<PaymentDataRecord> {
+        self.current
+            .custom_records
+            .as_ref()
+            .and_then(PaymentDataRecord::read)
+    }
+}
+
 impl<T> OnionPacket<T> {
     pub fn new(data: Vec<u8>) -> Self {
         OnionPacket {
@@ -3877,15 +3973,15 @@ impl<T: HopData> OnionPacket<T> {
     /// - Fail to peel the packet using the given private key.
     pub fn peel<C: Verification>(
         self,
-        privkey: &Privkey,
+        peeler: &Privkey,
         assoc_data: Option<&[u8]>,
         secp_ctx: &Secp256k1<C>,
     ) -> Result<PeeledOnionPacket<T>, Error> {
         let sphinx_packet = self.into_sphinx_onion_packet()?;
-        let shared_secret = sphinx_packet.shared_secret(&privkey.0);
+        let shared_secret = sphinx_packet.shared_secret(&peeler.0);
 
         let (new_current, new_next) = sphinx_packet
-            .peel(&privkey.0, assoc_data, secp_ctx, get_hop_data_len)
+            .peel(&peeler.0, assoc_data, secp_ctx, get_hop_data_len)
             .map_err(|err| Error::OnionPacket(err.into()))?;
 
         let current = unpack_hop_data(&new_current)
@@ -3972,14 +4068,14 @@ impl<T: HopData> PeeledOnionPacket<T> {
     /// - Fail to peel the packet using the given private key.
     pub fn peel<C: Verification>(
         self,
-        privkey: &Privkey,
+        peeler: &Privkey,
         secp_ctx: &Secp256k1<C>,
     ) -> Result<Self, Error> {
         let next = self
             .next
             .ok_or_else(|| Error::OnionPacket(OnionPacketError::PeelingLastHop))?;
 
-        next.peel(privkey, self.current.assoc_data().as_deref(), secp_ctx)
+        next.peel(peeler, self.current.assoc_data().as_deref(), secp_ctx)
     }
 
     pub fn serialize(&self) -> Vec<u8> {
@@ -4050,4 +4146,45 @@ fn get_hop_data_len(buf: &[u8]) -> Option<usize> {
         ) as usize
             + HOP_DATA_HEAD_LEN,
     )
+}
+
+/// Used as identifier of node.
+#[serde_as]
+#[derive(Clone, Debug, Serialize, Deserialize, Hash, Eq, PartialEq)]
+pub struct NodeId(#[serde_as(as = "SliceBase58")] Vec<u8>);
+
+impl NodeId {
+    pub fn from_bytes(bytes: Vec<u8>) -> Self {
+        Self(bytes)
+    }
+
+    // return a empty node_id represent local node
+    pub fn local() -> Self {
+        Self(Default::default())
+    }
+}
+
+impl AsRef<[u8]> for NodeId {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl ::std::str::FromStr for NodeId {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let bytes = bs58::decode(s)
+            .into_vec()
+            .map_err(|_| anyhow!("can't parse node_id: {s}"))?;
+
+        Ok(Self::from_bytes(bytes))
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct HoldTlc {
+    pub channel_id: Hash256,
+    pub tlc_id: u64,
+    pub hold_expire_at: u64,
 }

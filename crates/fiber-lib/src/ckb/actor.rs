@@ -1,7 +1,8 @@
-use ckb_sdk::{CkbRpcClient, RpcError};
+use ckb_sdk::{CkbRpcAsyncClient, RpcError};
 use ckb_types::{
     core::{tx_pool::TxStatus, TransactionView},
     packed,
+    prelude::IntoTransactionView as _,
 };
 use ractor::{concurrency::Duration, Actor, ActorProcessingErr, ActorRef, RpcReplyPort};
 use tracing::debug;
@@ -88,6 +89,12 @@ pub enum CkbChainMessage {
         FundingRequest,
         RpcReplyPort<Result<FundingTx, FundingError>>,
     ),
+    VerifyFundingTx {
+        local_tx: packed::Transaction,
+        remote_tx: packed::Transaction,
+        funding_cell_lock_script: packed::Script,
+        reply: RpcReplyPort<Result<(), FundingError>>,
+    },
     /// Add funding tx. This is used to reestablish a channel that is not ready yet.
     /// Adding a funding tx will add its used input cells to the exclusion list.
     AddFundingTx(FundingTx),
@@ -109,12 +116,12 @@ pub enum CkbChainMessage {
     Stop,
 }
 
-#[ractor::async_trait]
+#[cfg_attr(target_arch="wasm32",async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl Actor for CkbChainActor {
     type Msg = CkbChainMessage;
     type State = CkbChainState;
     type Arguments = CkbConfig;
-
     async fn pre_start(
         &self,
         myself: ActorRef<Self::Msg>,
@@ -158,16 +165,27 @@ impl Actor for CkbChainActor {
         match message {
             CkbChainMessage::Fund(tx, request, reply_port) => {
                 if !reply_port.is_closed() {
-                    let context = state.build_funding_context(&request);
+                    let context = state.build_funding_context(request.script.clone());
                     let exclusion = &mut state.live_cells_exclusion_map;
-                    tokio::task::block_in_place(move || {
-                        let result = tx.fulfill(request, context, exclusion);
-                        if !reply_port.is_closed() {
-                            // ignore error
-                            let _ = reply_port.send(result);
-                        }
-                    });
+                    let result = tx.fulfill(request, context, exclusion).await;
+                    if !reply_port.is_closed() {
+                        // ignore error
+                        let _ = reply_port.send(result);
+                    }
                 }
+            }
+            CkbChainMessage::VerifyFundingTx {
+                local_tx,
+                remote_tx,
+                funding_cell_lock_script,
+                reply,
+            } => {
+                let mut funding_tx: FundingTx = local_tx.into();
+                let context = state.build_funding_context(funding_cell_lock_script);
+                let result = funding_tx
+                    .update_for_peer(remote_tx.into_view(), context)
+                    .await;
+                let _ = reply.send(result);
             }
             CkbChainMessage::AddFundingTx(tx) => {
                 state.live_cells_exclusion_map.add_funding_tx(&tx);
@@ -184,62 +202,56 @@ impl Actor for CkbChainActor {
                 if !reply_port.is_closed() {
                     let secret_key = state.secret_key;
                     let rpc_url = state.config.rpc_url.clone();
-                    tokio::task::block_in_place(move || {
-                        let result = tx.sign(secret_key, rpc_url);
-                        if !reply_port.is_closed() {
-                            // ignore error
-                            let _ = reply_port.send(result);
-                        }
-                    });
-                }
-            }
-            CkbChainMessage::SendTx(tx, reply_port) => {
-                let rpc_url = state.config.rpc_url.clone();
-                tokio::task::block_in_place(move || {
-                    let ckb_client = CkbRpcClient::new(&rpc_url);
-                    let result = match ckb_client.send_transaction(tx.data().into(), None) {
-                        Ok(_) => Ok(()),
-                        Err(err) => {
-                            //FIXME(yukang): RBF or duplicated transaction handling
-                            match err {
-                                RpcError::Rpc(e)
-                                    if (e.code.code() == -1107 || e.code.code() == -1111) =>
-                                {
-                                    tracing::warn!(
-                                        "[{}] transaction { } already in pool",
-                                        myself.get_name().unwrap_or_default(),
-                                        tx.hash(),
-                                    );
-                                    Ok(())
-                                }
-                                _ => {
-                                    tracing::error!(
-                                        "[{}] send transaction {} failed: {:?}",
-                                        myself.get_name().unwrap_or_default(),
-                                        tx.hash(),
-                                        err
-                                    );
-                                    Err(err)
-                                }
-                            }
-                        }
-                    };
+                    let result = tx.sign(secret_key, rpc_url).await;
                     if !reply_port.is_closed() {
                         // ignore error
                         let _ = reply_port.send(result);
                     }
-                });
+                }
+            }
+            CkbChainMessage::SendTx(tx, reply_port) => {
+                let rpc_url = state.config.rpc_url.clone();
+                let ckb_client = CkbRpcAsyncClient::new(&rpc_url);
+                let result = match ckb_client.send_transaction(tx.data().into(), None).await {
+                    Ok(_) => Ok(()),
+                    Err(err) => {
+                        //FIXME(yukang): RBF or duplicated transaction handling
+                        match err {
+                            RpcError::Rpc(e)
+                                if (e.code.code() == -1107 || e.code.code() == -1111) =>
+                            {
+                                tracing::warn!(
+                                    "[{}] transaction { } already in pool",
+                                    myself.get_name().unwrap_or_default(),
+                                    tx.hash(),
+                                );
+                                Ok(())
+                            }
+                            _ => {
+                                tracing::error!(
+                                    "[{}] send transaction {} failed: {:?}",
+                                    myself.get_name().unwrap_or_default(),
+                                    tx.hash(),
+                                    err
+                                );
+                                Err(err)
+                            }
+                        }
+                    }
+                };
+                if !reply_port.is_closed() {
+                    // ignore error
+                    let _ = reply_port.send(result);
+                }
             }
             CkbChainMessage::GetTx(tx_hash, reply_port) => {
                 let rpc_url = state.config.rpc_url.clone();
-                tokio::task::block_in_place(move || {
-                    let ckb_client = CkbRpcClient::new(&rpc_url);
-                    let result = ckb_client.get_transaction(tx_hash.into());
-                    if !reply_port.is_closed() {
-                        // ignore error
-                        let _ = reply_port.send(result.map(Into::into));
-                    }
-                });
+                let ckb_client = CkbRpcAsyncClient::new(&rpc_url);
+                let result = ckb_client.get_transaction(tx_hash.into()).await;
+                if !reply_port.is_closed() {
+                    // ignore error
+                    let _ = reply_port.send(result.map(Into::into));
+                }
             }
             CkbChainMessage::CreateTxTracer(tracer) => {
                 debug!(
@@ -262,14 +274,13 @@ impl Actor for CkbChainActor {
                 reply_port,
             ) => {
                 let rpc_url = state.config.rpc_url.clone();
-                tokio::task::block_in_place(move || {
-                    let ckb_client = CkbRpcClient::new(&rpc_url);
-                    let _ = reply_port.send(
-                        ckb_client
-                            .get_header(block_hash.into())
-                            .map(|x| x.map(|x| x.inner.timestamp.into())),
-                    );
-                });
+                let ckb_client = CkbRpcAsyncClient::new(&rpc_url);
+                let _ = reply_port.send(
+                    ckb_client
+                        .get_header(block_hash.into())
+                        .await
+                        .map(|x| x.map(|x| x.inner.timestamp.into())),
+                );
             }
             CkbChainMessage::Stop => {
                 myself.stop(Some("stop received".to_string()));
@@ -281,12 +292,12 @@ impl Actor for CkbChainActor {
 }
 
 impl CkbChainState {
-    fn build_funding_context(&self, request: &FundingRequest) -> FundingContext {
+    fn build_funding_context(&self, funding_cell_lock_script: packed::Script) -> FundingContext {
         FundingContext {
             secret_key: self.secret_key,
             rpc_url: self.config.rpc_url.clone(),
             funding_source_lock_script: self.funding_source_lock_script.clone(),
-            funding_cell_lock_script: request.script.clone(),
+            funding_cell_lock_script,
         }
     }
 }

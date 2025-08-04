@@ -2,8 +2,8 @@ use fiber::{store::migration::Migration, Error};
 use indicatif::ProgressBar;
 use std::sync::Arc;
 
-// Remember to update the version number here
-const MIGRATION_DB_VERSION: &str = "20311116135521";
+// Remember to update the version number here, sample `20311116135521`
+const MIGRATION_DB_VERSION: &str = "xxxxxxxxxxxx";
 
 pub struct MigrationObj {
     version: String,

@@ -10,7 +10,8 @@ use crate::gen_rand_sha256_hash;
 use crate::now_timestamp_as_millis_u64;
 use ckb_hash::new_blake2b;
 use ckb_types::packed::Byte32;
-use ractor::{async_trait as rasync_trait, Actor, ActorProcessingErr, ActorRef};
+
+use ractor::{Actor, ActorProcessingErr, ActorRef};
 use std::collections::HashMap;
 
 fn sign_tlcs<'a>(tlcs: impl Iterator<Item = &'a TlcInfo>) -> Hash256 {
@@ -88,6 +89,8 @@ impl TlcActor {
 pub struct AddTlcCommand {
     pub amount: u128,
     pub payment_hash: Hash256,
+    /// The attempt id associate with the tlc
+    pub attempt_id: Option<u64>,
     pub expiry: u64,
     pub hash_algorithm: HashAlgorithm,
     pub onion_packet: Option<PaymentOnionPacket>,
@@ -118,7 +121,8 @@ pub enum NetworkActorMessage {
     PeerMsg(String, TlcActorMessage),
 }
 
-#[rasync_trait]
+#[cfg_attr(target_arch="wasm32",async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl Actor for NetworkActor {
     type Msg = NetworkActorMessage;
     type State = NetworkActorState;
@@ -172,7 +176,8 @@ impl Actor for NetworkActor {
     }
 }
 
-#[rasync_trait]
+#[cfg_attr(target_arch="wasm32",async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl Actor for TlcActor {
     type Msg = TlcActorMessage;
     type State = TlcActorState;
@@ -205,6 +210,7 @@ impl Actor for TlcActor {
                     tlc_id: TLCId::Offered(next_offer_id),
                     amount: command.amount,
                     payment_hash: command.payment_hash,
+                    attempt_id: command.attempt_id,
                     expiry: command.expiry,
                     hash_algorithm: command.hash_algorithm,
                     created_at: CommitmentNumbers::default(),
@@ -214,6 +220,8 @@ impl Actor for TlcActor {
                     previous_tlc: None,
                     status: TlcStatus::Outbound(OutboundTlcStatus::LocalAnnounced),
                     removed_confirmed_at: None,
+                    total_amount: None,
+                    payment_secret: None,
                 };
                 state.tlc_state.add_offered_tlc(add_tlc.clone());
                 state.tlc_state.increment_offering();
@@ -279,6 +287,7 @@ impl Actor for TlcActor {
                     "Peer {} process peer remove tlc .... with tlc_id: {}",
                     state.peer_id, tlc_id
                 );
+                dbg!("set offered tlc removed", &tlc_id);
                 state.tlc_state.set_offered_tlc_removed(
                     tlc_id,
                     RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
@@ -369,6 +378,7 @@ async fn test_tlc_actor() {
             AddTlcCommand {
                 amount: 10000,
                 payment_hash: gen_rand_sha256_hash(),
+                attempt_id: None,
                 expiry: now_timestamp_as_millis_u64() + 1000,
                 hash_algorithm: HashAlgorithm::Sha256,
                 onion_packet: None,
@@ -379,12 +389,14 @@ async fn test_tlc_actor() {
         .unwrap();
 
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
     network_actor
         .send_message(NetworkActorMessage::AddTlc(
             "peer_a".to_string(),
             AddTlcCommand {
                 amount: 20000,
                 payment_hash: gen_rand_sha256_hash(),
+                attempt_id: None,
                 expiry: now_timestamp_as_millis_u64() + 1000,
                 hash_algorithm: HashAlgorithm::Sha256,
                 onion_packet: None,
@@ -395,12 +407,14 @@ async fn test_tlc_actor() {
         .unwrap();
 
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
     network_actor
         .send_message(NetworkActorMessage::AddTlc(
             "peer_b".to_string(),
             AddTlcCommand {
                 amount: 30000,
                 payment_hash: gen_rand_sha256_hash(),
+                attempt_id: None,
                 expiry: now_timestamp_as_millis_u64() + 1000,
                 hash_algorithm: HashAlgorithm::Sha256,
                 onion_packet: None,
@@ -411,12 +425,14 @@ async fn test_tlc_actor() {
         .unwrap();
 
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
     network_actor
         .send_message(NetworkActorMessage::AddTlc(
             "peer_b".to_string(),
             AddTlcCommand {
                 amount: 50000,
                 payment_hash: gen_rand_sha256_hash(),
+                attempt_id: None,
                 expiry: now_timestamp_as_millis_u64() + 1000,
                 hash_algorithm: HashAlgorithm::Sha256,
                 onion_packet: None,
@@ -459,6 +475,7 @@ fn test_tlc_state_v2() {
         status: TlcStatus::Outbound(OutboundTlcStatus::LocalAnnounced),
         channel_id: gen_rand_sha256_hash(),
         payment_hash: gen_rand_sha256_hash(),
+        attempt_id: None,
         expiry: now_timestamp_as_millis_u64() + 1000,
         hash_algorithm: HashAlgorithm::Sha256,
         onion_packet: None,
@@ -468,12 +485,15 @@ fn test_tlc_state_v2() {
         removed_reason: None,
         previous_tlc: None,
         removed_confirmed_at: None,
+        total_amount: None,
+        payment_secret: None,
     };
     let mut add_tlc2 = TlcInfo {
         amount: 20000,
         status: TlcStatus::Outbound(OutboundTlcStatus::LocalAnnounced),
         channel_id: gen_rand_sha256_hash(),
         payment_hash: gen_rand_sha256_hash(),
+        attempt_id: None,
         expiry: now_timestamp_as_millis_u64() + 2000,
         hash_algorithm: HashAlgorithm::Sha256,
         onion_packet: None,
@@ -483,6 +503,8 @@ fn test_tlc_state_v2() {
         removed_reason: None,
         previous_tlc: None,
         removed_confirmed_at: None,
+        total_amount: None,
+        payment_secret: None,
     };
     tlc_state.add_offered_tlc(add_tlc1.clone());
     tlc_state.add_offered_tlc(add_tlc2.clone());

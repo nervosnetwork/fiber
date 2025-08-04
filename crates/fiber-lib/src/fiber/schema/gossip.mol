@@ -37,13 +37,11 @@ vector BroadcastMessageQueries <BroadcastMessageQuery>;
 table NodeAnnouncement {
     // Signature to this message.
     signature: EcdsaSignature,
-    // Tentatively using 64 bits for features. May change the type later while developing.
-    // https://github.com/lightningdevkit/rust-lightning/blob/8c1b3d1263f6b9247c0c819039ef2027dc4d4588/lightning/src/ln/features.rs#L448-L457
-    // rust-lightning uses a Vec<u8> here.
-    features: Uint64,
+    features: Bytes,
     // Timestamp to the node announcement update, later update should have larger timestamp.
     timestamp: Uint64,
     node_id: Pubkey,
+    version: Bytes,
     // Must be a valid utf-8 string of length maximal length 32 bytes.
     node_name: Byte32,
     // All the reachable addresses.

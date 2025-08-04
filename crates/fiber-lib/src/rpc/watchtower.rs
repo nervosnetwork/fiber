@@ -1,20 +1,76 @@
 use ckb_jsonrpc_types::Script;
-use jsonrpsee::{proc_macros::rpc, types::ErrorObjectOwned};
-use ractor::async_trait;
+use jsonrpsee::proc_macros::rpc;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 
-use crate::{
-    fiber::{
-        channel::{RevocationData, SettlementData},
-        types::Hash256,
-    },
-    invoice::PreimageStore,
-    watchtower::WatchtowerStore,
+#[cfg(feature = "watchtower")]
+use jsonrpsee::types::error::{ErrorObjectOwned, CALL_EXECUTION_FAILED_CODE};
+
+use crate::fiber::{
+    channel::{RevocationData, SettlementData},
+    types::Hash256,
 };
+#[cfg(feature = "watchtower")]
+use crate::rpc::context::RpcContext;
+#[cfg(feature = "watchtower")]
+use crate::watchtower::WatchtowerStore;
 
 /// RPC module for watchtower related operations
-#[rpc(client, server)]
+#[cfg(feature = "watchtower")]
+#[rpc(server)]
+trait WatchtowerRpc {
+    /// Create a new watched channel
+    #[method(name = "create_watch_channel")]
+    async fn create_watch_channel(
+        &self,
+        ctx: RpcContext,
+        params: CreateWatchChannelParams,
+    ) -> Result<(), ErrorObjectOwned>;
+
+    /// Remove a watched channel
+    #[method(name = "remove_watch_channel")]
+    async fn remove_watch_channel(
+        &self,
+        ctx: RpcContext,
+        params: RemoveWatchChannelParams,
+    ) -> Result<(), ErrorObjectOwned>;
+
+    /// Update revocation
+    #[method(name = "update_revocation")]
+    async fn update_revocation(
+        &self,
+        ctx: RpcContext,
+        params: UpdateRevocationParams,
+    ) -> Result<(), ErrorObjectOwned>;
+
+    /// Update settlement
+    #[method(name = "update_local_settlement")]
+    async fn update_local_settlement(
+        &self,
+        ctx: RpcContext,
+        params: UpdateLocalSettlementParams,
+    ) -> Result<(), ErrorObjectOwned>;
+
+    /// Create preimage
+    #[method(name = "create_preimage")]
+    async fn create_preimage(
+        &self,
+        ctx: RpcContext,
+        params: CreatePreimageParams,
+    ) -> Result<(), ErrorObjectOwned>;
+
+    /// Remove preimage
+    #[method(name = "remove_preimage")]
+    async fn remove_preimage(
+        &self,
+        ctx: RpcContext,
+        params: RemovePreimageParams,
+    ) -> Result<(), ErrorObjectOwned>;
+}
+
+/// ignore rpc-doc-gen
+/// RPC client
+#[rpc(client)]
 trait WatchtowerRpc {
     /// Create a new watched channel
     #[method(name = "create_watch_channel")]
@@ -107,26 +163,31 @@ pub struct RemovePreimageParams {
     pub payment_hash: Hash256,
 }
 
+#[cfg(feature = "watchtower")]
 pub struct WatchtowerRpcServerImpl<S> {
     store: S,
 }
 
+#[cfg(feature = "watchtower")]
 impl<S> WatchtowerRpcServerImpl<S> {
     pub fn new(store: S) -> Self {
         Self { store }
     }
 }
 
-#[async_trait]
+#[cfg(feature = "watchtower")]
+#[async_trait::async_trait]
 impl<S> WatchtowerRpcServer for WatchtowerRpcServerImpl<S>
 where
-    S: PreimageStore + WatchtowerStore + Send + Sync + 'static,
+    S: WatchtowerStore + Send + Sync + 'static,
 {
     async fn create_watch_channel(
         &self,
+        ctx: RpcContext,
         params: CreateWatchChannelParams,
     ) -> Result<(), ErrorObjectOwned> {
         self.store.insert_watch_channel(
+            ctx.node_id,
             params.channel_id,
             params.funding_tx_lock.into(),
             params.remote_settlement_data,
@@ -136,17 +197,21 @@ where
 
     async fn remove_watch_channel(
         &self,
+        ctx: RpcContext,
         params: RemoveWatchChannelParams,
     ) -> Result<(), ErrorObjectOwned> {
-        self.store.remove_watch_channel(params.channel_id);
+        self.store
+            .remove_watch_channel(ctx.node_id, params.channel_id);
         Ok(())
     }
 
     async fn update_revocation(
         &self,
+        ctx: RpcContext,
         params: UpdateRevocationParams,
     ) -> Result<(), ErrorObjectOwned> {
         self.store.update_revocation(
+            ctx.node_id,
             params.channel_id,
             params.revocation_data,
             params.settlement_data,
@@ -156,20 +221,37 @@ where
 
     async fn update_local_settlement(
         &self,
+        ctx: RpcContext,
         params: UpdateLocalSettlementParams,
     ) -> Result<(), ErrorObjectOwned> {
         self.store
-            .update_local_settlement(params.channel_id, params.settlement_data);
+            .update_local_settlement(ctx.node_id, params.channel_id, params.settlement_data);
         Ok(())
     }
 
-    async fn create_preimage(&self, params: CreatePreimageParams) -> Result<(), ErrorObjectOwned> {
+    async fn create_preimage(
+        &self,
+        ctx: RpcContext,
+        params: CreatePreimageParams,
+    ) -> Result<(), ErrorObjectOwned> {
+        if params.payment_hash != ckb_hash::blake2b_256(params.preimage).into() {
+            return Err(ErrorObjectOwned::owned(
+                CALL_EXECUTION_FAILED_CODE,
+                "Wrong preimage",
+                Option::<()>::None,
+            ));
+        }
         self.store
-            .insert_preimage(params.payment_hash, params.preimage);
+            .insert_watch_preimage(ctx.node_id, params.payment_hash, params.preimage);
         Ok(())
     }
-    async fn remove_preimage(&self, params: RemovePreimageParams) -> Result<(), ErrorObjectOwned> {
-        self.store.remove_preimage(&params.payment_hash);
+    async fn remove_preimage(
+        &self,
+        ctx: RpcContext,
+        params: RemovePreimageParams,
+    ) -> Result<(), ErrorObjectOwned> {
+        self.store
+            .remove_watch_preimage(ctx.node_id, params.payment_hash);
         Ok(())
     }
 }

@@ -6,9 +6,11 @@ use lnd_grpc_tonic_client::{
     create_invoices_client, create_router_client, invoicesrpc, lnrpc, routerrpc, InvoicesClient,
     RouterClient, Uri,
 };
+
 use ractor::{call, RpcReplyPort};
 use ractor::{Actor, ActorCell, ActorProcessingErr, ActorRef};
 use serde::Deserialize;
+
 use std::str::FromStr;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::{select, time::sleep};
@@ -137,8 +139,8 @@ pub struct CchState {
     lnd_connection: LndConnectionInfo,
     orders_db: CchOrdersDb,
 }
-
-#[ractor::async_trait]
+#[cfg_attr(target_arch="wasm32",async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl Actor for CchActor {
     type Msg = CchMessage;
     type State = CchState;
@@ -590,6 +592,7 @@ impl CchActor {
                                 amount: order.amount_sats - order.fee_sats,
                                 payment_hash: Hash256::from_str(&order.payment_hash)
                                     .expect("parse Hash256"),
+                                attempt_id: None,
                                 expiry: now_timestamp_as_millis_u64()
                                     + self.config.ckb_final_tlc_expiry_delta,
                                 hash_algorithm: HashAlgorithm::Sha256,

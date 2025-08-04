@@ -6,6 +6,7 @@ use ckb_types::{packed::OutPoint, prelude::Pack};
 use secp256k1::{Keypair, PublicKey, Secp256k1, SecretKey, XOnlyPublicKey};
 
 use crate::ckb::contracts::{get_cell_deps_by_contracts, get_script_by_contract, Contract};
+use crate::fiber::features::FeatureVector;
 use crate::fiber::types::{
     ChannelUpdate, ChannelUpdateChannelFlags, ChannelUpdateMessageFlags, EcdsaSignature,
 };
@@ -81,6 +82,7 @@ pub fn gen_rand_node_announcement() -> (Privkey, NodeAnnouncement) {
 pub fn gen_node_announcement_from_privkey(sk: &Privkey) -> NodeAnnouncement {
     NodeAnnouncement::new(
         AnnouncedNodeName::from_string("node1").expect("valid name"),
+        FeatureVector::default(),
         vec![],
         sk,
         now_timestamp_as_millis_u64(),
@@ -88,13 +90,15 @@ pub fn gen_node_announcement_from_privkey(sk: &Privkey) -> NodeAnnouncement {
     )
 }
 
-pub fn create_funding_tx(x_only: &XOnlyPublicKey) -> TransactionView {
+pub async fn create_funding_tx(x_only: &XOnlyPublicKey) -> TransactionView {
     let capacity = 100u64;
     let commitment_lock_script_args = [&blake2b_256(x_only.serialize())[0..20]].concat();
 
     TransactionView::new_advanced_builder()
         .cell_deps(
-            get_cell_deps_by_contracts(vec![Contract::Secp256k1Lock]).expect("get cell deps"),
+            get_cell_deps_by_contracts(vec![Contract::Secp256k1Lock])
+                .await
+                .expect("get cell deps"),
         )
         .output(
             CellOutput::new_builder()
@@ -118,12 +122,12 @@ pub struct ChannelTestContext {
 }
 
 impl ChannelTestContext {
-    pub fn gen() -> ChannelTestContext {
+    pub async fn gen() -> ChannelTestContext {
         let funding_tx_sk = gen_rand_fiber_private_key();
         let node1_sk = gen_rand_fiber_private_key();
         let node2_sk = gen_rand_fiber_private_key();
         let xonly = funding_tx_sk.x_only_pub_key();
-        let funding_tx = create_funding_tx(&xonly);
+        let funding_tx = create_funding_tx(&xonly).await;
         let outpoint = funding_tx.output_pts_iter().next().unwrap();
         let capacity: u64 = funding_tx.output(0).unwrap().capacity().unpack();
         let mut channel_announcement = ChannelAnnouncement::new_unsigned(
