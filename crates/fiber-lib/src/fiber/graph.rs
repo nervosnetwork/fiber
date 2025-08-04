@@ -2376,13 +2376,7 @@ impl From<PaymentSession> for SendPaymentResponse {
                 .active_attempts()
                 .map(|a| a.route.receiver_amount())
                 .sum::<u128>();
-            dbg!(
-                active_amount,
-                session.request.amount,
-                active_count,
-                session.max_parts(),
-                session.remain_amount(),
-            );
+            dbg!(active_amount, session.request.amount, active_count);
         }
 
         #[cfg(any(debug_assertions, test, feature = "bench"))]

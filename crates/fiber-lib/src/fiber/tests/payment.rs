@@ -5318,13 +5318,8 @@ async fn test_send_payment_with_reverse_channel_of_capaicity_not_enough() {
     for _i in 0..count {
         let payment = nodes[0].send_payment_keysend(&nodes[2], 1, false).await;
         let payment_hash = payment.unwrap().payment_hash;
-        nodes[0].wait_until_inflight(payment_hash).await;
-        payments.insert(payment_hash);
-    }
-
-    for payment_hash in payments.iter() {
-        nodes[0].wait_until_success(*payment_hash).await;
-        let session = nodes[0].get_payment_session(*payment_hash).unwrap();
+        nodes[0].wait_until_success(payment_hash).await;
+        let session = nodes[0].get_payment_session(payment_hash).unwrap();
         let retry_times = session.retry_times();
         debug!(
             "payment_hash: {:?} retry_times: {:?}",
@@ -5334,6 +5329,7 @@ async fn test_send_payment_with_reverse_channel_of_capaicity_not_enough() {
             .entry(retry_times)
             .and_modify(|e| *e += 1)
             .or_insert(1);
+        payments.insert(payment_hash);
     }
 
     // assert only one payment session will try 2 times
