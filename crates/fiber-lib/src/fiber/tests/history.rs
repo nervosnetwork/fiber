@@ -5,11 +5,11 @@ use crate::fiber::history::{InternalPairResult, InternalResult};
 use crate::fiber::history::{PaymentHistory, TimedResult};
 use crate::store::Store;
 use crate::test_utils::generate_store;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::TempDir;
 use crate::{
     gen_rand_channel_outpoint, gen_rand_fiber_public_key, init_tracing, now_timestamp_as_millis_u64,
 };
-#[cfg(not(target_arch = "wasm32"))]
-use crate::TempDir;
 use ckb_types::packed::OutPoint;
 
 trait Round {
