@@ -70,12 +70,17 @@ impl Store {
             IteratorMode::Start => Box::new(guard.iter()),
             IteratorMode::End => Box::new(guard.iter().rev()),
             IteratorMode::From(items, db_direction) => match db_direction {
-                DbDirection::Forward => {
-                    Box::new(guard.iter().skip_while(move |(key, _)| **key < items.to_vec()))
-                }
-                DbDirection::Reverse => {
-                    Box::new(guard.iter().rev().skip_while(move |(key, _)| **key > items.to_vec()))
-                }
+                DbDirection::Forward => Box::new(
+                    guard
+                        .iter()
+                        .skip_while(move |(key, _)| **key < items.to_vec()),
+                ),
+                DbDirection::Reverse => Box::new(
+                    guard
+                        .iter()
+                        .rev()
+                        .skip_while(move |(key, _)| **key > items.to_vec()),
+                ),
             },
         };
         let mut result = vec![];

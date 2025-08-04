@@ -22,7 +22,6 @@ use crate::{
     gen_rand_secp256k1_keypair_tuple, generate_store, init_tracing, now_timestamp_as_millis_u64,
 };
 
-
 // Default tlc expiry delta used in this test environment.
 // Should be a value larger than the running duration of the unit tests.
 // The value below is 42 minutes.
