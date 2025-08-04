@@ -17,6 +17,7 @@ use crate::invoice::CkbInvoice;
 use crate::invoice::Currency;
 use crate::invoice::InvoiceBuilder;
 use crate::now_timestamp_as_millis_u64;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::rpc::invoice::NewInvoiceParams;
 use crate::tasks::cancel_tasks_and_wait_for_completion;
 use crate::test_utils::init_tracing;

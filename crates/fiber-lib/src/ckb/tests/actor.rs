@@ -83,8 +83,7 @@ async fn test_submit_mocked_secp256k1_tx() {
     ));
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[tokio::test]
 async fn test_repeatedly_consume_the_same_cell() {
     let actor = create_mock_chain_actor().await;
     let capacity = 100u64;
@@ -155,8 +154,7 @@ async fn test_repeatedly_consume_the_same_cell() {
     assert!(matches!(submit_tx(actor, tx).await, TxStatus::Rejected(_)));
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[tokio::test]
 async fn test_submit_malformed_commitment_tx() {
     let actor = create_mock_chain_actor().await;
     let capacity = 100u64;

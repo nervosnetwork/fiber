@@ -1,14 +1,13 @@
 use crate::fiber::channel::*;
 use crate::fiber::config::AnnouncedNodeName;
-use crate::fiber::config::DEFAULT_TLC_EXPIRY_DELTA;
-use crate::fiber::config::MAX_PAYMENT_TLC_EXPIRY_LIMIT;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::fiber::config::{
+    graph::*, history::Direction, history::TimedResult, network::SendPaymentData,
+    DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT,
+};
 use crate::fiber::features::FeatureVector;
 use crate::fiber::gossip::GossipMessageStore;
-use crate::fiber::graph::*;
-use crate::fiber::history::Direction;
-use crate::fiber::history::TimedResult;
 use crate::fiber::network::PaymentCustomRecords;
-use crate::fiber::network::SendPaymentData;
 use crate::fiber::types::*;
 use crate::gen_rand_fiber_private_key;
 use crate::gen_rand_fiber_public_key;
@@ -17,6 +16,7 @@ use crate::invoice::*;
 use crate::now_timestamp_as_millis_u64;
 use crate::store::store_impl::deserialize_from;
 use crate::store::store_impl::serialize_to_vec;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::store::Store;
 use crate::tests::test_utils::*;
 use crate::time::SystemTime;
@@ -28,6 +28,7 @@ use ckb_hash::new_blake2b;
 use ckb_types::packed::*;
 use ckb_types::prelude::*;
 use ckb_types::H256;
+#[cfg(not(target_arch = "wasm32"))]
 use core::cmp::Ordering;
 use musig2::secp::MaybeScalar;
 #[cfg(not(target_arch = "wasm32"))]

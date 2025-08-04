@@ -47,6 +47,7 @@ use std::time::Duration;
 use tracing::debug;
 
 #[tokio::test]
+// Not supported on wasm: require filesystem access
 async fn test_connect_to_other_node() {
     let mut node_a = NetworkNode::new().await;
     let mut node_b = NetworkNode::new().await;

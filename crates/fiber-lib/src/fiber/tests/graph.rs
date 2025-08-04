@@ -1886,8 +1886,7 @@ fn test_graph_find_path_source_with_multiple_edges_with_different_fee_rate() {
     assert_eq!(route[0].channel_outpoint, network.edges[2].2);
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), test)]
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[test]
 fn test_graph_find_path_source_with_multiple_edges_with_invalid_tlc_delta() {
     init_tracing();
 
@@ -1932,8 +1931,7 @@ fn test_graph_find_path_source_with_multiple_edges_with_invalid_tlc_delta() {
     assert_eq!(route[0].channel_outpoint, network.edges[1].2);
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), test)]
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[test]
 fn test_graph_find_path_will_consider_tlc_expiry_delta() {
     init_tracing();
 

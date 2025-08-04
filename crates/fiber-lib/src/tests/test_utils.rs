@@ -22,8 +22,8 @@ use crate::fiber::ASSUME_NETWORK_ACTOR_ALIVE;
 use crate::gen_rand_sha256_hash;
 use crate::invoice::*;
 use crate::rpc::config::RpcConfig;
-use crate::rpc::invoice::InvoiceResult;
-use crate::rpc::invoice::NewInvoiceParams;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::rpc::invoice::{InvoiceResult, NewInvoiceParams};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::rpc::server::start_rpc;
 use ckb_sdk::core::TransactionBuilder;
@@ -35,23 +35,21 @@ use ckb_types::{
 #[cfg(not(target_arch = "wasm32"))]
 use hyper::{header::HeaderValue, HeaderMap};
 #[cfg(not(target_arch = "wasm32"))]
-use jsonrpsee::core::client::ClientT;
-#[cfg(not(target_arch = "wasm32"))]
-use jsonrpsee::http_client::transport::HttpBackend;
-#[cfg(not(target_arch = "wasm32"))]
-use jsonrpsee::http_client::HttpClient;
-use jsonrpsee::rpc_params;
-#[cfg(not(target_arch = "wasm32"))]
-use jsonrpsee::server::ServerHandle;
+use jsonrpsee::{
+    core::client::ClientT, http_client::transport::HttpBackend, http_client::HttpClient,
+    rpc_params, server::ServerHandle,
+};
+
 use ractor::{call, Actor, ActorRef};
 use rand::distributions::Alphanumeric;
 use rand::rngs::OsRng;
 use rand::Rng;
 use secp256k1::{Message, Secp256k1};
-use serde::de::DeserializeOwned;
-use serde::Serialize;
+#[cfg(not(target_arch = "wasm32"))]
+use serde::{de::DeserializeOwned, Serialize};
 use std::collections::HashMap;
 use std::collections::HashSet;
+#[cfg(not(target_arch = "wasm32"))]
 use std::net::SocketAddr;
 use std::time::Instant;
 use std::{
