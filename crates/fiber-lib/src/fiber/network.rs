@@ -56,9 +56,7 @@ use super::channel::{
 use super::config::AnnouncedNodeName;
 use super::features::FeatureVector;
 use super::gossip::{GossipActorMessage, GossipMessageStore, GossipMessageUpdates};
-use super::graph::{
-    Attempt, NetworkGraph, NetworkGraphStateStore, OwnedChannelUpdateEvent, RouterHop, SessionRoute,
-};
+use super::graph::{NetworkGraph, NetworkGraphStateStore, OwnedChannelUpdateEvent, RouterHop};
 use super::key::blake2b_hash_with_salt;
 use super::types::{
     BroadcastMessageWithTimestamp, EcdsaSignature, FiberMessage, ForwardTlcResult, GossipMessage,
@@ -85,7 +83,9 @@ use crate::fiber::config::{
 };
 use crate::fiber::fee::{check_open_channel_parameters, check_tlc_delta_with_epochs};
 use crate::fiber::gossip::{GossipConfig, GossipService, SubscribableGossipMessageStore};
-use crate::fiber::graph::{AttemptStatus, GraphChannelStat, PaymentSession, PaymentStatus};
+use crate::fiber::graph::GraphChannelStat;
+use crate::fiber::payment::SessionRoute;
+use crate::fiber::payment::{Attempt, AttemptStatus, PaymentSession, PaymentStatus};
 use crate::fiber::serde_utils::EntityHex;
 use crate::fiber::types::{
     FiberChannelMessage, PeeledPaymentOnionPacket, TlcErrPacket, TxSignatures,
@@ -4716,6 +4716,7 @@ pub async fn start_network<
 
     actor
 }
+
 #[allow(dead_code)]
 pub(crate) fn find_type(addr: &Multiaddr) -> TransportType {
     let mut iter = addr.iter();
@@ -4727,6 +4728,7 @@ pub(crate) fn find_type(addr: &Multiaddr) -> TransportType {
     })
     .unwrap_or(TransportType::Tcp)
 }
+
 struct ToBeAcceptedChannels {
     total_number_limit: usize,
     total_bytes_limit: usize,
@@ -4813,6 +4815,7 @@ impl ToBeAcceptedChannels {
         Ok(())
     }
 }
+
 #[cfg(not(target_arch = "wasm32"))]
 async fn fund_via_shell(
     shell_script: String,

@@ -2,14 +2,14 @@ pub mod channel;
 pub mod config;
 pub mod features;
 pub mod gen;
+pub mod gossip;
 pub mod graph;
 pub mod hash_algorithm;
 pub mod history;
 pub mod network;
+pub mod payment;
 pub mod serde_utils;
 pub mod types;
-
-pub mod gossip;
 
 mod fee;
 mod in_flight_ckb_tx_actor;
