@@ -9,8 +9,9 @@ use crate::fiber::config::{
     MIN_TLC_EXPIRY_DELTA,
 };
 use crate::fiber::features::FeatureVector;
-use crate::fiber::graph::{ChannelInfo, PaymentStatus};
+use crate::fiber::graph::ChannelInfo;
 use crate::fiber::network::{DebugEvent, FiberMessageWithPeerId, SendPaymentCommand};
+use crate::fiber::payment::PaymentStatus;
 use crate::fiber::types::{
     AddTlc, FiberMessage, Hash256, Init, PaymentHopData, PeeledOnionPacket, Pubkey, TlcErr,
     TlcErrorCode, NO_SHARED_SECRET,

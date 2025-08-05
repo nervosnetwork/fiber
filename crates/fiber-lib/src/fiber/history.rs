@@ -2,8 +2,9 @@
 // https://github.com/lightningnetwork/lnd/blob/b7c59b36a74975c4e710a02ea42959053735402e/routing/probability_bimodal.go
 // we only use direct channel probability now.
 
+use super::payment::SessionRouteNode;
 use super::{
-    graph::{NetworkGraphStateStore, SessionRouteNode},
+    graph::NetworkGraphStateStore,
     types::{ChannelUpdate, Pubkey, TlcErr},
 };
 #[cfg(test)]

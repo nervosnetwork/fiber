@@ -9,6 +9,8 @@ use crate::fiber::history::Direction;
 use crate::fiber::history::TimedResult;
 use crate::fiber::network::PaymentCustomRecords;
 use crate::fiber::network::SendPaymentData;
+use crate::fiber::payment::PaymentSession;
+use crate::fiber::payment::PaymentStatus;
 use crate::fiber::types::*;
 use crate::gen_rand_fiber_private_key;
 use crate::gen_rand_fiber_public_key;

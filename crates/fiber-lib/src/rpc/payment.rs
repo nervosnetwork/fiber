@@ -1,15 +1,15 @@
 use crate::fiber::graph::RouterHop;
-#[cfg(debug_assertions)]
-use crate::fiber::graph::SessionRoute;
 use crate::fiber::network::BuildRouterCommand;
 use crate::fiber::network::HopRequire;
 use crate::fiber::network::SendPaymentWithRouterCommand;
+#[cfg(debug_assertions)]
+use crate::fiber::payment::SessionRoute;
 use crate::fiber::serde_utils::SliceHex;
 use crate::fiber::serde_utils::U32Hex;
 use crate::fiber::{
     channel::ChannelActorStateStore,
-    graph::PaymentStatus,
     network::{HopHint as NetworkHopHint, SendPaymentCommand},
+    payment::PaymentStatus,
     serde_utils::{EntityHex, U128Hex, U64Hex},
     types::{Hash256, Pubkey},
     NetworkActorCommand, NetworkActorMessage,
