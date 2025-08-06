@@ -168,6 +168,7 @@ impl Actor for Subscriber {
 }
 
 #[tokio::test]
+// Not supported on wasm: requires filesystem access
 async fn test_save_gossip_message() {
     let context = GossipTestingContext::new().await;
     let (_, announcement) = gen_rand_node_announcement();
@@ -211,6 +212,7 @@ async fn test_saving_confirmed_channel_announcement() {
 }
 
 #[tokio::test]
+// Not supported on wasm: requires filesystem access
 async fn test_saving_invalid_channel_announcement() {
     let context = GossipTestingContext::new().await;
     let channel_context = ChannelTestContext::gen().await;
@@ -243,6 +245,7 @@ async fn test_saving_invalid_channel_announcement() {
 }
 
 #[tokio::test]
+// Not supported on wasm: requires filesystem
 async fn test_saving_channel_update_after_saving_channel_announcement() {
     let context = GossipTestingContext::new().await;
     let channel_context = ChannelTestContext::gen().await;

@@ -209,7 +209,9 @@ pub(crate) fn bytes_to_u8_array(array: &molecule::bytes::Bytes) -> [u8; 32] {
     res
 }
 
-#[test]
+#[cfg(test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
 fn test_parse_hrp() {
     let res = parse_hrp("fibb1280");
     assert_eq!(res, Ok((Currency::Fibb, Some(1280))));

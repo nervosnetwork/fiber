@@ -22,8 +22,9 @@ use crate::fiber::ASSUME_NETWORK_ACTOR_ALIVE;
 use crate::gen_rand_sha256_hash;
 use crate::invoice::*;
 use crate::rpc::config::RpcConfig;
-use crate::rpc::invoice::InvoiceResult;
-use crate::rpc::invoice::NewInvoiceParams;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::rpc::invoice::{InvoiceResult, NewInvoiceParams};
+#[cfg(not(target_arch = "wasm32"))]
 use crate::rpc::server::start_rpc;
 use ckb_sdk::core::TransactionBuilder;
 use ckb_types::core::FeeRate;
@@ -31,22 +32,24 @@ use ckb_types::{
     core::{tx_pool::TxStatus, TransactionView},
     packed::{OutPoint, Script},
 };
-use hyper::header::HeaderValue;
-use hyper::HeaderMap;
-use jsonrpsee::core::client::ClientT;
-use jsonrpsee::http_client::transport::HttpBackend;
-use jsonrpsee::http_client::HttpClient;
-use jsonrpsee::rpc_params;
-use jsonrpsee::server::ServerHandle;
+#[cfg(not(target_arch = "wasm32"))]
+use hyper::{header::HeaderValue, HeaderMap};
+#[cfg(not(target_arch = "wasm32"))]
+use jsonrpsee::{
+    core::client::ClientT, http_client::transport::HttpBackend, http_client::HttpClient,
+    rpc_params, server::ServerHandle,
+};
+
 use ractor::{call, Actor, ActorRef};
 use rand::distributions::Alphanumeric;
 use rand::rngs::OsRng;
 use rand::Rng;
 use secp256k1::{Message, Secp256k1};
-use serde::de::DeserializeOwned;
-use serde::Serialize;
+#[cfg(not(target_arch = "wasm32"))]
+use serde::{de::DeserializeOwned, Serialize};
 use std::collections::HashMap;
 use std::collections::HashSet;
+#[cfg(not(target_arch = "wasm32"))]
 use std::net::SocketAddr;
 use std::time::Instant;
 use std::{
@@ -204,11 +207,17 @@ pub fn mock_ecdsa_signature() -> EcdsaSignature {
     let signature = secp.sign_ecdsa(&message, &secret_key);
     EcdsaSignature(signature)
 }
-
+#[cfg(not(target_arch = "wasm32"))]
 pub fn generate_store() -> (Store, TempDir) {
     let temp_dir = TempDir::new("test-fnn-node");
     let store = Store::new(temp_dir.as_ref());
     (store.expect("create store"), temp_dir)
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn generate_store() -> (Store, ()) {
+    let store = Store::new(&PathBuf::default());
+    (store.expect("create store"), ())
 }
 
 #[derive(Debug)]
@@ -234,6 +243,7 @@ pub struct NetworkNode {
     pub pubkey: Pubkey,
     pub unexpected_events: Arc<TokioRwLock<HashSet<String>>>,
     pub triggered_unexpected_events: Arc<TokioRwLock<Vec<String>>>,
+    #[cfg(not(target_arch = "wasm32"))]
     pub rpc_server: Option<(ServerHandle, SocketAddr)>,
     pub auth_token: Option<String>,
 }
@@ -341,6 +351,8 @@ impl NetworkNodeConfigBuilder {
                 rpc_url: "http://localhost:8114".to_string(),
                 tx_tracing_polling_interval_ms: 4000,
                 udt_whitelist: None,
+                #[cfg(target_arch = "wasm32")]
+                wasm_secret_key: None,
             })
         } else {
             None
@@ -862,6 +874,7 @@ impl NetworkNode {
         self.auth_token = Some(token);
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub async fn send_rpc_request_raw<P: Serialize>(
         &self,
         method: &str,
@@ -888,7 +901,7 @@ impl NetworkNode {
             Err("RPC server not started".to_string())
         }
     }
-
+    #[cfg(not(target_arch = "wasm32"))]
     pub async fn send_rpc_request<P: Serialize, R: DeserializeOwned>(
         &self,
         method: &str,
@@ -925,7 +938,7 @@ impl NetworkNode {
         }
         Ok(())
     }
-
+    #[cfg(not(target_arch = "wasm32"))]
     pub async fn gen_invoice(&self, new_invoice_params: NewInvoiceParams) -> InvoiceResult {
         let invoice: InvoiceResult = self
             .send_rpc_request("new_invoice", new_invoice_params)
@@ -1388,7 +1401,7 @@ impl NetworkNode {
         let gossip_actor = ractor::registry::where_is(get_gossip_actor_name(&peer_id))
             .expect("gossip actor should have been started")
             .into();
-
+        #[cfg(not(target_arch = "wasm32"))]
         let rpc_server = if let Some(rpc_config) = rpc_config.clone() {
             Some(
                 start_rpc(
@@ -1432,6 +1445,7 @@ impl NetworkNode {
             pubkey,
             unexpected_events,
             triggered_unexpected_events,
+            #[cfg(not(target_arch = "wasm32"))]
             rpc_server,
             auth_token: None,
         }

@@ -1,149 +1,154 @@
 [package]
+build = "src/build.rs"
+edition = "2021"
 name = "fnn"
 version = "0.5.1"
-edition = "2021"
-build = "src/build.rs"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-serde = { version = "1.0.197", features = ["derive"] }
-serde_yaml = "0.9.32"
-lightning-invoice = { version = "0.29.0" }
-bitcoin = { version = "0.30.2", features = ["serde", "rand"] }
-bech32 = "0.9"
-rand = "0.8.5"
-serde_json = { version = "1.0" }
-ckb-sdk = "4.1.0"
-thiserror = "1.0.58"
+aes-gcm = "0.10"
 anyhow = "1.0.81"
-futures = "0.3.30"
-parking_lot = "0.12"
-once_cell = "1.19.0"
-tokio-util = { version = "0.7.10", features = ["rt"] }
-molecule = { version = "0.8.0", default-features = false }
-ckb-types = "0.202.0"
+arcode = "0.2.4"
+async-trait = "0.1"
+bech32 = "0.9"
+bincode = "1.3.3"
+bitcoin = {version = "0.30.2", features = ["serde", "rand"]}
+bitflags = {version = "2.5.0", features = ["serde"]}
+bitmask-enum = "2.2.5"
+bs58 = "0.5.1"
 ckb-gen-types = "0.202.0"
 ckb-jsonrpc-types = "0.202.0"
-serde_with = { version = "3.7.0", features = ["macros", "base64"] }
-hex = "0.4.3"
-bitflags = { version = "2.5.0", features = ["serde"] }
-secp256k1 = { version = "0.28.0", features = ["serde", "recovery", "rand-std"] }
-musig2 = { version = "0.0.11", features = ["secp256k1", "serde"] }
-# ractor = { version = "0.15.3" }
-ractor = { "git" = "https://github.com/officeyutong/ractor", branch = "use-non-send-future-in-wasm", features = [
-    "async-trait",
-] }
-arcode = "0.2.4"
-nom = "7.1.3"
-regex = "1.10.5"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-git-version = "0.3.9"
-fiber-sphinx = "2.1.0"
-strum = { version = "0.26", features = ["derive"] }
-async-trait = "0.1"
-indicatif = "0.18"
-bincode = "1.3.3"
-num_enum = "0.7.3"
-bitmask-enum = "2.2.5"
-tempfile = { version = "3.10.1", optional = true }
-ckb-testtool = { version = "0.16.0", optional = true }
-either = "1.15.0"
-aes-gcm = "0.10"
-scrypt = "0.11"
+ckb-sdk = "4.1.0"
+ckb-testtool = {version = "0.16.0", optional = true}
+ckb-types = "0.202.0"
+clap = {version = "4.5.2", features = ["derive", "env", "string"]}
 clap-serde-derive = "0.2.1"
-clap = { version = "4.5.2", features = ["derive", "env", "string"] }
+either = "1.15.0"
+fiber-sphinx = "2.1.0"
+futures = "0.3.30"
+getrandom = {version = "0.2", features = ["js"]}
+git-version = "0.3.9"
+hex = "0.4.3"
+indicatif = "0.18"
+lightning-invoice = {version = "0.29.0"}
+molecule = {version = "0.8.0", default-features = false}
+musig2 = {version = "0.0.11", features = ["secp256k1", "serde"]}
+nom = "7.1.3"
+num_enum = "0.7.3"
+once_cell = "1.19.0"
+parking_lot = "0.12"
 paste = "1.0"
-getrandom = { version = "0.2", features = ["js"] }
-bs58 = "0.5.1"
+ractor = {"git" = "https://github.com/officeyutong/ractor", branch = "use-non-send-future-in-wasm", features = [
+  "async-trait",
+]}
+rand = "0.8.5"
+regex = "1.10.5"
+scrypt = "0.11"
+secp256k1 = {version = "0.28.0", features = ["serde", "recovery", "rand-std"]}
+serde = {version = "1.0.197", features = ["derive"]}
+serde_json = {version = "1.0"}
+serde_with = {version = "3.7.0", features = ["macros", "base64"]}
+serde_yaml = "0.9.32"
+strum = {version = "0.26", features = ["derive"]}
+tempfile = {version = "3.10.1", optional = true}
+thiserror = "1.0.58"
+tokio-util = {version = "0.7.10", features = ["rt"]}
+tracing = "0.1"
+tracing-subscriber = {version = "0.3", features = ["env-filter"]}
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-console = "0.16.0"
-rocksdb = { package = "ckb-rocksdb", version = "=0.21.1", features = [
-    "lz4",
-], default-features = false }
-clap = { version = "4.5.2", features = ["derive", "env", "string"] }
-clap-serde-derive = "0.2.1"
-jsonrpsee = { version = "0.25.1", features = ["client", "server", "macros"] }
-tower = { version = "0.5" }
-hyper = { version = "1.5" }
-tokio = { version = "1", features = [
-    "io-util",
-    "macros",
-    "rt",
-    "rt-multi-thread",
-    "sync",
-    "net",
-    "time",
-    "signal",
-    "process",
-] }
-tentacle = { version = "0.7.2", default-features = false, features = [
-    "upnp",
-    "parking_lot",
-    "openssl-vendored",
-    "tokio-runtime",
-    "tokio-timer",
-    "ws",
-] }
-lnd-grpc-tonic-client = "0.3.0"
-home = "0.5.9"
-ckb-hash = "0.202.0"
 biscuit-auth = "6.0.0-beta.3"
+ckb-hash = "0.202.0"
+clap = {version = "4.5.2", features = ["derive", "env", "string"]}
+clap-serde-derive = "0.2.1"
+console = "0.16.0"
+home = "0.5.9"
+hyper = {version = "1.5"}
+jsonrpsee = {version = "0.25.1", features = ["client", "server", "macros"]}
+lnd-grpc-tonic-client = "0.3.0"
+rocksdb = {package = "ckb-rocksdb", version = "=0.21.1", features = [
+  "lz4",
+], default-features = false}
+tentacle = {version = "0.6.6", default-features = false, features = [
+  "upnp",
+  "parking_lot",
+  "openssl-vendored",
+  "tokio-runtime",
+  "tokio-timer",
+  "ws",
+]}
+tokio = {version = "1", features = [
+  "io-util",
+  "macros",
+  "rt",
+  "rt-multi-thread",
+  "sync",
+  "net",
+  "time",
+  "signal",
+  "process",
+]}
+tower = {version = "0.5"}
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-tokio = { version = "1", features = ["io-util", "macros", "rt", "sync"] }
-tentacle = { version = "0.7.2", default-features = false, features = [
-    "wasm-timer",
-] }
-ckb-hash = { version = "0.202.0", features = [
-    "blake2b-ref",
-], default-features = false }
-tracing = { version = "0.1", features = ["log"] }
-jsonrpsee = { version = "0.25.1", features = [
-    "macros",
-    "server-core",
-    "wasm-client",
-] }
-getrandom = { version = "0.3", features = ["wasm_js"] }
-fiber-wasm-db-common = { path = "../fiber-wasm-db-common" }
-web-sys = "0.3.72"
+biscuit-auth = {version = "6.0.0-beta.3", features = ["wasm"]}
+ckb-hash = {version = "0.202.0", features = [
+  "blake2b-ref",
+], default-features = false}
+console_error_panic_hook = {version = "0.1.7"}
+fiber-wasm-db-common = {path = "../fiber-wasm-db-common"}
+getrandom = {version = "0.3", features = ["wasm_js"]}
+jsonrpsee = {version = "0.25.1", features = [
+  "macros",
+  "server-core",
+  "wasm-client",
+]}
+tentacle = {version = "0.7", default-features = false, features = [
+  "wasm-timer",
+]}
+tokio = {version = "1", features = ["io-util", "macros", "rt", "sync"]}
+tracing = {version = "0.1", features = ["log"]}
 wasm-bindgen = "0.2.84"
-console_error_panic_hook = { version = "0.1.7" }
-web-time = { version = "1.1.0", features = ["serde"] }
+web-sys = "0.3.72"
+web-time = {version = "1.1.0", features = ["serde"]}
 
 [features]
+bench = ["tempfile", "ckb-testtool"]
 default = ["watchtower"]
 portable = ["rocksdb/portable"]
 watchtower = []
-bench = ["tempfile", "ckb-testtool"]
 
 [dev-dependencies]
-tempfile = "3.10.1"
-ckb-testtool = "0.16.0"
 ciborium = "0.2.2"
-jsonrpsee = { version = "0.25.1", features = ["server", "macros", "http-client"] }
-ouroboros = "0.18.5"
+ckb-testtool = "0.16.0"
 futures = "0.3.31"
-criterion = { version = "0.5", features = ["html_reports"] }
+ouroboros = "0.18.5"
+tempfile = "3.10.1"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+criterion = {version = "0.5", features = ["html_reports"]}
+jsonrpsee = {version = "0.25.1", features = ["server", "macros", "http-client"]}
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "0.3.50"
 
 [lints.clippy]
-needless-return = "allow"
-mutable-key-type = "allow"
-upper-case-acronyms = "allow"
-fallible-impl-from = "allow"
 expect-fun-call = "allow"
+fallible-impl-from = "allow"
 large-enum-variant = "allow"
+mutable-key-type = "allow"
+needless-return = "allow"
+upper-case-acronyms = "allow"
 
 [package.metadata.cargo-shear]
 ignored = ["getrandom"]
 
 [[bench]]
-name = "payment_benchmarks"
 harness = false
+name = "payment_benchmarks"
 
 [[bench]]
-name = "biscuit_benchmarks"
 harness = false
+name = "biscuit_benchmarks"

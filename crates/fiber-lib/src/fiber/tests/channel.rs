@@ -49,6 +49,7 @@ use std::time::Duration;
 use tracing::{debug, error};
 
 #[tokio::test]
+// Not supported on wasm: require filesystem access
 async fn test_connect_to_other_node() {
     let mut node_a = NetworkNode::new().await;
     let mut node_b = NetworkNode::new().await;
@@ -73,7 +74,8 @@ fn test_per_commitment_point_and_secret_consistency() {
     );
 }
 
-#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
 fn test_derive_private_and_public_tlc_keys() {
     let privkey = Privkey::from(&[1; 32]);
     let per_commitment_point = Privkey::from(&[2; 32]).pubkey();

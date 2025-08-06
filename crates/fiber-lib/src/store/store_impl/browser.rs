@@ -15,6 +15,7 @@ use fiber_wasm_db_common::IteratorModeOwned;
 use fiber_wasm_db_common::OutputCommand;
 use fiber_wasm_db_common::KV;
 use std::cell::RefCell;
+use std::fmt::Debug;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use tracing::info;
@@ -35,6 +36,14 @@ unsafe impl Sync for Store {}
 pub struct Store {
     chan: CommunicationChannel,
 }
+
+impl Debug for Store {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::result::Result<(), std::fmt::Error> {
+        write!(f, "BrowserStore")?;
+        Ok(())
+    }
+}
+
 impl Store {
     /// Open a store, with migration check
     pub fn new<P: AsRef<Path>>(path: P) -> Result<Self, String> {

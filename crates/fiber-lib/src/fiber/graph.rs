@@ -1446,7 +1446,7 @@ where
             "begin find_path from {:?} to {:?} amount: {:?}",
             source, target, amount
         );
-        let started_time = std::time::Instant::now();
+        let started_time = crate::time::Instant::now();
         let nodes_len = self.nodes.len();
         let route_to_self = source == target;
 
