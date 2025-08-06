@@ -1,8 +1,8 @@
-use crate::fiber::graph::SessionRouteNode;
 use crate::fiber::history::output_direction;
 use crate::fiber::history::{Direction, DEFAULT_BIMODAL_DECAY_TIME};
 use crate::fiber::history::{InternalPairResult, InternalResult};
 use crate::fiber::history::{PaymentHistory, TimedResult};
+use crate::fiber::payment::SessionRouteNode;
 use crate::store::Store;
 use crate::test_utils::generate_store;
 #[cfg(not(target_arch = "wasm32"))]

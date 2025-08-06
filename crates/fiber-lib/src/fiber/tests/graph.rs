@@ -2,7 +2,8 @@
 use crate::fiber::config::MAX_PAYMENT_TLC_EXPIRY_LIMIT;
 use crate::fiber::features::FeatureVector;
 use crate::fiber::gossip::GossipMessageStore;
-use crate::fiber::graph::{PathFindError, SessionRoute};
+use crate::fiber::graph::PathFindError;
+use crate::fiber::payment::SessionRoute;
 use crate::fiber::types::{ChannelUpdateChannelFlags, ChannelUpdateMessageFlags, Pubkey};
 use crate::{
     fiber::{

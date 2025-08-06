@@ -3,6 +3,9 @@ use crate::fiber::config::AnnouncedNodeName;
 use crate::fiber::features::FeatureVector;
 use crate::fiber::gossip::GossipMessageStore;
 use crate::fiber::network::PaymentCustomRecords;
+use crate::fiber::network::SendPaymentData;
+use crate::fiber::payment::PaymentSession;
+use crate::fiber::payment::PaymentStatus;
 use crate::fiber::types::*;
 #[allow(unused)]
 use crate::fiber::{

@@ -18,12 +18,12 @@ use std::path::Path;
 use super::db_migrate::DbMigrate;
 use super::schema::*;
 use crate::fiber::gossip::GossipMessageStore;
-use crate::fiber::graph::AttemptStatus;
+use crate::fiber::payment::{Attempt, AttemptStatus, PaymentSession, PaymentStatus};
 use crate::fiber::types::{HoldTlc, CURSOR_SIZE};
 use crate::{
     fiber::{
         channel::{ChannelActorState, ChannelActorStateStore, ChannelState},
-        graph::{Attempt, NetworkGraphStateStore, PaymentSession, PaymentStatus},
+        graph::NetworkGraphStateStore,
         history::{Direction, TimedResult},
         network::{NetworkActorStateStore, PaymentCustomRecords, PersistentNetworkActorState},
         types::{BroadcastMessage, BroadcastMessageID, Cursor, Hash256},
