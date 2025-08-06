@@ -2010,7 +2010,7 @@ checksum = "28dea519a9695b9977216879a3ebfddf92f1c08c05d984f8996aecd6ecdc811d"
 
 [[package]]
 name = "fiber-bin"
-version = "0.5.1"
+version = "0.6.0-rc1"
 dependencies = [
  "ckb-chain-spec",
  "ckb-resource",
@@ -2037,7 +2037,7 @@ dependencies = [
 
 [[package]]
 name = "fiber-wasm"
-version = "0.1.0"
+version = "0.6.0-rc1"
 dependencies = [
  "ckb-chain-spec",
  "ckb-resource",
@@ -2057,7 +2057,7 @@ dependencies = [
 
 [[package]]
 name = "fiber-wasm-db-common"
-version = "0.1.0"
+version = "0.6.0-rc1"
 dependencies = [
  "anyhow",
  "bincode 2.0.1",
@@ -2067,7 +2067,7 @@ dependencies = [
 
 [[package]]
 name = "fiber-wasm-db-worker"
-version = "0.1.0"
+version = "0.6.0-rc1"
 dependencies = [
  "anyhow",
  "console_error_panic_hook",
@@ -2100,7 +2100,7 @@ dependencies = [
 
 [[package]]
 name = "fnn"
-version = "0.5.1"
+version = "0.6.0-rc1"
 dependencies = [
  "aes-gcm",
  "anyhow",
