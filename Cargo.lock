@@ -2037,7 +2037,7 @@ dependencies = [
 
 [[package]]
 name = "fiber-wasm"
-version = "0.6.0-rc1"
+version = "0.1.0"
 dependencies = [
  "ckb-chain-spec",
  "ckb-resource",
@@ -2057,7 +2057,7 @@ dependencies = [
 
 [[package]]
 name = "fiber-wasm-db-common"
-version = "0.6.0-rc1"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "bincode 2.0.1",
@@ -2067,7 +2067,7 @@ dependencies = [
 
 [[package]]
 name = "fiber-wasm-db-worker"
-version = "0.6.0-rc1"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "console_error_panic_hook",
