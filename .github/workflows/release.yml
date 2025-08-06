@@ -5,7 +5,6 @@ on:
     tags: [ '*' ]
 env:
   CARGO_TERM_COLOR: always
-  RUST_TOOLCHAIN: 1.84.0
 permissions:
   contents: write
   id-token: write
@@ -51,10 +50,6 @@ jobs:
     steps:
     - name: Checkout the Repository
       uses: actions/checkout@v4
-    - name: Install Rust Toolchain
-      run: |
-        rustup toolchain install ${{ env.RUST_TOOLCHAIN }} --profile minimal
-        rustup override set ${{ env.RUST_TOOLCHAIN }}
     - if: matrix.os == 'windows-2019'
       name: Windows Dependencies
       run: |
@@ -80,7 +75,7 @@ jobs:
         export OPENSSL_STATIC=1
         cargo build --release --locked --features portable
         cd migrate
-        cargo build --release --locked --features portable
+        cargo build --release --locked
         cd ..
     - if: matrix.os == 'ubuntu-24.04'
       name: Build linux
@@ -91,7 +86,7 @@ jobs:
         export OPENSSL_LIB_DIR=/usr/local/opt/openssl@1.1/lib
         export OPENSSL_INCLUDE_DIR=/usr/local/opt/openssl@1.1/include
         export OPENSSL_STATIC=1
-        cargo build --release --locked --features portable && cd migrate && cargo build --release --locked --features portable && cd ..
+        cargo build --release --locked --features portable && cd migrate && cargo build --release --locked && cd ..
     - if: matrix.os == 'windows-2019'
       name: Build windows
       run: cargo build --release --locked && cd migrate && cargo build --release --locked && cd ..
