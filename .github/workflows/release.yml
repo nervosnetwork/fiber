@@ -23,7 +23,22 @@ jobs:
         npm install
     - run: |
         npm run build -ws
-    - run: |
+    - name: Check if version exists
+      run: |
+        cd fiber-js
+        PACKAGE_NAME=$(node -p "require('./package.json').name")
+        PACKAGE_VERSION=$(node -p "require('./package.json').version")
+
+        if npm view "$PACKAGE_NAME@$PACKAGE_VERSION" version 2>/dev/null; then
+          echo "Version $PACKAGE_VERSION already exists on NPM"
+          echo "SHOULD_PUBLISH=false" >> $GITHUB_ENV
+        else
+          echo "Version $PACKAGE_VERSION does not exist, proceeding with publish"
+          echo "SHOULD_PUBLISH=true" >> $GITHUB_ENV
+        fi
+    - name: Publish to NPM
+      if: env.SHOULD_PUBLISH == 'true'
+      run: |
         cd fiber-js
         npm publish --provenance --access public
       env:
