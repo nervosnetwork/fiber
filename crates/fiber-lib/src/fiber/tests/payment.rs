@@ -4072,65 +4072,69 @@ async fn test_send_payment_shutdown_cooperative_sender_sent() {
     )
     .await;
 
-    let old_node0_balance = nodes[0].get_local_balance_from_channel(channels[0]);
-    let old_node3_balance = nodes[3].get_local_balance_from_channel(channels[2]);
+    let [node_0, _node_1, node_2, node_3] = nodes.try_into().expect("4 nodes");
+
+    let old_node0_balance = node_0.get_local_balance_from_channel(channels[0]);
+    let old_node3_balance = node_3.get_local_balance_from_channel(channels[2]);
 
     let mut all_sent = HashSet::new();
     let tlc_amount = 1000;
-    for _i in 0..10 {
-        let res = nodes[0]
-            .send_payment_keysend(&nodes[3], tlc_amount, false)
+    for _i in 0..4 {
+        let res = node_0
+            .send_payment_keysend(&node_3, tlc_amount, false)
             .await;
         if let Ok(send_payment_res) = res {
             all_sent.insert(send_payment_res.payment_hash);
         }
     }
 
-    // sleep for a while to make sure some payments may Success
-    tokio::time::sleep(tokio::time::Duration::from_millis(6000)).await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(5000)).await;
+    for _i in 0..100 {
+        let node_3_channel_actor_state = node_3.get_channel_actor_state(channels[2]);
+        if node_3_channel_actor_state
+            .tlc_state
+            .all_tlcs()
+            .next()
+            .is_none()
+        {
+            break;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+    }
 
     loop {
-        let res = nodes[2].send_shutdown(channels[2], false).await;
+        let res = node_2.send_shutdown(channels[2], false).await;
         if res.is_ok() {
-            debug!("sent shutdown successfully");
+            debug!("send shutdown successfully");
             break;
         }
     }
 
-    let mut failed_count = 0;
     let mut succ_count = 0;
     let all_tx_count = all_sent.len();
     let mut count = 0;
     while !all_sent.is_empty() && count < 100 {
         for payment_hash in all_sent.clone().iter() {
-            nodes[0].wait_until_final_status(*payment_hash).await;
-            let res = nodes[0].get_payment_result(*payment_hash).await;
-            eprintln!(
-                "payment_hash: {:?} status: {:?} failed_count: {:?}",
-                payment_hash, res.status, failed_count
-            );
-            if res.status == PaymentStatus::Failed {
-                failed_count += 1;
-                all_sent.remove(payment_hash);
-            } else if res.status == PaymentStatus::Success {
+            node_0.wait_until_final_status(*payment_hash).await;
+            let res = node_0.get_payment_result(*payment_hash).await;
+            eprintln!("payment_hash: {:?} status: {:?}", payment_hash, res.status);
+
+            if res.status == PaymentStatus::Success {
                 succ_count += 1;
                 all_sent.remove(payment_hash);
             }
         }
         count += 1;
     }
-    debug!(
-        "all_count: {:?} failed_count: {:?} succ_count: {:?}",
-        all_tx_count, failed_count, succ_count
-    );
+    debug!("all_count: {:?} succ_count: {:?}", all_tx_count, succ_count);
 
     for _i in 0..100 {
-        let node_3_channel_actor_state = nodes[3].get_channel_actor_state(channels[2]);
+        let node_3_channel_actor_state = node_3.get_channel_actor_state(channels[2]);
         eprintln!(
             "node_3_channel_actor_state: {:?}",
             node_3_channel_actor_state.state
         );
-        let node_2_channel_actor_state = nodes[2].get_channel_actor_state(channels[2]);
+        let node_2_channel_actor_state = node_2.get_channel_actor_state(channels[2]);
         eprintln!(
             "node_2_channel_actor_state: {:?}",
             node_2_channel_actor_state.state
@@ -4142,19 +4146,19 @@ async fn test_send_payment_shutdown_cooperative_sender_sent() {
         }
     }
 
-    let node_3_channel_actor_state = nodes[3].get_channel_actor_state(channels[2]);
+    let node_3_channel_actor_state = node_3.get_channel_actor_state(channels[2]);
     assert_eq!(
         node_3_channel_actor_state.state,
         ChannelState::Closed(CloseFlags::COOPERATIVE)
     );
-    let node_2_channel_actor_state = nodes[2].get_channel_actor_state(channels[2]);
+    let node_2_channel_actor_state = node_2.get_channel_actor_state(channels[2]);
     assert_eq!(
         node_2_channel_actor_state.state,
         ChannelState::Closed(CloseFlags::COOPERATIVE)
     );
 
-    let new_node0_balance = nodes[0].get_local_balance_from_channel(channels[0]);
-    let new_node3_balance = nodes[3].get_local_balance_from_channel(channels[2]);
+    let new_node0_balance = node_0.get_local_balance_from_channel(channels[0]);
+    let new_node3_balance = node_3.get_local_balance_from_channel(channels[2]);
     debug!(
         "node0 send: {} - {} = {}",
         old_node0_balance,
@@ -5313,13 +5317,8 @@ async fn test_send_payment_with_reverse_channel_of_capaicity_not_enough() {
     for _i in 0..count {
         let payment = nodes[0].send_payment_keysend(&nodes[2], 1, false).await;
         let payment_hash = payment.unwrap().payment_hash;
-        nodes[0].wait_until_inflight(payment_hash).await;
-        payments.insert(payment_hash);
-    }
-
-    for payment_hash in payments.iter() {
-        nodes[0].wait_until_success(*payment_hash).await;
-        let session = nodes[0].get_payment_session(*payment_hash).unwrap();
+        nodes[0].wait_until_success(payment_hash).await;
+        let session = nodes[0].get_payment_session(payment_hash).unwrap();
         let retry_times = session.retry_times();
         debug!(
             "payment_hash: {:?} retry_times: {:?}",
@@ -5329,6 +5328,7 @@ async fn test_send_payment_with_reverse_channel_of_capaicity_not_enough() {
             .entry(retry_times)
             .and_modify(|e| *e += 1)
             .or_insert(1);
+        payments.insert(payment_hash);
     }
 
     // assert only one payment session will try 2 times

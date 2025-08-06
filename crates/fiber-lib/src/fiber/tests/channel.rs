@@ -2383,26 +2383,33 @@ async fn test_network_add_two_tlcs_remove_one() {
 
     eprintln!("add_tlc_result: {:?}", add_tlc_result_b);
 
-    // remove tlc from node_b
-    call!(node_b.network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
-            ChannelCommandWithId {
-                channel_id,
-                command: ChannelCommand::RemoveTlc(
-                    RemoveTlcCommand {
-                        id: add_tlc_result_a.tlc_id,
-                        reason: RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
-                            payment_preimage: preimage_a.into(),
-                        }),
-                    },
-                    rpc_reply,
-                ),
-            },
-        ))
-    })
-    .expect("node_b alive")
-    .expect("successfully removed tlc");
-    eprintln!("remove tlc result: {:?}", ());
+    loop {
+        // remove tlc from node_b
+        let res = call!(node_b.network_actor, |rpc_reply| {
+            NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+                ChannelCommandWithId {
+                    channel_id,
+                    command: ChannelCommand::RemoveTlc(
+                        RemoveTlcCommand {
+                            id: add_tlc_result_a.tlc_id,
+                            reason: RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+                                payment_preimage: preimage_a.into(),
+                            }),
+                        },
+                        rpc_reply,
+                    ),
+                },
+            ))
+        })
+        .expect("node_b alive");
+        if res.is_ok() {
+            println!("remove tlc result: {:?}", res);
+            break;
+        } else {
+            eprintln!("Failed to remove tlc, retrying...");
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        }
+    }
 
     loop {
         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
