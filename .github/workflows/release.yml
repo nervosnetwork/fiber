@@ -5,7 +5,6 @@ on:
     tags: [ '*' ]
 env:
   CARGO_TERM_COLOR: always
-  RUST_TOOLCHAIN: 1.84.0
 permissions:
   contents: write
   id-token: write
@@ -51,10 +50,6 @@ jobs:
     steps:
     - name: Checkout the Repository
       uses: actions/checkout@v4
-    - name: Install Rust Toolchain
-      run: |
-        rustup toolchain install ${{ env.RUST_TOOLCHAIN }} --profile minimal
-        rustup override set ${{ env.RUST_TOOLCHAIN }}
     - if: matrix.os == 'windows-2019'
       name: Windows Dependencies
       run: |
