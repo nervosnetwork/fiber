@@ -234,7 +234,16 @@ where
         ctx: RpcContext,
         params: CreatePreimageParams,
     ) -> Result<(), ErrorObjectOwned> {
-        if params.payment_hash != ckb_hash::blake2b_256(params.preimage).into() {
+        use crate::fiber::hash_algorithm::HashAlgorithm;
+        let CreatePreimageParams {
+            payment_hash,
+            preimage,
+        } = params;
+
+        if HashAlgorithm::supported_algorithms()
+            .iter()
+            .all(|algorithm| payment_hash != algorithm.hash(preimage).into())
+        {
             return Err(ErrorObjectOwned::owned(
                 CALL_EXECUTION_FAILED_CODE,
                 "Wrong preimage",
@@ -242,7 +251,7 @@ where
             ));
         }
         self.store
-            .insert_watch_preimage(ctx.node_id, params.payment_hash, params.preimage);
+            .insert_watch_preimage(ctx.node_id, payment_hash, preimage);
         Ok(())
     }
     async fn remove_preimage(

@@ -806,11 +806,6 @@ impl WatchtowerStore for Store {
     }
 
     fn insert_watch_preimage(&self, node_id: NodeId, payment_hash: Hash256, preimage: Hash256) {
-        debug_assert_eq!(
-            payment_hash,
-            ckb_hash::blake2b_256(preimage).into(),
-            "wrong preimage"
-        );
         let mut batch = self.batch();
         batch.put_kv(KeyValue::WatchtowerPreimage(
             payment_hash,
