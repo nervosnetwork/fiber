@@ -120,7 +120,10 @@ where
                 .store
                 .update_local_settlement(NodeId::local(), channel_id, local_settlement_data),
             WatchtowerMessage::CreatePreimage(payment_hash, preimage) => {
-                if payment_hash == ckb_hash::blake2b_256(preimage).into() {
+                if HashAlgorithm::supported_algorithms()
+                    .iter()
+                    .any(|algorithm| payment_hash == algorithm.hash(preimage).into())
+                {
                     self.store
                         .insert_watch_preimage(NodeId::local(), payment_hash, preimage);
                 } else {
