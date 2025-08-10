@@ -1,0 +1,19 @@
+[package]
+name = "funding-tx-builder"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+serde = { version = "1.0.197", features = ["derive"] }
+serde_json = "1.0.135"
+serde_with = { version = "3.7.0", features = ["macros", "base64"] }
+ckb-gen-types = "0.202.0"
+ckb-jsonrpc-types = "0.202.0"
+ckb-sdk = "4.1.0"
+ckb-types = "0.202.0"
+hex = "0.4.3"
+molecule = { version = "0.8.0", default-features = false }
+anyhow = "1.0.81"
+async-trait = "0.1"
+
+[workspace]

@@ -5,11 +5,13 @@ use ckb_types::{
     prelude::IntoTransactionView as _,
 };
 use ractor::{concurrency::Duration, Actor, ActorProcessingErr, ActorRef, RpcReplyPort};
+use serde::{Deserialize, Serialize};
+use serde_with::serde_as;
 use tracing::debug;
 
 use crate::{
     ckb::contracts::{get_script_by_contract, Contract},
-    fiber::types::Hash256,
+    fiber::{serde_utils::EntityHex, types::Hash256},
 };
 
 use super::{
@@ -164,15 +166,15 @@ impl Actor for CkbChainActor {
     ) -> Result<(), ActorProcessingErr> {
         match message {
             CkbChainMessage::Fund(tx, request, reply_port) => {
-                if !reply_port.is_closed() {
-                    let context = state.build_funding_context(request.script.clone());
-                    let exclusion = &mut state.live_cells_exclusion_map;
-                    let result = tx.fulfill(request, context, exclusion).await;
-                    if !reply_port.is_closed() {
-                        // ignore error
-                        let _ = reply_port.send(result);
+                let context = state.build_funding_context(request.script.clone());
+                let result = match state.config.funding_tx_shell_builder.as_ref() {
+                    None => {
+                        let exclusion = &mut state.live_cells_exclusion_map;
+                        tx.fulfill(request, context, exclusion).await
                     }
-                }
+                    Some(shell_script) => fund_via_shell(shell_script, tx, request, context).await,
+                };
+                let _ = reply_port.send(result);
             }
             CkbChainMessage::VerifyFundingTx {
                 local_tx,
@@ -300,4 +302,71 @@ impl CkbChainState {
             funding_cell_lock_script,
         }
     }
+}
+
+#[serde_as]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+struct FundingTxShellBuilderInput {
+    tx: ckb_jsonrpc_types::Transaction,
+    request: FundingRequest,
+    rpc_url: String,
+    #[serde_as(as = "EntityHex")]
+    funding_source_lock_script: packed::Script,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn fund_via_shell(
+    shell_script: &str,
+    mut tx: FundingTx,
+    request: FundingRequest,
+    context: FundingContext,
+) -> Result<FundingTx, FundingError> {
+    use std::process::Stdio;
+    use tokio::{io::AsyncWriteExt, process::Command};
+    let (executable, arg) = if cfg!(target_os = "windows") {
+        ("cmd", "/C")
+    } else {
+        ("sh", "-c")
+    };
+    let mut child = Command::new(executable)
+        .arg(arg)
+        .arg(shell_script)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+
+    let input = FundingTxShellBuilderInput {
+        tx: tx.take().map(|tx| tx.data().into()).unwrap_or_default(),
+        request,
+        rpc_url: context.rpc_url,
+        funding_source_lock_script: context.funding_source_lock_script,
+    };
+    let mut stdin = child.stdin.take().expect("failed to get stdin");
+    let input_json = serde_json::to_string(&input)?;
+    stdin.write_all(input_json.as_bytes()).await?;
+
+    let output = child.wait_with_output().await?;
+    if output.status.success() {
+        let out_tx_json = String::from_utf8(output.stdout)?;
+        let tx: ckb_jsonrpc_types::Transaction = serde_json::from_str(&out_tx_json)?;
+        let tx: packed::Transaction = tx.into();
+        let tx: FundingTx = tx.into_view().into();
+        Ok(tx)
+    } else {
+        let err = String::from_utf8(output.stderr)?;
+        Err(FundingError::CkbTxBuilderError(
+            ckb_sdk::tx_builder::TxBuilderError::Other(anyhow::anyhow!(err)),
+        ))
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn fund_via_shell(
+    _shell_script: &str,
+    _tx: FundingTx,
+    _request: FundingRequest,
+    _context: FundingContext,
+) -> Result<FundingTx, FundingError> {
+    todo!();
 }
