@@ -547,7 +547,7 @@ where
 
         let factor = self.time_factor(time);
         let fail_amount = fail_amount.max(1);
-        (fail_amount * (1.0 / factor) as u128).min(capacity)
+        (fail_amount.saturating_mul((1.0 / factor) as u128)).min(capacity)
     }
 
     // Get the probability of a payment success through a direct channel,
