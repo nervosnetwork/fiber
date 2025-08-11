@@ -245,6 +245,131 @@ pub trait GossipMessageStore {
     fn delete_channel_timestamps(&self, outpoint: &OutPoint);
 }
 
+/// Used for delegating the store trait
+pub trait GossipMessageStoreDeref {
+    type Target: GossipMessageStore;
+    fn gossip_message_store_deref(&self) -> &Self::Target;
+}
+
+impl<T: GossipMessageStoreDeref> GossipMessageStore for T {
+    fn get_broadcast_messages_iter(
+        &self,
+        after_cursor: &Cursor,
+    ) -> impl IntoIterator<Item = BroadcastMessageWithTimestamp> {
+        self.gossip_message_store_deref()
+            .get_broadcast_messages_iter(after_cursor)
+    }
+
+    fn get_broadcast_messages(
+        &self,
+        after_cursor: &Cursor,
+        count: Option<u16>,
+    ) -> Vec<BroadcastMessageWithTimestamp> {
+        self.gossip_message_store_deref()
+            .get_broadcast_messages(after_cursor, count)
+    }
+
+    fn query_broadcast_messages<I: IntoIterator<Item = BroadcastMessageQuery>>(
+        &self,
+        queries: I,
+    ) -> (Vec<BroadcastMessageWithTimestamp>, Vec<u16>) {
+        self.gossip_message_store_deref()
+            .query_broadcast_messages(queries)
+    }
+
+    fn query_broadcast_message(
+        &self,
+        query: BroadcastMessageQuery,
+    ) -> Option<BroadcastMessageWithTimestamp> {
+        self.gossip_message_store_deref()
+            .query_broadcast_message(query)
+    }
+
+    fn get_broadcast_message_with_cursor(
+        &self,
+        cursor: &Cursor,
+    ) -> Option<BroadcastMessageWithTimestamp> {
+        self.gossip_message_store_deref()
+            .get_broadcast_message_with_cursor(cursor)
+    }
+
+    fn get_latest_broadcast_message_cursor(&self) -> Option<Cursor> {
+        self.gossip_message_store_deref()
+            .get_latest_broadcast_message_cursor()
+    }
+
+    fn get_latest_channel_announcement_timestamp(&self, outpoint: &OutPoint) -> Option<u64> {
+        self.gossip_message_store_deref()
+            .get_latest_channel_announcement_timestamp(outpoint)
+    }
+
+    fn get_latest_channel_update_timestamp(
+        &self,
+        outpoint: &OutPoint,
+        is_node1: bool,
+    ) -> Option<u64> {
+        self.gossip_message_store_deref()
+            .get_latest_channel_update_timestamp(outpoint, is_node1)
+    }
+
+    fn get_latest_node_announcement_timestamp(&self, pk: &Pubkey) -> Option<u64> {
+        self.gossip_message_store_deref()
+            .get_latest_node_announcement_timestamp(pk)
+    }
+
+    fn get_latest_channel_announcement(
+        &self,
+        outpoint: &OutPoint,
+    ) -> Option<(u64, ChannelAnnouncement)> {
+        self.gossip_message_store_deref()
+            .get_latest_channel_announcement(outpoint)
+    }
+
+    fn get_latest_channel_update(
+        &self,
+        outpoint: &OutPoint,
+        is_node1: bool,
+    ) -> Option<ChannelUpdate> {
+        self.gossip_message_store_deref()
+            .get_latest_channel_update(outpoint, is_node1)
+    }
+
+    fn get_latest_node_announcement(&self, pk: &Pubkey) -> Option<NodeAnnouncement> {
+        self.gossip_message_store_deref()
+            .get_latest_node_announcement(pk)
+    }
+
+    fn delete_broadcast_message(&self, cursor: &Cursor) {
+        self.gossip_message_store_deref()
+            .delete_broadcast_message(cursor);
+    }
+
+    fn save_channel_announcement(&self, timestamp: u64, channel_announcement: ChannelAnnouncement) {
+        self.gossip_message_store_deref()
+            .save_channel_announcement(timestamp, channel_announcement);
+    }
+
+    fn save_channel_update(&self, channel_update: ChannelUpdate) {
+        self.gossip_message_store_deref()
+            .save_channel_update(channel_update)
+    }
+
+    fn save_node_announcement(&self, node_announcement: NodeAnnouncement) {
+        self.gossip_message_store_deref()
+            .save_node_announcement(node_announcement);
+    }
+
+    fn get_channel_timestamps_iter(&self) -> impl IntoIterator<Item = (OutPoint, [u64; 3])> {
+        self.gossip_message_store_deref()
+            .get_channel_timestamps_iter()
+    }
+
+    fn delete_channel_timestamps(&self, outpoint: &OutPoint) {
+        self.gossip_message_store_deref()
+            .delete_channel_timestamps(outpoint);
+    }
+}
+
 // A batch of gossip messages has been added to the store since the last time
 // we pulled new messages/messages are pushed to us.
 #[derive(Clone, Debug)]

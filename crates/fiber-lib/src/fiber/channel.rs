@@ -8140,6 +8140,81 @@ pub trait ChannelActorStateStore {
     fn get_node_hold_tlcs(&self) -> HashMap<Hash256, Vec<HoldTlc>>;
 }
 
+/// Used for delegating the store trait
+pub trait ChannelActorStateStoreDeref {
+    type Target: ChannelActorStateStore;
+    fn channel_actor_state_store_deref(&self) -> &Self::Target;
+}
+
+impl<T: ChannelActorStateStoreDeref> ChannelActorStateStore for T {
+    fn get_channel_actor_state(&self, id: &Hash256) -> Option<ChannelActorState> {
+        self.channel_actor_state_store_deref()
+            .get_channel_actor_state(id)
+    }
+    fn insert_channel_actor_state(&self, state: ChannelActorState) {
+        self.channel_actor_state_store_deref()
+            .insert_channel_actor_state(state);
+    }
+    fn delete_channel_actor_state(&self, id: &Hash256) {
+        self.channel_actor_state_store_deref()
+            .delete_channel_actor_state(id);
+    }
+    fn get_channel_ids_by_peer(&self, peer_id: &PeerId) -> Vec<Hash256> {
+        self.channel_actor_state_store_deref()
+            .get_channel_ids_by_peer(peer_id)
+    }
+    fn get_active_channel_ids_by_peer(&self, peer_id: &PeerId) -> Vec<Hash256> {
+        self.channel_actor_state_store_deref()
+            .get_active_channel_ids_by_peer(peer_id)
+    }
+    fn get_channel_states(&self, peer_id: Option<PeerId>) -> Vec<(PeerId, Hash256, ChannelState)> {
+        self.channel_actor_state_store_deref()
+            .get_channel_states(peer_id)
+    }
+    fn get_active_channel_states(
+        &self,
+        peer_id: Option<PeerId>,
+    ) -> Vec<(PeerId, Hash256, ChannelState)> {
+        self.channel_actor_state_store_deref()
+            .get_active_channel_states(peer_id)
+    }
+    fn get_channel_state_by_outpoint(&self, id: &OutPoint) -> Option<ChannelActorState> {
+        self.channel_actor_state_store_deref()
+            .get_channel_state_by_outpoint(id)
+    }
+    fn insert_payment_custom_records(
+        &self,
+        payment_hash: &Hash256,
+        custom_records: PaymentCustomRecords,
+    ) {
+        self.channel_actor_state_store_deref()
+            .insert_payment_custom_records(payment_hash, custom_records);
+    }
+    fn get_payment_custom_records(&self, payment_hash: &Hash256) -> Option<PaymentCustomRecords> {
+        self.channel_actor_state_store_deref()
+            .get_payment_custom_records(payment_hash)
+    }
+
+    fn insert_payment_hold_tlc(&self, payment_hash: Hash256, hold_tlc: HoldTlc) {
+        self.channel_actor_state_store_deref()
+            .insert_payment_hold_tlc(payment_hash, hold_tlc);
+    }
+
+    fn remove_payment_hold_tlc(&self, payment_hash: &Hash256, channel_id: &Hash256, tlc_id: u64) {
+        self.channel_actor_state_store_deref()
+            .remove_payment_hold_tlc(payment_hash, channel_id, tlc_id);
+    }
+
+    fn get_payment_hold_tlcs(&self, payment_hash: Hash256) -> Vec<HoldTlc> {
+        self.channel_actor_state_store_deref()
+            .get_payment_hold_tlcs(payment_hash)
+    }
+
+    fn get_node_hold_tlcs(&self) -> HashMap<Hash256, Vec<HoldTlc>> {
+        self.channel_actor_state_store_deref().get_node_hold_tlcs()
+    }
+}
+
 /// A wrapper on CommitmentTransaction that has a partial signature along with
 /// the ckb transaction.
 #[derive(Clone, Debug)]

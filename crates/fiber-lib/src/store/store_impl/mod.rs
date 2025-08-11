@@ -546,7 +546,7 @@ impl InvoiceStore for Store {
     fn update_invoice_status(
         &self,
         id: &Hash256,
-        status: crate::invoice::CkbInvoiceStatus,
+        status: CkbInvoiceStatus,
     ) -> Result<(), InvoiceError> {
         self.get_invoice(id).ok_or(InvoiceError::InvoiceNotFound)?;
         let mut batch = self.batch();

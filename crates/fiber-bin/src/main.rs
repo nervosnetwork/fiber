@@ -13,6 +13,7 @@ use fnn::rpc::watchtower::{
     CreatePreimageParams, CreateWatchChannelParams, RemovePreimageParams, RemoveWatchChannelParams,
     UpdateLocalSettlementParams, UpdateRevocationParams, WatchtowerRpcClient,
 };
+use fnn::store::pub_sub::StoreWithPubSub;
 use fnn::store::Store;
 use fnn::tasks::{
     cancel_tasks_and_wait_for_completion, new_tokio_cancellation_token, new_tokio_task_tracker,
@@ -85,6 +86,7 @@ pub async fn main() -> Result<(), ExitMessage> {
         .store_path();
 
     let store = Store::new(store_path).map_err(|err| ExitMessage(err.to_string()))?;
+    let store = StoreWithPubSub::new(store);
 
     let tracker = new_tokio_task_tracker();
     let token = new_tokio_cancellation_token();

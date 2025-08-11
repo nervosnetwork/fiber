@@ -3259,6 +3259,23 @@ pub trait NetworkActorStateStore {
     fn insert_network_actor_state(&self, id: &PeerId, state: PersistentNetworkActorState);
 }
 
+/// Used for delegating the store trait
+pub trait NetworkActorStateStoreDeref {
+    type Target: NetworkActorStateStore;
+    fn network_actor_state_store_deref(&self) -> &Self::Target;
+}
+
+impl<T: NetworkActorStateStoreDeref> NetworkActorStateStore for T {
+    fn get_network_actor_state(&self, id: &PeerId) -> Option<PersistentNetworkActorState> {
+        self.network_actor_state_store_deref()
+            .get_network_actor_state(id)
+    }
+    fn insert_network_actor_state(&self, id: &PeerId, state: PersistentNetworkActorState) {
+        self.network_actor_state_store_deref()
+            .insert_network_actor_state(id, state);
+    }
+}
+
 static CHANNEL_ACTOR_NAME_PREFIX: AtomicU64 = AtomicU64::new(0u64);
 
 // ractor requires that the actor name is unique, so we add a prefix to the actor name.

@@ -26,3 +26,24 @@ pub trait PreimageStore {
     /// Get a preimage from the store.
     fn get_preimage(&self, payment_hash: &Hash256) -> Option<Hash256>;
 }
+
+/// Used for delegating the store trait
+pub trait PreimageStoreDeref {
+    type Target: PreimageStore;
+    fn preimage_store_deref(&self) -> &Self::Target;
+}
+
+impl<T: PreimageStoreDeref> PreimageStore for T {
+    fn insert_preimage(&self, payment_hash: Hash256, preimage: Hash256) {
+        self.preimage_store_deref()
+            .insert_preimage(payment_hash, preimage);
+    }
+
+    fn remove_preimage(&self, payment_hash: &Hash256) {
+        self.preimage_store_deref().remove_preimage(payment_hash);
+    }
+
+    fn get_preimage(&self, payment_hash: &Hash256) -> Option<Hash256> {
+        self.preimage_store_deref().get_preimage(payment_hash)
+    }
+}
