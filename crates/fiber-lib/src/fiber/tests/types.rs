@@ -517,13 +517,13 @@ fn test_verify_hard_coded_node_announcement() {
 
     for (signature, message, node_announcement) in [
         (
-            "80a0e9d4ed35eb76e086038983dfd2572e7298a795b4cde7b113d805eeb495192cf552e4cc631e73fee76c4f0479a33327488f8a99978a10e2583b7faba2cf61",
-            "044e5172e9a9d7b383c15f40d8dac30f86422e7082af2b4d7db7f5484b4a1701",
+            "cfe5d1dde285bac326fb290899c14bd05b9afa013c61c3c9338daca07ab0d287647c2101482bc193913b91da0e9284ebd352f1139149b8943876c78ff46608fc",
+            "e387e01002f45594d36577ac53c822f8712b378ed52e8dde3bfbdb3b01b29abc",
             node1(),
         ),
         (
-            "3a1eea2e372e5c3bc53d1c283d449afbfff029308fe59e111a23ad32163d2a6f58128e21083e128a05d34fb8c0068a1f4fa6e4ae12e370d3051591df151a957a",
-            "db96ac7278d1db7b03eefdc4d21c952e3aee8a4be87a82c8c0e66a87e8897a81",
+            "1fec23d92c9fc9fafd39f477bf1fbb79cfb8f63604a6aeb0712cfd7dbe31e4e21a174f4e6733e78970f4489859aa1ba615fe712d4d212dd7f1c1a6678dff5d00",
+            "3e612fcfa66885352ac18e1fdd602199fb125fa4435ea509f472c0c870b0d307",
             node2(),
         ),
     ] {

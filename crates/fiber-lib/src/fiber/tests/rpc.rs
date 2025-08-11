@@ -29,9 +29,8 @@ fn rpc_config_with_auth() -> (RpcConfig, KeyPair) {
     (config, root)
 }
 
-#[tokio::test]
-async fn test_rpc_basic() {
-    let (nodes, _channels) = create_n_nodes_network_with_params(
+async fn gen_mock_network() -> (Vec<NetworkNode>, Vec<Hash256>) {
+    create_n_nodes_network_with_params(
         &[
             (
                 (0, 1),
@@ -55,7 +54,13 @@ async fn test_rpc_basic() {
         2,
         Some(gen_rpc_config()),
     )
-    .await;
+    .await
+}
+
+#[tokio::test]
+async fn test_rpc_basic() {
+    let (nodes, _channels) = gen_mock_network().await;
+
     let [node_0, node_1] = nodes.try_into().expect("2 nodes");
 
     let res: ListChannelsResult = node_0
@@ -93,7 +98,8 @@ async fn test_rpc_basic() {
         fallback_address: None,
         final_expiry_delta: Some(900000 + 1234),
         udt_type_script: Some(Script::default().into()),
-        payment_preimage: Hash256::default(),
+        payment_preimage: Some(Hash256::default()),
+        payment_hash: None,
         hash_algorithm: Some(crate::fiber::hash_algorithm::HashAlgorithm::CkbHash),
         allow_mpp: Some(true),
         atomic_mpp: None,
@@ -145,7 +151,8 @@ async fn test_rpc_basic() {
         fallback_address: None,
         final_expiry_delta: Some(900000 + 1234),
         udt_type_script: Some(Script::default().into()),
-        payment_preimage: gen_rand_sha256_hash(),
+        payment_preimage: Some(gen_rand_sha256_hash()),
+        payment_hash: None,
         hash_algorithm: Some(crate::fiber::hash_algorithm::HashAlgorithm::CkbHash),
         allow_mpp: Some(false),
         atomic_mpp: None,
@@ -159,6 +166,40 @@ async fn test_rpc_basic() {
 
     let internal_ckb_invoice: CkbInvoice = invoice_res.invoice_address.parse().unwrap();
     assert!(internal_ckb_invoice.payment_secret().is_none());
+}
+
+#[tokio::test]
+async fn test_invoice_rpc() {
+    let (nodes, _channels) = gen_mock_network().await;
+
+    let [node_0, _node_1] = nodes.try_into().expect("2 nodes");
+
+    let payment_hash = gen_rand_sha256_hash();
+    let new_invoice_params = NewInvoiceParams {
+        amount: 1000,
+        description: Some("test".to_string()),
+        currency: Currency::Fibd,
+        expiry: Some(322),
+        fallback_address: None,
+        final_expiry_delta: Some(900000 + 1234),
+        udt_type_script: Some(Script::default().into()),
+        payment_preimage: None,
+        payment_hash: Some(payment_hash),
+        hash_algorithm: Some(crate::fiber::hash_algorithm::HashAlgorithm::CkbHash),
+        allow_mpp: None,
+        atomic_mpp: Some(true),
+    };
+
+    // node0 generate a invoice
+    let invoice_res: InvoiceResult = node_0
+        .send_rpc_request("new_invoice", new_invoice_params)
+        .await
+        .unwrap();
+
+    let ckb_invoice = invoice_res.invoice.clone();
+    let invoice_payment_hash = ckb_invoice.data.payment_hash;
+    assert_eq!(invoice_payment_hash, payment_hash);
+    assert!(node_0.get_payment_preimage(&payment_hash).is_none());
 }
 
 #[tokio::test]
@@ -239,31 +280,7 @@ async fn test_rpc_list_peers() {
 
 #[tokio::test]
 async fn test_rpc_graph() {
-    let (nodes, _channels) = create_n_nodes_network_with_params(
-        &[
-            (
-                (0, 1),
-                ChannelParameters {
-                    public: true,
-                    node_a_funding_amount: MIN_RESERVED_CKB + 10000000000,
-                    node_b_funding_amount: MIN_RESERVED_CKB,
-                    ..Default::default()
-                },
-            ),
-            (
-                (0, 1),
-                ChannelParameters {
-                    public: true,
-                    node_a_funding_amount: MIN_RESERVED_CKB + 10000000000,
-                    node_b_funding_amount: MIN_RESERVED_CKB,
-                    ..Default::default()
-                },
-            ),
-        ],
-        2,
-        Some(gen_rpc_config()),
-    )
-    .await;
+    let (nodes, _channels) = gen_mock_network().await;
     let [node_0, node_1] = nodes.try_into().expect("2 nodes");
 
     let graph_nodes: GraphNodesResult = node_0
@@ -290,31 +307,8 @@ async fn test_rpc_graph() {
 
 #[tokio::test]
 async fn test_rpc_shutdown_channels() {
-    let (nodes, _channels) = create_n_nodes_network_with_params(
-        &[
-            (
-                (0, 1),
-                ChannelParameters {
-                    public: true,
-                    node_a_funding_amount: MIN_RESERVED_CKB + 10000000000,
-                    node_b_funding_amount: MIN_RESERVED_CKB,
-                    ..Default::default()
-                },
-            ),
-            (
-                (0, 1),
-                ChannelParameters {
-                    public: true,
-                    node_a_funding_amount: MIN_RESERVED_CKB + 10000000000,
-                    node_b_funding_amount: MIN_RESERVED_CKB,
-                    ..Default::default()
-                },
-            ),
-        ],
-        2,
-        Some(gen_rpc_config()),
-    )
-    .await;
+    let (nodes, _channels) = gen_mock_network().await;
+
     let [node_0, _node_1] = nodes.try_into().expect("2 nodes");
 
     let list_channels: ListChannelsResult = node_0
@@ -413,31 +407,8 @@ async fn test_rpc_shutdown_channels() {
 
 #[tokio::test]
 async fn test_rpc_node_info() {
-    let (nodes, _channels) = create_n_nodes_network_with_params(
-        &[
-            (
-                (0, 1),
-                ChannelParameters {
-                    public: true,
-                    node_a_funding_amount: MIN_RESERVED_CKB + 10000000000,
-                    node_b_funding_amount: MIN_RESERVED_CKB,
-                    ..Default::default()
-                },
-            ),
-            (
-                (0, 1),
-                ChannelParameters {
-                    public: true,
-                    node_a_funding_amount: MIN_RESERVED_CKB + 10000000000,
-                    node_b_funding_amount: MIN_RESERVED_CKB,
-                    ..Default::default()
-                },
-            ),
-        ],
-        2,
-        Some(gen_rpc_config()),
-    )
-    .await;
+    let (nodes, _channels) = gen_mock_network().await;
+
     let [node_0, _node_1] = nodes.try_into().expect("2 nodes");
 
     let node_info: NodeInfoResult = node_0.send_rpc_request("node_info", ()).await.unwrap();
@@ -537,7 +508,8 @@ async fn test_rpc_basic_with_auth() {
                 fallback_address: None,
                 final_expiry_delta: Some(900000 + 1234),
                 udt_type_script: Some(Script::default().into()),
-                payment_preimage: Hash256::default(),
+                payment_preimage: Some(Hash256::default()),
+                payment_hash: None,
                 hash_algorithm: Some(crate::fiber::hash_algorithm::HashAlgorithm::CkbHash),
                 allow_mpp: None,
                 atomic_mpp: None,

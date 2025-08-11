@@ -492,7 +492,11 @@ fn test_invoice_rand_payment_hash() {
     let invoice = InvoiceBuilder::new(Currency::Fibb)
         .amount(Some(1280))
         .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key));
-    assert!(invoice.is_ok());
+    eprintln!("invoice: {:?}", invoice);
+    assert_eq!(
+        invoice.err(),
+        Some(InvoiceError::NeitherPaymenthashNorPreimage)
+    );
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]

@@ -5,7 +5,6 @@ use crate::fiber::gen::invoice::{self as gen_invoice, *};
 use crate::fiber::hash_algorithm::HashAlgorithm;
 use crate::fiber::serde_utils::{duration_hex, EntityHex, U128Hex, U64Hex};
 use crate::fiber::types::Hash256;
-use crate::gen_rand_sha256_hash;
 use crate::invoice::InvoiceError;
 use bech32::{encode, u5, FromBase32, ToBase32, Variant, WriteBase32};
 use bitcoin::hashes::{sha256::Hash as Sha256, Hash as _};
@@ -709,27 +708,22 @@ impl InvoiceBuilder {
     }
 
     pub fn build(self) -> Result<CkbInvoice, InvoiceError> {
-        let preimage = self.payment_preimage;
-
-        if self.payment_hash.is_some() && preimage.is_some() {
-            return Err(InvoiceError::BothPaymenthashAndPreimage);
-        }
-        let payment_hash: Hash256 = if let Some(preimage) = preimage {
-            let algo = self
-                .attrs
-                .iter()
-                .find_map(|attr| match attr {
-                    Attribute::HashAlgorithm(algo) => Some(algo),
-                    _ => None,
-                })
-                .copied()
-                .unwrap_or_default();
-            algo.hash(preimage.as_ref()).into()
-        } else if let Some(payment_hash) = self.payment_hash {
-            payment_hash
-        } else {
-            // generate a random payment hash if not provided
-            gen_rand_sha256_hash()
+        let payment_hash: Hash256 = match (self.payment_hash, self.payment_preimage) {
+            (Some(payment_hash), None) => payment_hash,
+            (None, Some(preimage)) => {
+                let algo = self
+                    .attrs
+                    .iter()
+                    .find_map(|attr| match attr {
+                        Attribute::HashAlgorithm(algo) => Some(algo),
+                        _ => None,
+                    })
+                    .copied()
+                    .unwrap_or_default();
+                algo.hash(preimage.as_ref()).into()
+            }
+            (Some(_), Some(_)) => return Err(InvoiceError::BothPaymenthashAndPreimage),
+            (None, None) => return Err(InvoiceError::NeitherPaymenthashNorPreimage),
         };
 
         self.check_attrs_valid()?;

@@ -12,7 +12,7 @@ use crate::invoice::{
     Currency, InvoiceBuilder, InvoiceData as InternalInvoiceData, InvoiceSignature, InvoiceStore,
 };
 
-use crate::FiberConfig;
+use crate::{gen_rand_sha256_hash, FiberConfig};
 use ckb_jsonrpc_types::Script;
 use jsonrpsee::types::{error::CALL_EXECUTION_FAILED_CODE, ErrorObjectOwned};
 
@@ -141,8 +141,10 @@ pub struct NewInvoiceParams {
     pub description: Option<String>,
     /// The currency of the invoice.
     pub currency: Currency,
-    /// The payment preimage of the invoice.
-    pub payment_preimage: Hash256,
+    /// The preimage to settle an incoming TLC payable to this invoice. If preimage is set, hash must be absent. If both preimage and hash are absent, a random preimage is generated.
+    pub payment_preimage: Option<Hash256>,
+    /// The hash of the preimage. If hash is set, preimage must be absent. This condition indicates a 'hold invoice' for which the tlc must be accepted and held until the preimage becomes known.
+    pub payment_hash: Option<Hash256>,
     /// The expiry time of the invoice, in seconds.
     #[serde_as(as = "Option<U64Hex>")]
     pub expiry: Option<u64>,
@@ -325,9 +327,23 @@ where
                 ));
             }
         }
-        let mut invoice_builder = InvoiceBuilder::new(params.currency)
-            .amount(Some(params.amount))
-            .payment_preimage(params.payment_preimage);
+
+        let mut invoice_builder = InvoiceBuilder::new(params.currency).amount(Some(params.amount));
+
+        // If both preimage and payment hash are absent, a random preimage is generated.
+        let need_gen_preimage =
+            params.payment_hash.is_none() && params.atomic_mpp.is_none_or(|atomic| !atomic);
+        let preimage_opt = params
+            .payment_preimage
+            .or_else(|| need_gen_preimage.then(gen_rand_sha256_hash));
+
+        if let Some(preimage) = preimage_opt {
+            invoice_builder = invoice_builder.payment_preimage(preimage);
+        }
+        if let Some(hash) = params.payment_hash {
+            invoice_builder = invoice_builder.payment_hash(hash);
+        }
+
         if let Some(description) = params.description.clone() {
             invoice_builder = invoice_builder.description(description);
         };
@@ -391,10 +407,7 @@ where
         };
 
         match invoice {
-            Ok(invoice) => match self
-                .store
-                .insert_invoice(invoice.clone(), Some(params.payment_preimage))
-            {
+            Ok(invoice) => match self.store.insert_invoice(invoice.clone(), preimage_opt) {
                 Ok(_) => Ok(InvoiceResult {
                     invoice_address: invoice.to_string(),
                     invoice: invoice.into(),

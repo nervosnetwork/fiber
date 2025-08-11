@@ -521,7 +521,8 @@ Generates a new invoice.
 * `amount` - <em>`u128`</em>, The amount of the invoice.
 * `description` - <em>`Option<String>`</em>, The description of the invoice.
 * `currency` - <em>[Currency](#type-currency)</em>, The currency of the invoice.
-* `payment_preimage` - <em>[Hash256](#type-hash256)</em>, The payment preimage of the invoice.
+* `payment_preimage` - <em>Option<[Hash256](#type-hash256)></em>, The preimage to settle an incoming TLC payable to this invoice. If preimage is set, hash must be absent. If both preimage and hash are absent, a random preimage is generated.
+* `payment_hash` - <em>Option<[Hash256](#type-hash256)></em>, The hash of the preimage. If hash is set, preimage must be absent. This condition indicates a 'hold invoice' for which the tlc must be accepted and held until the preimage becomes known.
 * `expiry` - <em>`Option<u64>`</em>, The expiry time of the invoice, in seconds.
 * `fallback_address` - <em>`Option<String>`</em>, The fallback address of the invoice.
 * `final_expiry_delta` - <em>`Option<u64>`</em>, The final HTLC timeout of the invoice, in milliseconds.
@@ -529,6 +530,7 @@ Generates a new invoice.
 * `udt_type_script` - <em>`Option<Script>`</em>, The UDT type script of the invoice.
 * `hash_algorithm` - <em>Option<[HashAlgorithm](#type-hashalgorithm)></em>, The hash algorithm of the invoice.
 * `allow_mpp` - <em>`Option<bool>`</em>, Whether allow payment to use MPP
+* `atomic_mpp` - <em>`Option<bool>`</em>, Whether use atomic mpp, if use atomic mpp there will be no preimage generated.
 
 ##### Returns
 
