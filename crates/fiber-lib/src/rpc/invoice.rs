@@ -158,6 +158,8 @@ pub struct NewInvoiceParams {
     pub hash_algorithm: Option<HashAlgorithm>,
     /// Whether allow payment to use MPP
     pub allow_mpp: Option<bool>,
+    /// Whether use atomic mpp, if use atomic mpp there will be no preimage generated.
+    pub atomic_mpp: Option<bool>,
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
@@ -345,6 +347,11 @@ where
                 invoice_builder = invoice_builder.payment_secret(payment_secret.into());
             }
         };
+
+        if let Some(atomic_mpp) = params.atomic_mpp {
+            invoice_builder = invoice_builder.allow_atomic_mpp(atomic_mpp);
+        }
+
         if let Some(final_expiry_delta) = params.final_expiry_delta {
             if final_expiry_delta < MIN_TLC_EXPIRY_DELTA {
                 return Err(ErrorObjectOwned::owned(

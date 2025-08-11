@@ -96,6 +96,7 @@ async fn test_rpc_basic() {
         payment_preimage: Hash256::default(),
         hash_algorithm: Some(crate::fiber::hash_algorithm::HashAlgorithm::CkbHash),
         allow_mpp: Some(true),
+        atomic_mpp: None,
     };
 
     // node0 generate a invoice
@@ -147,6 +148,7 @@ async fn test_rpc_basic() {
         payment_preimage: gen_rand_sha256_hash(),
         hash_algorithm: Some(crate::fiber::hash_algorithm::HashAlgorithm::CkbHash),
         allow_mpp: Some(false),
+        atomic_mpp: None,
     };
 
     // node0 generate a invoice
@@ -538,6 +540,7 @@ async fn test_rpc_basic_with_auth() {
                 payment_preimage: Hash256::default(),
                 hash_algorithm: Some(crate::fiber::hash_algorithm::HashAlgorithm::CkbHash),
                 allow_mpp: None,
+                atomic_mpp: None,
             },
         )
         .await

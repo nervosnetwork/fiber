@@ -1,3 +1,4 @@
+pub mod amp;
 pub mod channel;
 pub mod config;
 pub mod features;

@@ -668,7 +668,10 @@ impl InvoiceBuilder {
     attr_setter!(payment_secret, PaymentSecret, Hash256);
     attr_setter!(hash_algorithm, HashAlgorithm, HashAlgorithm);
 
-    pub fn allow_mpp(self, allow_mpp: bool) -> Self {
+    fn update_feature_vector<F>(self, updater: F) -> Self
+    where
+        F: FnOnce(&mut FeatureVector),
+    {
         let mut feature_vector = self
             .attrs
             .iter()
@@ -681,12 +684,28 @@ impl InvoiceBuilder {
             })
             .unwrap_or_else(FeatureVector::new);
 
-        if allow_mpp {
-            feature_vector.set_basic_mpp_optional();
-        } else {
-            feature_vector.unset_basic_mpp_optional();
-        }
+        updater(&mut feature_vector);
         self.add_attr(Attribute::Feature(feature_vector))
+    }
+
+    pub fn allow_mpp(self, allow_mpp: bool) -> Self {
+        self.update_feature_vector(|feature_vector| {
+            if allow_mpp {
+                feature_vector.set_basic_mpp_optional();
+            } else {
+                feature_vector.unset_basic_mpp_optional();
+            }
+        })
+    }
+
+    pub fn allow_atomic_mpp(self, allow_atomic_mpp: bool) -> Self {
+        self.update_feature_vector(|feature_vector| {
+            if allow_atomic_mpp {
+                feature_vector.set_atomic_mpp_required();
+            } else {
+                feature_vector.unset_basic_mpp_optional();
+            }
+        })
     }
 
     pub fn build(self) -> Result<CkbInvoice, InvoiceError> {
