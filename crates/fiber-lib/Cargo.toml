@@ -2,7 +2,7 @@
 build = "src/build.rs"
 edition = "2021"
 name = "fnn"
-version = "0.6.0-rc1"
+version = "0.6.0-rc2"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -71,7 +71,7 @@ lnd-grpc-tonic-client = "0.3.0"
 rocksdb = {package = "ckb-rocksdb", version = "=0.21.1", features = [
   "lz4",
 ], default-features = false}
-tentacle = {version = "0.6.6", default-features = false, features = [
+tentacle = {version = "0.7", default-features = false, features = [
   "upnp",
   "parking_lot",
   "openssl-vendored",

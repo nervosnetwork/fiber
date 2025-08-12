@@ -1347,9 +1347,9 @@ dependencies = [
 
 [[package]]
 name = "clap"
-version = "4.5.42"
+version = "4.5.43"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ed87a9d530bb41a67537289bafcac159cb3ee28460e0a4571123d2a778a6a882"
+checksum = "50fd97c9dc2399518aa331917ac6f274280ec5eb34e555dd291899745c48ec6f"
 dependencies = [
  "clap_builder",
  "clap_derive",
@@ -1379,9 +1379,9 @@ dependencies = [
 
 [[package]]
 name = "clap_builder"
-version = "4.5.42"
+version = "4.5.43"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "64f4f3f3c77c94aff3c7e9aac9a2ca1974a5adf392a8bb751e827d6d127ab966"
+checksum = "c35b5830294e1fa0462034af85cc95225a4cb07092c088c55bda3147cfcd8f65"
 dependencies = [
  "anstream",
  "anstyle",
@@ -2010,7 +2010,7 @@ checksum = "28dea519a9695b9977216879a3ebfddf92f1c08c05d984f8996aecd6ecdc811d"
 
 [[package]]
 name = "fiber-bin"
-version = "0.6.0-rc1"
+version = "0.6.0-rc2"
 dependencies = [
  "ckb-chain-spec",
  "ckb-resource",
@@ -2100,7 +2100,7 @@ dependencies = [
 
 [[package]]
 name = "fnn"
-version = "0.6.0-rc1"
+version = "0.6.0-rc2"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -2159,8 +2159,7 @@ dependencies = [
  "serde_yaml",
  "strum",
  "tempfile",
- "tentacle 0.6.7",
- "tentacle 0.7.2",
+ "tentacle",
  "thiserror 1.0.69",
  "tokio",
  "tokio-util",
@@ -5461,13 +5460,15 @@ dependencies = [
 
 [[package]]
 name = "tentacle"
-version = "0.6.7"
+version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7a3374cb0b9cf25499dcb2e9ecf199af2f778b8d40dd01c413536de5b1574a2b"
+checksum = "f506abf5f90f9a082c8368b34bc62026bfc9138c6e6e706c3ea3e9906dc34564"
 dependencies = [
  "async-trait",
  "bytes",
+ "fast-socks5",
  "futures",
+ "futures-timer",
  "httparse",
  "igd-next",
  "js-sys",
@@ -5483,35 +5484,6 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tokio-tungstenite",
- "tokio-util",
- "tokio-yamux",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "winapi",
-]
-
-[[package]]
-name = "tentacle"
-version = "0.7.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f506abf5f90f9a082c8368b34bc62026bfc9138c6e6e706c3ea3e9906dc34564"
-dependencies = [
- "async-trait",
- "bytes",
- "fast-socks5",
- "futures",
- "futures-timer",
- "js-sys",
- "libc",
- "log",
- "molecule",
- "nohash-hasher",
- "rand 0.8.5",
- "socket2 0.5.10",
- "tentacle-multiaddr",
- "tentacle-secio",
- "thiserror 1.0.69",
- "tokio",
  "tokio-util",
  "tokio-yamux",
  "url",
@@ -5773,9 +5745,9 @@ dependencies = [
 
 [[package]]
 name = "tokio-tungstenite"
-version = "0.26.2"
+version = "0.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7a9daff607c6d2bf6c16fd681ccb7eecc83e4e2cdc1ca067ffaadfca5de7f084"
+checksum = "489a59b6730eda1b0171fcfda8b121f4bee2b35cba8645ca35c5f7ba3eb736c1"
 dependencies = [
  "futures-util",
  "log",
@@ -6114,9 +6086,9 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
 name = "tungstenite"
-version = "0.26.2"
+version = "0.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4793cb5e56680ecbb1d843515b23b6de9a75eb04b66643e256a396d43be33c13"
+checksum = "eadc29d668c91fcc564941132e17b28a7ceb2f3ebf0b9dae3e03fd7a6748eb0d"
 dependencies = [
  "bytes",
  "data-encoding",
