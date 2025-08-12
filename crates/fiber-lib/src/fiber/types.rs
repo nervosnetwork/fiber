@@ -3764,7 +3764,7 @@ impl BasicMppPaymentData {
         vec
     }
 
-    pub fn write(self, custom_records: &mut PaymentCustomRecords) {
+    pub fn write(&self, custom_records: &mut PaymentCustomRecords) {
         custom_records
             .data
             .insert(Self::CUSTOM_RECORD_KEY, self.to_vec());
