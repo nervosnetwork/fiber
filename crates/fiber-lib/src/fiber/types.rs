@@ -3739,6 +3739,7 @@ pub(crate) fn deterministically_hash<T: Entity>(v: &T) -> [u8; 32] {
     ckb_hash::blake2b_256(v.as_slice())
 }
 
+#[derive(Eq, PartialEq, Debug)]
 /// Bolt04 basic MPP payment data record
 pub struct BasicMppPaymentData {
     pub payment_secret: Hash256,
