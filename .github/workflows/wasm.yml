@@ -1,3 +1,4 @@
+# See .github/wasm-test-runner/README.md to run the task locally.
 name: Unittests for wasm32-unknown-unknown
 on:
   push:
