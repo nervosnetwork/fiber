@@ -59,9 +59,9 @@ use super::gossip::{GossipActorMessage, GossipMessageStore, GossipMessageUpdates
 use super::graph::{NetworkGraph, NetworkGraphStateStore, OwnedChannelUpdateEvent, RouterHop};
 use super::key::blake2b_hash_with_salt;
 use super::types::{
-    BroadcastMessageWithTimestamp, EcdsaSignature, FiberMessage, ForwardTlcResult, GossipMessage,
-    Hash256, Init, NodeAnnouncement, OpenChannel, PaymentDataRecord, PaymentHopData, Privkey,
-    Pubkey, RemoveTlcFulfill, RemoveTlcReason, TlcErr, TlcErrData, TlcErrorCode,
+    BasicMppPaymentData, BroadcastMessageWithTimestamp, EcdsaSignature, FiberMessage,
+    ForwardTlcResult, GossipMessage, Hash256, Init, NodeAnnouncement, OpenChannel, PaymentHopData,
+    Privkey, Pubkey, RemoveTlcFulfill, RemoveTlcReason, TlcErr, TlcErrData, TlcErrorCode,
 };
 use super::{
     FiberConfig, InFlightCkbTxActor, InFlightCkbTxActorArguments, InFlightCkbTxActorMessage,
@@ -666,11 +666,11 @@ impl SendPaymentData {
             if custom_records
                 .data
                 .keys()
-                .any(|k| *k >= PaymentDataRecord::CUSTOM_RECORD_KEY)
+                .any(|k| *k >= BasicMppPaymentData::CUSTOM_RECORD_KEY)
             {
                 return Err(format!(
                     "custom_records key should in range 0 ~ {:?}",
-                    PaymentDataRecord::CUSTOM_RECORD_KEY - 1
+                    BasicMppPaymentData::CUSTOM_RECORD_KEY - 1
                 ));
             }
         }
@@ -679,7 +679,7 @@ impl SendPaymentData {
         // bolt04 write payment data record to custom records if payment secret is set
         if let Some(payment_secret) = payment_secret {
             let records = custom_records.get_or_insert_with(PaymentCustomRecords::default);
-            PaymentDataRecord::new(payment_secret, amount).write(records);
+            BasicMppPaymentData::new(payment_secret, amount).write(records);
         }
 
         Ok(SendPaymentData {

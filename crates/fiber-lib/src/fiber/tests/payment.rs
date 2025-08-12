@@ -5521,7 +5521,7 @@ async fn test_payment_with_payment_data_record() {
 
     let secp = Secp256k1::new();
     let mut custom_records = PaymentCustomRecords::default();
-    let record = PaymentDataRecord::new(payment_secret, 10000000000);
+    let record = BasicMppPaymentData::new(payment_secret, 10000000000);
     record.write(&mut custom_records);
     let hops_infos = vec![
         PaymentHopData {
@@ -5623,7 +5623,7 @@ async fn test_payment_with_insufficient_total_amount() {
     let secp = Secp256k1::new();
     let mut custom_records = PaymentCustomRecords::default();
     // set total amount to 20000000000, but pay only 10000000000
-    let record = PaymentDataRecord::new(payment_secret, 20000000000);
+    let record = BasicMppPaymentData::new(payment_secret, 20000000000);
     record.write(&mut custom_records);
     let hops_infos = vec![
         PaymentHopData {
@@ -5749,7 +5749,7 @@ async fn test_payment_with_wrong_payment_secret() {
     let wrong_payment_secret = gen_rand_sha256_hash();
     let secp = Secp256k1::new();
     let mut custom_records = PaymentCustomRecords::default();
-    let record = PaymentDataRecord::new(wrong_payment_secret, 10000000000);
+    let record = BasicMppPaymentData::new(wrong_payment_secret, 10000000000);
     record.write(&mut custom_records);
     let hops_infos = vec![
         PaymentHopData {
@@ -5862,7 +5862,7 @@ async fn test_payment_with_insufficient_amount_with_payment_data() {
 
     let secp = Secp256k1::new();
     let mut custom_records = PaymentCustomRecords::default();
-    let record = PaymentDataRecord::new(payment_secret, 9000000000);
+    let record = BasicMppPaymentData::new(payment_secret, 9000000000);
     record.write(&mut custom_records);
     let hops_infos = vec![
         PaymentHopData {
