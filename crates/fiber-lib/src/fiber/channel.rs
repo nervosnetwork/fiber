@@ -4992,7 +4992,15 @@ impl ChannelActorState {
             }
         }
 
-        let sign_ctx = self.get_revoke_sign_context(false);
+        let sign_ctx = match self.get_revoke_sign_context(false) {
+            Some(ctx) => ctx,
+            None => {
+                let error =
+                    "get_revoke_sign_context returned None, cannot send RevokeAndAck message";
+                warn!(error);
+                return Err(ProcessingChannelError::InvalidState(error.to_string()));
+            }
+        };
         let x_only_aggregated_pubkey = sign_ctx.common_ctx.x_only_aggregated_pubkey();
 
         let revocation_partial_signature = {
@@ -5064,7 +5072,15 @@ impl ChannelActorState {
                 ]
                 .concat(),
             );
-            let sign_ctx = self.get_ack_sign_context(false);
+            let sign_ctx = match self.get_ack_sign_context(false) {
+                Some(ctx) => ctx,
+                None => {
+                    let error =
+                        "get_ack_sign_context returned None, cannot send RevokeAndAck message";
+                    warn!(error);
+                    return Err(ProcessingChannelError::InvalidState(error.to_string()));
+                }
+            };
             sign_ctx.sign(message.as_slice())?
         };
 
@@ -5167,18 +5183,6 @@ impl ChannelActorState {
             .as_ref()
             .expect("always have peer's last_committed_remote_nonce in normal channel operations")
             .clone()
-    }
-
-    fn get_remote_revocation_nonce_for_verify(&self) -> RevocationNonce {
-        self.remote_revocation_nonce_for_verify.clone().expect(
-            "always have peer's remote_revocation_nonce_for_verify in normal channel operations",
-        )
-    }
-
-    fn get_remote_revocation_nonce_for_send(&self) -> RevocationNonce {
-        self.remote_revocation_nonce_for_send
-            .clone()
-            .expect("always have our remote_revocation_nonce_for_send in normal channel operations")
     }
 
     fn commit_remote_nonce(&mut self, nonce: CommitmentNonce) {
@@ -6656,7 +6660,15 @@ impl ChannelActorState {
             next_revocation_nonce,
         } = revoke_and_ack;
 
-        let sign_ctx = self.get_revoke_sign_context(true);
+        let sign_ctx = match self.get_revoke_sign_context(true) {
+            Some(ctx) => ctx,
+            None => {
+                let error =
+                    "RevokeAndAck message received, but get_revoke_sign_context returned None";
+                warn!(error);
+                return Err(ProcessingChannelError::InvalidState(error.to_string()));
+            }
+        };
         let x_only_aggregated_pubkey = sign_ctx.common_ctx.x_only_aggregated_pubkey();
 
         let revocation_data = {
@@ -6735,7 +6747,15 @@ impl ChannelActorState {
                 .concat(),
             );
 
-            let sign_ctx = self.get_ack_sign_context(true);
+            let sign_ctx = match self.get_ack_sign_context(true) {
+                Some(ctx) => ctx,
+                None => {
+                    let error =
+                        "RevokeAndAck message received, but get_ack_sign_context returned None";
+                    warn!(error);
+                    return Err(ProcessingChannelError::InvalidState(error.to_string()));
+                }
+            };
             let aggregated_signature =
                 sign_ctx.sign_and_aggregate(message.as_slice(), commitment_tx_partial_signature)?;
             SettlementData {
@@ -7207,44 +7227,46 @@ impl ChannelActorState {
         }
     }
 
-    fn get_revoke_common_context(&self, for_remote: bool) -> Musig2CommonContext {
+    fn get_revoke_common_context(&self, for_remote: bool) -> Option<Musig2CommonContext> {
         let key_agg_ctx = self.get_musig2_agg_context(for_remote);
         let remote_nonce = if for_remote {
-            self.get_remote_revocation_nonce_for_verify().revoke
+            self.remote_revocation_nonce_for_verify.as_ref()
         } else {
-            self.get_remote_revocation_nonce_for_send().revoke
-        };
+            self.remote_revocation_nonce_for_send.as_ref()
+        }
+        .map(|r| r.revoke.clone())?;
         let local_nonce = self.get_revocation_nonce(for_remote).revoke;
         let agg_nonce = AggNonce::sum(if for_remote {
             [local_nonce, remote_nonce]
         } else {
             [remote_nonce, local_nonce]
         });
-        Musig2CommonContext {
+        Some(Musig2CommonContext {
             local_first: for_remote,
             key_agg_ctx,
             agg_nonce,
-        }
+        })
     }
 
-    fn get_ack_common_context(&self, for_remote: bool) -> Musig2CommonContext {
+    fn get_ack_common_context(&self, for_remote: bool) -> Option<Musig2CommonContext> {
         let key_agg_ctx = self.get_musig2_agg_context(for_remote);
         let remote_nonce = if for_remote {
-            self.get_remote_revocation_nonce_for_verify().ack
+            self.remote_revocation_nonce_for_verify.as_ref()
         } else {
-            self.get_remote_revocation_nonce_for_send().ack
-        };
+            self.remote_revocation_nonce_for_send.as_ref()
+        }
+        .map(|r| r.ack.clone())?;
         let local_nonce = self.get_revocation_nonce(for_remote).ack;
         let agg_nonce = AggNonce::sum(if for_remote {
             [local_nonce, remote_nonce]
         } else {
             [remote_nonce, local_nonce]
         });
-        Musig2CommonContext {
+        Some(Musig2CommonContext {
             local_first: for_remote,
             key_agg_ctx,
             agg_nonce,
-        }
+        })
     }
 
     fn get_musig2_agg_context(&self, for_remote: bool) -> KeyAggContext {
@@ -7311,8 +7333,8 @@ impl ChannelActorState {
     }
 
     // This is used to sign revocation transactions which consume the commitment cell.
-    fn get_revoke_sign_context(&self, for_remote: bool) -> Musig2SignContext {
-        let common_ctx = self.get_revoke_common_context(for_remote);
+    fn get_revoke_sign_context(&self, for_remote: bool) -> Option<Musig2SignContext> {
+        let common_ctx = self.get_revoke_common_context(for_remote)?;
         let seckey = self.signer.funding_key.clone();
         let commitment_number = if for_remote {
             self.get_local_commitment_number()
@@ -7323,16 +7345,16 @@ impl ChannelActorState {
             .signer
             .derive_musig2_nonce(commitment_number, [Musig2Context::Revoke]);
 
-        Musig2SignContext {
+        Some(Musig2SignContext {
             common_ctx,
             seckey,
             secnonce,
-        }
+        })
     }
 
     // This is used to sign commitment transaction (in RevokeAndAck message) which consume the funding cell.
-    fn get_ack_sign_context(&self, for_remote: bool) -> Musig2SignContext {
-        let common_ctx = self.get_ack_common_context(for_remote);
+    fn get_ack_sign_context(&self, for_remote: bool) -> Option<Musig2SignContext> {
+        let common_ctx = self.get_ack_common_context(for_remote)?;
         let seckey = self.signer.funding_key.clone();
         let commitment_number = if for_remote {
             self.get_local_commitment_number()
@@ -7343,11 +7365,11 @@ impl ChannelActorState {
             .signer
             .derive_musig2_nonce(commitment_number, [Musig2Context::Ack]);
 
-        Musig2SignContext {
+        Some(Musig2SignContext {
             common_ctx,
             seckey,
             secnonce,
-        }
+        })
     }
 
     // Should the local send tx_signatures first?
