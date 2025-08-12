@@ -3786,6 +3786,58 @@ impl PaymentDataRecord {
     }
 }
 
+#[derive(Hash, Eq, PartialEq, Debug)]
+pub struct AMPDataRecord {
+    pub parent_payment_hash: Hash256,
+    pub total_amp_count: u16,
+    pub index: u16,
+}
+
+impl AMPDataRecord {
+    pub const CUSTOM_RECORD_KEY: u32 = 65537;
+
+    pub fn new(parent_payment_hash: Hash256, index: u16, total_amp_count: u16) -> Self {
+        Self {
+            parent_payment_hash,
+            total_amp_count,
+            index,
+        }
+    }
+
+    fn to_vec(&self) -> Vec<u8> {
+        let mut vec = Vec::new();
+        vec.extend_from_slice(self.parent_payment_hash.as_ref());
+        vec.extend_from_slice(&self.total_amp_count.to_le_bytes());
+        vec.extend_from_slice(&self.index.to_le_bytes());
+        vec
+    }
+
+    pub fn write(&self, custom_records: &mut PaymentCustomRecords) {
+        custom_records
+            .data
+            .insert(Self::CUSTOM_RECORD_KEY, self.to_vec());
+    }
+
+    pub fn read(custom_records: &PaymentCustomRecords) -> Option<Self> {
+        custom_records
+            .data
+            .get(&Self::CUSTOM_RECORD_KEY)
+            .and_then(|data| {
+                if data.len() != 32 + 4 {
+                    return None;
+                }
+                let parent_hash: [u8; 32] = data[..32].try_into().unwrap();
+                let total_amp_count = u16::from_le_bytes(data[32..34].try_into().unwrap());
+                let index = u16::from_le_bytes(data[34..].try_into().unwrap());
+                Some(Self::new(
+                    Hash256::from(parent_hash),
+                    index,
+                    total_amp_count,
+                ))
+            })
+    }
+}
+
 #[serde_as]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaymentHopData {
