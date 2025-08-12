@@ -48,7 +48,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ ubuntu-22.04, ubuntu-24.04, macos-13, windows-2019 ]
+        os: [ ubuntu-22.04, ubuntu-24.04, macos-13, windows-2022 ]
         include:
           - os: ubuntu-22.04
             bin_suffix:
@@ -59,13 +59,13 @@ jobs:
           - os: macos-13
             bin_suffix:
             pkg_suffix: x86_64-darwin-portable
-          - os: windows-2019
+          - os: windows-2022
             bin_suffix: .exe
             pkg_suffix: x86_64-windows
     steps:
     - name: Checkout the Repository
       uses: actions/checkout@v4
-    - if: matrix.os == 'windows-2019'
+    - if: matrix.os == 'windows-2022'
       name: Windows Dependencies
       run: |
         iwr -useb get.scoop.sh -outfile 'install-scoop.ps1'
@@ -102,7 +102,7 @@ jobs:
         export OPENSSL_INCLUDE_DIR=/usr/local/opt/openssl@1.1/include
         export OPENSSL_STATIC=1
         cargo build --release --locked --features portable && cd migrate && cargo build --release --locked && cd ..
-    - if: matrix.os == 'windows-2019'
+    - if: matrix.os == 'windows-2022'
       name: Build windows
       run: cargo build --release --locked && cd migrate && cargo build --release --locked && cd ..
     - name: Get the Version
