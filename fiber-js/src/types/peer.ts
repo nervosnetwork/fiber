@@ -13,7 +13,7 @@ interface DisconnectPeerParams {
 interface PeerInfo {
     pubkey: string;
     peer_id: string;
-    addresses: string[];
+    address: string;
 }
 
 interface ListPeerResult {
