@@ -418,6 +418,8 @@ pub struct SendPaymentWithRouterCommand {
     pub dry_run: bool,
 }
 
+// 0 ~ 65535 is reserved for endpoint usage, index aboving 65535 is reserved for internal usage
+pub const USER_CUSTOM_RECORDS_MAX_INDEX: u32 = 65535;
 /// The custom records to be included in the payment.
 /// The key is hex encoded of `u32`, and the value is hex encoded of `Vec<u8>` with `0x` as prefix.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Default)]
@@ -666,11 +668,11 @@ impl SendPaymentData {
             if custom_records
                 .data
                 .keys()
-                .any(|k| *k >= BasicMppPaymentData::CUSTOM_RECORD_KEY)
+                .any(|k| *k > USER_CUSTOM_RECORDS_MAX_INDEX)
             {
                 return Err(format!(
                     "custom_records key should in range 0 ~ {:?}",
-                    BasicMppPaymentData::CUSTOM_RECORD_KEY - 1
+                    USER_CUSTOM_RECORDS_MAX_INDEX
                 ));
             }
         }

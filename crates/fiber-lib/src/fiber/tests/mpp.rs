@@ -11,7 +11,7 @@ use crate::{
         config::{CKB_SHANNONS, DEFAULT_TLC_EXPIRY_DELTA, PAYMENT_MAX_PARTS_LIMIT},
         features::FeatureVector,
         hash_algorithm::HashAlgorithm,
-        network::{DebugEvent, SendPaymentCommand},
+        network::{DebugEvent, SendPaymentCommand, USER_CUSTOM_RECORDS_MAX_INDEX},
         payment::AttemptStatus,
         types::{BasicMppPaymentData, Hash256, PaymentHopData, PeeledOnionPacket, RemoveTlcReason},
         NetworkActorCommand, NetworkActorMessage, PaymentCustomRecords,
@@ -3146,7 +3146,7 @@ async fn test_send_payment_custom_records_not_in_range() {
     assert!(error.contains("custom_records key should in range 0 ~ 65535"));
 
     let data: HashMap<_, _> = vec![(
-        BasicMppPaymentData::CUSTOM_RECORD_KEY - 1,
+        USER_CUSTOM_RECORDS_MAX_INDEX,
         "hello".to_string().into_bytes(),
     )]
     .into_iter()

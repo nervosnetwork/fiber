@@ -12,6 +12,7 @@ use super::r#gen::fiber::PubNonceOpt;
 use super::serde_utils::{EntityHex, PubNonceAsBytes, SliceBase58, SliceHex};
 use crate::ckb::config::{UdtArgInfo, UdtCellDep, UdtCfgInfos, UdtDep, UdtScript};
 use crate::ckb::contracts::get_udt_whitelist;
+use crate::fiber::network::USER_CUSTOM_RECORDS_MAX_INDEX;
 use ckb_jsonrpc_types::CellOutput;
 use ckb_types::H256;
 use num_enum::IntoPrimitive;
@@ -3749,7 +3750,7 @@ pub struct BasicMppPaymentData {
 impl BasicMppPaymentData {
     // record type for payment data record in bolt04
     // custom records key from 65536 is reserved for internal usage
-    pub const CUSTOM_RECORD_KEY: u32 = 65536;
+    pub const CUSTOM_RECORD_KEY: u32 = USER_CUSTOM_RECORDS_MAX_INDEX + 1;
 
     pub fn new(payment_secret: Hash256, total_amount: u128) -> Self {
         Self {
