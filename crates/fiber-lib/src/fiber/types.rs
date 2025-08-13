@@ -12,6 +12,7 @@ use super::r#gen::fiber::PubNonceOpt;
 use super::serde_utils::{EntityHex, PubNonceAsBytes, SliceBase58, SliceHex};
 use crate::ckb::config::{UdtArgInfo, UdtCellDep, UdtCfgInfos, UdtDep, UdtScript};
 use crate::ckb::contracts::get_udt_whitelist;
+use crate::fiber::network::USER_CUSTOM_RECORDS_MAX_INDEX;
 use ckb_jsonrpc_types::CellOutput;
 use ckb_types::H256;
 use num_enum::IntoPrimitive;
@@ -3739,16 +3740,17 @@ pub(crate) fn deterministically_hash<T: Entity>(v: &T) -> [u8; 32] {
     ckb_hash::blake2b_256(v.as_slice())
 }
 
-/// Bolt04 payment data record
-pub struct PaymentDataRecord {
+#[derive(Eq, PartialEq, Debug)]
+/// Bolt04 basic MPP payment data record
+pub struct BasicMppPaymentData {
     pub payment_secret: Hash256,
     pub total_amount: u128,
 }
 
-impl PaymentDataRecord {
+impl BasicMppPaymentData {
     // record type for payment data record in bolt04
     // custom records key from 65536 is reserved for internal usage
-    pub const CUSTOM_RECORD_KEY: u32 = 65536;
+    pub const CUSTOM_RECORD_KEY: u32 = USER_CUSTOM_RECORDS_MAX_INDEX + 1;
 
     pub fn new(payment_secret: Hash256, total_amount: u128) -> Self {
         Self {
@@ -3764,7 +3766,7 @@ impl PaymentDataRecord {
         vec
     }
 
-    pub fn write(self, custom_records: &mut PaymentCustomRecords) {
+    pub fn write(&self, custom_records: &mut PaymentCustomRecords) {
         custom_records
             .data
             .insert(Self::CUSTOM_RECORD_KEY, self.to_vec());
@@ -3935,11 +3937,11 @@ pub type PaymentOnionPacket = OnionPacket<PaymentHopData>;
 pub type PeeledPaymentOnionPacket = PeeledOnionPacket<PaymentHopData>;
 
 impl PeeledOnionPacket<PaymentHopData> {
-    pub fn mpp_custom_records(&self) -> Option<PaymentDataRecord> {
+    pub fn mpp_custom_records(&self) -> Option<BasicMppPaymentData> {
         self.current
             .custom_records
             .as_ref()
-            .and_then(PaymentDataRecord::read)
+            .and_then(BasicMppPaymentData::read)
     }
 }
 

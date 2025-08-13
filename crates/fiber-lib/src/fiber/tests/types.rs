@@ -6,14 +6,15 @@ use crate::{
         gen::{fiber as molecule_fiber, gossip},
         hash_algorithm::HashAlgorithm,
         types::{
-            pack_hop_data, secp256k1_instance, unpack_hop_data, AddTlc, BroadcastMessageID, Cursor,
-            Hash256, NodeAnnouncement, NodeId, PaymentHopData, PeeledOnionPacket, Privkey, Pubkey,
-            TlcErr, TlcErrPacket, TlcErrorCode, NO_SHARED_SECRET,
+            pack_hop_data, secp256k1_instance, unpack_hop_data, AddTlc, BasicMppPaymentData,
+            BroadcastMessageID, Cursor, Hash256, NodeAnnouncement, NodeId, PaymentHopData,
+            PeeledOnionPacket, Privkey, Pubkey, TlcErr, TlcErrPacket, TlcErrorCode,
+            NO_SHARED_SECRET,
         },
         PaymentCustomRecords,
     },
     gen_deterministic_fiber_private_key, gen_rand_channel_outpoint, gen_rand_fiber_private_key,
-    gen_rand_fiber_public_key, now_timestamp_as_millis_u64,
+    gen_rand_fiber_public_key, gen_rand_sha256_hash, now_timestamp_as_millis_u64,
 };
 use ckb_hash::blake2b_256;
 use ckb_jsonrpc_types::OutPoint;
@@ -700,4 +701,15 @@ fn test_serde_node_id() {
         serde_json::from_str(&node_id_str).unwrap(),
         "to NodeId"
     );
+}
+
+#[test]
+fn test_basic_mpp_custom_records() {
+    let mut payment_custom_records = PaymentCustomRecords::default();
+    let payment_secret = gen_rand_sha256_hash();
+    let record = BasicMppPaymentData::new(payment_secret, 100);
+    record.write(&mut payment_custom_records);
+
+    let new_record = BasicMppPaymentData::read(&payment_custom_records).unwrap();
+    assert_eq!(new_record, record);
 }

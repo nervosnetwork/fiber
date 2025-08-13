@@ -11,9 +11,9 @@ use crate::{
         config::{CKB_SHANNONS, DEFAULT_TLC_EXPIRY_DELTA, PAYMENT_MAX_PARTS_LIMIT},
         features::FeatureVector,
         hash_algorithm::HashAlgorithm,
-        network::{DebugEvent, SendPaymentCommand},
+        network::{DebugEvent, SendPaymentCommand, USER_CUSTOM_RECORDS_MAX_INDEX},
         payment::AttemptStatus,
-        types::{Hash256, PaymentDataRecord, PaymentHopData, PeeledOnionPacket, RemoveTlcReason},
+        types::{BasicMppPaymentData, Hash256, PaymentHopData, PeeledOnionPacket, RemoveTlcReason},
         NetworkActorCommand, NetworkActorMessage, PaymentCustomRecords,
     },
     gen_rand_sha256_hash, gen_rpc_config,
@@ -510,7 +510,7 @@ async fn test_mpp_tlc_set() {
 
     let secp = Secp256k1::new();
     let mut custom_records = PaymentCustomRecords::default();
-    let record = PaymentDataRecord::new(payment_secret, 20000000000);
+    let record = BasicMppPaymentData::new(payment_secret, 20000000000);
     record.write(&mut custom_records);
     let hops_infos = vec![
         PaymentHopData {
@@ -650,7 +650,7 @@ async fn test_mpp_tlc_set_with_insufficient_total_amount() {
     let secp = Secp256k1::new();
     let mut custom_records = PaymentCustomRecords::default();
     // set total amount to 20000000000, but pay only 10000000000
-    let record = PaymentDataRecord::new(payment_secret, 20000000000);
+    let record = BasicMppPaymentData::new(payment_secret, 20000000000);
     record.write(&mut custom_records);
     let hops_infos = vec![
         PaymentHopData {
@@ -787,7 +787,7 @@ async fn test_mpp_tlc_set_with_only_1_tlc() {
 
     let secp = Secp256k1::new();
     let mut custom_records = PaymentCustomRecords::default();
-    let record = PaymentDataRecord::new(payment_secret, 10000000000);
+    let record = BasicMppPaymentData::new(payment_secret, 10000000000);
     record.write(&mut custom_records);
     let hops_infos = vec![
         PaymentHopData {
@@ -993,7 +993,7 @@ async fn test_mpp_tlc_set_total_amount_mismatch() {
     let secp = Secp256k1::new();
     let mut custom_records = PaymentCustomRecords::default();
     // the total amount should be 20000000000, but we set 10000000000 here
-    let record = PaymentDataRecord::new(payment_secret, 10000000000);
+    let record = BasicMppPaymentData::new(payment_secret, 10000000000);
     record.write(&mut custom_records);
     let hops_infos = vec![
         PaymentHopData {
@@ -1147,12 +1147,12 @@ async fn test_mpp_tlc_set_total_amount_should_be_consistent() {
     // but payment will fail because the total_amount is inconsistent
     // tlc1 records
     let mut custom_records_1 = PaymentCustomRecords::default();
-    let record = PaymentDataRecord::new(payment_secret, 20000000000);
+    let record = BasicMppPaymentData::new(payment_secret, 20000000000);
     record.write(&mut custom_records_1);
 
     // tlc2 records
     let mut custom_records_2 = PaymentCustomRecords::default();
-    let record = PaymentDataRecord::new(payment_secret, 20000000001);
+    let record = BasicMppPaymentData::new(payment_secret, 20000000001);
     record.write(&mut custom_records_2);
 
     let build_packet = |custom_records: PaymentCustomRecords| {
@@ -1320,7 +1320,7 @@ async fn test_mpp_tlc_set_payment_secret_mismatch() {
     let secp = Secp256k1::new();
     let mut custom_records = PaymentCustomRecords::default();
     // set the payment secret to a random value
-    let record = PaymentDataRecord::new(gen_rand_sha256_hash(), 20000000000);
+    let record = BasicMppPaymentData::new(gen_rand_sha256_hash(), 20000000000);
     record.write(&mut custom_records);
     let hops_infos = vec![
         PaymentHopData {
@@ -1472,7 +1472,7 @@ async fn test_mpp_tlc_set_timeout_1_of_2() {
 
     let secp = Secp256k1::new();
     let mut custom_records = PaymentCustomRecords::default();
-    let record = PaymentDataRecord::new(payment_secret, 30000000000);
+    let record = BasicMppPaymentData::new(payment_secret, 30000000000);
     record.write(&mut custom_records);
     let hops_infos = vec![
         PaymentHopData {
@@ -1685,7 +1685,7 @@ async fn test_mpp_tlc_set_timeout() {
 
     let secp = Secp256k1::new();
     let mut custom_records = PaymentCustomRecords::default();
-    let record = PaymentDataRecord::new(payment_secret, 20000000000);
+    let record = BasicMppPaymentData::new(payment_secret, 20000000000);
     record.write(&mut custom_records);
     let hops_infos = vec![
         PaymentHopData {
@@ -2521,7 +2521,7 @@ async fn test_mpp_tlc_set_without_invoice_should_not_be_accepted() {
 
         let secp = Secp256k1::new();
         let mut custom_records = PaymentCustomRecords::default();
-        let record = PaymentDataRecord::new(payment_secret, 20000000000);
+        let record = BasicMppPaymentData::new(payment_secret, 20000000000);
         record.write(&mut custom_records);
         let hops_infos = vec![
             PaymentHopData {
@@ -2687,7 +2687,7 @@ async fn test_mpp_tlc_with_invoice_not_allow_mpp_should_not_be_accepted() {
 
     let secp = Secp256k1::new();
     let mut custom_records = PaymentCustomRecords::default();
-    let record = PaymentDataRecord::new(payment_secret, 20000000000);
+    let record = BasicMppPaymentData::new(payment_secret, 20000000000);
     record.write(&mut custom_records);
     let hops_infos = vec![
         PaymentHopData {
@@ -3126,7 +3126,7 @@ async fn test_send_payment_custom_records_not_in_range() {
     let target_pubkey = node_1.pubkey;
 
     let data: HashMap<_, _> = vec![(
-        PaymentDataRecord::CUSTOM_RECORD_KEY,
+        BasicMppPaymentData::CUSTOM_RECORD_KEY,
         "hello".to_string().into_bytes(),
     )]
     .into_iter()
@@ -3146,7 +3146,7 @@ async fn test_send_payment_custom_records_not_in_range() {
     assert!(error.contains("custom_records key should in range 0 ~ 65535"));
 
     let data: HashMap<_, _> = vec![(
-        PaymentDataRecord::CUSTOM_RECORD_KEY - 1,
+        USER_CUSTOM_RECORDS_MAX_INDEX,
         "hello".to_string().into_bytes(),
     )]
     .into_iter()
