@@ -13,7 +13,9 @@ use crate::{
         hash_algorithm::HashAlgorithm,
         network::{DebugEvent, SendPaymentCommand, USER_CUSTOM_RECORDS_MAX_INDEX},
         payment::AttemptStatus,
-        types::{BasicMppPaymentData, Hash256, PaymentHopData, PeeledPaymentOnionPacket, RemoveTlcReason},
+        types::{
+            BasicMppPaymentData, Hash256, PaymentHopData, PeeledPaymentOnionPacket, RemoveTlcReason,
+        },
         NetworkActorCommand, NetworkActorMessage, PaymentCustomRecords,
     },
     gen_rand_sha256_hash, gen_rpc_config,

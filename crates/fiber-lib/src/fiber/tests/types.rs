@@ -250,7 +250,10 @@ fn test_peeled_large_onion_packet() {
             now = Some(packet.clone());
         }
         let last_packet = now.unwrap();
-        assert_eq!(last_packet.current, hops_infos[hops_infos.len() - 1].clone().into());
+        assert_eq!(
+            last_packet.current,
+            hops_infos[hops_infos.len() - 1].clone().into()
+        );
         assert!(last_packet.is_last());
         return Ok(());
     }
