@@ -274,7 +274,7 @@ pub enum NetworkActorCommand {
     ),
     // Send a command to a channel.
     ControlFiberChannel(ChannelCommandWithId),
-    // The first parameter is the peeled onion in binary via `PeeledOnionPacket::serialize`. `PeeledOnionPacket::current`
+    // The first parameter is the peeled onion in binary via `PeeledPaymentOnionPacket::serialize`. `PeeledPaymentOnionPacket::current`
     // is for the current node.
     SendPaymentOnionPacket(SendOnionPacketCommand),
     UpdateChannelFunding(Hash256, Transaction, FundingRequest),
