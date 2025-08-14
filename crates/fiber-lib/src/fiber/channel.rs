@@ -4,12 +4,15 @@ use super::{
     gossip::SOFT_BROADCAST_MESSAGES_CONSIDERED_STALE_DURATION, graph::ChannelUpdateInfo,
     types::ForwardTlcResult,
 };
+use crate::ckb::GetShutdownTxRequest;
+use crate::ckb::GetShutdownTxResponse;
 use crate::fiber::config::MILLI_SECONDS_PER_EPOCH;
 use crate::fiber::fee::{check_open_channel_parameters, check_tlc_delta_with_epochs};
 #[cfg(any(debug_assertions, feature = "bench"))]
 use crate::fiber::network::DebugEvent;
 use crate::fiber::network::PaymentCustomRecords;
 use crate::{debug_event, fiber::types::TxAbort, utils::tx::compute_tx_message};
+use ckb_types::core::tx_pool::TxStatus;
 #[cfg(test)]
 use musig2::BinaryEncoding;
 use musig2::SecNonceBuilder;
@@ -123,6 +126,9 @@ pub const PEER_CHANNEL_RESPONSE_TIMEOUT: u64 = 10 * 1000;
 // multiple 5 times for max tlc number of tlcs is a safe number
 const MAX_RETRYABLE_TLC_OPERATIONS: u16 = SYS_MAX_TLC_NUMBER_IN_FLIGHT as u16 * 5;
 
+// The interval time to check shutdown transaction
+const CHANNEL_CHECK_SHUTDOWN_INTERVAL: Duration = Duration::from_secs(300);
+
 #[derive(Debug)]
 pub enum ChannelActorMessage {
     /// Command are the messages that are sent to the channel actor to perform some action.
@@ -169,6 +175,7 @@ pub enum ChannelCommand {
     ForwardTlcResult(ForwardTlcResult),
     #[cfg(any(test, feature = "bench"))]
     ReloadState(ReloadParams),
+    CheckShutdown,
 }
 
 impl Display for ChannelCommand {
@@ -184,6 +191,7 @@ impl Display for ChannelCommand {
             ChannelCommand::ForwardTlcResult(res) => write!(f, "ForwardTlcResult [{:?}]", res),
             #[cfg(any(test, feature = "bench"))]
             ChannelCommand::ReloadState(_) => write!(f, "ReloadState"),
+            ChannelCommand::CheckShutdown => write!(f, "CheckShutdown"),
         }
     }
 }
@@ -2162,6 +2170,59 @@ where
                 }
                 Ok(())
             }
+            ChannelCommand::CheckShutdown => {
+                // check channel ready state
+                if state.state == ChannelState::ChannelReady {
+                    // check shutdown transactions
+                    let request = GetShutdownTxRequest {
+                        funding_lock_script: state.get_funding_lock_script(),
+                    };
+                    match call!(self.network, |tx| NetworkActorMessage::Command(
+                        NetworkActorCommand::GetShutdownTx(request, tx)
+                    ))
+                    .expect(ASSUME_NETWORK_ACTOR_ALIVE)
+                    {
+                        Ok(Some(GetShutdownTxResponse {
+                            transaction: Some(tx),
+                            tx_status: TxStatus::Committed(..),
+                        })) => {
+                            // we only check remote sent force close transaction here
+                            if tx.outputs().len() == 1 {
+                                if let Some(output) = tx.outputs().get(0) {
+                                    // Check if channel is force closed by counter party
+                                    let lock_args =
+                                        &blake2b_256(state.get_commitment_lock_script_xonly(true))
+                                            [0..20];
+                                    if &output.lock().args().raw_data()[0..20] == lock_args {
+                                        let channel_id = state.get_id();
+                                        let peer_id = state.get_remote_peer_id();
+                                        let tx_hash = tx.hash();
+                                        self.network
+                                            .send_message(NetworkActorMessage::Event(
+                                                NetworkActorEvent::ClosingTransactionConfirmed(
+                                                    peer_id, channel_id, tx_hash, true, false,
+                                                ),
+                                            ))
+                                            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                                    }
+                                }
+                            }
+                        }
+                        Ok(_) => {
+                            // no shutdown tx
+                        }
+                        Err(err) => {
+                            warn!(
+                                "Error during get channel shutdown tx {} from peer {:?} {:?}",
+                                state.get_id(),
+                                state.get_remote_peer_id(),
+                                err
+                            );
+                        }
+                    }
+                }
+                Ok(())
+            }
         }
     }
 
@@ -2229,20 +2290,27 @@ where
                 }
                 myself.stop(None);
             }
-            ChannelEvent::ClosingTransactionConfirmed(force) => {
+            ChannelEvent::ClosingTransactionConfirmed(force, close_by_us) => {
                 match state.state {
                     ChannelState::ShuttingDown(flags)
                         if flags.contains(ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION) => {}
+                    ChannelState::ChannelReady if force && !close_by_us => {}
                     _ => {
                         return Err(ProcessingChannelError::InvalidState(format!(
-                            "Expecting commitment transaction confirmed event in state ShuttingDown, but got state {:?}", &state.state)
+                            "Expecting commitment transaction confirmed event in unexpected state {:?} force {force} close_by_us {close_by_us}", &state.state)
                         ));
                     }
                 };
 
                 let closed_state = if force {
                     debug!("Channel closed with uncooperative close");
-                    ChannelState::Closed(CloseFlags::UNCOOPERATIVE)
+                    if close_by_us {
+                        ChannelState::Closed(CloseFlags::UNCOOPERATIVE)
+                    } else {
+                        ChannelState::Closed(
+                            CloseFlags::UNCOOPERATIVE | CloseFlags::CLOSE_BY_REMOTE,
+                        )
+                    }
                 } else {
                     debug!("Channel closed with cooperative close");
                     ChannelState::Closed(CloseFlags::COOPERATIVE)
@@ -2763,6 +2831,11 @@ where
                 }
             }
         }
+
+        // check channel shutdown
+        myself.send_interval(CHANNEL_CHECK_SHUTDOWN_INTERVAL, || {
+            ChannelActorMessage::Command(ChannelCommand::CheckShutdown)
+        });
 
         Ok(())
     }
@@ -3778,7 +3851,7 @@ pub enum StopReason {
 pub enum ChannelEvent {
     Stop(StopReason),
     FundingTransactionConfirmed(H256, u32, u64),
-    ClosingTransactionConfirmed(bool),
+    ClosingTransactionConfirmed(bool, bool),
     RunRetryTask(RetryableTlcOperation),
     CheckActiveChannel,
     CheckFundingTimeout,
@@ -3948,6 +4021,8 @@ bitflags! {
         const ABANDONED = 1 << 2;
         /// Channel is closed because of aborted funding.
         const FUNDING_ABORTED = 1 << 3;
+        /// Indicates the close is initiated by remote, only meaningful when UNCOOPERATIVE is set
+        const CLOSE_BY_REMOTE = 1 << 4;
     }
 }
 

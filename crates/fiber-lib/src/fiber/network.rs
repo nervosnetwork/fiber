@@ -1,4 +1,5 @@
 use ckb_hash::blake2b_256;
+use ckb_sdk::RpcError;
 use ckb_types::core::{EpochNumberWithFraction, TransactionView};
 use ckb_types::packed::{Byte32, OutPoint, Script, Transaction};
 use ckb_types::prelude::{IntoTransactionView, Pack, Unpack};
@@ -69,7 +70,10 @@ use super::{
 };
 use crate::ckb::config::UdtCfgInfos;
 use crate::ckb::contracts::{check_udt_script, get_udt_whitelist, is_udt_type_auto_accept};
-use crate::ckb::{CkbChainMessage, FundingError, FundingRequest, FundingTx};
+use crate::ckb::{
+    CkbChainMessage, FundingError, FundingRequest, FundingTx, GetShutdownTxRequest,
+    GetShutdownTxResponse,
+};
 use crate::fiber::channel::{
     AddTlcCommand, AddTlcResponse, ChannelEphemeralConfig, ChannelInitializationOperation,
     ShutdownCommand, TxCollaborationCommand, TxUpdateCommand, DEFAULT_COMMITMENT_DELAY_EPOCHS,
@@ -286,6 +290,10 @@ pub enum NetworkActorCommand {
     },
     SignFundingTx(PeerId, Hash256, Transaction, Option<Vec<Vec<u8>>>),
     NotifyFundingTx(Transaction),
+    GetShutdownTx(
+        GetShutdownTxRequest,
+        RpcReplyPort<Result<Option<GetShutdownTxResponse>, RpcError>>,
+    ),
     // Broadcast our BroadcastMessage to the network.
     BroadcastMessages(Vec<BroadcastMessageWithTimestamp>),
     // Broadcast local information to the network.
@@ -860,7 +868,7 @@ pub enum NetworkActorEvent {
     FundingTransactionFailed(OutPoint),
 
     /// A closing transaction has been confirmed.
-    ClosingTransactionConfirmed(PeerId, Hash256, Byte32, bool),
+    ClosingTransactionConfirmed(PeerId, Hash256, Byte32, bool, bool),
 
     /// A closing transaction has failed (either because of invalid transaction or timeout)
     ClosingTransactionFailed(PeerId, Hash256, Byte32),
@@ -1187,9 +1195,21 @@ where
                     .on_closing_transaction_pending(channel_id, peer_id.clone(), tx.clone(), force)
                     .await;
             }
-            NetworkActorEvent::ClosingTransactionConfirmed(peer_id, channel_id, tx_hash, force) => {
+            NetworkActorEvent::ClosingTransactionConfirmed(
+                peer_id,
+                channel_id,
+                tx_hash,
+                force,
+                close_by_us,
+            ) => {
                 state
-                    .on_closing_transaction_confirmed(&peer_id, &channel_id, tx_hash, force)
+                    .on_closing_transaction_confirmed(
+                        &peer_id,
+                        &channel_id,
+                        tx_hash,
+                        force,
+                        close_by_us,
+                    )
                     .await;
             }
             NetworkActorEvent::ClosingTransactionFailed(peer_id, tx_hash, channel_id) => {
@@ -1972,6 +1992,11 @@ where
                         NetworkActorCommand::SendFiberMessage(msg),
                     ))
                     .expect("network actor alive");
+            }
+            NetworkActorCommand::GetShutdownTx(request, reply) => {
+                let _ = self
+                    .chain_actor
+                    .send_message(CkbChainMessage::GetShutdownTx(request, reply));
             }
             NetworkActorCommand::BroadcastMessages(message) => {
                 state
@@ -3897,11 +3922,15 @@ where
         channel_id: &Hash256,
         tx_hash: Byte32,
         force: bool,
+        close_by_us: bool,
     ) {
         self.send_message_to_channel_actor(
             *channel_id,
             None,
-            ChannelActorMessage::Event(ChannelEvent::ClosingTransactionConfirmed(force)),
+            ChannelActorMessage::Event(ChannelEvent::ClosingTransactionConfirmed(
+                force,
+                close_by_us,
+            )),
         )
         .await;
         if let Some(session) = self.get_peer_session(peer_id) {

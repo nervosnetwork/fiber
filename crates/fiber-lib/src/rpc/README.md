@@ -30,6 +30,7 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
         * [Method `add_tlc`](#dev-add_tlc)
         * [Method `remove_tlc`](#dev-remove_tlc)
         * [Method `submit_commitment_transaction`](#dev-submit_commitment_transaction)
+        * [Method `check_channel_shutdown`](#dev-check_channel_shutdown)
     * [Module Graph](#module-graph)
         * [Method `graph_nodes`](#graph-graph_nodes)
         * [Method `graph_channels`](#graph-graph_channels)
@@ -421,6 +422,23 @@ Submit a commitment transaction to the chain
 ##### Returns
 
 * `tx_hash` - <em>[Hash256](#type-hash256)</em>, Submitted commitment transaction hash
+
+---
+
+
+
+<a id="dev-check_channel_shutdown"></a>
+#### Method `check_channel_shutdown`
+
+Manually trigger CheckShutdownTx on all channels
+
+##### Params
+
+* `channel_id` - <em>[Hash256](#type-hash256)</em>, Channel ID
+
+##### Returns
+
+* None
 
 ---
 

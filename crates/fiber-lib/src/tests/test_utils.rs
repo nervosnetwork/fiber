@@ -849,7 +849,7 @@ impl NetworkNode {
         use crate::fiber::NetworkActorEvent::ClosingTransactionConfirmed;
 
         let tx_hash = TransactionBuilder::default().build().hash();
-        let event = ClosingTransactionConfirmed(peer_id, channel_id, tx_hash, force);
+        let event = ClosingTransactionConfirmed(peer_id, channel_id, tx_hash, force, true);
         self.network_actor
             .send_message(NetworkActorMessage::Event(event))
             .expect("network actor alive");

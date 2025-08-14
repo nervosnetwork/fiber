@@ -102,6 +102,13 @@ pub struct SubmitCommitmentTransactionResult {
     pub tx_hash: Hash256,
 }
 
+#[serde_as]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct CheckChannelShutdownParams {
+    /// Channel ID
+    pub channel_id: Hash256,
+}
+
 /// RPC module for development purposes, this module is not intended to be used in production.
 /// This module will be disabled in release build.
 #[cfg(not(target_arch = "wasm32"))]
@@ -128,6 +135,13 @@ trait DevRpc {
         &self,
         params: SubmitCommitmentTransactionParams,
     ) -> Result<SubmitCommitmentTransactionResult, ErrorObjectOwned>;
+
+    /// Manually trigger CheckShutdownTx on all channels
+    #[method(name = "check_channel_shutdown")]
+    async fn check_channel_shutdown(
+        &self,
+        params: CheckChannelShutdownParams,
+    ) -> Result<(), ErrorObjectOwned>;
 }
 
 pub struct DevRpcServerImpl {
@@ -177,6 +191,13 @@ impl DevRpcServer for DevRpcServerImpl {
         params: SubmitCommitmentTransactionParams,
     ) -> Result<SubmitCommitmentTransactionResult, ErrorObjectOwned> {
         self.submit_commitment_transaction(params).await
+    }
+
+    async fn check_channel_shutdown(
+        &self,
+        params: CheckChannelShutdownParams,
+    ) -> Result<(), ErrorObjectOwned> {
+        self.check_channel_shutdown(params).await
     }
 }
 impl DevRpcServerImpl {
@@ -301,5 +322,19 @@ impl DevRpcServerImpl {
                 Some(params),
             ))
         }
+    }
+
+    pub async fn check_channel_shutdown(
+        &self,
+        params: CheckChannelShutdownParams,
+    ) -> Result<(), ErrorObjectOwned> {
+        let message = NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id: params.channel_id,
+                command: ChannelCommand::CheckShutdown,
+            },
+        ));
+
+        handle_actor_cast!(self.network_actor, message, params)
     }
 }
