@@ -118,6 +118,8 @@ pub const PEER_CHANNEL_RESPONSE_TIMEOUT: u64 = 30 * 1000;
 #[cfg(any(test, feature = "bench"))]
 pub const PEER_CHANNEL_RESPONSE_TIMEOUT: u64 = 10 * 1000;
 
+const MAX_RETRYABLE_TLC_OPERATIONS: usize = 200000;
+
 #[derive(Debug)]
 pub enum ChannelActorMessage {
     /// Command are the messages that are sent to the channel actor to perform some action.
@@ -1761,6 +1763,7 @@ where
         state: &mut ChannelActorState,
         operation: RetryableTlcOperation,
     ) {
+        debug_assert!(state.retryable_tlc_operations.len() <= MAX_RETRYABLE_TLC_OPERATIONS);
         let mut job_id = 1;
         while state.retryable_tlc_operations.contains_key(&job_id) {
             if let Some(next_job_id) = job_id.checked_add(1) {
@@ -1785,7 +1788,7 @@ where
         &self,
         myself: &ActorRef<ChannelActorMessage>,
         state: &mut ChannelActorState,
-        job_id: usize,
+        job_id: u16,
     ) {
         let Some((retryable_operation, retry_count)) =
             state.retryable_tlc_operations.get(&job_id).cloned()
@@ -1904,17 +1907,13 @@ where
         }
     }
 
-    fn find_matching_forward_tlc_operation(
+    async fn handle_forward_tlc_result(
         &self,
-        state: &ChannelActorState,
-        result: &ForwardTlcResult,
-    ) -> Option<(
-        usize,
-        usize,
-        RetryableTlcOperation,
-        PeeledPaymentOnionPacket,
-    )> {
-        state
+        myself: &ActorRef<ChannelActorMessage>,
+        state: &mut ChannelActorState,
+        result: ForwardTlcResult,
+    ) {
+        let Some((job_id, retry_count, shared_secret)) = state
             .retryable_tlc_operations
             .iter()
             .find_map(|(job_id, (op, retry_count))| match op {
@@ -1922,20 +1921,10 @@ where
                     if *payment_hash == result.payment_hash
                         && u64::from(*tlc_id) == result.tlc_id =>
                 {
-                    Some((*job_id, *retry_count, op.clone(), peel_packet.clone()))
+                    Some((*job_id, *retry_count, peel_packet.shared_secret))
                 }
                 _ => None,
             })
-    }
-
-    async fn handle_forward_tlc_result(
-        &self,
-        myself: &ActorRef<ChannelActorMessage>,
-        state: &mut ChannelActorState,
-        result: ForwardTlcResult,
-    ) {
-        let Some((job_id, retry_count, _tlc_op, peeled_onion)) =
-            self.find_matching_forward_tlc_operation(state, &result)
         else {
             return;
         };
@@ -1954,7 +1943,7 @@ where
                 }
                 _ => {
                     let error = ProcessingChannelError::TlcForwardingError(tlc_err)
-                        .with_shared_secret(peeled_onion.shared_secret);
+                        .with_shared_secret(shared_secret);
                     self.process_add_tlc_error(
                         myself,
                         state,
@@ -3647,7 +3636,7 @@ pub struct ChannelActorState {
     pub tlc_state: TlcState,
 
     // the retryable tlc operations that are waiting to be processed.
-    pub retryable_tlc_operations: HashMap<usize, (RetryableTlcOperation, usize)>,
+    pub retryable_tlc_operations: HashMap<u16, (RetryableTlcOperation, u32)>,
 
     // The remote and local lock script for close channel, they are setup during the channel establishment.
     #[serde_as(as = "Option<EntityHex>")]
@@ -3803,7 +3792,7 @@ pub enum ChannelEvent {
     Stop(StopReason),
     FundingTransactionConfirmed(H256, u32, u64),
     ClosingTransactionConfirmed(bool),
-    RunRetryTask(usize),
+    RunRetryTask(u16),
     CheckActiveChannel,
     CheckFundingTimeout,
 }
@@ -4459,7 +4448,7 @@ impl ChannelActorState {
         }
     }
 
-    fn update_retryable_task_retry_count(&mut self, job_id: usize, new_retry_count: usize) {
+    fn update_retryable_task_retry_count(&mut self, job_id: u16, new_retry_count: u32) {
         if let Some((_op, retry_count)) = self.retryable_tlc_operations.get_mut(&job_id) {
             *retry_count = new_retry_count;
         }
@@ -4468,10 +4457,10 @@ impl ChannelActorState {
     fn trigger_retryable_tasks(
         &mut self,
         myself: &ActorRef<ChannelActorMessage>,
-        run_job: Option<(usize, usize)>,
+        run_job: Option<(u16, u32)>,
     ) {
         if let Some((job_id, retry_delay)) = run_job {
-            myself.send_after(RETRYABLE_TLC_OPS_INTERVAL * retry_delay as u32, move || {
+            myself.send_after(RETRYABLE_TLC_OPS_INTERVAL * retry_delay, move || {
                 ChannelActorMessage::Event(ChannelEvent::RunRetryTask(job_id))
             });
         } else {
@@ -5830,7 +5819,9 @@ impl ChannelActorState {
             return Err(ProcessingChannelError::WaitingTlcAck);
         }
 
-        if is_tlc_command_message && self.retryable_tlc_operations.len() >= usize::MAX / 2 {
+        if is_tlc_command_message
+            && self.retryable_tlc_operations.len() > MAX_RETRYABLE_TLC_OPERATIONS
+        {
             return Err(ProcessingChannelError::InternalError(format!(
                 "
                 Too many retryable tlc operations: {}",
@@ -7926,7 +7917,7 @@ impl ChannelActorState {
         }
     }
 
-    pub fn get_pending_operations(&self) -> Vec<usize> {
+    pub fn get_pending_operations(&self) -> Vec<u16> {
         self.retryable_tlc_operations.keys().cloned().collect()
     }
 
@@ -7934,7 +7925,7 @@ impl ChannelActorState {
         !self.retryable_tlc_operations.is_empty()
     }
 
-    pub fn remove_pending_tlc_operation(&mut self, job_id: &usize) {
+    pub fn remove_pending_tlc_operation(&mut self, job_id: &u16) {
         let Some((retryable_tlc_op, _)) = self.retryable_tlc_operations.remove(job_id) else {
             return;
         };
