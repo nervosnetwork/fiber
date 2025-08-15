@@ -55,8 +55,6 @@ pub enum Error {
     InvalidOnionPacket(crate::fiber::types::Error),
     #[error("Ckb Rpc error: {0}")]
     CkbRpcError(RpcError),
-    #[error("Too many retryable tasks: {0}")]
-    TooManyRetryableTasks(usize),
     #[error("Database error: {0}")]
     DBInternalError(String),
     #[error("Internal error: {0}")]
