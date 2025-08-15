@@ -328,11 +328,8 @@ impl DevRpcServerImpl {
         &self,
         params: CheckChannelShutdownParams,
     ) -> Result<(), ErrorObjectOwned> {
-        let message = NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
-            ChannelCommandWithId {
-                channel_id: params.channel_id,
-                command: ChannelCommand::CheckShutdown,
-            },
+        let message = NetworkActorMessage::Command(NetworkActorCommand::CheckChannelShutdown(
+            params.channel_id,
         ));
 
         handle_actor_cast!(self.network_actor, message, params)

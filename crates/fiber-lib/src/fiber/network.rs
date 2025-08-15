@@ -1,5 +1,5 @@
 use ckb_hash::blake2b_256;
-use ckb_sdk::RpcError;
+use ckb_types::core::tx_pool::TxStatus;
 use ckb_types::core::{EpochNumberWithFraction, TransactionView};
 use ckb_types::packed::{Byte32, OutPoint, Script, Transaction};
 use ckb_types::prelude::{IntoTransactionView, Pack, Unpack};
@@ -138,6 +138,9 @@ const CHECK_CHANNELS_INTERVAL: Duration = Duration::from_secs(60);
 
 // The duration for which we will check peer init messages.
 const CHECK_PEER_INIT_INTERVAL: Duration = Duration::from_secs(20);
+
+// The interval time to check shutdown transaction
+const CHANNEL_CHECK_SHUTDOWN_INTERVAL: Duration = Duration::from_secs(300);
 
 // While creating a network graph from the gossip messages, we will load current gossip messages
 // in the store and process them. We will load all current messages and get the latest cursor.
@@ -290,10 +293,7 @@ pub enum NetworkActorCommand {
     },
     SignFundingTx(PeerId, Hash256, Transaction, Option<Vec<Vec<u8>>>),
     NotifyFundingTx(Transaction),
-    GetShutdownTx(
-        GetShutdownTxRequest,
-        RpcReplyPort<Result<Option<GetShutdownTxResponse>, RpcError>>,
-    ),
+    CheckChannelShutdown(Hash256),
     // Broadcast our BroadcastMessage to the network.
     BroadcastMessages(Vec<BroadcastMessageWithTimestamp>),
     // Broadcast local information to the network.
@@ -867,7 +867,7 @@ pub enum NetworkActorEvent {
     /// A funding transaction has failed.
     FundingTransactionFailed(OutPoint),
 
-    /// A closing transaction has been confirmed.
+    /// A closing transaction has been confirmed (peer_id, channel_id, tx_hash, force, close_by_us).
     ClosingTransactionConfirmed(PeerId, Hash256, Byte32, bool, bool),
 
     /// A closing transaction has failed (either because of invalid transaction or timeout)
@@ -1993,10 +1993,8 @@ where
                     ))
                     .expect("network actor alive");
             }
-            NetworkActorCommand::GetShutdownTx(request, reply) => {
-                let _ = self
-                    .chain_actor
-                    .send_message(CkbChainMessage::GetShutdownTx(request, reply));
+            NetworkActorCommand::CheckChannelShutdown(channel_id) => {
+                self.check_channel_shutdown(myself, channel_id).await;
             }
             NetworkActorCommand::BroadcastMessages(message) => {
                 state
@@ -2117,6 +2115,77 @@ where
             }
         };
         Ok(())
+    }
+
+    async fn check_channel_shutdown(
+        &self,
+        myself: ActorRef<NetworkActorMessage>,
+        channel_id: Hash256,
+    ) {
+        let Some(state) = self.store.get_channel_actor_state(&channel_id) else {
+            tracing::debug!("stop check channel shutdown, can't find {channel_id:?} actor state");
+            return;
+        };
+        // stop check if channel closed
+        if matches!(state.state, ChannelState::Closed(..)) {
+            tracing::debug!("stop check channel shutdown, {channel_id:?} is closed");
+            return;
+        }
+        // check channel ready state
+        if !state.reestablishing && state.state == ChannelState::ChannelReady {
+            // check shutdown transactions
+            let request = GetShutdownTxRequest {
+                funding_lock_script: state.get_funding_lock_script(),
+            };
+            match call!(self.chain_actor, |tx| CkbChainMessage::GetShutdownTx(
+                request, tx
+            ))
+            .expect(ASSUME_NETWORK_ACTOR_ALIVE)
+            {
+                Ok(Some(GetShutdownTxResponse {
+                    transaction: Some(tx),
+                    tx_status: TxStatus::Committed(..),
+                })) => {
+                    // we only check remote sent force close transaction here
+                    if tx.outputs().len() == 1 {
+                        if let Some(output) = tx.outputs().get(0) {
+                            // Check if channel is force closed by counter party
+                            let lock_args =
+                                &blake2b_256(state.get_commitment_lock_script_xonly(true))[0..20];
+                            if &output.lock().args().raw_data()[0..20] == lock_args {
+                                let channel_id = state.get_id();
+                                let peer_id = state.get_remote_peer_id();
+                                let tx_hash = tx.hash();
+                                tracing::debug!("channel {channel_id:?} is shutdown by remote");
+                                myself
+                                    .send_message(NetworkActorMessage::Event(
+                                        NetworkActorEvent::ClosingTransactionConfirmed(
+                                            peer_id, channel_id, tx_hash, true, false,
+                                        ),
+                                    ))
+                                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                            }
+                        }
+                    }
+                }
+                Ok(_) => {
+                    // no shutdown tx
+                }
+                Err(err) => {
+                    warn!(
+                        "Error during get channel shutdown tx {} from peer {:?} {:?}",
+                        state.get_id(),
+                        state.get_remote_peer_id(),
+                        err
+                    );
+                }
+            }
+        }
+
+        // Check channel shutdown after interval
+        myself.send_after(CHANNEL_CHECK_SHUTDOWN_INTERVAL, move || {
+            NetworkActorMessage::Command(NetworkActorCommand::CheckChannelShutdown(channel_id))
+        });
     }
 
     async fn handle_send_onion_packet_command(
@@ -3890,6 +3959,12 @@ where
                 NetworkServiceEvent::ChannelCreated(peer_id.clone(), id),
             ))
             .expect(ASSUME_NETWORK_MYSELF_ALIVE);
+
+        // start check channel shutdown
+        self.network
+            .send_after(CHANNEL_CHECK_SHUTDOWN_INTERVAL, move || {
+                NetworkActorMessage::Command(NetworkActorCommand::CheckChannelShutdown(id))
+            });
     }
 
     async fn on_closing_transaction_pending(
