@@ -14,6 +14,7 @@ use crate::{debug_event, fiber::types::TxAbort, utils::tx::compute_tx_message};
 use musig2::BinaryEncoding;
 use musig2::SecNonceBuilder;
 use secp256k1::{Secp256k1, XOnlyPublicKey};
+use std::collections::hash_map::Entry;
 #[cfg(test)]
 use std::{
     backtrace::Backtrace,
@@ -118,7 +119,9 @@ pub const PEER_CHANNEL_RESPONSE_TIMEOUT: u64 = 30 * 1000;
 #[cfg(any(test, feature = "bench"))]
 pub const PEER_CHANNEL_RESPONSE_TIMEOUT: u64 = 10 * 1000;
 
-const MAX_RETRYABLE_TLC_OPERATIONS: usize = 200000;
+// A tlc may involve AddTlc, RemoveTlc, ForwardTlc, RelayRemoveTlc operations,
+// multiple 5 times for max tlc number of tlcs is a safe number
+const MAX_RETRYABLE_TLC_OPERATIONS: u16 = SYS_MAX_TLC_NUMBER_IN_FLIGHT as u16 * 5;
 
 #[derive(Debug)]
 pub enum ChannelActorMessage {
@@ -1763,25 +1766,20 @@ where
         state: &mut ChannelActorState,
         operation: RetryableTlcOperation,
     ) {
-        debug_assert!(state.retryable_tlc_operations.len() <= MAX_RETRYABLE_TLC_OPERATIONS);
-        let mut job_id = 1;
-        while state.retryable_tlc_operations.contains_key(&job_id) {
-            if let Some(next_job_id) = job_id.checked_add(1) {
-                job_id = next_job_id;
-            } else {
-                // if we reach the maximum usize, we can't add more operations
-                // this expect not happen since we have a limit check on check_for_tlc_update
-                error!(
-                    "Too many retryable operations: {:?}, can't add more operations",
-                    state.retryable_tlc_operations.len()
-                );
+        debug_assert!(state.retryable_tlc_operations.len() < MAX_RETRYABLE_TLC_OPERATIONS as usize);
+        for job_id in 1..=MAX_RETRYABLE_TLC_OPERATIONS {
+            if let Entry::Vacant(e) = state.retryable_tlc_operations.entry(job_id) {
+                e.insert((operation, 0));
+                state.trigger_retryable_tasks(myself, Some((job_id, 0)));
                 return;
             }
         }
-        state
-            .retryable_tlc_operations
-            .insert(job_id, (operation, 0));
-        state.trigger_retryable_tasks(myself, Some((job_id, 0)));
+        // we can't add more operations because of limit on size,
+        // this expect not happen since we have a limit check on check_for_tlc_update
+        error!(
+            "Too many retryable operations: {:?}, can't add more operations",
+            state.retryable_tlc_operations.len()
+        );
     }
 
     pub async fn apply_retryable_tlc_operations(
@@ -5819,12 +5817,13 @@ impl ChannelActorState {
             return Err(ProcessingChannelError::WaitingTlcAck);
         }
 
+        // don't add tlc if there are too many retryable tasks, a forward tlc may need to register a RemoveFail task if
+        // forwarding get a failed result, so we use half of allowed tasks for check here
         if is_tlc_command_message
-            && self.retryable_tlc_operations.len() > MAX_RETRYABLE_TLC_OPERATIONS
+            && self.retryable_tlc_operations.len() > (MAX_RETRYABLE_TLC_OPERATIONS / 2) as usize
         {
             return Err(ProcessingChannelError::InternalError(format!(
-                "
-                Too many retryable tlc operations: {}",
+                "Too many retryable tlc operations: {}",
                 self.retryable_tlc_operations.len()
             )));
         }
