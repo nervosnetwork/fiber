@@ -1868,7 +1868,6 @@ where
                 //
                 // but we need the result for better error handling
                 // so we introduce the ForwardTlcResult to get the result based on actor message
-
                 match self.network.send_message(NetworkActorMessage::Command(
                     NetworkActorCommand::SendPaymentOnionPacket(SendOnionPacketCommand {
                         peeled_onion_packet: peeled_onion_packet.clone(),
