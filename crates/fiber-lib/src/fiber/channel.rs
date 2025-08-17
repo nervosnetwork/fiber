@@ -4457,9 +4457,13 @@ impl ChannelActorState {
         run_job: Option<(u16, u32)>,
     ) {
         if let Some((job_id, retry_delay)) = run_job {
-            myself.send_after(RETRYABLE_TLC_OPS_INTERVAL * retry_delay, move || {
-                ChannelActorMessage::Event(ChannelEvent::RunRetryTask(job_id))
-            });
+            // we have limited number of tasks, so set a upper bound for retry delay
+            // to make sure we don't wait too long for retryable tasks and also not to cost too much resource
+            // the upper bound here is (500 ms * 3600 = 30 minutes)
+            myself.send_after(
+                RETRYABLE_TLC_OPS_INTERVAL * retry_delay.min(3600),
+                move || ChannelActorMessage::Event(ChannelEvent::RunRetryTask(job_id)),
+            );
         } else {
             let job_ids = self.get_pending_operations();
             for job_id in job_ids.into_iter() {
