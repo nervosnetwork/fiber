@@ -3107,24 +3107,18 @@ pub enum RetryableTlcOperation {
     ForwardTlc(Hash256, TLCId, PeeledPaymentOnionPacket, u128),
 }
 
-use std::hash::Hash;
-impl Hash for RetryableTlcOperation {
+impl std::hash::Hash for RetryableTlcOperation {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::mem::discriminant(self).hash(state);
         match self {
-            RetryableTlcOperation::RemoveTlc(tlc_id, ..) => {
-                "remove_tlc".hash(state);
-                tlc_id.hash(state);
-            }
-            RetryableTlcOperation::RelayRemoveTlc(_, tlc_id, ..) => {
-                "relay_remove_tlc".hash(state);
-                tlc_id.hash(state);
-            }
-            RetryableTlcOperation::ForwardTlc(_, tlc_id, ..) => {
-                "forward_tlc".hash(state);
+            RetryableTlcOperation::RemoveTlc(tlc_id, ..)
+            | RetryableTlcOperation::RelayRemoveTlc(_, tlc_id, ..)
+            | RetryableTlcOperation::ForwardTlc(_, tlc_id, ..) => {
                 tlc_id.hash(state);
             }
         }
     }
+}
 }
 
 impl Debug for RetryableTlcOperation {
