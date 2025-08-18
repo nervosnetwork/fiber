@@ -420,9 +420,6 @@ pub enum Error {
 
 #[derive(Error, Debug)]
 pub enum OnionPacketError {
-    #[error("Try to peel the last hop")]
-    PeelingLastHop,
-
     #[error("Fail to deserialize the hop data")]
     InvalidHopData,
 
@@ -4073,23 +4070,6 @@ impl PeeledPaymentOnionPacket {
     /// Returns true if this is the peeled packet for the last destination.
     pub fn is_last(&self) -> bool {
         self.next.is_none()
-    }
-
-    /// Peels the next layer of the onion packet using the privkey of the current node.
-    ///
-    /// Returns errors when:
-    /// - This is the packet for the last hop.
-    /// - Fail to peel the packet using the given private key.
-    pub fn peel<C: Verification>(
-        self,
-        peeler: &Privkey,
-        secp_ctx: &Secp256k1<C>,
-    ) -> Result<Self, Error> {
-        let next = self
-            .next
-            .ok_or_else(|| Error::OnionPacket(OnionPacketError::PeelingLastHop))?;
-
-        next.peel(peeler, None, secp_ctx)
     }
 
     pub fn serialize(&self) -> Vec<u8> {
