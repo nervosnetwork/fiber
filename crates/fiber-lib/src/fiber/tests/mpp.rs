@@ -13,7 +13,9 @@ use crate::{
         hash_algorithm::HashAlgorithm,
         network::{DebugEvent, SendPaymentCommand, USER_CUSTOM_RECORDS_MAX_INDEX},
         payment::AttemptStatus,
-        types::{BasicMppPaymentData, Hash256, PaymentHopData, PeeledOnionPacket, RemoveTlcReason},
+        types::{
+            BasicMppPaymentData, Hash256, PaymentHopData, PeeledPaymentOnionPacket, RemoveTlcReason,
+        },
         NetworkActorCommand, NetworkActorMessage, PaymentCustomRecords,
     },
     gen_rand_sha256_hash, gen_rpc_config,
@@ -533,7 +535,7 @@ async fn test_mpp_tlc_set() {
         },
     ];
 
-    let packet = PeeledOnionPacket::create(
+    let packet = PeeledPaymentOnionPacket::create(
         source_node.get_private_key().clone(),
         hops_infos.clone(),
         Some(payment_hash.as_ref().to_vec()),
@@ -673,7 +675,7 @@ async fn test_mpp_tlc_set_with_insufficient_total_amount() {
         },
     ];
 
-    let packet = PeeledOnionPacket::create(
+    let packet = PeeledPaymentOnionPacket::create(
         source_node.get_private_key().clone(),
         hops_infos.clone(),
         Some(payment_hash.as_ref().to_vec()),
@@ -810,7 +812,7 @@ async fn test_mpp_tlc_set_with_only_1_tlc() {
         },
     ];
 
-    let packet = PeeledOnionPacket::create(
+    let packet = PeeledPaymentOnionPacket::create(
         source_node.get_private_key().clone(),
         hops_infos.clone(),
         Some(payment_hash.as_ref().to_vec()),
@@ -911,7 +913,7 @@ async fn test_mpp_tlc_set_with_only_1_tlc_without_payment_data() {
         },
     ];
 
-    let packet = PeeledOnionPacket::create(
+    let packet = PeeledPaymentOnionPacket::create(
         source_node.get_private_key().clone(),
         hops_infos.clone(),
         Some(payment_hash.as_ref().to_vec()),
@@ -1016,7 +1018,7 @@ async fn test_mpp_tlc_set_total_amount_mismatch() {
         },
     ];
 
-    let packet = PeeledOnionPacket::create(
+    let packet = PeeledPaymentOnionPacket::create(
         source_node.get_private_key().clone(),
         hops_infos.clone(),
         Some(payment_hash.as_ref().to_vec()),
@@ -1177,7 +1179,7 @@ async fn test_mpp_tlc_set_total_amount_should_be_consistent() {
             },
         ];
 
-        PeeledOnionPacket::create(
+        PeeledPaymentOnionPacket::create(
             source_node.get_private_key().clone(),
             hops_infos.clone(),
             Some(payment_hash.as_ref().to_vec()),
@@ -1343,7 +1345,7 @@ async fn test_mpp_tlc_set_payment_secret_mismatch() {
         },
     ];
 
-    let packet = PeeledOnionPacket::create(
+    let packet = PeeledPaymentOnionPacket::create(
         source_node.get_private_key().clone(),
         hops_infos.clone(),
         Some(payment_hash.as_ref().to_vec()),
@@ -1495,7 +1497,7 @@ async fn test_mpp_tlc_set_timeout_1_of_2() {
         },
     ];
 
-    let packet = PeeledOnionPacket::create(
+    let packet = PeeledPaymentOnionPacket::create(
         source_node.get_private_key().clone(),
         hops_infos.clone(),
         Some(payment_hash.as_ref().to_vec()),
@@ -1708,7 +1710,7 @@ async fn test_mpp_tlc_set_timeout() {
         },
     ];
 
-    let packet = PeeledOnionPacket::create(
+    let packet = PeeledPaymentOnionPacket::create(
         source_node.get_private_key().clone(),
         hops_infos.clone(),
         Some(payment_hash.as_ref().to_vec()),
@@ -1883,7 +1885,7 @@ async fn test_mpp_tlc_set_without_payment_data() {
         },
     ];
 
-    let packet = PeeledOnionPacket::create(
+    let packet = PeeledPaymentOnionPacket::create(
         source_node.get_private_key().clone(),
         hops_infos.clone(),
         Some(payment_hash.as_ref().to_vec()),
@@ -2544,7 +2546,7 @@ async fn test_mpp_tlc_set_without_invoice_should_not_be_accepted() {
             },
         ];
 
-        let packet = PeeledOnionPacket::create(
+        let packet = PeeledPaymentOnionPacket::create(
             source_node.get_private_key().clone(),
             hops_infos.clone(),
             Some(payment_hash.as_ref().to_vec()),
@@ -2710,7 +2712,7 @@ async fn test_mpp_tlc_with_invoice_not_allow_mpp_should_not_be_accepted() {
         },
     ];
 
-    let packet = PeeledOnionPacket::create(
+    let packet = PeeledPaymentOnionPacket::create(
         source_node.get_private_key().clone(),
         hops_infos.clone(),
         Some(payment_hash.as_ref().to_vec()),

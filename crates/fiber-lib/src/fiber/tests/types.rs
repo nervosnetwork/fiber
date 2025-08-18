@@ -8,7 +8,7 @@ use crate::{
         types::{
             pack_hop_data, secp256k1_instance, unpack_hop_data, AddTlc, BasicMppPaymentData,
             BroadcastMessageID, Cursor, Hash256, NodeAnnouncement, NodeId, PaymentHopData,
-            PeeledOnionPacket, Privkey, Pubkey, TlcErr, TlcErrPacket, TlcErrorCode,
+            PeeledPaymentOnionPacket, Privkey, Pubkey, TlcErr, TlcErrPacket, TlcErrorCode,
             NO_SHARED_SECRET,
         },
         PaymentCustomRecords,
@@ -174,7 +174,7 @@ fn test_peeled_onion_packet() {
             custom_records: None,
         },
     ];
-    let packet = PeeledOnionPacket::create(
+    let packet = PeeledPaymentOnionPacket::create(
         gen_rand_fiber_private_key(),
         hops_infos.clone(),
         None,
@@ -183,19 +183,19 @@ fn test_peeled_onion_packet() {
     .expect("create peeled packet");
 
     let serialized = packet.serialize();
-    let deserialized = PeeledOnionPacket::deserialize(&serialized).expect("deserialize");
+    let deserialized = PeeledPaymentOnionPacket::deserialize(&serialized).expect("deserialize");
 
     assert_eq!(packet, deserialized);
 
-    assert_eq!(packet.current, hops_infos[0]);
+    assert_eq!(packet.current, hops_infos[0].clone().into());
     assert!(!packet.is_last());
 
     let packet = packet.peel(&keys[1], &secp).expect("peel");
-    assert_eq!(packet.current, hops_infos[1]);
+    assert_eq!(packet.current, hops_infos[1].clone().into());
     assert!(!packet.is_last());
 
     let packet = packet.peel(&keys[2], &secp).expect("peel");
-    assert_eq!(packet.current, hops_infos[2]);
+    assert_eq!(packet.current, hops_infos[2].clone().into());
     assert!(packet.is_last());
 }
 
@@ -230,7 +230,7 @@ fn test_peeled_large_onion_packet() {
             custom_records: None,
         });
 
-        let packet = PeeledOnionPacket::create(
+        let packet = PeeledPaymentOnionPacket::create(
             gen_rand_fiber_private_key(),
             hops_infos.clone(),
             None,
@@ -239,18 +239,21 @@ fn test_peeled_large_onion_packet() {
         .map_err(|e| format!("create peeled packet error: {}", e))?;
 
         let serialized = packet.serialize();
-        let deserialized = PeeledOnionPacket::deserialize(&serialized).expect("deserialize");
+        let deserialized = PeeledPaymentOnionPacket::deserialize(&serialized).expect("deserialize");
 
         assert_eq!(packet, deserialized);
 
         let mut now = Some(packet);
         for i in 0..hops_infos.len() - 1 {
             let packet = now.unwrap().peel(&keys[i], &secp).expect("peel");
-            assert_eq!(packet.current, hops_infos[i + 1]);
+            assert_eq!(packet.current, hops_infos[i + 1].clone().into());
             now = Some(packet.clone());
         }
         let last_packet = now.unwrap();
-        assert_eq!(last_packet.current, hops_infos[hops_infos.len() - 1]);
+        assert_eq!(
+            last_packet.current,
+            hops_infos[hops_infos.len() - 1].clone().into()
+        );
         assert!(last_packet.is_last());
         return Ok(());
     }
