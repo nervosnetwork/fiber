@@ -6240,3 +6240,97 @@ async fn test_send_payment_with_invalid_amount() {
     let error = payment.unwrap_err();
     assert!(error.contains("amount must be greater than 0"));
 }
+
+#[tokio::test]
+async fn test_send_payment_direct_channel_error_from_node_stop() {
+    init_tracing();
+
+    let (nodes, _channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+            ((1, 2), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+        ],
+        3,
+    )
+    .await;
+    let [node_0, mut node_1, node_2] = nodes.try_into().expect("3 nodes");
+
+    node_1.stop().await;
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    let payment = node_0
+        .send_payment(SendPaymentCommand {
+            target_pubkey: Some(node_2.pubkey),
+            amount: Some(100),
+            keysend: Some(true),
+            ..Default::default()
+        })
+        .await;
+
+    assert!(payment.unwrap_err().contains("no path found"));
+}
+
+#[tokio::test]
+async fn test_send_payment_3_nodes_failed_last_hop() {
+    init_tracing();
+
+    let (nodes, _channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+            ((1, 2), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+        ],
+        3,
+    )
+    .await;
+    let [node_0, mut node_1, mut node_2] = nodes.try_into().expect("3 nodes");
+    node_1
+        .expect_event(|event| match event {
+            NetworkServiceEvent::DebugEvent(DebugEvent::Common(msg)) => {
+                msg.starts_with("Channel is now ready")
+            }
+            _ => false,
+        })
+        .await;
+
+    node_2.stop().await;
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    let payment = node_0
+        .send_payment(SendPaymentCommand {
+            target_pubkey: Some(node_2.pubkey),
+            amount: Some(100),
+            keysend: Some(true),
+            ..Default::default()
+        })
+        .await;
+
+    node_0
+        .wait_until_failed(payment.unwrap().payment_hash)
+        .await;
+
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    node_2.start().await;
+
+    node_1
+        .expect_event(|event| match event {
+            NetworkServiceEvent::DebugEvent(DebugEvent::Common(msg)) => {
+                msg.starts_with("Channel is now ready")
+            }
+            _ => false,
+        })
+        .await;
+
+    node_0.clear_history().await;
+
+    let payment = node_0
+        .send_payment(SendPaymentCommand {
+            target_pubkey: Some(node_2.pubkey),
+            amount: Some(100),
+            keysend: Some(true),
+            ..Default::default()
+        })
+        .await;
+
+    debug!("payment: {:?}", payment);
+    node_0
+        .wait_until_success(payment.unwrap().payment_hash)
+        .await;
+}

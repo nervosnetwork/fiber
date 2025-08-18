@@ -2404,11 +2404,17 @@ async fn test_network_add_two_tlcs_remove_one() {
             ))
         })
         .expect("node_b alive");
-        if res.is_ok() {
+
+        let a_tlc_state = node_a.get_channel_actor_state(channel_id);
+        let tlc_is_removed = a_tlc_state
+            .tlc_state
+            .get(&TLCId::Offered(add_tlc_result_a.tlc_id))
+            .is_none();
+
+        if res.is_ok() || tlc_is_removed {
             println!("remove tlc result: {:?}", res);
             break;
         } else {
-            eprintln!("Failed to remove tlc, retrying...");
             tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
         }
     }

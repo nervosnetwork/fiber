@@ -1126,7 +1126,7 @@ where
                 myself
                     .send_message(NetworkActorMessage::new_notification(
                         NetworkServiceEvent::ChannelReady(
-                            peer_id,
+                            peer_id.clone(),
                             channel_id,
                             channel_outpoint.clone(),
                         ),
@@ -1151,6 +1151,13 @@ where
                         );
                     }
                 }
+                debug_event!(
+                    myself,
+                    format!(
+                        "Channel is now ready with channel_id {:?} to peer {:?}",
+                        channel_id, peer_id
+                    )
+                );
             }
             NetworkActorEvent::FiberMessage(peer_id, message) => {
                 self.handle_peer_message(myself, state, peer_id, message)
