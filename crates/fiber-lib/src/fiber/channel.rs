@@ -1770,7 +1770,7 @@ where
         debug_assert!(state.retryable_tlc_operations.len() < MAX_RETRYABLE_TLC_OPERATIONS as usize);
         if let Entry::Vacant(e) = state.retryable_tlc_operations.entry(operation.clone()) {
             e.insert(0);
-            state.trigger_retryable_tasks(myself, Some((operation, 0)));
+            state.trigger_retryable_tasks(myself, Some((operation, 0, false)));
         }
     }
 
@@ -1789,7 +1789,7 @@ where
         };
 
         let mut retry_later = true;
-        let mut retry_delay = retry_count.saturating_add(1);
+        let mut waiting_ack = false;
         let keep_job = match retryable_operation {
             RetryableTlcOperation::RemoveTlc(tlc_id, ref reason) => {
                 match self
@@ -1805,9 +1805,7 @@ where
                 {
                     Ok(_) | Err(ProcessingChannelError::RepeatedProcessing(_)) => false,
                     Err(ProcessingChannelError::WaitingTlcAck) => {
-                        // don't retry too many times, but in most cases we need to retry immediately for WaitingTlcAck
-                        // here we use 2 minutes as decreasing unit
-                        retry_delay = 1.max(retry_count / 120);
+                        waiting_ack = true;
                         true
                     }
                     Err(_err) => false,
@@ -1893,7 +1891,10 @@ where
                     &retryable_operation,
                     retry_count.saturating_add(1),
                 );
-                state.trigger_retryable_tasks(myself, Some((retryable_operation, retry_delay)));
+                state.trigger_retryable_tasks(
+                    myself,
+                    Some((retryable_operation, retry_count, waiting_ack)),
+                );
             }
         } else {
             // if the operation is finished, we will remove it from the retryable_tlc_operations
@@ -1926,10 +1927,8 @@ where
         if let Some((channel_err, tlc_err)) = result.error_info {
             match channel_err {
                 ProcessingChannelError::WaitingTlcAck => {
-                    // if we get WaitingTlcAck error, we will retry it later
-                    let retry_delay = 1.max(retry_count / 120);
                     state.update_retryable_task_retry_count(&op, retry_count.saturating_add(1));
-                    state.trigger_retryable_tasks(myself, Some((op, retry_delay)));
+                    state.trigger_retryable_tasks(myself, Some((op, retry_count, true)));
                 }
                 ProcessingChannelError::RepeatedProcessing(_) => {
                     // ignore repeated processing error, we have already handled it
@@ -4475,16 +4474,22 @@ impl ChannelActorState {
     fn trigger_retryable_tasks(
         &mut self,
         myself: &ActorRef<ChannelActorMessage>,
-        run_job: Option<(RetryableTlcOperation, u32)>,
+        run_job: Option<(RetryableTlcOperation, u32, bool)>,
     ) {
-        if let Some((job, retry_delay)) = run_job {
+        if let Some((job, retry_count, waiting_ack)) = run_job {
+            // don't retry too many times, but in most cases we need to retry immediately for WaitingTlcAck
+            let retry_delay = if waiting_ack {
+                1.max(retry_count / 120)
+            } else {
+                retry_count
+            };
             // we have limited number of tasks, so set a upper bound for retry delay
             // to make sure we don't wait too long for retryable tasks and also not to cost too much resource
             // the upper bound here is (500 ms * 3600 = 30 minutes)
-            myself.send_after(
-                RETRYABLE_TLC_OPS_INTERVAL * retry_delay.min(3600),
-                move || ChannelActorMessage::Event(ChannelEvent::RunRetryTask(job)),
-            );
+            let duration = RETRYABLE_TLC_OPS_INTERVAL * retry_delay.min(3600);
+            myself.send_after(duration, move || {
+                ChannelActorMessage::Event(ChannelEvent::RunRetryTask(job))
+            });
         } else {
             let jobs = self.get_pending_operations();
             for job in jobs.into_iter() {
