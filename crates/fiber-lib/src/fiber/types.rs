@@ -42,7 +42,6 @@ use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use std::cmp::Ordering;
 use std::fmt::Display;
-use std::marker::PhantomData;
 use std::str::FromStr;
 use strum::{AsRefStr, EnumString};
 use tentacle::multiaddr::MultiAddr;
@@ -3801,33 +3800,58 @@ pub struct PaymentHopData {
     pub custom_records: Option<PaymentCustomRecords>,
 }
 
-/// Trait for hop data
-pub trait HopData: Sized {
-    const PACKET_DATA_LEN: usize;
-    fn next_hop(&self) -> Option<Pubkey>;
-    fn assoc_data(&self) -> Option<Vec<u8>>;
-    fn serialize(&self) -> Vec<u8>;
-    fn deserialize(data: &[u8]) -> Option<Self>;
+const PACKET_DATA_LEN: usize = 6500;
+
+#[serde_as]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CurrentPaymentHopData {
+    pub amount: u128,
+    pub expiry: u64,
+    pub payment_preimage: Option<Hash256>,
+    pub hash_algorithm: HashAlgorithm,
+    pub funding_tx_hash: Hash256,
+    pub custom_records: Option<PaymentCustomRecords>,
 }
 
-impl HopData for PaymentHopData {
-    const PACKET_DATA_LEN: usize = 6500;
+impl From<PaymentHopData> for CurrentPaymentHopData {
+    fn from(hop: PaymentHopData) -> Self {
+        CurrentPaymentHopData {
+            amount: hop.amount,
+            expiry: hop.expiry,
+            payment_preimage: hop.payment_preimage,
+            hash_algorithm: hop.hash_algorithm,
+            funding_tx_hash: hop.funding_tx_hash,
+            custom_records: hop.custom_records,
+        }
+    }
+}
 
-    fn next_hop(&self) -> Option<Pubkey> {
+impl From<CurrentPaymentHopData> for PaymentHopData {
+    fn from(hop: CurrentPaymentHopData) -> Self {
+        PaymentHopData {
+            amount: hop.amount,
+            expiry: hop.expiry,
+            payment_preimage: hop.payment_preimage,
+            hash_algorithm: hop.hash_algorithm,
+            funding_tx_hash: hop.funding_tx_hash,
+            custom_records: hop.custom_records,
+            next_hop: None,
+        }
+    }
+}
+
+impl PaymentHopData {
+    pub fn next_hop(&self) -> Option<Pubkey> {
         self.next_hop
     }
 
-    fn assoc_data(&self) -> Option<Vec<u8>> {
-        None
-    }
-
-    fn serialize(&self) -> Vec<u8> {
+    pub fn serialize(&self) -> Vec<u8> {
         molecule_fiber::PaymentHopData::from(self.clone())
             .as_bytes()
             .to_vec()
     }
 
-    fn deserialize(data: &[u8]) -> Option<Self> {
+    pub fn deserialize(data: &[u8]) -> Option<Self> {
         molecule_fiber::PaymentHopData::from_slice(data)
             .ok()
             .map(|x| x.into())
@@ -3916,27 +3940,23 @@ impl From<molecule_fiber::PaymentHopData> for PaymentHopData {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct OnionPacket<T> {
-    _phantom: PhantomData<T>,
+pub struct PaymentOnionPacket {
     // The encrypted packet
     data: Vec<u8>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct PeeledOnionPacket<T> {
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeeledPaymentOnionPacket {
     // The decrypted hop data for the current hop
-    pub current: T,
+    pub current: CurrentPaymentHopData,
     // The shared secret for `current` used for returning error. Set to all zeros for the origin node
     // who has no shared secret.
     pub shared_secret: [u8; 32],
     // The packet for the next hop
-    pub next: Option<OnionPacket<T>>,
+    pub next: Option<PaymentOnionPacket>,
 }
 
-pub type PaymentOnionPacket = OnionPacket<PaymentHopData>;
-pub type PeeledPaymentOnionPacket = PeeledOnionPacket<PaymentHopData>;
-
-impl PeeledOnionPacket<PaymentHopData> {
+impl PeeledPaymentOnionPacket {
     pub fn mpp_custom_records(&self) -> Option<BasicMppPaymentData> {
         self.current
             .custom_records
@@ -3945,12 +3965,9 @@ impl PeeledOnionPacket<PaymentHopData> {
     }
 }
 
-impl<T> OnionPacket<T> {
+impl PaymentOnionPacket {
     pub fn new(data: Vec<u8>) -> Self {
-        OnionPacket {
-            _phantom: PhantomData,
-            data,
-        }
+        Self { data }
     }
 
     pub fn into_sphinx_onion_packet(self) -> Result<fiber_sphinx::OnionPacket, Error> {
@@ -3967,7 +3984,7 @@ impl<T> OnionPacket<T> {
     }
 }
 
-impl<T: HopData> OnionPacket<T> {
+impl PaymentOnionPacket {
     /// Peels the next layer of the onion packet using the privkey of the current node.
     ///
     /// Returns errors when:
@@ -3978,7 +3995,7 @@ impl<T: HopData> OnionPacket<T> {
         peeler: &Privkey,
         assoc_data: Option<&[u8]>,
         secp_ctx: &Secp256k1<C>,
-    ) -> Result<PeeledOnionPacket<T>, Error> {
+    ) -> Result<PeeledPaymentOnionPacket, Error> {
         let sphinx_packet = self.into_sphinx_onion_packet()?;
         let shared_secret = sphinx_packet.shared_secret(&peeler.0);
 
@@ -3986,29 +4003,29 @@ impl<T: HopData> OnionPacket<T> {
             .peel(&peeler.0, assoc_data, secp_ctx, get_hop_data_len)
             .map_err(|err| Error::OnionPacket(err.into()))?;
 
-        let current = unpack_hop_data(&new_current)
+        let current: PaymentHopData = unpack_hop_data(&new_current)
             .ok_or_else(|| Error::OnionPacket(OnionPacketError::InvalidHopData))?;
         // All zeros hmac indicates the last hop
         let next = new_next
             .hmac
             .iter()
             .any(|b| *b != 0)
-            .then(|| OnionPacket::new(new_next.into_bytes()));
+            .then(|| PaymentOnionPacket::new(new_next.into_bytes()));
 
-        Ok(PeeledOnionPacket {
-            current,
+        Ok(PeeledPaymentOnionPacket {
+            current: current.into(),
             next,
             shared_secret,
         })
     }
 }
 
-impl<T: HopData> PeeledOnionPacket<T> {
+impl PeeledPaymentOnionPacket {
     /// - `hops_info`: the first is the instruction for the origin node itself.
     ///                Remaining elements are for each node to receive the packet.
     pub fn create<C: Signing>(
         session_key: Privkey,
-        mut hops_infos: Vec<T>,
+        mut hops_infos: Vec<PaymentHopData>,
         assoc_data: Option<Vec<u8>>,
         secp_ctx: &Secp256k1<C>,
     ) -> Result<Self, Error> {
@@ -4018,7 +4035,7 @@ impl<T: HopData> PeeledOnionPacket<T> {
 
         let hops_path: Vec<PublicKey> = hops_infos
             .iter()
-            .map(HopData::next_hop)
+            .map(|h| h.next_hop())
             .take_while(Option::is_some)
             .map(|opt| opt.expect("must be some").into())
             .collect();
@@ -4027,20 +4044,15 @@ impl<T: HopData> PeeledOnionPacket<T> {
         let hops_data = hops_infos.iter().skip(1).map(pack_hop_data).collect();
 
         let current = hops_infos.swap_remove(0);
-        let assoc_data = if assoc_data.is_some() {
-            assoc_data
-        } else {
-            current.assoc_data()
-        };
 
         let next = if !hops_path.is_empty() {
-            Some(OnionPacket::new(
+            Some(PaymentOnionPacket::new(
                 fiber_sphinx::OnionPacket::create(
                     session_key.into(),
                     hops_path,
                     hops_data,
                     assoc_data,
-                    T::PACKET_DATA_LEN,
+                    PACKET_DATA_LEN,
                     secp_ctx,
                 )
                 .map_err(|err| Error::OnionPacket(err.into()))?
@@ -4050,8 +4062,8 @@ impl<T: HopData> PeeledOnionPacket<T> {
             None
         };
 
-        Ok(PeeledOnionPacket {
-            current,
+        Ok(PeeledPaymentOnionPacket {
+            current: current.into(),
             next,
             // Use all zeros for the sender
             shared_secret: NO_SHARED_SECRET,
@@ -4077,11 +4089,12 @@ impl<T: HopData> PeeledOnionPacket<T> {
             .next
             .ok_or_else(|| Error::OnionPacket(OnionPacketError::PeelingLastHop))?;
 
-        next.peel(peeler, self.current.assoc_data().as_deref(), secp_ctx)
+        next.peel(peeler, None, secp_ctx)
     }
 
     pub fn serialize(&self) -> Vec<u8> {
-        let mut res = pack_hop_data(&self.current);
+        let current = self.current.clone().into();
+        let mut res = pack_hop_data(&current);
         res.extend(self.shared_secret);
         if let Some(ref next) = self.next {
             res.extend(&next.data[..]);
@@ -4097,18 +4110,18 @@ impl<T: HopData> PeeledOnionPacket<T> {
 
         // Ensure backward compatibility
         let mut shared_secret = NO_SHARED_SECRET;
-        if data.len() >= read_bytes + 32 && data.len() != read_bytes + T::PACKET_DATA_LEN {
+        if data.len() >= read_bytes + 32 && data.len() != read_bytes + PACKET_DATA_LEN {
             shared_secret.copy_from_slice(&data[read_bytes..read_bytes + 32]);
             read_bytes += 32;
         }
 
         let next = if read_bytes < data.len() {
-            Some(OnionPacket::new(data[read_bytes..].to_vec()))
+            Some(PaymentOnionPacket::new(data[read_bytes..].to_vec()))
         } else {
             None
         };
         Ok(Self {
-            current,
+            current: current.into(),
             shared_secret,
             next,
         })
@@ -4118,7 +4131,7 @@ impl<T: HopData> PeeledOnionPacket<T> {
 const HOP_DATA_HEAD_LEN: usize = std::mem::size_of::<u64>();
 
 /// TODO: when JSON is replaced, this function may return `data` directly.
-pub(crate) fn pack_hop_data<T: HopData>(hop_data: &T) -> Vec<u8> {
+pub(crate) fn pack_hop_data(hop_data: &PaymentHopData) -> Vec<u8> {
     let mut serialized = hop_data.serialize();
     // A temporary solution to prepend the length as the header
     let mut packed = (serialized.len() as u64).to_be_bytes().to_vec();
@@ -4127,12 +4140,12 @@ pub(crate) fn pack_hop_data<T: HopData>(hop_data: &T) -> Vec<u8> {
 }
 
 /// TODO: when JSON is replaced, this function may return `data` directly.
-pub(crate) fn unpack_hop_data<T: HopData>(buf: &[u8]) -> Option<T> {
+pub(crate) fn unpack_hop_data(buf: &[u8]) -> Option<PaymentHopData> {
     let len = get_hop_data_len(buf)?;
     if buf.len() < len {
         return None;
     }
-    T::deserialize(&buf[HOP_DATA_HEAD_LEN..len])
+    PaymentHopData::deserialize(&buf[HOP_DATA_HEAD_LEN..len])
 }
 
 /// TODO: when JSON is replaced, this function may return `data` directly.

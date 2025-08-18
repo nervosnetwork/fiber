@@ -5544,7 +5544,7 @@ async fn test_payment_with_payment_data_record() {
         },
     ];
 
-    let packet = PeeledOnionPacket::create(
+    let packet = PeeledPaymentOnionPacket::create(
         source_node.get_private_key().clone(),
         hops_infos.clone(),
         Some(payment_hash.as_ref().to_vec()),
@@ -5646,7 +5646,7 @@ async fn test_payment_with_insufficient_total_amount() {
         },
     ];
 
-    let packet = PeeledOnionPacket::create(
+    let packet = PeeledPaymentOnionPacket::create(
         source_node.get_private_key().clone(),
         hops_infos.clone(),
         Some(payment_hash.as_ref().to_vec()),
@@ -5772,7 +5772,7 @@ async fn test_payment_with_wrong_payment_secret() {
         },
     ];
 
-    let packet = PeeledOnionPacket::create(
+    let packet = PeeledPaymentOnionPacket::create(
         source_node.get_private_key().clone(),
         hops_infos.clone(),
         Some(payment_hash.as_ref().to_vec()),
@@ -5885,7 +5885,7 @@ async fn test_payment_with_insufficient_amount_with_payment_data() {
         },
     ];
 
-    let packet = PeeledOnionPacket::create(
+    let packet = PeeledPaymentOnionPacket::create(
         source_node.get_private_key().clone(),
         hops_infos.clone(),
         Some(payment_hash.as_ref().to_vec()),
@@ -5995,7 +5995,7 @@ async fn test_payment_with_insufficient_amount_without_payment_data() {
         },
     ];
 
-    let packet = PeeledOnionPacket::create(
+    let packet = PeeledPaymentOnionPacket::create(
         source_node.get_private_key().clone(),
         hops_infos.clone(),
         Some(payment_hash.as_ref().to_vec()),

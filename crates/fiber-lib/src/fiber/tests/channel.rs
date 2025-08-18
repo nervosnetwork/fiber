@@ -13,7 +13,7 @@ use crate::fiber::graph::ChannelInfo;
 use crate::fiber::network::{DebugEvent, FiberMessageWithPeerId, SendPaymentCommand};
 use crate::fiber::payment::PaymentStatus;
 use crate::fiber::types::{
-    AddTlc, FiberMessage, Hash256, Init, PaymentHopData, PeeledOnionPacket, Pubkey, TlcErr,
+    AddTlc, FiberMessage, Hash256, Init, PaymentHopData, PeeledPaymentOnionPacket, Pubkey, TlcErr,
     TlcErrorCode, NO_SHARED_SECRET,
 };
 use crate::invoice::{CkbInvoiceStatus, Currency, InvoiceBuilder};
@@ -982,7 +982,7 @@ async fn test_network_send_previous_tlc_error() {
     ];
     let generated_payment_hash = gen_rand_sha256_hash();
 
-    let packet = PeeledOnionPacket::create(
+    let packet = PeeledPaymentOnionPacket::create(
         gen_rand_fiber_private_key(),
         hops_infos.clone(),
         Some(generated_payment_hash.as_ref().to_vec()),
@@ -1084,7 +1084,7 @@ async fn test_network_send_previous_tlc_error_with_limit_amount_error() {
     ];
     let generated_payment_hash = gen_rand_sha256_hash();
 
-    let packet = PeeledOnionPacket::create(
+    let packet = PeeledPaymentOnionPacket::create(
         gen_rand_fiber_private_key(),
         hops_infos.clone(),
         Some(generated_payment_hash.as_ref().to_vec()),
