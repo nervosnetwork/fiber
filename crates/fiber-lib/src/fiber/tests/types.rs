@@ -190,11 +190,19 @@ fn test_peeled_onion_packet() {
     assert_eq!(packet.current, hops_infos[0].clone().into());
     assert!(!packet.is_last());
 
-    let packet = packet.peel(&keys[1], &secp).expect("peel");
+    let packet = packet
+        .next
+        .expect("next hop")
+        .peel(&keys[1], None, &secp)
+        .expect("peel");
     assert_eq!(packet.current, hops_infos[1].clone().into());
     assert!(!packet.is_last());
 
-    let packet = packet.peel(&keys[2], &secp).expect("peel");
+    let packet = packet
+        .next
+        .expect("next hop")
+        .peel(&keys[2], None, &secp)
+        .expect("peel");
     assert_eq!(packet.current, hops_infos[2].clone().into());
     assert!(packet.is_last());
 }
@@ -245,7 +253,12 @@ fn test_peeled_large_onion_packet() {
 
         let mut now = Some(packet);
         for i in 0..hops_infos.len() - 1 {
-            let packet = now.unwrap().peel(&keys[i], &secp).expect("peel");
+            let packet = now
+                .unwrap()
+                .next
+                .expect("next hop")
+                .peel(&keys[i], None, &secp)
+                .expect("peel");
             assert_eq!(packet.current, hops_infos[i + 1].clone().into());
             now = Some(packet.clone());
         }
