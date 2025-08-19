@@ -2258,11 +2258,9 @@ where
                 let closed_state = if force {
                     debug!("Channel closed with uncooperative close");
                     if close_by_us {
-                        ChannelState::Closed(CloseFlags::UNCOOPERATIVE)
+                        ChannelState::Closed(CloseFlags::UNCOOPERATIVE_LOCAL)
                     } else {
-                        ChannelState::Closed(
-                            CloseFlags::UNCOOPERATIVE | CloseFlags::CLOSE_BY_REMOTE,
-                        )
+                        ChannelState::Closed(CloseFlags::UNCOOPERATIVE_REMOTE)
                     }
                 } else {
                     debug!("Channel closed with cooperative close");
@@ -3979,14 +3977,14 @@ bitflags! {
     pub struct CloseFlags: u32 {
         /// Indicates that channel is closed cooperatively.
         const COOPERATIVE = 1;
-        /// Indicates that channel is closed uncooperatively, initiated by one party forcibly.
-        const UNCOOPERATIVE = 1 << 1;
+        /// Indicates that channel is closed uncooperatively, initiated by local forcibly.
+        const UNCOOPERATIVE_LOCAL = 1 << 1;
         /// Indicates that channel is abandoned.
         const ABANDONED = 1 << 2;
         /// Channel is closed because of aborted funding.
         const FUNDING_ABORTED = 1 << 3;
-        /// Indicates the close is initiated by remote, only meaningful when UNCOOPERATIVE is set
-        const CLOSE_BY_REMOTE = 1 << 4;
+        /// Indicates that channel is closed uncooperatively, initiated by remote forcibly.
+        const UNCOOPERATIVE_REMOTE = 1 << 4;
     }
 }
 
