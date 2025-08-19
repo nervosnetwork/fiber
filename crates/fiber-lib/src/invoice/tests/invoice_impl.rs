@@ -575,7 +575,7 @@ fn test_invoice_with_mpp_option() {
         .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))
         .unwrap();
 
-    assert!(!invoice.allow_mpp());
+    assert!(!invoice.basic_mpp());
 
     let invoice = InvoiceBuilder::new(Currency::Fibb)
         .amount(Some(1280))
@@ -585,21 +585,21 @@ fn test_invoice_with_mpp_option() {
         .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))
         .unwrap();
 
-    assert!(invoice.allow_mpp());
+    assert!(invoice.basic_mpp());
 
     let serialized_invoice = serde_json::to_string(&invoice).unwrap();
     eprintln!("Serialized invoice: {}", serialized_invoice);
     let deserialized_invoice: CkbInvoice =
         serde_json::from_str(&serialized_invoice).expect("Failed to deserialize invoice");
     assert_eq!(deserialized_invoice, invoice);
-    assert!(deserialized_invoice.allow_mpp());
+    assert!(deserialized_invoice.basic_mpp());
 
     let human_readable_invoice = invoice.to_string();
     let parsed_invoice: CkbInvoice = human_readable_invoice
         .parse()
         .expect("Failed to parse invoice");
     assert_eq!(parsed_invoice, invoice);
-    assert!(parsed_invoice.allow_mpp());
+    assert!(parsed_invoice.basic_mpp());
     assert!(parsed_invoice.payment_secret().is_some());
 
     let invoice = InvoiceBuilder::new(Currency::Fibb)
@@ -609,7 +609,7 @@ fn test_invoice_with_mpp_option() {
         .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))
         .unwrap();
 
-    assert!(!invoice.allow_mpp());
+    assert!(!invoice.basic_mpp());
     let payment_secret = invoice.payment_secret();
     assert!(payment_secret.is_none());
 }

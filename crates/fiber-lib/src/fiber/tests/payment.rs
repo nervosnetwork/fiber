@@ -6334,3 +6334,36 @@ async fn test_send_payment_3_nodes_failed_last_hop() {
         .wait_until_success(payment.unwrap().payment_hash)
         .await;
 }
+
+#[tokio::test]
+async fn test_send_payment_mpp_can_not_be_keysend() {
+    init_tracing();
+
+    let (nodes, _channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+            ((1, 2), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+        ],
+        3,
+    )
+    .await;
+    let [node_0, _node_1, mut node_2] = nodes.try_into().expect("3 nodes");
+    let node_2_pubkey = node_2.pubkey;
+    let res = node_0
+        .send_mpp_payment_with_command(
+            &mut node_2,
+            100,
+            SendPaymentCommand {
+                target_pubkey: Some(node_2_pubkey),
+                keysend: Some(true),
+                allow_self_payment: false,
+                dry_run: false,
+                ..Default::default()
+            },
+        )
+        .await;
+    eprintln!("res: {:?}", res);
+    assert!(res
+        .unwrap_err()
+        .contains("keysend payment should not have invoice"));
+}

@@ -494,7 +494,8 @@ pub struct SendPaymentData {
     pub allow_self_payment: bool,
     pub hop_hints: Vec<HopHint>,
     pub router: Vec<RouterHop>,
-    pub allow_mpp: bool,
+    pub allow_basic_mpp: bool,
+    pub allow_atomic_mpp: bool,
     pub dry_run: bool,
     #[serde(skip)]
     pub channel_stats: GraphChannelStat,
@@ -509,7 +510,7 @@ impl SendPaymentData {
             .transpose()
             .map_err(|_| "invoice is invalid".to_string())?;
 
-        if let Some(invoice) = invoice.clone() {
+        if let Some(ref invoice) = invoice {
             if invoice.is_expired() {
                 return Err("invoice is expired".to_string());
             }
@@ -637,14 +638,22 @@ impl SendPaymentData {
 
         let hop_hints = command.hop_hints.unwrap_or_default();
 
-        let allow_mpp = invoice.as_ref().is_some_and(|inv| inv.allow_mpp());
+        let basic_mpp = invoice.as_ref().is_some_and(|inv| inv.basic_mpp());
+        let atomic_mpp = invoice.as_ref().is_some_and(|inv| inv.atomic_mpp());
+        let is_mpp_payment = basic_mpp || atomic_mpp;
+
+        if basic_mpp && atomic_mpp {
+            // invoice rpc already make sure this
+            return Err("basic_mpp and atomic_mpp cannot be both true".to_string());
+        }
+
         let payment_secret = invoice
             .as_ref()
             .and_then(|inv| inv.payment_secret().cloned());
-        if allow_mpp && payment_secret.is_none() {
+        if is_mpp_payment && payment_secret.is_none() {
             return Err("payment secret is required for multi-path payment".to_string());
         }
-        if allow_mpp
+        if is_mpp_payment
             && command
                 .max_parts
                 .is_some_and(|max_parts| max_parts <= 1 || max_parts > PAYMENT_MAX_PARTS_LIMIT)
@@ -700,7 +709,8 @@ impl SendPaymentData {
             custom_records,
             allow_self_payment: command.allow_self_payment,
             hop_hints,
-            allow_mpp,
+            allow_basic_mpp: basic_mpp,
+            allow_atomic_mpp: atomic_mpp,
             router: vec![],
             dry_run: command.dry_run,
             channel_stats: Default::default(),
@@ -713,7 +723,7 @@ impl SendPaymentData {
 
     pub fn allow_mpp(&self) -> bool {
         // only allow mpp if max_parts is greater than 1 and not keysend
-        self.allow_mpp && self.max_parts() > 1 && !self.keysend
+        (self.allow_basic_mpp || self.allow_atomic_mpp) && self.max_parts() > 1 && !self.keysend
     }
 }
 

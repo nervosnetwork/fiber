@@ -348,11 +348,22 @@ impl CkbInvoice {
     attr_getter!(hash_algorithm, HashAlgorithm, HashAlgorithm);
     attr_getter!(payment_secret, PaymentSecret, Hash256);
 
-    pub fn allow_mpp(&self) -> bool {
+    fn has_feature<F>(&self, feature_check: F) -> bool
+    where
+        F: Fn(&FeatureVector) -> bool,
+    {
         self.data
             .attrs
             .iter()
-            .any(|attr| matches!(attr, Attribute::Feature(feature) if feature.supports_basic_mpp()))
+            .any(|attr| matches!(attr, Attribute::Feature(feature) if feature_check(feature)))
+    }
+
+    pub fn basic_mpp(&self) -> bool {
+        self.has_feature(|feature| feature.supports_basic_mpp())
+    }
+
+    pub fn atomic_mpp(&self) -> bool {
+        self.has_feature(|feature| feature.supports_atomic_mpp())
     }
 }
 

@@ -928,7 +928,7 @@ where
                     error!("invoice already paid, ignore");
                     return;
                 }
-                _ if invoice.allow_mpp() => {
+                _ if invoice.basic_mpp() => {
                     // add to pending settlement tlc set
                     // the tlc set will be settled by network actor
                     state
@@ -1081,7 +1081,7 @@ where
                     tlc.total_amount = Some(record.total_amount);
                 }
                 (Some(invoice), None) => {
-                    if invoice.allow_mpp() {
+                    if invoice.basic_mpp() {
                         // FIXME: whether we allow MPP without MPP records in onion packet?
                         // currently we allow it pay with enough amount
                         // TODO: add a unit test of using single path payment pay MPP invoice successfully
