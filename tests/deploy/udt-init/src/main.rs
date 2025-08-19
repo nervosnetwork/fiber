@@ -266,7 +266,7 @@ fn generate_nodes_config() {
     let header = format!(
         "{}\n{}\n\n",
         "# this is generated from nodes/deployer/config.yml, any changes will not be checked in",
-        "# you can edit nodes/deployer/config.yml and run `REMOVE_OLD_STATE=y ./tests/nodes/start.sh` to regenerate"
+        "# you can edit nodes/deployer/config.yml and run `REMOVE_OLD_STATE=y ./tests/nodes/start.sh TESTCASE` to regenerate"
     );
     let config_dirs = vec!["bootnode", "1", "2", "3"];
     let mut ports_map = vec![];
