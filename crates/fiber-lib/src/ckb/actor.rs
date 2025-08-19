@@ -167,10 +167,10 @@ impl Actor for CkbChainActor {
         match message {
             CkbChainMessage::Fund(tx, request, reply_port) => {
                 let context = state.build_funding_context(request.script.clone());
-                let result = match state.config.funding_tx_shell_builder.as_ref() {
+                let result = match state.config.funding_tx_shell_builder_as_deref() {
                     None => {
-                        let exclusion = &mut state.live_cells_exclusion_map;
-                        tx.fulfill(request, context, exclusion).await
+                        tx.fulfill(request, context, &mut state.live_cells_exclusion_map)
+                            .await
                     }
                     Some(shell_script) => fund_via_shell(shell_script, tx, request, context).await,
                 };
@@ -368,5 +368,6 @@ async fn fund_via_shell(
     _request: FundingRequest,
     _context: FundingContext,
 ) -> Result<FundingTx, FundingError> {
-    todo!();
+    // Never called in WASM
+    unreachable!();
 }

@@ -89,6 +89,7 @@ pub struct CkbConfig {
         env,
         help = "Use an external shell command to build funding tx. [default: None]"
     )]
+    #[cfg(not(target_arch = "wasm32"))]
     pub funding_tx_shell_builder: Option<String>,
 
     #[arg(skip)]
@@ -148,6 +149,17 @@ impl CkbConfig {
             Contract::Secp256k1Lock,
             &pubkey_hash[0..20],
         ))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn funding_tx_shell_builder_as_deref(&self) -> Option<&str> {
+        self.funding_tx_shell_builder.as_deref()
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    #[doc(hidden)]
+    pub fn funding_tx_shell_builder_as_deref(&self) -> Option<&str> {
+        None
     }
 }
 
