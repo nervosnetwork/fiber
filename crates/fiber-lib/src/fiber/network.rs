@@ -70,6 +70,7 @@ use super::{
 use crate::ckb::config::UdtCfgInfos;
 use crate::ckb::contracts::{check_udt_script, get_udt_whitelist, is_udt_type_auto_accept};
 use crate::ckb::{CkbChainMessage, FundingError, FundingRequest, FundingTx};
+use crate::fiber::amp::{reconstruct_children, ChildDesc, Share};
 use crate::fiber::channel::{
     AddTlcCommand, AddTlcResponse, ChannelEphemeralConfig, ChannelInitializationOperation,
     ShutdownCommand, TxCollaborationCommand, TxUpdateCommand, DEFAULT_COMMITMENT_DELAY_EPOCHS,
@@ -88,7 +89,7 @@ use crate::fiber::payment::SessionRoute;
 use crate::fiber::payment::{Attempt, AttemptStatus, PaymentSession, PaymentStatus};
 use crate::fiber::serde_utils::EntityHex;
 use crate::fiber::types::{
-    FiberChannelMessage, PeeledPaymentOnionPacket, TlcErrPacket, TxSignatures,
+    AMPPaymentData, FiberChannelMessage, PeeledPaymentOnionPacket, TlcErrPacket, TxSignatures,
 };
 use crate::fiber::KeyPair;
 use crate::invoice::{CkbInvoice, CkbInvoiceStatus, InvoiceStore, PreimageStore};
@@ -659,7 +660,7 @@ impl SendPaymentData {
                 .is_some_and(|max_parts| max_parts <= 1 || max_parts > PAYMENT_MAX_PARTS_LIMIT)
         {
             return Err(format!(
-                "invalid max_parts, value should be in range [1, {}]",
+                "invalid max_parts, value should be in range [2, {}]",
                 PAYMENT_MAX_PARTS_LIMIT
             ));
         }
@@ -2384,6 +2385,7 @@ where
         session: &mut PaymentSession,
     ) -> Result<Vec<(Attempt, Vec<PaymentHopData>)>, Error> {
         let graph = self.network_graph.read().await;
+        let amp_mpp = session.request.allow_atomic_mpp;
         let source = graph.get_source_pubkey();
         let active_parts = session.attempts().filter(|a| a.is_active()).count();
         let mut remain_amount = session.remain_amount();
@@ -2464,11 +2466,59 @@ where
             return Err(Error::SendPaymentError(error));
         }
 
+        // generate custom records for amp_mpp
+        if amp_mpp {
+            self.set_custom_records_for_amp_mpp(&mut result, session.payment_hash());
+        }
+
         for (attempt, _) in &result {
             session.append_attempt(attempt.clone());
         }
 
         return Ok(result);
+    }
+
+    fn set_custom_records_for_amp_mpp(
+        &self,
+        attempts_routers: &mut [(Attempt, Vec<PaymentHopData>)],
+        payment_hash: Hash256,
+    ) {
+        let root = Share::random();
+        let mut final_secret = root;
+        let mut secrets = vec![];
+        for _i in 0..(attempts_routers.iter().len() - 1) {
+            let secret = Share::random();
+            final_secret = final_secret.xor(&secret);
+            secrets.push(secret);
+        }
+        secrets.push(final_secret);
+
+        let descs: Vec<ChildDesc> = secrets
+            .iter()
+            .enumerate()
+            .map(|(i, &share)| ChildDesc::new(share, i as u32))
+            .collect();
+
+        let children = reconstruct_children(&descs);
+
+        for (i, desc) in descs.iter().enumerate() {
+            let (mut attempt, mut route) = attempts_routers[i].clone();
+
+            let route_len = route.len();
+            let mpp_payment_data =
+                AMPPaymentData::new(payment_hash, i as u16, children.len() as u16, desc.share);
+            let mut custom_records = route
+                .last()
+                .expect("expect last hop data")
+                .custom_records
+                .clone()
+                .unwrap_or_default();
+
+            mpp_payment_data.write(&mut custom_records);
+            route[route_len - 1].custom_records = Some(custom_records);
+            attempt.hash = children[i].hash;
+            attempts_routers[i] = (attempt, route);
+        }
     }
 
     async fn send_payment_onion_packet(

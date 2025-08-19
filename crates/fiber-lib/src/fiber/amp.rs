@@ -253,6 +253,58 @@ mod tests {
     }
 
     #[test]
+    fn test_reconstruct_single_child() {
+        let root = Share::random();
+        let share = root;
+        let desc = ChildDesc::new(share, 1);
+
+        let children = reconstruct_children(&[desc]);
+
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].desc, desc);
+
+        // Verify that the child is correctly derived from the reconstructed root
+        let expected_child = derive_child(root, desc);
+        assert_eq!(children[0], expected_child);
+    }
+
+    #[test]
+    fn test_reconstruct_n_children() {
+        let root = Share::random();
+        let n = 100;
+        let mut shares: Vec<Share> = (0..n - 1).map(|_| Share::random()).collect();
+        let final_share = {
+            let mut final_share = root;
+            for share in &shares {
+                final_share.xor_assign(share);
+            }
+            final_share
+        };
+        shares.push(final_share);
+
+        // onion packet will add ChildDesc
+        let descs: Vec<ChildDesc> = shares
+            .iter()
+            .enumerate()
+            .map(|(i, &share)| ChildDesc::new(share, i as u32))
+            .collect();
+
+        // last hop will reconstruct children and derive them
+        let children = reconstruct_children(&descs);
+
+        assert_eq!(children.len(), descs.len());
+        for (i, child) in children.iter().enumerate() {
+            assert_eq!(child.desc, descs[i]);
+        }
+
+        // Verify that each child is correctly derived from the reconstructed root
+        for (i, desc) in descs.iter().enumerate() {
+            let expected_child = derive_child(root, *desc);
+            assert_eq!(children[i], expected_child);
+        }
+    }
+
+    #[test]
     fn test_reconstruct_empty_children() {
         let children = reconstruct_children(&[]);
         assert!(children.is_empty());

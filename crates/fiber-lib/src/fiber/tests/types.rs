@@ -1,6 +1,7 @@
 use crate::{
     ckb::config::{UdtArgInfo, UdtCellDep, UdtCfgInfos, UdtDep, UdtScript},
     fiber::{
+        amp::Share,
         config::AnnouncedNodeName,
         features::FeatureVector,
         gen::{fiber as molecule_fiber, gossip},
@@ -734,7 +735,7 @@ fn test_basic_mpp_custom_records() {
 fn test_amp_custom_records() {
     let mut payment_custom_records = PaymentCustomRecords::default();
     let parent_payment_hash = gen_rand_sha256_hash();
-    let amp_record = AMPPaymentData::new(parent_payment_hash, 0, 3);
+    let amp_record = AMPPaymentData::new(parent_payment_hash, 0, 3, Share::random());
     amp_record.write(&mut payment_custom_records);
 
     let new_amp_record = AMPPaymentData::read(&payment_custom_records).unwrap();

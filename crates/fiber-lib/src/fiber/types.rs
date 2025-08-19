@@ -12,6 +12,7 @@ use super::r#gen::fiber::PubNonceOpt;
 use super::serde_utils::{EntityHex, PubNonceAsBytes, SliceBase58, SliceHex};
 use crate::ckb::config::{UdtArgInfo, UdtCellDep, UdtCfgInfos, UdtDep, UdtScript};
 use crate::ckb::contracts::get_udt_whitelist;
+use crate::fiber::amp::Share;
 use crate::fiber::network::USER_CUSTOM_RECORDS_MAX_INDEX;
 use ckb_jsonrpc_types::CellOutput;
 use ckb_types::H256;
@@ -3784,21 +3785,28 @@ impl BasicMppPaymentData {
     }
 }
 
-#[derive(Hash, Eq, PartialEq, Debug)]
+#[derive(Eq, PartialEq, Debug)]
 pub struct AMPPaymentData {
     pub parent_payment_hash: Hash256,
     pub total_amp_count: u16,
     pub index: u16,
+    pub secret: Share,
 }
 
 impl AMPPaymentData {
     pub const CUSTOM_RECORD_KEY: u32 = USER_CUSTOM_RECORDS_MAX_INDEX + 2;
 
-    pub fn new(parent_payment_hash: Hash256, index: u16, total_amp_count: u16) -> Self {
+    pub fn new(
+        parent_payment_hash: Hash256,
+        index: u16,
+        total_amp_count: u16,
+        secret: Share,
+    ) -> Self {
         Self {
             parent_payment_hash,
             total_amp_count,
             index,
+            secret,
         }
     }
 
@@ -3807,6 +3815,7 @@ impl AMPPaymentData {
         vec.extend_from_slice(self.parent_payment_hash.as_ref());
         vec.extend_from_slice(&self.total_amp_count.to_le_bytes());
         vec.extend_from_slice(&self.index.to_le_bytes());
+        vec.extend_from_slice(self.secret.as_bytes());
         vec
     }
 
@@ -3821,16 +3830,18 @@ impl AMPPaymentData {
             .data
             .get(&Self::CUSTOM_RECORD_KEY)
             .and_then(|data| {
-                if data.len() != 32 + 4 {
+                if data.len() != 32 + 4 + 32 {
                     return None;
                 }
                 let parent_hash: [u8; 32] = data[..32].try_into().unwrap();
                 let total_amp_count = u16::from_le_bytes(data[32..34].try_into().unwrap());
-                let index = u16::from_le_bytes(data[34..].try_into().unwrap());
+                let index = u16::from_le_bytes(data[34..36].try_into().unwrap());
+                let secret = Share::new(data[36..68].try_into().unwrap());
                 Some(Self::new(
                     Hash256::from(parent_hash),
                     index,
                     total_amp_count,
+                    secret,
                 ))
             })
     }
