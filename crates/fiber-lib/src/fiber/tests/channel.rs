@@ -4863,13 +4863,10 @@ async fn test_shutdown_channel_network_graph_with_sync_up() {
     assert_eq!(network_nodes.len(), 2);
 
     let network_channels = node_a.get_network_channels().await;
-    assert!(!network_channels[0].update_of_node1.unwrap().enabled);
-    assert!(!network_channels[0].update_of_node2.unwrap().enabled);
+    assert!(network_channels.is_empty());
 
     let network_channels = node_b.get_network_channels().await;
-    assert_eq!(network_channels.len(), 1);
-    assert!(!network_channels[0].update_of_node1.unwrap().enabled);
-    assert!(!network_channels[0].update_of_node2.unwrap().enabled);
+    assert!(network_channels.is_empty());
 }
 
 #[tokio::test]
