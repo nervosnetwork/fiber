@@ -139,9 +139,6 @@ const CHECK_CHANNELS_INTERVAL: Duration = Duration::from_secs(60);
 // The duration for which we will check peer init messages.
 const CHECK_PEER_INIT_INTERVAL: Duration = Duration::from_secs(20);
 
-// The interval time to check shutdown transaction
-const CHANNEL_CHECK_SHUTDOWN_INTERVAL: Duration = Duration::from_secs(300);
-
 // While creating a network graph from the gossip messages, we will load current gossip messages
 // in the store and process them. We will load all current messages and get the latest cursor.
 // The problem is that we can't guarantee that the messages are in order, that is to say it is
@@ -2181,11 +2178,6 @@ where
                 }
             }
         }
-
-        // Check channel shutdown after interval
-        myself.send_after(CHANNEL_CHECK_SHUTDOWN_INTERVAL, move || {
-            NetworkActorMessage::Command(NetworkActorCommand::CheckChannelShutdown(channel_id))
-        });
     }
 
     async fn handle_send_onion_packet_command(
@@ -3959,12 +3951,6 @@ where
                 NetworkServiceEvent::ChannelCreated(peer_id.clone(), id),
             ))
             .expect(ASSUME_NETWORK_MYSELF_ALIVE);
-
-        // start check channel shutdown
-        self.network
-            .send_after(CHANNEL_CHECK_SHUTDOWN_INTERVAL, move || {
-                NetworkActorMessage::Command(NetworkActorCommand::CheckChannelShutdown(id))
-            });
     }
 
     async fn on_closing_transaction_pending(

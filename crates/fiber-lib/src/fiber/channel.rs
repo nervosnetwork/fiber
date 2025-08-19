@@ -113,6 +113,9 @@ pub const INITIAL_COMMITMENT_NUMBER: u64 = 0;
 const RETRYABLE_TLC_OPS_INTERVAL: Duration = Duration::from_millis(500);
 const WAITING_REESTABLISH_FINISH_TIMEOUT: Duration = Duration::from_millis(4000);
 
+// The interval time to check shutdown transaction
+const CHANNEL_CHECK_SHUTDOWN_INTERVAL: Duration = Duration::from_secs(300);
+
 // if a important TLC operation is not acked in 30 seconds, we will try to disconnect the peer.
 #[cfg(not(any(test, feature = "bench")))]
 pub const PEER_CHANNEL_RESPONSE_TIMEOUT: u64 = 30 * 1000;
@@ -167,6 +170,7 @@ pub enum ChannelCommand {
     BroadcastChannelUpdate(),
     Update(UpdateCommand, RpcReplyPort<Result<(), String>>),
     ForwardTlcResult(ForwardTlcResult),
+    CheckChannelShutdown,
     #[cfg(any(test, feature = "bench"))]
     ReloadState(ReloadParams),
 }
@@ -182,6 +186,7 @@ impl Display for ChannelCommand {
             ChannelCommand::BroadcastChannelUpdate() => write!(f, "BroadcastChannelUpdate"),
             ChannelCommand::Update(_, _) => write!(f, "Update"),
             ChannelCommand::ForwardTlcResult(res) => write!(f, "ForwardTlcResult [{:?}]", res),
+            ChannelCommand::CheckChannelShutdown => write!(f, "CheckChannelShutdown"),
             #[cfg(any(test, feature = "bench"))]
             ChannelCommand::ReloadState(_) => write!(f, "ReloadState"),
         }
@@ -2149,6 +2154,15 @@ where
                     .await;
                 Ok(())
             }
+            ChannelCommand::CheckChannelShutdown => {
+                // This command is used to trigger the NetworkActorCommand
+                self.network
+                    .send_message(NetworkActorMessage::Command(
+                        NetworkActorCommand::CheckChannelShutdown(state.get_id()),
+                    ))
+                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                Ok(())
+            }
             #[cfg(any(test, feature = "bench"))]
             ChannelCommand::ReloadState(reload_params) => {
                 *state = self
@@ -2769,6 +2783,22 @@ where
                     myself.send_message(event_factory()).expect("myself alive");
                 }
             }
+        }
+
+        // Setup a check channel shutdown task
+        // This command trigger the NetworkActorCommand::CheckChannelShutdown to do the actually
+        // check, because the task is defined on channel actor, the check auto stopped if channel
+        // actor stopped.
+        myself.send_interval(CHANNEL_CHECK_SHUTDOWN_INTERVAL, || {
+            ChannelActorMessage::Command(ChannelCommand::CheckChannelShutdown)
+        });
+
+        // The remote may force closed the channel so we start check immediately if reestablishing
+        if state.reestablishing {
+            let channel_id = state.get_id();
+            self.network.send_after(Duration::from_secs(5), move || {
+                NetworkActorMessage::Command(NetworkActorCommand::CheckChannelShutdown(channel_id))
+            });
         }
 
         Ok(())
