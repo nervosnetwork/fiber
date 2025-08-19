@@ -3989,6 +3989,7 @@ where
             *channel_id,
             None,
             ChannelActorMessage::Event(ChannelEvent::ClosingTransactionConfirmed(
+                tx_hash.unpack(),
                 force,
                 close_by_us,
             )),

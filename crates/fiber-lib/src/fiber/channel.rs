@@ -2243,7 +2243,7 @@ where
                 }
                 myself.stop(None);
             }
-            ChannelEvent::ClosingTransactionConfirmed(force, close_by_us) => {
+            ChannelEvent::ClosingTransactionConfirmed(tx_hash, force, close_by_us) => {
                 match state.state {
                     ChannelState::ShuttingDown(flags)
                         if flags.contains(ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION) => {}
@@ -2267,6 +2267,7 @@ where
                     ChannelState::Closed(CloseFlags::COOPERATIVE)
                 };
                 state.update_state(closed_state);
+                state.shutdown_transaction_hash.replace(tx_hash);
                 // Broadcast the channel update message which disables the channel.
                 if state.is_public() {
                     let update = state.generate_disabled_channel_update().await;
@@ -3691,6 +3692,10 @@ pub struct ChannelActorState {
     pub local_shutdown_info: Option<ShutdownInfo>,
     pub remote_shutdown_info: Option<ShutdownInfo>,
 
+    // Transaction hash of the shutdown transaction
+    // The shutdown transaction can be COOPERATIVE or UNCOOPERATIVE
+    pub shutdown_transaction_hash: Option<H256>,
+
     // A flag to indicate whether the channel is reestablishing,
     // we won't process any messages until the channel is reestablished.
     pub reestablishing: bool,
@@ -3813,7 +3818,8 @@ pub enum StopReason {
 pub enum ChannelEvent {
     Stop(StopReason),
     FundingTransactionConfirmed(H256, u32, u64),
-    ClosingTransactionConfirmed(bool, bool),
+    // (tx_hash, force, close_by_us)
+    ClosingTransactionConfirmed(H256, bool, bool),
     RunRetryTask(RetryableTlcOperation),
     CheckActiveChannel,
     CheckFundingTimeout,
@@ -4603,6 +4609,7 @@ impl ChannelActorState {
             ],
             local_shutdown_info: None,
             remote_shutdown_info: None,
+            shutdown_transaction_hash: None,
             local_reserved_ckb_amount,
             remote_reserved_ckb_amount,
             local_constraints: ChannelConstraints::new(
@@ -4688,6 +4695,7 @@ impl ChannelActorState {
             remote_shutdown_script: None,
             local_shutdown_info: None,
             remote_shutdown_info: None,
+            shutdown_transaction_hash: None,
             local_reserved_ckb_amount,
             remote_reserved_ckb_amount: 0,
             latest_commitment_transaction: None,

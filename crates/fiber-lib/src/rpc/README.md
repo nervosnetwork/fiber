@@ -1037,6 +1037,7 @@ The channel data structure
  Not that, we use outbound channel to calculate the fee for TLC forwarding. For example,
  if we have a path A -> B -> C, then the fee B requires for TLC forwarding, is calculated
  the channel configuration of B and C, not A and B.
+* `shutdown_transaction_hash` - <em>`Option<H256>`</em>, The hash of the shutdown transaction
 ---
 
 <a id="#type-channelinfo"></a>
