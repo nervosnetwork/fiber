@@ -908,7 +908,6 @@ impl NetworkNode {
         params: P,
     ) -> Result<R, String> {
         let response = self.send_rpc_request_raw(method, params).await?;
-        eprintln!("response: {:?}", response);
         let result = serde_json::from_value::<R>(response.clone())
             .map_err(|e| format!("failed to deserialize response: {}", e))?;
         Ok(result)

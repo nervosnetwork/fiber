@@ -492,7 +492,6 @@ fn test_invoice_rand_payment_hash() {
     let invoice = InvoiceBuilder::new(Currency::Fibb)
         .amount(Some(1280))
         .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key));
-    eprintln!("invoice: {:?}", invoice);
     assert_eq!(
         invoice.err(),
         Some(InvoiceError::NeitherPaymenthashNorPreimage)

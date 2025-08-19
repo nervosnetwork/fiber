@@ -3785,14 +3785,14 @@ impl BasicMppPaymentData {
 }
 
 #[derive(Hash, Eq, PartialEq, Debug)]
-pub struct AMPDataRecord {
+pub struct AMPPaymentData {
     pub parent_payment_hash: Hash256,
     pub total_amp_count: u16,
     pub index: u16,
 }
 
-impl AMPDataRecord {
-    pub const CUSTOM_RECORD_KEY: u32 = 65537;
+impl AMPPaymentData {
+    pub const CUSTOM_RECORD_KEY: u32 = USER_CUSTOM_RECORDS_MAX_INDEX + 2;
 
     pub fn new(parent_payment_hash: Hash256, index: u16, total_amp_count: u16) -> Self {
         Self {

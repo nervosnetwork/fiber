@@ -6,7 +6,7 @@ use crate::{
         gen::{fiber as molecule_fiber, gossip},
         hash_algorithm::HashAlgorithm,
         types::{
-            pack_hop_data, secp256k1_instance, unpack_hop_data, AMPDataRecord, AddTlc,
+            pack_hop_data, secp256k1_instance, unpack_hop_data, AMPPaymentData, AddTlc,
             BasicMppPaymentData, BroadcastMessageID, Cursor, Hash256, NodeAnnouncement, NodeId,
             PaymentHopData, PeeledPaymentOnionPacket, Privkey, Pubkey, TlcErr, TlcErrPacket,
             TlcErrorCode, NO_SHARED_SECRET,
@@ -734,9 +734,9 @@ fn test_basic_mpp_custom_records() {
 fn test_amp_custom_records() {
     let mut payment_custom_records = PaymentCustomRecords::default();
     let parent_payment_hash = gen_rand_sha256_hash();
-    let amp_record = AMPDataRecord::new(parent_payment_hash, 0, 3);
+    let amp_record = AMPPaymentData::new(parent_payment_hash, 0, 3);
     amp_record.write(&mut payment_custom_records);
 
-    let new_amp_record = AMPDataRecord::read(&payment_custom_records).unwrap();
+    let new_amp_record = AMPPaymentData::read(&payment_custom_records).unwrap();
     assert_eq!(new_amp_record, amp_record);
 }
