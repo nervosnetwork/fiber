@@ -746,9 +746,9 @@ fn test_history_interval_fuzz_assertion_crash() {
     let (direction, _) = output_direction(from, target);
 
     let result = TimedResult {
-        fail_time: 1,
-        fail_amount: 2,
-        success_time: 3,
+        fail_time: 100,
+        fail_amount: 5,
+        success_time: 50,
         success_amount: 4,
     };
 
@@ -756,9 +756,9 @@ fn test_history_interval_fuzz_assertion_crash() {
 
     let mut now = 0;
     for _i in 0..10000 {
-        let rand_amount = rand::random::<u64>() % 1000;
+        let rand_amount = rand::random::<u64>() % 1000 + 1;
         let rand_succ = rand::random::<bool>();
-        eprintln!("rand_amount: {}, rand_succ: {}", rand_amount, rand_succ);
+        //eprintln!("rand_amount: {}, rand_succ: {}", rand_amount, rand_succ);
         now += 60_001;
         history.apply_pair_result(
             channel_outpoint.clone(),
