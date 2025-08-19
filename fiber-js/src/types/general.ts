@@ -22,7 +22,7 @@ type FiberInvokeResponse = { ok: true; data: any; } | { ok: false; error: string
 
 type HexString = `0x${string}`;
 
-type HashAlgorithm = "ckb_hash" | "sha_256";
+type HashAlgorithm = "ckb_hash" | "sha256";
 
 export type {
     DbWorkerInitializationOptions,

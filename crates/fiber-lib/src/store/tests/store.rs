@@ -500,6 +500,7 @@ fn test_channel_actor_state_store() {
         funding_fee_rate: 100,
         id: gen_rand_sha256_hash(),
         tlc_state: Default::default(),
+        retryable_tlc_operations: Default::default(),
         local_shutdown_script: Script::default(),
         local_channel_public_keys: ChannelBasePublicKeys {
             funding_pubkey: gen_rand_fiber_public_key(),
@@ -618,6 +619,7 @@ fn test_serde_channel_actor_state_ciborium() {
         funding_fee_rate: 100,
         id: gen_rand_sha256_hash(),
         tlc_state: Default::default(),
+        retryable_tlc_operations: Default::default(),
         local_shutdown_script: Script::default(),
         local_channel_public_keys: ChannelBasePublicKeys {
             funding_pubkey: gen_rand_fiber_public_key(),

@@ -13,7 +13,7 @@ use crate::fiber::graph::ChannelInfo;
 use crate::fiber::network::{DebugEvent, FiberMessageWithPeerId, SendPaymentCommand};
 use crate::fiber::payment::PaymentStatus;
 use crate::fiber::types::{
-    AddTlc, FiberMessage, Hash256, Init, PaymentHopData, PeeledOnionPacket, Pubkey, TlcErr,
+    AddTlc, FiberMessage, Hash256, Init, PaymentHopData, PeeledPaymentOnionPacket, Pubkey, TlcErr,
     TlcErrorCode, NO_SHARED_SECRET,
 };
 use crate::invoice::{CkbInvoiceStatus, Currency, InvoiceBuilder};
@@ -982,7 +982,7 @@ async fn test_network_send_previous_tlc_error() {
     ];
     let generated_payment_hash = gen_rand_sha256_hash();
 
-    let packet = PeeledOnionPacket::create(
+    let packet = PeeledPaymentOnionPacket::create(
         gen_rand_fiber_private_key(),
         hops_infos.clone(),
         Some(generated_payment_hash.as_ref().to_vec()),
@@ -1084,7 +1084,7 @@ async fn test_network_send_previous_tlc_error_with_limit_amount_error() {
     ];
     let generated_payment_hash = gen_rand_sha256_hash();
 
-    let packet = PeeledOnionPacket::create(
+    let packet = PeeledPaymentOnionPacket::create(
         gen_rand_fiber_private_key(),
         hops_infos.clone(),
         Some(generated_payment_hash.as_ref().to_vec()),
@@ -2404,11 +2404,17 @@ async fn test_network_add_two_tlcs_remove_one() {
             ))
         })
         .expect("node_b alive");
-        if res.is_ok() {
+
+        let a_tlc_state = node_a.get_channel_actor_state(channel_id);
+        let tlc_is_removed = a_tlc_state
+            .tlc_state
+            .get(&TLCId::Offered(add_tlc_result_a.tlc_id))
+            .is_none();
+
+        if res.is_ok() || tlc_is_removed {
             println!("remove tlc result: {:?}", res);
             break;
         } else {
-            eprintln!("Failed to remove tlc, retrying...");
             tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
         }
     }

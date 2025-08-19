@@ -59,9 +59,9 @@ use super::gossip::{GossipActorMessage, GossipMessageStore, GossipMessageUpdates
 use super::graph::{NetworkGraph, NetworkGraphStateStore, OwnedChannelUpdateEvent, RouterHop};
 use super::key::blake2b_hash_with_salt;
 use super::types::{
-    BroadcastMessageWithTimestamp, EcdsaSignature, FiberMessage, ForwardTlcResult, GossipMessage,
-    Hash256, Init, NodeAnnouncement, OpenChannel, PaymentDataRecord, PaymentHopData, Privkey,
-    Pubkey, RemoveTlcFulfill, RemoveTlcReason, TlcErr, TlcErrData, TlcErrorCode,
+    BasicMppPaymentData, BroadcastMessageWithTimestamp, EcdsaSignature, FiberMessage,
+    ForwardTlcResult, GossipMessage, Hash256, Init, NodeAnnouncement, OpenChannel, PaymentHopData,
+    Privkey, Pubkey, RemoveTlcFulfill, RemoveTlcReason, TlcErr, TlcErrData, TlcErrorCode,
 };
 use super::{
     FiberConfig, InFlightCkbTxActor, InFlightCkbTxActorArguments, InFlightCkbTxActorMessage,
@@ -274,7 +274,7 @@ pub enum NetworkActorCommand {
     ),
     // Send a command to a channel.
     ControlFiberChannel(ChannelCommandWithId),
-    // The first parameter is the peeled onion in binary via `PeeledOnionPacket::serialize`. `PeeledOnionPacket::current`
+    // The first parameter is the peeled onion in binary via `PeeledPaymentOnionPacket::serialize`. `PeeledPaymentOnionPacket::current`
     // is for the current node.
     SendPaymentOnionPacket(SendOnionPacketCommand),
     UpdateChannelFunding(Hash256, Transaction, FundingRequest),
@@ -418,6 +418,8 @@ pub struct SendPaymentWithRouterCommand {
     pub dry_run: bool,
 }
 
+// 0 ~ 65535 is reserved for endpoint usage, index aboving 65535 is reserved for internal usage
+pub const USER_CUSTOM_RECORDS_MAX_INDEX: u32 = 65535;
 /// The custom records to be included in the payment.
 /// The key is hex encoded of `u32`, and the value is hex encoded of `Vec<u8>` with `0x` as prefix.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Default)]
@@ -666,11 +668,11 @@ impl SendPaymentData {
             if custom_records
                 .data
                 .keys()
-                .any(|k| *k >= PaymentDataRecord::CUSTOM_RECORD_KEY)
+                .any(|k| *k > USER_CUSTOM_RECORDS_MAX_INDEX)
             {
                 return Err(format!(
                     "custom_records key should in range 0 ~ {:?}",
-                    PaymentDataRecord::CUSTOM_RECORD_KEY - 1
+                    USER_CUSTOM_RECORDS_MAX_INDEX
                 ));
             }
         }
@@ -679,7 +681,7 @@ impl SendPaymentData {
         // bolt04 write payment data record to custom records if payment secret is set
         if let Some(payment_secret) = payment_secret {
             let records = custom_records.get_or_insert_with(PaymentCustomRecords::default);
-            PaymentDataRecord::new(payment_secret, amount).write(records);
+            BasicMppPaymentData::new(payment_secret, amount).write(records);
         }
 
         Ok(SendPaymentData {
@@ -1124,7 +1126,7 @@ where
                 myself
                     .send_message(NetworkActorMessage::new_notification(
                         NetworkServiceEvent::ChannelReady(
-                            peer_id,
+                            peer_id.clone(),
                             channel_id,
                             channel_outpoint.clone(),
                         ),
@@ -1149,6 +1151,13 @@ where
                         );
                     }
                 }
+                debug_event!(
+                    myself,
+                    format!(
+                        "Channel is now ready with channel_id {:?} to peer {:?}",
+                        channel_id, peer_id
+                    )
+                );
             }
             NetworkActorEvent::FiberMessage(peer_id, message) => {
                 self.handle_peer_message(myself, state, peer_id, message)
