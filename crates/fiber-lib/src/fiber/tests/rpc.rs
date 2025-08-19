@@ -102,7 +102,7 @@ async fn test_rpc_basic() {
         payment_hash: None,
         hash_algorithm: Some(crate::fiber::hash_algorithm::HashAlgorithm::CkbHash),
         allow_mpp: Some(true),
-        atomic_mpp: None,
+        allow_atomic_mpp: None,
     };
 
     // node0 generate a invoice
@@ -155,7 +155,7 @@ async fn test_rpc_basic() {
         payment_hash: None,
         hash_algorithm: Some(crate::fiber::hash_algorithm::HashAlgorithm::CkbHash),
         allow_mpp: Some(false),
-        atomic_mpp: None,
+        allow_atomic_mpp: None,
     };
 
     // node0 generate a invoice
@@ -187,7 +187,7 @@ async fn test_invoice_rpc() {
         payment_hash: Some(payment_hash),
         hash_algorithm: Some(crate::fiber::hash_algorithm::HashAlgorithm::CkbHash),
         allow_mpp: None,
-        atomic_mpp: Some(true),
+        allow_atomic_mpp: Some(true),
     };
 
     // node0 generate a invoice
@@ -200,6 +200,37 @@ async fn test_invoice_rpc() {
     let invoice_payment_hash = ckb_invoice.data.payment_hash;
     assert_eq!(invoice_payment_hash, payment_hash);
     assert!(node_0.get_payment_preimage(&payment_hash).is_none());
+}
+
+#[tokio::test]
+async fn test_invoice_rpc_invalid_mpp_option() {
+    let (nodes, _channels) = gen_mock_network().await;
+
+    let [node_0, _node_1] = nodes.try_into().expect("2 nodes");
+
+    let payment_hash = gen_rand_sha256_hash();
+    let new_invoice_params = NewInvoiceParams {
+        amount: 1000,
+        description: Some("test".to_string()),
+        currency: Currency::Fibd,
+        expiry: Some(322),
+        fallback_address: None,
+        final_expiry_delta: Some(900000 + 1234),
+        udt_type_script: Some(Script::default().into()),
+        payment_preimage: None,
+        payment_hash: Some(payment_hash),
+        hash_algorithm: Some(crate::fiber::hash_algorithm::HashAlgorithm::CkbHash),
+        allow_mpp: Some(true),
+        allow_atomic_mpp: Some(true),
+    };
+
+    // node0 generate a invoice
+    let invoice_res: Result<InvoiceResult, String> = node_0
+        .send_rpc_request("new_invoice", new_invoice_params)
+        .await;
+
+    let err = invoice_res.unwrap_err();
+    assert!(err.contains("Can not set both basic MPP and atomic MPP"));
 }
 
 #[tokio::test]
@@ -512,7 +543,7 @@ async fn test_rpc_basic_with_auth() {
                 payment_hash: None,
                 hash_algorithm: Some(crate::fiber::hash_algorithm::HashAlgorithm::CkbHash),
                 allow_mpp: None,
-                atomic_mpp: None,
+                allow_atomic_mpp: None,
             },
         )
         .await

@@ -161,7 +161,7 @@ pub struct NewInvoiceParams {
     /// Whether allow payment to use MPP
     pub allow_mpp: Option<bool>,
     /// Whether use atomic mpp, if use atomic mpp there will be no preimage generated.
-    pub atomic_mpp: Option<bool>,
+    pub allow_atomic_mpp: Option<bool>,
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
@@ -330,9 +330,10 @@ where
 
         let mut invoice_builder = InvoiceBuilder::new(params.currency).amount(Some(params.amount));
 
-        // If both preimage and payment hash are absent, a random preimage is generated.
-        let need_gen_preimage =
-            params.payment_hash.is_none() && params.atomic_mpp.is_none_or(|atomic| !atomic);
+        let basic_mpp = params.allow_mpp.unwrap_or_default();
+        let atomic_mpp = params.allow_atomic_mpp.unwrap_or_default();
+        let need_gen_preimage = params.payment_hash.is_none() && !atomic_mpp;
+
         let preimage_opt = params
             .payment_preimage
             .or_else(|| need_gen_preimage.then(gen_rand_sha256_hash));
@@ -355,17 +356,15 @@ where
             invoice_builder = invoice_builder.fallback_address(fallback_address);
         };
 
-        if let Some(allow_mpp) = params.allow_mpp {
-            invoice_builder = invoice_builder.allow_mpp(allow_mpp);
-            if allow_mpp {
-                let mut rng = rand::thread_rng();
-                let payment_secret: [u8; 32] = rng.gen();
-                invoice_builder = invoice_builder.payment_secret(payment_secret.into());
-            }
+        if basic_mpp {
+            invoice_builder = invoice_builder.allow_mpp(true);
+            let mut rng = rand::thread_rng();
+            let payment_secret: [u8; 32] = rng.gen();
+            invoice_builder = invoice_builder.payment_secret(payment_secret.into());
         };
 
-        if let Some(atomic_mpp) = params.atomic_mpp {
-            invoice_builder = invoice_builder.allow_atomic_mpp(atomic_mpp);
+        if atomic_mpp {
+            invoice_builder = invoice_builder.allow_atomic_mpp(true);
         }
 
         if let Some(final_expiry_delta) = params.final_expiry_delta {

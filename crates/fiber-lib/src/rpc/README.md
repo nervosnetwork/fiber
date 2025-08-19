@@ -530,7 +530,7 @@ Generates a new invoice.
 * `udt_type_script` - <em>`Option<Script>`</em>, The UDT type script of the invoice.
 * `hash_algorithm` - <em>Option<[HashAlgorithm](#type-hashalgorithm)></em>, The hash algorithm of the invoice.
 * `allow_mpp` - <em>`Option<bool>`</em>, Whether allow payment to use MPP
-* `atomic_mpp` - <em>`Option<bool>`</em>, Whether use atomic mpp, if use atomic mpp there will be no preimage generated.
+* `allow_atomic_mpp` - <em>`Option<bool>`</em>, Whether use atomic mpp, if use atomic mpp there will be no preimage generated.
 
 ##### Returns
 

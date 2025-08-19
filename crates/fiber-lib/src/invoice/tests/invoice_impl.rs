@@ -613,3 +613,20 @@ fn test_invoice_with_mpp_option() {
     let payment_secret = invoice.payment_secret();
     assert!(payment_secret.is_none());
 }
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn test_invoice_basic_mpp_and_atomic_mpp() {
+    let private_key = gen_rand_secp256k1_private_key();
+
+    let invoice = InvoiceBuilder::new(Currency::Fibb)
+        .amount(Some(1280))
+        .payment_hash(gen_rand_sha256_hash())
+        .allow_mpp(true)
+        .allow_atomic_mpp(true)
+        .payment_secret(gen_rand_sha256_hash())
+        .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key));
+
+    let err = invoice.unwrap_err();
+    assert_eq!(err, InvoiceError::BothBasicMPPAndAtomicMPP)
+}
