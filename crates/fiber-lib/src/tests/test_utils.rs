@@ -614,6 +614,11 @@ pub(crate) async fn create_n_nodes_network_with_params(
     (nodes, channels)
 }
 
+pub enum MppMode {
+    BasicMpp,
+    AtomicMpp,
+}
+
 #[allow(clippy::type_complexity)]
 pub async fn create_n_nodes_network(
     amounts: &[((usize, usize), (u128, u128))],
@@ -726,6 +731,26 @@ impl NetworkNode {
                 dry_run: false,
                 ..Default::default()
             },
+            MppMode::BasicMpp,
+        )
+        .await
+    }
+
+    pub async fn send_atomic_mpp_payment(
+        &self,
+        target_node: &mut NetworkNode,
+        amount: u128,
+        max_parts: Option<u64>,
+    ) -> Result<SendPaymentResponse, String> {
+        self.send_mpp_payment_with_command(
+            target_node,
+            amount,
+            SendPaymentCommand {
+                max_parts,
+                dry_run: false,
+                ..Default::default()
+            },
+            MppMode::AtomicMpp,
         )
         .await
     }
@@ -736,6 +761,7 @@ impl NetworkNode {
         amount: u128,
         max_parts: Option<u64>,
         dry_run: bool,
+        mode: MppMode,
     ) -> Result<SendPaymentResponse, String> {
         self.send_mpp_payment_with_command(
             target_node,
@@ -745,6 +771,7 @@ impl NetworkNode {
                 dry_run,
                 ..Default::default()
             },
+            mode,
         )
         .await
     }
@@ -754,18 +781,20 @@ impl NetworkNode {
         target_node: &mut NetworkNode,
         amount: u128,
         command: SendPaymentCommand,
+        mode: MppMode,
     ) -> Result<SendPaymentResponse, String> {
         let target_pubkey = target_node.get_public_key();
         let preimage = gen_rand_sha256_hash();
-        let ckb_invoice = InvoiceBuilder::new(Currency::Fibd)
+        let mut builder = InvoiceBuilder::new(Currency::Fibd)
             .amount(Some(amount))
             .payment_preimage(preimage)
             .payee_pub_key(target_pubkey.into())
-            .allow_mpp(true)
-            .payment_secret(gen_rand_sha256_hash())
-            .build()
-            .expect("build invoice success");
-
+            .payment_secret(gen_rand_sha256_hash());
+        match mode {
+            MppMode::BasicMpp => builder = builder.allow_mpp(true),
+            MppMode::AtomicMpp => builder = builder.allow_atomic_mpp(true),
+        }
+        let ckb_invoice = builder.build().expect("build invoice success");
         target_node.insert_invoice(ckb_invoice.clone(), Some(preimage));
         let mut command = command.clone();
         command.invoice = Some(ckb_invoice.to_string());

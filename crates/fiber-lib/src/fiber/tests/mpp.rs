@@ -26,7 +26,7 @@ use crate::{
         create_n_nodes_network, establish_channel_between_nodes, init_tracing, ChannelParameters,
         NetworkNode, MIN_RESERVED_CKB,
     },
-    NetworkServiceEvent, HUGE_CKB_AMOUNT,
+    MppMode, NetworkServiceEvent, HUGE_CKB_AMOUNT,
 };
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1998,7 +1998,13 @@ async fn test_send_mpp_dry_run_will_be_ok_with_single_path() {
         .await;
         let [node_0, _node_1, mut node_2] = nodes.try_into().expect("ok nodes");
         let res = node_0
-            .send_mpp_payment_with_dry_run_option(&mut node_2, amount, None, true)
+            .send_mpp_payment_with_dry_run_option(
+                &mut node_2,
+                amount,
+                None,
+                true,
+                MppMode::BasicMpp,
+            )
             .await;
 
         if let Some(count) = expect_routers_count {
@@ -2040,7 +2046,13 @@ async fn test_send_mpp_direct_channels_dry_run() {
         let [node_0, mut node_1, _node_2] = nodes.try_into().expect("ok nodes");
 
         let res = node_0
-            .send_mpp_payment_with_dry_run_option(&mut node_1, amount, None, true)
+            .send_mpp_payment_with_dry_run_option(
+                &mut node_1,
+                amount,
+                None,
+                true,
+                MppMode::BasicMpp,
+            )
             .await;
 
         if let Some(count) = expect_routers_count {
@@ -2085,7 +2097,13 @@ async fn test_send_mpp_dry_run_single_path_mixed_with_multiple_paths() {
         .await;
         let [node_0, _node_1, mut node_2] = nodes.try_into().expect("ok nodes");
         let res = node_0
-            .send_mpp_payment_with_dry_run_option(&mut node_2, amount, None, true)
+            .send_mpp_payment_with_dry_run_option(
+                &mut node_2,
+                amount,
+                None,
+                true,
+                MppMode::BasicMpp,
+            )
             .await;
 
         if let Some(count) = expect_routers_count {
@@ -2135,7 +2153,7 @@ async fn test_send_mpp_will_succeed_with_retry_first_hops() {
     let [node_0, mut node_1] = nodes.try_into().expect("ok nodes");
 
     let res = node_0
-        .send_mpp_payment_with_dry_run_option(&mut node_1, 300000, None, true)
+        .send_mpp_payment_with_dry_run_option(&mut node_1, 300000, None, true, MppMode::BasicMpp)
         .await;
 
     let query_res = res.unwrap();
@@ -2190,7 +2208,7 @@ async fn test_send_mpp_will_succeed_with_retry_2_channels() {
     let [node_0, mut node_1] = nodes.try_into().expect("ok nodes");
 
     let res = node_0
-        .send_mpp_payment_with_dry_run_option(&mut node_1, 300000, None, true)
+        .send_mpp_payment_with_dry_run_option(&mut node_1, 300000, None, true, MppMode::BasicMpp)
         .await;
 
     let query_res = res.unwrap();
@@ -2247,7 +2265,7 @@ async fn test_send_mpp_will_fail_with_retry_3_channels() {
     let [node_0, mut node_1] = nodes.try_into().expect("ok nodes");
 
     let res = node_0
-        .send_mpp_payment_with_dry_run_option(&mut node_1, 300000, None, true)
+        .send_mpp_payment_with_dry_run_option(&mut node_1, 300000, None, true, MppMode::BasicMpp)
         .await;
 
     let query_res = res.unwrap();
@@ -2293,7 +2311,7 @@ async fn test_send_mpp_will_success_with_retry_split_channels() {
     let [node_0, mut node_1] = nodes.try_into().expect("ok nodes");
 
     let res = node_0
-        .send_mpp_payment_with_dry_run_option(&mut node_1, 300000, None, true)
+        .send_mpp_payment_with_dry_run_option(&mut node_1, 300000, None, true, MppMode::BasicMpp)
         .await;
 
     let query_res = res.unwrap();
@@ -2339,7 +2357,7 @@ async fn test_send_mpp_will_fail_with_disable_single_path() {
     let [node_0, _node_1, mut node_2] = nodes.try_into().expect("ok nodes");
 
     let res = node_0
-        .send_mpp_payment_with_dry_run_option(&mut node_2, 30000, None, true)
+        .send_mpp_payment_with_dry_run_option(&mut node_2, 30000, None, true, MppMode::BasicMpp)
         .await;
 
     let query_res = res.unwrap();
@@ -2390,7 +2408,7 @@ async fn test_send_mpp_will_success_with_middle_hop_capacity_not_enough() {
     let [node_0, _node_1, mut node_2] = nodes.try_into().expect("ok nodes");
 
     let res = node_0
-        .send_mpp_payment_with_dry_run_option(&mut node_2, 300000, None, true)
+        .send_mpp_payment_with_dry_run_option(&mut node_2, 300000, None, true, MppMode::BasicMpp)
         .await;
 
     let query_res = res.unwrap();
@@ -3163,6 +3181,7 @@ async fn test_send_payment_custom_records_not_in_range() {
                 max_parts: Some(2),
                 ..Default::default()
             },
+            MppMode::BasicMpp,
         )
         .await;
 
@@ -3188,7 +3207,13 @@ async fn test_mpp_can_not_find_path_filter_target_node_features() {
     let [mut node_0, mut node_1] = nodes.try_into().expect("2 nodes");
 
     let res = node_0
-        .send_mpp_payment_with_dry_run_option(&mut node_1, 20000000000, Some(2), true)
+        .send_mpp_payment_with_dry_run_option(
+            &mut node_1,
+            20000000000,
+            Some(2),
+            true,
+            MppMode::BasicMpp,
+        )
         .await;
     eprintln!("query res: {:?}", res);
 
@@ -3202,7 +3227,13 @@ async fn test_mpp_can_not_find_path_filter_target_node_features() {
         .await;
 
     let res = node_0
-        .send_mpp_payment_with_dry_run_option(&mut node_1, 20000000000, Some(2), true)
+        .send_mpp_payment_with_dry_run_option(
+            &mut node_1,
+            20000000000,
+            Some(2),
+            true,
+            MppMode::BasicMpp,
+        )
         .await;
     eprintln!("query res: {:?}", res);
 
@@ -3312,6 +3343,7 @@ async fn test_mpp_can_not_find_path_filter_middle_node_features() {
                 200 * CKB_SHANNONS as u128,
                 Some(2),
                 true,
+                MppMode::BasicMpp,
             )
             .await;
         eprintln!("query res: {:?}", res);
@@ -3342,6 +3374,7 @@ async fn test_mpp_can_not_find_path_filter_middle_node_features() {
                 200 * CKB_SHANNONS as u128,
                 Some(2),
                 true,
+                MppMode::BasicMpp,
             )
             .await;
         eprintln!("query res: {:?}", res);
@@ -3530,14 +3563,14 @@ async fn test_send_mpp_respect_min_tlc_value() {
     assert!(res.is_ok());
 
     let res = node_0
-        .send_mpp_payment_with_dry_run_option(&mut node_2, 28000, Some(3), true)
+        .send_mpp_payment_with_dry_run_option(&mut node_2, 28000, Some(3), true, MppMode::BasicMpp)
         .await;
 
     eprintln!("res: {:?}", res);
     assert!(res.is_err());
 
     let res = node_0
-        .send_mpp_payment_with_dry_run_option(&mut node_2, 30000, None, true)
+        .send_mpp_payment_with_dry_run_option(&mut node_2, 30000, None, true, MppMode::BasicMpp)
         .await;
     debug!("res: {:?}", res);
     assert!(res.is_ok());

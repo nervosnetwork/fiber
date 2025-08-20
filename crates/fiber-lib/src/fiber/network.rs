@@ -726,6 +726,10 @@ impl SendPaymentData {
         // only allow mpp if max_parts is greater than 1 and not keysend
         (self.allow_basic_mpp || self.allow_atomic_mpp) && self.max_parts() > 1 && !self.keysend
     }
+
+    pub fn is_atomic_mpp(&self) -> bool {
+        self.allow_atomic_mpp
+    }
 }
 
 #[derive(Debug)]
@@ -2262,7 +2266,7 @@ where
                     &attempt,
                     error_detail.clone(),
                     false,
-                );
+                ) && !session.is_atomic_mpp();
                 debug!(
                     "set attempt failed to : {:?}",
                     error_detail.error_code.as_ref()
@@ -2519,6 +2523,7 @@ where
             attempt.hash = children[i].hash;
             attempts_routers[i] = (attempt, route);
         }
+        debug!("finished set custom records for amp_mpp");
     }
 
     async fn send_payment_onion_packet(
@@ -2646,7 +2651,7 @@ where
                             &attempt,
                             tlc_err.clone(),
                             true,
-                        );
+                        ) && !session.is_atomic_mpp();
                         (error.to_string(), need_to_retry)
                     };
 

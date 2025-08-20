@@ -165,6 +165,10 @@ impl PaymentSession {
         self.request.allow_mpp()
     }
 
+    pub fn is_atomic_mpp(&self) -> bool {
+        self.request.is_atomic_mpp()
+    }
+
     pub fn payment_hash(&self) -> Hash256 {
         self.request.payment_hash
     }

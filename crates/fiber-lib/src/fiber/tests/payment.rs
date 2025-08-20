@@ -6360,6 +6360,7 @@ async fn test_send_payment_mpp_can_not_be_keysend() {
                 dry_run: false,
                 ..Default::default()
             },
+            MppMode::BasicMpp,
         )
         .await;
     eprintln!("res: {:?}", res);
