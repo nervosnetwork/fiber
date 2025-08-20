@@ -12,7 +12,7 @@ use crate::{
         features::FeatureVector,
         hash_algorithm::HashAlgorithm,
         network::{DebugEvent, SendPaymentCommand, USER_CUSTOM_RECORDS_MAX_INDEX},
-        payment::AttemptStatus,
+        payment::{AttemptStatus, MppMode},
         types::{
             BasicMppPaymentData, Hash256, PaymentHopData, PeeledPaymentOnionPacket, RemoveTlcReason,
         },
@@ -26,7 +26,7 @@ use crate::{
         create_n_nodes_network, establish_channel_between_nodes, init_tracing, ChannelParameters,
         NetworkNode, MIN_RESERVED_CKB,
     },
-    MppMode, NetworkServiceEvent, HUGE_CKB_AMOUNT,
+    NetworkServiceEvent, HUGE_CKB_AMOUNT,
 };
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -18,8 +18,8 @@ use std::path::Path;
 use super::db_migrate::DbMigrate;
 use super::schema::*;
 use crate::fiber::gossip::GossipMessageStore;
-use crate::fiber::payment::{Attempt, AttemptStatus, PaymentSession, PaymentStatus};
-use crate::fiber::types::{HoldTlc, CURSOR_SIZE};
+use crate::fiber::payment::{Attempt, AttemptStatus, MppMode, PaymentSession, PaymentStatus};
+use crate::fiber::types::{AMPPaymentData, HoldTlc, CURSOR_SIZE};
 use crate::{
     fiber::{
         channel::{ChannelActorState, ChannelActorStateStore, ChannelState},
@@ -199,16 +199,15 @@ impl Store {
             .expect("channel_id should be 32 bytes");
 
         let tlc_id: u64 =
-            u64::from_le_bytes(key[65..].try_into().expect("tlc_id should be 8 bytes"));
+            u64::from_le_bytes(key[65..73].try_into().expect("tlc_id should be 8 bytes"));
 
-        let expired_at: u64 = deserialize_from(value, "HoldTlc");
+        let (hold_expire_at, mpp_mode): (u64, MppMode) = deserialize_from(value, "HoldTlc");
 
         let hold_tlc = HoldTlc {
             channel_id: channel_id.into(),
             tlc_id,
-            hold_expire_at: expired_at,
-            attempt_hash: None,
-            atomic_info: None,
+            hold_expire_at,
+            mpp_mode,
         };
 
         (payment_hash.into(), hold_tlc)
@@ -238,7 +237,8 @@ pub enum KeyValue {
     NetworkActorState(PeerId, PersistentNetworkActorState),
     Attempt((Hash256, u64), Attempt),
     AttemptToPaymentHash((Hash256, u64), Hash256),
-    HoldTlc((Hash256, Hash256, u64), u64),
+    HoldTlc((Hash256, Hash256, u64), u64, MppMode),
+    HoldTlcAtomicPaymentData((Hash256, Hash256, u64), AMPPaymentData),
 }
 
 pub trait StoreKeyValue {
@@ -323,8 +323,15 @@ impl StoreKeyValue for KeyValue {
             KeyValue::PaymentCustomRecord(payment_hash, _data) => {
                 [&[PAYMENT_CUSTOM_RECORD_PREFIX], payment_hash.as_ref()].concat()
             }
-            KeyValue::HoldTlc((payment_hash, channel_id, tlc_id), _hold_tlc) => [
+            KeyValue::HoldTlc((payment_hash, channel_id, tlc_id), _expired_at, _mpp_mode) => [
                 &[HOLD_TLC_PREFIX],
+                payment_hash.as_ref(),
+                channel_id.as_ref(),
+                &tlc_id.to_le_bytes(),
+            ]
+            .concat(),
+            KeyValue::HoldTlcAtomicPaymentData((payment_hash, channel_id, tlc_id), _data) => [
+                &[HOLD_TLC_ATOMIC_PAYMENT_DATA_PREFIX],
                 payment_hash.as_ref(),
                 channel_id.as_ref(),
                 &tlc_id.to_le_bytes(),
@@ -370,7 +377,10 @@ impl StoreKeyValue for KeyValue {
             KeyValue::PaymentCustomRecord(_, custom_records) => {
                 serialize_to_vec(custom_records, "PaymentCustomRecord")
             }
-            KeyValue::HoldTlc(_, expired_at) => serialize_to_vec(expired_at, "HoldTlc"),
+            KeyValue::HoldTlc(_, expired_at, mpp_mode) => {
+                serialize_to_vec(&(expired_at, mpp_mode), "HoldTlc")
+            }
+            KeyValue::HoldTlcAtomicPaymentData(_, data) => serialize_to_vec(data, "AMPPaymentData"),
         }
     }
 }
@@ -488,6 +498,7 @@ impl ChannelActorStateStore for Store {
         batch.put_kv(KeyValue::HoldTlc(
             (payment_hash, hold_tlc.channel_id, hold_tlc.tlc_id),
             hold_tlc.hold_expire_at,
+            hold_tlc.mpp_mode,
         ));
         batch.commit();
     }
@@ -523,6 +534,21 @@ impl ChannelActorStateStore for Store {
                 acc.entry(payment_hash).or_default().push(hold_tlc);
                 acc
             })
+    }
+
+    fn insert_atomic_mpp_payment_data(
+        &self,
+        payment_hash: Hash256,
+        channel_id: Hash256,
+        tlc_id: u64,
+        payment_data: AMPPaymentData,
+    ) {
+        let mut batch = self.batch();
+        batch.put_kv(KeyValue::HoldTlcAtomicPaymentData(
+            (payment_hash, channel_id, tlc_id),
+            payment_data,
+        ));
+        batch.commit();
     }
 }
 

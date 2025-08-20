@@ -9,6 +9,7 @@ use crate::fiber::gossip::get_gossip_actor_name;
 use crate::fiber::gossip::GossipActorMessage;
 use crate::fiber::graph::NetworkGraphStateStore;
 use crate::fiber::network::*;
+use crate::fiber::payment::MppMode;
 use crate::fiber::payment::PaymentSession;
 use crate::fiber::payment::PaymentStatus;
 use crate::fiber::payment::SessionRoute;
@@ -614,11 +615,6 @@ pub(crate) async fn create_n_nodes_network_with_params(
     }
     wait_for_network_graph_update(&nodes[0], amounts.len()).await;
     (nodes, channels)
-}
-
-pub enum MppMode {
-    BasicMpp,
-    AtomicMpp,
 }
 
 #[allow(clippy::type_complexity)]

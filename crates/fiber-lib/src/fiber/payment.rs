@@ -11,6 +11,12 @@ use ckb_types::packed::OutPoint;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub enum MppMode {
+    BasicMpp,
+    AtomicMpp,
+}
+
 /// The status of a payment, will update as the payment progresses.
 /// The transfer path for payment status is `Created -> Inflight -> Success | Failed`.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]

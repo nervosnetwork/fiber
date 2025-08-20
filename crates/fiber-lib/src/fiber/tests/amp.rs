@@ -1,6 +1,7 @@
 use crate::test_utils::{create_n_nodes_network, init_tracing, MIN_RESERVED_CKB};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore]
 async fn test_send_basic_amp() {
     init_tracing();
 

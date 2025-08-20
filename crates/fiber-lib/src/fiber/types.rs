@@ -14,6 +14,7 @@ use crate::ckb::config::{UdtArgInfo, UdtCellDep, UdtCfgInfos, UdtDep, UdtScript}
 use crate::ckb::contracts::get_udt_whitelist;
 use crate::fiber::amp::Share;
 use crate::fiber::network::USER_CUSTOM_RECORDS_MAX_INDEX;
+use crate::fiber::payment::MppMode;
 use ckb_jsonrpc_types::CellOutput;
 use ckb_types::H256;
 use num_enum::IntoPrimitive;
@@ -3787,8 +3788,8 @@ impl BasicMppPaymentData {
 
 #[derive(Clone, Eq, PartialEq, Debug, Serialize, Deserialize)]
 pub struct AMPPaymentData {
-    pub parent_payment_hash: Hash256,
     pub total_amp_count: u16,
+    pub hash: Hash256,
     pub index: u16,
     pub secret: Share,
 }
@@ -3803,7 +3804,7 @@ impl AMPPaymentData {
         secret: Share,
     ) -> Self {
         Self {
-            parent_payment_hash,
+            hash: parent_payment_hash,
             total_amp_count,
             index,
             secret,
@@ -3812,7 +3813,7 @@ impl AMPPaymentData {
 
     fn to_vec(&self) -> Vec<u8> {
         let mut vec = Vec::new();
-        vec.extend_from_slice(self.parent_payment_hash.as_ref());
+        vec.extend_from_slice(self.hash.as_ref());
         vec.extend_from_slice(&self.total_amp_count.to_le_bytes());
         vec.extend_from_slice(&self.index.to_le_bytes());
         vec.extend_from_slice(self.secret.as_bytes());
@@ -4017,11 +4018,18 @@ pub struct PeeledPaymentOnionPacket {
 }
 
 impl PeeledPaymentOnionPacket {
-    pub fn mpp_custom_records(&self) -> Option<BasicMppPaymentData> {
+    pub fn basic_mpp_custom_records(&self) -> Option<BasicMppPaymentData> {
         self.current
             .custom_records
             .as_ref()
             .and_then(BasicMppPaymentData::read)
+    }
+
+    pub fn atomic_mpp_custom_records(&self) -> Option<AMPPaymentData> {
+        self.current
+            .custom_records
+            .as_ref()
+            .and_then(AMPPaymentData::read)
     }
 }
 
@@ -4245,6 +4253,5 @@ pub struct HoldTlc {
     pub channel_id: Hash256,
     pub tlc_id: u64,
     pub hold_expire_at: u64,
-    pub attempt_hash: Option<Hash256>,
-    pub atomic_info: Option<AMPPaymentData>,
+    pub mpp_mode: MppMode,
 }

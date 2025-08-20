@@ -9,6 +9,8 @@ use crate::fiber::fee::{check_open_channel_parameters, check_tlc_delta_with_epoc
 #[cfg(any(debug_assertions, feature = "bench"))]
 use crate::fiber::network::DebugEvent;
 use crate::fiber::network::PaymentCustomRecords;
+use crate::fiber::payment::MppMode;
+use crate::fiber::types::AMPPaymentData;
 use crate::{debug_event, fiber::types::TxAbort, utils::tx::compute_tx_message};
 #[cfg(test)]
 use musig2::BinaryEncoding;
@@ -935,17 +937,23 @@ where
                 _ if invoice.basic_mpp() => {
                     // add to pending settlement tlc set
                     // the tlc set will be settled by network actor
-                    state
-                        .pending_notify_mpp_tcls
-                        .push((tlc.payment_hash, tlc.id()));
+                    state.pending_notify_mpp_tcls.push((
+                        tlc.payment_hash,
+                        tlc.id(),
+                        MppMode::BasicMpp,
+                    ));
 
                     // just return, the tlc set will be settled by network actor
                     return;
                 }
                 _ if is_atomic_mpp => {
-                    state
-                        .pending_notify_mpp_tcls
-                        .push((tlc.payment_hash, tlc.id()));
+                    if let Some(parent_payment_hash) = tlc.parent_payment_hash {
+                        state.pending_notify_mpp_tcls.push((
+                            parent_payment_hash,
+                            tlc.id(),
+                            MppMode::AtomicMpp,
+                        ));
+                    }
 
                     return;
                 }
@@ -1037,6 +1045,7 @@ where
     ) -> Result<(), ProcessingChannelError> {
         let payment_hash = add_tlc.payment_hash;
         let forward_amount = peeled_onion_packet.current.amount;
+        let channel_id = state.get_id();
 
         state.tlc_state.applied_add_tlcs.insert(add_tlc.tlc_id);
         if peeled_onion_packet.is_last() {
@@ -1048,7 +1057,22 @@ where
                 return Err(ProcessingChannelError::IncorrectFinalTlcExpiry);
             }
 
-            let invoice = self.store.get_invoice(&payment_hash);
+            let Some(tlc) = state.tlc_state.get_mut(&add_tlc.tlc_id) else {
+                return Err(ProcessingChannelError::InternalError(
+                    "TLC not found in state".to_string(),
+                ));
+            };
+
+            let basic_mpp_payment_data = peeled_onion_packet.basic_mpp_custom_records();
+            let atomic_mpp_payment_data = peeled_onion_packet.atomic_mpp_custom_records();
+            let is_atomic_mpp = atomic_mpp_payment_data.is_some();
+
+            let parent_payment_hash = atomic_mpp_payment_data
+                .as_ref()
+                .map(|a| a.hash)
+                .unwrap_or(payment_hash);
+
+            let invoice = self.store.get_invoice(&parent_payment_hash);
             if let Some(ref invoice) = invoice {
                 let invoice_status = self.get_invoice_status(invoice);
                 if !matches!(
@@ -1059,15 +1083,9 @@ where
                 }
             }
 
-            let Some(tlc) = state.tlc_state.get_mut(&add_tlc.tlc_id) else {
-                return Err(ProcessingChannelError::InternalError(
-                    "TLC not found in state".to_string(),
-                ));
-            };
-
             // extract MPP total payment fields from onion packet
-            match (&invoice, peeled_onion_packet.mpp_custom_records()) {
-                (Some(invoice), Some(record)) => {
+            match (&invoice, basic_mpp_payment_data, atomic_mpp_payment_data) {
+                (Some(invoice), Some(record), None) => {
                     if record.total_amount < invoice.amount.unwrap_or_default() {
                         error!(
                             "total amount is less than invoice amount: {:?}",
@@ -1092,7 +1110,25 @@ where
                     tlc.payment_secret = Some(record.payment_secret);
                     tlc.total_amount = Some(record.total_amount);
                 }
-                (Some(invoice), None) => {
+                (Some(invoice), None, Some(record)) => {
+                    tlc.total_amount = Some(invoice.amount.unwrap_or_default());
+                    tlc.parent_payment_hash = Some(parent_payment_hash);
+                    let mut amp_record = record.clone();
+                    amp_record.hash = payment_hash;
+                    // now save amp_record with parent payment_hash as key
+                    self.store.insert_atomic_mpp_payment_data(
+                        parent_payment_hash,
+                        channel_id,
+                        tlc.tlc_id.into(),
+                        amp_record,
+                    );
+                }
+                (Some(invoice), _, None) if invoice.atomic_mpp() => {
+                    return Err(ProcessingChannelError::FinalIncorrectMPPInfo(
+                        "invoice is atomic mpp but no MPP records in onion packet".to_string(),
+                    ));
+                }
+                (Some(invoice), None, _) => {
                     if invoice.basic_mpp() {
                         // FIXME: whether we allow MPP without MPP records in onion packet?
                         // currently we allow it pay with enough amount
@@ -1107,8 +1143,7 @@ where
                         return Err(ProcessingChannelError::FinalIncorrectHTLCAmount);
                     }
                 }
-                (None, Some(_record)) => {
-                    // TODO: try to extrace AMP information from custom_records here
+                (None, Some(_record), None) => {
                     error!("invoice not found for MPP payment: {:?}", payment_hash);
                     return Err(ProcessingChannelError::FinalIncorrectMPPInfo(
                         "invoice not found".to_string(),
@@ -1149,6 +1184,8 @@ where
                 }
 
                 self.store_preimage(payment_hash, preimage);
+            } else if is_atomic_mpp {
+                // atomic mpp don't have preimage
             } else {
                 error!("preimage is not found for payment hash: {:?}", payment_hash);
                 return Err(ProcessingChannelError::FinalIncorrectPaymentHash);
@@ -2710,7 +2747,7 @@ where
         self.store.insert_channel_actor_state(state.clone());
 
         // try to settle down tlc set
-        for (payment_hash, tlc_id) in pending_notify_mpp_tcls {
+        for (payment_hash, tlc_id, mpp_mode) in pending_notify_mpp_tcls {
             let channel_id = state.get_id();
             // hold the tlc
             self.store.insert_payment_hold_tlc(
@@ -2719,8 +2756,7 @@ where
                     channel_id,
                     tlc_id,
                     hold_expire_at: now_timestamp_as_millis_u64() + DEFAULT_HOLD_TLC_TIMEOUT,
-                    attempt_hash: None,
-                    atomic_info: None,
+                    mpp_mode,
                 },
             );
 
@@ -2968,6 +3004,8 @@ pub struct TlcInfo {
     pub total_amount: Option<u128>,
     /// bolt04 payment secret, only exists for last hop in multi-path payment
     pub payment_secret: Option<Hash256>,
+    /// atomic parent payment_hash
+    pub parent_payment_hash: Option<Hash256>,
     /// The attempt id associate with the tlc, only on outbound tlc
     /// only exists for first hop in multi-path payment
     pub attempt_id: Option<u64>,
@@ -3706,7 +3744,7 @@ pub struct ChannelActorState {
 
     // The TLC set ready to be settled
     #[serde(skip)]
-    pub pending_notify_mpp_tcls: Vec<(Hash256, u64)>,
+    pub pending_notify_mpp_tcls: Vec<(Hash256, u64, MppMode)>,
 
     #[serde(skip)]
     pub ephemeral_config: ChannelEphemeralConfig,
@@ -5931,6 +5969,7 @@ impl ChannelActorState {
             attempt_id: command.attempt_id,
             amount: command.amount,
             payment_hash: command.payment_hash,
+            parent_payment_hash: None,
             expiry: command.expiry,
             hash_algorithm: command.hash_algorithm,
             created_at: self.get_current_commitment_numbers(),
@@ -5956,6 +5995,7 @@ impl ChannelActorState {
             channel_id: self.get_id(),
             amount: message.amount,
             payment_hash: message.payment_hash,
+            parent_payment_hash: None,
             attempt_id: None,
             expiry: message.expiry,
             hash_algorithm: message.hash_algorithm,
@@ -7997,6 +8037,13 @@ pub trait ChannelActorStateStore {
     fn remove_payment_hold_tlc(&self, payment_hash: &Hash256, channel_id: &Hash256, tlc_id: u64);
     fn get_payment_hold_tlcs(&self, payment_hash: Hash256) -> Vec<HoldTlc>;
     fn get_node_hold_tlcs(&self) -> HashMap<Hash256, Vec<HoldTlc>>;
+    fn insert_atomic_mpp_payment_data(
+        &self,
+        payment_hash: Hash256,
+        channel_id: Hash256,
+        tlc_id: u64,
+        payment_data: AMPPaymentData,
+    );
 }
 
 /// A wrapper on CommitmentTransaction that has a partial signature along with
