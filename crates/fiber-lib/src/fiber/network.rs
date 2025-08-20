@@ -1401,9 +1401,9 @@ where
 
                 if num_outbound_peers >= state.min_outbound_peers {
                     debug!(
-                                "Already connected to {} outbound peers, wants a minimal of {} peers, skipping connecting to more peers",
-                                num_outbound_peers, state.min_outbound_peers
-                            );
+                        "Already connected to {} outbound peers, wants a minimal of {} peers, skipping connecting to more peers",
+                        num_outbound_peers, state.min_outbound_peers
+                    );
                     return Ok(());
                 }
 
@@ -1441,9 +1441,9 @@ where
                     debug!("Peer to connect: {:?}, {:?}", peer_id, addresses);
                     if let Some(session) = state.get_peer_session(&peer_id) {
                         debug!(
-                                    "Randomly selected peer {:?} already connected with session id {:?}, skipping connection",
-                                    peer_id, session
-                                );
+                            "Randomly selected peer {:?} already connected with session id {:?}, skipping connection",
+                            peer_id, session
+                        );
                         continue;
                     }
                     for addr in addresses {

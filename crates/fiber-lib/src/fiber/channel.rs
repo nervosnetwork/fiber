@@ -897,30 +897,34 @@ where
     ) {
         let tlc_info = state.get_received_tlc(tlc_id).expect("expect tlc").clone();
 
-        let Some(preimage) = self.store.get_preimage(&tlc_info.payment_hash) else {
+        let preimage = self.store.get_preimage(&tlc_info.payment_hash);
+        let invoice = self.store.get_invoice(&tlc_info.payment_hash);
+        let is_atomic_mpp = invoice.as_ref().is_some_and(|inv| inv.atomic_mpp());
+        if preimage.is_none() && !is_atomic_mpp {
             return;
-        };
-
-        let mut remove_reason = RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
-            payment_preimage: preimage,
+        }
+        let mut remove_reason = preimage.map(|preimage| {
+            RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+                payment_preimage: preimage,
+            })
         });
 
         let tlc = tlc_info.clone();
-
-        if let Some(invoice) = self.store.get_invoice(&tlc.payment_hash) {
+        if let Some(invoice) = invoice {
             let status = self.get_invoice_status(&invoice);
+
             match status {
                 CkbInvoiceStatus::Expired => {
-                    remove_reason = RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
+                    remove_reason = Some(RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
                         TlcErr::new(TlcErrorCode::InvoiceExpired),
                         &tlc.shared_secret,
-                    ));
+                    )));
                 }
                 CkbInvoiceStatus::Cancelled => {
-                    remove_reason = RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
+                    remove_reason = Some(RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
                         TlcErr::new(TlcErrorCode::InvoiceCancelled),
                         &tlc.shared_secret,
-                    ));
+                    )));
                 }
                 CkbInvoiceStatus::Paid => {
                     // we have already checked invoice status in apply_add_tlc_operation_with_peeled_onion_packet
@@ -938,21 +942,29 @@ where
                     // just return, the tlc set will be settled by network actor
                     return;
                 }
+                _ if is_atomic_mpp => {
+                    state
+                        .pending_notify_mpp_tcls
+                        .push((tlc.payment_hash, tlc.id()));
+
+                    return;
+                }
                 _ => {
                     // single path payment
                     if !is_invoice_fulfilled(&invoice, std::slice::from_ref(&tlc)) {
-                        remove_reason = RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
+                        remove_reason = Some(RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
                             TlcErr::new(TlcErrorCode::IncorrectOrUnknownPaymentDetails),
                             &tlc.shared_secret,
-                        ));
+                        )));
                     }
                 }
             }
         }
-
         // remove tlc
-        self.register_retryable_tlc_remove(myself, state, tlc.tlc_id, remove_reason)
-            .await;
+        if let Some(remove_reason) = remove_reason {
+            self.register_retryable_tlc_remove(myself, state, tlc.tlc_id, remove_reason)
+                .await;
+        }
     }
 
     async fn apply_add_tlc_operation(
@@ -2707,6 +2719,8 @@ where
                     channel_id,
                     tlc_id,
                     hold_expire_at: now_timestamp_as_millis_u64() + DEFAULT_HOLD_TLC_TIMEOUT,
+                    attempt_hash: None,
+                    atomic_info: None,
                 },
             );
 

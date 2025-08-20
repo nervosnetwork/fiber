@@ -3785,7 +3785,7 @@ impl BasicMppPaymentData {
     }
 }
 
-#[derive(Eq, PartialEq, Debug)]
+#[derive(Clone, Eq, PartialEq, Debug, Serialize, Deserialize)]
 pub struct AMPPaymentData {
     pub parent_payment_hash: Hash256,
     pub total_amp_count: u16,
@@ -4245,4 +4245,6 @@ pub struct HoldTlc {
     pub channel_id: Hash256,
     pub tlc_id: u64,
     pub hold_expire_at: u64,
+    pub attempt_hash: Option<Hash256>,
+    pub atomic_info: Option<AMPPaymentData>,
 }

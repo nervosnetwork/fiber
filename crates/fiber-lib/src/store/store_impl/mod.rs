@@ -207,6 +207,8 @@ impl Store {
             channel_id: channel_id.into(),
             tlc_id,
             hold_expire_at: expired_at,
+            attempt_hash: None,
+            atomic_info: None,
         };
 
         (payment_hash.into(), hold_tlc)
