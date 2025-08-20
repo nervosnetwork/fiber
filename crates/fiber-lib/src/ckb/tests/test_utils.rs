@@ -498,6 +498,9 @@ impl Actor for MockChainActor {
             AddFundingTx(_) | RemoveFundingTx(_) | CommitFundingTx(..) => {
                 // ignore
             }
+            GetShutdownTx(.., reply) => {
+                let _ = reply.send(Ok(None));
+            }
             Sign(tx, reply_port) => {
                 // We don't need to sign the funding transaction in mock chain actor,
                 // as any funding transaction is considered correct if we can successfully

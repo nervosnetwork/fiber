@@ -1,4 +1,5 @@
 use ckb_hash::blake2b_256;
+use ckb_types::core::tx_pool::TxStatus;
 use ckb_types::core::{EpochNumberWithFraction, TransactionView};
 use ckb_types::packed::{Byte32, OutPoint, Script, Transaction};
 use ckb_types::prelude::{IntoTransactionView, Pack, Unpack};
@@ -69,7 +70,10 @@ use super::{
 };
 use crate::ckb::config::UdtCfgInfos;
 use crate::ckb::contracts::{check_udt_script, get_udt_whitelist, is_udt_type_auto_accept};
-use crate::ckb::{CkbChainMessage, FundingError, FundingRequest, FundingTx};
+use crate::ckb::{
+    CkbChainMessage, FundingError, FundingRequest, FundingTx, GetShutdownTxRequest,
+    GetShutdownTxResponse,
+};
 use crate::fiber::channel::{
     AddTlcCommand, AddTlcResponse, ChannelEphemeralConfig, ChannelInitializationOperation,
     ShutdownCommand, TxCollaborationCommand, TxUpdateCommand, DEFAULT_COMMITMENT_DELAY_EPOCHS,
@@ -286,6 +290,7 @@ pub enum NetworkActorCommand {
     },
     SignFundingTx(PeerId, Hash256, Transaction, Option<Vec<Vec<u8>>>),
     NotifyFundingTx(Transaction),
+    CheckChannelShutdown(Hash256),
     // Broadcast our BroadcastMessage to the network.
     BroadcastMessages(Vec<BroadcastMessageWithTimestamp>),
     // Broadcast local information to the network.
@@ -859,8 +864,8 @@ pub enum NetworkActorEvent {
     /// A funding transaction has failed.
     FundingTransactionFailed(OutPoint),
 
-    /// A closing transaction has been confirmed.
-    ClosingTransactionConfirmed(PeerId, Hash256, Byte32, bool),
+    /// A closing transaction has been confirmed (peer_id, channel_id, tx_hash, force, close_by_us).
+    ClosingTransactionConfirmed(PeerId, Hash256, Byte32, bool, bool),
 
     /// A closing transaction has failed (either because of invalid transaction or timeout)
     ClosingTransactionFailed(PeerId, Hash256, Byte32),
@@ -1187,9 +1192,21 @@ where
                     .on_closing_transaction_pending(channel_id, peer_id.clone(), tx.clone(), force)
                     .await;
             }
-            NetworkActorEvent::ClosingTransactionConfirmed(peer_id, channel_id, tx_hash, force) => {
+            NetworkActorEvent::ClosingTransactionConfirmed(
+                peer_id,
+                channel_id,
+                tx_hash,
+                force,
+                close_by_us,
+            ) => {
                 state
-                    .on_closing_transaction_confirmed(&peer_id, &channel_id, tx_hash, force)
+                    .on_closing_transaction_confirmed(
+                        &peer_id,
+                        &channel_id,
+                        tx_hash,
+                        force,
+                        close_by_us,
+                    )
                     .await;
             }
             NetworkActorEvent::ClosingTransactionFailed(peer_id, tx_hash, channel_id) => {
@@ -1425,6 +1442,13 @@ where
                 for (_peer_id, channel_id, channel_state) in self.store.get_channel_states(None) {
                     if matches!(channel_state, ChannelState::ChannelReady) {
                         if let Some(actor_state) = self.store.get_channel_actor_state(&channel_id) {
+                            // Check channel shutdown
+                            myself
+                                .send_message(NetworkActorMessage::Command(
+                                    NetworkActorCommand::CheckChannelShutdown(channel_id),
+                                ))
+                                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+
                             if actor_state.reestablishing {
                                 continue;
                             }
@@ -1576,12 +1600,12 @@ where
 
                 // Due to channel offline or network issues, remove hold tlc maybe failed,
                 // we retry timeout these tlcs.
-                let now = now_timestamp_as_millis_u64();
+                let current_time = now_timestamp_as_millis_u64();
                 for (payment_hash, hold_tlcs) in self.store.get_node_hold_tlcs() {
                     // timeout hold tlc
                     let already_timeout = hold_tlcs
                         .iter()
-                        .any(|hold_tlc| now >= hold_tlc.hold_expire_at);
+                        .any(|hold_tlc| current_time >= hold_tlc.hold_expire_at);
                     if already_timeout {
                         debug!("Timeout {payment_hash} hold tlcs {}", hold_tlcs.len());
                         for hold_tlc in hold_tlcs {
@@ -1597,6 +1621,9 @@ where
                         }
                     }
                 }
+
+                let used_ms = now_timestamp_as_millis_u64() - now;
+                tracing::debug!("CheckChannels complete after {used_ms}ms");
             }
             NetworkActorCommand::SettleMPPTlcSet(payment_hash) => {
                 // load hold tlcs
@@ -1973,6 +2000,9 @@ where
                     ))
                     .expect("network actor alive");
             }
+            NetworkActorCommand::CheckChannelShutdown(channel_id) => {
+                self.check_channel_shutdown(myself, channel_id).await;
+            }
             NetworkActorCommand::BroadcastMessages(message) => {
                 state
                     .gossip_actor
@@ -2092,6 +2122,72 @@ where
             }
         };
         Ok(())
+    }
+
+    async fn check_channel_shutdown(
+        &self,
+        myself: ActorRef<NetworkActorMessage>,
+        channel_id: Hash256,
+    ) {
+        let Some(state) = self.store.get_channel_actor_state(&channel_id) else {
+            tracing::debug!("stop check channel shutdown, can't find {channel_id:?} actor state");
+            return;
+        };
+        // stop check if channel closed
+        if matches!(state.state, ChannelState::Closed(..)) {
+            tracing::debug!("stop check channel shutdown, {channel_id:?} is closed");
+            return;
+        }
+        // check channel ready state
+        if state.state == ChannelState::ChannelReady {
+            // check shutdown transactions
+            let request = GetShutdownTxRequest {
+                funding_lock_script: state.get_funding_lock_script(),
+            };
+            match call!(self.chain_actor, |tx| CkbChainMessage::GetShutdownTx(
+                request, tx
+            ))
+            .expect(ASSUME_NETWORK_ACTOR_ALIVE)
+            {
+                Ok(Some(GetShutdownTxResponse {
+                    transaction: Some(tx),
+                    tx_status: TxStatus::Committed(..),
+                })) => {
+                    // we only check remote sent force close transaction here
+                    if tx.outputs().len() == 1 {
+                        if let Some(output) = tx.outputs().get(0) {
+                            // Check if channel is force closed by counter party
+                            let lock_args =
+                                &blake2b_256(state.get_commitment_lock_script_xonly(true))[0..20];
+                            if &output.lock().args().raw_data()[0..20] == lock_args {
+                                let channel_id = state.get_id();
+                                let peer_id = state.get_remote_peer_id();
+                                let tx_hash = tx.hash();
+                                tracing::debug!("channel {channel_id:?} is shutdown by remote");
+                                myself
+                                    .send_message(NetworkActorMessage::Event(
+                                        NetworkActorEvent::ClosingTransactionConfirmed(
+                                            peer_id, channel_id, tx_hash, true, false,
+                                        ),
+                                    ))
+                                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                            }
+                        }
+                    }
+                }
+                Ok(_) => {
+                    // no shutdown tx
+                }
+                Err(err) => {
+                    warn!(
+                        "Error during get channel shutdown tx {} from peer {:?} {:?}",
+                        state.get_id(),
+                        state.get_remote_peer_id(),
+                        err
+                    );
+                }
+            }
+        }
     }
 
     async fn handle_send_onion_packet_command(
@@ -3897,11 +3993,16 @@ where
         channel_id: &Hash256,
         tx_hash: Byte32,
         force: bool,
+        close_by_us: bool,
     ) {
         self.send_message_to_channel_actor(
             *channel_id,
             None,
-            ChannelActorMessage::Event(ChannelEvent::ClosingTransactionConfirmed(force)),
+            ChannelActorMessage::Event(ChannelEvent::ClosingTransactionConfirmed(
+                tx_hash.unpack(),
+                force,
+                close_by_us,
+            )),
         )
         .await;
         if let Some(session) = self.get_peer_session(peer_id) {

@@ -4870,6 +4870,47 @@ async fn test_shutdown_channel_network_graph_with_sync_up() {
 }
 
 #[tokio::test]
+async fn test_shutdown_channel_and_shutdown_transaction_hash() {
+    let node_a_funding_amount = 100000000000;
+    let node_b_funding_amount = 6200000000;
+
+    let (node_a, node_b, channel_id) =
+        create_nodes_with_established_channel(node_a_funding_amount, node_b_funding_amount, true)
+            .await;
+
+    let message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id,
+                command: ChannelCommand::Shutdown(
+                    ShutdownCommand {
+                        close_script: Some(Script::new_builder().args([0u8; 19].pack()).build()),
+                        fee_rate: Some(FeeRate::from_u64(DEFAULT_COMMITMENT_FEE_RATE)),
+                        force: false,
+                    },
+                    rpc_reply,
+                ),
+            },
+        ))
+    };
+
+    call!(node_b.network_actor, message)
+        .expect("node_b alive")
+        .expect("successfully shutdown channel");
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
+
+    let channel_state_a = node_a.get_channel_actor_state(channel_id);
+    assert!(channel_state_a.shutdown_transaction_hash.is_some());
+
+    let channel_state_b = node_b.get_channel_actor_state(channel_id);
+    assert_eq!(
+        channel_state_a.shutdown_transaction_hash,
+        channel_state_b.shutdown_transaction_hash
+    );
+}
+
+#[tokio::test]
 async fn test_send_payment_with_channel_balance_error() {
     init_tracing();
 

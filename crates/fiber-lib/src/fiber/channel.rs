@@ -2229,25 +2229,31 @@ where
                 }
                 myself.stop(None);
             }
-            ChannelEvent::ClosingTransactionConfirmed(force) => {
+            ChannelEvent::ClosingTransactionConfirmed(tx_hash, force, close_by_us) => {
                 match state.state {
                     ChannelState::ShuttingDown(flags)
                         if flags.contains(ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION) => {}
+                    ChannelState::ChannelReady if force && !close_by_us => {}
                     _ => {
                         return Err(ProcessingChannelError::InvalidState(format!(
-                            "Expecting commitment transaction confirmed event in state ShuttingDown, but got state {:?}", &state.state)
+                            "Expecting commitment transaction confirmed event in unexpected state {:?} force {force} close_by_us {close_by_us}", &state.state)
                         ));
                     }
                 };
 
                 let closed_state = if force {
                     debug!("Channel closed with uncooperative close");
-                    ChannelState::Closed(CloseFlags::UNCOOPERATIVE)
+                    if close_by_us {
+                        ChannelState::Closed(CloseFlags::UNCOOPERATIVE_LOCAL)
+                    } else {
+                        ChannelState::Closed(CloseFlags::UNCOOPERATIVE_REMOTE)
+                    }
                 } else {
                     debug!("Channel closed with cooperative close");
                     ChannelState::Closed(CloseFlags::COOPERATIVE)
                 };
                 state.update_state(closed_state);
+                state.shutdown_transaction_hash.replace(tx_hash);
                 // Broadcast the channel update message which disables the channel.
                 if state.is_public() {
                     let update = state.generate_disabled_channel_update().await;
@@ -3656,6 +3662,10 @@ pub struct ChannelActorState {
     pub local_shutdown_info: Option<ShutdownInfo>,
     pub remote_shutdown_info: Option<ShutdownInfo>,
 
+    // Transaction hash of the shutdown transaction
+    // The shutdown transaction can be COOPERATIVE or UNCOOPERATIVE
+    pub shutdown_transaction_hash: Option<H256>,
+
     // A flag to indicate whether the channel is reestablishing,
     // we won't process any messages until the channel is reestablished.
     pub reestablishing: bool,
@@ -3778,7 +3788,8 @@ pub enum StopReason {
 pub enum ChannelEvent {
     Stop(StopReason),
     FundingTransactionConfirmed(H256, u32, u64),
-    ClosingTransactionConfirmed(bool),
+    // (tx_hash, force, close_by_us)
+    ClosingTransactionConfirmed(H256, bool, bool),
     RunRetryTask(RetryableTlcOperation),
     CheckActiveChannel,
     CheckFundingTimeout,
@@ -3942,12 +3953,14 @@ bitflags! {
     pub struct CloseFlags: u32 {
         /// Indicates that channel is closed cooperatively.
         const COOPERATIVE = 1;
-        /// Indicates that channel is closed uncooperatively, initiated by one party forcibly.
-        const UNCOOPERATIVE = 1 << 1;
+        /// Indicates that channel is closed uncooperatively, initiated by local forcibly.
+        const UNCOOPERATIVE_LOCAL = 1 << 1;
         /// Indicates that channel is abandoned.
         const ABANDONED = 1 << 2;
         /// Channel is closed because of aborted funding.
         const FUNDING_ABORTED = 1 << 3;
+        /// Indicates that channel is closed uncooperatively, initiated by remote forcibly.
+        const UNCOOPERATIVE_REMOTE = 1 << 4;
     }
 }
 
@@ -4566,6 +4579,7 @@ impl ChannelActorState {
             ],
             local_shutdown_info: None,
             remote_shutdown_info: None,
+            shutdown_transaction_hash: None,
             local_reserved_ckb_amount,
             remote_reserved_ckb_amount,
             local_constraints: ChannelConstraints::new(
@@ -4651,6 +4665,7 @@ impl ChannelActorState {
             remote_shutdown_script: None,
             local_shutdown_info: None,
             remote_shutdown_info: None,
+            shutdown_transaction_hash: None,
             local_reserved_ckb_amount,
             remote_reserved_ckb_amount: 0,
             latest_commitment_transaction: None,
@@ -7558,7 +7573,7 @@ impl ChannelActorState {
         }
     }
 
-    fn get_commitment_lock_script_xonly(&self, for_remote: bool) -> [u8; 32] {
+    pub(crate) fn get_commitment_lock_script_xonly(&self, for_remote: bool) -> [u8; 32] {
         let local_pubkey = self.get_local_channel_public_keys().funding_pubkey;
         let remote_pubkey = self.get_remote_channel_public_keys().funding_pubkey;
         let pubkeys = if for_remote {

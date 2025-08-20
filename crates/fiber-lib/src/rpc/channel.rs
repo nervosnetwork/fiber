@@ -271,6 +271,8 @@ pub struct Channel {
     /// the channel configuration of B and C, not A and B.
     #[serde_as(as = "U128Hex")]
     pub tlc_fee_proportional_millionths: u128,
+    /// The hash of the shutdown transaction
+    pub shutdown_transaction_hash: Option<H256>,
 }
 
 #[serde_as]
@@ -521,6 +523,7 @@ where
                         tlc_fee_proportional_millionths: state
                             .local_tlc_info
                             .tlc_fee_proportional_millionths,
+                        shutdown_transaction_hash: state.shutdown_transaction_hash,
                     })
             })
             .collect();

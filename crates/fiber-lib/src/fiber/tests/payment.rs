@@ -3922,7 +3922,7 @@ async fn test_send_payment_shutdown_with_force() {
             let channel_actor_state = node_3.get_channel_actor_state(channels[2]);
             assert_eq!(
                 channel_actor_state.state,
-                ChannelState::Closed(CloseFlags::UNCOOPERATIVE)
+                ChannelState::Closed(CloseFlags::UNCOOPERATIVE_LOCAL)
             );
         }
     }
@@ -3980,7 +3980,7 @@ async fn test_send_payment_shutdown_channel_actor_may_already_stopped() {
         let channel_actor_state = nodes[i].get_channel_actor_state(channels[i]);
         assert_eq!(
             channel_actor_state.state,
-            ChannelState::Closed(CloseFlags::UNCOOPERATIVE)
+            ChannelState::Closed(CloseFlags::UNCOOPERATIVE_LOCAL)
         );
     }
 

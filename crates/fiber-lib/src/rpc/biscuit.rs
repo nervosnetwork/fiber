@@ -89,6 +89,7 @@ fn build_rules() -> HashMap<&'static str, AuthRule> {
     b.rule("commitment_signed", r#"allow if write("messages");"#);
     b.rule("add_tlc", r#"allow if write("channels");"#);
     b.rule("remove_tlc", r#"allow if write("channels");"#);
+    b.rule("check_channel_shutdown", r#"allow if write("channels");"#);
     b.rule(
         "submit_commitment_transaction",
         r#"allow if write("chain");"#,
