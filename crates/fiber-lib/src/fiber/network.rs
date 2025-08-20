@@ -1442,6 +1442,13 @@ where
                 for (_peer_id, channel_id, channel_state) in self.store.get_channel_states(None) {
                     if matches!(channel_state, ChannelState::ChannelReady) {
                         if let Some(actor_state) = self.store.get_channel_actor_state(&channel_id) {
+                            // Check channel shutdown
+                            myself
+                                .send_message(NetworkActorMessage::Command(
+                                    NetworkActorCommand::CheckChannelShutdown(channel_id),
+                                ))
+                                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+
                             if actor_state.reestablishing {
                                 continue;
                             }
@@ -1593,12 +1600,12 @@ where
 
                 // Due to channel offline or network issues, remove hold tlc maybe failed,
                 // we retry timeout these tlcs.
-                let now = now_timestamp_as_millis_u64();
+                let current_time = now_timestamp_as_millis_u64();
                 for (payment_hash, hold_tlcs) in self.store.get_node_hold_tlcs() {
                     // timeout hold tlc
                     let already_timeout = hold_tlcs
                         .iter()
-                        .any(|hold_tlc| now >= hold_tlc.hold_expire_at);
+                        .any(|hold_tlc| current_time >= hold_tlc.hold_expire_at);
                     if already_timeout {
                         debug!("Timeout {payment_hash} hold tlcs {}", hold_tlcs.len());
                         for hold_tlc in hold_tlcs {
@@ -1614,6 +1621,9 @@ where
                         }
                     }
                 }
+
+                let used_ms = now_timestamp_as_millis_u64() - now;
+                tracing::debug!("CheckChannels complete after {used_ms}ms");
             }
             NetworkActorCommand::SettleMPPTlcSet(payment_hash) => {
                 // load hold tlcs
@@ -2129,7 +2139,7 @@ where
             return;
         }
         // check channel ready state
-        if !state.reestablishing && state.state == ChannelState::ChannelReady {
+        if state.state == ChannelState::ChannelReady {
             // check shutdown transactions
             let request = GetShutdownTxRequest {
                 funding_lock_script: state.get_funding_lock_script(),
