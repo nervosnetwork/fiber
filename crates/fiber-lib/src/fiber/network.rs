@@ -1214,8 +1214,10 @@ where
                 );
                 state.remove_in_flight_tx(tx_hash);
             }
-            NetworkActorEvent::TlcRemoveReceived(payment_hash, attempt_id, remove_tlc_reason) => {
+            NetworkActorEvent::TlcRemoveReceived(attempt_hash, attempt_id, remove_tlc_reason) => {
                 // When a node is restarted, RemoveTLC will also be resent if necessary
+                let payment_hash =
+                    self.get_payment_hash_from_attempt_hash(attempt_hash, attempt_id);
                 self.on_remove_tlc_event(
                     myself.clone(),
                     state,
@@ -1243,7 +1245,9 @@ where
                     .resume_payment_session(myself, state, payment_hash, attempt_id)
                     .await;
             }
-            NetworkActorEvent::AddTlcResult(payment_hash, attempt_id, error_info, previous_tlc) => {
+            NetworkActorEvent::AddTlcResult(attempt_hash, attempt_id, error_info, previous_tlc) => {
+                let payment_hash =
+                    self.get_payment_hash_from_attempt_hash(attempt_hash, attempt_id);
                 self.on_add_tlc_result_event(
                     myself,
                     state,
@@ -1277,6 +1281,20 @@ where
             }
         }
         Ok(())
+    }
+
+    pub fn get_payment_hash_from_attempt_hash(
+        &self,
+        attempt_hash: Hash256,
+        attempt_id: Option<u64>,
+    ) -> Hash256 {
+        if let Some(attempt_id) = attempt_id {
+            self.store
+                .get_payment_hash_with_attempt_hash(attempt_hash, attempt_id)
+                .unwrap_or(attempt_hash)
+        } else {
+            attempt_hash
+        }
     }
 
     pub async fn handle_command(
@@ -2547,8 +2565,8 @@ where
             Ok(packet) => packet,
             Err(e) => {
                 let err = format!(
-                    "Failed to create onion packet: {:?}, error: {:?}",
-                    attempt.hash, e
+                    "Failed to create onion packet for attempt_hash: {:?} with payment_hash: {:?}, error: {:?}",
+                    attempt.hash, attempt.payment_hash, e
                 );
                 self.set_attempt_fail_with_error(session, attempt, &err, false);
                 return Err(Error::SendPaymentFirstHopError(err, false));
@@ -2561,7 +2579,7 @@ where
                 SendOnionPacketCommand {
                     peeled_onion_packet,
                     previous_tlc: None,
-                    payment_hash: attempt.payment_hash,
+                    payment_hash: attempt.hash,
                     attempt_id: Some(attempt.id),
                 },
             )

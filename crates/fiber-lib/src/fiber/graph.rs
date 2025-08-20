@@ -2009,4 +2009,9 @@ pub trait NetworkGraphStateStore {
     fn get_attempts(&self, payment_hash: Hash256) -> Vec<Attempt>;
     fn delete_attempts(&self, payment_hash: Hash256);
     fn get_attempts_with_statuses(&self, status: &[AttemptStatus]) -> Vec<Attempt>;
+    fn get_payment_hash_with_attempt_hash(
+        &self,
+        attempt_hash: Hash256,
+        attempt_id: u64,
+    ) -> Option<Hash256>;
 }

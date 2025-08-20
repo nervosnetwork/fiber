@@ -235,6 +235,7 @@ pub enum KeyValue {
     PaymentCustomRecord(Hash256, PaymentCustomRecords),
     NetworkActorState(PeerId, PersistentNetworkActorState),
     Attempt((Hash256, u64), Attempt),
+    AttemptToPaymentHash((Hash256, u64), Hash256),
     HoldTlc((Hash256, Hash256, u64), u64),
 }
 
@@ -269,6 +270,12 @@ impl StoreKeyValue for KeyValue {
             KeyValue::Attempt((payment_hash, attempt_id), _) => [
                 &[ATTEMPT_PREFIX],
                 payment_hash.as_ref(),
+                &attempt_id.to_le_bytes(),
+            ]
+            .concat(),
+            KeyValue::AttemptToPaymentHash((attempt_hash, attempt_id), _) => [
+                &[ATTEMPT_HASH_PREFIX],
+                attempt_hash.as_ref(),
                 &attempt_id.to_le_bytes(),
             ]
             .concat(),
@@ -336,6 +343,9 @@ impl StoreKeyValue for KeyValue {
                 serialize_to_vec(payment_session, "PaymentSession")
             }
             KeyValue::Attempt(_, attempt) => serialize_to_vec(attempt, "Attempt"),
+            KeyValue::AttemptToPaymentHash(_, payment_hash) => {
+                serialize_to_vec(payment_hash, "Hash256")
+            }
             #[cfg(feature = "watchtower")]
             KeyValue::WatchtowerChannel(_, _, channel_data) => {
                 serialize_to_vec(channel_data, "ChannelData")
@@ -624,6 +634,10 @@ impl NetworkGraphStateStore for Store {
     fn insert_attempt(&self, attempt: Attempt) {
         assert_ne!(attempt.id, 0, "Attempt ID should not be zero");
         let mut batch = self.batch();
+        batch.put_kv(KeyValue::AttemptToPaymentHash(
+            (attempt.hash, attempt.id),
+            attempt.payment_hash,
+        ));
         batch.put_kv(KeyValue::Attempt(
             (attempt.payment_hash, attempt.id),
             attempt,
@@ -638,11 +652,35 @@ impl NetworkGraphStateStore for Store {
             .collect()
     }
 
+    fn get_payment_hash_with_attempt_hash(
+        &self,
+        attempt_hash: Hash256,
+        attempt_id: u64,
+    ) -> Option<Hash256> {
+        let key = [
+            &[ATTEMPT_HASH_PREFIX],
+            attempt_hash.as_ref(),
+            &attempt_id.to_le_bytes(),
+        ]
+        .concat();
+        self.get(key)
+            .map(|v| deserialize_from(v.as_ref(), "Hash256"))
+    }
+
     fn delete_attempts(&self, payment_hash: Hash256) {
         let prefix = [&[ATTEMPT_PREFIX], payment_hash.as_ref()].concat();
         let mut batch = self.batch();
-        for (key, _) in self.prefix_iterator(&prefix) {
+        let mut attempt_to_payments = vec![];
+        for (key, value) in self.prefix_iterator(&prefix) {
+            let attempt: Attempt = deserialize_from(value.as_ref(), "Attempt");
+            attempt_to_payments.push(KeyValue::AttemptToPaymentHash(
+                (attempt.hash, attempt.id),
+                attempt.payment_hash,
+            ));
             batch.delete(key);
+        }
+        for attempt_hash in attempt_to_payments {
+            batch.delete(attempt_hash.key());
         }
         batch.commit();
     }

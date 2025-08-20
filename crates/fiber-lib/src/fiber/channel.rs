@@ -1096,6 +1096,7 @@ where
                     }
                 }
                 (None, Some(_record)) => {
+                    // TODO: try to extrace AMP information from custom_records here
                     error!("invoice not found for MPP payment: {:?}", payment_hash);
                     return Err(ProcessingChannelError::FinalIncorrectMPPInfo(
                         "invoice not found".to_string(),
