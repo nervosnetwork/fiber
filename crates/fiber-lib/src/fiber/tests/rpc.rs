@@ -432,7 +432,7 @@ async fn test_rpc_shutdown_channels() {
     eprintln!("Channel status: {:?}", status);
     assert!(matches!(
         status,
-        ChannelState::Closed(CloseFlags::UNCOOPERATIVE)
+        ChannelState::Closed(CloseFlags::UNCOOPERATIVE_LOCAL)
     ));
 }
 

@@ -367,24 +367,6 @@ pub struct FiberConfig {
     #[default(DEFAULT_FUNDING_TIMEOUT_SECONDS)]
     pub funding_timeout_seconds: u64,
 
-    /// Use an external shell command to build funding tx.
-    ///
-    /// The command is executed by `cmd /C` in Windows, and by `sh -c` in other systems.
-    ///
-    /// The command receives a JSON object from stdin with following keys:
-    /// - `tx`: The current `Transaction`. This can be `null` for the first funding request.
-    /// - `request`: The `FundingRequest` to fulfil.
-    ///
-    /// The command MUST use non-zero exit status to indicate failures and print error message to stderr.
-    /// It MUST print Transaction in JSON to stdout on success building.
-    #[arg(
-        name = "FIBER_FUNDING_TX_SHELL_BUILDER",
-        long = "fiber-funding-tx-shell-builder",
-        env,
-        help = "Use an external shell command to build funding tx. [default: None]"
-    )]
-    pub funding_tx_shell_builder: Option<String>,
-
     /// Listen to WebSocket on the same TCP port
     #[arg(
         name = "FIBER_REUSE_PORT_FOR_WEBSOCKET",

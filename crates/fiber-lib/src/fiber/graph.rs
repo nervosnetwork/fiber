@@ -925,7 +925,15 @@ where
                 ) => {
                     let mut channel_info = ChannelInfo::from((timestamp, channel_announcement));
                     self.load_channel_updates_from_store(&mut channel_info);
-                    Some(channel_info)
+
+                    // assuming channel is closed if disabled from the both side
+                    let is_closed = channel_info.update_of_node1.is_some_and(|u| !u.enabled)
+                        && channel_info.update_of_node2.is_some_and(|u| !u.enabled);
+                    if !is_closed {
+                        Some(channel_info)
+                    } else {
+                        None
+                    }
                 }
                 _ => None,
             })

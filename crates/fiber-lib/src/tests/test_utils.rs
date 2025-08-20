@@ -351,6 +351,8 @@ impl NetworkNodeConfigBuilder {
                 rpc_url: "http://localhost:8114".to_string(),
                 tx_tracing_polling_interval_ms: 4000,
                 udt_whitelist: None,
+                #[cfg(not(target_arch = "wasm32"))]
+                funding_tx_shell_builder: None,
                 #[cfg(target_arch = "wasm32")]
                 wasm_secret_key: None,
             })
@@ -876,7 +878,7 @@ impl NetworkNode {
         use crate::fiber::NetworkActorEvent::ClosingTransactionConfirmed;
 
         let tx_hash = TransactionBuilder::default().build().hash();
-        let event = ClosingTransactionConfirmed(peer_id, channel_id, tx_hash, force);
+        let event = ClosingTransactionConfirmed(peer_id, channel_id, tx_hash, force, true);
         self.network_actor
             .send_message(NetworkActorMessage::Event(event))
             .expect("network actor alive");

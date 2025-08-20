@@ -3,13 +3,40 @@ set -euo pipefail
 export SHELLOPTS
 export RUST_BACKTRACE=full RUST_LOG=info,fnn=debug,fnn::cch::actor::tracker=off,fnn::fiber::gossip=off,fnn::fiber::graph=off
 
-should_remove_old_state="${REMOVE_OLD_STATE:-}"
-should_clean_fiber_state="${REMOVE_OLD_FIBER:-}"
-should_start_bootnode="${START_BOOTNODE:-}"
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
 nodes_dir="$(dirname "$script_dir")/nodes"
 deploy_dir="$(dirname "$script_dir")/deploy"
 bruno_dir="$(dirname "$script_dir")/bruno/environments"
+
+testcase_name="${1:-}"
+testcase_dir="$(dirname "$script_dir")/bruno/${testcase_name}"
+start_node_ids=()
+if ! [ -d "$testcase_dir" ]; then
+  echo "usage: ${BASH_SOURCE[0]} TESTCASE" >&2
+  echo "$testcase_dir is not a testcase directory"
+  exit 1
+fi
+
+case "$testcase_name" in
+  "e2e/cross-chain-hub")
+    ./tests/deploy/lnd-init/setup-lnd.sh
+    ;;
+  "e2e/router-pay")
+    export START_BOOTNODE=y
+    ;;
+  "e2e/funding-tx-verification")
+    cd ./tests/funding-tx-builder/ && cargo build --locked && cd -
+    export FIBER_FUNDING_TX_SHELL_BUILDER="$(dirname "$script_dir")/funding-tx-builder/target/debug/funding-tx-builder ${EXTRA_BRU_ARGS:-}"
+    echo "FIBER_FUNDING_TX_SHELL_BUILDER=\"$FIBER_FUNDING_TX_SHELL_BUILDER\""
+    ;;
+  "unit")
+    start_node_ids=(3)
+    ;;
+esac
+
+should_remove_old_state="${REMOVE_OLD_STATE:-}"
+should_clean_fiber_state="${REMOVE_OLD_FIBER:-}"
+should_start_bootnode="${START_BOOTNODE:-}"
 
 # The following environment variables are used in the contract tests.
 # We may load all contracts within the following folder to the test environment.
@@ -43,7 +70,7 @@ start() {
     ../../target/debug/fnn "$@" 2>&1 | tee "$log_file"
 }
 
-if [ "$#" -ne 1 ]; then
+if [ "${#start_node_ids[@]}" = 0 ]; then
     if [[ -n "$should_start_bootnode" ]]; then
         FIBER_SECRET_KEY_PASSWORD='password0' LOG_PREFIX=$'[boot node]' start -d bootnode &
         # sleep some time to ensure bootnode started
@@ -56,7 +83,7 @@ if [ "$#" -ne 1 ]; then
     FIBER_SECRET_KEY_PASSWORD='password2' LOG_PREFIX=$'[node 2]' start -d 2 &
     FIBER_SECRET_KEY_PASSWORD='password3' LOG_PREFIX=$'[node 3]' start -d 3 &
 else
-    for id in "$@"; do
+    for id in "${start_node_ids[@]}"; do
         FIBER_SECRET_KEY_PASSWORD="password$id" LOG_PREFIX="[$id]"$'' start -d "$id" &
     done
 fi

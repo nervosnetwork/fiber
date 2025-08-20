@@ -1,4 +1,5 @@
 use ckb_hash::blake2b_256;
+use ckb_types::core::tx_pool::TxStatus;
 use ckb_types::core::{EpochNumberWithFraction, TransactionView};
 use ckb_types::packed::{Byte32, OutPoint, Script, Transaction};
 use ckb_types::prelude::{IntoTransactionView, Pack, Unpack};
@@ -69,7 +70,10 @@ use super::{
 };
 use crate::ckb::config::UdtCfgInfos;
 use crate::ckb::contracts::{check_udt_script, get_udt_whitelist, is_udt_type_auto_accept};
-use crate::ckb::{CkbChainMessage, FundingError, FundingRequest, FundingTx};
+use crate::ckb::{
+    CkbChainMessage, FundingError, FundingRequest, FundingTx, GetShutdownTxRequest,
+    GetShutdownTxResponse,
+};
 use crate::fiber::amp::{reconstruct_children, ChildDesc, Share};
 use crate::fiber::channel::{
     AddTlcCommand, AddTlcResponse, ChannelEphemeralConfig, ChannelInitializationOperation,
@@ -287,6 +291,7 @@ pub enum NetworkActorCommand {
     },
     SignFundingTx(PeerId, Hash256, Transaction, Option<Vec<Vec<u8>>>),
     NotifyFundingTx(Transaction),
+    CheckChannelShutdown(Hash256),
     // Broadcast our BroadcastMessage to the network.
     BroadcastMessages(Vec<BroadcastMessageWithTimestamp>),
     // Broadcast local information to the network.
@@ -874,8 +879,8 @@ pub enum NetworkActorEvent {
     /// A funding transaction has failed.
     FundingTransactionFailed(OutPoint),
 
-    /// A closing transaction has been confirmed.
-    ClosingTransactionConfirmed(PeerId, Hash256, Byte32, bool),
+    /// A closing transaction has been confirmed (peer_id, channel_id, tx_hash, force, close_by_us).
+    ClosingTransactionConfirmed(PeerId, Hash256, Byte32, bool, bool),
 
     /// A closing transaction has failed (either because of invalid transaction or timeout)
     ClosingTransactionFailed(PeerId, Hash256, Byte32),
@@ -1202,9 +1207,21 @@ where
                     .on_closing_transaction_pending(channel_id, peer_id.clone(), tx.clone(), force)
                     .await;
             }
-            NetworkActorEvent::ClosingTransactionConfirmed(peer_id, channel_id, tx_hash, force) => {
+            NetworkActorEvent::ClosingTransactionConfirmed(
+                peer_id,
+                channel_id,
+                tx_hash,
+                force,
+                close_by_us,
+            ) => {
                 state
-                    .on_closing_transaction_confirmed(&peer_id, &channel_id, tx_hash, force)
+                    .on_closing_transaction_confirmed(
+                        &peer_id,
+                        &channel_id,
+                        tx_hash,
+                        force,
+                        close_by_us,
+                    )
                     .await;
             }
             NetworkActorEvent::ClosingTransactionFailed(peer_id, tx_hash, channel_id) => {
@@ -1458,6 +1475,13 @@ where
                 for (_peer_id, channel_id, channel_state) in self.store.get_channel_states(None) {
                     if matches!(channel_state, ChannelState::ChannelReady) {
                         if let Some(actor_state) = self.store.get_channel_actor_state(&channel_id) {
+                            // Check channel shutdown
+                            myself
+                                .send_message(NetworkActorMessage::Command(
+                                    NetworkActorCommand::CheckChannelShutdown(channel_id),
+                                ))
+                                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+
                             if actor_state.reestablishing {
                                 continue;
                             }
@@ -1609,12 +1633,12 @@ where
 
                 // Due to channel offline or network issues, remove hold tlc maybe failed,
                 // we retry timeout these tlcs.
-                let now = now_timestamp_as_millis_u64();
+                let current_time = now_timestamp_as_millis_u64();
                 for (payment_hash, hold_tlcs) in self.store.get_node_hold_tlcs() {
                     // timeout hold tlc
                     let already_timeout = hold_tlcs
                         .iter()
-                        .any(|hold_tlc| now >= hold_tlc.hold_expire_at);
+                        .any(|hold_tlc| current_time >= hold_tlc.hold_expire_at);
                     if already_timeout {
                         debug!("Timeout {payment_hash} hold tlcs {}", hold_tlcs.len());
                         for hold_tlc in hold_tlcs {
@@ -1630,6 +1654,9 @@ where
                         }
                     }
                 }
+
+                let used_ms = now_timestamp_as_millis_u64() - now;
+                tracing::debug!("CheckChannels complete after {used_ms}ms");
             }
             NetworkActorCommand::SettleMPPTlcSet(payment_hash) => {
                 // load hold tlcs
@@ -1845,7 +1872,7 @@ where
                 let old_tx = transaction.into_view();
                 let mut tx = FundingTx::new();
                 tx.update_for_self(old_tx);
-                let tx = match self.fund(state, tx, request).await {
+                let tx = match self.fund(tx, request).await {
                     Ok(tx) => match tx.into_inner() {
                         Some(tx) => tx,
                         _ => {
@@ -2006,6 +2033,9 @@ where
                     ))
                     .expect("network actor alive");
             }
+            NetworkActorCommand::CheckChannelShutdown(channel_id) => {
+                self.check_channel_shutdown(myself, channel_id).await;
+            }
             NetworkActorCommand::BroadcastMessages(message) => {
                 state
                     .gossip_actor
@@ -2125,6 +2155,72 @@ where
             }
         };
         Ok(())
+    }
+
+    async fn check_channel_shutdown(
+        &self,
+        myself: ActorRef<NetworkActorMessage>,
+        channel_id: Hash256,
+    ) {
+        let Some(state) = self.store.get_channel_actor_state(&channel_id) else {
+            tracing::debug!("stop check channel shutdown, can't find {channel_id:?} actor state");
+            return;
+        };
+        // stop check if channel closed
+        if matches!(state.state, ChannelState::Closed(..)) {
+            tracing::debug!("stop check channel shutdown, {channel_id:?} is closed");
+            return;
+        }
+        // check channel ready state
+        if state.state == ChannelState::ChannelReady {
+            // check shutdown transactions
+            let request = GetShutdownTxRequest {
+                funding_lock_script: state.get_funding_lock_script(),
+            };
+            match call!(self.chain_actor, |tx| CkbChainMessage::GetShutdownTx(
+                request, tx
+            ))
+            .expect(ASSUME_NETWORK_ACTOR_ALIVE)
+            {
+                Ok(Some(GetShutdownTxResponse {
+                    transaction: Some(tx),
+                    tx_status: TxStatus::Committed(..),
+                })) => {
+                    // we only check remote sent force close transaction here
+                    if tx.outputs().len() == 1 {
+                        if let Some(output) = tx.outputs().get(0) {
+                            // Check if channel is force closed by counter party
+                            let lock_args =
+                                &blake2b_256(state.get_commitment_lock_script_xonly(true))[0..20];
+                            if &output.lock().args().raw_data()[0..20] == lock_args {
+                                let channel_id = state.get_id();
+                                let peer_id = state.get_remote_peer_id();
+                                let tx_hash = tx.hash();
+                                tracing::debug!("channel {channel_id:?} is shutdown by remote");
+                                myself
+                                    .send_message(NetworkActorMessage::Event(
+                                        NetworkActorEvent::ClosingTransactionConfirmed(
+                                            peer_id, channel_id, tx_hash, true, false,
+                                        ),
+                                    ))
+                                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                            }
+                        }
+                    }
+                }
+                Ok(_) => {
+                    // no shutdown tx
+                }
+                Err(err) => {
+                    warn!(
+                        "Error during get channel shutdown tx {} from peer {:?} {:?}",
+                        state.get_id(),
+                        state.get_remote_peer_id(),
+                        err
+                    );
+                }
+            }
+        }
     }
 
     async fn handle_send_onion_packet_command(
@@ -3010,20 +3106,16 @@ where
 
     async fn fund(
         &self,
-        state: &NetworkActorState<S>,
         tx: FundingTx,
         request: FundingRequest,
     ) -> Result<FundingTx, FundingError> {
-        match &state.funding_tx_shell_builder {
-            None => call_t!(
-                self.chain_actor.clone(),
-                CkbChainMessage::Fund,
-                DEFAULT_CHAIN_ACTOR_TIMEOUT,
-                tx,
-                request
-            )?,
-            Some(shell_script) => fund_via_shell(shell_script.clone(), tx, request).await,
-        }
+        call_t!(
+            self.chain_actor.clone(),
+            CkbChainMessage::Fund,
+            DEFAULT_CHAIN_ACTOR_TIMEOUT,
+            tx,
+            request
+        )?
     }
 }
 
@@ -3082,7 +3174,6 @@ pub struct NetworkActorState<S> {
     // the payment router map, only used for avoiding finding the same payment router multiple times
     payment_router_map: HashMap<(Hash256, u64), Vec<PaymentHopData>>,
     channel_ephemeral_config: ChannelEphemeralConfig,
-    funding_tx_shell_builder: Option<String>,
 
     // the number of pending retrying send payments, we track it for
     // set retry delay dynamically, pending too many payments may have a negative impact
@@ -3985,11 +4076,16 @@ where
         channel_id: &Hash256,
         tx_hash: Byte32,
         force: bool,
+        close_by_us: bool,
     ) {
         self.send_message_to_channel_actor(
             *channel_id,
             None,
-            ChannelActorMessage::Event(ChannelEvent::ClosingTransactionConfirmed(force)),
+            ChannelActorMessage::Event(ChannelEvent::ClosingTransactionConfirmed(
+                tx_hash.unpack(),
+                force,
+                close_by_us,
+            )),
         )
         .await;
         if let Some(session) = self.get_peer_session(peer_id) {
@@ -4500,7 +4596,6 @@ where
                 funding_timeout_seconds: config.funding_timeout_seconds,
             },
             retry_send_payment_count: 0,
-            funding_tx_shell_builder: config.funding_tx_shell_builder.clone(),
         };
 
         let node_announcement = state.get_or_create_new_node_announcement_message();
@@ -4906,66 +5001,4 @@ impl ToBeAcceptedChannels {
         self.map.insert(id, (peer_id, open_channel));
         Ok(())
     }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-async fn fund_via_shell(
-    shell_script: String,
-    mut tx: FundingTx,
-    request: FundingRequest,
-) -> Result<FundingTx, FundingError> {
-    use std::process::Stdio;
-    use tokio::{io::AsyncWriteExt, process::Command};
-    let (executable, arg) = if cfg!(target_os = "windows") {
-        ("cmd", "/C")
-    } else {
-        ("sh", "-c")
-    };
-    let mut child = Command::new(executable)
-        .arg(arg)
-        .arg(shell_script)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
-
-    let mut stdin = child.stdin.take().expect("failed to get stdin");
-    stdin.write_all(b"{\"tx\":").await?;
-    match tx.take() {
-        Some(tx) => {
-            let tx: ckb_jsonrpc_types::Transaction = tx.data().into();
-            let tx_json = serde_json::to_string(&tx)?;
-            stdin.write_all(tx_json.as_bytes()).await?;
-        }
-        None => {
-            stdin.write_all(b"null").await?;
-        }
-    }
-    stdin.write_all(b",\"request\":").await?;
-    let request_json = serde_json::to_string(&request)?;
-    stdin.write_all(request_json.as_bytes()).await?;
-    stdin.write_all(b"}").await?;
-
-    let output = child.wait_with_output().await?;
-    if output.status.success() {
-        let out_tx_json = String::from_utf8(output.stdout)?;
-        let tx: ckb_jsonrpc_types::Transaction = serde_json::from_str(&out_tx_json)?;
-        let tx: Transaction = tx.into();
-        let tx: FundingTx = tx.into_view().into();
-        Ok(tx)
-    } else {
-        let err = String::from_utf8(output.stderr)?;
-        Err(FundingError::CkbTxBuilderError(
-            ckb_sdk::tx_builder::TxBuilderError::Other(anyhow::anyhow!(err)),
-        ))
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-async fn fund_via_shell(
-    _shell_script: String,
-    _tx: FundingTx,
-    _request: FundingRequest,
-) -> Result<FundingTx, FundingError> {
-    todo!();
 }
