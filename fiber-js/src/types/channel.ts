@@ -65,6 +65,7 @@ interface Channel {
     enabled: boolean;
     tlc_expiry_delta: HexString;
     tlc_fee_proportional_millionths: HexString;
+    shutdown_transaction_hash?: HexString;
 }
 
 interface ShutdownChannelParams {
