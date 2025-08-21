@@ -2690,16 +2690,7 @@ where
         payment_hash: Hash256,
     ) {
         let root = AmpSecret::random();
-
-        let mut final_secret = root;
-        let mut secrets = vec![];
-        for _i in 0..(attempts_routers.iter().len() - 1) {
-            let secret = AmpSecret::random();
-            final_secret = final_secret.xor(&secret);
-            secrets.push(secret);
-        }
-        secrets.push(final_secret);
-
+        let secrets = AmpSecret::gen_random_sequence(root, attempts_routers.len() as u16);
         let hash_algorithm = attempts_routers[0].1.first().unwrap().hash_algorithm;
         let total_count = attempts_routers.len() as u16;
         let amp_payment_data: Vec<AMPPaymentData> = secrets

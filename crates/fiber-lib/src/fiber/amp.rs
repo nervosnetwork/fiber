@@ -53,6 +53,18 @@ impl AmpSecret {
     pub fn to_bytes(self) -> [u8; 32] {
         self.0
     }
+
+    /// generate a random AmpSecret sequence
+    pub fn gen_random_sequence(root: AmpSecret, n: u16) -> Vec<AmpSecret> {
+        let mut shares: Vec<AmpSecret> = (0..n - 1).map(|_| AmpSecret::random()).collect();
+
+        let mut final_secret = root;
+        for share in &shares {
+            final_secret.xor_assign(share);
+        }
+        shares.push(final_secret);
+        shares
+    }
 }
 
 impl From<[u8; 32]> for AmpSecret {

@@ -831,17 +831,7 @@ fn test_reconstruct_single_child() {
 #[test]
 fn test_reconstruct_n_children() {
     let root = AmpSecret::random();
-    let n = 100;
-    let mut shares: Vec<AmpSecret> = (0..n - 1).map(|_| AmpSecret::random()).collect();
-    let final_share = {
-        let mut final_share = root;
-        for share in &shares {
-            final_share.xor_assign(share);
-        }
-        final_share
-    };
-    shares.push(final_share);
-
+    let shares = AmpSecret::gen_random_sequence(root, 100);
     let descs: Vec<AMPPaymentData> = shares
         .iter()
         .enumerate()
@@ -857,6 +847,16 @@ fn test_reconstruct_n_children() {
     for (i, desc) in descs.iter().enumerate() {
         let expected_child = derive_child(root, desc.clone(), HashAlgorithm::Sha256);
         assert_eq!(children[i], expected_child);
+    }
+
+    // if we only reconstruct the first 10 children, they should not be the same
+    let first_10_children = &descs[0..10];
+    let children = construct_amp_children(&first_10_children, HashAlgorithm::Sha256);
+
+    // the derived child is not equal to expected child
+    for (i, desc) in first_10_children.iter().enumerate() {
+        let expected_child = derive_child(root, desc.clone(), HashAlgorithm::Sha256);
+        assert_ne!(children[i], expected_child);
     }
 }
 
