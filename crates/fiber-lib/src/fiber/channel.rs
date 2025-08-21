@@ -10,7 +10,7 @@ use crate::fiber::fee::{check_open_channel_parameters, check_tlc_delta_with_epoc
 use crate::fiber::network::DebugEvent;
 use crate::fiber::network::PaymentCustomRecords;
 use crate::fiber::payment::MppMode;
-use crate::fiber::types::AMPPaymentData;
+use crate::fiber::types::AmpPaymentData;
 use crate::{debug_event, fiber::types::TxAbort, utils::tx::compute_tx_message};
 #[cfg(test)]
 use musig2::BinaryEncoding;
@@ -8028,12 +8028,12 @@ pub trait ChannelActorStateStore {
         payment_hash: Hash256,
         channel_id: Hash256,
         tlc_id: u64,
-        payment_data: AMPPaymentData,
+        payment_data: AmpPaymentData,
     );
     fn get_atomic_mpp_payment_data(
         &self,
         payment_hash: &Hash256,
-    ) -> Vec<((Hash256, u64), AMPPaymentData)>;
+    ) -> Vec<((Hash256, u64), AmpPaymentData)>;
 }
 
 /// A wrapper on CommitmentTransaction that has a partial signature along with

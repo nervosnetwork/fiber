@@ -1,6 +1,6 @@
 use crate::fiber::{
     hash_algorithm::HashAlgorithm,
-    types::{AMPPaymentData, Hash256},
+    types::{AmpPaymentData, Hash256},
 };
 use bitcoin::hashes::{sha256::Hash as Sha256, Hash as _};
 use rand::RngCore;
@@ -95,52 +95,52 @@ impl AmpChild {
     pub fn new(preimage: Hash256, hash: Hash256) -> Self {
         Self { preimage, hash }
     }
-}
 
-/// DeriveChild computes the child preimage and child hash for a given (root, share, index) tuple.
-/// The derivation is defined as:
-///   child_preimage = SHA256(root || share || be16(index))
-///   child_hash = SHA256(child_preimage)
-pub fn derive_child(
-    root: AmpSecret,
-    data: AMPPaymentData,
-    hash_algorithm: HashAlgorithm,
-) -> AmpChild {
-    let index_bytes = data.index.to_be_bytes();
+    /// DeriveChild computes the child preimage and child hash for a given (root, share, index) tuple.
+    /// The derivation is defined as:
+    ///   child_preimage = SHA256(root || share || be16(index))
+    ///   child_hash = SHA256(child_preimage)
+    pub fn derive_child(
+        root: AmpSecret,
+        data: AmpPaymentData,
+        hash_algorithm: HashAlgorithm,
+    ) -> AmpChild {
+        let index_bytes = data.index.to_be_bytes();
 
-    // Compute child_preimage as SHA256(root || share || child_index)
-    let mut preimage_data = Vec::with_capacity(32 + 32 + 2);
-    preimage_data.extend_from_slice(root.as_bytes());
-    preimage_data.extend_from_slice(data.secret.as_bytes());
-    preimage_data.extend_from_slice(&index_bytes);
+        // Compute child_preimage as SHA256(root || share || child_index)
+        let mut preimage_data = Vec::with_capacity(32 + 32 + 2);
+        preimage_data.extend_from_slice(root.as_bytes());
+        preimage_data.extend_from_slice(data.secret.as_bytes());
+        preimage_data.extend_from_slice(&index_bytes);
 
-    let preimage_hash = Sha256::hash(&preimage_data);
-    let preimage: Hash256 = preimage_hash.to_byte_array().into();
+        let preimage_hash = Sha256::hash(&preimage_data);
+        let preimage: Hash256 = preimage_hash.to_byte_array().into();
 
-    // this is the payment hash for HTLC
-    let hash: Hash256 = hash_algorithm.hash(preimage.as_ref()).into();
-    AmpChild::new(preimage, hash)
-}
-
-/// ReconstructChildren derives the set of children hashes and preimages from the
-/// provided descriptors.
-pub fn construct_amp_children(
-    payment_data_vec: &[AMPPaymentData],
-    hash_algorithm: HashAlgorithm,
-) -> Vec<AmpChild> {
-    if payment_data_vec.is_empty() {
-        return Vec::new();
+        // this is the payment hash for HTLC
+        let hash: Hash256 = hash_algorithm.hash(preimage.as_ref()).into();
+        AmpChild::new(preimage, hash)
     }
 
-    // Recompute the root by XORing the provided shares
-    let mut root = AmpSecret::zero();
-    for desc in payment_data_vec {
-        root.xor_assign(&desc.secret);
-    }
+    /// ReconstructChildren derives the set of children hashes and preimages from the
+    /// provided descriptors.
+    pub fn construct_amp_children(
+        payment_data_vec: &[AmpPaymentData],
+        hash_algorithm: HashAlgorithm,
+    ) -> Vec<AmpChild> {
+        if payment_data_vec.is_empty() {
+            return Vec::new();
+        }
 
-    // With the root computed, derive the child hashes and preimages
-    payment_data_vec
-        .iter()
-        .map(|data| derive_child(root, data.clone(), hash_algorithm))
-        .collect()
+        // Recompute the root by XORing the provided shares
+        let mut root = AmpSecret::zero();
+        for desc in payment_data_vec {
+            root.xor_assign(&desc.secret);
+        }
+
+        // With the root computed, derive the child hashes and preimages
+        payment_data_vec
+            .iter()
+            .map(|data| Self::derive_child(root, data.clone(), hash_algorithm))
+            .collect()
+    }
 }

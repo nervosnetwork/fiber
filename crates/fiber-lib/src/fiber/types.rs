@@ -3786,14 +3786,14 @@ impl BasicMppPaymentData {
 }
 
 #[derive(Clone, Eq, PartialEq, Debug, Serialize, Deserialize)]
-pub struct AMPPaymentData {
+pub struct AmpPaymentData {
     pub total_amp_count: u16,
     pub payment_hash: Hash256,
     pub index: u16,
     pub secret: AmpSecret,
 }
 
-impl AMPPaymentData {
+impl AmpPaymentData {
     pub const CUSTOM_RECORD_KEY: u32 = USER_CUSTOM_RECORDS_MAX_INDEX + 2;
 
     pub fn new(payment_hash: Hash256, index: u16, total_amp_count: u16, secret: AmpSecret) -> Self {
@@ -4020,11 +4020,11 @@ impl PeeledPaymentOnionPacket {
             .and_then(BasicMppPaymentData::read)
     }
 
-    pub fn atomic_mpp_custom_records(&self) -> Option<AMPPaymentData> {
+    pub fn atomic_mpp_custom_records(&self) -> Option<AmpPaymentData> {
         self.current
             .custom_records
             .as_ref()
-            .and_then(AMPPaymentData::read)
+            .and_then(AmpPaymentData::read)
     }
 }
 

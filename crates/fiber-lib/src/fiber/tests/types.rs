@@ -1,13 +1,13 @@
 use crate::{
     ckb::config::{UdtArgInfo, UdtCellDep, UdtCfgInfos, UdtDep, UdtScript},
     fiber::{
-        amp::{construct_amp_children, derive_child, AmpSecret},
+        amp::{AmpChild, AmpSecret},
         config::AnnouncedNodeName,
         features::FeatureVector,
         gen::{fiber as molecule_fiber, gossip},
         hash_algorithm::HashAlgorithm,
         types::{
-            pack_hop_data, secp256k1_instance, unpack_hop_data, AMPPaymentData, AddTlc,
+            pack_hop_data, secp256k1_instance, unpack_hop_data, AddTlc, AmpPaymentData,
             BasicMppPaymentData, BroadcastMessageID, Cursor, Hash256, NodeAnnouncement, NodeId,
             PaymentHopData, PeeledPaymentOnionPacket, Privkey, Pubkey, TlcErr, TlcErrPacket,
             TlcErrorCode, NO_SHARED_SECRET,
@@ -735,10 +735,10 @@ fn test_basic_mpp_custom_records() {
 fn test_amp_custom_records() {
     let mut payment_custom_records = PaymentCustomRecords::default();
     let parent_payment_hash = gen_rand_sha256_hash();
-    let amp_record = AMPPaymentData::new(parent_payment_hash, 0, 3, AmpSecret::random());
+    let amp_record = AmpPaymentData::new(parent_payment_hash, 0, 3, AmpSecret::random());
     amp_record.write(&mut payment_custom_records);
 
-    let new_amp_record = AMPPaymentData::read(&payment_custom_records).unwrap();
+    let new_amp_record = AmpPaymentData::read(&payment_custom_records).unwrap();
     assert_eq!(new_amp_record, amp_record);
 }
 
@@ -760,14 +760,14 @@ fn test_derive_child() {
     let root = AmpSecret::random();
     let share = AmpSecret::random();
 
-    let amp_data = AMPPaymentData::new(gen_rand_sha256_hash(), 4, 43, share);
-    let child = derive_child(root, amp_data.clone(), HashAlgorithm::Sha256);
+    let amp_data = AmpPaymentData::new(gen_rand_sha256_hash(), 4, 43, share);
+    let child = AmpChild::derive_child(root, amp_data.clone(), HashAlgorithm::Sha256);
 
     assert_ne!(child.preimage, Hash256::default());
     assert_ne!(child.hash, Hash256::default());
 
     // Deriving the same child should produce the same result
-    let child2 = derive_child(root, amp_data, HashAlgorithm::Sha256);
+    let child2 = AmpChild::derive_child(root, amp_data, HashAlgorithm::Sha256);
     assert_eq!(child, child2);
 }
 
@@ -777,14 +777,14 @@ fn test_different_indices_produce_different_children() {
     let share = AmpSecret::random();
     let rand_hash = gen_rand_sha256_hash();
 
-    let child1 = derive_child(
+    let child1 = AmpChild::derive_child(
         root,
-        AMPPaymentData::new(rand_hash, 0, 2, share),
+        AmpPaymentData::new(rand_hash, 0, 2, share),
         HashAlgorithm::Sha256,
     );
-    let child2 = derive_child(
+    let child2 = AmpChild::derive_child(
         root,
-        AMPPaymentData::new(rand_hash, 1, 2, share),
+        AmpPaymentData::new(rand_hash, 1, 2, share),
         HashAlgorithm::Sha256,
     );
 
@@ -798,16 +798,17 @@ fn test_reconstruct_children() {
     let share1 = AmpSecret::random();
     let share2 = root.xor(&share1); // share2 = root ^ share1
 
-    let desc1 = AMPPaymentData::new(gen_rand_sha256_hash(), 0, 2, share1);
-    let desc2 = AMPPaymentData::new(gen_rand_sha256_hash(), 1, 2, share2);
+    let desc1 = AmpPaymentData::new(gen_rand_sha256_hash(), 0, 2, share1);
+    let desc2 = AmpPaymentData::new(gen_rand_sha256_hash(), 1, 2, share2);
 
-    let children = construct_amp_children(&[desc1.clone(), desc2.clone()], HashAlgorithm::Sha256);
+    let children =
+        AmpChild::construct_amp_children(&[desc1.clone(), desc2.clone()], HashAlgorithm::Sha256);
 
     assert_eq!(children.len(), 2);
 
     // Verify that the children are correctly derived from the reconstructed root
-    let expected_child1 = derive_child(root, desc1, HashAlgorithm::Sha256);
-    let expected_child2 = derive_child(root, desc2, HashAlgorithm::Sha256);
+    let expected_child1 = AmpChild::derive_child(root, desc1, HashAlgorithm::Sha256);
+    let expected_child2 = AmpChild::derive_child(root, desc2, HashAlgorithm::Sha256);
 
     assert_eq!(children[0], expected_child1);
     assert_eq!(children[1], expected_child2);
@@ -817,14 +818,14 @@ fn test_reconstruct_children() {
 fn test_reconstruct_single_child() {
     let root = AmpSecret::random();
     let share = root;
-    let desc = AMPPaymentData::new(gen_rand_sha256_hash(), 0, 2, share);
+    let desc = AmpPaymentData::new(gen_rand_sha256_hash(), 0, 2, share);
 
-    let children = construct_amp_children(&[desc.clone()], HashAlgorithm::Sha256);
+    let children = AmpChild::construct_amp_children(&[desc.clone()], HashAlgorithm::Sha256);
 
     assert_eq!(children.len(), 1);
 
     // Verify that the child is correctly derived from the reconstructed root
-    let expected_child = derive_child(root, desc, HashAlgorithm::Sha256);
+    let expected_child = AmpChild::derive_child(root, desc, HashAlgorithm::Sha256);
     assert_eq!(children[0], expected_child);
 }
 
@@ -832,36 +833,36 @@ fn test_reconstruct_single_child() {
 fn test_reconstruct_n_children() {
     let root = AmpSecret::random();
     let shares = AmpSecret::gen_random_sequence(root, 100);
-    let descs: Vec<AMPPaymentData> = shares
+    let descs: Vec<AmpPaymentData> = shares
         .iter()
         .enumerate()
-        .map(|(i, &share)| AMPPaymentData::new(gen_rand_sha256_hash(), i as u16, 100, share))
+        .map(|(i, &share)| AmpPaymentData::new(gen_rand_sha256_hash(), i as u16, 100, share))
         .collect();
 
     // last hop will reconstruct children and derive them
-    let children = construct_amp_children(&descs.clone(), HashAlgorithm::Sha256);
+    let children = AmpChild::construct_amp_children(&descs.clone(), HashAlgorithm::Sha256);
 
     assert_eq!(children.len(), descs.len());
 
     // Verify that each child is correctly derived from the reconstructed root
     for (i, desc) in descs.iter().enumerate() {
-        let expected_child = derive_child(root, desc.clone(), HashAlgorithm::Sha256);
+        let expected_child = AmpChild::derive_child(root, desc.clone(), HashAlgorithm::Sha256);
         assert_eq!(children[i], expected_child);
     }
 
     // if we only reconstruct the first 10 children, they should not be the same
     let first_10_children = &descs[0..10];
-    let children = construct_amp_children(&first_10_children, HashAlgorithm::Sha256);
+    let children = AmpChild::construct_amp_children(first_10_children, HashAlgorithm::Sha256);
 
     // the derived child is not equal to expected child
     for (i, desc) in first_10_children.iter().enumerate() {
-        let expected_child = derive_child(root, desc.clone(), HashAlgorithm::Sha256);
+        let expected_child = AmpChild::derive_child(root, desc.clone(), HashAlgorithm::Sha256);
         assert_ne!(children[i], expected_child);
     }
 }
 
 #[test]
 fn test_reconstruct_empty_children() {
-    let children = construct_amp_children(&[], HashAlgorithm::Sha256);
+    let children = AmpChild::construct_amp_children(&[], HashAlgorithm::Sha256);
     assert!(children.is_empty());
 }

@@ -19,7 +19,7 @@ use super::db_migrate::DbMigrate;
 use super::schema::*;
 use crate::fiber::gossip::GossipMessageStore;
 use crate::fiber::payment::{Attempt, AttemptStatus, PaymentSession, PaymentStatus};
-use crate::fiber::types::{AMPPaymentData, HoldTlc, CURSOR_SIZE};
+use crate::fiber::types::{AmpPaymentData, HoldTlc, CURSOR_SIZE};
 use crate::{
     fiber::{
         channel::{ChannelActorState, ChannelActorStateStore, ChannelState},
@@ -236,7 +236,7 @@ pub enum KeyValue {
     Attempt((Hash256, u64), Attempt),
     AttemptToPaymentHash((Hash256, u64), Hash256),
     HoldTlc((Hash256, Hash256, u64), u64),
-    HoldTlcAtomicPaymentData((Hash256, Hash256, u64), AMPPaymentData),
+    HoldTlcAtomicPaymentData((Hash256, Hash256, u64), AmpPaymentData),
 }
 
 pub trait StoreKeyValue {
@@ -546,7 +546,7 @@ impl ChannelActorStateStore for Store {
         payment_hash: Hash256,
         channel_id: Hash256,
         tlc_id: u64,
-        payment_data: AMPPaymentData,
+        payment_data: AmpPaymentData,
     ) {
         let mut batch = self.batch();
         batch.put_kv(KeyValue::HoldTlcAtomicPaymentData(
@@ -559,7 +559,7 @@ impl ChannelActorStateStore for Store {
     fn get_atomic_mpp_payment_data(
         &self,
         payment_hash: &Hash256,
-    ) -> Vec<((Hash256, u64), AMPPaymentData)> {
+    ) -> Vec<((Hash256, u64), AmpPaymentData)> {
         let prefix = [
             &[HOLD_TLC_ATOMIC_PAYMENT_DATA_PREFIX],
             payment_hash.as_ref(),
@@ -572,7 +572,7 @@ impl ChannelActorStateStore for Store {
                     .expect("channel_id should be 32 bytes");
                 let tlc_id: u64 =
                     u64::from_le_bytes(key[65..73].try_into().expect("tlc_id should be 8 bytes"));
-                let payment_data: AMPPaymentData =
+                let payment_data: AmpPaymentData =
                     deserialize_from(value.as_ref(), "AMPPaymentData");
                 ((channel_id.into(), tlc_id), payment_data)
             })
