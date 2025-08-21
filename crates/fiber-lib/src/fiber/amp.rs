@@ -1,4 +1,4 @@
-use crate::fiber::types::Hash256;
+use crate::fiber::{hash_algorithm::HashAlgorithm, types::Hash256};
 use bitcoin::hashes::{sha256::Hash as Sha256, Hash as _};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
@@ -81,15 +81,15 @@ pub struct ChildDesc {
     /// derivation of child hash and preimage.
     pub share: Share,
 
-    /// Index is 32-bit value that can be used to derive up to 2^32 child
+    /// Index is 16-bit value that can be used to derive up to 2^16 child
     /// hashes and preimages from a single Share. This allows the payment
     /// hashes sent over the network to be refreshed without needing to
     /// modify the Share.
-    pub index: u32,
+    pub index: u16,
 }
 
 impl ChildDesc {
-    pub fn new(share: Share, index: u32) -> Self {
+    pub fn new(share: Share, index: u16) -> Self {
         Self { share, index }
     }
 }
@@ -122,7 +122,7 @@ impl Child {
         self.desc.share
     }
 
-    pub fn index(&self) -> u32 {
+    pub fn index(&self) -> u16 {
         self.desc.index
     }
 }
@@ -142,14 +142,14 @@ impl fmt::Display for Child {
 
 /// DeriveChild computes the child preimage and child hash for a given (root, share, index) tuple.
 /// The derivation is defined as:
-///   child_preimage = SHA256(root || share || be32(index))
+///   child_preimage = SHA256(root || share || be16(index))
 ///   child_hash = SHA256(child_preimage)
-pub fn derive_child(root: Share, desc: ChildDesc) -> Child {
+pub fn derive_child(root: Share, desc: ChildDesc, hash_algorithm: HashAlgorithm) -> Child {
     // Serialize the child index in big-endian order
     let index_bytes = desc.index.to_be_bytes();
 
     // Compute child_preimage as SHA256(root || share || child_index)
-    let mut preimage_data = Vec::with_capacity(32 + 32 + 4);
+    let mut preimage_data = Vec::with_capacity(32 + 32 + 2);
     preimage_data.extend_from_slice(root.as_bytes());
     preimage_data.extend_from_slice(desc.share.as_bytes());
     preimage_data.extend_from_slice(&index_bytes);
@@ -158,15 +158,13 @@ pub fn derive_child(root: Share, desc: ChildDesc) -> Child {
     let preimage = Hash256::from(preimage_hash.to_byte_array());
 
     // Compute child_hash as SHA256(child_preimage)
-    let hash_hash = Sha256::hash(preimage.as_ref());
-    let hash = Hash256::from(hash_hash.to_byte_array());
-
+    let hash: Hash256 = hash_algorithm.hash(preimage.as_ref()).into();
     Child::new(desc, preimage, hash)
 }
 
 /// ReconstructChildren derives the set of children hashes and preimages from the
 /// provided descriptors.
-pub fn reconstruct_children(descs: &[ChildDesc]) -> Vec<Child> {
+pub fn reconstruct_children(descs: &[ChildDesc], hash_algorithm: HashAlgorithm) -> Vec<Child> {
     if descs.is_empty() {
         return Vec::new();
     }
@@ -178,149 +176,8 @@ pub fn reconstruct_children(descs: &[ChildDesc]) -> Vec<Child> {
     }
 
     // With the root computed, derive the child hashes and preimages
-    descs.iter().map(|&desc| derive_child(root, desc)).collect()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_share_xor() {
-        let share1 = Share::random();
-        let share2 = Share::random();
-        let result = share1.xor(&share2);
-
-        // XOR is commutative
-        assert_eq!(result, share2.xor(&share1));
-
-        // XOR with self should be zero
-        assert_eq!(share1.xor(&share1), Share::zero());
-    }
-
-    #[test]
-    fn test_derive_child() {
-        let root = Share::random();
-        let share = Share::random();
-        let index = 42;
-
-        let desc = ChildDesc::new(share, index);
-        let child = derive_child(root, desc);
-
-        assert_eq!(child.desc.share, share);
-        assert_eq!(child.desc.index, index);
-        assert_ne!(child.preimage, Hash256::default());
-        assert_ne!(child.hash, Hash256::default());
-
-        // Deriving the same child should produce the same result
-        let child2 = derive_child(root, desc);
-        assert_eq!(child, child2);
-    }
-
-    #[test]
-    fn test_different_indices_produce_different_children() {
-        let root = Share::random();
-        let share = Share::random();
-
-        let child1 = derive_child(root, ChildDesc::new(share, 1));
-        let child2 = derive_child(root, ChildDesc::new(share, 2));
-
-        assert_ne!(child1.preimage, child2.preimage);
-        assert_ne!(child1.hash, child2.hash);
-    }
-
-    #[test]
-    fn test_reconstruct_children() {
-        let root = Share::random();
-        let share1 = Share::random();
-        let share2 = root.xor(&share1); // share2 = root ^ share1
-
-        let desc1 = ChildDesc::new(share1, 1);
-        let desc2 = ChildDesc::new(share2, 2);
-
-        let children = reconstruct_children(&[desc1, desc2]);
-
-        assert_eq!(children.len(), 2);
-        assert_eq!(children[0].desc, desc1);
-        assert_eq!(children[1].desc, desc2);
-
-        // Verify that the children are correctly derived from the reconstructed root
-        let expected_child1 = derive_child(root, desc1);
-        let expected_child2 = derive_child(root, desc2);
-
-        assert_eq!(children[0], expected_child1);
-        assert_eq!(children[1], expected_child2);
-    }
-
-    #[test]
-    fn test_reconstruct_single_child() {
-        let root = Share::random();
-        let share = root;
-        let desc = ChildDesc::new(share, 1);
-
-        let children = reconstruct_children(&[desc]);
-
-        assert_eq!(children.len(), 1);
-        assert_eq!(children[0].desc, desc);
-
-        // Verify that the child is correctly derived from the reconstructed root
-        let expected_child = derive_child(root, desc);
-        assert_eq!(children[0], expected_child);
-    }
-
-    #[test]
-    fn test_reconstruct_n_children() {
-        let root = Share::random();
-        let n = 100;
-        let mut shares: Vec<Share> = (0..n - 1).map(|_| Share::random()).collect();
-        let final_share = {
-            let mut final_share = root;
-            for share in &shares {
-                final_share.xor_assign(share);
-            }
-            final_share
-        };
-        shares.push(final_share);
-
-        // onion packet will add ChildDesc
-        let descs: Vec<ChildDesc> = shares
-            .iter()
-            .enumerate()
-            .map(|(i, &share)| ChildDesc::new(share, i as u32))
-            .collect();
-
-        // last hop will reconstruct children and derive them
-        let children = reconstruct_children(&descs);
-
-        assert_eq!(children.len(), descs.len());
-        for (i, child) in children.iter().enumerate() {
-            assert_eq!(child.desc, descs[i]);
-        }
-
-        // Verify that each child is correctly derived from the reconstructed root
-        for (i, desc) in descs.iter().enumerate() {
-            let expected_child = derive_child(root, *desc);
-            assert_eq!(children[i], expected_child);
-        }
-    }
-
-    #[test]
-    fn test_reconstruct_empty_children() {
-        let children = reconstruct_children(&[]);
-        assert!(children.is_empty());
-    }
-
-    #[test]
-    fn test_child_display() {
-        let root = Share::random();
-        let share = Share::random();
-        let desc = ChildDesc::new(share, 123);
-        let child = derive_child(root, desc);
-
-        let display_str = child.to_string();
-        assert!(display_str.contains("share="));
-        assert!(display_str.contains("index=123"));
-        assert!(display_str.contains("preimage="));
-        assert!(display_str.contains("hash="));
-    }
+    descs
+        .iter()
+        .map(|&desc| derive_child(root, desc, hash_algorithm))
+        .collect()
 }

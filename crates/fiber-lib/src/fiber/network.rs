@@ -89,8 +89,9 @@ use crate::fiber::config::{
 use crate::fiber::fee::{check_open_channel_parameters, check_tlc_delta_with_epochs};
 use crate::fiber::gossip::{GossipConfig, GossipService, SubscribableGossipMessageStore};
 use crate::fiber::graph::GraphChannelStat;
-use crate::fiber::payment::SessionRoute;
+use crate::fiber::hash_algorithm::HashAlgorithm;
 use crate::fiber::payment::{Attempt, AttemptStatus, PaymentSession, PaymentStatus};
+use crate::fiber::payment::{MppMode, SessionRoute};
 use crate::fiber::serde_utils::EntityHex;
 use crate::fiber::types::{
     AMPPaymentData, FiberChannelMessage, PeeledPaymentOnionPacket, TlcErrPacket, TxSignatures,
@@ -643,7 +644,6 @@ impl SendPaymentData {
         }
 
         let hop_hints = command.hop_hints.unwrap_or_default();
-
         let basic_mpp = invoice.as_ref().is_some_and(|inv| inv.basic_mpp());
         let atomic_mpp = invoice.as_ref().is_some_and(|inv| inv.atomic_mpp());
         let is_mpp_payment = basic_mpp || atomic_mpp;
@@ -656,9 +656,7 @@ impl SendPaymentData {
         let payment_secret = invoice
             .as_ref()
             .and_then(|inv| inv.payment_secret().cloned());
-        if is_mpp_payment && payment_secret.is_none() {
-            return Err("payment secret is required for multi-path payment".to_string());
-        }
+
         if is_mpp_payment
             && command
                 .max_parts
@@ -693,8 +691,13 @@ impl SendPaymentData {
         }
 
         let mut custom_records = command.custom_records;
-        // bolt04 write payment data record to custom records if payment secret is set
-        if let Some(payment_secret) = payment_secret {
+        if basic_mpp {
+            let Some(payment_secret) = payment_secret else {
+                // if basic mpp, payment secret is required
+                return Err("payment secret is required for multi-path payment".to_string());
+            };
+
+            // bolt04 write payment data record to custom records if payment secret is set
             let records = custom_records.get_or_insert_with(PaymentCustomRecords::default);
             BasicMppPaymentData::new(payment_secret, amount).write(records);
         }
@@ -1659,10 +1662,24 @@ where
                 tracing::debug!("CheckChannels complete after {used_ms}ms");
             }
             NetworkActorCommand::SettleMPPTlcSet(payment_hash) => {
+                let hold_tlcs = self.store.get_payment_hold_tlcs(payment_hash);
+                // check all hold tlcs mpp_mode is same
+                let mpp_modes: HashSet<_> =
+                    hold_tlcs.iter().map(|hold_tlc| hold_tlc.mpp_mode).collect();
+                if mpp_modes.len() > 1 {
+                    error!(
+                        "payment_hash {:?} have different mpp_mode, cannot settle",
+                        payment_hash
+                    );
+                    return Ok(());
+                }
+                let Some(mpp_mode) = mpp_modes.iter().next().cloned() else {
+                    error!("payment_hash {:?} have not hold tlcs", payment_hash);
+                    return Ok(());
+                };
+
                 // load hold tlcs
-                let tlcs: Vec<_> = self
-                    .store
-                    .get_payment_hold_tlcs(payment_hash)
+                let tlcs: Vec<_> = hold_tlcs
                     .iter()
                     .filter_map(|hold_tlc| {
                         let state = self.store.get_channel_actor_state(&hold_tlc.channel_id)?;
@@ -1672,6 +1689,7 @@ where
                     .collect();
 
                 let mut tlc_fail = None;
+                let mut hash_algorithm = HashAlgorithm::default();
 
                 // check if all tlcs have the same total amount
                 if tlcs.len() > 1
@@ -1694,11 +1712,45 @@ where
                     if !is_invoice_fulfilled(&invoice, &tlcs) {
                         return Ok(());
                     }
+                    hash_algorithm = invoice.hash_algorithm().cloned().unwrap_or(hash_algorithm);
                 }
-
-                let Some(preimage) = self.store.get_preimage(&payment_hash) else {
-                    return Ok(());
-                };
+                let mut tlc_preimages = HashMap::new();
+                match mpp_mode {
+                    MppMode::BasicMpp => {
+                        let Some(preimage) = self.store.get_preimage(&payment_hash) else {
+                            error!(
+                                "basic MPP can not get preimage for payment: {:?}",
+                                payment_hash
+                            );
+                            return Ok(());
+                        };
+                        for tlc in tlcs.iter() {
+                            tlc_preimages.insert((tlc.channel_id, tlc.id()), preimage);
+                        }
+                    }
+                    MppMode::AtomicMpp => {
+                        let mut atomic_mpp_data =
+                            self.store.get_atomic_mpp_payment_data(&payment_hash);
+                        if atomic_mpp_data.len() != tlcs.len() {
+                            error!(
+                                "atomic mpp don't have enough mpp data for payment_hash: {:?}",
+                                payment_hash
+                            );
+                        }
+                        atomic_mpp_data.sort_by(|a, b| a.1.index.cmp(&b.1.index));
+                        let child_descs: Vec<ChildDesc> = atomic_mpp_data
+                            .iter()
+                            .map(|(_, data)| ChildDesc::new(data.secret, data.index))
+                            .collect();
+                        let children = reconstruct_children(&child_descs, hash_algorithm);
+                        debug_assert_eq!(child_descs.len(), children.len());
+                        for (((channel_id, tlc_id), _), child) in
+                            atomic_mpp_data.iter().zip(children.iter())
+                        {
+                            tlc_preimages.insert((*channel_id, *tlc_id), child.preimage);
+                        }
+                    }
+                }
 
                 // remove tlcs
                 for tlc in tlcs {
@@ -1709,9 +1761,14 @@ where
                             tlc_fail,
                             &tlc.shared_secret,
                         )),
-                        None => RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
-                            payment_preimage: preimage,
-                        }),
+                        None => {
+                            let preimage = *tlc_preimages
+                                .get(&(tlc.channel_id, tlc.id()))
+                                .expect("must got preimage");
+                            RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+                                payment_preimage: preimage,
+                            })
+                        }
                     };
                     match state
                         .send_command_to_channel(
@@ -2602,6 +2659,7 @@ where
         payment_hash: Hash256,
     ) {
         let root = Share::random();
+
         let mut final_secret = root;
         let mut secrets = vec![];
         for _i in 0..(attempts_routers.iter().len() - 1) {
@@ -2611,14 +2669,14 @@ where
         }
         secrets.push(final_secret);
 
+        let hash_algorithm = attempts_routers[0].1.first().unwrap().hash_algorithm;
         let descs: Vec<ChildDesc> = secrets
             .iter()
             .enumerate()
-            .map(|(i, &share)| ChildDesc::new(share, i as u32))
+            .map(|(i, &share)| ChildDesc::new(share, i as u16))
             .collect();
 
-        let children = reconstruct_children(&descs);
-
+        let children = reconstruct_children(&descs, hash_algorithm);
         for (i, desc) in descs.iter().enumerate() {
             let (mut attempt, mut route) = attempts_routers[i].clone();
 

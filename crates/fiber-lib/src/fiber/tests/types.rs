@@ -1,7 +1,7 @@
 use crate::{
     ckb::config::{UdtArgInfo, UdtCellDep, UdtCfgInfos, UdtDep, UdtScript},
     fiber::{
-        amp::Share,
+        amp::{derive_child, reconstruct_children, ChildDesc, Share},
         config::AnnouncedNodeName,
         features::FeatureVector,
         gen::{fiber as molecule_fiber, gossip},
@@ -740,4 +740,143 @@ fn test_amp_custom_records() {
 
     let new_amp_record = AMPPaymentData::read(&payment_custom_records).unwrap();
     assert_eq!(new_amp_record, amp_record);
+}
+
+#[test]
+fn test_share_xor() {
+    let share1 = Share::random();
+    let share2 = Share::random();
+    let result = share1.xor(&share2);
+
+    // XOR is commutative
+    assert_eq!(result, share2.xor(&share1));
+
+    // XOR with self should be zero
+    assert_eq!(share1.xor(&share1), Share::zero());
+}
+
+#[test]
+fn test_derive_child() {
+    let root = Share::random();
+    let share = Share::random();
+    let index = 42;
+
+    let desc = ChildDesc::new(share, index);
+    let child = derive_child(root, desc, HashAlgorithm::Sha256);
+
+    assert_eq!(child.desc.share, share);
+    assert_eq!(child.desc.index, index);
+    assert_ne!(child.preimage, Hash256::default());
+    assert_ne!(child.hash, Hash256::default());
+
+    // Deriving the same child should produce the same result
+    let child2 = derive_child(root, desc, HashAlgorithm::Sha256);
+    assert_eq!(child, child2);
+}
+
+#[test]
+fn test_different_indices_produce_different_children() {
+    let root = Share::random();
+    let share = Share::random();
+
+    let child1 = derive_child(root, ChildDesc::new(share, 1), HashAlgorithm::Sha256);
+    let child2 = derive_child(root, ChildDesc::new(share, 2), HashAlgorithm::Sha256);
+
+    assert_ne!(child1.preimage, child2.preimage);
+    assert_ne!(child1.hash, child2.hash);
+}
+
+#[test]
+fn test_reconstruct_children() {
+    let root = Share::random();
+    let share1 = Share::random();
+    let share2 = root.xor(&share1); // share2 = root ^ share1
+
+    let desc1 = ChildDesc::new(share1, 1);
+    let desc2 = ChildDesc::new(share2, 2);
+
+    let children = reconstruct_children(&[desc1, desc2], HashAlgorithm::Sha256);
+
+    assert_eq!(children.len(), 2);
+    assert_eq!(children[0].desc, desc1);
+    assert_eq!(children[1].desc, desc2);
+
+    // Verify that the children are correctly derived from the reconstructed root
+    let expected_child1 = derive_child(root, desc1, HashAlgorithm::Sha256);
+    let expected_child2 = derive_child(root, desc2, HashAlgorithm::Sha256);
+
+    assert_eq!(children[0], expected_child1);
+    assert_eq!(children[1], expected_child2);
+}
+
+#[test]
+fn test_reconstruct_single_child() {
+    let root = Share::random();
+    let share = root;
+    let desc = ChildDesc::new(share, 1);
+
+    let children = reconstruct_children(&[desc], HashAlgorithm::Sha256);
+
+    assert_eq!(children.len(), 1);
+    assert_eq!(children[0].desc, desc);
+
+    // Verify that the child is correctly derived from the reconstructed root
+    let expected_child = derive_child(root, desc, HashAlgorithm::Sha256);
+    assert_eq!(children[0], expected_child);
+}
+
+#[test]
+fn test_reconstruct_n_children() {
+    let root = Share::random();
+    let n = 100;
+    let mut shares: Vec<Share> = (0..n - 1).map(|_| Share::random()).collect();
+    let final_share = {
+        let mut final_share = root;
+        for share in &shares {
+            final_share.xor_assign(share);
+        }
+        final_share
+    };
+    shares.push(final_share);
+
+    // onion packet will add ChildDesc
+    let descs: Vec<ChildDesc> = shares
+        .iter()
+        .enumerate()
+        .map(|(i, &share)| ChildDesc::new(share, i as u16))
+        .collect();
+
+    // last hop will reconstruct children and derive them
+    let children = reconstruct_children(&descs, HashAlgorithm::Sha256);
+
+    assert_eq!(children.len(), descs.len());
+    for (i, child) in children.iter().enumerate() {
+        assert_eq!(child.desc, descs[i]);
+    }
+
+    // Verify that each child is correctly derived from the reconstructed root
+    for (i, desc) in descs.iter().enumerate() {
+        let expected_child = derive_child(root, *desc, HashAlgorithm::Sha256);
+        assert_eq!(children[i], expected_child);
+    }
+}
+
+#[test]
+fn test_reconstruct_empty_children() {
+    let children = reconstruct_children(&[], HashAlgorithm::Sha256);
+    assert!(children.is_empty());
+}
+
+#[test]
+fn test_child_display() {
+    let root = Share::random();
+    let share = Share::random();
+    let desc = ChildDesc::new(share, 123);
+    let child = derive_child(root, desc, HashAlgorithm::Sha256);
+
+    let display_str = child.to_string();
+    assert!(display_str.contains("share="));
+    assert!(display_str.contains("index=123"));
+    assert!(display_str.contains("preimage="));
+    assert!(display_str.contains("hash="));
 }

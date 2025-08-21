@@ -782,18 +782,30 @@ impl NetworkNode {
         mode: MppMode,
     ) -> Result<SendPaymentResponse, String> {
         let target_pubkey = target_node.get_public_key();
-        let preimage = gen_rand_sha256_hash();
+
         let mut builder = InvoiceBuilder::new(Currency::Fibd)
             .amount(Some(amount))
-            .payment_preimage(preimage)
-            .payee_pub_key(target_pubkey.into())
-            .payment_secret(gen_rand_sha256_hash());
-        match mode {
-            MppMode::BasicMpp => builder = builder.allow_mpp(true),
-            MppMode::AtomicMpp => builder = builder.allow_atomic_mpp(true),
-        }
+            .payee_pub_key(target_pubkey.into());
+        let preimage = match mode {
+            MppMode::BasicMpp => {
+                let preimage = gen_rand_sha256_hash();
+                builder = builder
+                    .allow_mpp(true)
+                    .payment_preimage(preimage)
+                    .payment_secret(gen_rand_sha256_hash());
+                Some(preimage)
+            }
+
+            MppMode::AtomicMpp => {
+                // use a random hash for atomic mpp
+                builder = builder
+                    .allow_atomic_mpp(true)
+                    .payment_hash(gen_rand_sha256_hash());
+                None
+            }
+        };
         let ckb_invoice = builder.build().expect("build invoice success");
-        target_node.insert_invoice(ckb_invoice.clone(), Some(preimage));
+        target_node.insert_invoice(ckb_invoice.clone(), preimage);
         let mut command = command.clone();
         command.invoice = Some(ckb_invoice.to_string());
 

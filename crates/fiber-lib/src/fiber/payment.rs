@@ -11,7 +11,7 @@ use ckb_types::packed::OutPoint;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub enum MppMode {
     BasicMpp,
     AtomicMpp,

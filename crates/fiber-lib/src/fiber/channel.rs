@@ -900,7 +900,11 @@ where
         let tlc_info = state.get_received_tlc(tlc_id).expect("expect tlc").clone();
 
         let preimage = self.store.get_preimage(&tlc_info.payment_hash);
-        let invoice = self.store.get_invoice(&tlc_info.payment_hash);
+        let parent_payment_hash = tlc_info
+            .parent_payment_hash
+            .unwrap_or(tlc_info.payment_hash);
+        let invoice = self.store.get_invoice(&parent_payment_hash);
+        let is_basic_mpp = invoice.as_ref().is_some_and(|inv| inv.basic_mpp());
         let is_atomic_mpp = invoice.as_ref().is_some_and(|inv| inv.atomic_mpp());
         if preimage.is_none() && !is_atomic_mpp {
             return;
@@ -934,27 +938,20 @@ where
                     error!("invoice already paid, ignore");
                     return;
                 }
-                _ if invoice.basic_mpp() => {
+                _ if is_basic_mpp || is_atomic_mpp => {
                     // add to pending settlement tlc set
                     // the tlc set will be settled by network actor
                     state.pending_notify_mpp_tcls.push((
-                        tlc.payment_hash,
+                        parent_payment_hash,
                         tlc.id(),
-                        MppMode::BasicMpp,
+                        if is_basic_mpp {
+                            MppMode::BasicMpp
+                        } else {
+                            MppMode::AtomicMpp
+                        },
                     ));
 
                     // just return, the tlc set will be settled by network actor
-                    return;
-                }
-                _ if is_atomic_mpp => {
-                    if let Some(parent_payment_hash) = tlc.parent_payment_hash {
-                        state.pending_notify_mpp_tcls.push((
-                            parent_payment_hash,
-                            tlc.id(),
-                            MppMode::AtomicMpp,
-                        ));
-                    }
-
                     return;
                 }
                 _ => {
@@ -8044,6 +8041,10 @@ pub trait ChannelActorStateStore {
         tlc_id: u64,
         payment_data: AMPPaymentData,
     );
+    fn get_atomic_mpp_payment_data(
+        &self,
+        payment_hash: &Hash256,
+    ) -> Vec<((Hash256, u64), AMPPaymentData)>;
 }
 
 /// A wrapper on CommitmentTransaction that has a partial signature along with

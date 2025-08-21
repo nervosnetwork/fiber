@@ -550,6 +550,29 @@ impl ChannelActorStateStore for Store {
         ));
         batch.commit();
     }
+
+    fn get_atomic_mpp_payment_data(
+        &self,
+        payment_hash: &Hash256,
+    ) -> Vec<((Hash256, u64), AMPPaymentData)> {
+        let prefix = [
+            &[HOLD_TLC_ATOMIC_PAYMENT_DATA_PREFIX],
+            payment_hash.as_ref(),
+        ]
+        .concat();
+        self.prefix_iterator(&prefix)
+            .map(|(key, value)| {
+                let channel_id: [u8; 32] = key[33..65]
+                    .try_into()
+                    .expect("channel_id should be 32 bytes");
+                let tlc_id: u64 =
+                    u64::from_le_bytes(key[65..73].try_into().expect("tlc_id should be 8 bytes"));
+                let payment_data: AMPPaymentData =
+                    deserialize_from(value.as_ref(), "AMPPaymentData");
+                ((channel_id.into(), tlc_id), payment_data)
+            })
+            .collect()
+    }
 }
 
 impl InvoiceStore for Store {

@@ -764,7 +764,7 @@ impl InvoiceBuilder {
     }
 
     fn check_attrs_valid(&self) -> Result<(), InvoiceError> {
-        let allow_mpp = self.attrs.iter().any(
+        let allow_basic_mpp = self.attrs.iter().any(
             |attr| matches!(attr, Attribute::Feature(feature) if feature.supports_basic_mpp()),
         );
         let allow_atomic_mpp = self.attrs.iter().any(
@@ -775,10 +775,10 @@ impl InvoiceBuilder {
             _ => None,
         });
 
-        if allow_mpp && payment_secret.is_none() {
+        if allow_basic_mpp && payment_secret.is_none() {
             return Err(InvoiceError::PaymentSecretRequiredForMpp);
         }
-        if allow_mpp && allow_atomic_mpp {
+        if allow_basic_mpp && allow_atomic_mpp {
             return Err(InvoiceError::BothBasicMPPAndAtomicMPP);
         }
         // check is there any duplicate attribute key set
