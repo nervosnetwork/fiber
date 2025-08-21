@@ -12,7 +12,7 @@ use super::r#gen::fiber::PubNonceOpt;
 use super::serde_utils::{EntityHex, PubNonceAsBytes, SliceBase58, SliceHex};
 use crate::ckb::config::{UdtArgInfo, UdtCellDep, UdtCfgInfos, UdtDep, UdtScript};
 use crate::ckb::contracts::get_udt_whitelist;
-use crate::fiber::amp::Share;
+use crate::fiber::amp::AmpSecret;
 use crate::fiber::network::USER_CUSTOM_RECORDS_MAX_INDEX;
 use ckb_jsonrpc_types::CellOutput;
 use ckb_types::H256;
@@ -3790,13 +3790,14 @@ pub struct AMPPaymentData {
     pub total_amp_count: u16,
     pub payment_hash: Hash256,
     pub index: u16,
-    pub secret: Share,
+    pub secret: AmpSecret,
 }
 
 impl AMPPaymentData {
     pub const CUSTOM_RECORD_KEY: u32 = USER_CUSTOM_RECORDS_MAX_INDEX + 2;
 
-    pub fn new(payment_hash: Hash256, index: u16, total_amp_count: u16, secret: Share) -> Self {
+    pub fn new(payment_hash: Hash256, index: u16, total_amp_count: u16, secret: AmpSecret) -> Self {
+        debug_assert!(index < total_amp_count);
         Self {
             payment_hash,
             total_amp_count,
@@ -3831,7 +3832,7 @@ impl AMPPaymentData {
                 let parent_hash: [u8; 32] = data[..32].try_into().unwrap();
                 let total_amp_count = u16::from_le_bytes(data[32..34].try_into().unwrap());
                 let index = u16::from_le_bytes(data[34..36].try_into().unwrap());
-                let secret = Share::new(data[36..68].try_into().unwrap());
+                let secret = AmpSecret::new(data[36..68].try_into().unwrap());
                 Some(Self::new(
                     Hash256::from(parent_hash),
                     index,

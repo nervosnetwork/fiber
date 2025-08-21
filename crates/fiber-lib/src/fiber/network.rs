@@ -74,7 +74,7 @@ use crate::ckb::{
     CkbChainMessage, FundingError, FundingRequest, FundingTx, GetShutdownTxRequest,
     GetShutdownTxResponse,
 };
-use crate::fiber::amp::{reconstruct_children, ChildDesc, Share};
+use crate::fiber::amp::{construct_amp_children, AmpSecret};
 use crate::fiber::channel::{
     AddTlcCommand, AddTlcResponse, ChannelEphemeralConfig, ChannelInitializationOperation,
     ShutdownCommand, TxCollaborationCommand, TxUpdateCommand, DEFAULT_COMMITMENT_DELAY_EPOCHS,
@@ -1765,12 +1765,12 @@ where
                                 break 'validation;
                             }
 
-                            let child_descs: Vec<ChildDesc> = atomic_mpp_data
+                            let payment_data: Vec<AMPPaymentData> = atomic_mpp_data
                                 .iter()
-                                .map(|(_, data)| ChildDesc::new(data.secret, data.index))
+                                .map(|(_, data)| data.clone())
                                 .collect();
-                            let children = reconstruct_children(&child_descs, hash_algorithm);
-                            debug_assert_eq!(child_descs.len(), children.len());
+                            let children = construct_amp_children(&payment_data, hash_algorithm);
+                            debug_assert_eq!(payment_data.len(), children.len());
 
                             for (((channel_id, tlc_id), _), child) in
                                 atomic_mpp_data.iter().zip(children.iter())
@@ -2689,31 +2689,30 @@ where
         attempts_routers: &mut [(Attempt, Vec<PaymentHopData>)],
         payment_hash: Hash256,
     ) {
-        let root = Share::random();
+        let root = AmpSecret::random();
 
         let mut final_secret = root;
         let mut secrets = vec![];
         for _i in 0..(attempts_routers.iter().len() - 1) {
-            let secret = Share::random();
+            let secret = AmpSecret::random();
             final_secret = final_secret.xor(&secret);
             secrets.push(secret);
         }
         secrets.push(final_secret);
 
         let hash_algorithm = attempts_routers[0].1.first().unwrap().hash_algorithm;
-        let descs: Vec<ChildDesc> = secrets
+        let total_count = attempts_routers.len() as u16;
+        let amp_payment_data: Vec<AMPPaymentData> = secrets
             .iter()
             .enumerate()
-            .map(|(i, &share)| ChildDesc::new(share, i as u16))
+            .map(|(i, &share)| AMPPaymentData::new(payment_hash, i as u16, total_count, share))
             .collect();
 
-        let children = reconstruct_children(&descs, hash_algorithm);
-        for (i, desc) in descs.iter().enumerate() {
+        let children = construct_amp_children(&amp_payment_data, hash_algorithm);
+        for (i, (amp_data, amp_child)) in amp_payment_data.iter().zip(children).enumerate() {
             let (mut attempt, mut route) = attempts_routers[i].clone();
 
             let route_len = route.len();
-            let mpp_payment_data =
-                AMPPaymentData::new(payment_hash, i as u16, children.len() as u16, desc.share);
             let mut custom_records = route
                 .last()
                 .expect("expect last hop data")
@@ -2721,9 +2720,9 @@ where
                 .clone()
                 .unwrap_or_default();
 
-            mpp_payment_data.write(&mut custom_records);
+            amp_data.write(&mut custom_records);
             route[route_len - 1].custom_records = Some(custom_records);
-            attempt.hash = children[i].hash;
+            attempt.hash = amp_child.hash;
             attempts_routers[i] = (attempt, route);
         }
         debug!("finished set custom records for amp_mpp");

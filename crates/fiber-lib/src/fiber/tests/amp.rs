@@ -38,3 +38,32 @@ async fn test_send_basic_amp() {
     assert_eq!(node_0_balance, 0);
     assert_eq!(node_1_balance, 10000000000);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_send_single_amp_path() {
+    init_tracing();
+
+    let (nodes, _channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+            ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+        ],
+        2,
+    )
+    .await;
+    let [node_0, mut node_1] = nodes.try_into().expect("2 nodes");
+    let res = node_0
+        .send_atomic_mpp_payment(&mut node_1, 10000000000, Some(2))
+        .await;
+
+    eprintln!("res: {:?}", res);
+    assert!(res.is_ok());
+    let payment_hash = res.unwrap().payment_hash;
+    eprintln!("begin to wait for payment: {} success ...", payment_hash);
+    node_0.wait_until_success(payment_hash).await;
+    let attempts = node_0
+        .get_payment_session(payment_hash)
+        .unwrap()
+        .attempts_count();
+    assert_eq!(attempts, 1);
+}
