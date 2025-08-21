@@ -1663,21 +1663,6 @@ where
             }
             NetworkActorCommand::SettleMPPTlcSet(payment_hash) => {
                 let hold_tlcs = self.store.get_payment_hold_tlcs(payment_hash);
-                // check all hold tlcs mpp_mode is same
-                let mpp_modes: HashSet<_> =
-                    hold_tlcs.iter().map(|hold_tlc| hold_tlc.mpp_mode).collect();
-                if mpp_modes.len() > 1 {
-                    error!(
-                        "payment_hash {:?} have different mpp_mode, cannot settle",
-                        payment_hash
-                    );
-                    return Ok(());
-                }
-                let Some(mpp_mode) = mpp_modes.iter().next().cloned() else {
-                    error!("payment_hash {:?} have not hold tlcs", payment_hash);
-                    return Ok(());
-                };
-
                 // load hold tlcs
                 let tlcs: Vec<_> = hold_tlcs
                     .iter()
@@ -1690,79 +1675,124 @@ where
 
                 let mut tlc_fail = None;
                 let mut hash_algorithm = HashAlgorithm::default();
+                let mut tlc_preimage_map = HashMap::new();
 
-                // check if all tlcs have the same total amount
-                if tlcs.len() > 1
-                    && !tlcs
-                        .windows(2)
-                        .all(|w| w[0].total_amount == w[1].total_amount)
-                {
-                    error!("TLCs have inconsistent total_amount: {:?}", tlcs);
-                    tlc_fail = Some(TlcErr::new(TlcErrorCode::IncorrectOrUnknownPaymentDetails));
-                } else {
+                // we generally set all validation error as IncorrectOrUnknownPaymentDetails, this failure
+                // is expected to be the scenarios malicious sender have sent a inconsistent data with MPP
+                'validation: {
+                    // check if all tlcs have the same total amount
+                    if tlcs.len() > 1
+                        && !tlcs
+                            .windows(2)
+                            .all(|w| w[0].total_amount == w[1].total_amount)
+                    {
+                        error!("TLCs have inconsistent total_amount: {:?}", tlcs);
+                        tlc_fail =
+                            Some(TlcErr::new(TlcErrorCode::IncorrectOrUnknownPaymentDetails));
+                        break 'validation;
+                    }
+
                     // check if tlc set are fulfilled
-                    let Some(invoice) = self.store.get_invoice(&payment_hash) else {
+                    let invoice = self.store.get_invoice(&payment_hash);
+                    let Some(invoice) = invoice else {
                         error!(
                             "Try to settle mpp tlc set, but invoice not found for payment hash {:?}",
                             payment_hash
                         );
-                        return Ok(());
+                        tlc_fail =
+                            Some(TlcErr::new(TlcErrorCode::IncorrectOrUnknownPaymentDetails));
+                        break 'validation;
                     };
-                    // just return if invoice is not fulfilled
+
+                    let Some(mpp_mode) = invoice.mpp_mode() else {
+                        error!("try to settle down mpp payment_hash: {:?} while the invoice does no support MPP", payment_hash);
+                        tlc_fail =
+                            Some(TlcErr::new(TlcErrorCode::IncorrectOrUnknownPaymentDetails));
+                        break 'validation;
+                    };
+
                     if !is_invoice_fulfilled(&invoice, &tlcs) {
                         return Ok(());
                     }
+
                     hash_algorithm = invoice.hash_algorithm().cloned().unwrap_or(hash_algorithm);
-                }
-                let mut tlc_preimages = HashMap::new();
-                match mpp_mode {
-                    MppMode::BasicMpp => {
-                        let Some(preimage) = self.store.get_preimage(&payment_hash) else {
-                            error!(
-                                "basic MPP can not get preimage for payment: {:?}",
-                                payment_hash
-                            );
-                            return Ok(());
-                        };
-                        for tlc in tlcs.iter() {
-                            tlc_preimages.insert((tlc.channel_id, tlc.id()), preimage);
+                    // Generate preimages based on MPP mode
+                    match mpp_mode {
+                        MppMode::BasicMpp => {
+                            let Some(preimage) = self.store.get_preimage(&payment_hash) else {
+                                error!(
+                                    "basic MPP can not get preimage for payment: {:?}",
+                                    payment_hash
+                                );
+                                tlc_fail = Some(TlcErr::new(
+                                    TlcErrorCode::IncorrectOrUnknownPaymentDetails,
+                                ));
+                                break 'validation;
+                            };
+
+                            for tlc in tlcs.iter() {
+                                tlc_preimage_map.insert((tlc.channel_id, tlc.id()), preimage);
+                            }
+                        }
+                        MppMode::AtomicMpp => {
+                            let mut atomic_mpp_data =
+                                self.store.get_atomic_mpp_payment_data(&payment_hash);
+
+                            if atomic_mpp_data.len() != tlcs.len() {
+                                error!(
+                                    "atomic mpp don't have enough mpp data for payment_hash: {:?}",
+                                    payment_hash
+                                );
+                                tlc_fail = Some(TlcErr::new(
+                                    TlcErrorCode::IncorrectOrUnknownPaymentDetails,
+                                ));
+                                break 'validation;
+                            }
+
+                            atomic_mpp_data.sort_by(|a, b| a.1.index.cmp(&b.1.index));
+                            let index: Vec<u16> =
+                                atomic_mpp_data.iter().map(|a| a.1.index).collect();
+                            let expected_index: Vec<u16> = (0..tlcs.len() as u16).collect();
+
+                            if index != expected_index {
+                                error!(
+                                    "atomic mpp index are not expected for payment_hash: {:?}",
+                                    payment_hash
+                                );
+                                tlc_fail = Some(TlcErr::new(
+                                    TlcErrorCode::IncorrectOrUnknownPaymentDetails,
+                                ));
+                                break 'validation;
+                            }
+
+                            let child_descs: Vec<ChildDesc> = atomic_mpp_data
+                                .iter()
+                                .map(|(_, data)| ChildDesc::new(data.secret, data.index))
+                                .collect();
+                            let children = reconstruct_children(&child_descs, hash_algorithm);
+                            debug_assert_eq!(child_descs.len(), children.len());
+
+                            for (((channel_id, tlc_id), _), child) in
+                                atomic_mpp_data.iter().zip(children.iter())
+                            {
+                                tlc_preimage_map.insert((*channel_id, *tlc_id), child.preimage);
+                            }
                         }
                     }
-                    MppMode::AtomicMpp => {
-                        let mut atomic_mpp_data =
-                            self.store.get_atomic_mpp_payment_data(&payment_hash);
-                        if atomic_mpp_data.len() != tlcs.len() {
-                            error!(
-                                "atomic mpp don't have enough mpp data for payment_hash: {:?}",
-                                payment_hash
-                            );
-                        }
-                        atomic_mpp_data.sort_by(|a, b| a.1.index.cmp(&b.1.index));
-                        let child_descs: Vec<ChildDesc> = atomic_mpp_data
-                            .iter()
-                            .map(|(_, data)| ChildDesc::new(data.secret, data.index))
-                            .collect();
-                        let children = reconstruct_children(&child_descs, hash_algorithm);
-                        debug_assert_eq!(child_descs.len(), children.len());
-                        for (((channel_id, tlc_id), _), child) in
-                            atomic_mpp_data.iter().zip(children.iter())
-                        {
-                            tlc_preimages.insert((*channel_id, *tlc_id), child.preimage);
-                        }
-                    }
-                }
+                } // end of 'validation block
 
                 // remove tlcs
                 for tlc in tlcs {
                     let (send, _recv) = oneshot::channel();
                     let rpc_reply = RpcReplyPort::from(send);
+
                     let remove_reason = match tlc_fail.clone() {
                         Some(tlc_fail) => RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
                             tlc_fail,
                             &tlc.shared_secret,
                         )),
                         None => {
-                            let preimage = *tlc_preimages
+                            let preimage = *tlc_preimage_map
                                 .get(&(tlc.channel_id, tlc.id()))
                                 .expect("must got preimage");
                             RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
@@ -1770,6 +1800,7 @@ where
                             })
                         }
                     };
+
                     match state
                         .send_command_to_channel(
                             tlc.channel_id,

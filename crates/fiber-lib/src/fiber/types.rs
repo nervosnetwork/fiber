@@ -14,7 +14,6 @@ use crate::ckb::config::{UdtArgInfo, UdtCellDep, UdtCfgInfos, UdtDep, UdtScript}
 use crate::ckb::contracts::get_udt_whitelist;
 use crate::fiber::amp::Share;
 use crate::fiber::network::USER_CUSTOM_RECORDS_MAX_INDEX;
-use crate::fiber::payment::MppMode;
 use ckb_jsonrpc_types::CellOutput;
 use ckb_types::H256;
 use num_enum::IntoPrimitive;
@@ -3789,7 +3788,7 @@ impl BasicMppPaymentData {
 #[derive(Clone, Eq, PartialEq, Debug, Serialize, Deserialize)]
 pub struct AMPPaymentData {
     pub total_amp_count: u16,
-    pub hash: Hash256,
+    pub payment_hash: Hash256,
     pub index: u16,
     pub secret: Share,
 }
@@ -3797,14 +3796,9 @@ pub struct AMPPaymentData {
 impl AMPPaymentData {
     pub const CUSTOM_RECORD_KEY: u32 = USER_CUSTOM_RECORDS_MAX_INDEX + 2;
 
-    pub fn new(
-        parent_payment_hash: Hash256,
-        index: u16,
-        total_amp_count: u16,
-        secret: Share,
-    ) -> Self {
+    pub fn new(payment_hash: Hash256, index: u16, total_amp_count: u16, secret: Share) -> Self {
         Self {
-            hash: parent_payment_hash,
+            payment_hash,
             total_amp_count,
             index,
             secret,
@@ -3813,7 +3807,7 @@ impl AMPPaymentData {
 
     fn to_vec(&self) -> Vec<u8> {
         let mut vec = Vec::new();
-        vec.extend_from_slice(self.hash.as_ref());
+        vec.extend_from_slice(self.payment_hash.as_ref());
         vec.extend_from_slice(&self.total_amp_count.to_le_bytes());
         vec.extend_from_slice(&self.index.to_le_bytes());
         vec.extend_from_slice(self.secret.as_bytes());
@@ -4253,5 +4247,4 @@ pub struct HoldTlc {
     pub channel_id: Hash256,
     pub tlc_id: u64,
     pub hold_expire_at: u64,
-    pub mpp_mode: MppMode,
 }

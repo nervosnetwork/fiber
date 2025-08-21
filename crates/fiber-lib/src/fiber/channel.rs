@@ -899,14 +899,13 @@ where
     ) {
         let tlc_info = state.get_received_tlc(tlc_id).expect("expect tlc").clone();
 
-        let preimage = self.store.get_preimage(&tlc_info.payment_hash);
         let parent_payment_hash = tlc_info
             .parent_payment_hash
             .unwrap_or(tlc_info.payment_hash);
         let invoice = self.store.get_invoice(&parent_payment_hash);
-        let is_basic_mpp = invoice.as_ref().is_some_and(|inv| inv.basic_mpp());
-        let is_atomic_mpp = invoice.as_ref().is_some_and(|inv| inv.atomic_mpp());
-        if preimage.is_none() && !is_atomic_mpp {
+        let mpp_mode = invoice.as_ref().and_then(|inv| inv.mpp_mode());
+        let preimage = self.store.get_preimage(&tlc_info.payment_hash);
+        if preimage.is_none() && !mpp_mode.is_some_and(|m| m == MppMode::AtomicMpp) {
             return;
         }
         let mut remove_reason = preimage.map(|preimage| {
@@ -915,7 +914,6 @@ where
             })
         });
 
-        let tlc = tlc_info.clone();
         if let Some(invoice) = invoice {
             let status = self.get_invoice_status(&invoice);
 
@@ -923,13 +921,13 @@ where
                 CkbInvoiceStatus::Expired => {
                     remove_reason = Some(RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
                         TlcErr::new(TlcErrorCode::InvoiceExpired),
-                        &tlc.shared_secret,
+                        &tlc_info.shared_secret,
                     )));
                 }
                 CkbInvoiceStatus::Cancelled => {
                     remove_reason = Some(RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
                         TlcErr::new(TlcErrorCode::InvoiceCancelled),
-                        &tlc.shared_secret,
+                        &tlc_info.shared_secret,
                     )));
                 }
                 CkbInvoiceStatus::Paid => {
@@ -938,28 +936,22 @@ where
                     error!("invoice already paid, ignore");
                     return;
                 }
-                _ if is_basic_mpp || is_atomic_mpp => {
+                _ if mpp_mode.is_some() => {
                     // add to pending settlement tlc set
                     // the tlc set will be settled by network actor
-                    state.pending_notify_mpp_tcls.push((
-                        parent_payment_hash,
-                        tlc.id(),
-                        if is_basic_mpp {
-                            MppMode::BasicMpp
-                        } else {
-                            MppMode::AtomicMpp
-                        },
-                    ));
+                    state
+                        .pending_notify_mpp_tcls
+                        .push((parent_payment_hash, tlc_info.id()));
 
                     // just return, the tlc set will be settled by network actor
                     return;
                 }
                 _ => {
                     // single path payment
-                    if !is_invoice_fulfilled(&invoice, std::slice::from_ref(&tlc)) {
+                    if !is_invoice_fulfilled(&invoice, std::slice::from_ref(&tlc_info)) {
                         remove_reason = Some(RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
                             TlcErr::new(TlcErrorCode::IncorrectOrUnknownPaymentDetails),
-                            &tlc.shared_secret,
+                            &tlc_info.shared_secret,
                         )));
                     }
                 }
@@ -967,7 +959,7 @@ where
         }
         // remove tlc
         if let Some(remove_reason) = remove_reason {
-            self.register_retryable_tlc_remove(myself, state, tlc.tlc_id, remove_reason)
+            self.register_retryable_tlc_remove(myself, state, tlc_info.tlc_id, remove_reason)
                 .await;
         }
     }
@@ -1066,7 +1058,7 @@ where
 
             let parent_payment_hash = atomic_mpp_payment_data
                 .as_ref()
-                .map(|a| a.hash)
+                .map(|a| a.payment_hash)
                 .unwrap_or(payment_hash);
 
             let invoice = self.store.get_invoice(&parent_payment_hash);
@@ -1107,17 +1099,15 @@ where
                     tlc.payment_secret = Some(record.payment_secret);
                     tlc.total_amount = Some(record.total_amount);
                 }
-                (Some(invoice), None, Some(record)) => {
+                (Some(invoice), None, Some(record)) if invoice.atomic_mpp() => {
                     tlc.total_amount = Some(invoice.amount.unwrap_or_default());
                     tlc.parent_payment_hash = Some(parent_payment_hash);
-                    let mut amp_record = record.clone();
-                    amp_record.hash = payment_hash;
                     // now save amp_record with parent payment_hash as key
                     self.store.insert_atomic_mpp_payment_data(
                         parent_payment_hash,
                         channel_id,
                         tlc.tlc_id.into(),
-                        amp_record,
+                        record.clone(),
                     );
                 }
                 (Some(invoice), _, None) if invoice.atomic_mpp() => {
@@ -2744,7 +2734,7 @@ where
         self.store.insert_channel_actor_state(state.clone());
 
         // try to settle down tlc set
-        for (payment_hash, tlc_id, mpp_mode) in pending_notify_mpp_tcls {
+        for (payment_hash, tlc_id) in pending_notify_mpp_tcls {
             let channel_id = state.get_id();
             // hold the tlc
             self.store.insert_payment_hold_tlc(
@@ -2753,7 +2743,6 @@ where
                     channel_id,
                     tlc_id,
                     hold_expire_at: now_timestamp_as_millis_u64() + DEFAULT_HOLD_TLC_TIMEOUT,
-                    mpp_mode,
                 },
             );
 
@@ -3741,7 +3730,7 @@ pub struct ChannelActorState {
 
     // The TLC set ready to be settled
     #[serde(skip)]
-    pub pending_notify_mpp_tcls: Vec<(Hash256, u64, MppMode)>,
+    pub pending_notify_mpp_tcls: Vec<(Hash256, u64)>,
 
     #[serde(skip)]
     pub ephemeral_config: ChannelEphemeralConfig,

@@ -155,7 +155,7 @@ pub fn derive_child(root: Share, desc: ChildDesc, hash_algorithm: HashAlgorithm)
     preimage_data.extend_from_slice(&index_bytes);
 
     let preimage_hash = Sha256::hash(&preimage_data);
-    let preimage = Hash256::from(preimage_hash.to_byte_array());
+    let preimage: Hash256 = preimage_hash.to_byte_array().into();
 
     // Compute child_hash as SHA256(child_preimage)
     let hash: Hash256 = hash_algorithm.hash(preimage.as_ref()).into();

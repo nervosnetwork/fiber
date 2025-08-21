@@ -3,6 +3,7 @@ use super::utils::*;
 use crate::fiber::features::FeatureVector;
 use crate::fiber::gen::invoice::{self as gen_invoice, *};
 use crate::fiber::hash_algorithm::HashAlgorithm;
+use crate::fiber::payment::MppMode;
 use crate::fiber::serde_utils::{duration_hex, EntityHex, U128Hex, U64Hex};
 use crate::fiber::types::Hash256;
 use crate::invoice::InvoiceError;
@@ -364,6 +365,16 @@ impl CkbInvoice {
 
     pub fn atomic_mpp(&self) -> bool {
         self.has_feature(|feature| feature.supports_atomic_mpp())
+    }
+
+    pub fn mpp_mode(&self) -> Option<MppMode> {
+        if self.basic_mpp() {
+            Some(MppMode::BasicMpp)
+        } else if self.atomic_mpp() {
+            Some(MppMode::AtomicMpp)
+        } else {
+            None
+        }
     }
 }
 
