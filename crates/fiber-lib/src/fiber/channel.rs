@@ -1130,7 +1130,7 @@ where
                         return Err(ProcessingChannelError::FinalIncorrectHTLCAmount);
                     }
                 }
-                (None, Some(_record), None) => {
+                (None, Some(_), _) | (None, _, Some(_)) => {
                     error!("invoice not found for MPP payment: {:?}", payment_hash);
                     return Err(ProcessingChannelError::FinalIncorrectMPPInfo(
                         "invoice not found".to_string(),

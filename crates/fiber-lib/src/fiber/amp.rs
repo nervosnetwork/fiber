@@ -94,7 +94,6 @@ pub fn derive_child(
     data: AMPPaymentData,
     hash_algorithm: HashAlgorithm,
 ) -> AmpChild {
-    // Serialize the child index in big-endian order
     let index_bytes = data.index.to_be_bytes();
 
     // Compute child_preimage as SHA256(root || share || child_index)
@@ -106,7 +105,7 @@ pub fn derive_child(
     let preimage_hash = Sha256::hash(&preimage_data);
     let preimage: Hash256 = preimage_hash.to_byte_array().into();
 
-    // Compute child_hash as SHA256(child_preimage)
+    // this is the payment hash for HTLC
     let hash: Hash256 = hash_algorithm.hash(preimage.as_ref()).into();
     AmpChild::new(preimage, hash)
 }
