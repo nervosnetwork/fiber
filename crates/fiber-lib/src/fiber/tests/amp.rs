@@ -200,3 +200,37 @@ async fn test_send_3_nodes_pay_self() {
     test_pay_self(MppMode::BasicMpp).await;
     test_pay_self(MppMode::AtomicMpp).await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_send_amp_can_not_retry() {
+    init_tracing();
+
+    // we have 4 channels in the middle, but we disable a channel quitely,
+    // AMP can not handle retry router currently
+    let (nodes, channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((1, 2), (MIN_RESERVED_CKB + 10100000000, MIN_RESERVED_CKB)),
+            ((1, 2), (MIN_RESERVED_CKB + 10100000000, MIN_RESERVED_CKB)),
+            ((1, 2), (MIN_RESERVED_CKB + 10100000000, MIN_RESERVED_CKB)),
+            ((1, 2), (MIN_RESERVED_CKB + 10100000000, MIN_RESERVED_CKB)),
+            ((2, 3), (HUGE_CKB_AMOUNT, MIN_RESERVED_CKB)),
+        ],
+        4,
+    )
+    .await;
+    let [node_0, node_1, _node_2, node_3] = nodes.try_into().expect("4 nodes");
+    let res = node_0
+        .send_atomic_mpp_payment(&node_3, 30000000000, Some(3))
+        .await;
+    node_1.disable_channel_stealthy(channels[3]).await;
+
+    eprintln!("res: {:?}", res);
+    assert!(res.is_ok());
+    let payment_hash = res.unwrap().payment_hash;
+    node_0.wait_until_failed(payment_hash).await;
+
+    let payment_session = node_0.get_payment_session(payment_hash).unwrap();
+    let mut attempts = payment_session.attempts();
+    assert!(attempts.any(|x| x.last_error.clone().unwrap().contains("ChannelDisabled")));
+}
