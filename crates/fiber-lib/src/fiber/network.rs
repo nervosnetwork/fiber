@@ -2465,26 +2465,26 @@ where
                         TlcErr::new(TlcErrorCode::InvalidOnionError)
                     });
                 debug!("on_remove_tlc: {:?}", error_detail.error_code);
-                let need_to_retry = self.network_graph.write().await.record_attempt_fail(
+                let need_retry = self.network_graph.write().await.record_attempt_fail(
                     &attempt,
                     error_detail.clone(),
                     false,
                 );
                 debug!(
-                    "set attempt failed to : {:?} need_to_retry: {} is_atomic_mpp: {:?}",
+                    "payment_hash: {:?} set attempt failed with: {:?} need_retry: {:?}",
+                    payment_hash,
                     error_detail.error_code.as_ref(),
-                    need_to_retry,
-                    session.is_atomic_mpp()
+                    need_retry
                 );
 
                 self.set_attempt_fail_with_error(
                     &mut session,
                     &mut attempt,
                     error_detail.error_code.as_ref(),
-                    need_to_retry,
+                    need_retry,
                 );
 
-                if need_to_retry {
+                if need_retry {
                     self.register_payment_retry(myself, state, payment_hash, Some(attempt.id));
                 }
             }

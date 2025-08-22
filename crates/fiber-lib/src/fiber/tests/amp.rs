@@ -161,7 +161,7 @@ async fn test_send_3_nodes_in_last_hop() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn test_send_amp_3_nodes_pay_self() {
+async fn test_send_mpp_3_nodes_pay_self() {
     init_tracing();
 
     async fn test_pay_self(mpp_mode: MppMode) {
@@ -200,12 +200,12 @@ async fn test_send_amp_3_nodes_pay_self() {
         node_0.wait_until_success(payment_hash).await;
     }
 
-    //test_pay_self(MppMode::BasicMpp).await;
+    test_pay_self(MppMode::BasicMpp).await;
     test_pay_self(MppMode::AtomicMpp).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn test_send_amp_can_not_retry() {
+async fn test_send_amp_can_handle_retry_in_middle() {
     init_tracing();
 
     // we have 4 channels in the middle, but we disable a channel quite,
@@ -226,7 +226,9 @@ async fn test_send_amp_can_not_retry() {
 
     node_1.disable_channel_stealthy(channels[3]).await;
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-    let res = node_0.send_mpp_payment(&node_3, 30000000000, Some(3)).await;
+    let res = node_0
+        .send_atomic_mpp_payment(&node_3, 30000000000, Some(3))
+        .await;
 
     eprintln!("res: {:?}", res);
     assert!(res.is_ok());
