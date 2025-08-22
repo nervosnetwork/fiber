@@ -205,7 +205,7 @@ async fn test_send_3_nodes_pay_self() {
 async fn test_send_amp_can_not_retry() {
     init_tracing();
 
-    // we have 4 channels in the middle, but we disable a channel quitely,
+    // we have 4 channels in the middle, but we disable a channel quite,
     // AMP can not handle retry router currently
     let (nodes, channels) = create_n_nodes_network(
         &[
