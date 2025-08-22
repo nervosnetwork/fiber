@@ -4591,11 +4591,8 @@ where
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        #[cfg(debug_assertions)]
         let now = std::time::Instant::now();
-        #[cfg(debug_assertions)]
         let msg_desc = format!("{:?}", &message);
-        #[cfg(debug_assertions)]
         debug!("begin_handle {}", &msg_desc);
 
         match message {
@@ -4616,7 +4613,6 @@ where
             }
         }
 
-        #[cfg(debug_assertions)]
         debug!("finish_handle {}ms {msg_desc}", now.elapsed().as_millis());
         Ok(())
     }
