@@ -65,8 +65,8 @@ use super::types::{
     Privkey, Pubkey, RemoveTlcFulfill, RemoveTlcReason, TlcErr, TlcErrData, TlcErrorCode,
 };
 use super::{
-    FiberConfig, InFlightCkbTxActor, InFlightCkbTxActorArguments, InFlightCkbTxActorMessage,
-    InFlightCkbTxKind, ASSUME_NETWORK_ACTOR_ALIVE,
+    FiberConfig, InFlightCkbTxActor, InFlightCkbTxActorArguments, InFlightCkbTxKind,
+    ASSUME_NETWORK_ACTOR_ALIVE,
 };
 use crate::ckb::config::UdtCfgInfos;
 use crate::ckb::contracts::{check_udt_script, get_udt_whitelist, is_udt_type_auto_accept};
@@ -1214,7 +1214,6 @@ where
                     "Closing transaction failed for channel {:?}, tx hash: {:?}, peer id: {:?}",
                     &channel_id, &tx_hash, &peer_id
                 );
-                state.remove_in_flight_tx(tx_hash);
             }
             NetworkActorEvent::TlcRemoveReceived(payment_hash, attempt_id, remove_tlc_reason) => {
                 // When a node is restarted, RemoveTLC will also be resent if necessary
@@ -1993,7 +1992,6 @@ where
 
                 // TODO: before sending the signatures to the peer, start tracing the tx
                 // It should be the first time to trace the tx
-
                 myself
                     .send_message(NetworkActorMessage::new_command(
                         NetworkActorCommand::SendFiberMessage(msg),
@@ -3060,7 +3058,6 @@ pub struct NetworkActorState<S> {
     peer_session_map: HashMap<PeerId, ConnectedPeer>,
     session_channels_map: HashMap<SessionId, HashSet<Hash256>>,
     channels: HashMap<Hash256, ActorRef<ChannelActorMessage>>,
-    ckb_txs_in_flight: HashMap<Hash256, ActorRef<InFlightCkbTxActorMessage>>,
     // Outpoint to channel id mapping, only contains channels with state of Ready.
     // We need to remove the channel from this map when the channel is closed or peer disconnected.
     outpoint_channel_map: HashMap<OutPoint, Hash256>,
@@ -3193,15 +3190,6 @@ fn generate_channel_actor_name(local_peer_id: &PeerId, remote_peer_id: &PeerId) 
         CHANNEL_ACTOR_NAME_PREFIX.fetch_add(1, Ordering::AcqRel),
         local_peer_id,
         remote_peer_id
-    )
-}
-
-fn generate_in_flight_tx_actor_name(supervisor: ActorCell, tx_hash: Hash256) -> String {
-    let supervisor_name = supervisor.get_name();
-    format!(
-        "{}/InFlightCkbTx-{}",
-        supervisor_name.as_deref().unwrap_or_default(),
-        tx_hash
     )
 }
 
@@ -3488,28 +3476,22 @@ where
         tx_hash: Hash256,
         tx_kind: InFlightCkbTxKind,
     ) -> crate::Result<()> {
-        if let Entry::Vacant(entry) = self.ckb_txs_in_flight.entry(tx_hash) {
-            let handler = InFlightCkbTxActor {
-                chain_actor: self.chain_actor.clone(),
-                network_actor: self.network.clone(),
-                tx_hash,
-                tx_kind,
-                confirmations: CKB_TX_TRACING_CONFIRMATIONS,
-            };
+        let handler = InFlightCkbTxActor {
+            chain_actor: self.chain_actor.clone(),
+            network_actor: self.network.clone(),
+            tx_hash,
+            tx_kind,
+            confirmations: CKB_TX_TRACING_CONFIRMATIONS,
+        };
 
-            let (task, _) = Actor::spawn_linked(
-                Some(generate_in_flight_tx_actor_name(
-                    self.network.get_cell(),
-                    tx_hash,
-                )),
-                handler,
-                InFlightCkbTxActorArguments { transaction: None },
-                self.network.get_cell(),
-            )
-            .await?;
+        Actor::spawn_linked(
+            None,
+            handler,
+            InFlightCkbTxActorArguments { transaction: None },
+            self.network.get_cell(),
+        )
+        .await?;
 
-            entry.insert(task);
-        }
         Ok(())
     }
 
@@ -3518,63 +3500,42 @@ where
         tx: TransactionView,
         tx_kind: InFlightCkbTxKind,
     ) -> crate::Result<()> {
-        let tx_hash: Hash256 = tx.hash().into();
-        match self.ckb_txs_in_flight.entry(tx_hash) {
-            Entry::Vacant(vacant) => {
-                let handler = InFlightCkbTxActor {
-                    chain_actor: self.chain_actor.clone(),
-                    network_actor: self.network.clone(),
-                    tx_hash,
-                    tx_kind,
-                    confirmations: CKB_TX_TRACING_CONFIRMATIONS,
-                };
+        let tx_hash = tx.hash().into();
 
-                let (task, _) = Actor::spawn_linked(
-                    Some(generate_in_flight_tx_actor_name(
-                        self.network.get_cell(),
-                        tx_hash,
-                    )),
-                    handler,
-                    InFlightCkbTxActorArguments {
-                        transaction: Some(tx),
-                    },
-                    self.network.get_cell(),
-                )
-                .await?;
+        let handler = InFlightCkbTxActor {
+            chain_actor: self.chain_actor.clone(),
+            network_actor: self.network.clone(),
+            tx_hash,
+            tx_kind,
+            confirmations: CKB_TX_TRACING_CONFIRMATIONS,
+        };
 
-                vacant.insert(task);
-            }
-            Entry::Occupied(occupied) => {
-                occupied
-                    .get()
-                    .send_message(InFlightCkbTxActorMessage::SendTx(tx))?;
-            }
-        }
+        Actor::spawn_linked(
+            None,
+            handler,
+            InFlightCkbTxActorArguments {
+                transaction: Some(tx),
+            },
+            self.network.get_cell(),
+        )
+        .await?;
+
         Ok(())
-    }
-
-    pub fn remove_in_flight_tx(&mut self, tx_hash: Hash256) {
-        if let Some(task) = self.ckb_txs_in_flight.remove(&tx_hash) {
-            task.stop(Some("cleanup in flight tx".to_string()));
-        }
     }
 
     pub async fn abort_funding(&mut self, channel_id_or_outpoint: Either<Hash256, OutPoint>) {
         let channel_id = match channel_id_or_outpoint {
             Either::Left(channel_id) => channel_id,
-            Either::Right(outpoint) => {
-                self.remove_in_flight_tx(outpoint.tx_hash().into());
-                match self.pending_channels.remove(&outpoint) {
-                    Some(channel_id) => channel_id,
-                    None => {
-                        warn!(
-                            "Funding transaction failed for outpoint {:?} but no channel found",
-                            &outpoint
-                        );
-                        return;
-                    }
+            Either::Right(outpoint) => match self.pending_channels.remove(&outpoint) {
+                Some(channel_id) => channel_id,
+                None => {
+                    warn!(
+                        "Funding transaction failed for outpoint {:?} but no channel found",
+                        &outpoint
+                    );
+                    return;
                 }
-            }
+            },
         };
 
         self.send_message_to_channel_actor(
@@ -4022,8 +3983,6 @@ where
                 ))
                 .expect(ASSUME_NETWORK_MYSELF_ALIVE);
         }
-
-        self.remove_in_flight_tx(tx_hash.into());
     }
 
     async fn on_channel_actor_stopped(&mut self, channel_id: Hash256, reason: StopReason) {
@@ -4213,7 +4172,6 @@ where
             )),
         )
         .await;
-        self.remove_in_flight_tx(outpoint.tx_hash().into());
     }
 
     async fn send_message_to_channel_actor(
@@ -4492,7 +4450,6 @@ where
             peer_session_map: Default::default(),
             session_channels_map: Default::default(),
             channels: Default::default(),
-            ckb_txs_in_flight: Default::default(),
             outpoint_channel_map: Default::default(),
             to_be_accepted_channels: ToBeAcceptedChannels::new_with_config(&config),
             pending_channels: Default::default(),
