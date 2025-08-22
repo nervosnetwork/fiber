@@ -3,6 +3,7 @@ use crate::{
     gen_rand_sha256_hash,
     invoice::{Currency, InvoiceBuilder},
     test_utils::{create_n_nodes_network, init_tracing, MIN_RESERVED_CKB},
+    HUGE_CKB_AMOUNT,
 };
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -105,4 +106,56 @@ async fn test_send_amp_without_invoice() {
     let payment_hash = res.unwrap().payment_hash;
 
     node_0.wait_until_failed(payment_hash).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_send_3_nodes_in_middle() {
+    init_tracing();
+
+    let (nodes, _channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((1, 2), (MIN_RESERVED_CKB + 10100000000, MIN_RESERVED_CKB)),
+            ((1, 2), (MIN_RESERVED_CKB + 10100000000, MIN_RESERVED_CKB)),
+            ((1, 2), (MIN_RESERVED_CKB + 10100000000, MIN_RESERVED_CKB)),
+            ((2, 3), (HUGE_CKB_AMOUNT, MIN_RESERVED_CKB)),
+        ],
+        4,
+    )
+    .await;
+    let [node_0, _node_1, _node_2, mut node_3] = nodes.try_into().expect("4 nodes");
+    let res = node_0
+        .send_atomic_mpp_payment(&mut node_3, 30000000000, Some(3))
+        .await;
+
+    eprintln!("res: {:?}", res);
+    assert!(res.is_ok());
+    let payment_hash = res.unwrap().payment_hash;
+    node_0.wait_until_success(payment_hash).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_send_3_nodes_in_last_hop() {
+    init_tracing();
+
+    let (nodes, _channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((2, 3), (MIN_RESERVED_CKB + 10100000000, MIN_RESERVED_CKB)),
+            ((2, 3), (MIN_RESERVED_CKB + 10100000000, MIN_RESERVED_CKB)),
+            ((2, 3), (MIN_RESERVED_CKB + 10100000000, MIN_RESERVED_CKB)),
+        ],
+        4,
+    )
+    .await;
+    let [node_0, _node_1, _node_2, mut node_3] = nodes.try_into().expect("4 nodes");
+    let res = node_0
+        .send_atomic_mpp_payment(&mut node_3, 30000000000, Some(3))
+        .await;
+
+    eprintln!("res: {:?}", res);
+    assert!(res.is_ok());
+    let payment_hash = res.unwrap().payment_hash;
+    node_0.wait_until_success(payment_hash).await;
 }
