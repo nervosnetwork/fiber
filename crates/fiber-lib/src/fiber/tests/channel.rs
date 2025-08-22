@@ -5483,7 +5483,7 @@ async fn test_send_payment_will_succeed_with_valid_invoice() {
         4,
     )
     .await;
-    let [mut node_0, _node_1, _node_2, mut node_3] = nodes.try_into().expect("4 nodes");
+    let [mut node_0, _node_1, _node_2, node_3] = nodes.try_into().expect("4 nodes");
     let source_node = &mut node_0;
     let target_pubkey = node_3.pubkey;
     let old_amount = node_3.get_local_balance_from_channel(channels[2]);
@@ -5543,7 +5543,7 @@ async fn test_send_payment_will_fail_with_no_invoice_preimage() {
         4,
     )
     .await;
-    let [mut node_0, _node_1, _node_2, mut node_3] = nodes.try_into().expect("4 nodes");
+    let [mut node_0, _node_1, _node_2, node_3] = nodes.try_into().expect("4 nodes");
     let source_node = &mut node_0;
     let target_pubkey = node_3.pubkey;
     let old_amount = node_3.get_local_balance_from_channel(channels[2]);
@@ -5603,7 +5603,7 @@ async fn test_send_payment_will_fail_with_cancelled_invoice() {
         4,
     )
     .await;
-    let [mut node_0, _node_1, _node_2, mut node_3] = nodes.try_into().expect("4 nodes");
+    let [mut node_0, _node_1, _node_2, node_3] = nodes.try_into().expect("4 nodes");
     let source_node = &mut node_0;
     let target_pubkey = node_3.pubkey;
     let old_amount = node_3.get_local_balance_from_channel(channels[2]);

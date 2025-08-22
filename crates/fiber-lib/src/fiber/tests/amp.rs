@@ -1,5 +1,5 @@
 use crate::{
-    fiber::network::SendPaymentCommand,
+    fiber::{network::SendPaymentCommand, payment::MppMode},
     gen_rand_sha256_hash,
     invoice::{Currency, InvoiceBuilder},
     test_utils::{create_n_nodes_network, init_tracing, MIN_RESERVED_CKB},
@@ -18,9 +18,9 @@ async fn test_send_basic_amp() {
         2,
     )
     .await;
-    let [node_0, mut node_1] = nodes.try_into().expect("2 nodes");
+    let [node_0, node_1] = nodes.try_into().expect("2 nodes");
     let res = node_0
-        .send_atomic_mpp_payment(&mut node_1, 20000000000, Some(2))
+        .send_atomic_mpp_payment(&node_1, 20000000000, Some(2))
         .await;
 
     eprintln!("res: {:?}", res);
@@ -56,9 +56,9 @@ async fn test_send_single_amp_path() {
         2,
     )
     .await;
-    let [node_0, mut node_1] = nodes.try_into().expect("2 nodes");
+    let [node_0, node_1] = nodes.try_into().expect("2 nodes");
     let res = node_0
-        .send_atomic_mpp_payment(&mut node_1, 10000000000, Some(2))
+        .send_atomic_mpp_payment(&node_1, 10000000000, Some(2))
         .await;
 
     eprintln!("res: {:?}", res);
@@ -123,9 +123,9 @@ async fn test_send_3_nodes_in_middle() {
         4,
     )
     .await;
-    let [node_0, _node_1, _node_2, mut node_3] = nodes.try_into().expect("4 nodes");
+    let [node_0, _node_1, _node_2, node_3] = nodes.try_into().expect("4 nodes");
     let res = node_0
-        .send_atomic_mpp_payment(&mut node_3, 30000000000, Some(3))
+        .send_atomic_mpp_payment(&node_3, 30000000000, Some(3))
         .await;
 
     eprintln!("res: {:?}", res);
@@ -149,13 +149,54 @@ async fn test_send_3_nodes_in_last_hop() {
         4,
     )
     .await;
-    let [node_0, _node_1, _node_2, mut node_3] = nodes.try_into().expect("4 nodes");
+    let [node_0, _node_1, _node_2, node_3] = nodes.try_into().expect("4 nodes");
     let res = node_0
-        .send_atomic_mpp_payment(&mut node_3, 30000000000, Some(3))
+        .send_atomic_mpp_payment(&node_3, 30000000000, Some(3))
         .await;
 
     eprintln!("res: {:?}", res);
     assert!(res.is_ok());
     let payment_hash = res.unwrap().payment_hash;
     node_0.wait_until_success(payment_hash).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_send_3_nodes_pay_self() {
+    init_tracing();
+
+    async fn test_pay_self(mpp_mode: MppMode) {
+        let (nodes, _channels) = create_n_nodes_network(
+            &[
+                ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+                ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+                ((2, 3), (MIN_RESERVED_CKB + 10100000000, MIN_RESERVED_CKB)),
+                ((2, 3), (MIN_RESERVED_CKB + 10100000000, MIN_RESERVED_CKB)),
+                ((2, 3), (MIN_RESERVED_CKB + 10100000000, MIN_RESERVED_CKB)),
+                ((3, 0), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ],
+            4,
+        )
+        .await;
+        let [node_0, _node_1, _node_2, _node_3] = nodes.try_into().expect("4 nodes");
+        let res = node_0
+            .send_mpp_payment_with_command(
+                &node_0,
+                30000000000,
+                SendPaymentCommand {
+                    max_parts: Some(3),
+                    allow_self_payment: true,
+                    ..Default::default()
+                },
+                mpp_mode,
+            )
+            .await;
+
+        eprintln!("res: {:?}", res);
+        assert!(res.is_ok());
+        let payment_hash = res.unwrap().payment_hash;
+        node_0.wait_until_success(payment_hash).await;
+    }
+
+    test_pay_self(MppMode::BasicMpp).await;
+    test_pay_self(MppMode::AtomicMpp).await;
 }

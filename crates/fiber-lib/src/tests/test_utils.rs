@@ -684,17 +684,17 @@ impl NetworkNode {
         self.store.get_channel_actor_state(&channel_id)
     }
 
-    pub fn insert_invoice(&mut self, invoice: CkbInvoice, preimage: Option<Hash256>) {
+    pub fn insert_invoice(&self, invoice: CkbInvoice, preimage: Option<Hash256>) {
         self.store
             .insert_invoice(invoice, preimage)
             .expect("insert success");
     }
 
-    pub fn get_invoice_status(&mut self, payment_hash: &Hash256) -> Option<CkbInvoiceStatus> {
+    pub fn get_invoice_status(&self, payment_hash: &Hash256) -> Option<CkbInvoiceStatus> {
         self.store.get_invoice_status(payment_hash)
     }
 
-    pub fn cancel_invoice(&mut self, payment_hash: &Hash256) {
+    pub fn cancel_invoice(&self, payment_hash: &Hash256) {
         self.store
             .update_invoice_status(payment_hash, CkbInvoiceStatus::Cancelled)
             .expect("cancel success");
@@ -717,7 +717,7 @@ impl NetworkNode {
 
     pub async fn send_mpp_payment(
         &self,
-        target_node: &mut NetworkNode,
+        target_node: &NetworkNode,
         amount: u128,
         max_parts: Option<u64>,
     ) -> Result<SendPaymentResponse, String> {
@@ -736,7 +736,7 @@ impl NetworkNode {
 
     pub async fn send_atomic_mpp_payment(
         &self,
-        target_node: &mut NetworkNode,
+        target_node: &NetworkNode,
         amount: u128,
         max_parts: Option<u64>,
     ) -> Result<SendPaymentResponse, String> {
@@ -755,7 +755,7 @@ impl NetworkNode {
 
     pub async fn send_mpp_payment_with_dry_run_option(
         &self,
-        target_node: &mut NetworkNode,
+        target_node: &NetworkNode,
         amount: u128,
         max_parts: Option<u64>,
         dry_run: bool,
@@ -776,7 +776,7 @@ impl NetworkNode {
 
     pub async fn send_mpp_payment_with_command(
         &self,
-        target_node: &mut NetworkNode,
+        target_node: &NetworkNode,
         amount: u128,
         command: SendPaymentCommand,
         mode: MppMode,

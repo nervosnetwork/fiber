@@ -4864,7 +4864,7 @@ async fn test_send_payment_invoice_cancel_multiple_ops() {
         3,
     )
     .await;
-    let [mut node_0, _node_1, _node_2] = nodes.try_into().expect("4 nodes");
+    let [node_0, _node_1, _node_2] = nodes.try_into().expect("4 nodes");
 
     let mut payments = HashSet::new();
     let mut invoices: Vec<CkbInvoice> = vec![];
@@ -5499,7 +5499,7 @@ async fn test_payment_with_payment_data_record() {
         2,
     )
     .await;
-    let [mut node_0, mut node_1] = nodes.try_into().expect("2 nodes");
+    let [mut node_0, node_1] = nodes.try_into().expect("2 nodes");
     let source_node = &mut node_0;
     let target_pubkey = node_1.pubkey;
 
@@ -5600,7 +5600,7 @@ async fn test_payment_with_insufficient_total_amount() {
         2,
     )
     .await;
-    let [mut node_0, mut node_1] = nodes.try_into().expect("2 nodes");
+    let [mut node_0, node_1] = nodes.try_into().expect("2 nodes");
     let source_node = &mut node_0;
     let target_pubkey = node_1.pubkey;
 
@@ -5726,7 +5726,7 @@ async fn test_payment_with_wrong_payment_secret() {
         2,
     )
     .await;
-    let [mut node_0, mut node_1] = nodes.try_into().expect("2 nodes");
+    let [mut node_0, node_1] = nodes.try_into().expect("2 nodes");
     let source_node = &mut node_0;
     let target_pubkey = node_1.pubkey;
 
@@ -5840,7 +5840,7 @@ async fn test_payment_with_insufficient_amount_with_payment_data() {
         2,
     )
     .await;
-    let [mut node_0, mut node_1] = nodes.try_into().expect("2 nodes");
+    let [mut node_0, node_1] = nodes.try_into().expect("2 nodes");
     let source_node = &mut node_0;
     let target_pubkey = node_1.pubkey;
 
@@ -5953,7 +5953,7 @@ async fn test_payment_with_insufficient_amount_without_payment_data() {
         2,
     )
     .await;
-    let [mut node_0, mut node_1] = nodes.try_into().expect("2 nodes");
+    let [mut node_0, node_1] = nodes.try_into().expect("2 nodes");
     let source_node = &mut node_0;
     let target_pubkey = node_1.pubkey;
 
@@ -6199,7 +6199,7 @@ async fn test_send_payment_with_invalid_amount() {
         3,
     )
     .await;
-    let [node_0, node_1, mut node_2] = nodes.try_into().expect("3 nodes");
+    let [node_0, node_1, node_2] = nodes.try_into().expect("3 nodes");
 
     let payment = node_0
         .send_payment(SendPaymentCommand {
@@ -6233,7 +6233,7 @@ async fn test_send_payment_with_invalid_amount() {
     let error = router.unwrap_err();
     assert!(error.contains("amount must be greater than 0"));
 
-    let payment = node_0.send_mpp_payment(&mut node_2, 0, Some(2)).await;
+    let payment = node_0.send_mpp_payment(&node_2, 0, Some(2)).await;
 
     debug!("payment: {:?}", payment);
 
@@ -6347,11 +6347,11 @@ async fn test_send_payment_mpp_can_not_be_keysend() {
         3,
     )
     .await;
-    let [node_0, _node_1, mut node_2] = nodes.try_into().expect("3 nodes");
+    let [node_0, _node_1, node_2] = nodes.try_into().expect("3 nodes");
     let node_2_pubkey = node_2.pubkey;
     let res = node_0
         .send_mpp_payment_with_command(
-            &mut node_2,
+            &node_2,
             100,
             SendPaymentCommand {
                 target_pubkey: Some(node_2_pubkey),
