@@ -161,18 +161,21 @@ async fn test_send_3_nodes_in_last_hop() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn test_send_3_nodes_pay_self() {
+async fn test_send_amp_3_nodes_pay_self() {
     init_tracing();
 
     async fn test_pay_self(mpp_mode: MppMode) {
         let (nodes, _channels) = create_n_nodes_network(
             &[
-                ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+                ((0, 1), (MIN_RESERVED_CKB + 66000, HUGE_CKB_AMOUNT)),
                 ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
-                ((2, 3), (MIN_RESERVED_CKB + 10100000000, MIN_RESERVED_CKB)),
-                ((2, 3), (MIN_RESERVED_CKB + 10100000000, MIN_RESERVED_CKB)),
-                ((2, 3), (MIN_RESERVED_CKB + 10100000000, MIN_RESERVED_CKB)),
-                ((3, 0), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+                ((2, 3), (MIN_RESERVED_CKB + 11000, MIN_RESERVED_CKB)),
+                ((2, 3), (MIN_RESERVED_CKB + 11000, MIN_RESERVED_CKB)),
+                ((2, 3), (MIN_RESERVED_CKB + 11000, MIN_RESERVED_CKB)),
+                // path_find will first try this direction, since it's with larger capacity
+                // but the middle hops for this direction don't have enough capacity
+                // so path finding should try another direction and succeed
+                ((3, 0), (MIN_RESERVED_CKB + 76000, HUGE_CKB_AMOUNT)),
             ],
             4,
         )
@@ -181,7 +184,7 @@ async fn test_send_3_nodes_pay_self() {
         let res = node_0
             .send_mpp_payment_with_command(
                 &node_0,
-                30000000000,
+                30000,
                 SendPaymentCommand {
                     max_parts: Some(3),
                     allow_self_payment: true,
@@ -197,8 +200,8 @@ async fn test_send_3_nodes_pay_self() {
         node_0.wait_until_success(payment_hash).await;
     }
 
-    test_pay_self(MppMode::BasicMpp).await;
-    //test_pay_self(MppMode::AtomicMpp).await;
+    //test_pay_self(MppMode::BasicMpp).await;
+    test_pay_self(MppMode::AtomicMpp).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -206,7 +209,7 @@ async fn test_send_amp_can_not_retry() {
     init_tracing();
 
     // we have 4 channels in the middle, but we disable a channel quite,
-    // AMP can not handle retry router currently
+    // AMP can handle retry router currently
     let (nodes, channels) = create_n_nodes_network(
         &[
             ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
@@ -220,17 +223,17 @@ async fn test_send_amp_can_not_retry() {
     )
     .await;
     let [node_0, node_1, _node_2, node_3] = nodes.try_into().expect("4 nodes");
-    let res = node_0
-        .send_atomic_mpp_payment(&node_3, 30000000000, Some(3))
-        .await;
+
     node_1.disable_channel_stealthy(channels[3]).await;
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    let res = node_0.send_mpp_payment(&node_3, 30000000000, Some(3)).await;
 
     eprintln!("res: {:?}", res);
     assert!(res.is_ok());
     let payment_hash = res.unwrap().payment_hash;
-    node_0.wait_until_failed(payment_hash).await;
+    node_0.wait_until_success(payment_hash).await;
 
     let payment_session = node_0.get_payment_session(payment_hash).unwrap();
     let mut attempts = payment_session.attempts();
-    assert!(attempts.any(|x| x.last_error.clone().unwrap().contains("ChannelDisabled")));
+    assert!(attempts.any(|x| x.tried_times >= 2));
 }

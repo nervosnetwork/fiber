@@ -6,6 +6,7 @@ use crate::fiber::network::DEFAULT_PAYMENT_MPP_ATTEMPT_TRY_LIMIT;
 use crate::fiber::serde_utils::EntityHex;
 use crate::fiber::serde_utils::U128Hex;
 use crate::fiber::types::PaymentHopData;
+use crate::fiber::PaymentCustomRecords;
 use crate::now_timestamp_as_millis_u64;
 use ckb_types::packed::OutPoint;
 use serde::{Deserialize, Serialize};
@@ -279,6 +280,7 @@ impl PaymentSession {
             last_updated_at: now,
             last_error: None,
             status: AttemptStatus::Created,
+            custom_records: None,
         }
     }
 
@@ -454,6 +456,7 @@ pub struct Attempt {
     pub created_at: u64,
     pub last_updated_at: u64,
     pub last_error: Option<String>,
+    pub custom_records: Option<PaymentCustomRecords>,
 }
 
 impl Attempt {

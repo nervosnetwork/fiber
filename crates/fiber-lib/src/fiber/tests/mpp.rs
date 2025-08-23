@@ -3483,7 +3483,7 @@ async fn test_send_3_nodes_pay_self() {
         4,
     )
     .await;
-    let [mut node_0, _node_1, _node_2, _node_3] = nodes.try_into().expect("4 nodes");
+    let [node_0, _node_1, _node_2, _node_3] = nodes.try_into().expect("4 nodes");
 
     let amount = 30000;
     let target_pubkey = node_0.get_public_key();

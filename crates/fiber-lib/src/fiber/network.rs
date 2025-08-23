@@ -2469,10 +2469,12 @@ where
                     &attempt,
                     error_detail.clone(),
                     false,
-                ) && !session.is_atomic_mpp();
+                );
                 debug!(
-                    "set attempt failed to : {:?}",
-                    error_detail.error_code.as_ref()
+                    "set attempt failed to : {:?} need_to_retry: {} is_atomic_mpp: {:?}",
+                    error_detail.error_code.as_ref(),
+                    need_to_retry,
+                    session.is_atomic_mpp()
                 );
 
                 self.set_attempt_fail_with_error(
@@ -2551,7 +2553,7 @@ where
     ) -> Result<(), Error> {
         assert!(attempt.is_retrying());
 
-        let hops = match state
+        let mut hops = match state
             .payment_router_map
             .get(&(attempt.payment_hash, attempt.id))
         {
@@ -2566,11 +2568,16 @@ where
 
                 session.request.channel_stats = GraphChannelStat::new(Some(graph.channel_stats()));
 
+                debug!("now retry attempt: {:?} amount: {:?}", attempt.hash, amount,);
                 let hops = graph
                     .build_route(amount, None, max_fee, &session.request)
                     .map_err(|e| {
                         Error::BuildPaymentRouteError(format!("Failed to build route, {}", e))
-                    })?;
+                    });
+                if hops.is_err() {
+                    error!("retry build router error: {:?}", hops);
+                }
+                let hops = hops?;
 
                 state
                     .payment_router_map
@@ -2581,6 +2588,11 @@ where
 
         let source = self.network_graph.read().await.get_source_pubkey();
         attempt.route = SessionRoute::new(source, session.request.target_pubkey, &hops);
+        // reuse the previous custom_records in hops
+        if session.is_atomic_mpp() {
+            hops.last_mut().expect("hops not empty").custom_records =
+                attempt.custom_records.clone();
+        }
         assert_ne!(hops[0].funding_tx_hash, Hash256::default());
         self.send_attempt(myself, state, session, attempt, hops)
             .await?;
@@ -2675,7 +2687,7 @@ where
 
         // generate custom records for amp_mpp
         if amp_mpp {
-            self.set_custom_records_for_amp_mpp(&mut result, session.payment_hash());
+            self.set_amp_custom_records(&mut result, session.payment_hash());
         }
 
         for (attempt, _) in &result {
@@ -2685,7 +2697,7 @@ where
         return Ok(result);
     }
 
-    fn set_custom_records_for_amp_mpp(
+    fn set_amp_custom_records(
         &self,
         attempts_routers: &mut [(Attempt, Vec<PaymentHopData>)],
         payment_hash: Hash256,
@@ -2703,21 +2715,19 @@ where
         let children = AmpChild::construct_amp_children(&amp_payment_data, hash_algorithm);
         for (i, (amp_data, amp_child)) in amp_payment_data.iter().zip(children).enumerate() {
             let (mut attempt, mut route) = attempts_routers[i].clone();
-
-            let route_len = route.len();
             let mut custom_records = route
                 .last()
-                .expect("expect last hop data")
+                .expect("last hop")
                 .custom_records
                 .clone()
                 .unwrap_or_default();
 
             amp_data.write(&mut custom_records);
-            route[route_len - 1].custom_records = Some(custom_records);
+            route.last_mut().expect("last hop").custom_records = Some(custom_records.clone());
             attempt.hash = amp_child.hash;
+            attempt.custom_records = Some(custom_records);
             attempts_routers[i] = (attempt, route);
         }
-        debug!("finished set custom records for amp_mpp");
     }
 
     async fn send_payment_onion_packet(
@@ -3252,6 +3262,8 @@ pub struct NetworkActorState<S> {
     // The features of the node, used to indicate the capabilities of the node.
     features: FeatureVector,
     // the payment router map, only used for avoiding finding the same payment router multiple times
+    // this is only used for saving time for first hop, if a channel is set into Inflight status,
+    // the related router will be removed from this map.
     payment_router_map: HashMap<(Hash256, u64), Vec<PaymentHopData>>,
     channel_ephemeral_config: ChannelEphemeralConfig,
 
