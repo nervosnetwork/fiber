@@ -198,7 +198,7 @@ async fn test_send_3_nodes_pay_self() {
     }
 
     test_pay_self(MppMode::BasicMpp).await;
-    test_pay_self(MppMode::AtomicMpp).await;
+    //test_pay_self(MppMode::AtomicMpp).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

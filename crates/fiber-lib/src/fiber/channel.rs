@@ -5901,6 +5901,13 @@ impl ChannelActorState {
         if is_sent {
             // local peer can not sent more tlc amount than they have
             let pending_sent_amount = self.get_offered_tlc_balance();
+            debug!(
+                "add_amount: {}, to_local_amount:{} - pending_sent_amount:{} = {}",
+                add_amount,
+                self.to_local_amount,
+                pending_sent_amount,
+                self.to_local_amount.saturating_sub(pending_sent_amount)
+            );
             if add_amount > self.to_local_amount.saturating_sub(pending_sent_amount) {
                 return Err(ProcessingChannelError::TlcAmountExceedLimit);
             }
@@ -5920,6 +5927,13 @@ impl ChannelActorState {
         } else {
             // remote peer can not sent more tlc amount than they have
             let pending_recv_amount = self.get_received_tlc_balance();
+            debug!(
+                "remote_amount: {}, to_remote_amount:{} - pending_recv_amount:{} = {}",
+                add_amount,
+                self.to_remote_amount,
+                pending_recv_amount,
+                self.to_local_amount.saturating_sub(pending_recv_amount)
+            );
             if add_amount > self.to_remote_amount.saturating_sub(pending_recv_amount) {
                 return Err(ProcessingChannelError::TlcAmountExceedLimit);
             }
