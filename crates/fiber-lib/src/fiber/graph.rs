@@ -23,8 +23,6 @@ use crate::invoice::CkbInvoice;
 use crate::now_timestamp_as_millis_u64;
 use ckb_types::packed::{OutPoint, Script};
 use parking_lot::Mutex;
-use rand::seq::SliceRandom;
-use rand::thread_rng;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use std::collections::{HashMap, HashSet};
@@ -1443,7 +1441,7 @@ where
         amount: u128,
         max_fee_amount: Option<u128>,
         udt_type_script: Option<Script>,
-        final_tlc_expiry_delta: u64,
+        final_tlc_expiry: u64,
         tlc_expiry_limit: u64,
         allow_self: bool,
         hop_hints: &[HopHint],
@@ -1454,15 +1452,8 @@ where
             "begin find_path from {:?} to {:?} amount: {:?}",
             source, target, amount
         );
-        let started_time = crate::time::Instant::now();
-        let nodes_len = self.nodes.len();
-        let route_to_self = source == target;
 
-        let mut result = vec![];
-        let mut nodes_visited = 0;
-        let mut edges_expanded = 0;
-        let mut nodes_heap = NodeHeap::new(nodes_len);
-        let mut distances = HashMap::<Pubkey, NodeHeapElement>::new();
+        let route_to_self = source == target;
 
         if amount == 0 {
             return Err(PathFindError::Amount(
@@ -1484,11 +1475,6 @@ where
             ));
         }
 
-        let mut target = target;
-        let mut expiry = final_tlc_expiry_delta;
-        let mut amount = amount;
-        let mut last_edge = None;
-
         if allow_mpp && !self.is_node_support_mpp(&target) {
             return Err(PathFindError::FeatureNotEnabled(
                 "MPP is not supported by the target node".to_string(),
@@ -1496,20 +1482,87 @@ where
         }
 
         if route_to_self {
-            let (edge, new_target, expiry_delta, fee) = self.adjust_target_for_route_self(
+            let direct_channels = self.adjust_target_for_route_self(
                 source,
                 amount,
-                final_tlc_expiry_delta,
+                final_tlc_expiry,
                 &udt_type_script,
                 tlc_expiry_limit,
                 channel_stats,
                 allow_mpp,
-            )?;
-            target = new_target;
-            expiry = expiry.saturating_add(expiry_delta);
-            amount = amount.saturating_add(fee);
-            last_edge = Some(edge);
+            );
+            for (edge, new_target, expiry_delta, fee) in direct_channels {
+                let final_tlc_expiry = final_tlc_expiry.saturating_add(expiry_delta);
+                let amount = amount.saturating_add(fee);
+                let max_fee_amount = max_fee_amount.map(|x| x.saturating_sub(fee));
+                if let Ok(res) = self.inner_find_path(
+                    source,
+                    new_target,
+                    amount,
+                    max_fee_amount,
+                    udt_type_script.clone(),
+                    final_tlc_expiry,
+                    tlc_expiry_limit,
+                    &[],
+                    channel_stats,
+                    allow_mpp,
+                    Some(edge),
+                ) {
+                    return Ok(res);
+                }
+            }
+            return Err(PathFindError::NoPathFound);
         } else {
+            self.inner_find_path(
+                source,
+                target,
+                amount,
+                max_fee_amount,
+                udt_type_script.clone(),
+                final_tlc_expiry,
+                tlc_expiry_limit,
+                hop_hints,
+                channel_stats,
+                allow_mpp,
+                None,
+            )
+        }
+    }
+
+    // the algorithm works from target-to-source to find the shortest path
+    // assume thers is no cycle from source node to target node,
+    // since we already use `adjust_target_for_route_self` to adjust target
+    #[allow(clippy::too_many_arguments)]
+    fn inner_find_path(
+        &self,
+        source: Pubkey,
+        target: Pubkey,
+        amount: u128,
+        max_fee_amount: Option<u128>,
+        udt_type_script: Option<Script>,
+        final_tlc_expiry_delta: u64,
+        tlc_expiry_limit: u64,
+        hop_hints: &[HopHint],
+        channel_stats: &GraphChannelStat,
+        allow_mpp: bool,
+        last_edge: Option<RouterHop>,
+    ) -> Result<Vec<RouterHop>, PathFindError> {
+        debug!(
+            "begin inner_find_path from {:?} to {:?} amount: {:?}",
+            source, target, amount
+        );
+        let started_time = crate::time::Instant::now();
+        let nodes_len = self.nodes.len();
+        let route_to_self = source == target;
+
+        let mut result = vec![];
+        let mut nodes_visited = 0;
+        let mut edges_expanded = 0;
+        let mut nodes_heap = NodeHeap::new(nodes_len);
+        let mut distances = HashMap::<Pubkey, NodeHeapElement>::new();
+
+        let expiry = final_tlc_expiry_delta;
+        if !route_to_self {
             // The calculation of probability and distance requires a capacity of the channel.
             // We don't know the capacity of the channels in the hop hints. We just assume that the capacity
             // of these channels is sufficiently large.
@@ -1732,9 +1785,8 @@ where
         tlc_expiry_limit: u64,
         channel_stats: &GraphChannelStat,
         allow_mpp: bool,
-    ) -> Result<(RouterHop, Pubkey, u64, u128), PathFindError> {
-        let channels: Vec<_> = self
-            .get_node_inbounds(source)
+    ) -> Vec<(RouterHop, Pubkey, u64, u128)> {
+        self.get_node_inbounds(source)
             .filter(|(from, _, channel_info, channel_update)| {
                 udt_type_script == channel_info.udt_type_script()
                     && self.check_channel_amount_and_expiry(
@@ -1752,37 +1804,22 @@ where
                     && (!allow_mpp || self.is_node_support_mpp(from))
             })
             .map(|(from, _, channel_info, channel_update)| {
+                let last_edge = RouterHop {
+                    target: source,
+                    channel_outpoint: channel_info.channel_outpoint.clone(),
+                    amount_received: amount,
+                    incoming_tlc_expiry: expiry,
+                };
                 (
+                    last_edge,
                     from,
-                    channel_info.channel_outpoint.clone(),
                     channel_update.tlc_expiry_delta,
-                    channel_update.fee_rate,
-                    channel_info,
-                    channel_update,
+                    // we have already checked the fee rate and amount in check_channel_amount_and_expiry
+                    calculate_tlc_forward_fee(amount, channel_update.fee_rate as u128)
+                        .expect("already checked"),
                 )
             })
-            .collect();
-
-        // if there are multiple channels, we will randomly select a channel from the source node for route to self
-        // so that the following part of algorithm will always trying to find a path without a cycle in network graph
-        if let Some((from, outpoint, tlc_expiry_delta, fee_rate, ..)) =
-            channels.choose(&mut thread_rng())
-        {
-            debug_assert_ne!(source, *from);
-            // we have already checked the fee rate and amount in check_channel_amount_and_expiry
-            let fee = calculate_tlc_forward_fee(amount, *fee_rate as u128).map_err(|err| {
-                PathFindError::Overflow(format!("calculate_tlc_forward_fee error: {:?}", err))
-            })?;
-            let last_edge = RouterHop {
-                target: source,
-                channel_outpoint: outpoint.clone(),
-                amount_received: amount,
-                incoming_tlc_expiry: expiry,
-            };
-            Ok((last_edge, *from, *tlc_expiry_delta, fee))
-        } else {
-            return Err(PathFindError::NoPathFound);
-        }
+            .collect()
     }
 
     #[allow(clippy::too_many_arguments)]
