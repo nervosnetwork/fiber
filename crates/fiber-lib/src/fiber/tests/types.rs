@@ -31,7 +31,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use tentacle::{multiaddr::MultiAddr, secio::PeerId};
 
-use std::str::FromStr;
+use std::{collections::HashSet, str::FromStr};
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), test)]
@@ -865,4 +865,55 @@ fn test_reconstruct_n_children() {
 fn test_reconstruct_empty_children() {
     let children = AmpChild::construct_amp_children(&[], HashAlgorithm::Sha256);
     assert!(children.is_empty());
+}
+
+#[test]
+fn test_part_of_attempt_retry() {
+    let root = AmpSecret::random();
+    let shares = AmpSecret::gen_random_sequence(root, 5);
+    let descs: Vec<AmpPaymentData> = shares
+        .iter()
+        .enumerate()
+        .map(|(i, &share)| AmpPaymentData::new(gen_rand_sha256_hash(), i as u16, 100, share))
+        .collect();
+
+    let children = AmpChild::construct_amp_children(&descs.clone(), HashAlgorithm::Sha256);
+
+    assert_eq!(children.len(), descs.len());
+
+    let retried_index = [1, 2];
+    let new_attempts_count = 9;
+
+    let old_descs: Vec<_> = descs
+        .iter()
+        .filter(|d| !retried_index.contains(&d.index))
+        .cloned()
+        .collect();
+
+    let mut new_root_share = AmpSecret::zero();
+    let removed_descs: Vec<_> = descs
+        .iter()
+        .filter(|d| retried_index.contains(&d.index))
+        .collect();
+    for d in removed_descs.iter() {
+        new_root_share = new_root_share.xor(&d.secret);
+    }
+
+    let old_index: HashSet<u16> = old_descs.iter().map(|d| d.index).collect();
+    let all_index: HashSet<u16> = (0..new_attempts_count as u16).collect();
+
+    let mut new_descs = old_descs.clone();
+    let new_indexes: Vec<_> = all_index.difference(&old_index).collect();
+    let new_shares = AmpSecret::gen_random_sequence(new_root_share, new_indexes.len() as u16);
+    for (i, share) in new_indexes.iter().zip(new_shares.iter()) {
+        let desc = AmpPaymentData::new(gen_rand_sha256_hash(), **i, 100, *share);
+        new_descs.push(desc);
+    }
+
+    // Verify that each child is correctly derived from the reconstructed root
+    let mut original_root_share = AmpSecret::zero();
+    for a in new_descs.iter() {
+        original_root_share = original_root_share.xor(&a.secret);
+    }
+    assert_eq!(original_root_share, root);
 }
