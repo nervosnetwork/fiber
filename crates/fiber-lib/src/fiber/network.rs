@@ -735,6 +735,10 @@ impl SendPaymentData {
         (self.allow_basic_mpp || self.allow_atomic_mpp) && self.max_parts() > 1 && !self.keysend
     }
 
+    pub fn is_basic_mpp(&self) -> bool {
+        self.allow_basic_mpp
+    }
+
     pub fn is_atomic_mpp(&self) -> bool {
         self.allow_atomic_mpp
     }
@@ -2581,17 +2585,9 @@ where
 
                 session.request.channel_stats = GraphChannelStat::new(Some(graph.channel_stats()));
 
-                debug!("now retry attempt: {:?} amount: {:?}", attempt.hash, amount,);
                 let hops = graph
                     .build_route(amount, None, max_fee, &session.request)
-                    .map_err(|e| {
-                        Error::BuildPaymentRouteError(format!("Failed to build route, {}", e))
-                    });
-                if hops.is_err() {
-                    error!("retry build router error: {:?}", hops);
-                }
-                let hops = hops?;
-
+                    .map_err(|e| Error::BuildPaymentRouteError(e.to_string()))?;
                 state
                     .payment_router_map
                     .insert((attempt.payment_hash, attempt.id), hops.clone());
@@ -3009,8 +3005,8 @@ where
                     .resend_payment_attempt(myself, state, session, &mut attempt)
                     .await
                 {
-                    Err(err) if session.allow_mpp() => {
-                        // usually `resend_payment_route` will only try build a route with same amount,
+                    Err(err) if session.is_basic_mpp() => {
+                        // usually `resend_payment_attempt` will only try build a route with same amount,
                         // because most of the time, resend payment caused by the first hop
                         // error with WaitingTlcAck, if resend failed we should try more attempts in MPP,
                         // so we may create more attempts with different split amounts
@@ -3024,6 +3020,11 @@ where
                             &err.to_string(),
                             false,
                         );
+                        // for atomic mpp, we are sure now one of attempt already failed and we will not retry
+                        // so it's safe we update payment_session status to failed
+                        if session.is_atomic_mpp() {
+                            self.set_payment_fail_with_error(session, "Part of AMP failed");
+                        }
                         return Err(err);
                     }
                     _ => {}

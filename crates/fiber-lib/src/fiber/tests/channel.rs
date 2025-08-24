@@ -4942,7 +4942,10 @@ async fn test_send_payment_with_channel_balance_error() {
     let res = source_node.get_payment_result(payment_hash).await;
 
     assert_eq!(res.status, PaymentStatus::Failed);
-    assert!(res.failed_error.unwrap().contains("Failed to build route"));
+    assert!(res
+        .failed_error
+        .unwrap()
+        .contains("PathFind error: no path found"));
 
     // because there is only one path for the payment, the payment will fail in the second try
     // this assertion make sure we didn't do meaningless retry

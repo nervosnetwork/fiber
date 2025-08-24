@@ -300,6 +300,9 @@ async fn test_send_mpp_split_in_retry() {
             );
         } else {
             node_0.wait_until_failed(payment_hash).await;
+            let payment_session = node_0.get_payment_session(payment_hash).unwrap();
+            // assert AMP don't try to split more channels when retrying
+            assert_eq!(payment_session.attempts_count(), 2);
         }
     }
 

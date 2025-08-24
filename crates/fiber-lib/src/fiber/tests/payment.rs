@@ -3097,11 +3097,10 @@ async fn test_send_payment_middle_hop_balance_is_not_enough() {
     // 2 -> 3 don't have enough balance
     node_0.wait_until_failed(res.payment_hash).await;
     let result = node_0.get_payment_result(res.payment_hash).await;
-    eprintln!("debug result: {:?}", result);
     assert!(result
         .failed_error
         .expect("got error")
-        .contains("Failed to build route"));
+        .contains("PathFind error: no path found"));
 }
 
 #[tokio::test]

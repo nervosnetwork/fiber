@@ -138,10 +138,6 @@ impl AmpChild {
         child_descs: &[AmpChildDesc],
         hash_algorithm: HashAlgorithm,
     ) -> Vec<AmpChild> {
-        if child_descs.is_empty() {
-            return Vec::new();
-        }
-
         // Recompute the root by XORing the provided shares
         let mut root = AmpSecret::zero();
         for desc in child_descs {

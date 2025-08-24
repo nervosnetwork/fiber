@@ -172,6 +172,10 @@ impl PaymentSession {
         self.request.allow_mpp()
     }
 
+    pub fn is_basic_mpp(&self) -> bool {
+        self.request.is_basic_mpp()
+    }
+
     pub fn is_atomic_mpp(&self) -> bool {
         self.request.is_atomic_mpp()
     }
