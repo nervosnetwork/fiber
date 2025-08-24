@@ -1,7 +1,7 @@
 use crate::{
     ckb::config::{UdtArgInfo, UdtCellDep, UdtCfgInfos, UdtDep, UdtScript},
     fiber::{
-        amp::{AmpChild, AmpSecret},
+        amp::{AmpChild, AmpChildDesc, AmpSecret},
         config::AnnouncedNodeName,
         features::FeatureVector,
         gen::{fiber as molecule_fiber, gossip},
@@ -760,7 +760,7 @@ fn test_derive_child() {
     let root = AmpSecret::random();
     let share = AmpSecret::random();
 
-    let amp_data = AmpPaymentData::new(gen_rand_sha256_hash(), 4, 43, share);
+    let amp_data = AmpChildDesc::new(4, share);
     let child = AmpChild::derive_child(root, amp_data.clone(), HashAlgorithm::Sha256);
 
     assert_ne!(child.preimage, Hash256::default());
@@ -775,18 +775,9 @@ fn test_derive_child() {
 fn test_different_indices_produce_different_children() {
     let root = AmpSecret::random();
     let share = AmpSecret::random();
-    let rand_hash = gen_rand_sha256_hash();
 
-    let child1 = AmpChild::derive_child(
-        root,
-        AmpPaymentData::new(rand_hash, 0, 2, share),
-        HashAlgorithm::Sha256,
-    );
-    let child2 = AmpChild::derive_child(
-        root,
-        AmpPaymentData::new(rand_hash, 1, 2, share),
-        HashAlgorithm::Sha256,
-    );
+    let child1 = AmpChild::derive_child(root, AmpChildDesc::new(0, share), HashAlgorithm::Sha256);
+    let child2 = AmpChild::derive_child(root, AmpChildDesc::new(1, share), HashAlgorithm::Sha256);
 
     assert_ne!(child1.preimage, child2.preimage);
     assert_ne!(child1.hash, child2.hash);
@@ -798,8 +789,8 @@ fn test_reconstruct_children() {
     let share1 = AmpSecret::random();
     let share2 = root.xor(&share1); // share2 = root ^ share1
 
-    let desc1 = AmpPaymentData::new(gen_rand_sha256_hash(), 0, 2, share1);
-    let desc2 = AmpPaymentData::new(gen_rand_sha256_hash(), 1, 2, share2);
+    let desc1 = AmpChildDesc::new(0, share1);
+    let desc2 = AmpChildDesc::new(1, share2);
 
     let children =
         AmpChild::construct_amp_children(&[desc1.clone(), desc2.clone()], HashAlgorithm::Sha256);
@@ -818,7 +809,7 @@ fn test_reconstruct_children() {
 fn test_reconstruct_single_child() {
     let root = AmpSecret::random();
     let share = root;
-    let desc = AmpPaymentData::new(gen_rand_sha256_hash(), 0, 2, share);
+    let desc = AmpChildDesc::new(0, share);
 
     let children = AmpChild::construct_amp_children(&[desc.clone()], HashAlgorithm::Sha256);
 
@@ -833,10 +824,10 @@ fn test_reconstruct_single_child() {
 fn test_reconstruct_n_children() {
     let root = AmpSecret::random();
     let shares = AmpSecret::gen_random_sequence(root, 100);
-    let descs: Vec<AmpPaymentData> = shares
+    let descs: Vec<AmpChildDesc> = shares
         .iter()
         .enumerate()
-        .map(|(i, &share)| AmpPaymentData::new(gen_rand_sha256_hash(), i as u16, 100, share))
+        .map(|(i, &share)| AmpChildDesc::new(i as u16, share))
         .collect();
 
     // last hop will reconstruct children and derive them
@@ -871,10 +862,10 @@ fn test_reconstruct_empty_children() {
 fn test_part_of_attempt_retry() {
     let root = AmpSecret::random();
     let shares = AmpSecret::gen_random_sequence(root, 5);
-    let descs: Vec<AmpPaymentData> = shares
+    let descs: Vec<AmpChildDesc> = shares
         .iter()
         .enumerate()
-        .map(|(i, &share)| AmpPaymentData::new(gen_rand_sha256_hash(), i as u16, 100, share))
+        .map(|(i, &share)| AmpChildDesc::new(i as u16, share))
         .collect();
 
     let children = AmpChild::construct_amp_children(&descs.clone(), HashAlgorithm::Sha256);
@@ -906,7 +897,7 @@ fn test_part_of_attempt_retry() {
     let new_indexes: Vec<_> = all_index.difference(&old_index).collect();
     let new_shares = AmpSecret::gen_random_sequence(new_root_share, new_indexes.len() as u16);
     for (i, share) in new_indexes.iter().zip(new_shares.iter()) {
-        let desc = AmpPaymentData::new(gen_rand_sha256_hash(), **i, 100, *share);
+        let desc = AmpChildDesc::new(**i, *share);
         new_descs.push(desc);
     }
 

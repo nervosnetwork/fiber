@@ -74,7 +74,7 @@ use crate::ckb::{
     CkbChainMessage, FundingError, FundingRequest, FundingTx, GetShutdownTxRequest,
     GetShutdownTxResponse,
 };
-use crate::fiber::amp::{AmpChild, AmpSecret};
+use crate::fiber::amp::{AmpChild, AmpChildDesc, AmpSecret};
 use crate::fiber::channel::{
     AddTlcCommand, AddTlcResponse, ChannelEphemeralConfig, ChannelInitializationOperation,
     ShutdownCommand, TxCollaborationCommand, TxUpdateCommand, DEFAULT_COMMITMENT_DELAY_EPOCHS,
@@ -1744,9 +1744,9 @@ where
                                 ));
                             }
 
-                            atomic_mpp_data.sort_by(|a, b| a.1.index.cmp(&b.1.index));
+                            atomic_mpp_data.sort_by(|a, b| a.1.index().cmp(&b.1.index()));
                             let index: Vec<u16> =
-                                atomic_mpp_data.iter().map(|a| a.1.index).collect();
+                                atomic_mpp_data.iter().map(|a| a.1.index()).collect();
                             let expected_index: Vec<u16> = (0..tlcs.len() as u16).collect();
 
                             if index != expected_index {
@@ -1759,13 +1759,13 @@ where
                                 ));
                             }
 
-                            let payment_data: Vec<AmpPaymentData> = atomic_mpp_data
+                            let child_descs: Vec<AmpChildDesc> = atomic_mpp_data
                                 .iter()
-                                .map(|(_, data)| data.clone())
+                                .map(|(_, data)| data.child_desc.clone())
                                 .collect();
                             let children =
-                                AmpChild::construct_amp_children(&payment_data, hash_algorithm);
-                            debug_assert_eq!(payment_data.len(), children.len());
+                                AmpChild::construct_amp_children(&child_descs, hash_algorithm);
+                            debug_assert_eq!(child_descs.len(), children.len());
 
                             for (((channel_id, tlc_id), _), child) in
                                 atomic_mpp_data.iter().zip(children.iter())
@@ -2725,7 +2725,11 @@ where
             .map(|(i, &share)| AmpPaymentData::new(payment_hash, i as u16, total_count, share))
             .collect();
 
-        let children = AmpChild::construct_amp_children(&amp_payment_data, hash_algorithm);
+        let child_descs: Vec<_> = amp_payment_data
+            .iter()
+            .map(|x| x.child_desc.clone())
+            .collect();
+        let children = AmpChild::construct_amp_children(&child_descs, hash_algorithm);
         for (i, (amp_data, amp_child)) in amp_payment_data.iter().zip(children).enumerate() {
             let (mut attempt, mut route) = attempts_routers[i].clone();
             let mut custom_records = route

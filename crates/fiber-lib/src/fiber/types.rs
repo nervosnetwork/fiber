@@ -12,7 +12,7 @@ use super::r#gen::fiber::PubNonceOpt;
 use super::serde_utils::{EntityHex, PubNonceAsBytes, SliceBase58, SliceHex};
 use crate::ckb::config::{UdtArgInfo, UdtCellDep, UdtCfgInfos, UdtDep, UdtScript};
 use crate::ckb::contracts::get_udt_whitelist;
-use crate::fiber::amp::AmpSecret;
+use crate::fiber::amp::{AmpChildDesc, AmpSecret};
 use crate::fiber::network::USER_CUSTOM_RECORDS_MAX_INDEX;
 use ckb_jsonrpc_types::CellOutput;
 use ckb_types::H256;
@@ -3789,8 +3789,7 @@ impl BasicMppPaymentData {
 pub struct AmpPaymentData {
     pub total_amp_count: u16,
     pub payment_hash: Hash256,
-    pub index: u16,
-    pub secret: AmpSecret,
+    pub child_desc: AmpChildDesc,
 }
 
 impl AmpPaymentData {
@@ -3801,8 +3800,7 @@ impl AmpPaymentData {
         Self {
             payment_hash,
             total_amp_count,
-            index,
-            secret,
+            child_desc: AmpChildDesc::new(index, secret),
         }
     }
 
@@ -3810,9 +3808,13 @@ impl AmpPaymentData {
         let mut vec = Vec::new();
         vec.extend_from_slice(self.payment_hash.as_ref());
         vec.extend_from_slice(&self.total_amp_count.to_le_bytes());
-        vec.extend_from_slice(&self.index.to_le_bytes());
-        vec.extend_from_slice(self.secret.as_bytes());
+        vec.extend_from_slice(&self.child_desc.index.to_le_bytes());
+        vec.extend_from_slice(self.child_desc.secret.as_bytes());
         vec
+    }
+
+    pub fn index(&self) -> u16 {
+        self.child_desc.index
     }
 
     pub fn write(&self, custom_records: &mut PaymentCustomRecords) {
