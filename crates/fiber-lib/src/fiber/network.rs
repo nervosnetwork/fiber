@@ -61,8 +61,8 @@ use super::graph::{NetworkGraph, NetworkGraphStateStore, OwnedChannelUpdateEvent
 use super::key::blake2b_hash_with_salt;
 use super::types::{
     BasicMppPaymentData, BroadcastMessageWithTimestamp, EcdsaSignature, FiberMessage,
-    ForwardTlcResult, GossipMessage, Hash256, Init, NodeAnnouncement, OpenChannel, PaymentHopData,
-    Privkey, Pubkey, RemoveTlcFulfill, RemoveTlcReason, TlcErr, TlcErrData, TlcErrorCode,
+    ForwardTlcResult, GossipMessage, Hash256, Init, NodeAnnouncement, OpenChannel, Privkey, Pubkey,
+    RemoveTlcFulfill, RemoveTlcReason, TlcErr, TlcErrData, TlcErrorCode,
 };
 use super::{
     FiberConfig, InFlightCkbTxActor, InFlightCkbTxActorArguments, InFlightCkbTxActorMessage,
@@ -2429,46 +2429,37 @@ where
     ) -> Result<(), Error> {
         assert!(attempt.is_retrying());
 
-        let hops = match state
-            .payment_router_map
-            .get(&(attempt.payment_hash, attempt.id))
+        if !attempt
+            .last_error
+            .as_ref()
+            .is_some_and(|err| err.contains("WaitingTlcAck"))
         {
-            Some(hops) => hops.clone(),
-            None => {
-                // `session.remain_amount()` do not contains this part of amount,
-                // so we need to add the receiver amount to it, so we may make fewer
-                // attempts to send the payment.
-                let amount = session.remain_amount() + attempt.route.receiver_amount();
-                let max_fee = session.remain_fee_amount();
-                let graph = self.network_graph.read().await;
+            // `session.remain_amount()` do not contains this part of amount,
+            // so we need to add the receiver amount to it, so we may make fewer
+            // attempts to send the payment.
+            let amount = session.remain_amount() + attempt.route.receiver_amount();
+            let max_fee = session.remain_fee_amount();
+            let graph = self.network_graph.read().await;
 
-                session.request.channel_stats = GraphChannelStat::new(Some(graph.channel_stats()));
+            session.request.channel_stats = GraphChannelStat::new(Some(graph.channel_stats()));
 
-                let hops = graph
-                    .build_route(amount, None, max_fee, &session.request)
-                    .map_err(|e| {
-                        Error::BuildPaymentRouteError(format!("Failed to build route, {}", e))
-                    })?;
+            let hops = graph
+                .build_route(amount, None, max_fee, &session.request)
+                .map_err(|e| {
+                    Error::BuildPaymentRouteError(format!("Failed to build route, {}", e))
+                })?;
 
-                state
-                    .payment_router_map
-                    .insert((attempt.payment_hash, attempt.id), hops.clone());
-                hops
-            }
+            attempt.update_route(hops);
         };
 
-        let source = self.network_graph.read().await.get_source_pubkey();
-        attempt.route = SessionRoute::new(source, session.request.target_pubkey, &hops);
-        assert_ne!(hops[0].funding_tx_hash, Hash256::default());
-        self.send_attempt(myself, state, session, attempt, hops)
-            .await?;
+        self.send_attempt(myself, state, session, attempt).await?;
         Ok(())
     }
 
     async fn build_payment_routes(
         &self,
         session: &mut PaymentSession,
-    ) -> Result<Vec<(Attempt, Vec<PaymentHopData>)>, Error> {
+    ) -> Result<Vec<Attempt>, Error> {
         let graph = self.network_graph.read().await;
         let source = graph.get_source_pubkey();
         let active_parts = session.attempts().filter(|a| a.is_active()).count();
@@ -2506,16 +2497,30 @@ where
                 }
                 Ok(hops) => {
                     assert_ne!(hops[0].funding_tx_hash, Hash256::default());
-                    let route = SessionRoute::new(source, session.request.target_pubkey, &hops);
+                    let new_attempt_id = if session.is_dry_run() {
+                        0
+                    } else {
+                        attempt_id += 1;
+                        attempt_id
+                    };
+
+                    let attempt = session.new_attempt(
+                        new_attempt_id,
+                        source,
+                        session.request.target_pubkey,
+                        hops,
+                    );
+
+                    let session_route = &attempt.route;
                     #[cfg(debug_assertions)]
                     dbg!(
                         "left amount: {}, minimal_amount: {} target amount: {}",
-                        remain_amount - route.receiver_amount(),
+                        remain_amount - session_route.receiver_amount(),
                         target_amount,
-                        route.receiver_amount()
+                        session_route.receiver_amount()
                     );
 
-                    for (from, channel_outpoint, amount) in route.channel_outpoints() {
+                    for (from, channel_outpoint, amount) in session_route.channel_outpoints() {
                         if let Some(sent_node) = graph.get_channel_sent_node(channel_outpoint, from)
                         {
                             session.request.channel_stats.add_channel(
@@ -2525,21 +2530,12 @@ where
                             );
                         }
                     }
-                    remain_amount -= route.receiver_amount();
+                    remain_amount -= session_route.receiver_amount();
                     target_amount = remain_amount;
                     if let Some(fee) = max_fee {
-                        max_fee = Some(fee - route.fee());
+                        max_fee = Some(fee - session_route.fee());
                     }
-
-                    let new_attempt_id = if session.is_dry_run() {
-                        0
-                    } else {
-                        attempt_id += 1;
-                        attempt_id
-                    };
-
-                    let attempt = session.new_attempt(new_attempt_id, route);
-                    result.push((attempt, hops));
+                    result.push(attempt);
                 }
             };
         }
@@ -2550,7 +2546,7 @@ where
             return Err(Error::SendPaymentError(error));
         }
 
-        for (attempt, _) in &result {
+        for attempt in &result {
             session.append_attempt(attempt.clone());
         }
 
@@ -2562,16 +2558,15 @@ where
         state: &mut NetworkActorState<S>,
         session: &mut PaymentSession,
         attempt: &mut Attempt,
-        hops: Vec<PaymentHopData>,
     ) -> Result<(), Error> {
         let session_key = Privkey::from_slice(KeyPair::generate_random_key().as_ref());
-        assert_ne!(hops[0].funding_tx_hash, Hash256::default());
+        assert_ne!(attempt.route_hops[0].funding_tx_hash, Hash256::default());
 
         attempt.session_key.copy_from_slice(session_key.as_ref());
 
         let peeled_onion_packet = match PeeledPaymentOnionPacket::create(
             session_key,
-            hops,
+            attempt.route_hops.clone(),
             Some(attempt.hash.as_ref().to_vec()),
             &Secp256k1::signing_only(),
         ) {
@@ -2665,7 +2660,6 @@ where
                     .write()
                     .await
                     .track_attempt_router(&attempt);
-                state.payment_router_map.remove(&(payment_hash, attempt.id));
                 self.store.insert_attempt(attempt);
             }
             Some((ProcessingChannelError::RepeatedProcessing(_), _)) => {
@@ -2677,7 +2671,6 @@ where
                     if matches!(error, ProcessingChannelError::WaitingTlcAck) {
                         ("WaitingTlcAck".to_string(), true)
                     } else {
-                        state.payment_router_map.remove(&(payment_hash, attempt.id));
                         let need_to_retry = self.network_graph.write().await.record_attempt_fail(
                             &attempt,
                             tlc_err.clone(),
@@ -2723,10 +2716,9 @@ where
         state: &mut NetworkActorState<S>,
         session: &mut PaymentSession,
         attempt: &mut Attempt,
-        route: Vec<PaymentHopData>,
     ) -> Result<(), Error> {
         if let Err(err) = self
-            .send_payment_onion_packet(state, session, attempt, route)
+            .send_payment_onion_packet(state, session, attempt)
             .await
         {
             let need_retry = matches!(err, Error::SendPaymentFirstHopError(_, true));
@@ -2742,9 +2734,6 @@ where
                 );
                 return Ok(());
             } else {
-                state
-                    .payment_router_map
-                    .remove(&(session.payment_hash(), attempt.id));
                 self.set_attempt_fail_with_error(session, attempt, &err.to_string(), false);
                 return Err(err);
             }
@@ -2780,18 +2769,15 @@ where
         // it depends on the path finding algorithm to create how many of attempts,
         // if a payment can not be met in the network graph, an build path error will be returned
         // and no attempts be stored in the payment session and db.
-        let attempts_with_routes =
-            self.build_payment_routes(&mut session)
-                .await
-                .inspect_err(|e| {
-                    self.set_payment_fail_with_error(&mut session, &e.to_string());
-                })?;
+        let mut attempts = self
+            .build_payment_routes(&mut session)
+            .await
+            .inspect_err(|e| {
+                self.set_payment_fail_with_error(&mut session, &e.to_string());
+            })?;
 
-        for (mut attempt, route) in attempts_with_routes {
-            state
-                .payment_router_map
-                .insert((session.payment_hash(), attempt.id), route.clone());
-            self.send_attempt(myself.clone(), state, &mut session, &mut attempt, route)
+        for attempt in attempts.iter_mut() {
+            self.send_attempt(myself.clone(), state, &mut session, attempt)
                 .await?;
         }
 
@@ -3088,8 +3074,6 @@ pub struct NetworkActorState<S> {
     min_outbound_peers: usize,
     // The features of the node, used to indicate the capabilities of the node.
     features: FeatureVector,
-    // the payment router map, only used for avoiding finding the same payment router multiple times
-    payment_router_map: HashMap<(Hash256, u64), Vec<PaymentHopData>>,
     channel_ephemeral_config: ChannelEphemeralConfig,
 
     // the number of pending retrying send payments, we track it for
@@ -4508,7 +4492,6 @@ where
             max_inbound_peers: config.max_inbound_peers(),
             min_outbound_peers: config.min_outbound_peers(),
             features,
-            payment_router_map: Default::default(),
             channel_ephemeral_config: ChannelEphemeralConfig {
                 funding_timeout_seconds: config.funding_timeout_seconds,
             },

@@ -245,7 +245,13 @@ impl PaymentSession {
         self.request.amount.saturating_sub(sent_amount)
     }
 
-    pub fn new_attempt(&self, attempt_id: u64, route: SessionRoute) -> Attempt {
+    pub fn new_attempt(
+        &self,
+        attempt_id: u64,
+        source: Pubkey,
+        target: Pubkey,
+        route_hops: Vec<PaymentHopData>,
+    ) -> Attempt {
         let now = now_timestamp_as_millis_u64();
         let payment_hash = self.payment_hash();
         // For HTLC, the attempt hash is the payment hash
@@ -256,6 +262,8 @@ impl PaymentSession {
             self.try_limit
         };
 
+        let route = SessionRoute::new(source, target, &route_hops);
+
         Attempt {
             id: attempt_id,
             hash,
@@ -263,6 +271,7 @@ impl PaymentSession {
             tried_times: 1,
             payment_hash,
             route,
+            route_hops,
             session_key: [0; 32],
             preimage: None,
             created_at: now,
@@ -439,6 +448,7 @@ pub struct Attempt {
     pub status: AttemptStatus,
     pub payment_hash: Hash256,
     pub route: SessionRoute,
+    pub route_hops: Vec<PaymentHopData>,
     pub session_key: [u8; 32],
     pub preimage: Option<Hash256>,
     pub created_at: u64,
@@ -469,6 +479,13 @@ impl Attempt {
         } else {
             self.status = AttemptStatus::Failed;
         }
+    }
+
+    pub fn update_route(&mut self, new_route_hops: Vec<PaymentHopData>) {
+        self.route_hops = new_route_hops;
+        let sender = self.route.nodes[0].pubkey;
+        let receiver = self.route.nodes.last().unwrap().pubkey;
+        self.route = SessionRoute::new(sender, receiver, &self.route_hops);
     }
 
     pub fn is_success(&self) -> bool {
