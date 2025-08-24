@@ -1662,8 +1662,8 @@ where
                 tracing::debug!("CheckChannels complete after {used_ms}ms");
             }
             NetworkActorCommand::SettleMPPTlcSet(payment_hash) => {
+                // both set basic_mpp and atomic_mpp here
                 let hold_tlcs = self.store.get_payment_hold_tlcs(payment_hash);
-                // load hold tlcs
                 let tlcs: Vec<_> = hold_tlcs
                     .iter()
                     .filter_map(|hold_tlc| {
@@ -1687,9 +1687,8 @@ where
                             .all(|w| w[0].total_amount == w[1].total_amount)
                     {
                         error!("TLCs have inconsistent total_amount: {:?}", tlcs);
-                        tlc_fail =
+                        break 'validation tlc_fail =
                             Some(TlcErr::new(TlcErrorCode::IncorrectOrUnknownPaymentDetails));
-                        break 'validation;
                     }
 
                     // check if tlc set are fulfilled
@@ -1699,16 +1698,14 @@ where
                             "Try to settle mpp tlc set, but invoice not found for payment hash {:?}",
                             payment_hash
                         );
-                        tlc_fail =
+                        break 'validation tlc_fail =
                             Some(TlcErr::new(TlcErrorCode::IncorrectOrUnknownPaymentDetails));
-                        break 'validation;
                     };
 
                     let Some(mpp_mode) = invoice.mpp_mode() else {
                         error!("try to settle down mpp payment_hash: {:?} while the invoice does no support MPP", payment_hash);
-                        tlc_fail =
+                        break 'validation tlc_fail =
                             Some(TlcErr::new(TlcErrorCode::IncorrectOrUnknownPaymentDetails));
-                        break 'validation;
                     };
 
                     if !is_invoice_fulfilled(&invoice, &tlcs) {
@@ -1724,10 +1721,9 @@ where
                                     "basic MPP can not get preimage for payment: {:?}",
                                     payment_hash
                                 );
-                                tlc_fail = Some(TlcErr::new(
+                                break 'validation tlc_fail = Some(TlcErr::new(
                                     TlcErrorCode::IncorrectOrUnknownPaymentDetails,
                                 ));
-                                break 'validation;
                             };
 
                             for tlc in tlcs.iter() {
@@ -1743,10 +1739,9 @@ where
                                     "atomic mpp don't have enough mpp data for payment_hash: {:?}",
                                     payment_hash
                                 );
-                                tlc_fail = Some(TlcErr::new(
+                                break 'validation tlc_fail = Some(TlcErr::new(
                                     TlcErrorCode::IncorrectOrUnknownPaymentDetails,
                                 ));
-                                break 'validation;
                             }
 
                             atomic_mpp_data.sort_by(|a, b| a.1.index.cmp(&b.1.index));
@@ -1759,10 +1754,9 @@ where
                                     "atomic mpp index are not expected for payment_hash: {:?}",
                                     payment_hash
                                 );
-                                tlc_fail = Some(TlcErr::new(
+                                break 'validation tlc_fail = Some(TlcErr::new(
                                     TlcErrorCode::IncorrectOrUnknownPaymentDetails,
                                 ));
-                                break 'validation;
                             }
 
                             let payment_data: Vec<AmpPaymentData> = atomic_mpp_data
@@ -1777,6 +1771,25 @@ where
                                 atomic_mpp_data.iter().zip(children.iter())
                             {
                                 tlc_preimage_map.insert((*channel_id, *tlc_id), child.preimage);
+                            }
+
+                            // verify the preimages
+                            for tlc in tlcs.iter() {
+                                let payment_hash = tlc.payment_hash;
+                                let preimage = tlc_preimage_map
+                                    .get(&(tlc.channel_id, tlc.id()))
+                                    .expect("must got preimage");
+                                let hash: Hash256 = hash_algorithm.hash(preimage.as_ref()).into();
+
+                                if hash != payment_hash {
+                                    error!(
+                                        "verify AMP preimage {:?} for payment hash {:?} is not valid",
+                                        preimage, payment_hash
+                                    );
+                                    break 'validation tlc_fail = Some(TlcErr::new(
+                                        TlcErrorCode::IncorrectOrUnknownPaymentDetails,
+                                    ));
+                                }
                             }
                         }
                     }

@@ -247,15 +247,14 @@ async fn test_send_amp_can_handle_retry_in_middle() {
 async fn test_send_mpp_split_in_retry() {
     init_tracing();
 
-    async fn run_test(mpp_mode: MppMode) {
+    async fn run_test(mpp_mode: MppMode, expect_status: AttemptStatus) {
         let (nodes, channels) = create_n_nodes_network(
             &[
                 ((0, 1), (MIN_RESERVED_CKB + 66000, HUGE_CKB_AMOUNT)),
                 // these two channels will selected when retry
                 ((1, 2), (MIN_RESERVED_CKB + 6000, MIN_RESERVED_CKB)),
                 ((1, 2), (MIN_RESERVED_CKB + 6000, MIN_RESERVED_CKB)),
-                //
-                ((1, 2), (MIN_RESERVED_CKB + 11000, MIN_RESERVED_CKB)),
+                // these two channels will used in first try
                 ((1, 2), (MIN_RESERVED_CKB + 11000, MIN_RESERVED_CKB)),
                 ((1, 2), (MIN_RESERVED_CKB + 11000, MIN_RESERVED_CKB)),
                 ((2, 3), (MIN_RESERVED_CKB + 66000, HUGE_CKB_AMOUNT)),
@@ -265,12 +264,12 @@ async fn test_send_mpp_split_in_retry() {
         .await;
         let [node_0, node_1, _node_2, node_3] = nodes.try_into().expect("4 nodes");
 
-        node_1.disable_channel_stealthy(channels[5]).await;
+        node_1.disable_channel_stealthy(channels[4]).await;
         tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
         let res = node_0
             .send_mpp_payment_with_command(
                 &node_3,
-                30000,
+                20000,
                 SendPaymentCommand {
                     max_parts: Some(15),
                     allow_self_payment: true,
@@ -283,23 +282,28 @@ async fn test_send_mpp_split_in_retry() {
         eprintln!("res: {:?}", res);
         assert!(res.is_ok());
         let payment_hash = res.unwrap().payment_hash;
-        node_0.wait_until_success(payment_hash).await;
-        let payment_session = node_0.get_payment_session(payment_hash).unwrap();
-        let total_amount: u128 = payment_session
-            .attempts()
-            .filter(|a| a.status == AttemptStatus::Success)
-            .map(|a| a.route.receiver_amount())
-            .sum();
-        assert_eq!(total_amount, 30000);
-        assert!(
-            payment_session
+        if expect_status == AttemptStatus::Success {
+            node_0.wait_until_success(payment_hash).await;
+            let payment_session = node_0.get_payment_session(payment_hash).unwrap();
+            let total_amount: u128 = payment_session
                 .attempts()
                 .filter(|a| a.status == AttemptStatus::Success)
-                .count()
-                <= 15
-        );
+                .map(|a| a.route.receiver_amount())
+                .sum();
+            assert_eq!(total_amount, 20000);
+            assert!(
+                payment_session
+                    .attempts()
+                    .filter(|a| a.status == AttemptStatus::Success)
+                    .count()
+                    <= 15
+            );
+        } else {
+            node_0.wait_until_failed(payment_hash).await;
+        }
     }
 
-    run_test(MppMode::BasicMpp).await;
-    //run_test(MppMode::AtomicMpp).await;
+    run_test(MppMode::BasicMpp, AttemptStatus::Success).await;
+    // Atomic mpp can not handle this scenario now
+    run_test(MppMode::AtomicMpp, AttemptStatus::Failed).await;
 }
