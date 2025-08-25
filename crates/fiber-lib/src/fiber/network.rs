@@ -4032,16 +4032,35 @@ where
         force: bool,
         close_by_us: bool,
     ) {
-        self.send_message_to_channel_actor(
-            *channel_id,
-            None,
-            ChannelActorMessage::Event(ChannelEvent::ClosingTransactionConfirmed(
-                tx_hash.unpack(),
-                force,
-                close_by_us,
-            )),
-        )
-        .await;
+        match self.channels.get(channel_id) {
+            Some(channel_actor) => {
+                let _ = channel_actor.send_message(ChannelActorMessage::Event(
+                    ChannelEvent::ClosingTransactionConfirmed(tx_hash.unpack(), force, close_by_us),
+                ));
+            }
+            None => {
+                // channel is already exit, we should not try to reestablish channel since we
+                // received a close transaction, so we just update channel actor state
+                if let Some(mut state) = self.store.get_channel_actor_state(channel_id) {
+                    if state.state == ChannelState::ChannelReady {
+                        if let Err(err) = state
+                            .update_close_transaction_confirmed(
+                                &self.network,
+                                tx_hash.unpack(),
+                                force,
+                                close_by_us,
+                            )
+                            .await
+                        {
+                            error!("failed to update_close_transaction_confirmed {err:?}");
+                        }
+
+                        self.store.insert_channel_actor_state(state);
+                    }
+                }
+            }
+        }
+
         if let Some(session) = self.get_peer_session(peer_id) {
             if let Some(set) = self.session_channels_map.get_mut(&session) {
                 set.remove(channel_id);
