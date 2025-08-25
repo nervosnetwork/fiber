@@ -19,11 +19,10 @@ body:json {
   {
     "id": "42",
     "jsonrpc": "2.0",
-    "method": "shutdown_channel",
+    "method": "disconnect_peer",
     "params": [
       {
-        "channel_id": "{{CHANNEL_ID}}",
-        "force": true
+        "peer_id": "{{NODE3_PEERID}}"
       }
     ]
   }

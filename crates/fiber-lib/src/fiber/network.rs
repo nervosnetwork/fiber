@@ -9,8 +9,7 @@ use getrandom::getrandom;
 use once_cell::sync::OnceCell;
 use ractor::concurrency::Duration;
 use ractor::{
-    call, call_t, Actor, ActorCell, ActorProcessingErr, ActorRef, RactorErr, RpcReplyPort,
-    SupervisionEvent,
+    call_t, Actor, ActorCell, ActorProcessingErr, ActorRef, RpcReplyPort, SupervisionEvent,
 };
 use rand::Rng;
 use secp256k1::Secp256k1;
@@ -300,7 +299,6 @@ pub enum NetworkActorCommand {
     BroadcastMessages(Vec<BroadcastMessageWithTimestamp>),
     // Broadcast local information to the network.
     BroadcastLocalInfo(LocalInfoKind),
-    SignMessage([u8; 32], RpcReplyPort<EcdsaSignature>),
     // Payment related commands
     SendPayment(
         SendPaymentCommand,
@@ -326,15 +324,13 @@ pub enum NetworkActorCommand {
     UpdateFeatures(FeatureVector),
 }
 
-pub async fn sign_network_message(
-    network: ActorRef<NetworkActorMessage>,
-    message: [u8; 32],
-) -> std::result::Result<EcdsaSignature, RactorErr<NetworkActorMessage>> {
-    let message = |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::SignMessage(message, rpc_reply))
-    };
-
-    call!(network, message)
+pub fn sign_network_message(private_key: &Privkey, message: [u8; 32]) -> EcdsaSignature {
+    debug!(
+        "Signing message with node private key: message {:?}, public key {:?}",
+        message,
+        private_key.pubkey()
+    );
+    private_key.sign(message)
 }
 
 #[derive(Debug)]
@@ -2044,15 +2040,6 @@ where
                     .send_message(GossipActorMessage::TryBroadcastMessages(message))
                     .expect(ASSUME_GOSSIP_ACTOR_ALIVE);
             }
-            NetworkActorCommand::SignMessage(message, reply) => {
-                debug!(
-                    "Signing message with node private key: message {:?}, public key {:?}",
-                    message,
-                    state.get_public_key()
-                );
-                let signature = state.private_key.sign(message);
-                let _ = reply.send(signature);
-            }
             NetworkActorCommand::SendPayment(payment_request, reply) => {
                 match self.on_send_payment(myself, state, payment_request).await {
                     Ok(payment) => {
@@ -3371,7 +3358,6 @@ where
                 network.clone(),
                 store,
                 self.channel_subscribers.clone(),
-                self.private_key.clone(),
             ),
             ChannelInitializationParameter {
                 operation: ChannelInitializationOperation::OpenChannel(OpenChannelParameter {
@@ -3396,6 +3382,7 @@ where
                         .unwrap_or(MAX_TLC_NUMBER_IN_FLIGHT),
                 }),
                 ephemeral_config: self.channel_ephemeral_config.clone(),
+                private_key: self.private_key.clone(),
             },
             network.clone().get_cell(),
         )
@@ -3463,7 +3450,6 @@ where
                 network.clone(),
                 store,
                 self.channel_subscribers.clone(),
-                self.private_key.clone(),
             ),
             ChannelInitializationParameter {
                 operation: ChannelInitializationOperation::AcceptChannel(AcceptChannelParameter {
@@ -3487,6 +3473,7 @@ where
                     max_tlc_value_in_flight: max_tlc_value_in_flight.unwrap_or(u128::MAX),
                 }),
                 ephemeral_config: self.channel_ephemeral_config.clone(),
+                private_key: self.private_key.clone(),
             },
             network.clone().get_cell(),
         )
@@ -3864,11 +3851,11 @@ where
                 self.network.clone(),
                 self.store.clone(),
                 self.channel_subscribers.clone(),
-                self.private_key.clone(),
             ),
             ChannelInitializationParameter {
                 operation: ChannelInitializationOperation::ReestablishChannel(channel_id),
                 ephemeral_config: self.channel_ephemeral_config.clone(),
+                private_key: self.private_key.clone(),
             },
             self.network.get_cell(),
         )
@@ -4039,23 +4026,23 @@ where
                 ));
             }
             None => {
+                debug!("Channel {channel_id} actor is exit, try to update channel state");
                 // channel is already exit, we should not try to reestablish channel since we
                 // received a close transaction, so we just update channel actor state
                 if let Some(mut state) = self.store.get_channel_actor_state(channel_id) {
-                    if state.state == ChannelState::ChannelReady {
-                        state.network = Some(self.network.clone());
-                        if let Err(err) = state
-                            .update_close_transaction_confirmed(
-                                tx_hash.unpack(),
-                                force,
-                                close_by_us,
-                            )
-                            .await
-                        {
+                    // setup required field:
+                    state.network = Some(self.network.clone());
+                    state.private_key = Some(self.private_key.clone());
+                    match state
+                        .update_close_transaction_confirmed(tx_hash.unpack(), force, close_by_us)
+                        .await
+                    {
+                        Ok(_) => {
+                            self.store.insert_channel_actor_state(state);
+                        }
+                        Err(err) => {
                             error!("failed to update_close_transaction_confirmed {err:?}");
                         }
-
-                        self.store.insert_channel_actor_state(state);
                     }
                 }
             }
