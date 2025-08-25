@@ -735,7 +735,11 @@ fn test_basic_mpp_custom_records() {
 fn test_amp_custom_records() {
     let mut payment_custom_records = PaymentCustomRecords::default();
     let parent_payment_hash = gen_rand_sha256_hash();
-    let amp_record = AmpPaymentData::new(parent_payment_hash, 0, 3, AmpSecret::random());
+    let amp_record = AmpPaymentData::new(
+        parent_payment_hash,
+        3,
+        AmpChildDesc::new(0, AmpSecret::random()),
+    );
     amp_record.write(&mut payment_custom_records);
 
     let new_amp_record = AmpPaymentData::read(&payment_custom_records).unwrap();

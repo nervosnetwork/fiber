@@ -3795,12 +3795,11 @@ pub struct AmpPaymentData {
 impl AmpPaymentData {
     pub const CUSTOM_RECORD_KEY: u32 = USER_CUSTOM_RECORDS_MAX_INDEX + 2;
 
-    pub fn new(payment_hash: Hash256, index: u16, total_amp_count: u16, secret: AmpSecret) -> Self {
-        debug_assert!(index < total_amp_count);
+    pub fn new(payment_hash: Hash256, total_amp_count: u16, child_desc: AmpChildDesc) -> Self {
         Self {
             payment_hash,
             total_amp_count,
-            child_desc: AmpChildDesc::new(index, secret),
+            child_desc,
         }
     }
 
@@ -3837,9 +3836,8 @@ impl AmpPaymentData {
                 let secret = AmpSecret::new(data[36..68].try_into().unwrap());
                 Some(Self::new(
                     Hash256::from(parent_hash),
-                    index,
                     total_amp_count,
-                    secret,
+                    AmpChildDesc::new(index, secret),
                 ))
             })
     }
