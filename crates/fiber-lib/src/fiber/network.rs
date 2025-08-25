@@ -2401,8 +2401,10 @@ where
                     false,
                 );
                 debug!(
-                    "set attempt failed to : {:?}",
-                    error_detail.error_code.as_ref()
+                    "payment_hash: {:?} set attempt failed with: {:?} need_to_retry: {:?}",
+                    payment_hash,
+                    error_detail.error_code.as_ref(),
+                    need_to_retry
                 );
 
                 self.set_attempt_fail_with_error(
