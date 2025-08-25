@@ -2230,42 +2230,9 @@ where
                 myself.stop(None);
             }
             ChannelEvent::ClosingTransactionConfirmed(tx_hash, force, close_by_us) => {
-                match state.state {
-                    ChannelState::ShuttingDown(flags)
-                        if flags.contains(ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION) => {}
-                    ChannelState::ChannelReady if force && !close_by_us => {}
-                    _ => {
-                        return Err(ProcessingChannelError::InvalidState(format!(
-                            "Expecting commitment transaction confirmed event in unexpected state {:?} force {force} close_by_us {close_by_us}", &state.state)
-                        ));
-                    }
-                };
-
-                let closed_state = if force {
-                    debug!("Channel closed with uncooperative close");
-                    if close_by_us {
-                        ChannelState::Closed(CloseFlags::UNCOOPERATIVE_LOCAL)
-                    } else {
-                        ChannelState::Closed(CloseFlags::UNCOOPERATIVE_REMOTE)
-                    }
-                } else {
-                    debug!("Channel closed with cooperative close");
-                    ChannelState::Closed(CloseFlags::COOPERATIVE)
-                };
-                state.update_state(closed_state);
-                state.shutdown_transaction_hash.replace(tx_hash);
-                // Broadcast the channel update message which disables the channel.
-                if state.is_public() {
-                    let update = state.generate_disabled_channel_update().await;
-
-                    self.network
-                        .send_message(NetworkActorMessage::new_command(
-                            NetworkActorCommand::BroadcastMessages(vec![
-                                BroadcastMessageWithTimestamp::ChannelUpdate(update),
-                            ]),
-                        ))
-                        .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-                }
+                state
+                    .update_close_transaction_confirmed(&self.network, tx_hash, force, close_by_us)
+                    .await?;
                 debug_event!(self.network, "ChannelClosed");
                 myself.stop(Some("ChannelClosed".to_string()));
             }
@@ -7909,6 +7876,52 @@ impl ChannelActorState {
                 NetworkActorCommand::NotifyFundingTx(tx.clone()),
             ));
         }
+    }
+
+    pub(crate) async fn update_close_transaction_confirmed(
+        &mut self,
+        network_actor: &ActorRef<NetworkActorMessage>,
+        tx_hash: H256,
+        force: bool,
+        close_by_us: bool,
+    ) -> Result<(), ProcessingChannelError> {
+        match self.state {
+            ChannelState::ShuttingDown(flags)
+                if flags.contains(ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION) => {}
+            ChannelState::ChannelReady if force && !close_by_us => {}
+            _ => {
+                return Err(ProcessingChannelError::InvalidState(format!(
+                            "Expecting commitment transaction confirmed event in unexpected state {:?} force {force} close_by_us {close_by_us}", &self.state)
+                        ));
+            }
+        };
+
+        let closed_state = if force {
+            debug!("Channel closed with uncooperative close");
+            if close_by_us {
+                ChannelState::Closed(CloseFlags::UNCOOPERATIVE_LOCAL)
+            } else {
+                ChannelState::Closed(CloseFlags::UNCOOPERATIVE_REMOTE)
+            }
+        } else {
+            debug!("Channel closed with cooperative close");
+            ChannelState::Closed(CloseFlags::COOPERATIVE)
+        };
+        self.update_state(closed_state);
+        self.shutdown_transaction_hash.replace(tx_hash);
+        // Broadcast the channel update message which disables the channel.
+        if self.is_public() {
+            let update = self.generate_disabled_channel_update().await;
+
+            network_actor
+                .send_message(NetworkActorMessage::new_command(
+                    NetworkActorCommand::BroadcastMessages(vec![
+                        BroadcastMessageWithTimestamp::ChannelUpdate(update),
+                    ]),
+                ))
+                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+        }
+        Ok(())
     }
 
     fn can_abort_funding_on_timeout(&self) -> bool {
