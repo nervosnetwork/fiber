@@ -1,6 +1,6 @@
 {
   "AnnouncedNodeName": "73035cf37b0bbc724336af8a5982ca40a37d6fdcb6f7b0fed98158b4afb51260",
-  "Attempt": "bc6f7e2cc2bebb67ec1382966b7a93bad68fc47cb17a8664d3ad1782a0d04dff",
+  "Attempt": "fc9bca945949fd6ac5591daf8ea2f2ca253698231801c3f6cf03cc01e7f7a94a",
   "AttemptStatus": "b18d88f1743ca9a7b657daa273e3ec3cab475113c2b34704792f8ca7a382313a",
   "Attribute": "bee9e44e53d7428c6881544b3859b5074d3ec016f45ba027fba7b92d1c9c2d4b",
   "BroadcastMessage": "c15fb7747e489e3ace898276a811a61060f3913bf8d6143ed9ab895d97128469",
@@ -34,6 +34,7 @@
   "NodeId": "ef2bc800b89157eab65f84241d236d7d942feec6a09ac81d1c44ee3ec42b2248",
   "OutboundTlcStatus": "e1bd26b1c042a0358cd6959127474bcd47b81a5d1808093fba133a3983725242",
   "PaymentCustomRecords": "ffd9808f13c17b84d00132cf82f46a8561bb74938e19f1613c04ba9d742da9bc",
+  "PaymentHopData": "4b812c1eccb1e223a39a3835113d13a50784ad7c1f28d369a3f24359fe6a321c",
   "PaymentOnionPacket": "11a21e69fdd950ea7cc46106ec5ae9de73f0de732e0c07a5e57c94e6b1911695",
   "PaymentSession": "18ba49a08bde5f5bb8ce8e58b7b0123a0a3ab19251dcea21a79070770cb4cccb",
   "PaymentStatus": "e261dd3257be525ba4bea793efcceb7dffb717a8de82a57bfe8e8b1d2d8913d9",
