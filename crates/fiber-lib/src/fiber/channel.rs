@@ -2231,7 +2231,7 @@ where
             }
             ChannelEvent::ClosingTransactionConfirmed(tx_hash, force, close_by_us) => {
                 state
-                    .update_close_transaction_confirmed(&self.network, tx_hash, force, close_by_us)
+                    .update_close_transaction_confirmed(tx_hash, force, close_by_us)
                     .await?;
                 debug_event!(self.network, "ChannelClosed");
                 myself.stop(Some("ChannelClosed".to_string()));
@@ -7880,7 +7880,6 @@ impl ChannelActorState {
 
     pub(crate) async fn update_close_transaction_confirmed(
         &mut self,
-        network_actor: &ActorRef<NetworkActorMessage>,
         tx_hash: H256,
         force: bool,
         close_by_us: bool,
@@ -7913,7 +7912,7 @@ impl ChannelActorState {
         if self.is_public() {
             let update = self.generate_disabled_channel_update().await;
 
-            network_actor
+            self.network()
                 .send_message(NetworkActorMessage::new_command(
                     NetworkActorCommand::BroadcastMessages(vec![
                         BroadcastMessageWithTimestamp::ChannelUpdate(update),

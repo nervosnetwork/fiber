@@ -4043,9 +4043,9 @@ where
                 // received a close transaction, so we just update channel actor state
                 if let Some(mut state) = self.store.get_channel_actor_state(channel_id) {
                     if state.state == ChannelState::ChannelReady {
+                        state.network = Some(self.network.clone());
                         if let Err(err) = state
                             .update_close_transaction_confirmed(
-                                &self.network,
                                 tx_hash.unpack(),
                                 force,
                                 close_by_us,
