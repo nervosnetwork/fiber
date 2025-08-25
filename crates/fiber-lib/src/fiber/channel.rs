@@ -5701,7 +5701,12 @@ impl ChannelActorState {
         let delay_epoch = EpochNumberWithFraction::from_full_value(self.commitment_delay_epoch);
         let epoch_delay_milliseconds =
             (delay_epoch.number() as f64 * MILLI_SECONDS_PER_EPOCH as f64 * 2.0 / 3.0) as u64;
-        let expect_expiry = current_time + epoch_delay_milliseconds;
+        let pending_tlc_count = self
+            .tlc_state
+            .all_tlcs()
+            .filter(|tlc| tlc.removed_confirmed_at.is_none())
+            .count() as u64;
+        let expect_expiry = current_time + epoch_delay_milliseconds * (pending_tlc_count + 1);
         if expiry < expect_expiry {
             error!(
                 "TLC expiry {} is too soon, current time + epoch delay: {}",

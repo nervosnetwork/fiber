@@ -2760,7 +2760,7 @@ where
     }
 
     fn set_amp_custom_records(&self, attempts: &mut [Attempt], payment_hash: Hash256) {
-        debug_assert!(attempts.len() > 0);
+        debug_assert!(!attempts.is_empty());
 
         let root = AmpSecret::random();
         let secrets = AmpSecret::gen_random_sequence(root, attempts.len() as u16);

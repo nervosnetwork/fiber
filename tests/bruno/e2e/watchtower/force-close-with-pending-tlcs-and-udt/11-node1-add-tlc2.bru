@@ -37,8 +37,8 @@ assert {
 }
 
 script:pre-request {
-  // 10 seconds expiry
-  let expiry = "0x" + (Date.now() + 1000 * 10).toString(16);
+  // 17 seconds expiry
+  let expiry = "0x" + (Date.now() + 1000 * 17).toString(16);
   bru.setVar("expiry", expiry);
 }
 

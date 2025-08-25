@@ -37,8 +37,9 @@ assert {
 }
 
 script:pre-request {
-  // 10 seconds expiry
-  let expiry = "0x" + (Date.now() + 1000 * 10).toString(16);
+  // default 2/3 commitment_delay_epoch is 6 * 2/3 * 2 = 8 seconds in test environment
+  // requires (pending_tlc_count + 1) * 8 = 24 seconds for expiry, we use 25 as a safe margin
+  let expiry = "0x" + (Date.now() + 1000 * 25).toString(16);
   bru.setVar("expiry", expiry);
 }
 

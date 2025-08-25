@@ -29,8 +29,8 @@ assert {
 }
 
 script:pre-request {
-  // wait 10 seconds for the onchain timestamp to be updated
-  await new Promise(r => setTimeout(r, 10000));
+  // wait 20 seconds for the onchain timestamp to be updated
+  await new Promise(r => setTimeout(r, 20000));
 }
 
 script:post-response {

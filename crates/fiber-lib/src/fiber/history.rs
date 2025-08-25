@@ -175,6 +175,8 @@ impl InternalResult {
             );
         }
     }
+
+    #[cfg(test)]
     pub fn fail_range_pairs(&mut self, nodes: &[SessionRouteNode], start: usize, end: usize) {
         for index in start.max(1)..=end {
             self.fail_pair(nodes, index);
@@ -211,6 +213,7 @@ impl InternalResult {
                 | TlcErrorCode::InvoiceCancelled
                 | TlcErrorCode::UnknownNextPeer
                 | TlcErrorCode::RequiredNodeFeatureMissing
+                | TlcErrorCode::ExpiryTooSoon
                 | TlcErrorCode::ExpiryTooFar
                 | TlcErrorCode::HoldTlcTimeout => {
                     need_retry = false;
@@ -242,6 +245,8 @@ impl InternalResult {
                     self.succeed_range_pairs(nodes, 0, len - 1);
                 }
                 TlcErrorCode::ExpiryTooSoon | TlcErrorCode::ExpiryTooFar => {
+                    // these two error code will not be reported from last hop in theory
+                    // anyway, don't retry payment anymore
                     need_retry = false;
                 }
                 _ => {
@@ -293,16 +298,11 @@ impl InternalResult {
                 | TlcErrorCode::ChannelDisabled
                 | TlcErrorCode::TemporaryNodeFailure
                 | TlcErrorCode::RequiredNodeFeatureMissing
-                | TlcErrorCode::AmountBelowMinimum => {
+                | TlcErrorCode::AmountBelowMinimum
+                | TlcErrorCode::ExpiryTooSoon
+                | TlcErrorCode::ExpiryTooFar => {
                     self.fail_pair_balanced(nodes, index + 1);
                     self.succeed_range_pairs(nodes, 0, index);
-                }
-                TlcErrorCode::ExpiryTooSoon | TlcErrorCode::ExpiryTooFar => {
-                    if index == 1 {
-                        self.fail_node(nodes, 1);
-                    } else {
-                        self.fail_range_pairs(nodes, 0, index - 1);
-                    }
                 }
                 TlcErrorCode::IncorrectOrUnknownPaymentDetails => {
                     need_retry = false;
