@@ -37,6 +37,7 @@
   "NodeId": "ef2bc800b89157eab65f84241d236d7d942feec6a09ac81d1c44ee3ec42b2248",
   "OutboundTlcStatus": "e1bd26b1c042a0358cd6959127474bcd47b81a5d1808093fba133a3983725242",
   "PaymentCustomRecords": "ffd9808f13c17b84d00132cf82f46a8561bb74938e19f1613c04ba9d742da9bc",
+  "PaymentHopData": "4b812c1eccb1e223a39a3835113d13a50784ad7c1f28d369a3f24359fe6a321c",
   "PaymentOnionPacket": "11a21e69fdd950ea7cc46106ec5ae9de73f0de732e0c07a5e57c94e6b1911695",
   "PaymentSession": "18ba49a08bde5f5bb8ce8e58b7b0123a0a3ab19251dcea21a79070770cb4cccb",
   "PaymentStatus": "e261dd3257be525ba4bea793efcceb7dffb717a8de82a57bfe8e8b1d2d8913d9",
