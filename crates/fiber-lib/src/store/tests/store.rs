@@ -537,6 +537,7 @@ fn test_channel_actor_state_store() {
         scheduled_channel_update_handle: None,
         pending_notify_mpp_tcls: vec![],
         ephemeral_config: Default::default(),
+        private_key: None,
     };
 
     let bincode_encoded = bincode::serialize(&state).unwrap();
@@ -657,6 +658,7 @@ fn test_serde_channel_actor_state_ciborium() {
         scheduled_channel_update_handle: None,
         pending_notify_mpp_tcls: vec![],
         ephemeral_config: Default::default(),
+        private_key: None,
     };
 
     let mut serialized = Vec::new();

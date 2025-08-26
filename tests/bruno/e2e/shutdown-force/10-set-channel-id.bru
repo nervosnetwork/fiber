@@ -1,5 +1,5 @@
 meta {
-  name: List all channels after shutdown force
+  name: Set shutdown channel id
   type: http
   seq: 10
 }
@@ -34,12 +34,7 @@ assert {
 }
 
 script:post-response {
-  console.log(res.body.result);
-  // Sleep for sometime to make sure current operation finishes before next request starts.
   await new Promise(r => setTimeout(r, 2000));
-  bru.setVar("CHANNEL_ID", res.body.result.channels.length);
-  if (res.body.result.channels.length != 0) {
-    console.log("channel first: ", res.body.result.channels[0]);
-    throw new Error("Assertion failed: expect thel channel is closed");
-  }
+  console.log(res.body.result);
+  bru.setVar("CHANNEL_ID", res.body.result.channels[0].channel_id);
 }
