@@ -1,7 +1,7 @@
 meta {
-  name: node1 add tlc2, 6000000 shannons
+  name: send shutdown from NODE1
   type: http
-  seq: 11
+  seq: 6
 }
 
 post {
@@ -19,13 +19,11 @@ body:json {
   {
     "id": "42",
     "jsonrpc": "2.0",
-    "method": "add_tlc",
+    "method": "shutdown_channel",
     "params": [
       {
         "channel_id": "{{CHANNEL_ID}}",
-        "amount": "0x5b8d80",
-        "payment_hash": "{{payment_hash}}",
-        "expiry": "{{expiry}}"
+        "force": true
       }
     ]
   }
@@ -33,17 +31,11 @@ body:json {
 
 assert {
   res.body.error: isUndefined
-  res.body.result: isDefined
-}
-
-script:pre-request {
-  // 17 seconds expiry
-  let expiry = "0x" + (Date.now() + 1000 * 17).toString(16);
-  bru.setVar("expiry", expiry);
+  res.body.result: isNull
 }
 
 script:post-response {
-  console.log("generated result: ", res.body.result);
+  console.log("res.body: ", res.body);
   // Sleep for sometime to make sure current operation finishes before next request starts.
-  await new Promise(r => setTimeout(r, 1000));
+  await new Promise(r => setTimeout(r, 100));
 }
