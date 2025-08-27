@@ -10,10 +10,12 @@ use crate::{
         },
         config::{CKB_SHANNONS, DEFAULT_TLC_EXPIRY_DELTA, PAYMENT_MAX_PARTS_LIMIT},
         features::FeatureVector,
-        graph::AttemptStatus,
         hash_algorithm::HashAlgorithm,
-        network::{DebugEvent, SendPaymentCommand},
-        types::{Hash256, PaymentDataRecord, PaymentHopData, PeeledOnionPacket, RemoveTlcReason},
+        network::{DebugEvent, SendPaymentCommand, USER_CUSTOM_RECORDS_MAX_INDEX},
+        payment::AttemptStatus,
+        types::{
+            BasicMppPaymentData, Hash256, PaymentHopData, PeeledPaymentOnionPacket, RemoveTlcReason,
+        },
         NetworkActorCommand, NetworkActorMessage, PaymentCustomRecords,
     },
     gen_rand_sha256_hash, gen_rpc_config,
@@ -510,7 +512,7 @@ async fn test_mpp_tlc_set() {
 
     let secp = Secp256k1::new();
     let mut custom_records = PaymentCustomRecords::default();
-    let record = PaymentDataRecord::new(payment_secret, 20000000000);
+    let record = BasicMppPaymentData::new(payment_secret, 20000000000);
     record.write(&mut custom_records);
     let hops_infos = vec![
         PaymentHopData {
@@ -533,7 +535,7 @@ async fn test_mpp_tlc_set() {
         },
     ];
 
-    let packet = PeeledOnionPacket::create(
+    let packet = PeeledPaymentOnionPacket::create(
         source_node.get_private_key().clone(),
         hops_infos.clone(),
         Some(payment_hash.as_ref().to_vec()),
@@ -650,7 +652,7 @@ async fn test_mpp_tlc_set_with_insufficient_total_amount() {
     let secp = Secp256k1::new();
     let mut custom_records = PaymentCustomRecords::default();
     // set total amount to 20000000000, but pay only 10000000000
-    let record = PaymentDataRecord::new(payment_secret, 20000000000);
+    let record = BasicMppPaymentData::new(payment_secret, 20000000000);
     record.write(&mut custom_records);
     let hops_infos = vec![
         PaymentHopData {
@@ -673,7 +675,7 @@ async fn test_mpp_tlc_set_with_insufficient_total_amount() {
         },
     ];
 
-    let packet = PeeledOnionPacket::create(
+    let packet = PeeledPaymentOnionPacket::create(
         source_node.get_private_key().clone(),
         hops_infos.clone(),
         Some(payment_hash.as_ref().to_vec()),
@@ -787,7 +789,7 @@ async fn test_mpp_tlc_set_with_only_1_tlc() {
 
     let secp = Secp256k1::new();
     let mut custom_records = PaymentCustomRecords::default();
-    let record = PaymentDataRecord::new(payment_secret, 10000000000);
+    let record = BasicMppPaymentData::new(payment_secret, 10000000000);
     record.write(&mut custom_records);
     let hops_infos = vec![
         PaymentHopData {
@@ -810,7 +812,7 @@ async fn test_mpp_tlc_set_with_only_1_tlc() {
         },
     ];
 
-    let packet = PeeledOnionPacket::create(
+    let packet = PeeledPaymentOnionPacket::create(
         source_node.get_private_key().clone(),
         hops_infos.clone(),
         Some(payment_hash.as_ref().to_vec()),
@@ -911,7 +913,7 @@ async fn test_mpp_tlc_set_with_only_1_tlc_without_payment_data() {
         },
     ];
 
-    let packet = PeeledOnionPacket::create(
+    let packet = PeeledPaymentOnionPacket::create(
         source_node.get_private_key().clone(),
         hops_infos.clone(),
         Some(payment_hash.as_ref().to_vec()),
@@ -993,7 +995,7 @@ async fn test_mpp_tlc_set_total_amount_mismatch() {
     let secp = Secp256k1::new();
     let mut custom_records = PaymentCustomRecords::default();
     // the total amount should be 20000000000, but we set 10000000000 here
-    let record = PaymentDataRecord::new(payment_secret, 10000000000);
+    let record = BasicMppPaymentData::new(payment_secret, 10000000000);
     record.write(&mut custom_records);
     let hops_infos = vec![
         PaymentHopData {
@@ -1016,7 +1018,7 @@ async fn test_mpp_tlc_set_total_amount_mismatch() {
         },
     ];
 
-    let packet = PeeledOnionPacket::create(
+    let packet = PeeledPaymentOnionPacket::create(
         source_node.get_private_key().clone(),
         hops_infos.clone(),
         Some(payment_hash.as_ref().to_vec()),
@@ -1147,12 +1149,12 @@ async fn test_mpp_tlc_set_total_amount_should_be_consistent() {
     // but payment will fail because the total_amount is inconsistent
     // tlc1 records
     let mut custom_records_1 = PaymentCustomRecords::default();
-    let record = PaymentDataRecord::new(payment_secret, 20000000000);
+    let record = BasicMppPaymentData::new(payment_secret, 20000000000);
     record.write(&mut custom_records_1);
 
     // tlc2 records
     let mut custom_records_2 = PaymentCustomRecords::default();
-    let record = PaymentDataRecord::new(payment_secret, 20000000001);
+    let record = BasicMppPaymentData::new(payment_secret, 20000000001);
     record.write(&mut custom_records_2);
 
     let build_packet = |custom_records: PaymentCustomRecords| {
@@ -1177,7 +1179,7 @@ async fn test_mpp_tlc_set_total_amount_should_be_consistent() {
             },
         ];
 
-        PeeledOnionPacket::create(
+        PeeledPaymentOnionPacket::create(
             source_node.get_private_key().clone(),
             hops_infos.clone(),
             Some(payment_hash.as_ref().to_vec()),
@@ -1320,7 +1322,7 @@ async fn test_mpp_tlc_set_payment_secret_mismatch() {
     let secp = Secp256k1::new();
     let mut custom_records = PaymentCustomRecords::default();
     // set the payment secret to a random value
-    let record = PaymentDataRecord::new(gen_rand_sha256_hash(), 20000000000);
+    let record = BasicMppPaymentData::new(gen_rand_sha256_hash(), 20000000000);
     record.write(&mut custom_records);
     let hops_infos = vec![
         PaymentHopData {
@@ -1343,7 +1345,7 @@ async fn test_mpp_tlc_set_payment_secret_mismatch() {
         },
     ];
 
-    let packet = PeeledOnionPacket::create(
+    let packet = PeeledPaymentOnionPacket::create(
         source_node.get_private_key().clone(),
         hops_infos.clone(),
         Some(payment_hash.as_ref().to_vec()),
@@ -1472,7 +1474,7 @@ async fn test_mpp_tlc_set_timeout_1_of_2() {
 
     let secp = Secp256k1::new();
     let mut custom_records = PaymentCustomRecords::default();
-    let record = PaymentDataRecord::new(payment_secret, 30000000000);
+    let record = BasicMppPaymentData::new(payment_secret, 30000000000);
     record.write(&mut custom_records);
     let hops_infos = vec![
         PaymentHopData {
@@ -1495,7 +1497,7 @@ async fn test_mpp_tlc_set_timeout_1_of_2() {
         },
     ];
 
-    let packet = PeeledOnionPacket::create(
+    let packet = PeeledPaymentOnionPacket::create(
         source_node.get_private_key().clone(),
         hops_infos.clone(),
         Some(payment_hash.as_ref().to_vec()),
@@ -1685,7 +1687,7 @@ async fn test_mpp_tlc_set_timeout() {
 
     let secp = Secp256k1::new();
     let mut custom_records = PaymentCustomRecords::default();
-    let record = PaymentDataRecord::new(payment_secret, 20000000000);
+    let record = BasicMppPaymentData::new(payment_secret, 20000000000);
     record.write(&mut custom_records);
     let hops_infos = vec![
         PaymentHopData {
@@ -1708,7 +1710,7 @@ async fn test_mpp_tlc_set_timeout() {
         },
     ];
 
-    let packet = PeeledOnionPacket::create(
+    let packet = PeeledPaymentOnionPacket::create(
         source_node.get_private_key().clone(),
         hops_infos.clone(),
         Some(payment_hash.as_ref().to_vec()),
@@ -1883,7 +1885,7 @@ async fn test_mpp_tlc_set_without_payment_data() {
         },
     ];
 
-    let packet = PeeledOnionPacket::create(
+    let packet = PeeledPaymentOnionPacket::create(
         source_node.get_private_key().clone(),
         hops_infos.clone(),
         Some(payment_hash.as_ref().to_vec()),
@@ -2521,7 +2523,7 @@ async fn test_mpp_tlc_set_without_invoice_should_not_be_accepted() {
 
         let secp = Secp256k1::new();
         let mut custom_records = PaymentCustomRecords::default();
-        let record = PaymentDataRecord::new(payment_secret, 20000000000);
+        let record = BasicMppPaymentData::new(payment_secret, 20000000000);
         record.write(&mut custom_records);
         let hops_infos = vec![
             PaymentHopData {
@@ -2544,7 +2546,7 @@ async fn test_mpp_tlc_set_without_invoice_should_not_be_accepted() {
             },
         ];
 
-        let packet = PeeledOnionPacket::create(
+        let packet = PeeledPaymentOnionPacket::create(
             source_node.get_private_key().clone(),
             hops_infos.clone(),
             Some(payment_hash.as_ref().to_vec()),
@@ -2687,7 +2689,7 @@ async fn test_mpp_tlc_with_invoice_not_allow_mpp_should_not_be_accepted() {
 
     let secp = Secp256k1::new();
     let mut custom_records = PaymentCustomRecords::default();
-    let record = PaymentDataRecord::new(payment_secret, 20000000000);
+    let record = BasicMppPaymentData::new(payment_secret, 20000000000);
     record.write(&mut custom_records);
     let hops_infos = vec![
         PaymentHopData {
@@ -2710,7 +2712,7 @@ async fn test_mpp_tlc_with_invoice_not_allow_mpp_should_not_be_accepted() {
         },
     ];
 
-    let packet = PeeledOnionPacket::create(
+    let packet = PeeledPaymentOnionPacket::create(
         source_node.get_private_key().clone(),
         hops_infos.clone(),
         Some(payment_hash.as_ref().to_vec()),
@@ -3126,7 +3128,7 @@ async fn test_send_payment_custom_records_not_in_range() {
     let target_pubkey = node_1.pubkey;
 
     let data: HashMap<_, _> = vec![(
-        PaymentDataRecord::CUSTOM_RECORD_KEY,
+        BasicMppPaymentData::CUSTOM_RECORD_KEY,
         "hello".to_string().into_bytes(),
     )]
     .into_iter()
@@ -3146,7 +3148,7 @@ async fn test_send_payment_custom_records_not_in_range() {
     assert!(error.contains("custom_records key should in range 0 ~ 65535"));
 
     let data: HashMap<_, _> = vec![(
-        PaymentDataRecord::CUSTOM_RECORD_KEY - 1,
+        USER_CUSTOM_RECORDS_MAX_INDEX,
         "hello".to_string().into_bytes(),
     )]
     .into_iter()
@@ -3471,6 +3473,54 @@ async fn test_send_mpp_with_reverse_node_send_back() {
     node_0.wait_until_success(payment_hash).await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_send_3_nodes_pay_self() {
+    init_tracing();
+
+    let (nodes, _channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (MIN_RESERVED_CKB + 66000, HUGE_CKB_AMOUNT)),
+            ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((2, 3), (MIN_RESERVED_CKB + 11000, MIN_RESERVED_CKB)),
+            ((2, 3), (MIN_RESERVED_CKB + 11000, MIN_RESERVED_CKB)),
+            ((2, 3), (MIN_RESERVED_CKB + 11000, MIN_RESERVED_CKB)),
+            // path_find will first try this direction, since it's with larger capacity
+            // but the middle hops for this direction don't have enough capacity
+            // so path finding should try another direction and succeed
+            ((3, 0), (MIN_RESERVED_CKB + 76000, HUGE_CKB_AMOUNT)),
+        ],
+        4,
+    )
+    .await;
+    let [mut node_0, _node_1, _node_2, _node_3] = nodes.try_into().expect("4 nodes");
+
+    let amount = 30000;
+    let target_pubkey = node_0.get_public_key();
+    let preimage = gen_rand_sha256_hash();
+    let ckb_invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(amount))
+        .payment_preimage(preimage)
+        .payee_pub_key(target_pubkey.into())
+        .allow_mpp(true)
+        .payment_secret(gen_rand_sha256_hash())
+        .build()
+        .expect("build invoice success");
+
+    node_0.insert_invoice(ckb_invoice.clone(), Some(preimage));
+    let command = SendPaymentCommand {
+        max_parts: Some(3),
+        invoice: Some(ckb_invoice.to_string()),
+        allow_self_payment: true,
+        ..Default::default()
+    };
+    let res = node_0.send_payment(command).await;
+
+    eprintln!("res: {:?}", res);
+    assert!(res.is_ok());
+    let payment_hash = res.unwrap().payment_hash;
+    node_0.wait_until_success(payment_hash).await;
+}
+
 #[tokio::test]
 async fn test_send_mpp_respect_min_tlc_value() {
     init_tracing();
@@ -3539,4 +3589,42 @@ async fn test_send_mpp_respect_min_tlc_value() {
         .await;
     debug!("res: {:?}", res);
     assert!(res.is_ok());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_send_mpp_can_retry() {
+    init_tracing();
+
+    // we have 4 channels in the middle, but we disable a channel quite,
+    // Basic MPP will retry the payment with the other channels and succeed
+    let (nodes, channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((1, 2), (MIN_RESERVED_CKB + 10100000000, MIN_RESERVED_CKB)),
+            ((1, 2), (MIN_RESERVED_CKB + 10100000000, MIN_RESERVED_CKB)),
+            ((1, 2), (MIN_RESERVED_CKB + 10100000000, MIN_RESERVED_CKB)),
+            ((1, 2), (MIN_RESERVED_CKB + 10100000000, MIN_RESERVED_CKB)),
+            ((2, 3), (HUGE_CKB_AMOUNT, MIN_RESERVED_CKB)),
+        ],
+        4,
+    )
+    .await;
+    let [node_0, node_1, _node_2, mut node_3] = nodes.try_into().expect("4 nodes");
+    let res = node_0
+        .send_mpp_payment(&mut node_3, 30000000000, Some(3))
+        .await;
+    node_1.disable_channel_stealthy(channels[3]).await;
+
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    eprintln!("res: {:?}", res);
+    assert!(res.is_ok());
+    let payment_hash = res.unwrap().payment_hash;
+    node_0.wait_until_success(payment_hash).await;
+
+    let payment_session = node_0.get_payment_session(payment_hash).unwrap();
+    let attempts = payment_session.attempts();
+
+    let mut retry_times: Vec<_> = attempts.map(|x| x.tried_times).collect();
+    retry_times.sort();
+    assert_eq!(retry_times, vec![1, 1, 2]);
 }

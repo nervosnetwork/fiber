@@ -1,4 +1,5 @@
 use ckb_hash::blake2b_256;
+use ckb_types::core::tx_pool::TxStatus;
 use ckb_types::core::{EpochNumberWithFraction, TransactionView};
 use ckb_types::packed::{Byte32, OutPoint, Script, Transaction};
 use ckb_types::prelude::{IntoTransactionView, Pack, Unpack};
@@ -8,8 +9,7 @@ use getrandom::getrandom;
 use once_cell::sync::OnceCell;
 use ractor::concurrency::Duration;
 use ractor::{
-    call, call_t, Actor, ActorCell, ActorProcessingErr, ActorRef, RactorErr, RpcReplyPort,
-    SupervisionEvent,
+    call_t, Actor, ActorCell, ActorProcessingErr, ActorRef, RpcReplyPort, SupervisionEvent,
 };
 use rand::Rng;
 use secp256k1::Secp256k1;
@@ -46,44 +46,51 @@ use tokio_util::task::TaskTracker;
 use tracing::{debug, error, info, trace, warn};
 
 use super::channel::{
-    get_funding_and_reserved_amount, AcceptChannelParameter, AwaitingTxSignaturesFlags,
-    ChannelActor, ChannelActorMessage, ChannelActorStateStore, ChannelCommand,
-    ChannelCommandWithId, ChannelEvent, ChannelInitializationParameter, ChannelState,
-    ChannelSubscribers, ChannelTlcInfo, OpenChannelParameter, PrevTlcInfo, ProcessingChannelError,
-    ProcessingChannelResult, PublicChannelInfo, RemoveTlcCommand, RevocationData, SettlementData,
-    ShuttingDownFlags, StopReason, TLCId, DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
+    get_funding_and_reserved_amount, AcceptChannelParameter, ChannelActor, ChannelActorMessage,
+    ChannelActorStateStore, ChannelCommand, ChannelCommandWithId, ChannelEvent,
+    ChannelInitializationParameter, ChannelState, ChannelSubscribers, ChannelTlcInfo,
+    OpenChannelParameter, PrevTlcInfo, ProcessingChannelError, ProcessingChannelResult,
+    PublicChannelInfo, RemoveTlcCommand, RevocationData, SettlementData, StopReason, TLCId,
+    DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
 };
 use super::config::AnnouncedNodeName;
 use super::features::FeatureVector;
 use super::gossip::{GossipActorMessage, GossipMessageStore, GossipMessageUpdates};
-use super::graph::{
-    Attempt, NetworkGraph, NetworkGraphStateStore, OwnedChannelUpdateEvent, RouterHop, SessionRoute,
-};
+use super::graph::{NetworkGraph, NetworkGraphStateStore, OwnedChannelUpdateEvent, RouterHop};
 use super::key::blake2b_hash_with_salt;
 use super::types::{
-    BroadcastMessageWithTimestamp, EcdsaSignature, FiberMessage, ForwardTlcResult, GossipMessage,
-    Hash256, Init, NodeAnnouncement, OpenChannel, PaymentDataRecord, PaymentHopData, Privkey,
-    Pubkey, RemoveTlcFulfill, RemoveTlcReason, TlcErr, TlcErrData, TlcErrorCode,
+    BasicMppPaymentData, BroadcastMessageWithTimestamp, EcdsaSignature, FiberMessage,
+    ForwardTlcResult, GossipMessage, Hash256, Init, NodeAnnouncement, OpenChannel, Privkey, Pubkey,
+    RemoveTlcFulfill, RemoveTlcReason, TlcErr, TlcErrData, TlcErrorCode,
 };
 use super::{
-    FiberConfig, InFlightCkbTxActor, InFlightCkbTxActorArguments, InFlightCkbTxActorMessage,
-    InFlightCkbTxKind, ASSUME_NETWORK_ACTOR_ALIVE,
+    FiberConfig, InFlightCkbTxActor, InFlightCkbTxActorArguments, InFlightCkbTxKind,
+    ASSUME_NETWORK_ACTOR_ALIVE,
 };
 use crate::ckb::config::UdtCfgInfos;
 use crate::ckb::contracts::{check_udt_script, get_udt_whitelist, is_udt_type_auto_accept};
-use crate::ckb::{CkbChainMessage, FundingError, FundingRequest, FundingTx};
-use crate::fiber::channel::MAX_TLC_NUMBER_IN_FLIGHT;
+use crate::ckb::{
+    CkbChainMessage, FundingError, FundingRequest, FundingTx, GetShutdownTxRequest,
+    GetShutdownTxResponse,
+};
 use crate::fiber::channel::{
-    AddTlcCommand, AddTlcResponse, ChannelEphemeralConfig, ChannelInitializationOperation,
-    ShutdownCommand, TxCollaborationCommand, TxUpdateCommand,
+    AddTlcCommand, AddTlcResponse, ChannelActorState, ChannelEphemeralConfig,
+    ChannelInitializationOperation, ShutdownCommand, TxCollaborationCommand, TxUpdateCommand,
+    DEFAULT_COMMITMENT_DELAY_EPOCHS,
+};
+use crate::fiber::channel::{
+    AwaitingTxSignaturesFlags, ShuttingDownFlags, MAX_TLC_NUMBER_IN_FLIGHT,
 };
 use crate::fiber::config::{
     DEFAULT_MAX_PARTS, DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT,
-    MILLI_SECONDS_PER_EPOCH, MIN_TLC_EXPIRY_DELTA, PAYMENT_MAX_PARTS_LIMIT,
+    MIN_TLC_EXPIRY_DELTA, PAYMENT_MAX_PARTS_LIMIT,
 };
-use crate::fiber::fee::check_open_channel_parameters;
+use crate::fiber::fee::{check_open_channel_parameters, check_tlc_delta_with_epochs};
 use crate::fiber::gossip::{GossipConfig, GossipService, SubscribableGossipMessageStore};
-use crate::fiber::graph::{AttemptStatus, GraphChannelStat, PaymentSession, PaymentStatus};
+use crate::fiber::graph::GraphChannelStat;
+#[cfg(any(debug_assertions, test, feature = "bench"))]
+use crate::fiber::payment::SessionRoute;
+use crate::fiber::payment::{Attempt, AttemptStatus, PaymentSession, PaymentStatus};
 use crate::fiber::serde_utils::EntityHex;
 use crate::fiber::types::{
     FiberChannelMessage, PeeledPaymentOnionPacket, TlcErrPacket, TxSignatures,
@@ -129,6 +136,8 @@ const MAINTAINING_CONNECTIONS_INTERVAL: Duration = Duration::from_secs(3600);
 const CHECK_CHANNELS_INTERVAL: Duration = Duration::from_secs(3);
 #[cfg(not(debug_assertions))]
 const CHECK_CHANNELS_INTERVAL: Duration = Duration::from_secs(60);
+
+const CHECK_CHANNELS_SHUTDOWN_INTERVAL: Duration = Duration::from_secs(300);
 
 // The duration for which we will check peer init messages.
 const CHECK_PEER_INIT_INTERVAL: Duration = Duration::from_secs(20);
@@ -272,7 +281,7 @@ pub enum NetworkActorCommand {
     ),
     // Send a command to a channel.
     ControlFiberChannel(ChannelCommandWithId),
-    // The first parameter is the peeled onion in binary via `PeeledOnionPacket::serialize`. `PeeledOnionPacket::current`
+    // The first parameter is the peeled onion in binary via `PeeledPaymentOnionPacket::serialize`. `PeeledPaymentOnionPacket::current`
     // is for the current node.
     SendPaymentOnionPacket(SendOnionPacketCommand),
     UpdateChannelFunding(Hash256, Transaction, FundingRequest),
@@ -284,11 +293,13 @@ pub enum NetworkActorCommand {
     },
     SignFundingTx(PeerId, Hash256, Transaction, Option<Vec<Vec<u8>>>),
     NotifyFundingTx(Transaction),
+    CheckChannelsShutdown,
+    CheckChannelShutdown(Hash256),
+    RemoteForceShutdownChannel(Hash256, Option<GetShutdownTxResponse>),
     // Broadcast our BroadcastMessage to the network.
     BroadcastMessages(Vec<BroadcastMessageWithTimestamp>),
     // Broadcast local information to the network.
     BroadcastLocalInfo(LocalInfoKind),
-    SignMessage([u8; 32], RpcReplyPort<EcdsaSignature>),
     // Payment related commands
     SendPayment(
         SendPaymentCommand,
@@ -314,15 +325,13 @@ pub enum NetworkActorCommand {
     UpdateFeatures(FeatureVector),
 }
 
-pub async fn sign_network_message(
-    network: ActorRef<NetworkActorMessage>,
-    message: [u8; 32],
-) -> std::result::Result<EcdsaSignature, RactorErr<NetworkActorMessage>> {
-    let message = |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::SignMessage(message, rpc_reply))
-    };
-
-    call!(network, message)
+pub fn sign_network_message(private_key: &Privkey, message: [u8; 32]) -> EcdsaSignature {
+    debug!(
+        "Signing message with node private key: message {:?}, public key {:?}",
+        message,
+        private_key.pubkey()
+    );
+    private_key.sign(message)
 }
 
 #[derive(Debug)]
@@ -416,6 +425,8 @@ pub struct SendPaymentWithRouterCommand {
     pub dry_run: bool,
 }
 
+// 0 ~ 65535 is reserved for endpoint usage, index aboving 65535 is reserved for internal usage
+pub const USER_CUSTOM_RECORDS_MAX_INDEX: u32 = 65535;
 /// The custom records to be included in the payment.
 /// The key is hex encoded of `u32`, and the value is hex encoded of `Vec<u8>` with `0x` as prefix.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Default)]
@@ -664,11 +675,11 @@ impl SendPaymentData {
             if custom_records
                 .data
                 .keys()
-                .any(|k| *k >= PaymentDataRecord::CUSTOM_RECORD_KEY)
+                .any(|k| *k > USER_CUSTOM_RECORDS_MAX_INDEX)
             {
                 return Err(format!(
                     "custom_records key should in range 0 ~ {:?}",
-                    PaymentDataRecord::CUSTOM_RECORD_KEY - 1
+                    USER_CUSTOM_RECORDS_MAX_INDEX
                 ));
             }
         }
@@ -677,7 +688,7 @@ impl SendPaymentData {
         // bolt04 write payment data record to custom records if payment secret is set
         if let Some(payment_secret) = payment_secret {
             let records = custom_records.get_or_insert_with(PaymentCustomRecords::default);
-            PaymentDataRecord::new(payment_secret, amount).write(records);
+            BasicMppPaymentData::new(payment_secret, amount).write(records);
         }
 
         Ok(SendPaymentData {
@@ -855,8 +866,8 @@ pub enum NetworkActorEvent {
     /// A funding transaction has failed.
     FundingTransactionFailed(OutPoint),
 
-    /// A closing transaction has been confirmed.
-    ClosingTransactionConfirmed(PeerId, Hash256, Byte32, bool),
+    /// A closing transaction has been confirmed (peer_id, channel_id, tx_hash, force, close_by_us).
+    ClosingTransactionConfirmed(PeerId, Hash256, Byte32, bool, bool),
 
     /// A closing transaction has failed (either because of invalid transaction or timeout)
     ClosingTransactionFailed(PeerId, Hash256, Byte32),
@@ -1122,7 +1133,7 @@ where
                 myself
                     .send_message(NetworkActorMessage::new_notification(
                         NetworkServiceEvent::ChannelReady(
-                            peer_id,
+                            peer_id.clone(),
                             channel_id,
                             channel_outpoint.clone(),
                         ),
@@ -1147,6 +1158,13 @@ where
                         );
                     }
                 }
+                debug_event!(
+                    myself,
+                    format!(
+                        "Channel is now ready with channel_id {:?} to peer {:?}",
+                        channel_id, peer_id
+                    )
+                );
             }
             NetworkActorEvent::FiberMessage(peer_id, message) => {
                 self.handle_peer_message(myself, state, peer_id, message)
@@ -1176,9 +1194,21 @@ where
                     .on_closing_transaction_pending(channel_id, peer_id.clone(), tx.clone(), force)
                     .await;
             }
-            NetworkActorEvent::ClosingTransactionConfirmed(peer_id, channel_id, tx_hash, force) => {
+            NetworkActorEvent::ClosingTransactionConfirmed(
+                peer_id,
+                channel_id,
+                tx_hash,
+                force,
+                close_by_us,
+            ) => {
                 state
-                    .on_closing_transaction_confirmed(&peer_id, &channel_id, tx_hash, force)
+                    .on_closing_transaction_confirmed(
+                        &peer_id,
+                        &channel_id,
+                        tx_hash,
+                        force,
+                        close_by_us,
+                    )
                     .await;
             }
             NetworkActorEvent::ClosingTransactionFailed(peer_id, tx_hash, channel_id) => {
@@ -1186,7 +1216,6 @@ where
                     "Closing transaction failed for channel {:?}, tx hash: {:?}, peer id: {:?}",
                     &channel_id, &tx_hash, &peer_id
                 );
-                state.remove_in_flight_tx(tx_hash);
             }
             NetworkActorEvent::TlcRemoveReceived(payment_hash, attempt_id, remove_tlc_reason) => {
                 // When a node is restarted, RemoveTLC will also be resent if necessary
@@ -1408,6 +1437,23 @@ where
                     }
                 }
             }
+            NetworkActorCommand::CheckChannelsShutdown => {
+                for (_peer_id, channel_id, channel_state) in self.store.get_channel_states(None) {
+                    if matches!(channel_state, ChannelState::ChannelReady) {
+                        if let Some(actor_state) = self.store.get_channel_actor_state(&channel_id) {
+                            let funding_lock_script = state
+                                .get_cached_channel_funding_lock_script(channel_id, &actor_state);
+                            // Check channel shutdown
+                            self.check_channel_shutdown(
+                                myself.clone(),
+                                &actor_state,
+                                funding_lock_script,
+                            )
+                            .await;
+                        }
+                    }
+                }
+            }
             NetworkActorCommand::CheckChannels => {
                 let now = now_timestamp_as_millis_u64();
 
@@ -1565,13 +1611,12 @@ where
 
                 // Due to channel offline or network issues, remove hold tlc maybe failed,
                 // we retry timeout these tlcs.
-                let now = now_timestamp_as_millis_u64();
-                debug!("Check expired hold tlcs");
+                let current_time = now_timestamp_as_millis_u64();
                 for (payment_hash, hold_tlcs) in self.store.get_node_hold_tlcs() {
                     // timeout hold tlc
                     let already_timeout = hold_tlcs
                         .iter()
-                        .any(|hold_tlc| now >= hold_tlc.hold_expire_at);
+                        .any(|hold_tlc| current_time >= hold_tlc.hold_expire_at);
                     if already_timeout {
                         debug!("Timeout {payment_hash} hold tlcs {}", hold_tlcs.len());
                         for hold_tlc in hold_tlcs {
@@ -1587,7 +1632,9 @@ where
                         }
                     }
                 }
-                debug!("Done check expired hold tlcs");
+
+                let used_ms = now_timestamp_as_millis_u64() - now;
+                tracing::debug!("CheckChannels complete after {used_ms}ms");
             }
             NetworkActorCommand::SettleMPPTlcSet(payment_hash) => {
                 // load hold tlcs
@@ -1803,7 +1850,7 @@ where
                 let old_tx = transaction.into_view();
                 let mut tx = FundingTx::new();
                 tx.update_for_self(old_tx);
-                let tx = match self.fund(state, tx, request).await {
+                let tx = match self.fund(tx, request).await {
                     Ok(tx) => match tx.into_inner() {
                         Some(tx) => tx,
                         _ => {
@@ -1957,27 +2004,40 @@ where
 
                 // TODO: before sending the signatures to the peer, start tracing the tx
                 // It should be the first time to trace the tx
-
                 myself
                     .send_message(NetworkActorMessage::new_command(
                         NetworkActorCommand::SendFiberMessage(msg),
                     ))
                     .expect("network actor alive");
             }
+            NetworkActorCommand::CheckChannelShutdown(channel_id) => {
+                if let Some(channel_state) = self.store.get_channel_actor_state(&channel_id) {
+                    let funding_lock_script =
+                        state.get_cached_channel_funding_lock_script(channel_id, &channel_state);
+                    // Check channel shutdown
+                    self.check_channel_shutdown(
+                        myself.clone(),
+                        &channel_state,
+                        funding_lock_script,
+                    )
+                    .await;
+                } else {
+                    tracing::debug!(
+                        "stop check channel shutdown, can't find {channel_id:?} actor state"
+                    );
+                }
+            }
+            NetworkActorCommand::RemoteForceShutdownChannel(channel_id, response) => {
+                if let Some(shutdown_tx_response) = response {
+                    self.handle_remote_channel_shutdown(myself, channel_id, shutdown_tx_response)
+                        .await;
+                }
+            }
             NetworkActorCommand::BroadcastMessages(message) => {
                 state
                     .gossip_actor
                     .send_message(GossipActorMessage::TryBroadcastMessages(message))
                     .expect(ASSUME_GOSSIP_ACTOR_ALIVE);
-            }
-            NetworkActorCommand::SignMessage(message, reply) => {
-                debug!(
-                    "Signing message with node private key: message {:?}, public key {:?}",
-                    message,
-                    state.get_public_key()
-                );
-                let signature = state.private_key.sign(message);
-                let _ = reply.send(signature);
             }
             NetworkActorCommand::SendPayment(payment_request, reply) => {
                 match self.on_send_payment(myself, state, payment_request).await {
@@ -2083,6 +2143,88 @@ where
             }
         };
         Ok(())
+    }
+
+    async fn check_channel_shutdown(
+        &self,
+        myself: ActorRef<NetworkActorMessage>,
+        state: &ChannelActorState,
+        funding_lock_script: Script,
+    ) {
+        // stop check if channel closed
+        if matches!(state.state, ChannelState::Closed(..)) {
+            tracing::debug!(
+                "stop check channel shutdown, {:?} is closed",
+                state.get_id()
+            );
+            return;
+        }
+        // check channel ready state
+        if state.state == ChannelState::ChannelReady {
+            let channel_id = state.get_id();
+            // check shutdown transactions
+            let request = GetShutdownTxRequest {
+                funding_lock_script,
+            };
+            if let Err(err) = self.chain_actor.call_and_forward(
+                |tx| CkbChainMessage::GetShutdownTx(request, tx),
+                &myself,
+                move |shutdown_tx| {
+                    NetworkActorMessage::Command(NetworkActorCommand::RemoteForceShutdownChannel(
+                        channel_id,
+                        shutdown_tx.unwrap_or_default(),
+                    ))
+                },
+                None,
+            ) {
+                tracing::error!("Failed to call_and_forward chain_actor: {err:?}");
+            }
+        }
+    }
+
+    // Check shutdown tx of a channel, shutdown channel if channel is force closed by remote
+    async fn handle_remote_channel_shutdown(
+        &self,
+        myself: ActorRef<NetworkActorMessage>,
+        channel_id: Hash256,
+        response: GetShutdownTxResponse,
+    ) {
+        let Some(state) = self.store.get_channel_actor_state(&channel_id) else {
+            tracing::debug!("skip check channel shutdown, can't find {channel_id:?} actor state");
+            return;
+        };
+
+        if state.state != ChannelState::ChannelReady {
+            return;
+        }
+
+        if let GetShutdownTxResponse {
+            transaction: Some(tx),
+            tx_status: TxStatus::Committed(..),
+        } = response
+        {
+            // we only check remote sent force close transaction here
+            if tx.outputs().len() == 1 {
+                if let Some(output) = tx.outputs().get(0) {
+                    // Check if channel is force closed by counter party
+                    let lock_args =
+                        &blake2b_256(state.get_commitment_lock_script_xonly(true))[0..20];
+                    if &output.lock().args().raw_data()[0..20] == lock_args {
+                        let channel_id = state.get_id();
+                        let peer_id = state.get_remote_peer_id();
+                        let tx_hash = tx.hash();
+                        tracing::debug!("channel {channel_id:?} is shutdown by remote");
+                        myself
+                            .send_message(NetworkActorMessage::Event(
+                                NetworkActorEvent::ClosingTransactionConfirmed(
+                                    peer_id, channel_id, tx_hash, true, false,
+                                ),
+                            ))
+                            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                    }
+                }
+            }
+        }
     }
 
     async fn handle_send_onion_packet_command(
@@ -2244,8 +2386,10 @@ where
                     false,
                 );
                 debug!(
-                    "set attempt failed to : {:?}",
-                    error_detail.error_code.as_ref()
+                    "payment_hash: {:?} set attempt failed with: {:?} need_to_retry: {:?}",
+                    payment_hash,
+                    error_detail.error_code.as_ref(),
+                    need_to_retry
                 );
 
                 self.set_attempt_fail_with_error(
@@ -2324,46 +2468,37 @@ where
     ) -> Result<(), Error> {
         assert!(attempt.is_retrying());
 
-        let hops = match state
-            .payment_router_map
-            .get(&(attempt.payment_hash, attempt.id))
+        if !attempt
+            .last_error
+            .as_ref()
+            .is_some_and(|err| err.contains("WaitingTlcAck"))
         {
-            Some(hops) => hops.clone(),
-            None => {
-                // `session.remain_amount()` do not contains this part of amount,
-                // so we need to add the receiver amount to it, so we may make fewer
-                // attempts to send the payment.
-                let amount = session.remain_amount() + attempt.route.receiver_amount();
-                let max_fee = session.remain_fee_amount();
-                let graph = self.network_graph.read().await;
+            // `session.remain_amount()` do not contains this part of amount,
+            // so we need to add the receiver amount to it, so we may make fewer
+            // attempts to send the payment.
+            let amount = session.remain_amount() + attempt.route.receiver_amount();
+            let max_fee = session.remain_fee_amount();
+            let graph = self.network_graph.read().await;
 
-                session.request.channel_stats = GraphChannelStat::new(Some(graph.channel_stats()));
+            session.request.channel_stats = GraphChannelStat::new(Some(graph.channel_stats()));
 
-                let hops = graph
-                    .build_route(amount, None, max_fee, &session.request)
-                    .map_err(|e| {
-                        Error::BuildPaymentRouteError(format!("Failed to build route, {}", e))
-                    })?;
+            let hops = graph
+                .build_route(amount, None, max_fee, &session.request)
+                .map_err(|e| {
+                    Error::BuildPaymentRouteError(format!("Failed to build route, {}", e))
+                })?;
 
-                state
-                    .payment_router_map
-                    .insert((attempt.payment_hash, attempt.id), hops.clone());
-                hops
-            }
+            attempt.update_route(hops);
         };
 
-        let source = self.network_graph.read().await.get_source_pubkey();
-        attempt.route = SessionRoute::new(source, session.request.target_pubkey, &hops);
-        assert_ne!(hops[0].funding_tx_hash, Hash256::default());
-        self.send_attempt(myself, state, session, attempt, hops)
-            .await?;
+        self.send_attempt(myself, state, session, attempt).await?;
         Ok(())
     }
 
     async fn build_payment_routes(
         &self,
         session: &mut PaymentSession,
-    ) -> Result<Vec<(Attempt, Vec<PaymentHopData>)>, Error> {
+    ) -> Result<Vec<Attempt>, Error> {
         let graph = self.network_graph.read().await;
         let source = graph.get_source_pubkey();
         let active_parts = session.attempts().filter(|a| a.is_active()).count();
@@ -2401,16 +2536,30 @@ where
                 }
                 Ok(hops) => {
                     assert_ne!(hops[0].funding_tx_hash, Hash256::default());
-                    let route = SessionRoute::new(source, session.request.target_pubkey, &hops);
+                    let new_attempt_id = if session.is_dry_run() {
+                        0
+                    } else {
+                        attempt_id += 1;
+                        attempt_id
+                    };
+
+                    let attempt = session.new_attempt(
+                        new_attempt_id,
+                        source,
+                        session.request.target_pubkey,
+                        hops,
+                    );
+
+                    let session_route = &attempt.route;
                     #[cfg(debug_assertions)]
                     dbg!(
                         "left amount: {}, minimal_amount: {} target amount: {}",
-                        remain_amount - route.receiver_amount(),
+                        remain_amount - session_route.receiver_amount(),
                         target_amount,
-                        route.receiver_amount()
+                        session_route.receiver_amount()
                     );
 
-                    for (from, channel_outpoint, amount) in route.channel_outpoints() {
+                    for (from, channel_outpoint, amount) in session_route.channel_outpoints() {
                         if let Some(sent_node) = graph.get_channel_sent_node(channel_outpoint, from)
                         {
                             session.request.channel_stats.add_channel(
@@ -2420,21 +2569,12 @@ where
                             );
                         }
                     }
-                    remain_amount -= route.receiver_amount();
+                    remain_amount -= session_route.receiver_amount();
                     target_amount = remain_amount;
                     if let Some(fee) = max_fee {
-                        max_fee = Some(fee - route.fee());
+                        max_fee = Some(fee - session_route.fee());
                     }
-
-                    let new_attempt_id = if session.is_dry_run() {
-                        0
-                    } else {
-                        attempt_id += 1;
-                        attempt_id
-                    };
-
-                    let attempt = session.new_attempt(new_attempt_id, route);
-                    result.push((attempt, hops));
+                    result.push(attempt);
                 }
             };
         }
@@ -2445,7 +2585,7 @@ where
             return Err(Error::SendPaymentError(error));
         }
 
-        for (attempt, _) in &result {
+        for attempt in &result {
             session.append_attempt(attempt.clone());
         }
 
@@ -2457,16 +2597,15 @@ where
         state: &mut NetworkActorState<S>,
         session: &mut PaymentSession,
         attempt: &mut Attempt,
-        hops: Vec<PaymentHopData>,
     ) -> Result<(), Error> {
         let session_key = Privkey::from_slice(KeyPair::generate_random_key().as_ref());
-        assert_ne!(hops[0].funding_tx_hash, Hash256::default());
+        assert_ne!(attempt.route_hops[0].funding_tx_hash, Hash256::default());
 
         attempt.session_key.copy_from_slice(session_key.as_ref());
 
         let peeled_onion_packet = match PeeledPaymentOnionPacket::create(
             session_key,
-            hops,
+            attempt.route_hops.clone(),
             Some(attempt.hash.as_ref().to_vec()),
             &Secp256k1::signing_only(),
         ) {
@@ -2560,7 +2699,6 @@ where
                     .write()
                     .await
                     .track_attempt_router(&attempt);
-                state.payment_router_map.remove(&(payment_hash, attempt.id));
                 self.store.insert_attempt(attempt);
             }
             Some((ProcessingChannelError::RepeatedProcessing(_), _)) => {
@@ -2572,7 +2710,6 @@ where
                     if matches!(error, ProcessingChannelError::WaitingTlcAck) {
                         ("WaitingTlcAck".to_string(), true)
                     } else {
-                        state.payment_router_map.remove(&(payment_hash, attempt.id));
                         let need_to_retry = self.network_graph.write().await.record_attempt_fail(
                             &attempt,
                             tlc_err.clone(),
@@ -2618,10 +2755,9 @@ where
         state: &mut NetworkActorState<S>,
         session: &mut PaymentSession,
         attempt: &mut Attempt,
-        route: Vec<PaymentHopData>,
     ) -> Result<(), Error> {
         if let Err(err) = self
-            .send_payment_onion_packet(state, session, attempt, route)
+            .send_payment_onion_packet(state, session, attempt)
             .await
         {
             let need_retry = matches!(err, Error::SendPaymentFirstHopError(_, true));
@@ -2637,9 +2773,6 @@ where
                 );
                 return Ok(());
             } else {
-                state
-                    .payment_router_map
-                    .remove(&(session.payment_hash(), attempt.id));
                 self.set_attempt_fail_with_error(session, attempt, &err.to_string(), false);
                 return Err(err);
             }
@@ -2675,18 +2808,15 @@ where
         // it depends on the path finding algorithm to create how many of attempts,
         // if a payment can not be met in the network graph, an build path error will be returned
         // and no attempts be stored in the payment session and db.
-        let attempts_with_routes =
-            self.build_payment_routes(&mut session)
-                .await
-                .inspect_err(|e| {
-                    self.set_payment_fail_with_error(&mut session, &e.to_string());
-                })?;
+        let mut attempts = self
+            .build_payment_routes(&mut session)
+            .await
+            .inspect_err(|e| {
+                self.set_payment_fail_with_error(&mut session, &e.to_string());
+            })?;
 
-        for (mut attempt, route) in attempts_with_routes {
-            state
-                .payment_router_map
-                .insert((session.payment_hash(), attempt.id), route.clone());
-            self.send_attempt(myself.clone(), state, &mut session, &mut attempt, route)
+        for attempt in attempts.iter_mut() {
+            self.send_attempt(myself.clone(), state, &mut session, attempt)
                 .await?;
         }
 
@@ -2918,20 +3048,16 @@ where
 
     async fn fund(
         &self,
-        state: &NetworkActorState<S>,
         tx: FundingTx,
         request: FundingRequest,
     ) -> Result<FundingTx, FundingError> {
-        match &state.funding_tx_shell_builder {
-            None => call_t!(
-                self.chain_actor.clone(),
-                CkbChainMessage::Fund,
-                DEFAULT_CHAIN_ACTOR_TIMEOUT,
-                tx,
-                request
-            )?,
-            Some(shell_script) => fund_via_shell(shell_script.clone(), tx, request).await,
-        }
+        call_t!(
+            self.chain_actor.clone(),
+            CkbChainMessage::Fund,
+            DEFAULT_CHAIN_ACTOR_TIMEOUT,
+            tx,
+            request
+        )?
     }
 }
 
@@ -2959,7 +3085,8 @@ pub struct NetworkActorState<S> {
     peer_session_map: HashMap<PeerId, ConnectedPeer>,
     session_channels_map: HashMap<SessionId, HashSet<Hash256>>,
     channels: HashMap<Hash256, ActorRef<ChannelActorMessage>>,
-    ckb_txs_in_flight: HashMap<Hash256, ActorRef<InFlightCkbTxActorMessage>>,
+    // Channels funding lock script cache
+    channels_funding_lock_script_cache: HashMap<Hash256, Script>,
     // Outpoint to channel id mapping, only contains channels with state of Ready.
     // We need to remove the channel from this map when the channel is closed or peer disconnected.
     outpoint_channel_map: HashMap<OutPoint, Hash256>,
@@ -2987,10 +3114,7 @@ pub struct NetworkActorState<S> {
     min_outbound_peers: usize,
     // The features of the node, used to indicate the capabilities of the node.
     features: FeatureVector,
-    // the payment router map, only used for avoiding finding the same payment router multiple times
-    payment_router_map: HashMap<(Hash256, u64), Vec<PaymentHopData>>,
     channel_ephemeral_config: ChannelEphemeralConfig,
-    funding_tx_shell_builder: Option<String>,
 
     // the number of pending retrying send payments, we track it for
     // set retry delay dynamically, pending too many payments may have a negative impact
@@ -3093,15 +3217,6 @@ fn generate_channel_actor_name(local_peer_id: &PeerId, remote_peer_id: &PeerId) 
         CHANNEL_ACTOR_NAME_PREFIX.fetch_add(1, Ordering::AcqRel),
         local_peer_id,
         remote_peer_id
-    )
-}
-
-fn generate_in_flight_tx_actor_name(supervisor: ActorCell, tx_hash: Hash256) -> String {
-    let supervisor_name = supervisor.get_name();
-    format!(
-        "{}/InFlightCkbTx-{}",
-        supervisor_name.as_deref().unwrap_or_default(),
-        tx_hash
     )
 }
 
@@ -3214,18 +3329,12 @@ where
             )));
         }
 
-        if let (Some(tlc_expiry_delta), Some(delay_epoch)) =
-            (tlc_expiry_delta, commitment_delay_epoch)
-        {
-            let epoch_delay_milliseconds =
-                (delay_epoch.number() as f64 * MILLI_SECONDS_PER_EPOCH as f64 * 2.0 / 3.0) as u64;
-            if tlc_expiry_delta < epoch_delay_milliseconds {
-                return Err(ProcessingChannelError::InvalidParameter(format!(
-                    "TLC expiry delta {} is smaller than 2/3 commitment_delay_epoch delay {}",
-                    tlc_expiry_delta, epoch_delay_milliseconds
-                )));
-            }
-        }
+        let tlc_expiry_delta = tlc_expiry_delta.unwrap_or(self.tlc_expiry_delta);
+        let commitment_delay_epochs = commitment_delay_epoch.map_or_else(
+            || EpochNumberWithFraction::new(DEFAULT_COMMITMENT_DELAY_EPOCHS, 0, 1).full_value(),
+            |epochs| epochs.full_value(),
+        );
+        check_tlc_delta_with_epochs(tlc_expiry_delta, commitment_delay_epochs)?;
 
         let shutdown_script =
             shutdown_script.unwrap_or_else(|| self.default_shutdown_script.clone());
@@ -3240,7 +3349,6 @@ where
                 network.clone(),
                 store,
                 self.channel_subscribers.clone(),
-                self.private_key.clone(),
             ),
             ChannelInitializationParameter {
                 operation: ChannelInitializationOperation::OpenChannel(OpenChannelParameter {
@@ -3248,7 +3356,7 @@ where
                     seed,
                     tlc_info: ChannelTlcInfo::new(
                         tlc_min_value.unwrap_or(self.tlc_min_value),
-                        tlc_expiry_delta.unwrap_or(self.tlc_expiry_delta),
+                        tlc_expiry_delta,
                         tlc_fee_proportional_millionths
                             .unwrap_or(self.tlc_fee_proportional_millionths),
                     ),
@@ -3265,6 +3373,7 @@ where
                         .unwrap_or(MAX_TLC_NUMBER_IN_FLIGHT),
                 }),
                 ephemeral_config: self.channel_ephemeral_config.clone(),
+                private_key: self.private_key.clone(),
             },
             network.clone().get_cell(),
         )
@@ -3332,7 +3441,6 @@ where
                 network.clone(),
                 store,
                 self.channel_subscribers.clone(),
-                self.private_key.clone(),
             ),
             ChannelInitializationParameter {
                 operation: ChannelInitializationOperation::AcceptChannel(AcceptChannelParameter {
@@ -3356,6 +3464,7 @@ where
                     max_tlc_value_in_flight: max_tlc_value_in_flight.unwrap_or(u128::MAX),
                 }),
                 ephemeral_config: self.channel_ephemeral_config.clone(),
+                private_key: self.private_key.clone(),
             },
             network.clone().get_cell(),
         )
@@ -3394,28 +3503,22 @@ where
         tx_hash: Hash256,
         tx_kind: InFlightCkbTxKind,
     ) -> crate::Result<()> {
-        if let Entry::Vacant(entry) = self.ckb_txs_in_flight.entry(tx_hash) {
-            let handler = InFlightCkbTxActor {
-                chain_actor: self.chain_actor.clone(),
-                network_actor: self.network.clone(),
-                tx_hash,
-                tx_kind,
-                confirmations: CKB_TX_TRACING_CONFIRMATIONS,
-            };
+        let handler = InFlightCkbTxActor {
+            chain_actor: self.chain_actor.clone(),
+            network_actor: self.network.clone(),
+            tx_hash,
+            tx_kind,
+            confirmations: CKB_TX_TRACING_CONFIRMATIONS,
+        };
 
-            let (task, _) = Actor::spawn_linked(
-                Some(generate_in_flight_tx_actor_name(
-                    self.network.get_cell(),
-                    tx_hash,
-                )),
-                handler,
-                InFlightCkbTxActorArguments { transaction: None },
-                self.network.get_cell(),
-            )
-            .await?;
+        Actor::spawn_linked(
+            None,
+            handler,
+            InFlightCkbTxActorArguments { transaction: None },
+            self.network.get_cell(),
+        )
+        .await?;
 
-            entry.insert(task);
-        }
         Ok(())
     }
 
@@ -3424,63 +3527,42 @@ where
         tx: TransactionView,
         tx_kind: InFlightCkbTxKind,
     ) -> crate::Result<()> {
-        let tx_hash: Hash256 = tx.hash().into();
-        match self.ckb_txs_in_flight.entry(tx_hash) {
-            Entry::Vacant(vacant) => {
-                let handler = InFlightCkbTxActor {
-                    chain_actor: self.chain_actor.clone(),
-                    network_actor: self.network.clone(),
-                    tx_hash,
-                    tx_kind,
-                    confirmations: CKB_TX_TRACING_CONFIRMATIONS,
-                };
+        let tx_hash = tx.hash().into();
 
-                let (task, _) = Actor::spawn_linked(
-                    Some(generate_in_flight_tx_actor_name(
-                        self.network.get_cell(),
-                        tx_hash,
-                    )),
-                    handler,
-                    InFlightCkbTxActorArguments {
-                        transaction: Some(tx),
-                    },
-                    self.network.get_cell(),
-                )
-                .await?;
+        let handler = InFlightCkbTxActor {
+            chain_actor: self.chain_actor.clone(),
+            network_actor: self.network.clone(),
+            tx_hash,
+            tx_kind,
+            confirmations: CKB_TX_TRACING_CONFIRMATIONS,
+        };
 
-                vacant.insert(task);
-            }
-            Entry::Occupied(occupied) => {
-                occupied
-                    .get()
-                    .send_message(InFlightCkbTxActorMessage::SendTx(tx))?;
-            }
-        }
+        Actor::spawn_linked(
+            None,
+            handler,
+            InFlightCkbTxActorArguments {
+                transaction: Some(tx),
+            },
+            self.network.get_cell(),
+        )
+        .await?;
+
         Ok(())
-    }
-
-    pub fn remove_in_flight_tx(&mut self, tx_hash: Hash256) {
-        if let Some(task) = self.ckb_txs_in_flight.remove(&tx_hash) {
-            task.stop(Some("cleanup in flight tx".to_string()));
-        }
     }
 
     pub async fn abort_funding(&mut self, channel_id_or_outpoint: Either<Hash256, OutPoint>) {
         let channel_id = match channel_id_or_outpoint {
             Either::Left(channel_id) => channel_id,
-            Either::Right(outpoint) => {
-                self.remove_in_flight_tx(outpoint.tx_hash().into());
-                match self.pending_channels.remove(&outpoint) {
-                    Some(channel_id) => channel_id,
-                    None => {
-                        warn!(
-                            "Funding transaction failed for outpoint {:?} but no channel found",
-                            &outpoint
-                        );
-                        return;
-                    }
+            Either::Right(outpoint) => match self.pending_channels.remove(&outpoint) {
+                Some(channel_id) => channel_id,
+                None => {
+                    warn!(
+                        "Funding transaction failed for outpoint {:?} but no channel found",
+                        &outpoint
+                    );
+                    return;
                 }
-            }
+            },
         };
 
         self.send_message_to_channel_actor(
@@ -3733,11 +3815,11 @@ where
                 self.network.clone(),
                 self.store.clone(),
                 self.channel_subscribers.clone(),
-                self.private_key.clone(),
             ),
             ChannelInitializationParameter {
                 operation: ChannelInitializationOperation::ReestablishChannel(channel_id),
                 ephemeral_config: self.channel_ephemeral_config.clone(),
+                private_key: self.private_key.clone(),
             },
             self.network.get_cell(),
         )
@@ -3899,13 +3981,37 @@ where
         channel_id: &Hash256,
         tx_hash: Byte32,
         force: bool,
+        close_by_us: bool,
     ) {
-        self.send_message_to_channel_actor(
-            *channel_id,
-            None,
-            ChannelActorMessage::Event(ChannelEvent::ClosingTransactionConfirmed(force)),
-        )
-        .await;
+        match self.channels.get(channel_id) {
+            Some(channel_actor) => {
+                let _ = channel_actor.send_message(ChannelActorMessage::Event(
+                    ChannelEvent::ClosingTransactionConfirmed(tx_hash.unpack(), force, close_by_us),
+                ));
+            }
+            None => {
+                debug!("Channel {channel_id} actor is exit, try to update channel state");
+                // channel is already exit, we should not try to reestablish channel since we
+                // received a close transaction, so we just update channel actor state
+                if let Some(mut state) = self.store.get_channel_actor_state(channel_id) {
+                    // setup required field:
+                    state.network = Some(self.network.clone());
+                    state.private_key = Some(self.private_key.clone());
+                    match state
+                        .update_close_transaction_confirmed(tx_hash.unpack(), force, close_by_us)
+                        .await
+                    {
+                        Ok(_) => {
+                            self.store.insert_channel_actor_state(state);
+                        }
+                        Err(err) => {
+                            error!("failed to update_close_transaction_confirmed {err:?}");
+                        }
+                    }
+                }
+            }
+        }
+
         if let Some(session) = self.get_peer_session(peer_id) {
             if let Some(set) = self.session_channels_map.get_mut(&session) {
                 set.remove(channel_id);
@@ -3923,13 +4029,12 @@ where
                 ))
                 .expect(ASSUME_NETWORK_MYSELF_ALIVE);
         }
-
-        self.remove_in_flight_tx(tx_hash.into());
     }
 
     async fn on_channel_actor_stopped(&mut self, channel_id: Hash256, reason: StopReason) {
         // all check passed, now begin to remove from memory and DB
         self.channels.remove(&channel_id);
+        self.channels_funding_lock_script_cache.remove(&channel_id);
         for (_peer_id, connected_peer) in self.peer_session_map.iter() {
             if let Some(session_channels) = self
                 .session_channels_map
@@ -4114,7 +4219,6 @@ where
             )),
         )
         .await;
-        self.remove_in_flight_tx(outpoint.tx_hash().into());
     }
 
     async fn send_message_to_channel_actor(
@@ -4164,6 +4268,23 @@ where
                 // to ChannelActor, since NetworkActor is responsible for multiple channels and a lot of stuff.
                 let _ = actor.send_message(message);
             }
+        }
+    }
+
+    fn get_cached_channel_funding_lock_script(
+        &mut self,
+        channel_id: Hash256,
+        state: &ChannelActorState,
+    ) -> Script {
+        if self.channels.contains_key(&channel_id) {
+            self.channels_funding_lock_script_cache
+                .entry(channel_id)
+                .or_insert_with(|| state.get_funding_lock_script())
+                .to_owned()
+        } else {
+            // To prevent potential memory leak, we do not cache this branch
+            tracing::warn!("Get funding lock script for unknown channel {channel_id:?}");
+            state.get_funding_lock_script()
         }
     }
 }
@@ -4393,8 +4514,8 @@ where
             peer_session_map: Default::default(),
             session_channels_map: Default::default(),
             channels: Default::default(),
-            ckb_txs_in_flight: Default::default(),
             outpoint_channel_map: Default::default(),
+            channels_funding_lock_script_cache: Default::default(),
             to_be_accepted_channels: ToBeAcceptedChannels::new_with_config(&config),
             pending_channels: Default::default(),
             chain_actor,
@@ -4409,12 +4530,10 @@ where
             max_inbound_peers: config.max_inbound_peers(),
             min_outbound_peers: config.min_outbound_peers(),
             features,
-            payment_router_map: Default::default(),
             channel_ephemeral_config: ChannelEphemeralConfig {
                 funding_timeout_seconds: config.funding_timeout_seconds,
             },
             retry_send_payment_count: 0,
-            funding_tx_shell_builder: config.funding_tx_shell_builder.clone(),
         };
 
         let node_announcement = state.get_or_create_new_node_announcement_message();
@@ -4466,6 +4585,9 @@ where
         });
         myself.send_interval(CHECK_CHANNELS_INTERVAL, || {
             NetworkActorMessage::new_command(NetworkActorCommand::CheckChannels)
+        });
+        myself.send_interval(CHECK_CHANNELS_SHUTDOWN_INTERVAL, || {
+            NetworkActorMessage::new_command(NetworkActorCommand::CheckChannelsShutdown)
         });
 
         // Trigger mmp tlc set fulfill check and hold tlc timeout
@@ -4722,6 +4844,7 @@ pub async fn start_network<
 
     actor
 }
+
 #[allow(dead_code)]
 pub(crate) fn find_type(addr: &Multiaddr) -> TransportType {
     let mut iter = addr.iter();
@@ -4733,6 +4856,7 @@ pub(crate) fn find_type(addr: &Multiaddr) -> TransportType {
     })
     .unwrap_or(TransportType::Tcp)
 }
+
 struct ToBeAcceptedChannels {
     total_number_limit: usize,
     total_bytes_limit: usize,
@@ -4818,65 +4942,4 @@ impl ToBeAcceptedChannels {
         self.map.insert(id, (peer_id, open_channel));
         Ok(())
     }
-}
-#[cfg(not(target_arch = "wasm32"))]
-async fn fund_via_shell(
-    shell_script: String,
-    mut tx: FundingTx,
-    request: FundingRequest,
-) -> Result<FundingTx, FundingError> {
-    use std::process::Stdio;
-    use tokio::{io::AsyncWriteExt, process::Command};
-    let (executable, arg) = if cfg!(target_os = "windows") {
-        ("cmd", "/C")
-    } else {
-        ("sh", "-c")
-    };
-    let mut child = Command::new(executable)
-        .arg(arg)
-        .arg(shell_script)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
-
-    let mut stdin = child.stdin.take().expect("failed to get stdin");
-    stdin.write_all(b"{\"tx\":").await?;
-    match tx.take() {
-        Some(tx) => {
-            let tx: ckb_jsonrpc_types::Transaction = tx.data().into();
-            let tx_json = serde_json::to_string(&tx)?;
-            stdin.write_all(tx_json.as_bytes()).await?;
-        }
-        None => {
-            stdin.write_all(b"null").await?;
-        }
-    }
-    stdin.write_all(b",\"request\":").await?;
-    let request_json = serde_json::to_string(&request)?;
-    stdin.write_all(request_json.as_bytes()).await?;
-    stdin.write_all(b"}").await?;
-
-    let output = child.wait_with_output().await?;
-    if output.status.success() {
-        let out_tx_json = String::from_utf8(output.stdout)?;
-        let tx: ckb_jsonrpc_types::Transaction = serde_json::from_str(&out_tx_json)?;
-        let tx: Transaction = tx.into();
-        let tx: FundingTx = tx.into_view().into();
-        Ok(tx)
-    } else {
-        let err = String::from_utf8(output.stderr)?;
-        Err(FundingError::CkbTxBuilderError(
-            ckb_sdk::tx_builder::TxBuilderError::Other(anyhow::anyhow!(err)),
-        ))
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-async fn fund_via_shell(
-    _shell_script: String,
-    _tx: FundingTx,
-    _request: FundingRequest,
-) -> Result<FundingTx, FundingError> {
-    todo!();
 }

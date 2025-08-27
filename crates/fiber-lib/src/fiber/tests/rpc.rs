@@ -405,7 +405,7 @@ async fn test_rpc_shutdown_channels() {
     eprintln!("Channel status: {:?}", status);
     assert!(matches!(
         status,
-        ChannelState::Closed(CloseFlags::UNCOOPERATIVE)
+        ChannelState::Closed(CloseFlags::UNCOOPERATIVE_LOCAL)
     ));
 }
 
@@ -447,6 +447,7 @@ async fn test_rpc_node_info() {
 
 #[tokio::test]
 async fn test_rpc_basic_with_auth() {
+    init_tracing();
     let (rpc_config, auth_root) = rpc_config_with_auth();
     let (nodes, _channels) = create_n_nodes_network_with_params(
         &[

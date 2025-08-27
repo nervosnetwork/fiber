@@ -13,7 +13,7 @@ pub use fiber_v040::fiber::channel::{
     TlcInfo as TlcInfoV040, TlcState as TlcStateV040,
 };
 pub use fiber_v040::fiber::types::PaymentHopData as PaymentHopDataV040;
-pub use fiber_v040::fiber::types::PeeledOnionPacket as PeeledOnionPacketV040;
+pub use fiber_v040::fiber::types::PeeledPaymentOnionPacket as PeeledOnionPacketV040;
 
 pub use fiber_v041::fiber::channel::ChannelActorState as ChannelActorStateV041;
 pub use fiber_v041::fiber::channel::{
@@ -22,7 +22,7 @@ pub use fiber_v041::fiber::channel::{
     TlcInfo as TlcInfoV041, TlcState as TlcStateV041,
 };
 pub use fiber_v041::fiber::types::PaymentHopData as PaymentHopDataV041;
-pub use fiber_v041::fiber::types::PeeledOnionPacket as PeeledOnionPacketV041;
+pub use fiber_v041::fiber::types::PeeledPaymentOnionPacket as PeeledOnionPacketV041;
 
 pub struct MigrationObj {
     version: String,

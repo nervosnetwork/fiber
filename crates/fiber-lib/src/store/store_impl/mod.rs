@@ -3,22 +3,27 @@ mod native;
 #[cfg(not(target_arch = "wasm32"))]
 pub use native::{Batch, DbDirection, IteratorMode, Store};
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", not(test)))]
 mod browser;
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", not(test)))]
 pub use browser::{Batch, DbDirection, IteratorMode, Store};
+
+#[cfg(all(target_arch = "wasm32", test))]
+mod browser_test;
+#[cfg(all(target_arch = "wasm32", test))]
+pub use browser_test::{Batch, DbDirection, IteratorMode, Store};
 
 use std::path::Path;
 
 use super::db_migrate::DbMigrate;
 use super::schema::*;
 use crate::fiber::gossip::GossipMessageStore;
-use crate::fiber::graph::AttemptStatus;
+use crate::fiber::payment::{Attempt, AttemptStatus, PaymentSession, PaymentStatus};
 use crate::fiber::types::{HoldTlc, CURSOR_SIZE};
 use crate::{
     fiber::{
         channel::{ChannelActorState, ChannelActorStateStore, ChannelState},
-        graph::{Attempt, NetworkGraphStateStore, PaymentSession, PaymentStatus},
+        graph::NetworkGraphStateStore,
         history::{Direction, TimedResult},
         network::{NetworkActorStateStore, PaymentCustomRecords, PersistentNetworkActorState},
         types::{BroadcastMessage, BroadcastMessageID, Cursor, Hash256},
@@ -801,11 +806,6 @@ impl WatchtowerStore for Store {
     }
 
     fn insert_watch_preimage(&self, node_id: NodeId, payment_hash: Hash256, preimage: Hash256) {
-        debug_assert_eq!(
-            payment_hash,
-            ckb_hash::blake2b_256(preimage).into(),
-            "wrong preimage"
-        );
         let mut batch = self.batch();
         batch.put_kv(KeyValue::WatchtowerPreimage(
             payment_hash,

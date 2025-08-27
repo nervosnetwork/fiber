@@ -33,7 +33,12 @@ pub const DEFAULT_OPEN_CHANNEL_AUTO_ACCEPT_MIN_CKB_FUNDING_AMOUNT: u64 = 100 * C
 pub const DEFAULT_TLC_EXPIRY_DELTA: u64 = 24 * 60 * 60 * 1000;
 
 /// 4 hours for each epoch
+#[cfg(not(debug_assertions))]
 pub const MILLI_SECONDS_PER_EPOCH: u64 = 4 * 60 * 60 * 1000;
+#[cfg(debug_assertions)]
+// 2 seconds for testing environment, so default 2/3 commitment_delay_epoch is 6 * 2/3 * 2 = 8 seconds
+// we need to make sure 2/3 commitment_delay_epoch is greater than MIN_TLC_EXPIRY_DELTA
+pub const MILLI_SECONDS_PER_EPOCH: u64 = 2 * 1000;
 
 #[cfg(not(debug_assertions))]
 /// The minimal expiry delta to forward a tlc, in milliseconds. 16 hours
@@ -361,24 +366,6 @@ pub struct FiberConfig {
     )]
     #[default(DEFAULT_FUNDING_TIMEOUT_SECONDS)]
     pub funding_timeout_seconds: u64,
-
-    /// Use an external shell command to build funding tx.
-    ///
-    /// The command is executed by `cmd /C` in Windows, and by `sh -c` in other systems.
-    ///
-    /// The command receives a JSON object from stdin with following keys:
-    /// - `tx`: The current `Transaction`. This can be `null` for the first funding request.
-    /// - `request`: The `FundingRequest` to fulfil.
-    ///
-    /// The command MUST use non-zero exit status to indicate failures and print error message to stderr.
-    /// It MUST print Transaction in JSON to stdout on success building.
-    #[arg(
-        name = "FIBER_FUNDING_TX_SHELL_BUILDER",
-        long = "fiber-funding-tx-shell-builder",
-        env,
-        help = "Use an external shell command to build funding tx. [default: None]"
-    )]
-    pub funding_tx_shell_builder: Option<String>,
 
     /// Listen to WebSocket on the same TCP port
     #[arg(

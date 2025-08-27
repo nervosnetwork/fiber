@@ -2,8 +2,9 @@
 // https://github.com/lightningnetwork/lnd/blob/b7c59b36a74975c4e710a02ea42959053735402e/routing/probability_bimodal.go
 // we only use direct channel probability now.
 
+use super::payment::SessionRouteNode;
 use super::{
-    graph::{NetworkGraphStateStore, SessionRouteNode},
+    graph::NetworkGraphStateStore,
     types::{ChannelUpdate, Pubkey, TlcErr},
 };
 #[cfg(test)]
@@ -174,6 +175,8 @@ impl InternalResult {
             );
         }
     }
+
+    #[cfg(test)]
     pub fn fail_range_pairs(&mut self, nodes: &[SessionRouteNode], start: usize, end: usize) {
         for index in start.max(1)..=end {
             self.fail_pair(nodes, index);
@@ -181,7 +184,7 @@ impl InternalResult {
     }
 
     pub fn record_payment_fail(&mut self, nodes: &[SessionRouteNode], tlc_err: TlcErr) -> bool {
-        let mut need_to_retry = true;
+        let mut need_retry = true;
 
         let error_index = nodes
             .iter()
@@ -210,8 +213,10 @@ impl InternalResult {
                 | TlcErrorCode::InvoiceCancelled
                 | TlcErrorCode::UnknownNextPeer
                 | TlcErrorCode::RequiredNodeFeatureMissing
-                | TlcErrorCode::ExpiryTooFar => {
-                    need_to_retry = false;
+                | TlcErrorCode::ExpiryTooSoon
+                | TlcErrorCode::ExpiryTooFar
+                | TlcErrorCode::HoldTlcTimeout => {
+                    need_retry = false;
                 }
                 TlcErrorCode::TemporaryChannelFailure => {
                     self.fail_pair_balanced(nodes, index + 1);
@@ -224,7 +229,7 @@ impl InternalResult {
             match error_code {
                 TlcErrorCode::FinalIncorrectExpiryDelta | TlcErrorCode::FinalIncorrectTlcAmount => {
                     if len == 2 {
-                        need_to_retry = false;
+                        need_retry = false;
                         self.fail_node(nodes, len - 1);
                     } else {
                         // maybe the previous hop is malicious
@@ -234,12 +239,15 @@ impl InternalResult {
                 }
                 TlcErrorCode::IncorrectOrUnknownPaymentDetails
                 | TlcErrorCode::InvoiceExpired
-                | TlcErrorCode::InvoiceCancelled => {
-                    need_to_retry = false;
+                | TlcErrorCode::InvoiceCancelled
+                | TlcErrorCode::HoldTlcTimeout => {
+                    need_retry = false;
                     self.succeed_range_pairs(nodes, 0, len - 1);
                 }
                 TlcErrorCode::ExpiryTooSoon | TlcErrorCode::ExpiryTooFar => {
-                    need_to_retry = false;
+                    // these two error code will not be reported from last hop in theory
+                    // anyway, don't retry payment anymore
+                    need_retry = false;
                 }
                 _ => {
                     self.fail_node(nodes, len - 1);
@@ -252,7 +260,8 @@ impl InternalResult {
             match error_code {
                 TlcErrorCode::InvalidOnionVersion
                 | TlcErrorCode::InvalidOnionHmac
-                | TlcErrorCode::InvalidOnionKey => {
+                | TlcErrorCode::InvalidOnionKey
+                | TlcErrorCode::InvalidOnionError => {
                     self.fail_pair(nodes, index);
                 }
                 TlcErrorCode::InvalidOnionPayload => {
@@ -268,14 +277,14 @@ impl InternalResult {
                     self.fail_pair(nodes, index + 1);
                 }
                 TlcErrorCode::FeeInsufficient => {
-                    need_to_retry = true;
+                    need_retry = true;
                     self.fail_pair_balanced(nodes, index + 1);
                     if index > 1 {
                         self.succeed_range_pairs(nodes, 0, index);
                     }
                 }
                 TlcErrorCode::IncorrectTlcExpiry => {
-                    need_to_retry = false;
+                    need_retry = false;
                     if index == 1 {
                         self.fail_node(nodes, 1);
                     } else {
@@ -285,33 +294,37 @@ impl InternalResult {
                         }
                     }
                 }
-                TlcErrorCode::TemporaryChannelFailure => {
+                TlcErrorCode::TemporaryChannelFailure
+                | TlcErrorCode::ChannelDisabled
+                | TlcErrorCode::TemporaryNodeFailure
+                | TlcErrorCode::RequiredNodeFeatureMissing
+                | TlcErrorCode::AmountBelowMinimum
+                | TlcErrorCode::ExpiryTooSoon
+                | TlcErrorCode::ExpiryTooFar => {
                     self.fail_pair_balanced(nodes, index + 1);
                     self.succeed_range_pairs(nodes, 0, index);
                 }
-                TlcErrorCode::ExpiryTooSoon => {
-                    if index == 1 {
-                        self.fail_node(nodes, 1);
-                    } else {
-                        self.fail_range_pairs(nodes, 0, index - 1);
-                    }
-                }
                 TlcErrorCode::IncorrectOrUnknownPaymentDetails => {
-                    need_to_retry = false;
+                    need_retry = false;
                 }
                 TlcErrorCode::InvoiceExpired
                 | TlcErrorCode::InvoiceCancelled
                 | TlcErrorCode::FinalIncorrectExpiryDelta
-                | TlcErrorCode::FinalIncorrectTlcAmount => {
-                    error!("middle hop does not expect to report this error");
-                    need_to_retry = false;
+                | TlcErrorCode::FinalIncorrectTlcAmount
+                | TlcErrorCode::HoldTlcTimeout => {
+                    error!(
+                        "middle hop does not expect to report this error: {:?}",
+                        error_code
+                    );
+                    need_retry = false;
                 }
-                _ => {
+                TlcErrorCode::PermanentNodeFailure
+                | TlcErrorCode::RequiredChannelFeatureMissing => {
                     self.fail_node(nodes, index);
                 }
             }
         }
-        need_to_retry
+        need_retry
     }
 }
 
@@ -546,7 +559,7 @@ where
 
         let factor = self.time_factor(time);
         let fail_amount = fail_amount.max(1);
-        (fail_amount * (1.0 / factor) as u128).min(capacity)
+        (fail_amount.saturating_mul((1.0 / factor) as u128)).min(capacity)
     }
 
     // Get the probability of a payment success through a direct channel,

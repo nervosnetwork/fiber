@@ -66,6 +66,32 @@ pub struct CkbConfig {
     )]
     pub tx_tracing_polling_interval_ms: u64,
 
+    /// Use an external shell command to build funding tx.
+    ///
+    /// The command is executed by `cmd /C` in Windows, and by `sh -c` in other systems.
+    ///
+    /// The command receives a JSON object from stdin with following keys:
+    /// - `tx`: The current `Transaction`. This can be `null` for the first funding request.
+    /// - `request`: The `FundingRequest` to fulfil.
+    /// - `rpc_url`: RPC URL to connect the CKB node.
+    /// - `funding_source_lock_script`: The lock script who provides input cells for funding.
+    ///
+    /// Example:
+    ///
+    /// ```json
+    /// ```
+    ///
+    /// The command MUST use non-zero exit status to indicate failures and print error message to stderr.
+    /// It MUST print Transaction in JSON to stdout on success building.
+    #[arg(
+        name = "FIBER_FUNDING_TX_SHELL_BUILDER",
+        long = "fiber-funding-tx-shell-builder",
+        env,
+        help = "Use an external shell command to build funding tx. [default: None]"
+    )]
+    #[cfg(not(target_arch = "wasm32"))]
+    pub funding_tx_shell_builder: Option<String>,
+
     #[arg(skip)]
     #[cfg(target_arch = "wasm32")]
     pub wasm_secret_key: Option<SecretKey>,
@@ -123,6 +149,17 @@ impl CkbConfig {
             Contract::Secp256k1Lock,
             &pubkey_hash[0..20],
         ))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn funding_tx_shell_builder_as_deref(&self) -> Option<&str> {
+        self.funding_tx_shell_builder.as_deref()
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    #[doc(hidden)]
+    pub fn funding_tx_shell_builder_as_deref(&self) -> Option<&str> {
+        None
     }
 }
 

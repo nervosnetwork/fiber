@@ -273,11 +273,15 @@ impl InFlightCkbTxActor {
                 TxStatus::Committed(..),
             ) => {
                 tracing::info!("Closing transaction {:?} confirmed", self.tx_hash);
+
+                // set close_by_us if we broadcast a force close
+                let close_by_us = force_closing;
                 NetworkActorEvent::ClosingTransactionConfirmed(
                     peer_id,
                     channel_id,
                     self.tx_hash.into(),
                     force_closing,
+                    close_by_us,
                 )
             }
             (InFlightCkbTxKind::Closing(peer_id, channel_id, _force_closing), status) => {

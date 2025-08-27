@@ -191,3 +191,9 @@ export function randomSecretKey(): Uint8Array {
 }
 
 export * from "./types/general.ts";
+export * from "./types/channel.ts";
+export * from "./types/graph.ts";
+export * from "./types/info.ts";
+export * from "./types/invoice.ts";
+export * from "./types/payment.ts";
+export * from "./types/peer.ts";

@@ -6,14 +6,15 @@ use crate::{
         gen::{fiber as molecule_fiber, gossip},
         hash_algorithm::HashAlgorithm,
         types::{
-            pack_hop_data, secp256k1_instance, unpack_hop_data, AddTlc, BroadcastMessageID, Cursor,
-            Hash256, NodeAnnouncement, NodeId, PaymentHopData, PeeledOnionPacket, Privkey, Pubkey,
-            TlcErr, TlcErrPacket, TlcErrorCode, NO_SHARED_SECRET,
+            pack_hop_data, secp256k1_instance, unpack_hop_data, AddTlc, BasicMppPaymentData,
+            BroadcastMessageID, Cursor, Hash256, NodeAnnouncement, NodeId, PaymentHopData,
+            PeeledPaymentOnionPacket, Privkey, Pubkey, TlcErr, TlcErrPacket, TlcErrorCode,
+            NO_SHARED_SECRET,
         },
         PaymentCustomRecords,
     },
     gen_deterministic_fiber_private_key, gen_rand_channel_outpoint, gen_rand_fiber_private_key,
-    gen_rand_fiber_public_key, now_timestamp_as_millis_u64,
+    gen_rand_fiber_public_key, gen_rand_sha256_hash, now_timestamp_as_millis_u64,
 };
 use ckb_hash::blake2b_256;
 use ckb_jsonrpc_types::OutPoint;
@@ -31,7 +32,8 @@ use tentacle::{multiaddr::MultiAddr, secio::PeerId};
 
 use std::str::FromStr;
 
-#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
 fn test_serde_public_key() {
     let sk = SecretKey::from_slice(&[42; 32]).unwrap();
     let public_key = Pubkey::from(sk.public_key(secp256k1_instance()));
@@ -44,7 +46,8 @@ fn test_serde_public_key() {
     assert_eq!(pubkey, public_key)
 }
 
-#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
 fn test_serde_cursor_node_announcement() {
     let now = 0u64;
     let node_id = gen_rand_fiber_public_key();
@@ -54,7 +57,8 @@ fn test_serde_cursor_node_announcement() {
     assert_eq!(cursor, unmoleculed_cursor);
 }
 
-#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
 fn test_serde_cursor_channel_announcement() {
     let now = 0u64;
     let channel_announcement_id = gen_rand_channel_outpoint();
@@ -67,7 +71,8 @@ fn test_serde_cursor_channel_announcement() {
     assert_eq!(cursor, unmoleculed_cursor);
 }
 
-#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
 fn test_serde_cursor_channel_update() {
     let now = 0u64;
     let channel_update_id = gen_rand_channel_outpoint();
@@ -77,7 +82,8 @@ fn test_serde_cursor_channel_update() {
     assert_eq!(cursor, unmoleculed_cursor);
 }
 
-#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
 fn test_cursor_timestamp() {
     let node_id = gen_rand_fiber_public_key();
     // 255 is larger than 256 in little endian.
@@ -87,7 +93,8 @@ fn test_cursor_timestamp() {
     );
 }
 
-#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
 fn test_cursor_types() {
     let node_id = gen_rand_fiber_public_key();
     let channel_outpoint = gen_rand_channel_outpoint();
@@ -114,7 +121,8 @@ fn test_cursor_types() {
     );
 }
 
-#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
 fn test_add_tlc_serialization() {
     let add_tlc = AddTlc {
         channel_id: [42; 32].into(),
@@ -130,7 +138,8 @@ fn test_add_tlc_serialization() {
     assert_eq!(add_tlc, add_tlc2);
 }
 
-#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
 fn test_peeled_onion_packet() {
     let secp = Secp256k1::new();
     let keys: Vec<Privkey> = std::iter::repeat_with(gen_rand_fiber_private_key)
@@ -165,7 +174,7 @@ fn test_peeled_onion_packet() {
             custom_records: None,
         },
     ];
-    let packet = PeeledOnionPacket::create(
+    let packet = PeeledPaymentOnionPacket::create(
         gen_rand_fiber_private_key(),
         hops_infos.clone(),
         None,
@@ -174,23 +183,32 @@ fn test_peeled_onion_packet() {
     .expect("create peeled packet");
 
     let serialized = packet.serialize();
-    let deserialized = PeeledOnionPacket::deserialize(&serialized).expect("deserialize");
+    let deserialized = PeeledPaymentOnionPacket::deserialize(&serialized).expect("deserialize");
 
     assert_eq!(packet, deserialized);
 
-    assert_eq!(packet.current, hops_infos[0]);
+    assert_eq!(packet.current, hops_infos[0].clone().into());
     assert!(!packet.is_last());
 
-    let packet = packet.peel(&keys[1], &secp).expect("peel");
-    assert_eq!(packet.current, hops_infos[1]);
+    let packet = packet
+        .next
+        .expect("next hop")
+        .peel(&keys[1], None, &secp)
+        .expect("peel");
+    assert_eq!(packet.current, hops_infos[1].clone().into());
     assert!(!packet.is_last());
 
-    let packet = packet.peel(&keys[2], &secp).expect("peel");
-    assert_eq!(packet.current, hops_infos[2]);
+    let packet = packet
+        .next
+        .expect("next hop")
+        .peel(&keys[2], None, &secp)
+        .expect("peel");
+    assert_eq!(packet.current, hops_infos[2].clone().into());
     assert!(packet.is_last());
 }
 
-#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
 fn test_peeled_large_onion_packet() {
     fn build_onion_packet(hops_num: usize) -> Result<(), String> {
         let secp = Secp256k1::new();
@@ -220,7 +238,7 @@ fn test_peeled_large_onion_packet() {
             custom_records: None,
         });
 
-        let packet = PeeledOnionPacket::create(
+        let packet = PeeledPaymentOnionPacket::create(
             gen_rand_fiber_private_key(),
             hops_infos.clone(),
             None,
@@ -229,18 +247,26 @@ fn test_peeled_large_onion_packet() {
         .map_err(|e| format!("create peeled packet error: {}", e))?;
 
         let serialized = packet.serialize();
-        let deserialized = PeeledOnionPacket::deserialize(&serialized).expect("deserialize");
+        let deserialized = PeeledPaymentOnionPacket::deserialize(&serialized).expect("deserialize");
 
         assert_eq!(packet, deserialized);
 
         let mut now = Some(packet);
         for i in 0..hops_infos.len() - 1 {
-            let packet = now.unwrap().peel(&keys[i], &secp).expect("peel");
-            assert_eq!(packet.current, hops_infos[i + 1]);
+            let packet = now
+                .unwrap()
+                .next
+                .expect("next hop")
+                .peel(&keys[i], None, &secp)
+                .expect("peel");
+            assert_eq!(packet.current, hops_infos[i + 1].clone().into());
             now = Some(packet.clone());
         }
         let last_packet = now.unwrap();
-        assert_eq!(last_packet.current, hops_infos[hops_infos.len() - 1]);
+        assert_eq!(
+            last_packet.current,
+            hops_infos[hops_infos.len() - 1].clone().into()
+        );
         assert!(last_packet.is_last());
         return Ok(());
     }
@@ -254,7 +280,8 @@ fn test_peeled_large_onion_packet() {
     );
 }
 
-#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
 fn test_tlc_fail_error() {
     let tlc_fail_detail = TlcErr::new(TlcErrorCode::InvalidOnionVersion);
     assert!(!tlc_fail_detail.error_code.is_node());
@@ -279,7 +306,8 @@ fn test_tlc_fail_error() {
     assert_eq!(error_code, convert);
 }
 
-#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
 fn test_tlc_err_packet_encryption() {
     // Setup
     let secp = Secp256k1::new();
@@ -318,7 +346,8 @@ fn test_tlc_err_packet_encryption() {
     }
 }
 
-#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
 fn test_tlc_error_code() {
     let code = TlcErrorCode::PermanentNodeFailure;
     let str = code.as_ref().to_string();
@@ -331,7 +360,8 @@ fn test_tlc_error_code() {
     assert_eq!(code, TlcErrorCode::IncorrectOrUnknownPaymentDetails);
 }
 
-#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
 fn test_create_and_verify_node_announcement() {
     let privkey = gen_rand_fiber_private_key();
     let node_announcement = NodeAnnouncement::new(
@@ -349,7 +379,8 @@ fn test_create_and_verify_node_announcement() {
     );
 }
 
-#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
 fn test_serde_node_announcement() {
     let privkey = gen_rand_fiber_private_key();
     let node_announcement = NodeAnnouncement::new(
@@ -378,7 +409,8 @@ fn test_serde_node_announcement() {
 // There was a bug in the node announcement verification logic which uses local udt whitelist to
 // verify the signature. This bug causes different nodes to have different results on signature verification.
 // We add a few hard coded node announcements with different udt_cfg_infos to ensure the verification logic is correct.
-#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
 fn test_verify_hard_coded_node_announcement() {
     // hard code node announcement 1
     fn node1() -> NodeAnnouncement {
@@ -526,7 +558,8 @@ fn test_verify_hard_coded_node_announcement() {
     }
 }
 
-#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
 fn test_custom_records_serialize_deserialize() {
     #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
     pub struct Custom {
@@ -556,7 +589,8 @@ fn test_custom_records_serialize_deserialize() {
     let _deserialized: Custom = bincode::deserialize(&bincode_serialize).expect("deserialize");
 }
 
-#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
 fn test_verify_payment_hop_data() {
     let hop_data = PaymentHopData {
         amount: 1000,
@@ -588,7 +622,8 @@ fn test_verify_payment_hop_data() {
     }
 }
 
-#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
 fn test_convert_udt_arg_info() {
     let udt_arg_info = UdtArgInfo {
         name: "SIMPLE_UDT".to_string(),
@@ -624,7 +659,8 @@ fn test_convert_udt_arg_info() {
     assert_eq!("", udt_arg_info_modified.name);
 }
 
-#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
 fn test_convert_payment_hop_data() {
     let sk = SecretKey::from_slice(&[42; 32]).unwrap();
     let public_key = Pubkey::from(sk.public_key(secp256k1_instance()));
@@ -681,4 +717,15 @@ fn test_serde_node_id() {
         serde_json::from_str(&node_id_str).unwrap(),
         "to NodeId"
     );
+}
+
+#[test]
+fn test_basic_mpp_custom_records() {
+    let mut payment_custom_records = PaymentCustomRecords::default();
+    let payment_secret = gen_rand_sha256_hash();
+    let record = BasicMppPaymentData::new(payment_secret, 100);
+    record.write(&mut payment_custom_records);
+
+    let new_record = BasicMppPaymentData::read(&payment_custom_records).unwrap();
+    assert_eq!(new_record, record);
 }

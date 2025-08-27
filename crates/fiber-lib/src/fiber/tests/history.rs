@@ -1,11 +1,12 @@
-use crate::fiber::graph::SessionRouteNode;
 use crate::fiber::history::output_direction;
 use crate::fiber::history::{Direction, DEFAULT_BIMODAL_DECAY_TIME};
 use crate::fiber::history::{InternalPairResult, InternalResult};
 use crate::fiber::history::{PaymentHistory, TimedResult};
+use crate::fiber::payment::SessionRouteNode;
 use crate::store::Store;
 use crate::test_utils::generate_store;
-use crate::tests::test_utils::TempDir;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::TempDir;
 use crate::{
     gen_rand_channel_outpoint, gen_rand_fiber_public_key, init_tracing, now_timestamp_as_millis_u64,
 };
@@ -23,19 +24,25 @@ impl Round for f64 {
 
 struct MockHistory {
     pub history: PaymentHistory<Store>,
+    #[cfg(not(target_arch = "wasm32"))]
     #[allow(dead_code)]
     pub temp_dir: TempDir,
 }
 
 impl MockHistory {
+    #[allow(unused)]
     fn new() -> Self {
         let (store, temp_dir) = generate_store();
         let history = PaymentHistory::new(gen_rand_fiber_public_key(), None, store);
-        Self { history, temp_dir }
+        #[cfg(not(target_arch = "wasm32"))]
+        return Self { history, temp_dir };
+        #[cfg(target_arch = "wasm32")]
+        return Self { history };
     }
 }
 
-#[test]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 fn test_history_demo() {
     let mock = MockHistory::new();
     let mut history = mock.history;
@@ -74,6 +81,7 @@ fn test_history_demo() {
 }
 
 #[test]
+// Not supported on wasm: using std::thread::sleep
 fn test_history_with_time_pass() {
     init_tracing();
     let mock = MockHistory::new();
@@ -118,7 +126,8 @@ fn test_history_with_time_pass() {
     }
 }
 
-#[test]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 fn test_history_cannot_sent() {
     let mock = MockHistory::new();
     let history = mock.history;
@@ -136,7 +145,8 @@ fn test_history_cannot_sent() {
     assert_eq!(prev_amount, 14100000000);
 }
 
-#[test]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 fn test_history_apply_channel_result() {
     let mock = MockHistory::new();
     let mut history = mock.history;
@@ -168,7 +178,8 @@ fn test_history_apply_channel_result() {
     );
 }
 
-#[test]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 fn test_history_internal_result() {
     let mut internal_result = InternalResult::default();
     let from = gen_rand_fiber_public_key();
@@ -226,7 +237,8 @@ fn test_history_internal_result() {
     assert!(!res.success);
 }
 
-#[test]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 fn test_history_internal_result_fail_pair() {
     let mut internal_result = InternalResult::default();
     let from = gen_rand_fiber_public_key();
@@ -267,7 +279,8 @@ fn test_history_internal_result_fail_pair() {
     assert!(!res.success);
 }
 
-#[test]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 fn test_history_internal_result_success_range_pair() {
     let mut internal_result = InternalResult::default();
     let node1 = gen_rand_fiber_public_key();
@@ -312,7 +325,8 @@ fn test_history_internal_result_success_range_pair() {
     assert!(res.success);
 }
 
-#[test]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 fn test_history_internal_result_fail_range_pair() {
     let mut internal_result = InternalResult::default();
     let node1 = gen_rand_fiber_public_key();
@@ -414,7 +428,8 @@ fn test_history_internal_result_fail_range_pair() {
     ));
 }
 
-#[test]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 fn test_history_apply_internal_result_fail_node() {
     let mut internal_result = InternalResult::default();
     let mock = MockHistory::new();
@@ -512,7 +527,8 @@ fn test_history_apply_internal_result_fail_node() {
     ));
 }
 
-#[test]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 fn test_history_fail_node_with_multiple_channels() {
     let mut internal_result = InternalResult::default();
     let mock = MockHistory::new();
@@ -654,7 +670,8 @@ fn test_history_fail_node_with_multiple_channels() {
     ));
 }
 
-#[test]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 fn test_history_interval_success_fail() {
     let mock = MockHistory::new();
     let mut history = mock.history;
@@ -718,7 +735,8 @@ fn test_history_interval_success_fail() {
     );
 }
 
-#[test]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 fn test_history_interval_fuzz_assertion_crash() {
     let mock = MockHistory::new();
     let mut history = mock.history;
@@ -728,9 +746,9 @@ fn test_history_interval_fuzz_assertion_crash() {
     let (direction, _) = output_direction(from, target);
 
     let result = TimedResult {
-        fail_time: 1,
-        fail_amount: 2,
-        success_time: 3,
+        fail_time: 100,
+        fail_amount: 5,
+        success_time: 50,
         success_amount: 4,
     };
 
@@ -738,9 +756,9 @@ fn test_history_interval_fuzz_assertion_crash() {
 
     let mut now = 0;
     for _i in 0..10000 {
-        let rand_amount = rand::random::<u64>() % 1000;
+        let rand_amount = rand::random::<u64>() % 1000 + 1;
         let rand_succ = rand::random::<bool>();
-        eprintln!("rand_amount: {}, rand_succ: {}", rand_amount, rand_succ);
+        //eprintln!("rand_amount: {}, rand_succ: {}", rand_amount, rand_succ);
         now += 60_001;
         history.apply_pair_result(
             channel_outpoint.clone(),
@@ -752,7 +770,8 @@ fn test_history_interval_fuzz_assertion_crash() {
     }
 }
 
-#[test]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 fn test_history_interval_fail_zero_after_succ() {
     let mock = MockHistory::new();
     let mut history = mock.history;
@@ -782,7 +801,8 @@ fn test_history_interval_fail_zero_after_succ() {
     );
 }
 
-#[test]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 fn test_history_interval_keep_valid_range() {
     let mock = MockHistory::new();
     let mut history = mock.history;
@@ -815,7 +835,8 @@ fn test_history_interval_keep_valid_range() {
     );
 }
 
-#[test]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 fn test_history_probability() {
     let mock = MockHistory::new();
     let mut history = mock.history;
@@ -905,7 +926,8 @@ fn test_history_probability() {
     );
 }
 
-#[test]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 fn test_history_direct_probability() {
     let mock = MockHistory::new();
     let mut history = mock.history;
@@ -967,6 +989,7 @@ fn test_history_direct_probability() {
 }
 
 #[test]
+// Not supported on wasm: using tracing_subscriber
 fn test_history_small_fail_amount_probability() {
     let mock = MockHistory::new();
     let mut history = mock.history;
@@ -991,7 +1014,8 @@ fn test_history_small_fail_amount_probability() {
     );
 }
 
-#[test]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 fn test_history_channel_probability_range() {
     let mock = MockHistory::new();
     let mut history = mock.history;
@@ -1033,6 +1057,7 @@ fn test_history_channel_probability_range() {
 }
 
 #[test]
+// Not supported on wasm: Using std::thread::sleep
 fn test_history_eval_probability_range() {
     let mock = MockHistory::new();
     let mut history = mock.history;
@@ -1105,9 +1130,9 @@ fn test_history_eval_probability_range() {
 }
 
 #[test]
+// Not supported on wasm: requires filesystem access
 fn test_history_load_store() {
-    let temp_path = TempDir::new("test-history-store");
-    let store = Store::new(temp_path).expect("created store failed");
+    let (store, _dir) = generate_store();
     let mut history = PaymentHistory::new(gen_rand_fiber_public_key(), None, store.clone());
     let from = gen_rand_fiber_public_key();
     let target = gen_rand_fiber_public_key();
@@ -1145,7 +1170,8 @@ fn test_history_load_store() {
     );
 }
 
-#[test]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 fn test_history_can_not_send_with_time() {
     use crate::fiber::history::DEFAULT_BIMODAL_DECAY_TIME;
 

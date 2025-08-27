@@ -1,17 +1,19 @@
 use crate::ckb::tests::test_utils::complete_commitment_tx;
 use crate::fiber::channel::{
     AddTlcResponse, ChannelState, CloseFlags, OutboundTlcStatus, TLCId, TlcStatus, UpdateCommand,
-    MAX_COMMITMENT_DELAY_EPOCHS, MIN_COMMITMENT_DELAY_EPOCHS, XUDT_COMPATIBLE_WITNESS,
+    DEFAULT_COMMITMENT_DELAY_EPOCHS, MAX_COMMITMENT_DELAY_EPOCHS, MIN_COMMITMENT_DELAY_EPOCHS,
+    XUDT_COMPATIBLE_WITNESS,
 };
 use crate::fiber::config::{
     DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT, MILLI_SECONDS_PER_EPOCH,
     MIN_TLC_EXPIRY_DELTA,
 };
 use crate::fiber::features::FeatureVector;
-use crate::fiber::graph::{ChannelInfo, PaymentStatus};
+use crate::fiber::graph::ChannelInfo;
 use crate::fiber::network::{DebugEvent, FiberMessageWithPeerId, SendPaymentCommand};
+use crate::fiber::payment::PaymentStatus;
 use crate::fiber::types::{
-    AddTlc, FiberMessage, Hash256, Init, PaymentHopData, PeeledOnionPacket, Pubkey, TlcErr,
+    AddTlc, FiberMessage, Hash256, Init, PaymentHopData, PeeledPaymentOnionPacket, Pubkey, TlcErr,
     TlcErrorCode, NO_SHARED_SECRET,
 };
 use crate::invoice::{CkbInvoiceStatus, Currency, InvoiceBuilder};
@@ -44,9 +46,10 @@ use ractor::call;
 use secp256k1::Secp256k1;
 use std::collections::HashSet;
 use std::time::Duration;
-use tracing::debug;
+use tracing::{debug, error};
 
 #[tokio::test]
+// Not supported on wasm: require filesystem access
 async fn test_connect_to_other_node() {
     let mut node_a = NetworkNode::new().await;
     let mut node_b = NetworkNode::new().await;
@@ -71,7 +74,8 @@ fn test_per_commitment_point_and_secret_consistency() {
     );
 }
 
-#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
 fn test_derive_private_and_public_tlc_keys() {
     let privkey = Privkey::from(&[1; 32]);
     let per_commitment_point = Privkey::from(&[2; 32]).pubkey();
@@ -978,7 +982,7 @@ async fn test_network_send_previous_tlc_error() {
     ];
     let generated_payment_hash = gen_rand_sha256_hash();
 
-    let packet = PeeledOnionPacket::create(
+    let packet = PeeledPaymentOnionPacket::create(
         gen_rand_fiber_private_key(),
         hops_infos.clone(),
         Some(generated_payment_hash.as_ref().to_vec()),
@@ -1080,7 +1084,7 @@ async fn test_network_send_previous_tlc_error_with_limit_amount_error() {
     ];
     let generated_payment_hash = gen_rand_sha256_hash();
 
-    let packet = PeeledOnionPacket::create(
+    let packet = PeeledPaymentOnionPacket::create(
         gen_rand_fiber_private_key(),
         hops_infos.clone(),
         Some(generated_payment_hash.as_ref().to_vec()),
@@ -2381,26 +2385,39 @@ async fn test_network_add_two_tlcs_remove_one() {
 
     eprintln!("add_tlc_result: {:?}", add_tlc_result_b);
 
-    // remove tlc from node_b
-    call!(node_b.network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
-            ChannelCommandWithId {
-                channel_id,
-                command: ChannelCommand::RemoveTlc(
-                    RemoveTlcCommand {
-                        id: add_tlc_result_a.tlc_id,
-                        reason: RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
-                            payment_preimage: preimage_a.into(),
-                        }),
-                    },
-                    rpc_reply,
-                ),
-            },
-        ))
-    })
-    .expect("node_b alive")
-    .expect("successfully removed tlc");
-    eprintln!("remove tlc result: {:?}", ());
+    loop {
+        // remove tlc from node_b
+        let res = call!(node_b.network_actor, |rpc_reply| {
+            NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+                ChannelCommandWithId {
+                    channel_id,
+                    command: ChannelCommand::RemoveTlc(
+                        RemoveTlcCommand {
+                            id: add_tlc_result_a.tlc_id,
+                            reason: RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+                                payment_preimage: preimage_a.into(),
+                            }),
+                        },
+                        rpc_reply,
+                    ),
+                },
+            ))
+        })
+        .expect("node_b alive");
+
+        let a_tlc_state = node_a.get_channel_actor_state(channel_id);
+        let tlc_is_removed = a_tlc_state
+            .tlc_state
+            .get(&TLCId::Offered(add_tlc_result_a.tlc_id))
+            .is_none();
+
+        if res.is_ok() || tlc_is_removed {
+            println!("remove tlc result: {:?}", res);
+            break;
+        } else {
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        }
+    }
 
     loop {
         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
@@ -2583,6 +2600,34 @@ async fn test_remove_tlc_with_expiry_error() {
 }
 
 #[tokio::test]
+async fn test_update_commitment_delay_epoch_will_trigger_signature_error() {
+    init_tracing();
+
+    let (node_a, node_b, new_channel_id) =
+        create_nodes_with_established_channel(HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT, true).await;
+
+    let mut node_a_channel_state = node_a.get_channel_actor_state(new_channel_id);
+    node_a_channel_state.commitment_delay_epoch = 0;
+    node_a
+        .update_channel_actor_state(node_a_channel_state, None)
+        .await;
+
+    let _res = node_a.send_payment_keysend(&node_b, 10000, false).await;
+
+    let mut expect_error = false;
+    for _ in 0..10 {
+        let res = node_b.get_triggered_unexpected_events().await;
+        error!("Unexpected event: {:?}", res);
+        if res.iter().any(|x| x == "Musig2VerifyError") {
+            expect_error = true;
+            break;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+    }
+    assert!(expect_error, "Expected Musig2VerifyError to be triggered");
+}
+
+#[tokio::test]
 async fn test_remove_expired_tlc_in_background() {
     init_tracing();
 
@@ -2598,11 +2643,16 @@ async fn test_remove_expired_tlc_in_background() {
     let tlc_amount = 1000000000;
 
     // add tlc command with expiry soon
+    let epoch_delay_milliseconds =
+        (DEFAULT_COMMITMENT_DELAY_EPOCHS as f64 * MILLI_SECONDS_PER_EPOCH as f64 * 2.0 / 3.0)
+            as u64;
+
+    let a_valid_but_small_expiry = now_timestamp_as_millis_u64() + epoch_delay_milliseconds + 100;
     let add_tlc_command = AddTlcCommand {
         amount: tlc_amount,
         hash_algorithm: HashAlgorithm::CkbHash,
         payment_hash: digest.into(),
-        expiry: now_timestamp_as_millis_u64() + MIN_TLC_EXPIRY_DELTA + 3000,
+        expiry: a_valid_but_small_expiry,
         onion_packet: None,
         shared_secret: NO_SHARED_SECRET,
         previous_tlc: None,
@@ -2622,7 +2672,7 @@ async fn test_remove_expired_tlc_in_background() {
     let tlc_id = add_tlc_result.unwrap().tlc_id;
 
     tokio::time::sleep(tokio::time::Duration::from_millis(
-        MIN_TLC_EXPIRY_DELTA + 3000 + 3000,
+        epoch_delay_milliseconds + 3000,
     ))
     .await;
 
@@ -2642,6 +2692,7 @@ async fn test_remove_expired_tlc_in_background() {
 
 #[tokio::test]
 async fn do_test_add_tlc_duplicated() {
+    init_tracing();
     let node_a_funding_amount = 100000000000;
     let node_b_funding_amount = 6200000000;
 
@@ -2658,8 +2709,8 @@ async fn do_test_add_tlc_duplicated() {
             amount: tlc_amount,
             hash_algorithm: HashAlgorithm::CkbHash,
             payment_hash: digest.into(),
+            expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA + 1000,
             attempt_id: None,
-            expiry: now_timestamp_as_millis_u64() + MIN_TLC_EXPIRY_DELTA + 1000,
             onion_packet: None,
             shared_secret: NO_SHARED_SECRET,
             previous_tlc: None,
@@ -2673,6 +2724,7 @@ async fn do_test_add_tlc_duplicated() {
             ))
         })
         .expect("node_b alive");
+        debug!("add_tlc_result: {:?}", add_tlc_result);
         if i == 1 {
             assert!(add_tlc_result.is_ok());
         }
@@ -3102,6 +3154,7 @@ async fn do_test_add_tlc_min_tlc_value_limit() {
 
 #[tokio::test]
 async fn test_channel_update_tlc_expiry() {
+    init_tracing();
     let node_a_funding_amount = 100000000000;
     let node_b_funding_amount = 6200000000;
 
@@ -3146,7 +3199,7 @@ async fn test_channel_update_tlc_expiry() {
                 command: ChannelCommand::Update(
                     UpdateCommand {
                         enabled: Some(true),
-                        tlc_expiry_delta: Some(DEFAULT_TLC_EXPIRY_DELTA + 1),
+                        tlc_expiry_delta: Some(MAX_PAYMENT_TLC_EXPIRY_LIMIT + 1),
                         tlc_minimum_value: None,
                         tlc_fee_proportional_millionths: None,
                     },
@@ -3162,7 +3215,11 @@ async fn test_channel_update_tlc_expiry() {
         .to_string()
         .contains("TLC expiry delta is too large"));
 
-    // update channel with new tlc_expiry_delta which is ok
+    let epoch_delay_milliseconds =
+        (DEFAULT_COMMITMENT_DELAY_EPOCHS as f64 * MILLI_SECONDS_PER_EPOCH as f64 * 2.0 / 3.0)
+            as u64;
+    // update channel with new tlc_expiry_delta which is still too small
+    // for less than 2/3 of the commitment delay
     let update_result = call!(node_b.network_actor, |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
@@ -3170,7 +3227,33 @@ async fn test_channel_update_tlc_expiry() {
                 command: ChannelCommand::Update(
                     UpdateCommand {
                         enabled: Some(true),
-                        tlc_expiry_delta: Some(900000),
+                        tlc_expiry_delta: Some(epoch_delay_milliseconds - 10),
+                        tlc_minimum_value: None,
+                        tlc_fee_proportional_millionths: None,
+                    },
+                    rpc_reply,
+                ),
+            },
+        ))
+    })
+    .unwrap();
+    debug!("update_result: {:?}", update_result);
+    assert!(update_result.is_err());
+
+    let epoch_delay_milliseconds =
+        (DEFAULT_COMMITMENT_DELAY_EPOCHS as f64 * MILLI_SECONDS_PER_EPOCH as f64 * 2.0 / 3.0)
+            as u64;
+
+    // update tlc_expiry_delta with 2/3 of the commitment delay
+    // this should be successful
+    let update_result = call!(node_b.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id: new_channel_id,
+                command: ChannelCommand::Update(
+                    UpdateCommand {
+                        enabled: Some(true),
+                        tlc_expiry_delta: Some(epoch_delay_milliseconds),
                         tlc_minimum_value: None,
                         tlc_fee_proportional_millionths: None,
                     },
@@ -3754,7 +3837,7 @@ async fn test_revoke_old_commitment_transaction() {
             ) => {
                 assert_eq!(peer_id, &node_b.peer_id);
                 assert_eq!(channel_id, &new_channel_id);
-                assert_eq!(revocation_data.commitment_number, 0u64);
+                assert_eq!(revocation_data.commitment_number, 1u64);
                 Some(revocation_data.clone())
             }
             _ => None,
@@ -4780,13 +4863,51 @@ async fn test_shutdown_channel_network_graph_with_sync_up() {
     assert_eq!(network_nodes.len(), 2);
 
     let network_channels = node_a.get_network_channels().await;
-    assert!(!network_channels[0].update_of_node1.unwrap().enabled);
-    assert!(!network_channels[0].update_of_node2.unwrap().enabled);
+    assert!(network_channels.is_empty());
 
     let network_channels = node_b.get_network_channels().await;
-    assert_eq!(network_channels.len(), 1);
-    assert!(!network_channels[0].update_of_node1.unwrap().enabled);
-    assert!(!network_channels[0].update_of_node2.unwrap().enabled);
+    assert!(network_channels.is_empty());
+}
+
+#[tokio::test]
+async fn test_shutdown_channel_and_shutdown_transaction_hash() {
+    let node_a_funding_amount = 100000000000;
+    let node_b_funding_amount = 6200000000;
+
+    let (node_a, node_b, channel_id) =
+        create_nodes_with_established_channel(node_a_funding_amount, node_b_funding_amount, true)
+            .await;
+
+    let message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id,
+                command: ChannelCommand::Shutdown(
+                    ShutdownCommand {
+                        close_script: Some(Script::new_builder().args([0u8; 19].pack()).build()),
+                        fee_rate: Some(FeeRate::from_u64(DEFAULT_COMMITMENT_FEE_RATE)),
+                        force: false,
+                    },
+                    rpc_reply,
+                ),
+            },
+        ))
+    };
+
+    call!(node_b.network_actor, message)
+        .expect("node_b alive")
+        .expect("successfully shutdown channel");
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
+
+    let channel_state_a = node_a.get_channel_actor_state(channel_id);
+    assert!(channel_state_a.shutdown_transaction_hash.is_some());
+
+    let channel_state_b = node_b.get_channel_actor_state(channel_id);
+    assert_eq!(
+        channel_state_a.shutdown_transaction_hash,
+        channel_state_b.shutdown_transaction_hash
+    );
 }
 
 #[tokio::test]
@@ -5709,9 +5830,8 @@ async fn test_open_channel_tlc_expiry_is_smaller_than_commitment_delay() {
 
     eprintln!("open_channel_result: {:?}", open_channel_result);
     let error = open_channel_result.unwrap_err().to_string();
-    assert!(error.contains(
-        "TLC expiry delta 95999999 is smaller than 2/3 commitment_delay_epoch delay 9600000"
-    ));
+    assert!(error
+        .contains("TLC expiry delta 13332 is smaller than 2/3 commitment_delay_epoch delay 13333"));
 
     let message = |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(

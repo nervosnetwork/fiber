@@ -49,6 +49,10 @@ rule("update_channel", r#"allow if write("channels");"#);
 rule("commitment_signed", r#"allow if write("messages");"#); 
 rule("add_tlc", r#"allow if write("channels");"#); 
 rule("remove_tlc", r#"allow if write("channels");"#); 
+rule(
+    "check_channel_shutdown",
+    r#"allow if write("channels");"#,
+);
 rule( 
     "submit_commitment_transaction", 
     r#"allow if write("chain");"#, 

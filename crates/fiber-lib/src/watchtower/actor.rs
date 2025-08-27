@@ -120,7 +120,10 @@ where
                 .store
                 .update_local_settlement(NodeId::local(), channel_id, local_settlement_data),
             WatchtowerMessage::CreatePreimage(payment_hash, preimage) => {
-                if payment_hash == ckb_hash::blake2b_256(preimage).into() {
+                if HashAlgorithm::supported_algorithms()
+                    .iter()
+                    .any(|algorithm| payment_hash == algorithm.hash(preimage).into())
+                {
                     self.store
                         .insert_watch_preimage(NodeId::local(), payment_hash, preimage);
                 } else {
@@ -597,10 +600,14 @@ fn try_settle_commitment_tx<S: WatchtowerStore>(
                                                         }
                                                         // RBF check for duplicate transaction
                                                         Err(RpcError::Rpc(err))
-                                                            if err.code.code() == -1107
-                                                                || err.code.code() == -1111 =>
+                                                            if err.code.code() == -1107 =>
                                                         {
                                                             info!("Settlement tx: {:?} already exists", tx.hash());
+                                                        }
+                                                        Err(RpcError::Rpc(err))
+                                                            if err.code.code() == -1111 =>
+                                                        {
+                                                            error!("Failed to send settlement tx for pending tlcs: {:?}, error: {:?}, maybe already submitted by peer?", tx, err);
                                                         }
                                                         Err(err) => {
                                                             error!("Failed to send settlement tx for pending tlcs: {:?}, error: {:?}", tx, err);
@@ -660,10 +667,11 @@ fn try_settle_commitment_tx<S: WatchtowerStore>(
                                         );
                                     }
                                     // RBF check for duplicate transaction
-                                    Err(RpcError::Rpc(err))
-                                        if err.code.code() == -1107 || err.code.code() == -1111 =>
-                                    {
+                                    Err(RpcError::Rpc(err)) if err.code.code() == -1107 => {
                                         info!("Settlement tx: {:?} already exists", tx.hash());
+                                    }
+                                    Err(RpcError::Rpc(err)) if err.code.code() == -1111 => {
+                                        error!("Failed to send settlement tx: {:?}, error: {:?}, maybe already submitted by peer?", tx, err);
                                     }
                                     Err(err) => {
                                         error!(

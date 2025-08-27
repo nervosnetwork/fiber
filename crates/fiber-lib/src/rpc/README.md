@@ -30,6 +30,7 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
         * [Method `add_tlc`](#dev-add_tlc)
         * [Method `remove_tlc`](#dev-remove_tlc)
         * [Method `submit_commitment_transaction`](#dev-submit_commitment_transaction)
+        * [Method `check_channel_shutdown`](#dev-check_channel_shutdown)
     * [Module Graph](#module-graph)
         * [Method `graph_nodes`](#graph-graph_nodes)
         * [Method `graph_channels`](#graph-graph_channels)
@@ -426,6 +427,23 @@ Submit a commitment transaction to the chain
 
 
 
+<a id="dev-check_channel_shutdown"></a>
+#### Method `check_channel_shutdown`
+
+Manually trigger CheckShutdownTx on all channels
+
+##### Params
+
+* `channel_id` - <em>[Hash256](#type-hash256)</em>, Channel ID
+
+##### Returns
+
+* None
+
+---
+
+
+
 <a id="graph"></a>
 ### Module `Graph`
 RPC module for graph management.
@@ -525,6 +543,7 @@ Generates a new invoice.
 * `expiry` - <em>`Option<u64>`</em>, The expiry time of the invoice, in seconds.
 * `fallback_address` - <em>`Option<String>`</em>, The fallback address of the invoice.
 * `final_expiry_delta` - <em>`Option<u64>`</em>, The final HTLC timeout of the invoice, in milliseconds.
+ Minimal value is 16 hours, and maximal value is 14 days.
 * `udt_type_script` - <em>`Option<Script>`</em>, The UDT type script of the invoice.
 * `hash_algorithm` - <em>Option<[HashAlgorithm](#type-hashalgorithm)></em>, The hash algorithm of the invoice.
 * `allow_mpp` - <em>`Option<bool>`</em>, Whether allow payment to use MPP
@@ -1018,6 +1037,7 @@ The channel data structure
  Not that, we use outbound channel to calculate the fee for TLC forwarding. For example,
  if we have a path A -> B -> C, then the fee B requires for TLC forwarding, is calculated
  the channel configuration of B and C, not A and B.
+* `shutdown_transaction_hash` - <em>`Option<H256>`</em>, The hash of the shutdown transaction
 ---
 
 <a id="#type-channelinfo"></a>

@@ -68,6 +68,7 @@ pub mod server {
     use tokio::net::TcpListener;
     use tokio::sync::RwLock;
     use tower::Service;
+    use tracing::debug;
 
     use super::biscuit::BiscuitAuth;
 
@@ -316,8 +317,8 @@ pub mod server {
             }
         }
 
-        tracing::debug!("starting listen RPC addr {:?}", &listening_addr);
         let (handle, addr) = start_server(listening_addr, auth, modules).await?;
+        debug!("started listen to RPC addr {:?}", &listening_addr);
         Ok((handle, addr))
     }
 

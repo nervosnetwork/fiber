@@ -1,7 +1,7 @@
 meta {
   name: List all channels after shutdown force
   type: http
-  seq: 7
+  seq: 9
 }
 
 post {
@@ -22,7 +22,8 @@ body:json {
     "method": "list_channels",
     "params": [
       {
-        "peer_id": "{{NODE3_PEERID}}"
+        "peer_id": "{{NODE3_PEERID}}",
+        "include_closed": true
       }
     ]
   }
@@ -37,9 +38,11 @@ script:post-response {
   console.log(res.body.result);
   // Sleep for sometime to make sure current operation finishes before next request starts.
   await new Promise(r => setTimeout(r, 2000));
-  bru.setVar("CHANNEL_ID", res.body.result.channels.length);
-  if (res.body.result.channels.length != 0) {
-    console.log("channel first: ", res.body.result.channels[0]);
+  console.log("channel first: ", res.body.result.channels[0]);
+  if (res.body.result.channels[0].state.state_name != 'CLOSED') {
     throw new Error("Assertion failed: expect thel channel is closed");
+  }
+  if (res.body.result.channels[0].shutdown_transaction_hash == null) {
+    throw new Error("Assertion failed: expect shutdown_transaction_hash is not null");
   }
 }

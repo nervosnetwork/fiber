@@ -1,6 +1,6 @@
 use crate::fiber::channel::ChannelFlags;
 use crate::fiber::features::FeatureVector;
-use crate::fiber::types::OpenChannel;
+use crate::fiber::types::{CommitmentNonce, OpenChannel, RevocationNonce};
 use crate::{
     ckb::{
         tests::test_utils::{
@@ -785,7 +785,8 @@ async fn test_saving_and_connecting_to_node() {
     .await;
 }
 
-#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
 fn test_announcement_message_serialize() {
     let capacity = 42;
     let priv_key: Privkey = get_test_priv_key();
@@ -820,7 +821,8 @@ fn test_announcement_message_serialize() {
     assert_eq!(shutdown_info, deserialized);
 }
 
-#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
 fn test_send_payment_validate_payment_hash() {
     let send_command = SendPaymentCommand {
         target_pubkey: Some(gen_rand_fiber_public_key()),
@@ -833,7 +835,8 @@ fn test_send_payment_validate_payment_hash() {
     assert!(result.unwrap_err().contains("payment_hash is missing"));
 }
 
-#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
 fn test_send_payment_validate_amount() {
     let send_command = SendPaymentCommand {
         target_pubkey: Some(gen_rand_fiber_public_key()),
@@ -845,7 +848,8 @@ fn test_send_payment_validate_amount() {
     assert!(result.unwrap_err().contains("amount is missing"));
 }
 
-#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
 fn test_send_payment_validate_invoice() {
     use crate::invoice::Attribute;
     use crate::invoice::Currency;
@@ -961,7 +965,8 @@ fn test_send_payment_validate_invoice() {
         .contains("invalid final_tlc_expiry_delta"));
 }
 
-#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
 fn test_send_payment_validate_htlc_expiry_delta() {
     let send_command = SendPaymentCommand {
         target_pubkey: Some(gen_rand_fiber_public_key()),
@@ -1256,9 +1261,16 @@ async fn test_to_be_accepted_channels_bytes_limit() {
         second_per_commitment_point: gen_rand_fiber_public_key(),
         funding_pubkey: gen_rand_fiber_public_key(),
         tlc_basepoint: gen_rand_fiber_public_key(),
-        next_local_nonce: rand_nonce.clone(),
+        next_commitment_nonce: CommitmentNonce {
+            funding: rand_nonce.clone(),
+            commitment: rand_nonce.clone(),
+        },
+        next_revocation_nonce: RevocationNonce {
+            revoke: rand_nonce.clone(),
+            ack: rand_nonce.clone(),
+        },
         // public channel must set this
-        channel_announcement_nonce: Some(rand_nonce.clone()),
+        channel_announcement_nonce: Some(rand_nonce),
     };
     let single_open_channel_size = open_channel.mem_size();
     tracing::info!(
@@ -1333,39 +1345,4 @@ async fn test_to_be_accepted_channels_bytes_limit() {
         .expect("peer alive")
         .expect("open channel");
     node.expect_debug_event("ChannelPendingToBeRejected").await;
-}
-
-#[cfg(unix)]
-#[tokio::test]
-#[should_panic]
-async fn test_failed_funding_shell_builder() {
-    init_tracing();
-
-    let funding_amount_a = 4_200_000_000u128;
-    let funding_amount_b: u128 = funding_amount_a;
-    let mut node_a = NetworkNode::new_with_config(
-        NetworkNodeConfig::builder()
-            .fiber_config_updater(|config| {
-                // It's hard to build a valid funding tx using simple shell script since the lock
-                // is derived from public keys of both parties.
-                config.funding_tx_shell_builder = Some(r#"echo '{"version":"0x0","cell_deps":[],"header_deps":[],"inputs":[],"outputs_data":["0x"],"witnesses":[],
-                "outputs":[{"capacity":"0xfa56ea00","lock":{"code_hash":"0x0a792ff1eabfdf90f17c7db3c7984c2a21dee569f4e584f271c3d9ae2addb3ae","hash_type":"data","args":"0x"},"type":null}]}
-                '"#.to_string());
-            })
-            .build()
-    )
-    .await;
-    let mut node_b = NetworkNode::new().await;
-    node_a.connect_to(&mut node_b).await;
-    establish_channel_between_nodes(
-        &mut node_a,
-        &mut node_b,
-        ChannelParameters {
-            public: true,
-            node_a_funding_amount: funding_amount_a,
-            node_b_funding_amount: funding_amount_b,
-            ..Default::default()
-        },
-    )
-    .await;
 }

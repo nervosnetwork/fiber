@@ -6,6 +6,9 @@ use crate::fiber::channel::{
     occupied_capacity, ProcessingChannelError, DEFAULT_COMMITMENT_FEE_RATE, DEFAULT_FEE_RATE,
     MAX_COMMITMENT_DELAY_EPOCHS, MIN_COMMITMENT_DELAY_EPOCHS, SYS_MAX_TLC_NUMBER_IN_FLIGHT,
 };
+use crate::fiber::config::{
+    MAX_PAYMENT_TLC_EXPIRY_LIMIT, MILLI_SECONDS_PER_EPOCH, MIN_TLC_EXPIRY_DELTA,
+};
 use ckb_types::core::{EpochNumberWithFraction, TransactionBuilder};
 use ckb_types::packed::{Bytes, CellDep, Script};
 use ckb_types::prelude::{Builder, PackVec};
@@ -214,6 +217,59 @@ pub(crate) fn check_open_channel_parameters(
         return Err(ProcessingChannelError::InvalidParameter(format!(
             "Max TLC number in flight {} is greater than the system maximal value {}",
             max_tlc_number_in_flight, SYS_MAX_TLC_NUMBER_IN_FLIGHT
+        )));
+    }
+
+    Ok(())
+}
+
+pub(crate) fn check_tlc_delta_with_epochs(
+    tlc_expiry_delta: u64,
+    commitment_delay_epoch: u64,
+) -> Result<(), ProcessingChannelError> {
+    if tlc_expiry_delta < MIN_TLC_EXPIRY_DELTA {
+        return Err(ProcessingChannelError::InvalidParameter(format!(
+            "TLC expiry delta is too small, expect larger than {}",
+            MIN_TLC_EXPIRY_DELTA
+        )));
+    }
+    if tlc_expiry_delta > MAX_PAYMENT_TLC_EXPIRY_LIMIT {
+        return Err(ProcessingChannelError::InvalidParameter(format!(
+            "TLC expiry delta is too large, expected to be smaller than {}",
+            MAX_PAYMENT_TLC_EXPIRY_LIMIT
+        )));
+    }
+
+    let epochs = EpochNumberWithFraction::from_full_value(commitment_delay_epoch);
+    if !epochs.is_well_formed() {
+        return Err(ProcessingChannelError::InvalidParameter(format!(
+            "Commitment delay epoch {} is not a valid value",
+            commitment_delay_epoch,
+        )));
+    }
+
+    let min = EpochNumberWithFraction::new(MIN_COMMITMENT_DELAY_EPOCHS, 0, 1);
+    if epochs < min {
+        return Err(ProcessingChannelError::InvalidParameter(format!(
+            "Commitment delay epoch {} is less than the minimal value {}",
+            epochs, min
+        )));
+    }
+
+    let max = EpochNumberWithFraction::new(MAX_COMMITMENT_DELAY_EPOCHS, 0, 1);
+    if epochs > max {
+        return Err(ProcessingChannelError::InvalidParameter(format!(
+            "Commitment delay epoch {} is greater than the maximal value {}",
+            epochs, max
+        )));
+    }
+
+    let epoch_delay_milliseconds =
+        (epochs.number() as f64 * MILLI_SECONDS_PER_EPOCH as f64 * 2.0 / 3.0) as u64;
+    if tlc_expiry_delta < epoch_delay_milliseconds {
+        return Err(ProcessingChannelError::InvalidParameter(format!(
+            "TLC expiry delta {} is smaller than 2/3 commitment_delay_epoch delay {}",
+            tlc_expiry_delta, epoch_delay_milliseconds
         )));
     }
 
