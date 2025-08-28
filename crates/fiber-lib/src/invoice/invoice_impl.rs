@@ -722,9 +722,9 @@ impl InvoiceBuilder {
     pub fn allow_atomic_mpp(self, allow_atomic_mpp: bool) -> Self {
         self.update_feature_vector(|feature_vector| {
             if allow_atomic_mpp {
-                feature_vector.set_atomic_mpp_required();
+                feature_vector.set_atomic_mpp_optional();
             } else {
-                feature_vector.unset_basic_mpp_optional();
+                feature_vector.unset_atomic_mpp_optional();
             }
         })
     }
