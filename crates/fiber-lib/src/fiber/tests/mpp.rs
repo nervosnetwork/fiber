@@ -12,7 +12,7 @@ use crate::{
         features::FeatureVector,
         hash_algorithm::HashAlgorithm,
         network::{DebugEvent, SendPaymentCommand, USER_CUSTOM_RECORDS_MAX_INDEX},
-        payment::AttemptStatus,
+        payment::{AttemptStatus, PaymentStatus},
         types::{
             BasicMppPaymentData, Hash256, PaymentHopData, PeeledPaymentOnionPacket, RemoveTlcReason,
         },
@@ -3627,4 +3627,252 @@ async fn test_send_mpp_can_retry() {
     let mut retry_times: Vec<_> = attempts.map(|x| x.tried_times).collect();
     retry_times.sort();
     assert_eq!(retry_times, vec![1, 1, 2]);
+}
+
+#[tokio::test]
+async fn test_send_payment_3_nodes_failed_last_hop() {
+    init_tracing();
+
+    let (nodes, _channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+            ((1, 2), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+        ],
+        3,
+    )
+    .await;
+    let [node_0, mut node_1, mut node_2] = nodes.try_into().expect("3 nodes");
+    node_1
+        .expect_event(|event| match event {
+            NetworkServiceEvent::DebugEvent(DebugEvent::Common(msg)) => {
+                msg.starts_with("Channel is now ready")
+            }
+            _ => false,
+        })
+        .await;
+
+    node_2.stop().await;
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    let payment = node_0
+        .send_payment(SendPaymentCommand {
+            target_pubkey: Some(node_2.pubkey),
+            amount: Some(100),
+            keysend: Some(true),
+            ..Default::default()
+        })
+        .await;
+
+    node_0
+        .wait_until_failed(payment.unwrap().payment_hash)
+        .await;
+
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    node_2.start().await;
+
+    node_1
+        .expect_event(|event| match event {
+            NetworkServiceEvent::DebugEvent(DebugEvent::Common(msg)) => {
+                msg.starts_with("Channel is now ready")
+            }
+            _ => false,
+        })
+        .await;
+
+    node_0.clear_history().await;
+
+    let payment = node_0
+        .send_payment(SendPaymentCommand {
+            target_pubkey: Some(node_2.pubkey),
+            amount: Some(100),
+            keysend: Some(true),
+            ..Default::default()
+        })
+        .await;
+
+    debug!("payment: {:?}", payment);
+    node_0
+        .wait_until_success(payment.unwrap().payment_hash)
+        .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_send_payment_tlc_expiry_soon_first_hop() {
+    init_tracing();
+
+    let (nodes, channels) = create_n_nodes_network(
+        &[((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB))],
+        2,
+    )
+    .await;
+    let [node_0, mut node_1] = nodes.try_into().expect("2 nodes");
+
+    let preimage = gen_rand_sha256_hash();
+    let ckb_invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(1000))
+        .payment_preimage(preimage)
+        .payee_pub_key(node_1.pubkey.into())
+        .build()
+        .expect("build invoice success");
+
+    node_1.insert_invoice(ckb_invoice.clone(), Some(preimage));
+
+    let payment_hash = node_0
+        .send_payment(SendPaymentCommand {
+            amount: Some(10000),
+            keysend: Some(true),
+            target_pubkey: Some(node_1.pubkey),
+            ..Default::default()
+        })
+        .await
+        .expect("send payment success")
+        .payment_hash;
+
+    node_0.wait_until_success(payment_hash).await;
+    let mut payment_session = node_0.get_payment_session(payment_hash).unwrap();
+
+    let hash_algorithm = HashAlgorithm::CkbHash;
+    let funding_tx_hash = node_0.get_channel_funding_tx(&channels[0]).unwrap();
+    let hops_infos = vec![
+        PaymentHopData {
+            amount: 1100,
+            expiry: now_timestamp_as_millis_u64() + 1, // too soon
+            next_hop: Some(node_1.pubkey),
+            funding_tx_hash,
+            hash_algorithm,
+            payment_preimage: None,
+            custom_records: None,
+        },
+        PaymentHopData {
+            amount: 1000,
+            expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+            next_hop: None,
+            funding_tx_hash: Default::default(),
+            hash_algorithm,
+            payment_preimage: None,
+            custom_records: None,
+        },
+    ];
+
+    payment_session.status = PaymentStatus::Created;
+    payment_session.last_error = None;
+    let mut attempt = payment_session.attempts().next().cloned().unwrap();
+    attempt.status = AttemptStatus::Retrying;
+    attempt.last_error = None;
+    attempt.route_hops = hops_infos;
+    attempt.tried_times = 0;
+    attempt.last_error = Some("WaitingTlcAck".to_string());
+    node_0.update_payment_session(payment_session);
+    node_0.update_payment_attempt(attempt.clone());
+
+    node_0
+        .retry_send_payment(payment_hash, Some(attempt.id))
+        .await;
+    node_0.wait_until_failed(payment_hash).await;
+    let payment_session = node_0.get_payment_session(payment_hash).unwrap();
+    let attempts: Vec<_> = payment_session.attempts().collect();
+    println!("attempts: {:?}", attempts);
+    assert!(payment_session
+        .last_error
+        .unwrap()
+        .contains("The tlc expiry soon"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_send_payment_tlc_expiry_soon() {
+    init_tracing();
+
+    let (nodes, channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+            ((1, 2), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+        ],
+        3,
+    )
+    .await;
+    let [node_0, node_1, mut node_2] = nodes.try_into().expect("3 nodes");
+    let target_pubkey = node_2.pubkey;
+
+    let preimage = gen_rand_sha256_hash();
+    let ckb_invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(1000))
+        .payment_preimage(preimage)
+        .payee_pub_key(target_pubkey.into())
+        .build()
+        .expect("build invoice success");
+
+    node_2.insert_invoice(ckb_invoice.clone(), Some(preimage));
+
+    let payment_hash = node_0
+        .send_payment(SendPaymentCommand {
+            amount: Some(10000),
+            keysend: Some(true),
+            target_pubkey: Some(target_pubkey),
+            ..Default::default()
+        })
+        .await
+        .expect("send payment success")
+        .payment_hash;
+
+    node_0.wait_until_success(payment_hash).await;
+    let mut payment_session = node_0.get_payment_session(payment_hash).unwrap();
+    let attempts: Vec<_> = payment_session.attempts().collect();
+    let route = attempts[0].route_hops.clone();
+    for x in route {
+        eprintln!("debug router: {:?}", x);
+    }
+
+    let hash_algorithm = HashAlgorithm::CkbHash;
+    let funding_tx_hash = node_0.get_channel_funding_tx(&channels[0]).unwrap();
+    let hops_infos = vec![
+        PaymentHopData {
+            amount: 1100,
+            expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+            next_hop: Some(node_1.pubkey),
+            funding_tx_hash,
+            hash_algorithm,
+            payment_preimage: None,
+            custom_records: None,
+        },
+        PaymentHopData {
+            amount: 1000,
+            expiry: now_timestamp_as_millis_u64() + 1, // too soon
+            next_hop: Some(node_2.pubkey),
+            funding_tx_hash: node_1.get_channel_funding_tx(&channels[1]).unwrap(),
+            hash_algorithm,
+            payment_preimage: None,
+            custom_records: None,
+        },
+        PaymentHopData {
+            amount: 1000,
+            expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+            next_hop: None,
+            funding_tx_hash: node_1.get_channel_funding_tx(&channels[1]).unwrap(),
+            hash_algorithm,
+            payment_preimage: None,
+            custom_records: None,
+        },
+    ];
+
+    payment_session.status = PaymentStatus::Created;
+    payment_session.last_error = None;
+    let mut attempt = payment_session.attempts().next().cloned().unwrap();
+    attempt.status = AttemptStatus::Retrying;
+    attempt.last_error = None;
+    attempt.route_hops = hops_infos;
+    attempt.tried_times = 0;
+    attempt.last_error = Some("WaitingTlcAck".to_string());
+    node_0.update_payment_session(payment_session);
+    node_0.update_payment_attempt(attempt.clone());
+
+    node_0
+        .retry_send_payment(payment_hash, Some(attempt.id))
+        .await;
+    node_0.wait_until_failed(payment_hash).await;
+    let payment_session = node_0.get_payment_session(payment_hash).unwrap();
+    let attempts: Vec<_> = payment_session.attempts().collect();
+    println!("attempts: {:?}", attempts);
+    assert!(payment_session
+        .last_error
+        .unwrap()
+        .contains("IncorrectTlcExpiry"));
 }
