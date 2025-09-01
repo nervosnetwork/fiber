@@ -1,5 +1,6 @@
-use super::config::DEFAULT_FUNDING_TIMEOUT_SECONDS;
-use super::config::DEFAULT_HOLD_TLC_TIMEOUT;
+use super::config::{
+    DEFAULT_COMMITMENT_DELAY_EPOCHS, DEFAULT_FUNDING_TIMEOUT_SECONDS, DEFAULT_HOLD_TLC_TIMEOUT,
+};
 use super::{
     gossip::SOFT_BROADCAST_MESSAGES_CONSIDERED_STALE_DURATION, graph::ChannelUpdateInfo,
     types::ForwardTlcResult,
@@ -282,8 +283,6 @@ pub struct ChannelCommandWithId {
 
 pub const DEFAULT_FEE_RATE: u64 = 1_000;
 pub const DEFAULT_COMMITMENT_FEE_RATE: u64 = 1_000;
-// The default commitment delay is 6 epochs = 24 hours.
-pub const DEFAULT_COMMITMENT_DELAY_EPOCHS: u64 = 6;
 // The min commitment delay is 1 epoch = 4 hours.
 pub const MIN_COMMITMENT_DELAY_EPOCHS: u64 = 1;
 // The max commitment delay is 84 epochs = 14 days.
