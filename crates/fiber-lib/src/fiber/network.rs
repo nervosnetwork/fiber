@@ -2399,7 +2399,7 @@ where
                     need_to_retry,
                 );
 
-                if need_to_retry {
+                if attempt.is_retrying() {
                     self.register_payment_retry(myself, state, payment_hash, Some(attempt.id));
                 }
             }
@@ -2720,7 +2720,9 @@ where
 
                 self.set_attempt_fail_with_error(&mut session, &mut attempt, &error, need_to_retry);
                 // retry the current attempt if it is retryable
-                self.register_payment_retry(myself, state, payment_hash, Some(attempt.id));
+                if attempt.is_retrying() {
+                    self.register_payment_retry(myself, state, payment_hash, Some(attempt.id));
+                }
             }
         }
     }
