@@ -1515,7 +1515,7 @@ where
                                     .await
                                 {
                                     error!(
-                                        "Failed to remove tlc {:?} for channel {:?}: {}",
+                                        "Failed to remove tlc {:?} with preimage for channel {:?}: {}",
                                         tlc.id(),
                                         channel_id,
                                         err
@@ -1560,7 +1560,7 @@ where
                                     .await
                                 {
                                     error!(
-                                        "Failed to remove tlc {:?} for channel {:?}: {}",
+                                        "Failed to remove expired tlc {:?} for channel {:?}: {}",
                                         tlc.id(),
                                         channel_id,
                                         err

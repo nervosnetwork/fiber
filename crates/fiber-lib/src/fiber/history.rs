@@ -298,10 +298,11 @@ impl InternalResult {
                 | TlcErrorCode::ChannelDisabled
                 | TlcErrorCode::TemporaryNodeFailure
                 | TlcErrorCode::RequiredNodeFeatureMissing
-                | TlcErrorCode::AmountBelowMinimum
-                | TlcErrorCode::ExpiryTooSoon
-                | TlcErrorCode::ExpiryTooFar => {
+                | TlcErrorCode::AmountBelowMinimum => {
                     self.fail_pair_balanced(nodes, index + 1);
+                    self.succeed_range_pairs(nodes, 0, index);
+                }
+                TlcErrorCode::ExpiryTooSoon | TlcErrorCode::ExpiryTooFar => {
                     self.succeed_range_pairs(nodes, 0, index);
                 }
                 TlcErrorCode::IncorrectOrUnknownPaymentDetails => {
