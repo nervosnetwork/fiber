@@ -11,7 +11,7 @@ use super::types::{
 };
 use super::types::{Cursor, Pubkey, TlcErr};
 use crate::ckb::config::UdtCfgInfos;
-use crate::fiber::config::DEFAULT_TLC_EXPIRY_DELTA;
+use crate::fiber::config::{DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT};
 use crate::fiber::fee::calculate_tlc_forward_fee;
 use crate::fiber::history::SentNode;
 use crate::fiber::path::NodeHeapElement;
@@ -23,6 +23,7 @@ use crate::invoice::CkbInvoice;
 use crate::now_timestamp_as_millis_u64;
 use ckb_types::packed::{OutPoint, Script};
 use parking_lot::Mutex;
+use rand::{thread_rng, Rng};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use std::collections::{HashMap, HashSet};
@@ -463,6 +464,9 @@ pub struct NetworkGraph<S> {
     history: PaymentHistory<S>,
     // Whether to process announcement of private address
     announce_private_addr: bool,
+
+    #[cfg(test)]
+    pub(crate) add_rand_expiry_delta: bool,
 }
 
 #[derive(Error, Debug)]
@@ -527,6 +531,8 @@ where
             store: store.clone(),
             history: PaymentHistory::new(source, None, store),
             announce_private_addr,
+            #[cfg(test)]
+            add_rand_expiry_delta: true,
         };
         network_graph.load_from_store();
         network_graph
@@ -544,6 +550,11 @@ where
 
     pub(crate) fn channel_stats(&self) -> Arc<Mutex<GraphChannelStat>> {
         self.channel_stats.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_add_rand_expiry_delta(&mut self, add: bool) {
+        self.add_rand_expiry_delta = add;
     }
 
     pub(crate) fn reset_channel_stats_for_direct_channel(
@@ -1288,13 +1299,14 @@ where
         let route_len = route.len();
         let now = now_timestamp_as_millis_u64();
         let mut hops_data = Vec::with_capacity(route.len() + 1);
+        let rand_tlc_expiry_delta = self.rand_tlc_expiry_delta(route);
 
         for r in route {
             hops_data.push(PaymentHopData {
                 amount: r.amount_received,
                 next_hop: Some(r.target),
                 hash_algorithm,
-                expiry: now + r.incoming_tlc_expiry,
+                expiry: now + r.incoming_tlc_expiry + rand_tlc_expiry_delta,
                 funding_tx_hash: r.channel_outpoint.tx_hash().into(),
                 payment_preimage: None,
                 custom_records: None,
@@ -1305,7 +1317,7 @@ where
             amount: max_amount,
             next_hop: None,
             hash_algorithm,
-            expiry: now + payment_data.final_tlc_expiry_delta,
+            expiry: now + payment_data.final_tlc_expiry_delta + rand_tlc_expiry_delta,
             funding_tx_hash: Default::default(),
             payment_preimage: payment_data.preimage,
             custom_records: payment_data.custom_records.clone(),
@@ -1326,6 +1338,21 @@ where
         self.nodes
             .get(node)
             .is_some_and(|node_info| node_info.features.supports_basic_mpp())
+    }
+
+    fn rand_tlc_expiry_delta(&self, route: &[RouterHop]) -> u64 {
+        #[cfg(test)]
+        if !self.add_rand_expiry_delta {
+            return 0;
+        }
+        // https://github.com/lightning/bolts/blob/master/07-routing-gossip.md#recommendations-for-routing
+        // Add a small random tlc_expiry_delta to each hop for privacy reason.
+        // This makes it harder for the intermediate nodes to infer their position in the route.
+        let max_rand_expiry_num = MAX_PAYMENT_TLC_EXPIRY_LIMIT
+            .saturating_sub(route.first().map(|r| r.incoming_tlc_expiry).unwrap_or(0))
+            / DEFAULT_TLC_EXPIRY_DELTA;
+
+        thread_rng().gen_range(0..max_rand_expiry_num.max(1)) * DEFAULT_TLC_EXPIRY_DELTA
     }
 
     // A helper function to evaluate whether an edge should be added to the heap of nodes to visit.
