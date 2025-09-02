@@ -11,6 +11,7 @@ use crate::fiber::network::DebugEvent;
 use crate::fiber::network::PaymentCustomRecords;
 use crate::fiber::payment::MppMode;
 use crate::fiber::types::AmpPaymentData;
+use crate::fiber::types::TxSignatures;
 use crate::{debug_event, fiber::types::TxAbort, utils::tx::compute_tx_message};
 #[cfg(test)]
 use musig2::BinaryEncoding;
@@ -66,7 +67,7 @@ use ckb_types::{
         Capacity, CapacityError, EpochNumberWithFraction, FeeRate, TransactionBuilder,
         TransactionView,
     },
-    packed::{Bytes, CellInput, CellOutput, OutPoint, Script, Transaction},
+    packed::{self, Bytes, CellInput, CellOutput, OutPoint, Script, Transaction},
     prelude::{AsTransactionBuilder, IntoTransactionView, Pack, Unpack},
     H256,
 };
@@ -159,6 +160,7 @@ pub struct TlcNotification {
 #[derive(Debug)]
 pub enum ChannelCommand {
     TxCollaborationCommand(TxCollaborationCommand),
+    FundingTxSigned(Transaction),
     CommitmentSigned(),
     AddTlc(AddTlcCommand, RpcReplyPort<Result<AddTlcResponse, TlcErr>>),
     RemoveTlc(
@@ -177,6 +179,7 @@ impl Display for ChannelCommand {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ChannelCommand::TxCollaborationCommand(_) => write!(f, "TxCollaborationCommand"),
+            ChannelCommand::FundingTxSigned(_) => write!(f, "FundingTxSigned"),
             ChannelCommand::CommitmentSigned() => write!(f, "CommitmentSigned"),
             ChannelCommand::AddTlc(_, _) => write!(f, "AddTlc"),
             ChannelCommand::RemoveTlc(_, _) => write!(f, "RemoveTlc"),
@@ -2087,6 +2090,16 @@ where
         match command {
             ChannelCommand::TxCollaborationCommand(tx_collaboration_command) => {
                 self.handle_tx_collaboration_command(state, tx_collaboration_command)
+            }
+            ChannelCommand::FundingTxSigned(tx) => {
+                if let ChannelState::AwaitingTxSignatures(flags) = state.state {
+                    let flags = flags | AwaitingTxSignaturesFlags::OUR_TX_SIGNATURES_SENT;
+                    state.funding_tx = Some(tx);
+                    state.update_state(ChannelState::AwaitingTxSignatures(flags));
+                } else {
+                    error!("Invalid state. Expect channel state to be AwaitingTxSignatures, but bot {:?}", state.state);
+                }
+                Ok(())
             }
             ChannelCommand::CommitmentSigned() => {
                 self.handle_commitment_signed_command(myself, state).await
@@ -6526,19 +6539,18 @@ impl ChannelActorState {
             }
         };
 
-        let flags = if partial_witnesses.is_some() {
-            flags | AwaitingTxSignaturesFlags::THEIR_TX_SIGNATURES_SENT
-        } else {
-            flags | AwaitingTxSignaturesFlags::OUR_TX_SIGNATURES_SENT
-        };
-        self.update_state(ChannelState::AwaitingTxSignatures(flags));
-
         let funding_tx = self
             .funding_tx
             .clone()
             .ok_or(ProcessingChannelError::InvalidState(
                 "Funding transaction is not present".to_string(),
             ))?;
+
+        if partial_witnesses.is_some() {
+            self.update_state(ChannelState::AwaitingTxSignatures(
+                flags | AwaitingTxSignaturesFlags::THEIR_TX_SIGNATURES_SENT,
+            ));
+        }
 
         self.network()
             .send_message(NetworkActorMessage::new_command(
@@ -6550,8 +6562,6 @@ impl ChannelActorState {
                 ),
             ))
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-        let flags = flags | AwaitingTxSignaturesFlags::OUR_TX_SIGNATURES_SENT;
-        self.update_state(ChannelState::AwaitingTxSignatures(flags));
 
         Ok(())
     }
@@ -6647,6 +6657,115 @@ impl ChannelActorState {
                 ))
             });
         self.on_owned_channel_updated(myself, false).await;
+    }
+
+    async fn resume_funding(&mut self, myself: &ActorRef<ChannelActorMessage>) {
+        match self.state {
+            ChannelState::AwaitingTxSignatures(mut flags) => {
+                let channel_id = self.get_id();
+                let funding_tx = self.must_get_funding_transaction().clone();
+                let funding_cell_outpoint = self.must_get_funding_transaction_outpoint();
+                let witnesses: Vec<Vec<u8>> = funding_tx
+                    .witnesses()
+                    .into_iter()
+                    .map(|x| x.unpack())
+                    .collect();
+
+                if !flags.is_empty() {
+                    // In the old code, signatures are not saved. Reset the state and resign the
+                    // funding tx if signatures does not match the flags.
+                    let placeholder_witness = packed::WitnessArgs::new_builder()
+                        .lock(Some(molecule::bytes::Bytes::from(vec![0u8; 170])).pack())
+                        .build()
+                        .as_bytes()
+                        .to_vec();
+                    if witnesses.iter().any(|w| w == &placeholder_witness) {
+                        flags = AwaitingTxSignaturesFlags::empty();
+                        self.update_state(ChannelState::AwaitingTxSignatures(flags));
+                    }
+                }
+
+                if flags.contains(AwaitingTxSignaturesFlags::TX_SIGNATURES_SENT) {
+                    // Both signed
+                    self.network()
+                        .send_message(NetworkActorMessage::new_event(
+                            NetworkActorEvent::FundingTransactionPending(
+                                funding_tx,
+                                funding_cell_outpoint,
+                                self.get_id(),
+                            ),
+                        ))
+                        .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                    let peer_id = self.get_remote_peer_id();
+                    let peer_message = FiberMessageWithPeerId {
+                        peer_id,
+                        message: FiberMessage::ChannelNormalOperation(
+                            FiberChannelMessage::TxSignatures(TxSignatures {
+                                channel_id,
+                                witnesses,
+                            }),
+                        ),
+                    };
+                    self.network()
+                        .send_message(NetworkActorMessage::new_command(
+                            NetworkActorCommand::SendFiberMessage(peer_message),
+                        ))
+                        .expect("network actor alive");
+                } else if flags.contains(AwaitingTxSignaturesFlags::THEIR_TX_SIGNATURES_SENT)
+                    || self.should_local_send_tx_signatures_first()
+                {
+                    // It's our turn to sign and send the signatures to the peer. If we have signed, resign it to reuse the code.
+                    self.network()
+                        .send_message(NetworkActorMessage::new_command(
+                            NetworkActorCommand::SignFundingTx(
+                                self.get_remote_peer_id(),
+                                self.get_id(),
+                                funding_tx,
+                                if self.should_local_send_tx_signatures_first() {
+                                    None
+                                } else {
+                                    Some(witnesses)
+                                },
+                            ),
+                        ))
+                        .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                }
+            }
+            ChannelState::AwaitingChannelReady(flags) => {
+                // It's turn to send the funding tx to chain and waiting for confirmations
+                if flags.contains(AwaitingChannelReadyFlags::CHANNEL_READY) {
+                    self.maybe_channel_is_ready(myself).await;
+                } else {
+                    if flags.contains(AwaitingChannelReadyFlags::OUR_CHANNEL_READY) {
+                        // If we are ready, resend the ChannelReady message
+                        self.network()
+                            .send_message(NetworkActorMessage::new_command(
+                                NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
+                                    self.get_remote_peer_id(),
+                                    FiberMessage::channel_ready(ChannelReady {
+                                        channel_id: self.get_id(),
+                                    }),
+                                )),
+                            ))
+                            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                    }
+
+                    // Trace the funding tx again
+                    self.network()
+                        .send_message(NetworkActorMessage::new_event(
+                            NetworkActorEvent::FundingTransactionPending(
+                                self.must_get_funding_transaction().clone(),
+                                self.must_get_funding_transaction_outpoint(),
+                                self.get_id(),
+                            ),
+                        ))
+                        .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                }
+            }
+            _ => {
+                unreachable!("Expect resume funding when the channel state is in AwaitingTxSignatures | AwaitingChannelReady, but got {:?}", self.state);
+            }
+        }
     }
 
     fn append_remote_commitment_point(&mut self, commitment_point: Pubkey) {
@@ -6840,40 +6959,9 @@ impl ChannelActorState {
                 // TODO: in current implementation, we don't store the channel when we are in NegotiatingFunding state.
                 // This is an unreachable state for reestablish channel message. we may need to handle this case in the future.
             }
-            ChannelState::AwaitingChannelReady(flags) => {
-                // It's turn to send the funding tx to chain and waiting for confirmations
-                if flags.contains(AwaitingChannelReadyFlags::CHANNEL_READY) {
-                    self.maybe_channel_is_ready(myself).await;
-                } else if flags.contains(AwaitingChannelReadyFlags::OUR_CHANNEL_READY) {
-                    // If we are ready, just resend the ChannelReady message
-                    network
-                        .send_message(NetworkActorMessage::new_command(
-                            NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
-                                self.get_remote_peer_id(),
-                                FiberMessage::channel_ready(ChannelReady {
-                                    channel_id: self.get_id(),
-                                }),
-                            )),
-                        ))
-                        .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-                } else {
-                    // Otherwise, trace the funding tx again
-                    if let Some(channel_outpoint) = self.get_funding_transaction_outpoint() {
-                        network
-                            .send_message(NetworkActorMessage::new_event(
-                                NetworkActorEvent::FundingTransactionPending(
-                                    self.must_get_funding_transaction().clone(),
-                                    channel_outpoint,
-                                    self.get_id(),
-                                ),
-                            ))
-                            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-                    } else {
-                        return Err(ProcessingChannelError::InvalidState(
-                            "reestablish channel message in AwaitingChannelReady but funding transaction outpoint is not set".to_string(),
-                        ));
-                    }
-                }
+            ChannelState::AwaitingTxSignatures(_) | ChannelState::AwaitingChannelReady(_) => {
+                self.on_reestablished_channel_ready(myself).await;
+                self.resume_funding(myself).await;
             }
             ChannelState::ChannelReady => {
                 self.clear_waiting_peer_response();

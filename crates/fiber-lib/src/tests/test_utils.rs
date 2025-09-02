@@ -9,6 +9,7 @@ use crate::fiber::gossip::get_gossip_actor_name;
 use crate::fiber::gossip::GossipActorMessage;
 use crate::fiber::graph::NetworkGraphStateStore;
 use crate::fiber::network::*;
+use crate::fiber::payment::Attempt;
 use crate::fiber::payment::MppMode;
 use crate::fiber::payment::PaymentSession;
 use crate::fiber::payment::PaymentStatus;
@@ -1132,7 +1133,7 @@ impl NetworkNode {
             |status| status == PaymentStatus::Failed,
             |status| {
                 if status == PaymentStatus::Success {
-                    error!("Payment success: {:?}\n\n", payment_hash);
+                    error!("Unexpected payment success: {:?}\n\n", payment_hash);
                     assert_eq!(status, PaymentStatus::Failed);
                 }
             },
@@ -1286,8 +1287,27 @@ impl NetworkNode {
             .expect("network actor is live");
     }
 
+    pub async fn retry_send_payment(&self, payment_hash: Hash256, attempt_id: Option<u64>) {
+        let message = NetworkActorMessage::Event(NetworkActorEvent::RetrySendPayment(
+            payment_hash,
+            attempt_id,
+        ));
+
+        self.network_actor
+            .send_message(message)
+            .expect("network actor is live");
+    }
+
     pub fn get_payment_session(&self, payment_hash: Hash256) -> Option<PaymentSession> {
         self.store.get_payment_session(payment_hash)
+    }
+
+    pub fn update_payment_session(&self, session: PaymentSession) {
+        self.store.insert_payment_session(session);
+    }
+
+    pub fn update_payment_attempt(&self, attempt: Attempt) {
+        self.store.insert_attempt(attempt);
     }
 
     pub fn assert_router_used(&self, index: usize, payment_hash: Hash256, channel_id: Hash256) {

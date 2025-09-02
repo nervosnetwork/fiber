@@ -486,15 +486,14 @@ impl Attempt {
 
     pub fn set_failed_status(&mut self, error: &str, retryable: bool) {
         self.last_error = Some(error.to_string());
-
-        if retryable {
-            self.status = AttemptStatus::Retrying;
-            if self.tried_times < self.try_limit && !error.to_string().contains("WaitingTlcAck") {
-                self.tried_times += 1;
-                self.last_updated_at = now_timestamp_as_millis_u64();
-            }
-        } else {
+        self.last_updated_at = now_timestamp_as_millis_u64();
+        if !retryable || self.tried_times > self.try_limit {
             self.status = AttemptStatus::Failed;
+        } else {
+            self.status = AttemptStatus::Retrying;
+            if !error.contains("WaitingTlcAck") {
+                self.tried_times += 1;
+            }
         }
     }
 

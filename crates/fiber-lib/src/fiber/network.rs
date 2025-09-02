@@ -1568,7 +1568,7 @@ where
                                     .await
                                 {
                                     error!(
-                                        "Failed to remove tlc {:?} for channel {:?}: {}",
+                                        "Failed to remove tlc {:?} with preimage for channel {:?}: {}",
                                         tlc.id(),
                                         channel_id,
                                         err
@@ -1613,7 +1613,7 @@ where
                                     .await
                                 {
                                     error!(
-                                        "Failed to remove tlc {:?} for channel {:?}: {}",
+                                        "Failed to remove expired tlc {:?} for channel {:?}: {}",
                                         tlc.id(),
                                         channel_id,
                                         err
@@ -2057,7 +2057,7 @@ where
                 partial_witnesses,
             ) => {
                 let tx_hash: Hash256 = funding_tx.calc_tx_hash().into();
-                let msg = match partial_witnesses {
+                let (msg, funding_tx) = match partial_witnesses {
                     Some(partial_witnesses) => {
                         debug!(
                             "Received SignFudningTx request with for transaction {:?} and partial witnesses {:?}",
@@ -2106,15 +2106,21 @@ where
                             .expect("network actor alive");
                         debug!("Fully signed funding tx {:?}", &funding_tx);
 
-                        FiberMessageWithPeerId {
-                            peer_id: peer_id.clone(),
-                            message: FiberMessage::ChannelNormalOperation(
-                                FiberChannelMessage::TxSignatures(TxSignatures {
-                                    channel_id: *channel_id,
-                                    witnesses: witnesses.into_iter().map(|x| x.unpack()).collect(),
-                                }),
-                            ),
-                        }
+                        (
+                            FiberMessageWithPeerId {
+                                peer_id: peer_id.clone(),
+                                message: FiberMessage::ChannelNormalOperation(
+                                    FiberChannelMessage::TxSignatures(TxSignatures {
+                                        channel_id: *channel_id,
+                                        witnesses: witnesses
+                                            .into_iter()
+                                            .map(|x| x.unpack())
+                                            .collect(),
+                                    }),
+                                ),
+                            },
+                            funding_tx,
+                        )
                     }
                     None => {
                         debug!(
@@ -2133,24 +2139,44 @@ where
                         let witnesses = funding_tx.witnesses();
 
                         debug!("Partially signed funding tx {:?}", &funding_tx);
-                        FiberMessageWithPeerId {
-                            peer_id: peer_id.clone(),
-                            message: FiberMessage::ChannelNormalOperation(
-                                FiberChannelMessage::TxSignatures(TxSignatures {
-                                    channel_id: *channel_id,
-                                    witnesses: witnesses.into_iter().map(|x| x.unpack()).collect(),
-                                }),
-                            ),
-                        }
+                        (
+                            FiberMessageWithPeerId {
+                                peer_id: peer_id.clone(),
+                                message: FiberMessage::ChannelNormalOperation(
+                                    FiberChannelMessage::TxSignatures(TxSignatures {
+                                        channel_id: *channel_id,
+                                        witnesses: witnesses
+                                            .into_iter()
+                                            .map(|x| x.unpack())
+                                            .collect(),
+                                    }),
+                                ),
+                            },
+                            funding_tx,
+                        )
                     }
                 };
 
+                // Before sending the signatures to the peer, start tracing the tx
+                // It should be the first time to trace the tx
                 state
                     .trace_tx(tx_hash, InFlightCkbTxKind::Funding(*channel_id))
                     .await?;
 
-                // TODO: before sending the signatures to the peer, start tracing the tx
-                // It should be the first time to trace the tx
+                // Notify channel actor to save the signatures
+                if let Err(err) = state
+                    .send_command_to_channel(
+                        *channel_id,
+                        ChannelCommand::FundingTxSigned(funding_tx.data()),
+                    )
+                    .await
+                {
+                    error!(
+                        "Failed to update signed funding tx {:?}: {}",
+                        channel_id, err
+                    );
+                }
+
                 myself
                     .send_message(NetworkActorMessage::new_command(
                         NetworkActorCommand::SendFiberMessage(msg),
@@ -2546,7 +2572,7 @@ where
                     need_retry,
                 );
 
-                if need_retry {
+                if attempt.is_retrying() {
                     self.register_payment_retry(myself, state, payment_hash, Some(attempt.id));
                 }
             }
@@ -2905,7 +2931,9 @@ where
 
                 self.set_attempt_fail_with_error(&mut session, &mut attempt, &error, need_to_retry);
                 // retry the current attempt if it is retryable
-                self.register_payment_retry(myself, state, payment_hash, Some(attempt.id));
+                if attempt.is_retrying() {
+                    self.register_payment_retry(myself, state, payment_hash, Some(attempt.id));
+                }
             }
         }
     }
