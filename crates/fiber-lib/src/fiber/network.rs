@@ -1242,8 +1242,20 @@ where
             }
             NetworkActorEvent::TlcRemoveReceived(attempt_hash, attempt_id, remove_tlc_reason) => {
                 // When a node is restarted, RemoveTLC will also be resent if necessary
-                let payment_hash =
-                    self.get_payment_hash_from_attempt_hash(attempt_hash, attempt_id);
+                let payment_hash = attempt_id
+                    .and_then(|id| {
+                        self.store
+                            .get_payment_hash_with_attempt_hash(attempt_hash, id)
+                    })
+                    .or(Some(attempt_hash));
+                let Some(payment_hash) = payment_hash else {
+                    error!(
+                        "Failed to find payment hash for attempt_hash {:?}, attempt_id {:?}",
+                        attempt_hash, attempt_id
+                    );
+                    return Ok(());
+                };
+
                 self.on_remove_tlc_event(
                     myself.clone(),
                     state,
