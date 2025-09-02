@@ -11,6 +11,7 @@ use ractor::concurrency::Duration;
 use ractor::{
     call_t, Actor, ActorCell, ActorProcessingErr, ActorRef, RpcReplyPort, SupervisionEvent,
 };
+use rand::seq::SliceRandom;
 use rand::Rng;
 use secp256k1::Secp256k1;
 use serde::{Deserialize, Serialize};
@@ -1405,6 +1406,8 @@ where
                         .into_iter()
                         .chain(graph_nodes_to_connect.into_iter())
                 };
+
+                let mut rng = rand::thread_rng();
                 for (peer_id, addresses) in peers_to_connect {
                     debug!("Peer to connect: {:?}, {:?}", peer_id, addresses);
                     if let Some(session) = state.get_peer_session(&peer_id) {
@@ -1414,7 +1417,9 @@ where
                                 );
                         continue;
                     }
-                    for addr in addresses {
+
+                    // Randomly pick one address to connect
+                    if let Some(addr) = addresses.choose(&mut rng) {
                         state
                             .network
                             .send_message(NetworkActorMessage::new_command(
