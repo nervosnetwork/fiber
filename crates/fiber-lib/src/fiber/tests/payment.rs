@@ -1,4 +1,5 @@
 #![allow(clippy::needless_range_loop)]
+use crate::fiber::builtin_records::BasicMppPaymentData;
 use crate::fiber::channel::*;
 use crate::fiber::config::DEFAULT_TLC_EXPIRY_DELTA;
 use crate::fiber::config::DEFAULT_TLC_FEE_PROPORTIONAL_MILLIONTHS;

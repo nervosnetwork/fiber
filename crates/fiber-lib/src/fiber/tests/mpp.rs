@@ -5,6 +5,7 @@ use tracing::debug;
 use crate::{
     create_n_nodes_network_with_params,
     fiber::{
+        builtin_records::BasicMppPaymentData,
         channel::{
             AddTlcCommand, ChannelActorStateStore, ChannelCommand, ChannelCommandWithId, TLCId,
         },
@@ -13,9 +14,7 @@ use crate::{
         hash_algorithm::HashAlgorithm,
         network::{DebugEvent, SendPaymentCommand, USER_CUSTOM_RECORDS_MAX_INDEX},
         payment::{AttemptStatus, MppMode, PaymentStatus},
-        types::{
-            BasicMppPaymentData, Hash256, PaymentHopData, PeeledPaymentOnionPacket, RemoveTlcReason,
-        },
+        types::{Hash256, PaymentHopData, PeeledPaymentOnionPacket, RemoveTlcReason},
         NetworkActorCommand, NetworkActorMessage, PaymentCustomRecords,
     },
     gen_rand_sha256_hash, gen_rpc_config,

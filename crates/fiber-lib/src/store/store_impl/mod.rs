@@ -17,9 +17,10 @@ use std::path::Path;
 
 use super::db_migrate::DbMigrate;
 use super::schema::*;
+use crate::fiber::builtin_records::AmpPaymentData;
 use crate::fiber::gossip::GossipMessageStore;
 use crate::fiber::payment::{Attempt, AttemptStatus, PaymentSession, PaymentStatus};
-use crate::fiber::types::{AmpPaymentData, HoldTlc, CURSOR_SIZE};
+use crate::fiber::types::{HoldTlc, CURSOR_SIZE};
 use crate::{
     fiber::{
         channel::{ChannelActorState, ChannelActorStateStore, ChannelState},
