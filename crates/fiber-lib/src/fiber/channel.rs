@@ -941,7 +941,7 @@ where
                     // add to pending settlement tlc set
                     // the tlc set will be settled by network actor
                     state
-                        .pending_notify_mpp_tcls
+                        .pending_notify_mpp_tlcs
                         .push((parent_payment_hash, tlc_info.id()));
 
                     // just return, the tlc set will be settled by network actor
@@ -2712,7 +2712,7 @@ where
         }
 
         // take the pending settlement tlc set
-        let pending_notify_mpp_tcls = std::mem::take(&mut state.pending_notify_mpp_tcls);
+        let pending_notify_mpp_tcls = std::mem::take(&mut state.pending_notify_mpp_tlcs);
 
         self.store.insert_channel_actor_state(state.clone());
 
@@ -3713,7 +3713,7 @@ pub struct ChannelActorState {
 
     // The TLC set ready to be settled
     #[serde(skip)]
-    pub pending_notify_mpp_tcls: Vec<(Hash256, u64)>,
+    pub pending_notify_mpp_tlcs: Vec<(Hash256, u64)>,
 
     #[serde(skip)]
     pub ephemeral_config: ChannelEphemeralConfig,
@@ -4627,7 +4627,7 @@ impl ChannelActorState {
             waiting_peer_response: None,
             network: Some(network),
             scheduled_channel_update_handle: None,
-            pending_notify_mpp_tcls: vec![],
+            pending_notify_mpp_tlcs: vec![],
             ephemeral_config: Default::default(),
             private_key: Some(private_key),
         };
@@ -4707,7 +4707,7 @@ impl ChannelActorState {
             waiting_peer_response: None,
             network: Some(network),
             scheduled_channel_update_handle: None,
-            pending_notify_mpp_tcls: vec![],
+            pending_notify_mpp_tlcs: vec![],
             ephemeral_config: Default::default(),
             private_key: Some(private_key),
         }
