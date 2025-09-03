@@ -4,6 +4,7 @@ use crate::gen_rand_sha256_hash;
 use crate::invoice::CkbInvoice;
 use crate::rpc::channel::{ChannelState, ShutdownChannelParams};
 use crate::rpc::config::RpcConfig;
+use crate::rpc::graph::{GraphChannelsParams, GraphChannelsResult};
 use crate::rpc::info::NodeInfoResult;
 use crate::tests::*;
 use crate::{
@@ -251,7 +252,7 @@ async fn test_rpc_graph() {
             (
                 (0, 1),
                 ChannelParameters {
-                    public: true,
+                    public: false,
                     node_a_funding_amount: MIN_RESERVED_CKB + 10000000000,
                     node_b_funding_amount: MIN_RESERVED_CKB,
                     ..Default::default()
@@ -277,6 +278,7 @@ async fn test_rpc_graph() {
 
     eprintln!("Graph nodes: {:#?}", graph_nodes);
 
+    assert_eq!(graph_nodes.total_count.value(), 2);
     assert!(!graph_nodes.nodes.is_empty());
     assert!(graph_nodes.nodes.iter().any(|n| n.node_id == node_1.pubkey));
     assert!(graph_nodes
@@ -284,6 +286,35 @@ async fn test_rpc_graph() {
         .iter()
         .all(|n| n.version == *env!("CARGO_PKG_VERSION")));
     assert!(!graph_nodes.nodes[0].features.is_empty());
+
+    let graph_nodes: GraphNodesResult = node_0
+        .send_rpc_request(
+            "graph_nodes",
+            GraphNodesParams {
+                limit: Some(1),
+                after: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(graph_nodes.total_count.value(), 2);
+    assert_eq!(graph_nodes.nodes.len(), 1);
+
+    let graph_channels: GraphChannelsResult = node_0
+        .send_rpc_request(
+            "graph_channels",
+            GraphChannelsParams {
+                limit: None,
+                after: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    // only public channels
+    assert_eq!(graph_channels.total_count.value(), 1);
+    assert_eq!(graph_channels.channels.len(), 1);
 }
 
 #[tokio::test]

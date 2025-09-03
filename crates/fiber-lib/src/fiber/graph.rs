@@ -445,10 +445,12 @@ pub struct NetworkGraph<S> {
     pub always_process_gossip_message: bool,
     // The pubkey of the node that is running this instance of the network graph.
     source: Pubkey,
+    // The count of private channels
+    pub(crate) private_channels_count: usize,
     // All the channels in the network.
     pub(crate) channels: IndexMap<OutPoint, ChannelInfo>,
     // All the nodes in the network.
-    nodes: HashMap<Pubkey, NodeInfo>,
+    pub(crate) nodes: IndexMap<Pubkey, NodeInfo>,
 
     // Channel stats map, used to track the attempts for each channel,
     // this information is used to HELP the path finding algorithm for better routing in two ways:
@@ -525,9 +527,10 @@ where
             #[cfg(any(test, feature = "bench"))]
             always_process_gossip_message: false,
             source,
+            private_channels_count: 0,
             channels: IndexMap::new(),
             channel_stats: Default::default(),
-            nodes: HashMap::new(),
+            nodes: IndexMap::new(),
             latest_cursor: Cursor::default(),
             store: store.clone(),
             history: PaymentHistory::new(source, None, store),
@@ -610,11 +613,18 @@ where
                 // so we can just overwrite the old channel info.
                 self.history
                     .remove_channel_history(&channel_info.channel_outpoint);
+                if !channel_info.is_public {
+                    self.private_channels_count += 1;
+                }
                 self.channels
                     .insert(channel_info.channel_outpoint.clone(), channel_info);
             }
             OwnedChannelUpdateEvent::Down(channel_outpoint) => {
-                self.channels.swap_remove(&channel_outpoint);
+                if let Some(channel_info) = self.channels.swap_remove(&channel_outpoint) {
+                    if !channel_info.is_public {
+                        self.private_channels_count -= 1;
+                    }
+                }
                 self.channel_stats.lock().remove_channel(&channel_outpoint);
             }
             OwnedChannelUpdateEvent::Updated(channel_outpoint, node, channel_update) => {
@@ -841,18 +851,13 @@ where
         self.nodes.values()
     }
 
-    pub fn get_nodes_with_params(&self, limit: usize, after: Option<Cursor>) -> Vec<NodeInfo> {
-        let cursor = after.unwrap_or_default();
-        self.store
-            .get_broadcast_messages_iter(&cursor)
-            .into_iter()
-            .filter_map(|message| match message {
-                BroadcastMessageWithTimestamp::NodeAnnouncement(node_announcement) => {
-                    Some(NodeInfo::from(node_announcement))
-                }
-                _ => None,
-            })
+    pub fn get_nodes_with_params(&self, limit: usize, after: Option<u64>) -> Vec<NodeInfo> {
+        let after = after.unwrap_or_default();
+        self.nodes
+            .iter()
+            .skip(after as usize)
             .take(limit)
+            .map(|(_pubkey, node)| node.to_owned())
             .collect()
     }
 
@@ -1089,6 +1094,7 @@ where
         self.channels.clear();
         self.nodes.clear();
         self.history.reset();
+        self.private_channels_count = 0;
     }
 
     #[cfg(any(test, feature = "bench"))]

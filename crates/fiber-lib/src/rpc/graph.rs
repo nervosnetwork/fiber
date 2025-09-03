@@ -8,13 +8,15 @@ use crate::fiber::graph::{ChannelUpdateInfo, NetworkGraph, NetworkGraphStateStor
 use crate::fiber::network::get_chain_hash;
 use crate::fiber::serde_utils::EntityHex;
 use crate::fiber::serde_utils::{U128Hex, U64Hex};
-use crate::fiber::types::{Cursor, Hash256, Pubkey};
-use ckb_jsonrpc_types::{DepType, JsonBytes, OutPoint as OutPointWrapper, Script, ScriptHashType};
+use crate::fiber::types::{Hash256, Pubkey};
+use ckb_jsonrpc_types::{
+    DepType, JsonBytes, OutPoint as OutPointWrapper, Script, ScriptHashType, Uint64,
+};
 use ckb_types::packed::OutPoint;
 use ckb_types::H256;
 #[cfg(not(target_arch = "wasm32"))]
 use jsonrpsee::proc_macros::rpc;
-use jsonrpsee::{types::error::INVALID_PARAMS_CODE, types::ErrorObjectOwned};
+use jsonrpsee::types::ErrorObjectOwned;
 
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
@@ -182,6 +184,8 @@ pub struct GraphNodesResult {
     pub nodes: Vec<NodeInfo>,
     /// The last cursor.
     pub last_cursor: JsonBytes,
+    /// The total count of nodes
+    pub total_count: Uint64,
 }
 
 #[serde_as]
@@ -247,6 +251,8 @@ pub struct GraphChannelsResult {
     pub channels: Vec<ChannelInfo>,
     /// The last cursor for pagination.
     pub last_cursor: JsonBytes,
+    /// The total count of channels
+    pub total_count: Uint64,
 }
 
 /// RPC module for graph management.
@@ -332,22 +338,24 @@ where
         let network_graph = self.network_graph.read().await;
         let default_max_limit = 500;
         let limit = params.limit.unwrap_or(default_max_limit) as usize;
-        let cursor = params
-            .after
-            .as_ref()
-            .map(|cursor| Cursor::from_bytes(cursor.as_bytes()))
-            .transpose()
-            .map_err(|e| {
-                ErrorObjectOwned::owned(INVALID_PARAMS_CODE, e.to_string(), Some(params))
-            })?;
-        let nodes = network_graph.get_nodes_with_params(limit, cursor);
-        let last_cursor = nodes
-            .last()
-            .map(|node| JsonBytes::from_vec(node.cursor().to_bytes().into()))
-            .unwrap_or_default();
+        let after = params.after.as_ref().map(|after| {
+            let buf: [u8; 8] = after.as_bytes().try_into().unwrap_or_default();
+            u64::from_le_bytes(buf)
+        });
+        let nodes = network_graph.get_nodes_with_params(limit, after);
+        let last_cursor = JsonBytes::from_vec(
+            (after.unwrap_or_default() + nodes.len() as u64)
+                .to_le_bytes()
+                .to_vec(),
+        );
         let nodes = nodes.into_iter().map(Into::into).collect();
+        let total_count = (network_graph.nodes.len() as u64).into();
 
-        Ok(GraphNodesResult { nodes, last_cursor })
+        Ok(GraphNodesResult {
+            nodes,
+            last_cursor,
+            total_count,
+        })
     }
 
     pub async fn graph_channels(
@@ -370,9 +378,13 @@ where
         );
 
         let channels = channels.into_iter().map(Into::into).collect();
+        let public_channels_count =
+            network_graph.channels.len() - network_graph.private_channels_count;
+        let total_count = (public_channels_count as u64).into();
         Ok(GraphChannelsResult {
             channels,
             last_cursor,
+            total_count,
         })
     }
 }
