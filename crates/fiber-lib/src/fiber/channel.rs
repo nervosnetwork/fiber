@@ -737,7 +737,15 @@ where
         commitment_signed: CommitmentSigned,
     ) -> Result<(), ProcessingChannelError> {
         // build commitment tx and verify signature from remote, if passed send ACK for partner
-        state.verify_commitment_signed_and_send_ack(commitment_signed.clone())?;
+        if let Err(err) = state.verify_commitment_signed_and_send_ack(commitment_signed.clone()) {
+            error!(
+                "Failed to verify commitment_signed message: {:?}, shutdown channel {} forcefully",
+                err,
+                state.get_id()
+            );
+            self.notify_network_actor_shutdown_me(state);
+            return Err(err);
+        }
         let need_commitment_signed = state.tlc_state.update_for_commitment_signed();
 
         // flush remove tlc for received tlcs after replying ack for peer
@@ -2251,17 +2259,12 @@ where
             }
             ChannelEvent::CheckActiveChannel => {
                 if state.should_disconnect_peer_awaiting_response() && !state.is_closed() {
-                    debug!(
-                        "Channel {} from peer {:?} is inactive for a time, closing it",
+                    error!(
+                        "Channel {} from peer {:?} is inactive for a time, shutting down it forcefully",
                         state.get_id(),
                         state.get_remote_peer_id(),
                     );
-                    state
-                        .network()
-                        .send_message(NetworkActorMessage::new_command(
-                            NetworkActorCommand::DisconnectPeer(state.get_remote_peer_id()),
-                        ))
-                        .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                    self.notify_network_actor_shutdown_me(state);
                 }
             }
             ChannelEvent::CheckFundingTimeout => {
@@ -2306,6 +2309,27 @@ where
             }
         }
         Ok(())
+    }
+
+    fn notify_network_actor_shutdown_me(&self, state: &ChannelActorState) {
+        let (send, _recv) = oneshot::channel();
+        let rpc_reply = RpcReplyPort::from(send);
+        state
+            .network()
+            .send_message(NetworkActorMessage::new_command(
+                NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
+                    channel_id: state.get_id(),
+                    command: ChannelCommand::Shutdown(
+                        ShutdownCommand {
+                            close_script: None,
+                            fee_rate: None,
+                            force: true,
+                        },
+                        rpc_reply,
+                    ),
+                }),
+            ))
+            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
     }
 }
 
