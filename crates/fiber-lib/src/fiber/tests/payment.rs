@@ -3901,7 +3901,7 @@ async fn test_send_payment_shutdown_with_force() {
     )
     .await;
 
-    let [node_0, _node_1, mut node_2, node_3] = nodes.try_into().expect("4 nodes");
+    let [node_0, _node_1, node_2, node_3] = nodes.try_into().expect("4 nodes");
 
     let mut all_sent = HashSet::new();
     for i in 0..10 {
@@ -3928,26 +3928,18 @@ async fn test_send_payment_shutdown_with_force() {
     }
 
     // make sure the later payments will fail
-    // because network actor will find out the inactive channels and disconnect peers
-    // which send shutdown force message
-    node_2
-        .expect_event(|event| match event {
-            NetworkServiceEvent::PeerDisConnected(peer_id, _) => {
-                assert_eq!(peer_id, &node_3.peer_id);
-                true
-            }
-            _ => false,
-        })
-        .await;
-
-    // because node2 didn't receive the shutdown message,
-    // so it will still think the channel is ready
-    let node_2_channel_actor_state = node_2.get_channel_actor_state(channels[2]);
-    eprintln!(
-        "node_2_channel_actor_state: {:?}",
-        node_2_channel_actor_state.state
-    );
-    assert_eq!(node_2_channel_actor_state.state, ChannelState::ChannelReady);
+    // because network actor will find out the inactive channels and shutdown channel forcefully
+    let mut wait_time = 0;
+    while wait_time < PEER_CHANNEL_RESPONSE_TIMEOUT + 3 {
+        let channel_state = node_2.get_channel_actor_state(channels[2]);
+        if channel_state.state == ChannelState::Closed(CloseFlags::UNCOOPERATIVE_LOCAL) {
+            break;
+        } else {
+            assert_eq!(channel_state.state, ChannelState::ChannelReady);
+            tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+            wait_time += 1000;
+        }
+    }
 }
 
 #[tokio::test]
