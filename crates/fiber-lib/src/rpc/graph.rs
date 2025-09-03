@@ -357,20 +357,17 @@ where
         let default_max_limit = 500;
         let network_graph = self.network_graph.read().await;
         let limit = params.limit.unwrap_or(default_max_limit) as usize;
-        let cursor = params
-            .after
-            .as_ref()
-            .map(|cursor| Cursor::from_bytes(cursor.as_bytes()))
-            .transpose()
-            .map_err(|e| {
-                ErrorObjectOwned::owned(INVALID_PARAMS_CODE, e.to_string(), Some(params))
-            })?;
+        let after = params.after.as_ref().map(|after| {
+            let buf: [u8; 8] = after.as_bytes().try_into().unwrap_or_default();
+            u64::from_le_bytes(buf)
+        });
 
-        let channels = network_graph.get_channels_with_params(limit, cursor);
-        let last_cursor = channels
-            .last()
-            .map(|node| JsonBytes::from_vec(node.cursor().to_bytes().into()))
-            .unwrap_or_default();
+        let channels = network_graph.get_channels_with_params(limit, after);
+        let last_cursor = JsonBytes::from_vec(
+            (after.unwrap_or_default() + channels.len() as u64)
+                .to_le_bytes()
+                .to_vec(),
+        );
 
         let channels = channels.into_iter().map(Into::into).collect();
         Ok(GraphChannelsResult {

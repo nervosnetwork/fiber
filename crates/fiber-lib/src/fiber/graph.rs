@@ -22,6 +22,7 @@ use crate::fiber::types::PaymentHopData;
 use crate::invoice::CkbInvoice;
 use crate::now_timestamp_as_millis_u64;
 use ckb_types::packed::{OutPoint, Script};
+use indexmap::IndexMap;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
@@ -85,6 +86,7 @@ impl From<NodeAnnouncement> for NodeInfo {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ChannelInfo {
     pub channel_outpoint: OutPoint,
+    pub is_public: bool,
     // The timestamp in the block header of the block that includes the funding transaction of the channel.
     pub timestamp: u64,
 
@@ -195,8 +197,10 @@ impl TryFrom<&ChannelActorState> for ChannelInfo {
                 Some(state.get_local_channel_update_info()),
             )
         };
+        let is_public = state.is_public();
         Ok(Self {
             channel_outpoint,
+            is_public,
             timestamp,
             features: 0,
             node1,
@@ -213,6 +217,7 @@ impl From<(u64, ChannelAnnouncement)> for ChannelInfo {
     fn from((timestamp, channel_announcement): (u64, ChannelAnnouncement)) -> Self {
         Self {
             channel_outpoint: channel_announcement.channel_outpoint,
+            is_public: true,
             timestamp,
             features: channel_announcement.features,
             node1: channel_announcement.node1_id,
@@ -441,7 +446,7 @@ pub struct NetworkGraph<S> {
     // The pubkey of the node that is running this instance of the network graph.
     source: Pubkey,
     // All the channels in the network.
-    pub(crate) channels: HashMap<OutPoint, ChannelInfo>,
+    pub(crate) channels: IndexMap<OutPoint, ChannelInfo>,
     // All the nodes in the network.
     nodes: HashMap<Pubkey, NodeInfo>,
 
@@ -520,7 +525,7 @@ where
             #[cfg(any(test, feature = "bench"))]
             always_process_gossip_message: false,
             source,
-            channels: HashMap::new(),
+            channels: IndexMap::new(),
             channel_stats: Default::default(),
             nodes: HashMap::new(),
             latest_cursor: Cursor::default(),
@@ -609,7 +614,7 @@ where
                     .insert(channel_info.channel_outpoint.clone(), channel_info);
             }
             OwnedChannelUpdateEvent::Down(channel_outpoint) => {
-                self.channels.remove(&channel_outpoint);
+                self.channels.swap_remove(&channel_outpoint);
                 self.channel_stats.lock().remove_channel(&channel_outpoint);
             }
             OwnedChannelUpdateEvent::Updated(channel_outpoint, node, channel_update) => {
@@ -651,19 +656,6 @@ where
     #[cfg(any(test, feature = "bench"))]
     pub(crate) fn clear_history(&mut self) {
         self.history.reset();
-    }
-
-    fn load_channel_updates_from_store(&self, channel_info: &mut ChannelInfo) {
-        let channel_update_of_node1 = self
-            .store
-            .get_latest_channel_update(&channel_info.channel_outpoint, true)
-            .map(Into::into);
-        let channel_update_of_node2 = self
-            .store
-            .get_latest_channel_update(&channel_info.channel_outpoint, false)
-            .map(Into::into);
-        channel_info.update_of_node1 = channel_update_of_node1;
-        channel_info.update_of_node2 = channel_update_of_node2;
     }
 
     fn load_channel_info_mut(&mut self, channel_outpoint: &OutPoint) -> Option<&mut ChannelInfo> {
@@ -907,35 +899,19 @@ where
         }
     }
 
-    pub fn get_channels_with_params(
-        &self,
-        limit: usize,
-        after: Option<Cursor>,
-    ) -> Vec<ChannelInfo> {
-        let cursor = after.unwrap_or_default();
-        self.store
-            .get_broadcast_messages_iter(&cursor)
-            .into_iter()
-            .filter_map(|message| match message {
-                BroadcastMessageWithTimestamp::ChannelAnnouncement(
-                    timestamp,
-                    channel_announcement,
-                ) => {
-                    let mut channel_info = ChannelInfo::from((timestamp, channel_announcement));
-                    self.load_channel_updates_from_store(&mut channel_info);
-
-                    // assuming channel is closed if disabled from the both side
-                    let is_closed = channel_info.update_of_node1.is_some_and(|u| !u.enabled)
-                        && channel_info.update_of_node2.is_some_and(|u| !u.enabled);
-                    if !is_closed {
-                        Some(channel_info)
-                    } else {
-                        None
-                    }
-                }
-                _ => None,
-            })
+    pub fn get_channels_with_params(&self, limit: usize, after: Option<u64>) -> Vec<ChannelInfo> {
+        let after = after.unwrap_or_default();
+        self.channels
+            .iter()
+            .skip(after as usize)
             .take(limit)
+            .filter_map(|(_out_point, channel_info)| {
+                if channel_info.is_public {
+                    Some(channel_info.to_owned())
+                } else {
+                    None
+                }
+            })
             .collect()
     }
 
