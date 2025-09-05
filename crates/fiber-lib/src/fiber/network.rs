@@ -77,14 +77,13 @@ use crate::ckb::{
 use crate::fiber::channel::{
     AddTlcCommand, AddTlcResponse, ChannelActorState, ChannelEphemeralConfig,
     ChannelInitializationOperation, ShutdownCommand, TxCollaborationCommand, TxUpdateCommand,
-    DEFAULT_COMMITMENT_DELAY_EPOCHS,
 };
 use crate::fiber::channel::{
     AwaitingTxSignaturesFlags, ShuttingDownFlags, MAX_TLC_NUMBER_IN_FLIGHT,
 };
 use crate::fiber::config::{
-    DEFAULT_MAX_PARTS, DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT,
-    MIN_TLC_EXPIRY_DELTA, PAYMENT_MAX_PARTS_LIMIT,
+    DEFAULT_COMMITMENT_DELAY_EPOCHS, DEFAULT_MAX_PARTS, DEFAULT_TLC_EXPIRY_DELTA,
+    MAX_PAYMENT_TLC_EXPIRY_LIMIT, MIN_TLC_EXPIRY_DELTA, PAYMENT_MAX_PARTS_LIMIT,
 };
 use crate::fiber::fee::{check_open_channel_parameters, check_tlc_delta_with_epochs};
 use crate::fiber::gossip::{GossipConfig, GossipService, SubscribableGossipMessageStore};
