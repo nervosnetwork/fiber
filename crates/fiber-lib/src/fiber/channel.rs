@@ -5718,8 +5718,8 @@ impl ChannelActorState {
         let expect_expiry = current_time + epoch_delay_milliseconds * (pending_tlc_count + 1);
         if expiry < expect_expiry {
             error!(
-                "TLC expiry {} is too soon, current time + epoch delay: {}",
-                expiry, expect_expiry
+                "TLC expiry {} is too soon, current time + epoch delay: {} pending_tlc_count {}",
+                expiry, expect_expiry, pending_tlc_count
             );
             return Err(ProcessingChannelError::TlcExpirySoon);
         }
