@@ -11,7 +11,7 @@ use ractor::concurrency::Duration;
 use ractor::{
     call_t, Actor, ActorCell, ActorProcessingErr, ActorRef, RpcReplyPort, SupervisionEvent,
 };
-use rand::seq::SliceRandom;
+use rand::seq::{IteratorRandom, SliceRandom};
 use rand::Rng;
 use secp256k1::Secp256k1;
 use serde::{Deserialize, Serialize};
@@ -129,7 +129,7 @@ const ASSUME_NETWORK_MYSELF_ALIVE: &str = "network actor myself alive";
 const ASSUME_GOSSIP_ACTOR_ALIVE: &str = "gossip actor must be alive";
 
 // The duration for which we will try to maintain the number of peers in connection.
-const MAINTAINING_CONNECTIONS_INTERVAL: Duration = Duration::from_secs(3600);
+const MAINTAINING_CONNECTIONS_INTERVAL: Duration = Duration::from_secs(1200);
 
 // The duration for which we will check all channels.
 #[cfg(debug_assertions)]
@@ -1334,6 +1334,28 @@ where
                 }
             },
             NetworkActorCommand::MaintainConnections => {
+                debug!("Trying to connect to peers with mutual channels");
+
+                for (peer_id, channel_id, channel_state) in self.store.get_channel_states(None) {
+                    if state.is_connected(&peer_id) {
+                        continue;
+                    }
+                    let addresses = state.get_peer_addresses(&peer_id);
+
+                    debug!(
+                        "Reconnecting channel {:x} peers {:?} in state {:?} with addresses {:?}",
+                        &channel_id, &peer_id, &channel_state, &addresses
+                    );
+
+                    if let Some(addr) = addresses.iter().choose(&mut rand::thread_rng()) {
+                        myself
+                            .send_message(NetworkActorMessage::new_command(
+                                NetworkActorCommand::ConnectPeer(addr.to_owned()),
+                            ))
+                            .expect(ASSUME_NETWORK_MYSELF_ALIVE);
+                    }
+                }
+
                 let mut inbound_peer_sessions = state.inbound_peer_sessions();
                 let num_inbound_peers = inbound_peer_sessions.len();
                 let num_outbound_peers = state.num_of_outbound_peers();
@@ -4589,24 +4611,8 @@ where
     async fn post_start(
         &self,
         myself: ActorRef<Self::Msg>,
-        state: &mut Self::State,
+        _state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        debug!("Trying to connect to peers with mutual channels");
-        for (peer_id, channel_id, channel_state) in self.store.get_channel_states(None) {
-            let addresses = state.get_peer_addresses(&peer_id);
-
-            debug!(
-                "Reconnecting channel {:x} peers {:?} in state {:?} with addresses {:?}",
-                &channel_id, &peer_id, &channel_state, &addresses
-            );
-            for addr in addresses {
-                myself
-                    .send_message(NetworkActorMessage::new_command(
-                        NetworkActorCommand::ConnectPeer(addr),
-                    ))
-                    .expect(ASSUME_NETWORK_MYSELF_ALIVE);
-            }
-        }
         // MAINTAINING_CONNECTIONS_INTERVAL is long, we need to trigger when start
         myself
             .send_message(NetworkActorMessage::new_command(
