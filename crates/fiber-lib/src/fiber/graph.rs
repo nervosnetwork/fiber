@@ -1301,6 +1301,7 @@ where
             });
         }
 
+        debug!("now final: {:?}", payment_data.final_tlc_expiry_delta);
         hops_data.push(PaymentHopData {
             amount: max_amount,
             next_hop: None,

@@ -5712,8 +5712,8 @@ impl ChannelActorState {
         let current_time = now_timestamp_as_millis_u64();
         if expiry <= current_time + MIN_TLC_EXPIRY_DELTA {
             error!(
-                "TLC expiry {} is too soon, current time: {}",
-                expiry, current_time
+                "TLC expiry {} is too soon, current time: {}, MIN_TLC_EXPIRY_DELTA: {}",
+                expiry, current_time, MIN_TLC_EXPIRY_DELTA
             );
             return Err(ProcessingChannelError::TlcExpirySoon);
         }
@@ -5725,6 +5725,11 @@ impl ChannelActorState {
             .all_tlcs()
             .filter(|tlc| tlc.removed_confirmed_at.is_none())
             .count() as u64;
+        debug!(
+            "here debug pending_tlc_count: {} => delay: {}",
+            pending_tlc_count,
+            epoch_delay_milliseconds * (pending_tlc_count + 1)
+        );
         let expect_expiry = current_time + epoch_delay_milliseconds * (pending_tlc_count + 1);
         if expiry < expect_expiry {
             error!(
