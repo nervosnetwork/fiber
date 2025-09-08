@@ -1444,7 +1444,10 @@ where
             }
             NetworkActorCommand::CheckChannelsShutdown => {
                 for (_peer_id, channel_id, channel_state) in self.store.get_channel_states(None) {
-                    if matches!(channel_state, ChannelState::ChannelReady) {
+                    if matches!(
+                        channel_state,
+                        ChannelState::ChannelReady | ChannelState::ShuttingDown(..)
+                    ) {
                         if let Some(actor_state) = self.store.get_channel_actor_state(&channel_id) {
                             let funding_lock_script = state
                                 .get_cached_channel_funding_lock_script(channel_id, &actor_state);
@@ -2191,7 +2194,10 @@ where
             return;
         }
         // check channel ready state
-        if state.state == ChannelState::ChannelReady {
+        if matches!(
+            state.state,
+            ChannelState::ChannelReady | ChannelState::ShuttingDown(..)
+        ) {
             let channel_id = state.get_id();
             // check shutdown transactions
             let request = GetShutdownTxRequest {
@@ -2225,7 +2231,10 @@ where
             return;
         };
 
-        if state.state != ChannelState::ChannelReady {
+        if !matches!(
+            state.state,
+            ChannelState::ChannelReady | ChannelState::ShuttingDown(..)
+        ) {
             return;
         }
 
