@@ -8015,7 +8015,8 @@ impl ChannelActorState {
         match self.state {
             ChannelState::ShuttingDown(flags)
                 if flags.contains(ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION) => {}
-            ChannelState::ChannelReady if force && !close_by_us => {}
+            ChannelState::ChannelReady | ChannelState::ShuttingDown(..)
+                if force && !close_by_us => {}
             _ => {
                 return Err(ProcessingChannelError::InvalidState(format!(
                             "Expecting commitment transaction confirmed event in unexpected state {:?} force {force} close_by_us {close_by_us}", &self.state)
