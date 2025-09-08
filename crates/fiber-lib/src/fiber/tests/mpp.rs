@@ -3918,6 +3918,7 @@ async fn test_send_mpp_send_each_other_with_no_fee() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "need to modify MILLI_SECONDS_PER_EPOCH and MIN_TLC_EXPIRY_DELTA to run this test"]
 async fn test_send_mpp_send_each_other_expire_soon() {
     init_tracing();
 
