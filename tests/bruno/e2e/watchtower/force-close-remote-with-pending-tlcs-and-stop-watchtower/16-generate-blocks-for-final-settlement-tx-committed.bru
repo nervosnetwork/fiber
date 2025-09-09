@@ -20,10 +20,14 @@ body:json {
     "id": 42,
     "jsonrpc": "2.0",
     "method": "generate_epochs",
-    "params": ["0x1"]
+    "params": ["0x10"]
   }
 }
 
 assert {
   res.status: eq 200
+}
+
+script:post-response {
+  await new Promise(r => setTimeout(r, 5000));
 }

@@ -1,5 +1,5 @@
 meta {
-  name: generate a few blocks for commitment tx
+  name: generate a few blocks for force closed tx to be committed
   type: http
   seq: 13
 }
@@ -29,6 +29,5 @@ assert {
 }
 
 script:post-response {
-  // Wait for the commitment tx to be included in a block
   await new Promise(r => setTimeout(r, 1000));
 }

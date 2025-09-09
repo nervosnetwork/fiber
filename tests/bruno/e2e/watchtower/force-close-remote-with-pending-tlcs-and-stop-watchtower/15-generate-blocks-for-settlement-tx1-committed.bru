@@ -29,6 +29,5 @@ assert {
 }
 
 script:post-response {
-  // Wait for the settlement tx2 to be generated
   await new Promise(r => setTimeout(r, 5000));
 }
