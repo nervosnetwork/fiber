@@ -4402,17 +4402,23 @@ where
             .await
             .expect("subscribe to gossip store updates");
         let gossip_actor = gossip_handle.actor().clone();
+        let yamux_config = tentacle::yamux::config::Config {
+            keepalive_interval: Duration::from_secs(15),
+            ..Default::default()
+        };
         #[cfg(not(target_arch = "wasm32"))]
         let mut service = ServiceBuilder::default()
             .insert_protocol(fiber_handle.create_meta())
             .insert_protocol(gossip_handle.create_meta())
             .handshake_type(secio_kp.into())
+            .yamux_config(yamux_config)
             .build(handle);
         #[cfg(target_arch = "wasm32")]
         let mut service = ServiceBuilder::default()
             .insert_protocol(fiber_handle.create_meta())
             .insert_protocol(gossip_handle.create_meta())
             .handshake_type(secio_kp.into())
+            .yamux_config(yamux_config)
             // Sets forever to true so the network service won't be shutdown due to no incoming connections
             .forever(true)
             .build(handle);
