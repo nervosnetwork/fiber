@@ -634,8 +634,11 @@ fn try_settle_commitment_tx<S: WatchtowerStore>(
                             > current_epoch.to_rational()
                         {
                             debug!(
-                                "Commitment tx: {:#x} is not ready to settle",
-                                cell.out_point.tx_hash
+                                "Commitment tx: {:#x} is not ready to settle, cell_header.epoch(): {:#}, delay_epoch: {:#}, current_epoch: {:#}",
+                                cell.out_point.tx_hash,
+                                cell_header.epoch(),
+                                delay_epoch.unwrap(),
+                                current_epoch
                             );
                         } else {
                             match build_settlement_tx(
