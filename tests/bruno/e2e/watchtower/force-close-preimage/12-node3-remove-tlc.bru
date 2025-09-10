@@ -1,7 +1,7 @@
 meta {
   name: remove tlc from node3, the preimage should be stored and node3 should be able to use it to claim the tlc from the force close tx
   type: http
-  seq: 13
+  seq: 12
 }
 
 post {
@@ -34,4 +34,5 @@ body:json {
 
 script:post-response {
   console.log(res.body);
+  await new Promise(r => setTimeout(r, 5000));
 }
