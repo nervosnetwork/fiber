@@ -644,7 +644,7 @@ where
             FiberChannelMessage::TxAbort(_) => {
                 if state.state.can_abort_funding() {
                     state.update_state(ChannelState::Closed(CloseFlags::FUNDING_ABORTED));
-                    myself.stop(None);
+                    myself.stop(Some("Funding abort".to_string()));
                 }
                 Ok(())
             }
@@ -2258,7 +2258,7 @@ where
                         ))
                         .expect(ASSUME_NETWORK_ACTOR_ALIVE);
                 }
-                myself.stop(None);
+                myself.stop(Some(format!("ChannelStopped: {:?}", reason)));
             }
             ChannelEvent::ClosingTransactionConfirmed(tx_hash, force, close_by_us) => {
                 state

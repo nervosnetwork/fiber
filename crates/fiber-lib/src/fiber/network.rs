@@ -4706,8 +4706,11 @@ where
         _state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
-            SupervisionEvent::ActorTerminated(who, _, _) => {
-                debug!("Actor {:?} terminated", who);
+            SupervisionEvent::ActorTerminated(who, state, reason) => {
+                debug!(
+                    "Actor {:?} terminated with reason {:?} state {:?}",
+                    who, reason, state
+                );
             }
             SupervisionEvent::ActorFailed(who, err) => {
                 panic!("Actor unexpectedly panicked (id: {:?}): {:?}", who, err);
@@ -4829,7 +4832,7 @@ impl ServiceHandle for NetworkServiceHandle {
     }
 
     async fn handle_event(&mut self, _context: &mut ServiceContext, event: ServiceEvent) {
-        trace!("Service event: {:?}", event);
+        debug!("Service event: {:?}", event);
     }
 }
 
