@@ -41,10 +41,8 @@ async fn test_send_mpp_basic_two_channels_one_time() {
         2,
     )
     .await;
-    let [node_0, mut node_1] = nodes.try_into().expect("2 nodes");
-    let res = node_0
-        .send_mpp_payment(&mut node_1, 20000000000, Some(2))
-        .await;
+    let [node_0, node_1] = nodes.try_into().expect("2 nodes");
+    let res = node_0.send_mpp_payment(&node_1, 20000000000, Some(2)).await;
 
     eprintln!("res: {:?}", res);
     assert!(res.is_ok());
@@ -80,7 +78,7 @@ async fn test_send_mpp_will_not_enabled_if_not_set_allow_mpp() {
         2,
     )
     .await;
-    let [mut node_0, mut node_1] = nodes.try_into().expect("2 nodes");
+    let [mut node_0, node_1] = nodes.try_into().expect("2 nodes");
     let source_node = &mut node_0;
     let target_pubkey = node_1.pubkey;
 
@@ -153,20 +151,16 @@ async fn test_send_mpp_with_invalid_max_parts_will_fail() {
         2,
     )
     .await;
-    let [node_0, mut node_1] = nodes.try_into().expect("2 nodes");
+    let [node_0, node_1] = nodes.try_into().expect("2 nodes");
 
-    let res = node_0
-        .send_mpp_payment(&mut node_1, 10000000000, Some(0))
-        .await;
+    let res = node_0.send_mpp_payment(&node_1, 10000000000, Some(0)).await;
     assert!(res.is_err(), "should fail because max_parts is 0");
 
-    let res = node_0
-        .send_mpp_payment(&mut node_1, 10000000000, Some(1))
-        .await;
+    let res = node_0.send_mpp_payment(&node_1, 10000000000, Some(1)).await;
     assert!(res.is_err(), "should fail because max_parts is 1");
 
     let res = node_0
-        .send_mpp_payment(&mut node_1, 10000000000, Some(PAYMENT_MAX_PARTS_LIMIT + 1))
+        .send_mpp_payment(&node_1, 10000000000, Some(PAYMENT_MAX_PARTS_LIMIT + 1))
         .await;
     assert!(
         res.is_err(),
@@ -177,7 +171,7 @@ async fn test_send_mpp_with_invalid_max_parts_will_fail() {
         .contains("invalid max_parts, value should be in range"));
 
     let res = node_0
-        .send_mpp_payment(&mut node_1, 10000000000, Some(PAYMENT_MAX_PARTS_LIMIT))
+        .send_mpp_payment(&node_1, 10000000000, Some(PAYMENT_MAX_PARTS_LIMIT))
         .await;
     assert!(res.is_ok(), "should succeed with max_parts equal to limit");
 }
@@ -197,9 +191,9 @@ async fn test_send_mpp_amount_choose_single_path() {
         2,
     )
     .await;
-    let [node_0, mut node_1] = nodes.try_into().expect("2 nodes");
+    let [node_0, node_1] = nodes.try_into().expect("2 nodes");
 
-    let res = node_0.send_mpp_payment(&mut node_1, 10000, Some(3)).await;
+    let res = node_0.send_mpp_payment(&node_1, 10000, Some(3)).await;
     eprintln!("res: {:?}", res);
     assert!(res.is_ok());
     let payment_hash = res.unwrap().payment_hash;
@@ -224,11 +218,9 @@ async fn test_send_mpp_amount_3_splits() {
         2,
     )
     .await;
-    let [node_0, mut node_1] = nodes.try_into().expect("2 nodes");
+    let [node_0, node_1] = nodes.try_into().expect("2 nodes");
 
-    let res = node_0
-        .send_mpp_payment(&mut node_1, 30000000000, Some(3))
-        .await;
+    let res = node_0.send_mpp_payment(&node_1, 30000000000, Some(3)).await;
 
     eprintln!("res: {:?}", res);
     assert!(res.is_ok());
@@ -256,10 +248,8 @@ async fn test_send_mpp_amount_split() {
         2,
     )
     .await;
-    let [node_0, mut node_1] = nodes.try_into().expect("2 nodes");
-    let res = node_0
-        .send_mpp_payment(&mut node_1, 15000000000, Some(2))
-        .await;
+    let [node_0, node_1] = nodes.try_into().expect("2 nodes");
+    let res = node_0.send_mpp_payment(&node_1, 15000000000, Some(2)).await;
     eprintln!("res: {:?}", res);
     assert!(res.is_ok());
     let payment_hash = res.unwrap().payment_hash;
@@ -296,9 +286,9 @@ async fn test_send_mpp_amount_split_with_more_channels() {
         3,
     )
     .await;
-    let [node_0, _node_1, mut node_2] = nodes.try_into().expect("2 nodes");
+    let [node_0, _node_1, node_2] = nodes.try_into().expect("2 nodes");
 
-    let res = node_0.send_mpp_payment(&mut node_2, 100000, Some(2)).await;
+    let res = node_0.send_mpp_payment(&node_2, 100000, Some(2)).await;
 
     eprintln!("res: {:?}", res);
     assert!(res.is_ok());
@@ -321,11 +311,9 @@ async fn test_send_mpp_amount_split_with_last_channels() {
             3,
         )
         .await;
-        let [node_0, _node_1, mut node_2] = nodes.try_into().expect("2 nodes");
+        let [node_0, _node_1, node_2] = nodes.try_into().expect("2 nodes");
 
-        let res = node_0
-            .send_mpp_payment(&mut node_2, amount, max_parts)
-            .await;
+        let res = node_0.send_mpp_payment(&node_2, amount, max_parts).await;
         if expect_status == "success" {
             node_0.wait_until_success(res.unwrap().payment_hash).await;
         } else {
@@ -360,11 +348,9 @@ async fn test_send_mpp_amount_split_with_one_extra_direct_channel() {
             3,
         )
         .await;
-        let [node_0, _node_1, mut node_2] = nodes.try_into().expect("2 nodes");
+        let [node_0, _node_1, node_2] = nodes.try_into().expect("2 nodes");
 
-        let res = node_0
-            .send_mpp_payment(&mut node_2, amount, max_parts)
-            .await;
+        let res = node_0.send_mpp_payment(&node_2, amount, max_parts).await;
         if expect_status == "build_error" {
             assert!(res.is_err(), "should fail to build payment");
             return;
@@ -490,7 +476,7 @@ async fn test_mpp_tlc_set() {
         2,
     )
     .await;
-    let [mut node_0, mut node_1] = nodes.try_into().expect("2 nodes");
+    let [mut node_0, node_1] = nodes.try_into().expect("2 nodes");
     let source_node = &mut node_0;
     let target_pubkey = node_1.pubkey;
 
@@ -629,7 +615,7 @@ async fn test_mpp_tlc_set_with_insufficient_total_amount() {
         2,
     )
     .await;
-    let [mut node_0, mut node_1] = nodes.try_into().expect("2 nodes");
+    let [mut node_0, node_1] = nodes.try_into().expect("2 nodes");
     let source_node = &mut node_0;
     let target_pubkey = node_1.pubkey;
 
@@ -767,7 +753,7 @@ async fn test_mpp_tlc_set_with_only_1_tlc() {
         2,
     )
     .await;
-    let [mut node_0, mut node_1] = nodes.try_into().expect("2 nodes");
+    let [mut node_0, node_1] = nodes.try_into().expect("2 nodes");
     let source_node = &mut node_0;
     let target_pubkey = node_1.pubkey;
 
@@ -871,7 +857,7 @@ async fn test_mpp_tlc_set_with_only_1_tlc_without_payment_data() {
         2,
     )
     .await;
-    let [mut node_0, mut node_1] = nodes.try_into().expect("2 nodes");
+    let [mut node_0, node_1] = nodes.try_into().expect("2 nodes");
     let source_node = &mut node_0;
     let target_pubkey = node_1.pubkey;
 
@@ -972,7 +958,7 @@ async fn test_mpp_tlc_set_total_amount_mismatch() {
         2,
     )
     .await;
-    let [mut node_0, mut node_1] = nodes.try_into().expect("2 nodes");
+    let [mut node_0, node_1] = nodes.try_into().expect("2 nodes");
     let source_node = &mut node_0;
     let target_pubkey = node_1.pubkey;
 
@@ -1122,7 +1108,7 @@ async fn test_mpp_tlc_set_total_amount_should_be_consistent() {
         2,
     )
     .await;
-    let [mut node_0, mut node_1] = nodes.try_into().expect("2 nodes");
+    let [mut node_0, node_1] = nodes.try_into().expect("2 nodes");
     let source_node = &mut node_0;
     let target_pubkey = node_1.pubkey;
 
@@ -1299,7 +1285,7 @@ async fn test_mpp_tlc_set_payment_secret_mismatch() {
         2,
     )
     .await;
-    let [mut node_0, mut node_1] = nodes.try_into().expect("2 nodes");
+    let [mut node_0, node_1] = nodes.try_into().expect("2 nodes");
     let source_node = &mut node_0;
     let target_pubkey = node_1.pubkey;
 
@@ -1449,7 +1435,7 @@ async fn test_mpp_tlc_set_timeout_1_of_2() {
         2,
     )
     .await;
-    let [mut node_0, mut node_1] = nodes.try_into().expect("2 nodes");
+    let [mut node_0, node_1] = nodes.try_into().expect("2 nodes");
     let source_node = &mut node_0;
     let target_pubkey = node_1.pubkey;
 
@@ -1665,7 +1651,7 @@ async fn test_mpp_tlc_set_timeout() {
         2,
     )
     .await;
-    let [mut node_0, mut node_1] = nodes.try_into().expect("2 nodes");
+    let [mut node_0, node_1] = nodes.try_into().expect("2 nodes");
     let source_node = &mut node_0;
     let target_pubkey = node_1.pubkey;
 
@@ -1842,8 +1828,8 @@ async fn test_mpp_tlc_set_without_payment_data() {
         2,
     )
     .await;
-    let [mut node_0, mut node_1] = nodes.try_into().expect("2 nodes");
-    let source_node = &mut node_0;
+    let [node_0, node_1] = nodes.try_into().expect("2 nodes");
+    let source_node = &node_0;
     let target_pubkey = node_1.pubkey;
 
     let preimage = gen_rand_sha256_hash();
@@ -1996,9 +1982,9 @@ async fn test_send_mpp_dry_run_will_be_ok_with_single_path() {
             3,
         )
         .await;
-        let [node_0, _node_1, mut node_2] = nodes.try_into().expect("ok nodes");
+        let [node_0, _node_1, node_2] = nodes.try_into().expect("ok nodes");
         let res = node_0
-            .send_mpp_payment_with_dry_run_option(&mut node_2, amount, None, true)
+            .send_mpp_payment_with_dry_run_option(&node_2, amount, None, true)
             .await;
 
         if let Some(count) = expect_routers_count {
@@ -2037,10 +2023,10 @@ async fn test_send_mpp_direct_channels_dry_run() {
             3,
         )
         .await;
-        let [node_0, mut node_1, _node_2] = nodes.try_into().expect("ok nodes");
+        let [node_0, node_1, _node_2] = nodes.try_into().expect("ok nodes");
 
         let res = node_0
-            .send_mpp_payment_with_dry_run_option(&mut node_1, amount, None, true)
+            .send_mpp_payment_with_dry_run_option(&node_1, amount, None, true)
             .await;
 
         if let Some(count) = expect_routers_count {
@@ -2083,9 +2069,9 @@ async fn test_send_mpp_dry_run_single_path_mixed_with_multiple_paths() {
             3,
         )
         .await;
-        let [node_0, _node_1, mut node_2] = nodes.try_into().expect("ok nodes");
+        let [node_0, _node_1, node_2] = nodes.try_into().expect("ok nodes");
         let res = node_0
-            .send_mpp_payment_with_dry_run_option(&mut node_2, amount, None, true)
+            .send_mpp_payment_with_dry_run_option(&node_2, amount, None, true)
             .await;
 
         if let Some(count) = expect_routers_count {
@@ -2132,10 +2118,10 @@ async fn test_send_mpp_will_succeed_with_retry_first_hops() {
         2,
     )
     .await;
-    let [node_0, mut node_1] = nodes.try_into().expect("ok nodes");
+    let [node_0, node_1] = nodes.try_into().expect("ok nodes");
 
     let res = node_0
-        .send_mpp_payment_with_dry_run_option(&mut node_1, 300000, None, true)
+        .send_mpp_payment_with_dry_run_option(&node_1, 300000, None, true)
         .await;
 
     let query_res = res.unwrap();
@@ -2153,7 +2139,7 @@ async fn test_send_mpp_will_succeed_with_retry_first_hops() {
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
     let res = node_0
-        .send_mpp_payment(&mut node_1, 300000, None)
+        .send_mpp_payment(&node_1, 300000, None)
         .await
         .expect("send mpp payment");
 
@@ -2187,10 +2173,10 @@ async fn test_send_mpp_will_succeed_with_retry_2_channels() {
         2,
     )
     .await;
-    let [node_0, mut node_1] = nodes.try_into().expect("ok nodes");
+    let [node_0, node_1] = nodes.try_into().expect("ok nodes");
 
     let res = node_0
-        .send_mpp_payment_with_dry_run_option(&mut node_1, 300000, None, true)
+        .send_mpp_payment_with_dry_run_option(&node_1, 300000, None, true)
         .await;
 
     let query_res = res.unwrap();
@@ -2210,7 +2196,7 @@ async fn test_send_mpp_will_succeed_with_retry_2_channels() {
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
     let res = node_0
-        .send_mpp_payment(&mut node_1, 300000, None)
+        .send_mpp_payment(&node_1, 300000, None)
         .await
         .expect("send mpp payment");
 
@@ -2244,10 +2230,10 @@ async fn test_send_mpp_will_fail_with_retry_3_channels() {
         2,
     )
     .await;
-    let [node_0, mut node_1] = nodes.try_into().expect("ok nodes");
+    let [node_0, node_1] = nodes.try_into().expect("ok nodes");
 
     let res = node_0
-        .send_mpp_payment_with_dry_run_option(&mut node_1, 300000, None, true)
+        .send_mpp_payment_with_dry_run_option(&node_1, 300000, None, true)
         .await;
 
     let query_res = res.unwrap();
@@ -2266,7 +2252,7 @@ async fn test_send_mpp_will_fail_with_retry_3_channels() {
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
     let res = node_0
-        .send_mpp_payment(&mut node_1, 300000, None)
+        .send_mpp_payment(&node_1, 300000, None)
         .await
         .expect("send mpp payment");
 
@@ -2290,10 +2276,10 @@ async fn test_send_mpp_will_success_with_retry_split_channels() {
         2,
     )
     .await;
-    let [node_0, mut node_1] = nodes.try_into().expect("ok nodes");
+    let [node_0, node_1] = nodes.try_into().expect("ok nodes");
 
     let res = node_0
-        .send_mpp_payment_with_dry_run_option(&mut node_1, 300000, None, true)
+        .send_mpp_payment_with_dry_run_option(&node_1, 300000, None, true)
         .await;
 
     let query_res = res.unwrap();
@@ -2311,7 +2297,7 @@ async fn test_send_mpp_will_success_with_retry_split_channels() {
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
     let res = node_0
-        .send_mpp_payment(&mut node_1, 300000, None)
+        .send_mpp_payment(&node_1, 300000, None)
         .await
         .expect("send mpp payment");
 
@@ -2336,10 +2322,10 @@ async fn test_send_mpp_will_fail_with_disable_single_path() {
         3,
     )
     .await;
-    let [node_0, _node_1, mut node_2] = nodes.try_into().expect("ok nodes");
+    let [node_0, _node_1, node_2] = nodes.try_into().expect("ok nodes");
 
     let res = node_0
-        .send_mpp_payment_with_dry_run_option(&mut node_2, 30000, None, true)
+        .send_mpp_payment_with_dry_run_option(&node_2, 30000, None, true)
         .await;
 
     let query_res = res.unwrap();
@@ -2357,7 +2343,7 @@ async fn test_send_mpp_will_fail_with_disable_single_path() {
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
     let res = node_0
-        .send_mpp_payment(&mut node_2, 30000, None)
+        .send_mpp_payment(&node_2, 30000, None)
         .await
         .expect("send mpp payment");
 
@@ -2387,10 +2373,10 @@ async fn test_send_mpp_will_success_with_middle_hop_capacity_not_enough() {
         3,
     )
     .await;
-    let [node_0, _node_1, mut node_2] = nodes.try_into().expect("ok nodes");
+    let [node_0, _node_1, node_2] = nodes.try_into().expect("ok nodes");
 
     let res = node_0
-        .send_mpp_payment_with_dry_run_option(&mut node_2, 300000, None, true)
+        .send_mpp_payment_with_dry_run_option(&node_2, 300000, None, true)
         .await;
 
     let query_res = res.unwrap();
@@ -2405,7 +2391,7 @@ async fn test_send_mpp_will_success_with_middle_hop_capacity_not_enough() {
     assert!(used_channels.contains(&channels[1]));
 
     let res = node_0
-        .send_mpp_payment(&mut node_2, 300000, None)
+        .send_mpp_payment(&node_2, 300000, None)
         .await
         .expect("send mpp payment");
 
@@ -2668,8 +2654,8 @@ async fn test_mpp_tlc_with_invoice_not_allow_mpp_should_not_be_accepted() {
         2,
     )
     .await;
-    let [mut node_0, mut node_1] = nodes.try_into().expect("2 nodes");
-    let source_node = &mut node_0;
+    let [node_0, node_1] = nodes.try_into().expect("2 nodes");
+    let source_node = &node_0;
     let target_pubkey = node_1.pubkey;
 
     let payment_secret = gen_rand_sha256_hash();
@@ -2779,11 +2765,9 @@ async fn test_send_mpp_basic_two_channels_send_each_other_multiple_time() {
         2,
     )
     .await;
-    let [mut node_0, mut node_1] = nodes.try_into().expect("2 nodes");
+    let [node_0, node_1] = nodes.try_into().expect("2 nodes");
     for _i in 0..2 {
-        let res = node_0
-            .send_mpp_payment(&mut node_1, 20000000000, Some(2))
-            .await;
+        let res = node_0.send_mpp_payment(&node_1, 20000000000, Some(2)).await;
 
         assert!(res.is_ok());
         let payment_hash = res.unwrap().payment_hash;
@@ -2795,9 +2779,7 @@ async fn test_send_mpp_basic_two_channels_send_each_other_multiple_time() {
 
         tokio::time::sleep(Duration::from_secs(2)).await;
 
-        let res = node_1
-            .send_mpp_payment(&mut node_0, 20000000000, Some(2))
-            .await;
+        let res = node_1.send_mpp_payment(&node_0, 20000000000, Some(2)).await;
 
         eprintln!("res: {:?}", res);
         assert!(res.is_ok());
@@ -2810,9 +2792,7 @@ async fn test_send_mpp_basic_two_channels_send_each_other_multiple_time() {
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
 
-    let res = node_0
-        .send_mpp_payment(&mut node_1, 20000000000, Some(2))
-        .await;
+    let res = node_0.send_mpp_payment(&node_1, 20000000000, Some(2)).await;
 
     eprintln!("res: {:?}", res);
     assert!(res.is_ok());
@@ -2858,10 +2838,10 @@ async fn test_send_mpp_three_channels_send_each_other_multiple_time() {
         2,
     )
     .await;
-    let [mut node_0, mut node_1] = nodes.try_into().expect("2 nodes");
+    let [node_0, node_1] = nodes.try_into().expect("2 nodes");
     for _i in 0..4 {
         let res = node_0
-            .send_mpp_payment(&mut node_1, 2100 * 100000000, None)
+            .send_mpp_payment(&node_1, 2100 * 100000000, None)
             .await;
 
         assert!(res.is_ok());
@@ -2875,7 +2855,7 @@ async fn test_send_mpp_three_channels_send_each_other_multiple_time() {
         tokio::time::sleep(Duration::from_secs(1)).await;
 
         let res = node_1
-            .send_mpp_payment(&mut node_0, 2100 * 100000000, None)
+            .send_mpp_payment(&node_0, 2100 * 100000000, None)
             .await;
 
         eprintln!("res: {:?}", res);
@@ -2956,11 +2936,11 @@ async fn test_send_payment_with_two_one_two_network() {
     )
     .await;
 
-    let [node_0, _node_1, _node_2, _node_3, _node_4, _node_5, _node_6, mut node_7] =
+    let [node_0, _node_1, _node_2, _node_3, _node_4, _node_5, _node_6, node_7] =
         nodes.try_into().expect("8 nodes");
 
     let res = node_0
-        .send_mpp_payment(&mut node_7, 2000 * 100000000, None)
+        .send_mpp_payment(&node_7, 2000 * 100000000, None)
         .await;
 
     assert!(res.is_ok());
@@ -3054,7 +3034,7 @@ async fn test_mpp_with_need_fee() {
         4,
     )
     .await;
-    let [node_0, _node_1, mut node_2, _node_3] = nodes.try_into().expect("2 nodes");
+    let [node_0, _node_1, node_2, _node_3] = nodes.try_into().expect("2 nodes");
 
     // query the path without MPP, it will fail with no path found
     let res = node_0
@@ -3064,7 +3044,7 @@ async fn test_mpp_with_need_fee() {
     assert!(res.unwrap_err().to_string().contains("no path found"));
 
     let res = node_0
-        .send_mpp_payment(&mut node_2, 10000000000, Some(16))
+        .send_mpp_payment(&node_2, 10000000000, Some(16))
         .await;
 
     eprintln!("res: {:?}", res);
@@ -3088,11 +3068,9 @@ async fn test_mpp_can_not_find_path_with_max_parts() {
         2,
     )
     .await;
-    let [node_0, mut node_1] = nodes.try_into().expect("2 nodes");
+    let [node_0, node_1] = nodes.try_into().expect("2 nodes");
 
-    let res = node_0
-        .send_mpp_payment(&mut node_1, 50000000000, Some(4))
-        .await;
+    let res = node_0.send_mpp_payment(&node_1, 50000000000, Some(4)).await;
     eprintln!("query res: {:?}", res);
 
     assert!(res.is_err());
@@ -3101,9 +3079,7 @@ async fn test_mpp_can_not_find_path_with_max_parts() {
 
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
-    let res = node_0
-        .send_mpp_payment(&mut node_1, 50000000000, Some(5))
-        .await;
+    let res = node_0.send_mpp_payment(&node_1, 50000000000, Some(5)).await;
 
     tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
     eprintln!("second query res: {:?}", res);
@@ -3123,8 +3099,8 @@ async fn test_send_payment_custom_records_not_in_range() {
         2,
     )
     .await;
-    let [mut node_0, mut node_1] = nodes.try_into().expect("2 nodes");
-    let source_node = &mut node_0;
+    let [node_0, node_1] = nodes.try_into().expect("2 nodes");
+    let source_node = &node_0;
     let target_pubkey = node_1.pubkey;
 
     let data: HashMap<_, _> = vec![(
@@ -3156,7 +3132,7 @@ async fn test_send_payment_custom_records_not_in_range() {
     let custom_records = PaymentCustomRecords { data };
     let payment = source_node
         .send_mpp_payment_with_command(
-            &mut node_1,
+            &node_1,
             20000,
             SendPaymentCommand {
                 custom_records: Some(custom_records.clone()),
@@ -3185,10 +3161,10 @@ async fn test_mpp_can_not_find_path_filter_target_node_features() {
         2,
     )
     .await;
-    let [mut node_0, mut node_1] = nodes.try_into().expect("2 nodes");
+    let [mut node_0, node_1] = nodes.try_into().expect("2 nodes");
 
     let res = node_0
-        .send_mpp_payment_with_dry_run_option(&mut node_1, 20000000000, Some(2), true)
+        .send_mpp_payment_with_dry_run_option(&node_1, 20000000000, Some(2), true)
         .await;
     eprintln!("query res: {:?}", res);
 
@@ -3202,7 +3178,7 @@ async fn test_mpp_can_not_find_path_filter_target_node_features() {
         .await;
 
     let res = node_0
-        .send_mpp_payment_with_dry_run_option(&mut node_1, 20000000000, Some(2), true)
+        .send_mpp_payment_with_dry_run_option(&node_1, 20000000000, Some(2), true)
         .await;
     eprintln!("query res: {:?}", res);
 
@@ -3224,7 +3200,7 @@ async fn test_mpp_fail_on_total_amount_not_match() {
         3,
     )
     .await;
-    let [mut node_0, _node_1, mut node_2] = nodes.try_into().expect("3 nodes");
+    let [mut node_0, _node_1, node_2] = nodes.try_into().expect("3 nodes");
 
     let target_pubkey = node_2.get_public_key();
     let preimage = gen_rand_sha256_hash();
@@ -3308,7 +3284,7 @@ async fn test_mpp_can_not_find_path_filter_middle_node_features() {
 
         let res = node_0
             .send_mpp_payment_with_dry_run_option(
-                &mut node_2,
+                &node_2,
                 200 * CKB_SHANNONS as u128,
                 Some(2),
                 true,
@@ -3318,9 +3294,9 @@ async fn test_mpp_can_not_find_path_filter_middle_node_features() {
         assert!(res.is_ok());
 
         let update_node = match update_node_index {
-            0 => &mut node_0,
-            1 => &mut node_1,
-            2 => &mut node_2,
+            0 => &node_0,
+            1 => &node_1,
+            2 => &node_2,
             _ => panic!("Invalid node index"),
         };
 
@@ -3338,7 +3314,7 @@ async fn test_mpp_can_not_find_path_filter_middle_node_features() {
 
         let res = node_0
             .send_mpp_payment_with_dry_run_option(
-                &mut node_2,
+                &node_2,
                 200 * CKB_SHANNONS as u128,
                 Some(2),
                 true,
@@ -3389,10 +3365,10 @@ async fn test_send_mpp_with_large_min_tlc_value_in_channel() {
         Some(gen_rpc_config()),
     )
     .await;
-    let [node_0, mut node_1] = nodes.try_into().expect("2 nodes");
+    let [node_0, node_1] = nodes.try_into().expect("2 nodes");
 
     let res = node_0
-        .send_mpp_payment(&mut node_1, 1001 * CKB_SHANNONS as u128, Some(2))
+        .send_mpp_payment(&node_1, 1001 * CKB_SHANNONS as u128, Some(2))
         .await;
 
     debug!("res: {:?}", res);
@@ -3400,7 +3376,7 @@ async fn test_send_mpp_with_large_min_tlc_value_in_channel() {
     assert!(error.contains("no path found"));
 
     let res = node_0
-        .send_mpp_payment(&mut node_1, 1010 * CKB_SHANNONS as u128, Some(2))
+        .send_mpp_payment(&node_1, 1010 * CKB_SHANNONS as u128, Some(2))
         .await;
 
     debug!("res: {:?}", res);
@@ -3426,12 +3402,12 @@ async fn test_send_mpp_with_reverse_node_send_back() {
         4,
     )
     .await;
-    let [mut node_0, _node_1, mut node_2, _node_3] = nodes.try_into().expect("2 nodes");
+    let [node_0, _node_1, node_2, _node_3] = nodes.try_into().expect("2 nodes");
 
     // node 0 send to node 2 with 30000000000 CKB
     for _ in 0..3 {
         let res = node_0
-            .send_mpp_payment(&mut node_2, 10000000000, Some(16))
+            .send_mpp_payment(&node_2, 10000000000, Some(16))
             .await;
 
         eprintln!("res: {:?}", res);
@@ -3443,7 +3419,7 @@ async fn test_send_mpp_with_reverse_node_send_back() {
 
     // node 0 does not have enough balance to send node 2 now
     let res = node_0
-        .send_mpp_payment(&mut node_2, 20000000000, Some(16))
+        .send_mpp_payment(&node_2, 20000000000, Some(16))
         .await;
     eprintln!("res: {:?}", res);
     assert!(res.unwrap_err().contains("no path found"));
@@ -3451,7 +3427,7 @@ async fn test_send_mpp_with_reverse_node_send_back() {
     // now node 2 send back to node 0 20000000000 CKB
     for _ in 0..2 {
         let res = node_2
-            .send_mpp_payment(&mut node_0, 10000000000, Some(16))
+            .send_mpp_payment(&node_0, 10000000000, Some(16))
             .await;
 
         eprintln!("res: {:?}", res);
@@ -3463,7 +3439,7 @@ async fn test_send_mpp_with_reverse_node_send_back() {
 
     // now node 0 should have enough balance to send node 2 again
     let res = node_0
-        .send_mpp_payment(&mut node_2, 10000000000, Some(16))
+        .send_mpp_payment(&node_2, 10000000000, Some(16))
         .await;
 
     assert!(res.is_ok());
@@ -3492,7 +3468,7 @@ async fn test_send_3_nodes_pay_self() {
         4,
     )
     .await;
-    let [mut node_0, _node_1, _node_2, _node_3] = nodes.try_into().expect("4 nodes");
+    let [node_0, _node_1, _node_2, _node_3] = nodes.try_into().expect("4 nodes");
 
     let amount = 30000;
     let target_pubkey = node_0.get_public_key();
@@ -3572,20 +3548,20 @@ async fn test_send_mpp_respect_min_tlc_value() {
     )
     .await;
 
-    let [node_0, _node_1, mut node_2] = nodes.try_into().expect("3 nodes");
+    let [node_0, _node_1, node_2] = nodes.try_into().expect("3 nodes");
 
     let res = node_0.send_payment_keysend(&node_2, 10000, true).await;
     assert!(res.is_ok());
 
     let res = node_0
-        .send_mpp_payment_with_dry_run_option(&mut node_2, 28000, Some(3), true)
+        .send_mpp_payment_with_dry_run_option(&node_2, 28000, Some(3), true)
         .await;
 
     eprintln!("res: {:?}", res);
     assert!(res.is_err());
 
     let res = node_0
-        .send_mpp_payment_with_dry_run_option(&mut node_2, 30000, None, true)
+        .send_mpp_payment_with_dry_run_option(&node_2, 30000, None, true)
         .await;
     debug!("res: {:?}", res);
     assert!(res.is_ok());
@@ -3609,10 +3585,8 @@ async fn test_send_mpp_can_retry() {
         4,
     )
     .await;
-    let [node_0, node_1, _node_2, mut node_3] = nodes.try_into().expect("4 nodes");
-    let res = node_0
-        .send_mpp_payment(&mut node_3, 30000000000, Some(3))
-        .await;
+    let [node_0, node_1, _node_2, node_3] = nodes.try_into().expect("4 nodes");
+    let res = node_0.send_mpp_payment(&node_3, 30000000000, Some(3)).await;
     node_1.disable_channel_stealthy(channels[3]).await;
 
     tokio::time::sleep(Duration::from_secs(1)).await;
@@ -3704,7 +3678,7 @@ async fn test_send_payment_tlc_expiry_soon_first_hop() {
         2,
     )
     .await;
-    let [node_0, mut node_1] = nodes.try_into().expect("2 nodes");
+    let [node_0, node_1] = nodes.try_into().expect("2 nodes");
 
     let preimage = gen_rand_sha256_hash();
     let ckb_invoice = InvoiceBuilder::new(Currency::Fibd)
@@ -3789,7 +3763,7 @@ async fn test_send_payment_tlc_expiry_soon() {
         3,
     )
     .await;
-    let [node_0, node_1, mut node_2] = nodes.try_into().expect("3 nodes");
+    let [node_0, node_1, node_2] = nodes.try_into().expect("3 nodes");
     let target_pubkey = node_2.pubkey;
 
     let preimage = gen_rand_sha256_hash();
@@ -3875,4 +3849,70 @@ async fn test_send_payment_tlc_expiry_soon() {
         .last_error
         .unwrap()
         .contains("IncorrectTlcExpiry"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_send_mpp_send_each_other_with_no_fee() {
+    init_tracing();
+
+    let (nodes, _channels) = create_n_nodes_network_with_params(
+        &[
+            (
+                (0, 1),
+                ChannelParameters {
+                    public: true,
+                    node_a_funding_amount: MIN_RESERVED_CKB + 1000 * 100000000,
+                    node_b_funding_amount: MIN_RESERVED_CKB,
+                    a_tlc_fee_proportional_millionths: Some(0),
+                    b_tlc_fee_proportional_millionths: Some(0),
+                    ..Default::default()
+                },
+            ),
+            (
+                (0, 1),
+                ChannelParameters {
+                    public: true,
+                    node_a_funding_amount: MIN_RESERVED_CKB + 1000 * 100000000,
+                    node_b_funding_amount: MIN_RESERVED_CKB,
+                    a_tlc_fee_proportional_millionths: Some(0),
+                    b_tlc_fee_proportional_millionths: Some(0),
+                    ..Default::default()
+                },
+            ),
+            (
+                (1, 2),
+                ChannelParameters {
+                    public: true,
+                    node_a_funding_amount: MIN_RESERVED_CKB + 2000 * 100000000,
+                    node_b_funding_amount: MIN_RESERVED_CKB,
+                    a_tlc_fee_proportional_millionths: Some(0),
+                    b_tlc_fee_proportional_millionths: Some(0),
+                    ..Default::default()
+                },
+            ),
+        ],
+        3,
+        None,
+    )
+    .await;
+    let [node_0, _node_1, node_2] = nodes.try_into().expect("3 nodes");
+
+    for _i in 0..2 {
+        let res = node_0
+            .send_mpp_payment(&node_2, 2000 * 100000000, None)
+            .await;
+
+        let payment_hash = res.unwrap().payment_hash;
+        node_0.wait_until_success(payment_hash).await;
+
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
+        let res = node_2
+            .send_mpp_payment(&node_0, 2000 * 100000000, None)
+            .await;
+
+        let payment_hash = res.unwrap().payment_hash;
+        node_2.wait_until_success(payment_hash).await;
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
 }
