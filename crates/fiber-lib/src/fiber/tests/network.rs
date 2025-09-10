@@ -10,7 +10,6 @@ use crate::{
     },
     fiber::{
         channel::ShutdownInfo,
-        config::DEFAULT_TLC_EXPIRY_DELTA,
         gossip::{GossipActorMessage, GossipMessageStore},
         graph::ChannelUpdateInfo,
         network::{
@@ -865,9 +864,6 @@ fn test_send_payment_validate_invoice() {
         .expiry_time(Duration::from_secs(1024))
         .payee_pub_key(public_key)
         .add_attr(Attribute::FinalHtlcTimeout(5))
-        .add_attr(Attribute::FinalHtlcMinimumExpiryDelta(
-            DEFAULT_TLC_EXPIRY_DELTA,
-        ))
         .add_attr(Attribute::Description("description".to_string()))
         .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))
         .unwrap();
