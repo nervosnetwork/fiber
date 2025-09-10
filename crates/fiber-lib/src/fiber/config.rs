@@ -46,14 +46,10 @@ pub const MILLI_SECONDS_PER_EPOCH: u64 = 4 * 60 * 60 * 1000;
 // we need to make sure 2/3 commitment_delay_epoch is greater than MIN_TLC_EXPIRY_DELTA
 pub const MILLI_SECONDS_PER_EPOCH: u64 = 2 * 1000;
 
-#[cfg(not(debug_assertions))]
 /// The minimal expiry delta to forward a tlc, in milliseconds, 160 minutes.
 /// expect it >= 2/3 commitment_delay_epoch, default DEFAULT_COMMITMENT_DELAY_EPOCHS is 1 epoch
 pub const MIN_TLC_EXPIRY_DELTA: u64 =
     DEFAULT_COMMITMENT_DELAY_EPOCHS * MILLI_SECONDS_PER_EPOCH * 2 / 3;
-#[cfg(debug_assertions)]
-// 5 seconds for testing environment
-pub const MIN_TLC_EXPIRY_DELTA: u64 = 5 * 1000;
 
 /// The maximum expiry delta for a payment, in milliseconds. 2 weeks
 pub const MAX_PAYMENT_TLC_EXPIRY_LIMIT: u64 = 14 * 24 * 60 * 60 * 1000; // 2 weeks

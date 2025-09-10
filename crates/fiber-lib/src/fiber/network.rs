@@ -3353,8 +3353,9 @@ where
 
         if tlc_expiry_delta.is_some_and(|d| d < MIN_TLC_EXPIRY_DELTA) {
             return Err(ProcessingChannelError::InvalidParameter(format!(
-                "TLC expiry delta is too small, expect larger than {}",
-                MIN_TLC_EXPIRY_DELTA
+                "TLC expiry delta is too small, expect larger than {}, got {}",
+                MIN_TLC_EXPIRY_DELTA,
+                tlc_expiry_delta.unwrap()
             )));
         }
 

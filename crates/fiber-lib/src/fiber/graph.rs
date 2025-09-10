@@ -11,7 +11,7 @@ use super::types::{
 };
 use super::types::{Cursor, Pubkey, TlcErr};
 use crate::ckb::config::UdtCfgInfos;
-use crate::fiber::config::DEFAULT_TLC_EXPIRY_DELTA;
+use crate::fiber::config::{DEFAULT_FINAL_TLC_EXPIRY_DELTA, DEFAULT_TLC_EXPIRY_DELTA};
 use crate::fiber::fee::calculate_tlc_forward_fee;
 use crate::fiber::history::SentNode;
 use crate::fiber::path::NodeHeapElement;
@@ -1928,7 +1928,7 @@ where
             ));
         }
 
-        let mut agg_tlc_expiry = final_tlc_expiry_delta.unwrap_or(DEFAULT_TLC_EXPIRY_DELTA);
+        let mut agg_tlc_expiry = final_tlc_expiry_delta.unwrap_or(DEFAULT_FINAL_TLC_EXPIRY_DELTA);
         for (idx, cur_hop) in router_hops.iter().enumerate() {
             let prev_hop_pubkey = router_hops.get(idx + 1).map(|h| h.pubkey).unwrap_or(source);
 

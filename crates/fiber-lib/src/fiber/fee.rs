@@ -229,14 +229,14 @@ pub(crate) fn check_tlc_delta_with_epochs(
 ) -> Result<(), ProcessingChannelError> {
     if tlc_expiry_delta < MIN_TLC_EXPIRY_DELTA {
         return Err(ProcessingChannelError::InvalidParameter(format!(
-            "TLC expiry delta is too small, expect larger than {}",
-            MIN_TLC_EXPIRY_DELTA
+            "TLC expiry delta is too small, expect larger than {}, got {}",
+            MIN_TLC_EXPIRY_DELTA, tlc_expiry_delta
         )));
     }
     if tlc_expiry_delta > MAX_PAYMENT_TLC_EXPIRY_LIMIT {
         return Err(ProcessingChannelError::InvalidParameter(format!(
-            "TLC expiry delta is too large, expected to be smaller than {}",
-            MAX_PAYMENT_TLC_EXPIRY_LIMIT
+            "TLC expiry delta is too large, expected to be smaller than {}, got {}",
+            MAX_PAYMENT_TLC_EXPIRY_LIMIT, tlc_expiry_delta
         )));
     }
 
