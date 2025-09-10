@@ -191,6 +191,16 @@ impl Display for ChannelCommand {
     }
 }
 
+impl ChannelCommand {
+    pub fn rpc_reply_port(self) -> Option<RpcReplyPort<Result<(), String>>> {
+        match self {
+            ChannelCommand::Shutdown(_, port) => Some(port),
+            ChannelCommand::Update(_, port) => Some(port),
+            _ => None,
+        }
+    }
+}
+
 #[cfg(any(test, feature = "bench"))]
 #[derive(Debug)]
 pub struct ReloadParams {

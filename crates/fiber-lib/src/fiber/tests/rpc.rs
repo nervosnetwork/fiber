@@ -1,5 +1,6 @@
 #![allow(clippy::needless_range_loop)]
 use crate::fiber::channel::CloseFlags;
+use crate::fiber::{NetworkActorCommand, NetworkActorMessage};
 use crate::gen_rand_sha256_hash;
 use crate::invoice::CkbInvoice;
 use crate::rpc::channel::{ChannelState, ShutdownChannelParams};
@@ -718,4 +719,52 @@ async fn test_rpc_auth_with_fixed_token() {
 
     let rpc_res: ListPeersResult = node_0.send_rpc_request("list_peers", ()).await.unwrap();
     assert_eq!(rpc_res.peers.len(), 0);
+}
+
+#[tokio::test]
+async fn test_rpc_shutdown_following_disconnect() {
+    init_tracing();
+    let _span = tracing::info_span!("node", node = "test").entered();
+    let (nodes, channels) = create_n_nodes_network_with_params(
+        &[(
+            (0, 1),
+            ChannelParameters {
+                public: true,
+                node_a_funding_amount: HUGE_CKB_AMOUNT,
+                node_b_funding_amount: HUGE_CKB_AMOUNT,
+                ..Default::default()
+            },
+        )],
+        2,
+        Some(gen_rpc_config()),
+    )
+    .await;
+    let [node_0, node_1] = nodes.try_into().expect("2 nodes");
+
+    node_0
+        .network_actor
+        .send_message(NetworkActorMessage::new_command(
+            NetworkActorCommand::DisconnectPeer(node_1.peer_id),
+        ))
+        .expect("node_a alive");
+
+    loop {
+        let res: Result<(), String> = node_0
+            .send_rpc_request(
+                "shutdown_channel",
+                ShutdownChannelParams {
+                    close_script: Some(Script::default().into()),
+                    channel_id: channels[0],
+                    fee_rate: Some(1000),
+                    force: Some(false),
+                },
+            )
+            .await;
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+        if let Err(err) = &res {
+            assert!(err.contains("Channel not found error"));
+            break;
+        }
+    }
 }

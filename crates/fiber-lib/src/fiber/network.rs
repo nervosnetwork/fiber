@@ -3801,7 +3801,13 @@ where
                     actor.send_message(ChannelActorMessage::Command(command))?;
                     Ok(())
                 }
-                None => Err(Error::ChannelNotFound(channel_id)),
+                None => {
+                    let error = Error::ChannelNotFound(channel_id);
+                    if let Some(rpc_reply) = command.rpc_reply_port() {
+                        let _ = rpc_reply.send(Err(error.to_string()));
+                    }
+                    Err(error)
+                }
             },
         }
     }
