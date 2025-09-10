@@ -716,8 +716,12 @@ fn find_preimages<S: WatchtowerStore>(
                                                 let pending_tlc_count = witness[17];
                                                 if unlock_type < 0xFE
                                                     && unlock_type < pending_tlc_count
+                                                    // 65 for signature, 32 for preimage
                                                     && witness.len()
-                                                        > 18 + 85 * pending_tlc_count as usize
+                                                        == 18
+                                                            + 85 * pending_tlc_count as usize
+                                                            + 65
+                                                            + 32
                                                 {
                                                     let tlc = Tlc(&witness[(18
                                                         + 85 * unlock_type as usize)
@@ -737,7 +741,7 @@ fn find_preimages<S: WatchtowerStore>(
                                                             preimage.into(),
                                                         );
                                                     } else {
-                                                        warn!("Found a preimage for payment hash: {:?}, but not match the tlc", payment_hash);
+                                                        warn!("Found a preimage for payment hash: {:?}, but not match the tlc, tx hash: {:?}", payment_hash, tx.calc_tx_hash());
                                                     }
                                                 }
                                             }
