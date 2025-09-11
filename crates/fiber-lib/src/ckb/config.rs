@@ -3,7 +3,7 @@ use super::contracts::{get_script_by_contract, Contract};
 use crate::utils::encrypt_decrypt_file::{decrypt_from_file, encrypt_to_file};
 use crate::Result;
 use ckb_jsonrpc_types::{OutPoint as OutPointWrapper, Script as ScriptWrapper};
-use ckb_sdk::CkbRpcAsyncClient;
+use ckb_sdk::{traits::DefaultCellCollector, CkbRpcAsyncClient};
 use ckb_types::core::ScriptHashType;
 use ckb_types::prelude::Builder;
 use ckb_types::H256;
@@ -295,4 +295,12 @@ pub fn new_ckb_rpc_async_client(rpc_url: &str) -> CkbRpcAsyncClient {
         .expect("create ckb rpc client should not fail");
     #[cfg(target_arch = "wasm32")]
     return CkbRpcAsyncClient::new(rpc_url);
+}
+
+pub fn new_default_cell_collector(rpc_url: &str) -> DefaultCellCollector {
+    #[cfg(not(target_arch = "wasm32"))]
+    return DefaultCellCollector::new_with_timeout(rpc_url, CKB_RPC_TIMEOUT)
+        .expect("create default cell collector should not fail");
+    #[cfg(target_arch = "wasm32")]
+    return DefaultCellCollector::new(rpc_url);
 }

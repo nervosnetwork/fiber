@@ -21,7 +21,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::{
     ckb::{
-        config::CKB_RPC_TIMEOUT,
+        config::{new_default_cell_collector, CKB_RPC_TIMEOUT},
         contracts::{get_cell_deps_sync, get_script_by_contract, Contract},
         CkbConfig,
     },
@@ -148,7 +148,7 @@ where
         let secret_key = state.secret_key;
         let rpc_url = state.config.rpc_url.clone();
         tokio::task::block_in_place(move || {
-            let mut cell_collector = DefaultCellCollector::new(&rpc_url);
+            let mut cell_collector = new_default_cell_collector(&rpc_url);
 
             for channel_data in self.store.get_watch_channels() {
                 let ckb_client = CkbRpcClient::with_builder(&rpc_url, |builder| {

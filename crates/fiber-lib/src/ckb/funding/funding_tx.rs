@@ -1,6 +1,9 @@
 use super::super::FundingError;
 use crate::{
-    ckb::{config::new_ckb_rpc_async_client, contracts::get_udt_cell_deps},
+    ckb::{
+        config::{new_ckb_rpc_async_client, new_default_cell_collector},
+        contracts::get_udt_cell_deps,
+    },
     fiber::serde_utils::EntityHex,
 };
 use anyhow::anyhow;
@@ -8,9 +11,9 @@ use ckb_sdk::{
     constants::SIGHASH_TYPE_HASH,
     rpc::ckb_indexer::SearchMode,
     traits::{
-        CellCollector, CellDepResolver, CellQueryOptions, DefaultCellCollector,
-        DefaultCellDepResolver, DefaultHeaderDepResolver, DefaultTransactionDependencyProvider,
-        HeaderDepResolver, SecpCkbRawKeySigner, TransactionDependencyProvider, ValueRangeOption,
+        CellCollector, CellDepResolver, CellQueryOptions, DefaultCellDepResolver,
+        DefaultHeaderDepResolver, DefaultTransactionDependencyProvider, HeaderDepResolver,
+        SecpCkbRawKeySigner, TransactionDependencyProvider, ValueRangeOption,
     },
     tx_builder::{unlock_tx_async, CapacityBalancer, TxBuilder, TxBuilderError},
     unlock::{ScriptUnlocker, SecpSighashUnlocker},
@@ -422,7 +425,7 @@ impl FundingTxBuilder {
         };
 
         let header_dep_resolver = DefaultHeaderDepResolver::new(&self.context.rpc_url);
-        let mut cell_collector = DefaultCellCollector::new(&self.context.rpc_url);
+        let mut cell_collector = new_default_cell_collector(&self.context.rpc_url);
         let tx_dep_provider = DefaultTransactionDependencyProvider::new(&self.context.rpc_url, 10);
 
         let tip_block_number: u64 = ckb_client.get_tip_block_number().await?.into();
