@@ -254,8 +254,7 @@ impl Actor for CkbChainActor {
                 }
             }
             CkbChainMessage::SendTx(tx, reply_port) => {
-                let rpc_url = state.config.rpc_url.clone();
-                let ckb_client = CkbRpcAsyncClient::new(&rpc_url);
+                let ckb_client = state.config.ckb_rpc_client();
                 let result = match ckb_client.send_transaction(tx.data().into(), None).await {
                     Ok(_) => Ok(()),
                     Err(err) => {
@@ -289,8 +288,7 @@ impl Actor for CkbChainActor {
                 }
             }
             CkbChainMessage::GetTx(tx_hash, reply_port) => {
-                let rpc_url = state.config.rpc_url.clone();
-                let ckb_client = CkbRpcAsyncClient::new(&rpc_url);
+                let ckb_client = state.config.ckb_rpc_client();
                 let result = ckb_client.get_transaction(tx_hash.into()).await;
                 if !reply_port.is_closed() {
                     // ignore error
@@ -317,8 +315,7 @@ impl Actor for CkbChainActor {
                 GetBlockTimestampRequest { block_hash },
                 reply_port,
             ) => {
-                let rpc_url = state.config.rpc_url.clone();
-                let ckb_client = CkbRpcAsyncClient::new(&rpc_url);
+                let ckb_client = state.config.ckb_rpc_client();
                 let _ = reply_port.send(
                     ckb_client
                         .get_header(block_hash.into())
@@ -327,8 +324,7 @@ impl Actor for CkbChainActor {
                 );
             }
             CkbChainMessage::GetShutdownTx(request, reply_port) => {
-                let rpc_url = state.config.rpc_url.clone();
-                let client = CkbRpcAsyncClient::new(&rpc_url);
+                let client = state.config.ckb_rpc_client();
                 let response = get_shutdown_tx(&client, request).await;
                 let _ = reply_port.send(response);
             }

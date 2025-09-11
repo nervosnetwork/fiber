@@ -3,6 +3,7 @@ use super::contracts::{get_script_by_contract, Contract};
 use crate::utils::encrypt_decrypt_file::{decrypt_from_file, encrypt_to_file};
 use crate::Result;
 use ckb_jsonrpc_types::{OutPoint as OutPointWrapper, Script as ScriptWrapper};
+use ckb_sdk::CkbRpcAsyncClient;
 use ckb_types::core::ScriptHashType;
 use ckb_types::prelude::Builder;
 use ckb_types::H256;
@@ -109,6 +110,12 @@ impl CkbConfig {
             Ok(())
         }
     }
+
+    pub fn ckb_rpc_client(&self) -> CkbRpcAsyncClient {
+        CkbRpcAsyncClient::with_builder(&self.rpc_url, |builder| builder.timeout(CKB_RPC_TIMEOUT))
+            .expect("create ckb rpc client should not fail")
+    }
+
     #[cfg(target_arch = "wasm32")]
     pub fn read_secret_key(&self) -> Result<SecretKey> {
         Ok(self.wasm_secret_key.expect("SecretKey not found on wasm"))
@@ -280,3 +287,5 @@ impl From<&UdtCellDep> for CellDep {
             .build()
     }
 }
+
+pub const CKB_RPC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);

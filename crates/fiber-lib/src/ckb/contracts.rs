@@ -14,9 +14,12 @@ use std::{collections::HashMap, vec};
 use thiserror::Error;
 use tracing::info;
 
-use crate::fiber::{
-    config::FiberScript,
-    gen::fiber::{UdtDep, UdtDepUnion},
+use crate::{
+    ckb::config::CKB_RPC_TIMEOUT,
+    fiber::{
+        config::FiberScript,
+        gen::fiber::{UdtDep, UdtDepUnion},
+    },
 };
 
 use super::config::{UdtArgInfo, UdtCfgInfos};
@@ -82,7 +85,10 @@ impl TypeIDResolver {
     }
 
     pub async fn resolve(&self, type_id: Script) -> Option<CellDep> {
-        let ckb_client = CkbRpcAsyncClient::new(&self.ckb_url);
+        let ckb_client = CkbRpcAsyncClient::with_builder(&self.ckb_url, |builder| {
+            builder.timeout(CKB_RPC_TIMEOUT)
+        })
+        .expect("create ckb rpc client should not fail");
         let search_key = SearchKey {
             script: type_id.into(),
             script_type: ScriptType::Type,
