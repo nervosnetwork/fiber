@@ -1,17 +1,23 @@
 use super::super::FundingError;
-use crate::{ckb::contracts::get_udt_cell_deps, fiber::serde_utils::EntityHex};
+use crate::{
+    ckb::{
+        config::{new_ckb_rpc_async_client, new_default_cell_collector},
+        contracts::get_udt_cell_deps,
+    },
+    fiber::serde_utils::EntityHex,
+};
 use anyhow::anyhow;
 use ckb_sdk::{
     constants::SIGHASH_TYPE_HASH,
     rpc::ckb_indexer::SearchMode,
     traits::{
-        CellCollector, CellDepResolver, CellQueryOptions, DefaultCellCollector,
-        DefaultCellDepResolver, DefaultHeaderDepResolver, DefaultTransactionDependencyProvider,
-        HeaderDepResolver, SecpCkbRawKeySigner, TransactionDependencyProvider, ValueRangeOption,
+        CellCollector, CellDepResolver, CellQueryOptions, DefaultCellDepResolver,
+        DefaultHeaderDepResolver, DefaultTransactionDependencyProvider, HeaderDepResolver,
+        SecpCkbRawKeySigner, TransactionDependencyProvider, ValueRangeOption,
     },
     tx_builder::{unlock_tx_async, CapacityBalancer, TxBuilder, TxBuilderError},
     unlock::{ScriptUnlocker, SecpSighashUnlocker},
-    CkbRpcAsyncClient, ScriptId,
+    ScriptId,
 };
 use ckb_types::{
     core::{BlockView, Capacity, TransactionView},
@@ -392,7 +398,7 @@ impl FundingTxBuilder {
             self.request.funding_fee_rate,
         );
 
-        let ckb_client = CkbRpcAsyncClient::new(&self.context.rpc_url);
+        let ckb_client = new_ckb_rpc_async_client(&self.context.rpc_url);
         let cell_dep_resolver = {
             match ckb_client.get_block_by_number(0.into()).await? {
                 Some(genesis_block) => {
@@ -419,7 +425,7 @@ impl FundingTxBuilder {
         };
 
         let header_dep_resolver = DefaultHeaderDepResolver::new(&self.context.rpc_url);
-        let mut cell_collector = DefaultCellCollector::new(&self.context.rpc_url);
+        let mut cell_collector = new_default_cell_collector(&self.context.rpc_url);
         let tx_dep_provider = DefaultTransactionDependencyProvider::new(&self.context.rpc_url, 10);
 
         let tip_block_number: u64 = ckb_client.get_tip_block_number().await?.into();
@@ -621,7 +627,7 @@ impl FundingTx {
             return Err(FundingError::InvalidPeerFundingTx);
         }
         // Peer SHOULD NOT add inputs locked by our lock scripts
-        let ckb_client = CkbRpcAsyncClient::new(&context.rpc_url);
+        let ckb_client = new_ckb_rpc_async_client(&context.rpc_url);
         for input in remote_tx.input_pts_iter().skip(local_tx.inputs().len()) {
             match ckb_client.get_live_cell(input.into(), false).await?.cell {
                 Some(cell) => {
