@@ -1,6 +1,6 @@
 use super::super::FundingError;
 use crate::{
-    ckb::{config::CKB_RPC_TIMEOUT, contracts::get_udt_cell_deps},
+    ckb::{config::new_ckb_rpc_async_client, contracts::get_udt_cell_deps},
     fiber::serde_utils::EntityHex,
 };
 use anyhow::anyhow;
@@ -14,7 +14,7 @@ use ckb_sdk::{
     },
     tx_builder::{unlock_tx_async, CapacityBalancer, TxBuilder, TxBuilderError},
     unlock::{ScriptUnlocker, SecpSighashUnlocker},
-    CkbRpcAsyncClient, ScriptId,
+    ScriptId,
 };
 use ckb_types::{
     core::{BlockView, Capacity, TransactionView},
@@ -395,10 +395,7 @@ impl FundingTxBuilder {
             self.request.funding_fee_rate,
         );
 
-        let ckb_client = CkbRpcAsyncClient::with_builder(&self.context.rpc_url, |builder| {
-            builder.timeout(CKB_RPC_TIMEOUT)
-        })
-        .expect("create ckb rpc client should not fail");
+        let ckb_client = new_ckb_rpc_async_client(&self.context.rpc_url);
         let cell_dep_resolver = {
             match ckb_client.get_block_by_number(0.into()).await? {
                 Some(genesis_block) => {
@@ -627,10 +624,7 @@ impl FundingTx {
             return Err(FundingError::InvalidPeerFundingTx);
         }
         // Peer SHOULD NOT add inputs locked by our lock scripts
-        let ckb_client = CkbRpcAsyncClient::with_builder(&context.rpc_url, |builder| {
-            builder.timeout(CKB_RPC_TIMEOUT)
-        })
-        .expect("create ckb rpc client should not fail");
+        let ckb_client = new_ckb_rpc_async_client(&context.rpc_url);
         for input in remote_tx.input_pts_iter().skip(local_tx.inputs().len()) {
             match ckb_client.get_live_cell(input.into(), false).await?.cell {
                 Some(cell) => {

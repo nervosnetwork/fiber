@@ -1,7 +1,4 @@
-use ckb_sdk::{
-    rpc::ckb_indexer::{Order, ScriptType, SearchKey, SearchMode},
-    CkbRpcAsyncClient,
-};
+use ckb_sdk::rpc::ckb_indexer::{Order, ScriptType, SearchKey, SearchMode};
 use ckb_types::{
     core::{BlockView, DepType, ScriptHashType},
     packed::{CellDep, CellDepVec, CellDepVecBuilder, CellOutput, OutPoint, Script},
@@ -15,7 +12,7 @@ use thiserror::Error;
 use tracing::info;
 
 use crate::{
-    ckb::config::CKB_RPC_TIMEOUT,
+    ckb::config::new_ckb_rpc_async_client,
     fiber::{
         config::FiberScript,
         gen::fiber::{UdtDep, UdtDepUnion},
@@ -85,10 +82,7 @@ impl TypeIDResolver {
     }
 
     pub async fn resolve(&self, type_id: Script) -> Option<CellDep> {
-        let ckb_client = CkbRpcAsyncClient::with_builder(&self.ckb_url, |builder| {
-            builder.timeout(CKB_RPC_TIMEOUT)
-        })
-        .expect("create ckb rpc client should not fail");
+        let ckb_client = new_ckb_rpc_async_client(&self.ckb_url);
         let search_key = SearchKey {
             script: type_id.into(),
             script_type: ScriptType::Type,

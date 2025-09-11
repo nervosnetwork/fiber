@@ -112,8 +112,7 @@ impl CkbConfig {
     }
 
     pub fn ckb_rpc_client(&self) -> CkbRpcAsyncClient {
-        CkbRpcAsyncClient::with_builder(&self.rpc_url, |builder| builder.timeout(CKB_RPC_TIMEOUT))
-            .expect("create ckb rpc client should not fail")
+        new_ckb_rpc_async_client(&self.rpc_url)
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -289,3 +288,11 @@ impl From<&UdtCellDep> for CellDep {
 }
 
 pub const CKB_RPC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+pub fn new_ckb_rpc_async_client(rpc_url: &str) -> CkbRpcAsyncClient {
+    #[cfg(not(target_arch = "wasm32"))]
+    return CkbRpcAsyncClient::with_builder(rpc_url, |builder| builder.timeout(CKB_RPC_TIMEOUT))
+        .expect("create ckb rpc client should not fail");
+    #[cfg(target_arch = "wasm32")]
+    return CkbRpcAsyncClient::new(rpc_url);
+}
