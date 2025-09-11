@@ -3895,11 +3895,11 @@ async fn test_send_mpp_send_each_other_with_no_fee() {
         None,
     )
     .await;
-    let [mut node_0, _node_1, mut node_2] = nodes.try_into().expect("3 nodes");
+    let [node_0, _node_1, node_2] = nodes.try_into().expect("3 nodes");
 
     for _i in 0..2 {
         let res = node_0
-            .send_mpp_payment(&mut node_2, 2000 * 100000000, None)
+            .send_mpp_payment(&node_2, 2000 * 100000000, None)
             .await;
 
         let payment_hash = res.unwrap().payment_hash;
@@ -3908,7 +3908,7 @@ async fn test_send_mpp_send_each_other_with_no_fee() {
         tokio::time::sleep(Duration::from_secs(1)).await;
 
         let res = node_2
-            .send_mpp_payment(&mut node_0, 2000 * 100000000, None)
+            .send_mpp_payment(&node_0, 2000 * 100000000, None)
             .await;
 
         let payment_hash = res.unwrap().payment_hash;
@@ -3962,11 +3962,11 @@ async fn test_send_mpp_send_each_other_expire_soon() {
         None,
     )
     .await;
-    let [mut node_0, _node_1, mut node_2] = nodes.try_into().expect("3 nodes");
+    let [node_0, _node_1, node_2] = nodes.try_into().expect("3 nodes");
 
     for _i in 0..2 {
         let res = node_0
-            .send_mpp_payment(&mut node_2, 2000 * 100000000, None)
+            .send_mpp_payment(&node_2, 2000 * 100000000, None)
             .await;
 
         let payment_hash = res.unwrap().payment_hash;
@@ -3975,7 +3975,7 @@ async fn test_send_mpp_send_each_other_expire_soon() {
         tokio::time::sleep(Duration::from_secs(1)).await;
 
         let res = node_2
-            .send_mpp_payment(&mut node_0, 2000 * 100000000, None)
+            .send_mpp_payment(&node_0, 2000 * 100000000, None)
             .await;
 
         let payment_hash = res.unwrap().payment_hash;
