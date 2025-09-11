@@ -11,7 +11,9 @@ use super::types::{
 };
 use super::types::{Cursor, Pubkey, TlcErr};
 use crate::ckb::config::UdtCfgInfos;
-use crate::fiber::config::{DEFAULT_FINAL_TLC_EXPIRY_DELTA, DEFAULT_TLC_EXPIRY_DELTA};
+use crate::fiber::config::{
+    DEFAULT_FINAL_TLC_EXPIRY_DELTA, DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT,
+};
 use crate::fiber::fee::calculate_tlc_forward_fee;
 use crate::fiber::history::SentNode;
 use crate::fiber::path::NodeHeapElement;
@@ -744,10 +746,12 @@ where
         // but a malicious node may send a channel update with a too large expiry delta
         // which makes the network graph contains a channel update with a too large expiry delta.
         // We need to check it again here to avoid any malicious channel update
-        if channel_update.tlc_expiry_delta > DEFAULT_TLC_EXPIRY_DELTA {
+        // Note: we don't check the tlc_expiry_delta is too small here, because it does not effect
+        // the path finding, and a too small tlc_expiry_delta only makes the hop itself more risky.
+        if channel_update.tlc_expiry_delta > MAX_PAYMENT_TLC_EXPIRY_LIMIT {
             error!(
                 "Channel update has too large expiry delta: {} > {}, channel update: {:?}",
-                channel_update.tlc_expiry_delta, DEFAULT_TLC_EXPIRY_DELTA, &channel_update
+                channel_update.tlc_expiry_delta, MAX_PAYMENT_TLC_EXPIRY_LIMIT, &channel_update
             );
             return None;
         }
