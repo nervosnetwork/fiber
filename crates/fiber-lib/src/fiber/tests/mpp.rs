@@ -3916,3 +3916,70 @@ async fn test_send_mpp_send_each_other_with_no_fee() {
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "need to modify MILLI_SECONDS_PER_EPOCH and MIN_TLC_EXPIRY_DELTA to run this test"]
+async fn test_send_mpp_send_each_other_expire_soon() {
+    init_tracing();
+
+    let (nodes, _channels) = create_n_nodes_network_with_params(
+        &[
+            (
+                (0, 1),
+                ChannelParameters {
+                    public: true,
+                    node_a_funding_amount: MIN_RESERVED_CKB + 1000 * 100000000,
+                    node_b_funding_amount: MIN_RESERVED_CKB,
+                    a_tlc_fee_proportional_millionths: Some(0),
+                    b_tlc_fee_proportional_millionths: Some(0),
+                    ..Default::default()
+                },
+            ),
+            (
+                (0, 1),
+                ChannelParameters {
+                    public: true,
+                    node_a_funding_amount: MIN_RESERVED_CKB + 1000 * 100000000,
+                    node_b_funding_amount: MIN_RESERVED_CKB,
+                    a_tlc_fee_proportional_millionths: Some(0),
+                    b_tlc_fee_proportional_millionths: Some(0),
+                    ..Default::default()
+                },
+            ),
+            (
+                (1, 2),
+                ChannelParameters {
+                    public: true,
+                    node_a_funding_amount: MIN_RESERVED_CKB + 2000 * 100000000,
+                    node_b_funding_amount: MIN_RESERVED_CKB,
+                    a_tlc_fee_proportional_millionths: Some(0),
+                    b_tlc_fee_proportional_millionths: Some(0),
+                    ..Default::default()
+                },
+            ),
+        ],
+        3,
+        None,
+    )
+    .await;
+    let [node_0, _node_1, node_2] = nodes.try_into().expect("3 nodes");
+
+    for _i in 0..2 {
+        let res = node_0
+            .send_mpp_payment(&node_2, 2000 * 100000000, None)
+            .await;
+
+        let payment_hash = res.unwrap().payment_hash;
+        node_0.wait_until_success(payment_hash).await;
+
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
+        let res = node_2
+            .send_mpp_payment(&node_0, 2000 * 100000000, None)
+            .await;
+
+        let payment_hash = res.unwrap().payment_hash;
+        node_2.wait_until_success(payment_hash).await;
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+}

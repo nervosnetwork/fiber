@@ -31,4 +31,5 @@ body:json {
 
 script:post-response {
   console.log(res.body);
+  await new Promise(r => setTimeout(r, 2000));
 }

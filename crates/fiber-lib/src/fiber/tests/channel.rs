@@ -1,12 +1,11 @@
 use crate::ckb::tests::test_utils::complete_commitment_tx;
 use crate::fiber::channel::{
     AddTlcResponse, ChannelState, CloseFlags, OutboundTlcStatus, TLCId, TlcStatus, UpdateCommand,
-    DEFAULT_COMMITMENT_DELAY_EPOCHS, MAX_COMMITMENT_DELAY_EPOCHS, MIN_COMMITMENT_DELAY_EPOCHS,
-    XUDT_COMPATIBLE_WITNESS,
+    MAX_COMMITMENT_DELAY_EPOCHS, MIN_COMMITMENT_DELAY_EPOCHS, XUDT_COMPATIBLE_WITNESS,
 };
 use crate::fiber::config::{
-    DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT, MILLI_SECONDS_PER_EPOCH,
-    MIN_TLC_EXPIRY_DELTA,
+    DEFAULT_COMMITMENT_DELAY_EPOCHS, DEFAULT_FINAL_TLC_EXPIRY_DELTA, DEFAULT_TLC_EXPIRY_DELTA,
+    MAX_PAYMENT_TLC_EXPIRY_LIMIT, MILLI_SECONDS_PER_EPOCH, MIN_TLC_EXPIRY_DELTA,
 };
 use crate::fiber::features::FeatureVector;
 use crate::fiber::graph::ChannelInfo;
@@ -5669,7 +5668,8 @@ async fn test_send_payment_will_succeed_with_large_tlc_expiry_limit() {
     let source_node = &mut node_0;
     let target_pubkey = node_3.pubkey;
 
-    let expected_minimal_tlc_expiry_limit = (24 * 60 * 60 * 1000) * 3;
+    let expected_minimal_tlc_expiry_limit =
+        DEFAULT_TLC_EXPIRY_DELTA * 2 + DEFAULT_FINAL_TLC_EXPIRY_DELTA;
 
     let res = source_node
         .send_payment(SendPaymentCommand {

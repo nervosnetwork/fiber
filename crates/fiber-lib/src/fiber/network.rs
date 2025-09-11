@@ -77,14 +77,13 @@ use crate::ckb::{
 use crate::fiber::channel::{
     AddTlcCommand, AddTlcResponse, ChannelActorState, ChannelEphemeralConfig,
     ChannelInitializationOperation, ShutdownCommand, TxCollaborationCommand, TxUpdateCommand,
-    DEFAULT_COMMITMENT_DELAY_EPOCHS,
 };
 use crate::fiber::channel::{
     AwaitingTxSignaturesFlags, ShuttingDownFlags, MAX_TLC_NUMBER_IN_FLIGHT,
 };
 use crate::fiber::config::{
-    DEFAULT_MAX_PARTS, DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT,
-    MIN_TLC_EXPIRY_DELTA, PAYMENT_MAX_PARTS_LIMIT,
+    DEFAULT_COMMITMENT_DELAY_EPOCHS, DEFAULT_FINAL_TLC_EXPIRY_DELTA, DEFAULT_MAX_PARTS,
+    MAX_PAYMENT_TLC_EXPIRY_LIMIT, MIN_TLC_EXPIRY_DELTA, PAYMENT_MAX_PARTS_LIMIT,
 };
 use crate::fiber::fee::{check_open_channel_parameters, check_tlc_delta_with_epochs};
 use crate::fiber::gossip::{GossipConfig, GossipService, SubscribableGossipMessageStore};
@@ -566,14 +565,11 @@ impl SendPaymentData {
         };
 
         // check htlc expiry delta and limit are both valid if it is set
-        let final_tlc_expiry_delta = command
-            .final_tlc_expiry_delta
-            .or_else(|| {
-                invoice
-                    .as_ref()
-                    .and_then(|i| i.final_tlc_minimum_expiry_delta().copied())
-            })
-            .unwrap_or(DEFAULT_TLC_EXPIRY_DELTA);
+        let final_tlc_expiry_delta = invoice
+            .as_ref()
+            .and_then(|i| i.final_tlc_minimum_expiry_delta().copied())
+            .or(command.final_tlc_expiry_delta)
+            .unwrap_or(DEFAULT_FINAL_TLC_EXPIRY_DELTA);
         if !(MIN_TLC_EXPIRY_DELTA..=MAX_PAYMENT_TLC_EXPIRY_LIMIT).contains(&final_tlc_expiry_delta)
         {
             return Err(format!(
@@ -587,7 +583,10 @@ impl SendPaymentData {
             .unwrap_or(MAX_PAYMENT_TLC_EXPIRY_LIMIT);
 
         if tlc_expiry_limit < final_tlc_expiry_delta || tlc_expiry_limit < MIN_TLC_EXPIRY_DELTA {
-            return Err("tlc_expiry_limit is too small".to_string());
+            return Err(format!(
+                "tlc_expiry_limit is too small, final_tlc_expiry_delta: {}, tlc_expiry_limit: {}",
+                final_tlc_expiry_delta, tlc_expiry_limit
+            ));
         }
         if tlc_expiry_limit > MAX_PAYMENT_TLC_EXPIRY_LIMIT {
             return Err(format!(
@@ -3357,8 +3356,9 @@ where
 
         if tlc_expiry_delta.is_some_and(|d| d < MIN_TLC_EXPIRY_DELTA) {
             return Err(ProcessingChannelError::InvalidParameter(format!(
-                "TLC expiry delta is too small, expect larger than {}",
-                MIN_TLC_EXPIRY_DELTA
+                "TLC expiry delta is too small, expect larger than {}, got {}",
+                MIN_TLC_EXPIRY_DELTA,
+                tlc_expiry_delta.unwrap()
             )));
         }
 

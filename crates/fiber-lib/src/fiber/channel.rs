@@ -1,5 +1,6 @@
-use super::config::DEFAULT_FUNDING_TIMEOUT_SECONDS;
-use super::config::DEFAULT_HOLD_TLC_TIMEOUT;
+use super::config::{
+    DEFAULT_COMMITMENT_DELAY_EPOCHS, DEFAULT_FUNDING_TIMEOUT_SECONDS, DEFAULT_HOLD_TLC_TIMEOUT,
+};
 use super::{
     gossip::SOFT_BROADCAST_MESSAGES_CONSIDERED_STALE_DURATION, graph::ChannelUpdateInfo,
     types::ForwardTlcResult,
@@ -282,8 +283,6 @@ pub struct ChannelCommandWithId {
 
 pub const DEFAULT_FEE_RATE: u64 = 1_000;
 pub const DEFAULT_COMMITMENT_FEE_RATE: u64 = 1_000;
-// The default commitment delay is 6 epochs = 24 hours.
-pub const DEFAULT_COMMITMENT_DELAY_EPOCHS: u64 = 6;
 // The min commitment delay is 1 epoch = 4 hours.
 pub const MIN_COMMITMENT_DELAY_EPOCHS: u64 = 1;
 // The max commitment delay is 84 epochs = 14 days.
@@ -5713,8 +5712,8 @@ impl ChannelActorState {
         let current_time = now_timestamp_as_millis_u64();
         if expiry <= current_time + MIN_TLC_EXPIRY_DELTA {
             error!(
-                "TLC expiry {} is too soon, current time: {}",
-                expiry, current_time
+                "TLC expiry {} is too soon, current time: {}, MIN_TLC_EXPIRY_DELTA: {}",
+                expiry, current_time, MIN_TLC_EXPIRY_DELTA
             );
             return Err(ProcessingChannelError::TlcExpirySoon);
         }
@@ -5726,6 +5725,11 @@ impl ChannelActorState {
             .all_tlcs()
             .filter(|tlc| tlc.removed_confirmed_at.is_none())
             .count() as u64;
+        debug!(
+            "here debug pending_tlc_count: {} => delay: {}",
+            pending_tlc_count,
+            epoch_delay_milliseconds * (pending_tlc_count + 1)
+        );
         let expect_expiry = current_time + epoch_delay_milliseconds * (pending_tlc_count + 1);
         if expiry < expect_expiry {
             error!(

@@ -1,5 +1,6 @@
 #![allow(clippy::needless_range_loop)]
 use crate::fiber::channel::*;
+use crate::fiber::config::DEFAULT_FINAL_TLC_EXPIRY_DELTA;
 use crate::fiber::config::DEFAULT_TLC_EXPIRY_DELTA;
 use crate::fiber::config::DEFAULT_TLC_FEE_PROPORTIONAL_MILLIONTHS;
 use crate::fiber::config::MAX_PAYMENT_TLC_EXPIRY_LIMIT;
@@ -3558,7 +3559,7 @@ async fn test_send_payment_with_invalid_tlc_expiry() {
             target_pubkey: Some(nodes[1].pubkey),
             amount: Some(1000),
             keysend: Some(true),
-            tlc_expiry_limit: Some(DEFAULT_TLC_EXPIRY_DELTA + 1), // Ok now
+            tlc_expiry_limit: Some(DEFAULT_FINAL_TLC_EXPIRY_DELTA + 1), // Ok now
             ..Default::default()
         })
         .await;
@@ -3617,7 +3618,7 @@ async fn test_send_payself_with_invalid_tlc_expiry() {
             amount: Some(1000),
             keysend: Some(true),
             allow_self_payment: true,
-            tlc_expiry_limit: Some(DEFAULT_TLC_EXPIRY_DELTA),
+            tlc_expiry_limit: Some(DEFAULT_FINAL_TLC_EXPIRY_DELTA),
             ..Default::default()
         })
         .await;
@@ -6137,7 +6138,7 @@ async fn test_network_with_hops_max_number_limit() {
             keysend: Some(true),
             allow_self_payment: false,
             dry_run: false,
-            tlc_expiry_limit: Some(13 * 24 * 60 * 60 * 1000), // 13 days
+            tlc_expiry_limit: Some(DEFAULT_TLC_EXPIRY_DELTA * 12 + DEFAULT_FINAL_TLC_EXPIRY_DELTA), // 13 hops limit
             ..Default::default()
         })
         .await;
@@ -6152,7 +6153,7 @@ async fn test_network_with_hops_max_number_limit() {
             keysend: Some(true),
             allow_self_payment: false,
             dry_run: false,
-            tlc_expiry_limit: Some(13 * 24 * 60 * 60 * 1000), // 13 days
+            tlc_expiry_limit: Some(DEFAULT_TLC_EXPIRY_DELTA * 12 + DEFAULT_FINAL_TLC_EXPIRY_DELTA), // 13 hops limit
             ..Default::default()
         })
         .await
