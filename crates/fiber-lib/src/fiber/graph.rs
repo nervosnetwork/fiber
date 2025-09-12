@@ -477,6 +477,8 @@ pub enum PathFindError {
     Overflow(String),
     #[error("Feature not enabled: {0}")]
     FeatureNotEnabled(String),
+    #[error("Node not found in graph: {0}")]
+    UnknownNode(String),
     #[error("Insufficient balance: {0}")]
     InsufficientBalance(String),
     #[error("Path find failed for min_tlc_value error: {0}")]
@@ -1332,6 +1334,17 @@ where
             .is_some_and(|node_info| node_info.features.supports_basic_mpp())
     }
 
+    fn check_node_exists(&self, node_id: &Pubkey) -> Result<(), PathFindError> {
+        if self.nodes.contains_key(node_id) {
+            Ok(())
+        } else {
+            Err(PathFindError::UnknownNode(format!(
+                "node {:?} not found in the graph",
+                node_id
+            )))
+        }
+    }
+
     // A helper function to evaluate whether an edge should be added to the heap of nodes to visit.
     // We will check the accumulated probability of this edge to be a successful payment, and evaluate
     // the distance from the source node to the final payee. If the distance is shorter than the current
@@ -1472,6 +1485,9 @@ where
                 max_fee_amount.unwrap_or(0)
             )));
         }
+
+        self.check_node_exists(&source)?;
+        self.check_node_exists(&target)?;
 
         if source == target && !allow_self {
             return Err(PathFindError::FeatureNotEnabled(
