@@ -18,6 +18,7 @@ use ckb_types::H256;
 use jsonrpsee::proc_macros::rpc;
 use jsonrpsee::types::ErrorObjectOwned;
 
+use molecule::prelude::Entity;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use std::sync::Arc;
@@ -338,15 +339,16 @@ where
         let network_graph = self.network_graph.read().await;
         let default_max_limit = 500;
         let limit = params.limit.unwrap_or(default_max_limit) as usize;
-        let after = params.after.as_ref().map(|after| {
-            let buf: [u8; 8] = after.as_bytes().try_into().unwrap_or_default();
-            u64::from_le_bytes(buf)
-        });
+        let after = params
+            .after
+            .as_ref()
+            .and_then(|after| Pubkey::from_slice(after.as_bytes()).ok());
         let nodes = network_graph.get_nodes_with_params(limit, after);
         let last_cursor = JsonBytes::from_vec(
-            (after.unwrap_or_default() + nodes.len() as u64)
-                .to_le_bytes()
-                .to_vec(),
+            nodes
+                .last()
+                .map(|n| n.node_id.serialize().to_vec())
+                .unwrap_or_default(),
         );
         let nodes = nodes.into_iter().map(Into::into).collect();
         let total_count = (network_graph.nodes.len() as u64).into();
@@ -365,16 +367,20 @@ where
         let default_max_limit = 500;
         let network_graph = self.network_graph.read().await;
         let limit = params.limit.unwrap_or(default_max_limit) as usize;
-        let after = params.after.as_ref().map(|after| {
-            let buf: [u8; 8] = after.as_bytes().try_into().unwrap_or_default();
-            u64::from_le_bytes(buf)
+        let after = params.after.as_ref().and_then(|after| {
+            if after.is_empty() {
+                None
+            } else {
+                OutPoint::from_slice(after.as_bytes()).ok()
+            }
         });
 
         let channels = network_graph.get_channels_with_params(limit, after);
         let last_cursor = JsonBytes::from_vec(
-            (after.unwrap_or_default() + channels.len() as u64)
-                .to_le_bytes()
-                .to_vec(),
+            channels
+                .last()
+                .map(|c| c.channel_outpoint.as_slice().to_vec())
+                .unwrap_or_default(),
         );
 
         let channels = channels.into_iter().map(Into::into).collect();

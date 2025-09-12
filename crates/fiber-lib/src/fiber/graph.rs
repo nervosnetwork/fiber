@@ -22,11 +22,11 @@ use crate::fiber::types::PaymentHopData;
 use crate::invoice::CkbInvoice;
 use crate::now_timestamp_as_millis_u64;
 use ckb_types::packed::{OutPoint, Script};
-use indexmap::IndexMap;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::ops::Bound;
 use std::sync::Arc;
 use tentacle::multiaddr::MultiAddr;
 use tentacle::secio::PeerId;
@@ -448,9 +448,9 @@ pub struct NetworkGraph<S> {
     // The count of private channels
     pub(crate) private_channels_count: usize,
     // All the channels in the network.
-    pub(crate) channels: IndexMap<OutPoint, ChannelInfo>,
+    pub(crate) channels: BTreeMap<OutPoint, ChannelInfo>,
     // All the nodes in the network.
-    pub(crate) nodes: IndexMap<Pubkey, NodeInfo>,
+    pub(crate) nodes: BTreeMap<Pubkey, NodeInfo>,
 
     // Channel stats map, used to track the attempts for each channel,
     // this information is used to HELP the path finding algorithm for better routing in two ways:
@@ -528,9 +528,9 @@ where
             always_process_gossip_message: false,
             source,
             private_channels_count: 0,
-            channels: IndexMap::new(),
+            channels: BTreeMap::new(),
             channel_stats: Default::default(),
-            nodes: IndexMap::new(),
+            nodes: BTreeMap::new(),
             latest_cursor: Cursor::default(),
             store: store.clone(),
             history: PaymentHistory::new(source, None, store),
@@ -620,7 +620,7 @@ where
                     .insert(channel_info.channel_outpoint.clone(), channel_info);
             }
             OwnedChannelUpdateEvent::Down(channel_outpoint) => {
-                if let Some(channel_info) = self.channels.swap_remove(&channel_outpoint) {
+                if let Some(channel_info) = self.channels.remove(&channel_outpoint) {
                     if !channel_info.is_public {
                         self.private_channels_count -= 1;
                     }
@@ -851,14 +851,21 @@ where
         self.nodes.values()
     }
 
-    pub fn get_nodes_with_params(&self, limit: usize, after: Option<u64>) -> Vec<NodeInfo> {
-        let after = after.unwrap_or_default();
-        self.nodes
-            .iter()
-            .skip(after as usize)
-            .take(limit)
-            .map(|(_pubkey, node)| node.to_owned())
-            .collect()
+    pub fn get_nodes_with_params(&self, limit: usize, after: Option<Pubkey>) -> Vec<NodeInfo> {
+        match after {
+            Some(after) => self
+                .nodes
+                .range((Bound::Excluded(after), Bound::Unbounded))
+                .take(limit)
+                .map(|(_pubkey, node)| node.to_owned())
+                .collect(),
+            None => self
+                .nodes
+                .iter()
+                .take(limit)
+                .map(|(_pubkey, node)| node.to_owned())
+                .collect(),
+        }
     }
 
     pub fn get_node(&self, node_id: &Pubkey) -> Option<&NodeInfo> {
@@ -904,20 +911,32 @@ where
         }
     }
 
-    pub fn get_channels_with_params(&self, limit: usize, after: Option<u64>) -> Vec<ChannelInfo> {
-        let after = after.unwrap_or_default();
-        self.channels
-            .iter()
-            .skip(after as usize)
-            .take(limit)
-            .filter_map(|(_out_point, channel_info)| {
-                if channel_info.is_public {
-                    Some(channel_info.to_owned())
-                } else {
-                    None
-                }
-            })
-            .collect()
+    pub fn get_channels_with_params(
+        &self,
+        limit: usize,
+        after: Option<OutPoint>,
+    ) -> Vec<ChannelInfo> {
+        let filter = |(_out_point, channel_info): (&OutPoint, &ChannelInfo)| {
+            if channel_info.is_public {
+                Some(channel_info.to_owned())
+            } else {
+                None
+            }
+        };
+        match after {
+            Some(after) => self
+                .channels
+                .range((Bound::Excluded(after), Bound::Unbounded))
+                .take(limit)
+                .filter_map(filter)
+                .collect(),
+            None => self
+                .channels
+                .iter()
+                .take(limit)
+                .filter_map(filter)
+                .collect(),
+        }
     }
 
     pub fn get_channels_by_peer(&self, node_id: Pubkey) -> impl Iterator<Item = &ChannelInfo> {

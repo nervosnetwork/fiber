@@ -287,7 +287,8 @@ async fn test_rpc_graph() {
         .all(|n| n.version == *env!("CARGO_PKG_VERSION")));
     assert!(!graph_nodes.nodes[0].features.is_empty());
 
-    let graph_nodes: GraphNodesResult = node_0
+    // query nodes by page
+    let graph_nodes_p1: GraphNodesResult = node_0
         .send_rpc_request(
             "graph_nodes",
             GraphNodesParams {
@@ -298,8 +299,33 @@ async fn test_rpc_graph() {
         .await
         .unwrap();
 
-    assert_eq!(graph_nodes.total_count.value(), 2);
-    assert_eq!(graph_nodes.nodes.len(), 1);
+    assert_eq!(graph_nodes_p1.total_count.value(), 2);
+    assert_eq!(graph_nodes_p1.nodes.len(), 1);
+
+    let graph_nodes_p2: GraphNodesResult = node_0
+        .send_rpc_request(
+            "graph_nodes",
+            GraphNodesParams {
+                limit: Some(1),
+                after: Some(graph_nodes_p1.last_cursor),
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(graph_nodes_p2.total_count.value(), 2);
+    assert_eq!(graph_nodes_p2.nodes.len(), 1);
+
+    let mut nodes = graph_nodes_p1.nodes.clone();
+    nodes.extend(graph_nodes_p2.nodes.clone());
+    assert_eq!(
+        graph_nodes
+            .nodes
+            .iter()
+            .map(|n| n.node_id)
+            .collect::<Vec<_>>(),
+        nodes.iter().map(|n| n.node_id).collect::<Vec<_>>(),
+    );
 
     let graph_channels: GraphChannelsResult = node_0
         .send_rpc_request(
@@ -315,6 +341,21 @@ async fn test_rpc_graph() {
     // only public channels
     assert_eq!(graph_channels.total_count.value(), 1);
     assert_eq!(graph_channels.channels.len(), 1);
+
+    // next query is empty
+    let graph_channels: GraphChannelsResult = node_0
+        .send_rpc_request(
+            "graph_channels",
+            GraphChannelsParams {
+                limit: Some(1),
+                after: Some(graph_channels.last_cursor),
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(graph_channels.total_count.value(), 1);
+    assert!(graph_channels.channels.is_empty());
 }
 
 #[tokio::test]
