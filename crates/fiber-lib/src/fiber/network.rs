@@ -176,6 +176,16 @@ pub(crate) fn check_chain_hash(chain_hash: &Hash256) -> Result<(), Error> {
 }
 
 #[derive(Debug)]
+pub enum PeerDisconnectReason {
+    /// User request disconnection.
+    Requested,
+    /// Init message timeout.
+    InitMessageTimeout,
+    /// Chain hash mismatch.
+    ChainHashMismatch,
+}
+
+#[derive(Debug)]
 pub struct OpenChannelResponse {
     pub channel_id: Hash256,
 }
@@ -250,7 +260,7 @@ pub enum NetworkActorCommand {
     /// Network commands
     // Connect to a peer, and optionally also save the peer to the peer store.
     ConnectPeer(Multiaddr),
-    DisconnectPeer(PeerId),
+    DisconnectPeer(PeerId, PeerDisconnectReason),
     // Save the address of a peer to the peer store, the address here must be a valid
     // multiaddr with the peer id.
     SavePeerAddress(Multiaddr),
@@ -1319,8 +1329,12 @@ where
                 // Tentacle sends an event by calling handle_error function instead, which
                 // may receive errors like DialerError.
             }
-            NetworkActorCommand::DisconnectPeer(peer_id) => {
+            NetworkActorCommand::DisconnectPeer(peer_id, reason) => {
                 if let Some(session) = state.get_peer_session(&peer_id) {
+                    debug!(
+                        "Disconnecting peer {:?} session w {:?}ith reason {:?}",
+                        &peer_id, &session, &reason
+                    );
                     state.control.disconnect(session).await?;
                 }
             }
@@ -1436,7 +1450,10 @@ where
                         state
                             .network
                             .send_message(NetworkActorMessage::new_command(
-                                NetworkActorCommand::DisconnectPeer(peer_id.clone()),
+                                NetworkActorCommand::DisconnectPeer(
+                                    peer_id.clone(),
+                                    PeerDisconnectReason::InitMessageTimeout,
+                                ),
                             ))
                             .expect(ASSUME_NETWORK_MYSELF_ALIVE);
                     }
@@ -4134,7 +4151,10 @@ where
         check_chain_hash(&init_msg.chain_hash).map_err(|e| {
             self.network
                 .send_message(NetworkActorMessage::new_command(
-                    NetworkActorCommand::DisconnectPeer(peer_id.clone()),
+                    NetworkActorCommand::DisconnectPeer(
+                        peer_id.clone(),
+                        PeerDisconnectReason::ChainHashMismatch,
+                    ),
                 ))
                 .expect(ASSUME_NETWORK_MYSELF_ALIVE);
 
@@ -4706,11 +4726,8 @@ where
         _state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
-            SupervisionEvent::ActorTerminated(who, state, reason) => {
-                debug!(
-                    "Actor {:?} terminated with reason {:?} state {:?}",
-                    who, reason, state
-                );
+            SupervisionEvent::ActorTerminated(who, _state, reason) => {
+                debug!("Actor {:?} terminated with reason {:?}", who, reason);
             }
             SupervisionEvent::ActorFailed(who, err) => {
                 panic!("Actor unexpectedly panicked (id: {:?}): {:?}", who, err);
