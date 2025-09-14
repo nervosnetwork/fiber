@@ -11,7 +11,7 @@ pub use config::{
 };
 
 mod order;
-pub use order::{CchOrderStatus, ReceiveBTCOrder, SendBTCOrder};
+pub use order::{CchInvoice, CchOrder, CchOrderStatus};
 
 mod orders_db;
 pub use orders_db::CchOrdersDb;

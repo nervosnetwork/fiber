@@ -1,4 +1,4 @@
-use crate::time::SystemTimeError;
+use crate::{fiber::types::Hash256, time::SystemTimeError};
 
 use jsonrpsee::types::{error::CALL_EXECUTION_FAILED_CODE, ErrorObjectOwned};
 use thiserror::Error;
@@ -6,10 +6,10 @@ use thiserror::Error;
 #[derive(Error, Debug)]
 pub enum CchDbError {
     #[error("Inserting duplicated key: {0}")]
-    Duplicated(String),
+    Duplicated(Hash256),
 
     #[error("Key not found: {0}")]
-    NotFound(String),
+    NotFound(Hash256),
 }
 
 #[derive(Error, Debug)]

@@ -1,14 +1,13 @@
-use std::{str::FromStr, time::Duration};
+use std::time::Duration;
 
 use bitcoin::hashes::Hash;
 use ckb_types::packed::Script;
-use lightning_invoice::Bolt11Invoice;
 use ractor::call_t;
 
 use crate::{
     cch::{
         tests::lnd_test_utils::{LndBitcoinDConf, LndNode},
-        CchMessage, ReceiveBTC, ReceiveBTCOrder, SendBTC, SendBTCOrder,
+        CchInvoice, CchMessage, CchOrder, ReceiveBTC, SendBTC,
     },
     ckb::tests::test_utils::{get_always_success_script, get_simple_udt_script},
     fiber::{
@@ -126,7 +125,7 @@ async fn do_test_cross_chain_payment_hub_send_btc(udt_script: Script, multiple_h
 
     let hash = Hash256::try_from(add_invoice_result.r_hash.as_slice()).expect("valid hash");
 
-    let send_btc_result: SendBTCOrder = call_t!(
+    let send_btc_result: CchOrder = call_t!(
         hub.get_cch_actor(),
         CchMessage::SendBTC,
         CALL_ACTOR_TIMEOUT_MS,
@@ -138,7 +137,10 @@ async fn do_test_cross_chain_payment_hub_send_btc(udt_script: Script, multiple_h
     .expect("send btc actor call")
     .expect("send btc result");
 
-    let fiber_invoice = send_btc_result.fiber_pay_invoice.expect("valid invoice");
+    let fiber_invoice = match send_btc_result.incoming_invoice {
+        CchInvoice::Fiber(fiber_invoice) => fiber_invoice,
+        _ => panic!("expect a fiber invoice"),
+    };
     assert_eq!(fiber_invoice.payment_hash(), &hash);
     assert_eq!(fiber_invoice.hash_algorithm(), Some(&HashAlgorithm::Sha256));
 
@@ -304,7 +306,7 @@ async fn do_test_cross_chain_payment_hub_receive_btc(udt_script: Script, multipl
     let payment_hash = *fiber_invoice.payment_hash();
     fiber_node.insert_invoice(fiber_invoice.clone(), Some(preimage));
 
-    let receive_btc_result: ReceiveBTCOrder = call_t!(
+    let receive_btc_result: CchOrder = call_t!(
         hub.get_cch_actor(),
         CchMessage::ReceiveBTC,
         CALL_ACTOR_TIMEOUT_MS,
@@ -315,8 +317,10 @@ async fn do_test_cross_chain_payment_hub_receive_btc(udt_script: Script, multipl
     .expect("receive btc actor call")
     .expect("receive btc result");
 
-    let lightning_invoice =
-        Bolt11Invoice::from_str(&receive_btc_result.btc_pay_req).expect("valid invoice");
+    let lightning_invoice = match receive_btc_result.incoming_invoice {
+        CchInvoice::Lightning(bolt11) => bolt11,
+        _ => panic!("expected lightning invoice"),
+    };
     assert_eq!(
         payment_hash,
         Hash256::from(lightning_invoice.payment_hash().to_byte_array())

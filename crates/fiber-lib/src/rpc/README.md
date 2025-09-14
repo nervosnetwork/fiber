@@ -17,7 +17,7 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
     * [Module Cch](#module-cch)
         * [Method `send_btc`](#cch-send_btc)
         * [Method `receive_btc`](#cch-receive_btc)
-        * [Method `get_receive_btc_order`](#cch-get_receive_btc_order)
+        * [Method `get_cch_order`](#cch-get_cch_order)
     * [Module Channel](#module-channel)
         * [Method `open_channel`](#channel-open_channel)
         * [Method `accept_channel`](#channel-accept_channel)
@@ -61,6 +61,7 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
 * [RPC Types](#rpc-types)
 
     * [Type `Attribute`](#type-attribute)
+    * [Type `CchInvoice`](#type-cchinvoice)
     * [Type `CchOrderStatus`](#type-cchorderstatus)
     * [Type `Channel`](#type-channel)
     * [Type `ChannelInfo`](#type-channelinfo)
@@ -117,11 +118,10 @@ Send BTC to a address.
 * `timestamp` - <em>`u64`</em>, Seconds since epoch when the order is created
 * `expiry` - <em>`u64`</em>, Seconds after timestamp that the order expires
 * `ckb_final_tlc_expiry_delta` - <em>`u64`</em>, The minimal expiry in seconds of the final TLC in the CKB network
-* `currency` - <em>[Currency](#type-currency)</em>, Request currency
 * `wrapped_btc_type_script` - <em>`ckb_jsonrpc_types::Script`</em>, Wrapped BTC type script
-* `btc_pay_req` - <em>`String`</em>, Payment request for BTC
-* `fiber_pay_invoice` - <em>`String`</em>, Generated invoice for CKB
-* `payment_hash` - <em>`String`</em>, Payment hash for the HTLC for both CKB and BTC.
+* `incoming_invoice` - <em>[CchInvoice](#type-cchinvoice)</em>, Generated invoice for the incoming payment
+* `outgoing_pay_req` - <em>`String`</em>, The final payee to accept the payment. It has the different network with incoming invoice.
+* `payment_hash` - <em>[Hash256](#type-hash256)</em>, Payment hash for the HTLC for both CKB and BTC.
 * `amount_sats` - <em>`u128`</em>, Amount required to pay in Satoshis, including fee
 * `fee_sats` - <em>`u128`</em>, Fee in Satoshis
 * `status` - <em>[CchOrderStatus](#type-cchorderstatus)</em>, Order status
@@ -145,9 +145,10 @@ Receive BTC from a payment hash.
 * `expiry` - <em>`u64`</em>, Seconds after timestamp that the order expires
 * `ckb_final_tlc_expiry_delta` - <em>`u64`</em>, The minimal expiry in seconds of the final TLC in the CKB network
 * `wrapped_btc_type_script` - <em>`ckb_jsonrpc_types::Script`</em>, Wrapped BTC type script
-* `btc_pay_req` - <em>`String`</em>, Payment request for BTC
-* `payment_hash` - <em>`String`</em>, Payment hash for the HTLC for both CKB and BTC.
-* `amount_sats` - <em>`u128`</em>, Amount will be received by the payee
+* `incoming_invoice` - <em>[CchInvoice](#type-cchinvoice)</em>, Generated invoice for the incoming payment
+* `outgoing_pay_req` - <em>`String`</em>, The final payee to accept the payment. It has the different network with incoming invoice.
+* `payment_hash` - <em>[Hash256](#type-hash256)</em>, Payment hash for the HTLC for both CKB and BTC.
+* `amount_sats` - <em>`u128`</em>, Amount required to pay in Satoshis, including fee
 * `fee_sats` - <em>`u128`</em>, Fee in Satoshis
 * `status` - <em>[CchOrderStatus](#type-cchorderstatus)</em>, Order status
 
@@ -155,14 +156,14 @@ Receive BTC from a payment hash.
 
 
 
-<a id="cch-get_receive_btc_order"></a>
-#### Method `get_receive_btc_order`
+<a id="cch-get_cch_order"></a>
+#### Method `get_cch_order`
 
 Get receive BTC order by payment hash.
 
 ##### Params
 
-* `payment_hash` - <em>`String`</em>, Payment hash for the HTLC for both CKB and BTC.
+* `payment_hash` - <em>[Hash256](#type-hash256)</em>, Payment hash for the HTLC for both CKB and BTC.
 
 ##### Returns
 
@@ -170,9 +171,10 @@ Get receive BTC order by payment hash.
 * `expiry` - <em>`u64`</em>, Seconds after timestamp that the order expires
 * `ckb_final_tlc_expiry_delta` - <em>`u64`</em>, The minimal expiry in seconds of the final TLC in the CKB network
 * `wrapped_btc_type_script` - <em>`ckb_jsonrpc_types::Script`</em>, Wrapped BTC type script
-* `btc_pay_req` - <em>`String`</em>, Payment request for BTC
-* `payment_hash` - <em>`String`</em>, Payment hash for the HTLC for both CKB and BTC.
-* `amount_sats` - <em>`u128`</em>, Amount will be received by the payee
+* `incoming_invoice` - <em>[CchInvoice](#type-cchinvoice)</em>, Generated invoice for the incoming payment
+* `outgoing_pay_req` - <em>`String`</em>, The final payee to accept the payment. It has the different network with incoming invoice.
+* `payment_hash` - <em>[Hash256](#type-hash256)</em>, Payment hash for the HTLC for both CKB and BTC.
+* `amount_sats` - <em>`u128`</em>, Amount required to pay in Satoshis, including fee
 * `fee_sats` - <em>`u128`</em>, Fee in Satoshis
 * `status` - <em>[CchOrderStatus](#type-cchorderstatus)</em>, Order status
 
@@ -1006,6 +1008,24 @@ The attributes of the invoice
 * `PaymentSecret` - <em>[Hash256](#type-hash256)</em>, The payment secret of the invoice
 ---
 
+<a id="#type-cchinvoice"></a>
+### Type `CchInvoice`
+
+The generated proxy invoice for the incoming payment.
+
+ The JSON representation:
+
+ ```text
+ { "Fiber": String } | { "Lightning": String }
+ ```
+
+
+#### Enum with values of
+
+* `Fiber` - <em>[CkbInvoice](#type-ckbinvoice)</em>, Fiber invoice that once paid, the hub will send the outgoing payment to Lightning
+* `Lightning` - <em>`Bolt11Invoice`</em>, Lightning invoice that once paid, the hub will send the outgoing payment to Fiber
+---
+
 <a id="#type-cchorderstatus"></a>
 ### Type `CchOrderStatus`
 
@@ -1015,9 +1035,10 @@ The status of a cross-chain hub order, will update as the order progresses.
 #### Enum with values of
 
 * `Pending` - Order is created and has not send out payments yet.
-* `Accepted` - HTLC in the first half is accepted.
-* `InFlight` - There's an outgoing payment in flight for the second half.
-* `Succeeded` - Order is settled.
+* `IncomingAccepted` - HTLC in the incoming payment is accepted.
+* `OutgoingInFlight` - There's an outgoing payment in flight.
+* `OutgoingSettled` - The outgoing payment is settled.
+* `Succeeded` - Both payments are settled and the order succeeds.
 * `Failed` - Order is failed.
 ---
 
