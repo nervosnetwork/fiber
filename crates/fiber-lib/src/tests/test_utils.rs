@@ -1,5 +1,7 @@
 #[cfg(not(target_arch = "wasm32"))]
-use crate::cch::{tests::lnd_test_utils::LndNode, CchMessage};
+use crate::cch::{
+    start_cch, tests::lnd_test_utils::LndNode, CchArgs, CchConfig, CchMessage, CchOrderStore,
+};
 use crate::ckb::tests::test_utils::get_tx_from_hash;
 use crate::ckb::tests::test_utils::MockChainActorMiddleware;
 use crate::ckb::CkbConfig;
@@ -44,8 +46,6 @@ use crate::{
     tasks::{new_tokio_cancellation_token, new_tokio_task_tracker},
     FiberConfig, NetworkServiceEvent,
 };
-#[cfg(not(target_arch = "wasm32"))]
-use crate::{start_cch, CchConfig};
 
 use ckb_sdk::core::TransactionBuilder;
 use ckb_types::core::FeeRate;
@@ -269,11 +269,12 @@ pub struct Cch {
 
 #[cfg(not(target_arch = "wasm32"))]
 impl Cch {
-    pub async fn start(
+    pub async fn start<S: CchOrderStore + Send + Sync + 'static>(
         config: CchConfig,
         should_start_lnd: bool,
         network_actor: ActorRef<NetworkActorMessage>,
         pubkey: Pubkey,
+        store: S,
     ) -> Self {
         let (config, lnd_node) = if should_start_lnd {
             let lnd_node = LndNode::new(Default::default(), Default::default()).await;
@@ -286,13 +287,17 @@ impl Cch {
         } else {
             (config, None)
         };
+        let root_actor = network_actor.get_cell();
         let actor = start_cch(
-            config.clone(),
-            new_tokio_task_tracker(),
-            new_tokio_cancellation_token(),
-            network_actor.get_cell(),
-            network_actor,
-            pubkey,
+            CchArgs {
+                config: config.clone(),
+                tracker: new_tokio_task_tracker(),
+                token: new_tokio_cancellation_token(),
+                network_actor,
+                pubkey,
+                store,
+            },
+            root_actor,
         )
         .await
         .expect("start cch actor");
@@ -1530,7 +1535,14 @@ impl NetworkNode {
         #[cfg(not(target_arch = "wasm32"))]
         let cch = match cch_config {
             Some(config) => {
-                let cch = Cch::start(config, should_start_lnd, network_actor.clone(), pubkey).await;
+                let cch = Cch::start(
+                    config,
+                    should_start_lnd,
+                    network_actor.clone(),
+                    pubkey,
+                    store.clone(),
+                )
+                .await;
                 store.subscribe(Box::new(cch.actor.clone()));
                 Some(cch)
             }

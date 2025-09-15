@@ -29,6 +29,22 @@ pub enum CchOrderStatus {
     Failed = 5,
 }
 
+impl CchOrderStatus {
+    /// An active order is neither succeeded nor failed.
+    ///
+    /// Active orders require further actions.
+    pub fn is_active(&self) -> bool {
+        !self.is_inactive()
+    }
+
+    /// An inactive order is either succeeded or failed.
+    ///
+    /// Inactive orders do not require further actions.
+    pub fn is_inactive(&self) -> bool {
+        matches!(self, CchOrderStatus::Succeeded | CchOrderStatus::Failed)
+    }
+}
+
 /// lnd payment is the outgoing part of SendBTCOrder
 impl From<lnrpc::payment::PaymentStatus> for CchOrderStatus {
     fn from(status: lnrpc::payment::PaymentStatus) -> Self {

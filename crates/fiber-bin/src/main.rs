@@ -21,7 +21,7 @@ use fnn::tasks::{
 use fnn::watchtower::{
     WatchtowerActor, WatchtowerMessage, DEFAULT_WATCHTOWER_CHECK_INTERVAL_SECONDS,
 };
-use fnn::{start_cch, start_network, Config, NetworkServiceEvent};
+use fnn::{start_cch, start_network, CchArgs, Config, NetworkServiceEvent};
 use jsonrpsee::http_client::HttpClientBuilder;
 use jsonrpsee::ws_client::{HeaderMap, HeaderValue};
 use ractor::{Actor, ActorRef};
@@ -307,14 +307,17 @@ pub async fn main() -> Result<(), ExitMessage> {
             info!("Starting cch");
             let ignore_startup_failure = cch_config.ignore_startup_failure;
             match start_cch(
-                cch_config,
-                new_tokio_task_tracker(),
-                new_tokio_cancellation_token(),
+                CchArgs {
+                    config: cch_config,
+                    tracker: new_tokio_task_tracker(),
+                    token: new_tokio_cancellation_token(),
+                    network_actor: network_actor
+                        .clone()
+                        .expect("Cch service requires network actor"),
+                    pubkey: node_public_key.expect("Cch service requires node public key"),
+                    store: store.clone(),
+                },
                 root_actor.get_cell(),
-                network_actor
-                    .clone()
-                    .expect("Cch service requires network actor"),
-                node_public_key.expect("Cch service requires node public key"),
             )
             .await
             {

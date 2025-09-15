@@ -5,6 +5,7 @@ use super::{InvoiceUpdatedPayload, PaymentUpdatedPayload, StorePublisher, StoreU
 #[cfg(feature = "watchtower")]
 use crate::watchtower::{WatchtowerStore, WatchtowerStoreDeref};
 use crate::{
+    cch::{CchOrderStore, CchOrderStoreDeref},
     fiber::{
         channel::{ChannelActorStateStore, ChannelActorStateStoreDeref},
         gossip::{GossipMessageStore, GossipMessageStoreDeref},
@@ -295,6 +296,14 @@ impl<T: GossipMessageStore> GossipMessageStoreDeref for StoreWithPubSub<T> {
     type Target = T;
 
     fn gossip_message_store_deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl<T: CchOrderStore> CchOrderStoreDeref for StoreWithPubSub<T> {
+    type Target = T;
+
+    fn cch_order_store_deref(&self) -> &Self::Target {
         &self.inner
     }
 }

@@ -14,6 +14,7 @@ use serde::Deserialize;
 use crate::fiber::hash_algorithm::HashAlgorithm;
 use crate::fiber::payment::PaymentStatus;
 use crate::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::marker::PhantomData;
 use std::str::FromStr;
 use tokio::{select, time::sleep};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
@@ -27,24 +28,21 @@ use crate::store::pub_sub::{
     StoreUpdatedEvent,
 };
 
-use super::error::CchDbError;
-use super::{CchConfig, CchError, CchInvoice, CchOrder, CchOrderStatus, CchOrdersDb};
+use super::{
+    CchConfig, CchError, CchInvoice, CchOrder, CchOrderStatus, CchOrderStore, CchStoreError,
+};
 
 pub const BTC_PAYMENT_TIMEOUT_SECONDS: i32 = 60;
 pub const DEFAULT_ORDER_EXPIRY_SECONDS: u64 = 86400; // 24 hours
 
-pub async fn start_cch(
-    config: CchConfig,
-    tracker: TaskTracker,
-    token: CancellationToken,
+pub async fn start_cch<S: CchOrderStore + Send + Sync + 'static>(
+    args: CchArgs<S>,
     root_actor: ActorCell,
-    network_actor: ActorRef<NetworkActorMessage>,
-    pubkey: Pubkey,
 ) -> Result<ActorRef<CchMessage>> {
     let (actor, _handle) = Actor::spawn_linked(
         Some("cch actor".to_string()),
-        CchActor::new(config, tracker, token, network_actor, pubkey),
-        (),
+        CchActor::default(),
+        args,
         root_actor,
     )
     .await?;
@@ -125,41 +123,65 @@ impl LndConnectionInfo {
     }
 }
 
-pub struct CchActor {
+pub struct CchActor<S>(PhantomData<S>);
+
+impl<S> Default for CchActor<S> {
+    fn default() -> Self {
+        Self(PhantomData)
+    }
+}
+
+pub struct CchArgs<S> {
+    pub config: CchConfig,
+    pub tracker: TaskTracker,
+    pub token: CancellationToken,
+    pub network_actor: ActorRef<NetworkActorMessage>,
+    pub pubkey: Pubkey,
+    pub store: S,
+}
+
+pub struct CchState<S> {
     config: CchConfig,
     tracker: TaskTracker,
     token: CancellationToken,
     network_actor: ActorRef<NetworkActorMessage>,
     pubkey: Pubkey,
+    store: S,
+    lnd_connection: LndConnectionInfo,
 }
 
-pub struct CchState {
-    lnd_connection: LndConnectionInfo,
-    orders_db: CchOrdersDb,
-}
-#[cfg_attr(target_arch="wasm32",async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-impl Actor for CchActor {
+#[async_trait::async_trait]
+impl<S: CchOrderStore + Send + Sync + 'static> Actor for CchActor<S> {
     type Msg = CchMessage;
-    type State = CchState;
-    type Arguments = ();
+    type State = CchState<S>;
+    type Arguments = CchArgs<S>;
 
     async fn pre_start(
         &self,
         myself: ActorRef<Self::Msg>,
-        _config: Self::Arguments,
+        args: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
-        let lnd_connection = self.config.get_lnd_connection_info().await?;
+        let lnd_connection = args.config.get_lnd_connection_info().await?;
+        let state = CchState {
+            config: args.config,
+            tracker: args.tracker,
+            token: args.token,
+            network_actor: args.network_actor,
+            pubkey: args.pubkey,
+            store: args.store,
+            lnd_connection,
+        };
 
-        let payments_tracker =
-            LndPaymentsTracker::new(myself.clone(), lnd_connection.clone(), self.token.clone());
-        self.tracker
+        let payments_tracker = LndPaymentsTracker::new(
+            myself.clone(),
+            state.lnd_connection.clone(),
+            state.token.clone(),
+        );
+        state
+            .tracker
             .spawn(async move { payments_tracker.run().await });
 
-        Ok(CchState {
-            lnd_connection,
-            orders_db: Default::default(),
-        })
+        Ok(state)
     }
 
     async fn handle(
@@ -170,7 +192,7 @@ impl Actor for CchActor {
     ) -> Result<(), ActorProcessingErr> {
         match message {
             CchMessage::SendBTC(send_btc, port) => {
-                let result = self.send_btc(state, send_btc).await;
+                let result = state.send_btc(send_btc).await;
                 if !port.is_closed() {
                     // ignore error
                     let _ = port.send(result);
@@ -178,7 +200,7 @@ impl Actor for CchActor {
                 Ok(())
             }
             CchMessage::ReceiveBTC(receive_btc, port) => {
-                let result = self.receive_btc(myself, state, receive_btc).await;
+                let result = state.receive_btc(myself, receive_btc).await;
                 if !port.is_closed() {
                     // ignore error
                     let _ = port.send(result);
@@ -186,11 +208,7 @@ impl Actor for CchActor {
                 Ok(())
             }
             CchMessage::GetCchOrder(payment_hash, port) => {
-                let result = state
-                    .orders_db
-                    .get_order(&payment_hash)
-                    .await
-                    .map_err(Into::into);
+                let result = state.store.get_cch_order(&payment_hash).map_err(Into::into);
                 if !port.is_closed() {
                     // ignore error
                     let _ = port.send(result);
@@ -199,14 +217,14 @@ impl Actor for CchActor {
             }
             CchMessage::SettleSendBTCOrder(event) => {
                 tracing::debug!("settle_send_btc_order {:?}", event);
-                if let Err(err) = self.settle_send_btc_order(state, event).await {
+                if let Err(err) = state.settle_send_btc_order(event).await {
                     tracing::error!("settle_send_btc_order failed: {}", err);
                 }
                 Ok(())
             }
             CchMessage::SettleReceiveBTCOrder(event) => {
                 tracing::debug!("settle_receive_btc_order {:?}", event);
-                if let Err(err) = self.settle_receive_btc_order(state, event).await {
+                if let Err(err) = state.settle_receive_btc_order(event).await {
                     tracing::error!("settle_receive_btc_order failed: {}", err);
                 }
                 Ok(())
@@ -216,7 +234,7 @@ impl Actor for CchActor {
                     store_updated_event = ?event,
                     "Cch actor received store updated event"
                 );
-                if let Err(err) = self.handle_store_updated_event(state, event).await {
+                if let Err(err) = state.handle_store_updated_event(event).await {
                     tracing::error!("handle_store_updated_event failed: {}", err);
                 }
                 Ok(())
@@ -225,28 +243,8 @@ impl Actor for CchActor {
     }
 }
 
-impl CchActor {
-    pub fn new(
-        config: CchConfig,
-        tracker: TaskTracker,
-        token: CancellationToken,
-        network_actor: ActorRef<NetworkActorMessage>,
-        pubkey: Pubkey,
-    ) -> Self {
-        Self {
-            config,
-            tracker,
-            token,
-            network_actor,
-            pubkey,
-        }
-    }
-
-    async fn send_btc(
-        &self,
-        state: &mut CchState,
-        send_btc: SendBTC,
-    ) -> Result<CchOrder, CchError> {
+impl<S: CchOrderStore + Send + Sync + 'static> CchState<S> {
+    async fn send_btc(&self, send_btc: SendBTC) -> Result<CchOrder, CchError> {
         let duration_since_epoch = SystemTime::now().duration_since(UNIX_EPOCH)?;
 
         let invoice = Bolt11Invoice::from_str(&send_btc.btc_pay_req)?;
@@ -300,23 +298,19 @@ impl CchActor {
 
         call!(&self.network_actor, message).expect("call actor")?;
 
-        state.orders_db.insert_order(order.clone()).await?;
+        self.store.insert_cch_order(order.clone())?;
 
         Ok(order)
     }
 
-    async fn handle_store_updated_event(
-        &self,
-        state: &mut CchState,
-        event: StoreUpdatedEvent,
-    ) -> Result<()> {
+    async fn handle_store_updated_event(&self, event: StoreUpdatedEvent) -> Result<()> {
         match event {
             StoreUpdatedEvent::InvoiceUpdated(invoice_updated_event) => {
-                self.handle_invoice_updated_event(state, invoice_updated_event)
+                self.handle_invoice_updated_event(invoice_updated_event)
                     .await?;
             }
             StoreUpdatedEvent::PaymentUpdated(payment_updated_event) => {
-                self.handle_payment_updated_event(state, payment_updated_event)
+                self.handle_payment_updated_event(payment_updated_event)
                     .await?;
             }
         }
@@ -324,11 +318,7 @@ impl CchActor {
     }
 
     // On receiving new TLC, check whether it matches the SendBTC order
-    async fn handle_invoice_updated_event(
-        &self,
-        state: &mut CchState,
-        event: InvoiceUpdatedEvent,
-    ) -> Result<()> {
+    async fn handle_invoice_updated_event(&self, event: InvoiceUpdatedEvent) -> Result<()> {
         if !matches!(
             event.payload,
             InvoiceUpdatedPayload::Received {
@@ -342,8 +332,8 @@ impl CchActor {
         let payment_hash = event.invoice_hash;
         tracing::debug!("[inbounding tlc] payment hash: {}", payment_hash);
 
-        let mut order = match state.orders_db.get_order(&payment_hash).await {
-            Err(CchDbError::NotFound(_)) => return Ok(()),
+        let mut order = match self.store.get_cch_order(&payment_hash) {
+            Err(CchStoreError::NotFound(_)) => return Ok(()),
             Err(err) => return Err(err.into()),
             Ok(order) if order.is_from_fiber_to_lightning() => order,
             // ignore if the order is not from fiber to lightning
@@ -355,7 +345,7 @@ impl CchActor {
         }
 
         order.status = CchOrderStatus::IncomingAccepted;
-        state.orders_db.update_order(order.clone()).await?;
+        self.store.update_cch_order(order.clone());
 
         let req = routerrpc::SendPaymentRequest {
             payment_request: order.outgoing_pay_req.clone(),
@@ -364,7 +354,7 @@ impl CchActor {
         };
         tracing::debug!("[inbounding tlc] SendPaymentRequest: {:?}", req);
 
-        let mut client = state.lnd_connection.create_router_client().await?;
+        let mut client = self.lnd_connection.create_router_client().await?;
         // TODO: set a fee
         let mut stream = client.send_payment_v2(req).await?.into_inner();
         // Wait for the first message then quit
@@ -374,9 +364,7 @@ impl CchActor {
                 if let Some(Ok(payment)) = payment_result_opt {
                     // TODO: the payment result here may indicate a failure, we need to handle it
                     order.status = lnrpc::payment::PaymentStatus::try_from(payment.status)?.into();
-                    state.orders_db
-                        .update_order(order)
-                        .await?;
+                    self.store.update_cch_order(order);
                 }
             }
             _ = self.token.cancelled() => {
@@ -388,16 +376,12 @@ impl CchActor {
         Ok(())
     }
 
-    async fn handle_payment_updated_event(
-        &self,
-        state: &mut CchState,
-        event: PaymentUpdatedEvent,
-    ) -> Result<()> {
+    async fn handle_payment_updated_event(&self, event: PaymentUpdatedEvent) -> Result<()> {
         let payment_hash = event.payment_hash;
         tracing::debug!("[settled tlc] payment hash: {:#x}", payment_hash);
 
-        let mut order = match state.orders_db.get_order(&payment_hash).await {
-            Err(CchDbError::NotFound(_)) => return Ok(()),
+        let mut order = match self.store.get_cch_order(&payment_hash) {
+            Err(CchStoreError::NotFound(_)) => return Ok(()),
             Err(err) => return Err(err.into()),
             // ignore if the order is from fiber to lightning
             Ok(order) if order.is_from_fiber_to_lightning() => return Ok(()),
@@ -419,7 +403,7 @@ impl CchActor {
         tracing::debug!("[settled tlc] preimage: {:#x}", preimage);
         order.status = CchOrderStatus::OutgoingSettled;
         order.payment_preimage = Some(preimage);
-        state.orders_db.update_order(order.clone()).await?;
+        self.store.update_cch_order(order.clone());
 
         // settle the lnd invoice
         let req = invoicesrpc::SettleInvoiceMsg {
@@ -427,26 +411,22 @@ impl CchActor {
         };
         tracing::debug!("[settled tlc] SettleInvoiceMsg: {:?}", req);
 
-        let mut client = state.lnd_connection.create_invoices_client().await?;
+        let mut client = self.lnd_connection.create_invoices_client().await?;
         // TODO: set a fee
         let resp = client.settle_invoice(req).await?.into_inner();
         tracing::debug!("[settled tlc] SettleInvoiceResp: {:?}", resp);
 
         order.status = CchOrderStatus::Succeeded;
-        state.orders_db.update_order(order).await?;
+        self.store.update_cch_order(order);
 
         Ok(())
     }
 
-    async fn settle_send_btc_order(
-        &self,
-        state: &mut CchState,
-        event: SettleSendBTCOrderEvent,
-    ) -> Result<()> {
+    async fn settle_send_btc_order(&self, event: SettleSendBTCOrderEvent) -> Result<()> {
         let payment_hash = event.payment_hash;
 
-        let mut order = match state.orders_db.get_order(&payment_hash).await {
-            Err(CchDbError::NotFound(_)) => return Ok(()),
+        let mut order = match self.store.get_cch_order(&payment_hash) {
+            Err(CchStoreError::NotFound(_)) => return Ok(()),
             Err(err) => return Err(err.into()),
             Ok(order) if !order.is_from_fiber_to_lightning() => return Ok(()),
             Ok(order) => order,
@@ -461,7 +441,7 @@ impl CchActor {
             );
             order.payment_preimage = Some(preimage);
             // Save preimage incase we need to retry settling the invoice
-            state.orders_db.update_order(order.clone()).await?;
+            self.store.update_cch_order(order.clone());
 
             let message = move |rpc_reply| -> NetworkActorMessage {
                 NetworkActorMessage::Command(NetworkActorCommand::SettleInvoice(
@@ -477,7 +457,7 @@ impl CchActor {
             order.status = CchOrderStatus::Succeeded;
         }
 
-        state.orders_db.update_order(order).await?;
+        self.store.update_cch_order(order);
 
         Ok(())
     }
@@ -485,7 +465,6 @@ impl CchActor {
     async fn receive_btc(
         &self,
         myself: ActorRef<CchMessage>,
-        state: &mut CchState,
         receive_btc: ReceiveBTC,
     ) -> Result<CchOrder, CchError> {
         let invoice = CkbInvoice::from_str(&receive_btc.fiber_pay_req)?;
@@ -504,7 +483,7 @@ impl CchActor {
             return Err(CchError::ReceiveBTCOrderAmountTooLarge);
         }
 
-        let mut client = state.lnd_connection.create_invoices_client().await?;
+        let mut client = self.lnd_connection.create_invoices_client().await?;
         let req = invoicesrpc::AddHoldInvoiceRequest {
             hash: payment_hash.into(),
             value_msat: (amount_sats * 1_000u128) as i64,
@@ -535,12 +514,12 @@ impl CchActor {
             wrapped_btc_type_script,
         };
 
-        state.orders_db.insert_order(order.clone()).await?;
+        self.store.insert_cch_order(order.clone())?;
 
         let invoice_tracker = LndInvoiceTracker::new(
             myself,
             payment_hash,
-            state.lnd_connection.clone(),
+            self.lnd_connection.clone(),
             self.token.clone(),
         );
         self.tracker
@@ -549,13 +528,9 @@ impl CchActor {
         Ok(order)
     }
 
-    async fn settle_receive_btc_order(
-        &self,
-        state: &mut CchState,
-        event: SettleReceiveBTCOrderEvent,
-    ) -> Result<()> {
-        let mut order = match state.orders_db.get_order(&event.payment_hash).await {
-            Err(CchDbError::NotFound(_)) => return Ok(()),
+    async fn settle_receive_btc_order(&self, event: SettleReceiveBTCOrderEvent) -> Result<()> {
+        let mut order = match self.store.get_cch_order(&event.payment_hash) {
+            Err(CchStoreError::NotFound(_)) => return Ok(()),
             Err(err) => return Err(err.into()),
             Ok(order) if order.is_from_fiber_to_lightning() => return Ok(()),
             Ok(order) => order,
@@ -590,7 +565,7 @@ impl CchActor {
             }
         }
 
-        state.orders_db.update_order(order.clone()).await?;
+        self.store.update_cch_order(order.clone());
         Ok(())
     }
 }

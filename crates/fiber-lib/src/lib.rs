@@ -15,7 +15,7 @@ pub use fiber::{start_network, FiberConfig, NetworkServiceEvent};
 #[cfg(not(target_arch = "wasm32"))]
 pub mod cch;
 #[cfg(not(target_arch = "wasm32"))]
-pub use cch::{start_cch, CchActor, CchConfig};
+pub use cch::{start_cch, CchActor, CchArgs, CchConfig};
 
 pub mod invoice;
 pub mod rpc;

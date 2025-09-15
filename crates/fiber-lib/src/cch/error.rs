@@ -4,7 +4,7 @@ use jsonrpsee::types::{error::CALL_EXECUTION_FAILED_CODE, ErrorObjectOwned};
 use thiserror::Error;
 
 #[derive(Error, Debug)]
-pub enum CchDbError {
+pub enum CchStoreError {
     #[error("Inserting duplicated key: {0}")]
     Duplicated(Hash256),
 
@@ -14,8 +14,8 @@ pub enum CchDbError {
 
 #[derive(Error, Debug)]
 pub enum CchError {
-    #[error("Database error: {0}")]
-    DbError(#[from] CchDbError),
+    #[error("Store error: {0}")]
+    StoreError(#[from] CchStoreError),
     #[error("BTC invoice parse error: {0}")]
     BTCInvoiceParseError(#[from] lightning_invoice::ParseOrSemanticError),
     #[error("BTC invoice expired")]
