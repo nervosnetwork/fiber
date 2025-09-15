@@ -14,9 +14,10 @@ pub trait CchOrderStore {
     fn insert_cch_order(&self, order: CchOrder) -> Result<(), CchStoreError>;
 
     /// Inserts or updates an order.
-    ///
-    /// Inserts
     fn update_cch_order(&self, order: CchOrder);
+
+    /// Deletes an order by payment hash.
+    fn delete_cch_order(&self, payment_hash: &Hash256);
 
     /// Get an iterator to list keys of all orders.
     fn get_cch_order_keys_iter(&self) -> impl IntoIterator<Item = Hash256>;
@@ -44,5 +45,9 @@ impl<T: CchOrderStoreDeref> CchOrderStore for T {
     /// Get an iterator to list keys of all orders.
     fn get_cch_order_keys_iter(&self) -> impl IntoIterator<Item = Hash256> {
         self.cch_order_store_deref().get_cch_order_keys_iter()
+    }
+
+    fn delete_cch_order(&self, payment_hash: &Hash256) {
+        self.cch_order_store_deref().delete_cch_order(payment_hash);
     }
 }

@@ -16,5 +16,7 @@ pub use order::{CchInvoice, CchOrder, CchOrderStatus};
 mod order_store;
 pub use order_store::{CchOrderStore, CchOrderStoreDeref};
 
+mod order_guard;
+
 #[cfg(any(test, feature = "bench"))]
 pub mod tests;

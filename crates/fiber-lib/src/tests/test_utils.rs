@@ -269,7 +269,7 @@ pub struct Cch {
 
 #[cfg(not(target_arch = "wasm32"))]
 impl Cch {
-    pub async fn start<S: CchOrderStore + Send + Sync + 'static>(
+    pub async fn start<S: CchOrderStore + Clone + Send + Sync + 'static>(
         config: CchConfig,
         should_start_lnd: bool,
         network_actor: ActorRef<NetworkActorMessage>,

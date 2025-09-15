@@ -29,13 +29,17 @@ use crate::store::pub_sub::{
 };
 
 use super::{
+    order_guard::{
+        CchOrderGuardActor, CchOrderGuardArgs, CchOrderGuardEvent, CchOrderGuardMessage,
+    },
     CchConfig, CchError, CchInvoice, CchOrder, CchOrderStatus, CchOrderStore, CchStoreError,
 };
 
 pub const BTC_PAYMENT_TIMEOUT_SECONDS: i32 = 60;
 pub const DEFAULT_ORDER_EXPIRY_SECONDS: u64 = 86400; // 24 hours
+pub const ORDER_PURGE_TTL: u64 = 86400 * 14; // 14 days
 
-pub async fn start_cch<S: CchOrderStore + Send + Sync + 'static>(
+pub async fn start_cch<S: CchOrderStore + Clone + Send + Sync + 'static>(
     args: CchArgs<S>,
     root_actor: ActorCell,
 ) -> Result<ActorRef<CchMessage>> {
@@ -84,11 +88,31 @@ pub enum CchMessage {
     SettleReceiveBTCOrder(SettleReceiveBTCOrderEvent),
 
     StoreUpdatedEvent(StoreUpdatedEvent),
+
+    /// Try the next action to move forward the order
+    StepOrder(CchOrder),
 }
 
 impl From<StoreUpdatedEvent> for CchMessage {
     fn from(event: StoreUpdatedEvent) -> Self {
         CchMessage::StoreUpdatedEvent(event)
+    }
+}
+
+impl From<CchOrderGuardEvent> for CchMessage {
+    fn from(event: CchOrderGuardEvent) -> Self {
+        match event {
+            CchOrderGuardEvent::OrderLoaded(order) => CchMessage::StepOrder(order),
+        }
+    }
+}
+impl TryFrom<CchMessage> for CchOrderGuardEvent {
+    type Error = String;
+    fn try_from(message: CchMessage) -> Result<Self, Self::Error> {
+        match message {
+            CchMessage::StepOrder(order) => Ok(CchOrderGuardEvent::OrderLoaded(order)),
+            _ => Err("Message has invalid type".to_string()),
+        }
     }
 }
 
@@ -148,10 +172,11 @@ pub struct CchState<S> {
     pubkey: Pubkey,
     store: S,
     lnd_connection: LndConnectionInfo,
+    order_guard: ActorRef<CchOrderGuardMessage>,
 }
 
 #[async_trait::async_trait]
-impl<S: CchOrderStore + Send + Sync + 'static> Actor for CchActor<S> {
+impl<S: CchOrderStore + Clone + Send + Sync + 'static> Actor for CchActor<S> {
     type Msg = CchMessage;
     type State = CchState<S>;
     type Arguments = CchArgs<S>;
@@ -162,6 +187,17 @@ impl<S: CchOrderStore + Send + Sync + 'static> Actor for CchActor<S> {
         args: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
         let lnd_connection = args.config.get_lnd_connection_info().await?;
+        let (order_guard, _) = Actor::spawn_linked(
+            None,
+            CchOrderGuardActor::default(),
+            CchOrderGuardArgs {
+                watcher: myself.get_derived(),
+                purge_ttl: ORDER_PURGE_TTL,
+                store: args.store.clone(),
+            },
+            myself.get_cell(),
+        )
+        .await?;
         let state = CchState {
             config: args.config,
             tracker: args.tracker,
@@ -170,6 +206,7 @@ impl<S: CchOrderStore + Send + Sync + 'static> Actor for CchActor<S> {
             pubkey: args.pubkey,
             store: args.store,
             lnd_connection,
+            order_guard,
         };
 
         let payments_tracker = LndPaymentsTracker::new(
@@ -192,7 +229,7 @@ impl<S: CchOrderStore + Send + Sync + 'static> Actor for CchActor<S> {
     ) -> Result<(), ActorProcessingErr> {
         match message {
             CchMessage::SendBTC(send_btc, port) => {
-                let result = state.send_btc(send_btc).await;
+                let result = state.send_btc(myself, send_btc).await;
                 if !port.is_closed() {
                     // ignore error
                     let _ = port.send(result);
@@ -217,14 +254,14 @@ impl<S: CchOrderStore + Send + Sync + 'static> Actor for CchActor<S> {
             }
             CchMessage::SettleSendBTCOrder(event) => {
                 tracing::debug!("settle_send_btc_order {:?}", event);
-                if let Err(err) = state.settle_send_btc_order(event).await {
+                if let Err(err) = state.settle_send_btc_order(myself, event).await {
                     tracing::error!("settle_send_btc_order failed: {}", err);
                 }
                 Ok(())
             }
             CchMessage::SettleReceiveBTCOrder(event) => {
                 tracing::debug!("settle_receive_btc_order {:?}", event);
-                if let Err(err) = state.settle_receive_btc_order(event).await {
+                if let Err(err) = state.settle_receive_btc_order(myself, event).await {
                     tracing::error!("settle_receive_btc_order failed: {}", err);
                 }
                 Ok(())
@@ -234,8 +271,16 @@ impl<S: CchOrderStore + Send + Sync + 'static> Actor for CchActor<S> {
                     store_updated_event = ?event,
                     "Cch actor received store updated event"
                 );
-                if let Err(err) = state.handle_store_updated_event(event).await {
+                if let Err(err) = state.handle_store_updated_event(myself, event).await {
                     tracing::error!("handle_store_updated_event failed: {}", err);
+                }
+                Ok(())
+            }
+            CchMessage::StepOrder(order) => {
+                if let Err(err) = state.step_order(myself.clone(), &order).await {
+                    tracing::error!("failed to step order: {}, order={:?}", err, order);
+                    // Retry later
+                    myself.send_after(Duration::from_secs(10), || CchMessage::StepOrder(order));
                 }
                 Ok(())
             }
@@ -244,7 +289,11 @@ impl<S: CchOrderStore + Send + Sync + 'static> Actor for CchActor<S> {
 }
 
 impl<S: CchOrderStore + Send + Sync + 'static> CchState<S> {
-    async fn send_btc(&self, send_btc: SendBTC) -> Result<CchOrder, CchError> {
+    async fn send_btc(
+        &self,
+        myself: ActorRef<CchMessage>,
+        send_btc: SendBTC,
+    ) -> Result<CchOrder, CchError> {
         let duration_since_epoch = SystemTime::now().duration_since(UNIX_EPOCH)?;
 
         let invoice = Bolt11Invoice::from_str(&send_btc.btc_pay_req)?;
@@ -299,18 +348,22 @@ impl<S: CchOrderStore + Send + Sync + 'static> CchState<S> {
         call!(&self.network_actor, message).expect("call actor")?;
 
         self.store.insert_cch_order(order.clone())?;
-
+        self.step_order(myself, &order).await?;
         Ok(order)
     }
 
-    async fn handle_store_updated_event(&self, event: StoreUpdatedEvent) -> Result<()> {
+    async fn handle_store_updated_event(
+        &self,
+        myself: ActorRef<CchMessage>,
+        event: StoreUpdatedEvent,
+    ) -> Result<()> {
         match event {
             StoreUpdatedEvent::InvoiceUpdated(invoice_updated_event) => {
-                self.handle_invoice_updated_event(invoice_updated_event)
+                self.handle_invoice_updated_event(myself, invoice_updated_event)
                     .await?;
             }
             StoreUpdatedEvent::PaymentUpdated(payment_updated_event) => {
-                self.handle_payment_updated_event(payment_updated_event)
+                self.handle_payment_updated_event(myself, payment_updated_event)
                     .await?;
             }
         }
@@ -318,7 +371,11 @@ impl<S: CchOrderStore + Send + Sync + 'static> CchState<S> {
     }
 
     // On receiving new TLC, check whether it matches the SendBTC order
-    async fn handle_invoice_updated_event(&self, event: InvoiceUpdatedEvent) -> Result<()> {
+    async fn handle_invoice_updated_event(
+        &self,
+        myself: ActorRef<CchMessage>,
+        event: InvoiceUpdatedEvent,
+    ) -> Result<()> {
         if !matches!(
             event.payload,
             InvoiceUpdatedPayload::Received {
@@ -345,38 +402,16 @@ impl<S: CchOrderStore + Send + Sync + 'static> CchState<S> {
         }
 
         order.status = CchOrderStatus::IncomingAccepted;
-        self.store.update_cch_order(order.clone());
-
-        let req = routerrpc::SendPaymentRequest {
-            payment_request: order.outgoing_pay_req.clone(),
-            timeout_seconds: BTC_PAYMENT_TIMEOUT_SECONDS,
-            ..Default::default()
-        };
-        tracing::debug!("[inbounding tlc] SendPaymentRequest: {:?}", req);
-
-        let mut client = self.lnd_connection.create_router_client().await?;
-        // TODO: set a fee
-        let mut stream = client.send_payment_v2(req).await?.into_inner();
-        // Wait for the first message then quit
-        select! {
-            payment_result_opt = stream.next() => {
-                tracing::debug!("[inbounding tlc] payment result: {:?}", payment_result_opt);
-                if let Some(Ok(payment)) = payment_result_opt {
-                    // TODO: the payment result here may indicate a failure, we need to handle it
-                    order.status = lnrpc::payment::PaymentStatus::try_from(payment.status)?.into();
-                    self.store.update_cch_order(order);
-                }
-            }
-            _ = self.token.cancelled() => {
-                tracing::debug!("Cancellation received, shutting down cch service");
-                return Ok(());
-            }
-        }
-
+        self.update_cch_order(order.clone());
+        self.step_order(myself, &order).await?;
         Ok(())
     }
 
-    async fn handle_payment_updated_event(&self, event: PaymentUpdatedEvent) -> Result<()> {
+    async fn handle_payment_updated_event(
+        &self,
+        myself: ActorRef<CchMessage>,
+        event: PaymentUpdatedEvent,
+    ) -> Result<()> {
         let payment_hash = event.payment_hash;
         tracing::debug!("[settled tlc] payment hash: {:#x}", payment_hash);
 
@@ -403,26 +438,17 @@ impl<S: CchOrderStore + Send + Sync + 'static> CchState<S> {
         tracing::debug!("[settled tlc] preimage: {:#x}", preimage);
         order.status = CchOrderStatus::OutgoingSettled;
         order.payment_preimage = Some(preimage);
-        self.store.update_cch_order(order.clone());
-
-        // settle the lnd invoice
-        let req = invoicesrpc::SettleInvoiceMsg {
-            preimage: preimage.as_ref().to_vec(),
-        };
-        tracing::debug!("[settled tlc] SettleInvoiceMsg: {:?}", req);
-
-        let mut client = self.lnd_connection.create_invoices_client().await?;
-        // TODO: set a fee
-        let resp = client.settle_invoice(req).await?.into_inner();
-        tracing::debug!("[settled tlc] SettleInvoiceResp: {:?}", resp);
-
-        order.status = CchOrderStatus::Succeeded;
-        self.store.update_cch_order(order);
+        self.update_cch_order(order.clone());
+        self.step_order(myself, &order).await?;
 
         Ok(())
     }
 
-    async fn settle_send_btc_order(&self, event: SettleSendBTCOrderEvent) -> Result<()> {
+    async fn settle_send_btc_order(
+        &self,
+        myself: ActorRef<CchMessage>,
+        event: SettleSendBTCOrderEvent,
+    ) -> Result<()> {
         let payment_hash = event.payment_hash;
 
         let mut order = match self.store.get_cch_order(&payment_hash) {
@@ -434,30 +460,10 @@ impl<S: CchOrderStore + Send + Sync + 'static> CchState<S> {
 
         order.status = event.status;
         if let Some(preimage) = event.preimage {
-            tracing::info!(
-                "SettleSendBTCOrder: payment_hash={:#x}, status={:?}",
-                payment_hash,
-                event.status
-            );
             order.payment_preimage = Some(preimage);
-            // Save preimage incase we need to retry settling the invoice
-            self.store.update_cch_order(order.clone());
-
-            let message = move |rpc_reply| -> NetworkActorMessage {
-                NetworkActorMessage::Command(NetworkActorCommand::SettleInvoice(
-                    payment_hash,
-                    preimage,
-                    rpc_reply,
-                ))
-            };
-
-            call!(&self.network_actor, message)
-                .expect("call actor")
-                .map_err(|msg| anyhow!(msg))?;
-            order.status = CchOrderStatus::Succeeded;
         }
-
-        self.store.update_cch_order(order);
+        self.update_cch_order(order.clone());
+        self.step_order(myself, &order).await?;
 
         Ok(())
     }
@@ -515,20 +521,16 @@ impl<S: CchOrderStore + Send + Sync + 'static> CchState<S> {
         };
 
         self.store.insert_cch_order(order.clone())?;
-
-        let invoice_tracker = LndInvoiceTracker::new(
-            myself,
-            payment_hash,
-            self.lnd_connection.clone(),
-            self.token.clone(),
-        );
-        self.tracker
-            .spawn(async move { invoice_tracker.run().await });
+        self.step_order(myself, &order).await?;
 
         Ok(order)
     }
 
-    async fn settle_receive_btc_order(&self, event: SettleReceiveBTCOrderEvent) -> Result<()> {
+    async fn settle_receive_btc_order(
+        &self,
+        myself: ActorRef<CchMessage>,
+        event: SettleReceiveBTCOrderEvent,
+    ) -> Result<()> {
         let mut order = match self.store.get_cch_order(&event.payment_hash) {
             Err(CchStoreError::NotFound(_)) => return Ok(()),
             Err(err) => return Err(err.into()),
@@ -537,36 +539,173 @@ impl<S: CchOrderStore + Send + Sync + 'static> CchState<S> {
         };
         order.status = event.status;
         order.payment_preimage = event.preimage;
+        self.update_cch_order(order.clone());
+        self.step_order(myself, &order).await?;
+        Ok(())
+    }
 
-        if event.status == CchOrderStatus::IncomingAccepted {
-            tracing::debug!(
-                payment_hash = ?event.payment_hash,
-                "Sending payment to fiber node because we received payment from LND",
-            );
-            let message = |rpc_reply| -> NetworkActorMessage {
-                NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
-                    SendPaymentCommand {
-                        invoice: Some(order.outgoing_pay_req.clone()),
+    async fn step_order(
+        &self,
+        myself: ActorRef<CchMessage>,
+        order: &CchOrder,
+    ) -> Result<(), CchError> {
+        if order.is_from_fiber_to_lightning() {
+            // send btc
+            match order.status {
+                CchOrderStatus::Pending => {}
+                CchOrderStatus::IncomingAccepted => {
+                    // Need to send the outgoing payment
+                    let req = routerrpc::SendPaymentRequest {
+                        payment_request: order.outgoing_pay_req.clone(),
+                        timeout_seconds: BTC_PAYMENT_TIMEOUT_SECONDS,
                         ..Default::default()
-                    },
-                    rpc_reply,
-                ))
-            };
+                    };
+                    tracing::debug!("[inbounding tlc] SendPaymentRequest: {:?}", req);
 
-            // TODO: handle payment failure here.
-            let tlc_response = call!(self.network_actor, message)
-                .expect("call actor")
-                .map_err(|msg| anyhow!(msg))?;
-            // TODO: handle payment failure here.
-            if tlc_response.status == PaymentStatus::Failed {
-                order.status = CchOrderStatus::Failed;
-            } else {
-                order.status = CchOrderStatus::OutgoingInFlight;
+                    let mut order = order.clone();
+                    let mut client = self.lnd_connection.create_router_client().await?;
+                    // TODO: set a fee
+                    let mut stream = client
+                        .send_payment_v2(req)
+                        .await
+                        .map_err(|err| CchError::LndRpcError(err.to_string()))?
+                        .into_inner();
+                    // Wait for the first message then quit
+                    select! {
+                        payment_result_opt = stream.next() => {
+                            tracing::debug!("[inbounding tlc] payment result: {:?}", payment_result_opt);
+                            if let Some(Ok(payment)) = payment_result_opt {
+                                // TODO: the payment result here may indicate a failure, we need to handle it
+                                order.status = lnrpc::payment::PaymentStatus::try_from(payment.status).map_err(|err| {
+                                    CchError::LndRpcError(format!("expect a valid payment status: {}", err))
+                                })?.into();
+                                if order.status == CchOrderStatus::OutgoingSettled {
+                                    order.payment_preimage = Some(Hash256::from_str(&payment.payment_preimage).expect("lnd payment preimage is valid Hash256"));
+                                }
+                                self.update_cch_order(order.clone());
+                            }
+                        }
+                        _ = self.token.cancelled() => {
+                            tracing::debug!("Cancellation received, shutting down cch service");
+                            return Ok(());
+                        }
+                    }
+                    // Repeat step until moving to the next step
+                    let _ = myself.send_message(CchMessage::StepOrder(order));
+                }
+                CchOrderStatus::OutgoingInFlight => {}
+                CchOrderStatus::OutgoingSettled => {
+                    if let Some(preimage) = order.payment_preimage {
+                        tracing::info!(
+                            "SettleSendBTCOrder: payment_hash={:#x}, status={:?}",
+                            order.payment_hash,
+                            order.status
+                        );
+                        let command = move |rpc_reply| -> NetworkActorMessage {
+                            NetworkActorMessage::Command(NetworkActorCommand::SettleInvoice(
+                                order.payment_hash,
+                                preimage,
+                                rpc_reply,
+                            ))
+                        };
+                        call!(&self.network_actor, command)
+                            .expect("call actor")
+                            .map_err(CchError::CKBSettleInvoiceError)?;
+
+                        let mut order = order.clone();
+                        order.status = CchOrderStatus::Succeeded;
+                        self.update_cch_order(order);
+                    }
+                }
+                CchOrderStatus::Succeeded => {}
+                CchOrderStatus::Failed => {}
+            }
+        } else {
+            // receive btc
+            match order.status {
+                CchOrderStatus::Pending => {
+                    let invoice_tracker = LndInvoiceTracker::new(
+                        myself,
+                        order.payment_hash,
+                        self.lnd_connection.clone(),
+                        self.token.clone(),
+                    );
+                    self.tracker
+                        .spawn(async move { invoice_tracker.run().await });
+                }
+                CchOrderStatus::IncomingAccepted => {
+                    tracing::debug!(
+                        payment_hash = ?order.payment_hash,
+                        "Sending payment to fiber node because we received payment from LND",
+                    );
+                    let message = |rpc_reply| -> NetworkActorMessage {
+                        NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
+                            SendPaymentCommand {
+                                invoice: Some(order.outgoing_pay_req.clone()),
+                                ..Default::default()
+                            },
+                            rpc_reply,
+                        ))
+                    };
+
+                    let mut order = order.clone();
+                    // TODO: handle payment failure here.
+                    let tlc_response = call!(self.network_actor, message)
+                        .expect("call actor")
+                        .map_err(CchError::CKBSendPaymentError)?;
+                    // TODO: handle payment failure here.
+                    if tlc_response.status == PaymentStatus::Failed {
+                        order.status = CchOrderStatus::Failed;
+                    } else {
+                        order.status = CchOrderStatus::OutgoingInFlight;
+                    }
+                    self.update_cch_order(order.clone());
+                    let _ = myself.send_message(CchMessage::StepOrder(order.clone()));
+                }
+                CchOrderStatus::OutgoingInFlight => {}
+                CchOrderStatus::OutgoingSettled => {
+                    if let Some(preimage) = order.payment_preimage {
+                        // settle the lnd invoice
+                        let req = invoicesrpc::SettleInvoiceMsg {
+                            preimage: preimage.as_ref().to_vec(),
+                        };
+                        tracing::debug!("[settled tlc] SettleInvoiceMsg: {:?}", req);
+
+                        let mut client = self.lnd_connection.create_invoices_client().await?;
+                        // TODO: set a fee
+                        let resp = client
+                            .settle_invoice(req)
+                            .await
+                            .map_err(|err| CchError::LndRpcError(err.to_string()))?
+                            .into_inner();
+                        tracing::debug!("[settled tlc] SettleInvoiceResp: {:?}", resp);
+
+                        let mut order = order.clone();
+                        order.status = CchOrderStatus::Succeeded;
+                        self.update_cch_order(order);
+                    }
+                }
+                CchOrderStatus::Succeeded => {}
+                CchOrderStatus::Failed => {}
             }
         }
-
-        self.store.update_cch_order(order.clone());
         Ok(())
+    }
+
+    /// Update the order in store. If the order is inactive, register it in CchOrderGuardActor.
+    fn update_cch_order(&self, order: CchOrder) {
+        if order.status.is_inactive() {
+            if let Err(err) = self
+                .order_guard
+                .send_message(CchOrderGuardMessage::DeactivateOrder {
+                    payment_hash: order.payment_hash,
+                    expires_at: order.created_at + order.expires_after,
+                })
+            {
+                tracing::error!("failed to send message to CchOrderGuardActor: {}", err);
+            }
+        }
+        self.store.update_cch_order(order);
     }
 }
 

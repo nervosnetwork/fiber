@@ -1,4 +1,4 @@
-use crate::{fiber::types::Hash256, time::SystemTimeError};
+use crate::{fiber::types::Hash256, invoice::SettleInvoiceError, time::SystemTimeError};
 
 use jsonrpsee::types::{error::CALL_EXECUTION_FAILED_CODE, ErrorObjectOwned};
 use thiserror::Error;
@@ -26,6 +26,10 @@ pub enum CchError {
     CKBInvoiceError(#[from] crate::invoice::InvoiceError),
     #[error("CKB invoice missing amount")]
     CKBInvoiceMissingAmount,
+    #[error("Fail to settle CKB invoice: {0}")]
+    CKBSettleInvoiceError(#[from] SettleInvoiceError),
+    #[error("Fail to send CKB payment: {0}")]
+    CKBSendPaymentError(String),
     #[error("SendBTC order already paid")]
     SendBTCOrderAlreadyPaid,
     #[error("SendBTC received payment amount is too small")]
