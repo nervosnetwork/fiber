@@ -354,6 +354,7 @@ pub async fn main() -> Result<(), ExitMessage> {
                 cch_actor,
                 store,
                 network_graph,
+                root_actor.get_cell(),
                 #[cfg(debug_assertions)] ckb_chain_actor,
                 #[cfg(debug_assertions)] rpc_dev_module_commitment_txs,
             )

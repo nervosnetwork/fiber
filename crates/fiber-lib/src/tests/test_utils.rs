@@ -1563,6 +1563,7 @@ impl NetworkNode {
                     None,
                     store.clone(),
                     network_graph.clone(),
+                    root_actor.get_cell(),
                     #[cfg(debug_assertions)]
                     None,
                     #[cfg(debug_assertions)]

@@ -47,6 +47,16 @@ impl<S> StoreWithPubSub<S> {
     }
 }
 
+pub trait Subscribe {
+    fn subscribe(&self, subscriber: OutputPortSubscriber<StoreUpdatedEvent>);
+}
+
+impl<S> Subscribe for StoreWithPubSub<S> {
+    fn subscribe(&self, subscriber: OutputPortSubscriber<StoreUpdatedEvent>) {
+        self.subscribe(subscriber);
+    }
+}
+
 impl<T: NetworkActorStateStore> NetworkActorStateStoreDeref for StoreWithPubSub<T> {
     type Target = T;
 

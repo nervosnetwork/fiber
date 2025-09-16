@@ -35,6 +35,7 @@ pub mod server {
     use crate::rpc::payment::PaymentRpcServer;
     use crate::rpc::payment::PaymentRpcServerImpl;
     use crate::rpc::peer::{PeerRpcServer, PeerRpcServerImpl};
+    use crate::store::pub_sub::{register_pub_sub_rpc, Subscribe};
     use crate::{
         cch::CchMessage,
         fiber::{
@@ -60,7 +61,7 @@ pub mod server {
     };
     use jsonrpsee::ws_client::RpcServiceBuilder;
     use jsonrpsee::{Methods, RpcModule};
-    use ractor::ActorRef;
+    use ractor::{ActorCell, ActorRef};
     #[cfg(debug_assertions)]
     use std::collections::HashMap;
     use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
@@ -80,6 +81,7 @@ pub mod server {
         + GossipMessageStore
         + WatchtowerStore
         + PreimageStore
+        + Subscribe
     {
     }
     #[cfg(feature = "watchtower")]
@@ -90,16 +92,25 @@ pub mod server {
             + GossipMessageStore
             + WatchtowerStore
             + PreimageStore
+            + Subscribe
     {
     }
     #[cfg(not(feature = "watchtower"))]
     pub trait RpcServerStore:
-        ChannelActorStateStore + InvoiceStore + NetworkGraphStateStore + GossipMessageStore
+        ChannelActorStateStore
+        + InvoiceStore
+        + NetworkGraphStateStore
+        + GossipMessageStore
+        + Subscribe
     {
     }
     #[cfg(not(feature = "watchtower"))]
     impl<T> RpcServerStore for T where
-        T: ChannelActorStateStore + InvoiceStore + NetworkGraphStateStore + GossipMessageStore
+        T: ChannelActorStateStore
+            + InvoiceStore
+            + NetworkGraphStateStore
+            + GossipMessageStore
+            + Subscribe
     {
     }
 
@@ -222,6 +233,7 @@ pub mod server {
         cch_actor: Option<ActorRef<CchMessage>>,
         store: S,
         network_graph: Arc<RwLock<NetworkGraph<S>>>,
+        supervisor: ActorCell,
         #[cfg(debug_assertions)] ckb_chain_actor: Option<ActorRef<CkbChainMessage>>,
         #[cfg(debug_assertions)] rpc_dev_module_commitment_txs: Option<
             Arc<RwLock<HashMap<(Hash256, u64), TransactionView>>>,
@@ -257,6 +269,9 @@ pub mod server {
             modules
                 .merge(GraphRpcServerImpl::new(network_graph, store.clone()).into_rpc())
                 .unwrap();
+        }
+        if config.is_module_enabled("pubsub") {
+            register_pub_sub_rpc(&mut modules, &store, supervisor).await?;
         }
         if let Some(network_actor) = network_actor {
             if config.is_module_enabled("info") {

@@ -78,6 +78,7 @@ fn build_rules() -> HashMap<&'static str, AuthRule> {
     b.rule("send_btc", r#"allow if write("cch");"#);
     b.rule("receive_btc", r#"allow if read("cch");"#);
     b.rule("get_cch_order", r#"allow if read("cch");"#);
+    b.rule("subscribe_store_changes", r#"allow if read("cch");"#);
     // channels
     b.rule("open_channel", r#"allow if write("channels");"#);
     b.rule("accept_channel", r#"allow if write("channels");"#);

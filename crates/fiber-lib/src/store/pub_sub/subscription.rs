@@ -3,13 +3,14 @@
 use std::sync::Arc;
 
 use ractor::{port::OutputPortSubscriber, OutputPort};
+use serde::{Deserialize, Serialize};
 
 use crate::{
     fiber::{payment::PaymentStatus, types::Hash256},
     invoice::CkbInvoiceStatus,
 };
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum InvoiceUpdatedPayload {
     /// The invoice is open and can be paid.
     Open,
@@ -28,7 +29,7 @@ pub enum InvoiceUpdatedPayload {
     /// The invoice is paid.
     Paid,
 }
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct InvoiceUpdatedEvent {
     pub invoice_hash: Hash256,
     pub payload: InvoiceUpdatedPayload,
@@ -61,7 +62,7 @@ impl InvoiceUpdatedEvent {
 }
 
 // but with additional information for downstream services.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum PaymentUpdatedPayload {
     /// initial status, payment session is created, no HTLC is sent
     Created,
@@ -72,7 +73,7 @@ pub enum PaymentUpdatedPayload {
     /// related HTLC is failed
     Failed,
 }
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct PaymentUpdatedEvent {
     pub payment_hash: Hash256,
     pub payload: PaymentUpdatedPayload,
@@ -104,7 +105,7 @@ impl PaymentUpdatedEvent {
 }
 
 /// Message sent from Store to publisher.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum StoreUpdatedEvent {
     InvoiceUpdated(InvoiceUpdatedEvent),
     PaymentUpdated(PaymentUpdatedEvent),
