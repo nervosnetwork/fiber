@@ -18,7 +18,7 @@ use crate::{
         },
         NetworkActorCommand, NetworkActorMessage, PaymentCustomRecords,
     },
-    gen_rand_sha256_hash, gen_rpc_config,
+    gen_rand_secp256k1_public_key, gen_rand_sha256_hash, gen_rpc_config,
     invoice::{Currency, InvoiceBuilder},
     now_timestamp_as_millis_u64,
     rpc::invoice::NewInvoiceParams,
@@ -3982,4 +3982,41 @@ async fn test_send_mpp_send_each_other_expire_soon() {
         node_2.wait_until_success(payment_hash).await;
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_send_payment_mpp_with_node_not_in_graph() {
+    init_tracing();
+
+    let (nodes, _channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+            ((1, 2), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+        ],
+        3,
+    )
+    .await;
+    let [node_0, _node_1, node_2] = nodes.try_into().expect("3 nodes");
+
+    let wrong_target_pubkey = gen_rand_secp256k1_public_key();
+    let preimage = gen_rand_sha256_hash();
+    let ckb_invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(1000))
+        .payment_preimage(preimage)
+        .payee_pub_key(wrong_target_pubkey)
+        .build()
+        .expect("build invoice success");
+
+    node_2.insert_invoice(ckb_invoice.clone(), Some(preimage));
+
+    let payment_hash = node_0
+        .send_payment(SendPaymentCommand {
+            max_parts: Some(10),
+            invoice: Some(ckb_invoice.to_string()),
+            ..Default::default()
+        })
+        .await;
+
+    let error = payment_hash.unwrap_err().to_string();
+    assert!(error.contains("Failed to build route, Node not found in graph"));
 }
