@@ -3892,6 +3892,7 @@ where
         remote_pubkey: Pubkey,
         session: &SessionContext,
     ) {
+        debug!("Peer {remote_peer_id:?} connected");
         self.peer_session_map.insert(
             remote_peer_id.clone(),
             ConnectedPeer {
@@ -3945,6 +3946,7 @@ where
     }
 
     fn on_peer_disconnected(&mut self, id: &PeerId) {
+        debug!("Peer {id:?} disconnected");
         if let Some(peer) = self.peer_session_map.remove(id) {
             if let Some(channel_ids) = self.session_channels_map.remove(&peer.session_id) {
                 for channel_id in channel_ids {
