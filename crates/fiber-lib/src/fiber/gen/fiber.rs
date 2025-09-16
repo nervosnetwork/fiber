@@ -6744,12 +6744,6 @@ impl ::core::fmt::Display for CommitmentSigned {
         write!(
             f,
             ", {}: {}",
-            "commitment_tx_partial_signature",
-            self.commitment_tx_partial_signature()
-        )?;
-        write!(
-            f,
-            ", {}: {}",
             "next_commitment_nonce",
             self.next_commitment_nonce()
         )?;
@@ -6763,30 +6757,26 @@ impl ::core::default::Default for CommitmentSigned {
     }
 }
 impl CommitmentSigned {
-    const DEFAULT_VALUE: [u8; 228] = [
+    const DEFAULT_VALUE: [u8; 196] = [
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     ];
-    pub const TOTAL_SIZE: usize = 228;
-    pub const FIELD_SIZES: [usize; 4] = [32, 32, 32, 132];
-    pub const FIELD_COUNT: usize = 4;
+    pub const TOTAL_SIZE: usize = 196;
+    pub const FIELD_SIZES: [usize; 3] = [32, 32, 132];
+    pub const FIELD_COUNT: usize = 3;
     pub fn channel_id(&self) -> Byte32 {
         Byte32::new_unchecked(self.0.slice(0..32))
     }
     pub fn funding_tx_partial_signature(&self) -> Byte32 {
         Byte32::new_unchecked(self.0.slice(32..64))
     }
-    pub fn commitment_tx_partial_signature(&self) -> Byte32 {
-        Byte32::new_unchecked(self.0.slice(64..96))
-    }
     pub fn next_commitment_nonce(&self) -> CommitmentNonce {
-        CommitmentNonce::new_unchecked(self.0.slice(96..228))
+        CommitmentNonce::new_unchecked(self.0.slice(64..196))
     }
     pub fn as_reader<'r>(&'r self) -> CommitmentSignedReader<'r> {
         CommitmentSignedReader::new_unchecked(self.as_slice())
@@ -6817,7 +6807,6 @@ impl molecule::prelude::Entity for CommitmentSigned {
         Self::new_builder()
             .channel_id(self.channel_id())
             .funding_tx_partial_signature(self.funding_tx_partial_signature())
-            .commitment_tx_partial_signature(self.commitment_tx_partial_signature())
             .next_commitment_nonce(self.next_commitment_nonce())
     }
 }
@@ -6850,12 +6839,6 @@ impl<'r> ::core::fmt::Display for CommitmentSignedReader<'r> {
         write!(
             f,
             ", {}: {}",
-            "commitment_tx_partial_signature",
-            self.commitment_tx_partial_signature()
-        )?;
-        write!(
-            f,
-            ", {}: {}",
             "next_commitment_nonce",
             self.next_commitment_nonce()
         )?;
@@ -6863,20 +6846,17 @@ impl<'r> ::core::fmt::Display for CommitmentSignedReader<'r> {
     }
 }
 impl<'r> CommitmentSignedReader<'r> {
-    pub const TOTAL_SIZE: usize = 228;
-    pub const FIELD_SIZES: [usize; 4] = [32, 32, 32, 132];
-    pub const FIELD_COUNT: usize = 4;
+    pub const TOTAL_SIZE: usize = 196;
+    pub const FIELD_SIZES: [usize; 3] = [32, 32, 132];
+    pub const FIELD_COUNT: usize = 3;
     pub fn channel_id(&self) -> Byte32Reader<'r> {
         Byte32Reader::new_unchecked(&self.as_slice()[0..32])
     }
     pub fn funding_tx_partial_signature(&self) -> Byte32Reader<'r> {
         Byte32Reader::new_unchecked(&self.as_slice()[32..64])
     }
-    pub fn commitment_tx_partial_signature(&self) -> Byte32Reader<'r> {
-        Byte32Reader::new_unchecked(&self.as_slice()[64..96])
-    }
     pub fn next_commitment_nonce(&self) -> CommitmentNonceReader<'r> {
-        CommitmentNonceReader::new_unchecked(&self.as_slice()[96..228])
+        CommitmentNonceReader::new_unchecked(&self.as_slice()[64..196])
     }
 }
 impl<'r> molecule::prelude::Reader<'r> for CommitmentSignedReader<'r> {
@@ -6904,23 +6884,18 @@ impl<'r> molecule::prelude::Reader<'r> for CommitmentSignedReader<'r> {
 pub struct CommitmentSignedBuilder {
     pub(crate) channel_id: Byte32,
     pub(crate) funding_tx_partial_signature: Byte32,
-    pub(crate) commitment_tx_partial_signature: Byte32,
     pub(crate) next_commitment_nonce: CommitmentNonce,
 }
 impl CommitmentSignedBuilder {
-    pub const TOTAL_SIZE: usize = 228;
-    pub const FIELD_SIZES: [usize; 4] = [32, 32, 32, 132];
-    pub const FIELD_COUNT: usize = 4;
+    pub const TOTAL_SIZE: usize = 196;
+    pub const FIELD_SIZES: [usize; 3] = [32, 32, 132];
+    pub const FIELD_COUNT: usize = 3;
     pub fn channel_id(mut self, v: Byte32) -> Self {
         self.channel_id = v;
         self
     }
     pub fn funding_tx_partial_signature(mut self, v: Byte32) -> Self {
         self.funding_tx_partial_signature = v;
-        self
-    }
-    pub fn commitment_tx_partial_signature(mut self, v: Byte32) -> Self {
-        self.commitment_tx_partial_signature = v;
         self
     }
     pub fn next_commitment_nonce(mut self, v: CommitmentNonce) -> Self {
@@ -6937,7 +6912,6 @@ impl molecule::prelude::Builder for CommitmentSignedBuilder {
     fn write<W: molecule::io::Write>(&self, writer: &mut W) -> molecule::io::Result<()> {
         writer.write_all(self.channel_id.as_slice())?;
         writer.write_all(self.funding_tx_partial_signature.as_slice())?;
-        writer.write_all(self.commitment_tx_partial_signature.as_slice())?;
         writer.write_all(self.next_commitment_nonce.as_slice())?;
         Ok(())
     }
@@ -7650,12 +7624,6 @@ impl ::core::fmt::Display for TxComplete {
         write!(
             f,
             ", {}: {}",
-            "commitment_tx_partial_signature",
-            self.commitment_tx_partial_signature()
-        )?;
-        write!(
-            f,
-            ", {}: {}",
             "next_commitment_nonce",
             self.next_commitment_nonce()
         )?;
@@ -7669,26 +7637,22 @@ impl ::core::default::Default for TxComplete {
     }
 }
 impl TxComplete {
-    const DEFAULT_VALUE: [u8; 196] = [
+    const DEFAULT_VALUE: [u8; 164] = [
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     ];
-    pub const TOTAL_SIZE: usize = 196;
-    pub const FIELD_SIZES: [usize; 3] = [32, 32, 132];
-    pub const FIELD_COUNT: usize = 3;
+    pub const TOTAL_SIZE: usize = 164;
+    pub const FIELD_SIZES: [usize; 2] = [32, 132];
+    pub const FIELD_COUNT: usize = 2;
     pub fn channel_id(&self) -> Byte32 {
         Byte32::new_unchecked(self.0.slice(0..32))
     }
-    pub fn commitment_tx_partial_signature(&self) -> Byte32 {
-        Byte32::new_unchecked(self.0.slice(32..64))
-    }
     pub fn next_commitment_nonce(&self) -> CommitmentNonce {
-        CommitmentNonce::new_unchecked(self.0.slice(64..196))
+        CommitmentNonce::new_unchecked(self.0.slice(32..164))
     }
     pub fn as_reader<'r>(&'r self) -> TxCompleteReader<'r> {
         TxCompleteReader::new_unchecked(self.as_slice())
@@ -7718,7 +7682,6 @@ impl molecule::prelude::Entity for TxComplete {
     fn as_builder(self) -> Self::Builder {
         Self::new_builder()
             .channel_id(self.channel_id())
-            .commitment_tx_partial_signature(self.commitment_tx_partial_signature())
             .next_commitment_nonce(self.next_commitment_nonce())
     }
 }
@@ -7745,12 +7708,6 @@ impl<'r> ::core::fmt::Display for TxCompleteReader<'r> {
         write!(
             f,
             ", {}: {}",
-            "commitment_tx_partial_signature",
-            self.commitment_tx_partial_signature()
-        )?;
-        write!(
-            f,
-            ", {}: {}",
             "next_commitment_nonce",
             self.next_commitment_nonce()
         )?;
@@ -7758,17 +7715,14 @@ impl<'r> ::core::fmt::Display for TxCompleteReader<'r> {
     }
 }
 impl<'r> TxCompleteReader<'r> {
-    pub const TOTAL_SIZE: usize = 196;
-    pub const FIELD_SIZES: [usize; 3] = [32, 32, 132];
-    pub const FIELD_COUNT: usize = 3;
+    pub const TOTAL_SIZE: usize = 164;
+    pub const FIELD_SIZES: [usize; 2] = [32, 132];
+    pub const FIELD_COUNT: usize = 2;
     pub fn channel_id(&self) -> Byte32Reader<'r> {
         Byte32Reader::new_unchecked(&self.as_slice()[0..32])
     }
-    pub fn commitment_tx_partial_signature(&self) -> Byte32Reader<'r> {
-        Byte32Reader::new_unchecked(&self.as_slice()[32..64])
-    }
     pub fn next_commitment_nonce(&self) -> CommitmentNonceReader<'r> {
-        CommitmentNonceReader::new_unchecked(&self.as_slice()[64..196])
+        CommitmentNonceReader::new_unchecked(&self.as_slice()[32..164])
     }
 }
 impl<'r> molecule::prelude::Reader<'r> for TxCompleteReader<'r> {
@@ -7795,19 +7749,14 @@ impl<'r> molecule::prelude::Reader<'r> for TxCompleteReader<'r> {
 #[derive(Clone, Debug, Default)]
 pub struct TxCompleteBuilder {
     pub(crate) channel_id: Byte32,
-    pub(crate) commitment_tx_partial_signature: Byte32,
     pub(crate) next_commitment_nonce: CommitmentNonce,
 }
 impl TxCompleteBuilder {
-    pub const TOTAL_SIZE: usize = 196;
-    pub const FIELD_SIZES: [usize; 3] = [32, 32, 132];
-    pub const FIELD_COUNT: usize = 3;
+    pub const TOTAL_SIZE: usize = 164;
+    pub const FIELD_SIZES: [usize; 2] = [32, 132];
+    pub const FIELD_COUNT: usize = 2;
     pub fn channel_id(mut self, v: Byte32) -> Self {
         self.channel_id = v;
-        self
-    }
-    pub fn commitment_tx_partial_signature(mut self, v: Byte32) -> Self {
-        self.commitment_tx_partial_signature = v;
         self
     }
     pub fn next_commitment_nonce(mut self, v: CommitmentNonce) -> Self {
@@ -7823,7 +7772,6 @@ impl molecule::prelude::Builder for TxCompleteBuilder {
     }
     fn write<W: molecule::io::Write>(&self, writer: &mut W) -> molecule::io::Result<()> {
         writer.write_all(self.channel_id.as_slice())?;
-        writer.write_all(self.commitment_tx_partial_signature.as_slice())?;
         writer.write_all(self.next_commitment_nonce.as_slice())?;
         Ok(())
     }
@@ -9712,12 +9660,6 @@ impl ::core::fmt::Display for RevokeAndAck {
         write!(
             f,
             ", {}: {}",
-            "commitment_tx_partial_signature",
-            self.commitment_tx_partial_signature()
-        )?;
-        write!(
-            f,
-            ", {}: {}",
             "next_per_commitment_point",
             self.next_per_commitment_point()
         )?;
@@ -9737,7 +9679,7 @@ impl ::core::default::Default for RevokeAndAck {
     }
 }
 impl RevokeAndAck {
-    const DEFAULT_VALUE: [u8; 261] = [
+    const DEFAULT_VALUE: [u8; 229] = [
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
@@ -9745,26 +9687,22 @@ impl RevokeAndAck {
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     ];
-    pub const TOTAL_SIZE: usize = 261;
-    pub const FIELD_SIZES: [usize; 5] = [32, 32, 32, 33, 132];
-    pub const FIELD_COUNT: usize = 5;
+    pub const TOTAL_SIZE: usize = 229;
+    pub const FIELD_SIZES: [usize; 4] = [32, 32, 33, 132];
+    pub const FIELD_COUNT: usize = 4;
     pub fn channel_id(&self) -> Byte32 {
         Byte32::new_unchecked(self.0.slice(0..32))
     }
     pub fn revocation_partial_signature(&self) -> Byte32 {
         Byte32::new_unchecked(self.0.slice(32..64))
     }
-    pub fn commitment_tx_partial_signature(&self) -> Byte32 {
-        Byte32::new_unchecked(self.0.slice(64..96))
-    }
     pub fn next_per_commitment_point(&self) -> Pubkey {
-        Pubkey::new_unchecked(self.0.slice(96..129))
+        Pubkey::new_unchecked(self.0.slice(64..97))
     }
     pub fn next_revocation_nonce(&self) -> RevocationNonce {
-        RevocationNonce::new_unchecked(self.0.slice(129..261))
+        RevocationNonce::new_unchecked(self.0.slice(97..229))
     }
     pub fn as_reader<'r>(&'r self) -> RevokeAndAckReader<'r> {
         RevokeAndAckReader::new_unchecked(self.as_slice())
@@ -9795,7 +9733,6 @@ impl molecule::prelude::Entity for RevokeAndAck {
         Self::new_builder()
             .channel_id(self.channel_id())
             .revocation_partial_signature(self.revocation_partial_signature())
-            .commitment_tx_partial_signature(self.commitment_tx_partial_signature())
             .next_per_commitment_point(self.next_per_commitment_point())
             .next_revocation_nonce(self.next_revocation_nonce())
     }
@@ -9829,12 +9766,6 @@ impl<'r> ::core::fmt::Display for RevokeAndAckReader<'r> {
         write!(
             f,
             ", {}: {}",
-            "commitment_tx_partial_signature",
-            self.commitment_tx_partial_signature()
-        )?;
-        write!(
-            f,
-            ", {}: {}",
             "next_per_commitment_point",
             self.next_per_commitment_point()
         )?;
@@ -9848,23 +9779,20 @@ impl<'r> ::core::fmt::Display for RevokeAndAckReader<'r> {
     }
 }
 impl<'r> RevokeAndAckReader<'r> {
-    pub const TOTAL_SIZE: usize = 261;
-    pub const FIELD_SIZES: [usize; 5] = [32, 32, 32, 33, 132];
-    pub const FIELD_COUNT: usize = 5;
+    pub const TOTAL_SIZE: usize = 229;
+    pub const FIELD_SIZES: [usize; 4] = [32, 32, 33, 132];
+    pub const FIELD_COUNT: usize = 4;
     pub fn channel_id(&self) -> Byte32Reader<'r> {
         Byte32Reader::new_unchecked(&self.as_slice()[0..32])
     }
     pub fn revocation_partial_signature(&self) -> Byte32Reader<'r> {
         Byte32Reader::new_unchecked(&self.as_slice()[32..64])
     }
-    pub fn commitment_tx_partial_signature(&self) -> Byte32Reader<'r> {
-        Byte32Reader::new_unchecked(&self.as_slice()[64..96])
-    }
     pub fn next_per_commitment_point(&self) -> PubkeyReader<'r> {
-        PubkeyReader::new_unchecked(&self.as_slice()[96..129])
+        PubkeyReader::new_unchecked(&self.as_slice()[64..97])
     }
     pub fn next_revocation_nonce(&self) -> RevocationNonceReader<'r> {
-        RevocationNonceReader::new_unchecked(&self.as_slice()[129..261])
+        RevocationNonceReader::new_unchecked(&self.as_slice()[97..229])
     }
 }
 impl<'r> molecule::prelude::Reader<'r> for RevokeAndAckReader<'r> {
@@ -9892,24 +9820,19 @@ impl<'r> molecule::prelude::Reader<'r> for RevokeAndAckReader<'r> {
 pub struct RevokeAndAckBuilder {
     pub(crate) channel_id: Byte32,
     pub(crate) revocation_partial_signature: Byte32,
-    pub(crate) commitment_tx_partial_signature: Byte32,
     pub(crate) next_per_commitment_point: Pubkey,
     pub(crate) next_revocation_nonce: RevocationNonce,
 }
 impl RevokeAndAckBuilder {
-    pub const TOTAL_SIZE: usize = 261;
-    pub const FIELD_SIZES: [usize; 5] = [32, 32, 32, 33, 132];
-    pub const FIELD_COUNT: usize = 5;
+    pub const TOTAL_SIZE: usize = 229;
+    pub const FIELD_SIZES: [usize; 4] = [32, 32, 33, 132];
+    pub const FIELD_COUNT: usize = 4;
     pub fn channel_id(mut self, v: Byte32) -> Self {
         self.channel_id = v;
         self
     }
     pub fn revocation_partial_signature(mut self, v: Byte32) -> Self {
         self.revocation_partial_signature = v;
-        self
-    }
-    pub fn commitment_tx_partial_signature(mut self, v: Byte32) -> Self {
-        self.commitment_tx_partial_signature = v;
         self
     }
     pub fn next_per_commitment_point(mut self, v: Pubkey) -> Self {
@@ -9930,7 +9853,6 @@ impl molecule::prelude::Builder for RevokeAndAckBuilder {
     fn write<W: molecule::io::Write>(&self, writer: &mut W) -> molecule::io::Result<()> {
         writer.write_all(self.channel_id.as_slice())?;
         writer.write_all(self.revocation_partial_signature.as_slice())?;
-        writer.write_all(self.commitment_tx_partial_signature.as_slice())?;
         writer.write_all(self.next_per_commitment_point.as_slice())?;
         writer.write_all(self.next_revocation_nonce.as_slice())?;
         Ok(())

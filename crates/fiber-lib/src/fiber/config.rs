@@ -20,7 +20,7 @@ pub const DEFAULT_MIN_SHUTDOWN_FEE: u64 = CKB_SHANNONS; // 1 CKB prepared for sh
 /// By default, listen to any tcp port allocated by the kernel.
 pub const DEFAULT_LISTENING_ADDR: &str = "/ip4/0.0.0.0/tcp/0";
 
-const MIN_OCCUPIED_CAPACITY: u64 = 61 * CKB_SHANNONS; // 61 CKB for occupied capacity
+const MIN_OCCUPIED_CAPACITY: u64 = 97 * CKB_SHANNONS; // 97 CKB for commitment lock occupied capacity
 
 /// Default ckb funding amount when auto accepting an open channel request.
 pub const DEFAULT_AUTO_ACCEPT_CHANNEL_CKB_FUNDING_AMOUNT: u64 =
@@ -169,12 +169,12 @@ pub struct FiberConfig {
         help = "minimum ckb funding amount for auto accepting an open channel requests, unit: shannons [default: 10000000000 shannons]"
     )]
     pub open_channel_auto_accept_min_ckb_funding_amount: Option<u64>,
-    /// whether to accept open channel requests with ckb funding amount automatically, unit: shannons [default: 6200000000 shannons], if this is set to zero, it means to disable auto accept
+    /// whether to accept open channel requests with ckb funding amount automatically, unit: shannons [default: 9800000000 shannons], if this is set to zero, it means to disable auto accept
     #[arg(
         name = "FIBER_AUTO_ACCEPT_CHANNEL_CKB_FUNDING_AMOUNT",
         long = "fiber-auto-accept-channel-ckb-funding-amount",
         env,
-        help = "whether to accept open channel requests with ckb funding amount automatically, unit: shannons [default: 6200000000 shannons], if this is set to zero, it means to disable auto accept"
+        help = "whether to accept open channel requests with ckb funding amount automatically, unit: shannons [default: 9800000000 shannons], if this is set to zero, it means to disable auto accept"
     )]
     pub auto_accept_channel_ckb_funding_amount: Option<u64>,
 

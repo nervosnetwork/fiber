@@ -12,6 +12,7 @@ use crate::fiber::{
     history::TimedResult,
     network::SendPaymentData,
     payment::{PaymentSession, PaymentStatus},
+    types::{Privkey, Pubkey},
 };
 use crate::gen_rand_fiber_private_key;
 use crate::gen_rand_fiber_public_key;
@@ -244,29 +245,37 @@ fn test_store_watchtower() {
 
     let node_id = NodeId::from_bytes(PeerId::random().into_bytes());
     let channel_id = gen_rand_sha256_hash();
-    let funding_tx_lock = Script::default();
 
     let settlement_data = SettlementData {
-        x_only_aggregated_pubkey: [0u8; 32],
-        aggregated_signature: CompactSignature::from_bytes(&[0u8; 64]).unwrap(),
-        to_local_output: CellOutput::default(),
-        to_local_output_data: Bytes::default(),
-        to_remote_output: CellOutput::default(),
-        to_remote_output_data: Bytes::default(),
+        local_amount: 100,
+        remote_amount: 200,
         tlcs: vec![],
     };
+
+    let local_settlement_key = Privkey::from(&[1; 32]);
+    let remote_settlement_key = Privkey::from(&[2; 32]).pubkey();
+    let local_funding_pubkey = Privkey::from(&[3; 32]).pubkey();
+    let remote_funding_pubkey = Privkey::from(&[4; 32]).pubkey();
 
     store.insert_watch_channel(
         node_id.clone(),
         channel_id,
-        funding_tx_lock.clone(),
+        None,
+        local_settlement_key.clone(),
+        remote_settlement_key,
+        local_funding_pubkey,
+        remote_funding_pubkey,
         settlement_data.clone(),
     );
     assert_eq!(
         store.get_watch_channels(),
         vec![ChannelData {
             channel_id,
-            funding_tx_lock: funding_tx_lock.clone(),
+            funding_udt_type_script: None,
+            local_settlement_key: local_settlement_key.clone(),
+            remote_settlement_key,
+            local_funding_pubkey,
+            remote_funding_pubkey,
             revocation_data: None,
             local_settlement_data: None,
             remote_settlement_data: settlement_data.clone(),
@@ -275,7 +284,6 @@ fn test_store_watchtower() {
 
     let revocation_data = RevocationData {
         commitment_number: 0,
-        x_only_aggregated_pubkey: [0u8; 32],
         aggregated_signature: CompactSignature::from_bytes(&[0u8; 64]).unwrap(),
         output: CellOutput::default(),
         output_data: Bytes::default(),
@@ -291,7 +299,11 @@ fn test_store_watchtower() {
         store.get_watch_channels(),
         vec![ChannelData {
             channel_id,
-            funding_tx_lock,
+            funding_udt_type_script: None,
+            local_settlement_key,
+            remote_settlement_key,
+            local_funding_pubkey,
+            remote_funding_pubkey,
             local_settlement_data: None,
             revocation_data: Some(revocation_data),
             remote_settlement_data: settlement_data,
@@ -322,10 +334,9 @@ fn test_store_watchtower_preimage() {
     store.insert_watch_preimage(node_id_a.clone(), payment_hash_a, preimage_a);
     store.insert_watch_preimage(node_id_b.clone(), payment_hash_b, preimage_b);
 
-    // this interface should not return a watch preimage
     assert!(
-        store.get_preimage(&payment_hash_a).is_none(),
-        "should not return a watch preimage"
+        store.get_preimage(&payment_hash_a).is_some(),
+        "should return a watch preimage also"
     );
     assert_eq!(
         store.get_watch_preimage(&payment_hash_a).unwrap(),
@@ -376,27 +387,35 @@ fn test_store_watchtower_with_wrong_node_id() {
     let node_id = NodeId::from_bytes(PeerId::random().into_bytes());
     let wrong_node_id = NodeId::from_bytes(PeerId::random().into_bytes());
     let channel_id = gen_rand_sha256_hash();
-    let funding_tx_lock = Script::default();
+
+    let local_settlement_key = Privkey::from(&[1; 32]);
+    let remote_settlement_key = Privkey::from(&[2; 32]).pubkey();
+    let local_funding_pubkey = Privkey::from(&[3; 32]).pubkey();
+    let remote_funding_pubkey = Privkey::from(&[4; 32]).pubkey();
 
     let settlement_data = SettlementData {
-        x_only_aggregated_pubkey: [0u8; 32],
-        aggregated_signature: CompactSignature::from_bytes(&[0u8; 64]).unwrap(),
-        to_local_output: CellOutput::default(),
-        to_local_output_data: Bytes::default(),
-        to_remote_output: CellOutput::default(),
-        to_remote_output_data: Bytes::default(),
+        local_amount: 100,
+        remote_amount: 200,
         tlcs: vec![],
     };
 
     store.insert_watch_channel(
         node_id.clone(),
         channel_id,
-        funding_tx_lock.clone(),
+        None,
+        local_settlement_key.clone(),
+        remote_settlement_key,
+        local_funding_pubkey,
+        remote_funding_pubkey,
         settlement_data.clone(),
     );
     let expected_value = vec![ChannelData {
         channel_id,
-        funding_tx_lock: funding_tx_lock.clone(),
+        funding_udt_type_script: None,
+        local_settlement_key: local_settlement_key.clone(),
+        remote_settlement_key,
+        local_funding_pubkey,
+        remote_funding_pubkey,
         revocation_data: None,
         local_settlement_data: None,
         remote_settlement_data: settlement_data.clone(),
@@ -406,7 +425,6 @@ fn test_store_watchtower_with_wrong_node_id() {
     // update with wrong node_id
     let revocation_data = RevocationData {
         commitment_number: 0,
-        x_only_aggregated_pubkey: [0u8; 32],
         aggregated_signature: CompactSignature::from_bytes(&[0u8; 64]).unwrap(),
         output: CellOutput::default(),
         output_data: Bytes::default(),

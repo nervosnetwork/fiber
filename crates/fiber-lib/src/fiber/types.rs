@@ -830,7 +830,6 @@ impl TryFrom<molecule_fiber::AcceptChannel> for AcceptChannel {
 pub struct CommitmentSigned {
     pub channel_id: Hash256,
     pub funding_tx_partial_signature: PartialSignature,
-    pub commitment_tx_partial_signature: PartialSignature,
     pub next_commitment_nonce: CommitmentNonce,
 }
 
@@ -845,9 +844,6 @@ impl From<CommitmentSigned> for molecule_fiber::CommitmentSigned {
             .funding_tx_partial_signature(partial_signature_to_molecule(
                 commitment_signed.funding_tx_partial_signature,
             ))
-            .commitment_tx_partial_signature(partial_signature_to_molecule(
-                commitment_signed.commitment_tx_partial_signature,
-            ))
             .next_commitment_nonce(commitment_signed.next_commitment_nonce.into())
             .build()
     }
@@ -861,12 +857,6 @@ impl TryFrom<molecule_fiber::CommitmentSigned> for CommitmentSigned {
             channel_id: commitment_signed.channel_id().into(),
             funding_tx_partial_signature: PartialSignature::from_slice(
                 commitment_signed.funding_tx_partial_signature().as_slice(),
-            )
-            .map_err(|e| anyhow!(e))?,
-            commitment_tx_partial_signature: PartialSignature::from_slice(
-                commitment_signed
-                    .commitment_tx_partial_signature()
-                    .as_slice(),
             )
             .map_err(|e| anyhow!(e))?,
             next_commitment_nonce: commitment_signed.next_commitment_nonce().into(),
@@ -972,7 +962,6 @@ impl TryFrom<molecule_fiber::TxUpdate> for TxUpdate {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TxComplete {
     pub channel_id: Hash256,
-    pub commitment_tx_partial_signature: PartialSignature,
     pub next_commitment_nonce: CommitmentNonce,
 }
 
@@ -980,9 +969,6 @@ impl From<TxComplete> for molecule_fiber::TxComplete {
     fn from(tx_complete: TxComplete) -> Self {
         molecule_fiber::TxComplete::new_builder()
             .channel_id(tx_complete.channel_id.into())
-            .commitment_tx_partial_signature(partial_signature_to_molecule(
-                tx_complete.commitment_tx_partial_signature,
-            ))
             .next_commitment_nonce(tx_complete.next_commitment_nonce.into())
             .build()
     }
@@ -994,10 +980,6 @@ impl TryFrom<molecule_fiber::TxComplete> for TxComplete {
     fn try_from(tx_complete: molecule_fiber::TxComplete) -> Result<Self, Self::Error> {
         Ok(TxComplete {
             channel_id: tx_complete.channel_id().into(),
-            commitment_tx_partial_signature: PartialSignature::from_slice(
-                tx_complete.commitment_tx_partial_signature().as_slice(),
-            )
-            .map_err(|e| anyhow!(e))?,
             next_commitment_nonce: tx_complete.next_commitment_nonce().into(),
         })
     }
@@ -1262,7 +1244,6 @@ impl TryFrom<molecule_fiber::AddTlc> for AddTlc {
 pub struct RevokeAndAck {
     pub channel_id: Hash256,
     pub revocation_partial_signature: PartialSignature,
-    pub commitment_tx_partial_signature: PartialSignature,
     pub next_per_commitment_point: Pubkey,
     pub next_revocation_nonce: RevocationNonce,
 }
@@ -1273,9 +1254,6 @@ impl From<RevokeAndAck> for molecule_fiber::RevokeAndAck {
             .channel_id(revoke_and_ack.channel_id.into())
             .revocation_partial_signature(partial_signature_to_molecule(
                 revoke_and_ack.revocation_partial_signature,
-            ))
-            .commitment_tx_partial_signature(partial_signature_to_molecule(
-                revoke_and_ack.commitment_tx_partial_signature,
             ))
             .next_per_commitment_point(revoke_and_ack.next_per_commitment_point.into())
             .next_revocation_nonce(revoke_and_ack.next_revocation_nonce.into())
@@ -1291,10 +1269,6 @@ impl TryFrom<molecule_fiber::RevokeAndAck> for RevokeAndAck {
             channel_id: revoke_and_ack.channel_id().into(),
             revocation_partial_signature: PartialSignature::from_slice(
                 revoke_and_ack.revocation_partial_signature().as_slice(),
-            )
-            .map_err(|e| anyhow!(e))?,
-            commitment_tx_partial_signature: PartialSignature::from_slice(
-                revoke_and_ack.commitment_tx_partial_signature().as_slice(),
             )
             .map_err(|e| anyhow!(e))?,
             next_per_commitment_point: revoke_and_ack.next_per_commitment_point().try_into()?,

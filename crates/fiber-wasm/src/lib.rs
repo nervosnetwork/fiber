@@ -23,8 +23,8 @@ use fnn::{
         peer::PeerRpcServerImpl,
         watchtower::{
             CreatePreimageParams, CreateWatchChannelParams, RemovePreimageParams,
-            RemoveWatchChannelParams, UpdateLocalSettlementParams, UpdateRevocationParams,
-            WatchtowerRpcClient,
+            RemoveWatchChannelParams, UpdateLocalSettlementParams,
+            UpdatePendingRemoteSettlementParams, UpdateRevocationParams, WatchtowerRpcClient,
         },
     },
     start_network,
@@ -309,13 +309,21 @@ async fn forward_event_to_client<T: WatchtowerRpcClient + Sync>(
         NetworkServiceEvent::RemoteTxComplete(
             _peer_id,
             channel_id,
-            funding_tx_lock,
+            funding_udt_type_script,
+            local_settlement_key,
+            remote_settlement_key,
+            local_funding_pubkey,
+            remote_funding_pubkey,
             remote_settlement_data,
         ) => {
             watchtower_client
                 .create_watch_channel(CreateWatchChannelParams {
                     channel_id,
-                    funding_tx_lock: funding_tx_lock.into(),
+                    funding_udt_type_script,
+                    local_settlement_key,
+                    remote_settlement_key,
+                    local_funding_pubkey,
+                    remote_funding_pubkey,
                     remote_settlement_data,
                 })
                 .await
@@ -351,6 +359,15 @@ async fn forward_event_to_client<T: WatchtowerRpcClient + Sync>(
         ) => {
             watchtower_client
                 .update_local_settlement(UpdateLocalSettlementParams {
+                    channel_id,
+                    settlement_data,
+                })
+                .await
+                .expect(ASSUME_WATCHTOWER_CLIENT_CALL_OK);
+        }
+        NetworkServiceEvent::LocalCommitmentSigned(channel_id, settlement_data) => {
+            watchtower_client
+                .update_pending_remote_settlement(UpdatePendingRemoteSettlementParams {
                     channel_id,
                     settlement_data,
                 })

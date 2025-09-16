@@ -8,7 +8,7 @@ use jsonrpsee::types::error::{ErrorObjectOwned, CALL_EXECUTION_FAILED_CODE};
 
 use crate::fiber::{
     channel::{RevocationData, SettlementData},
-    types::Hash256,
+    types::{Hash256, Privkey, Pubkey},
 };
 #[cfg(feature = "watchtower")]
 use crate::rpc::context::RpcContext;
@@ -41,6 +41,14 @@ trait WatchtowerRpc {
         &self,
         ctx: RpcContext,
         params: UpdateRevocationParams,
+    ) -> Result<(), ErrorObjectOwned>;
+
+    /// Update pending remote settlement
+    #[method(name = "update_pending_remote_settlement")]
+    async fn update_pending_remote_settlement(
+        &self,
+        ctx: RpcContext,
+        params: UpdatePendingRemoteSettlementParams,
     ) -> Result<(), ErrorObjectOwned>;
 
     /// Update settlement
@@ -93,6 +101,13 @@ trait WatchtowerRpc {
         params: UpdateRevocationParams,
     ) -> Result<(), ErrorObjectOwned>;
 
+    /// Update pending remote settlement
+    #[method(name = "update_pending_remote_settlement")]
+    async fn update_pending_remote_settlement(
+        &self,
+        params: UpdatePendingRemoteSettlementParams,
+    ) -> Result<(), ErrorObjectOwned>;
+
     /// Update settlement
     #[method(name = "update_local_settlement")]
     async fn update_local_settlement(
@@ -114,8 +129,16 @@ trait WatchtowerRpc {
 pub struct CreateWatchChannelParams {
     /// Channel ID
     pub channel_id: Hash256,
-    /// Channel funding transaction lock script
-    pub funding_tx_lock: Script,
+    /// Funding UDT type script
+    pub funding_udt_type_script: Option<Script>,
+    /// The local party's private key used to settle the commitment transaction
+    pub local_settlement_key: Privkey,
+    /// The remote party's public key used to settle the commitment transaction
+    pub remote_settlement_key: Pubkey,
+    /// The local party's funding public key
+    pub local_funding_pubkey: Pubkey,
+    /// The remote party's funding public key
+    pub remote_funding_pubkey: Pubkey,
     /// Remote settlement data
     pub remote_settlement_data: SettlementData,
 }
@@ -134,6 +157,15 @@ pub struct UpdateRevocationParams {
     pub channel_id: Hash256,
     /// Revocation data
     pub revocation_data: RevocationData,
+    /// Settlement data
+    pub settlement_data: SettlementData,
+}
+
+#[serde_as]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct UpdatePendingRemoteSettlementParams {
+    /// Channel ID
+    pub channel_id: Hash256,
     /// Settlement data
     pub settlement_data: SettlementData,
 }
@@ -189,7 +221,11 @@ where
         self.store.insert_watch_channel(
             ctx.node_id,
             params.channel_id,
-            params.funding_tx_lock.into(),
+            params.funding_udt_type_script.map(Into::into),
+            params.local_settlement_key,
+            params.remote_settlement_key,
+            params.local_funding_pubkey,
+            params.remote_funding_pubkey,
             params.remote_settlement_data,
         );
         Ok(())
@@ -214,6 +250,19 @@ where
             ctx.node_id,
             params.channel_id,
             params.revocation_data,
+            params.settlement_data,
+        );
+        Ok(())
+    }
+
+    async fn update_pending_remote_settlement(
+        &self,
+        ctx: RpcContext,
+        params: UpdatePendingRemoteSettlementParams,
+    ) -> Result<(), ErrorObjectOwned> {
+        self.store.update_pending_remote_settlement(
+            ctx.node_id,
+            params.channel_id,
             params.settlement_data,
         );
         Ok(())

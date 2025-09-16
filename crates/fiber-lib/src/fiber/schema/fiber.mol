@@ -76,7 +76,6 @@ table AcceptChannel {
 struct CommitmentSigned {
     channel_id:                       Byte32,
     funding_tx_partial_signature:     Byte32,
-    commitment_tx_partial_signature:  Byte32,
     next_commitment_nonce:            CommitmentNonce,
 }
 
@@ -96,7 +95,6 @@ table TxUpdate {
 
 struct TxComplete {
     channel_id:                       Byte32,
-    commitment_tx_partial_signature:  Byte32,
     next_commitment_nonce:            CommitmentNonce,
 }
 
@@ -149,7 +147,6 @@ table AddTlc {
 struct RevokeAndAck {
     channel_id:                         Byte32,
     revocation_partial_signature:       Byte32,
-    commitment_tx_partial_signature:    Byte32,
     next_per_commitment_point:          Pubkey,
     next_revocation_nonce:              RevocationNonce,
 }

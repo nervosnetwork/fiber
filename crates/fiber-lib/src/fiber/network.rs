@@ -819,7 +819,16 @@ pub enum NetworkServiceEvent {
     // An incoming channel is pending to be accepted.
     ChannelPendingToBeAccepted(PeerId, Hash256),
     // A funding tx is completed. The watch tower may use this to monitor the channel.
-    RemoteTxComplete(PeerId, Hash256, Script, SettlementData),
+    RemoteTxComplete(
+        PeerId,
+        Hash256,
+        Option<Script>,
+        Privkey,
+        Pubkey,
+        Pubkey,
+        Pubkey,
+        SettlementData,
+    ),
     // The channel is ready to use (with funding transaction confirmed
     // and both parties sent ChannelReady messages).
     ChannelReady(PeerId, Hash256, OutPoint),
@@ -838,6 +847,9 @@ pub enum NetworkServiceEvent {
     // and we successfully assemble the partial signature from other party
     // to create a complete commitment transaction and a settlement transaction.
     RemoteCommitmentSigned(PeerId, Hash256, TransactionView, SettlementData),
+    // We have signed a valid commitment transaction, and the other party may use
+    // the signature we sent to them to create a complete commitment transaction
+    LocalCommitmentSigned(Hash256, SettlementData),
     // Preimage is created for the payment hash, the first Hash256 is the payment hash,
     // and the second Hash256 is the preimage.
     PreimageCreated(Hash256, Hash256),
@@ -3398,7 +3410,7 @@ where
             // and falsely believe we updated the node announcement, and then forward this message to other nodes.
             // This is undesirable because we don't want to flood the network with the same message.
             // On the other hand, if the message is too old, we need to create a new one.
-            Some(ref message) if now - message.timestamp < 3600 * 1000 => {
+            Some(ref message) if now.saturating_sub(message.timestamp) < 3600 * 1000 => {
                 debug!("Returning old node announcement message as it is still valid");
             }
             _ => {
@@ -3931,6 +3943,26 @@ where
                                 state.state,
                                 ChannelState::ChannelReady | ChannelState::ShuttingDown(_)
                             ) {
+                                if let RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+                                    payment_preimage,
+                                }) = remove_tlc.reason
+                                {
+                                    if let Some(tlc) =
+                                        state.tlc_state.get(&TLCId::Received(remove_tlc.id))
+                                    {
+                                        let payment_hash = tlc.payment_hash;
+                                        self.store.insert_preimage(payment_hash, payment_preimage);
+                                        self.network
+                                            .send_message(NetworkActorMessage::new_notification(
+                                                NetworkServiceEvent::PreimageCreated(
+                                                    payment_hash,
+                                                    payment_preimage,
+                                                ),
+                                            ))
+                                            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                                    }
+                                }
+
                                 let operation = RetryableTlcOperation::RemoveTlc(
                                     TLCId::Received(remove_tlc.id),
                                     remove_tlc.reason.clone(),

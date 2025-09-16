@@ -415,13 +415,21 @@ fn forward_event_to_actor(
         NetworkServiceEvent::RemoteTxComplete(
             _peer_id,
             channel_id,
-            funding_tx_lock,
+            funding_udt_type_script,
+            local_settlement_key,
+            remote_settlement_key,
+            local_funding_pubkey,
+            remote_funding_pubkey,
             remote_settlement_data,
         ) => {
             watchtower_actor
                 .send_message(WatchtowerMessage::CreateChannel(
                     channel_id,
-                    funding_tx_lock,
+                    funding_udt_type_script,
+                    local_settlement_key,
+                    remote_settlement_key,
+                    local_funding_pubkey,
+                    remote_funding_pubkey,
                     remote_settlement_data,
                 ))
                 .expect(ASSUME_WATCHTOWER_ACTOR_ALIVE);
@@ -459,6 +467,14 @@ fn forward_event_to_actor(
                 ))
                 .expect(ASSUME_WATCHTOWER_ACTOR_ALIVE);
         }
+        NetworkServiceEvent::LocalCommitmentSigned(channel_id, settlement_data) => {
+            watchtower_actor
+                .send_message(WatchtowerMessage::UpdatePendingRemoteSettlement(
+                    channel_id,
+                    settlement_data,
+                ))
+                .expect(ASSUME_WATCHTOWER_ACTOR_ALIVE);
+        }
         NetworkServiceEvent::PreimageCreated(payment_hash, preimage) => {
             // ignore, the store of channel actor already has stored the preimage
             watchtower_actor
@@ -485,13 +501,21 @@ async fn forward_event_to_client<T: WatchtowerRpcClient + Sync>(
         NetworkServiceEvent::RemoteTxComplete(
             _peer_id,
             channel_id,
-            funding_tx_lock,
+            funding_udt_type_script,
+            local_settlement_key,
+            remote_settlement_key,
+            local_funding_pubkey,
+            remote_funding_pubkey,
             remote_settlement_data,
         ) => {
             watchtower_client
                 .create_watch_channel(CreateWatchChannelParams {
                     channel_id,
-                    funding_tx_lock: funding_tx_lock.into(),
+                    funding_udt_type_script: funding_udt_type_script.map(Into::into),
+                    local_settlement_key,
+                    remote_settlement_key,
+                    local_funding_pubkey,
+                    remote_funding_pubkey,
                     remote_settlement_data,
                 })
                 .await
