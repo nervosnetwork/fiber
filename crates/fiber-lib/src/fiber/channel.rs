@@ -1796,9 +1796,16 @@ where
         let mut tasks_to_retry = Vec::new();
 
         // Process all tasks that are ready to execute
-        while let Some(_task) = state.retryable_tlc_operations.peek() {
+        while let Some(task) = state.retryable_tlc_operations.peek() {
+            // here we does not check the task next_retry_time with current time,
+            // because RelayRemoveTlc need a higher priority to be processed
+            // so we just process all tasks in the list
+            if task.next_retry_time > now_timestamp_as_millis_u64() {
+                break;
+            }
+
             let task = state.retryable_tlc_operations.pop().expect("must got task");
-            let (mut retry_later, mut waiting_ack) = (true, false);
+            let (mut retry_later, mut _waiting_ack) = (true, false);
             let keep_job = match task.operation {
                 RetryableTlcOperation::RemoveTlc(tlc_id, ref reason) => {
                     match self
@@ -1814,7 +1821,7 @@ where
                     {
                         Ok(_) | Err(ProcessingChannelError::RepeatedProcessing(_)) => false,
                         Err(ProcessingChannelError::WaitingTlcAck) => {
-                            waiting_ack = true;
+                            _waiting_ack = true;
                             true
                         }
                         Err(_err) => false,
@@ -1889,18 +1896,15 @@ where
 
             if keep_job {
                 let retry_count = task.retry_count + 1;
-                let next_retry_time =
-                    self.calc_retryable_task_next_run_time(retry_count, waiting_ack);
                 if retry_later {
-                    tasks_to_retry.push(RetryableTask {
-                        next_retry_time,
-                        operation: task.operation,
+                    tasks_to_retry.push(RetryableTask::new_with_retry_count(
+                        task.operation,
                         retry_count,
-                    });
+                    ));
                 } else if let Some(key) = (&task.operation).into() {
                     state
                         .waiting_tlc_result_tasks
-                        .insert(key, (task.operation.clone(), retry_count));
+                        .insert(key, (task.operation, retry_count));
                 };
             }
         }
@@ -1909,45 +1913,28 @@ where
         state.schedule_next_retry_task(myself);
     }
 
-    fn calc_retryable_task_next_run_time(&self, retry_count: u32, waiting_ack: bool) -> u64 {
-        let current_time = now_timestamp_as_millis_u64();
-        // Calculate next retry time with backoff
-        let retry_delay = if waiting_ack {
-            1.max(retry_count / 1000)
-        } else {
-            1.max(retry_count / 500)
-        };
-        // Cap the retry delay to prevent excessive waiting (max 30 minutes)
-        let duration = retry_delay.min(7200) * RETRYABLE_TLC_OPS_INTERVAL;
-        current_time + duration.as_millis() as u64
-    }
-
     async fn handle_forward_tlc_result(
         &self,
         myself: &ActorRef<ChannelActorMessage>,
         state: &mut ChannelActorState,
         result: ForwardTlcResult,
     ) {
-        let key = &WaitingTaskKey::ForwardTlc {
-            payment_hash: result.payment_hash,
-            tlc_id: result.tlc_id,
-        };
-        let Some((operation, retry_count)) = state.waiting_tlc_result_tasks.get(key).cloned()
+        let Some((operation, retry_count)) =
+            state
+                .waiting_tlc_result_tasks
+                .remove(&WaitingTaskKey::ForwardTlc {
+                    payment_hash: result.payment_hash,
+                    tlc_id: result.tlc_id,
+                })
         else {
             return;
         };
 
-        state.waiting_tlc_result_tasks.remove(key);
         if let Some((channel_err, tlc_err)) = result.error_info {
             match channel_err {
                 ProcessingChannelError::WaitingTlcAck => {
                     // The operation will be retried automatically by the scheduler
-                    let next_retry_time = self.calc_retryable_task_next_run_time(retry_count, true);
-                    let task = RetryableTask {
-                        next_retry_time,
-                        operation,
-                        retry_count,
-                    };
+                    let task = RetryableTask::new_with_retry_count(operation, retry_count);
                     state.retryable_tlc_operations.push(task);
                     state.schedule_next_retry_task(myself);
                 }
@@ -3163,9 +3150,23 @@ impl RetryableTask {
         }
     }
 
-    pub fn with_retry_count(mut self, retry_count: u32) -> Self {
-        self.retry_count = retry_count;
-        self
+    pub fn new_with_retry_count(operation: RetryableTlcOperation, retry_count: u32) -> Self {
+        let current_time = now_timestamp_as_millis_u64();
+        // Calculate next retry time with backoff
+        let retry_delay = 1.max(retry_count / 1000);
+
+        // Cap the retry delay to prevent excessive waiting (max 30 minutes)
+        let mut duration = retry_delay.min(7200) * RETRYABLE_TLC_OPS_INTERVAL;
+        if matches!(operation, RetryableTlcOperation::RelayRemoveTlc(..)) {
+            duration /= 2;
+        }
+        let next_retry_time = current_time + duration.as_millis() as u64;
+
+        Self {
+            next_retry_time,
+            operation,
+            retry_count,
+        }
     }
 }
 
@@ -4532,10 +4533,6 @@ impl ChannelActorState {
         }
     }
 
-    // Note: In the new BinaryHeap-based design, we don't immediately remove tasks.
-    // Instead, we rely on the idempotent nature of task processing.
-    // Tasks that are no longer relevant will be naturally filtered out during execution.
-
     fn trigger_all_retryable_tasks(&mut self, myself: &ActorRef<ChannelActorMessage>) {
         // With the new heap-based design, we simply trigger immediate processing
         // of all tasks and let the scheduler handle them appropriately
@@ -4555,12 +4552,11 @@ impl ChannelActorState {
 
     fn schedule_next_retry_task(&mut self, myself: &ActorRef<ChannelActorMessage>) {
         if let Some(next_task) = self.retryable_tlc_operations.peek() {
-            let current_time = now_timestamp_as_millis_u64();
-            let delay = if next_task.next_retry_time <= current_time {
-                Duration::from_millis(0) // Execute immediately
-            } else {
-                Duration::from_millis(next_task.next_retry_time - current_time)
-            };
+            let delay = Duration::from_millis(
+                next_task
+                    .next_retry_time
+                    .saturating_sub(now_timestamp_as_millis_u64()),
+            );
 
             myself.send_after(delay, || {
                 ChannelActorMessage::Event(ChannelEvent::RunRetryTask)
