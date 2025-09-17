@@ -9,7 +9,9 @@ use crate::fiber::config::{
 };
 use crate::fiber::features::FeatureVector;
 use crate::fiber::graph::ChannelInfo;
-use crate::fiber::network::{DebugEvent, FiberMessageWithPeerId, SendPaymentCommand};
+use crate::fiber::network::{
+    DebugEvent, FiberMessageWithPeerId, PeerDisconnectReason, SendPaymentCommand,
+};
 use crate::fiber::payment::PaymentStatus;
 use crate::fiber::types::{
     AddTlc, FiberMessage, Hash256, Init, PaymentHopData, PeeledPaymentOnionPacket, Pubkey, TlcErr,
@@ -402,7 +404,7 @@ async fn do_test_owned_channel_removed_from_graph_on_disconnected(public: bool) 
     node1
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::DisconnectPeer(node2_id.clone()),
+            NetworkActorCommand::DisconnectPeer(node2_id.clone(), PeerDisconnectReason::Requested),
         ))
         .expect("node_a alive");
 
@@ -466,7 +468,7 @@ async fn do_test_owned_channel_saved_to_graph_on_reconnected(public: bool) {
     node1
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::DisconnectPeer(node2_id.clone()),
+            NetworkActorCommand::DisconnectPeer(node2_id.clone(), PeerDisconnectReason::Requested),
         ))
         .expect("node_a alive");
 
@@ -4105,7 +4107,10 @@ async fn test_reestablish_channel() {
     node_a
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::DisconnectPeer(node_b.peer_id.clone()),
+            NetworkActorCommand::DisconnectPeer(
+                node_b.peer_id.clone(),
+                PeerDisconnectReason::Requested,
+            ),
         ))
         .expect("node_a alive");
 

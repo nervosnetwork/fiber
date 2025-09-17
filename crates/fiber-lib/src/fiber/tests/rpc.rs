@@ -1,5 +1,6 @@
 #![allow(clippy::needless_range_loop)]
 use crate::fiber::channel::CloseFlags;
+use crate::fiber::network::PeerDisconnectReason;
 use crate::fiber::{NetworkActorCommand, NetworkActorMessage};
 use crate::gen_rand_sha256_hash;
 use crate::invoice::CkbInvoice;
@@ -744,7 +745,7 @@ async fn test_rpc_shutdown_following_disconnect() {
     node_0
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::DisconnectPeer(node_1.peer_id),
+            NetworkActorCommand::DisconnectPeer(node_1.peer_id, PeerDisconnectReason::Requested),
         ))
         .expect("node_a alive");
 
