@@ -4018,5 +4018,5 @@ async fn test_send_payment_mpp_with_node_not_in_graph() {
         .await;
 
     let error = payment_hash.unwrap_err().to_string();
-    assert!(error.contains("Failed to build route, Node not found in graph"));
+    assert!(error.contains("no path found"));
 }
