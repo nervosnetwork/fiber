@@ -1797,6 +1797,13 @@ where
 
         // Process all tasks that are ready to execute
         while let Some(_task) = state.retryable_tlc_operations.peek() {
+            // here we does not check the task next_retry_time with current time,
+            // because RelayRemoveTlc need a higher priority to be processed
+            // so we just process all tasks in the list
+            // if _task.next_retry_time > now_timestamp_as_millis_u64() {
+            //     break;
+            // }
+
             let task = state.retryable_tlc_operations.pop().expect("must got task");
             let (mut retry_later, mut waiting_ack) = (true, false);
             let keep_job = match task.operation {
