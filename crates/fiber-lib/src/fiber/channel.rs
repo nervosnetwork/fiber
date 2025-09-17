@@ -16,7 +16,8 @@ use crate::{debug_event, fiber::types::TxAbort, utils::tx::compute_tx_message};
 use musig2::BinaryEncoding;
 use musig2::SecNonceBuilder;
 use secp256k1::{Secp256k1, XOnlyPublicKey};
-use std::collections::hash_map::Entry;
+use std::cmp::Ordering;
+use std::collections::{BinaryHeap, HashMap, HashSet};
 #[cfg(test)]
 use std::{
     backtrace::Backtrace,
@@ -85,9 +86,7 @@ use ractor::{
 };
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
-use std::collections::HashMap;
 use std::{
-    collections::HashSet,
     fmt::{self, Debug, Display},
     sync::Arc,
 };
@@ -112,7 +111,7 @@ pub const COMMITMENT_CELL_WITNESS_LEN: usize = 16 + 1 + 32 + 64;
 // is funded or not.
 pub const INITIAL_COMMITMENT_NUMBER: u64 = 0;
 
-const RETRYABLE_TLC_OPS_INTERVAL: Duration = Duration::from_millis(250);
+const RETRYABLE_TLC_OPS_INTERVAL: Duration = Duration::from_millis(450);
 const WAITING_REESTABLISH_FINISH_TIMEOUT: Duration = Duration::from_millis(4000);
 
 // if a important TLC operation is not acked in 30 seconds, we will try to disconnect the peer.
@@ -120,10 +119,6 @@ const WAITING_REESTABLISH_FINISH_TIMEOUT: Duration = Duration::from_millis(4000)
 pub const PEER_CHANNEL_RESPONSE_TIMEOUT: u64 = 30 * 1000;
 #[cfg(any(test, feature = "bench"))]
 pub const PEER_CHANNEL_RESPONSE_TIMEOUT: u64 = 10 * 1000;
-
-// A tlc may involve AddTlc, RemoveTlc, ForwardTlc, RelayRemoveTlc operations,
-// multiple 5 times for max tlc number of tlcs is a safe number
-const MAX_RETRYABLE_TLC_OPERATIONS: u16 = SYS_MAX_TLC_NUMBER_IN_FLIGHT as u16 * 5;
 
 #[derive(Debug)]
 pub enum ChannelActorMessage {
@@ -1785,127 +1780,146 @@ where
         state: &mut ChannelActorState,
         operation: RetryableTlcOperation,
     ) {
-        debug_assert!(state.retryable_tlc_operations.len() < MAX_RETRYABLE_TLC_OPERATIONS as usize);
-        if let Entry::Vacant(e) = state.retryable_tlc_operations.entry(operation.clone()) {
-            e.insert(0);
-            state.trigger_single_retryable_task(myself, operation, false);
-        }
+        let current_time = now_timestamp_as_millis_u64();
+        let task = RetryableTask::new(operation, current_time);
+        state.retryable_tlc_operations.push(task);
+
+        // Schedule the next retry task if needed
+        state.schedule_next_retry_task(myself);
     }
 
     pub async fn apply_retryable_tlc_operations(
         &self,
         myself: &ActorRef<ChannelActorMessage>,
         state: &mut ChannelActorState,
-        retryable_operation: RetryableTlcOperation,
     ) {
-        let mut retry_later = true;
-        let mut waiting_ack = false;
-        let keep_job = match retryable_operation {
-            RetryableTlcOperation::RemoveTlc(tlc_id, ref reason) => {
-                match self
-                    .handle_remove_tlc_command(
-                        myself,
-                        state,
-                        RemoveTlcCommand {
-                            id: u64::from(tlc_id),
-                            reason: reason.clone(),
-                        },
-                    )
-                    .await
-                {
-                    Ok(_) | Err(ProcessingChannelError::RepeatedProcessing(_)) => false,
-                    Err(ProcessingChannelError::WaitingTlcAck) => {
-                        waiting_ack = true;
-                        true
-                    }
-                    Err(_err) => false,
-                }
-            }
-            RetryableTlcOperation::RelayRemoveTlc(channel_id, tlc_id, ref reason) => {
-                let prev_channel_state = self
-                    .store
-                    .get_channel_actor_state(&channel_id)
-                    .expect("channel state not found");
-                let tlc_info = prev_channel_state.tlc_state.get(&tlc_id);
-                if tlc_info.is_none_or(|tlc| tlc.removed_reason.is_some()) {
-                    // the tlc has been removed, we can remove the operation
-                    false
-                } else {
-                    // send relay remove tlc with network actor to previous hop
-                    // if the previous channel is reestablishing, we need to retry it later
-                    if !prev_channel_state.reestablishing {
-                        let (send, _recv) =
-                            oneshot::channel::<Result<(), ProcessingChannelError>>();
-                        let port = RpcReplyPort::from(send);
-                        match self.network.send_message(NetworkActorMessage::new_command(
-                            NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
-                                channel_id,
-                                command: ChannelCommand::RemoveTlc(
-                                    RemoveTlcCommand {
-                                        id: tlc_id.into(),
-                                        reason: reason.clone(),
-                                    },
-                                    port,
-                                ),
-                            }),
-                        )) {
-                            Ok(_) => {
-                                // the previous hop will automatically retry if there is Waiting_Ack error
-                                retry_later = false;
-                            }
-                            Err(_err) => {}
-                        }
-                    }
-                    true
-                }
-            }
-            RetryableTlcOperation::ForwardTlc(
-                payment_hash,
-                tlc_id,
-                ref peeled_onion_packet,
-                forward_fee,
-            ) => {
-                // there is a potential deadlock for waiting the result from another channel actor
-                // for the scenario these two things happen at the same time:
-                //  1. channel A send forward tlc to channel B
-                //  2. channel B send forward tlc to channel A
-                // we may end up waiting for each other forever
-                //
-                // but we need the result for better error handling
-                // so we introduce the ForwardTlcResult to get the result based on actor message
-                match self.network.send_message(NetworkActorMessage::Command(
-                    NetworkActorCommand::SendPaymentOnionPacket(SendOnionPacketCommand {
-                        peeled_onion_packet: peeled_onion_packet.clone(),
-                        previous_tlc: Some(PrevTlcInfo::new(
-                            state.get_id(),
-                            u64::from(tlc_id),
-                            forward_fee,
-                        )),
-                        payment_hash,
-                        // forward tlc always set attempt_id to None
-                        attempt_id: None,
-                    }),
-                )) {
-                    Ok(_) => {
-                        // we successfully sent the forward tlc, we will wait for the result
-                        // here we just make sure the forward tlc is sent, we don't need to wait for the result
-                        // retry it from job list until we get ForwardTlcResult
-                        retry_later = false;
-                        true
-                    }
-                    Err(_err) => false,
-                }
-            }
-        };
+        let mut tasks_to_retry = Vec::new();
 
-        if keep_job {
-            if retry_later {
-                state.trigger_single_retryable_task(myself, retryable_operation, waiting_ack);
+        // Process all tasks that are ready to execute
+        while let Some(_task) = state.retryable_tlc_operations.peek() {
+            let task = state.retryable_tlc_operations.pop().expect("must got task");
+            let (mut retry_later, mut waiting_ack) = (true, false);
+            let keep_job = match task.operation {
+                RetryableTlcOperation::RemoveTlc(tlc_id, ref reason) => {
+                    match self
+                        .handle_remove_tlc_command(
+                            myself,
+                            state,
+                            RemoveTlcCommand {
+                                id: u64::from(tlc_id),
+                                reason: reason.clone(),
+                            },
+                        )
+                        .await
+                    {
+                        Ok(_) | Err(ProcessingChannelError::RepeatedProcessing(_)) => false,
+                        Err(ProcessingChannelError::WaitingTlcAck) => {
+                            waiting_ack = true;
+                            true
+                        }
+                        Err(_err) => false,
+                    }
+                }
+                RetryableTlcOperation::RelayRemoveTlc(channel_id, tlc_id, ref reason) => {
+                    let prev_channel_state = self
+                        .store
+                        .get_channel_actor_state(&channel_id)
+                        .expect("channel state not found");
+                    let tlc_info = prev_channel_state.tlc_state.get(&tlc_id);
+                    if tlc_info.is_none_or(|tlc| tlc.removed_reason.is_some()) {
+                        // the tlc has been removed, we can remove the operation
+                        false
+                    } else {
+                        // send relay remove tlc with network actor to previous hop
+                        // if the previous channel is reestablishing, we need to retry it later
+                        if !prev_channel_state.reestablishing {
+                            let (send, _recv) =
+                                oneshot::channel::<Result<(), ProcessingChannelError>>();
+                            let port = RpcReplyPort::from(send);
+                            self.network
+                                .send_message(NetworkActorMessage::new_command(
+                                    NetworkActorCommand::ControlFiberChannel(
+                                        ChannelCommandWithId {
+                                            channel_id,
+                                            command: ChannelCommand::RemoveTlc(
+                                                RemoveTlcCommand {
+                                                    id: tlc_id.into(),
+                                                    reason: reason.clone(),
+                                                },
+                                                port,
+                                            ),
+                                        },
+                                    ),
+                                ))
+                                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                        }
+                        true
+                    }
+                }
+                RetryableTlcOperation::ForwardTlc(
+                    payment_hash,
+                    tlc_id,
+                    ref peeled_onion_packet,
+                    forward_fee,
+                ) => {
+                    match self.network.send_message(NetworkActorMessage::Command(
+                        NetworkActorCommand::SendPaymentOnionPacket(SendOnionPacketCommand {
+                            peeled_onion_packet: peeled_onion_packet.clone(),
+                            previous_tlc: Some(PrevTlcInfo::new(
+                                state.get_id(),
+                                u64::from(tlc_id),
+                                forward_fee,
+                            )),
+                            payment_hash,
+                            // forward tlc always set attempt_id to None
+                            attempt_id: None,
+                        }),
+                    )) {
+                        Ok(_) => {
+                            // we successfully sent the forward tlc, we will wait for the result
+                            // here we just make sure the forward tlc is sent, we don't need to wait for the result
+                            // retry it from job list until we get ForwardTlcResult
+                            retry_later = false;
+                            true
+                        }
+                        Err(_err) => false,
+                    }
+                }
+            };
+
+            if keep_job {
+                let retry_count = task.retry_count + 1;
+                let next_retry_time =
+                    self.calc_retryable_task_next_run_time(retry_count, waiting_ack);
+                if retry_later {
+                    tasks_to_retry.push(RetryableTask {
+                        next_retry_time,
+                        operation: task.operation,
+                        retry_count,
+                    });
+                } else if let Some(key) = (&task.operation).into() {
+                    state
+                        .waiting_tlc_result_tasks
+                        .insert(key, (task.operation.clone(), retry_count));
+                };
             }
-        } else {
-            // if the operation is finished, we will remove it from the retryable_tlc_operations
-            state.retryable_tlc_operations.remove(&retryable_operation);
         }
+
+        state.retryable_tlc_operations.extend(tasks_to_retry);
+        state.schedule_next_retry_task(myself);
+    }
+
+    fn calc_retryable_task_next_run_time(&self, retry_count: u32, waiting_ack: bool) -> u64 {
+        let current_time = now_timestamp_as_millis_u64();
+        // Calculate next retry time with backoff
+        let retry_delay = if waiting_ack {
+            1.max(retry_count / 1000)
+        } else {
+            1.max(retry_count / 500)
+        };
+        // Cap the retry delay to prevent excessive waiting (max 30 minutes)
+        let duration = retry_delay.min(7200) * RETRYABLE_TLC_OPS_INTERVAL;
+        current_time + duration.as_millis() as u64
     }
 
     async fn handle_forward_tlc_result(
@@ -1914,49 +1928,50 @@ where
         state: &mut ChannelActorState,
         result: ForwardTlcResult,
     ) {
-        let Some((op, shared_secret)) =
-            state
-                .retryable_tlc_operations
-                .iter()
-                .find_map(|(op, _)| match op {
-                    RetryableTlcOperation::ForwardTlc(payment_hash, tlc_id, peel_packet, ..)
-                        if *payment_hash == result.payment_hash
-                            && u64::from(*tlc_id) == result.tlc_id =>
-                    {
-                        Some((op.clone(), peel_packet.shared_secret))
-                    }
-                    _ => None,
-                })
+        let key = &WaitingTaskKey::ForwardTlc {
+            payment_hash: result.payment_hash,
+            tlc_id: result.tlc_id,
+        };
+        let Some((operation, retry_count)) = state.waiting_tlc_result_tasks.get(key).cloned()
         else {
             return;
         };
 
+        state.waiting_tlc_result_tasks.remove(key);
         if let Some((channel_err, tlc_err)) = result.error_info {
             match channel_err {
                 ProcessingChannelError::WaitingTlcAck => {
-                    state.trigger_single_retryable_task(myself, op, true);
+                    // The operation will be retried automatically by the scheduler
+                    let next_retry_time = self.calc_retryable_task_next_run_time(retry_count, true);
+                    let task = RetryableTask {
+                        next_retry_time,
+                        operation,
+                        retry_count,
+                    };
+                    state.retryable_tlc_operations.push(task);
+                    state.schedule_next_retry_task(myself);
                 }
                 ProcessingChannelError::RepeatedProcessing(_) => {
-                    // ignore repeated processing error, we have already handled it
-                    state.remove_pending_tlc_operation(&op);
+                    // Remove the task from retry queue since it's already processed
                 }
-                _ => {
-                    let error = ProcessingChannelError::TlcForwardingError(tlc_err)
-                        .with_shared_secret(shared_secret);
-                    self.process_add_tlc_error(
-                        myself,
-                        state,
-                        result.payment_hash,
-                        TLCId::Received(result.tlc_id),
-                        error,
-                    )
-                    .await;
-                    state.remove_pending_tlc_operation(&op);
-                }
+                _ => match operation {
+                    RetryableTlcOperation::ForwardTlc(_, _, onion_packet, _) => {
+                        let error = ProcessingChannelError::TlcForwardingError(tlc_err)
+                            .with_shared_secret(onion_packet.shared_secret);
+                        self.process_add_tlc_error(
+                            myself,
+                            state,
+                            result.payment_hash,
+                            TLCId::Received(result.tlc_id),
+                            error,
+                        )
+                        .await;
+                    }
+                    _ => {
+                        error!("Mismatched operation type for ForwardTlcResult");
+                    }
+                },
             }
-        } else {
-            // if we get success result from AddTlc, we will remove the pending operation
-            state.remove_pending_tlc_operation(&op);
         }
     }
 
@@ -2234,9 +2249,8 @@ where
                 state.update_state(ChannelState::AwaitingChannelReady(flags));
                 state.maybe_channel_is_ready(myself).await;
             }
-            ChannelEvent::RunRetryTask(operation) => {
-                self.apply_retryable_tlc_operations(myself, state, operation)
-                    .await;
+            ChannelEvent::RunRetryTask => {
+                self.apply_retryable_tlc_operations(myself, state).await;
             }
             ChannelEvent::Stop(reason) => {
                 debug_event!(self.network, "ChannelActorStopped");
@@ -3113,16 +3127,59 @@ pub enum RetryableTlcOperation {
     ForwardTlc(Hash256, TLCId, PeeledPaymentOnionPacket, u128),
 }
 
-impl std::hash::Hash for RetryableTlcOperation {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        std::mem::discriminant(self).hash(state);
-        match self {
-            RetryableTlcOperation::RemoveTlc(tlc_id, ..)
-            | RetryableTlcOperation::RelayRemoveTlc(_, tlc_id, ..)
-            | RetryableTlcOperation::ForwardTlc(_, tlc_id, ..) => {
-                tlc_id.hash(state);
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum WaitingTaskKey {
+    ForwardTlc { payment_hash: Hash256, tlc_id: u64 },
+    // Other task types can be added here in the future
+}
+
+impl From<&RetryableTlcOperation> for Option<WaitingTaskKey> {
+    fn from(op: &RetryableTlcOperation) -> Option<WaitingTaskKey> {
+        match op {
+            RetryableTlcOperation::ForwardTlc(payment_hash, tlc_id, ..) => {
+                Some(WaitingTaskKey::ForwardTlc {
+                    payment_hash: *payment_hash,
+                    tlc_id: u64::from(*tlc_id),
+                })
             }
+            _ => None,
         }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+pub struct RetryableTask {
+    pub next_retry_time: u64,
+    pub operation: RetryableTlcOperation,
+    pub retry_count: u32,
+}
+
+impl RetryableTask {
+    pub fn new(operation: RetryableTlcOperation, next_retry_time: u64) -> Self {
+        Self {
+            next_retry_time,
+            operation,
+            retry_count: 0,
+        }
+    }
+
+    pub fn with_retry_count(mut self, retry_count: u32) -> Self {
+        self.retry_count = retry_count;
+        self
+    }
+}
+
+impl Ord for RetryableTask {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // Note: BinaryHeap is a max-heap, but we want min-heap behavior for earliest tasks first.
+        // So we reverse the ordering.
+        other.next_retry_time.cmp(&self.next_retry_time)
+    }
+}
+
+impl PartialOrd for RetryableTask {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
     }
 }
 
@@ -3648,7 +3705,8 @@ pub struct ChannelActorState {
     pub tlc_state: TlcState,
 
     // the retryable tlc operations that are waiting to be processed.
-    pub retryable_tlc_operations: HashMap<RetryableTlcOperation, u32>,
+    pub retryable_tlc_operations: BinaryHeap<RetryableTask>,
+    pub waiting_tlc_result_tasks: HashMap<WaitingTaskKey, (RetryableTlcOperation, u32)>,
 
     // The remote and local lock script for close channel, they are setup during the channel establishment.
     #[serde_as(as = "Option<EntityHex>")]
@@ -3813,7 +3871,7 @@ pub enum ChannelEvent {
     FundingTransactionConfirmed(H256, u32, u64),
     // (tx_hash, force, close_by_us)
     ClosingTransactionConfirmed(H256, bool, bool),
-    RunRetryTask(RetryableTlcOperation),
+    RunRetryTask,
     CheckActiveChannel,
     CheckFundingTimeout,
 }
@@ -4474,37 +4532,38 @@ impl ChannelActorState {
         }
     }
 
-    fn trigger_single_retryable_task(
-        &mut self,
-        myself: &ActorRef<ChannelActorMessage>,
-        operation: RetryableTlcOperation,
-        waiting_ack: bool,
-    ) {
-        if let Some(retry_count) = self.retryable_tlc_operations.get_mut(&operation) {
-            // don't retry too many times, but in most cases we need to retry immediately for WaitingTlcAck
-            let retry_delay = if waiting_ack {
-                1.max(*retry_count / 500)
-            } else {
-                *retry_count
-            };
-            // we have limited number of tasks, so set a upper bound for retry delay
-            // to make sure we don't wait too long for retryable tasks and also not to cost too much resource
-            // the upper bound here is (250 ms * 7200 = 30 minutes)
-            let duration = RETRYABLE_TLC_OPS_INTERVAL * retry_delay.min(7200);
-            myself.send_after(duration, move || {
-                ChannelActorMessage::Event(ChannelEvent::RunRetryTask(operation))
-            });
-            *retry_count += 1;
-        }
-    }
+    // Note: In the new BinaryHeap-based design, we don't immediately remove tasks.
+    // Instead, we rely on the idempotent nature of task processing.
+    // Tasks that are no longer relevant will be naturally filtered out during execution.
 
     fn trigger_all_retryable_tasks(&mut self, myself: &ActorRef<ChannelActorMessage>) {
-        for (operation, retry_count) in self.retryable_tlc_operations.iter_mut() {
-            // reset retry_count after reestablish
-            *retry_count = 0;
-            let op = operation.clone();
-            myself.send_after(WAITING_REESTABLISH_FINISH_TIMEOUT, move || {
-                ChannelActorMessage::Event(ChannelEvent::RunRetryTask(op))
+        // With the new heap-based design, we simply trigger immediate processing
+        // of all tasks and let the scheduler handle them appropriately
+        let current_time = now_timestamp_as_millis_u64();
+
+        // Reset all retry counts after reestablish and reschedule for immediate execution
+        let tasks: Vec<_> = self.retryable_tlc_operations.drain().collect();
+        for mut task in tasks {
+            task.retry_count = 0;
+            task.next_retry_time =
+                current_time + WAITING_REESTABLISH_FINISH_TIMEOUT.as_millis() as u64;
+            self.retryable_tlc_operations.push(task);
+        }
+
+        self.schedule_next_retry_task(myself);
+    }
+
+    fn schedule_next_retry_task(&mut self, myself: &ActorRef<ChannelActorMessage>) {
+        if let Some(next_task) = self.retryable_tlc_operations.peek() {
+            let current_time = now_timestamp_as_millis_u64();
+            let delay = if next_task.next_retry_time <= current_time {
+                Duration::from_millis(0) // Execute immediately
+            } else {
+                Duration::from_millis(next_task.next_retry_time - current_time)
+            };
+
+            myself.send_after(delay, || {
+                ChannelActorMessage::Event(ChannelEvent::RunRetryTask)
             });
         }
     }
@@ -4590,6 +4649,7 @@ impl ChannelActorState {
             id: channel_id,
             tlc_state: Default::default(),
             retryable_tlc_operations: Default::default(),
+            waiting_tlc_result_tasks: Default::default(),
             local_shutdown_script,
             local_channel_public_keys: local_base_pubkeys,
             signer,
@@ -4675,6 +4735,7 @@ impl ChannelActorState {
             id: temp_channel_id,
             tlc_state: Default::default(),
             retryable_tlc_operations: Default::default(),
+            waiting_tlc_result_tasks: Default::default(),
             signer,
             local_channel_public_keys: local_pubkeys,
             local_constraints: ChannelConstraints::new(
@@ -5867,17 +5928,6 @@ impl ChannelActorState {
 
         if is_tlc_command_message && (self.is_waiting_tlc_ack() || self.reestablishing) {
             return Err(ProcessingChannelError::WaitingTlcAck);
-        }
-
-        // don't add tlc if there are too many retryable tasks, a forward tlc may need to register a RemoveFail task if
-        // forwarding get a failed result, so we use half of allowed tasks for check here
-        if is_tlc_command_message
-            && self.retryable_tlc_operations.len() > (MAX_RETRYABLE_TLC_OPERATIONS / 2) as usize
-        {
-            return Err(ProcessingChannelError::InternalError(format!(
-                "Too many retryable tlc operations: {}",
-                self.retryable_tlc_operations.len()
-            )));
         }
 
         Ok(())
@@ -8091,19 +8141,6 @@ impl ChannelActorState {
 
     pub fn has_pending_operations(&self) -> bool {
         !self.retryable_tlc_operations.is_empty()
-    }
-
-    pub fn remove_pending_tlc_operation(&mut self, operation: &RetryableTlcOperation) {
-        if self.retryable_tlc_operations.remove(operation).is_some() {
-            // if we already finished the RemoveTlc operation for the tlc,
-            // we should also remove the ForwardTlc to avoid any later retry.
-            if let RetryableTlcOperation::RemoveTlc(tlc_id, _) = operation {
-                self.retryable_tlc_operations.retain(|op, _| match op {
-                    RetryableTlcOperation::ForwardTlc(_, id, ..) => id != tlc_id,
-                    _ => true,
-                });
-            }
-        }
     }
 }
 
