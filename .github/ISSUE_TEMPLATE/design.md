@@ -2,7 +2,7 @@
 name: Project desgin
 about: Suggest an idea for this project
 title: ''
-labels: ''
+labels: 'design'
 assignees: ''
 
 ---
