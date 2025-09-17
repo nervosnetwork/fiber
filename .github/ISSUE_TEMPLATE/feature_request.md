@@ -11,9 +11,9 @@ assignees: ''
 - A clear and concise description of what the problem is.
 
 **Describe the solution you'd like**
-- A clear and concise description of what you want to happen.
+- A clear and concise description of the solution.
 - Reference links
 - Describe alternatives you've considered
 
-**Testing focused scope**
+**Focused testing scope**
 Describe the main testing area
