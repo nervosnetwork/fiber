@@ -262,7 +262,7 @@ pub enum NetworkActorCommand {
     // Settle MPP tlc set
     SettleMPPTlcSet(Hash256),
     // Check peer send us Init message in an expected time, otherwise disconnect with the peer.
-    CheckPeerInit(PeerId),
+    CheckPeerInit(PeerId, SessionId),
     // For internal use and debugging only. Most of the messages requires some
     // changes to local state. Even if we can send a message to a peer, some
     // part of the local state is not changed.
@@ -1428,10 +1428,12 @@ where
                     }
                 }
             }
-            NetworkActorCommand::CheckPeerInit(peer_id) => {
+            NetworkActorCommand::CheckPeerInit(peer_id, session_id) => {
                 // Check if the peer has sent Init message.
                 if let Some(session) = state.peer_session_map.get(&peer_id) {
-                    if session.features.is_none() {
+                    // If Peer reconnect, the session_id will changed, and a new CheckPeerInit command will be issued.
+                    // In that case we just skip check here.
+                    if session.session_id == session_id && session.features.is_none() {
                         state
                             .network
                             .send_message(NetworkActorMessage::new_command(
@@ -3922,8 +3924,12 @@ where
         .expect("send Init message to peer must succeed");
 
         let remote_peer_id = remote_peer_id.clone();
+        let session_id = session.id;
         self.network.send_after(CHECK_PEER_INIT_INTERVAL, move || {
-            NetworkActorMessage::new_command(NetworkActorCommand::CheckPeerInit(remote_peer_id))
+            NetworkActorMessage::new_command(NetworkActorCommand::CheckPeerInit(
+                remote_peer_id,
+                session_id,
+            ))
         });
     }
 
