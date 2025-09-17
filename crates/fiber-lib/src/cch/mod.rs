@@ -18,5 +18,7 @@ pub use order_store::{CchOrderStore, CchOrderStoreDeref};
 
 mod order_guard;
 
+mod cch_fiber_agent;
+
 #[cfg(any(test, feature = "bench"))]
 pub mod tests;

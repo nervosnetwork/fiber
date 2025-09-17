@@ -195,9 +195,9 @@ pub struct InvoiceParams {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct SettleInvoiceParams {
     /// The payment hash of the invoice.
-    payment_hash: Hash256,
+    pub payment_hash: Hash256,
     /// The payment preimage of the invoice.
-    payment_preimage: Hash256,
+    pub payment_preimage: Hash256,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

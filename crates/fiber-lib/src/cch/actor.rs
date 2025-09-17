@@ -7,10 +7,14 @@ use lnd_grpc_tonic_client::{
     RouterClient, Uri,
 };
 
-use ractor::{call, RpcReplyPort};
+use ractor::RpcReplyPort;
 use ractor::{Actor, ActorCell, ActorProcessingErr, ActorRef};
+use secp256k1::{PublicKey, Secp256k1, SecretKey};
 use serde::Deserialize;
+use tentacle::secio::SecioKeyPair;
 
+use crate::cch::cch_fiber_agent::CchFiberAgent;
+use crate::cch::order_guard::{CchOrderGuardActor, CchOrderGuardArgs};
 use crate::fiber::hash_algorithm::HashAlgorithm;
 use crate::fiber::payment::PaymentStatus;
 use crate::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -19,19 +23,16 @@ use std::str::FromStr;
 use tokio::{select, time::sleep};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
-use crate::fiber::network::SendPaymentCommand;
-use crate::fiber::types::{Hash256, Pubkey};
-use crate::fiber::{NetworkActorCommand, NetworkActorMessage};
+use crate::fiber::types::{Hash256, Privkey};
+use crate::fiber::NetworkActorMessage;
 use crate::invoice::{CkbInvoice, Currency, InvoiceBuilder};
 use crate::store::pub_sub::{
     InvoiceUpdatedEvent, InvoiceUpdatedPayload, PaymentUpdatedEvent, PaymentUpdatedPayload,
-    StoreUpdatedEvent,
+    PubSubClient, StoreUpdatedEvent, Subscribe,
 };
 
 use super::{
-    order_guard::{
-        CchOrderGuardActor, CchOrderGuardArgs, CchOrderGuardEvent, CchOrderGuardMessage,
-    },
+    order_guard::{CchOrderGuardEvent, CchOrderGuardMessage},
     CchConfig, CchError, CchInvoice, CchOrder, CchOrderStatus, CchOrderStore, CchStoreError,
 };
 
@@ -39,10 +40,20 @@ pub const BTC_PAYMENT_TIMEOUT_SECONDS: i32 = 60;
 pub const DEFAULT_ORDER_EXPIRY_SECONDS: u64 = 86400; // 24 hours
 pub const ORDER_PURGE_TTL: u64 = 86400 * 14; // 14 days
 
-pub async fn start_cch<S: CchOrderStore + Clone + Send + Sync + 'static>(
+pub async fn start_cch<S: CchOrderStore + Subscribe + Clone + Send + Sync + 'static>(
     args: CchArgs<S>,
     root_actor: ActorCell,
 ) -> Result<ActorRef<CchMessage>> {
+    if args.network_actor.is_none() {
+        if args.config.fiber_rpc_url.is_none() {
+            return Err(anyhow!(
+                "Cch requires either in process network actor or configured fiber RPC URL"
+            ));
+        } else {
+            ensure_fiber_http_url(args.config.fiber_rpc_url.clone())?;
+        }
+    }
+
     let (actor, _handle) = Actor::spawn_linked(
         Some("cch actor".to_string()),
         CchActor::default(),
@@ -50,6 +61,7 @@ pub async fn start_cch<S: CchOrderStore + Clone + Send + Sync + 'static>(
         root_actor,
     )
     .await?;
+
     Ok(actor)
 }
 
@@ -159,8 +171,8 @@ pub struct CchArgs<S> {
     pub config: CchConfig,
     pub tracker: TaskTracker,
     pub token: CancellationToken,
-    pub network_actor: ActorRef<NetworkActorMessage>,
-    pub pubkey: Pubkey,
+    pub network_actor: Option<ActorRef<NetworkActorMessage>>,
+    pub node_keypair: Option<crate::fiber::KeyPair>,
     pub store: S,
 }
 
@@ -168,15 +180,15 @@ pub struct CchState<S> {
     config: CchConfig,
     tracker: TaskTracker,
     token: CancellationToken,
-    network_actor: ActorRef<NetworkActorMessage>,
-    pubkey: Pubkey,
+    fiber_agent: CchFiberAgent,
+    node_keypair: Option<(PublicKey, SecretKey)>,
     store: S,
     lnd_connection: LndConnectionInfo,
     order_guard: ActorRef<CchOrderGuardMessage>,
 }
 
 #[async_trait::async_trait]
-impl<S: CchOrderStore + Clone + Send + Sync + 'static> Actor for CchActor<S> {
+impl<S: CchOrderStore + Subscribe + Clone + Send + Sync + 'static> Actor for CchActor<S> {
     type Msg = CchMessage;
     type State = CchState<S>;
     type Arguments = CchArgs<S>;
@@ -198,13 +210,40 @@ impl<S: CchOrderStore + Clone + Send + Sync + 'static> Actor for CchActor<S> {
             myself.get_cell(),
         )
         .await?;
+
+        if args.network_actor.is_some() {
+            // in process
+            args.store.subscribe(Box::new(myself.clone()));
+        } else {
+            let pub_sub_client =
+                PubSubClient::new(ensure_fiber_ws_url(args.config.fiber_rpc_url.clone())?);
+            pub_sub_client.subscribe(Box::new(myself.clone()));
+            let token = args.token.clone();
+            args.tracker
+                .spawn(async move { pub_sub_client.run(token).await });
+        };
+        let fiber_agent =
+            CchFiberAgent::try_new(args.network_actor, args.config.fiber_rpc_url.as_deref())?;
+
+        let node_keypair = args.node_keypair.map(|kp| {
+            let private_key: Privkey = <[u8; 32]>::try_from(kp.as_ref())
+                .expect("valid length for key")
+                .into();
+            let secio_kp = SecioKeyPair::from(kp);
+
+            (
+                PublicKey::from_slice(secio_kp.public_key().inner_ref()).expect("valid public key"),
+                private_key.into(),
+            )
+        });
+
         let state = CchState {
             config: args.config,
             tracker: args.tracker,
             token: args.token,
-            network_actor: args.network_actor,
-            pubkey: args.pubkey,
             store: args.store,
+            node_keypair,
+            fiber_agent,
             lnd_connection,
             order_guard,
         };
@@ -318,15 +357,26 @@ impl<S: CchOrderStore + Send + Sync + 'static> CchState<S> {
         let wrapped_btc_type_script: ckb_jsonrpc_types::Script =
             self.config.get_wrapped_btc_script().into();
         let invoice_amount_sats = amount_msat.div_ceil(1_000u128) + fee_sats;
-        let invoice = InvoiceBuilder::new(send_btc.currency)
-            .payee_pub_key(self.pubkey.into())
+
+        let invoice_builder = InvoiceBuilder::new(send_btc.currency)
             .amount(Some(invoice_amount_sats))
             .payment_hash(payment_hash)
             .hash_algorithm(HashAlgorithm::Sha256)
             .expiry_time(Duration::from_secs(expiry))
             .final_expiry_delta(self.config.ckb_final_tlc_expiry_delta)
-            .udt_type_script(wrapped_btc_type_script.clone().into())
-            .build()?;
+            .udt_type_script(wrapped_btc_type_script.clone().into());
+        let invoice = if let Some((public_key, secret_key)) = &self.node_keypair {
+            invoice_builder
+                .payee_pub_key(*public_key)
+                .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, secret_key))
+        } else {
+            invoice_builder.build()
+        }?;
+        let invoice = self
+            .fiber_agent
+            .add_invoice(invoice)
+            .await
+            .map_err(CchError::FiberNodeError)?;
         let order = CchOrder {
             wrapped_btc_type_script,
             fee_sats,
@@ -335,17 +385,11 @@ impl<S: CchOrderStore + Send + Sync + 'static> CchState<S> {
             created_at: duration_since_epoch.as_secs(),
             ckb_final_tlc_expiry_delta: self.config.ckb_final_tlc_expiry_delta,
             outgoing_pay_req: send_btc.btc_pay_req,
-            incoming_invoice: CchInvoice::Fiber(invoice.clone()),
+            incoming_invoice: CchInvoice::Fiber(invoice),
             payment_preimage: None,
             amount_sats: invoice_amount_sats,
             status: CchOrderStatus::Pending,
         };
-
-        let message = move |rpc_reply| -> NetworkActorMessage {
-            NetworkActorMessage::Command(NetworkActorCommand::AddInvoice(invoice, None, rpc_reply))
-        };
-
-        call!(&self.network_actor, message).expect("call actor")?;
 
         self.store.insert_cch_order(order.clone())?;
         self.step_order(myself, &order).await?;
@@ -601,17 +645,11 @@ impl<S: CchOrderStore + Send + Sync + 'static> CchState<S> {
                             order.payment_hash,
                             order.status
                         );
-                        let command = move |rpc_reply| -> NetworkActorMessage {
-                            NetworkActorMessage::Command(NetworkActorCommand::SettleInvoice(
-                                order.payment_hash,
-                                preimage,
-                                rpc_reply,
-                            ))
-                        };
-                        call!(&self.network_actor, command)
-                            .expect("call actor")
-                            .map_err(CchError::CKBSettleInvoiceError)?;
 
+                        self.fiber_agent
+                            .settle_invoice(order.payment_hash, preimage)
+                            .await
+                            .map_err(CchError::FiberNodeError)?;
                         let mut order = order.clone();
                         order.status = CchOrderStatus::Succeeded;
                         self.update_cch_order(order);
@@ -638,23 +676,15 @@ impl<S: CchOrderStore + Send + Sync + 'static> CchState<S> {
                         payment_hash = ?order.payment_hash,
                         "Sending payment to fiber node because we received payment from LND",
                     );
-                    let message = |rpc_reply| -> NetworkActorMessage {
-                        NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
-                            SendPaymentCommand {
-                                invoice: Some(order.outgoing_pay_req.clone()),
-                                ..Default::default()
-                            },
-                            rpc_reply,
-                        ))
-                    };
+
+                    let payment_status = self
+                        .fiber_agent
+                        .send_payment(order.outgoing_pay_req.clone())
+                        .await
+                        .map_err(CchError::FiberNodeError)?;
 
                     let mut order = order.clone();
-                    // TODO: handle payment failure here.
-                    let tlc_response = call!(self.network_actor, message)
-                        .expect("call actor")
-                        .map_err(CchError::CKBSendPaymentError)?;
-                    // TODO: handle payment failure here.
-                    if tlc_response.status == PaymentStatus::Failed {
+                    if payment_status == PaymentStatus::Failed {
                         order.status = CchOrderStatus::Failed;
                     } else {
                         order.status = CchOrderStatus::OutgoingInFlight;
@@ -929,4 +959,20 @@ impl LndInvoiceTracker {
         // Quit tracker when the status is final
         Ok(status == CchOrderStatus::Succeeded || status == CchOrderStatus::Failed)
     }
+}
+
+fn ensure_fiber_http_url(url_opt: Option<String>) -> Result<String> {
+    if let Some(url) = url_opt {
+        if url.starts_with("http://") || url.starts_with("https://") {
+            return Ok(url);
+        }
+    }
+    Err(anyhow!("fiber_rpc_url must start with http:// or https://"))
+}
+
+fn ensure_fiber_ws_url(url_opt: Option<String>) -> Result<String> {
+    let mut url = ensure_fiber_http_url(url_opt)?;
+    // replace http with ws
+    url.replace_range(..4, "ws");
+    Ok(url)
 }

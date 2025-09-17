@@ -1,0 +1,34 @@
+meta {
+  name: 11-check-receive-btc-order
+  type: http
+  seq: 11
+}
+
+post {
+  url: {{NODE_CCH_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "get_cch_order",
+    "params": [
+      {
+        "payment_hash": "{{PAYMENT_HASH}}"
+      }
+    ]
+  }
+}
+
+assert {
+  res.body.error: isUndefined
+  res.status: eq 200
+}

@@ -10,7 +10,9 @@
 /tests/nodes/*/dev.toml
 /tests/nodes/*.log
 /tests/deploy/udt-init/target
-tests/nodes/.ports
+/tests/nodes/.ports
+/tests/nodes/.ports_map
+/tests/nodes/.ports_tmp
 /coverage-report
 /*.info
 .vscode

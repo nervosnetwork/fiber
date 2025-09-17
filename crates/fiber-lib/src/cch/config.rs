@@ -127,6 +127,15 @@ pub struct CchConfig {
     #[default(false)]
     #[arg(skip)]
     pub ignore_startup_failure: bool,
+
+    #[default(None)]
+    #[arg(
+        name = "CCH_FIBER_RPC_URL",
+        long = "cch-fiber-rpc-url",
+        env,
+        help = "fiber endpoint, default is None. May be used to connect to an external fiber node with websocket and normal http jsonrpc support. The address format should be in the format http[s]://<host>:<port>, if http is specified, the websocket connection will be ws://<host>:<port>, if https is specified, the websocket connection will be wss://<host>:<port>"
+    )]
+    pub fiber_rpc_url: Option<String>,
 }
 
 impl CchConfig {

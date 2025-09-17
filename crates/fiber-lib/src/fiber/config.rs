@@ -1,5 +1,3 @@
-#[cfg(target_arch = "wasm32")]
-use crate::fiber::KeyPair;
 use crate::{ckb::contracts::Contract, Result};
 use ckb_jsonrpc_types::{CellDep, Script};
 use clap_serde_derive::{
@@ -339,7 +337,7 @@ pub struct FiberConfig {
     pub disable_built_in_watchtower: Option<bool>,
     #[cfg(target_arch = "wasm32")]
     #[arg(skip)]
-    pub wasm_key_pair: Option<KeyPair>,
+    pub wasm_key_pair: Option<super::KeyPair>,
 
     /// Max allowed number of channels to be accepted from one peer. [default: 20]
     #[arg(

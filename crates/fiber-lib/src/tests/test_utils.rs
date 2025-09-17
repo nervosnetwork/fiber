@@ -26,6 +26,8 @@ use crate::fiber::types::Init;
 use crate::fiber::types::Privkey;
 use crate::fiber::types::Pubkey;
 use crate::fiber::types::Shutdown;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::fiber::KeyPair;
 use crate::fiber::ASSUME_NETWORK_ACTOR_ALIVE;
 use crate::gen_rand_sha256_hash;
 use crate::invoice::*;
@@ -35,7 +37,7 @@ use crate::rpc::invoice::{InvoiceResult, NewInvoiceParams};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::rpc::server::start_rpc;
 #[cfg(not(target_arch = "wasm32"))]
-use crate::store::pub_sub::StoreWithPubSub;
+use crate::store::pub_sub::{StoreWithPubSub, Subscribe};
 use crate::store::Store;
 use crate::{
     actors::{RootActor, RootActorMessage},
@@ -269,11 +271,11 @@ pub struct Cch {
 
 #[cfg(not(target_arch = "wasm32"))]
 impl Cch {
-    pub async fn start<S: CchOrderStore + Clone + Send + Sync + 'static>(
+    pub async fn start<S: CchOrderStore + Subscribe + Clone + Send + Sync + 'static>(
         config: CchConfig,
         should_start_lnd: bool,
         network_actor: ActorRef<NetworkActorMessage>,
-        pubkey: Pubkey,
+        node_keypair: KeyPair,
         store: S,
     ) -> Self {
         let (config, lnd_node) = if should_start_lnd {
@@ -293,8 +295,8 @@ impl Cch {
                 config: config.clone(),
                 tracker: new_tokio_task_tracker(),
                 token: new_tokio_cancellation_token(),
-                network_actor,
-                pubkey,
+                network_actor: Some(network_actor),
+                node_keypair: Some(node_keypair),
                 store,
             },
             root_actor,
@@ -1445,10 +1447,10 @@ impl NetworkNode {
         .expect("start mock chain actor")
         .0;
 
-        let private_key: Privkey = fiber_config
+        let keypair = fiber_config
             .read_or_generate_secret_key()
-            .expect("must generate key")
-            .into();
+            .expect("must generate key");
+        let private_key: Privkey = keypair.clone().into();
         let pubkey = private_key.pubkey();
 
         let network_graph = Arc::new(TokioRwLock::new(NetworkGraph::new(
@@ -1539,7 +1541,7 @@ impl NetworkNode {
                     config,
                     should_start_lnd,
                     network_actor.clone(),
-                    pubkey,
+                    keypair,
                     store.clone(),
                 )
                 .await;
@@ -1562,7 +1564,7 @@ impl NetworkNode {
                     Some(network_actor.clone()),
                     None,
                     store.clone(),
-                    network_graph.clone(),
+                    Some(network_graph.clone()),
                     root_actor.get_cell(),
                     #[cfg(debug_assertions)]
                     None,

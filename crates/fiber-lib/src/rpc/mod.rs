@@ -232,7 +232,7 @@ pub mod server {
         network_actor: Option<ActorRef<NetworkActorMessage>>,
         cch_actor: Option<ActorRef<CchMessage>>,
         store: S,
-        network_graph: Arc<RwLock<NetworkGraph<S>>>,
+        network_graph: Option<Arc<RwLock<NetworkGraph<S>>>>,
         supervisor: ActorCell,
         #[cfg(debug_assertions)] ckb_chain_actor: Option<ActorRef<CkbChainMessage>>,
         #[cfg(debug_assertions)] rpc_dev_module_commitment_txs: Option<
@@ -266,9 +266,18 @@ pub mod server {
                 .unwrap();
         }
         if config.is_module_enabled("graph") {
-            modules
-                .merge(GraphRpcServerImpl::new(network_graph, store.clone()).into_rpc())
-                .unwrap();
+            match network_graph {
+                Some(network_graph) => {
+                    modules
+                        .merge(GraphRpcServerImpl::new(network_graph, store.clone()).into_rpc())
+                        .unwrap();
+                }
+                None => {
+                    tracing::error!(
+                        "rpc graph module is enabled, but fiber service is not enabled"
+                    );
+                }
+            }
         }
         if config.is_module_enabled("pubsub") {
             register_pub_sub_rpc(&mut modules, &store, supervisor).await?;
@@ -331,11 +340,14 @@ pub mod server {
             }
         }
         if let Some(cch_actor) = cch_actor {
+            println!("cch enabled!");
             if config.is_module_enabled("cch") {
                 modules
                     .merge(CchRpcServerImpl::new(cch_actor).into_rpc())
                     .unwrap();
             }
+        } else {
+            println!("cch not enabled!");
         }
 
         let (handle, addr) = start_server(listening_addr, auth, modules).await?;

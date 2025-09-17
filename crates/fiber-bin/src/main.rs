@@ -78,12 +78,9 @@ pub async fn main() -> Result<(), ExitMessage> {
     let _span = info_span!("node", node = fnn::get_node_prefix()).entered();
 
     let config = Config::parse();
+    let fiber_fallback_config = config.fiber_fallback_config.clone();
 
-    let store_path = config
-        .fiber
-        .as_ref()
-        .ok_or_else(|| ExitMessage("fiber config is required but absent".to_string()))?
-        .store_path();
+    let store_path = fiber_fallback_config.store_path();
 
     let store = Store::new(store_path).map_err(|err| ExitMessage(err.to_string()))?;
     let store = StoreWithPubSub::new(store);
@@ -102,10 +99,7 @@ pub async fn main() -> Result<(), ExitMessage> {
     });
 
     #[allow(unused_variables)]
-    let (network_actor, ckb_chain_actor, network_graph, node_public_key) = match config
-        .fiber
-        .clone()
-    {
+    let (network_actor, ckb_chain_actor, network_graph) = match config.fiber.clone() {
         Some(fiber_config) => {
             // TODO: this is not a super user friendly error message which has actionable information
             // for the user to fix the error and start the node.
@@ -296,26 +290,31 @@ pub async fn main() -> Result<(), ExitMessage> {
                 Some(network_actor),
                 Some(ckb_chain_actor),
                 Some(network_graph),
-                Some(node_public_key),
             )
         }
-        None => (None, None, None, None),
+        None => (None, None, None),
     };
 
     let cch_actor = match config.cch {
         Some(cch_config) => {
             info!("Starting cch");
             let ignore_startup_failure = cch_config.ignore_startup_failure;
+            let node_keypair =
+                if let Some(fiber) = config.fiber.as_ref() {
+                    Some(fiber.read_or_generate_secret_key().map_err(|err| {
+                        ExitMessage(format!("failed to read secret key: {}", err))
+                    })?)
+                } else {
+                    None
+                };
             match start_cch(
                 CchArgs {
                     config: cch_config,
                     tracker: new_tokio_task_tracker(),
                     token: new_tokio_cancellation_token(),
-                    network_actor: network_actor
-                        .clone()
-                        .expect("Cch service requires network actor"),
-                    pubkey: node_public_key.expect("Cch service requires node public key"),
+                    network_actor: network_actor.clone(),
                     store: store.clone(),
+                    node_keypair,
                 },
                 root_actor.get_cell(),
             )
@@ -333,8 +332,6 @@ pub async fn main() -> Result<(), ExitMessage> {
                     }
                 }
                 Ok(actor) => {
-                    // Subscribe the actor to the store so it can receive updates
-                    store.subscribe(Box::new(actor.clone()));
                     info!("cch started successfully ...");
                     Some(actor)
                 }
@@ -344,8 +341,8 @@ pub async fn main() -> Result<(), ExitMessage> {
     };
 
     // Start rpc service
-    let rpc_server_handle = match (config.rpc, network_graph) {
-        (Some(rpc_config), Some(network_graph)) => {
+    let rpc_server_handle = match config.rpc {
+        Some(rpc_config) => {
             match start_rpc(
                 rpc_config,
                 config.ckb,
@@ -355,20 +352,19 @@ pub async fn main() -> Result<(), ExitMessage> {
                 store,
                 network_graph,
                 root_actor.get_cell(),
-                #[cfg(debug_assertions)] ckb_chain_actor,
-                #[cfg(debug_assertions)] rpc_dev_module_commitment_txs,
+                #[cfg(debug_assertions)]
+                ckb_chain_actor,
+                #[cfg(debug_assertions)]
+                rpc_dev_module_commitment_txs,
             )
-            .await {
+            .await
+            {
                 Ok(handle) => Some(handle),
                 Err(err) => {
                     return ExitMessage::err(format!("rpc server failed to start: {}", err));
                 }
             }
-        },
-        (Some(_), None) => return ExitMessage::err(
-            "RPC requires network graph in the fiber service which is not enabled in the config file"
-            .to_string()
-        ),
+        }
         _ => None,
     };
 

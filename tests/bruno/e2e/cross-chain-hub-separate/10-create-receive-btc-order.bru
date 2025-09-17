@@ -1,0 +1,44 @@
+meta {
+  name: 10-create-receive-btc-order
+  type: http
+  seq: 10
+}
+
+post {
+  url: {{NODE_CCH_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "receive_btc",
+    "params": [
+      {
+        "fiber_pay_req": "{{FIBER_PAY_REQ}}"
+      }
+    ]
+  }
+}
+
+assert {
+  res.status: eq 200
+  res.body.error: isUndefined
+  res.body.result.incoming_invoice.Lightning: isDefined
+}
+
+script:post-response {
+  bru.setVar("BTC_PAY_REQ", res.body.result.incoming_invoice.Lightning);
+  console.log(res.body.result.incoming_invoice.Lightning);
+}
+
+docs {
+  CKB user requests a BTC invoice to receive BTC from Bitcoin user.
+}

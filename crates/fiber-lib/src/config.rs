@@ -20,6 +20,8 @@ pub struct Config {
     // ckb actor config, None represents that we should not run ckb actor
     pub ckb: Option<CkbConfig>,
     pub base_dir: PathBuf,
+    /// fiber config, even when fiber service is not configured.
+    pub fiber_fallback_config: FiberConfig,
 }
 
 #[derive(Serialize, Deserialize, Parser, Copy, Clone, Debug, PartialEq)]
@@ -217,6 +219,7 @@ pub mod native {
                 ckb.unwrap_or(CkbConfig::from(&mut args.ckb)),
             );
 
+            let fiber_fallback_config = fiber.clone();
             let fiber = services.contains(&Service::FIBER).then_some(fiber);
             let cch = services.contains(&Service::CCH).then_some(cch);
             let rpc = services.contains(&Service::RPC).then_some(rpc);
@@ -228,6 +231,7 @@ pub mod native {
                 rpc,
                 ckb,
                 base_dir,
+                fiber_fallback_config,
             }
         }
     }
@@ -273,10 +277,10 @@ mod wasm {
                 )
             };
 
+            let fiber_fallback_config = FiberConfig::from(fiber);
             let fiber = services
                 .contains(&Service::FIBER)
-                .then_some(fiber)
-                .map(FiberConfig::from);
+                .then_some(fiber_fallback_config.clone());
             let rpc = services
                 .contains(&Service::RPC)
                 .then_some(rpc)
@@ -290,6 +294,7 @@ mod wasm {
                 fiber,
                 rpc,
                 ckb,
+                fiber_fallback_config,
                 base_dir: PathBuf::from_str(&database_prefix).unwrap(),
             }
         }

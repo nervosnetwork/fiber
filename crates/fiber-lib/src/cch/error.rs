@@ -28,8 +28,8 @@ pub enum CchError {
     CKBInvoiceMissingAmount,
     #[error("Fail to settle CKB invoice: {0}")]
     CKBSettleInvoiceError(#[from] SettleInvoiceError),
-    #[error("Fail to send CKB payment: {0}")]
-    CKBSendPaymentError(String),
+    #[error("Fiber node error: {0}")]
+    FiberNodeError(anyhow::Error),
     #[error("SendBTC order already paid")]
     SendBTCOrderAlreadyPaid,
     #[error("SendBTC received payment amount is too small")]

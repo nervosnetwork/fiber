@@ -18,7 +18,7 @@ if ! [ -d "$testcase_dir" ]; then
 fi
 
 case "$testcase_name" in
-  "e2e/cross-chain-hub")
+  "e2e/cross-chain-hub"*)
     ./tests/deploy/lnd-init/setup-lnd.sh
     ;;
   "e2e/router-pay")
@@ -67,9 +67,13 @@ cd "$nodes_dir" || exit 1
 start() {
     log_file="${2}.log"
     echo "logging to ${log_file}"
-    ../../target/debug/fnn "$@" 2>&1 | tee "$log_file"
+    # Append used ports to the file for ports detection
+    grep "^${2}\\." "$nodes_dir/.ports_map" | sed 's/.*: //' >> "$nodes_dir/.ports_tmp"
+    ../../target/debug/fnn "$@" 2>&1 | tee "$log_file" &
 }
 
+rm -f "$nodes_dir/.ports"
+rm -f "$nodes_dir/.ports_tmp"
 if [ "${#start_node_ids[@]}" = 0 ]; then
     if [[ -n "$should_start_bootnode" ]]; then
         FIBER_SECRET_KEY_PASSWORD='password0' LOG_PREFIX=$'[boot node]' start -d bootnode &
@@ -79,14 +83,18 @@ if [ "${#start_node_ids[@]}" = 0 ]; then
         # export the environment variable so that other nodes can connect to the bootnode.
         export FIBER_BOOTNODE_ADDRS=/ip4/127.0.0.1/tcp/8343/p2p/Qmbyc4rhwEwxxSQXd5B4Ej4XkKZL6XLipa3iJrnPL9cjGR
     fi
-    FIBER_SECRET_KEY_PASSWORD='password1' LOG_PREFIX=$'[node 1]' start -d 1 &
-    FIBER_SECRET_KEY_PASSWORD='password2' LOG_PREFIX=$'[node 2]' start -d 2 &
-    FIBER_SECRET_KEY_PASSWORD='password3' LOG_PREFIX=$'[node 3]' start -d 3 &
+    FIBER_SECRET_KEY_PASSWORD='password1' LOG_PREFIX=$'[node 1]' start -d 1
+    FIBER_SECRET_KEY_PASSWORD='password2' LOG_PREFIX=$'[node 2]' start -d 2
+    FIBER_SECRET_KEY_PASSWORD='password3' LOG_PREFIX=$'[node 3]' start -d 3
+    if [ "$testcase_name" = "e2e/cross-chain-hub-separate" ]; then
+        FIBER_SECRET_KEY_PASSWORD='password4' LOG_PREFIX=$'[node cch]' start -d cch
+    fi
 else
     for id in "${start_node_ids[@]}"; do
-        FIBER_SECRET_KEY_PASSWORD="password$id" LOG_PREFIX="[$id]"$'' start -d "$id" &
+        FIBER_SECRET_KEY_PASSWORD="password$id" LOG_PREFIX="[$id]"$'' start -d "$id"
     done
 fi
+mv -f "$nodes_dir/.ports_tmp" "$nodes_dir/.ports"
 
 # we will exit when any of the background processes exits.
 # we don't use `wait -n` because of compatibility issues between bash and zsh

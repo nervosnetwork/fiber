@@ -1,10 +1,16 @@
-use crate::store::pub_sub::Subscribe;
-
-/// Store Pub/Sub via RPC
+//! Store Pub/Sub via RPC
 use super::StoreUpdatedEvent;
+use crate::store::pub_sub::{StorePublisher, Subscribe};
 
-use jsonrpsee::{RpcModule, SubscriptionSink};
-use ractor::{Actor, ActorCell, ActorProcessingErr, ActorRef};
+use jsonrpsee::{
+    core::client::{Subscription, SubscriptionClientT},
+    rpc_params,
+    ws_client::WsClientBuilder,
+    RpcModule, SubscriptionSink,
+};
+use ractor::{port::OutputPortSubscriber, Actor, ActorCell, ActorProcessingErr, ActorRef};
+use tokio::select;
+use tokio_util::sync::CancellationToken;
 
 pub struct PubSubServerActor;
 
@@ -87,4 +93,78 @@ pub async fn register_pub_sub_rpc<S: Subscribe>(
         },
     )?;
     Ok(())
+}
+
+pub struct PubSubClient {
+    ws_url: String,
+    publisher: StorePublisher,
+}
+
+impl PubSubClient {
+    pub fn new(ws_url: String) -> Self {
+        Self {
+            ws_url,
+            publisher: Default::default(),
+        }
+    }
+
+    pub fn subscribe(&self, subscriber: OutputPortSubscriber<StoreUpdatedEvent>) {
+        self.publisher.subscribe(subscriber);
+    }
+
+    async fn run_inner(&self, token: &CancellationToken) -> anyhow::Result<()> {
+        let client = WsClientBuilder::default().build(&self.ws_url).await?;
+        let mut subscription: Subscription<StoreUpdatedEvent> = client
+            .subscribe(
+                SUBSCRIBE_STORE_CHANGES_NAME,
+                rpc_params![],
+                UNSUBSCRIBE_STORE_CHANGES_NAME,
+            )
+            .await?;
+
+        loop {
+            select! {
+                notif = subscription.next() => {
+                    match notif {
+                        Some(Ok(event)) => {
+                            self.publisher.publish(event);
+                        },
+                        Some(Err(err)) => {
+                            // ignore errors from server
+                            tracing::error!("unexpected store changes stream error: {}", err);
+                        },
+                        None => {
+                            return Err(anyhow::anyhow!("reconnect"));
+                        }
+                    }
+                }
+                _ = token.cancelled() => {
+                    break;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn run(self, token: CancellationToken) {
+        loop {
+            select! {
+                result = self.run_inner(&token) => {
+                    if let Err(err) = result {
+                        tracing::error!(
+                            "restart pub sub client to {} because of error: {}",
+                            self.ws_url,
+                            err
+                        );
+                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    } else {
+                        break;
+                    }
+                }
+                _ = token.cancelled() => {
+                    break;
+                }
+            }
+        }
+    }
 }
