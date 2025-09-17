@@ -1837,21 +1837,24 @@ where
                         let (send, _recv) =
                             oneshot::channel::<Result<(), ProcessingChannelError>>();
                         let port = RpcReplyPort::from(send);
-                        self.network
-                            .send_message(NetworkActorMessage::new_command(
-                                NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
-                                    channel_id,
-                                    command: ChannelCommand::RemoveTlc(
-                                        RemoveTlcCommand {
-                                            id: tlc_id.into(),
-                                            reason: reason.clone(),
-                                        },
-                                        port,
-                                    ),
-                                }),
-                            ))
-                            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-                        // the previous hop will automatically retry if there is Waiting_Ack error
+                        match self.network.send_message(NetworkActorMessage::new_command(
+                            NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
+                                channel_id,
+                                command: ChannelCommand::RemoveTlc(
+                                    RemoveTlcCommand {
+                                        id: tlc_id.into(),
+                                        reason: reason.clone(),
+                                    },
+                                    port,
+                                ),
+                            }),
+                        )) {
+                            Ok(_) => {
+                                // the previous hop will automatically retry if there is Waiting_Ack error
+                                retry_later = false;
+                            }
+                            Err(_err) => {}
+                        }
                     }
                     true
                 }
