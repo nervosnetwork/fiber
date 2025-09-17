@@ -112,7 +112,7 @@ pub const COMMITMENT_CELL_WITNESS_LEN: usize = 16 + 1 + 32 + 64;
 // is funded or not.
 pub const INITIAL_COMMITMENT_NUMBER: u64 = 0;
 
-const RETRYABLE_TLC_OPS_INTERVAL: Duration = Duration::from_millis(500);
+const RETRYABLE_TLC_OPS_INTERVAL: Duration = Duration::from_millis(250);
 const WAITING_REESTABLISH_FINISH_TIMEOUT: Duration = Duration::from_millis(4000);
 
 // if a important TLC operation is not acked in 30 seconds, we will try to disconnect the peer.
@@ -4480,14 +4480,14 @@ impl ChannelActorState {
         if let Some(retry_count) = self.retryable_tlc_operations.get_mut(&operation) {
             // don't retry too many times, but in most cases we need to retry immediately for WaitingTlcAck
             let retry_delay = if waiting_ack {
-                1.max(*retry_count / 120)
+                1.max(*retry_count / 500)
             } else {
                 *retry_count
             };
             // we have limited number of tasks, so set a upper bound for retry delay
             // to make sure we don't wait too long for retryable tasks and also not to cost too much resource
-            // the upper bound here is (500 ms * 3600 = 30 minutes)
-            let duration = RETRYABLE_TLC_OPS_INTERVAL * retry_delay.min(3600);
+            // the upper bound here is (250 ms * 7200 = 30 minutes)
+            let duration = RETRYABLE_TLC_OPS_INTERVAL * retry_delay.min(7200);
             myself.send_after(duration, move || {
                 ChannelActorMessage::Event(ChannelEvent::RunRetryTask(operation))
             });
