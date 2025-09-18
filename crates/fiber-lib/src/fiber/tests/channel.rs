@@ -2071,6 +2071,7 @@ async fn do_test_remove_tlc_with_wrong_hash_algorithm(
 
 #[tokio::test]
 async fn do_test_channel_remote_commitment_error() {
+    init_tracing();
     // https://github.com/nervosnetwork/fiber/issues/447
     let node_a_funding_amount = 100000000000;
     let node_b_funding_amount = 100000000000;
@@ -2100,7 +2101,7 @@ async fn do_test_channel_remote_commitment_error() {
         // create a new payment hash
         let hash_algorithm = HashAlgorithm::Sha256;
         let digest = hash_algorithm.hash(preimage);
-        if let Ok(add_tlc_result) = call!(node_a.network_actor, |rpc_reply| {
+        if let Ok(res) = call!(node_a.network_actor, |rpc_reply| {
             NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
                 ChannelCommandWithId {
                     channel_id: new_channel_id,
@@ -2122,10 +2123,14 @@ async fn do_test_channel_remote_commitment_error() {
         })
         .expect("node_b alive")
         {
-            dbg!(&add_tlc_result);
-            all_sent.push((preimage, add_tlc_result.tlc_id));
+            all_sent.push((preimage, res.tlc_id));
         }
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        debug!(
+            "now begin to remove all_sent len: {}  tlc_number_in_flight_limit: {:?}",
+            all_sent.len(),
+            tlc_number_in_flight_limit
+        );
         if all_sent.len() >= tlc_number_in_flight_limit {
             while all_sent.len() > tlc_number_in_flight_limit - 2 {
                 if let Some((preimage, tlc_id)) = all_sent.first().cloned() {
@@ -2149,6 +2154,7 @@ async fn do_test_channel_remote_commitment_error() {
                     })
                     .expect("node_b alive");
                     dbg!(&remove_tlc_result);
+
                     if remove_tlc_result.is_ok()
                         || remove_tlc_result
                             .unwrap_err()
@@ -2157,6 +2163,7 @@ async fn do_test_channel_remote_commitment_error() {
                     {
                         all_sent.remove(0);
                     }
+                    debug!("after remaining all_sent len: {}", all_sent.len());
                 }
             }
             batch_remove_count += 1;
@@ -2737,6 +2744,7 @@ async fn do_test_add_tlc_duplicated() {
 
 #[tokio::test]
 async fn do_test_add_tlc_waiting_ack() {
+    init_tracing();
     let node_a_funding_amount = 100000000000;
     let node_b_funding_amount = 6200000000;
 
@@ -2778,8 +2786,10 @@ async fn do_test_add_tlc_waiting_ack() {
 
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
+    debug!("after sleep 1s");
     // send from b to a
     for i in 1..=2 {
+        debug!("hello round : {:?}", i);
         let add_tlc_command = AddTlcCommand {
             amount: tlc_amount,
             hash_algorithm: HashAlgorithm::CkbHash,
@@ -2809,6 +2819,7 @@ async fn do_test_add_tlc_waiting_ack() {
             assert!(add_tlc_result.is_ok());
         }
     }
+    debug!("now debug now...");
 }
 
 #[tokio::test]

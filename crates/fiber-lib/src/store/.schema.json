@@ -1,11 +1,12 @@
 {
+  "AddTlcCommand": "31129451de66547e68f560c9b40fcc25d8e5a73de9b1aaebd8b09bf42d49467f",
   "AnnouncedNodeName": "73035cf37b0bbc724336af8a5982ca40a37d6fdcb6f7b0fed98158b4afb51260",
   "Attempt": "fc9bca945949fd6ac5591daf8ea2f2ca253698231801c3f6cf03cc01e7f7a94a",
   "AttemptStatus": "b18d88f1743ca9a7b657daa273e3ec3cab475113c2b34704792f8ca7a382313a",
   "Attribute": "bee9e44e53d7428c6881544b3859b5074d3ec016f45ba027fba7b92d1c9c2d4b",
   "BroadcastMessage": "c15fb7747e489e3ace898276a811a61060f3913bf8d6143ed9ab895d97128469",
   "BroadcastMessageID": "4e3dd7d56d0d844ac3e1fb4f508ad85499fbcd718130716c9605268e25641c05",
-  "ChannelActorState": "f39a2738e1aa5d53d4403d6c205ba2cb1fe9f14608f5449335c32d2ef4ec26e7",
+  "ChannelActorState": "aac9ac28662c4e120d54e13c7bc1a9ce1903127794c3530e9b037d3484b2ea6f",
   "ChannelAnnouncement": "c563d7eae48dbc39b8dedce964b836aece184be176d8687150c0ef5abc2c81db",
   "ChannelBasePublicKeys": "c711ccbe027f8bf52b7123393e447a650b838d327fa1832a28d92e88125317e2",
   "ChannelConstraints": "320fe47cbe42ba7ade03d12b8f6a07a9347d9180f5e593918a14461f3d54b0bd",
@@ -41,13 +42,14 @@
   "PeeledPaymentOnionPacket": "643ecddd6a8d34a0e643a144090dee14f2983de4fb33fad4b37634c17ec27c67",
   "PendingTlcs": "820c763de8fc8fe727995346949e5b8f552853492b7ef6ec69161d6926083d31",
   "PersistentNetworkActorState": "871dfe6547ebe6113a3e24420c754ee7d83d4c7d595cee67abbbf0e8f9b8f7f5",
+  "PrevTlcInfo": "b780048e54d585047f052d19e4bf169c8d43da8e0d6d8f96237c5f0eaf30efdf",
   "Privkey": "c1f528c03034c7973d99992120f501f4acaecfba5a073657951be0763d4f1420",
   "Pubkey": "030fd3357ff8fdac9e9a2d3dba0e2be9d03d4a1ff4a17daed58097bba8f1e4f2",
   "PublicChannelInfo": "4f61ae37e46c668747d83f946405622c9320ce0f9442856cb11e693eee1671be",
   "RemoveTlcFulfill": "7d3b3e01740bc094ecbfaf7530dc3be088a13e1df9d5c603c4ade4c1e0147135",
   "RemoveTlcReason": "4a28416b4d12f11853d045c1f1a63ff77b923a52402df3968e9277b39c49ba76",
   "RetryableTask": "54f4a8804d826e9b667c16f738d3b0a1759fc5a3c858bb9ac98e5421a6fbba7a",
-  "RetryableTlcOperation": "768e6d084389701e830de3bb8790bffc65182c700995d78d775c23b3cf4a47f4",
+  "RetryableTlcOperation": "2d4d2335638e7d0770b6d68c126808c739eafae08daa1b8e151a63d491b38419",
   "RevocationData": "95c238ac967cd6947951116ed39b6d0ab9ffcb509e9fb1b5684abff134e2030e",
   "RevocationNonce": "55812ed9f87d6495f0d9d06935bc0b9084a4a8a58fc53d627e3e494d1d972285",
   "RevokeAndAck": "8b2a0d7a780fe10a8245e97815743c9769774ff3d4834e601dea2fdde2d56702",
@@ -65,5 +67,5 @@
   "TlcState": "5b843c13a75da1cbe31fe91f5c8aef4e3705172735d57429786d82df62311d26",
   "TlcStatus": "c6e573785811e5289908255ec8e30c55af5aa9bb6c8b97a90d3d0abace00b983",
   "UdtCfgInfos": "810d91ca44e779cfebb4ab1dffb1072c7993bdf9af22423abed2e339586d09fa",
-  "WaitingTaskKey": "ad1d84721585537912c1c14613249289fec098d7d9eccdb86e4efe9f31b8be34"
+  "WaitingTlcOperation": "97bc90725e2ebfa27ac3824752a3b0260fcbbff2d83eec38376e63146068dc80"
 }
