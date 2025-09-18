@@ -1796,16 +1796,15 @@ where
         let mut tasks_to_retry = Vec::new();
 
         // Process all tasks that are ready to execute
-        while let Some(task) = state.retryable_tlc_operations.peek() {
+        while let Some(task) = state.retryable_tlc_operations.pop() {
             // here we does not check the task next_retry_time with current time,
             // because RelayRemoveTlc need a higher priority to be processed
             // so we just process all tasks in the list
-            if task.next_retry_time > now_timestamp_as_millis_u64() {
-                break;
-            }
+            // if task.next_retry_time > now_timestamp_as_millis_u64() {
+            //     break;
+            // }
 
-            let task = state.retryable_tlc_operations.pop().expect("must got task");
-            let (mut retry_later, mut _waiting_ack) = (true, false);
+            let mut retry_later = true;
             let keep_job = match task.operation {
                 RetryableTlcOperation::RemoveTlc(tlc_id, ref reason) => {
                     match self
@@ -1820,10 +1819,7 @@ where
                         .await
                     {
                         Ok(_) | Err(ProcessingChannelError::RepeatedProcessing(_)) => false,
-                        Err(ProcessingChannelError::WaitingTlcAck) => {
-                            _waiting_ack = true;
-                            true
-                        }
+                        Err(ProcessingChannelError::WaitingTlcAck) => true,
                         Err(_err) => false,
                     }
                 }
@@ -3156,10 +3152,7 @@ impl RetryableTask {
         let retry_delay = 1.max(retry_count / 1000);
 
         // Cap the retry delay to prevent excessive waiting (max 30 minutes)
-        let mut duration = retry_delay.min(7200) * RETRYABLE_TLC_OPS_INTERVAL;
-        if matches!(operation, RetryableTlcOperation::RelayRemoveTlc(..)) {
-            duration /= 2;
-        }
+        let duration = retry_delay.min(7200) * RETRYABLE_TLC_OPS_INTERVAL;
         let next_retry_time = current_time + duration.as_millis() as u64;
 
         Self {
