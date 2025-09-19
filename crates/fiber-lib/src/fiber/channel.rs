@@ -1,5 +1,6 @@
-use super::config::DEFAULT_FUNDING_TIMEOUT_SECONDS;
-use super::config::DEFAULT_HOLD_TLC_TIMEOUT;
+use super::config::{
+    DEFAULT_COMMITMENT_DELAY_EPOCHS, DEFAULT_FUNDING_TIMEOUT_SECONDS, DEFAULT_HOLD_TLC_TIMEOUT,
+};
 use super::{
     gossip::SOFT_BROADCAST_MESSAGES_CONSIDERED_STALE_DURATION, graph::ChannelUpdateInfo,
     types::ForwardTlcResult,
@@ -193,6 +194,16 @@ impl Display for ChannelCommand {
     }
 }
 
+impl ChannelCommand {
+    pub fn rpc_reply_port(self) -> Option<RpcReplyPort<Result<(), String>>> {
+        match self {
+            ChannelCommand::Shutdown(_, port) => Some(port),
+            ChannelCommand::Update(_, port) => Some(port),
+            _ => None,
+        }
+    }
+}
+
 #[cfg(any(test, feature = "bench"))]
 #[derive(Debug)]
 pub struct ReloadParams {
@@ -274,8 +285,6 @@ pub struct ChannelCommandWithId {
 
 pub const DEFAULT_FEE_RATE: u64 = 1_000;
 pub const DEFAULT_COMMITMENT_FEE_RATE: u64 = 1_000;
-// The default commitment delay is 6 epochs = 24 hours.
-pub const DEFAULT_COMMITMENT_DELAY_EPOCHS: u64 = 6;
 // The min commitment delay is 1 epoch = 4 hours.
 pub const MIN_COMMITMENT_DELAY_EPOCHS: u64 = 1;
 // The max commitment delay is 84 epochs = 14 days.
@@ -636,7 +645,7 @@ where
             FiberChannelMessage::TxAbort(_) => {
                 if state.state.can_abort_funding() {
                     state.update_state(ChannelState::Closed(CloseFlags::FUNDING_ABORTED));
-                    myself.stop(None);
+                    myself.stop(Some("Funding abort".to_string()));
                 }
                 Ok(())
             }
@@ -739,7 +748,15 @@ where
         commitment_signed: CommitmentSigned,
     ) -> Result<(), ProcessingChannelError> {
         // build commitment tx and verify signature from remote, if passed send ACK for partner
-        state.verify_commitment_signed_and_send_ack(commitment_signed.clone())?;
+        if let Err(err) = state.verify_commitment_signed_and_send_ack(commitment_signed.clone()) {
+            error!(
+                "Failed to verify commitment_signed message: {:?}, shutdown channel {} forcefully",
+                err,
+                state.get_id()
+            );
+            self.notify_network_actor_shutdown_me(state);
+            return Err(err);
+        }
         let need_commitment_signed = state.tlc_state.update_for_commitment_signed();
 
         // flush remove tlc for received tlcs after replying ack for peer
@@ -2277,7 +2294,7 @@ where
                         ))
                         .expect(ASSUME_NETWORK_ACTOR_ALIVE);
                 }
-                myself.stop(None);
+                myself.stop(Some(format!("ChannelStopped: {:?}", reason)));
             }
             ChannelEvent::ClosingTransactionConfirmed(tx_hash, force, close_by_us) => {
                 state
@@ -2288,17 +2305,12 @@ where
             }
             ChannelEvent::CheckActiveChannel => {
                 if state.should_disconnect_peer_awaiting_response() && !state.is_closed() {
-                    debug!(
-                        "Channel {} from peer {:?} is inactive for a time, closing it",
+                    error!(
+                        "Channel {} from peer {:?} is inactive for a time, shutting down it forcefully",
                         state.get_id(),
                         state.get_remote_peer_id(),
                     );
-                    state
-                        .network()
-                        .send_message(NetworkActorMessage::new_command(
-                            NetworkActorCommand::DisconnectPeer(state.get_remote_peer_id()),
-                        ))
-                        .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                    self.notify_network_actor_shutdown_me(state);
                 }
             }
             ChannelEvent::CheckFundingTimeout => {
@@ -2343,6 +2355,27 @@ where
             }
         }
         Ok(())
+    }
+
+    fn notify_network_actor_shutdown_me(&self, state: &ChannelActorState) {
+        let (send, _recv) = oneshot::channel();
+        let rpc_reply = RpcReplyPort::from(send);
+        state
+            .network()
+            .send_message(NetworkActorMessage::new_command(
+                NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
+                    channel_id: state.get_id(),
+                    command: ChannelCommand::Shutdown(
+                        ShutdownCommand {
+                            close_script: None,
+                            fee_rate: None,
+                            force: true,
+                        },
+                        rpc_reply,
+                    ),
+                }),
+            ))
+            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
     }
 }
 
@@ -5718,8 +5751,8 @@ impl ChannelActorState {
         let current_time = now_timestamp_as_millis_u64();
         if expiry <= current_time + MIN_TLC_EXPIRY_DELTA {
             error!(
-                "TLC expiry {} is too soon, current time: {}",
-                expiry, current_time
+                "TLC expiry {} is too soon, current time: {}, MIN_TLC_EXPIRY_DELTA: {}",
+                expiry, current_time, MIN_TLC_EXPIRY_DELTA
             );
             return Err(ProcessingChannelError::TlcExpirySoon);
         }
@@ -5731,6 +5764,11 @@ impl ChannelActorState {
             .all_tlcs()
             .filter(|tlc| tlc.removed_confirmed_at.is_none())
             .count() as u64;
+        debug!(
+            "here debug pending_tlc_count: {} => delay: {}",
+            pending_tlc_count,
+            epoch_delay_milliseconds * (pending_tlc_count + 1)
+        );
         let expect_expiry = current_time + epoch_delay_milliseconds * (pending_tlc_count + 1);
         if expiry < expect_expiry {
             error!(

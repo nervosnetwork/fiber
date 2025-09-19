@@ -1,7 +1,4 @@
-use ckb_sdk::{
-    rpc::ckb_indexer::{Order, ScriptType, SearchKey, SearchMode},
-    CkbRpcAsyncClient,
-};
+use ckb_sdk::rpc::ckb_indexer::{Order, ScriptType, SearchKey, SearchMode};
 use ckb_types::{
     core::{BlockView, DepType, ScriptHashType},
     packed::{CellDep, CellDepVec, CellDepVecBuilder, CellOutput, OutPoint, Script},
@@ -14,9 +11,12 @@ use std::{collections::HashMap, vec};
 use thiserror::Error;
 use tracing::info;
 
-use crate::fiber::{
-    config::FiberScript,
-    gen::fiber::{UdtDep, UdtDepUnion},
+use crate::{
+    ckb::config::new_ckb_rpc_async_client,
+    fiber::{
+        config::FiberScript,
+        gen::fiber::{UdtDep, UdtDepUnion},
+    },
 };
 
 use super::config::{UdtArgInfo, UdtCfgInfos};
@@ -82,7 +82,7 @@ impl TypeIDResolver {
     }
 
     pub async fn resolve(&self, type_id: Script) -> Option<CellDep> {
-        let ckb_client = CkbRpcAsyncClient::new(&self.ckb_url);
+        let ckb_client = new_ckb_rpc_async_client(&self.ckb_url);
         let search_key = SearchKey {
             script: type_id.into(),
             script_type: ScriptType::Type,

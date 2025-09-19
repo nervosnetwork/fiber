@@ -1,11 +1,10 @@
 use std::collections::HashMap;
 
 use bitmask_enum::bitmask;
-use ckb_sdk::CkbRpcAsyncClient;
 use ckb_types::core::tx_pool::TxStatus;
 use ractor::{concurrency::Duration, Actor, ActorProcessingErr, ActorRef, RpcReplyPort};
 
-use crate::fiber::types::Hash256;
+use crate::{ckb::config::new_ckb_rpc_async_client, fiber::types::Hash256};
 
 use super::jsonrpc_types_convert::tx_status_from_json;
 
@@ -266,7 +265,7 @@ impl TracingTask {
     }
 
     async fn run_inner(self) -> Result<(), Box<dyn std::error::Error>> {
-        let ckb_client = CkbRpcAsyncClient::new(&self.rpc_url);
+        let ckb_client = new_ckb_rpc_async_client(&self.rpc_url);
         let tip_block_number: u64 = ckb_client.get_tip_block_number().await?.into();
 
         for tx_hash in self.tx_hashes {

@@ -709,7 +709,7 @@ impl InvoiceBuilder {
         self.add_attr(Attribute::Feature(feature_vector))
     }
 
-    pub fn allow_mpp(self, allow_mpp: bool) -> Self {
+    pub fn allow_basic_mpp(self, allow_mpp: bool) -> Self {
         self.update_feature_vector(|feature_vector| {
             if allow_mpp {
                 feature_vector.set_basic_mpp_optional();

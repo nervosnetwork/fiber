@@ -791,7 +791,7 @@ impl NetworkNode {
             MppMode::BasicMpp => {
                 let preimage = gen_rand_sha256_hash();
                 builder = builder
-                    .allow_mpp(true)
+                    .allow_basic_mpp(true)
                     .payment_preimage(preimage)
                     .payment_secret(gen_rand_sha256_hash());
                 Some(preimage)

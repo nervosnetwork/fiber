@@ -1,5 +1,5 @@
 meta {
-  name: Node1 open a channel to Node2 with amount 1000000000 udt and 3.5 delay_epoch
+  name: Node1 open a channel to Node2 with amount 99 ckb
   type: http
   seq: 6
 }
@@ -23,14 +23,7 @@ body:json {
     "params": [
       {
         "peer_id": "{{NODE2_PEERID}}",
-        "funding_amount": "0x3B9ACA00",
-        "commitment_delay_epoch": "0x20001000003",
-        "tlc_fee_proportional_millionths": "0x4B0",
-        "funding_udt_type_script": {
-            "code_hash": "{{UDT_CODE_HASH}}",
-            "hash_type": "data1",
-            "args": "0x32e555f3ff8e135cece1351a6a2971518392c1e30375c1e006ad0ce8eac07947"
-          }
+        "funding_amount": "0x24e160300"
       }
     ]
   }
@@ -43,4 +36,5 @@ assert {
 
 script:post-response {
   await new Promise(r => setTimeout(r, 2000));
+    bru.setVar("N1N2_TEMP_CHANNEL_ID", res.body.result.temporary_channel_id);
 }

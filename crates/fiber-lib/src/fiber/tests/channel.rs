@@ -1,16 +1,17 @@
 use crate::ckb::tests::test_utils::complete_commitment_tx;
 use crate::fiber::channel::{
     AddTlcResponse, ChannelState, CloseFlags, OutboundTlcStatus, TLCId, TlcStatus, UpdateCommand,
-    DEFAULT_COMMITMENT_DELAY_EPOCHS, MAX_COMMITMENT_DELAY_EPOCHS, MIN_COMMITMENT_DELAY_EPOCHS,
-    XUDT_COMPATIBLE_WITNESS,
+    MAX_COMMITMENT_DELAY_EPOCHS, MIN_COMMITMENT_DELAY_EPOCHS, XUDT_COMPATIBLE_WITNESS,
 };
 use crate::fiber::config::{
-    DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT, MILLI_SECONDS_PER_EPOCH,
-    MIN_TLC_EXPIRY_DELTA,
+    DEFAULT_COMMITMENT_DELAY_EPOCHS, DEFAULT_FINAL_TLC_EXPIRY_DELTA, DEFAULT_TLC_EXPIRY_DELTA,
+    MAX_PAYMENT_TLC_EXPIRY_LIMIT, MILLI_SECONDS_PER_EPOCH, MIN_TLC_EXPIRY_DELTA,
 };
 use crate::fiber::features::FeatureVector;
 use crate::fiber::graph::ChannelInfo;
-use crate::fiber::network::{DebugEvent, FiberMessageWithPeerId, SendPaymentCommand};
+use crate::fiber::network::{
+    DebugEvent, FiberMessageWithPeerId, PeerDisconnectReason, SendPaymentCommand,
+};
 use crate::fiber::payment::PaymentStatus;
 use crate::fiber::types::{
     AddTlc, FiberMessage, Hash256, Init, PaymentHopData, PeeledPaymentOnionPacket, Pubkey, TlcErr,
@@ -403,7 +404,7 @@ async fn do_test_owned_channel_removed_from_graph_on_disconnected(public: bool) 
     node1
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::DisconnectPeer(node2_id.clone()),
+            NetworkActorCommand::DisconnectPeer(node2_id.clone(), PeerDisconnectReason::Requested),
         ))
         .expect("node_a alive");
 
@@ -467,7 +468,7 @@ async fn do_test_owned_channel_saved_to_graph_on_reconnected(public: bool) {
     node1
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::DisconnectPeer(node2_id.clone()),
+            NetworkActorCommand::DisconnectPeer(node2_id.clone(), PeerDisconnectReason::Requested),
         ))
         .expect("node_a alive");
 
@@ -1249,7 +1250,7 @@ async fn test_network_send_payment_target_not_found() {
         })
         .await;
     assert!(res.is_err());
-    assert!(res.err().unwrap().contains("no path found"));
+    assert!(res.err().unwrap().contains("Node not found in graph"));
 }
 
 #[tokio::test]
@@ -4106,7 +4107,10 @@ async fn test_reestablish_channel() {
     node_a
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::DisconnectPeer(node_b.peer_id.clone()),
+            NetworkActorCommand::DisconnectPeer(
+                node_b.peer_id.clone(),
+                PeerDisconnectReason::Requested,
+            ),
         ))
         .expect("node_a alive");
 
@@ -5672,7 +5676,8 @@ async fn test_send_payment_will_succeed_with_large_tlc_expiry_limit() {
     let source_node = &mut node_0;
     let target_pubkey = node_3.pubkey;
 
-    let expected_minimal_tlc_expiry_limit = (24 * 60 * 60 * 1000) * 3;
+    let expected_minimal_tlc_expiry_limit =
+        DEFAULT_TLC_EXPIRY_DELTA * 2 + DEFAULT_FINAL_TLC_EXPIRY_DELTA;
 
     let res = source_node
         .send_payment(SendPaymentCommand {

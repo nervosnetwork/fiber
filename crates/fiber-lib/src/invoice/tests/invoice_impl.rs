@@ -580,7 +580,7 @@ fn test_invoice_with_mpp_option() {
     let invoice = InvoiceBuilder::new(Currency::Fibb)
         .amount(Some(1280))
         .payment_hash(gen_rand_sha256_hash())
-        .allow_mpp(true)
+        .allow_basic_mpp(true)
         .payment_secret(gen_rand_sha256_hash())
         .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))
         .unwrap();
@@ -605,7 +605,7 @@ fn test_invoice_with_mpp_option() {
     let invoice = InvoiceBuilder::new(Currency::Fibb)
         .amount(Some(1280))
         .payment_hash(gen_rand_sha256_hash())
-        .allow_mpp(false)
+        .allow_basic_mpp(false)
         .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))
         .unwrap();
 
@@ -622,7 +622,7 @@ fn test_invoice_basic_mpp_and_atomic_mpp() {
     let invoice = InvoiceBuilder::new(Currency::Fibb)
         .amount(Some(1280))
         .payment_hash(gen_rand_sha256_hash())
-        .allow_mpp(true)
+        .allow_basic_mpp(true)
         .allow_atomic_mpp(true)
         .payment_secret(gen_rand_sha256_hash())
         .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key));

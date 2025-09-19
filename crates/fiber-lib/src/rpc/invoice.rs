@@ -4,6 +4,7 @@
 //! For better separation of concerns, the actual invoice logic is implemented in the `invoice` module.
 //!
 use crate::fiber::config::{MAX_PAYMENT_TLC_EXPIRY_LIMIT, MIN_TLC_EXPIRY_DELTA};
+use crate::fiber::features::FeatureVector;
 use crate::fiber::hash_algorithm::HashAlgorithm;
 use crate::fiber::serde_utils::{duration_hex, U128Hex, U64Hex};
 use crate::fiber::types::{Hash256, Privkey};
@@ -132,7 +133,7 @@ impl From<InternalCkbInvoice> for CkbInvoice {
 
 /// The parameter struct for generating a new invoice.
 #[serde_as]
-#[derive(Serialize, Deserialize, Default)]
+#[derive(Serialize, Deserialize, Default, Clone)]
 pub struct NewInvoiceParams {
     /// The amount of the invoice.
     #[serde_as(as = "U128Hex")]
@@ -238,11 +239,12 @@ pub struct InvoiceRpcServerImpl<S> {
     store: S,
     keypair: Option<(PublicKey, SecretKey)>,
     currency: Option<Currency>,
+    node_features: Option<FeatureVector>,
 }
 
 impl<S> InvoiceRpcServerImpl<S> {
     pub fn new(store: S, config: Option<FiberConfig>) -> Self {
-        let config = config.map(|config| {
+        let (keypair, currency, node_features) = if let Some(config) = config {
             let kp = config
                 .read_or_generate_secret_key()
                 .expect("read or generate secret key");
@@ -262,12 +264,19 @@ impl<S> InvoiceRpcServerImpl<S> {
                 _ => Currency::Fibd,
             };
 
-            (keypair, currency)
-        });
+            (
+                Some(keypair),
+                Some(currency),
+                Some(config.gen_node_features()),
+            )
+        } else {
+            (None, None, None)
+        };
         Self {
             store,
-            keypair: config.as_ref().map(|(kp, _)| *kp),
-            currency: config.as_ref().map(|(_, currency)| *currency),
+            keypair,
+            currency,
+            node_features,
         }
     }
 }
@@ -318,12 +327,19 @@ where
         &self,
         params: NewInvoiceParams,
     ) -> Result<InvoiceResult, ErrorObjectOwned> {
+        let error = |msg: &str| {
+            Err(ErrorObjectOwned::owned(
+                CALL_EXECUTION_FAILED_CODE,
+                msg.to_string(),
+                Some(params.clone()),
+            ))
+        };
+
         if let Some(currency) = self.currency {
             if currency != params.currency {
-                return Err(ErrorObjectOwned::owned(
-                    CALL_EXECUTION_FAILED_CODE,
-                    format!("Currency must be {:?} with the chain network", currency),
-                    Some(params),
+                return error(&format!(
+                    "Currency must be {:?} with the chain network",
+                    currency
                 ));
             }
         }
@@ -349,43 +365,49 @@ where
             invoice_builder = invoice_builder.description(description);
         };
         if let Some(expiry) = params.expiry {
-            let duration: Duration = Duration::from_secs(expiry);
-            invoice_builder = invoice_builder.expiry_time(duration);
+            invoice_builder = invoice_builder.expiry_time(Duration::from_secs(expiry));
         };
         if let Some(fallback_address) = params.fallback_address.clone() {
             invoice_builder = invoice_builder.fallback_address(fallback_address);
         };
 
         if basic_mpp {
-            invoice_builder = invoice_builder.allow_mpp(true);
+            if !self
+                .node_features
+                .as_ref()
+                .is_some_and(|f| f.supports_basic_mpp())
+            {
+                return error("Node does not support MPP, please enable MPP feature");
+            }
+            invoice_builder = invoice_builder.allow_basic_mpp(true);
+
             let mut rng = rand::thread_rng();
             let payment_secret: [u8; 32] = rng.gen();
             invoice_builder = invoice_builder.payment_secret(payment_secret.into());
         };
 
         if atomic_mpp {
+            if !self
+                .node_features
+                .as_ref()
+                .is_some_and(|f| f.supports_atomic_mpp())
+            {
+                return error("Node does not support Atomic MPP, please enable Atomic MPP feature");
+            }
             invoice_builder = invoice_builder.allow_atomic_mpp(true);
         }
 
         if let Some(final_expiry_delta) = params.final_expiry_delta {
             if final_expiry_delta < MIN_TLC_EXPIRY_DELTA {
-                return Err(ErrorObjectOwned::owned(
-                    CALL_EXECUTION_FAILED_CODE,
-                    format!(
-                        "final_expiry_delta must be greater than or equal to {}",
-                        MIN_TLC_EXPIRY_DELTA
-                    ),
-                    Some(params),
+                return error(&format!(
+                    "final_expiry_delta must be greater than or equal to {}",
+                    MIN_TLC_EXPIRY_DELTA
                 ));
             }
             if final_expiry_delta > MAX_PAYMENT_TLC_EXPIRY_LIMIT {
-                return Err(ErrorObjectOwned::owned(
-                    CALL_EXECUTION_FAILED_CODE,
-                    format!(
-                        "final_expiry_delta must be less than or equal to {}",
-                        MAX_PAYMENT_TLC_EXPIRY_LIMIT
-                    ),
-                    Some(params),
+                return error(&format!(
+                    "final_expiry_delta must be less than or equal to {}",
+                    MAX_PAYMENT_TLC_EXPIRY_LIMIT
                 ));
             }
             invoice_builder = invoice_builder.final_expiry_delta(final_expiry_delta);
@@ -411,19 +433,9 @@ where
                     invoice_address: invoice.to_string(),
                     invoice: invoice.into(),
                 }),
-                Err(e) => {
-                    return Err(ErrorObjectOwned::owned(
-                        CALL_EXECUTION_FAILED_CODE,
-                        e.to_string(),
-                        Some(params),
-                    ))
-                }
+                Err(e) => error(&e.to_string()),
             },
-            Err(e) => Err(ErrorObjectOwned::owned(
-                CALL_EXECUTION_FAILED_CODE,
-                e.to_string(),
-                Some(params),
-            )),
+            Err(e) => error(&e.to_string()),
         }
     }
 

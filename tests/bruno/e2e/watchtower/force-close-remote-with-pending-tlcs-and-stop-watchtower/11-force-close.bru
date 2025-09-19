@@ -1,5 +1,5 @@
 meta {
-  name: node2 force close channel
+  name: Node2 force close channel
   type: http
   seq: 11
 }
@@ -22,7 +22,7 @@ body:json {
     "method": "shutdown_channel",
     "params": [
       {
-        "channel_id": "{{N2N3_CHANNEL_ID}}",
+        "channel_id": "{{CHANNEL_ID}}",
         "force": true
       }
     ]
@@ -31,5 +31,4 @@ body:json {
 
 script:post-response {
   console.log(res.body);
-  await new Promise(r => setTimeout(r, 2000));
 }

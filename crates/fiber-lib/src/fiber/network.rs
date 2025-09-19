@@ -79,14 +79,13 @@ use crate::fiber::builtin_records::{AmpPaymentData, BasicMppPaymentData};
 use crate::fiber::channel::{
     AddTlcCommand, AddTlcResponse, ChannelActorState, ChannelEphemeralConfig,
     ChannelInitializationOperation, ShutdownCommand, TxCollaborationCommand, TxUpdateCommand,
-    DEFAULT_COMMITMENT_DELAY_EPOCHS,
 };
 use crate::fiber::channel::{
     AwaitingTxSignaturesFlags, ShuttingDownFlags, MAX_TLC_NUMBER_IN_FLIGHT,
 };
 use crate::fiber::config::{
-    DEFAULT_MAX_PARTS, DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT,
-    MIN_TLC_EXPIRY_DELTA, PAYMENT_MAX_PARTS_LIMIT,
+    DEFAULT_COMMITMENT_DELAY_EPOCHS, DEFAULT_FINAL_TLC_EXPIRY_DELTA, DEFAULT_MAX_PARTS,
+    MAX_PAYMENT_TLC_EXPIRY_LIMIT, MIN_TLC_EXPIRY_DELTA, PAYMENT_MAX_PARTS_LIMIT,
 };
 use crate::fiber::fee::{check_open_channel_parameters, check_tlc_delta_with_epochs};
 use crate::fiber::gossip::{GossipConfig, GossipService, SubscribableGossipMessageStore};
@@ -180,6 +179,16 @@ pub(crate) fn check_chain_hash(chain_hash: &Hash256) -> Result<(), Error> {
 }
 
 #[derive(Debug)]
+pub enum PeerDisconnectReason {
+    /// User request disconnection.
+    Requested,
+    /// Init message timeout.
+    InitMessageTimeout,
+    /// Chain hash mismatch.
+    ChainHashMismatch,
+}
+
+#[derive(Debug)]
 pub struct OpenChannelResponse {
     pub channel_id: Hash256,
 }
@@ -254,7 +263,7 @@ pub enum NetworkActorCommand {
     /// Network commands
     // Connect to a peer, and optionally also save the peer to the peer store.
     ConnectPeer(Multiaddr),
-    DisconnectPeer(PeerId),
+    DisconnectPeer(PeerId, PeerDisconnectReason),
     // Save the address of a peer to the peer store, the address here must be a valid
     // multiaddr with the peer id.
     SavePeerAddress(Multiaddr),
@@ -267,7 +276,7 @@ pub enum NetworkActorCommand {
     // Settle MPP tlc set
     SettleMPPTlcSet(Hash256),
     // Check peer send us Init message in an expected time, otherwise disconnect with the peer.
-    CheckPeerInit(PeerId),
+    CheckPeerInit(PeerId, SessionId),
     // For internal use and debugging only. Most of the messages requires some
     // changes to local state. Even if we can send a message to a peer, some
     // part of the local state is not changed.
@@ -571,14 +580,11 @@ impl SendPaymentData {
         };
 
         // check htlc expiry delta and limit are both valid if it is set
-        let final_tlc_expiry_delta = command
-            .final_tlc_expiry_delta
-            .or_else(|| {
-                invoice
-                    .as_ref()
-                    .and_then(|i| i.final_tlc_minimum_expiry_delta().copied())
-            })
-            .unwrap_or(DEFAULT_TLC_EXPIRY_DELTA);
+        let final_tlc_expiry_delta = invoice
+            .as_ref()
+            .and_then(|i| i.final_tlc_minimum_expiry_delta().copied())
+            .or(command.final_tlc_expiry_delta)
+            .unwrap_or(DEFAULT_FINAL_TLC_EXPIRY_DELTA);
         if !(MIN_TLC_EXPIRY_DELTA..=MAX_PAYMENT_TLC_EXPIRY_LIMIT).contains(&final_tlc_expiry_delta)
         {
             return Err(format!(
@@ -592,7 +598,10 @@ impl SendPaymentData {
             .unwrap_or(MAX_PAYMENT_TLC_EXPIRY_LIMIT);
 
         if tlc_expiry_limit < final_tlc_expiry_delta || tlc_expiry_limit < MIN_TLC_EXPIRY_DELTA {
-            return Err("tlc_expiry_limit is too small".to_string());
+            return Err(format!(
+                "tlc_expiry_limit is too small, final_tlc_expiry_delta: {}, tlc_expiry_limit: {}",
+                final_tlc_expiry_delta, tlc_expiry_limit
+            ));
         }
         if tlc_expiry_limit > MAX_PAYMENT_TLC_EXPIRY_LIMIT {
             return Err(format!(
@@ -1373,8 +1382,12 @@ where
                 // Tentacle sends an event by calling handle_error function instead, which
                 // may receive errors like DialerError.
             }
-            NetworkActorCommand::DisconnectPeer(peer_id) => {
+            NetworkActorCommand::DisconnectPeer(peer_id, reason) => {
                 if let Some(session) = state.get_peer_session(&peer_id) {
+                    debug!(
+                        "Disconnecting peer {:?} session w {:?}ith reason {:?}",
+                        &peer_id, &session, &reason
+                    );
                     state.control.disconnect(session).await?;
                 }
             }
@@ -1483,14 +1496,19 @@ where
                     }
                 }
             }
-            NetworkActorCommand::CheckPeerInit(peer_id) => {
+            NetworkActorCommand::CheckPeerInit(peer_id, session_id) => {
                 // Check if the peer has sent Init message.
                 if let Some(session) = state.peer_session_map.get(&peer_id) {
-                    if session.features.is_none() {
+                    // If Peer reconnect, the session_id will changed, and a new CheckPeerInit command will be issued.
+                    // In that case we just skip check here.
+                    if session.session_id == session_id && session.features.is_none() {
                         state
                             .network
                             .send_message(NetworkActorMessage::new_command(
-                                NetworkActorCommand::DisconnectPeer(peer_id.clone()),
+                                NetworkActorCommand::DisconnectPeer(
+                                    peer_id.clone(),
+                                    PeerDisconnectReason::InitMessageTimeout,
+                                ),
                             ))
                             .expect(ASSUME_NETWORK_MYSELF_ALIVE);
                     }
@@ -3548,8 +3566,9 @@ where
 
         if tlc_expiry_delta.is_some_and(|d| d < MIN_TLC_EXPIRY_DELTA) {
             return Err(ProcessingChannelError::InvalidParameter(format!(
-                "TLC expiry delta is too small, expect larger than {}",
-                MIN_TLC_EXPIRY_DELTA
+                "TLC expiry delta is too small, expect larger than {}, got {}",
+                MIN_TLC_EXPIRY_DELTA,
+                tlc_expiry_delta.unwrap()
             )));
         }
 
@@ -3992,7 +4011,13 @@ where
                     actor.send_message(ChannelActorMessage::Command(command))?;
                     Ok(())
                 }
-                None => Err(Error::ChannelNotFound(channel_id)),
+                None => {
+                    let error = Error::ChannelNotFound(channel_id);
+                    if let Some(rpc_reply) = command.rpc_reply_port() {
+                        let _ = rpc_reply.send(Err(error.to_string()));
+                    }
+                    Err(error)
+                }
             },
         }
     }
@@ -4060,6 +4085,7 @@ where
         remote_pubkey: Pubkey,
         session: &SessionContext,
     ) {
+        debug!("Peer {remote_peer_id:?} connected");
         self.peer_session_map.insert(
             remote_peer_id.clone(),
             ConnectedPeer {
@@ -4107,12 +4133,17 @@ where
         .expect("send Init message to peer must succeed");
 
         let remote_peer_id = remote_peer_id.clone();
+        let session_id = session.id;
         self.network.send_after(CHECK_PEER_INIT_INTERVAL, move || {
-            NetworkActorMessage::new_command(NetworkActorCommand::CheckPeerInit(remote_peer_id))
+            NetworkActorMessage::new_command(NetworkActorCommand::CheckPeerInit(
+                remote_peer_id,
+                session_id,
+            ))
         });
     }
 
     fn on_peer_disconnected(&mut self, id: &PeerId) {
+        debug!("Peer {id:?} disconnected");
         if let Some(peer) = self.peer_session_map.remove(id) {
             if let Some(channel_ids) = self.session_channels_map.remove(&peer.session_id) {
                 for channel_id in channel_ids {
@@ -4319,7 +4350,10 @@ where
         check_chain_hash(&init_msg.chain_hash).map_err(|e| {
             self.network
                 .send_message(NetworkActorMessage::new_command(
-                    NetworkActorCommand::DisconnectPeer(peer_id.clone()),
+                    NetworkActorCommand::DisconnectPeer(
+                        peer_id.clone(),
+                        PeerDisconnectReason::ChainHashMismatch,
+                    ),
                 ))
                 .expect(ASSUME_NETWORK_MYSELF_ALIVE);
 
@@ -4891,8 +4925,8 @@ where
         _state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
-            SupervisionEvent::ActorTerminated(who, _, _) => {
-                debug!("Actor {:?} terminated", who);
+            SupervisionEvent::ActorTerminated(who, _state, reason) => {
+                debug!("Actor {:?} terminated with reason {:?}", who, reason);
             }
             SupervisionEvent::ActorFailed(who, err) => {
                 panic!("Actor unexpectedly panicked (id: {:?}): {:?}", who, err);
@@ -5014,7 +5048,7 @@ impl ServiceHandle for NetworkServiceHandle {
     }
 
     async fn handle_event(&mut self, _context: &mut ServiceContext, event: ServiceEvent) {
-        trace!("Service event: {:?}", event);
+        debug!("Service event: {:?}", event);
     }
 }
 

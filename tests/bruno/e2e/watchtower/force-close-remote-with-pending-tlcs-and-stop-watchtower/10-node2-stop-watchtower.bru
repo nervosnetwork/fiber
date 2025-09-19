@@ -1,7 +1,7 @@
 meta {
-  name: node2 force close channel
+  name: remove watched channel from node2 watchtower
   type: http
-  seq: 11
+  seq: 10
 }
 
 post {
@@ -19,17 +19,16 @@ body:json {
   {
     "id": "42",
     "jsonrpc": "2.0",
-    "method": "shutdown_channel",
+    "method": "remove_watch_channel",
     "params": [
       {
-        "channel_id": "{{N2N3_CHANNEL_ID}}",
-        "force": true
+        "channel_id": "{{CHANNEL_ID}}"
       }
     ]
   }
 }
 
-script:post-response {
-  console.log(res.body);
-  await new Promise(r => setTimeout(r, 2000));
+assert {
+  res.body.error: isUndefined
+  res.body.result: isDefined
 }

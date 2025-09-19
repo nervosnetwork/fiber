@@ -17,7 +17,7 @@ use crate::{
         types::{Hash256, PaymentHopData, PeeledPaymentOnionPacket, RemoveTlcReason},
         NetworkActorCommand, NetworkActorMessage, PaymentCustomRecords,
     },
-    gen_rand_sha256_hash, gen_rpc_config,
+    gen_rand_secp256k1_public_key, gen_rand_sha256_hash, gen_rpc_config,
     invoice::{Currency, InvoiceBuilder},
     now_timestamp_as_millis_u64,
     rpc::invoice::NewInvoiceParams,
@@ -127,7 +127,7 @@ async fn test_send_mpp_without_payment_secret_will_fail() {
         .amount(Some(20000000000))
         .payment_preimage(preimage)
         .payee_pub_key(target_pubkey.into())
-        .allow_mpp(true)
+        .allow_basic_mpp(true)
         .build();
 
     let error = ckb_invoice.unwrap_err().to_string();
@@ -443,7 +443,7 @@ async fn test_send_mpp_fee_rate() {
         .amount(Some(1_500_000_000))
         .payment_preimage(preimage)
         .payee_pub_key(node_2.pubkey.into())
-        .allow_mpp(true)
+        .allow_basic_mpp(true)
         .payment_secret(gen_rand_sha256_hash())
         .build()
         .expect("build invoice success");
@@ -485,7 +485,7 @@ async fn test_mpp_tlc_set() {
         .amount(Some(20000000000))
         .payment_preimage(preimage)
         .payee_pub_key(target_pubkey.into())
-        .allow_mpp(true)
+        .allow_basic_mpp(true)
         .payment_secret(payment_secret)
         .build()
         .expect("build invoice success");
@@ -624,7 +624,7 @@ async fn test_mpp_tlc_set_with_insufficient_total_amount() {
         .amount(Some(10000000000))
         .payment_preimage(preimage)
         .payee_pub_key(target_pubkey.into())
-        .allow_mpp(true)
+        .allow_basic_mpp(true)
         .payment_secret(payment_secret)
         .build()
         .expect("build invoice success");
@@ -762,7 +762,7 @@ async fn test_mpp_tlc_set_with_only_1_tlc() {
         .amount(Some(10000000000))
         .payment_preimage(preimage)
         .payee_pub_key(target_pubkey.into())
-        .allow_mpp(true)
+        .allow_basic_mpp(true)
         .payment_secret(payment_secret)
         .build()
         .expect("build invoice success");
@@ -866,7 +866,7 @@ async fn test_mpp_tlc_set_with_only_1_tlc_without_payment_data() {
         .amount(Some(10000000000))
         .payment_preimage(preimage)
         .payee_pub_key(target_pubkey.into())
-        .allow_mpp(true)
+        .allow_basic_mpp(true)
         .payment_secret(payment_secret)
         .build()
         .expect("build invoice success");
@@ -967,7 +967,7 @@ async fn test_mpp_tlc_set_total_amount_mismatch() {
         .amount(Some(20000000000))
         .payment_preimage(preimage)
         .payee_pub_key(target_pubkey.into())
-        .allow_mpp(true)
+        .allow_basic_mpp(true)
         .payment_secret(payment_secret)
         .build()
         .expect("build invoice success");
@@ -1117,7 +1117,7 @@ async fn test_mpp_tlc_set_total_amount_should_be_consistent() {
         .amount(Some(20000000000))
         .payment_preimage(preimage)
         .payee_pub_key(target_pubkey.into())
-        .allow_mpp(true)
+        .allow_basic_mpp(true)
         .payment_secret(payment_secret)
         .build()
         .expect("build invoice success");
@@ -1294,7 +1294,7 @@ async fn test_mpp_tlc_set_payment_secret_mismatch() {
         .amount(Some(20000000000))
         .payment_preimage(preimage)
         .payee_pub_key(target_pubkey.into())
-        .allow_mpp(true)
+        .allow_basic_mpp(true)
         .payment_secret(payment_secret)
         .build()
         .expect("build invoice success");
@@ -1447,7 +1447,7 @@ async fn test_mpp_tlc_set_timeout_1_of_2() {
         .amount(Some(30000000000))
         .payment_preimage(preimage)
         .payee_pub_key(target_pubkey.into())
-        .allow_mpp(true)
+        .allow_basic_mpp(true)
         .payment_secret(payment_secret)
         .build()
         .expect("build invoice success");
@@ -1660,7 +1660,7 @@ async fn test_mpp_tlc_set_timeout() {
         .amount(Some(20000000000))
         .payment_preimage(preimage)
         .payee_pub_key(target_pubkey.into())
-        .allow_mpp(true)
+        .allow_basic_mpp(true)
         .payment_secret(payment_secret)
         .build()
         .expect("build invoice success");
@@ -1837,7 +1837,7 @@ async fn test_mpp_tlc_set_without_payment_data() {
         .amount(Some(20000000000))
         .payment_preimage(preimage)
         .payee_pub_key(target_pubkey.into())
-        .allow_mpp(true)
+        .allow_basic_mpp(true)
         .payment_secret(payment_secret)
         .build()
         .expect("build invoice success");
@@ -2430,7 +2430,7 @@ async fn test_send_mpp_will_success_with_same_payment_after_restarted() {
         .amount(Some(amount))
         .payment_preimage(preimage)
         .payee_pub_key(target_pubkey.into())
-        .allow_mpp(true)
+        .allow_basic_mpp(true)
         .payment_secret(gen_rand_sha256_hash())
         .build()
         .expect("build invoice success");
@@ -2617,7 +2617,7 @@ async fn test_send_payment_with_invoice_removed_from_last_hop() {
         .amount(Some(amount))
         .payment_preimage(preimage)
         .payee_pub_key(target_pubkey.into())
-        .allow_mpp(true)
+        .allow_basic_mpp(true)
         .payment_secret(gen_rand_sha256_hash())
         .build()
         .expect("build invoice success");
@@ -2663,7 +2663,7 @@ async fn test_mpp_tlc_with_invoice_not_allow_mpp_should_not_be_accepted() {
         .amount(Some(20000000000))
         .payment_preimage(preimage)
         .payee_pub_key(target_pubkey.into())
-        .allow_mpp(false)
+        .allow_basic_mpp(false)
         .payment_secret(payment_secret)
         .build()
         .expect("build invoice success");
@@ -3220,7 +3220,7 @@ async fn test_mpp_fail_on_total_amount_not_match() {
         .amount(Some(15000))
         .payment_preimage(preimage)
         .payee_pub_key(target_pubkey.into())
-        .allow_mpp(true)
+        .allow_basic_mpp(true)
         .payment_secret(gen_rand_sha256_hash())
         .build()
         .expect("build invoice success");
@@ -3491,7 +3491,7 @@ async fn test_send_3_nodes_pay_self() {
         .amount(Some(amount))
         .payment_preimage(preimage)
         .payee_pub_key(target_pubkey.into())
-        .allow_mpp(true)
+        .allow_basic_mpp(true)
         .payment_secret(gen_rand_sha256_hash())
         .build()
         .expect("build invoice success");
@@ -3600,7 +3600,6 @@ async fn test_send_mpp_can_retry() {
     )
     .await;
     let [node_0, node_1, _node_2, node_3] = nodes.try_into().expect("4 nodes");
-
     node_1.disable_channel_stealthy(channels[3]).await;
     let res = node_0.send_mpp_payment(&node_3, 30000000000, Some(3)).await;
 
@@ -3864,4 +3863,174 @@ async fn test_send_payment_tlc_expiry_soon() {
         .last_error
         .unwrap()
         .contains("IncorrectTlcExpiry"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_send_mpp_send_each_other_with_no_fee() {
+    init_tracing();
+
+    let (nodes, _channels) = create_n_nodes_network_with_params(
+        &[
+            (
+                (0, 1),
+                ChannelParameters {
+                    public: true,
+                    node_a_funding_amount: MIN_RESERVED_CKB + 1000 * 100000000,
+                    node_b_funding_amount: MIN_RESERVED_CKB,
+                    a_tlc_fee_proportional_millionths: Some(0),
+                    b_tlc_fee_proportional_millionths: Some(0),
+                    ..Default::default()
+                },
+            ),
+            (
+                (0, 1),
+                ChannelParameters {
+                    public: true,
+                    node_a_funding_amount: MIN_RESERVED_CKB + 1000 * 100000000,
+                    node_b_funding_amount: MIN_RESERVED_CKB,
+                    a_tlc_fee_proportional_millionths: Some(0),
+                    b_tlc_fee_proportional_millionths: Some(0),
+                    ..Default::default()
+                },
+            ),
+            (
+                (1, 2),
+                ChannelParameters {
+                    public: true,
+                    node_a_funding_amount: MIN_RESERVED_CKB + 2000 * 100000000,
+                    node_b_funding_amount: MIN_RESERVED_CKB,
+                    a_tlc_fee_proportional_millionths: Some(0),
+                    b_tlc_fee_proportional_millionths: Some(0),
+                    ..Default::default()
+                },
+            ),
+        ],
+        3,
+        None,
+    )
+    .await;
+    let [node_0, _node_1, node_2] = nodes.try_into().expect("3 nodes");
+
+    for _i in 0..2 {
+        let res = node_0
+            .send_mpp_payment(&node_2, 2000 * 100000000, None)
+            .await;
+
+        let payment_hash = res.unwrap().payment_hash;
+        node_0.wait_until_success(payment_hash).await;
+
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
+        let res = node_2
+            .send_mpp_payment(&node_0, 2000 * 100000000, None)
+            .await;
+
+        let payment_hash = res.unwrap().payment_hash;
+        node_2.wait_until_success(payment_hash).await;
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "need to modify MILLI_SECONDS_PER_EPOCH and MIN_TLC_EXPIRY_DELTA to run this test"]
+async fn test_send_mpp_send_each_other_expire_soon() {
+    init_tracing();
+
+    let (nodes, _channels) = create_n_nodes_network_with_params(
+        &[
+            (
+                (0, 1),
+                ChannelParameters {
+                    public: true,
+                    node_a_funding_amount: MIN_RESERVED_CKB + 1000 * 100000000,
+                    node_b_funding_amount: MIN_RESERVED_CKB,
+                    a_tlc_fee_proportional_millionths: Some(0),
+                    b_tlc_fee_proportional_millionths: Some(0),
+                    ..Default::default()
+                },
+            ),
+            (
+                (0, 1),
+                ChannelParameters {
+                    public: true,
+                    node_a_funding_amount: MIN_RESERVED_CKB + 1000 * 100000000,
+                    node_b_funding_amount: MIN_RESERVED_CKB,
+                    a_tlc_fee_proportional_millionths: Some(0),
+                    b_tlc_fee_proportional_millionths: Some(0),
+                    ..Default::default()
+                },
+            ),
+            (
+                (1, 2),
+                ChannelParameters {
+                    public: true,
+                    node_a_funding_amount: MIN_RESERVED_CKB + 2000 * 100000000,
+                    node_b_funding_amount: MIN_RESERVED_CKB,
+                    a_tlc_fee_proportional_millionths: Some(0),
+                    b_tlc_fee_proportional_millionths: Some(0),
+                    ..Default::default()
+                },
+            ),
+        ],
+        3,
+        None,
+    )
+    .await;
+    let [node_0, _node_1, node_2] = nodes.try_into().expect("3 nodes");
+
+    for _i in 0..2 {
+        let res = node_0
+            .send_mpp_payment(&node_2, 2000 * 100000000, None)
+            .await;
+
+        let payment_hash = res.unwrap().payment_hash;
+        node_0.wait_until_success(payment_hash).await;
+
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
+        let res = node_2
+            .send_mpp_payment(&node_0, 2000 * 100000000, None)
+            .await;
+
+        let payment_hash = res.unwrap().payment_hash;
+        node_2.wait_until_success(payment_hash).await;
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_send_payment_mpp_with_node_not_in_graph() {
+    init_tracing();
+
+    let (nodes, _channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+            ((1, 2), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+        ],
+        3,
+    )
+    .await;
+    let [node_0, _node_1, node_2] = nodes.try_into().expect("3 nodes");
+
+    let wrong_target_pubkey = gen_rand_secp256k1_public_key();
+    let preimage = gen_rand_sha256_hash();
+    let ckb_invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(1000))
+        .payment_preimage(preimage)
+        .payee_pub_key(wrong_target_pubkey)
+        .build()
+        .expect("build invoice success");
+
+    node_2.insert_invoice(ckb_invoice.clone(), Some(preimage));
+
+    let payment_hash = node_0
+        .send_payment(SendPaymentCommand {
+            max_parts: Some(10),
+            invoice: Some(ckb_invoice.to_string()),
+            ..Default::default()
+        })
+        .await;
+
+    let error = payment_hash.unwrap_err().to_string();
+    assert!(error.contains("Failed to build route, Node not found in graph"));
 }

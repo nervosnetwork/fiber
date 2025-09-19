@@ -1,4 +1,4 @@
-use crate::fiber::network::PeerInfo;
+use crate::fiber::network::{PeerDisconnectReason, PeerInfo};
 use crate::fiber::{NetworkActorCommand, NetworkActorMessage};
 use crate::log_and_error;
 #[cfg(not(target_arch = "wasm32"))]
@@ -102,6 +102,7 @@ impl PeerRpcServerImpl {
     ) -> Result<(), ErrorObjectOwned> {
         let message = NetworkActorMessage::Command(NetworkActorCommand::DisconnectPeer(
             params.peer_id.clone(),
+            PeerDisconnectReason::Requested,
         ));
         crate::handle_actor_cast!(self.actor, message, params)
     }

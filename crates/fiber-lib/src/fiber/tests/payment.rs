@@ -1,6 +1,7 @@
 #![allow(clippy::needless_range_loop)]
 use crate::fiber::builtin_records::BasicMppPaymentData;
 use crate::fiber::channel::*;
+use crate::fiber::config::DEFAULT_FINAL_TLC_EXPIRY_DELTA;
 use crate::fiber::config::DEFAULT_TLC_EXPIRY_DELTA;
 use crate::fiber::config::DEFAULT_TLC_FEE_PROPORTIONAL_MILLIONTHS;
 use crate::fiber::config::MAX_PAYMENT_TLC_EXPIRY_LIMIT;
@@ -3558,7 +3559,7 @@ async fn test_send_payment_with_invalid_tlc_expiry() {
             target_pubkey: Some(nodes[1].pubkey),
             amount: Some(1000),
             keysend: Some(true),
-            tlc_expiry_limit: Some(DEFAULT_TLC_EXPIRY_DELTA + 1), // Ok now
+            tlc_expiry_limit: Some(DEFAULT_FINAL_TLC_EXPIRY_DELTA + 1), // Ok now
             ..Default::default()
         })
         .await;
@@ -3617,7 +3618,7 @@ async fn test_send_payself_with_invalid_tlc_expiry() {
             amount: Some(1000),
             keysend: Some(true),
             allow_self_payment: true,
-            tlc_expiry_limit: Some(DEFAULT_TLC_EXPIRY_DELTA),
+            tlc_expiry_limit: Some(DEFAULT_FINAL_TLC_EXPIRY_DELTA),
             ..Default::default()
         })
         .await;
@@ -3901,7 +3902,7 @@ async fn test_send_payment_shutdown_with_force() {
     )
     .await;
 
-    let [node_0, _node_1, mut node_2, node_3] = nodes.try_into().expect("4 nodes");
+    let [node_0, _node_1, node_2, node_3] = nodes.try_into().expect("4 nodes");
 
     let mut all_sent = HashSet::new();
     for i in 0..10 {
@@ -3928,26 +3929,18 @@ async fn test_send_payment_shutdown_with_force() {
     }
 
     // make sure the later payments will fail
-    // because network actor will find out the inactive channels and disconnect peers
-    // which send shutdown force message
-    node_2
-        .expect_event(|event| match event {
-            NetworkServiceEvent::PeerDisConnected(peer_id, _) => {
-                assert_eq!(peer_id, &node_3.peer_id);
-                true
-            }
-            _ => false,
-        })
-        .await;
-
-    // because node2 didn't receive the shutdown message,
-    // so it will still think the channel is ready
-    let node_2_channel_actor_state = node_2.get_channel_actor_state(channels[2]);
-    eprintln!(
-        "node_2_channel_actor_state: {:?}",
-        node_2_channel_actor_state.state
-    );
-    assert_eq!(node_2_channel_actor_state.state, ChannelState::ChannelReady);
+    // because network actor will find out the inactive channels and shutdown channel forcefully
+    let mut wait_time = 0;
+    while wait_time < PEER_CHANNEL_RESPONSE_TIMEOUT + 3 {
+        let channel_state = node_2.get_channel_actor_state(channels[2]);
+        if channel_state.state == ChannelState::Closed(CloseFlags::UNCOOPERATIVE_LOCAL) {
+            break;
+        } else {
+            assert_eq!(channel_state.state, ChannelState::ChannelReady);
+            tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+            wait_time += 1000;
+        }
+    }
 }
 
 #[tokio::test]
@@ -4692,7 +4685,7 @@ async fn test_send_payment_remove_tlc_with_preimage_will_retry() {
     node_0
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::DisconnectPeer(node1_id.clone()),
+            NetworkActorCommand::DisconnectPeer(node1_id.clone(), PeerDisconnectReason::Requested),
         ))
         .expect("node_a alive");
 
@@ -4791,7 +4784,7 @@ async fn test_send_payment_send_each_other_reestablishing() {
     node_0
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::DisconnectPeer(node1_id.clone()),
+            NetworkActorCommand::DisconnectPeer(node1_id.clone(), PeerDisconnectReason::Requested),
         ))
         .expect("node_a alive");
 
@@ -5136,7 +5129,10 @@ async fn test_send_payment_with_reconnect_two_times() {
         node0
             .network_actor
             .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::DisconnectPeer(node1_id.clone()),
+                NetworkActorCommand::DisconnectPeer(
+                    node1_id.clone(),
+                    PeerDisconnectReason::Requested,
+                ),
             ))
             .expect("node_a alive");
 
@@ -5509,7 +5505,7 @@ async fn test_payment_with_payment_data_record() {
         .amount(Some(10000000000))
         .payment_preimage(preimage)
         .payee_pub_key(target_pubkey.into())
-        .allow_mpp(false)
+        .allow_basic_mpp(false)
         .payment_secret(payment_secret)
         .build()
         .expect("build invoice success");
@@ -5610,7 +5606,7 @@ async fn test_payment_with_insufficient_total_amount() {
         .amount(Some(10000000000))
         .payment_preimage(preimage)
         .payee_pub_key(target_pubkey.into())
-        .allow_mpp(false)
+        .allow_basic_mpp(false)
         .payment_secret(payment_secret)
         .build()
         .expect("build invoice success");
@@ -5736,7 +5732,7 @@ async fn test_payment_with_wrong_payment_secret() {
         .amount(Some(10000000000))
         .payment_preimage(preimage)
         .payee_pub_key(target_pubkey.into())
-        .allow_mpp(false)
+        .allow_basic_mpp(false)
         .payment_secret(payment_secret)
         .build()
         .expect("build invoice success");
@@ -5850,7 +5846,7 @@ async fn test_payment_with_insufficient_amount_with_payment_data() {
         .amount(Some(10000000000))
         .payment_preimage(preimage)
         .payee_pub_key(target_pubkey.into())
-        .allow_mpp(false)
+        .allow_basic_mpp(false)
         .payment_secret(payment_secret)
         .build()
         .expect("build invoice success");
@@ -5963,7 +5959,7 @@ async fn test_payment_with_insufficient_amount_without_payment_data() {
         .amount(Some(10000000000))
         .payment_preimage(preimage)
         .payee_pub_key(target_pubkey.into())
-        .allow_mpp(false)
+        .allow_basic_mpp(false)
         .payment_secret(payment_secret)
         .build()
         .expect("build invoice success");
@@ -6145,7 +6141,7 @@ async fn test_network_with_hops_max_number_limit() {
             keysend: Some(true),
             allow_self_payment: false,
             dry_run: false,
-            tlc_expiry_limit: Some(13 * 24 * 60 * 60 * 1000), // 13 days
+            tlc_expiry_limit: Some(DEFAULT_TLC_EXPIRY_DELTA * 12 + DEFAULT_FINAL_TLC_EXPIRY_DELTA), // 13 hops limit
             ..Default::default()
         })
         .await;
@@ -6160,7 +6156,7 @@ async fn test_network_with_hops_max_number_limit() {
             keysend: Some(true),
             allow_self_payment: false,
             dry_run: false,
-            tlc_expiry_limit: Some(13 * 24 * 60 * 60 * 1000), // 13 days
+            tlc_expiry_limit: Some(DEFAULT_TLC_EXPIRY_DELTA * 12 + DEFAULT_FINAL_TLC_EXPIRY_DELTA), // 13 hops limit
             ..Default::default()
         })
         .await
