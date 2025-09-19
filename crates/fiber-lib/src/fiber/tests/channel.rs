@@ -2126,11 +2126,7 @@ async fn do_test_channel_remote_commitment_error() {
             all_sent.push((preimage, res.tlc_id));
         }
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-        debug!(
-            "now begin to remove all_sent len: {}  tlc_number_in_flight_limit: {:?}",
-            all_sent.len(),
-            tlc_number_in_flight_limit
-        );
+
         if all_sent.len() >= tlc_number_in_flight_limit {
             while all_sent.len() > tlc_number_in_flight_limit - 2 {
                 if let Some((preimage, tlc_id)) = all_sent.first().cloned() {
@@ -2163,7 +2159,6 @@ async fn do_test_channel_remote_commitment_error() {
                     {
                         all_sent.remove(0);
                     }
-                    debug!("after remaining all_sent len: {}", all_sent.len());
                 }
             }
             batch_remove_count += 1;
@@ -2815,11 +2810,9 @@ async fn do_test_add_tlc_waiting_ack() {
             let code = add_tlc_result.unwrap_err();
             assert_eq!(code.error_code, TlcErrorCode::TemporaryChannelFailure);
         } else {
-            eprintln!("add_tlc_result: {:?}", add_tlc_result);
             assert!(add_tlc_result.is_ok());
         }
     }
-    debug!("now debug now...");
 }
 
 #[tokio::test]

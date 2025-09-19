@@ -655,7 +655,7 @@ where
         }
     }
 
-    async fn get_tlc_error(
+    fn get_tlc_error(
         &self,
         state: &mut ChannelActorState,
         error: &ProcessingChannelError,
@@ -728,7 +728,7 @@ where
         };
 
         let channel_update = if error_code.is_update() {
-            state.try_create_channel_update_message().await
+            state.try_create_channel_update_message()
         } else {
             None
         };
@@ -759,7 +759,7 @@ where
         let need_commitment_signed = state.tlc_state.update_for_commitment_signed();
 
         // flush remove tlc for received tlcs after replying ack for peer
-        self.apply_settled_remove_tlcs(myself, state, true).await;
+        self.apply_settled_remove_tlcs(state, true).await;
 
         // when we transfer to shutdown state, we need to build shutdown transaction
         // here `maybe_transfer_to_shutdown` must be called after `apply_settled_remove_tlcs`
@@ -773,12 +773,7 @@ where
         Ok(())
     }
 
-    async fn apply_settled_remove_tlcs(
-        &self,
-        myself: &ActorRef<ChannelActorMessage>,
-        state: &mut ChannelActorState,
-        inbound: bool,
-    ) {
+    async fn apply_settled_remove_tlcs(&self, state: &mut ChannelActorState, inbound: bool) {
         let previous_balance = state.get_local_balance();
         let pending_tlcs = if inbound {
             state.tlc_state.received_tlcs.tlcs.iter()
@@ -799,7 +794,7 @@ where
             .collect();
 
         for tlc_id in settled_tlcs {
-            self.apply_remove_tlc_operation(myself, state, tlc_id)
+            self.apply_remove_tlc_operation(state, tlc_id)
                 .await
                 .expect("expect remove tlc success");
         }
@@ -822,7 +817,7 @@ where
             // If we already have TlcErr, we can directly use it to send back to the peer.
             ProcessingChannelError::TlcForwardingError(tlc_err) => tlc_err,
             _ => {
-                let error_detail = self.get_tlc_error(state, &error.source).await;
+                let error_detail = self.get_tlc_error(state, &error.source);
                 #[cfg(debug_assertions)]
                 self.network
                     .clone()
@@ -848,8 +843,7 @@ where
             state,
             tlc_id,
             RemoveTlcReason::RemoveTlcFail(error_packet),
-        )
-        .await;
+        );
     }
 
     async fn update_tlc_status_on_ack(
@@ -880,12 +874,11 @@ where
         }
 
         // flush outbound tlcs
-        self.apply_settled_remove_tlcs(myself, state, false).await;
+        self.apply_settled_remove_tlcs(state, false).await;
     }
 
     async fn try_to_relay_remove_tlc(
         &self,
-        _myself: &ActorRef<ChannelActorMessage>,
         state: &mut ChannelActorState,
         tlc_info: &TlcInfo,
         remove_reason: RemoveTlcReason,
@@ -969,8 +962,7 @@ where
         }
 
         // remove tlc
-        self.register_retryable_tlc_remove(myself, state, tlc.tlc_id, remove_reason)
-            .await;
+        self.register_retryable_tlc_remove(myself, state, tlc.tlc_id, remove_reason);
     }
 
     async fn apply_add_tlc_operation(
@@ -994,11 +986,9 @@ where
                     .map_err(|err| ProcessingChannelError::PeelingOnionPacketError(err.to_string()))
                     .map_err(ProcessingChannelError::without_shared_secret)?;
                 let shared_secret = peeled.shared_secret;
-                self.apply_add_tlc_operation_with_peeled_onion_packet(
-                    myself, state, add_tlc, peeled,
-                )
-                .await
-                .map_err(move |err| err.with_shared_secret(shared_secret))?;
+                self.apply_add_tlc_operation_with_peeled_onion_packet(state, add_tlc, peeled)
+                    .await
+                    .map_err(move |err| err.with_shared_secret(shared_secret))?;
             }
             None => {
                 // The TLC is with a NO_SHARED_SECRET and no onion packet.
@@ -1036,7 +1026,6 @@ where
 
     async fn apply_add_tlc_operation_with_peeled_onion_packet(
         &self,
-        _myself: &ActorRef<ChannelActorMessage>,
         state: &mut ChannelActorState,
         add_tlc: &TlcInfo,
         peeled_onion_packet: PeeledPaymentOnionPacket,
@@ -1176,7 +1165,7 @@ where
             let forward_fee = received_amount.saturating_sub(forward_amount);
 
             // if this is not the last hop, forward TLC to next hop
-            self.register_retryable_forward_tlc(
+            self.register_and_apply_forward_tlc(
                 state,
                 add_tlc.payment_hash,
                 add_tlc.tlc_id,
@@ -1335,7 +1324,6 @@ where
 
     async fn apply_remove_tlc_operation(
         &self,
-        myself: &ActorRef<ChannelActorMessage>,
         state: &mut ChannelActorState,
         tlc_id: TLCId,
     ) -> Result<(), ProcessingChannelError> {
@@ -1389,7 +1377,7 @@ where
             }
         } else {
             // relay RemoveTlc to previous channel if needed
-            self.try_to_relay_remove_tlc(myself, state, &tlc_info, remove_reason)
+            self.try_to_relay_remove_tlc(state, &tlc_info, remove_reason)
                 .await;
         }
         Ok(())
@@ -1733,7 +1721,7 @@ where
         Ok(())
     }
 
-    pub async fn register_retryable_tlc_remove(
+    pub fn register_retryable_tlc_remove(
         &self,
         myself: &ActorRef<ChannelActorMessage>,
         state: &mut ChannelActorState,
@@ -1741,22 +1729,20 @@ where
         reason: RemoveTlcReason,
     ) {
         let remove_tlc = RetryableTlcOperation::RemoveTlc(tlc_id, reason);
-        self.register_retryable_tlc_operation(myself, state, remove_tlc)
-            .await;
+        self.register_retryable_tlc_operation(myself, state, remove_tlc);
     }
 
-    pub async fn register_retryable_tlc_add(
+    pub fn register_retryable_tlc_add(
         &self,
         myself: &ActorRef<ChannelActorMessage>,
         state: &mut ChannelActorState,
         add_tlc_command: AddTlcCommand,
     ) {
         let add_tlc = RetryableTlcOperation::AddTlc(add_tlc_command);
-        self.register_retryable_tlc_operation(myself, state, add_tlc)
-            .await;
+        self.register_retryable_tlc_operation(myself, state, add_tlc);
     }
 
-    async fn register_retryable_tlc_operation(
+    fn register_retryable_tlc_operation(
         &self,
         myself: &ActorRef<ChannelActorMessage>,
         state: &mut ChannelActorState,
@@ -1768,7 +1754,7 @@ where
         state.schedule_next_retry_task(myself);
     }
 
-    pub async fn register_retryable_forward_tlc(
+    pub async fn register_and_apply_forward_tlc(
         &self,
         state: &mut ChannelActorState,
         payment_hash: Hash256,
@@ -1894,28 +1880,12 @@ where
                     }
                 }
                 RetryableTlcOperation::AddTlc(ref command) => {
-                    match self
+                    let res = self
                         .handle_add_tlc_command(myself, state, command.clone())
-                        .await
-                    {
-                        Ok(_) => true,
-                        Err(err) => {
-                            // notify the network actor about the add tlc result
-                            let error_info =
-                                Some((err.clone(), self.get_tlc_error(state, &err).await));
-                            self.network
-                                .send_message(NetworkActorMessage::new_event(
-                                    NetworkActorEvent::AddTlcResult(
-                                        command.payment_hash,
-                                        command.attempt_id,
-                                        error_info,
-                                        command.previous_tlc,
-                                    ),
-                                ))
-                                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-                            false
-                        }
-                    }
+                        .await;
+                    self.post_add_tlc_command(myself, state, command.clone(), &res);
+
+                    res.is_ok()
                 }
             };
 
@@ -2091,35 +2061,7 @@ where
                     .handle_add_tlc_command(myself, state, command.clone())
                     .await;
 
-                let error_info = match &res {
-                    Err(err) => Some((err.clone(), self.get_tlc_error(state, err).await)),
-                    Ok(_) => None,
-                };
-                let is_forward_tlc = command.previous_tlc.is_some();
-
-                match res {
-                    Err(ProcessingChannelError::WaitingTlcAck) if is_forward_tlc => {
-                        // buffer the tlc add command to retry later
-                        self.register_retryable_tlc_add(myself, state, command)
-                            .await;
-                    }
-                    Err(ProcessingChannelError::RepeatedProcessing(_)) => {
-                        // do nothing, the tlc has been processed
-                    }
-                    _ => {
-                        // notify the network actor about the add tlc result
-                        self.network
-                            .send_message(NetworkActorMessage::new_event(
-                                NetworkActorEvent::AddTlcResult(
-                                    command.payment_hash,
-                                    command.attempt_id,
-                                    error_info,
-                                    command.previous_tlc,
-                                ),
-                            ))
-                            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-                    }
-                }
+                self.post_add_tlc_command(myself, state, command, &res);
 
                 match res {
                     Ok(tlc_id) => {
@@ -2127,7 +2069,7 @@ where
                         Ok(())
                     }
                     Err(err) => {
-                        let tlc_err = self.get_tlc_error(state, &err).await;
+                        let tlc_err = self.get_tlc_error(state, &err);
                         let _ = reply.send(Err(tlc_err));
                         Err(err)
                     }
@@ -2149,8 +2091,7 @@ where
                                 state,
                                 TLCId::Received(command.id),
                                 command.reason,
-                            )
-                            .await;
+                            );
                         }
                         let _ = reply.send(Err(err.clone()));
                         Err(err)
@@ -2304,6 +2245,39 @@ where
             }
         }
         Ok(())
+    }
+
+    fn post_add_tlc_command(
+        &self,
+        myself: &ActorRef<ChannelActorMessage>,
+        state: &mut ChannelActorState,
+        command: AddTlcCommand,
+        res: &Result<u64, ProcessingChannelError>,
+    ) {
+        match res {
+            Err(ProcessingChannelError::WaitingTlcAck) if command.previous_tlc.is_some() => {
+                // buffer the tlc add command to retry later
+                self.register_retryable_tlc_add(myself, state, command);
+            }
+            _ => {
+                let notify = res
+                    .as_ref()
+                    .err()
+                    .map(|err| (err.clone(), self.get_tlc_error(state, err)));
+
+                // notify the network actor about the add tlc result
+                self.network
+                    .send_message(NetworkActorMessage::new_event(
+                        NetworkActorEvent::AddTlcResult(
+                            command.payment_hash,
+                            command.attempt_id,
+                            notify,
+                            command.previous_tlc,
+                        ),
+                    ))
+                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+            }
+        }
     }
 
     fn get_invoice_status(&self, invoice: &CkbInvoice) -> CkbInvoiceStatus {
@@ -4244,7 +4218,7 @@ impl ChannelActorState {
         &mut self,
     ) -> Option<(ChannelAnnouncement, ChannelUpdate)> {
         let channel_announcement = self.try_create_channel_announcement_message().await?;
-        let channel_update = self.try_create_channel_update_message().await?;
+        let channel_update = self.try_create_channel_update_message()?;
         Some((channel_announcement, channel_update))
     }
 
@@ -4490,7 +4464,7 @@ impl ChannelActorState {
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
     }
 
-    async fn try_create_channel_update_message(&mut self) -> Option<ChannelUpdate> {
+    fn try_create_channel_update_message(&mut self) -> Option<ChannelUpdate> {
         if !self.is_public() {
             debug!("Ignoring non-public channel update");
             return None;
