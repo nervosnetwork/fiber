@@ -2781,10 +2781,8 @@ async fn do_test_add_tlc_waiting_ack() {
 
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
-    debug!("after sleep 1s");
     // send from b to a
     for i in 1..=2 {
-        debug!("hello round : {:?}", i);
         let add_tlc_command = AddTlcCommand {
             amount: tlc_amount,
             hash_algorithm: HashAlgorithm::CkbHash,
