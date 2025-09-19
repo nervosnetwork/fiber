@@ -501,7 +501,8 @@ fn test_channel_actor_state_store() {
         id: gen_rand_sha256_hash(),
         tlc_state: Default::default(),
         retryable_tlc_operations: Default::default(),
-        waiting_tlc_result_tasks: Default::default(),
+        waiting_forward_tlc_tasks: Default::default(),
+        waiting_relay_remove_tasks: Default::default(),
         local_shutdown_script: Script::default(),
         local_channel_public_keys: ChannelBasePublicKeys {
             funding_pubkey: gen_rand_fiber_public_key(),
@@ -623,7 +624,8 @@ fn test_serde_channel_actor_state_ciborium() {
         id: gen_rand_sha256_hash(),
         tlc_state: Default::default(),
         retryable_tlc_operations: Default::default(),
-        waiting_tlc_result_tasks: Default::default(),
+        waiting_forward_tlc_tasks: Default::default(),
+        waiting_relay_remove_tasks: Default::default(),
         local_shutdown_script: Script::default(),
         local_channel_public_keys: ChannelBasePublicKeys {
             funding_pubkey: gen_rand_fiber_public_key(),
