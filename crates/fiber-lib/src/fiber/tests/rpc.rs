@@ -4,6 +4,7 @@ use crate::gen_rand_sha256_hash;
 use crate::invoice::CkbInvoice;
 use crate::rpc::channel::{ChannelState, ShutdownChannelParams};
 use crate::rpc::config::RpcConfig;
+use crate::rpc::graph::{GraphChannelsParams, GraphChannelsResult};
 use crate::rpc::info::NodeInfoResult;
 use crate::tests::*;
 use crate::{
@@ -334,6 +335,19 @@ async fn test_rpc_graph() {
         .iter()
         .all(|n| n.version == *env!("CARGO_PKG_VERSION")));
     assert!(!graph_nodes.nodes[0].features.is_empty());
+
+    let graph_channels: GraphChannelsResult = node_0
+        .send_rpc_request(
+            "graph_channels",
+            GraphChannelsParams {
+                limit: None,
+                after: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(graph_channels.channels.len(), 2);
 }
 
 #[tokio::test]
