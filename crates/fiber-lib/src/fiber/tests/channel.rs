@@ -1250,7 +1250,7 @@ async fn test_network_send_payment_target_not_found() {
         })
         .await;
     assert!(res.is_err());
-    assert!(res.err().unwrap().contains("Node not found in graph"));
+    assert!(res.err().unwrap().contains("no path found"));
 }
 
 #[tokio::test]
