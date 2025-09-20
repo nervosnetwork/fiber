@@ -28,6 +28,8 @@ pub enum Contract {
     CommitmentLock,
     Secp256k1Lock,
     SimpleUDT,
+    #[cfg(any(test, feature = "bench"))]
+    AlwaysSuccess,
 }
 
 #[derive(Clone, Debug)]
@@ -425,8 +427,6 @@ fn get_contracts_context() -> &'static ContractsContext {
 #[cfg(any(test, feature = "bench"))]
 fn get_contracts_context() -> ContractsContext {
     super::tests::test_utils::MOCK_CONTEXT
-        .read()
-        .expect("read mock context")
         .contracts_context
         .clone()
 }

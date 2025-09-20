@@ -1,21 +1,21 @@
-use crate::time::SystemTimeError;
+use crate::{fiber::types::Hash256, invoice::SettleInvoiceError, time::SystemTimeError};
 
 use jsonrpsee::types::{error::CALL_EXECUTION_FAILED_CODE, ErrorObjectOwned};
 use thiserror::Error;
 
 #[derive(Error, Debug)]
-pub enum CchDbError {
+pub enum CchStoreError {
     #[error("Inserting duplicated key: {0}")]
-    Duplicated(String),
+    Duplicated(Hash256),
 
     #[error("Key not found: {0}")]
-    NotFound(String),
+    NotFound(Hash256),
 }
 
 #[derive(Error, Debug)]
 pub enum CchError {
-    #[error("Database error: {0}")]
-    DbError(#[from] CchDbError),
+    #[error("Store error: {0}")]
+    StoreError(#[from] CchStoreError),
     #[error("BTC invoice parse error: {0}")]
     BTCInvoiceParseError(#[from] lightning_invoice::ParseOrSemanticError),
     #[error("BTC invoice expired")]
@@ -24,6 +24,12 @@ pub enum CchError {
     BTCInvoiceMissingAmount,
     #[error("CKB invoice error: {0}")]
     CKBInvoiceError(#[from] crate::invoice::InvoiceError),
+    #[error("CKB invoice missing amount")]
+    CKBInvoiceMissingAmount,
+    #[error("Fail to settle CKB invoice: {0}")]
+    CKBSettleInvoiceError(#[from] SettleInvoiceError),
+    #[error("Fiber node error: {0}")]
+    FiberNodeError(anyhow::Error),
     #[error("SendBTC order already paid")]
     SendBTCOrderAlreadyPaid,
     #[error("SendBTC received payment amount is too small")]

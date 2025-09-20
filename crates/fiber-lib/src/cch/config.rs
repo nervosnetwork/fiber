@@ -1,6 +1,10 @@
 use std::path::PathBuf;
 
+use anyhow::Context;
 use clap_serde_derive::ClapSerde;
+use lnd_grpc_tonic_client::Uri;
+
+use super::actor::LndConnectionInfo;
 
 /// Default cross-chain order expiry time in seconds.
 pub const DEFAULT_ORDER_EXPIRY_TIME: u64 = 3600;
@@ -31,29 +35,45 @@ pub struct CchConfig {
     pub lnd_rpc_url: String,
 
     #[arg(
+        name = "CCH_LND_CERT_HEX",
+        long = "cch-lnd-cert-hex",
+        env,
+        help = "Hex encoded TLS cert for the grpc connection (will be preferred over cch-lnd-cert-path). Leave it empty to use wellknown CA certificates like Let's Encrypt."
+    )]
+    pub lnd_cert_hex: Option<String>,
+
+    #[arg(
         name = "CCH_LND_CERT_PATH",
         long = "cch-lnd-cert-path",
         env,
-        help = "Path to the TLS cert file for the grpc connection. Leave it empty to use wellknown CA certificates like Let's Encrypt."
+        help = "Path to the TLS cert file for the grpc connection (will be ignored if cch-lnd-cert-hex is also set). Leave it empty to use wellknown CA certificates like Let's Encrypt."
     )]
     pub lnd_cert_path: Option<String>,
+
+    #[arg(
+        name = "CCH_LND_MACAROON_HEX",
+        long = "cch-lnd-macaroon-hex",
+        env,
+        help = "Hex encoded Macaroon for the grpc connection (will be preferred over cch-lnd-macaroon-path)"
+    )]
+    pub lnd_macaroon_hex: Option<String>,
 
     #[arg(
         name = "CCH_LND_MACAROON_PATH",
         long = "cch-lnd-macaroon-path",
         env,
-        help = "Path to the Macaroon file for the grpc connection"
+        help = "Path to the Macaroon file for the grpc connection (will be ignored if cch-lnd-macaroon-hex is also set)"
     )]
     pub lnd_macaroon_path: Option<String>,
 
-    // TODO: use hex type
     #[arg(
-        name = "CCH_WRAPPED_BTC_TYPE_SCRIPT_ARGS",
-        long = "cch-wrapped-btc-type-script-args",
+        name = "CCH_WRAPPED_BTC_TYPE_SCRIPT",
+        long = "cch-wrapped-btc-type-script",
         env,
-        help = "Wrapped BTC type script args. It must be a UDT with 8 decimal places."
+        value_parser = parse_script_from_str,
+        help = "Wrapped BTC type script."
     )]
-    pub wrapped_btc_type_script_args: String,
+    pub wrapped_btc_type_script: ckb_jsonrpc_types::Script,
 
     /// Cross-chain order expiry time in seconds.
     #[default(DEFAULT_ORDER_EXPIRY_TIME)]
@@ -107,11 +127,34 @@ pub struct CchConfig {
     #[default(false)]
     #[arg(skip)]
     pub ignore_startup_failure: bool,
+
+    #[default(None)]
+    #[arg(
+        name = "CCH_FIBER_RPC_URL",
+        long = "cch-fiber-rpc-url",
+        env,
+        help = "fiber endpoint, default is None. May be used to connect to an external fiber node with websocket and normal http jsonrpc support. The address format should be in the format http[s]://<host>:<port>, if http is specified, the websocket connection will be ws://<host>:<port>, if https is specified, the websocket connection will be wss://<host>:<port>"
+    )]
+    pub fiber_rpc_url: Option<String>,
 }
 
 impl CchConfig {
-    pub fn resolve_lnd_cert_path(&self) -> Option<PathBuf> {
-        self.lnd_cert_path.as_ref().map(|lnd_cert_path| {
+    pub async fn get_lnd_tlc_cert(&self) -> Result<Option<Vec<u8>>, anyhow::Error> {
+        if let Some(cert_hex) = self.lnd_cert_hex.as_deref() {
+            return Ok(Some(hex::decode(cert_hex).with_context(|| {
+                format!("decode hex encoded cert {}", cert_hex)
+            })?));
+        }
+        if let Some(cert_path) = self.resolve_lnd_cert_path() {
+            return Ok(Some(tokio::fs::read(&cert_path).await.with_context(
+                || format!("read cert file {}", cert_path.display()),
+            )?));
+        }
+        Ok(None)
+    }
+
+    fn resolve_lnd_cert_path(&self) -> Option<PathBuf> {
+        self.lnd_cert_path.as_deref().map(|lnd_cert_path| {
             let path = PathBuf::from(lnd_cert_path);
             match (self.base_dir.clone(), path.is_relative()) {
                 (Some(base_dir), true) => base_dir.join(path),
@@ -120,8 +163,22 @@ impl CchConfig {
         })
     }
 
-    pub fn resolve_lnd_macaroon_path(&self) -> Option<PathBuf> {
-        self.lnd_macaroon_path.as_ref().map(|lnd_macaroon_path| {
+    pub async fn get_lnd_macaroon(&self) -> Result<Option<Vec<u8>>, anyhow::Error> {
+        if let Some(macaroon_hex) = self.lnd_macaroon_hex.as_deref() {
+            return Ok(Some(hex::decode(macaroon_hex).with_context(|| {
+                format!("decode hex encoded macaroon {}", macaroon_hex)
+            })?));
+        }
+        if let Some(macaroon_path) = self.resolve_lnd_macaroon_path() {
+            return Ok(Some(tokio::fs::read(&macaroon_path).await.with_context(
+                || format!("read macaroon file {}", macaroon_path.display()),
+            )?));
+        }
+        Ok(None)
+    }
+
+    fn resolve_lnd_macaroon_path(&self) -> Option<PathBuf> {
+        self.lnd_macaroon_path.as_deref().map(|lnd_macaroon_path| {
             let path = PathBuf::from(lnd_macaroon_path);
             match (self.base_dir.clone(), path.is_relative()) {
                 (Some(base_dir), true) => base_dir.join(path),
@@ -129,4 +186,23 @@ impl CchConfig {
             }
         })
     }
+
+    pub fn get_wrapped_btc_script(&self) -> ckb_types::packed::Script {
+        ckb_types::packed::Script::from(self.wrapped_btc_type_script.clone())
+    }
+
+    pub(crate) async fn get_lnd_connection_info(&self) -> Result<LndConnectionInfo, anyhow::Error> {
+        let lnd_rpc_url: Uri = self.lnd_rpc_url.clone().try_into()?;
+        let cert = self.get_lnd_tlc_cert().await?;
+        let macaroon = self.get_lnd_macaroon().await?;
+        Ok(LndConnectionInfo {
+            uri: lnd_rpc_url,
+            cert,
+            macaroon,
+        })
+    }
+}
+
+fn parse_script_from_str(s: &str) -> Result<ckb_jsonrpc_types::Script, anyhow::Error> {
+    serde_json::from_str(s).map_err(Into::into)
 }

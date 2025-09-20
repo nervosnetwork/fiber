@@ -1,6 +1,7 @@
 #![allow(clippy::needless_range_loop)]
 use crate::fiber::channel::CloseFlags;
 use crate::fiber::network::PeerDisconnectReason;
+use crate::fiber::types::Hash256;
 use crate::fiber::{NetworkActorCommand, NetworkActorMessage};
 use crate::gen_rand_sha256_hash;
 use crate::invoice::CkbInvoice;
@@ -9,7 +10,6 @@ use crate::rpc::config::RpcConfig;
 use crate::rpc::info::NodeInfoResult;
 use crate::tests::*;
 use crate::{
-    fiber::types::Hash256,
     invoice::Currency,
     rpc::{
         channel::{ListChannelsParams, ListChannelsResult},
@@ -95,7 +95,8 @@ async fn test_rpc_basic() {
         fallback_address: None,
         final_expiry_delta: Some(900000 + 1234),
         udt_type_script: Some(Script::default().into()),
-        payment_preimage: Hash256::default(),
+        payment_hash: None,
+        payment_preimage: Some(Hash256::default()),
         hash_algorithm: Some(crate::fiber::hash_algorithm::HashAlgorithm::CkbHash),
         allow_mpp: Some(true),
     };
@@ -146,7 +147,8 @@ async fn test_rpc_basic() {
         fallback_address: None,
         final_expiry_delta: Some(900000 + 1234),
         udt_type_script: Some(Script::default().into()),
-        payment_preimage: gen_rand_sha256_hash(),
+        payment_preimage: Some(gen_rand_sha256_hash()),
+        payment_hash: None,
         hash_algorithm: Some(crate::fiber::hash_algorithm::HashAlgorithm::CkbHash),
         allow_mpp: Some(false),
     };
@@ -537,7 +539,8 @@ async fn test_rpc_basic_with_auth() {
                 fallback_address: None,
                 final_expiry_delta: Some(900000 + 1234),
                 udt_type_script: Some(Script::default().into()),
-                payment_preimage: Hash256::default(),
+                payment_preimage: None,
+                payment_hash: None,
                 hash_algorithm: Some(crate::fiber::hash_algorithm::HashAlgorithm::CkbHash),
                 allow_mpp: None,
             },

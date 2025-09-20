@@ -23,7 +23,7 @@ body:json {
     "params": [
       {
         "btc_pay_req": "{{BTC_PAY_REQ}}",
-        "currency": "Fibt"
+        "currency": "Fibd"
       }
     ]
   }
@@ -32,11 +32,12 @@ body:json {
 assert {
   res.status: eq 200
   res.body.error: isUndefined
+  res.body.result.incoming_invoice.Fiber: isDefined
 }
 
 script:post-response {
   if (res.body.result) {
-    bru.setVar("CKB_PAY_REQ", res.body.result.ckb_pay_req);
+    bru.setVar("FIBER_PAY_INVOICE", res.body.result.incoming_invoice.Fiber);
     console.log(res.body.result.payment_hash);
   }
 }

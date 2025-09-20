@@ -1,8 +1,8 @@
 mod actor;
-pub use actor::{start_cch, CchActor, CchMessage, ReceiveBTC, SendBTC};
+pub use actor::{start_cch, CchActor, CchArgs, CchMessage, ReceiveBTC, SendBTC};
 
 mod error;
-pub use error::{CchError, CchResult};
+pub use error::{CchError, CchResult, CchStoreError};
 
 mod config;
 pub use config::{
@@ -11,7 +11,14 @@ pub use config::{
 };
 
 mod order;
-pub use order::{CchOrderStatus, ReceiveBTCOrder, SendBTCOrder};
+pub use order::{CchInvoice, CchOrder, CchOrderStatus};
 
-mod orders_db;
-pub use orders_db::CchOrdersDb;
+mod order_store;
+pub use order_store::{CchOrderStore, CchOrderStoreDeref};
+
+mod order_guard;
+
+mod cch_fiber_agent;
+
+#[cfg(any(test, feature = "bench"))]
+pub mod tests;

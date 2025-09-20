@@ -14,6 +14,7 @@ jobs:
           - udt
           - reestablish
           - cross-chain-hub
+          - cross-chain-hub-separate
           - router-pay
           - udt-router-pay
           - watchtower
@@ -60,7 +61,7 @@ jobs:
           wget "https://github.com/nervosnetwork/ckb/releases/download/v${version}/ckb_v${version}_x86_64-unknown-linux-gnu-portable.tar.gz"
           tar -xvaf "ckb_v${version}_x86_64-unknown-linux-gnu-portable.tar.gz"
           sudo mv "ckb_v${version}_x86_64-unknown-linux-gnu-portable"/* /usr/local/bin/
-          if [ ${{ matrix.workflow }} = "cross-chain-hub" ]; then
+          if [[ "${{ matrix.workflow }}" = cross-chain-hub* ]]; then
             wget "https://bitcoin.org/bin/bitcoin-core-27.0/bitcoin-27.0-x86_64-linux-gnu.tar.gz"
             tar -xvaf "bitcoin-27.0-x86_64-linux-gnu.tar.gz"
             echo "$(pwd)/bitcoin-27.0/bin" >> $GITHUB_PATH
@@ -82,13 +83,15 @@ jobs:
           export ON_GITHUB_ACTION=y
           # Pass it to tests/funding-tx-builder as args
           export EXTRA_BRU_ARGS="${{ matrix.extra_bru_args }}"
+
+          port_file=./tests/nodes/.ports
+          rm -f "$port_file"
           ./tests/nodes/start.sh "e2e/${{ matrix.workflow }}" &
 
           # Wait for the nodes to start, the initialization takes some time
           # check all the ports are open
 
           # when .ports file is not generated, we will retry 20 times to check if all ports are open
-          port_file=./tests/nodes/.ports
           retry_count=0
           while [ $retry_count -lt 100 ]; do
             if [ -f $port_file ]; then
@@ -105,6 +108,7 @@ jobs:
             ports+=("$line")
           done < ./tests/nodes/.ports
 
+          cat ./tests/nodes/.ports_map
           echo "Checking if all ports are open ... ${ports[@]}"
 
           try_number=120

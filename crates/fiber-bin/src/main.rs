@@ -2,17 +2,18 @@ use ckb_chain_spec::ChainSpec;
 use ckb_resource::Resource;
 use core::default::Default;
 use fnn::actors::RootActor;
-use fnn::cch::CchMessage;
 use fnn::ckb::contracts::TypeIDResolver;
 #[cfg(debug_assertions)]
 use fnn::ckb::contracts::{get_cell_deps, Contract};
 use fnn::ckb::{contracts::try_init_contracts_context, CkbChainActor};
-use fnn::fiber::{channel::ChannelSubscribers, graph::NetworkGraph, network::init_chain_hash};
+use fnn::fiber::types::Pubkey;
+use fnn::fiber::{graph::NetworkGraph, network::init_chain_hash};
 use fnn::rpc::server::start_rpc;
 use fnn::rpc::watchtower::{
     CreatePreimageParams, CreateWatchChannelParams, RemovePreimageParams, RemoveWatchChannelParams,
     UpdateLocalSettlementParams, UpdateRevocationParams, WatchtowerRpcClient,
 };
+use fnn::store::pub_sub::StoreWithPubSub;
 use fnn::store::Store;
 use fnn::tasks::{
     cancel_tasks_and_wait_for_completion, new_tokio_cancellation_token, new_tokio_task_tracker,
@@ -20,7 +21,7 @@ use fnn::tasks::{
 use fnn::watchtower::{
     WatchtowerActor, WatchtowerMessage, DEFAULT_WATCHTOWER_CHECK_INTERVAL_SECONDS,
 };
-use fnn::{start_cch, start_network, Config, NetworkServiceEvent};
+use fnn::{start_cch, start_network, CchArgs, Config, NetworkServiceEvent};
 use jsonrpsee::http_client::HttpClientBuilder;
 use jsonrpsee::ws_client::{HeaderMap, HeaderValue};
 use ractor::{Actor, ActorRef};
@@ -77,19 +78,16 @@ pub async fn main() -> Result<(), ExitMessage> {
     let _span = info_span!("node", node = fnn::get_node_prefix()).entered();
 
     let config = Config::parse();
+    let fiber_fallback_config = config.fiber_fallback_config.clone();
 
-    let store_path = config
-        .fiber
-        .as_ref()
-        .ok_or_else(|| ExitMessage("fiber config is required but absent".to_string()))?
-        .store_path();
+    let store_path = fiber_fallback_config.store_path();
 
     let store = Store::new(store_path).map_err(|err| ExitMessage(err.to_string()))?;
+    let store = StoreWithPubSub::new(store);
 
     let tracker = new_tokio_task_tracker();
     let token = new_tokio_cancellation_token();
     let root_actor = RootActor::start(tracker, token).await;
-    let subscribers = ChannelSubscribers::default();
 
     #[cfg(debug_assertions)]
     let rpc_dev_module_commitment_txs = config.rpc.as_ref().and_then(|rpc_config| {
@@ -111,7 +109,7 @@ pub async fn main() -> Result<(), ExitMessage> {
                         .to_string(),
                 )
             })?;
-            let node_public_key = fiber_config.public_key();
+            let node_public_key: Pubkey = fiber_config.public_key().into();
 
             let chain = fiber_config.chain.as_str();
             let chain_spec = ChainSpec::load_from(&match chain {
@@ -150,7 +148,7 @@ pub async fn main() -> Result<(), ExitMessage> {
 
             let network_graph = Arc::new(RwLock::new(NetworkGraph::new(
                 store.clone(),
-                node_public_key.clone().into(),
+                node_public_key,
                 fiber_config.announce_private_addr(),
             )));
 
@@ -168,7 +166,6 @@ pub async fn main() -> Result<(), ExitMessage> {
                 new_tokio_task_tracker(),
                 root_actor.get_cell(),
                 store.clone(),
-                subscribers.clone(),
                 network_graph.clone(),
                 default_shutdown_script,
             )
@@ -302,12 +299,24 @@ pub async fn main() -> Result<(), ExitMessage> {
         Some(cch_config) => {
             info!("Starting cch");
             let ignore_startup_failure = cch_config.ignore_startup_failure;
+            let node_keypair =
+                if let Some(fiber) = config.fiber.as_ref() {
+                    Some(fiber.read_or_generate_secret_key().map_err(|err| {
+                        ExitMessage(format!("failed to read secret key: {}", err))
+                    })?)
+                } else {
+                    None
+                };
             match start_cch(
-                cch_config,
-                new_tokio_task_tracker(),
-                new_tokio_cancellation_token(),
+                CchArgs {
+                    config: cch_config,
+                    tracker: new_tokio_task_tracker(),
+                    token: new_tokio_cancellation_token(),
+                    network_actor: network_actor.clone(),
+                    store: store.clone(),
+                    node_keypair,
+                },
                 root_actor.get_cell(),
-                network_actor.clone(),
             )
             .await
             {
@@ -323,18 +332,6 @@ pub async fn main() -> Result<(), ExitMessage> {
                     }
                 }
                 Ok(actor) => {
-                    subscribers.pending_received_tlcs_subscribers.subscribe(
-                        actor.clone(),
-                        |tlc_notification| {
-                            Some(CchMessage::PendingReceivedTlcNotification(tlc_notification))
-                        },
-                    );
-                    subscribers.settled_tlcs_subscribers.subscribe(
-                        actor.clone(),
-                        |tlc_notification| {
-                            Some(CchMessage::SettledTlcNotification(tlc_notification))
-                        },
-                    );
                     info!("cch started successfully ...");
                     Some(actor)
                 }
@@ -344,8 +341,8 @@ pub async fn main() -> Result<(), ExitMessage> {
     };
 
     // Start rpc service
-    let rpc_server_handle = match (config.rpc, network_graph) {
-        (Some(rpc_config), Some(network_graph)) => {
+    let rpc_server_handle = match config.rpc {
+        Some(rpc_config) => {
             match start_rpc(
                 rpc_config,
                 config.ckb,
@@ -354,20 +351,20 @@ pub async fn main() -> Result<(), ExitMessage> {
                 cch_actor,
                 store,
                 network_graph,
-                #[cfg(debug_assertions)] ckb_chain_actor,
-                #[cfg(debug_assertions)] rpc_dev_module_commitment_txs,
+                root_actor.get_cell(),
+                #[cfg(debug_assertions)]
+                ckb_chain_actor,
+                #[cfg(debug_assertions)]
+                rpc_dev_module_commitment_txs,
             )
-            .await {
+            .await
+            {
                 Ok(handle) => Some(handle),
                 Err(err) => {
                     return ExitMessage::err(format!("rpc server failed to start: {}", err));
                 }
             }
-        },
-        (Some(_), None) => return ExitMessage::err(
-            "RPC requires network graph in the fiber service which is not enabled in the config file"
-            .to_string()
-        ),
+        }
         _ => None,
     };
 

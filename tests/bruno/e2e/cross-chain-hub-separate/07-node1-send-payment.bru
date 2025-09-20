@@ -1,5 +1,5 @@
 meta {
-  name: 07-node1-add-tlc
+  name: 07-node1-send-payment
   type: http
   seq: 7
 }
@@ -19,14 +19,10 @@ body:json {
   {
     "id": "42",
     "jsonrpc": "2.0",
-    "method": "add_tlc",
+    "method": "send_payment",
     "params": [
       {
-        "channel_id": "{{N1N3_CHANNEL_ID}}",
-        "amount": "0x4e20",
-        "payment_hash": "{{PAYMENT_HASH}}",
-        "expiry": "{{expiry}}",
-        "hash_algorithm": "sha256"
+        "invoice": "{{FIBER_PAY_INVOICE}}"
       }
     ]
   }
@@ -34,7 +30,6 @@ body:json {
 
 assert {
   res.body.error: isUndefined
-  res.body.result.tlc_id: isDefined
 }
 
 script:pre-request {
@@ -46,5 +41,4 @@ script:post-response {
   // Sleep for sometime to make sure current operation finishes before next request starts.
   await new Promise(r => setTimeout(r, 100));
   console.log("response from node1 AddTlc:", res.body);
-  bru.setVar("N1N3_TLC_ID1", res.body.result.tlc_id);
 }

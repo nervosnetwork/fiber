@@ -2979,7 +2979,7 @@ async fn test_send_mpp_with_generated_invoice() {
     let too_large_amount_invoice = nodes[1]
         .gen_invoice(NewInvoiceParams {
             amount: 20000000001,
-            payment_preimage: gen_rand_sha256_hash(),
+            payment_preimage: Some(gen_rand_sha256_hash()),
             allow_mpp: Some(true),
             ..Default::default()
         })
@@ -2999,7 +2999,7 @@ async fn test_send_mpp_with_generated_invoice() {
     let ok_invoice = nodes[1]
         .gen_invoice(NewInvoiceParams {
             amount: 20000000000,
-            payment_preimage: gen_rand_sha256_hash(),
+            payment_preimage: Some(gen_rand_sha256_hash()),
             allow_mpp: Some(true),
             ..Default::default()
         })

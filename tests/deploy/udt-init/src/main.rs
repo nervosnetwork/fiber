@@ -25,9 +25,8 @@ use ckb_types::{packed::CellDep, prelude::Builder};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::{collections::HashSet, path::Path};
-use std::{fs, net::TcpListener};
-
 use std::{error::Error as StdErr, str::FromStr};
+use std::{fs, net::TcpListener};
 
 const UDT_KINDS: [&str; 2] = ["SIMPLE_UDT", "XUDT"];
 
@@ -234,11 +233,13 @@ fn generate_ports(num_ports: usize) -> Vec<u16> {
 }
 
 fn generate_nodes_config() {
+    use serde_yaml::Value;
+
     let node_dir_env = std::env::var("NODES_DIR").expect("env var");
     let nodes_dir = Path::new(&node_dir_env);
     let yaml_file_path = nodes_dir.join("deployer/config.yml");
     let content = std::fs::read_to_string(yaml_file_path).expect("read failed");
-    let data: serde_yaml::Value = serde_yaml::from_str(&content).expect("Unable to parse YAML");
+    let data: Value = serde_yaml::from_str(&content).expect("Unable to parse YAML");
     let mut udt_infos = vec![];
     for udt in UDT_KINDS {
         let (code_hash, genesis_tx, index) = get_udt_info(udt);
@@ -246,7 +247,7 @@ fn generate_nodes_config() {
             name: udt.to_string(),
             auto_accept_amount: Some(1000),
             script: UdtScript {
-                code_hash: code_hash,
+                code_hash,
                 hash_type: "Data1".to_string(),
                 args: "0x.*".to_string(),
             },
@@ -268,12 +269,13 @@ fn generate_nodes_config() {
         "# this is generated from nodes/deployer/config.yml, any changes will not be checked in",
         "# you can edit nodes/deployer/config.yml and run `REMOVE_OLD_STATE=y ./tests/nodes/start.sh TESTCASE` to regenerate"
     );
-    let config_dirs = vec!["bootnode", "1", "2", "3"];
+    let config_dirs = vec!["bootnode", "1", "2", "3", "cch"];
     let mut ports_map = vec![];
     let on_github_action = std::env::var("ON_GITHUB_ACTION").is_ok();
-    let gen_ports = generate_ports(6);
+    let gen_ports = generate_ports(8);
     let mut ports_iter = gen_ports.iter();
     let dev_config = nodes_dir.join("deployer/dev.toml");
+    let mut node_3_rpc_port: u16 = 0;
     for (i, config_dir) in config_dirs.iter().enumerate() {
         let use_gen_port = on_github_action && i != 0;
         let default_fiber_port = (8343 + i) as u16;
@@ -283,27 +285,66 @@ fn generate_nodes_config() {
         } else {
             (default_fiber_port, default_rpc_port)
         };
-        ports_map.push((default_fiber_port, fiber_port));
-        ports_map.push((default_rpc_port, rpc_port));
+        if i == 3 {
+            node_3_rpc_port = rpc_port;
+        }
+        if i != 4 {
+            // Separate CCH node does not start p2p
+            ports_map.push((
+                format!("{}.{}", config_dir, "p2p"),
+                default_fiber_port,
+                fiber_port,
+            ));
+        }
+        ports_map.push((
+            format!("{}.{}", config_dir, "rpc"),
+            default_rpc_port,
+            rpc_port,
+        ));
         let mut data = data.clone();
-        data["fiber"]["listening_addr"] =
-            serde_yaml::Value::String(format!("/ip4/0.0.0.0/tcp/{}", fiber_port));
-        data["fiber"]["announced_addrs"] =
-            serde_yaml::Value::Sequence(vec![serde_yaml::Value::String(format!(
-                "/ip4/127.0.0.1/tcp/{}",
-                fiber_port
-            ))]);
-        data["fiber"]["announced_node_name"] = serde_yaml::Value::String(format!("fiber-{}", i));
-        data["rpc"]["listening_addr"] =
-            serde_yaml::Value::String(format!("127.0.0.1:{}", rpc_port));
+        data["fiber"]["listening_addr"] = Value::String(format!("/ip4/0.0.0.0/tcp/{}", fiber_port));
+        data["fiber"]["announced_addrs"] = Value::Sequence(vec![serde_yaml::Value::String(
+            format!("/ip4/127.0.0.1/tcp/{}", fiber_port),
+        )]);
+        data["fiber"]["announced_node_name"] = Value::String(format!("fiber-{}", i));
+        data["rpc"]["listening_addr"] = Value::String(format!("127.0.0.1:{}", rpc_port));
         data["ckb"]["udt_whitelist"] = serde_yaml::to_value(&udt_infos).unwrap();
+        let script: serde_yaml::Mapping = serde_yaml::from_str(
+            serde_yaml::to_string(&ckb_jsonrpc_types::Script::from(get_sudt_script()))
+                .expect("save script")
+                .as_str(),
+        )
+        .expect("parse script");
+        data["cch"]["wrapped_btc_type_script"] = Value::Mapping(script);
 
         // Node 3 acts as a CCH node.
         if i == 3 {
             data["services"]
                 .as_sequence_mut()
                 .unwrap()
-                .push(serde_yaml::Value::String("cch".to_string()));
+                .push(Value::String("cch".to_string()));
+        }
+        // Node cch is a separate CCH node
+        if i == 4 {
+            let top_mapping = data.as_mapping_mut().unwrap();
+            top_mapping.remove("ckb");
+            top_mapping.remove("fiber");
+            data["cch"]
+                .as_mapping_mut()
+                .unwrap()
+                .remove("ignore_startup_failure");
+            let modules = data["rpc"]["enabled_modules"].as_sequence_mut().unwrap();
+            modules.clear();
+            modules.push(Value::String("cch".to_string()));
+            let services = data["services"].as_sequence_mut().unwrap();
+            services.clear();
+            services.push(Value::String("rpc".to_string()));
+            services.push(Value::String("cch".to_string()));
+            let cch = data["cch"].as_mapping_mut().unwrap();
+            cch.insert(
+                Value::String("fiber_rpc_url".into()),
+                Value::String(format!("http://127.0.0.1:{}", node_3_rpc_port)),
+            );
         }
 
         let new_yaml = header.to_string() + &serde_yaml::to_string(&data).unwrap();
@@ -317,7 +358,7 @@ fn generate_nodes_config() {
         let bruno_dir = nodes_dir.join("../bruno/environments/");
         for config in std::fs::read_dir(bruno_dir).expect("read dir") {
             let config = config.expect("read config");
-            for (default_port, port) in ports_map.iter() {
+            for (_, default_port, port) in ports_map.iter() {
                 let content = std::fs::read_to_string(config.path()).expect("read config");
                 let new_content = content.replace(&default_port.to_string(), &port.to_string());
                 std::fs::write(config.path(), new_content).expect("write config");
@@ -328,14 +369,18 @@ fn generate_nodes_config() {
     // write the real ports into a file so that later script can use it to double check the ports
     let content = ports_map
         .iter()
-        .skip(2) // bootnode node was not always started
-        .map(|(_, port)| port.to_string())
+        .map(|(config_dir, _, port)| format!("{}: {}", config_dir, port))
         .collect::<Vec<_>>()
         .join("\n")
         + "\n";
 
-    let port_file_path = nodes_dir.join(".ports");
+    let port_file_path = nodes_dir.join(".ports_map");
     std::fs::write(port_file_path, content).expect("write ports list");
+}
+
+fn get_sudt_script() -> Script {
+    let udt_owner = get_nodes_info("deployer");
+    generate_udt_type_script("SIMPLE_UDT", &udt_owner.0)
 }
 
 fn init_udt_accounts() -> Result<(), Box<dyn StdErr>> {

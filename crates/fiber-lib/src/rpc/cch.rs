@@ -1,6 +1,7 @@
 #[cfg(not(target_arch = "wasm32"))]
-use crate::cch::{CchMessage, CchOrderStatus, ReceiveBTCOrder};
+use crate::cch::{CchMessage, CchOrder, CchOrderStatus};
 use crate::{
+    cch::CchInvoice,
     fiber::{
         serde_utils::{U128Hex, U64Hex},
         types::Hash256,
@@ -17,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 
 #[derive(Serialize, Deserialize)]
-pub struct SendBtcParams {
+pub struct SendBTCParams {
     /// Bitcoin payment request string
     pub btc_pay_req: String,
     /// Request currency
@@ -26,7 +27,7 @@ pub struct SendBtcParams {
 
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SendBTCResponse {
+pub struct CchOrderResponse {
     /// Seconds since epoch when the order is created
     #[serde_as(as = "U64Hex")]
     pub timestamp: u64,
@@ -37,17 +38,15 @@ pub struct SendBTCResponse {
     #[serde_as(as = "U64Hex")]
     pub ckb_final_tlc_expiry_delta: u64,
 
-    /// Request currency
-    pub currency: Currency,
     /// Wrapped BTC type script
     pub wrapped_btc_type_script: ckb_jsonrpc_types::Script,
 
-    /// Payment request for BTC
-    pub btc_pay_req: String,
-    /// Payment request for CKB
-    pub ckb_pay_req: String,
+    /// Generated invoice for the incoming payment
+    pub incoming_invoice: CchInvoice,
+    /// The final payee to accept the payment. It has the different network with incoming invoice.
+    pub outgoing_pay_req: String,
     /// Payment hash for the HTLC for both CKB and BTC.
-    pub payment_hash: String,
+    pub payment_hash: Hash256,
     /// Amount required to pay in Satoshis, including fee
     #[serde_as(as = "U128Hex")]
     pub amount_sats: u128,
@@ -60,60 +59,15 @@ pub struct SendBTCResponse {
 
 #[serde_as]
 #[derive(Serialize, Deserialize)]
-pub struct ReceiveBtcParams {
-    /// Payment hash for the HTLC for both CKB and BTC.
-    pub payment_hash: String,
-    /// Channel ID for the CKB payment.
-    pub channel_id: Hash256,
-    /// How many satoshis to receive, excluding cross-chain hub fee.
-    #[serde_as(as = "U128Hex")]
-    pub amount_sats: u128,
-    /// Expiry set for the HTLC for the CKB payment to the payee.
-    #[serde_as(as = "U64Hex")]
-    pub final_tlc_expiry: u64,
+pub struct ReceiveBTCParams {
+    /// Fiber payment request string
+    pub fiber_pay_req: String,
 }
 
 #[derive(Serialize, Deserialize)]
-pub struct GetReceiveBtcOrderParams {
+pub struct GetCchOrderParams {
     /// Payment hash for the HTLC for both CKB and BTC.
-    pub payment_hash: String,
-}
-
-#[serde_as]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReceiveBTCResponse {
-    /// Seconds since epoch when the order is created
-    #[serde_as(as = "U64Hex")]
-    pub timestamp: u64,
-    /// Seconds after timestamp that the order expires
-    #[serde_as(as = "U64Hex")]
-    pub expiry: u64,
-    /// The minimal expiry in seconds of the final TLC in the CKB network
-    #[serde_as(as = "U64Hex")]
-    pub ckb_final_tlc_expiry_delta: u64,
-
-    /// Wrapped BTC type script
-    pub wrapped_btc_type_script: ckb_jsonrpc_types::Script,
-
-    /// Payment request for BTC
-    pub btc_pay_req: String,
-    /// Payment hash for the HTLC for both CKB and BTC.
-    pub payment_hash: String,
-    /// Channel ID for the CKB payment.
-    pub channel_id: Hash256,
-    /// TLC ID for the CKB payment.
-    #[serde_as(as = "Option<U64Hex>")]
-    pub tlc_id: Option<u64>,
-
-    /// Amount will be received by the payee
-    #[serde_as(as = "U128Hex")]
-    pub amount_sats: u128,
-    /// Fee in Satoshis
-    #[serde_as(as = "U128Hex")]
-    pub fee_sats: u128,
-
-    /// Order status
-    pub status: CchOrderStatus,
+    pub payment_hash: Hash256,
 }
 
 /// RPC module for cross chain hub demonstration.
@@ -123,21 +77,21 @@ pub struct ReceiveBTCResponse {
 trait CchRpc {
     /// Send BTC to a address.
     #[method(name = "send_btc")]
-    async fn send_btc(&self, params: SendBtcParams) -> Result<SendBTCResponse, ErrorObjectOwned>;
+    async fn send_btc(&self, params: SendBTCParams) -> Result<CchOrderResponse, ErrorObjectOwned>;
 
     /// Receive BTC from a payment hash.
     #[method(name = "receive_btc")]
     async fn receive_btc(
         &self,
-        params: ReceiveBtcParams,
-    ) -> Result<ReceiveBTCResponse, ErrorObjectOwned>;
+        params: ReceiveBTCParams,
+    ) -> Result<CchOrderResponse, ErrorObjectOwned>;
 
     /// Get receive BTC order by payment hash.
-    #[method(name = "get_receive_btc_order")]
-    async fn get_receive_btc_order(
+    #[method(name = "get_cch_order")]
+    async fn get_cch_order(
         &self,
-        params: GetReceiveBtcOrderParams,
-    ) -> Result<ReceiveBTCResponse, ErrorObjectOwned>;
+        params: GetCchOrderParams,
+    ) -> Result<CchOrderResponse, ErrorObjectOwned>;
 }
 
 pub struct CchRpcServerImpl {
@@ -155,7 +109,7 @@ const TIMEOUT: u64 = 1000;
 #[async_trait::async_trait]
 impl CchRpcServer for CchRpcServerImpl {
     /// Send BTC to a address.
-    async fn send_btc(&self, params: SendBtcParams) -> Result<SendBTCResponse, ErrorObjectOwned> {
+    async fn send_btc(&self, params: SendBTCParams) -> Result<CchOrderResponse, ErrorObjectOwned> {
         // <Self as CchRpcServerImpl>::send_btc(self, params).await
         self.send_btc(params).await
     }
@@ -163,23 +117,23 @@ impl CchRpcServer for CchRpcServerImpl {
     /// Receive BTC from a payment hash.
     async fn receive_btc(
         &self,
-        params: ReceiveBtcParams,
-    ) -> Result<ReceiveBTCResponse, ErrorObjectOwned> {
+        params: ReceiveBTCParams,
+    ) -> Result<CchOrderResponse, ErrorObjectOwned> {
         self.receive_btc(params).await
     }
 
-    /// Get receive BTC order by payment hash.
-    async fn get_receive_btc_order(
+    /// Get order by payment hash.
+    async fn get_cch_order(
         &self,
-        params: GetReceiveBtcOrderParams,
-    ) -> Result<ReceiveBTCResponse, ErrorObjectOwned> {
-        self.get_receive_btc_order(params).await
+        params: GetCchOrderParams,
+    ) -> Result<CchOrderResponse, ErrorObjectOwned> {
+        self.get_cch_order(params).await
     }
 }
 
 // #[async_trait::async_trait(?Send)]
 impl CchRpcServerImpl {
-    async fn send_btc(&self, params: SendBtcParams) -> Result<SendBTCResponse, ErrorObjectOwned> {
+    async fn send_btc(&self, params: SendBTCParams) -> Result<CchOrderResponse, ErrorObjectOwned> {
         let result = call_t!(
             self.cch_actor,
             CchMessage::SendBTC,
@@ -197,36 +151,19 @@ impl CchRpcServerImpl {
             )
         })?;
 
-        result
-            .map(|order| SendBTCResponse {
-                timestamp: order.created_at,
-                expiry: order.expires_after,
-                ckb_final_tlc_expiry_delta: order.ckb_final_tlc_expiry_delta,
-                currency: order.currency,
-                wrapped_btc_type_script: order.wrapped_btc_type_script,
-                btc_pay_req: order.btc_pay_req,
-                ckb_pay_req: order.ckb_pay_req,
-                payment_hash: order.payment_hash,
-                amount_sats: order.amount_sats,
-                fee_sats: order.fee_sats,
-                status: order.status,
-            })
-            .map_err(Into::into)
+        result.map(Into::into).map_err(Into::into)
     }
 
     async fn receive_btc(
         &self,
-        params: ReceiveBtcParams,
-    ) -> Result<ReceiveBTCResponse, ErrorObjectOwned> {
+        params: ReceiveBTCParams,
+    ) -> Result<CchOrderResponse, ErrorObjectOwned> {
         let result = call_t!(
             self.cch_actor,
             CchMessage::ReceiveBTC,
             TIMEOUT,
             crate::cch::ReceiveBTC {
-                payment_hash: params.payment_hash,
-                channel_id: params.channel_id,
-                amount_sats: params.amount_sats,
-                final_tlc_expiry: params.final_tlc_expiry,
+                fiber_pay_req: params.fiber_pay_req,
             }
         )
         .map_err(|ractor_error| {
@@ -240,13 +177,13 @@ impl CchRpcServerImpl {
         result.map(Into::into).map_err(Into::into)
     }
 
-    async fn get_receive_btc_order(
+    async fn get_cch_order(
         &self,
-        params: GetReceiveBtcOrderParams,
-    ) -> Result<ReceiveBTCResponse, ErrorObjectOwned> {
+        params: GetCchOrderParams,
+    ) -> Result<CchOrderResponse, ErrorObjectOwned> {
         let result = call_t!(
             self.cch_actor,
-            CchMessage::GetReceiveBTCOrder,
+            CchMessage::GetCchOrder,
             TIMEOUT,
             params.payment_hash
         )
@@ -262,17 +199,16 @@ impl CchRpcServerImpl {
     }
 }
 
-impl From<ReceiveBTCOrder> for ReceiveBTCResponse {
-    fn from(value: ReceiveBTCOrder) -> Self {
+impl From<CchOrder> for CchOrderResponse {
+    fn from(value: CchOrder) -> Self {
         Self {
             timestamp: value.created_at,
             expiry: value.expires_after,
             ckb_final_tlc_expiry_delta: value.ckb_final_tlc_expiry_delta,
             wrapped_btc_type_script: value.wrapped_btc_type_script,
-            btc_pay_req: value.btc_pay_req,
+            outgoing_pay_req: value.outgoing_pay_req,
+            incoming_invoice: value.incoming_invoice,
             payment_hash: value.payment_hash,
-            channel_id: value.channel_id,
-            tlc_id: value.tlc_id,
             amount_sats: value.amount_sats,
             fee_sats: value.fee_sats,
             status: value.status,

@@ -6,7 +6,7 @@ import { DbWorkerInitializationOptions, FiberInvokeRequest, FiberInvokeResponse,
 import { AbandonChannelParams, AcceptChannelParams, AcceptChannelResult, ListChannelsParams, ListChannelsResult, OpenChannelParams, OpenChannelResult, ShutdownChannelParams, UpdateChannelParams } from "./types/channel.ts";
 import { GraphChannelsParams, GraphChannelsResult, GraphNodesParams, GraphNodesResult } from "./types/graph.ts";
 import { NodeInfoResult } from "./types/info.ts";
-import { GetInvoiceResult, InvoiceParams, InvoiceResult, NewInvoiceParams, ParseInvoiceParams, ParseInvoiceResult } from "./types/invoice.ts";
+import { GetInvoiceResult, InvoiceParams, InvoiceResult, NewInvoiceParams, ParseInvoiceParams, ParseInvoiceResult, SettleInvoiceParams, SettleInvoiceResult } from "./types/invoice.ts";
 import { BuildPaymentRouterResult, BuildRouterParams, GetPaymentCommandParams, GetPaymentCommandResult, SendPaymentCommandParams, SendPaymentWithRouterParams } from "./types/payment.ts";
 import { ConnectPeerParams, DisconnectPeerParams, ListPeerResult } from "./types/peer.ts";
 
@@ -153,6 +153,9 @@ class Fiber {
         return await this.invokeCommand("get_invoice", [params]);
     }
     async cancelInvoice(params: InvoiceParams): Promise<GetInvoiceResult> {
+        return await this.invokeCommand("cancel_invoice", [params]);
+    }
+    async settleInvoice(params: SettleInvoiceParams): Promise<SettleInvoiceResult> {
         return await this.invokeCommand("cancel_invoice", [params]);
     }
     async sendPayment(params: SendPaymentCommandParams): Promise<GetPaymentCommandResult> {

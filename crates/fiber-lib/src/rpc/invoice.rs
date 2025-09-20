@@ -8,17 +8,20 @@ use crate::fiber::features::FeatureVector;
 use crate::fiber::hash_algorithm::HashAlgorithm;
 use crate::fiber::serde_utils::{duration_hex, U128Hex, U64Hex};
 use crate::fiber::types::{Hash256, Privkey};
+use crate::fiber::{NetworkActorCommand, NetworkActorMessage};
 use crate::invoice::{
-    Attribute as InternalAttribute, CkbInvoice as InternalCkbInvoice, CkbInvoiceStatus, CkbScript,
-    Currency, InvoiceBuilder, InvoiceData as InternalInvoiceData, InvoiceSignature, InvoiceStore,
+    add_invoice, Attribute as InternalAttribute, CkbInvoice as InternalCkbInvoice,
+    CkbInvoiceStatus, CkbScript, Currency, InvoiceBuilder, InvoiceData as InternalInvoiceData,
+    InvoiceSignature, InvoiceStore,
 };
 
-use crate::FiberConfig;
+use crate::{gen_rand_sha256_hash, handle_actor_call, log_and_error, FiberConfig};
 use ckb_jsonrpc_types::Script;
 use jsonrpsee::types::{error::CALL_EXECUTION_FAILED_CODE, ErrorObjectOwned};
 
 #[cfg(not(target_arch = "wasm32"))]
 use jsonrpsee::proc_macros::rpc;
+use ractor::{call, ActorRef};
 use rand::Rng;
 use secp256k1::{PublicKey, Secp256k1, SecretKey};
 use serde::{Deserialize, Serialize};
@@ -142,8 +145,10 @@ pub struct NewInvoiceParams {
     pub description: Option<String>,
     /// The currency of the invoice.
     pub currency: Currency,
-    /// The payment preimage of the invoice.
-    pub payment_preimage: Hash256,
+    /// The preimage to settle an incoming TLC payable to this invoice. If preimage is set, hash must be absent. If both preimage and hash are absent, a random preimage is generated.
+    pub payment_preimage: Option<Hash256>,
+    /// The hash of the preimage. If hash is set, preimage must be absent. This condition indicates a 'hold invoice' for which the tlc must be accepted and held until the preimage becomes known.
+    pub payment_hash: Option<Hash256>,
     /// The expiry time of the invoice, in seconds.
     #[serde_as(as = "Option<U64Hex>")]
     pub expiry: Option<u64>,
@@ -187,6 +192,17 @@ pub struct InvoiceParams {
     pub payment_hash: Hash256,
 }
 
+#[derive(Serialize, Deserialize, Debug)]
+pub struct SettleInvoiceParams {
+    /// The payment hash of the invoice.
+    pub payment_hash: Hash256,
+    /// The payment preimage of the invoice.
+    pub payment_preimage: Hash256,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct SettleInvoiceResult {}
+
 /// The status of the invoice.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct GetInvoiceResult {
@@ -229,17 +245,29 @@ trait InvoiceRpc {
         &self,
         payment_hash: InvoiceParams,
     ) -> Result<GetInvoiceResult, ErrorObjectOwned>;
+
+    /// Settles an invoice by saving the preimage to this invoice.
+    #[method(name = "settle_invoice")]
+    async fn settle_invoice(
+        &self,
+        settle_invoice: SettleInvoiceParams,
+    ) -> Result<SettleInvoiceResult, ErrorObjectOwned>;
 }
 
 pub struct InvoiceRpcServerImpl<S> {
     store: S,
+    network_actor: Option<ActorRef<NetworkActorMessage>>,
     keypair: Option<(PublicKey, SecretKey)>,
     currency: Option<Currency>,
     node_features: Option<FeatureVector>,
 }
 
 impl<S> InvoiceRpcServerImpl<S> {
-    pub fn new(store: S, config: Option<FiberConfig>) -> Self {
+    pub fn new(
+        store: S,
+        network_actor: Option<ActorRef<NetworkActorMessage>>,
+        config: Option<FiberConfig>,
+    ) -> Self {
         let (keypair, currency, node_features) = if let Some(config) = config {
             let kp = config
                 .read_or_generate_secret_key()
@@ -270,6 +298,7 @@ impl<S> InvoiceRpcServerImpl<S> {
         };
         Self {
             store,
+            network_actor,
             keypair,
             currency,
             node_features,
@@ -313,6 +342,13 @@ where
     ) -> Result<GetInvoiceResult, ErrorObjectOwned> {
         self.cancel_invoice(payment_hash).await
     }
+
+    async fn settle_invoice(
+        &self,
+        settle_invoice: SettleInvoiceParams,
+    ) -> Result<SettleInvoiceResult, ErrorObjectOwned> {
+        self.settle_invoice(settle_invoice).await
+    }
 }
 
 impl<S> InvoiceRpcServerImpl<S>
@@ -339,9 +375,20 @@ where
                 ));
             }
         }
-        let mut invoice_builder = InvoiceBuilder::new(params.currency)
-            .amount(Some(params.amount))
-            .payment_preimage(params.payment_preimage);
+
+        let mut invoice_builder = InvoiceBuilder::new(params.currency).amount(Some(params.amount));
+
+        // If both preimage and hash are absent, a random preimage is generated.
+        let preimage_opt = params
+            .payment_preimage
+            .or_else(|| params.payment_hash.is_none().then(gen_rand_sha256_hash));
+
+        if let Some(preimage) = preimage_opt {
+            invoice_builder = invoice_builder.payment_preimage(preimage);
+        }
+        if let Some(hash) = params.payment_hash {
+            invoice_builder = invoice_builder.payment_hash(hash);
+        }
         if let Some(description) = params.description.clone() {
             invoice_builder = invoice_builder.description(description);
         };
@@ -399,10 +446,7 @@ where
         };
 
         match invoice {
-            Ok(invoice) => match self
-                .store
-                .insert_invoice(invoice.clone(), Some(params.payment_preimage))
-            {
+            Ok(invoice) => match add_invoice(&self.store, invoice.clone(), preimage_opt) {
                 Ok(_) => Ok(InvoiceResult {
                     invoice_address: invoice.to_string(),
                     invoice: invoice.into(),
@@ -507,5 +551,31 @@ where
                 Some(payment_hash),
             )),
         }
+    }
+
+    pub async fn settle_invoice(
+        &self,
+        params: SettleInvoiceParams,
+    ) -> Result<SettleInvoiceResult, ErrorObjectOwned> {
+        let network_actor = self.network_actor.as_ref().ok_or(ErrorObjectOwned::owned(
+            CALL_EXECUTION_FAILED_CODE,
+            "network actor not initialized".to_string(),
+            Option::<()>::None,
+        ))?;
+
+        let SettleInvoiceParams {
+            ref payment_hash,
+            ref payment_preimage,
+        } = params;
+
+        let message = move |rpc_reply| -> NetworkActorMessage {
+            NetworkActorMessage::Command(NetworkActorCommand::SettleInvoice(
+                *payment_hash,
+                *payment_preimage,
+                rpc_reply,
+            ))
+        };
+
+        handle_actor_call!(network_actor, message, params).map(|_| SettleInvoiceResult {})
     }
 }

@@ -1,5 +1,5 @@
 meta {
-  name: 11-get-receive-btc-order-tlc-id
+  name: 11-check-receive-btc-order
   type: http
   seq: 11
 }
@@ -19,7 +19,7 @@ body:json {
   {
     "id": "42",
     "jsonrpc": "2.0",
-    "method": "get_receive_btc_order",
+    "method": "get_cch_order",
     "params": [
       {
         "payment_hash": "{{PAYMENT_HASH}}"
@@ -31,33 +31,4 @@ body:json {
 assert {
   res.body.error: isUndefined
   res.status: eq 200
-}
-
-script:pre-request {
-  if(bru.getVar("iteration") === undefined){
-    bru.setVar("iteration", 0);
-  }
-}
-
-script:post-response {
-  const i = bru.getVar("iteration");
-  const n = bru.getVar("max_iterations");
-  if (i < n) {
-    console.log(`Try ${i+1}/${n}`);
-  }
-
-  if (res.body.result.tlc_id !== null) {
-    bru.setVar("N3N1_TLC_ID1", res.body.result.tlc_id);
-    console.log(`Node 3 has sent a pending tlc: ${res.body.result.tlc_id}`);
-    bru.setVar("iteration", 0);
-    // wait for confirmation
-    await new Promise(r => setTimeout(r, 500));
-  } else if (i+1 < n) {
-    await new Promise(r => setTimeout(r, 10));
-    bru.setVar("iteration", i + 1);
-    bru.setNextRequest("11-get-receive-btc-order-tlc-id");
-  } else {
-    bru.setVar("iteration", 0);
-    throw new Error("Node 3 has not sent a pending tlc");
-  }
 }

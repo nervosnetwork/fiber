@@ -1,3 +1,7 @@
+#[cfg(not(target_arch = "wasm32"))]
+use crate::cch::{
+    start_cch, tests::lnd_test_utils::LndNode, CchArgs, CchConfig, CchMessage, CchOrderStore,
+};
 use crate::ckb::tests::test_utils::get_tx_from_hash;
 use crate::ckb::tests::test_utils::MockChainActorMiddleware;
 use crate::ckb::CkbConfig;
@@ -7,7 +11,9 @@ use crate::fiber::config::CKB_SHANNONS;
 use crate::fiber::features::FeatureVector;
 use crate::fiber::gossip::get_gossip_actor_name;
 use crate::fiber::gossip::GossipActorMessage;
+use crate::fiber::graph::ChannelInfo;
 use crate::fiber::graph::NetworkGraphStateStore;
+use crate::fiber::graph::NodeInfo;
 use crate::fiber::network::*;
 use crate::fiber::payment::Attempt;
 use crate::fiber::payment::PaymentSession;
@@ -17,8 +23,11 @@ use crate::fiber::types::EcdsaSignature;
 use crate::fiber::types::FiberMessage;
 use crate::fiber::types::GossipMessage;
 use crate::fiber::types::Init;
+use crate::fiber::types::Privkey;
 use crate::fiber::types::Pubkey;
 use crate::fiber::types::Shutdown;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::fiber::KeyPair;
 use crate::fiber::ASSUME_NETWORK_ACTOR_ALIVE;
 use crate::gen_rand_sha256_hash;
 use crate::invoice::*;
@@ -27,6 +36,19 @@ use crate::rpc::config::RpcConfig;
 use crate::rpc::invoice::{InvoiceResult, NewInvoiceParams};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::rpc::server::start_rpc;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::store::pub_sub::{StoreWithPubSub, Subscribe};
+use crate::store::Store;
+use crate::{
+    actors::{RootActor, RootActorMessage},
+    ckb::tests::test_utils::{submit_tx, trace_tx, MockChainActor},
+    ckb::CkbChainMessage,
+    fiber::graph::NetworkGraph,
+    fiber::types::Hash256,
+    tasks::{new_tokio_cancellation_token, new_tokio_task_tracker},
+    FiberConfig, NetworkServiceEvent,
+};
+
 use ckb_sdk::core::TransactionBuilder;
 use ckb_types::core::FeeRate;
 use ckb_types::{
@@ -41,6 +63,8 @@ use jsonrpsee::{
     rpc_params, server::ServerHandle,
 };
 
+#[cfg(not(target_arch = "wasm32"))]
+use lnd::bitcoind::BitcoinD;
 use ractor::{call, Actor, ActorRef};
 use rand::distributions::Alphanumeric;
 use rand::rngs::OsRng;
@@ -73,24 +97,6 @@ use tracing::debug;
 use tracing::error;
 use tracing::info;
 use tracing::warn;
-
-use crate::fiber::graph::ChannelInfo;
-use crate::fiber::graph::NodeInfo;
-use crate::fiber::network::{AcceptChannelCommand, OpenChannelCommand};
-use crate::fiber::types::Privkey;
-use crate::store::Store;
-use crate::{
-    actors::{RootActor, RootActorMessage},
-    ckb::tests::test_utils::{submit_tx, trace_tx, MockChainActor},
-    ckb::CkbChainMessage,
-    fiber::graph::NetworkGraph,
-    fiber::network::{
-        NetworkActor, NetworkActorCommand, NetworkActorMessage, NetworkActorStartArguments,
-    },
-    fiber::types::Hash256,
-    tasks::{new_tokio_cancellation_token, new_tokio_task_tracker},
-    FiberConfig, NetworkServiceEvent,
-};
 
 static RETAIN_VAR: &str = "TEST_TEMP_RETAIN";
 pub const MIN_RESERVED_CKB: u128 = 42 * CKB_SHANNONS as u128;
@@ -221,12 +227,17 @@ pub fn generate_store() -> (Store, ()) {
     (store.expect("create store"), ())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+pub type TestStore = StoreWithPubSub<Store>;
+#[cfg(target_arch = "wasm32")]
+pub type TestStore = Store;
+
 #[derive(Debug)]
 pub struct NetworkNode {
     /// The base directory of the node, will be deleted after this struct dropped.
     pub base_dir: Arc<TempDir>,
     pub node_name: Option<String>,
-    pub store: Store,
+    pub store: TestStore,
     pub channels_tx_map: HashMap<Hash256, Hash256>,
     pub fiber_config: FiberConfig,
     pub rpc_config: Option<RpcConfig>,
@@ -234,7 +245,9 @@ pub struct NetworkNode {
     pub listening_addrs: Vec<MultiAddr>,
     pub network_actor: ActorRef<NetworkActorMessage>,
     pub ckb_chain_actor: ActorRef<CkbChainMessage>,
-    pub network_graph: Arc<TokioRwLock<NetworkGraph<Store>>>,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub cch: Option<Cch>,
+    pub network_graph: Arc<TokioRwLock<NetworkGraph<TestStore>>>,
     pub chain_actor: ActorRef<CkbChainMessage>,
     pub mock_chain_actor_middleware: Option<Box<dyn MockChainActorMiddleware>>,
     pub gossip_actor: ActorRef<GossipActorMessage>,
@@ -249,14 +262,82 @@ pub struct NetworkNode {
     pub auth_token: Option<String>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+pub struct Cch {
+    pub actor: ActorRef<CchMessage>,
+    pub config: CchConfig,
+    pub lnd_node: Option<LndNode>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Cch {
+    pub async fn start<S: CchOrderStore + Subscribe + Clone + Send + Sync + 'static>(
+        config: CchConfig,
+        should_start_lnd: bool,
+        network_actor: ActorRef<NetworkActorMessage>,
+        node_keypair: KeyPair,
+        store: S,
+    ) -> Self {
+        let (config, lnd_node) = if should_start_lnd {
+            let lnd_node = LndNode::new(Default::default(), Default::default()).await;
+            let mut config = config;
+            // Override the lnd config with the lnd node we just created.
+            config.lnd_rpc_url = lnd_node.lnd.grpc_url.clone();
+            config.lnd_cert_hex = Some(lnd_node.lnd.tls_cert.clone());
+            config.lnd_macaroon_hex = Some(lnd_node.lnd.admin_macaroon.clone());
+            (config, Some(lnd_node))
+        } else {
+            (config, None)
+        };
+        let root_actor = network_actor.get_cell();
+        let actor = start_cch(
+            CchArgs {
+                config: config.clone(),
+                tracker: new_tokio_task_tracker(),
+                token: new_tokio_cancellation_token(),
+                network_actor: Some(network_actor),
+                node_keypair: Some(node_keypair),
+                store,
+            },
+            root_actor,
+        )
+        .await
+        .expect("start cch actor");
+
+        Cch {
+            actor,
+            config,
+            lnd_node,
+        }
+    }
+
+    fn stop_actor(&self) {
+        self.actor.stop(Some("stop cch actor".to_string()));
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl std::fmt::Debug for Cch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Cch")
+            .field("actor", &self.actor)
+            .field("config", &self.config)
+            .finish()
+    }
+}
+
 pub struct NetworkNodeConfig {
     base_dir: Arc<TempDir>,
     node_name: Option<String>,
-    store: Store,
+    store: TestStore,
     fiber_config: FiberConfig,
     rpc_config: Option<RpcConfig>,
     ckb_config: Option<CkbConfig>,
     mock_chain_actor_middleware: Option<Box<dyn MockChainActorMiddleware>>,
+    #[cfg(not(target_arch = "wasm32"))]
+    should_start_lnd: bool,
+    #[cfg(not(target_arch = "wasm32"))]
+    cch_config: Option<CchConfig>,
 }
 
 impl NetworkNodeConfig {
@@ -265,6 +346,7 @@ impl NetworkNodeConfig {
     }
 }
 
+#[derive(Default)]
 pub struct NetworkNodeConfigBuilder {
     base_dir: Option<Arc<TempDir>>,
     node_name: Option<String>,
@@ -274,23 +356,15 @@ pub struct NetworkNodeConfigBuilder {
     #[allow(clippy::type_complexity)]
     fiber_config_updater: Option<Box<dyn FnOnce(&mut FiberConfig) + 'static>>,
     mock_chain_actor_middleware: Option<Box<dyn MockChainActorMiddleware>>,
-}
-
-impl Default for NetworkNodeConfigBuilder {
-    fn default() -> Self {
-        Self::new()
-    }
+    #[cfg(not(target_arch = "wasm32"))]
+    should_start_lnd: Option<bool>,
+    #[cfg(not(target_arch = "wasm32"))]
+    cch_config: Option<CchConfig>,
 }
 
 impl NetworkNodeConfigBuilder {
     pub fn new() -> Self {
-        Self {
-            base_dir: None,
-            node_name: None,
-            rpc_config: None,
-            fiber_config_updater: None,
-            mock_chain_actor_middleware: None,
-        }
+        Self::default()
     }
 
     pub fn base_dir(mut self, base_dir: Arc<TempDir>) -> Self {
@@ -328,6 +402,18 @@ impl NetworkNodeConfigBuilder {
         self
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn should_start_lnd(mut self, should_start_lnd: bool) -> Self {
+        self.should_start_lnd = Some(should_start_lnd);
+        self
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn cch_config(mut self, cch_config: CchConfig) -> Self {
+        self.cch_config = Some(cch_config);
+        self
+    }
+
     pub fn build(self) -> NetworkNodeConfig {
         let base_dir = self
             .base_dir
@@ -344,6 +430,8 @@ impl NetworkNodeConfigBuilder {
             .collect();
         let rand_db_dir = Path::new(base_dir.to_str()).join(rand_name);
         let store = Store::new(rand_db_dir).expect("create store");
+        #[cfg(not(target_arch = "wasm32"))]
+        let store = StoreWithPubSub::new(store);
         let fiber_config = get_fiber_config(base_dir.as_ref(), node_name.as_deref());
         let ckb_config = if self.rpc_config.is_some() {
             let ckb_dir = Path::new(base_dir.to_str()).join("ckb");
@@ -369,6 +457,10 @@ impl NetworkNodeConfigBuilder {
             fiber_config,
             rpc_config,
             mock_chain_actor_middleware: self.mock_chain_actor_middleware,
+            #[cfg(not(target_arch = "wasm32"))]
+            should_start_lnd: self.should_start_lnd.unwrap_or(false),
+            #[cfg(not(target_arch = "wasm32"))]
+            cch_config: self.cch_config,
         };
 
         if let Some(updater) = self.fiber_config_updater {
@@ -610,7 +702,11 @@ pub(crate) async fn create_n_nodes_network_with_params(
         for node in nodes.iter_mut() {
             let res = node.submit_tx(funding_tx.clone()).await;
             node.add_channel_tx(channel_id, funding_tx.hash().into());
-            assert!(matches!(res, TxStatus::Committed(..)));
+            assert!(
+                matches!(res, TxStatus::Committed(..)),
+                "expect committed tx, got {:?}",
+                res
+            );
         }
     }
     wait_for_network_graph_update(&nodes[0], amounts.len()).await;
@@ -702,6 +798,22 @@ impl NetworkNode {
 
     pub fn get_payment_preimage(&self, payment_hash: &Hash256) -> Option<Hash256> {
         self.store.get_preimage(payment_hash)
+    }
+
+    #[allow(private_interfaces)]
+    pub async fn settle_invoice(
+        &self,
+        payment_hash: &Hash256,
+        preimage: &Hash256,
+    ) -> Result<(), SettleInvoiceError> {
+        let message = move |rpc_reply| -> NetworkActorMessage {
+            NetworkActorMessage::Command(NetworkActorCommand::SettleInvoice(
+                *payment_hash,
+                *preimage,
+                rpc_reply,
+            ))
+        };
+        call!(&self.network_actor, message).expect("call network actor")
     }
 
     pub async fn send_payment(
@@ -1307,35 +1419,38 @@ impl NetworkNode {
     }
 
     pub async fn new_with_config(config: NetworkNodeConfig) -> Self {
-        let NetworkNodeConfig {
-            base_dir,
-            node_name,
-            store,
-            fiber_config,
-            ckb_config,
-            rpc_config,
-            mock_chain_actor_middleware,
-        } = config;
+        let base_dir = config.base_dir;
+        let node_name = config.node_name;
+        let store = config.store;
+        let fiber_config = config.fiber_config;
+        let ckb_config = config.ckb_config;
+        let rpc_config = config.rpc_config;
+        let mock_chain_actor_middleware = config.mock_chain_actor_middleware;
+        #[cfg(not(target_arch = "wasm32"))]
+        let should_start_lnd = config.should_start_lnd;
+        #[cfg(not(target_arch = "wasm32"))]
+        let cch_config = config.cch_config;
 
         let _span = tracing::info_span!("NetworkNode", node_name = &node_name).entered();
 
-        let root = get_test_root_actor().await;
+        let root_actor = get_test_root_actor().await;
+
         let (event_sender, mut event_receiver) = mpsc::channel(10000);
 
         let chain_actor = Actor::spawn_linked(
             None,
             MockChainActor::new(),
             mock_chain_actor_middleware.clone(),
-            root.get_cell(),
+            root_actor.get_cell(),
         )
         .await
         .expect("start mock chain actor")
         .0;
 
-        let private_key: Privkey = fiber_config
+        let keypair = fiber_config
             .read_or_generate_secret_key()
-            .expect("must generate key")
-            .into();
+            .expect("must generate key");
+        let private_key: Privkey = keypair.clone().into();
         let pubkey = private_key.pubkey();
 
         let network_graph = Arc::new(TokioRwLock::new(NetworkGraph::new(
@@ -1355,10 +1470,9 @@ impl NetworkNode {
             NetworkActorStartArguments {
                 config: fiber_config.clone(),
                 tracker: new_tokio_task_tracker(),
-                channel_subscribers: Default::default(),
                 default_shutdown_script: Default::default(),
             },
-            root.get_cell(),
+            root_actor.get_cell(),
         )
         .await
         .expect("start network actor")
@@ -1420,6 +1534,23 @@ impl NetworkNode {
             base_dir.as_ref()
         );
 
+        #[cfg(not(target_arch = "wasm32"))]
+        let cch = match cch_config {
+            Some(config) => {
+                let cch = Cch::start(
+                    config,
+                    should_start_lnd,
+                    network_actor.clone(),
+                    keypair,
+                    store.clone(),
+                )
+                .await;
+                store.subscribe(Box::new(cch.actor.clone()));
+                Some(cch)
+            }
+            None => None,
+        };
+
         let gossip_actor = ractor::registry::where_is(get_gossip_actor_name(&peer_id))
             .expect("gossip actor should have been started")
             .into();
@@ -1433,7 +1564,8 @@ impl NetworkNode {
                     Some(network_actor.clone()),
                     None,
                     store.clone(),
-                    network_graph.clone(),
+                    Some(network_graph.clone()),
+                    root_actor.get_cell(),
                     #[cfg(debug_assertions)]
                     None,
                     #[cfg(debug_assertions)]
@@ -1457,6 +1589,8 @@ impl NetworkNode {
             listening_addrs: announced_addrs,
             network_actor,
             ckb_chain_actor: chain_actor.clone(),
+            #[cfg(not(target_arch = "wasm32"))]
+            cch,
             mock_chain_actor_middleware,
             network_graph,
             chain_actor,
@@ -1482,6 +1616,10 @@ impl NetworkNode {
             fiber_config: self.fiber_config.clone(),
             rpc_config: self.rpc_config.clone(),
             mock_chain_actor_middleware: self.mock_chain_actor_middleware.clone(),
+            #[cfg(not(target_arch = "wasm32"))]
+            should_start_lnd: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            cch_config: self.cch.as_ref().map(|cch| cch.config.clone()),
         }
     }
 
@@ -1541,6 +1679,10 @@ impl NetworkNode {
             |event| matches!(event, NetworkServiceEvent::NetworkStopped(id) if id == &my_peer_id),
         )
         .await;
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(cch) = self.cch.as_ref() {
+            cch.stop_actor();
+        }
     }
 
     pub async fn restart(&mut self) {
@@ -1734,7 +1876,7 @@ impl NetworkNode {
             .and_then(|response| response.transaction)
     }
 
-    pub fn get_network_graph(&self) -> &Arc<TokioRwLock<NetworkGraph<Store>>> {
+    pub fn get_network_graph(&self) -> &Arc<TokioRwLock<NetworkGraph<TestStore>>> {
         &self.network_graph
     }
 
@@ -1744,7 +1886,7 @@ impl NetworkNode {
 
     pub async fn with_network_graph<F, T>(&self, f: F) -> T
     where
-        F: FnOnce(&NetworkGraph<Store>) -> T,
+        F: FnOnce(&NetworkGraph<TestStore>) -> T,
     {
         let graph = self.get_network_graph().read().await;
         f(&graph)
@@ -1752,7 +1894,7 @@ impl NetworkNode {
 
     pub async fn with_network_graph_mut<F, T>(&self, f: F) -> T
     where
-        F: FnOnce(&mut NetworkGraph<Store>) -> T,
+        F: FnOnce(&mut NetworkGraph<TestStore>) -> T,
     {
         let mut graph = self.get_network_graph().write().await;
         f(&mut graph)
@@ -1794,8 +1936,35 @@ impl NetworkNode {
         ));
     }
 
-    pub fn get_store(&self) -> &Store {
+    pub fn get_store(&self) -> &TestStore {
         &self.store
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn get_cch_actor(&self) -> &ActorRef<CchMessage> {
+        &self.cch.as_ref().expect("cch started").actor
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn get_bitcoind(&self) -> Arc<BitcoinD> {
+        self.cch
+            .as_ref()
+            .expect("cch started")
+            .lnd_node
+            .as_ref()
+            .expect("lnd started")
+            .bitcoind
+            .clone()
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn get_lnd_node_mut(&mut self) -> &mut LndNode {
+        self.cch
+            .as_mut()
+            .expect("cch started")
+            .lnd_node
+            .as_mut()
+            .expect("lnd started")
     }
 }
 
@@ -1855,4 +2024,40 @@ async fn test_connect_to_other_node() {
 async fn test_restart_network_node() {
     let mut node = NetworkNode::new().await;
     node.restart().await;
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[cfg_attr(not(feature = "lnd-tests"), ignore)]
+#[tokio::test]
+async fn test_start_node_with_cch_connected_to_internal_lnd_node() {
+    let mut node = NetworkNode::new_with_config(
+        NetworkNodeConfigBuilder::new()
+            .cch_config(CchConfig::default())
+            .should_start_lnd(true)
+            .build(),
+    )
+    .await;
+    let cch = node.cch.as_mut().expect("cch started");
+    let lnd_node = cch.lnd_node.as_mut().expect("lnd node started");
+    println!("lnd_node: {:?}", lnd_node.get_info().await);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[cfg_attr(not(feature = "lnd-tests"), ignore)]
+#[tokio::test]
+async fn test_start_node_with_cch_connected_to_external_lnd_node() {
+    let cch_config = CchConfig {
+        // The default lnd_rpc_url may actually work, so we need to set it to an invalid value.
+        // Let's assume that the following URL is not a valid lnd RPC URL.
+        lnd_rpc_url: "http://1.1.1.1:1".to_string(),
+        ..Default::default()
+    };
+    let mut node = NetworkNode::new_with_config(
+        NetworkNodeConfigBuilder::new()
+            .cch_config(cch_config)
+            .build(),
+    )
+    .await;
+    let cch = node.cch.as_mut().expect("cch started");
+    assert!(cch.lnd_node.is_none());
 }

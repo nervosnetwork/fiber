@@ -59,6 +59,14 @@ interface GetInvoiceResult {
     status: CkbInvoiceStatus;
 }
 
+interface SettleInvoiceParams {
+    payment_hash: HexString,
+    payment_preimage: HexString,
+}
+
+interface SettleInvoiceResult {
+}
+
 export type {
     NewInvoiceParams,
     InvoiceResult,
@@ -71,5 +79,7 @@ export type {
     InvoiceData,
     InvoiceParams,
     ParseInvoiceParams,
-    ParseInvoiceResult
+    ParseInvoiceResult,
+    SettleInvoiceParams,
+    SettleInvoiceResult
 }

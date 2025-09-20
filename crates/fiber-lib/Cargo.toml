@@ -14,8 +14,8 @@ arcode = "0.2.4"
 async-trait = "0.1"
 bech32 = "0.9"
 bincode = "1.3.3"
-bitcoin = {version = "0.30.2", features = ["serde", "rand"]}
-bitflags = {version = "2.5.0", features = ["serde"]}
+bitcoin = { version = "0.30.2", features = ["serde", "rand"] }
+bitflags = { version = "2.5.0", features = ["serde"] }
 bitmask-enum = "2.2.5"
 bs58 = "0.5.1"
 ckb-gen-types = "0.202.0"
@@ -23,63 +23,64 @@ ckb-jsonrpc-types = "0.202.0"
 ckb-sdk = "4.4"
 ckb-testtool = {version = "0.16.0", optional = true}
 ckb-types = "0.202.0"
-clap = {version = "4.5.2", features = ["derive", "env", "string"]}
+clap = { version = "4.5.2", features = ["derive", "env", "string"] }
 clap-serde-derive = "0.2.1"
 either = "1.15.0"
 fiber-sphinx = "2.1.0"
 futures = "0.3.30"
-getrandom = {version = "0.2", features = ["js"]}
+getrandom = { version = "0.2", features = ["js"] }
 git-version = "0.3.9"
 hex = "0.4.3"
 indicatif = "0.18"
-lightning-invoice = {version = "0.29.0"}
-molecule = {version = "0.8.0", default-features = false}
-musig2 = {version = "0.0.11", features = ["secp256k1", "serde"]}
+lightning-invoice = { version = "0.29.0" }
+molecule = { version = "0.8.0", default-features = false }
+musig2 = { version = "0.0.11", features = ["secp256k1", "serde"] }
 nom = "7.1.3"
 num_enum = "0.7.3"
 once_cell = "1.19.0"
 parking_lot = "0.12"
 paste = "1.0"
-ractor = {"git" = "https://github.com/officeyutong/ractor", branch = "use-non-send-future-in-wasm", features = [
+ractor = { "git" = "https://github.com/officeyutong/ractor", branch = "use-non-send-future-in-wasm", features = [
   "async-trait",
-]}
+] }
 rand = "0.8.5"
 regex = "1.10.5"
 scrypt = "0.11"
-secp256k1 = {version = "0.28.0", features = ["serde", "recovery", "rand-std"]}
-serde = {version = "1.0.197", features = ["derive"]}
-serde_json = {version = "1.0"}
-serde_with = {version = "3.7.0", features = ["macros", "base64"]}
+secp256k1 = { version = "0.28.0", features = ["serde", "recovery", "rand-std"] }
+serde = { version = "1.0.197", features = ["derive"] }
+serde_json = { version = "1.0" }
+serde_with = { version = "3.7.0", features = ["macros", "base64"] }
 serde_yaml = "0.9.32"
-strum = {version = "0.26", features = ["derive"]}
-tempfile = {version = "3.10.1", optional = true}
+strum = { version = "0.26", features = ["derive"] }
+tempfile = { version = "3.10.1", optional = true }
 thiserror = "1.0.58"
-tokio-util = {version = "0.7.10", features = ["rt"]}
+tokio-util = { version = "0.7.10", features = ["rt"] }
 tracing = "0.1"
-tracing-subscriber = {version = "0.3", features = ["env-filter"]}
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 biscuit-auth = "6.0.0-beta.3"
 ckb-hash = "0.202.0"
-clap = {version = "4.5.2", features = ["derive", "env", "string"]}
+clap = { version = "4.5.2", features = ["derive", "env", "string"] }
 clap-serde-derive = "0.2.1"
 console = "0.16.0"
 home = "0.5.9"
-hyper = {version = "1.5"}
-jsonrpsee = {version = "0.25.1", features = ["client", "server", "macros"]}
+hyper = { version = "1.5" }
+jsonrpsee = { version = "0.25.1", features = ["client", "server", "macros"] }
+lnd = { version = "0.1.6", optional = true }
 lnd-grpc-tonic-client = "0.3.0"
-rocksdb = {package = "ckb-rocksdb", version = "=0.21.1", features = [
+rocksdb = { package = "ckb-rocksdb", version = "=0.21.1", features = [
   "lz4",
-], default-features = false}
-tentacle = {version = "0.7", default-features = false, features = [
+], default-features = false }
+tentacle = { version = "0.7", default-features = false, features = [
   "upnp",
   "parking_lot",
   "openssl-vendored",
   "tokio-runtime",
   "tokio-timer",
   "ws",
-]}
-tokio = {version = "1", features = [
+] }
+tokio = { version = "1", features = [
   "io-util",
   "macros",
   "rt",
@@ -89,36 +90,38 @@ tokio = {version = "1", features = [
   "time",
   "signal",
   "process",
-]}
-tower = {version = "0.5"}
+] }
+tower = { version = "0.5" }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-biscuit-auth = {version = "6.0.0-beta.3", features = ["wasm"]}
-ckb-hash = {version = "0.202.0", features = [
+biscuit-auth = { version = "6.0.0-beta.3", features = ["wasm"] }
+ckb-hash = { version = "0.202.0", features = [
   "blake2b-ref",
-], default-features = false}
-console_error_panic_hook = {version = "0.1.7"}
-fiber-wasm-db-common = {path = "../fiber-wasm-db-common"}
-getrandom = {version = "0.3", features = ["wasm_js"]}
-jsonrpsee = {version = "0.25.1", features = [
+], default-features = false }
+console_error_panic_hook = { version = "0.1.7" }
+fiber-wasm-db-common = { path = "../fiber-wasm-db-common" }
+getrandom = { version = "0.3", features = ["wasm_js"] }
+jsonrpsee = { version = "0.25.1", features = [
   "macros",
   "server-core",
   "wasm-client",
-]}
-tentacle = {version = "0.7", default-features = false, features = [
+] }
+tentacle = { version = "0.7", default-features = false, features = [
   "wasm-timer",
-]}
-tokio = {version = "1", features = ["io-util", "macros", "rt", "sync"]}
-tracing = {version = "0.1", features = ["log"]}
+] }
+tokio = { version = "1", features = ["io-util", "macros", "rt", "sync"] }
+tracing = { version = "0.1", features = ["log"] }
 wasm-bindgen = "0.2.84"
 web-sys = "0.3.72"
-web-time = {version = "1.1.0", features = ["serde"]}
+web-time = { version = "1.1.0", features = ["serde"] }
 
 [features]
-bench = ["tempfile", "ckb-testtool"]
+bench = ["tempfile", "ckb-testtool", "lnd"]
 default = ["watchtower"]
 portable = ["rocksdb/portable"]
 watchtower = []
+# Some lnd related unit tests will only run if this feature is enabled.
+lnd-tests = []
 
 [dev-dependencies]
 ciborium = "0.2.2"
@@ -128,8 +131,13 @@ ouroboros = "0.18.5"
 tempfile = "3.10.1"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
-criterion = {version = "0.5", features = ["html_reports"]}
-jsonrpsee = {version = "0.25.1", features = ["server", "macros", "http-client"]}
+criterion = { version = "0.5", features = ["html_reports"] }
+jsonrpsee = { version = "0.25.1", features = [
+  "server",
+  "macros",
+  "http-client",
+] }
+lnd = "0.1.6"
 
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 wasm-bindgen-test = "0.3.50"

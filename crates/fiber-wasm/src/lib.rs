@@ -13,7 +13,7 @@ use fnn::{
         CkbChainActor,
         contracts::{TypeIDResolver, try_init_contracts_context},
     },
-    fiber::{KeyPair, channel::ChannelSubscribers, graph::NetworkGraph, network::init_chain_hash},
+    fiber::{KeyPair, graph::NetworkGraph, network::init_chain_hash},
     rpc::{
         channel::ChannelRpcServerImpl,
         graph::GraphRpcServerImpl,
@@ -140,7 +140,6 @@ pub async fn fiber(
     let token = new_tokio_cancellation_token();
     let root_actor = RootActor::start(tracker, token).await;
     ROOT_ACTOR.set(root_actor.clone()).unwrap();
-    let subscribers = ChannelSubscribers::default();
 
     #[allow(unused_variables)]
     let (network_actor, ckb_chain_actor, network_graph) = match config.fiber.clone() {
@@ -211,7 +210,6 @@ pub async fn fiber(
                 new_tokio_task_tracker(),
                 root_actor.get_cell(),
                 store.clone(),
-                subscribers.clone(),
                 network_graph.clone(),
                 default_shutdown_script,
             )
@@ -281,7 +279,11 @@ pub async fn fiber(
             channel: ChannelRpcServerImpl::new(network_actor.clone(), store.clone()),
             graph: GraphRpcServerImpl::new(network_graph.clone(), store.clone()),
             info: InfoRpcServerImpl::new(network_actor.clone(), config.ckb.unwrap_or_default()),
-            invoice: InvoiceRpcServerImpl::new(store.clone(), config.fiber),
+            invoice: InvoiceRpcServerImpl::new(
+                store.clone(),
+                Some(network_actor.clone()),
+                config.fiber,
+            ),
             payment: PaymentRpcServerImpl::new(network_actor.clone(), store.clone()),
             peer: PeerRpcServerImpl::new(network_actor.clone()),
         })

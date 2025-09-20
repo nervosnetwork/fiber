@@ -35,6 +35,7 @@ pub mod server {
     use crate::rpc::payment::PaymentRpcServer;
     use crate::rpc::payment::PaymentRpcServerImpl;
     use crate::rpc::peer::{PeerRpcServer, PeerRpcServerImpl};
+    use crate::store::pub_sub::{register_pub_sub_rpc, Subscribe};
     use crate::{
         cch::CchMessage,
         fiber::{
@@ -60,7 +61,7 @@ pub mod server {
     };
     use jsonrpsee::ws_client::RpcServiceBuilder;
     use jsonrpsee::{Methods, RpcModule};
-    use ractor::ActorRef;
+    use ractor::{ActorCell, ActorRef};
     #[cfg(debug_assertions)]
     use std::collections::HashMap;
     use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
@@ -80,6 +81,7 @@ pub mod server {
         + GossipMessageStore
         + WatchtowerStore
         + PreimageStore
+        + Subscribe
     {
     }
     #[cfg(feature = "watchtower")]
@@ -90,16 +92,25 @@ pub mod server {
             + GossipMessageStore
             + WatchtowerStore
             + PreimageStore
+            + Subscribe
     {
     }
     #[cfg(not(feature = "watchtower"))]
     pub trait RpcServerStore:
-        ChannelActorStateStore + InvoiceStore + NetworkGraphStateStore + GossipMessageStore
+        ChannelActorStateStore
+        + InvoiceStore
+        + NetworkGraphStateStore
+        + GossipMessageStore
+        + Subscribe
     {
     }
     #[cfg(not(feature = "watchtower"))]
     impl<T> RpcServerStore for T where
-        T: ChannelActorStateStore + InvoiceStore + NetworkGraphStateStore + GossipMessageStore
+        T: ChannelActorStateStore
+            + InvoiceStore
+            + NetworkGraphStateStore
+            + GossipMessageStore
+            + Subscribe
     {
     }
 
@@ -221,7 +232,8 @@ pub mod server {
         network_actor: Option<ActorRef<NetworkActorMessage>>,
         cch_actor: Option<ActorRef<CchMessage>>,
         store: S,
-        network_graph: Arc<RwLock<NetworkGraph<S>>>,
+        network_graph: Option<Arc<RwLock<NetworkGraph<S>>>>,
+        supervisor: ActorCell,
         #[cfg(debug_assertions)] ckb_chain_actor: Option<ActorRef<CkbChainMessage>>,
         #[cfg(debug_assertions)] rpc_dev_module_commitment_txs: Option<
             Arc<RwLock<HashMap<(Hash256, u64), TransactionView>>>,
@@ -243,14 +255,32 @@ pub mod server {
 
         let mut modules = RpcModule::new(());
         if config.is_module_enabled("invoice") {
+            if network_actor.is_none() {
+                tracing::warn!("network_actor should be set when invoice module is enabled");
+            }
             modules
-                .merge(InvoiceRpcServerImpl::new(store.clone(), fiber_config).into_rpc())
+                .merge(
+                    InvoiceRpcServerImpl::new(store.clone(), network_actor.clone(), fiber_config)
+                        .into_rpc(),
+                )
                 .unwrap();
         }
         if config.is_module_enabled("graph") {
-            modules
-                .merge(GraphRpcServerImpl::new(network_graph, store.clone()).into_rpc())
-                .unwrap();
+            match network_graph {
+                Some(network_graph) => {
+                    modules
+                        .merge(GraphRpcServerImpl::new(network_graph, store.clone()).into_rpc())
+                        .unwrap();
+                }
+                None => {
+                    tracing::error!(
+                        "rpc graph module is enabled, but fiber service is not enabled"
+                    );
+                }
+            }
+        }
+        if config.is_module_enabled("pubsub") {
+            register_pub_sub_rpc(&mut modules, &store, supervisor).await?;
         }
         if let Some(network_actor) = network_actor {
             if config.is_module_enabled("info") {
@@ -310,11 +340,14 @@ pub mod server {
             }
         }
         if let Some(cch_actor) = cch_actor {
+            println!("cch enabled!");
             if config.is_module_enabled("cch") {
                 modules
                     .merge(CchRpcServerImpl::new(cch_actor).into_rpc())
                     .unwrap();
             }
+        } else {
+            println!("cch not enabled!");
         }
 
         let (handle, addr) = start_server(listening_addr, auth, modules).await?;
