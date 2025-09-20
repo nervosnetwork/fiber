@@ -17,7 +17,7 @@ use musig2::BinaryEncoding;
 use musig2::SecNonceBuilder;
 use secp256k1::{Secp256k1, XOnlyPublicKey};
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 #[cfg(test)]
 use std::{
     backtrace::Backtrace,
@@ -111,7 +111,7 @@ pub const COMMITMENT_CELL_WITNESS_LEN: usize = 16 + 1 + 32 + 64;
 // is funded or not.
 pub const INITIAL_COMMITMENT_NUMBER: u64 = 0;
 
-const RETRYABLE_TLC_OPS_INTERVAL: Duration = Duration::from_millis(300);
+const RETRYABLE_TLC_OPS_INTERVAL: Duration = Duration::from_millis(500);
 const WAITING_REESTABLISH_FINISH_TIMEOUT: Duration = Duration::from_millis(4000);
 
 // if a important TLC operation is not acked in 30 seconds, we will try to disconnect the peer.
@@ -1750,7 +1750,7 @@ where
     ) {
         let current_time = now_timestamp_as_millis_u64();
         let task = RetryableTask::new(operation, current_time);
-        state.retryable_tlc_operations.push(task);
+        state.retryable_tlc_operations.push_back(task);
         state.schedule_next_retry_task(myself);
     }
 
@@ -1855,7 +1855,7 @@ where
                 break;
             }
 
-            let Some(task) = state.retryable_tlc_operations.pop() else {
+            let Some(task) = state.retryable_tlc_operations.pop_front() else {
                 return;
             };
 
@@ -3652,7 +3652,7 @@ pub struct ChannelActorState {
     pub tlc_state: TlcState,
 
     // the retryable tlc operations that are waiting to be processed.
-    pub retryable_tlc_operations: Vec<RetryableTask>,
+    pub retryable_tlc_operations: VecDeque<RetryableTask>,
     pub waiting_forward_tlc_tasks: HashMap<(Hash256, TLCId), ForwardTlc>,
     pub waiting_relay_remove_tasks: HashSet<RelayRemoveTlc>,
 
