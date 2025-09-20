@@ -111,7 +111,7 @@ pub const COMMITMENT_CELL_WITNESS_LEN: usize = 16 + 1 + 32 + 64;
 // is funded or not.
 pub const INITIAL_COMMITMENT_NUMBER: u64 = 0;
 
-const RETRYABLE_TLC_OPS_INTERVAL: Duration = Duration::from_millis(450);
+const RETRYABLE_TLC_OPS_INTERVAL: Duration = Duration::from_millis(300);
 const WAITING_REESTABLISH_FINISH_TIMEOUT: Duration = Duration::from_millis(4000);
 
 // if a important TLC operation is not acked in 30 seconds, we will try to disconnect the peer.
@@ -1838,7 +1838,6 @@ where
     ) {
         state.schedule_next_retry_task(myself);
 
-        // Re-send all forward tlc tasks that are waiting for result
         let tasks: Vec<_> = state.waiting_relay_remove_tasks.drain().collect();
         for RelayRemoveTlc(channel_id, tlc_id, reason) in tasks {
             self.register_retryable_relay_tlc_remove(state, tlc_id, channel_id, reason)
@@ -1856,35 +1855,27 @@ where
                 break;
             }
 
-            // Process all tasks that are ready to execute
             let Some(task) = state.retryable_tlc_operations.pop() else {
-                debug!("No more retryable TLC operations to process.");
                 return;
             };
 
             let success = match task.operation {
-                RetryableTlcOperation::RemoveTlc(tlc_id, ref reason) => {
-                    match self
-                        .handle_remove_tlc_command(
-                            myself,
-                            state,
-                            RemoveTlcCommand {
-                                id: u64::from(tlc_id),
-                                reason: reason.clone(),
-                            },
-                        )
-                        .await
-                    {
-                        Ok(_) => true,
-                        Err(_err) => false,
-                    }
-                }
-                RetryableTlcOperation::AddTlc(ref command) => {
+                RetryableTlcOperation::RemoveTlc(tlc_id, reason) => self
+                    .handle_remove_tlc_command(
+                        myself,
+                        state,
+                        RemoveTlcCommand {
+                            id: u64::from(tlc_id),
+                            reason,
+                        },
+                    )
+                    .await
+                    .is_ok(),
+                RetryableTlcOperation::AddTlc(command) => {
                     let res = self
                         .handle_add_tlc_command(myself, state, command.clone())
                         .await;
-                    self.post_add_tlc_command(myself, state, command.clone(), &res);
-
+                    self.post_add_tlc_command(myself, state, command, &res);
                     res.is_ok()
                 }
             };
