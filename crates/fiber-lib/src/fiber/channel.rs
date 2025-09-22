@@ -1787,7 +1787,9 @@ where
         state.retryable_tlc_operations.push(task);
 
         // Schedule the next retry task if needed
-        state.schedule_next_retry_task(myself);
+        if state.retryable_tlc_operations.len() == 1 {
+            state.schedule_next_retry_task(myself);
+        }
     }
 
     pub async fn apply_retryable_tlc_operations(
@@ -1934,7 +1936,9 @@ where
                     // The operation will be retried automatically by the scheduler
                     let task = RetryableTask::new_with_retry_count(operation, retry_count);
                     state.retryable_tlc_operations.push(task);
-                    state.schedule_next_retry_task(myself);
+                    if state.retryable_tlc_operations.len() == 1 {
+                        state.schedule_next_retry_task(myself);
+                    }
                 }
                 ProcessingChannelError::RepeatedProcessing(_) => {
                     // Remove the task from retry queue since it's already processed
