@@ -1493,7 +1493,7 @@ where
         &self,
         myself: &ActorRef<ChannelActorMessage>,
         state: &mut ChannelActorState,
-        command: AddTlcCommand,
+        command: &AddTlcCommand,
     ) -> Result<u64, ProcessingChannelError> {
         state.check_for_tlc_update(Some(command.amount), true, true)?;
         state.check_tlc_expiry(command.expiry)?;
@@ -1501,9 +1501,9 @@ where
             command.amount,
             command.previous_tlc.map(|x| x.forwarding_fee),
         )?;
-        let tlc = state.create_outbounding_tlc(&command);
+        let tlc = state.create_outbounding_tlc(command);
         state.check_insert_tlc(&tlc)?;
-        self.check_add_tlc_consistent(&command, state)?;
+        self.check_add_tlc_consistent(command, state)?;
 
         let tlc_id = tlc.tlc_id;
         state.tlc_state.add_offered_tlc(tlc);
@@ -1516,7 +1516,7 @@ where
             payment_hash: command.payment_hash,
             expiry: command.expiry,
             hash_algorithm: command.hash_algorithm,
-            onion_packet: command.onion_packet,
+            onion_packet: command.onion_packet.clone(),
         };
 
         // Send tlc update message to peer.
@@ -1751,9 +1751,7 @@ where
         state: &mut ChannelActorState,
         operation: RetryableTlcOperation,
     ) {
-        let current_time = now_timestamp_as_millis_u64();
-        let task = RetryableTask::new(operation, current_time);
-        state.retryable_tlc_operations.push_back(task);
+        state.retryable_tlc_operations.push_back(operation);
         if state.retryable_tlc_operations.len() == 1 {
             state.schedule_next_retry_task(myself);
         }
@@ -1861,11 +1859,11 @@ where
                 break;
             }
 
-            let Some(task) = state.retryable_tlc_operations.pop_front() else {
+            let Some(operation) = state.retryable_tlc_operations.pop_front() else {
                 return;
             };
 
-            let success = match task.operation {
+            let success = match operation {
                 RetryableTlcOperation::RemoveTlc(tlc_id, reason) => self
                     .handle_remove_tlc_command(
                         myself,
@@ -1878,9 +1876,7 @@ where
                     .await
                     .is_ok(),
                 RetryableTlcOperation::AddTlc(command) => {
-                    let res = self
-                        .handle_add_tlc_command(myself, state, command.clone())
-                        .await;
+                    let res = self.handle_add_tlc_command(myself, state, &command).await;
                     self.post_add_tlc_command(myself, state, command, &res);
                     res.is_ok()
                 }
@@ -2056,9 +2052,7 @@ where
                 self.handle_commitment_signed_command(myself, state).await
             }
             ChannelCommand::AddTlc(command, reply) => {
-                let res = self
-                    .handle_add_tlc_command(myself, state, command.clone())
-                    .await;
+                let res = self.handle_add_tlc_command(myself, state, &command).await;
 
                 self.post_add_tlc_command(myself, state, command, &res);
 
@@ -3661,7 +3655,7 @@ pub struct ChannelActorState {
     pub tlc_state: TlcState,
 
     // the retryable tlc operations that are waiting to be processed.
-    pub retryable_tlc_operations: VecDeque<RetryableTask>,
+    pub retryable_tlc_operations: VecDeque<RetryableTlcOperation>,
     pub waiting_forward_tlc_tasks: HashMap<(Hash256, TLCId), ForwardTlc>,
     pub waiting_relay_remove_tasks: HashSet<RelayRemoveTlc>,
 
