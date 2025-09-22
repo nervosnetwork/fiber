@@ -111,7 +111,7 @@ pub const COMMITMENT_CELL_WITNESS_LEN: usize = 16 + 1 + 32 + 64;
 // is funded or not.
 pub const INITIAL_COMMITMENT_NUMBER: u64 = 0;
 
-const RETRYABLE_TLC_OPS_INTERVAL: Duration = Duration::from_millis(500);
+const RETRYABLE_TLC_OPS_INTERVAL: Duration = Duration::from_millis(100);
 const WAITING_REESTABLISH_FINISH_TIMEOUT: Duration = Duration::from_millis(4000);
 
 // if a important TLC operation is not acked in 30 seconds, we will try to disconnect the peer.
@@ -568,7 +568,8 @@ where
                     self.handle_commitment_signed_command(myself, state).await?;
                 }
                 if !state.is_waiting_tlc_ack() {
-                    self.apply_retryable_tlc_operations(myself, state).await;
+                    self.apply_retryable_tlc_operations(myself, state, false)
+                        .await;
                 }
                 Ok(())
             }
@@ -1751,7 +1752,9 @@ where
         let current_time = now_timestamp_as_millis_u64();
         let task = RetryableTask::new(operation, current_time);
         state.retryable_tlc_operations.push_back(task);
-        state.schedule_next_retry_task(myself);
+        if state.retryable_tlc_operations.len() == 1 {
+            state.schedule_next_retry_task(myself);
+        }
     }
 
     pub async fn register_and_apply_forward_tlc(
@@ -1849,6 +1852,7 @@ where
         &self,
         myself: &ActorRef<ChannelActorMessage>,
         state: &mut ChannelActorState,
+        trigger_next: bool,
     ) {
         loop {
             if state.is_waiting_tlc_ack() {
@@ -1885,7 +1889,9 @@ where
             }
         }
 
-        state.schedule_next_retry_task(myself);
+        if trigger_next {
+            state.schedule_next_retry_task(myself);
+        }
     }
 
     async fn handle_forward_tlc_result(
@@ -2181,7 +2187,8 @@ where
                 state.maybe_channel_is_ready(myself).await;
             }
             ChannelEvent::RunRetryTask => {
-                self.apply_retryable_tlc_operations(myself, state).await;
+                self.apply_retryable_tlc_operations(myself, state, true)
+                    .await;
             }
             ChannelEvent::Stop(reason) => {
                 debug_event!(self.network, "ChannelActorStopped");
