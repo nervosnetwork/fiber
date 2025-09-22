@@ -28,3 +28,4 @@ tests/nodes/.ports
 /crates/fiber-wasm/dist
 /crates/fiber-wasm-db-worker/dist
 package-lock.json
+target
