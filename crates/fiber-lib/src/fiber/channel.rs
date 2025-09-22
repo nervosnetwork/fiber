@@ -111,7 +111,7 @@ pub const COMMITMENT_CELL_WITNESS_LEN: usize = 16 + 1 + 32 + 64;
 // is funded or not.
 pub const INITIAL_COMMITMENT_NUMBER: u64 = 0;
 
-const RETRYABLE_TLC_OPS_INTERVAL: Duration = Duration::from_millis(450);
+const RETRYABLE_TLC_OPS_INTERVAL: Duration = Duration::from_millis(100);
 const WAITING_REESTABLISH_FINISH_TIMEOUT: Duration = Duration::from_millis(4000);
 
 // if a important TLC operation is not acked in 30 seconds, we will try to disconnect the peer.
