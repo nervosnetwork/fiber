@@ -305,7 +305,7 @@ impl TestContext {
             ));
         }
 
-        println!("Channel info: {}", serde_json::to_string_pretty(channel)?);
+        //println!("Channel info: {}", serde_json::to_string_pretty(channel)?);
 
         Ok(channel_id.to_string())
     }

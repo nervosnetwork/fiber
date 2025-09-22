@@ -1485,9 +1485,11 @@ where
             }
             CommitmentSignedFlags::ChannelReady() => {
                 state.set_waiting_ack(myself, true);
+                myself.start_track();
             }
             CommitmentSignedFlags::PendingShutdown() => {
                 state.set_waiting_ack(myself, true);
+                myself.start_track();
                 state.maybe_transfer_to_shutdown().await?;
             }
         }
@@ -4555,6 +4557,9 @@ impl ChannelActorState {
                 ChannelActorMessage::Event(ChannelEvent::RunRetryTask)
             });
         }
+        let time = myself.get_accumulated_time();
+        let number = myself.get_message_count();
+        debug!("schedule_next_retry_task now time {time}, message count {number}");
     }
 
     pub fn get_unsigned_channel_update_message(&self) -> Option<ChannelUpdate> {

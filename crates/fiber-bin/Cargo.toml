@@ -11,9 +11,9 @@ path = "src/main.rs"
 fnn = { path = "../fiber-lib" }
 ckb-chain-spec = "0.202.0"
 ckb-resource = "0.202.0"
-ractor = { "git" = "https://github.com/officeyutong/ractor", branch = "use-non-send-future-in-wasm", features = [
-    "async-trait",
-] }
+ractor = {"git" = "https://github.com/chenyukang/ractor", branch = "message-count-track-with-yutong", features = [
+  "async-trait",
+]}
 jsonrpsee = { version = "0.25", features = ["http-client"] }
 tokio = { version = "1", features = [
     "io-util",
