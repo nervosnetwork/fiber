@@ -7,6 +7,7 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
 nodes_dir="$(dirname "$script_dir")/nodes"
 deploy_dir="$(dirname "$script_dir")/deploy"
 bruno_dir="$(dirname "$script_dir")/bruno/environments"
+test_env="${TEST_ENV:-debug}"
 
 testcase_name="${1:-}"
 testcase_dir="$(dirname "$script_dir")/bruno/${testcase_name}"
@@ -55,11 +56,11 @@ elif [ -n "$should_remove_old_state" ]; then
     "$deploy_dir/init-dev-chain.sh" -f
 fi
 
-echo "Initializing finished, begin to start services ...."
+echo "Initializing finished, begin to start services .... ${test_env}"
 sleep 1
 
 ckb run -C "$deploy_dir/node-data" --indexer &
-cargo build --locked
+cargo build --locked "--${TEST_ENV:-}"
 
 # Start the dev node in the background.
 cd "$nodes_dir" || exit 1
@@ -67,7 +68,7 @@ cd "$nodes_dir" || exit 1
 start() {
     log_file="${2}.log"
     echo "logging to ${log_file}"
-    ../../target/debug/fnn "$@" 2>&1 | tee "$log_file"
+    ../../target/"${test_env}"/fnn "$@" 2>&1 | tee "$log_file"
 }
 
 if [ "${#start_node_ids[@]}" = 0 ]; then

@@ -40,7 +40,7 @@ num_enum = "0.7.3"
 once_cell = "1.19.0"
 parking_lot = "0.12"
 paste = "1.0"
-ractor = {"git" = "https://github.com/officeyutong/ractor", branch = "use-non-send-future-in-wasm", features = [
+ractor = {"git" = "https://github.com/chenyukang/ractor", branch = "message-count-track-with-yutong", features = [
   "async-trait",
 ]}
 rand = "0.8.5"
