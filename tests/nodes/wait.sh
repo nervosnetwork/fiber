@@ -11,8 +11,8 @@ while [ $retry_count -lt 100 ]; do
         break
     else
         retry_count=$((retry_count + 1))
-        echo "File $port_file not found. Retrying in 2 seconds..."
-        sleep 2
+        echo "File $port_file not found. Retrying in 30 seconds..."
+        sleep 30
     fi
 done
 
@@ -20,7 +20,6 @@ ports=()
 while IFS= read -r line; do
     ports+=("$line")
 done < ./tests/nodes/.ports
-
 echo "Checking if all ports are open ... ${ports[@]}"
 
 try_number=120
@@ -43,7 +42,6 @@ while [ $count -lt $try_number ]; do
           echo "Reached maximum number of tries ($try_number), exiting with status 1"
             exit 1
         fi
-        echo "Not all ports are open, waiting 3 seconds before retrying"
-        sleep 3
+        sleep 5
     fi
 done

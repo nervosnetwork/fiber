@@ -61,7 +61,14 @@ async fn main() -> TestResult<()> {
                     // Load baseline and compare
                     match load_benchmark_baseline("baseline.json") {
                         Ok(baseline) => {
-                            compare_with_baseline(&benchmark_result, &baseline);
+                            match compare_with_baseline(
+                                &benchmark_result,
+                                &baseline,
+                                "comparison_report.txt",
+                            ) {
+                                Ok(_) => println!("📊 Comparison completed successfully"),
+                                Err(e) => eprintln!("❌ Failed to save comparison report: {}", e),
+                            }
                         }
                         Err(e) => {
                             eprintln!("❌ Failed to load baseline.json: {}", e);
@@ -86,6 +93,7 @@ async fn main() -> TestResult<()> {
             println!("    - duration: test duration in seconds (default: 60)");
             println!("    - workers: number of worker threads (default: 10)");
             println!("    - mode: 'base' to save baseline, 'compare' to compare with baseline (default: base)");
+            std::process::exit(1);
         }
     }
     Ok(())

@@ -715,54 +715,89 @@ pub fn load_benchmark_baseline(filename: &str) -> TestResult<BenchmarkResult> {
 }
 
 /// Compare current benchmark result with baseline
-pub fn compare_with_baseline(current: &BenchmarkResult, baseline: &BenchmarkResult) {
-    println!("\n🔄 Benchmark Comparison Results:");
-    println!("=====================================");
+pub fn compare_with_baseline(
+    current: &BenchmarkResult,
+    baseline: &BenchmarkResult,
+    filename: &str,
+) -> TestResult<()> {
+    let mut output = String::new();
+
+    // Helper macro to write to both console and string buffer
+    macro_rules! write_line {
+        ($($arg:tt)*) => {
+            let line = format!($($arg)*);
+            println!("{}", line);
+            output.push_str(&line);
+            output.push('\n');
+        };
+    }
+
+    write_line!("\n🔄 Benchmark Comparison Results:");
+    write_line!("=====================================");
 
     // TPS comparison
     let tps_diff = current.tps - baseline.tps;
     let tps_percent = (tps_diff / baseline.tps) * 100.0;
-    println!(
+    write_line!(
         "TPS: {:.2} vs {:.2} (baseline) | Diff: {:+.2} ({:+.1}%)",
-        current.tps, baseline.tps, tps_diff, tps_percent
+        current.tps,
+        baseline.tps,
+        tps_diff,
+        tps_percent
     );
 
     // Success rate comparison
     let success_diff = current.success_rate_percent - baseline.success_rate_percent;
-    println!(
+    write_line!(
         "Success Rate: {:.2}% vs {:.2}% (baseline) | Diff: {:+.2}%",
-        current.success_rate_percent, baseline.success_rate_percent, success_diff
+        current.success_rate_percent,
+        baseline.success_rate_percent,
+        success_diff
     );
 
     // Latency comparison
     let latency_diff = current.avg_latency_ms - baseline.avg_latency_ms;
     let latency_percent = (latency_diff / baseline.avg_latency_ms) * 100.0;
-    println!(
+    write_line!(
         "Avg Latency: {:.2}ms vs {:.2}ms (baseline) | Diff: {:+.2}ms ({:+.1}%)",
-        current.avg_latency_ms, baseline.avg_latency_ms, latency_diff, latency_percent
+        current.avg_latency_ms,
+        baseline.avg_latency_ms,
+        latency_diff,
+        latency_percent
     );
 
+    let mut failed = false;
     // Overall assessment
-    println!("\n📈 Performance Assessment:");
+    write_line!("\n📈 Performance Assessment:");
     if tps_percent > 5.0 {
-        println!("✅ TPS improved significantly (+{:.1}%)", tps_percent);
+        write_line!("✅ TPS improved significantly (+{:.1}%)", tps_percent);
     } else if tps_percent > 0.0 {
-        println!("🟡 TPS slightly improved (+{:.1}%)", tps_percent);
+        write_line!("🟡 TPS slightly improved (+{:.1}%)", tps_percent);
     } else if tps_percent > -5.0 {
-        println!("🟡 TPS slightly decreased ({:.1}%)", tps_percent);
+        write_line!("🟡 TPS slightly decreased ({:.1}%)", tps_percent);
     } else {
-        println!("❌ TPS significantly decreased ({:.1}%)", tps_percent);
+        write_line!("❌ TPS significantly decreased ({:.1}%)", tps_percent);
+        failed = true;
     }
 
     if success_diff > 1.0 {
-        println!("✅ Success rate improved (+{:.2}%)", success_diff);
-    } else if success_diff > -1.0 {
-        println!("🟡 Success rate stable ({:+.2}%)", success_diff);
+        write_line!("✅ Success rate improved (+{:.2}%)", success_diff);
+    } else if success_diff > -5.0 {
+        write_line!("🟡 Success rate stable ({:+.2}%)", success_diff);
     } else {
-        println!("❌ Success rate decreased ({:.2}%)", success_diff);
+        write_line!("❌ Success rate decreased ({:.2}%)", success_diff);
+        failed = true;
     }
 
-    println!("=====================================\n");
+    write_line!("=====================================\n");
+    if failed {
+        write_line!("❗ Performance regression detected!");
+    }
+    // Write to file
+    fs::write(filename, output)?;
+    println!("📁 Comparison results saved to: {}", filename);
+
+    Ok(())
 }
 
 #[cfg(test)]

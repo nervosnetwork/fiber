@@ -31,3 +31,4 @@ package-lock.json
 target
 baseline.json
 current.json
+comparison_report.txt
