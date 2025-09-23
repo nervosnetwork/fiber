@@ -112,7 +112,6 @@ pub const COMMITMENT_CELL_WITNESS_LEN: usize = 16 + 1 + 32 + 64;
 pub const INITIAL_COMMITMENT_NUMBER: u64 = 0;
 
 const RETRYABLE_TLC_OPS_INTERVAL: Duration = Duration::from_millis(200);
-const CHECK_RELAY_REMOVE_INTERVAL: Duration = Duration::from_millis(8000);
 const WAITING_REESTABLISH_FINISH_TIMEOUT: Duration = Duration::from_millis(4000);
 
 // if a important TLC operation is not acked in 30 seconds, we will try to disconnect the peer.
@@ -899,18 +898,15 @@ where
 
         let remove_reason = remove_reason.clone().backward(&tlc_info.shared_secret);
 
-        self.register_retryable_relay_tlc_remove(
-            state,
-            previous_tlc,
-            previous_channel_id,
-            remove_reason,
-        )
-        .await;
-        if state.waiting_relay_remove_tasks.len() == 1 {
-            myself.send_after(CHECK_RELAY_REMOVE_INTERVAL, || {
-                ChannelActorMessage::Event(ChannelEvent::RetryRelayRemove)
-            });
-        }
+        let _ = self
+            .register_retryable_relay_tlc_remove(
+                myself,
+                state,
+                previous_tlc,
+                previous_channel_id,
+                remove_reason,
+            )
+            .await;
     }
 
     async fn try_to_settle_down_tlc(
@@ -1807,11 +1803,12 @@ where
 
     pub async fn register_retryable_relay_tlc_remove(
         &self,
+        myself: &ActorRef<ChannelActorMessage>,
         state: &mut ChannelActorState,
         tlc_id: TLCId,
         channel_id: Hash256,
         reason: RemoveTlcReason,
-    ) {
+    ) -> Result<(), ActorProcessingErr> {
         let prev_channel_state = self
             .store
             .get_channel_actor_state(&channel_id)
@@ -1823,11 +1820,9 @@ where
             // send relay remove tlc with network actor to previous hop
             // if the previous channel is reestablishing, we need to retry it later
             if !prev_channel_state.reestablishing {
-                let (send, _recv) = oneshot::channel::<Result<(), ProcessingChannelError>>();
-                let port = RpcReplyPort::from(send);
-                self.network
-                    .send_message(NetworkActorMessage::new_command(
-                        NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
+                let msg = |port| {
+                    NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+                        ChannelCommandWithId {
                             channel_id,
                             command: ChannelCommand::RemoveTlc(
                                 RemoveTlcCommand {
@@ -1836,15 +1831,28 @@ where
                                 },
                                 port,
                             ),
-                        }),
+                        },
                     ))
-                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-            }
+                };
 
-            state
-                .waiting_relay_remove_tasks
-                .insert(RelayRemoveTlc(channel_id, tlc_id, reason));
+                self.network.call_and_forward(
+                    msg,
+                    myself,
+                    move |res| {
+                        ChannelActorMessage::Event(ChannelEvent::RelayRemoveResult(
+                            (channel_id, tlc_id),
+                            res,
+                        ))
+                    },
+                    None,
+                )?;
+                state.waiting_relay_remove_tasks.insert(
+                    (channel_id, tlc_id),
+                    RelayRemoveTlc(channel_id, tlc_id, reason),
+                );
+            }
         }
+        Ok(())
     }
 
     async fn trigger_all_retryable_tasks(
@@ -1862,14 +1870,10 @@ where
         state: &mut ChannelActorState,
     ) {
         let tasks: Vec<_> = state.waiting_relay_remove_tasks.drain().collect();
-        for RelayRemoveTlc(channel_id, tlc_id, reason) in tasks {
-            self.register_retryable_relay_tlc_remove(state, tlc_id, channel_id, reason)
+        for (_, RelayRemoveTlc(channel_id, tlc_id, reason)) in tasks {
+            let _ = self
+                .register_retryable_relay_tlc_remove(myself, state, tlc_id, channel_id, reason)
                 .await;
-        }
-        if !state.waiting_relay_remove_tasks.is_empty() {
-            myself.send_after(CHECK_RELAY_REMOVE_INTERVAL, || {
-                ChannelActorMessage::Event(ChannelEvent::RetryRelayRemove)
-            });
         }
     }
 
@@ -1945,6 +1949,25 @@ where
                     )
                     .await;
                 }
+            }
+        }
+    }
+
+    async fn handle_relay_remove_result(
+        &self,
+        _myself: &ActorRef<ChannelActorMessage>,
+        state: &mut ChannelActorState,
+        key: (Hash256, TLCId),
+        result: Result<(), ProcessingChannelError>,
+    ) {
+        match result {
+            Ok(_)
+            | Err(ProcessingChannelError::WaitingTlcAck)
+            | Err(ProcessingChannelError::RepeatedProcessing(_)) => {
+                state.waiting_relay_remove_tasks.remove(&key);
+            }
+            _ => {
+                error!("relay remove failed with error: {:?}", result.err());
             }
         }
     }
@@ -2211,8 +2234,9 @@ where
                 self.apply_retryable_tlc_operations(myself, state, true)
                     .await;
             }
-            ChannelEvent::RetryRelayRemove => {
-                self.check_and_retry_relay_remove_tasks(myself, state).await;
+            ChannelEvent::RelayRemoveResult(key, res) => {
+                self.handle_relay_remove_result(myself, state, key, res)
+                    .await;
             }
             ChannelEvent::Stop(reason) => {
                 debug_event!(self.network, "ChannelActorStopped");
@@ -3685,7 +3709,7 @@ pub struct ChannelActorState {
     // the retryable tlc operations that are waiting to be processed.
     pub retryable_tlc_operations: VecDeque<RetryableTlcOperation>,
     pub waiting_forward_tlc_tasks: HashMap<(Hash256, TLCId), ForwardTlc>,
-    pub waiting_relay_remove_tasks: HashSet<RelayRemoveTlc>,
+    pub waiting_relay_remove_tasks: HashMap<(Hash256, TLCId), RelayRemoveTlc>,
 
     // The remote and local lock script for close channel, they are setup during the channel establishment.
     #[serde_as(as = "Option<EntityHex>")]
@@ -3851,7 +3875,7 @@ pub enum ChannelEvent {
     // (tx_hash, force, close_by_us)
     ClosingTransactionConfirmed(H256, bool, bool),
     RunRetryTask,
-    RetryRelayRemove,
+    RelayRemoveResult((Hash256, TLCId), Result<(), ProcessingChannelError>),
     CheckActiveChannel,
     CheckFundingTimeout,
 }
