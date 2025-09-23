@@ -3530,7 +3530,7 @@ where
         Ok((channel, temp_channel_id, new_id))
     }
 
-    fn check_feature_compatibility(&self, peer_id: &PeerId) -> Result<(), ProcessingChannelError> {
+    fn check_feature_compatibility(&self, peer_id: &PeerId) -> ProcessingChannelResult {
         if let Some(ConnectedPeer {
             features: Some(peer_features),
             ..
@@ -3627,10 +3627,7 @@ where
         .await;
     }
 
-    pub async fn abandon_channel(
-        &mut self,
-        channel_id: Hash256,
-    ) -> Result<(), ProcessingChannelError> {
+    pub async fn abandon_channel(&mut self, channel_id: Hash256) -> ProcessingChannelResult {
         if let Some(channel_actor_state) = self.store.get_channel_actor_state(&channel_id) {
             match channel_actor_state.state {
                 ChannelState::ChannelReady
@@ -4150,7 +4147,7 @@ where
         _myself: ActorRef<NetworkActorMessage>,
         peer_id: PeerId,
         init_msg: Init,
-    ) -> Result<(), ProcessingChannelError> {
+    ) -> ProcessingChannelResult {
         if !self.is_connected(&peer_id) {
             return Err(ProcessingChannelError::InvalidParameter(format!(
                 "Peer {:?} is not connected",

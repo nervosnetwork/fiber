@@ -110,7 +110,7 @@ pub const COMMITMENT_CELL_WITNESS_LEN: usize = 16 + 1 + 32 + 64;
 // is funded or not.
 pub const INITIAL_COMMITMENT_NUMBER: u64 = 0;
 
-const RETRYABLE_TLC_OPS_INTERVAL: Duration = Duration::from_millis(200);
+const RETRYABLE_TLC_OPS_INTERVAL: Duration = Duration::from_millis(100);
 const WAITING_REESTABLISH_FINISH_TIMEOUT: Duration = Duration::from_millis(4000);
 
 // if a important TLC operation is not acked in 30 seconds, we will try to disconnect the peer.
@@ -156,10 +156,7 @@ pub enum ChannelCommand {
     FundingTxSigned(Transaction),
     CommitmentSigned(),
     AddTlc(AddTlcCommand, RpcReplyPort<Result<AddTlcResponse, TlcErr>>),
-    RemoveTlc(
-        RemoveTlcCommand,
-        RpcReplyPort<Result<(), ProcessingChannelError>>,
-    ),
+    RemoveTlc(RemoveTlcCommand, RpcReplyPort<ProcessingChannelResult>),
     Shutdown(ShutdownCommand, RpcReplyPort<Result<(), String>>),
     BroadcastChannelUpdate(),
     Update(UpdateCommand, RpcReplyPort<Result<(), String>>),
@@ -418,7 +415,7 @@ where
         myself: &ActorRef<ChannelActorMessage>,
         state: &mut ChannelActorState,
         message: FiberChannelMessage,
-    ) -> Result<(), ProcessingChannelError> {
+    ) -> ProcessingChannelResult {
         if state.reestablishing {
             match message {
                 FiberChannelMessage::ReestablishChannel(ref reestablish_channel) => {
@@ -745,7 +742,7 @@ where
         myself: &ActorRef<ChannelActorMessage>,
         state: &mut ChannelActorState,
         commitment_signed: CommitmentSigned,
-    ) -> Result<(), ProcessingChannelError> {
+    ) -> ProcessingChannelResult {
         // build commitment tx and verify signature from remote, if passed send ACK for partner
         if let Err(err) = state.verify_commitment_signed_and_send_ack(commitment_signed.clone()) {
             error!(
@@ -1037,7 +1034,7 @@ where
         state: &mut ChannelActorState,
         add_tlc: &TlcInfo,
         peeled_onion_packet: PeeledPaymentOnionPacket,
-    ) -> Result<(), ProcessingChannelError> {
+    ) -> ProcessingChannelResult {
         let payment_hash = add_tlc.payment_hash;
         let forward_amount = peeled_onion_packet.current.amount;
 
@@ -1198,7 +1195,7 @@ where
         &self,
         state: &mut ChannelActorState,
         add_tlc: AddTlc,
-    ) -> Result<(), ProcessingChannelError> {
+    ) -> ProcessingChannelResult {
         // TODO: here we only check the error which sender didn't follow agreed rules,
         //       if any error happened here we need go to shutdown procedure
 
@@ -1214,7 +1211,7 @@ where
         &self,
         state: &mut ChannelActorState,
         remove_tlc: RemoveTlc,
-    ) -> Result<(), ProcessingChannelError> {
+    ) -> ProcessingChannelResult {
         state.check_for_tlc_update(None, false, false)?;
         // TODO: here if we received a invalid remove tlc, it's maybe a malioucious peer,
         // maybe we need to go through shutdown process for this error
@@ -1243,7 +1240,7 @@ where
         &self,
         state: &mut ChannelActorState,
         shutdown: Shutdown,
-    ) -> Result<(), ProcessingChannelError> {
+    ) -> ProcessingChannelResult {
         debug!("Received Shutdown message from peer: {:?}", shutdown);
         #[cfg(debug_assertions)]
         state.tlc_state.debug();
@@ -1335,7 +1332,7 @@ where
         myself: &ActorRef<ChannelActorMessage>,
         state: &mut ChannelActorState,
         tlc_id: TLCId,
-    ) -> Result<(), ProcessingChannelError> {
+    ) -> ProcessingChannelResult {
         let channel_id = state.get_id();
         assert!(!state.tlc_state.applied_remove_tlcs.contains(&tlc_id));
         state.tlc_state.applied_remove_tlcs.insert(tlc_id);
@@ -1934,7 +1931,7 @@ where
         if let Some((channel_err, tlc_err)) = result.error_info {
             match channel_err {
                 ProcessingChannelError::WaitingTlcAck => {
-                    error!("not expected WaitingTlcAck error in ForwardTlcResult");
+                    // peer already buffered the tlc, we just ignore the error here
                 }
                 _ => {
                     let error = ProcessingChannelError::TlcForwardingError(tlc_err)
@@ -1957,7 +1954,7 @@ where
         _myself: &ActorRef<ChannelActorMessage>,
         state: &mut ChannelActorState,
         key: (Hash256, TLCId),
-        result: Result<(), ProcessingChannelError>,
+        result: ProcessingChannelResult,
     ) {
         match result {
             Ok(_)
@@ -1977,7 +1974,7 @@ where
         &self,
         state: &mut ChannelActorState,
         command: TxCollaborationCommand,
-    ) -> Result<(), ProcessingChannelError> {
+    ) -> ProcessingChannelResult {
         debug!("Handling tx collaboration command: {:?}", &command);
         let is_complete_command = matches!(command, TxCollaborationCommand::TxComplete());
         let is_waiting_for_remote = match state.state {
@@ -2080,7 +2077,7 @@ where
         myself: &ActorRef<ChannelActorMessage>,
         state: &mut ChannelActorState,
         command: ChannelCommand,
-    ) -> Result<(), ProcessingChannelError> {
+    ) -> ProcessingChannelResult {
         match command {
             ChannelCommand::TxCollaborationCommand(tx_collaboration_command) => {
                 self.handle_tx_collaboration_command(state, tx_collaboration_command)
@@ -2194,7 +2191,7 @@ where
         myself: &ActorRef<ChannelActorMessage>,
         state: &mut ChannelActorState,
         event: ChannelEvent,
-    ) -> Result<(), ProcessingChannelError> {
+    ) -> ProcessingChannelResult {
         match event {
             ChannelEvent::FundingTransactionConfirmed(block_hash, tx_index, timestamp) => {
                 debug!("Funding transaction confirmed");
@@ -3814,9 +3811,9 @@ pub enum ChannelEvent {
     FundingTransactionConfirmed(H256, u32, u64),
     // (tx_hash, force, close_by_us)
     ClosingTransactionConfirmed(H256, bool, bool),
-    RunRetryTask,
-    RelayRemoveResult((Hash256, TLCId), Result<(), ProcessingChannelError>),
+    RelayRemoveResult((Hash256, TLCId), ProcessingChannelResult),
     ForwardTlcResult(ForwardTlcResult),
+    RunRetryTask,
     CheckActiveChannel,
     CheckFundingTimeout,
 }
@@ -4700,7 +4697,7 @@ impl ChannelActorState {
         }
     }
 
-    fn check_accept_channel_parameters(&self) -> Result<(), ProcessingChannelError> {
+    fn check_accept_channel_parameters(&self) -> ProcessingChannelResult {
         if self.remote_constraints.max_tlc_number_in_flight > MAX_TLC_NUMBER_IN_FLIGHT {
             return Err(ProcessingChannelError::InvalidParameter(format!(
                 "Remote max TLC number in flight {} is greater than the system maximal value {}",
@@ -5247,7 +5244,7 @@ impl ChannelActorState {
         self.tlc_state.get(&tlc_id)
     }
 
-    pub fn check_insert_tlc(&mut self, tlc: &TlcInfo) -> Result<(), ProcessingChannelError> {
+    pub fn check_insert_tlc(&mut self, tlc: &TlcInfo) -> ProcessingChannelResult {
         let next_tlc_id = if tlc.is_offered() {
             self.get_next_offering_tlc_id()
         } else {
@@ -5868,11 +5865,7 @@ impl ChannelActorState {
                 || self.remote_revocation_nonce_for_verify.is_none())
     }
 
-    fn check_tlc_limits(
-        &self,
-        add_amount: u128,
-        is_sent: bool,
-    ) -> Result<(), ProcessingChannelError> {
+    fn check_tlc_limits(&self, add_amount: u128, is_sent: bool) -> ProcessingChannelResult {
         if add_amount == 0 {
             return Err(ProcessingChannelError::TlcAmountIsTooLow);
         }
@@ -6751,7 +6744,7 @@ impl ChannelActorState {
         &mut self,
         myself: &ActorRef<ChannelActorMessage>,
         revoke_and_ack: RevokeAndAck,
-    ) -> Result<(), ProcessingChannelError> {
+    ) -> ProcessingChannelResult {
         if !self.tlc_state.waiting_ack {
             return Err(ProcessingChannelError::InvalidState(
                 "unexpected RevokeAndAck message".to_string(),
@@ -8003,7 +7996,7 @@ impl ChannelActorState {
         tx_hash: H256,
         force: bool,
         close_by_us: bool,
-    ) -> Result<(), ProcessingChannelError> {
+    ) -> ProcessingChannelResult {
         match self.state {
             ChannelState::ShuttingDown(flags)
                 if flags.contains(ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION) => {}
