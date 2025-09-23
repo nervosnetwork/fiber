@@ -29,3 +29,5 @@ tests/nodes/.ports
 /crates/fiber-wasm-db-worker/dist
 package-lock.json
 target
+baseline.json
+current.json

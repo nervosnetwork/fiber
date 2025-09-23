@@ -145,22 +145,43 @@ jobs:
           echo "PR target branch: ${{ github.base_ref }}"
           echo "Comparing against: origin/${{ github.base_ref }}"
           git checkout origin/${{ github.base_ref }}
-          cargo criterion --manifest-path crates/fiber-lib/Cargo.toml --features bench --output-format bencher 2>&1 | tee baseline.txt
+
+          cd ./tests/deploy/udt-init && cargo build --locked && cd -
+          export ON_GITHUB_ACTION=y
+
+          pgrep -f 'fnn|ckb run|npm' | xargs kill -9
+          rm -rf ./tests/nodes/.ports
+          REMOVE_OLD_STATE=y START_BOOTNODE=y CKB_LOG=warn TEST_ENV=release ./tests/nodes/start.sh > run_base.log 2>&1 &
+          ./tests/wait.sh
+
+          cd ./tests/perf/
+          cargo run --bin run-test --release integration
+          cargo run --bin run-test --release benchmark 50 30 base
+          cd -
+          git stash
 
       - name: Run current benchmark
         run: |
           echo "Running benchmark on current PR commit: ${{ github.sha }}"
           git checkout ${{ github.sha }}
-          cargo criterion --manifest-path crates/fiber-lib/Cargo.toml --features bench --output-format bencher 2>&1 | tee current.txt
 
-      - name: Compare benchmark results
-        run: |
-          python3 crates/fiber-lib/benches/compare_bench.py
+          pgrep -f 'fnn|ckb run|npm' | xargs kill -9
+          rm -rf ./tests/nodes/.ports
+
+          REMOVE_OLD_STATE=y START_BOOTNODE=y CKB_LOG=warn TEST_ENV=release ./tests/nodes/start.sh > run_current.log 2>&1 &
+          ./tests/wait.sh
+
+          cd ./tests/perf/
+          cargo run --bin run-test --release integration
+          cargo run --bin run-test --release benchmark 50 30 compare
+          cd -
 
       - name: Upload benchmark results
         uses: actions/upload-artifact@v4
         with:
           name: benchmark-results
           path: |
-            baseline.txt
-            current.txt
+            run_base.log
+            run_current.log
+            ./tests/perf/baseline.json
+            ./tests/perf/current.json
