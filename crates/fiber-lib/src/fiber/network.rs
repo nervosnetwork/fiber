@@ -2755,6 +2755,11 @@ where
             Some((ProcessingChannelError::RepeatedProcessing(_), _)) => {
                 // do nothing
             }
+
+            Some((ProcessingChannelError::WaitingTlcAck, _)) => {
+                // do nothing
+            }
+
             Some((error, tlc_err)) => {
                 self.update_graph_with_tlc_fail(&myself, &tlc_err).await;
                 let (error, need_to_retry) =
@@ -2818,6 +2823,7 @@ where
                 // If this is the first hop error, such as the WaitingTlcAck error,
                 // we will just retry later, return Ok here for letting endpoint user
                 // know payment session is created successfully
+                debug!("Retrying payment attempt due to first hop error: {:?}", err);
                 self.register_payment_retry(
                     myself,
                     state,
@@ -2954,7 +2960,7 @@ where
         // retrying payment in ractor framework, we will increase the delay time to avoid
         // flooding the network actor with too many retrying payments.
         state.retry_send_payment_count += 1;
-        let delay = (state.retry_send_payment_count as u64) * 50_u64;
+        let delay = (state.retry_send_payment_count as u64) * 20_u64;
         myself.send_after(Duration::from_millis(delay), move || {
             NetworkActorMessage::new_event(NetworkActorEvent::RetrySendPayment(
                 payment_hash,
