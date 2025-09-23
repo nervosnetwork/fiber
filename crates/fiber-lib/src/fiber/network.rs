@@ -2722,12 +2722,14 @@ where
                 .send_message(NetworkActorMessage::new_command(
                     NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
                         channel_id,
-                        command: ChannelCommand::ForwardTlcResult(ForwardTlcResult {
-                            payment_hash,
-                            channel_id,
-                            tlc_id,
-                            error_info: error_info.clone(),
-                        }),
+                        command: ChannelCommand::NotifyEvent(ChannelEvent::ForwardTlcResult(
+                            ForwardTlcResult {
+                                payment_hash,
+                                channel_id,
+                                tlc_id,
+                                error_info: error_info.clone(),
+                            },
+                        )),
                     }),
                 ))
                 .expect("network actor alive");

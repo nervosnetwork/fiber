@@ -16,7 +16,6 @@ use crate::{debug_event, fiber::types::TxAbort, utils::tx::compute_tx_message};
 use musig2::BinaryEncoding;
 use musig2::SecNonceBuilder;
 use secp256k1::{Secp256k1, XOnlyPublicKey};
-use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet, VecDeque};
 #[cfg(test)]
 use std::{
@@ -164,7 +163,7 @@ pub enum ChannelCommand {
     Shutdown(ShutdownCommand, RpcReplyPort<Result<(), String>>),
     BroadcastChannelUpdate(),
     Update(UpdateCommand, RpcReplyPort<Result<(), String>>),
-    ForwardTlcResult(ForwardTlcResult),
+    NotifyEvent(ChannelEvent),
     #[cfg(any(test, feature = "bench"))]
     ReloadState(ReloadParams),
 }
@@ -180,7 +179,7 @@ impl Display for ChannelCommand {
             ChannelCommand::Shutdown(_, _) => write!(f, "Shutdown"),
             ChannelCommand::BroadcastChannelUpdate() => write!(f, "BroadcastChannelUpdate"),
             ChannelCommand::Update(_, _) => write!(f, "Update"),
-            ChannelCommand::ForwardTlcResult(res) => write!(f, "ForwardTlcResult [{:?}]", res),
+            ChannelCommand::NotifyEvent(event) => write!(f, "NotifyEvent [{:?}]", event),
             #[cfg(any(test, feature = "bench"))]
             ChannelCommand::ReloadState(_) => write!(f, "ReloadState"),
         }
@@ -2171,11 +2170,7 @@ where
                 state.broadcast_channel_update(myself).await;
                 Ok(())
             }
-            ChannelCommand::ForwardTlcResult(forward_tlc_res) => {
-                self.handle_forward_tlc_result(myself, state, forward_tlc_res)
-                    .await;
-                Ok(())
-            }
+            ChannelCommand::NotifyEvent(event) => self.handle_event(myself, state, event).await,
             #[cfg(any(test, feature = "bench"))]
             ChannelCommand::ReloadState(reload_params) => {
                 let private_key = state.private_key.clone();
@@ -2237,6 +2232,9 @@ where
             ChannelEvent::RelayRemoveResult(key, res) => {
                 self.handle_relay_remove_result(myself, state, key, res)
                     .await;
+            }
+            ChannelEvent::ForwardTlcResult(result) => {
+                self.handle_forward_tlc_result(myself, state, result).await;
             }
             ChannelEvent::Stop(reason) => {
                 debug_event!(self.network, "ChannelActorStopped");
@@ -2725,6 +2723,11 @@ where
                     debug_event!(&self.network, &format!("{:?}", error));
                 }
             }
+            ChannelActorMessage::Event(e) => {
+                if let Err(err) = self.handle_event(&myself, state, e).await {
+                    error!("Error while processing channel event: {:?}", err);
+                }
+            }
             ChannelActorMessage::Command(command) => {
                 if let Err(err) = self.handle_command(&myself, state, command).await {
                     if !matches!(err, ProcessingChannelError::WaitingTlcAck) {
@@ -2734,11 +2737,6 @@ where
                             err,
                         );
                     }
-                }
-            }
-            ChannelActorMessage::Event(e) => {
-                if let Err(err) = self.handle_event(&myself, state, e).await {
-                    error!("Error while processing channel event: {:?}", err);
                 }
             }
         }
@@ -3150,64 +3148,6 @@ pub struct RelayRemoveTlc(Hash256, TLCId, RemoveTlcReason);
 
 #[derive(Clone, Serialize, Deserialize, Eq, PartialEq)]
 pub struct ForwardTlc(Hash256, TLCId, PeeledPaymentOnionPacket, u128);
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum WaitingTaskKey {
-    ForwardTlc { payment_hash: Hash256, tlc_id: u64 },
-    RelayRemoveTlc { channel_id: Hash256, tlc_id: u64 },
-    // Other task types can be added here in the future
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
-pub struct RetryableTask {
-    pub next_retry_time: u64,
-    pub operation: RetryableTlcOperation,
-    pub retry_count: u32,
-}
-
-impl RetryableTask {
-    pub fn new(operation: RetryableTlcOperation, next_retry_time: u64) -> Self {
-        Self {
-            next_retry_time,
-            operation,
-            retry_count: 0,
-        }
-    }
-
-    pub fn with_retry_count(mut self, retry_count: u32) -> Self {
-        self.retry_count = retry_count;
-        self
-    }
-}
-
-impl Ord for RetryableTask {
-    fn cmp(&self, other: &Self) -> Ordering {
-        // Note: BinaryHeap is a max-heap, but we want min-heap behavior for earliest tasks first.
-        // So we reverse the ordering.
-        other.next_retry_time.cmp(&self.next_retry_time)
-    }
-}
-
-impl PartialOrd for RetryableTask {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Debug for RetryableTlcOperation {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            RetryableTlcOperation::RemoveTlc(tlc_id, reason) => f
-                .debug_tuple("RemoveTlc")
-                .field(tlc_id)
-                .field(reason)
-                .finish(),
-            RetryableTlcOperation::AddTlc(add_tlc) => {
-                f.debug_tuple("AddTlc").field(add_tlc).finish()
-            }
-        }
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Default)]
 pub struct PendingTlcs {
@@ -3876,6 +3816,7 @@ pub enum ChannelEvent {
     ClosingTransactionConfirmed(H256, bool, bool),
     RunRetryTask,
     RelayRemoveResult((Hash256, TLCId), Result<(), ProcessingChannelError>),
+    ForwardTlcResult(ForwardTlcResult),
     CheckActiveChannel,
     CheckFundingTimeout,
 }
