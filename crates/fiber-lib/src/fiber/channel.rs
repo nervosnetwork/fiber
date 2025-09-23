@@ -112,6 +112,7 @@ pub const COMMITMENT_CELL_WITNESS_LEN: usize = 16 + 1 + 32 + 64;
 pub const INITIAL_COMMITMENT_NUMBER: u64 = 0;
 
 const RETRYABLE_TLC_OPS_INTERVAL: Duration = Duration::from_millis(200);
+const CHECK_RELAY_REMOVE_INTERVAL: Duration = Duration::from_millis(8000);
 const WAITING_REESTABLISH_FINISH_TIMEOUT: Duration = Duration::from_millis(4000);
 
 // if a important TLC operation is not acked in 30 seconds, we will try to disconnect the peer.
@@ -760,7 +761,7 @@ where
         let need_commitment_signed = state.tlc_state.update_for_commitment_signed();
 
         // flush remove tlc for received tlcs after replying ack for peer
-        self.apply_settled_remove_tlcs(state, true).await;
+        self.apply_settled_remove_tlcs(myself, state, true).await;
 
         // when we transfer to shutdown state, we need to build shutdown transaction
         // here `maybe_transfer_to_shutdown` must be called after `apply_settled_remove_tlcs`
@@ -774,7 +775,12 @@ where
         Ok(())
     }
 
-    async fn apply_settled_remove_tlcs(&self, state: &mut ChannelActorState, inbound: bool) {
+    async fn apply_settled_remove_tlcs(
+        &self,
+        myself: &ActorRef<ChannelActorMessage>,
+        state: &mut ChannelActorState,
+        inbound: bool,
+    ) {
         let previous_balance = state.get_local_balance();
         let pending_tlcs = if inbound {
             state.tlc_state.received_tlcs.tlcs.iter()
@@ -795,7 +801,7 @@ where
             .collect();
 
         for tlc_id in settled_tlcs {
-            self.apply_remove_tlc_operation(state, tlc_id)
+            self.apply_remove_tlc_operation(myself, state, tlc_id)
                 .await
                 .expect("expect remove tlc success");
         }
@@ -875,11 +881,12 @@ where
         }
 
         // flush outbound tlcs
-        self.apply_settled_remove_tlcs(state, false).await;
+        self.apply_settled_remove_tlcs(myself, state, false).await;
     }
 
     async fn try_to_relay_remove_tlc(
         &self,
+        myself: &ActorRef<ChannelActorMessage>,
         state: &mut ChannelActorState,
         tlc_info: &TlcInfo,
         remove_reason: RemoveTlcReason,
@@ -899,6 +906,11 @@ where
             remove_reason,
         )
         .await;
+        if state.waiting_relay_remove_tasks.len() == 1 {
+            myself.send_after(CHECK_RELAY_REMOVE_INTERVAL, || {
+                ChannelActorMessage::Event(ChannelEvent::RetryRelayRemove)
+            });
+        }
     }
 
     async fn try_to_settle_down_tlc(
@@ -1325,6 +1337,7 @@ where
 
     async fn apply_remove_tlc_operation(
         &self,
+        myself: &ActorRef<ChannelActorMessage>,
         state: &mut ChannelActorState,
         tlc_id: TLCId,
     ) -> Result<(), ProcessingChannelError> {
@@ -1378,7 +1391,7 @@ where
             }
         } else {
             // relay RemoveTlc to previous channel if needed
-            self.try_to_relay_remove_tlc(state, &tlc_info, remove_reason)
+            self.try_to_relay_remove_tlc(myself, state, &tlc_info, remove_reason)
                 .await;
         }
         Ok(())
@@ -1840,11 +1853,23 @@ where
         state: &mut ChannelActorState,
     ) {
         state.schedule_next_retry_task(myself);
+        self.check_and_retry_relay_remove_tasks(myself, state).await;
+    }
 
+    async fn check_and_retry_relay_remove_tasks(
+        &self,
+        myself: &ActorRef<ChannelActorMessage>,
+        state: &mut ChannelActorState,
+    ) {
         let tasks: Vec<_> = state.waiting_relay_remove_tasks.drain().collect();
         for RelayRemoveTlc(channel_id, tlc_id, reason) in tasks {
             self.register_retryable_relay_tlc_remove(state, tlc_id, channel_id, reason)
                 .await;
+        }
+        if !state.waiting_relay_remove_tasks.is_empty() {
+            myself.send_after(CHECK_RELAY_REMOVE_INTERVAL, || {
+                ChannelActorMessage::Event(ChannelEvent::RetryRelayRemove)
+            });
         }
     }
 
@@ -2185,6 +2210,9 @@ where
             ChannelEvent::RunRetryTask => {
                 self.apply_retryable_tlc_operations(myself, state, true)
                     .await;
+            }
+            ChannelEvent::RetryRelayRemove => {
+                self.check_and_retry_relay_remove_tasks(myself, state).await;
             }
             ChannelEvent::Stop(reason) => {
                 debug_event!(self.network, "ChannelActorStopped");
@@ -3823,6 +3851,7 @@ pub enum ChannelEvent {
     // (tx_hash, force, close_by_us)
     ClosingTransactionConfirmed(H256, bool, bool),
     RunRetryTask,
+    RetryRelayRemove,
     CheckActiveChannel,
     CheckFundingTimeout,
 }
@@ -4492,10 +4521,12 @@ impl ChannelActorState {
         let time = myself.get_accumulated_time();
         let count = myself.get_message_count();
         debug!(
-            "schedule_next_retry_task time {:?}, count {} ops: {:?}",
+            "schedule_next_retry_task time {:?}, count {} ops: {:?} waiting_fwd: {:?} waiting_relay_remove: {:?}",
             time,
             count,
-            self.retryable_tlc_operations.len()
+            self.retryable_tlc_operations.len(),
+            self.waiting_forward_tlc_tasks.len(),
+            self.waiting_relay_remove_tasks.len()
         );
     }
 
