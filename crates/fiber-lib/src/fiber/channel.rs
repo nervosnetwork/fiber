@@ -110,6 +110,9 @@ pub const COMMITMENT_CELL_WITNESS_LEN: usize = 16 + 1 + 32 + 64;
 // is funded or not.
 pub const INITIAL_COMMITMENT_NUMBER: u64 = 0;
 
+// The current goal throughput is about 20 TPS, set interval to 100 to limit retryable task
+// triggered 10 times per second, plus we also trigger `apply_retryable_tlc_operations` when
+// receiving ACK from peer, so it's a reason number for 20 TPS
 const RETRYABLE_TLC_OPS_INTERVAL: Duration = Duration::from_millis(100);
 const WAITING_REESTABLISH_FINISH_TIMEOUT: Duration = Duration::from_millis(4000);
 
@@ -1767,6 +1770,9 @@ where
     ) {
         state.retryable_tlc_operations.push_back(operation);
         if state.retryable_tlc_operations.len() == 1 {
+            // if there are already some retryable tasks in queue, we don't need to trigger again
+            // keep the existing schedule event message so that we don't send too many ractor messages
+            // which may introduce perform regression
             state.schedule_next_retry_task(myself);
         }
     }
@@ -2108,7 +2114,6 @@ where
                 let res = self.handle_add_tlc_command(myself, state, &command).await;
 
                 self.post_add_tlc_command(myself, state, command, &res);
-
                 match res {
                     Ok(tlc_id) => {
                         let _ = reply.send(Ok(AddTlcResponse { tlc_id }));
