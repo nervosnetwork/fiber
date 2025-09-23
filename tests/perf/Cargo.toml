@@ -12,12 +12,7 @@ regex = "1.5"
 serde = { version = "1.0", features = ["derive"] }
 
 [[bin]]
-name = "run_integration_test"
+name = "run-test"
 path = "src/main.rs"
-
-[[bin]]
-name = "benchmark"
-path = "src/benchmark.rs"
-
 
 [workspace]

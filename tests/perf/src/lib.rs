@@ -511,12 +511,12 @@ pub async fn run_integration_test() -> TestResult<()> {
     Ok(())
 }
 
-/// Run benchmark test with specified duration and number of workers
-pub async fn run_benchmark_test(duration: Duration, worker_number: usize) -> TestResult<()> {
+/// Run benchmark test with specified duration and number of workers using native threads
+pub fn run_benchmark_test(duration: Duration, worker_number: usize) -> TestResult<()> {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
-    use tokio::task::JoinSet;
-    use tokio::time::{interval, Instant};
+    use std::thread;
+    use std::time::Instant;
 
     let ctx = Arc::new(TestContext::new());
     let success_count = Arc::new(AtomicU64::new(0));
@@ -524,92 +524,97 @@ pub async fn run_benchmark_test(duration: Duration, worker_number: usize) -> Tes
     let total_count = Arc::new(AtomicU64::new(0));
 
     println!(
-        "🚀 Starting benchmark test with {} workers for {:?}",
+        "🚀 Native thread benchmark test: {} worker threads, duration {:?}",
         worker_number, duration
     );
 
-    let mut task_set = JoinSet::new();
     let start_time = Instant::now();
+    let end_time = start_time + duration;
+    let mut thread_handles = Vec::new();
 
+    // Start worker threads
     for worker_id in 0..worker_number {
         let ctx_clone = ctx.clone();
         let success_count_clone = success_count.clone();
         let error_count_clone = error_count.clone();
         let total_count_clone = total_count.clone();
-        let end_time = start_time + duration;
 
-        task_set.spawn(async move {
-            let mut local_success = 0u64;
-            let mut local_error = 0u64;
-            let mut local_total = 0u64;
-
-            while Instant::now() < end_time {
-                local_total += 1;
-
-                let result = ctx_clone
-                    .send_payment(
-                        &ctx_clone.node1.rpc_url,
-                        NODE_3_PUBKEY,
-                        "0x64", // 100 units
-                        true,
-                    )
-                    .await;
-
-                let Ok(result) = result else {
-                    continue;
-                };
-
-                let res = ctx_clone
-                    .wait_until_final_status(
-                        &ctx_clone.node1.rpc_url,
-                        result["result"]["payment_hash"].as_str().unwrap(),
-                    )
-                    .await;
-
-                match res {
-                    Ok(status) if status == "Success" => {
-                        local_success += 1;
-                        if local_total % 50 == 0 {
-                            println!(
-                                "Worker {}: {} transactions completed",
-                                worker_id, local_total
-                            );
-                        }
-                    }
-                    Ok(status) if status == "Failed" => {
-                        local_error += 1;
-                        if local_error % 10 == 0 {
-                            eprintln!("Worker {}: Error #{}: ", worker_id, local_error);
-                        }
-                    }
-                    _ => {}
-                }
-
-                tokio::time::sleep(Duration::from_millis(1)).await;
-            }
-
-            success_count_clone.fetch_add(local_success, Ordering::Relaxed);
-            error_count_clone.fetch_add(local_error, Ordering::Relaxed);
-            total_count_clone.fetch_add(local_total, Ordering::Relaxed);
+        let handle = thread::spawn(move || {
+            // Create independent single-threaded tokio runtime for each thread
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
 
             println!(
-                "Worker {} finished: {} success, {} errors, {} total",
-                worker_id, local_success, local_error, local_total
+                "🚀 Worker thread {} started, thread ID: {:?}",
+                worker_id,
+                thread::current().id()
             );
+
+            rt.block_on(async move {
+                let mut local_success = 0u64;
+                let mut local_error = 0u64;
+                let mut local_total = 0u64;
+
+                while Instant::now() < end_time {
+                    let Ok(result) = ctx_clone
+                        .send_payment(
+                            &ctx_clone.node1.rpc_url,
+                            NODE_3_PUBKEY,
+                            "0x64", // 100 units
+                            true,
+                        )
+                        .await
+                    else {
+                        continue;
+                    };
+
+                    let res = ctx_clone
+                        .wait_until_final_status(
+                            &ctx_clone.node1.rpc_url,
+                            result["result"]["payment_hash"].as_str().unwrap(),
+                        )
+                        .await;
+
+                    match res {
+                        Ok(status) if status == "Success" => {
+                            local_success += 1;
+                            success_count_clone.fetch_add(1, Ordering::Relaxed);
+                        }
+                        Ok(status) if status == "Failed" => {
+                            local_error += 1;
+                            error_count_clone.fetch_add(1, Ordering::Relaxed);
+                            if local_error % 10 == 0 {
+                                eprintln!("Worker {}: Error #{}: ", worker_id, local_error);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+
+                local_total += 1;
+                total_count_clone.fetch_add(local_total, Ordering::Relaxed);
+                println!(
+                    "🏁 Worker {} completed: {} success, {} errors, {} total",
+                    worker_id, local_success, local_error, local_total
+                );
+            });
         });
+
+        thread_handles.push(handle);
     }
 
-    let progress_task = {
+    // Start progress monitoring thread
+    let progress_handle = {
         let success_count_clone = success_count.clone();
         let error_count_clone = error_count.clone();
         let total_count_clone = total_count.clone();
-        let end_time = start_time + duration;
 
-        tokio::spawn(async move {
-            let mut interval = interval(Duration::from_secs(10));
+        thread::spawn(move || {
+            while start_time.elapsed() < duration {
+                thread::sleep(std::time::Duration::from_secs(10));
 
-            while Instant::now() < end_time {
-                interval.tick().await;
                 let elapsed = start_time.elapsed().as_secs_f64();
                 let current_success = success_count_clone.load(Ordering::Relaxed);
                 let current_error = error_count_clone.load(Ordering::Relaxed);
@@ -617,21 +622,24 @@ pub async fn run_benchmark_test(duration: Duration, worker_number: usize) -> Tes
                 let current_tps = current_success as f64 / elapsed;
 
                 println!(
-                    "📊 Progress: {:.1}s elapsed, {} success, {} errors, {} total, TPS: {:.2}",
+                    "📊 Progress report: {:.1}s elapsed, {} success, {} errors, {} total, TPS: {:.2}",
                     elapsed, current_success, current_error, current_total, current_tps
                 );
             }
         })
     };
 
-    while let Some(result) = task_set.join_next().await {
-        if let Err(e) = result {
-            eprintln!("Worker task failed: {}", e);
+    // Wait for all worker threads to complete
+    for (i, handle) in thread_handles.into_iter().enumerate() {
+        if let Err(e) = handle.join() {
+            eprintln!("Worker thread {} execution error: {:?}", i, e);
         }
     }
 
-    progress_task.abort();
+    // Wait for progress monitoring thread
+    let _ = progress_handle.join();
 
+    // Calculate final statistics
     let final_elapsed = start_time.elapsed();
     let final_success = success_count.load(Ordering::Relaxed);
     let final_error = error_count.load(Ordering::Relaxed);
@@ -643,19 +651,19 @@ pub async fn run_benchmark_test(duration: Duration, worker_number: usize) -> Tes
         0.0
     };
 
-    println!("\n🎯 Benchmark Results:");
+    println!("\n🎯 Native thread benchmark test results:");
     println!("=====================================");
-    println!("Duration: {:.2} seconds", final_elapsed.as_secs_f64());
-    println!("Workers: {}", worker_number);
+    println!("Test duration: {:.2} seconds", final_elapsed.as_secs_f64());
+    println!("Worker threads: {}", worker_number);
     println!("Total transactions: {}", final_total);
     println!("Successful transactions: {}", final_success);
     println!("Failed transactions: {}", final_error);
     println!("Success rate: {:.2}%", success_rate);
     println!(
-        "Average latency per worker: {:.2} ms",
+        "Average per-thread latency: {:.2} ms",
         (final_elapsed.as_millis() as f64) / (worker_number as f64)
     );
-    println!("TPS (Transactions Per Second): {:.2}", final_tps);
+    println!("TPS (Transactions per second): {:.2}", final_tps);
     println!("=====================================\n");
 
     Ok(())
@@ -727,15 +735,15 @@ mod tests {
         run_integration_test().await
     }
 
-    #[tokio::test]
+    #[test]
     #[ignore]
-    async fn test_benchmark() -> TestResult<()> {
-        run_benchmark_test(Duration::from_secs(180), 6).await
+    fn test_benchmark() -> TestResult<()> {
+        run_benchmark_test(Duration::from_secs(180), 6)
     }
 
-    #[tokio::test]
+    #[test]
     #[ignore]
-    async fn test_short_benchmark() -> TestResult<()> {
-        run_benchmark_test(Duration::from_secs(30), 2).await
+    fn test_short_benchmark() -> TestResult<()> {
+        run_benchmark_test(Duration::from_secs(30), 2)
     }
 }
