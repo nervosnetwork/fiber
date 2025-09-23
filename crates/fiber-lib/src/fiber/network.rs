@@ -2969,6 +2969,7 @@ where
         state: &mut NetworkActorState<S>,
         payment_request: SendPaymentCommand,
     ) -> Result<SendPaymentResponse, Error> {
+        let time = std::time::Instant::now();
         let payment_data = SendPaymentData::new(payment_request.clone()).map_err(|e| {
             error!("Failed to validate payment request: {:?}", e);
             Error::InvalidParameter(format!("Failed to validate payment request: {:?}", e))
@@ -2979,8 +2980,16 @@ where
                 "Too many pending retrying payment requests".to_string(),
             ));
         }
-        self.send_payment_with_payment_data(myself, state, payment_data)
-            .await
+        let res = self
+            .send_payment_with_payment_data(myself, state, payment_data)
+            .await;
+
+        let elapsed = time.elapsed().as_millis();
+        debug!(
+            "debug time send payment elapsed: {:?}, retry_send_payment_count: {:?}",
+            elapsed, state.retry_send_payment_count
+        );
+        res
     }
 
     async fn on_send_payment_with_router(
