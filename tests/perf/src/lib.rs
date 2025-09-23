@@ -1,14 +1,28 @@
 use regex::Regex;
 use reqwest::{Client, Error as ReqwestError};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 use tokio::time::sleep;
 
 const NODE_3_PUBKEY: &str = "03032b99943822e721a651c5a5b9621043017daa9dc3ec81d83215fd2e25121187";
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct BenchmarkResult {
+    pub timestamp: String,
+    pub test_duration_secs: f64,
+    pub worker_threads: usize,
+    pub total_transactions: u64,
+    pub successful_transactions: u64,
+    pub failed_transactions: u64,
+    pub success_rate_percent: f64,
+    pub tps: f64,
+    pub avg_latency_ms: f64,
+}
 
 #[derive(Error, Debug)]
 pub enum TestError {
@@ -512,7 +526,7 @@ pub async fn run_integration_test() -> TestResult<()> {
 }
 
 /// Run benchmark test with specified duration and number of workers using native threads
-pub fn run_benchmark_test(duration: Duration, worker_number: usize) -> TestResult<()> {
+pub fn run_benchmark_test(duration: Duration, worker_number: usize) -> TestResult<BenchmarkResult> {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
     use std::thread;
@@ -546,11 +560,11 @@ pub fn run_benchmark_test(duration: Duration, worker_number: usize) -> TestResul
                 .build()
                 .unwrap();
 
-            println!(
-                "🚀 Worker thread {} started, thread ID: {:?}",
-                worker_id,
-                thread::current().id()
-            );
+            // println!(
+            //     "🚀 Worker thread {} started, thread ID: {:?}",
+            //     worker_id,
+            //     thread::current().id()
+            // );
 
             rt.block_on(async move {
                 let mut local_success = 0u64;
@@ -591,10 +605,10 @@ pub fn run_benchmark_test(duration: Duration, worker_number: usize) -> TestResul
                         }
                         _ => {}
                     }
+                    local_total += 1;
+                    total_count_clone.fetch_add(1, Ordering::Relaxed);
                 }
 
-                local_total += 1;
-                total_count_clone.fetch_add(local_total, Ordering::Relaxed);
                 println!(
                     "🏁 Worker {} completed: {} success, {} errors, {} total",
                     worker_id, local_success, local_error, local_total
@@ -666,7 +680,89 @@ pub fn run_benchmark_test(duration: Duration, worker_number: usize) -> TestResul
     println!("TPS (Transactions per second): {:.2}", final_tps);
     println!("=====================================\n");
 
+    let benchmark_result = BenchmarkResult {
+        timestamp: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            .to_string(),
+        test_duration_secs: final_elapsed.as_secs_f64(),
+        worker_threads: worker_number,
+        total_transactions: final_total,
+        successful_transactions: final_success,
+        failed_transactions: final_error,
+        success_rate_percent: success_rate,
+        tps: final_tps,
+        avg_latency_ms: (final_elapsed.as_millis() as f64) / (worker_number as f64),
+    };
+
+    Ok(benchmark_result)
+}
+
+/// Save benchmark result to a JSON file
+pub fn save_benchmark_baseline(result: &BenchmarkResult, filename: &str) -> TestResult<()> {
+    let json_data = serde_json::to_string_pretty(result)?;
+    fs::write(filename, json_data)?;
+    println!("📊 Baseline saved to: {}", filename);
     Ok(())
+}
+
+/// Load benchmark baseline from a JSON file
+pub fn load_benchmark_baseline(filename: &str) -> TestResult<BenchmarkResult> {
+    let json_data = fs::read_to_string(filename)?;
+    let result: BenchmarkResult = serde_json::from_str(&json_data)?;
+    Ok(result)
+}
+
+/// Compare current benchmark result with baseline
+pub fn compare_with_baseline(current: &BenchmarkResult, baseline: &BenchmarkResult) {
+    println!("\n🔄 Benchmark Comparison Results:");
+    println!("=====================================");
+
+    // TPS comparison
+    let tps_diff = current.tps - baseline.tps;
+    let tps_percent = (tps_diff / baseline.tps) * 100.0;
+    println!(
+        "TPS: {:.2} vs {:.2} (baseline) | Diff: {:+.2} ({:+.1}%)",
+        current.tps, baseline.tps, tps_diff, tps_percent
+    );
+
+    // Success rate comparison
+    let success_diff = current.success_rate_percent - baseline.success_rate_percent;
+    println!(
+        "Success Rate: {:.2}% vs {:.2}% (baseline) | Diff: {:+.2}%",
+        current.success_rate_percent, baseline.success_rate_percent, success_diff
+    );
+
+    // Latency comparison
+    let latency_diff = current.avg_latency_ms - baseline.avg_latency_ms;
+    let latency_percent = (latency_diff / baseline.avg_latency_ms) * 100.0;
+    println!(
+        "Avg Latency: {:.2}ms vs {:.2}ms (baseline) | Diff: {:+.2}ms ({:+.1}%)",
+        current.avg_latency_ms, baseline.avg_latency_ms, latency_diff, latency_percent
+    );
+
+    // Overall assessment
+    println!("\n📈 Performance Assessment:");
+    if tps_percent > 5.0 {
+        println!("✅ TPS improved significantly (+{:.1}%)", tps_percent);
+    } else if tps_percent > 0.0 {
+        println!("🟡 TPS slightly improved (+{:.1}%)", tps_percent);
+    } else if tps_percent > -5.0 {
+        println!("🟡 TPS slightly decreased ({:.1}%)", tps_percent);
+    } else {
+        println!("❌ TPS significantly decreased ({:.1}%)", tps_percent);
+    }
+
+    if success_diff > 1.0 {
+        println!("✅ Success rate improved (+{:.2}%)", success_diff);
+    } else if success_diff > -1.0 {
+        println!("🟡 Success rate stable ({:+.2}%)", success_diff);
+    } else {
+        println!("❌ Success rate decreased ({:.2}%)", success_diff);
+    }
+
+    println!("=====================================\n");
 }
 
 #[cfg(test)]
@@ -738,12 +834,14 @@ mod tests {
     #[test]
     #[ignore]
     fn test_benchmark() -> TestResult<()> {
-        run_benchmark_test(Duration::from_secs(180), 6)
+        let _result = run_benchmark_test(Duration::from_secs(180), 6)?;
+        Ok(())
     }
 
     #[test]
     #[ignore]
     fn test_short_benchmark() -> TestResult<()> {
-        run_benchmark_test(Duration::from_secs(30), 2)
+        let _result = run_benchmark_test(Duration::from_secs(30), 2)?;
+        Ok(())
     }
 }

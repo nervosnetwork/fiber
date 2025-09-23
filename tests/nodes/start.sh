@@ -8,10 +8,10 @@ nodes_dir="$(dirname "$script_dir")/nodes"
 deploy_dir="$(dirname "$script_dir")/deploy"
 bruno_dir="$(dirname "$script_dir")/bruno/environments"
 test_env="${TEST_ENV:-debug}"
-
 testcase_name="${1:-}"
 testcase_dir="$(dirname "$script_dir")/bruno/${testcase_name}"
 start_node_ids=()
+
 if ! [ -d "$testcase_dir" ]; then
   echo "usage: ${BASH_SOURCE[0]} TESTCASE" >&2
   echo "$testcase_dir is not a testcase directory"
