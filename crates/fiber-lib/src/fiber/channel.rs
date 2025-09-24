@@ -1501,7 +1501,6 @@ where
         state: &mut ChannelActorState,
         command: &AddTlcCommand,
     ) -> Result<u64, ProcessingChannelError> {
-        let time = std::time::Instant::now();
         state.check_for_tlc_update(Some(command.amount), true, true)?;
         state.check_tlc_expiry(command.expiry)?;
         state.check_tlc_forward_amount(
@@ -1539,8 +1538,6 @@ where
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
 
         self.handle_commitment_signed_command(myself, state).await?;
-        let elapsed = time.elapsed();
-        debug!("debug time handle_add_tlc_command elapsed: {:?}", elapsed);
         Ok(tlc_id.into())
     }
 
@@ -1550,7 +1547,6 @@ where
         state: &mut ChannelActorState,
         command: RemoveTlcCommand,
     ) -> ProcessingChannelResult {
-        let time = std::time::Instant::now();
         state.check_for_tlc_update(None, true, false)?;
         state.check_remove_tlc_with_reason(TLCId::Received(command.id), &command.reason)?;
         let payment_hash = state
@@ -1577,11 +1573,6 @@ where
 
         state.maybe_transfer_to_shutdown().await?;
         self.handle_commitment_signed_command(myself, state).await?;
-        let elapsed = time.elapsed();
-        debug!(
-            "debug time handle_remove_tlc_command elapsed: {:?}",
-            elapsed
-        );
         Ok(())
     }
 
