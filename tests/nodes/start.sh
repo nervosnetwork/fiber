@@ -43,9 +43,6 @@ should_start_bootnode="${START_BOOTNODE:-}"
 # We may load all contracts within the following folder to the test environment.
 export TESTING_CONTRACTS_DIR="$deploy_dir/contracts"
 
-# Initialize the dev-chain if it does not exist.
-# This script is nilpotent, so it is safe to run multiple times.
-"$deploy_dir/init-dev-chain.sh"
 
 if [ -n "$should_clean_fiber_state" ]; then
     echo "starting to clean fiber store ...."
@@ -56,6 +53,10 @@ elif [ -n "$should_remove_old_state" ]; then
     "$deploy_dir/init-dev-chain.sh" -f
 fi
 
+# Initialize the dev-chain if it does not exist.
+# This script is nilpotent, so it is safe to run multiple times.
+"$deploy_dir/init-dev-chain.sh"
+
 echo "Initializing finished, begin to start services .... ${test_env}"
 sleep 1
 
@@ -65,7 +66,7 @@ cargo build --locked "--${TEST_ENV:-}"
 # Start the dev node in the background.
 cd "$nodes_dir" || exit 1
 
-start() {
+start_fnn() {
     log_file="${2}.log"
     echo "logging to ${log_file}"
     ../../target/"${test_env}"/fnn "$@" 2>&1 | tee "$log_file"
@@ -73,19 +74,19 @@ start() {
 
 if [ "${#start_node_ids[@]}" = 0 ]; then
     if [[ -n "$should_start_bootnode" ]]; then
-        FIBER_SECRET_KEY_PASSWORD='password0' LOG_PREFIX=$'[boot node]' start -d bootnode &
+        FIBER_SECRET_KEY_PASSWORD='password0' LOG_PREFIX=$'[boot node]' start_fnn -d bootnode &
         # sleep some time to ensure bootnode started
         # while other nodes try to connect to it.
         sleep 5
         # export the environment variable so that other nodes can connect to the bootnode.
         export FIBER_BOOTNODE_ADDRS=/ip4/127.0.0.1/tcp/8343/p2p/Qmbyc4rhwEwxxSQXd5B4Ej4XkKZL6XLipa3iJrnPL9cjGR
     fi
-    FIBER_SECRET_KEY_PASSWORD='password1' LOG_PREFIX=$'[node 1]' start -d 1 &
-    FIBER_SECRET_KEY_PASSWORD='password2' LOG_PREFIX=$'[node 2]' start -d 2 &
-    FIBER_SECRET_KEY_PASSWORD='password3' LOG_PREFIX=$'[node 3]' start -d 3 &
+    FIBER_SECRET_KEY_PASSWORD='password1' LOG_PREFIX=$'[node 1]' start_fnn -d 1 &
+    FIBER_SECRET_KEY_PASSWORD='password2' LOG_PREFIX=$'[node 2]' start_fnn -d 2 &
+    FIBER_SECRET_KEY_PASSWORD='password3' LOG_PREFIX=$'[node 3]' start_fnn -d 3 &
 else
     for id in "${start_node_ids[@]}"; do
-        FIBER_SECRET_KEY_PASSWORD="password$id" LOG_PREFIX="[$id]"$'' start -d "$id" &
+        FIBER_SECRET_KEY_PASSWORD="password$id" LOG_PREFIX="[$id]"$'' start_fnn -d "$id" &
     done
 fi
 
