@@ -131,36 +131,73 @@ jobs:
 
       - uses: dsherret/rust-toolchain-file@v1
       - uses: Swatinem/rust-cache@v2
+      - name: Install dependencies
+        run: |
+          version=0.116.1
+          wget "https://github.com/nervosnetwork/ckb/releases/download/v${version}/ckb_v${version}_x86_64-unknown-linux-gnu-portable.tar.gz"
+          tar -xvaf "ckb_v${version}_x86_64-unknown-linux-gnu-portable.tar.gz"
+          sudo mv "ckb_v${version}_x86_64-unknown-linux-gnu-portable"/* /usr/local/bin/
 
-      - name: Setup Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.x'
-
-      - name: Install cargo-criterion
-        run: cargo install cargo-criterion --locked --force
+      - name: Build rust code
+        run: |
+          cd ./tests/deploy/udt-init && cargo build --locked && cd -
+          cd ./tests/perf/ && cargo build --release --locked && cd -
 
       - name: Get baseline benchmark
         run: |
           echo "PR target branch: ${{ github.base_ref }}"
           echo "Comparing against: origin/${{ github.base_ref }}"
-          git checkout origin/${{ github.base_ref }}
-          cargo criterion --manifest-path crates/fiber-lib/Cargo.toml --features bench --output-format bencher 2>&1 | tee baseline.txt
+          git checkout ${{ github.sha }}
+
+          export ON_GITHUB_ACTION=y
+          CKB_LOG=warn TEST_ENV=release ./tests/nodes/start.sh > baseline.log 2>&1 &
+          ./tests/nodes/wait.sh
+
+          cd ./tests/perf/
+          cargo run --bin run-test --release integration
+          cargo run --bin run-test --release benchmark 50 30 base
+          cd -
+          git stash
 
       - name: Run current benchmark
         run: |
           echo "Running benchmark on current PR commit: ${{ github.sha }}"
           git checkout ${{ github.sha }}
-          cargo criterion --manifest-path crates/fiber-lib/Cargo.toml --features bench --output-format bencher 2>&1 | tee current.txt
 
-      - name: Compare benchmark results
-        run: |
-          python3 crates/fiber-lib/benches/compare_bench.py
+          pkill -f 'fnn|ckb run|npm' || true
+          rm -rf ./tests/nodes/.ports
+          export ON_GITHUB_ACTION=y
+          REMOVE_OLD_STATE=y CKB_LOG=warn TEST_ENV=release ./tests/nodes/start.sh > current.log 2>&1 &
+          ./tests/nodes/wait.sh
+
+          cd ./tests/perf/
+          cargo run --bin run-test --release integration
+          cargo run --bin run-test --release benchmark 50 30 compare
+          cd -
 
       - name: Upload benchmark results
         uses: actions/upload-artifact@v4
         with:
           name: benchmark-results
           path: |
-            baseline.txt
-            current.txt
+            ./baseline.log
+            ./current.log
+            ./tests/perf/comparison_report.txt
+            ./tests/perf/baseline.json
+            ./tests/perf/current.json
+
+      - name: Check benchmark result
+        run: |
+          echo "Check benchmark result on current PR commit: ${{ github.sha }}"
+          if [ -f "./tests/perf/comparison_report.txt" ]; then
+            if grep -q "Performance regression detected" "./tests/perf/comparison_report.txt"; then
+              echo "❌ Performance regression detected! Failing the workflow."
+              exit 1
+            else
+              echo "✅ No performance regression detected."
+            fi
+          else
+            echo "⚠️ Comparison report not found at ./tests/perf/comparison_report.txt"
+            echo "This might indicate a benchmark execution failure."
+            exit 1
+          fi
