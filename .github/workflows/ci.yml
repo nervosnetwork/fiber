@@ -145,10 +145,10 @@ jobs:
 
       - name: Get baseline benchmark
         run: |
-          echo "PR target branch: ${{ github.base_ref }}"
           echo "Comparing against: origin/${{ github.base_ref }}"
-          git checkout ${{ github.base_ref }}
+          git checkout origin/${{ github.base_ref }}
 
+          sed -i 's/sleep 5/sleep 10/g' ./tests/nodes/wait.sh
           export ON_GITHUB_ACTION=y
           CKB_LOG=warn TEST_ENV=release ./tests/nodes/start.sh > baseline.log 2>&1 &
           ./tests/nodes/wait.sh

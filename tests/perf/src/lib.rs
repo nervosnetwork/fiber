@@ -739,9 +739,9 @@ pub fn compare_with_baseline(
     let tps_diff = current.tps - baseline.tps;
     let tps_percent = (tps_diff / baseline.tps) * 100.0;
     write_line!(
-        "TPS: {:.2} vs {:.2} (baseline) | Diff: {:+.2} ({:+.1}%)",
-        current.tps,
+        "TPS: {:.2} (baseline) vs {:.2} (current) | Diff: {:+.2} ({:+.1}%)",
         baseline.tps,
+        current.tps,
         tps_diff,
         tps_percent
     );
@@ -749,9 +749,9 @@ pub fn compare_with_baseline(
     // Success rate comparison
     let success_diff = current.success_rate_percent - baseline.success_rate_percent;
     write_line!(
-        "Success Rate: {:.2}% vs {:.2}% (baseline) | Diff: {:+.2}%",
-        current.success_rate_percent,
+        "Success Rate: {:.2}% (baseline) vs {:.2}% (current) | Diff: {:+.2}%",
         baseline.success_rate_percent,
+        current.success_rate_percent,
         success_diff
     );
 
@@ -759,9 +759,9 @@ pub fn compare_with_baseline(
     let latency_diff = current.avg_latency_ms - baseline.avg_latency_ms;
     let latency_percent = (latency_diff / baseline.avg_latency_ms) * 100.0;
     write_line!(
-        "Avg Latency: {:.2}ms vs {:.2}ms (baseline) | Diff: {:+.2}ms ({:+.1}%)",
-        current.avg_latency_ms,
+        "Avg Latency: {:.2}ms (baseline) vs {:.2}ms (current) | Diff: {:+.2}ms ({:+.1}%)",
         baseline.avg_latency_ms,
+        current.avg_latency_ms,
         latency_diff,
         latency_percent
     );
