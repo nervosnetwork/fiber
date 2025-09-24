@@ -1486,11 +1486,9 @@ where
             }
             CommitmentSignedFlags::ChannelReady() => {
                 state.set_waiting_ack(myself, true);
-                myself.start_track();
             }
             CommitmentSignedFlags::PendingShutdown() => {
                 state.set_waiting_ack(myself, true);
-                myself.start_track();
                 state.maybe_transfer_to_shutdown().await?;
             }
         }
@@ -4503,12 +4501,9 @@ impl ChannelActorState {
                 ChannelActorMessage::Event(ChannelEvent::RunRetryTask)
             });
         }
-        let time = myself.get_accumulated_time();
-        let count = myself.get_message_count();
         debug!(
-            "schedule_next_retry_task time {:?}, count {} ops: {:?} waiting_fwd: {:?} waiting_relay_remove: {:?}  tlc_state: {:?}",
-            time,
-            count,
+            "schedule_next_retry_task retryable tlc ops: {:?} \
+            waiting_fwd: {:?} waiting_relay_remove: {:?}  tlc_state: {:?}",
             self.retryable_tlc_operations.len(),
             self.waiting_forward_tlc_tasks.len(),
             self.waiting_relay_remove_tasks.len(),
