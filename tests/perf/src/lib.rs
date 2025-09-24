@@ -479,7 +479,7 @@ impl TestContext {
 pub async fn run_integration_test() -> TestResult<()> {
     let mut ctx = TestContext::new();
 
-    println!("🔗 Step 1: Connecting peers...");
+    println!("📡 Step 1: Connecting peers...");
     ctx.connect_peer(&ctx.node2.rpc_url, &ctx.node1.addr)
         .await?;
     ctx.connect_peer(&ctx.node3.rpc_url, &ctx.node2.addr)
@@ -494,7 +494,7 @@ pub async fn run_integration_test() -> TestResult<()> {
             .await?,
     );
 
-    println!("⛏️ Step 3: Generating blocks for channel 1...");
+    println!("📡 Step 3: Generating blocks for channel 1...");
     ctx.generate_ckb_epochs("0x2").await?;
 
     let _temp_channel_2 = ctx
@@ -505,7 +505,7 @@ pub async fn run_integration_test() -> TestResult<()> {
             .await?,
     );
 
-    println!("⛏️ Step 4: Generating blocks for channel 2...");
+    println!("📡 Step 4: Generating blocks for channel 2...");
     ctx.generate_ckb_epochs("0x2").await?;
 
     println!("✅ Step 5: Validating channel balances...");
