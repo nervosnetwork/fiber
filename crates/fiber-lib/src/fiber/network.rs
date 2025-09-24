@@ -2517,11 +2517,7 @@ where
     ) -> Result<(), Error> {
         assert!(attempt.is_retrying());
 
-        if !attempt
-            .last_error
-            .as_ref()
-            .is_some_and(|err| err.contains("WaitingTlcAck"))
-        {
+        if attempt.last_error.as_ref().is_some_and(|e| !e.is_empty()) {
             // `session.remain_amount()` do not contains this part of amount,
             // so we need to add the receiver amount to it, so we may make fewer
             // attempts to send the payment.
@@ -2538,7 +2534,7 @@ where
                 })?;
 
             attempt.update_route(hops);
-        };
+        }
 
         self.send_attempt(myself, state, session, attempt).await?;
         Ok(())
@@ -2665,7 +2661,7 @@ where
                     attempt.hash, e
                 );
                 self.set_attempt_fail_with_error(session, attempt, &err, false);
-                return Err(Error::SendPaymentFirstHopError(err, false));
+                return Err(Error::FirstHopError(err, false));
             }
         };
 
@@ -2694,7 +2690,7 @@ where
                     error_detail.error_code_as_str()
                 );
                 self.set_attempt_fail_with_error(session, attempt, &err, need_to_retry);
-                return Err(Error::SendPaymentFirstHopError(err, need_to_retry));
+                return Err(Error::FirstHopError(err, need_to_retry));
             }
             Ok(_) => {
                 self.store.insert_attempt(attempt.clone());
@@ -2752,29 +2748,22 @@ where
                     .track_attempt_router(&attempt);
                 self.store.insert_attempt(attempt);
             }
-            Some((ProcessingChannelError::RepeatedProcessing(_), _)) => {
-                // do nothing
-            }
-
             Some((ProcessingChannelError::WaitingTlcAck, _)) => {
                 // do nothing
             }
-
             Some((error, tlc_err)) => {
                 self.update_graph_with_tlc_fail(&myself, &tlc_err).await;
-                let (error, need_to_retry) =
-                    if matches!(error, ProcessingChannelError::WaitingTlcAck) {
-                        ("WaitingTlcAck".to_string(), true)
-                    } else {
-                        let need_to_retry = self.network_graph.write().await.record_attempt_fail(
-                            &attempt,
-                            tlc_err.clone(),
-                            true,
-                        );
-                        (error.to_string(), need_to_retry)
-                    };
-
-                self.set_attempt_fail_with_error(&mut session, &mut attempt, &error, need_to_retry);
+                let need_to_retry = self.network_graph.write().await.record_attempt_fail(
+                    &attempt,
+                    tlc_err.clone(),
+                    true,
+                );
+                self.set_attempt_fail_with_error(
+                    &mut session,
+                    &mut attempt,
+                    &error.to_string(),
+                    need_to_retry,
+                );
                 // retry the current attempt if it is retryable
                 if attempt.is_retrying() {
                     self.register_payment_retry(myself, state, payment_hash, Some(attempt.id));
@@ -2818,11 +2807,8 @@ where
             .send_payment_onion_packet(state, session, attempt)
             .await
         {
-            let need_retry = matches!(err, Error::SendPaymentFirstHopError(_, true));
+            let need_retry = matches!(err, Error::FirstHopError(_, true));
             if need_retry {
-                // If this is the first hop error, such as the WaitingTlcAck error,
-                // we will just retry later, return Ok here for letting endpoint user
-                // know payment session is created successfully
                 debug!("Retrying payment attempt due to first hop error: {:?}", err);
                 self.register_payment_retry(
                     myself,
