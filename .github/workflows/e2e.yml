@@ -2,8 +2,14 @@ on: [push, pull_request, workflow_dispatch]
 
 name: E2E tests
 
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
 jobs:
   e2e-testing:
+    name: e2e test for ${{ matrix.workflow }} --env ${{ matrix.test_env }} ${{ matrix.extra_bru_args }}
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -48,62 +54,20 @@ jobs:
             test_env: "test"
             release: "0.116.1"
             extra_bru_args: "--env-var FUNDING_TX_VERIFICATION_CASE=fund_from_peer"
-    name: e2e test for ${{ matrix.workflow }} --env ${{ matrix.test_env }} ${{ matrix.extra_bru_args }}
+
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: e2e-${{ matrix.workflow }}-${{ runner.os }}
       - uses: dsherret/rust-toolchain-file@v1
-      - name: Cache CKB binaries
-        uses: actions/cache@v4
-        id: cache-ckb
+      - name: Setup Dependencies
+        uses: ./.github/actions/setup-dependencies
         with:
-          path: /usr/local/bin/ckb*
-          key: ckb-v${{ matrix.release }}-${{ runner.os }}
-          restore-keys: |
-            ckb-v${{ matrix.release }}-
-
-      - name: Cache Bitcoin and LND binaries
-        if: matrix.workflow == 'cross-chain-hub'
-        uses: actions/cache@v4
-        id: cache-bitcoin-lnd
-        with:
-          path: |
-            ./bitcoin-27.0
-            ./lnd-linux-amd64-v0.18.0-beta
-          key: bitcoin-lnd-v27.0-v0.18.0-${{ runner.os }}
-          restore-keys: |
-            bitcoin-lnd-v27.0-v0.18.0-
-
-      - name: Install dependencies
-        run: |
-          version=${{ matrix.release }}
-
-          # Install CKB if not cached
-          if [ "${{ steps.cache-ckb.outputs.cache-hit }}" != "true" ]; then
-            echo "📥 Downloading CKB v${version}..."
-            wget "https://github.com/nervosnetwork/ckb/releases/download/v${version}/ckb_v${version}_x86_64-unknown-linux-gnu-portable.tar.gz"
-            tar -xvaf "ckb_v${version}_x86_64-unknown-linux-gnu-portable.tar.gz"
-            sudo mv "ckb_v${version}_x86_64-unknown-linux-gnu-portable"/* /usr/local/bin/
-          else
-            echo "✅ Using cached CKB binaries"
-          fi
-
-          # Install Bitcoin and LND for cross-chain-hub workflow
-          if [ ${{ matrix.workflow }} = "cross-chain-hub" ]; then
-            if [ "${{ steps.cache-bitcoin-lnd.outputs.cache-hit }}" != "true" ]; then
-              echo "📥 Downloading Bitcoin Core v27.0..."
-              wget "https://bitcoin.org/bin/bitcoin-core-27.0/bitcoin-27.0-x86_64-linux-gnu.tar.gz"
-              tar -xvaf "bitcoin-27.0-x86_64-linux-gnu.tar.gz"
-              echo "📥 Downloading LND v0.18.0-beta..."
-              wget "https://github.com/lightningnetwork/lnd/releases/download/v0.18.0-beta/lnd-linux-amd64-v0.18.0-beta.tar.gz"
-              tar -xvaf "lnd-linux-amd64-v0.18.0-beta.tar.gz"
-            else
-              echo "✅ Using cached Bitcoin and LND binaries"
-            fi
-            echo "$(pwd)/bitcoin-27.0/bin" >> $GITHUB_PATH
-            echo "$(pwd)/lnd-linux-amd64-v0.18.0-beta" >> $GITHUB_PATH
-          fi
+          ckb-version: ${{ matrix.release }}
+          install-bitcoin-lnd: ${{ matrix.workflow == 'cross-chain-hub' }}
+          cache-prefix: 'e2e'
 
       - name: Cache build artifacts
         uses: actions/cache@v4
@@ -144,3 +108,4 @@ jobs:
         with:
           name: e2e-test-${{ matrix.workflow }}-${{ hashFiles('matrix.json') }}-logs
           path: tests/nodes/*.log
+

@@ -1,0 +1,114 @@
+name: 'Setup Dependencies'
+description: 'Install CKB, Bitcoin, and LND dependencies with caching'
+inputs:
+  ckb-version:
+    description: 'CKB version to install'
+    required: true
+    default: '0.116.1'
+  install-bitcoin-lnd:
+    description: 'Whether to install Bitcoin and LND'
+    required: false
+    default: 'false'
+  cache-prefix:
+    description: 'Prefix for cache keys'
+    required: false
+    default: 'deps'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Cache CKB binaries
+      uses: actions/cache@v4
+      id: cache-ckb
+      with:
+        path: ~/.local/bin/ckb*
+        key: ${{ inputs.cache-prefix }}-ckb-v${{ inputs.ckb-version }}-${{ runner.os }}
+        restore-keys: |
+          ${{ inputs.cache-prefix }}-ckb-v${{ inputs.ckb-version }}-
+
+    - name: Cache Bitcoin and LND binaries
+      if: inputs.install-bitcoin-lnd == 'true'
+      uses: actions/cache@v4
+      id: cache-bitcoin-lnd
+      with:
+        path: |
+          ./bitcoin-27.0
+          ./lnd-linux-amd64-v0.18.0-beta
+        key: ${{ inputs.cache-prefix }}-bitcoin-lnd-v27.0-v0.18.0-${{ runner.os }}
+        restore-keys: |
+          ${{ inputs.cache-prefix }}-bitcoin-lnd-v27.0-v0.18.0-
+
+    - name: Install CKB
+      if: steps.cache-ckb.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        version=${{ inputs.ckb-version }}
+        echo "🔐 Downloading and verifying CKB v${version} with retry..."
+
+        # Download with retry
+        for attempt in 1 2 3; do
+          if wget "https://github.com/nervosnetwork/ckb/releases/download/v${version}/ckb_v${version}_x86_64-unknown-linux-gnu-portable.tar.gz"; then
+            break
+          else
+            echo "Download attempt $attempt failed, retrying..."
+            sleep 2
+          fi
+        done
+
+        # Verify and install
+        if [ -f "ckb_v${version}_x86_64-unknown-linux-gnu-portable.tar.gz" ]; then
+          tar -xzf "ckb_v${version}_x86_64-unknown-linux-gnu-portable.tar.gz"
+          mkdir -p ~/.local/bin
+          mv "ckb_v${version}_x86_64-unknown-linux-gnu-portable"/* ~/.local/bin/
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+          ~/.local/bin/ckb --version
+          echo "✅ CKB v${version} installed successfully"
+        else
+          echo "❌ CKB download failed after 3 attempts"
+          exit 1
+        fi
+
+    - name: Use cached CKB
+      if: steps.cache-ckb.outputs.cache-hit == 'true'
+      shell: bash
+      run: |
+        echo "✅ Using cached CKB binaries"
+        echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+    - name: Install Bitcoin and LND
+      if: inputs.install-bitcoin-lnd == 'true' && steps.cache-bitcoin-lnd.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        echo "📥 Downloading Bitcoin Core v27.0 with retry..."
+        for attempt in 1 2 3; do
+          if wget "https://bitcoin.org/bin/bitcoin-core-27.0/bitcoin-27.0-x86_64-linux-gnu.tar.gz"; then
+            break
+          else
+            echo "Bitcoin download attempt $attempt failed, retrying..."
+            sleep 2
+          fi
+        done
+
+        echo "📥 Downloading LND v0.18.0-beta with retry..."
+        for attempt in 1 2 3; do
+          if wget "https://github.com/lightningnetwork/lnd/releases/download/v0.18.0-beta/lnd-linux-amd64-v0.18.0-beta.tar.gz"; then
+            break
+          else
+            echo "LND download attempt $attempt failed, retrying..."
+            sleep 2
+          fi
+        done
+
+        tar -xzf "bitcoin-27.0-x86_64-linux-gnu.tar.gz"
+        tar -xzf "lnd-linux-amd64-v0.18.0-beta.tar.gz"
+        echo "✅ Bitcoin and LND downloaded successfully"
+
+    - name: Setup Bitcoin and LND paths
+      if: inputs.install-bitcoin-lnd == 'true'
+      shell: bash
+      run: |
+        echo "$(pwd)/bitcoin-27.0/bin" >> $GITHUB_PATH
+        echo "$(pwd)/lnd-linux-amd64-v0.18.0-beta" >> $GITHUB_PATH
+        if [ "${{ steps.cache-bitcoin-lnd.outputs.cache-hit }}" == "true" ]; then
+          echo "✅ Using cached Bitcoin and LND binaries"
+        fi

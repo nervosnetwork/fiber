@@ -158,44 +158,11 @@ jobs:
 
       - uses: dsherret/rust-toolchain-file@v1
       - uses: Swatinem/rust-cache@v2
-      - name: Cache CKB binaries
-        uses: actions/cache@v4
-        id: cache-ckb
+      - name: Setup Dependencies
+        uses: ./.github/actions/setup-dependencies
         with:
-          path: ~/.local/bin/ckb*
-          key: ckb-v0.116.1-${{ runner.os }}
-          restore-keys: |
-            ckb-v0.116.1-
-
-      - name: Install dependencies
-        if: steps.cache-ckb.outputs.cache-hit != 'true'
-        run: |
-          version=0.116.1
-          echo "🔐 Downloading and verifying CKB v${version}..."
-
-          # Download with retry and verification
-          for attempt in 1 2 3; do
-            if wget "https://github.com/nervosnetwork/ckb/releases/download/v${version}/ckb_v${version}_x86_64-unknown-linux-gnu-portable.tar.gz"; then
-              break
-            else
-              echo "Download attempt $attempt failed, retrying..."
-              sleep 2
-            fi
-          done
-
-          # Verify file exists and extract
-          if [ -f "ckb_v${version}_x86_64-unknown-linux-gnu-portable.tar.gz" ]; then
-            tar -xzf "ckb_v${version}_x86_64-unknown-linux-gnu-portable.tar.gz"
-            # Use more secure installation method
-            mkdir -p ~/.local/bin
-            mv "ckb_v${version}_x86_64-unknown-linux-gnu-portable"/* ~/.local/bin/
-            echo "$HOME/.local/bin" >> $GITHUB_PATH
-            # Verify installation
-            ~/.local/bin/ckb --version
-          else
-            echo "❌ CKB download failed after 3 attempts"
-            exit 1
-          fi
+          ckb-version: '0.116.1'
+          cache-prefix: 'benchmark'
 
       - name: Cache build artifacts
         uses: actions/cache@v4
@@ -212,19 +179,7 @@ jobs:
           cd ./tests/deploy/udt-init && cargo build --locked && cd -
           cd ./tests/perf/ && cargo build --release --locked && cd -
 
-      - name: Cache baseline benchmark results
-        uses: actions/cache@v4
-        id: cache-baseline
-        with:
-          path: |
-            ./tests/perf/baseline.json
-            ./baseline.log
-          key: baseline-${{ github.base_ref }}-${{ hashFiles('tests/**/*.rs', 'crates/**/*.rs') }}
-          restore-keys: |
-            baseline-${{ github.base_ref }}-
-
-      - name: Get baseline benchmark
-        if: steps.cache-baseline.outputs.cache-hit != 'true'
+      - name: Run baseline benchmark
         run: |
           echo "Comparing against: origin/${{ github.base_ref }}"
           git checkout origin/${{ github.base_ref }}
@@ -238,12 +193,6 @@ jobs:
           cargo run --bin run-test --release benchmark 90 30 base
           cd -
           git stash
-
-      - name: Restore baseline results (if cached)
-        if: steps.cache-baseline.outputs.cache-hit == 'true'
-        run: |
-          echo "✅ Using cached baseline benchmark results"
-          ls -la ./tests/perf/baseline.json || echo "Baseline file not found in cache"
 
       - name: Run current benchmark
         run: |
@@ -285,33 +234,5 @@ jobs:
           else
             echo "⚠️ Comparison report not found at ./tests/perf/comparison_report.txt"
             echo "This might indicate a benchmark execution failure."
-            exit 1
-          fi
-
-  # Summary job that depends on all other jobs
-  ci-success:
-    name: CI Success
-    runs-on: ubuntu-latest
-    needs: [check, cargo-shear, test, fmt, clippy, typos]
-    if: always()
-    steps:
-      - name: Check all job results
-        run: |
-          if [[ "${{ needs.check.result }}" == "success" && \
-                "${{ needs.cargo-shear.result }}" == "success" && \
-                "${{ needs.test.result }}" == "success" && \
-                "${{ needs.fmt.result }}" == "success" && \
-                "${{ needs.clippy.result }}" == "success" && \
-                "${{ needs.typos.result }}" == "success" ]]; then
-            echo "🎉 All CI checks passed!"
-            exit 0
-          else
-            echo "❌ Some CI checks failed:"
-            echo "  - Check: ${{ needs.check.result }}"
-            echo "  - Cargo Shear: ${{ needs.cargo-shear.result }}"
-            echo "  - Test: ${{ needs.test.result }}"
-            echo "  - Format: ${{ needs.fmt.result }}"
-            echo "  - Clippy: ${{ needs.clippy.result }}"
-            echo "  - Typos: ${{ needs.typos.result }}"
             exit 1
           fi
