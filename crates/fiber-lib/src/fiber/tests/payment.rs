@@ -6182,6 +6182,65 @@ async fn test_network_with_hops_max_number_limit() {
     );
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_network_with_relay_remove_will_be_ok() {
+    init_tracing();
+    let _span = tracing::info_span!("node", node = "test").entered();
+    let (mut nodes, channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((2, 3), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((3, 4), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((4, 5), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+        ],
+        6,
+    )
+    .await;
+
+    eprintln!("now test begin to send payment ...");
+    let payment = nodes[0]
+        .send_payment(SendPaymentCommand {
+            target_pubkey: Some(nodes[5].pubkey),
+            amount: Some(1000),
+            keysend: Some(true),
+            allow_self_payment: false,
+            dry_run: false,
+            tlc_expiry_limit: Some(DEFAULT_TLC_EXPIRY_DELTA * 10 + DEFAULT_FINAL_TLC_EXPIRY_DELTA),
+            ..Default::default()
+        })
+        .await
+        .expect("send payment success");
+    eprintln!("payment: {:?}", payment);
+
+    loop {
+        let channel_actor_state = nodes[1].get_channel_actor_state(channels[1]);
+        if !channel_actor_state.tlc_state.offered_tlcs.tlcs.is_empty() {
+            nodes[0].stop().await;
+            break;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_micros(500)).await;
+    }
+
+    loop {
+        let channel_actor_state = nodes[1].get_channel_actor_state(channels[0]);
+        if !channel_actor_state.retryable_tlc_operations.is_empty() {
+            eprintln!(
+                "channel_actor_state: {:?}",
+                channel_actor_state.retryable_tlc_operations
+            );
+            break;
+        } else {
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+            eprintln!("channel actor state: {:?}", channel_actor_state.state);
+        }
+    }
+
+    nodes[0].start().await;
+    nodes[0].wait_until_success(payment.payment_hash).await;
+}
+
 #[tokio::test]
 async fn test_send_payment_with_invalid_amount() {
     init_tracing();

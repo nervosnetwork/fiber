@@ -3056,7 +3056,7 @@ impl From<TlcInfo> for TlcNotifyInfo {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Serialize, Deserialize, Eq, PartialEq, Debug)]
 pub enum RetryableTlcOperation {
     RemoveTlc(TLCId, RemoveTlcReason),
     AddTlc(AddTlcCommand),

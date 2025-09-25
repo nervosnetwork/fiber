@@ -3813,7 +3813,10 @@ where
                     // if it's relay remove tlc, insert it into ChannelActorState's retryable queue
                     if let ChannelCommand::RemoveTlc(remove_tlc, _) = &command {
                         if let Some(mut state) = self.store.get_channel_actor_state(&channel_id) {
-                            if matches!(state.state, ChannelState::ChannelReady) {
+                            if matches!(
+                                state.state,
+                                ChannelState::ChannelReady | ChannelState::ShuttingDown(_)
+                            ) {
                                 let operation = RetryableTlcOperation::RemoveTlc(
                                     TLCId::Received(remove_tlc.id),
                                     remove_tlc.reason.clone(),
