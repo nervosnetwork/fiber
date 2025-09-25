@@ -131,19 +131,51 @@ jobs:
 
       - uses: dsherret/rust-toolchain-file@v1
       - uses: Swatinem/rust-cache@v2
+      - name: Cache CKB binaries
+        uses: actions/cache@v4
+        id: cache-ckb
+        with:
+          path: /usr/local/bin/ckb*
+          key: ckb-v0.116.1-${{ runner.os }}
+          restore-keys: |
+            ckb-v0.116.1-
+
       - name: Install dependencies
+        if: steps.cache-ckb.outputs.cache-hit != 'true'
         run: |
           version=0.116.1
           wget "https://github.com/nervosnetwork/ckb/releases/download/v${version}/ckb_v${version}_x86_64-unknown-linux-gnu-portable.tar.gz"
           tar -xvaf "ckb_v${version}_x86_64-unknown-linux-gnu-portable.tar.gz"
           sudo mv "ckb_v${version}_x86_64-unknown-linux-gnu-portable"/* /usr/local/bin/
 
+      - name: Cache build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ./tests/deploy/udt-init/target
+            ./tests/perf/target
+          key: build-artifacts-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            build-artifacts-${{ runner.os }}-
+
       - name: Build rust code
         run: |
           cd ./tests/deploy/udt-init && cargo build --locked && cd -
           cd ./tests/perf/ && cargo build --release --locked && cd -
 
+      - name: Cache baseline benchmark results
+        uses: actions/cache@v4
+        id: cache-baseline
+        with:
+          path: |
+            ./tests/perf/baseline.json
+            ./baseline.log
+          key: baseline-${{ github.base_ref }}-${{ hashFiles('tests/**/*.rs', 'crates/**/*.rs') }}
+          restore-keys: |
+            baseline-${{ github.base_ref }}-
+
       - name: Get baseline benchmark
+        if: steps.cache-baseline.outputs.cache-hit != 'true'
         run: |
           echo "Comparing against: origin/${{ github.base_ref }}"
           git checkout origin/${{ github.base_ref }}
@@ -157,6 +189,12 @@ jobs:
           cargo run --bin run-test --release benchmark 90 30 base
           cd -
           git stash
+
+      - name: Restore baseline results (if cached)
+        if: steps.cache-baseline.outputs.cache-hit == 'true'
+        run: |
+          echo "✅ Using cached baseline benchmark results"
+          ls -la ./tests/perf/baseline.json || echo "Baseline file not found in cache"
 
       - name: Run current benchmark
         run: |
