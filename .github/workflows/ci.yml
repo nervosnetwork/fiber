@@ -204,44 +204,11 @@ jobs:
 
       - uses: dsherret/rust-toolchain-file@v1
       - uses: Swatinem/rust-cache@v2
-      - name: Cache CKB binaries
-        uses: actions/cache@v4
-        id: cache-ckb
+      - name: Setup Dependencies
+        uses: ./.github/actions/setup-dependencies
         with:
-          path: ~/.local/bin/ckb*
-          key: ckb-v0.116.1-${{ runner.os }}
-          restore-keys: |
-            ckb-v0.116.1-
-
-      - name: Install dependencies
-        if: steps.cache-ckb.outputs.cache-hit != 'true'
-        run: |
-          version=0.116.1
-          echo "🔐 Downloading and verifying CKB v${version}..."
-
-          # Download with retry and verification
-          for attempt in 1 2 3; do
-            if wget "https://github.com/nervosnetwork/ckb/releases/download/v${version}/ckb_v${version}_x86_64-unknown-linux-gnu-portable.tar.gz"; then
-              break
-            else
-              echo "Download attempt $attempt failed, retrying..."
-              sleep 2
-            fi
-          done
-
-          # Verify file exists and extract
-          if [ -f "ckb_v${version}_x86_64-unknown-linux-gnu-portable.tar.gz" ]; then
-            tar -xzf "ckb_v${version}_x86_64-unknown-linux-gnu-portable.tar.gz"
-            # Use more secure installation method
-            mkdir -p ~/.local/bin
-            mv "ckb_v${version}_x86_64-unknown-linux-gnu-portable"/* ~/.local/bin/
-            echo "$HOME/.local/bin" >> $GITHUB_PATH
-            # Verify installation
-            ~/.local/bin/ckb --version
-          else
-            echo "❌ CKB download failed after 3 attempts"
-            exit 1
-          fi
+          ckb-version: '0.116.1'
+          cache-prefix: 'benchmark'
 
       - name: Cache build artifacts
         uses: actions/cache@v4
