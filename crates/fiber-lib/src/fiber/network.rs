@@ -76,7 +76,8 @@ use crate::ckb::{
 };
 use crate::fiber::channel::{
     AddTlcCommand, AddTlcResponse, ChannelActorState, ChannelEphemeralConfig,
-    ChannelInitializationOperation, ShutdownCommand, TxCollaborationCommand, TxUpdateCommand,
+    ChannelInitializationOperation, RetryableTlcOperation, ShutdownCommand, TxCollaborationCommand,
+    TxUpdateCommand,
 };
 use crate::fiber::channel::{
     AwaitingTxSignaturesFlags, ShuttingDownFlags, MAX_TLC_NUMBER_IN_FLIGHT,
@@ -1655,9 +1656,6 @@ where
                         }
                     }
                 }
-
-                let used_ms = now_timestamp_as_millis_u64() - now;
-                tracing::debug!("CheckChannels complete after {used_ms}ms");
             }
             NetworkActorCommand::SettleMPPTlcSet(payment_hash) => {
                 // load hold tlcs
@@ -3812,6 +3810,20 @@ where
                     Ok(())
                 }
                 None => {
+                    // if it's relay remove tlc, insert it into ChannelActorState's retryable queue
+                    if let ChannelCommand::RemoveTlc(remove_tlc, _) = &command {
+                        if let Some(mut state) = self.store.get_channel_actor_state(&channel_id) {
+                            if matches!(state.state, ChannelState::ChannelReady) {
+                                let operation = RetryableTlcOperation::RemoveTlc(
+                                    TLCId::Received(remove_tlc.id),
+                                    remove_tlc.reason.clone(),
+                                );
+                                state.retryable_tlc_operations.push_back(operation);
+                                self.store.insert_channel_actor_state(state);
+                            }
+                        }
+                    }
+
                     let error = Error::ChannelNotFound(channel_id);
                     if let Some(rpc_reply) = command.rpc_reply_port() {
                         let _ = rpc_reply.send(Err(error.to_string()));
